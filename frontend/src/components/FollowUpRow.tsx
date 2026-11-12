@@ -7,10 +7,9 @@ export interface FollowUpRowProps {
   onContinue: (question: string) => void;
   onBranch: (question: string) => void;
   disabled?: boolean;
-  /** The row element: where a picked follow-up's bubble flies in from. */
-  rowRef?: React.Ref<HTMLDivElement>;
-  /** Picked and sent: its text goes on as the new bubble, so the row hides. */
-  picked?: boolean;
+  /** Already branched from here (phones): the button reads Branched and the
+   *  row quiets; branching again still works. */
+  branched?: boolean;
 }
 
 export function FollowUpRow({
@@ -19,8 +18,7 @@ export function FollowUpRow({
   onContinue,
   onBranch,
   disabled = false,
-  rowRef,
-  picked = false,
+  branched = false,
 }: FollowUpRowProps): React.JSX.Element {
   const ariaContinue = `Continue follow-up in current pane: ${question}. Press B to branch into a new pane.`;
   const ariaBranch = `Branch follow-up into new pane: ${question}`;
@@ -48,11 +46,11 @@ export function FollowUpRow({
 
   return (
     <div
-      ref={rowRef}
       className="t-followup-row"
       role="group"
-      style={{ '--followup-delay': `${index * 90}ms`, ...(picked ? { visibility: 'hidden' } : null) } as React.CSSProperties}
+      style={{ '--followup-delay': `${index * 90}ms` } as React.CSSProperties}
       data-disabled={disabled ? 'true' : undefined}
+      data-branched={branched ? 'true' : undefined}
     >
       <button
         type="button"
@@ -75,7 +73,7 @@ export function FollowUpRow({
         <span className="t-followup-branch-glyph" aria-hidden>
           <BranchIcon size={15} />
         </span>
-        <span className="t-followup-branch-label">Branch</span>
+        <span className="t-followup-branch-label">{branched ? 'Branched' : 'Branch'}</span>
       </button>
     </div>
   );

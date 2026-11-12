@@ -69,6 +69,26 @@ export type RuntimeTitleSource =
   /** No title mechanism of the runtime's own. */
   | 'none';
 
+/**
+ * How a runtime honors `NewAgentSessionOptions.ephemeral` (DESIGN-v2 §3.2).
+ * A runtime that declares neither leaves `RuntimeTopology.ephemeralSessions`
+ * absent, and a host must not open ephemeral sessions on it (Michi then runs
+ * no check-ins there).
+ */
+export type RuntimeEphemeralSessions =
+  /**
+   * An ephemeral session writes no native transcript of its own (Claude
+   * persistSession:false, a Codex ephemeral thread on a scratch home, Pi in
+   * memory); discardNativeSession, when present, removes whatever is left.
+   */
+  | 'native'
+  /**
+   * The runtime keeps its native record anyway (Kiro); the host removes it
+   * with discardNativeSession after the release, which may answer `deferred`
+   * until the runtime lets go of it.
+   */
+  | 'discard-after-release';
+
 export interface RuntimeTopology {
   readonly identityTiming: RuntimeIdentityTiming;
   readonly cancel: RuntimeCancel;
@@ -90,6 +110,18 @@ export interface RuntimeTopology {
   readonly workflowsRequireOptIn?: true;
   /** `/clear` replaces the native session (new identity) instead of clearing it in place. Default false. */
   readonly clearCreatesNewNativeSession?: boolean;
+  /**
+   * How the runtime honors ephemeral sessions (RuntimeEphemeralSessions);
+   * absent: it does not, and a host opens none on it. Declared per flavor
+   * by W1-A, never inherited: kiroDescriptor() builds the topology of
+   * kiro-cli, Kiro Crew and Antigravity alike, so it sets this only for the
+   * kiro-cli flavor (Crew and Antigravity stay without it and run no
+   * check-ins); Pi declares it in backend/src/agents/pi/piDescriptor.ts,
+   * which W1-A owns for this (DESIGN-v2 §8.1). Read by W1-B
+   * (chatManager.openEphemeralSession) and W2-G1a (whether a check-in can
+   * run on the conversation's runtime).
+   */
+  readonly ephemeralSessions?: RuntimeEphemeralSessions;
 }
 
 /**

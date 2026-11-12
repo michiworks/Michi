@@ -53,7 +53,6 @@ export default class AppErrorBoundary extends React.Component<Props, State> {
   }
 
   componentDidCatch(error: Error, info: React.ErrorInfo) {
-    // eslint-disable-next-line no-console
     console.error('[AppErrorBoundary] React tree crashed', error, info.componentStack);
   }
 

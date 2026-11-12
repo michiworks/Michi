@@ -1,20 +1,12 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { resolveWithinCwd, PathSandboxError } from "./pathSandbox";
-
-const IMAGE_MIME_BY_EXT: Record<string, string> = {
-  ".png": "image/png",
-  ".jpg": "image/jpeg",
-  ".jpeg": "image/jpeg",
-  ".gif": "image/gif",
-  ".webp": "image/webp",
-};
+import { imageMimeType } from "./attachments";
+import { isWithinRoot, resolveWithinCwd, PathSandboxError } from "./pathSandbox";
 
 /**
  * Max bytes a single image may be to display via show_image / the /files serve
- * route. Mirrors the `read` tool's per-image cap (SINGLE_IMAGE_MAX_BYTES) so the
- * two image paths agree, and bounds what the serve route will stream. Shared by
- * `resolveShowImage` here and the serve route in routes/files.ts.
+ * route, and the Pi `read` tool's per-image cap, so the image paths agree. Shared by
+ * `resolveShowImage` here, the serve route in routes/files.ts and agents/tools/read.ts.
  */
 export const SHOW_IMAGE_MAX_BYTES = 5 * 1024 * 1024;
 
@@ -48,7 +40,7 @@ export function resolveShowImage(cwd: string, inputPath: string): ShowImageResul
     return { ok: false, error: `file not found: ${inputPath}` };
   }
   const realCwd = fs.realpathSync(cwd);
-  if (real !== realCwd && !real.startsWith(realCwd + path.sep)) {
+  if (!isWithinRoot(real, realCwd)) {
     return { ok: false, error: `path is outside the workspace: ${inputPath}` };
   }
   const stat = fs.statSync(real);
@@ -60,11 +52,12 @@ export function resolveShowImage(cwd: string, inputPath: string): ShowImageResul
     };
   }
 
-  const ext = path.extname(real).toLowerCase();
-  const mimeType = IMAGE_MIME_BY_EXT[ext];
+  const mimeType = imageMimeType(real);
   if (!mimeType) {
+    const ext = path.extname(real).toLowerCase();
     return { ok: false, error: `unsupported image type: ${ext || "(none)"}` };
   }
-  const relPath = path.relative(realCwd, real);
+  // The /files route rejects backslashes, so Windows paths must use `/`.
+  const relPath = path.relative(realCwd, real).split(path.sep).join("/");
   return { ok: true, relPath, mimeType, size: stat.size };
 }

@@ -1,4 +1,3 @@
-import React from 'react';
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { AgentDefinitionDtoV1 } from 'michi-shared';
@@ -6,6 +5,7 @@ import { AgentDefinitionStatus } from 'michi-shared';
 import { indexBackendProjects, setActiveBackendConnectionId } from '../../config/backendConnections';
 import { locatedAgentResource } from '../../state/agentIdentity';
 import { _resetForTest } from '../../state/manageRoute';
+import { HttpResponseError } from '../../services/api/httpError';
 import TerminalShell from './TerminalShell';
 
 const shell = vi.hoisted(() => ({ activeProjectId: 'remote-ws', narrow: false }));
@@ -18,7 +18,7 @@ const domainState = vi.hoisted(() => ({ definitions: {} as Record<string, Return
 vi.mock('../../state/chatStore', async () => {
   const actual = await vi.importActual<typeof import('../../state/chatStore')>('../../state/chatStore');
   const project = () => ({ id: shell.activeProjectId, name: shell.activeProjectId, backendConnectionId: shell.activeProjectId === 'remote-ws' ? 'remote-a' : 'remote-b', artifacts: [], trees: [], chatIds: [], edges: [], activeTreeId: null, createdAt: 0 });
-  return { ...actual, useChatProjects: () => ({ activeProject: project(), activeProjectId: shell.activeProjectId, projects: [project()], order: [], edges: [], theme: 'light', availableModes: [], agentStatus: { customAgentsEnabled: true }, warmFailedError: null, focusedNodeId: null, selection: new Set(), hydrated: true, treeSelection: new Set(), searchHighlightTerm: null, canNavBack: false, canNavForward: false }), useChatPanes: () => ({ openPanes: [], focusedPane: null, focusNonce: 0, paneItems: {}, viewMode: 'single' as const }), useChatActions: () => ({ createProject: async () => 'p', enterChatsWorkspace: async () => 'p', focusPane: () => {}, closePane: () => {}, openPane: () => {}, createBlankChild: async () => {}, restoreLastDeletion: () => null, clearSelection: () => {}, clearTreeSelection: () => {}, selectAllTrees: () => {}, navBack: () => {}, navForward: () => {} }), useStructuralSelector: (selector: (nodes: Record<string, never>) => unknown) => selector({}), useChatNodesSnapshot: () => ({}), useNodesSelector: () => 0, chatLabel: () => '' };
+  return { ...actual, useChatProjects: () => ({ activeProject: project(), activeProjectId: shell.activeProjectId, projects: [project()], order: [], edges: [], theme: 'light', availableModes: [], agentStatus: { customAgentsEnabled: true }, warmFailedError: null, focusedNodeId: null, selection: new Set(), hydrated: true, treeSelection: new Set(), searchHighlightTerm: null }), useChatPanes: () => ({ openPanes: [], focusedPane: null, focusNonce: 0, paneItems: {}, viewMode: 'single' as const }), useChatActions: () => ({ createProject: async () => 'p', enterChatsWorkspace: async () => 'p', focusPane: () => {}, closePane: () => {}, openPane: () => {}, createBlankChild: async () => {}, restoreLastDeletion: () => null, clearSelection: () => {}, clearTreeSelection: () => {}, selectAllTrees: () => {} }), useStructuralSelector: (selector: (nodes: Record<string, never>) => unknown) => selector({}), useChatNodesSnapshot: () => ({}), useNodesSelector: () => 0, chatLabel: () => '' };
 });
 vi.mock('../../state/agentDomain', () => ({ useAgentDomain: () => ({ state: domainState, loadDefinitions, dispatch }) }));
 vi.mock('../../state/prefs', async () => { const actual = await vi.importActual<typeof import('../../state/prefs')>('../../state/prefs'); return { ...actual, usePrefs: () => ({ prefs: actual.DEFAULT_PREFS, setPref: vi.fn() }) }; });
@@ -28,7 +28,7 @@ vi.mock('./useTerminalColors', () => ({ useTerminalColors: () => ({}) }));
 vi.mock('./Topbar', () => ({ default: ({ onToggleSidebar }: { onToggleSidebar: () => void }) => <button onClick={onToggleSidebar}>toggle sidebar</button> }));
 vi.mock('./Sidebar', () => ({ default: ({ onNav, narrowMode, narrowOverlayOpen }: { onNav: (page: string) => void; narrowMode: boolean; narrowOverlayOpen: boolean }) => narrowMode && !narrowOverlayOpen ? null : <nav aria-label="test sidebar"><button onClick={() => onNav('agents')}>Agents</button><button onClick={() => onNav('profile')}>Profile</button></nav> }));
 vi.mock('./WarmFailedBanner', () => ({ default: () => null }));
-vi.mock('./AskUserAlertBar', () => ({ default: () => null }));
+vi.mock('./ShellNotices', () => ({ default: () => null }));
 vi.mock('./pages/Home', () => ({ default: () => <div>Home page</div> }));
 vi.mock('./pages/Dashboard', () => ({ default: () => <div>Dashboard page</div> }));
 vi.mock('./pages/Profile', () => ({ default: ({ onNav }: { onNav: (page: string) => void }) => <div>Profile page<button onClick={() => onNav('home')}>Profile home</button></div> }));
@@ -53,6 +53,13 @@ describe('TerminalShell Agent management routes', () => {
     expect(loadDefinitions).toHaveBeenCalledWith('remote-ws');
     expect(screen.getByTestId('library-resources').textContent).toContain('remote-a:remote-a Agent');
     expect(screen.getByTestId('library-resources').textContent).not.toContain('remote-b');
+  });
+
+  it('says Custom Agents are off when the Backend answers the Library with 404', async () => {
+    loadDefinitions.mockRejectedValueOnce(new HttpResponseError('custom_agents_disabled', 404, undefined));
+    render(<TerminalShell />);
+    fireEvent.click(screen.getByRole('button', { name: 'Agents' }));
+    expect((await screen.findByRole('status')).textContent).toMatch(/Custom Agents are not enabled on/);
   });
 
   it('preserves Workspace/Global create scope, editor deep-link, and back navigation', async () => {

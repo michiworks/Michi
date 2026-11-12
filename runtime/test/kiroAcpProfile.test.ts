@@ -67,6 +67,15 @@ describe("Kiro's ACP profile", () => {
         assert.deepEqual(v3.sessionParams("load", { modelId: "x", metadata: { chatId: "c" } }), { _meta: { kiro: { modelId: "x" }, chatId: "c" } });
     });
 
+    test("session params: v3 opens the additional directories at new and again at load; v2 has none", () => {
+        const additionalDirectories = ["/data/skill-mounts/kiro-workspace"];
+        const v3 = new KiroAcpProfile({ ...base, engine: "v3" });
+        for (const kind of ["new", "load"] as const) {
+            assert.deepEqual(v3.sessionParams(kind, { additionalDirectories }), { additionalDirectories, _meta: { kiro: {} } }, kind);
+        }
+        assert.deepEqual(new KiroAcpProfile(base).sessionParams("new", { additionalDirectories }), {});
+    });
+
     test("session info: v3 config options also answer as models and modes", () => {
         const info = new KiroAcpProfile(base).normalizeSessionInfo({ configOptions: [
             { id: "model", type: "select", currentValue: "m1", options: [{ value: "m1", name: "One" }] },
@@ -116,5 +125,15 @@ describe("Kiro's ACP profile", () => {
         assert.equal(new KiroAcpProfile({ ...base, launch: { bin: "/crew", args: () => [] } }).spawnEnvironment(hostEnv), undefined,
             "a launch override's child inherits ours");
         assert.equal(reads, 3);
+    });
+
+    test("spawn environment of a launch override with an env: that env as it is, read at each start", () => {
+        let reads = 0;
+        const env = () => ({ MARKER: `read-${++reads}`, CALLER_SETTING: "other" });
+        const profile = new KiroAcpProfile({ ...base, engine: "v3", launch: { bin: "/crew", args: () => [], env } });
+        const hostEnv = () => { throw new Error("kiro-cli's host environment is not a launch override's"); };
+        assert.deepEqual(profile.spawnEnvironment(hostEnv), { MARKER: "read-1", CALLER_SETTING: "other" },
+            "no kiroEnv entries: neither Michi made mandatory nor the trust classifier");
+        assert.deepEqual(profile.spawnEnvironment(undefined), { MARKER: "read-2", CALLER_SETTING: "other" });
     });
 });

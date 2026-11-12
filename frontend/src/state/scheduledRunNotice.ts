@@ -15,6 +15,12 @@ export function latestTurnIsScheduled(messages: readonly ChatMessage[] | undefin
   return false;
 }
 
+/** Fired by the chat store for every scheduled run lifecycle frame. */
+export const SCHEDULED_JOB_RUN_WINDOW_EVENT = 'michi:scheduled-job-run';
+
+/** Fired by the chat store when a job is created, edited or deleted elsewhere. */
+export const SCHEDULED_JOBS_CHANGED_WINDOW_EVENT = 'michi:scheduled-jobs-changed';
+
 export interface ScheduledRunNoticeText {
   title: string;
   subtitle: string;

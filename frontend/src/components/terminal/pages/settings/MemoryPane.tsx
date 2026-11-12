@@ -1,8 +1,9 @@
 import React, { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react';
-import { TriangleAlert } from 'lucide-react';
+import { ChevronRight } from 'lucide-react';
 import {
   MEMORY_BODY_MAX_CHARS,
   MEMORY_KINDS,
+  type MemoryImportSource,
   type MemoryKind,
   type MemoryMode,
   type MemoryOrigin,
@@ -12,13 +13,16 @@ import {
 import type { PageId } from '../../../../state/commands';
 import type { Project } from '../../../../state/chatTypes';
 import { useChatActions, useChatProjects } from '../../../../state/chatStore';
-import { navigateToNode } from '../../../../state/navigateToNode';
 import { isSystemWorkspace } from '../../../../state/assistant/systemWorkspace';
-import { notePendingMemories, onMemoryChanged, runSelfCreate, runSelfMutation } from '../../../../state/memory/memoryNotifications';
+import { noteMemoryOn } from '../../../../state/memory/conversationMemory';
+import { onMemoryChanged, runSelfCreate, runSelfMutation } from '../../../../state/memory/memoryNotifications';
 import { backendConnectionIdForWorkspace, LOCAL_BACKEND_CONNECTION_ID } from '../../../../config/backendConnections';
+import { API_BASE_URL } from '../../../../config/env';
+import { prefersReducedMotion } from '../../../../hooks/useReducedMotion';
 import { relativeTime } from '../../../../lib/relativeTime';
+import { useCompanionName } from '../../../../state/companion/companionName';
+import { isImeComposing } from '../../../../lib/ime';
 import {
-  approveMemory,
   createMemory,
   deleteMemory,
   fetchMemoryExtractionStatus,
@@ -27,38 +31,44 @@ import {
   isMemoryUnavailable,
   isMemoryVersionConflict,
   listMemories,
-  rejectMemory,
+  resetMemories,
   saveMemorySettings,
   setMemoryExtractionPaused,
   updateMemory,
   type MemoryApiError,
   type MemoryExtractionStatus,
+  type MemoryListQuery,
 } from '../../../../services/api/memories';
-import { Button } from '../../../ui/controls';
-import { Radio, type RadioOption } from './controls';
+import { confirmDialog } from '../../../ui/ConfirmDialog';
+import { Button, Switch } from '../../../ui/controls';
+import { AboutTheUser } from './AboutTheUser';
+import { onMemoryReveal, takeMemoryReveal } from './memoryReveal';
 import { SettingsRow, SettingsSection } from './SettingsSection';
 import './memory.css';
 
 /**
- * Settings › Memory: the memory mode, what agents remember (searchable, by
- * scope), memories waiting for approval, and automatic memory's status.
- * Everything is on this machine's backend; a workspace on another machine
- * keeps its memories there.
+ * Settings › Memory, a page few people need: memory on or off, what agents
+ * remember (searchable, by scope; edit, delete, add), About the user (the
+ * profile Michi writes from its memories) and, under Details, what automatic
+ * memory is doing. Nothing here waits for the user: agents and automatic
+ * memory save without asking. Everything is on this machine's backend; a
+ * workspace on another machine keeps its memories there.
  */
-
-export const MEMORY_MODE_OPTIONS: ReadonlyArray<RadioOption<MemoryMode>> = [
-  { value: 'off', label: 'Off', description: 'Agents don’t read or save memories. Saved memories stay here until you delete them.' },
-  { value: 'explicit', label: 'Explicit only', description: 'Agents save a memory only when you ask them to remember something.' },
-  { value: 'auto', label: 'Automatic', description: 'Michi also suggests memories from your conversations. Suggestions wait for your approval below.' },
-];
 
 const KIND_LABEL: Record<MemoryKind, string> = { preference: 'Preference', fact: 'Fact', decision: 'Decision', convention: 'Convention' };
 const ORIGIN_LABEL: Record<MemoryOrigin, string> = { explicit: 'Explicit', extracted: 'Automatic' };
+/** Where an imported memory was read from (a runtime's own memory, one way). */
+const IMPORT_LABEL: Record<MemoryImportSource, string> = { claude: 'Claude Code', codex: 'Codex', kiro: 'Kiro' };
 const LIST_PAGE = 50;
 const LIST_MAX = 200;
-const PENDING_LIMIT = 200;
 const SEARCH_DEBOUNCE_MS = 250;
 const RELOAD_DEBOUNCE_MS = 250;
+/** How long a memory shown from About the user stays marked, and how long it may take to appear. */
+const REVEAL_MARK_MS = 1_600;
+const REVEAL_WAIT_MS = 5_000;
+
+/** A memory About the user cites, to show under Saved memories; each click makes a new request. */
+interface RevealRequest { id: string; body: string }
 
 type Filter = 'all' | 'user' | 'workspace';
 
@@ -91,8 +101,8 @@ interface MemoryContext {
 }
 
 function useMemoryContext(onNav?: (page: PageId) => void): MemoryContext {
-  const { projects, activeProject, activeProjectId } = useChatProjects();
-  const { selectProject, openPane, openPaneInTree, activateTree, setFocusedNodeId } = useChatActions();
+  const { projects, activeProject } = useChatProjects();
+  const { revealNode } = useChatActions();
   const workspace = activeProject && !activeProject.deletedAt && !activeProject.archivedAt && !isSystemWorkspace(activeProject)
     && backendConnectionIdForWorkspace(activeProject.id) === LOCAL_BACKEND_CONNECTION_ID ? activeProject : null;
   return useMemo(() => {
@@ -113,11 +123,11 @@ function useMemoryContext(onNav?: (page: PageId) => void): MemoryContext {
       },
       // An explicit request: opens the conversation wherever it lives, then leaves Settings.
       openSource: (nodeId) => {
-        navigateToNode({ projects, activeProjectId, selectProject, openPane, openPaneInTree, activateTree, setFocusedNodeId }, nodeId);
+        revealNode(nodeId);
         onNav?.('dashboard');
       },
     };
-  }, [projects, activeProjectId, workspace, selectProject, openPane, openPaneInTree, activateTree, setFocusedNodeId, onNav]);
+  }, [projects, workspace, revealNode, onNav]);
 }
 
 // ── the pane ───────────────────────────────────────────────────────────────
@@ -130,6 +140,18 @@ export function MemoryPane({ onNav }: { onNav?: (page: PageId) => void }) {
     { status: 'loading', mode: null, error: null });
   const [modeSaving, setModeSaving] = useState(false);
   const [modeError, setModeError] = useState<string | null>(null);
+  const [reveal, setReveal] = useState<RevealRequest | null>(null);
+  // Goes up once every memory was deleted: the profile and the list are read again.
+  const [resets, setResets] = useState(0);
+  // Edit under a reply (ReplyMemorySources): the memory it names is found and marked, whether this opened for it or was open.
+  useEffect(() => {
+    const waiting = takeMemoryReveal();
+    if (waiting) setReveal(waiting);
+    return onMemoryReveal(() => {
+      const request = takeMemoryReveal();
+      if (request) setReveal(request);
+    });
+  }, []);
 
   const loadSettings = useCallback(async () => {
     setSettings((current) => ({ ...current, status: current.mode ? current.status : 'loading', error: null }));
@@ -143,7 +165,9 @@ export function MemoryPane({ onNav }: { onNav?: (page: PageId) => void }) {
   }, []);
   useEffect(() => { void loadSettings(); }, [loadSettings]);
 
-  const changeMode = async (mode: MemoryMode) => {
+  // On is 'auto'. Only an older backend still answers 'explicit', which is on too.
+  const turn = async (on: boolean) => {
+    const mode: MemoryMode = on ? 'auto' : 'off';
     if (modeSaving || mode === settings.mode) return;
     const previous = settings.mode;
     setModeSaving(true);
@@ -152,9 +176,11 @@ export function MemoryPane({ onNav }: { onNav?: (page: PageId) => void }) {
     try {
       const saved = await saveMemorySettings(mode);
       setSettings((current) => ({ ...current, mode: saved.mode }));
+      // Each chat's memory control in this window shows only while memory is on.
+      noteMemoryOn(API_BASE_URL, saved.mode !== 'off');
     } catch (error) {
       setSettings((current) => ({ ...current, mode: previous }));
-      setModeError(`Couldn’t change the memory mode: ${errorText(error, 'unknown error')}`);
+      setModeError(`Couldn’t turn memory ${on ? 'on' : 'off'}: ${errorText(error, 'unknown error')}`);
     } finally {
       setModeSaving(false);
     }
@@ -174,38 +200,83 @@ export function MemoryPane({ onNav }: { onNav?: (page: PageId) => void }) {
       </SettingsSection>
     );
   }
-  const mode = settings.mode;
+  const on = settings.mode !== 'off';
   return (
     <>
-      <SettingsSection title="Memory"
-        intro="Short notes about your preferences and projects that every runtime can read. Correct or delete any of them here.">
-        <SettingsRow label="Memory mode">
-          <Radio label="Memory mode" opts={MEMORY_MODE_OPTIONS} value={mode} onChange={(value) => { void changeMode(value); }} />
+      <SettingsSection title="Memory" intro="Michi remembers what you tell it. You can review or edit memories here.">
+        <SettingsRow label="Use memory"
+          description={on
+            ? 'Agents read your memories in every conversation and save what you tell them.'
+            : 'Agents don’t read or save memories. Saved memories stay here until you delete them.'}
+          control={<>
+            <span className="settings-row__state">{on ? 'On' : 'Off'}</span>
+            <Switch on={on} disabled={modeSaving} aria-label="Use memory" onChange={(next) => { void turn(next); }} />
+          </>}>
           <p className="settings-row__note">Turning memory off doesn’t delete chat history. Conversations are kept as before.</p>
+          {on && <p className="settings-row__note">To leave one chat out, choose Use only or Off from the memory button in its composer.</p>}
           {modeSaving && <p className="settings-row__note" role="status">Saving…</p>}
           {modeError && <p className="settings-row__note" role="alert">{modeError}</p>}
         </SettingsRow>
+        {on && <MemoryDetails />}
+        <DeleteAllMemories onDeleted={() => setResets((count) => count + 1)} />
       </SettingsSection>
-      {mode === 'auto' && <AutomaticMemorySection />}
-      <MemoryLists mode={mode} context={context} />
+      <AboutTheUser memoryOn={on} reloadKey={resets} onShowMemory={(memory) => setReveal({ id: memory.id, body: memory.body })} />
+      <SavedMemories memoryOn={on} context={context} reveal={reveal} reloadKey={resets} />
     </>
   );
 }
 
-// ── automatic memory (C5) ──────────────────────────────────────────────────
+/** Deletes every memory and the profile (POST /api/memories/reset), after the user confirms. */
+function DeleteAllMemories({ onDeleted }: { onDeleted: () => void }) {
+  const [busy, setBusy] = useState(false);
+  const [note, setNote] = useState<{ tone: 'ok' | 'error'; text: string } | null>(null);
+  const run = async () => {
+    if (busy) return;
+    setNote(null);
+    const confirmed = await confirmDialog({
+      title: 'Delete all memories?',
+      message: 'This deletes every saved memory, including the ones you added yourself, and About the user. Your conversations stay, but memory won’t bring them up again or learn from what they already say.\n\nThis can’t be undone.',
+      confirmLabel: 'Delete all memories',
+      danger: true,
+    });
+    if (!confirmed) return;
+    setBusy(true);
+    try {
+      const { removed } = await resetMemories();
+      setNote({ tone: 'ok', text: removed === 1 ? 'Deleted 1 memory.' : `Deleted ${removed} memories.` });
+      onDeleted();
+    } catch (error) {
+      setNote({ tone: 'error', text: `Couldn’t delete your memories: ${errorText(error, 'unknown error')}` });
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <SettingsRow label="Delete all memories" description="Every saved memory and About the user. Conversations stay."
+      control={<Button size="sm" danger disabled={busy} onClick={() => { void run(); }}>{busy ? 'Deleting…' : 'Delete all…'}</Button>}>
+      {note && <p className="settings-row__note" role={note.tone === 'error' ? 'alert' : 'status'} data-tone={note.tone === 'ok' ? 'ok' : undefined}>{note.text}</p>}
+    </SettingsRow>
+  );
+}
+
+// ── details: automatic memory's status ─────────────────────────────────────
 
 interface ExtractionView { label: string; description: string; action: 'pause' | 'resume' | null }
 
-/** Label, explanation and the one action that applies; backends without `state` fall back to `paused`. */
-function extractionView(status: MemoryExtractionStatus): ExtractionView {
-  if (!status.enabled) return { label: 'Off', description: 'Turn on Automatic above to get suggestions.', action: null };
+/**
+ * Label, explanation and the one action that applies; backends without
+ * `state` fall back to `paused`. `name` is the agent's name: its Pages upkeep
+ * pausing pauses automatic memory too.
+ */
+function extractionView(status: MemoryExtractionStatus, name: string): ExtractionView {
+  if (!status.enabled) return { label: 'Off', description: 'Memory is off.', action: null };
   if (status.supported === false || status.state === 'unsupported') {
     return { label: 'Unsupported', description: 'This backend can’t read conversations in the background.', action: null };
   }
   switch (status.state ?? (status.paused ? 'paused' : 'running')) {
     case 'paused': return { label: 'Paused', description: 'Paused. No conversations are read until you resume.', action: 'resume' };
     case 'maintenance_paused':
-      return { label: 'Paused', description: 'Meta agent background work is paused in Settings › Meta agent.', action: null };
+      return { label: 'Paused', description: `Paused with Pages upkeep, under Settings › ${name} › Pages upkeep.`, action: null };
     case 'stopped': return { label: 'Stopped', description: 'Stopped after repeated failures. Resume to try again.', action: 'resume' };
     case 'budget_exhausted': return { label: 'Daily limit reached', description: 'Resumes tomorrow, when the daily token limit resets.', action: 'pause' };
     case 'waiting': return { label: 'Waiting', description: 'New conversations are queued and will be read soon.', action: 'pause' };
@@ -214,7 +285,22 @@ function extractionView(status: MemoryExtractionStatus): ExtractionView {
   }
 }
 
-function AutomaticMemorySection() {
+/** A collapsed row under the switch; automatic memory's status is read only once it opens. */
+function MemoryDetails() {
+  const [open, setOpen] = useState(false);
+  return <>
+    <div className="settings-row memory-details">
+      <button type="button" className="memory-details__toggle" aria-expanded={open} onClick={() => setOpen((value) => !value)}>
+        <ChevronRight size={12} strokeWidth={2} aria-hidden="true" />
+        Details
+      </button>
+    </div>
+    {open && <AutomaticMemoryStatus />}
+  </>;
+}
+
+function AutomaticMemoryStatus() {
+  const name = useCompanionName();
   const [state, setState] = useState<{ status: 'loading' | 'ready' | 'unavailable' | 'error'; value: MemoryExtractionStatus | null; error: string | null }>(
     { status: 'loading', value: null, error: null });
   const [busy, setBusy] = useState(false);
@@ -243,53 +329,57 @@ function AutomaticMemorySection() {
     }
   };
 
-  if (state.status === 'loading') return <SettingsSection title="Automatic memory"><p className="settings-section__status" role="status">Loading…</p></SettingsSection>;
+  if (state.status === 'loading') return <p className="settings-section__status" role="status">Loading…</p>;
   if (state.status === 'unavailable') {
-    return <SettingsSection title="Automatic memory" aside={<span className="settings-row__state">Unavailable</span>}
-      intro="This Michi backend can’t suggest memories yet. Agents still save memories when you ask." />;
+    return <p className="settings-section__status">This Michi backend can’t save memories in the background yet. Agents still save memories when you ask.</p>;
   }
   if (state.status === 'error' || !state.value) {
     return (
-      <SettingsSection title="Automatic memory">
-        <p className="settings-section__error" role="alert">
-          Couldn’t read automatic memory’s status{state.error ? `: ${state.error}` : ''}.{' '}
-          <button type="button" className="settings-row__link" onClick={() => { void load(); }}>Try again</button>
-        </p>
-      </SettingsSection>
+      <p className="settings-section__error" role="alert">
+        Couldn’t read automatic memory’s status{state.error ? `: ${state.error}` : ''}.{' '}
+        <button type="button" className="settings-row__link" onClick={() => { void load(); }}>Try again</button>
+      </p>
     );
   }
   const status = state.value;
-  const view = extractionView(status);
+  const view = extractionView(status, name);
   const tokens = status.todayTokens.toLocaleString();
-  return (
-    <SettingsSection title="Automatic memory" aside={<span className="settings-row__state">{view.label}</span>}
-      intro="Reads finished conversations in the background and suggests memories for you to approve.">
-      <SettingsRow label="Background suggestions"
-        description={view.description}
-        control={status.enabled && view.action ? (
-          <Button size="sm" disabled={busy} onClick={() => { void togglePause(view.action === 'pause'); }}>
-            {view.action === 'resume' ? 'Resume automatic memory' : 'Pause automatic memory'}
+  return <>
+    <SettingsRow label="Automatic memory" description={view.description}
+      control={<>
+        <span className="settings-row__state">{view.label}</span>
+        {view.action && (
+          <Button size="sm" disabled={busy} aria-label={view.action === 'resume' ? 'Resume automatic memory' : 'Pause automatic memory'}
+            onClick={() => { void togglePause(view.action === 'pause'); }}>
+            {view.action === 'resume' ? 'Resume' : 'Pause'}
           </Button>
-        ) : undefined}>
-        {status.stateReason && <p className="settings-row__note">{status.stateReason}</p>}
-        {actionError && <p className="settings-row__note" role="alert">{actionError}</p>}
-      </SettingsRow>
-      <SettingsRow label="Last run" control={<span className="settings-row__state">
-        {status.lastRunAt ? <time dateTime={new Date(status.lastRunAt).toISOString()}>{updatedText(status.lastRunAt).replace('Updated ', '')}</time> : 'Not yet'}
-      </span>}>
-        {status.lastError && <p className="settings-row__note" role="alert">Last error: {status.lastError}</p>}
-      </SettingsRow>
-      <SettingsRow label="Today"
-        control={<span className="settings-row__state">
-          {status.dailyTokenLimit ? `${tokens} of ${status.dailyTokenLimit.toLocaleString()} tokens` : `${tokens} tokens`}
-        </span>} />
-    </SettingsSection>
-  );
+        )}
+      </>}>
+      {status.stateReason && <p className="settings-row__note">{status.stateReason}</p>}
+      {actionError && <p className="settings-row__note" role="alert">{actionError}</p>}
+    </SettingsRow>
+    <SettingsRow label="Last run" control={<span className="settings-row__state">
+      {status.lastRunAt ? <time dateTime={new Date(status.lastRunAt).toISOString()}>{updatedText(status.lastRunAt).replace('Updated ', '')}</time> : 'Not yet'}
+    </span>}>
+      {status.lastError && <p className="settings-row__note" role="alert">Last error: {status.lastError}</p>}
+    </SettingsRow>
+    <SettingsRow label="Today"
+      control={<span className="settings-row__state">
+        {status.dailyTokenLimit ? `${tokens} of ${status.dailyTokenLimit.toLocaleString()} tokens` : `${tokens} tokens`}
+      </span>} />
+  </>;
 }
 
-// ── pending and saved lists ────────────────────────────────────────────────
+// ── saved memories ─────────────────────────────────────────────────────────
 
-function MemoryLists({ mode, context }: { mode: MemoryMode; context: MemoryContext }) {
+function SavedMemories({ memoryOn, context, reveal, reloadKey }: {
+  memoryOn: boolean;
+  context: MemoryContext;
+  /** A memory to scroll to and focus (from About the user). */
+  reveal: RevealRequest | null;
+  /** Changes when every memory was deleted: the list is read again. */
+  reloadKey: number;
+}) {
   const workspaceId = context.workspace?.id ?? null;
   const [filter, setFilter] = useState<Filter>('all');
   const effectiveFilter: Filter = filter === 'workspace' && !workspaceId ? 'all' : filter;
@@ -300,11 +390,10 @@ function MemoryLists({ mode, context }: { mode: MemoryMode; context: MemoryConte
     return () => clearTimeout(timer);
   }, [query]);
 
-  const [saved, setSaved] = useState<Load<{ items: MemoryRecord[]; nextCursor: string | null }>>(
-    { status: 'loading', value: { items: [], nextCursor: null }, error: null });
-  const [pending, setPending] = useState<Load<MemoryRecord[]>>({ status: 'loading', value: [], error: null });
+  // `query` read the items; their cursor continues that query only.
+  const [saved, setSaved] = useState<Load<{ items: MemoryRecord[]; nextCursor: string | null; query: MemoryListQuery | null }>>(
+    { status: 'loading', value: { items: [], nextCursor: null, query: null }, error: null });
   const savedGeneration = useRef(0);
-  const pendingGeneration = useRef(0);
   const loadedCount = useRef(0);
   loadedCount.current = saved.value.items.length;
 
@@ -322,7 +411,7 @@ function MemoryLists({ mode, context }: { mode: MemoryMode; context: MemoryConte
     try {
       const page = await listMemories({ ...savedQuery, limit });
       if (mine !== savedGeneration.current) return null;
-      setSaved({ status: 'ready', value: page, error: null });
+      setSaved({ status: 'ready', value: { items: page.items, nextCursor: page.nextCursor, query: savedQuery }, error: null });
       return page.items;
     } catch (error) {
       if (mine !== savedGeneration.current) return null;
@@ -331,52 +420,70 @@ function MemoryLists({ mode, context }: { mode: MemoryMode; context: MemoryConte
     }
   }, [savedQuery]);
 
-  const reloadPending = useCallback(async () => {
-    const mine = ++pendingGeneration.current;
-    try {
-      const page = await listMemories({ status: ['pending'], limit: PENDING_LIMIT });
-      if (mine !== pendingGeneration.current) return;
-      setPending({ status: 'ready', value: page.items, error: null });
-      notePendingMemories(page.items.length, page.nextCursor !== null);
-    } catch (error) {
-      if (mine !== pendingGeneration.current) return;
-      setPending((current) => ({ status: 'error', value: current.value, error: errorText(error, 'unknown error') }));
-    }
-  }, []);
-
-  // A new filter or search starts the list over.
+  // A new filter or search starts the list over, and so does deleting every memory.
   useEffect(() => {
     setSaved((current) => ({ ...current, status: 'loading' }));
     void reloadSaved();
-  }, [reloadSaved]);
-  useEffect(() => { void reloadPending(); }, [reloadPending]);
+  }, [reloadSaved, reloadKey]);
 
-  // Changes made anywhere (an agent, another window, an Undo) refresh both lists.
-  const reloadRef = useRef({ reloadSaved, reloadPending });
-  reloadRef.current = { reloadSaved, reloadPending };
+  // A memory About the user cites: shown here, scrolled to and focused. One
+  // the list does not hold as filtered and loaded is looked up by its text.
+  const listRef = useRef<HTMLUListElement>(null);
+  const [revealing, setRevealing] = useState<string | null>(null);
+  const [marked, setMarked] = useState<string | null>(null);
+  const itemsRef = useRef(saved.value.items);
+  itemsRef.current = saved.value.items;
+  useEffect(() => {
+    if (!reveal) return;
+    if (!itemsRef.current.some((item) => item.id === reveal.id)) {
+      setFilter('all');
+      setQuery(reveal.body);
+      setQ(reveal.body.trim());
+    }
+    setRevealing(reveal.id);
+    const timer = setTimeout(() => setRevealing((current) => current === reveal.id ? null : current), REVEAL_WAIT_MS);
+    return () => clearTimeout(timer);
+  }, [reveal]);
+  useEffect(() => {
+    if (!revealing) return;
+    const row = Array.from(listRef.current?.querySelectorAll<HTMLElement>('[data-memory-id]') ?? []).find((element) => element.dataset.memoryId === revealing);
+    if (!row) return;
+    setRevealing(null);
+    setMarked(revealing);
+    row.scrollIntoView?.({ block: 'center', behavior: prefersReducedMotion(document.documentElement.dataset.reduceMotion === 'on') ? 'auto' : 'smooth' });
+    row.focus({ preventScroll: true });
+  }, [revealing, saved.value.items]);
+  useEffect(() => {
+    if (!marked) return;
+    const timer = setTimeout(() => setMarked(null), REVEAL_MARK_MS);
+    return () => clearTimeout(timer);
+  }, [marked]);
+
+  // Changes made anywhere (an agent, automatic memory, another window, an Undo) refresh the list.
+  const reloadRef = useRef(reloadSaved);
+  reloadRef.current = reloadSaved;
   useEffect(() => {
     let timer: ReturnType<typeof setTimeout> | null = null;
     const stop = onMemoryChanged(() => {
       if (timer !== null) clearTimeout(timer);
       timer = setTimeout(() => {
         timer = null;
-        void reloadRef.current.reloadSaved({ keepLength: true });
-        void reloadRef.current.reloadPending();
+        void reloadRef.current({ keepLength: true });
       }, RELOAD_DEBOUNCE_MS);
     });
     return () => { stop(); if (timer !== null) clearTimeout(timer); };
   }, []);
 
   const showMore = async () => {
-    const cursor = saved.value.nextCursor;
-    if (!cursor) return;
+    const { nextCursor: cursor, query } = saved.value;
+    if (!cursor || !query) return;
     const mine = ++savedGeneration.current;
     try {
-      const page = await listMemories({ ...savedQuery, cursor, limit: LIST_PAGE });
+      const page = await listMemories({ ...query, cursor, limit: LIST_PAGE });
       if (mine !== savedGeneration.current) return;
       setSaved((current) => {
         const seen = new Set(current.value.items.map((item) => item.id));
-        return { status: 'ready', value: { items: [...current.value.items, ...page.items.filter((item) => !seen.has(item.id))], nextCursor: page.nextCursor }, error: null };
+        return { status: 'ready', value: { items: [...current.value.items, ...page.items.filter((item) => !seen.has(item.id))], nextCursor: page.nextCursor, query }, error: null };
       });
     } catch (error) {
       if (mine === savedGeneration.current) setSaved((current) => ({ ...current, error: errorText(error, 'unknown error') }));
@@ -395,10 +502,9 @@ function MemoryLists({ mode, context }: { mode: MemoryMode; context: MemoryConte
     return items ? items.find((item) => item.id === id) ?? null : undefined;
   };
 
-  return <>
-    <PendingSection items={pending.value} status={pending.status} error={pending.error} context={context}
-      onReload={() => { void reloadPending(); void reloadSaved({ keepLength: true }); }} />
-    <SettingsSection title="Saved memories" className="memory-saved">
+  return (
+    <SettingsSection title="Saved memories" className="memory-saved"
+      intro="Deleting a conversation doesn’t delete what Michi learned from it. Delete those memories here.">
       <div className="memory-toolbar">
         <select className="ui-select settings-row__select" aria-label="Show memories" value={effectiveFilter}
           onChange={(event) => setFilter(event.target.value as Filter)}>
@@ -409,7 +515,7 @@ function MemoryLists({ mode, context }: { mode: MemoryMode; context: MemoryConte
         <input type="search" className="ui-input memory-toolbar__search" aria-label="Search memories" placeholder="Search memories"
           value={query} onChange={(event) => setQuery(event.target.value)} />
       </div>
-      <AddMemory mode={mode} context={context} onAdded={(record) => {
+      <AddMemory memoryOn={memoryOn} context={context} onAdded={(record) => {
         setSaved((current) => ({ ...current, value: { ...current.value, items: [record, ...current.value.items.filter((item) => item.id !== record.id)] } }));
         void reloadSaved({ keepLength: true });
       }} />
@@ -418,26 +524,30 @@ function MemoryLists({ mode, context }: { mode: MemoryMode; context: MemoryConte
       {saved.status === 'ready' && saved.value.items.length === 0 && (
         <p className="settings-section__status">{q ? `No memories match “${q}”.` : effectiveFilter === 'all' ? 'No memories yet.' : 'No memories here yet.'}</p>
       )}
-      {saved.value.items.length > 0 && <ul className="memory-list" aria-label="Saved memories">
+      {saved.value.items.length > 0 && <ul ref={listRef} className="memory-list" aria-label="Saved memories">
         {saved.value.items.map((record) => (
-          <SavedMemoryItem key={record.id} record={record} context={context}
+          <SavedMemoryItem key={record.id} record={record} context={context} marked={marked === record.id}
             onReplace={(next) => { replaceSaved(next); if (!sameScope(next.scope, record.scope)) void reloadSaved({ keepLength: true }); }}
             onRemoved={() => removeSaved(record.id)}
             onConflict={() => currentRecord(record.id)} />
         ))}
       </ul>}
-      {saved.value.nextCursor && <Button size="sm" className="memory-more" onClick={() => { void showMore(); }}>Show more</Button>}
+      {saved.value.nextCursor && saved.value.query === savedQuery
+        && <Button size="sm" className="memory-more" onClick={() => { void showMore(); }}>Show more</Button>}
     </SettingsSection>
-  </>;
+  );
 }
 
 function MemoryMeta({ record, context }: { record: MemoryRecord; context: MemoryContext }) {
   const source = context.sourceNode(record);
+  const imported = record.importSource ? IMPORT_LABEL[record.importSource] : undefined;
   return (
     <div className="memory-item__meta">
       <span>{KIND_LABEL[record.kind]}</span>
       <span>{context.scopeLabel(record.scope)}</span>
-      <span>{ORIGIN_LABEL[record.origin]}</span>
+      {imported
+        ? <span title={record.importRef ? `Imported from ${imported}’s memory: ${record.importRef}` : `Imported from ${imported}’s memory`}>From {imported}</span>
+        : <span>{ORIGIN_LABEL[record.origin]}</span>}
       <time dateTime={new Date(record.updatedAt).toISOString()} title={new Date(record.updatedAt).toLocaleString()}>{updatedText(record.updatedAt)}</time>
       {source && <button type="button" className="settings-row__link" onClick={() => context.openSource(source)}>Open conversation</button>}
     </div>
@@ -446,9 +556,11 @@ function MemoryMeta({ record, context }: { record: MemoryRecord; context: Memory
 
 type Notice = { tone: 'error' | 'info'; text: string } | null;
 
-function SavedMemoryItem({ record, context, onReplace, onRemoved, onConflict }: {
+function SavedMemoryItem({ record, context, marked, onReplace, onRemoved, onConflict }: {
   record: MemoryRecord;
   context: MemoryContext;
+  /** Just shown from About the user. */
+  marked: boolean;
   onReplace: (record: MemoryRecord) => void;
   onRemoved: () => void;
   /** Reads the list again: the stored record, null when it is gone, undefined when it couldn't be read. */
@@ -524,13 +636,14 @@ function SavedMemoryItem({ record, context, onReplace, onRemoved, onConflict }: 
 
   const label = previewOf(record.body);
   return (
-    <li className="memory-item" aria-label={label} aria-busy={busy || undefined}>
+    <li className="memory-item" aria-label={label} aria-busy={busy || undefined} data-memory-id={record.id} data-marked={marked || undefined} tabIndex={-1}>
       {editing ? (
         <div className="memory-item__editor">
           <label className="sr-only" htmlFor={editorId}>Edit memory</label>
           <textarea id={editorId} className="ui-input memory-item__textarea" value={editing.draft} maxLength={MEMORY_BODY_MAX_CHARS} rows={3}
             autoFocus onChange={(event) => setEditing({ ...editing, draft: event.target.value })}
             onKeyDown={(event) => {
+              if (isImeComposing(event)) return;
               if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); setEditing(null); setNotice(null); }
               if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) { event.preventDefault(); void save(); }
             }} />
@@ -557,108 +670,7 @@ function SavedMemoryItem({ record, context, onReplace, onRemoved, onConflict }: 
   );
 }
 
-function PendingSection({ items, status, error, context, onReload }: {
-  items: MemoryRecord[];
-  status: Load<unknown>['status'];
-  error: string | null;
-  context: MemoryContext;
-  onReload: () => void;
-}) {
-  const [selected, setSelected] = useState<ReadonlySet<string>>(new Set());
-  const [busy, setBusy] = useState(false);
-  const [notice, setNotice] = useState<Notice>(null);
-  // Selection follows the list: a memory handled elsewhere drops out of it.
-  useEffect(() => {
-    setSelected((current) => {
-      const ids = new Set(items.map((item) => item.id));
-      const next = new Set([...current].filter((id) => ids.has(id)));
-      return next.size === current.size ? current : next;
-    });
-  }, [items]);
-
-  const decide = async (ids: readonly string[], decision: 'approve' | 'reject') => {
-    if (busy || ids.length === 0) return;
-    setBusy(true);
-    setNotice(null);
-    const failures: string[] = [];
-    for (const id of ids) {
-      try {
-        await runSelfMutation<unknown>(id, () => decision === 'approve' ? approveMemory(id) : rejectMemory(id));
-      } catch (failure) {
-        // Already handled elsewhere: the reload shows where it went.
-        if (isMemoryNotFound(failure) || (failure as MemoryApiError)?.code === 'invalid_state') continue;
-        failures.push(errorText(failure, 'unknown error'));
-      }
-    }
-    setSelected(new Set());
-    setBusy(false);
-    onReload();
-    if (failures.length > 0) {
-      const verb = decision === 'approve' ? 'approve' : 'reject';
-      setNotice({ tone: 'error', text: ids.length === 1 ? `Couldn’t ${verb} the memory: ${failures[0]}` : `Couldn’t ${verb} ${failures.length} of ${ids.length} memories: ${failures[0]}` });
-    }
-  };
-
-  if (status === 'error' && items.length === 0) {
-    return <SettingsSection title="Waiting for confirmation"><p className="settings-section__error" role="alert">Couldn’t load memories waiting for confirmation: {error}</p></SettingsSection>;
-  }
-  if (items.length === 0) return null;
-  const allSelected = selected.size === items.length;
-  const selectedIds = items.filter((item) => selected.has(item.id)).map((item) => item.id);
-  return (
-    <SettingsSection title="Waiting for confirmation" className="memory-pending"
-      aside={<span className="settings-row__state">{items.length}</span>}
-      intro="Agents suggested these, or saved them while reading web pages or tool output. They aren’t used until you approve them.">
-      <div className="memory-bulk">
-        <label className="memory-bulk__all">
-          <input type="checkbox" checked={allSelected} disabled={busy}
-            ref={(input) => { if (input) input.indeterminate = selected.size > 0 && !allSelected; }}
-            onChange={() => setSelected(allSelected ? new Set() : new Set(items.map((item) => item.id)))} />
-          Select all
-        </label>
-        <Button size="sm" disabled={busy || selectedIds.length === 0} onClick={() => { void decide(selectedIds, 'approve'); }}>
-          Approve selected{selectedIds.length ? ` (${selectedIds.length})` : ''}
-        </Button>
-        <Button size="sm" variant="ghost" disabled={busy || selectedIds.length === 0} onClick={() => { void decide(selectedIds, 'reject'); }}>
-          Reject selected{selectedIds.length ? ` (${selectedIds.length})` : ''}
-        </Button>
-      </div>
-      <ul className="memory-list" aria-label="Waiting for confirmation">
-        {items.map((record) => {
-          const label = previewOf(record.body);
-          return (
-            <li key={record.id} className="memory-item memory-item--pending" aria-label={label}>
-              <div className="memory-item__row">
-                <input type="checkbox" className="memory-item__check" aria-label={`Select “${label}”`} disabled={busy}
-                  checked={selected.has(record.id)}
-                  onChange={() => setSelected((current) => {
-                    const next = new Set(current);
-                    if (next.has(record.id)) next.delete(record.id); else next.add(record.id);
-                    return next;
-                  })} />
-                <p className="memory-item__body">{record.body}</p>
-              </div>
-              {record.sourceRisk === 'untrusted' && (
-                <p className="memory-item__warning">
-                  <TriangleAlert size={14} strokeWidth={1.75} aria-hidden="true" />
-                  <span>Saved while an agent was reading web pages or tool output. Check that it says what you want before approving it.</span>
-                </p>
-              )}
-              <MemoryMeta record={record} context={context} />
-              <div className="memory-item__actions">
-                <Button size="sm" variant="primary" disabled={busy} onClick={() => { void decide([record.id], 'approve'); }}>Approve</Button>
-                <Button size="sm" variant="ghost" disabled={busy} onClick={() => { void decide([record.id], 'reject'); }}>Reject</Button>
-              </div>
-            </li>
-          );
-        })}
-      </ul>
-      {notice && <p className="settings-section__error" role="alert">{notice.text}</p>}
-    </SettingsSection>
-  );
-}
-
-function AddMemory({ mode, context, onAdded }: { mode: MemoryMode; context: MemoryContext; onAdded: (record: MemoryRecord) => void }) {
+function AddMemory({ memoryOn, context, onAdded }: { memoryOn: boolean; context: MemoryContext; onAdded: (record: MemoryRecord) => void }) {
   const [open, setOpen] = useState(false);
   const [body, setBody] = useState('');
   const [kind, setKind] = useState<MemoryKind>('preference');
@@ -671,8 +683,8 @@ function AddMemory({ mode, context, onAdded }: { mode: MemoryMode; context: Memo
 
   if (!open) {
     return <div className="memory-add">
-      <Button size="sm" disabled={mode === 'off'} onClick={() => { setOpen(true); setError(null); }}>Add memory</Button>
-      {mode === 'off' && <span className="settings-row__state">Turn memory on to add memories.</span>}
+      <Button disabled={!memoryOn} onClick={() => { setOpen(true); setError(null); }}>Add memory</Button>
+      {!memoryOn && <span className="settings-row__state">Turn memory on to add memories.</span>}
     </div>;
   }
   const save = async () => {
@@ -698,6 +710,7 @@ function AddMemory({ mode, context, onAdded }: { mode: MemoryMode; context: Memo
         placeholder="For example: Answer in Chinese unless I write in English."
         onChange={(event) => setBody(event.target.value)}
         onKeyDown={(event) => {
+          if (isImeComposing(event)) return;
           if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); setOpen(false); }
           if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) { event.preventDefault(); void save(); }
         }} />

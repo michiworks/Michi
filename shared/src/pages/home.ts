@@ -25,11 +25,10 @@
  *   POST   /progress-cards/:threadNodeId/dismiss     -> ProgressCardDto
  */
 
-import type { ChangeSource, PageDto } from './types';
+import type { ChangeSource, CompanionActor, PageDto } from './types';
 import type { BranchOverviewEntry } from '../branchOverview';
 import { finalizeTurnContent } from '../turnProjection';
-
-export type HomePageRole = 'spaces-home' | 'workspace-home';
+import { BACKEND_RESTARTED_ERROR } from '../turnErrors';
 
 export const PAGE_LAYOUT_RULE_LIMITS = { text: 500, perPage: 50 } as const;
 export const PAGE_LAYOUT_PREFERENCES_LIMIT = 8_000;
@@ -162,7 +161,22 @@ export interface SpacesFirstRunStatus {
   closed?: boolean;
 }
 
-export type HomeSectionKey = 'waiting' | 'stalled' | 'done';
+/**
+ * One choice of a question the first run asks in the Meta agent's window, kept in its message's
+ * `metaAgentNarration` metadata: answered by sending it, or (with `open`) by going to a conversation.
+ */
+export interface NarrationOption {
+  label: string;
+  /** Opens this conversation with `draft` in its composer instead of answering. */
+  open?: { nodeId: string; workspaceId: string; draft: string };
+}
+
+export const HOME_SECTION_KEYS = ['waiting', 'stalled', 'done'] as const;
+export type HomeSectionKey = typeof HOME_SECTION_KEYS[number];
+/** The section headings on Home. */
+export const HOME_SECTION_TITLES: Readonly<Record<HomeSectionKey, string>> = { waiting: 'Waiting on you', stalled: 'Stalled', done: 'Just done' };
+/** The shorter names layout rules use for a section. */
+export const HOME_SECTION_SHORT_TITLES: Readonly<Record<HomeSectionKey, string>> = { waiting: 'Waiting', stalled: 'Stalled', done: 'Done' };
 
 /** Most items a Home section lists; `total` counts the rest. */
 export const HOME_SECTION_LIMIT = 8;
@@ -262,9 +276,11 @@ export interface ThreadCardItem {
   at: number;
   /** The reply the card is about, to open the conversation at; null before one. */
   messageId: string | null;
+  /** Archived out of its thread (Settings › Archived): it opens read-only. */
+  archived?: true;
 }
 
-/** The named conversations still in the workspace; one deleted or moved away is not among them. */
+/** The named conversations still in the workspace; one in the Trash or moved away is not among them. */
 export interface ThreadCardsDto {
   items: ThreadCardItem[];
 }
@@ -281,8 +297,11 @@ export const SPACE_ACTIVITY_LIMITS = { default: 20, max: 50 } as const;
  * and to which blocks or rows.
  */
 export interface SpaceActivityDetail {
-  /** The person; the Meta agent (its runs and its chat window); or the conversation the change came from. */
-  by: { kind: 'user' } | { kind: 'meta-agent' } | { kind: 'conversation'; title: string } | { kind: 'agent' };
+  /**
+   * The person; the user's own agent (a CompanionActor, DESIGN-v2 §2.7: its
+   * conversations, check-ins and Pages upkeep); or the conversation the change came from.
+   */
+  by: { kind: 'user' } | { kind: 'conversation'; title: string } | { kind: 'agent' } | CompanionActor;
   /**
    * `suggested`: nothing applied and something waits for review; `accepted` /
    * `dismissed`: the person reviewed every one. Otherwise what the applied
@@ -336,6 +355,36 @@ export type SpaceActivityItem =
     fresh?: boolean;
   };
 
+/** How a conversation's latest turn ended. An early stop completed without finishing its work. */
+export type ConversationEndingOutcome = 'done' | 'stopped_early' | 'cancelled' | 'interrupted' | 'failed';
+
+export interface ConversationEnding {
+  outcome: ConversationEndingOutcome;
+  /** What Home rows and thread cards say about it; a failure's first error line, which each surface frames. */
+  note: string | null;
+}
+
+/** Why a turn a Michi restart cut short stopped. */
+export const RESTART_INTERRUPTION = 'Michi stopped while it was running';
+
+const ENDED_EARLY: Record<string, string> = {
+  max_tokens: 'Stopped early: it reached its output limit',
+  max_turn_requests: 'Stopped early: it reached its step limit',
+  refusal: 'Stopped: the agent declined to continue',
+};
+
+/** How the latest turn ended, from its durable row; null while it runs or before the first turn. */
+export function conversationEnding(turn: { status: string | null; stopReason: string | null; error: string | null }): ConversationEnding | null {
+  if (turn.status === 'completed') {
+    const early = turn.stopReason ? ENDED_EARLY[turn.stopReason] : undefined;
+    return early ? { outcome: 'stopped_early', note: early } : { outcome: 'done', note: null };
+  }
+  if (turn.status === 'cancelled') return { outcome: 'cancelled', note: 'Stopped before it finished' };
+  if (turn.status !== 'error') return null;
+  if (turn.error === BACKEND_RESTARTED_ERROR) return { outcome: 'interrupted', note: `Interrupted: ${RESTART_INTERRUPTION}` };
+  return { outcome: 'failed', note: turn.error?.split('\n').find((line) => line.trim())?.trim() ?? null };
+}
+
 export const PROGRESS_CARD_TTL_MS = 24 * 60 * 60 * 1000;
 
 export type ProgressCardStatus = 'idle' | 'running' | 'done' | 'failed' | 'cancelled';
@@ -357,7 +406,7 @@ export interface ProgressCardDto {
   status: ProgressCardStatus;
   /** Once it is not running: the summary its latest turn ended with (`progressTurnSummary`), else what its last reply concluded (`progressReplyConclusion`). */
   summary: string | null;
-  /** Why a failed conversation stopped: the first line of its error. Absent from older backends. */
+  /** Why a failed conversation stopped: why it ended early or was interrupted, else the first line of its error. Absent from older backends. */
   error?: string | null;
   /** When the latest turn ended; null while it runs. Absent from older backends. */
   finishedAt?: number | null;

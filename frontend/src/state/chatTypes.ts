@@ -1,11 +1,11 @@
 import type { AgentSessionState, ChatStreamEnvelope, ChatStreamPayloads, SteerMessageOptions } from 'michi-shared';
 import type { AgentCommand, AgentReasoning, PlanEntry, RuntimeId, SessionMode } from '../services/api';
-import type { AgentStatus, PermissionRequest } from '../services/api';
+import type { AgentStatus, PermissionRequest, TreeMessagePageEntry } from '../services/api';
 import type { MentionRecord } from '../components/mentions';
 import type { AttachmentRef } from '../lib/composerAttachments';
 import type { UserInputAnswer, UserInputQuestion } from '../services/chatStreamEvents';
-import type { BranchOverviewEntry, SteeringReport } from 'michi-shared';
-import type { DurableMessageMetadata, ThreadMessageSource } from 'michi-shared';
+import type { BranchOverviewEntry, LeanNodeField, SteeringReport } from 'michi-shared';
+import type { CompanionPostMetadata, CompanionSendSource, CompanionTurnMetadata, DurableMessageMetadata, NarrationOption, ThreadMessageSource, TurnStartAssistantMetadata } from 'michi-shared';
 import type { PaneItem, PaneLauncherChoice } from './paneItems';
 
 export type { AgentStatus, PermissionRequest } from '../services/api';
@@ -41,36 +41,7 @@ export interface DigestState {
 
 export type Theme = 'light' | 'dark';
 
-export type NodeKind = 'chat' | 'digest' | 'artifact';
-
-/** State for an artifact viewer pane (kind === 'artifact'). */
-export interface ArtifactState {
-  /** Relative file path within the workspace cwd. */
-  filePath: string;
-  /** Loaded text content. null = not yet fetched. */
-  content: string | null;
-  /** 'rendered' shows MarkdownContent; 'source' shows raw text. */
-  viewMode: 'rendered' | 'source';
-  /** File extension (without dot), e.g. 'md', 'ts'. */
-  extension?: string;
-  /** File basename, e.g. 'analysis.md'. */
-  basename?: string;
-  /** Size in bytes. */
-  size?: number;
-  /** Last-modified epoch ms. */
-  modifiedAt?: number;
-  /** Loading/error state. */
-  status: 'idle' | 'loading' | 'error';
-  error?: string;
-  /**
-   * Set by the artifact watcher when the file changed on disk since the last
-   * load. Drives the "● Changed on disk · refresh" badge; content is NOT auto-replaced —
-   * the user clicks to reload. Cleared on a successful reload.
-   */
-  pendingRefresh?: boolean;
-  /** Set when the watcher reports the file was deleted on disk. */
-  removed?: boolean;
-}
+export type NodeKind = 'chat' | 'digest';
 
 export type ViewMode = 'single' | 'two' | 'three';
 
@@ -165,6 +136,20 @@ export interface UserSendMeta {
   displayText?: string;
   /** Structured mention records from the composer. Persisted on the ChatMessage for click navigation. */
   mentions?: Array<{ kind: 'context' | 'node'; refId: string; label: string }>;
+  /**
+   * A retry, or an edit that keeps its /name, of a message that ran a skill
+   * (ChatMessage.skill): that skill runs again by its id rather than by what
+   * the name resolves to now.
+   */
+  skill?: import('michi-shared').SkillMessageMetadata;
+  /** The / menu row the message's `/name` was picked from: it runs that entry rather than the name's first. */
+  slash?: import('./slashEntries').SlashPick;
+  /**
+   * The runtime whose / menu the composer showed, which the message's
+   * `/name` resolves against. Needed where the send names no runtime (the
+   * assistant's conversations); otherwise it is `runtimeId`'s.
+   */
+  slashRuntimeId?: string;
   /** Per-node runtime binding override from composer chips. Passed through to ensureSession. */
   runtimeId?: string;
   providerId?: string;
@@ -175,6 +160,13 @@ export interface UserSendMeta {
    * send, a reply to a selection): leave the node's composer draft as it is.
    */
   keepDraft?: boolean;
+  /**
+   * The agent's conversation V: the `metaAgentContext` this message carries,
+   * captured when the user sent it (a queued send's, merged; a retry's, the
+   * original message's), F1a-review #1. Null: it carries none. Undefined: read
+   * it now, as the send starts.
+   */
+  metaAgentContext?: import('michi-shared').MetaAgentChatTurnContext | null;
 }
 
 /** Runtime binding fields a send or retry passes through to ensureSession. */
@@ -201,10 +193,12 @@ export interface ChatMessage {
    */
   clientKey?: string;
   /**
-   * The queued entry (`PendingQueuedMessage.id`) a steered user message came
-   * from, so its bubble can fly in from the queued block. In memory only.
+   * When this client received a user message the server created mid-turn (a
+   * steer it accepted). The bubble's entrance reads this instead of
+   * `createdAt`, so the server's clock and the round trip cannot keep it from
+   * fading in. In memory only.
    */
-  queueId?: string;
+  arrivedAt?: number;
   role: 'user' | 'assistant';
   /** User-typed body for user messages; legacy assistant body for old data. */
   text: string;
@@ -264,7 +258,50 @@ export interface ChatMessage {
    * thread's agent (send_to_thread). `text` then holds only the relayed body.
    */
   threadMessage?: ThreadMessageSource;
+  /** The skill this user message ran (`text` is the `/name args` typed). */
+  skill?: import('michi-shared').SkillMessageMetadata;
+  /**
+   * User messages in a conversation the agent started: this one is a
+   * follow-up the agent sent (DESIGN-v2 §4), beside `threadMessage`, from the
+   * stored row's metadata or, live, from turn_start.userMetadata. The bubble
+   * says "From <name>", and its label opens the panel (never the hidden
+   * workspace).
+   */
+  companionSend?: CompanionSendSource;
+  /**
+   * Assistant messages: a check-in posted it into the agent's conversation
+   * (DESIGN-v2 §3.3), from the stored row's metadata or, live, from
+   * turn_start.assistantMetadata. Rendered as "<name> · check-in" with a
+   * receipt; its chips only fill the composer (§2.8 T3).
+   */
+  companionPost?: CompanionPostMetadata;
+  /**
+   * User messages to the agent: what the route decided before the turn
+   * started (DESIGN-v2 §1.3, §2.8 T4), shown as a line under the message.
+   */
+  companionTurn?: CompanionTurnMetadata;
+  /**
+   * User messages to the agent: the context they were sent with
+   * (UserSendMeta.metaAgentContext), so a retry or an edit sends the same
+   * references (§2.8 T4). In memory only; `companionRefs` survives a reload.
+   */
+  metaAgentContext?: import('michi-shared').MetaAgentChatTurnContext | null;
+  /** User messages to the agent: the references they carried (stored as userMetadata.companionRefs). */
+  companionRefs?: import('michi-shared').CompanionTurnRef[];
+  /**
+   * The Pages upkeep's first-run question (`mna-` narration, its end): its
+   * options, one of which may open another conversation with a draft
+   * instead of being sent (stored metaAgentNarration.options).
+   */
+  narrationOptions?: NarrationOption[];
 }
+
+/**
+ * One answer to the first run's closing question: sent as text, or (`open`) a
+ * conversation to continue in. Declared once, beside SpacesFirstRunStatus in
+ * shared/src/pages/home.ts, for the backend that stores it and this window.
+ */
+export type { NarrationOption };
 
 export interface UserInputRequest {
   requestId: number;
@@ -344,9 +381,18 @@ export interface ChatNodeState {
   /** Server-owned: the Meta agent maintenance job that ran this transcript.
    * Hydrated read-only, never written back by workspace sync. */
   maintenanceJobId?: string | null;
+  /** Server-owned: the Scheduled-only job whose run made this thread; it shows
+   * only on the Scheduled page until moved to the workspace (cleared). */
+  scheduledOnlyJobId?: string | null;
   permissionMode?: import('michi-shared').ChatPermissionMode;
   /** Approve for me on top of `permissionMode: 'ask'` (Kiro V3). Server-owned, like permissionMode. */
   permissionApproveForMe?: boolean;
+  /**
+   * The chat asks for Ultracode (Claude: a workflow for every substantive
+   * task). Server-owned, like permissionMode; whether it took effect is the
+   * session's to say (sessionState.ultracode).
+   */
+  ultracode?: boolean;
   /** Stable id used as the key in the nodes map. */
   nodeId: string;
   /** 'chat' for normal agent-backed threads; 'digest' for generated markdown docs. */
@@ -392,10 +438,13 @@ export interface ChatNodeState {
   /** Older server-authored history still exists before this keyset cursor.
    * A partial display page keeps messagesLoaded=false; never use it as full context. */
   historyBefore?: { seq: number; id: string };
+  /** How many messages lie before `historyBefore`, counted when its page was
+   * read. Messages sent since then leave it right, unlike `messageCount`. */
+  olderMessageCount?: number;
   /**
-   * Message count from the meta hydration payload, shown by Map/Digest/Branches
-   * while bodies are unloaded. In-memory only; never persisted / written back.
-   * Once messages load, `messages.length` is authoritative and this is ignored.
+   * The server's message count when the node or its latest page was read.
+   * In-memory only; never persisted / written back. Sends do not update it:
+   * read the node's count through nodeMessageCount().
    */
   messageCount?: number;
   followUps: string[];
@@ -486,10 +535,12 @@ export interface ChatNodeState {
   consumedLinks?: string[];
   /** Populated iff kind === 'digest'. Holds the generated markdown, sources, and fingerprints. */
   digest?: DigestState;
-  /** Populated iff kind === 'artifact'. Holds the file viewer state. */
-  artifact?: ArtifactState;
   /** True iff this node was created by an agent-initiated spawn_branches tool call. */
   spawnedByAgent?: boolean;
+  /** Server-owned: the multi-model run that created this branch (nodes.multi_model_run_id). */
+  multiModelRunId?: string;
+  /** Server-owned: the branch got only its prompt, not the parent's history (nodes.fresh_context). */
+  freshContext?: true;
   /**
    * Server-durable first prompt for an agent-spawned child. This is a one-shot
    * outbox item, not a user composer draft; clear it only after turn_start.
@@ -509,9 +560,9 @@ export interface ChatNodeState {
   deletionGroupId?: string;
   /**
    * Set when the node was sent to trash via single-node trim (Phase 2). Holds
-   * everything `restoreTrimmedNode()` needs to reverse the operation: the
-   * original parent, the children that got reparented up, and the tree-root
-   * pointer if the trimmed node was a tree root. Absent on subtree
+   * everything trashActions' `restoreFromTrimSnapshot()` needs to reverse
+   * the operation: the original parent, the children that got reparented up,
+   * and the tree-root pointer if the trimmed node was a tree root. Absent on subtree
    * deletions, which use `deletionGroupId` for restore lookups.
    */
   trimSnapshot?: TrimSnapshot;
@@ -542,6 +593,15 @@ export interface ChatNodeState {
    * workspaces, or panes without losing partially-written text and @mentions.
    */
   composerDraft?: ComposerDraft;
+  /**
+   * Lean node fields (shared/leanNodeFields) the backend holds but this
+   * window has no value for yet: lean remote metadata left them out, and the
+   * node's tree page brings them (chatHydration mergeDeferredNodeFields). The
+   * window never writes a deferred field. A live update settles one: a new
+   * follow-up list or a draft edit takes over that field; an overview entry
+   * that streams in joins the stored ones when they arrive. Absent: none.
+   */
+  deferredNodeFields?: readonly LeanNodeField[];
   /**
    * In-memory list of selection comments the user has accumulated on this
    * node's assistant messages. The user selects a passage → picks
@@ -577,9 +637,22 @@ export interface ChatNodeState {
    * Wall-clock ms when the user last opened (focused) this node.
    * Set on focusedNodeId change in chatStore. Mirrors `digest.viewedAt`.
    * Unread iff `lastAssistantAt > viewedAt` (with focusedNodeId excluded
-   * by the selector). Persisted.
+   * by the selector) when the backend sends no completion facts. Persisted.
    */
   viewedAt?: number;
+  /**
+   * Server completion facts (backend migration 0064): turns of this node
+   * that completed with an answer, the latest one's time, and the highest
+   * count a focused window had on screen. Present only from a backend that
+   * keeps them; then unread iff `completionSeq > seenCompletionSeq` (see
+   * completionFacts.ts). `seenCompletionSeq` is written with the view mark.
+   * `lastCompletedTurnId` names the turn last counted, so a turn is counted
+   * once however often its `done` arrives.
+   */
+  completionSeq?: number;
+  seenCompletionSeq?: number;
+  lastCompletedAt?: number;
+  lastCompletedTurnId?: string;
   /**
    * Node-level pin. Unix ms when the user pinned this branch node; absent =
    * not pinned. A pinned node floats to the top of its sibling group in the
@@ -630,6 +703,14 @@ export interface PendingQueuedMessage {
   commentBlock?: string;
   /** Structured source metadata retained when this queue is flushed. */
   comments?: PendingComment[];
+  /** The / menu row its `/name` was picked from (UserSendMeta.slash). */
+  slash?: import('./slashEntries').SlashPick;
+  /**
+   * The agent's conversation: the metaAgentContext read when the user queued
+   * it (its chips, the post it replies to, the area), sent when it flushes,
+   * whatever the panel shows then (F1a-review #1). Null: none.
+   */
+  metaAgentContext?: import('michi-shared').MetaAgentChatTurnContext | null;
   /** Wall-clock at queue time. Recorded but unused in v1. */
   queuedAt: number;
 }
@@ -639,7 +720,10 @@ export interface Tree {
   id: string;
   /** Root nodeId of this tree. Member of the owning project's chatIds. */
   rootNodeId: string;
-  /** User-set name. Falls back to the root node's title in UI. */
+  /**
+   * Legacy: a name set apart from the root's title, which the UI shows first.
+   * A thread's name is now its root node's title; renaming clears this.
+   */
   name?: string;
   createdAt: number;
   /** Bumped whenever a node-level event (chunk/done/user-send/title/...) lands on a node in this tree. */
@@ -761,6 +845,7 @@ export interface Project {
 export type ChatAction =
   | { type: 'create'; nodeId: string; projectId: string; parentNodeId?: string; mergeSources?: string[]; modeId?: string }
   | { type: 'set-permission-mode'; nodeId: string; mode: import('michi-shared').ChatPermissionMode; approveForMe?: boolean }
+  | { type: 'set-ultracode'; nodeId: string; enabled: boolean }
   | {
       type: 'bind-chat';
       nodeId: string;
@@ -785,6 +870,9 @@ export type ChatAction =
       /** Not a composer send: the composer draft stays (UserSendMeta.keepDraft). */
       keepDraft?: boolean;
       quoteSource?: import('../lib/quoteSource').AnyQuoteSource;
+      skill?: import('michi-shared').SkillMessageMetadata;
+      /** A message to the agent: the context it carries, kept on the message for a retry (ChatMessage.metaAgentContext). */
+      metaAgentContext?: import('michi-shared').MetaAgentChatTurnContext | null;
     }
   | { type: 'chunk'; nodeId: string; assistantId: string; text: string; observedAt?: number }
   | { type: 'steering-report'; nodeId: string; assistantId: string; reports: SteeringReport[] }
@@ -803,6 +891,10 @@ export type ChatAction =
       /** The turn was cancelled (Stop / abort). Still-active tool calls are
        *  finalized as 'interrupted' instead of 'completed'. */
       aborted?: boolean;
+      /** The turn that ended, when the stream named it: its completion counts once. */
+      turnId?: string;
+      /** The node's completion facts the server committed with this turn (completionFacts.ts). */
+      completion?: { completionSeq: number; seenCompletionSeq: number };
     }
   | { type: 'recover-original-result'; nodeId: string; turnId: string; assistantId: string; assistant: ChatMessage; lastSeq: number; cursor: 'foreground' | 'background' }
   | { type: 'error-recovery'; nodeId: string; state?: 'checking' | 'unavailable' }
@@ -816,7 +908,21 @@ export type ChatAction =
       selfInitiated?: boolean;
       /** Metadata of the turn's visible user message (e.g. a cross-thread message source). */
       userMetadata?: DurableMessageMetadata;
+      /** Metadata of the turn's assistant message (a check-in's post, DESIGN-v2 §3.3). */
+      assistantMetadata?: TurnStartAssistantMetadata;
       cursor?: 'foreground' | 'background';
+    }
+  | {
+      /**
+       * The sending window's turn_start: the route's metadata for the user
+       * message it already shows (companionTurn, DESIGN-v2 §1.3) and the
+       * assistant message's own (companionPost).
+       */
+      type: 'turn-start-metadata';
+      nodeId: string;
+      assistantId: string;
+      userMetadata?: DurableMessageMetadata;
+      assistantMetadata?: TurnStartAssistantMetadata;
     }
   | { type: 'apply-seq'; nodeId: string; turnId: string; seq: number }
   | { type: 'active-turn'; nodeId: string; assistantId: string; turnId: string }
@@ -835,7 +941,10 @@ export type ChatAction =
       type: 'messages-loaded';
       nodeIds: string[];
       messagesByNode: Record<string, ChatMessage[]>;
-      pages?: Array<{ nodeId: string; total: number; before: { seq: number; id: string } | null }>;
+      /** Each node's page bounds, and on a latest page its lean node fields. */
+      pages?: TreeMessagePageEntry[];
+      /** Latest turn rows read with the bodies (see applyTreeMessages). */
+      turns?: unknown[];
     }
   | { type: 'history-page-loaded'; nodeId: string; expectedBefore: { seq: number; id: string };
       before: { seq: number; id: string } | null; messages: ChatMessage[]; total: number }
@@ -846,13 +955,6 @@ export type ChatAction =
   | { type: 'clear-positions'; nodeIds: string[] }
   | { type: 'consume-links'; nodeId: string; peerIds: string[] }
   | { type: 'forget-consumed-link'; nodeId: string; peerId: string }
-  | { type: 'create-artifact'; nodeId: string; projectId: string; filePath: string }
-  | { type: 'artifact-loading'; nodeId: string }
-  | { type: 'artifact-loaded'; nodeId: string; content: string; basename: string; extension: string; size: number; modifiedAt: number }
-  | { type: 'artifact-error'; nodeId: string; error: string }
-  | { type: 'artifact-set-view'; nodeId: string; viewMode: 'rendered' | 'source' }
-  | { type: 'artifact-mark-stale'; nodeId: string }
-  | { type: 'artifact-mark-removed'; nodeId: string }
   | { type: 'create-digest'; nodeId: string; projectId: string; sources: string[] }
   | { type: 'digest-started'; nodeId: string }
   | { type: 'digest-chunk'; nodeId: string; text: string }
@@ -872,7 +974,8 @@ export type ChatAction =
   | { type: 'digest-error'; nodeId: string; message: string }
   | { type: 'digest-set-prompt'; nodeId: string; customPrompt: string }
   | { type: 'digest-viewed'; nodeId: string; viewedAt: number }
-  | { type: 'node-viewed'; nodeId: string; viewedAt: number }
+  /** `seen`: a focused window had the node on screen, so its completions count as seen. */
+  | { type: 'node-viewed'; nodeId: string; viewedAt: number; seen?: boolean }
   | { type: 'mark-all-read'; viewedAt: number }
   | { type: 'set-title'; nodeId: string; title: string }
   | { type: 'set-branch-overview'; nodeId: string; overview: string; assistantId?: string }
@@ -882,7 +985,7 @@ export type ChatAction =
   | { type: 'set-follow-ups'; nodeId: string; followUps: string[] }
   | { type: 'visible-response-complete'; nodeId: string; assistantId: string }
   | { type: 'follow-ups-status'; nodeId: string; status: 'in_progress' | 'completed' | 'failed' }
-  | { type: 'command-result'; nodeId: string; result: NonNullable<ChatNodeState['commandResult']> }
+  | { type: 'command-result'; nodeId: string; result: NonNullable<ChatNodeState['commandResult']> | null }
   | { type: 'session-state'; nodeId: string; state: AgentSessionState }
   | { type: 'set-commands'; nodeId: string; commands: AgentCommand[] }
   | { type: 'set-current-mode'; nodeId: string; currentModeId: string }
@@ -931,6 +1034,8 @@ export type ChatAction =
   | { type: 'warning'; nodeId: string; assistantId?: string; warning: import('michi-shared').RuntimeWarning }
   | { type: 'mcp-server-error'; nodeId: string; serverName: string; error: string }
   | { type: 'set-composer-draft'; nodeId: string; draft: ComposerDraft | null; preserveExisting?: boolean }
+  /** A suggested prompt after whatever draft the node holds when it lands. */
+  | { type: 'append-composer-line'; nodeId: string; text: string }
   | { type: 'add-comment'; nodeId: string; comment: PendingComment }
   | { type: 'edit-comment'; nodeId: string; commentId: string; body: string }
   | { type: 'remove-comment'; nodeId: string; commentId: string }
@@ -942,16 +1047,19 @@ export type ChatAction =
 
 export type ProjectAction =
   | { type: 'create-tree'; treeId: string; rootNodeId: string; now: number; kind?: 'normal' | 'merge' }
-  | { type: 'archive-tree'; treeId: string; now: number }
+  /** `nodes` tells which thread the workspace may land on if this was its open one. */
+  | { type: 'archive-tree'; treeId: string; now: number; nodes: Readonly<Record<string, ChatNodeState>> }
   | { type: 'unarchive-tree'; treeId: string; now: number }
   | { type: 'pin-tree'; treeId: string; now: number }
   | { type: 'unpin-tree'; treeId: string }
-  | { type: 'rename-tree'; treeId: string; name: string }
+  | { type: 'clear-thread-name'; rootNodeId: string }
   | { type: 'activate-tree'; treeId: string | null }
   | { type: 'touch-tree'; treeId: string; now: number }
   | {
       type: 'upsert-context';
       projectId: string;
+      /** The id a new artifact of this window takes (no context.id); one is made up when absent. */
+      newId?: string;
       context: {
         id?: string;
         name: string;
@@ -1032,10 +1140,10 @@ export interface ChatContextValue {
   retryLastTurn: (nodeId: string, fromIndex?: number, binding?: SendBindingMeta) => void;
   /** Explicitly execute again; an uncertain original attempt keeps its existing output and anchors. */
   rerunLastTurn: (nodeId: string, fromIndex?: number, binding?: SendBindingMeta) => void;
-  /** Carry on a turn a restart cut short with a continuation prompt; the original request is not re-sent. */
+  /** Carry on a turn a restart or expired credentials cut short with a continuation prompt; the original request is not re-sent. */
   resumeLastTurn: (nodeId: string, binding?: SendBindingMeta) => void;
   /** Trim from a given user message index and resend with new (edited) text. */
-  editAndResend: (nodeId: string, fromIndex: number, newText: string) => void;
+  editAndResend: (nodeId: string, fromIndex: number, newText: string, binding?: SendBindingMeta) => void;
   createChildChat: (
     parentNodeId: string,
     firstMessage: string,
@@ -1060,6 +1168,12 @@ export interface ChatContextValue {
    * runtime label, provider list, etc.). null until first fetch resolves.
    */
   agentStatus: AgentStatus | null;
+  /**
+   * True when the active backend gave no status for a whole bounded retry
+   * (boot, a backend switch or a reload). Cleared by the next status and by
+   * every new retry.
+   */
+  agentStatusUnreachable: boolean;
   /**
    * Error message recorded when /api/ready reports `failed` during boot
    * (e.g. kiro-cli ENOENT). null when warm is pending or has succeeded.
@@ -1094,6 +1208,11 @@ export interface ChatContextValue {
   restoreLastDeletion: () => string | null;
   /** Restore a specific deletion group. Returns the root nodeId, or null. */
   restoreDeletion: (groupId: string) => string | null;
+  /**
+   * Move an archived node to Trash, or a trimmed node back to Archived,
+   * keeping its restore snapshot. Returns the group's new id, or null.
+   */
+  moveDeletionGroupLane: (groupId: string, lane: 'trash' | 'archive', at?: number) => string | null;
   /** Permanently purge a deletion group (local state only). Prefer `purgeDeletionAsync` from UI. */
   purgeDeletion: (groupId: string) => void;
   /**
@@ -1128,6 +1247,13 @@ export interface ChatContextValue {
     opts?: { anchorMessageId?: string },
   ) => Promise<string[]>;
   /**
+   * Open a chat and its branches as panes side by side: the branches right
+   * after the chat, in its tree's slot, then focus one (the first branch by
+   * default) and show the dashboard. Deleted branches and branches in
+   * another tree are skipped.
+   */
+  openPanesSideBySide: (callerNodeId: string, childNodeIds: readonly string[], opts?: { focusNodeId?: string }) => void;
+  /**
    * Link two existing nodes (no-op if already linked or self-loop). A link
    * is a bidirectional context bridge: next time either node sends a
    * message, the other's latest reply is injected into its agent session.
@@ -1156,14 +1282,12 @@ export interface ChatContextValue {
   activateLauncherPane: (paneId: string, choice: PaneLauncherChoice) => Promise<string>;
   /** Move an existing detached terminal into a launcher slot. */
   adoptTerminalPane: (launcherPaneId: string, terminalPaneId: string) => void;
+  /** Show a terminal a backend already runs in a launcher slot. */
+  adoptBackendTerminal: (launcherPaneId: string, terminal: { terminalId: string; cwd: string }, connectionId: string) => void;
   /** Open a standalone file viewer without inserting it into the chat graph. */
   openFilePane: (filePath: string, options?: { parseSourceLocation?: boolean }) => string;
   /** Open a workspace-owned native Page beside chat in the active pane slot. */
   openPagePane: (page: { pageId: string; workspaceId: string; backendConnectionId: string; title?: string }) => string;
-  /** Open a workspace-relative working-tree diff. */
-  openDiffPane: (filePath: string) => string;
-  /** Open a persistent PTY surface rooted at cwd (active workspace cwd by default). */
-  openTerminalPane: (cwd?: string) => string;
   /** Open a secure native browser surface. */
   openBrowserPane: (url?: string) => string;
   /** Patch serializable pane metadata such as title, URL, or view mode. */
@@ -1191,20 +1315,13 @@ export interface ChatContextValue {
    * derived paneKey hasn't refreshed yet, so plain `openPane` would write
    * into the outgoing thread's slot.
    */
-  openPaneInTree: (projectId: string, treeId: string, nodeId: string) => void;
+  openPaneInTree: (projectId: string, treeId: string | null, nodeId: string) => void;
   closePane: (nodeId: string) => void;
   focusPane: (nodeId: string) => void;
+  /** Zoom a pane (focusing it) so it fills the pane strip alone; null ends the zoom. */
+  zoomPane: (nodeId: string | null) => void;
   /** Reorder open panes: move `fromId` to the index of `toId`. */
   reorderPane: (fromId: string, toId: string) => void;
-  /** Step back to the previously focused chat location (browser-style; crosses
-   *  trees/workspaces). No-op when the back stack is empty. In-memory only. */
-  navBack: () => void;
-  /** Step forward again after navBack. No-op when the forward stack is empty. */
-  navForward: () => void;
-  /** Whether navBack has a destination — drives the topbar button enabled state. */
-  canNavBack: boolean;
-  /** Whether navForward has a destination. */
-  canNavForward: boolean;
   setViewMode: (mode: ViewMode) => void;
   /** Node ids currently selected for multi-node operations. In-memory only; clears on project switch. */
   selection: ReadonlySet<string>;
@@ -1212,14 +1329,18 @@ export interface ChatContextValue {
   clearSelection: () => void;
   createThread: (modeId?: string) => string | null;
   setChatPermissionMode: (nodeId: string, choice: import('michi-shared').ChatPermissionChoice) => Promise<void>;
+  /** Save the chat's Ultracode choice; its live session takes it at once. */
+  setChatUltracode: (nodeId: string, enabled: boolean) => Promise<void>;
   archiveTree: (treeId: string) => void;
   unarchiveTree: (treeId: string) => void;
   pinTree: (treeId: string) => void;
   unpinTree: (treeId: string) => void;
   pinProject: (projectId: string) => void;
   unpinProject: (projectId: string) => void;
+  /** Renames the thread's root conversation: a thread's name is its title. */
   renameTree: (treeId: string, name: string, targetProjectId?: string) => void;
-  deleteTree: (treeId: string) => void;
+  /** Move a thread's nodes to Trash. Returns their deletion group id, or null when nothing moved. */
+  deleteTree: (treeId: string) => string | null;
   activateTree: (treeId: string, targetProjectId?: string) => void;
   /** Move a thread (its tree row, nodes, and intra-tree edges) to another
    *  workspace. Atomic on the backend; client state mirrors the same slice.
@@ -1258,7 +1379,10 @@ export interface ChatContextValue {
   treeSelection: ReadonlySet<string>;
   toggleTreeSelection: (treeId: string) => void;
   clearTreeSelection: () => void;
+  /** Select the thread rows the sidebar lists in the active workspace. */
   selectAllTrees: () => void;
+  /** Replace the selection with `treeIds`, the threads a surface shows. */
+  selectTrees: (treeIds: Iterable<string>) => void;
   bulkArchiveTrees: () => void;
   bulkDeleteTrees: () => void;
   bulkUnarchiveTrees: () => void;
@@ -1279,7 +1403,6 @@ export interface ChatContextValue {
   clearPendingComments: (nodeId: string) => void;
   /** Same-turn native steer. Returns accepted=false when the runtime is invisible. */
   steerMessage: (nodeId: string, text: string, options?: SteerMessageOptions) => Promise<boolean>;
-  compactContext: (nodeId: string, instructions?: string) => Promise<{ started: boolean; detail?: string }>;
   /** Push a queued message onto the node (used while streaming). */
   queueMessage: (nodeId: string, message: PendingQueuedMessage) => void;
   /** Remove a queued message by id (used when the user × the pill). */
@@ -1324,6 +1447,7 @@ export type ChatProjectsValue = Pick<
   | 'agentModesError'
   | 'retryAgentModes'
   | 'agentStatus'
+  | 'agentStatusUnreachable'
   | 'warmFailedError'
   | 'refreshAgentStatus'
   | 'focusedNodeId'
@@ -1332,8 +1456,6 @@ export type ChatProjectsValue = Pick<
   | 'treeSelection'
   | 'searchHighlightTerm'
   | 'unreadFilterOn'
-  | 'canNavBack'
-  | 'canNavForward'
 >;
 
 /** Pane-layout slice of the chat store. Separated from ChatProjectsValue
@@ -1353,6 +1475,8 @@ export type ChatPaneValue = Pick<
   tabPanes?: string[];
   /** Single-page mode's visible pane ('' otherwise); feeds paneScopeKey. */
   pagePane?: string;
+  /** The pane filling the strip while the slot is zoomed, else null. */
+  zoomedPane?: string | null;
 };
 
 /** Callback-only slice for hot chat surfaces. It intentionally excludes the
@@ -1375,6 +1499,7 @@ export type ChatActionsValue = Pick<
   | 'createBlankChild'
   | 'createMergedChat'
   | 'fanoutBranches'
+  | 'openPanesSideBySide'
   | 'switchAgent'
   | 'cancelStream'
   | 'deleteNode'
@@ -1387,6 +1512,7 @@ export type ChatActionsValue = Pick<
   | 'openPaneInTree'
   | 'closePane'
   | 'focusPane'
+  | 'zoomPane'
   | 'toggleSelection'
   | 'clearSelection'
   | 'restoreLastDeletion'
@@ -1404,12 +1530,14 @@ export type ChatActionsValue = Pick<
   | 'toggleTreeSelection'
   | 'clearTreeSelection'
   | 'selectAllTrees'
+  | 'selectTrees'
   | 'bulkArchiveTrees'
   | 'bulkDeleteTrees'
   | 'setFocusedNodeId'
   | 'createDigest'
   | 'resolvePermission'
   | 'setChatPermissionMode'
+  | 'setChatUltracode'
   | 'denyPermission'
   | 'resolveUserInputRequest'
   | 'skipUserInputRequest'
@@ -1418,7 +1546,6 @@ export type ChatActionsValue = Pick<
   | 'removePendingComment'
   | 'clearPendingComments'
   | 'steerMessage'
-  | 'compactContext'
   | 'queueMessage'
   | 'dequeueMessage'
   | 'setComposerDraft'
@@ -1428,14 +1555,11 @@ export type ChatActionsValue = Pick<
   | 'openLauncherPane'
   | 'activateLauncherPane'
   | 'adoptTerminalPane'
+  | 'adoptBackendTerminal'
   | 'openFilePane'
   | 'openPagePane'
-  | 'openDiffPane'
-  | 'openTerminalPane'
   | 'openBrowserPane'
   | 'updatePaneItem'
-  | 'navBack'
-  | 'navForward'
   | 'setUnreadFilterOn'
   | 'markAllRead'
   | 'renameNode'

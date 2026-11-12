@@ -10,6 +10,7 @@ import { columnName, viewName } from '../dbLabels';
 import { addRowOp, cellEditLabel, cellEditOps } from '../dbOps';
 import { GroupHeading, groupSums, rowTitle, } from './RowBits';
 import type { DbViewProps } from './viewTypes';
+import { isImeComposing } from '../../../../../lib/ime';
 
 type Spot = { row: string; col: string };
 const spotKey = (s: Spot) => `${s.row}\n${s.col}`;
@@ -250,7 +251,7 @@ function TableRow({
   const title = titleColumn(db);
   const selected = handlers.selected.has(row.id);
   return (
-    <tr className="michi-db-row michi-item" {...threadItemProps(row.id, handlers, 'row')}>
+    <tr className="michi-db-row michi-item t-reveal-host" {...threadItemProps(row.id, handlers, 'row')}>
       <td className="michi-db-td michi-db-td--check">
         <input
           type="checkbox"
@@ -359,7 +360,7 @@ function Cell({
             onEdit();
           } : undefined}
           onKeyDown={(event) => {
-            if (!live || event.target !== event.currentTarget || event.nativeEvent.isComposing) return;
+            if (!live || event.target !== event.currentTarget || isImeComposing(event)) return;
             if (event.key === 'Enter' || event.key === 'F2') {
               event.preventDefault();
               event.stopPropagation();
@@ -371,7 +372,7 @@ function Cell({
           {isTitle && live && (
             <button
               type="button"
-              className="michi-db-open"
+              className="michi-db-open t-reveal"
               aria-label={`Rename ${rowTitle(db, row)}`}
               onClick={(event) => {
                 event.stopPropagation();

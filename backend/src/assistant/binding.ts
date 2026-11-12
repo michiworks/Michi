@@ -8,7 +8,8 @@
  * cwd, so the client cannot point the assistant at a project).
  *
  * Runtime choice: what the user picked in the conversation, else the global
- * runtime settings, resolved on every binding. A conversation whose bound
+ * runtime settings, resolved on every binding (a check-in node follows V,
+ * at the agent's reasoning: store.ts assistantConversationRuntime). A conversation whose bound
  * session ran on another runtime gets a new native session on this one,
  * seeded with its visible history, by the same resume paths that rebuild any
  * session whose runtime changed.
@@ -32,7 +33,7 @@ import { getDb } from '../services/db';
 import { getNode, type WorkspaceRow } from '../services/dbRepository';
 import { assistantInstructionsFor, assistantProfileHash, assistantToolProfile, type AssistantPurpose } from './policy';
 import { assistantPurposeOf } from './identity';
-import { assistantConversationRuntime, assistantCwd } from './store';
+import { assistantConversationRuntime, assistantCwd, checkinCwd } from './store';
 
 export interface AssistantSessionBinding {
   effectiveDefinition: EffectiveAgentDefinitionV1;
@@ -75,7 +76,8 @@ export function resolveAssistantBinding(nodeId: string, override?: { reasoning: 
     modelId: runs.modelId,
     reasoning: override ? override.reasoning : runs.reasoning,
   };
-  // The Scheduled window's conversations open with their own instructions; the Michi tools follow the same purpose.
+  // V and a check-in open with their own instructions and tools; a check-in node is closed by
+  // its id alone (assistantPurposeOf), its meta row deleted or not, and runs in its own directory.
   const purpose = assistantPurposeOf(nodeId);
   const profileHash = assistantProfileHash(runtimeProfile, purpose);
   return {
@@ -83,9 +85,9 @@ export function resolveAssistantBinding(nodeId: string, override?: { reasoning: 
     profileHash,
     sessionOptions: {
       bootstrapInstructions: assistantInstructionsFor(purpose),
-      toolProfile: assistantToolProfile(),
+      toolProfile: assistantToolProfile(purpose),
       profileHash,
-      cwd: assistantCwd(),
+      cwd: purpose === 'checkin' ? checkinCwd() : assistantCwd(),
     },
   };
 }
@@ -106,17 +108,24 @@ export async function resolveAssistantBindingForSession(nodeId: string): Promise
   return reasoning === profile.reasoning ? binding : resolveAssistantBinding(nodeId, { reasoning });
 }
 
+/** What a definition of this purpose is called. */
+function assistantIdentity(purpose: AssistantPurpose): { name: string; description: string } {
+  return purpose === 'checkin'
+    ? {
+      name: 'Michi check-in',
+      description: 'Checks on the user\'s work for them, unattended. Uses only Michi\'s read tools, guarded Michi-internal writes and its own tools: no files, commands, network or other MCP servers.',
+    }
+    : {
+      name: 'Michi assistant',
+      description: 'Answers the user across workspaces: Michi threads, Pages, tasks, scheduled jobs and its own check-ins. Uses the selected runtime tools.',
+    };
+}
+
 /** A well-formed definition for code that reads a primary binding; never stored. */
 function assistantDefinition(runtimeProfile: RuntimeProfileV1, purpose: AssistantPurpose): EffectiveAgentDefinitionV1 {
   return {
     version: 1,
-    ...(purpose === 'schedule' ? {
-      name: 'Michi scheduling assistant',
-      description: 'Creates and manages scheduled jobs in the user\'s workspaces, each change approved by the user. Uses the selected runtime tools.',
-    } : {
-      name: 'Michi assistant',
-      description: 'Reads and coordinates Michi threads across workspaces and maintains Michi Pages. Uses the selected runtime tools.',
-    }),
+    ...assistantIdentity(purpose),
     instructions: assistantInstructionsFor(purpose),
     runtimeProfile,
     fallbackChain: [],

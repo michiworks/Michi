@@ -1,5 +1,4 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import React from 'react';
 import { fireEvent, render, waitFor } from '@testing-library/react';
 
 const H = vi.hoisted(() => {
@@ -98,6 +97,10 @@ function prepareScrollGeometry(container: HTMLElement) {
 
 const FILE_CONTENT = Array.from({ length: 500 }, (_, i) => `line ${i + 1}`).join('\n');
 
+function textFile(content: string, extension = '') {
+  return { kind: 'text' as const, content, size: content.length, modifiedAt: 1, extension };
+}
+
 beforeEach(() => {
   vi.stubGlobal('crypto', webcrypto);
   H.mockFetchArtifactContent.mockReset();
@@ -148,36 +151,27 @@ describe('FilePane source locations', () => {
 
   it('does not reinterpret a failed numeric-colon path as another file', async () => {
     const rawPath = '/repo/report:2024';
-    const readFile = vi.fn(async (filePath: string) => (
-      filePath === rawPath
-        ? null
-        : { content: 'wrong file', size: 10, modifiedAt: 1 }
-    ));
-    H.mockGetElectron.mockReturnValue({
-      statFile: vi.fn().mockResolvedValue({ size: 10, modifiedAt: 1 }),
-      readFile,
-    });
+    const statFile = vi.fn(async (filePath: string) => (filePath === rawPath ? null : { size: 10, modifiedAt: 1 }));
+    const readFilePreview = vi.fn().mockResolvedValue(textFile('wrong file'));
+    H.mockGetElectron.mockReturnValue({ statFile, readFilePreview });
 
     const { container } = renderPane(makeItem({ filePath: rawPath, title: 'report:2024' }));
     await waitFor(() => expect(container.textContent).toContain('File is not readable'));
-    expect(readFile).toHaveBeenCalledTimes(1);
-    expect(readFile).toHaveBeenCalledWith(rawPath);
+    expect(statFile).toHaveBeenCalledTimes(1);
+    expect(statFile).toHaveBeenCalledWith(rawPath);
+    expect(readFilePreview).not.toHaveBeenCalled();
   });
 
   it('re-resolves changed source candidates and re-navigates repeated source links', async () => {
     const cleanPath = '/repo/src/foo.ts';
     const firstRawPath = `${cleanPath}:100`;
     const secondRawPath = `${cleanPath}:200`;
-    const readFile = vi.fn(async (filePath: string) => (
-      filePath === cleanPath
-        ? { content: FILE_CONTENT, size: FILE_CONTENT.length, modifiedAt: 1 }
-        : null
+    const statFile = vi.fn(async (filePath: string) => (
+      filePath === cleanPath ? { size: FILE_CONTENT.length, modifiedAt: 1 } : null
     ));
     H.mockGetElectron.mockReturnValue({
-      statFile: vi.fn(async (filePath: string) => (
-        filePath === cleanPath ? { size: FILE_CONTENT.length, modifiedAt: 1 } : null
-      )),
-      readFile,
+      statFile,
+      readFilePreview: vi.fn().mockResolvedValue(textFile(FILE_CONTENT, 'ts')),
     });
 
     const view = renderPane(makeItem({
@@ -209,7 +203,7 @@ describe('FilePane source locations', () => {
         })} />
       </H.ChatNodeStoreContext.Provider>,
     );
-    await waitFor(() => expect(readFile).toHaveBeenCalledWith(secondRawPath));
+    await waitFor(() => expect(statFile).toHaveBeenCalledWith(secondRawPath));
     await waitFor(() => expect(view.container.querySelector('pre')).toBeTruthy());
     geometry = prepareScrollGeometry(view.container);
     view.rerender(
@@ -222,7 +216,7 @@ describe('FilePane source locations', () => {
       </H.ChatNodeStoreContext.Provider>,
     );
     await waitFor(() => expect(geometry.scrollContainer.scrollTop).toBeGreaterThan(firstLineTop));
-    expect(readFile.mock.calls.map(([filePath]) => filePath)).toEqual([
+    expect(statFile.mock.calls.map(([filePath]) => filePath)).toEqual([
       firstRawPath,
       cleanPath,
       secondRawPath,
@@ -230,20 +224,53 @@ describe('FilePane source locations', () => {
     ]);
   });
 
+  it('says a binary file cannot be previewed instead of showing its bytes', async () => {
+    H.mockGetElectron.mockReturnValue({
+      statFile: vi.fn().mockResolvedValue({ size: 5, modifiedAt: 1 }),
+      readFilePreview: vi.fn().mockResolvedValue(null),
+    });
+
+    const { container } = renderPane(makeItem({ filePath: '/repo/out/app.zip', title: 'app.zip' }));
+    await waitFor(() => expect(container.textContent).toContain('This binary file cannot be previewed.'));
+    expect(container.querySelector('pre')).toBeNull();
+  });
+
   it('treats a Windows UNC path as local and opens it unchanged', async () => {
     const filePath = '\\\\server\\share\\foo.ts';
     const openPath = vi.fn();
-    const readFile = vi.fn().mockResolvedValue({ content: 'content', size: 7, modifiedAt: 1 });
+    const readFilePreview = vi.fn().mockResolvedValue(textFile('content', 'ts'));
     H.mockGetElectron.mockReturnValue({
       statFile: vi.fn().mockResolvedValue({ size: 7, modifiedAt: 1 }),
-      readFile,
+      readFilePreview,
       openPath,
     });
 
     const { container, getByRole } = renderPane(makeItem({ filePath, title: 'foo.ts' }));
     await waitFor(() => expect(container.querySelector('pre')?.textContent).toBe('content'));
-    expect(readFile).toHaveBeenCalledWith(filePath);
+    expect(readFilePreview).toHaveBeenCalledWith(filePath);
     fireEvent.click(getByRole('button', { name: 'Open externally' }));
     expect(openPath).toHaveBeenCalledWith(filePath);
+  });
+
+  it('reads an absolute path itself before the workspace has loaded', async () => {
+    const readFilePreview = vi.fn().mockResolvedValue(textFile('outside', 'ts'));
+    H.mockGetElectron.mockReturnValue({
+      statFile: vi.fn().mockResolvedValue({ size: 7, modifiedAt: 1 }),
+      readFilePreview,
+    });
+
+    const { container } = renderPane(makeItem({ projectId: 'p-not-loaded', filePath: '/elsewhere/foo.ts' }));
+    await waitFor(() => expect(container.querySelector('pre')?.textContent).toBe('outside'));
+    expect(readFilePreview).toHaveBeenCalledWith('/elsewhere/foo.ts');
+    expect(H.mockFetchArtifactContent).not.toHaveBeenCalled();
+  });
+
+  it('asks the remote for a remote workspace that has not loaded yet', async () => {
+    const readFilePreview = vi.fn();
+    H.mockGetElectron.mockReturnValue({ statFile: vi.fn(), readFilePreview });
+
+    renderPane(makeItem({ projectId: 'remote:backend-1:p9', filePath: '/srv/foo.ts' }));
+    await waitFor(() => expect(H.mockFetchArtifactContent).toHaveBeenCalledWith('remote:backend-1:p9', '/srv/foo.ts', true));
+    expect(readFilePreview).not.toHaveBeenCalled();
   });
 });

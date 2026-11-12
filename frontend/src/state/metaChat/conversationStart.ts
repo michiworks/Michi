@@ -1,17 +1,9 @@
+import type { MichiConversationStart } from 'michi-shared';
 import type { ToolCallState } from '../chatTypes';
 import { normalizeToolResultEnvelope, normalizeTurnToolName } from '../../lib/turnPageReceipt';
 
 /** The conversation `start_conversation` opened, as its result names it. */
-export interface StartedConversation {
-  nodeId: string;
-  treeId: string;
-  workspaceId: string;
-  workspaceName: string;
-  title: string;
-  runtimeId: string;
-  modelId: string | null;
-  startedFromPageId: string | null;
-}
+export type StartedConversation = Omit<MichiConversationStart, 'kind'>;
 
 export interface ConversationStartCard {
   status: 'started' | 'queued' | 'declined';

@@ -19,6 +19,8 @@ const EVENTS: MichiHostEvent[] = [
   { type: 'follow_ups_status', payload: { status: 'failed' } },
   { type: 'artifact_saved', payload: { contextId: 'ctx-1', name: 'notes', filePath: '.contexts/notes.md', size: 10 } },
   { type: 'artifact_updated', payload: { contextId: undefined, name: 'notes', filePath: '.contexts/notes.md', size: undefined } },
+  { type: 'artifact_deleted', payload: { contextId: 'ctx-1', name: 'notes' } },
+  { type: 'artifact_deleted', payload: { contextId: undefined, name: 'notes' } },
   { type: 'image', payload: { path: 'chart.png', caption: 'Chart', mimeType: 'image/png', size: 16 } },
   { type: 'image', payload: { path: 'chart.png', caption: undefined, mimeType: 'image/png', size: 16 } },
 ];
@@ -84,6 +86,9 @@ describe('Michi host events', () => {
       ['follow_ups_status', { status: 'done' }],
       ['artifact_saved', { name: 'notes' }],
       ['artifact_updated', { name: 'notes', filePath: 'n.md', size: '10' }],
+      ['artifact_deleted', { contextId: 'ctx-1' }],
+      ['artifact_deleted', { name: '', contextId: 'ctx-1' }],
+      ['artifact_deleted', { name: 'notes', contextId: 7 }],
       ['image', { path: 'chart.png', mimeType: 'image/png' }],
       ['image', null],
       ['image', ['chart.png']],
@@ -93,7 +98,7 @@ describe('Michi host events', () => {
     }
     assert.deepEqual(warn.mock.calls.map((call) => call.arguments[2]), [
       { type: 'spawn_branches' }, { type: 'branch_overview' }, { type: 'follow_ups' }, { type: 'follow_ups_status' },
-      { type: 'artifact_saved' }, { type: 'artifact_updated' }, { type: 'image' },
+      { type: 'artifact_saved' }, { type: 'artifact_updated' }, { type: 'artifact_deleted' }, { type: 'image' },
     ]);
     assert.ok(warn.mock.calls.every((call) => call.arguments[0] === 'chat' && call.arguments[1] === 'host event dropped: malformed payload'));
   });

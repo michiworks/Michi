@@ -1,9 +1,8 @@
 /**
  * mountMcp end to end on the runtime package's MCP host, behind express.json
  * as in server.ts: a real MCP client calls a tool through /api/mcp/<slot> and
- * through the session group at /api/mcp-session/<group>, and the Codex Stop
- * Hook posts to /api/codex-hooks/<slot>/stop. Also covers the host's HTTP
- * gates as Michi mounts them.
+ * through the session group at /api/mcp-session/<group>. Also covers the
+ * host's HTTP gates as Michi mounts them.
  */
 
 import { test, type TestContext } from 'node:test';
@@ -17,6 +16,8 @@ import { mcpSlotProviderInternals } from 'michi-runtime/internal/mcp-host/slotPr
 import * as dbRepository from '../src/services/dbRepository';
 import { McpSlotRegistry, mountMcp } from '../src/services/mcpServer';
 import { JSON_BODY_LIMIT_BYTES } from '../src/services/requestBodyLimit';
+import { kiroToolResultForDisplay } from '../src/agents/hostText/kiro';
+import { KIRO_METADATA_DONE_SENTINEL } from 'michi-runtime/internal/adapters/kiro/kiroProtocol';
 
 type CallResult = { content: Array<{ type: string; text?: string }>; isError?: boolean };
 const textOf = (result: CallResult) => result.content.map((part) => part.text ?? '').join('');
@@ -24,23 +25,11 @@ const textOf = (result: CallResult) => result.content.map((part) => part.text ??
 /**
  * An express app with express.json and mountMcp under /api, as server.ts
  * mounts them. `logged` records `${method} ${req.path}` at 'finish', where
- * server.ts's access log reads it. With spoofRemoteAddress, a request's
- * x-test-remote-address header stands in for its peer address.
+ * server.ts's access log reads it.
  */
-async function startMcpApp(t: TestContext, registry: McpSlotRegistry, options: { spoofRemoteAddress?: boolean } = {}) {
+async function startMcpApp(t: TestContext, registry: McpSlotRegistry) {
     const app = express();
     const logged: string[] = [];
-    if (options.spoofRemoteAddress) {
-        app.use((req, res, next) => {
-            const spoofed = req.headers['x-test-remote-address'];
-            if (typeof spoofed === 'string') {
-                Object.defineProperty(req.socket, 'remoteAddress', { value: spoofed, configurable: true });
-                // Back to the socket's own getter for the next request on this connection.
-                res.on('finish', () => { delete (req.socket as { remoteAddress?: string }).remoteAddress; });
-            }
-            next();
-        });
-    }
     app.use((req, res, next) => {
         res.on('finish', () => logged.push(`${req.method} ${req.path}`));
         next();
@@ -65,7 +54,7 @@ async function startMcpApp(t: TestContext, registry: McpSlotRegistry, options: {
     return { base, connect, logged };
 }
 
-test('mountMcp serves slot and session-group tool calls and the Codex Stop Hook through the package host', async (t) => {
+test('mountMcp serves slot and session-group tool calls through the package host', async (t) => {
     const registry = new McpSlotRegistry();
     const saved: Array<{ name: string; size: number }> = [];
     const slot = registry.create('chat-a', '/tmp', null, {
@@ -75,7 +64,6 @@ test('mountMcp serves slot and session-group tool calls and the Codex Stop Hook 
             return { name, filePath: `/tmp/${name}`, size: body.length };
         },
         onUpdateArtifact: () => null,
-        onValidateFollowUps: () => ({ decision: 'block', reason: 'Call set_follow_ups first.' }),
     }, { nodeId: 'node-a' });
     const group = registry.createSessionGroup(slot);
     registry.bindSession(group, 'chat-a', slot.slotId);
@@ -108,26 +96,15 @@ test('mountMcp serves slot and session-group tool calls and the Codex Stop Hook 
     assert.equal(textOf(viaGroup), 'Saved artifact: @routed');
     assert.deepEqual(saved, [{ name: 'direct', size: 3 }, { name: 'large', size: 5 * 1024 * 1024 }, { name: 'routed', size: 3 }]);
 
-    // /api/codex-hooks/<slot>/stop
-    const hook = async (slotId: string, body: unknown, headers: Record<string, string> = {}) => {
-        const response = await fetch(`${base}/codex-hooks/${slotId}/stop`, {
-            method: 'POST',
-            headers: { 'content-type': 'application/json', ...headers },
-            body: JSON.stringify(body),
-        });
-        return { status: response.status, body: await response.json() };
-    };
-    assert.deepEqual(await hook(slot.slotId, { hook_event_name: 'Stop', stop_hook_active: false }),
-        { status: 200, body: { decision: 'block', reason: 'Call set_follow_ups first.' } });
-    assert.deepEqual(await hook(slot.slotId, { hook_event_name: 'PostToolUse' }), { status: 200, body: {} });
-    assert.deepEqual(await hook('f'.repeat(32), { hook_event_name: 'Stop' }), { status: 200, body: {} },
-        'an unknown slot still fails open with {}');
-    assert.equal((await hook(slot.slotId, { hook_event_name: 'Stop' }, { origin: 'http://evil.example' })).status, 403);
+    // The follow-ups Stop-hook POC's route is gone.
+    const hook = await fetch(`${base}/codex-hooks/${slot.slotId}/stop`, {
+        method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ hook_event_name: 'Stop' }),
+    });
+    assert.equal(hook.status, 404);
+    await hook.body?.cancel();
     // Requests the host served keep their Express path for the access log.
-    assert.ok(logged.includes(`POST /codex-hooks/${slot.slotId}/stop`), logged.join('\n'));
     assert.ok(logged.includes(`POST /mcp/${slot.slotId}`), logged.join('\n'));
     assert.ok(logged.includes(`POST /mcp-session/${group}`), logged.join('\n'));
-    assert.ok(!logged.some((line) => line.includes('/mcp-hooks/')), logged.join('\n'));
 
     // The host's gates and method rules on the MCP routes.
     const initialize = JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'initialize', params: {
@@ -194,27 +171,20 @@ test('a tool catalog that fails to build fails tools/list instead of serving an 
     assert.equal(textOf(call), 'tool catalog unavailable');
 });
 
-test('a Codex Stop Hook request from a non-loopback peer is refused, for an unknown slot too', async (t) => {
+test("a Kiro slot's set_branch_overview result is the one its tool chip trims", async (t) => {
     const registry = new McpSlotRegistry();
-    const slot = registry.create('chat-c', '/tmp', null, {
-        onSpawnBranches: async () => [], onSaveArtifact: () => null, onUpdateArtifact: () => null,
-        onValidateFollowUps: () => ({ decision: 'block', reason: 'Call set_follow_ups first.' }),
-    }, { nodeId: 'node-c' });
-    const { base } = await startMcpApp(t, registry, { spoofRemoteAddress: true });
-    const hook = async (slotId: string, remote?: string) => {
-        const response = await fetch(`${base}/codex-hooks/${slotId}/stop`, {
-            method: 'POST',
-            headers: { 'content-type': 'application/json', ...(remote ? { 'x-test-remote-address': remote } : {}) },
-            body: JSON.stringify({ hook_event_name: 'Stop' }),
-        });
-        return { status: response.status, body: await response.json() };
-    };
-    const unknownSlot = 'f'.repeat(32);
-    for (const remote of ['10.0.0.5', '::ffff:192.168.1.2']) {
-        assert.deepEqual(await hook(unknownSlot, remote), { status: 403, body: {} }, remote);
-        assert.equal((await hook(slot.slotId, remote)).status, 403, remote);
-    }
-    // From loopback an unknown slot still fails open, and a known one validates.
-    assert.deepEqual(await hook(unknownSlot), { status: 200, body: {} });
-    assert.deepEqual(await hook(slot.slotId), { status: 200, body: { decision: 'block', reason: 'Call set_follow_ups first.' } });
+    const overviews: string[] = [];
+    const slot = registry.create('chat-k', '/tmp', null, {
+        onSpawnBranches: async () => [],
+        onSaveArtifact: () => null,
+        onUpdateArtifact: () => null,
+        onSetBranchOverview: (overview) => { overviews.push(overview); },
+        metadataDoneSentinel: KIRO_METADATA_DONE_SENTINEL,
+    }, { nodeId: 'node-k' });
+    const { connect } = await startMcpApp(t, registry);
+    const client = await connect(`/mcp/${slot.slotId}`);
+    const result = await client.callTool({ name: 'set_branch_overview', arguments: { overview: ' Done. ' } }) as CallResult;
+    assert.deepEqual(overviews, ['Done.']);
+    assert.match(textOf(result), new RegExp(`emit ${KIRO_METADATA_DONE_SENTINEL.replace(/[[\]]/g, '\\$&')} as`));
+    assert.equal(kiroToolResultForDisplay(textOf(result)), 'Branch overview recorded.');
 });

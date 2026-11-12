@@ -1,0 +1,114 @@
+/* What a reply was based on (ReplyMemorySources.tsx): a quiet, collapsed line under the reply. It looks the same at rest
+   and hovered on a touch screen (a tap's hover reveals nothing), and its colour changes only where there is hover. */
+.t-reply-sources {
+  margin: 2px 0 4px;
+  font-family: var(--ui-font);
+  font-size: var(--fs-xs);
+  color: var(--term-muted);
+  background: transparent;
+}
+
+.t-reply-sources-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 2px 4px;
+  margin: 0 -4px;
+  border: 0;
+  border-radius: var(--ui-radius-sm);
+  background: transparent;
+  color: var(--term-muted);
+  font: inherit;
+  cursor: pointer;
+}
+.t-reply-sources-chevron { transition: transform var(--t-soft) ease-out; }
+.t-reply-sources-toggle[aria-expanded='true'] .t-reply-sources-chevron { transform: rotate(180deg); }
+
+.t-reply-sources-list {
+  list-style: none;
+  margin: 4px 0 0;
+  padding: 2px 0 0 10px;
+  border-left: 1px solid var(--term-line);
+  animation: t-reply-sources-fade var(--t-soft) ease-out;
+}
+@keyframes t-reply-sources-fade { from { opacity: 0; } to { opacity: 1; } }
+
+.t-reply-sources-item { padding: 4px 0 6px; }
+.t-reply-sources-item + .t-reply-sources-item { border-top: 1px solid var(--term-line); }
+
+.t-reply-sources-text {
+  margin: 0;
+  color: var(--term-fg);
+  font-size: var(--fs-sm);
+  line-height: 1.45;
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
+  line-clamp: 3;
+  overflow: hidden;
+  overflow-wrap: anywhere;
+}
+
+.t-reply-sources-meta {
+  margin: 2px 0 0;
+  color: var(--term-faint);
+  font-size: var(--fs-xs);
+}
+
+.t-reply-sources-link,
+.t-reply-sources-action {
+  padding: 0;
+  border: 0;
+  background: transparent;
+  font: inherit;
+  cursor: pointer;
+}
+.t-reply-sources-link {
+  color: var(--term-faint);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.t-reply-sources-actions {
+  display: flex;
+  gap: 12px;
+  margin-top: 3px;
+}
+.t-reply-sources-action {
+  color: var(--term-muted);
+  border-radius: var(--ui-radius-sm);
+}
+.t-reply-sources-action:disabled { cursor: default; opacity: 0.6; }
+.t-reply-sources-danger { color: var(--term-danger-text); }
+
+.t-reply-sources-done { color: var(--term-muted); font-size: var(--fs-sm); }
+.t-reply-sources-error { margin: 3px 0 0; color: var(--term-danger-text); }
+
+.t-reply-sources-toggle:focus-visible,
+.t-reply-sources-link:focus-visible,
+.t-reply-sources-action:focus-visible {
+  outline: var(--focus-ring);
+  outline-offset: 1px;
+}
+
+@media (hover: hover) {
+  .t-reply-sources-toggle:hover { color: var(--term-mid); }
+  .t-reply-sources-link:hover { color: var(--term-mid); }
+  .t-reply-sources-action:hover { color: var(--term-mid); }
+  .t-reply-sources-danger:hover { color: var(--term-danger-text); text-decoration: underline; }
+}
+
+/* Touch: 44 px targets; the negative margins keep the line where it is. A phone shows 5 lines of each item. */
+@media (hover: none) and (pointer: coarse) {
+  .t-reply-sources-toggle { min-height: 44px; padding: 0 8px; margin: -12px -8px; }
+  .t-reply-sources-actions { gap: 4px; }
+  .t-reply-sources-action,
+  .t-reply-sources-link { min-height: 44px; min-width: 44px; padding: 0 8px; margin: -10px -8px; }
+  .t-reply-sources-actions .t-reply-sources-action { margin: -10px 0; }
+  .t-reply-sources-text { -webkit-line-clamp: 5; line-clamp: 5; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .t-reply-sources-list { animation: none; }
+  .t-reply-sources-chevron { transition: none; }
+}

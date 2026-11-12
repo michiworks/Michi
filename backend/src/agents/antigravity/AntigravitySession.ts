@@ -6,7 +6,7 @@ import { randomUUID } from "node:crypto";
 import { StringDecoder } from "node:string_decoder";
 import type { AgentSession, ChatMessage } from "../types";
 import type { NormalizedEvent } from "../../services/chatEvents";
-import { EventQueue } from "../eventQueue";
+import { EventQueue } from "michi-runtime/internal/core/eventQueue";
 import { followUpReminder } from "../preamble";
 
 const DEFAULT_PRINT_TIMEOUT_MS = (() => {

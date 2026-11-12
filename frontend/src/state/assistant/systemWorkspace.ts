@@ -4,18 +4,22 @@ import type { Project } from '../chatTypes';
  * Workspaces the backend creates for Michi itself carry `settings.system`
  * (today only `'assistant'`: the ⌘J assistant's conversation). They hold real
  * nodes, so panes and navigation still resolve them, but nothing that lists
- * workspaces to the user shows them.
+ * workspaces to the user shows them. Hydration reads the flag with shared
+ * workspaceSystemOf, the backend's rule.
  */
-export const ASSISTANT_SYSTEM_WORKSPACE = 'assistant';
-
-/** Reads the flag out of a workspace's settings JSON; undefined for user workspaces. */
-export function parseSystemWorkspace(settings: Record<string, unknown> | null | undefined): string | undefined {
-  const value = settings?.system;
-  return typeof value === 'string' && value.trim() ? value : undefined;
-}
 
 export function isSystemWorkspace(project: Pick<Project, 'system'> | null | undefined): boolean {
   return !!project?.system;
+}
+
+/** Neither trashed, archived nor a system workspace: one a window may open on. */
+export function isLiveUserWorkspace(project: Project | null | undefined): project is Project {
+  return !!project && !project.deletedAt && !project.archivedAt && !isSystemWorkspace(project);
+}
+
+/** The first live user workspace, other than `exceptId`; null when there is none. */
+export function firstLiveUserWorkspaceId(projects: readonly Project[], exceptId?: string): string | null {
+  return projects.find((project) => project.id !== exceptId && isLiveUserWorkspace(project))?.id ?? null;
 }
 
 /** The user's own workspaces. Returns `projects` itself when none is a system workspace. */

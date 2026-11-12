@@ -1,22 +1,28 @@
-import { formatQuotedSelectionContext } from '../lib/quoteFormat';
-import type { ChatAction, ChatNodeState, ComposerDraft, ArtifactEntry, Project, ProjectAction, Tree } from './chatTypes';
-import { applyTreeMessages, mapMessageRow } from './chatHydration';
+import { uniqueContextName } from '../lib/sanitizeContextName';
+import type { ChatAction, ChatNodeState, ArtifactEntry, Project, ProjectAction, Tree } from './chatTypes';
+import { parseCompanionTurnMetadata } from 'michi-shared';
+import { applyTreeMessages, mapMessageRow, settleDeferredNodeFields } from './chatHydration';
 import { deriveTitleFromUserText } from './assistantParsing';
+import { classifiedErrorKind } from './turnInterruption';
+import { retryTrimmedMessages } from './branchAnchors';
+import { completionAfterDone, hasUnseenCompletion, initialCompletionFacts, seenAllCompletions } from './completionFacts';
+import { pickLandingTreeId } from './conversationVisibility';
+import { appendComposerLine, composerDraftEqual, mergeComposerDraft, normalizeComposerDraft } from './composerDraft';
 import {
-  appendToolBlock,
   assistantMetadata,
   finalizeAssistantBlocks,
   projectAssistantStreamEvent,
-  nextToolBlockPlacement,
 } from './assistantBlocks';
 import {
   appendBranchOverviewEntry,
   applySubagentActivity,
+  artifactNameKey,
   CHAT_STREAM_EVENTS,
   endBackgroundSubagents,
   finalizeSubagentRoster,
   mergeSubagentRoster,
   steeredUserMessage,
+  userMessageIdFor,
 } from 'michi-shared';
 
 /** The assistant message a roster event belongs to: the stamped id when the
@@ -65,6 +71,24 @@ export const NODE_ACTIVITY_ACTIONS = new Set<ChatAction['type']>([
   'observer-turn-start',
 ]);
 
+/**
+ * Whether an artifact reported with an id this window does not hold
+ * (artifact_saved / artifact_updated) stays out of it: another artifact here
+ * holds its exact name. The backend holds one artifact per name (exactly,
+ * agents save names exactly), so one of the two is stale, most often the
+ * report: a replay of an artifact deleted or renamed since. Taking the other
+ * one's place would make this window delete it (persistence diffs by id),
+ * tombstoned for good. A name differing only in case is another artifact.
+ */
+function nameHeldByAnother(artifacts: readonly ArtifactEntry[], name: string): boolean {
+  return artifacts.some((artifact) => artifact.name === name);
+}
+
+/** The id an artifact made in this window takes. */
+export function newArtifactId(now = Date.now()): string {
+  return `ctx-${now}-${Math.random().toString(36).slice(2, 6)}`;
+}
+
 export function reduceProject(p: Project, a: ProjectAction): Project {
   switch (a.type) {
     case 'create-tree': {
@@ -84,13 +108,7 @@ export function reduceProject(p: Project, a: ProjectAction): Project {
     }
     case 'archive-tree': {
       const trees = p.trees.map((t) => (t.id === a.treeId ? { ...t, archivedAt: a.now } : t));
-      let nextActive = p.activeTreeId;
-      if (p.activeTreeId === a.treeId) {
-        const candidate = [...trees]
-          .filter((t) => t.id !== a.treeId && !t.archivedAt)
-          .sort((x, y) => y.lastActiveAt - x.lastActiveAt)[0];
-        nextActive = candidate ? candidate.id : null;
-      }
+      const nextActive = p.activeTreeId === a.treeId ? pickLandingTreeId(trees, a.nodes) : p.activeTreeId;
       return { ...p, trees, activeTreeId: nextActive };
     }
     case 'unarchive-tree': {
@@ -113,8 +131,14 @@ export function reduceProject(p: Project, a: ProjectAction): Project {
       });
       return { ...p, trees };
     }
-    case 'rename-tree': {
-      const trees = p.trees.map((t) => (t.id === a.treeId ? { ...t, name: a.name } : t));
+    case 'clear-thread-name': {
+      // A thread's name is its root conversation's title: one stored apart is dropped.
+      if (!p.trees.some((t) => t.rootNodeId === a.rootNodeId && t.name !== undefined)) return p;
+      const trees = p.trees.map((t) => {
+        if (t.rootNodeId !== a.rootNodeId) return t;
+        const { name: _name, ...rest } = t;
+        return rest;
+      });
       return { ...p, trees };
     }
     case 'activate-tree': {
@@ -134,15 +158,13 @@ export function reduceProject(p: Project, a: ProjectAction): Project {
       const artifacts = p.artifacts ?? [];
       const now = Date.now();
       if (a.context.id) {
-        const idx = artifacts.findIndex((c) =>
-          c.id === a.context.id || c.name.toLowerCase() === a.context.name.toLowerCase(),
-        );
+        // The artifact with that id, never another by its name (nameHeldByAnother).
+        const idx = artifacts.findIndex((c) => c.id === a.context.id);
         if (idx >= 0) {
           const updated = artifacts.map((c, i) =>
             i === idx
               ? {
                   ...c,
-                  id: a.context.id ?? c.id,
                   name: a.context.name,
                   filePath: a.context.filePath,
                   url: a.context.url ?? c.url,
@@ -156,16 +178,19 @@ export function reduceProject(p: Project, a: ProjectAction): Project {
           );
           return { ...p, artifacts: updated };
         }
+        if (nameHeldByAnother(artifacts, a.context.name)) return p;
       }
+      // A new artifact of this window takes a free name; one the backend
+      // reported keeps its own (renaming it here would rename it there).
       let name = a.context.name;
       const names = new Set(artifacts.map((c) => c.name.toLowerCase()));
-      if (names.has(name.toLowerCase())) {
+      if (!a.context.id && names.has(name.toLowerCase())) {
         let suffix = 2;
         while (names.has(`${a.context.name}-${suffix}`.toLowerCase())) suffix++;
         name = `${a.context.name}-${suffix}`;
       }
       const entry: ArtifactEntry = {
-        id: a.context.id ?? `ctx-${now}-${Math.random().toString(36).slice(2, 6)}`,
+        id: a.context.id ?? a.newId ?? newArtifactId(now),
         name,
         filePath: a.context.filePath,
         url: a.context.url,
@@ -182,7 +207,12 @@ export function reduceProject(p: Project, a: ProjectAction): Project {
     case 'update-context-by-name': {
       const artifacts = p.artifacts ?? [];
       const now = Date.now();
-      const idx = artifacts.findIndex((c) => c.name.toLowerCase() === a.context.name.toLowerCase());
+      // By id when the report has one, as upsert-context; by name only for an
+      // older backend's, which has none.
+      const idx = a.context.id
+        ? artifacts.findIndex((c) => c.id === a.context.id)
+        : artifacts.findIndex((c) => c.name.toLowerCase() === a.context.name.toLowerCase());
+      if (idx < 0 && a.context.id && nameHeldByAnother(artifacts, a.context.name)) return p;
       if (idx >= 0) {
         return {
           ...p,
@@ -190,7 +220,6 @@ export function reduceProject(p: Project, a: ProjectAction): Project {
             i === idx
               ? {
                   ...c,
-                  id: a.context.id ?? c.id,
                   name: a.context.name,
                   filePath: a.context.filePath,
                   url: a.context.url ?? c.url,
@@ -205,7 +234,7 @@ export function reduceProject(p: Project, a: ProjectAction): Project {
         };
       }
       const entry: ArtifactEntry = {
-        id: a.context.id ?? `ctx-${now}-${Math.random().toString(36).slice(2, 6)}`,
+        id: a.context.id ?? newArtifactId(now),
         name: a.context.name,
         filePath: a.context.filePath,
         url: a.context.url,
@@ -240,7 +269,7 @@ export function reduceProject(p: Project, a: ProjectAction): Project {
       if (!/^[\p{L}\p{N}_-]+$/u.test(a.newName)) return p;
       const artifacts = p.artifacts ?? [];
       const collision = artifacts.some(
-        (c) => c.id !== a.contextId && c.name.toLowerCase() === a.newName.toLowerCase(),
+        (c) => c.id !== a.contextId && artifactNameKey(c.name) === artifactNameKey(a.newName),
       );
       if (collision) return p;
       return {
@@ -253,33 +282,6 @@ export function reduceProject(p: Project, a: ProjectAction): Project {
   }
 }
 
-function normalizeComposerDraft(draft: ComposerDraft | null): ComposerDraft | null {
-  if (!draft) return null;
-  const value = draft.value ?? '';
-  const mentions = Array.isArray(draft.mentions) ? draft.mentions : [];
-  const quotedText = draft.quotedText?.trim() ? draft.quotedText : undefined;
-  if (!value && mentions.length === 0 && !quotedText) return null;
-  return { value, mentions, quotedText, ...(quotedText && draft.quoteSource ? { quoteSource: draft.quoteSource } : {}) };
-}
-
-function composerDraftEqual(a: ComposerDraft | undefined, b: ComposerDraft | null): boolean {
-  if (!a && !b) return true;
-  if (!a || !b) return false;
-  if (a.value !== b.value || (a.quotedText ?? '') !== (b.quotedText ?? '')) return false;
-  if (JSON.stringify(a.quoteSource) !== JSON.stringify(b.quoteSource)) return false;
-  if (a.mentions.length !== b.mentions.length) return false;
-  return a.mentions.every((m, i) => {
-    const n = b.mentions[i];
-    return (
-      m.start === n.start &&
-      m.end === n.end &&
-      m.kind === n.kind &&
-      m.refId === n.refId &&
-      m.label === n.label
-    );
-  });
-}
-
 export function reduceNodes(
   nodes: Record<string, ChatNodeState>,
   action: ChatAction,
@@ -289,6 +291,11 @@ export function reduceNodes(
       const node = nodes[action.nodeId];
       return node ? { ...nodes, [action.nodeId]: { ...node, permissionMode: action.mode,
         permissionApproveForMe: action.mode === 'ask' && action.approveForMe === true ? true : undefined } } : nodes;
+    }
+    case 'set-ultracode': {
+      const node = nodes[action.nodeId];
+      return node && (node.ultracode === true) !== action.enabled
+        ? { ...nodes, [action.nodeId]: { ...node, ultracode: action.enabled ? true : undefined } } : nodes;
     }
     case 'create': {
       return {
@@ -308,6 +315,7 @@ export function reduceNodes(
           // time; bind-chat overwrites it with the runtime's actual mode once bound.
           currentModeId: action.modeId,
           viewedAt: Date.now(),
+          ...initialCompletionFacts(action.projectId),
         },
       };
     }
@@ -347,6 +355,8 @@ export function reduceNodes(
         ...nodes,
         [action.nodeId]: {
           ...(action.keepDraft ? n : draftless),
+          // This window's own send sets both (lean metadata may have deferred them).
+          ...settleDeferredNodeFields(n, 'follow_ups', ...(action.keepDraft ? [] : ['composer_draft' as const])),
           status: 'streaming',
           activeTurnId: undefined,
           runtimeActivity: undefined,
@@ -366,7 +376,7 @@ export function reduceNodes(
           messages: [
             ...n.messages,
             {
-              id: `u-${action.assistantId}`,
+              id: userMessageIdFor(action.assistantId),
               role: 'user',
               text: action.userText,
               toolCalls: [],
@@ -376,6 +386,9 @@ export function reduceNodes(
               attachments: action.attachments,
               comments: action.comments,
               mentions: action.mentions,
+              ...(action.skill ? { skill: action.skill } : {}),
+              ...(action.metaAgentContext !== undefined ? { metaAgentContext: action.metaAgentContext } : {}),
+              ...(action.metaAgentContext?.refs?.length ? { companionRefs: action.metaAgentContext.refs } : {}),
             },
             { id: action.assistantId, role: 'assistant', text: '', toolCalls: [], blocks: [], streaming: true, createdAt: Date.now() },
           ],
@@ -391,12 +404,13 @@ export function reduceNodes(
       const exists = n.messages.some((m) => m.id === durable.id);
       const pendingQueued = n.pendingQueued?.filter((q) => q.id !== action.data.queueId);
       if (exists && pendingQueued?.length === n.pendingQueued?.length) return nodes;
-      const row = mapMessageRow({
-        id: durable.id, role: 'user', content: durable.content,
-        metadata: durable.metadata, created_at: durable.createdAt,
-      });
-      // Links the bubble to the queued block it replaces (messageFlight).
-      const message = action.data.queueId ? { ...row, queueId: action.data.queueId } : row;
+      const message = {
+        ...mapMessageRow({
+          id: durable.id, role: 'user', content: durable.content,
+          metadata: durable.metadata, created_at: durable.createdAt,
+        }),
+        arrivedAt: Date.now(),
+      };
       return { ...nodes, [action.nodeId]: {
         ...n,
         pendingQueued: pendingQueued?.length ? pendingQueued : undefined,
@@ -412,11 +426,14 @@ export function reduceNodes(
       const cursor = foreground
         ? { lastAppliedTurnId: action.turnId, lastAppliedSeq: Math.max(n.lastAppliedSeq ?? 0, 0) }
         : { lastAppliedBackgroundTurnId: action.turnId, lastAppliedBackgroundSeq: Math.max(n.lastAppliedBackgroundSeq ?? 0, 0) };
+      // A check-in's post (DESIGN-v2 §3.3) renders as one from its first frame, as it will after a reload.
+      const companionPost = action.assistantMetadata?.companionPost;
       if (n.messages.some((m) => m.id === action.assistantId)) {
         return {
           ...nodes,
           [action.nodeId]: {
             ...n,
+            ...(companionPost ? { messages: n.messages.map((m) => (m.id === action.assistantId ? { ...m, companionPost } : m)) } : {}),
             status: 'streaming',
             activeTurnId: action.turnId,
             streamingStartedAt: n.streamingStartedAt ?? Date.now(),
@@ -437,7 +454,7 @@ export function reduceNodes(
       // transcripts render the same bubble and source marker.
       const userMessage = (!action.selfInitiated || action.userText)
         ? mapMessageRow({
-            id: `u-${action.assistantId}`, role: 'user', content: action.userText,
+            id: userMessageIdFor(action.assistantId), role: 'user', content: action.userText,
             metadata: action.userMetadata, created_at: now,
           })
         : null;
@@ -453,6 +470,7 @@ export function reduceNodes(
               blocks: [] as never[],
               streaming: true,
               createdAt: now,
+              ...(companionPost ? { companionPost } : {}),
             },
           ]
         : [
@@ -481,7 +499,10 @@ export function reduceNodes(
           errorRecovery: undefined,
           errorRecoverable: undefined,
           errorCompletedAt: undefined,
+          // The backend clears follow_ups and their source when any turn begins (a post's too): match a reload.
           followUps: [],
+          followUpsSourceMessageId: undefined,
+          ...settleDeferredNodeFields(n, 'follow_ups'),
           followUpsGenerating: false,
           visibleResponseComplete: false,
           subagents: undefined,
@@ -493,6 +514,30 @@ export function reduceNodes(
           messages: [...n.messages, ...newMessages],
         },
       };
+    }
+    case 'turn-start-metadata': {
+      const n = nodes[action.nodeId];
+      if (!n) return nodes;
+      const companionPost = action.assistantMetadata?.companionPost;
+      const companionTurn = parseCompanionTurnMetadata(action.userMetadata?.companionTurn);
+      if (!companionPost && !companionTurn) return nodes;
+      const assistantIndex = n.messages.findIndex((m) => m.id === action.assistantId);
+      if (assistantIndex < 0) return nodes;
+      // The user message this turn answers: the last one before its assistant message.
+      let userIndex = -1;
+      if (companionTurn) {
+        for (let i = assistantIndex - 1; i >= 0; i -= 1) {
+          if (n.messages[i].role === 'user') { userIndex = i; break; }
+          if (n.messages[i].role === 'assistant') break;
+        }
+      }
+      if (!companionPost && userIndex < 0) return nodes;
+      const messages = n.messages.map((m, index) => {
+        if (index === assistantIndex && companionPost) return { ...m, companionPost };
+        if (index === userIndex && companionTurn) return { ...m, companionTurn };
+        return m;
+      });
+      return { ...nodes, [action.nodeId]: { ...n, messages } };
     }
     case 'active-turn': {
       const n = nodes[action.nodeId];
@@ -653,6 +698,8 @@ export function reduceNodes(
         .reverse()
         .find((message) => message.role === 'assistant')?.id;
       const isLatestAssistantTurn = latestAssistantId === action.assistantId;
+      // Read before the message stops streaming: a done that names no turn counts only a live reply.
+      const completion = completionAfterDone(n, action);
       let extractedTitle: string | null = null;
       let extractedBranchOverview: string | null = null;
       let extractedFollowUps: string[] = [];
@@ -675,6 +722,7 @@ export function reduceNodes(
           ...nodes,
           [action.nodeId]: {
             ...n,
+            ...completion,
             messages: msgs,
             lastAssistantAt: action.completedAt ?? Date.now(),
             backgroundTurnAssistantId:
@@ -701,6 +749,7 @@ export function reduceNodes(
         ...nodes,
         [action.nodeId]: {
           ...n,
+          ...completion,
           // Persist a derived fallback title so it survives reload (the
           // sentinel/structured title is extracted backend-side; a derived one
           // is not, so the frontend must flag it for persistence).
@@ -730,6 +779,7 @@ export function reduceNodes(
           messages: msgs,
           lastAssistantAt: action.completedAt ?? Date.now(),
           followUps: extractedFollowUps.length > 0 ? extractedFollowUps : n.followUps,
+          ...(extractedFollowUps.length > 0 ? settleDeferredNodeFields(n, 'follow_ups') : {}),
           followUpsGenerating: false,
           // Preserve previous source when this turn produced no follow-ups (kept in sync
           // with the followUps preservation above).
@@ -833,7 +883,7 @@ export function reduceNodes(
           visibleResponseComplete: false,
           streamingStartedAt: undefined,
           error: humanizeDbError(action.message),
-          errorKind: action.errorKind,
+          errorKind: classifiedErrorKind(action.errorKind, action.message),
           errorTurnId: action.turnId ?? n.activeTurnId,
           errorRecovery: undefined,
           errorRecoverable: action.recoverable,
@@ -858,9 +908,9 @@ export function reduceNodes(
           changed = true;
           return { ...m, id: action.toId, clientKey: m.clientKey ?? m.id };
         }
-        if (m.id === `u-${action.fromId}`) {
+        if (m.id === userMessageIdFor(action.fromId)) {
           changed = true;
-          return { ...m, id: `u-${action.toId}`, clientKey: m.clientKey ?? m.id };
+          return { ...m, id: userMessageIdFor(action.toId), clientKey: m.clientKey ?? m.id };
         }
         return m;
       });
@@ -873,7 +923,7 @@ export function reduceNodes(
       // two converge. NOT in NODE_ACTIVITY_ACTIONS → does not bump tree
       // lastActiveAt, and the persistence layer treats messagesLoaded/messages
       // as memory-only (never written back — messages are backend-authored).
-      return applyTreeMessages(nodes, action.messagesByNode, action.pages);
+      return applyTreeMessages(nodes, action.messagesByNode, action.pages, action.turns);
     }
     case 'history-page-loaded': {
       const node = nodes[action.nodeId];
@@ -885,23 +935,13 @@ export function reduceNodes(
       const messages = [...action.messages.filter(message => !known.has(message.id)), ...node.messages];
       return { ...nodes, [action.nodeId]: { ...node, messages,
         historyBefore: action.before ?? undefined, messagesLoaded: !action.before,
+        olderMessageCount: action.before ? Math.max(0, action.total - messages.length) : undefined,
         messageCount: Math.max(action.total, messages.length) } };
     }
     case 'retry-trim': {
       const n = nodes[action.nodeId];
       if (!n) return nodes;
-      let msgs = n.messages;
-      if (action.fromIndex != null) {
-        // Trim from a specific user message index (keep messages before it).
-        msgs = msgs.slice(0, action.fromIndex);
-      } else {
-        const len = msgs.length;
-        if (len >= 2 && msgs[len - 1].role === 'assistant' && msgs[len - 2].role === 'user') {
-          msgs = msgs.slice(0, len - 2);
-        } else if (len >= 1 && msgs[len - 1].role === 'assistant') {
-          msgs = msgs.slice(0, len - 1);
-        }
-      }
+      const msgs = retryTrimmedMessages(n.messages, action.fromIndex) as ChatNodeState['messages'];
       const liveIds = new Set(msgs.map((m) => m.id));
       const nextFollowUpsSrc =
         n.followUpsSourceMessageId && liveIds.has(n.followUpsSourceMessageId)
@@ -1014,110 +1054,6 @@ export function reduceNodes(
       const next = n.consumedLinks.filter((id) => id !== action.peerId);
       if (next.length === n.consumedLinks.length) return nodes;
       return { ...nodes, [action.nodeId]: { ...n, consumedLinks: next } };
-    }
-    case 'create-artifact': {
-      return {
-        ...nodes,
-        [action.nodeId]: {
-          nodeId: action.nodeId,
-          kind: 'artifact',
-          chatId: null,
-          projectId: action.projectId,
-          messages: [],
-          followUps: [],
-          status: 'idle',
-          artifact: {
-            filePath: action.filePath,
-            content: null,
-            viewMode: 'rendered',
-            status: 'idle',
-          },
-        },
-      };
-    }
-    case 'artifact-loading': {
-      const n = nodes[action.nodeId];
-      if (!n || n.kind !== 'artifact' || !n.artifact) return nodes;
-      return {
-        ...nodes,
-        [action.nodeId]: {
-          ...n,
-          artifact: { ...n.artifact, status: 'loading', error: undefined },
-        },
-      };
-    }
-    case 'artifact-loaded': {
-      const n = nodes[action.nodeId];
-      if (!n || n.kind !== 'artifact' || !n.artifact) return nodes;
-      return {
-        ...nodes,
-        [action.nodeId]: {
-          ...n,
-          title: action.basename,
-          artifact: {
-            ...n.artifact,
-            content: action.content,
-            basename: action.basename,
-            extension: action.extension,
-            size: action.size,
-            modifiedAt: action.modifiedAt,
-            status: 'idle',
-            // A fresh read is the current truth → clear any pending badge.
-            pendingRefresh: false,
-            removed: false,
-          },
-        },
-      };
-    }
-    case 'artifact-error': {
-      const n = nodes[action.nodeId];
-      if (!n || n.kind !== 'artifact' || !n.artifact) return nodes;
-      return {
-        ...nodes,
-        [action.nodeId]: {
-          ...n,
-          artifact: { ...n.artifact, status: 'error', error: action.error },
-        },
-      };
-    }
-    case 'artifact-set-view': {
-      const n = nodes[action.nodeId];
-      if (!n || n.kind !== 'artifact' || !n.artifact) return nodes;
-      return {
-        ...nodes,
-        [action.nodeId]: {
-          ...n,
-          artifact: { ...n.artifact, viewMode: action.viewMode },
-        },
-      };
-    }
-    case 'artifact-mark-stale': {
-      const n = nodes[action.nodeId];
-      if (!n || n.kind !== 'artifact' || !n.artifact) return nodes;
-      // Idempotent: skip the re-render if the badge is already showing and the
-      // file isn't flagged removed (the watcher fires this on every real edit).
-      if (n.artifact.pendingRefresh && !n.artifact.removed) return nodes;
-      return {
-        ...nodes,
-        [action.nodeId]: {
-          ...n,
-          // Only a hint — content is untouched until the user clicks reload.
-          // A change event also means the file exists, so clear `removed`.
-          artifact: { ...n.artifact, pendingRefresh: true, removed: false },
-        },
-      };
-    }
-    case 'artifact-mark-removed': {
-      const n = nodes[action.nodeId];
-      if (!n || n.kind !== 'artifact' || !n.artifact) return nodes;
-      if (n.artifact.removed) return nodes;
-      return {
-        ...nodes,
-        [action.nodeId]: {
-          ...n,
-          artifact: { ...n.artifact, removed: true, pendingRefresh: false },
-        },
-      };
     }
     case 'create-digest': {
       return {
@@ -1251,20 +1187,20 @@ export function reduceNodes(
     case 'node-viewed': {
       const n = nodes[action.nodeId];
       if (!n) return nodes;
-      return { ...nodes, [action.nodeId]: { ...n, viewedAt: action.viewedAt } };
+      return { ...nodes, [action.nodeId]: { ...n, viewedAt: action.viewedAt, ...(action.seen ? seenAllCompletions(n) : {}) } };
     }
     case 'mark-all-read': {
-      // Clear unread on every chat node whose last assistant reply post-dates
-      // its last view (mirrors isNodeUnread). Digest nodes track their own
+      // Clear unread on every chat node with a completion the user has not
+      // seen (mirrors isNodeUnread). Digest nodes track their own
       // read model (digest.viewedAt) and are left alone. Returns the same
       // reference when nothing was unread so consumers skip a re-render.
       let next: Record<string, ChatNodeState> | null = null;
       for (const id in nodes) {
         const n = nodes[id];
         if (n.kind === 'digest') continue;
-        if ((n.lastAssistantAt ?? 0) <= (n.viewedAt ?? 0)) continue;
+        if (!hasUnseenCompletion(n)) continue;
         if (!next) next = { ...nodes };
-        next[id] = { ...n, viewedAt: action.viewedAt };
+        next[id] = { ...n, viewedAt: action.viewedAt, ...seenAllCompletions(n) };
       }
       return next ?? nodes;
     }
@@ -1293,7 +1229,11 @@ export function reduceNodes(
       if (!next) return nodes;
       const prev = n.branchOverviewEntries ?? [];
       const entries = appendBranchOverviewEntry(prev, next, Date.now());
-      if (entries === prev) return nodes;
+      if (entries === prev) {
+        // A frame that repeats the stored entry still answers for its turn, so done's text fallback stays out.
+        if (!action.assistantId || n.branchOverviewSourceMessageId === action.assistantId) return nodes;
+        return { ...nodes, [action.nodeId]: { ...n, branchOverviewSourceMessageId: action.assistantId } };
+      }
       return {
         ...nodes,
         [action.nodeId]: {
@@ -1335,6 +1275,7 @@ export function reduceNodes(
         [action.nodeId]: {
           ...n,
           followUps: cleaned,
+          ...settleDeferredNodeFields(n, 'follow_ups'),
           // Keep an explicit runtime-owned output-boundary wait active. The
           // matching follow_ups_status=completed event clears it after the
           // final visible answer block; legacy producers that never send an
@@ -1380,7 +1321,8 @@ export function reduceNodes(
     }
     case 'command-result': {
       const n = nodes[action.nodeId];
-      return n ? { ...nodes, [action.nodeId]: { ...n, commandResult: action.result } } : nodes;
+      if (!n || (!action.result && !n.commandResult)) return nodes;
+      return { ...nodes, [action.nodeId]: { ...n, commandResult: action.result ?? undefined } };
     }
     case 'session-state': {
       const n = nodes[action.nodeId];
@@ -1465,7 +1407,8 @@ export function reduceNodes(
       const next = n.pendingQueued.filter((q) => q.id !== action.messageId);
       if (next.length === n.pendingQueued.length) return nodes;
       const updated = { ...n };
-      if (next.length === 0) delete updated.pendingQueued;
+      // The pause ends with the queue it paused.
+      if (next.length === 0) { delete updated.pendingQueued; delete updated.queueErrored; }
       else updated.pendingQueued = next;
       return { ...nodes, [action.nodeId]: updated };
     }
@@ -1526,21 +1469,21 @@ export function reduceNodes(
         const msgs = parent.messages.map((m, i, arr) => {
           if (i !== arr.length - 1) return m;
           if (m.role !== 'assistant') return m;
-          const placement = nextToolBlockPlacement(m);
           // Keep the chip's *title* short — the card variant renders it in a
           // non-shrinking column, so a sentence-long title overflows the card.
           // The branch names ride along as `detail` (one truncated line) and
           // `output` (the expandable full list).
-          const tool = {
-            id: `spawn-${Date.now()}-${newlyCreated[0]?.nodeId ?? 'na'}`,
-            title: `Spawned ${newlyCreated.length} branch${newlyCreated.length === 1 ? '' : 'es'}`,
-            status: 'completed',
-            kind: 'spawn_branches',
-            detail: newlyCreated.map((n) => n.title).join(', '),
-            output: newlyCreated.map((n) => `→ ${n.title}`).join('\n'),
-            textOffset: placement.rawOffset,
-          };
-          return appendToolBlock({ ...m, toolCalls: [...m.toolCalls, tool] }, tool.id);
+          return projectAssistantStreamEvent(m, action.projectId, {
+            event: CHAT_STREAM_EVENTS.toolCall,
+            data: {
+              toolCallId: `spawn-${Date.now()}-${newlyCreated[0]?.nodeId ?? 'na'}`,
+              title: `Spawned ${newlyCreated.length} branch${newlyCreated.length === 1 ? '' : 'es'}`,
+              status: 'completed',
+              kind: 'spawn_branches',
+              detail: newlyCreated.map((n) => n.title).join(', '),
+              output: newlyCreated.map((n) => `→ ${n.title}`).join('\n'),
+            },
+          });
         });
         copy[action.parentNodeId] = { ...parent, messages: msgs };
       }
@@ -1702,36 +1645,21 @@ export function reduceNodes(
     case 'set-composer-draft': {
       const n = nodes[action.nodeId];
       if (!n) return nodes;
-      let draft = normalizeComposerDraft(action.draft);
-      if (action.preserveExisting && draft && n.composerDraft) {
-        const current = n.composerDraft;
-        // A single quoteSource cannot describe two different file versions.
-        // Frame the incoming quote in restored text while retaining the current chip.
-        const distinctSources = draft.quotedText && current.quotedText
-          && JSON.stringify(draft.quoteSource) !== JSON.stringify(current.quoteSource);
-        const prefix = distinctSources ? `${formatQuotedSelectionContext(draft.quotedText!, draft.quoteSource)}\n\n` : '';
-        const incomingValue = prefix + draft.value;
-        const separator = incomingValue && current.value ? '\n\n' : '';
-        const offset = incomingValue.length + separator.length;
-        const quotedText = distinctSources ? current.quotedText
-          : [draft.quotedText, current.quotedText].filter(Boolean).join('\n\n') || undefined;
-        const quoteSource = distinctSources ? current.quoteSource
-          : draft.quotedText ? draft.quoteSource : current.quoteSource;
-        draft = {
-          value: incomingValue + separator + current.value,
-          mentions: [
-            ...draft.mentions.map(mention => ({ ...mention, start: mention.start + prefix.length, end: mention.end + prefix.length })),
-            ...current.mentions.map(mention => ({ ...mention, start: mention.start + offset, end: mention.end + offset })),
-          ],
-          quotedText,
-          ...(quotedText && quoteSource ? { quoteSource } : {}),
-        };
-      }
+      const draft = action.preserveExisting
+        ? mergeComposerDraft(action.draft, n.composerDraft)
+        : normalizeComposerDraft(action.draft);
       if (composerDraftEqual(n.composerDraft, draft)) return nodes;
-      const updated = { ...n };
+      // An edit here takes over a draft lean metadata deferred.
+      const updated = { ...n, ...settleDeferredNodeFields(n, 'composer_draft') };
       if (draft) updated.composerDraft = draft;
       else delete updated.composerDraft;
       return { ...nodes, [action.nodeId]: updated };
+    }
+    case 'append-composer-line': {
+      const n = nodes[action.nodeId];
+      if (!n) return nodes;
+      return reduceNodes(nodes, { type: 'set-composer-draft', nodeId: action.nodeId,
+        draft: appendComposerLine(n.composerDraft ?? { value: '', mentions: [] }, action.text) });
     }
   }
 }

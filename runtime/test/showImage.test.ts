@@ -18,6 +18,14 @@ test('resolves a workspace image to relPath + mime', () => {
   assert.deepEqual(r, { ok: true, relPath: 'pic.png', mimeType: 'image/png', size: 4 });
 });
 
+test('returns a nested image path with / separators, as the /files route requires', () => {
+  const cwd = tmpWorkspace();
+  fs.mkdirSync(path.join(cwd, 'docs', 'shots'), { recursive: true });
+  fs.writeFileSync(path.join(cwd, 'docs', 'shots', 'pic.png'), Buffer.from([0x89, 0x50, 0x4e, 0x47]));
+  const r = resolveShowImage(cwd, path.join('docs', 'shots', 'pic.png'));
+  assert.deepEqual(r, { ok: true, relPath: 'docs/shots/pic.png', mimeType: 'image/png', size: 4 });
+});
+
 test('rejects path traversal outside cwd', () => {
   const cwd = tmpWorkspace();
   const r = resolveShowImage(cwd, '../../../etc/hosts');

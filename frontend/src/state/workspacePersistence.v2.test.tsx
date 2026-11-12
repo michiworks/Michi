@@ -17,7 +17,6 @@ vi.mock('../services/api', () => ({
     backgroundWorkspaceSync: false,
     legacySyncAccepted: true,
   })),
-  fetchAllWorkspaces: vi.fn(() => new Promise(() => {})),
   fetchWorkspace: vi.fn(),
   fetchWorkspaces: vi.fn(),
   applyWorkspaceCommands: apiMocks.applyWorkspaceCommands,
@@ -114,6 +113,12 @@ function useHarness() {
       setNodes({ n1: { ...node, composerDraft: value ? { value, mentions: [] } : undefined } });
       dirtyDraftNodeIdsRef.current.add('n1');
     },
+    /** A composer send: the draft empties as the message lands, in one change. */
+    send(text: string) {
+      setNodes({ n1: { ...node, messages: [{ id: 'u1', role: 'user', text, toolCalls: [] }] } });
+      dirtyDraftNodeIdsRef.current.add('n1');
+      setStructureVersion((version) => version + 1);
+    },
     streamChunk() {
       setNodes(trackedNodes({
         ...node,
@@ -207,6 +212,19 @@ describe('v2 authoritative workspace persistence', () => {
     await act(async () => vi.advanceTimersByTimeAsync(2_000));
     expect(apiMocks.applyWorkspaceCommands).toHaveBeenCalledTimes(2);
     expect(apiMocks.applyWorkspaceCommands.mock.calls[1][2][0].payload.composer_draft).toBeNull();
+  });
+
+  it('clears a sent draft when the send leaves the node row as it was', async () => {
+    const { result } = renderHook(() => useHarness());
+    await act(async () => { await Promise.resolve(); });
+    act(() => result.current.editDraft('sent text'));
+    await act(async () => vi.advanceTimersByTimeAsync(2_000));
+    act(() => result.current.send('sent text'));
+    await act(async () => vi.advanceTimersByTimeAsync(2_000));
+    expect(apiMocks.applyWorkspaceCommands).toHaveBeenCalledTimes(2);
+    expect(apiMocks.applyWorkspaceCommands.mock.calls[1][2]).toEqual([{ type: 'node.patch', payload: {
+      id: 'n1', composer_draft_window_id: 'window-a', composer_draft: null,
+    } }]);
   });
 
   it('does not scan the node graph for high-frequency stream-only renders', async () => {
@@ -318,6 +336,27 @@ describe('v2 authoritative workspace persistence', () => {
     expect(pending()).toEqual(['t1']);
   });
 
+  it('counts an artifact removed here as pending for reads begun before its confirmed delete', async () => {
+    const { result } = renderHook(() => useHarness());
+    await act(async () => { await Promise.resolve(); });
+    const artifact = { id: 'ctx-1', name: 'notes', filePath: '.contexts/notes.md', source: 'user' as const, createdAt: 1, updatedAt: 1 };
+    act(() => result.current.change('ws-1', (p) => ({ ...p, artifacts: [artifact] })));
+    await act(async () => vi.advanceTimersByTimeAsync(2_000));
+    const pending = (readStartedAt?: number) => [
+      ...(result.current.pendingBackendDeletes(result.current.projects.find((p) => p.id === 'ws-1')!, readStartedAt).contextIds ?? []),
+    ];
+    expect(pending()).toEqual([]);
+    act(() => result.current.change('ws-1', (p) => ({ ...p, artifacts: [] })));
+    // Removed and not sent yet.
+    expect(pending()).toEqual(['ctx-1']);
+    await act(async () => vi.advanceTimersByTimeAsync(2_000));
+    expect(apiMocks.applyWorkspaceCommands.mock.calls.at(-1)![2].map((c) => c.type)).toContain('context.delete');
+    // Confirmation must still protect a read already in flight.
+    expect(pending()).toEqual(['ctx-1']);
+    expect(pending(0)).toEqual(['ctx-1']);
+    expect(pending(Date.now() + 1)).toEqual([]);
+  });
+
   it('writes view marks on the persistence cadence: one patch with the latest mark, retried until it lands', async () => {
     const { result } = renderHook(() => useHarness());
     await act(async () => { await Promise.resolve(); });
@@ -365,8 +404,10 @@ describe('v2 authoritative workspace persistence', () => {
       vi.unstubAllGlobals();
     }
     expect(sendBeacon).toHaveBeenCalledTimes(1);
-    const body = JSON.parse(String(parts[0])) as { commands: WorkspaceCommand[] };
+    const body = JSON.parse(String(parts[0])) as { commands: WorkspaceCommand[]; artifactIdentity?: unknown };
     expect(body.commands).toEqual([{ type: 'node.patch', payload: { id: 'n1', viewed_at: 4_000 } }]);
+    // Like every command batch of this window: it matches artifacts by id only.
+    expect(body.artifactIdentity).toBe('id');
   });
 
   it('flushes an immediate-close domain mutation with an explicit command beacon, never /sync', async () => {

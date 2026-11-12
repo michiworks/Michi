@@ -85,7 +85,7 @@ function errorMessage(body: unknown, status: number): string {
     if (typeof body.error === 'string') return body.error;
     if (isObject(body.error) && typeof body.error.message === 'string') return body.error.message;
   }
-  return `Meta agent request failed (${status})`;
+  return `Pages upkeep request failed (${status})`;
 }
 
 async function metaAgentJson(path: string, init: { method?: 'PUT' | 'POST'; body?: unknown; signal?: AbortSignal } = {}): Promise<MetaAgentInfo> {
@@ -99,7 +99,7 @@ async function metaAgentJson(path: string, init: { method?: 'PUT' | 'POST'; body
   });
   const body: unknown = await res.json().catch(() => null);
   if (!res.ok) throw new MetaAgentApiError(res.status, errorMessage(body, res.status));
-  if (!isMetaAgentInfo(body)) throw new MetaAgentApiError(res.status, 'Unexpected Meta agent response', true);
+  if (!isMetaAgentInfo(body)) throw new MetaAgentApiError(res.status, 'Unexpected Pages upkeep response', true);
   const { settings } = body;
   return {
     ...body,

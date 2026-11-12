@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { buildTranscriptMarkdown, runSelectionTranscript } from './exportWorkspace';
+import { buildTranscriptMarkdown, runSelectionTranscript, runTranscript } from './exportWorkspace';
 import type { ChatNodeState, Project } from '../state/chatTypes';
 
 function message(role: 'user' | 'assistant', text: string) {
@@ -97,6 +97,14 @@ describe('buildTranscriptMarkdown', () => {
     expect(markdown).toContain('Selected child text');
     expect(markdown).not.toContain('Root-only text');
     expect(suggestedFilename).toMatch(/root-title-selection-\d{4}-\d{2}-\d{2}\.md/);
+  });
+
+  it('titles a renamed thread and its file with the name the user gave it', () => {
+    const renamed = { ...project, trees: [{ ...project.trees[0], name: 'Payment bug' }] };
+    const nodes = { root: node({ nodeId: 'root', title: 'Debugging foo', messages: [message('assistant', 'Found it.')] }) };
+    const { markdown, suggestedFilename } = runTranscript(renamed, 'root', nodes);
+    expect(markdown).toContain('# Payment bug');
+    expect(suggestedFilename).toMatch(/^payment-bug-\d{4}-\d{2}-\d{2}\.md$/);
   });
 
   it('includes structured user-message context in the transcript', () => {

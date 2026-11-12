@@ -10,7 +10,6 @@
  * workspace-switch auto-open effect then focused the destination tree's root,
  * so the sidebar never revealed the conversation the user clicked.
  */
-import React from 'react';
 import { vi } from 'vitest';
 import { render, act, waitFor } from '@testing-library/react';
 
@@ -222,4 +221,49 @@ describe('sidebar reveal when opening a search result (navigateToNode)', () => {
     await waitFor(() => expect(row(childB)).not.toBeNull());
     await waitFor(() => expect(scrollSpy).toHaveBeenCalled());
   });
+});
+
+// Archiving or deleting the open thread opens another in its place (the most
+// recent one, at the top of the list). The user did not go there, so the
+// sidebar keeps its scroll position; the next real navigation reveals again.
+describe('sidebar keeps its place when the open thread is archived or deleted', () => {
+  let scrollSpy: ReturnType<typeof vi.fn>;
+  beforeEach(() => {
+    localStorage.clear();
+    scrollSpy = vi.fn();
+    Element.prototype.scrollIntoView = scrollSpy as unknown as typeof Element.prototype.scrollIntoView;
+  });
+
+  for (const remove of ['archive', 'delete'] as const) {
+    it(`${remove}: no scroll to the thread opened in its place`, async () => {
+      mountTree();
+      await act(async () => { await storeRef.createProject('ws1', undefined); });
+      await waitFor(() => expect(storeRef.activeProject).toBeTruthy());
+      const pid = storeRef.activeProject!.id;
+
+      let rootA = '';
+      let rootB = '';
+      let rootC = '';
+      await act(async () => { rootC = (await storeRef.createThread()) ?? ''; });
+      await act(async () => { rootA = (await storeRef.createThread()) ?? ''; });
+      await act(async () => { rootB = (await storeRef.createThread()) ?? ''; });
+      const treeB = storeRef.activeProject!.trees.find((t) => t.rootNodeId === rootB)!.id;
+      await waitFor(() => expect(storeRef.focusedPane).toBe(rootB));
+      await new Promise((r) => setTimeout(r, 50));
+      scrollSpy.mockClear();
+
+      act(() => {
+        if (remove === 'archive') storeRef.archiveTree(treeB);
+        else storeRef.deleteTree(treeB);
+      });
+
+      await waitFor(() => expect(storeRef.focusedPane).toBe(rootA));
+      await new Promise((r) => setTimeout(r, 50)); // past the reveal's two frames
+      expect(scrollSpy).not.toHaveBeenCalled();
+
+      act(() => { navigateToNode(deps(), rootC, pid); });
+      await waitFor(() => expect(storeRef.focusedPane).toBe(rootC));
+      await waitFor(() => expect(scrollSpy).toHaveBeenCalled());
+    });
+  }
 });

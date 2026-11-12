@@ -238,6 +238,8 @@ export function weaveToolCalls(
   };
   const pushText = (text: string, start: number) => {
     if (!text) return;
+    // Blank text renders nothing, so it must not end an open tool group.
+    if (currentGroup && !text.trim()) return;
     flushGroup();
     const revealTailChars = revealTailCharsForSlice(start, start + text.length, opts.revealFrom);
     out.push(revealTailChars ? { kind: 'text', text, revealTailChars } : { kind: 'text', text });
@@ -295,6 +297,9 @@ export function weaveRunToolBlocks(
   };
   const pushText = (text: string, start: number) => {
     if (!text) return;
+    // Blank text renders nothing, so it must not end an open tool group: the
+    // Claude adapter puts "\n\n" between API messages even when no text follows.
+    if (currentGroup && !text.trim()) return;
     flushGroup();
     const revealTailChars = revealTailCharsForSlice(start, start + text.length, opts.revealFrom);
     out.push(revealTailChars ? { kind: 'text', text, revealTailChars } : { kind: 'text', text });

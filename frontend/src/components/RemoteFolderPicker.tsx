@@ -2,6 +2,7 @@ import { useEffect, useId, useState } from 'react';
 import { browseRemoteDirectory, type RemoteDirectory } from '../services/api/backendConnections';
 import { Button } from './ui/controls';
 import { ChevronRightIcon, FolderIcon } from './terminal/icons';
+import { isImeComposing } from '../lib/ime';
 import './RemoteConnection.css';
 
 export function RemoteFolderPicker({ connectionId, onSelect }: {
@@ -33,7 +34,7 @@ export function RemoteFolderPicker({ connectionId, onSelect }: {
     <div className="remote-folder-picker__entry">
       <input className="ui-input" id={pathInputId} aria-label="Browse remote folder" value={path} disabled={loading}
         spellCheck={false} autoCapitalize="none" autoCorrect="off" onChange={event => setPath(event.target.value)}
-        onKeyDown={event => { if (event.key === 'Enter' && !event.nativeEvent.isComposing) { event.preventDefault(); navigate(path); } }} />
+        onKeyDown={event => { if (event.key === 'Enter' && !isImeComposing(event)) { event.preventDefault(); navigate(path); } }} />
       <Button onClick={() => navigate(path)} disabled={loading}>Go</Button>
     </div>
     {loading && <div role="status" className="remote-folder-picker__status">Loading remote folders…</div>}

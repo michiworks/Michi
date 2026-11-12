@@ -1,0 +1,33 @@
+/* ==========================================================================
+   60-recall.css (owner: verbs). #recall, brief §3.8, §5.9, R1-R2: the text
+   beside the replica >= 1280, stacked below. Pane helpers are in 50-how.css.
+   ========================================================================== */
+.rec-grid { row-gap: 40px; }
+.rec-text, .rec-fig { grid-column: 1 / -1; min-width: 0; }
+.rec-body { margin-top: var(--sp-head-body); }
+@media (min-width: 1280px) {
+  .rec-text { grid-column: 1 / 6; padding-right: 24px; }
+  .rec-fig { grid-column: 6 / -1; }
+}
+
+/* The ⁄⁄ 31.0d idle break (MapTimeline.tsx, formatGap): a 1 px hairline the
+   width of the replica, broken around its label. Static. */
+.rec-gap { display: flex; align-items: center; max-width: 760px; margin: 0 auto 14px; font-family: var(--mono);
+  font-size: 10px; line-height: 1.4; color: var(--ink-3); white-space: nowrap; }
+.rec-gap::before, .rec-gap::after { content: ""; flex: 1; height: 1px; background: var(--edge); }
+.rec-gap::before { flex: 0 0 48px; margin-right: 10px; }
+.rec-gap::after { margin-left: 10px; }
+@media (max-width: 767px) { .rec-gap { max-width: 640px; } }
+
+/* A new chat starts empty, its list top-aligned until the answer reaches the
+   composer (the follow-the-tail target at tA). */
+.rec-top { display: block; height: 0; }
+/* R1: rows grow into the expanded group, rising 4 px, and keep the card's
+   separators (29 px each). One spacer per row below the column shrinks as
+   its row grows, on the same curve, so the list keeps its height: the phone
+   replica is as tall as its list (50-how.css), and nothing below it moves. */
+.rec-r > div > .mk-tool-row { border-top: 1px solid var(--term-line);
+  transition: background-color var(--t-enter) ease-out, translate var(--t-enter) var(--ease-out); }
+.rec-r.is-off > div > .mk-tool-row { translate: 0 4px; }
+.rec-sp { display: block; height: 29px; transition: height var(--t-enter) var(--ease-out); }
+.rec-sp.is-off { height: 0; }

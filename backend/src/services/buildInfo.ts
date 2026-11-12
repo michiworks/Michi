@@ -3,7 +3,8 @@ import { existsSync, readFileSync } from 'node:fs';
 import path from 'node:path';
 import type { MichiBuildInfo, RemoteUpdateStatus } from 'michi-shared';
 
-export interface BuildInfo extends MichiBuildInfo { ancestors: string[] }
+// nodeMinimum is engines.node (X.Y.Z) of this build's package.json.
+export interface BuildInfo extends MichiBuildInfo { ancestors: string[]; nodeMinimum?: string }
 declare const __MICHI_BUILD_INFO__: BuildInfo | undefined;
 
 function sourceBuildInfo(): BuildInfo {
@@ -14,11 +15,11 @@ function sourceBuildInfo(): BuildInfo {
     const ancestors = execFileSync('git', ['rev-list', '--max-count=20000', 'HEAD'], {
       cwd: root, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], maxBuffer: 2_000_000,
     }).trim().split(/\r?\n/);
-    const { version } = JSON.parse(readFileSync(path.join(root, 'package.json'), 'utf8'));
+    const { version, engines } = JSON.parse(readFileSync(path.join(root, 'package.json'), 'utf8'));
     const dirty = execFileSync('git', ['status', '--porcelain', '--untracked-files=normal', '--', 'backend', 'frontend', 'shared', 'runtime', 'scripts', 'electron', 'package.json'], {
       cwd: root, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'],
     }).trim().length > 0;
-    return { version, revision: ancestors[0], ancestors, dirty };
+    return { version, nodeMinimum: engines?.node?.replace(/^>=/, ''), revision: ancestors[0], ancestors, dirty };
   } catch { return { version: 'unknown', revision: null, ancestors: [] }; }
 }
 

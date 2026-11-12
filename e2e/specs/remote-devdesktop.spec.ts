@@ -111,7 +111,7 @@ for (const palette of ['bone', 'gruvbox']) {
     } });
     await bootWithWorkspace(page, 'Remote design review');
     const settings = await openSettings(page, 'General');
-    await expect(settings.getByText('SSH connected', { exact: true })).toHaveCount(2);
+    await expect(settings.locator('.remote-machine__status').getByText('Connected', { exact: true })).toHaveCount(2);
     const add = settings.getByRole('button', { name: 'Connect remote', exact: true });
     await expect(add).toBeVisible();
     await expect(settings.getByText('SSH launch:', { exact: false })).toHaveCount(0);
@@ -129,7 +129,7 @@ for (const palette of ['bone', 'gruvbox']) {
     await expect(settings.getByText(/Run.*in Terminal/)).toBeVisible();
     await page.screenshot({ path: testInfo.outputPath(`connect-${palette}.png`) });
     await settings.getByRole('button', { name: 'Cancel', exact: true }).click();
-    await settings.getByRole('button', { name: 'Manual setup…' }).click();
+    await settings.getByRole('button', { name: 'Manual setup', exact: true }).click();
     await expect(settings.getByRole('heading', { name: 'Manual connection' })).toBeVisible();
     await page.setViewportSize({ width: 540, height: 850 });
     await expect.poll(() => settings.locator('.terminal-settings-content').evaluate(el => el.scrollWidth <= el.clientWidth)).toBe(true);
@@ -145,7 +145,8 @@ for (const hasLocalRuntime of [true, false]) {
     const diagnostic = { id: 'attempt-e2e', host: 'build+', startedAt: '2026-10-16T12:00:00Z', stage: 'tunnel', code: 'setup_failed', message: 'SSH tunnel failed: bind: Address already in use', log: '[ssh] Remote service healthy\n[tunnel] bind: Address already in use\n[exit] code=255', truncated: false };
     const sends: { path: string; body: unknown }[] = [];
     const sessions: { path: string; body: unknown }[] = [];
-    const remoteWorkspace = { workspace: { id: 'remote-existing', name: 'Remote existing workspace', created_at: 1, cwd: '/home/u/project' }, nodes: [], trees: [], edges: [], messages: [], artifacts: [] };
+    // Created today: a workspace idle for a month would fold into the sidebar's Earlier group.
+    const remoteWorkspace = { workspace: { id: 'remote-existing', name: 'Remote existing workspace', created_at: Date.now(), cwd: '/home/u/project' }, nodes: [], trees: [], edges: [], messages: [], artifacts: [] };
     await installMockApi(page, { custom: async route => {
       const request = route.request(); const url = new URL(request.url());
       if (url.pathname === '/api/backend-connections') {

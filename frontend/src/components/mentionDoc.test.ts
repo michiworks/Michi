@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { docToDraft, draftToDoc, type PMNode } from './mentionDoc';
-import type { MentionRecord } from './mentions';
+import type { MentionRecord } from '../lib/mentions';
 
 const ctx = (label: string, start: number, refId = label): MentionRecord => ({
   start,

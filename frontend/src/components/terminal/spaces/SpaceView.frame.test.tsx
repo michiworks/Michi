@@ -34,16 +34,24 @@ vi.mock('../../../state/pages/usePage', () => ({ usePage: () => ({
   refresh: vi.fn(), edit: vi.fn(), accept: vi.fn(), dismiss: vi.fn(), reopen: vi.fn(), revert: vi.fn(), redo: vi.fn(), revertBatch: vi.fn(),
 }) }));
 vi.mock('../../../state/pages/revealSource', () => ({ revealPageSource: vi.fn() }));
-vi.mock('../../../state/pages/pageEvents', () => ({ notifyPageChanged: vi.fn() }));
-vi.mock('../../../services/api/pages', () => ({
+vi.mock('../../../state/pages/pageEvents', () => ({ notifyPageChanged: vi.fn(), subscribePageChanges: vi.fn(() => () => {}) }));
+vi.mock('../../../services/api/pages', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../../services/api/pages')>()),
   createWorkspaceDatabase: vi.fn(), listWorkspaceDatabases: vi.fn(), createPage: vi.fn(), deletePage: vi.fn(), fetchPage: vi.fn(), patchPage: vi.fn(),
 }));
 vi.mock('../../../services/api/spacesHome', () => ({ fetchLayoutRules: vi.fn().mockResolvedValue([]), deleteLayoutRule: vi.fn() }));
 vi.mock('./NativeDatabase', () => ({ default: (props: Record<string, unknown>) => { state.databaseProps.push(props); return <div data-testid="database" />; } }));
 vi.mock('./MaintenanceStatus', () => ({ MaintenanceStatus: () => null }));
 vi.mock('./conversation/SpaceConversationSlot', () => ({ NewChatSheetSlot: () => null, PageProgressCards: () => null }));
+// The caption names the agent through the one helper task cards use too (F1b-review #7).
+const naming = vi.hoisted(() => ({ actorName: vi.fn() }));
+vi.mock('../content/db/taskActivity', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../content/db/taskActivity')>();
+  naming.actorName.mockImplementation(actual.companionActorName);
+  return { ...actual, companionActorName: (...args: Parameters<typeof actual.companionActorName>) => naming.actorName(...args) };
+});
 
-import { SpaceView, spaceCaption, spaceMetaLine } from './SpaceView';
+import SpaceView, { spaceCaption, spaceMetaLine } from './SpaceView';
 
 const route = { type: 'space' as const, pageId: 'page-1', workspaceId: 'workspace-1', backendConnectionId: 'local' };
 const summary = (extra: Partial<SpaceSummaryDto>): SpaceSummaryDto => ({
@@ -93,24 +101,32 @@ describe('A Space page laid out like the workspace homes', () => {
   });
 
   it('says who made the Space and reads the line under the title like the mock', () => {
-    state.spaces = [summary({ createdBy: 'meta-agent' })];
+    state.spaces = [summary({ createdBy: { kind: 'companion', via: 'conversation' } })];
     state.tree = [
       { id: 'page-1', workspaceId: 'workspace-1', parentId: null, position: 0, title: 'Michi 0.9' },
       { id: 'child-1', workspaceId: 'workspace-1', parentId: 'page-1', position: 0, title: 'Notes' },
       { id: 'child-2', workspaceId: 'workspace-1', parentId: 'page-1', position: 1, title: 'Risks' },
     ];
     show();
-    expect(screen.getByText('Page · rabbitholes · created by the Meta agent')).toBeTruthy();
+    expect(screen.getByText('Page · rabbitholes · created by Michi')).toBeTruthy();
     expect(document.querySelector('.space-doc__source')?.textContent).toBe('2 pages inside · 2 conversations wrote here · updated 5m ago');
   });
 
   it('leaves the page count out when there is no page inside, and words the creator for a person or a conversation', () => {
-    expect(spaceCaption('个人', 'user')).toBe('Page · 个人 · created by you');
-    expect(spaceCaption('个人', 'agent')).toBe('Page · 个人 · created by an agent');
-    expect(spaceCaption('个人', undefined)).toBe('Page · 个人');
+    expect(spaceCaption('个人', 'user', 'Robin')).toBe('Page · 个人 · created by you');
+    expect(spaceCaption('个人', 'agent', 'Robin')).toBe('Page · 个人 · created by an agent');
+    expect(spaceCaption('个人', undefined, 'Robin')).toBe('Page · 个人');
     expect(spaceMetaLine({ pagesInside: 0, parentTitle: null, conversations: 1, updatedAt: NOW - 50 * MIN, state: null, now: NOW })).toBe('1 conversation wrote here · updated 50m ago');
     expect(spaceMetaLine({ pagesInside: 0, parentTitle: null, conversations: 0, updatedAt: NOW, state: null, now: NOW })).toBe('Updated just now');
     expect(spaceMetaLine({ pagesInside: null, parentTitle: 'Release', conversations: null, updatedAt: NOW, state: 'saving…', now: NOW })).toBe('In Release · updated just now · saving…');
+  });
+
+  // DESIGN-v2 §8 F1b: the agent is "<name>" wherever it made a Space, its upkeep "<name> · Pages upkeep".
+  it('names the agent that made a Space by the name the user gave it', () => {
+    expect(spaceCaption('个人', { kind: 'companion', via: 'checkin' }, 'Robin')).toBe('Page · 个人 · created by Robin');
+    expect(spaceCaption('个人', { kind: 'companion', via: 'conversation' }, 'Robin')).toBe('Page · 个人 · created by Robin');
+    expect(spaceCaption('个人', { kind: 'companion', via: 'upkeep' }, 'Robin')).toBe('Page · 个人 · created by Robin · Pages upkeep');
+    expect(naming.actorName).toHaveBeenCalledWith({ kind: 'companion', via: 'upkeep' }, 'Robin');
   });
 
   it('keeps source in the block toolbar and undo in Activity without repeating metadata under the block', () => {

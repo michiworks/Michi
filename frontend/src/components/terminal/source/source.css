@@ -107,24 +107,3 @@
   font-size: var(--fs-sm);
 }
 .source-ref-mark > svg { flex: none; }
-
-/* A page write receipt under a conversation's reply. */
-.assistant-receipt[data-variant='conversation'] {
-  display: inline-flex;
-  max-width: 100%;
-  margin: 8px 0 4px;
-  padding: 5px 6px 5px 10px;
-  border-radius: var(--ui-radius);
-  background: var(--term-surface);
-}
-.assistant-receipt[data-variant='conversation'] .assistant-receipt__label { flex: 0 1 auto; }
-.assistant-receipt[data-variant='conversation'] .assistant-receipt__btn {
-  padding: 0 4px;
-  border: 0;
-  background: transparent;
-  color: var(--term-mid);
-  font: inherit;
-  text-decoration: underline;
-  text-underline-offset: 2px;
-  cursor: pointer;
-}

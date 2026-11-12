@@ -114,10 +114,6 @@ export interface MaintenanceBacklog {
   attentionSources: number;
 }
 
-export type MaintenanceQueuedRequest =
-  | { kind: 'reconsider'; requestId: string; createdAt: number }
-  | { kind: 'catchup'; requestId: string; spaceId: string; after: number; through: number; createdAt: number };
-
 export interface MaintenanceWorkspaceResponse {
   config: MaintenanceConfig | null;
   status: MaintenanceWorkspaceStatus | null;

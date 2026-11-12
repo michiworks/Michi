@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { Project } from '../../../state/chatTypes';
-import { visibleMapNodeIds } from './mapVisibility';
+import { mapGraphNodeIds, visibleMapNodeIds } from './mapVisibility';
 
 function project(overrides: Partial<Project> = {}): Project {
   return {
@@ -100,5 +100,30 @@ describe('visibleMapNodeIds', () => {
         },
       ),
     ).toEqual(['A', 'A1', 'B', 'B1', 'M']);
+  });
+});
+
+describe('mapGraphNodeIds', () => {
+  it('returns the visible nodes in walk order from the same seeds', () => {
+    const nodes = { A: {}, A1: {}, A2: {}, B: {}, B1: {}, M: { mergeSources: ['A1', 'B1'] } };
+    const merge = project({
+      chatIds: ['M', 'B1', 'A2', 'A1', 'B', 'A'],
+      edges: [
+        { source: 'A', target: 'A2', kind: 'branch' },
+        { source: 'A', target: 'A1', kind: 'branch' },
+        { source: 'B', target: 'B1', kind: 'branch' },
+        { source: 'A1', target: 'M', kind: 'merge' },
+        { source: 'B1', target: 'M', kind: 'merge' },
+      ],
+      trees: [
+        { id: 'tree-a', rootNodeId: 'A', createdAt: 0, lastActiveAt: 0 },
+        { id: 'tree-b', rootNodeId: 'B', createdAt: 0, lastActiveAt: 0 },
+        { id: 'merge-tree', rootNodeId: 'M', createdAt: 1, lastActiveAt: 1, kind: 'merge' },
+      ],
+      activeTreeId: 'merge-tree',
+    });
+    expect(mapGraphNodeIds(merge, nodes)).toEqual(['M', 'A1', 'A', 'B1', 'B', 'A2']);
+    expect(new Set(mapGraphNodeIds(merge, nodes))).toEqual(new Set(visibleMapNodeIds(merge, nodes)));
+    expect(mapGraphNodeIds({ ...merge, activeTreeId: 'tree-a' }, nodes)).toEqual(['A', 'A2', 'A1', 'M']);
   });
 });

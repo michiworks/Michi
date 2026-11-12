@@ -6,6 +6,8 @@ import { claudeInitCatalog } from 'michi-runtime/internal/adapters/claude/claude
 import { checkMetaAgentToolCatalog } from '../src/agents/metaAgentGuard';
 import { buildMcpServerForSlot, McpSlotRegistry } from '../src/services/mcpServer';
 import { PAGE_BLOCK_CATALOG, PAGE_BLOCK_TYPES } from 'michi-shared';
+import { ClaudeRuntime } from 'michi-runtime/internal/adapters/claude/ClaudeRuntime';
+import { claudeTestOptions } from './helpers/claudeTestOptions';
 
 describe('scheduled maintenance runtime isolation', () => {
   test('maintenance bootstrap treats one successful resource write as final, including proposals', () => {
@@ -122,6 +124,22 @@ describe('scheduled maintenance runtime isolation', () => {
     const databaseResult = await call('maintenance_write_database', databaseInput);
     assert.match(databaseResult.content[0].text, /No active maintenance send/,
       'the emitted MCP invocation validates the dynamic database values and reaches its bound handler');
+  });
+
+  test('Claude: a maintenance session\'s first turn carries no workspace Instructions; a chat\'s does', async () => {
+    const creates: Array<{ firstTurnPrefix: string }> = [];
+    const options = claudeTestOptions();
+    options.host.prompt.workspaceInstructions = () => 'Always answer in Japanese.';
+    // Runtime orchestration only: no CLI and no warm pool.
+    const runtime = Object.assign(Object.create(ClaudeRuntime.prototype), { host: options.host, options, manager: {
+      waitForRelease: async () => {},
+      getCompatible: () => undefined,
+      createSession: async (input: { firstTurnPrefix: string }) => { creates.push(input); return {}; },
+    } }) as ClaudeRuntime;
+    await runtime.newSession({ sessionId: 'n-maint', cwd: '/tmp', workspaceId: 'ws-1', toolProfile: maintenanceToolProfile(), bootstrapInstructions: MAINTENANCE_BOOTSTRAP_INSTRUCTIONS });
+    await runtime.newSession({ sessionId: 'n-chat', cwd: '/tmp', workspaceId: 'ws-1' });
+    assert.equal(creates[0].firstTurnPrefix, MAINTENANCE_BOOTSTRAP_INSTRUCTIONS);
+    assert.match(creates[1].firstTurnPrefix, /Always answer in Japanese/);
   });
 });
 

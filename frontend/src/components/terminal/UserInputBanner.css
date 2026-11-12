@@ -1,3 +1,381 @@
+/* ── Ask-user input card ──────────────────────────────────────────────────────
+   Same family as the scheduled-job receipt and the workflow card: a hairline
+   card that says each thing once. The question leads (a steady accent mark,
+   its text, its header as a quiet tag), an approval's facts follow as a
+   label/value list, the options are light rows, and the footer holds Skip,
+   the step count and the one solid accent button. The alert bar under the
+   topbar carries the only moving light. */
+.ask-card {
+  margin: 8px 0;
+  padding: 10px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  border: 1px solid var(--term-line);
+  border-radius: var(--ui-radius);
+  background: var(--term-surface);
+  font-family: var(--ui-font);
+  font-size: var(--fs-md);
+  color: var(--term-fg);
+  overflow: hidden;
+}
+
+/* ── Horizontal sliding question track ──
+   The viewport height follows the active question; the track slides on X.
+   Question widths are locked to the viewport by UserInputBanner via a
+   ResizeObserver (panes are user-resizable). */
+.ask-viewport {
+  overflow: hidden;
+  width: 100%;
+  padding: 1px;
+  margin: -1px;
+}
+.ask-viewport[data-animate="true"] {
+  transition: height var(--t-decay) cubic-bezier(0.22, 1, 0.36, 1);
+}
+.ask-track {
+  position: relative;
+  display: flex;
+  flex-direction: row;
+  align-items: flex-start;
+  gap: 28px; /* must match TRACK_GAP in UserInputBanner.tsx */
+  will-change: transform;
+}
+.ask-track[data-animate="true"] {
+  transition: transform var(--t-decay) cubic-bezier(0.22, 1, 0.36, 1);
+}
+.ask-question {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  flex: none;
+  opacity: 0;
+}
+.ask-question[data-active="true"] { opacity: 1; }
+.ask-track[data-animate="true"] .ask-question {
+  transition: opacity var(--t-decay) cubic-bezier(0.22, 1, 0.36, 1);
+}
+.ask-question:not([data-active="true"]) { pointer-events: none; }
+@media (prefers-reduced-motion: reduce) {
+  .ask-viewport[data-animate="true"],
+  .ask-track[data-animate="true"],
+  .ask-track[data-animate="true"] .ask-question { transition: none; }
+}
+
+/* ── The question ── */
+.ask-card-qheader {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+}
+.ask-card-qrow {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  min-width: 0;
+}
+/* Steady: it marks the card as waiting on you without competing with the
+   alert bar's pulse. Sits on the first line's x-height. */
+.ask-card-qmark {
+  flex: none;
+  align-self: flex-start;
+  width: 6px;
+  height: 6px;
+  margin-top: calc(0.7em - 3px);
+  border-radius: 50%;
+  background: var(--term-accent);
+}
+.ask-card-qtitle,
+.ask-card-qtext {
+  flex: 1;
+  min-width: 0;
+  font-size: var(--fs-lg);
+  font-weight: 600;
+  line-height: 1.4;
+  color: var(--term-fg);
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+/* A plain question keeps its line breaks: one can carry a whole message to
+   approve (send_to_thread from the Michi assistant), so a long one scrolls. */
+.ask-card-qtext {
+  max-height: 40vh;
+  overflow-y: auto;
+}
+.ask-card-chip {
+  flex: none;
+  max-width: 40%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+  color: var(--term-muted);
+}
+.ask-card-hint {
+  margin-left: 14px;
+  color: var(--term-muted);
+  font-size: var(--fs-sm);
+}
+
+/* An approval's facts (`Label: value` lines), indented under the title like
+   the scheduled-job receipt. A quoted value (a job's prompt) reads quieter. */
+.ask-card-details {
+  display: grid;
+  grid-template-columns: fit-content(40%) minmax(0, 1fr);
+  align-items: baseline;
+  gap: 4px 12px;
+  margin: 0 0 0 14px;
+  max-height: 40vh;
+  overflow-y: auto;
+  line-height: 1.45;
+}
+.ask-card-detail { display: contents; }
+.ask-card-detail-label { color: var(--term-muted); }
+.ask-card-detail-value {
+  color: var(--term-fg);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.ask-card-detail.is-quoted .ask-card-detail-value { color: var(--term-mid); }
+.ask-card-detail.is-quoted .ask-card-detail-value:not(.ask-change)::before { content: "“"; }
+.ask-card-detail.is-quoted .ask-card-detail-value:not(.ask-change)::after { content: "”"; }
+/* A change: the old value quiet and struck, the new one in full. Quoted
+   values keep their quotes; long ones stack as Was / Now. */
+.ask-change { display: inline; }
+.ask-change del,
+.ask-change ins { text-decoration: none; }
+.ask-change-before {
+  color: var(--term-muted);
+  text-decoration: line-through !important;
+  text-decoration-color: color-mix(in srgb, var(--term-muted) 55%, transparent) !important;
+}
+.ask-change-arrow { margin: 0 6px; color: var(--term-faint); }
+.ask-change-after { color: var(--term-fg); font-weight: 500; }
+.ask-change.is-stacked { display: flex; flex-direction: column; gap: 3px; }
+.ask-change-row { display: grid; grid-template-columns: 28px minmax(0, 1fr); align-items: baseline; }
+.ask-change-tag { font-size: var(--fs-xs); color: var(--term-faint); }
+.ask-change.is-stacked .ask-change-after { font-weight: 400; }
+/* A long old text stays readable: the Was tag already says it is replaced. */
+.ask-change.is-stacked .ask-change-before { text-decoration: none !important; }
+.is-quoted .ask-change-before::before,
+.is-quoted .ask-change-after::before { content: "“"; }
+.is-quoted .ask-change-before::after,
+.is-quoted .ask-change-after::after { content: "”"; }
+/* A long value (a full prompt) starts as its first lines, with a toggle
+   under it. Line breaks and indentation stay as written. */
+.ask-clamp {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+  min-width: 0;
+}
+.ask-clamp-text { max-width: 100%; }
+.ask-clamp-text.is-clamped {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 6; /* CLAMP_LINES in UserInputBanner.tsx */
+  line-clamp: 6;
+  overflow: hidden;
+}
+.ask-clamp-toggle {
+  appearance: none;
+  background: none;
+  border: 0;
+  padding: 0;
+  font: inherit;
+  font-size: var(--fs-xs);
+  color: var(--term-muted);
+  cursor: pointer;
+}
+.ask-clamp-toggle:hover { color: var(--term-fg); }
+.ask-clamp-toggle:focus-visible {
+  outline: 1px solid var(--term-accent);
+  outline-offset: 1px;
+}
+/* A note line has no label: as a grid item of its own, it takes the row. */
+.ask-card-detail.is-note {
+  display: block;
+  grid-column: 1 / -1;
+  color: var(--term-mid);
+}
+
+/* ── Options: light rows; the indicator lines up with the title text ── */
+.ask-card-options {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  margin-left: 6px;
+}
+.ask-card-opt {
+  display: flex;
+  align-items: flex-start;
+  gap: 9px;
+  padding: 6px 8px;
+  border: 0;
+  border-radius: var(--ui-radius);
+  background: transparent;
+  color: var(--term-fg);
+  cursor: pointer;
+  text-align: left;
+  font-family: inherit;
+  font-size: var(--fs-md);
+  line-height: 1.4;
+  transition: background-color var(--t-soft) cubic-bezier(0.22, 1, 0.36, 1);
+}
+.ask-card-opt:hover:not(.selected):not(:disabled) {
+  background: var(--term-hover-bg, var(--term-alt));
+}
+.ask-card-opt.selected {
+  background: color-mix(in srgb, var(--term-accent) 8%, transparent);
+}
+.ask-card-opt:active:not(:disabled) { transform: scale(0.995); }
+.ask-card-opt:disabled { cursor: default; }
+.ask-card-opt-other { align-items: center; cursor: text; }
+.ask-card-opt-other:active { transform: none; }
+.ask-card-opt-other input {
+  flex: 1;
+  min-width: 0;
+  border: 0;
+  background: transparent;
+  color: var(--term-fg);
+  font: inherit;
+  outline: none;
+  padding: 0;
+}
+.ask-card-opt-other input::placeholder { color: var(--term-faint); }
+.ask-card-indicator {
+  flex-shrink: 0;
+  width: 12px;
+  height: 12px;
+  margin-top: calc(0.7em - 6px);
+  box-sizing: border-box;
+  border-radius: 50%;
+  border: 1.5px solid var(--term-faint);
+  transition:
+    border-color var(--t-soft) cubic-bezier(0.22, 1, 0.36, 1),
+    background var(--t-soft) cubic-bezier(0.22, 1, 0.36, 1),
+    box-shadow var(--t-soft) cubic-bezier(0.22, 1, 0.36, 1);
+}
+.ask-card-opt-other .ask-card-indicator { margin-top: 0; }
+.ask-card-indicator.checkbox { border-radius: var(--ui-radius-sm); }
+.ask-card-opt:hover:not(:disabled) .ask-card-indicator { border-color: var(--term-mid); }
+.ask-card-opt.selected .ask-card-indicator {
+  border-color: var(--term-accent);
+  background: var(--term-accent);
+  box-shadow: inset 0 0 0 2px var(--term-surface);
+}
+.ask-card-opt.selected .ask-card-indicator.checkbox { box-shadow: none; }
+.ask-card-opt-label {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 0;
+}
+.ask-card-opt.selected .ask-card-opt-label { font-weight: 500; }
+.ask-card-opt-desc {
+  display: block;
+  color: var(--term-muted);
+  font-size: var(--fs-sm);
+  font-weight: 400;
+}
+
+/* ── Footer: Skip on the left; count, arrows and the accent button right ── */
+.ask-card-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-left: 6px;
+}
+.ask-card-footer-right {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+.ask-card-skip {
+  border: 0;
+  border-radius: var(--ui-radius);
+  background: transparent;
+  color: var(--term-muted);
+  cursor: pointer;
+  font-size: var(--fs-md);
+  font-family: inherit;
+  padding: 4px 8px;
+  transition: color var(--t-soft) cubic-bezier(0.22, 1, 0.36, 1);
+}
+.ask-card-skip:hover { color: var(--term-fg); }
+.ask-card-count {
+  margin-right: 2px;
+  font-size: var(--fs-sm);
+  color: var(--term-muted);
+  font-variant-numeric: tabular-nums;
+}
+.ask-nav-arrow {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  border: 0;
+  border-radius: var(--ui-radius);
+  background: transparent;
+  color: var(--term-muted);
+  cursor: pointer;
+  font-size: var(--fs-xl);
+  padding: 0;
+  font-family: inherit;
+  transition: color var(--t-soft) cubic-bezier(0.22, 1, 0.36, 1);
+}
+.ask-nav-arrow:hover:not(:disabled) { color: var(--term-fg); background: var(--term-hover-bg, var(--term-alt)); }
+.ask-nav-arrow:active:not(:disabled) { transform: scale(0.95); }
+.ask-nav-arrow:disabled { opacity: 0.28; cursor: default; }
+/* Fill, hover and disabled come from .ui-btn--primary (the Send recipe). */
+.ask-card .ask-card-submit {
+  margin-left: 4px;
+  padding: 4px 12px;
+  font-size: var(--fs-md);
+}
+.ask-card .ask-card-submit:active:not(:disabled) { transform: scale(0.98); }
+.ask-card-opt:focus-visible,
+.ask-card-skip:focus-visible,
+.ask-nav-arrow:focus-visible,
+.ask-card-opt-other input:focus-visible {
+  outline: 1px solid var(--term-accent);
+  outline-offset: 1px;
+}
+
+/* ── Resolved receipt: the question quiet, the answer in full ── */
+.ask-card-body {
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.ask-qa-pair {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.ask-qa-question {
+  color: var(--term-muted);
+  font-size: var(--fs-sm);
+  overflow-wrap: anywhere;
+}
+.ask-qa-answer {
+  color: var(--term-fg);
+  font-size: var(--fs-md);
+  font-weight: 500;
+  overflow-wrap: anywhere;
+}
+.ask-qa-answer.skipped {
+  color: var(--term-muted);
+  font-weight: 400;
+  font-style: italic;
+}
+
 /* The frozen copy of an answered ask card (UserInputBanner's hand-off to its
    receipt) draws its text as generated content, so the copy looks like the
    card for its ~200ms but is not findable text: find in page, Testing Library

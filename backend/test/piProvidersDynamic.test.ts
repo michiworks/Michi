@@ -6,13 +6,11 @@ const piAiModule = require("../src/agents/pi/piAi") as {
   loadPiAi: () => Promise<unknown>;
 };
 const originalLoadPiAi = piAiModule.loadPiAi;
-const openRouterModels = require("../src/agents/pi/openrouterModels") as typeof import("../src/agents/pi/openrouterModels");
 const discovery = require("../src/agents/pi/providerModelDiscovery") as typeof import("../src/agents/pi/providerModelDiscovery");
 
 afterEach(() => {
   global.fetch = originalFetch;
   piAiModule.loadPiAi = originalLoadPiAi;
-  openRouterModels.invalidateOpenRouterCache();
   discovery.resetModelDiscoveryForTests();
   delete process.env.MICHI_MODEL_DISCOVERY;
 });
@@ -203,3 +201,63 @@ function listPiModelsForTest(provider: string) {
   const { listPiModels } = require("../src/agents/pi/piProviders") as typeof import("../src/agents/pi/piProviders");
   return listPiModels(provider);
 }
+
+const openRouterRow = { id: 'vendor/live-model', name: 'Live', context_length: 200_000,
+  pricing: { prompt: '0.000001', completion: '0.000002' }, architecture: { input_modalities: ['text', 'image'] } };
+
+test("MICHI_MODEL_DISCOVERY=0 keeps OpenRouter static and offline too", async () => {
+  process.env.MICHI_MODEL_DISCOVERY = "0";
+  let calls = 0;
+  global.fetch = async () => { calls += 1; throw new Error("must not be called"); };
+  const { resolvePiModel } = require("../src/agents/pi/piProviders") as typeof import("../src/agents/pi/piProviders");
+
+  const models = await listPiModelsForTest("openrouter");
+  const model = await resolvePiModel("openrouter", "vendor/brand-new");
+
+  assert.equal(calls, 0);
+  assert.ok(models.length > 0, "the static catalog answers");
+  assert.equal(model.id, "vendor/brand-new");
+});
+
+test("a hanging OpenRouter catalog blocks neither the list nor a turn", async () => {
+  global.fetch = () => new Promise<Response>(() => { /* never settles */ });
+  const { resolvePiModel } = require("../src/agents/pi/piProviders") as typeof import("../src/agents/pi/piProviders");
+  const started = Date.now();
+  const models = await listPiModelsForTest("openrouter");
+  const model = await resolvePiModel("openrouter", "vendor/brand-new");
+  assert.ok(Date.now() - started < 5_000, "both answer within the discovery budget");
+  assert.ok(models.length > 0);
+  assert.equal(model.contextWindow, 128_000, "a turn starts on the safe descriptor");
+});
+
+test("concurrent OpenRouter reads share one download, and a failure is not retried for a minute", async () => {
+  let calls = 0;
+  global.fetch = async () => { calls += 1; return new Response(JSON.stringify({ data: [openRouterRow] })); };
+  const [first, second] = await Promise.all([listPiModelsForTest("openrouter"), listPiModelsForTest("openrouter")]);
+  assert.equal(calls, 1);
+  assert.deepEqual(first.map((m) => m.model_id), ["vendor/live-model"]);
+  assert.deepEqual(second.map((m) => m.model_id), ["vendor/live-model"]);
+
+  discovery.resetModelDiscoveryForTests();
+  calls = 0;
+  global.fetch = async () => { calls += 1; return new Response("busy", { status: 503 }); };
+  await listPiModelsForTest("openrouter");
+  await listPiModelsForTest("openrouter");
+  const { resolvePiModel } = require("../src/agents/pi/piProviders") as typeof import("../src/agents/pi/piProviders");
+  await resolvePiModel("openrouter", "vendor/brand-new");
+  assert.equal(calls, 1);
+});
+
+test("the catalog timeout covers the whole read, body included", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  let aborted = false;
+  const pending = discovery.discoverCatalog("test-catalog", (signal) => new Promise<unknown[] | null>((_resolve, reject) => {
+    signal.addEventListener("abort", () => { aborted = true; reject(new Error("aborted")); });
+  }), 8_000);
+  t.mock.timers.tick(7_999);
+  await Promise.resolve();
+  assert.equal(aborted, false);
+  t.mock.timers.tick(1);
+  assert.equal(await pending, null);
+  assert.equal(aborted, true);
+});

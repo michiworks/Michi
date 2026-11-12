@@ -45,4 +45,12 @@ describe('estimateMergePreambleTokens', () => {
     const total = blocks.join('').length;
     expect(estimateMergePreambleTokens(['A'], nodes, [])).toBe(Math.ceil(total / 4));
   });
+
+  it('counts each Chinese character as a token', () => {
+    const text = '合并线程'.repeat(30_000);
+    const nodes: Record<string, ChatNodeState> = {
+      A: node('A', { messages: [{ id: 'A-u', role: 'user', text, toolCalls: [] }] }),
+    };
+    expect(estimateMergePreambleTokens(['A'], nodes, [])).toBeGreaterThan(120_000);
+  });
 });

@@ -1,6 +1,6 @@
 # Conversation increments
 
-更新：2026-10-26 · 阶段：已合入
+更新：2026-11-08 · 阶段：已合入
 
 实现已包含在当前源码中；已安装版本：未核对。
 
@@ -138,11 +138,12 @@ targets or authority retain unresolved progress. Human-owned content continues
 to require proposals, and changes retain the original conversation evidence
 separately from the scheduled execution.
 
-The managed profile uses Settings → Meta agent and supports Pi, Claude,
-Codex and Kiro. Each adapter checks its actual exposed tool catalog against
-the restricted allowlist at session startup. Crew remains unsupported for
-the Meta agent, independently of its ordinary chat Page tools. The current
-Pages/Meta agent UI is local-only; remote workspaces are not enrolled/read
+The managed profile uses Settings → Michi → Pages upkeep (the Settings page
+is named after your agent) and supports Pi, Claude, Codex and Kiro. Each
+adapter checks its actual exposed tool catalog against the restricted
+allowlist at session startup. Crew remains unsupported for Pages upkeep,
+independently of its ordinary chat Page tools. The current Pages and Pages
+upkeep UI is local-only; remote workspaces are not enrolled/read
 through it. Enabling maintenance does not grant shell, arbitrary
 network, job-management, component-library or proposal-acceptance permissions.
 

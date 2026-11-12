@@ -1,23 +1,9 @@
+import { HOME_CARD_KINDS, HOME_CARD_LIMITS as LIMITS, type HomeCard, type HomeCardsWrite } from 'michi-shared';
 import { getDb } from '../db';
 import { listWorkspaceHomes } from '../pages/homePages';
 import { getHomeState, updateHomeState } from './firstRunStore';
 
-/** Mirrors the home-cards storage contract (shared/src/homeCards.ts once it lands). */
-export const HOME_CARD_KINDS = ['continue', 'try', 'from-space', 'review', 'stalled', 'discover', 'tip'] as const;
-export type HomeCardKind = (typeof HOME_CARD_KINDS)[number];
-const LIMITS = { sets: 8, cardsPerSet: 6, id: 200, label: 80, title: 200, reason: 500, buttonText: 40, prompt: 4000, greeting: 300 } as const;
 const MODEL_SETS = 3;
-
-export interface HomeCard {
-  id: string; kind: HomeCardKind; label: string;
-  source: { workspaceId?: string; pageId?: string; threadNodeId?: string };
-  title: string; reason: string; buttonText: string; prompt: string; workspaceId: string | null;
-}
-export interface HomeCardsWrite {
-  greeting: { text: string; detail: string | null } | null;
-  sets: Array<{ cards: HomeCard[] }>;
-  inputFingerprint: string | null;
-}
 
 /** Where generated cards are stored. Until the home-cards storage is wired, cards stay in the Meta agent state. */
 export interface HomeCardsSink { write(ownerUserId: string, cards: HomeCardsWrite, now: number): void }
@@ -40,7 +26,7 @@ export function extractCardsJson(reply: string): unknown {
 function knownRefs(ownerUserId: string) {
   const workspaces = new Set(listWorkspaceHomes(ownerUserId).map((home) => home.workspaceId));
   const page = getDb().prepare('SELECT workspace_id FROM pages WHERE id=? AND owner_user_id=? AND deleted_at IS NULL');
-  const node = getDb().prepare("SELECT workspace_id FROM nodes WHERE id=? AND kind='chat' AND deleted_at IS NULL AND maintenance_job_id IS NULL");
+  const node = getDb().prepare("SELECT workspace_id FROM nodes WHERE id=? AND kind='chat' AND deleted_at IS NULL AND maintenance_job_id IS NULL AND scheduled_only_job_id IS NULL");
   return {
     workspace: (id: unknown) => typeof id === 'string' && workspaces.has(id),
     page: (id: unknown) => typeof id === 'string' && !!page.get(id, ownerUserId),
@@ -86,7 +72,8 @@ export function parseCardTemplates(value: unknown, ownerUserId: string, inputFin
     const cards: HomeCard[] = [];
     for (const entry of raw) {
       const parsed = card(entry, refs);
-      if (!parsed || ids.has(parsed.id) || (parsed.kind === 'tip' && cards.some((other) => other.kind === 'tip'))) continue;
+      if (!parsed || ids.has(parsed.id)
+        || (parsed.kind === 'tip' && cards.filter((other) => other.kind === 'tip').length >= LIMITS.tipsPerSet)) continue;
       ids.add(parsed.id);
       cards.push(parsed);
       if (cards.length === LIMITS.cardsPerSet) break;

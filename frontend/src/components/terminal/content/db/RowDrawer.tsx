@@ -1,8 +1,10 @@
 import React, { useEffect, useRef, useState } from 'react';
 import type { MichiDatabase, MichiDbColumn, MichiDbEditOp, MichiDbRow } from 'michi-shared';
 import { isTaskDb, TASK_COLUMN } from 'michi-shared';
-import MarkdownContent, { type MarkdownFeatureProfile } from '../../../MarkdownContent';
+import MarkdownContent from '../../../MarkdownContent';
+import { TERM_PROSE_CLASS, UNTRUSTED_MARKDOWN } from '../../../markdownProse';
 import { DrawerShell } from '../../../ui/DrawerShell';
+import { usePanelWidth } from '../../../../state/prefs';
 import { openMichiAssistant, type MichiAssistantPage } from '../../../../state/content/assistantBridge';
 import { dialogOf, isEditableTarget } from '../threads/threadItem';
 import { escapeIsForPage, isInAssistantPanel } from '../../escapeLayers';
@@ -17,15 +19,11 @@ import { TaskConversations } from './TaskConversations';
 import { TaskOriginLine, TaskSuggestions, useTaskActivity } from './taskActivity';
 import { rowTitle } from './views/RowBits';
 import type { DbEdit } from './views/viewTypes';
+import { isImeComposing } from '../../../../lib/ime';
 import '../threads/peek.css';
 
 const BODY_MAX = 20_000;
 const THREADS_PAGE: MichiAssistantPage = { kind: 'threads' };
-/** Rows are written by people and agents alike: opening one loads nothing, and only https links stay links. */
-const ROW_MARKDOWN: MarkdownFeatureProfile = { remoteMedia: false, httpsLinksOnly: true };
-const PROSE_CLASS =
-  'prose prose-sm max-w-none wrap-break-word [&>*:first-child]:mt-0 [&>*:last-child]:mb-0 '
-  + '[&_p]:text-(--term-mid) [&_li]:text-(--term-mid) [&_strong]:text-(--term-fg) [&_a]:text-(--term-accent) [&_code]:text-(--term-fg)';
 const PROSE_STYLE: React.CSSProperties = { color: 'var(--term-mid)', fontSize: 'var(--fs-lg)', lineHeight: 1.6 };
 
 /**
@@ -44,6 +42,7 @@ export function RowDrawer({
   keysFirst = null,
   assistantPage = THREADS_PAGE,
   handToAgent,
+  onAsk,
 }: {
   db: MichiDatabase;
   rowId: string | null;
@@ -61,6 +60,8 @@ export function RowDrawer({
   assistantPage?: MichiAssistantPage;
   /** Injects the owning surface's assistant route; null hides this action. */
   handToAgent?: ((row: MichiDbRow) => void) | null;
+  /** Ask the host's assistant about this row; omitted hides the action. */
+  onAsk?: (row: MichiDbRow) => void;
 }) {
   const row = rowId ? db.rows.find((r) => r.id === rowId) ?? null : null;
   const bodyRef = useRef<HTMLDivElement>(null);
@@ -106,12 +107,14 @@ export function RowDrawer({
   }, [rowId, onOpen, onClose, keysFirst]);
 
   const inOrder = !!rowId && order.includes(rowId);
+  const resize = usePanelWidth('row');
   return (
     <DrawerShell
       open={row != null}
       onClose={onClose}
       title={isTaskDb(db) ? 'Task' : 'Row'}
       width={440}
+      resize={resize}
       modal={false}
       closeOnEscape={false}
       headerActions={inOrder ? <span className="michi-peek__hint">↑↓ next row</span> : undefined}
@@ -122,6 +125,14 @@ export function RowDrawer({
       {row && (
         <div className="michi-peek__footer">
           <div className="michi-peek__links">
+            {onAsk && <button
+              type="button"
+              className="michi-peek__text-btn"
+              title="Ask the assistant about this row"
+              onClick={() => onAsk(row)}
+            >
+              Ask
+            </button>}
             {handToAgent !== null && <button
               type="button"
               className="michi-peek__text-btn"
@@ -275,7 +286,7 @@ export function RowProp({
         setEditing(true);
       }}
       onKeyDown={(event) => {
-        if (event.target !== event.currentTarget || event.nativeEvent.isComposing) return;
+        if (event.target !== event.currentTarget || isImeComposing(event)) return;
         if (event.key === 'Enter' || event.key === 'F2') {
           event.preventDefault();
           setEditing(true);
@@ -323,6 +334,7 @@ export function RowNotes({ row, onSave }: { row: MichiDbRow; onSave: (text: stri
           }}
           onKeyDown={(event) => {
             event.stopPropagation();
+            if (isImeComposing(event)) return;
             if (event.key === 'Escape') {
               event.preventDefault();
               dropped.current = true;
@@ -332,7 +344,7 @@ export function RowNotes({ row, onSave }: { row: MichiDbRow; onSave: (text: stri
           }}
         />
       ) : saved ? (
-        <MarkdownContent text={saved} size="sm" className={PROSE_CLASS} style={PROSE_STYLE} features={ROW_MARKDOWN} />
+        <MarkdownContent text={saved} size="sm" className={TERM_PROSE_CLASS} style={PROSE_STYLE} features={UNTRUSTED_MARKDOWN} />
       ) : null}
     </section>
   );

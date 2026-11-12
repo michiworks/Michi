@@ -129,3 +129,34 @@ describe('permission expiry', () => {
     expect(reduceNodes(before, { type: 'permission-resolved', nodeId: 'n1', requestId: 9 }).n1.pendingPermission).toBeNull();
   });
 });
+
+describe('reduceNodes agent-spawn', () => {
+  const spawn = (blocks: NonNullable<ChatNodeState['messages'][number]['blocks']>) => {
+    const next = reduceNodes({ n1: makeNode({ messages: [{ id: 'a1', role: 'assistant', text: '', toolCalls: [], blocks, streaming: true, createdAt: 1 }] }) }, {
+      type: 'agent-spawn', parentNodeId: 'n1', projectId: 'p1',
+      nodes: [{ nodeId: 'b1', chatId: 'cb1', title: 'Try A', prompt: 'a' }, { nodeId: 'b2', chatId: 'cb2', title: 'Try B', prompt: 'b' }],
+    });
+    return next.n1.messages[0]!;
+  };
+
+  it('adds a completed spawn chip at the end of the answer run and closes the text before it', () => {
+    const message = spawn([{ id: 'a1-b-0', kind: 'answer', rawText: 'before', streaming: true }]);
+    const tool = message.toolCalls[0]!;
+    expect(tool).toMatchObject({
+      title: 'Spawned 2 branches', status: 'completed', kind: 'spawn_branches',
+      detail: 'Try A, Try B', output: '→ Try A\n→ Try B', textOffset: 6,
+    });
+    expect(message.blocks).toEqual([
+      { id: 'a1-b-0', kind: 'answer', rawText: 'before', streaming: false },
+      { id: 'a1-b-1', kind: 'tool', toolCallId: tool.id, section: 'answer', rawOffset: 6 },
+    ]);
+  });
+
+  it('keeps the chip in the thinking run that a tool already continues', () => {
+    const message = spawn([
+      { id: 'a1-b-0', kind: 'thinking', rawText: 'inspect', streaming: false },
+      { id: 'a1-b-1', kind: 'tool', toolCallId: 't1', section: 'thinking', rawOffset: 7 },
+    ]);
+    expect(message.blocks?.[2]).toEqual({ id: 'a1-b-2', kind: 'tool', toolCallId: message.toolCalls[0]!.id, section: 'thinking', rawOffset: 7 });
+  });
+});

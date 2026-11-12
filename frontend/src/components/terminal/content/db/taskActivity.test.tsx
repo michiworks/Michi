@@ -1,12 +1,29 @@
 import React, { useState } from 'react';
-import { describe, expect, it, vi } from 'vitest';
-import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import type { MichiDatabase, MichiDbEditOp, MichiDbRow, PageChangeDto } from 'michi-shared';
 import { TASK_VIEW } from 'michi-shared';
 import { DatabaseView } from './DatabaseView';
 import { applyOpsLocally, taskDatabase } from './dbTestData';
 import { LiveThreadsContext, type LiveThreads } from './liveThreads';
+import { resetCompanionStoreForTests } from '../../../../state/companion/companionStore';
+import { companionSnapshot } from '../../../../test/companionFixtures';
 import { originText, suggestionSummary, TaskActivityContext, TaskUpkeepLine, upkeepSummary, type TaskActivityView } from './taskActivity';
+
+// "<name> · Pages upkeep" comes from the one helper Scheduled, the rail and Settings use (F1b-review #7).
+const naming = vi.hoisted(() => ({ upkeepTitle: vi.fn() }));
+vi.mock('../../scheduled/metaAgent/metaAgentCopy', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../scheduled/metaAgent/metaAgentCopy')>();
+  naming.upkeepTitle.mockImplementation(actual.pagesUpkeepTitle);
+  return { ...actual, pagesUpkeepTitle: (name: string) => naming.upkeepTitle(name) };
+});
+
+/** The agent goes by the name the user gave it; before a snapshot, the default. */
+function nameAgent(displayName: string) {
+  const base = companionSnapshot();
+  resetCompanionStoreForTests({ snapshot: { ...base, settings: { ...base.settings, displayName } } });
+}
+afterEach(() => resetCompanionStoreForTests());
 
 const NOW = new Date(2026, 9, 27, 10, 0).getTime();
 const live: LiveThreads = { byNode: new Map(), loaded: true, failed: false, workspaceId: 'ws', workspaceName: 'Release work' };
@@ -36,15 +53,19 @@ function Harness({ view }: { view: TaskActivityView }) {
 }
 const cardOf = (title: string) => screen.getByText(title).closest('.michi-card') as HTMLElement;
 
-describe('what the Meta agent changed, on a task board', () => {
-  it('says it in words', () => {
-    expect(upkeepSummary({ added: 1, updated: 1, removed: 0, suggested: 0 })).toBe('Meta agent added 1 task and updated 1');
-    expect(upkeepSummary({ added: 0, updated: 2, removed: 1, suggested: 1 })).toBe('Meta agent updated 2 tasks, removed 1 and suggested 1 change');
-    expect(upkeepSummary({ added: 0, updated: 0, removed: 0, suggested: 2 })).toBe('Meta agent suggested 2 changes');
-    expect(originText({ by: 'meta-agent', conversations: 3 })).toBe('Created by Meta agent from 3 conversations');
-    expect(originText({ by: 'agent', conversations: 1 })).toBe('Created by an agent from 1 conversation');
-    expect(originText({ by: 'agent', conversations: 0 })).toBe('Created by an agent');
-    expect(originText({ by: 'you', conversations: 2 })).toBe('Created by you');
+describe('what the agent’s Pages upkeep changed, on a task board', () => {
+  it('says it in words, by the agent’s name', () => {
+    expect(upkeepSummary({ added: 1, updated: 1, removed: 0, suggested: 0 }, 'Robin')).toBe('Robin · Pages upkeep added 1 task and updated 1');
+    expect(upkeepSummary({ added: 0, updated: 2, removed: 1, suggested: 1 }, 'Robin')).toBe('Robin · Pages upkeep updated 2 tasks, removed 1 and suggested 1 change');
+    expect(upkeepSummary({ added: 0, updated: 0, removed: 0, suggested: 2 }, 'Robin')).toBe('Robin · Pages upkeep suggested 2 changes');
+    // DESIGN-v2 §2.7: "Created by <name>", the background upkeep as "<name> · Pages upkeep".
+    expect(originText({ by: { kind: 'companion', via: 'conversation' }, conversations: 3 }, 'Robin')).toBe('Created by Robin from 3 conversations');
+    expect(originText({ by: { kind: 'companion', via: 'checkin' }, conversations: 0 }, 'Robin')).toBe('Created by Robin');
+    expect(originText({ by: { kind: 'companion', via: 'upkeep' }, conversations: 2 }, 'Robin')).toBe('Created by Robin · Pages upkeep from 2 conversations');
+    expect(naming.upkeepTitle).toHaveBeenCalledWith('Robin');
+    expect(originText({ by: 'agent', conversations: 1 }, 'Robin')).toBe('Created by an agent from 1 conversation');
+    expect(originText({ by: 'agent', conversations: 0 }, 'Robin')).toBe('Created by an agent');
+    expect(originText({ by: 'you', conversations: 2 }, 'Robin')).toBe('Created by you');
     const db = taskDatabase(rows);
     expect(suggestionSummary(db, suggestion)).toBe('Suggested: Status → Waiting on you · Next step → Confirm the screenshots');
     expect(suggestionSummary(db, { ...suggestion, forward: { kind: 'row', op: 'delete', id: 't3', expectedLocation: { position: 2, after: 't2' } } }))
@@ -68,7 +89,8 @@ describe('what the Meta agent changed, on a task board', () => {
 
   it("opens a task's details on its suggestion, its workspace and who made it", async () => {
     const seen = vi.fn();
-    const loadOrigin = vi.fn(async () => ({ by: 'meta-agent' as const, conversations: 3, at: Date.now() - 120_000 }));
+    nameAgent('Robin');
+    const loadOrigin = vi.fn(async () => ({ by: { kind: 'companion' as const, via: 'conversation' as const }, conversations: 3, at: Date.now() - 120_000 }));
     render(<Harness view={{
       markOf: (id) => (id === 't3' ? 'updated' : null),
       suggestionsOf: (id) => (id === 't3' ? [suggestion] : []),
@@ -81,7 +103,7 @@ describe('what the Meta agent changed, on a task board', () => {
     expect(within(drawer).getByRole('button', { name: 'Accept chg-docs' })).toBeTruthy();
     expect([...drawer.querySelectorAll('dt')].map((dt) => dt.textContent)).toEqual(['Workspace', 'Status', 'Next step']);
     expect(within(drawer).getByText('Release work')).toBeTruthy();
-    await waitFor(() => expect(drawer.querySelector('.michi-db-peek__origin')?.textContent).toBe('Created by Meta agent from 3 conversations · 2m ago'));
+    await waitFor(() => expect(drawer.querySelector('.michi-db-peek__origin')?.textContent).toBe('Created by Robin from 3 conversations · 2m ago'));
     expect(loadOrigin).toHaveBeenCalledWith('t3');
     expect(seen).toHaveBeenCalledWith('t3');
   });
@@ -93,7 +115,7 @@ describe('what the Meta agent changed, on a task board', () => {
       source: { nodeId: 'n1', turnId: 't1', assistantId: 'a1', title: 'Release check' } };
     const { rerender } = render(<TaskUpkeepLine upkeep={upkeep} now={NOW} onUndo={onUndo} onOpenSource={onOpenSource} />);
     // Only the summary is announced; the age beside it changes every minute and stays out of the live region.
-    expect(screen.getByRole('status').textContent).toBe('Meta agent added 1 task and updated 1');
+    expect(screen.getByRole('status').textContent).toBe('Michi · Pages upkeep added 1 task and updated 1');
     const line = screen.getByRole('status').closest('.michi-task-upkeep') as HTMLElement;
     expect(line.textContent).toContain('5m ago');
     fireEvent.click(within(line).getByRole('button', { name: '“Release check”' }));
@@ -101,7 +123,10 @@ describe('what the Meta agent changed, on a task board', () => {
     fireEvent.click(within(line).getByRole('button', { name: 'Undo' }));
     expect(onUndo).toHaveBeenCalledOnce();
     rerender(<TaskUpkeepLine upkeep={{ ...upkeep, added: 0, updated: 0, suggested: 2, source: null }} now={NOW} onUndo={onUndo} />);
-    expect(screen.getByRole('status').textContent).toBe('Meta agent suggested 2 changes');
+    expect(screen.getByRole('status').textContent).toBe('Michi · Pages upkeep suggested 2 changes');
     expect(screen.queryByRole('button', { name: 'Undo' })).toBeNull();
+    // A name the user gives it shows at once.
+    act(() => nameAgent('Robin'));
+    expect(screen.getByRole('status').textContent).toBe('Robin · Pages upkeep suggested 2 changes');
   });
 });

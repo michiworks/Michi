@@ -13,17 +13,15 @@ import React, {
 } from 'react';
 import { usePhoneLayout } from '../../hooks/usePhoneLayout';
 import { useKeyboardDismiss } from '../../hooks/useKeyboardDismiss';
-import { DUR, EASE } from '../../motion/tokens';
+import { onScreenKeyboardUp } from '../../hooks/useKeyboardInset';
+import { DUR, EASE, KEYBOARD_MOVE } from '../../motion/tokens';
 import { composerMotionAllowed, morphComposer, snapshotComposer, type ComposerSnapshot } from './composerMorph';
 
 export type ComposerShellPosition = 'absolute' | 'static';
-export type ComposerShellDensity = 'compact' | 'dense' | 'comfortable';
 
 export interface ComposerShellProps {
   /** absolute = floats over scroll area (TPane). static = inline (Home). */
   position?: ComposerShellPosition;
-  /** TPane only: density-aware horizontal insets. Ignored when position=static. */
-  density?: ComposerShellDensity;
   /** TPane only: clamp width + center via auto margins. Ignored when position=static. */
   contentMaxWidth?: number | null;
   /** Render outline highlight while a drag-and-drop file hovers the composer. */
@@ -70,15 +68,13 @@ export interface ComposerShellHandle {
    * put; the card's height settles to the emptied field instead of snapping
    * (settleComposerHeight). Call it from the send itself, before the
    * emptied field reaches the screen.
+   *
+   * Returns whether it lowered the on-screen keyboard. The composer then
+   * rests on the keyboard's own curve (KEYBOARD_MOVE), and the caller moves
+   * what the send adds on that curve too.
    */
-  settle: () => void;
+  settle: () => boolean;
 }
-
-const DENSITY_INSET: Record<ComposerShellDensity, number> = {
-  dense: 18,
-  compact: 20,
-  comfortable: 26,
-};
 
 /**
  * What moves down with the frame's top edge after a send: the pre-blocks
@@ -93,6 +89,11 @@ const CARET_ROW = '.terminal-composer__input';
  * so the field shrinks a frame or two after the send itself.
  */
 const SEND_SETTLE_WINDOW_MS = 400;
+/** A rest after a send that lowers the keyboard, timed like the keyboard (composerMorph's override). */
+const KEYBOARD_REST = {
+  duration: KEYBOARD_MOVE.duration * 1000,
+  easing: `cubic-bezier(${KEYBOARD_MOVE.ease.join(', ')})`,
+};
 
 interface PreBlocksBox {
   /** Its top, from the composer's bottom edge (which stays put). */
@@ -220,7 +221,6 @@ export const ComposerShell = forwardRef<ComposerShellHandle, ComposerShellProps>
   function ComposerShell(props, ref) {
     const {
       position = 'absolute',
-      density = 'comfortable',
       contentMaxWidth,
       dragHover = false,
       preBlocks,
@@ -299,6 +299,9 @@ export const ComposerShell = forwardRef<ComposerShellHandle, ComposerShellProps>
     useLayoutEffect(() => {
       if (canCollapse) sendSettleRef.current?.();
     }, [canCollapse]);
+    // Until when the next rest belongs to a send that lowered the keyboard
+    // (settle): the field empties a frame or two after the send itself.
+    const keyboardRestUntilRef = useRef(0);
     useLayoutEffect(() => {
       const root = rootRef.current;
       const changed = shownCollapsedRef.current !== collapsed;
@@ -313,6 +316,8 @@ export const ComposerShell = forwardRef<ComposerShellHandle, ComposerShellProps>
       endMorphRef.current?.();
       const next = snapshotComposer(root);
       settledRef.current = next;
+      const withKeyboard = changed && collapsed && performance.now() < keyboardRestUntilRef.current;
+      if (changed) keyboardRestUntilRef.current = 0;
       const frame = frameRef.current;
       if (!changed || !prev || !frame || !composerMotionAllowed()) return;
       let end: (() => void) | null = null;
@@ -321,7 +326,7 @@ export const ComposerShell = forwardRef<ComposerShellHandle, ComposerShellProps>
         finished = true;
         if (endMorphRef.current === end) endMorphRef.current = null;
         if (rootRef.current) settledRef.current = snapshotComposer(rootRef.current);
-      });
+      }, withKeyboard ? KEYBOARD_REST : undefined);
       if (!finished) endMorphRef.current = end;
     });
     useEffect(() => () => endMorphRef.current?.(), []);
@@ -412,11 +417,16 @@ export const ComposerShell = forwardRef<ComposerShellHandle, ComposerShellProps>
       settle: () => {
         if (!canCollapseRef.current) {
           armSendSettle();
-          return;
+          return false;
         }
         const active = document.activeElement;
-        if (active instanceof HTMLElement && rootRef.current?.contains(active)) active.blur();
+        const ownsFocus = active instanceof HTMLElement && !!rootRef.current?.contains(active);
+        // Leaving the field lowers a keyboard that is up for it.
+        const lowersKeyboard = ownsFocus && onScreenKeyboardUp();
+        keyboardRestUntilRef.current = lowersKeyboard ? performance.now() + SEND_SETTLE_WINDOW_MS : 0;
+        if (ownsFocus) active.blur();
         setEngaged(false);
+        return lowersKeyboard;
       },
     }), [armSendSettle]);
 
@@ -429,8 +439,9 @@ export const ComposerShell = forwardRef<ComposerShellHandle, ComposerShellProps>
       position === 'absolute'
         ? {
             position: 'absolute',
-            left: DENSITY_INSET[density],
-            right: DENSITY_INSET[density],
+            // The pane's density scale (index.css).
+            left: 'var(--composer-inset)',
+            right: 'var(--composer-inset)',
             ...(contentMaxWidth != null
               ? { maxWidth: contentMaxWidth, marginLeft: 'auto', marginRight: 'auto' }
               : {}),
@@ -450,6 +461,8 @@ export const ComposerShell = forwardRef<ComposerShellHandle, ComposerShellProps>
       <div
         ref={rootRef}
         className={className}
+        // The shell's notice corner steps aside while the user works here (ShellNotices).
+        data-notice-avoid
         data-collapsed={collapsed || undefined}
         onFocus={() => { setIsFocused(true); if (canCollapse) engage(); }}
         onClickCapture={canCollapse ? handleClickCapture : undefined}

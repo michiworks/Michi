@@ -1,0 +1,98 @@
+<!-- #why: errand vs idea (owner: figures). Brief §3.4, §5.11.1, W1-W3.
+     The markup is the settled frame (tB); data-ta / data-ta-cls declare the
+     start frame (tA). Two variants per figure, .why-w (viewBox 560) and .why-n
+     (viewBox 360); CSS shows one, both animate. Colours are the page tokens,
+     set as inline style="fill/stroke: var(--…)" (a presentation attribute
+     cannot take var(), and an inline style beats no rule here: the only CSS
+     paint rule, .why-ret.why-lit, sits on a child that has no attribute of
+     its own): --edge, --line-s, --line, --surface, --ink-2, --ink-3, --ground. -->
+<section class="sec sec--m why" id="why" aria-labelledby="why-title">
+  <div class="wrap">
+    <h2 class="h2" id="why-title"><span class="consequence">A subagent runs an errand.</span> <span class="claim">A branch explores an idea.</span></h2>
+    <div class="why-figs" data-take="why">
+      <p class="sr-only">Diagram. Left: a subagent’s errand loops out of the main thread to one task, check identity 7, which turns done; the loop returns and fades, and only its result stays on the main thread. Right: a branch leaves the main thread and keeps going with its own steps, Why Tokyo only? and A timing gap, while the main thread continues to the post-deploy checks.</p>
+      <figure class="why-fig">
+        <svg class="why-svg why-w" width="560" height="260" viewBox="0 0 560 260" font-size="13" style="fill:var(--ink-2)" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">
+          <path d="M24 200H536" fill="none" style="stroke:var(--edge)" stroke-width="1.4"/>
+          <g class="why-errand why-faded" data-ta-cls="-why-faded" fill="none" style="stroke:var(--line-s)">
+            <path class="draw why-out" data-ta="off" pathLength="1" style="--d-ms:280ms" d="M176 200V104Q176 92 188 92H224"/>
+            <path class="draw why-back" data-ta="off" pathLength="1" style="--d-ms:280ms" d="M360 92H372Q384 92 384 104V200"/>
+            <g class="why-chip e e-pop" data-ta="off">
+              <rect x="224" y="78" width="136" height="28" style="fill:var(--surface);stroke:var(--line)" shape-rendering="crispEdges"/>
+              <g class="mono" font-size="12" style="fill:var(--ink-2)" stroke="none">
+                <text class="why-ct why-ct1 e is-off" data-ta="on" x="292" y="96" text-anchor="middle">check identity 7</text>
+                <g class="why-ct why-ct2 e" data-ta="off"><path d="M269.5 92.5l3 3 6.5-7" fill="none" style="stroke:var(--ink-2)" stroke-width="1.4"/><text x="284" y="96">done</text></g>
+              </g>
+            </g>
+          </g>
+          <g style="fill:var(--ground);stroke:var(--edge)" stroke-width="1.4">
+            <circle cx="64" cy="200" r="4.5"/><circle cx="176" cy="200" r="4.5"/>
+            <circle class="why-ret why-lit" data-ta-cls="-why-lit" cx="384" cy="200" r="4.5"/><circle cx="496" cy="200" r="4.5"/>
+          </g>
+          <text x="24" y="232" style="fill:var(--ink-3)">main thread</text>
+        </svg>
+        <svg class="why-svg why-n" width="360" height="260" viewBox="0 0 360 260" font-size="13" style="fill:var(--ink-2)" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">
+          <path d="M16 200H344" fill="none" style="stroke:var(--edge)" stroke-width="1.4"/>
+          <g class="why-errand why-faded" data-ta-cls="-why-faded" fill="none" style="stroke:var(--line-s)">
+            <path class="draw why-out" data-ta="off" pathLength="1" style="--d-ms:280ms" d="M80 200V104Q80 92 92 92H112"/>
+            <path class="draw why-back" data-ta="off" pathLength="1" style="--d-ms:280ms" d="M248 92H268Q280 92 280 104V200"/>
+            <g class="why-chip e e-pop" data-ta="off">
+              <rect x="112" y="78" width="136" height="28" style="fill:var(--surface);stroke:var(--line)" shape-rendering="crispEdges"/>
+              <g class="mono" font-size="12" style="fill:var(--ink-2)" stroke="none">
+                <text class="why-ct why-ct1 e is-off" data-ta="on" x="180" y="96" text-anchor="middle">check identity 7</text>
+                <g class="why-ct why-ct2 e" data-ta="off"><path d="M157.5 92.5l3 3 6.5-7" fill="none" style="stroke:var(--ink-2)" stroke-width="1.4"/><text x="172" y="96">done</text></g>
+              </g>
+            </g>
+          </g>
+          <g style="fill:var(--ground);stroke:var(--edge)" stroke-width="1.4">
+            <circle cx="36" cy="200" r="4.5"/><circle cx="80" cy="200" r="4.5"/>
+            <circle class="why-ret why-lit" data-ta-cls="-why-lit" cx="280" cy="200" r="4.5"/><circle cx="324" cy="200" r="4.5"/>
+          </g>
+          <text x="16" y="232" style="fill:var(--ink-3)">main thread</text>
+        </svg>
+        <figcaption class="meta why-cap">It does one task, reports back, and it’s gone.</figcaption>
+      </figure>
+      <figure class="why-fig" data-take-observe>
+        <svg class="why-svg why-w" width="560" height="260" viewBox="0 0 560 260" font-size="13" style="fill:var(--ink-2)" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">
+          <text x="24" y="40">Tokyo deployment</text>
+          <text class="e why-pdc" data-ta="off" x="536" y="40" text-anchor="end">post-deploy checks</text>
+          <g fill="none" style="stroke:var(--ink-2)" stroke-width="1.5">
+            <path d="M24 64H136"/>
+            <path class="draw why-cont" data-ta="off" pathLength="1" style="--d-ms:280ms" d="M136 64H536"/>
+            <path class="draw why-br" data-ta="off" pathLength="1" style="--d-ms:310ms" d="M136 64V138Q136 150 148 150H456"/>
+          </g>
+          <g style="fill:var(--ground);stroke:var(--ink-2)" stroke-width="1.5">
+            <circle cx="56" cy="64" r="4.5"/><circle cx="136" cy="64" r="4.5"/>
+            <circle class="why-pop e why-n3" data-ta="off" cx="296" cy="64" r="4.5"/><circle class="why-pop e why-n4" data-ta="off" cx="456" cy="64" r="4.5"/>
+            <rect class="why-pop e why-sq1" data-ta="off" x="212.75" y="146.75" width="6.5" height="6.5"/><rect class="why-pop e why-sq2" data-ta="off" x="372.75" y="146.75" width="6.5" height="6.5"/>
+          </g>
+          <text class="e why-sl1" data-ta="off" x="216" y="178" text-anchor="middle">Why Tokyo only?</text>
+          <text class="e why-sl2" data-ta="off" x="376" y="178" text-anchor="middle">A timing gap.</text>
+          <circle class="e why-d1" data-ta="off" cx="470" cy="150" r="1.5"/><circle class="e why-d2" data-ta="off" cx="484" cy="150" r="1.5"/>
+          <circle class="e why-d3" data-ta="off" cx="498" cy="150" r="1.5"/><circle class="e why-d4" data-ta="off" cx="512" cy="150" r="1.5"/>
+        </svg>
+        <svg class="why-svg why-n" width="360" height="260" viewBox="0 0 360 260" font-size="13" style="fill:var(--ink-2)" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">
+          <text x="16" y="40">Tokyo deployment</text>
+          <text class="e why-pdc" data-ta="off" x="344" y="40" text-anchor="end">post-deploy checks</text>
+          <g fill="none" style="stroke:var(--ink-2)" stroke-width="1.5">
+            <path d="M16 64H88"/>
+            <path class="draw why-cont" data-ta="off" pathLength="1" style="--d-ms:280ms" d="M88 64H344"/>
+            <path class="draw why-br" data-ta="off" pathLength="1" style="--d-ms:310ms" d="M88 64V138Q88 150 100 150H288"/>
+          </g>
+          <g style="fill:var(--ground);stroke:var(--ink-2)" stroke-width="1.5">
+            <circle cx="36" cy="64" r="4.5"/><circle cx="88" cy="64" r="4.5"/>
+            <circle class="why-pop e why-n3" data-ta="off" cx="190" cy="64" r="4.5"/><circle class="why-pop e why-n4" data-ta="off" cx="292" cy="64" r="4.5"/>
+            <rect class="why-pop e why-sq1" data-ta="off" x="132.75" y="146.75" width="6.5" height="6.5"/><rect class="why-pop e why-sq2" data-ta="off" x="244.75" y="146.75" width="6.5" height="6.5"/>
+          </g>
+          <text class="e why-sl1" data-ta="off" x="136" y="178" text-anchor="middle">Why Tokyo only?</text>
+          <text class="e why-sl2" data-ta="off" x="248" y="178" text-anchor="middle">A timing gap.</text>
+          <circle class="e why-d1" data-ta="off" cx="302" cy="150" r="1.5"/><circle class="e why-d2" data-ta="off" cx="316" cy="150" r="1.5"/>
+          <circle class="e why-d3" data-ta="off" cx="330" cy="150" r="1.5"/><circle class="e why-d4" data-ta="off" cx="344" cy="150" r="1.5"/>
+        </svg>
+        <figcaption class="meta why-cap">A thread you keep talking to, while the main one keeps going.</figcaption>
+      </figure>
+    </div>
+    <p class="statement why-stmt"><span class="consequence">Multi-agent tools scale execution.</span> <a class="fn" href="#note-orchestrator">Michi scales direction.</a></p>
+    <p class="body why-body">You decide what splits off, what keeps going and what comes back. The agents do the work inside each branch.</p>
+  </div>
+</section>

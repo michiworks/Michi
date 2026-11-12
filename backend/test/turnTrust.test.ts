@@ -15,7 +15,13 @@ import { closeDb, getDb, initDb } from '../src/services/db';
 import {
   deleteWorkspace, emptyWorkspaceTrash, purgeWorkspaceNodes, saveNode, saveTree, saveWorkspace, softDeleteNode,
 } from '../src/services/dbRepository';
-import { activeTurnTrust, getTurnTrust, observeTurnTrust, recordUntrustedSource } from '../src/services/turnTrust';
+import {
+  activeCompanionTaint, activeTurnTrust, companionRuntimeGateAuthoritative, companionTaintOf, getTurnTrust, observeTurnTrust, recordCompanionTaint,
+  recordUntrustedSource, turnTaintOf,
+} from '../src/services/turnTrust';
+import { activeTurnRow } from './helpers/checkinNodes';
+import { registerLiveSession } from './helpers/liveSession';
+import { clearAllSessions } from '../src/agents/sessionRegistry';
 
 /** A runtime turn's events; `hold` pauses before the event at that index until released. */
 function scripted(events: NormalizedEvent[], hold?: number) {
@@ -75,6 +81,7 @@ describe('turn trust', () => {
 
   afterEach(async () => {
     await new Promise<void>((resolve) => setImmediate(resolve));
+    clearAllSessions();
     closeDb();
     fs.rmSync(tmpDir, { recursive: true, force: true });
   });
@@ -262,5 +269,116 @@ describe('turn trust', () => {
     recordUntrustedSource({ nodeId: 'node-2', turnId: 'turn-hard' }, { tool: 'Bash', runtimeId: 'claude' });
     getDb().prepare('DELETE FROM nodes WHERE id = ?').run('node-2');
     assert.equal((getDb().prepare('SELECT COUNT(*) AS n FROM turn_trust').get() as { n: number }).n, 0);
+  });
+
+  test('companion taint (DESIGN-v2 §2.8): check-in material outranks the collectors\', other untrusted sources are neither', () => {
+    const ref = { nodeId: 'node-1', turnId: 'turn-taint' };
+    activeTurnRow('node-1', ref.turnId, 'a-taint');
+    recordUntrustedSource(ref, { tool: 'web_search', runtimeId: 'pi', detail: 'mcp:web' });
+    assert.equal(getTurnTrust(ref).untrusted, true);
+    assert.equal(companionTaintOf(ref), null, 'the web is untrusted, not check-in material');
+    assert.equal(activeCompanionTaint('node-1'), null);
+    recordCompanionTaint(ref, 'companion_items', 'collector');
+    assert.equal(companionTaintOf(ref), 'collector');
+    recordCompanionTaint(ref, 'companion_read', 'checkin');
+    recordCompanionTaint(ref, 'companion_items', 'collector');
+    assert.equal(companionTaintOf(ref), 'checkin');
+    assert.equal(activeCompanionTaint('node-1'), 'checkin', 'the running turn holds it');
+    assert.deepEqual(getTurnTrust(ref).sources.find((source) => source.tool === 'companion_read'), { tool: 'companion_read', runtimeId: 'unknown', detail: 'checkin' });
+    assert.equal(activeCompanionTaint('node-2'), null, 'a chat with no running turn holds none');
+    assert.equal(activeCompanionTaint(''), null);
+  });
+
+  test('companion taint fails closed: a record that cannot be read answers check-in material; no open database answers none', () => {
+    activeTurnRow('node-1', 'turn-unreadable', 'a-unreadable');
+    getDb().exec('ALTER TABLE turn_trust RENAME TO turn_trust_away');
+    try {
+      assert.equal(activeCompanionTaint('node-1'), 'checkin');
+    } finally {
+      getDb().exec('ALTER TABLE turn_trust_away RENAME TO turn_trust');
+    }
+    assert.equal(activeCompanionTaint('node-1'), null);
+    closeDb();
+    assert.equal(activeCompanionTaint('node-1'), null, 'nothing can have been recorded');
+    initDb();
+  });
+
+  test('turnTaintOf names what made the turn untrusted, so its copy says check-in material only for that (G2-review suggestion 1)', () => {
+    const ref = (turnId: string) => ({ nodeId: 'node-2', turnId });
+    registerLiveSession('node-2', { runtimeId: 'kiro' });
+    activeTurnRow('node-2', 'turn-kind-web', 'a-kind-web');
+    assert.equal(turnTaintOf(ref('turn-kind-web')), null, 'nothing read yet');
+    recordUntrustedSource(ref('turn-kind-web'), { tool: 'WebFetch', runtimeId: 'claude', detail: 'https://example.com' });
+    assert.equal(turnTaintOf(ref('turn-kind-web')), 'untrusted', 'the web: outside content, not check-in material');
+    recordCompanionTaint(ref('turn-kind-web'), 'companion_items', 'collector');
+    assert.equal(turnTaintOf(ref('turn-kind-web')), 'collector');
+    recordCompanionTaint(ref('turn-kind-web'), 'companion_read', 'checkin');
+    assert.equal(turnTaintOf(ref('turn-kind-web')), 'checkin');
+    // A finished turn answers from its record alone; the running one also for what its session took in earlier (D17).
+    getDb().prepare("UPDATE turns SET status = 'completed' WHERE node_id = 'node-2'").run();
+    activeTurnRow('node-2', 'turn-kind-next', 'a-kind-next');
+    recordUntrustedSource(ref('turn-kind-next'), { tool: 'WebFetch', runtimeId: 'claude', detail: 'https://example.com' });
+    assert.equal(turnTaintOf(ref('turn-kind-next')), 'checkin', 'carried');
+    assert.equal(turnTaintOf({ nodeId: 'node-2', turnId: '' }), null);
+    getDb().exec('ALTER TABLE turn_trust RENAME TO turn_trust_away');
+    try {
+      assert.equal(turnTaintOf(ref('turn-kind-web')), 'checkin', 'unreadable: fail closed');
+    } finally {
+      getDb().exec('ALTER TABLE turn_trust_away RENAME TO turn_trust');
+    }
+    closeDb();
+    assert.equal(turnTaintOf(ref('turn-kind-web')), null, 'no database open');
+    initDb();
+  });
+
+  test('only a live session carries check-in material to its next turn: none registered, or a post (w4-fix D25), carries nothing', () => {
+    const next = (nodeId: string, turnId: string) => {
+      getDb().prepare("UPDATE turns SET status = 'completed' WHERE node_id = ?").run(nodeId);
+      activeTurnRow(nodeId, turnId, `a-${turnId}`);
+    };
+    // No session holds the chat: the turn's own record holds it, its next turn carries nothing (W4 failure 1).
+    activeTurnRow('node-1', 'turn-nosess-1', 'a-nosess-1');
+    recordCompanionTaint({ nodeId: 'node-1', turnId: 'turn-nosess-1' }, 'companion_context', 'checkin');
+    assert.equal(activeCompanionTaint('node-1'), 'checkin', 'the turn that recorded it');
+    next('node-1', 'turn-nosess-2');
+    assert.equal(activeCompanionTaint('node-1'), null, 'nothing took it in');
+    // And a session opened afterwards does not pick up what no session held.
+    registerLiveSession('node-1', { nativeSessionId: null });
+    next('node-1', 'turn-nosess-3');
+    assert.equal(activeCompanionTaint('node-1'), null, 'a session opened later');
+
+    // A post's record, even with a live session: only that turn holds it; the session's next turn carries nothing.
+    registerLiveSession('node-2', { runtimeId: 'kiro' });
+    recordUntrustedSource({ nodeId: 'node-2', turnId: 'cmp-post-run-x' }, { tool: 'companion_post', runtimeId: 'michi', detail: 'checkin' }, { carry: false });
+    assert.equal(companionTaintOf({ nodeId: 'node-2', turnId: 'cmp-post-run-x' }), 'checkin', 'the post itself stays marked');
+    next('node-2', 'turn-post-next');
+    assert.equal(activeCompanionTaint('node-2'), null, 'the next turn is clean');
+    assert.equal(getTurnTrust({ nodeId: 'node-2', turnId: 'turn-post-next' }).untrusted, false);
+    // A turn of that session that reads it carries it from there (T5, D17).
+    recordCompanionTaint({ nodeId: 'node-2', turnId: 'turn-post-next' }, 'companion_read', 'checkin');
+    next('node-2', 'turn-post-after');
+    assert.equal(activeCompanionTaint('node-2'), 'checkin', 'sticky after the read');
+  });
+
+  test('companionRuntimeGateAuthoritative (w3-fix D15): Pi and Claude with its PreToolUse hook; never Kiro, Codex, another runtime, or Claude in bare mode', () => {
+    const bare = process.env.MICHI_CLAUDE_BARE;
+    try {
+      delete process.env.MICHI_CLAUDE_BARE;
+      assert.equal(companionRuntimeGateAuthoritative('pi'), true);
+      assert.equal(companionRuntimeGateAuthoritative('claude'), true);
+      for (const id of ['kiro', 'codex', 'crew', 'antigravity', 'unknown', '', 'Claude', 'toString', '__proto__', 'constructor']) {
+        assert.equal(companionRuntimeGateAuthoritative(id), false, id);
+      }
+      assert.equal(companionRuntimeGateAuthoritative(undefined as unknown as string), false);
+      process.env.MICHI_CLAUDE_BARE = '0';
+      assert.equal(companionRuntimeGateAuthoritative('claude'), true, 'only exactly 1 turns bare mode on');
+      // --bare turns SDK hooks off with it, so the gate is the user's settings' again.
+      process.env.MICHI_CLAUDE_BARE = '1';
+      assert.equal(companionRuntimeGateAuthoritative('claude'), false);
+      assert.equal(companionRuntimeGateAuthoritative('pi'), true);
+    } finally {
+      if (bare === undefined) delete process.env.MICHI_CLAUDE_BARE;
+      else process.env.MICHI_CLAUDE_BARE = bare;
+    }
   });
 });

@@ -2,7 +2,7 @@ import React from 'react';
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { PageBlock } from 'michi-shared';
-import { consumePageHelperDraft, pendingPageHelperDrafts } from '../../../state/pages/pageHelperDraft';
+import { PAGE_HELPER_DRAFT_EVENT, type PageHelperDraftRequest } from '../../../state/pages/pageHelperDraft';
 
 const mocks = vi.hoisted(() => ({ edit: vi.fn(), readComponent: vi.fn(), layoutRules: vi.fn(), openTasks: vi.fn(), slotInsert: vi.fn() }));
 
@@ -18,26 +18,29 @@ vi.mock('../../../state/pages/usePage', () => ({ usePage: () => ({
 }) }));
 vi.mock('../../../state/pages/useSpaces', () => ({ useSpaces: () => ({ spaces: [], status: 'ready', error: null, refresh: vi.fn() }) }));
 vi.mock('../../../state/pages/revealSource', () => ({ revealPageSource: vi.fn() }));
-vi.mock('../../../state/pages/pageEvents', () => ({ notifyPageChanged: vi.fn() }));
+vi.mock('../../../state/pages/pageEvents', () => ({ notifyPageChanged: vi.fn(), subscribePageChanges: vi.fn(() => () => {}) }));
 vi.mock('../../../services/api/pages', () => ({
   createWorkspaceDatabase: vi.fn(), listWorkspaceDatabases: vi.fn(), createPage: vi.fn(), deletePage: vi.fn(), fetchPage: vi.fn(), patchPage: vi.fn(),
 }));
 vi.mock('../../../services/api/pageComponents', () => ({ readPageComponent: mocks.readComponent }));
 vi.mock('../../../services/api/taskDatabase', () => ({ openTaskDatabase: mocks.openTasks, fetchTaskDatabaseId: vi.fn() }));
 vi.mock('../../../services/api/spacesHome', () => ({ fetchLayoutRules: mocks.layoutRules, deleteLayoutRule: vi.fn(), fetchLayoutPreferences: vi.fn().mockResolvedValue({ text: '', revision: 0, updatedAt: null, updatedBy: null }), saveLayoutPreferences: vi.fn() }));
-vi.mock('./NativePageDocument', () => ({ default: ({ page, renderComponent, renderDatabaseRef, addEntries, slotAddEntries }: { page: { blocks: Array<{ type: string }> }; renderComponent?: (block: PageBlock) => React.ReactNode; renderDatabaseRef?: (block: Extract<PageBlock, { type: 'database-ref' }>) => React.ReactNode; addEntries?: (afterId: string, anchor: HTMLElement | null) => Array<{ id: string; label: string; onSelect(): void }>; slotAddEntries?: (insert: (block: { type: string }) => void) => Array<{ id: string; label: string; onSelect(): void }> }) => <div data-testid="native-document">{page.blocks.map((block, index) => <React.Fragment key={index}>{renderComponent?.(block as PageBlock)}</React.Fragment>)}{renderComponent?.({ id: 'component-block', rev: 1, type: 'component', componentId: 'component-1', props: {} })}{renderDatabaseRef?.({ id: 'database-block', rev: 1, type: 'database-ref', databaseId: 'database-1' })}{addEntries?.('', null).map(entry => <button key={entry.id} type="button" onClick={entry.onSelect}>{entry.label}</button>)}{slotAddEntries?.(mocks.slotInsert).map(entry => <button key={`slot-${entry.id}`} type="button" onClick={entry.onSelect}>{`Slot ${entry.label}`}</button>)}</div> }));
+vi.mock('./NativePageDocument', async (importOriginal) => ({ ...(await importOriginal<typeof import('./NativePageDocument')>()), default: ({ page, renderComponent, renderDatabaseRef, addEntries, slotAddEntries }: { page: { blocks: Array<{ type: string }> }; renderComponent?: (block: PageBlock) => React.ReactNode; renderDatabaseRef?: (block: Extract<PageBlock, { type: 'database-ref' }>) => React.ReactNode; addEntries?: (afterId: string, anchor: HTMLElement | null) => Array<{ id: string; label: string; onSelect(): void }>; slotAddEntries?: (insert: (block: { type: string }) => void) => Array<{ id: string; label: string; onSelect(): void }> }) => <div data-testid="native-document">{page.blocks.map((block, index) => <React.Fragment key={index}>{renderComponent?.(block as PageBlock)}</React.Fragment>)}{renderComponent?.({ id: 'component-block', rev: 1, type: 'component', componentId: 'component-1', props: {} })}{renderDatabaseRef?.({ id: 'database-block', rev: 1, type: 'database-ref', databaseId: 'database-1' })}{addEntries?.('', null).map(entry => <button key={entry.id} type="button" onClick={entry.onSelect}>{entry.label}</button>)}{slotAddEntries?.(mocks.slotInsert).map(entry => <button key={`slot-${entry.id}`} type="button" onClick={entry.onSelect}>{`Slot ${entry.label}`}</button>)}</div> }));
 vi.mock('./NativeDatabase', () => ({ default: ({ onAskDraft }: { onAskDraft?: (text: string) => void }) => <button type="button" onClick={() => onAskDraft?.('Summarize this database')}>Ask database</button> }));
 vi.mock('./components/CustomBlock', () => ({ CustomBlock: ({ block, onAskDraft }: { block: { componentId: string }; onAskDraft?(text: string): void }) => <div><div data-testid="custom-block">{block.componentId}</div><button type="button" onClick={() => onAskDraft?.('Summarize this component')}>Ask component</button></div> }));
 vi.mock('./components/ComponentLibrary', () => ({ ComponentLibrary: ({ workspaceId, connectionId, onInsert }: { workspaceId: string; connectionId: string; onInsert(component: { id: string; enabled: boolean }, version: number): void }) => <div aria-label="Mock component library" data-workspace={workspaceId} data-connection={connectionId}><button type="button" onClick={() => onInsert({ id: 'component-1', enabled: true }, 3)}>Insert enabled component v3</button></div> }));
 vi.mock('./MaintenanceStatus', () => ({ MaintenanceStatus: () => null }));
 vi.mock('./conversation/SpaceConversationSlot', () => ({ NewChatSheetSlot: () => null, PageProgressCards: () => null }));
 
-import { SpaceView } from './SpaceView';
+import SpaceView from './SpaceView';
 
 describe('SpaceView components', () => {
+  let drafts: PageHelperDraftRequest[] = [];
+  const recordDraft = (event: Event) => { drafts.push((event as CustomEvent<PageHelperDraftRequest>).detail); };
+  beforeEach(() => { window.addEventListener(PAGE_HELPER_DRAFT_EVENT, recordDraft); });
   afterEach(() => {
-    pendingPageHelperDrafts({ backendConnectionId: 'backend-1', workspaceId: 'workspace-1', pageId: 'page-1' })
-      .forEach((request) => request.requestId !== undefined && consumePageHelperDraft(request.requestId));
+    window.removeEventListener(PAGE_HELPER_DRAFT_EVENT, recordDraft);
+    drafts = [];
   });
 
   beforeEach(() => {
@@ -98,7 +101,7 @@ describe('SpaceView components', () => {
   it('prefills the page helper from component asks without sending immediately', () => {
     const onDraft = (event: Event) => expect((event as CustomEvent).detail).toMatchObject({
       backendConnectionId: 'backend-1', workspaceId: 'workspace-1', pageId: 'page-1',
-      text: 'Summarize this component', blockContext: { blockId: 'component-block', title: 'Component component-1' },
+      text: 'Summarize this component', blockContext: { blockId: 'component-block', title: 'Component' },
     });
     window.addEventListener('michi:page-helper-draft', onDraft);
     render(<SpaceView route={{ type: 'space', pageId: 'page-1', workspaceId: 'workspace-1', backendConnectionId: 'backend-1' }} onBack={vi.fn()} onOpenPage={vi.fn()} />);
@@ -106,13 +109,14 @@ describe('SpaceView components', () => {
     window.removeEventListener('michi:page-helper-draft', onDraft);
   });
 
-  it('queues a database ask for the assistant window with the block attached', () => {
+  it('queues a database ask for the panel with the block attached', () => {
     render(<SpaceView route={{ type: 'space', pageId: 'page-1', workspaceId: 'workspace-1', backendConnectionId: 'backend-1' }} onBack={vi.fn()} onOpenPage={vi.fn()} />);
     expect(screen.queryByRole('button', { name: 'Show assistant' })).toBeNull();
     fireEvent.click(screen.getByRole('button', { name: 'Ask database' }));
-    expect(pendingPageHelperDrafts({ backendConnectionId: 'backend-1', workspaceId: 'workspace-1', pageId: 'page-1' })[0]).toMatchObject({
+    expect(drafts[0]).toMatchObject({
+      backendConnectionId: 'backend-1', workspaceId: 'workspace-1', pageId: 'page-1',
       text: 'Summarize this database',
-      blockContext: { blockId: 'database-block', title: 'Database database-1' },
+      blockContext: { blockId: 'database-block', title: 'Database' },
     });
   });
   it('adds a task board from the page\u2019s + menu, making the workspace\u2019s task database first', async () => {

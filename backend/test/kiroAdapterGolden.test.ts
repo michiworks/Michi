@@ -40,9 +40,10 @@ function assertGolden(name: string, actual: unknown): void {
 
 /** The env the adapters, the prompts and the title model read; pinned, then restored. */
 const PINNED_ENV = [
-  'MICHI_CLOUD', 'MICHI_CUSTOM_AGENTS', 'MICHI_KIRO_ENGINE', 'MICHI_NODE_SUMMARY_EXPERIMENT_MODE',
+  'MICHI_CLOUD', 'MICHI_CUSTOM_AGENTS', 'MICHI_KIRO_ENGINE',
   'MICHI_TITLE_MODEL_KIRO', 'MICHI_TITLE_TIMEOUT_MS', 'MICHI_CREW_MEMORY_MODE', 'MICHI_CREW_ACP_BIN',
-  'KIROCREW_HOME', 'MICHI_CREW_APP', 'MICHI_DATA_DIR', 'MICHI_KIRO_PRELOAD_TOOLS',
+  'KIROCREW_HOME', 'MICHI_CREW_APP', 'MICHI_DATA_DIR', 'MICHI_KIRO_PRELOAD_TOOLS', 'CALLER_SETTING',
+  'MICHI_DISABLE_MULTI_MODEL',
 ] as const;
 const savedEnv = Object.fromEntries(PINNED_ENV.map((key) => [key, process.env[key]]));
 const tempDirs: string[] = [];
@@ -235,7 +236,7 @@ describe('Kiro adapter golden', () => {
         id: 'ws', name: 'Golden', cwd: directory, created_at: 1, updated_at: 1, owner_user_id: owner,
         settings: JSON.stringify({ instructions: 'Workspace rule: answer in one paragraph.' }),
       });
-      for (const id of ['node-a', 'node-b', 'node-c', 'node-d', 'node-e', 'node-f', 'node-parent']) {
+      for (const id of ['node-a', 'node-b', 'node-c', 'node-d', 'node-e', 'node-parent']) {
         saveNode({ id, workspace_id: 'ws', kind: 'chat', status: 'idle', minimized: 0, spawned_by_agent: 0, created_at: 1 });
       }
 
@@ -317,17 +318,6 @@ describe('Kiro adapter golden', () => {
           });
           const turns = [await drain(session, 'Forked question?')];
           return { session: identity(session), parentChatId: session.parentChatId ?? null, turns, node: nodeColumns('node-d') };
-        });
-
-        await scenario('chat: node summary experiment', async () => {
-          process.env.MICHI_NODE_SUMMARY_EXPERIMENT_MODE = 'full';
-          try {
-            const session = await runtime.newSession({ sessionId: 'node-f', cwd: directory, workspaceId: 'ws', ownerUserId: owner });
-            const turns = [await drain(session, 'Summarized question?')];
-            return { session: identity(session), turns, node: nodeColumns('node-f') };
-          } finally {
-            delete process.env.MICHI_NODE_SUMMARY_EXPERIMENT_MODE;
-          }
         });
 
         await scenario('agent run: new with bootstrap', async () => {

@@ -55,22 +55,13 @@
   padding: var(--m-padding);
 }
 /* Material. Menus wear the shared .term-glass (PopoverSurface adds it), the same
-   frost as the Command Palette, drawers and sidebar. The right-click menu opts
-   out — frosted it felt heavy (0718e31e) — and stays a solid surface. Scoped by
-   :not(.term-glass) so stylesheet order cannot override the shared glass. */
+   frost as the Command Palette and every other overlay. The right-click menu
+   opts out — frosted it felt heavy (0718e31e) — and stays a solid surface.
+   Scoped by :not(.term-glass) so stylesheet order cannot override the shared
+   glass. */
 .michi-menu:not(.term-glass) {
   background: var(--term-surface);
   box-shadow: var(--m-shadow);
-}
-/* Menus take the shared glass at a denser setting than full panels. The palette
-   and drawers sit behind a scrim; menus float straight over reading text, and at
-   the thin panel setting that text ghosts through while they fade in. Same tint,
-   highlight and shadow — only the surface alpha and blur get a floor (the old
-   menu material's 78% / 26px). Reduced-transparency rules below still win. */
-.michi-menu.term-glass {
-  --term-glass-solid-alpha: max(var(--term-sidebar-solid-alpha), 0.78);
-  -webkit-backdrop-filter: blur(max(var(--term-glass-blur), 26px)) saturate(var(--term-glass-saturate));
-  backdrop-filter: blur(max(var(--term-glass-blur), 26px)) saturate(var(--term-glass-saturate));
 }
 .michi-menu[data-menu='workspace'] {
   --m-width: 252px;
@@ -125,7 +116,7 @@
   overflow-wrap: anywhere;
 }
 .michi-menu[data-menu='mentions'] { --m-width: 420px; }
-.michi-menu[data-menu='slash'] { --m-width: 480px; --m-maxHeight: 192px; }
+.michi-menu[data-menu='slash'] { --m-maxHeight: 240px; }
 /* The plain fade for the @ / slash autocompletes and hover cards. Other menus
    grow in from script instead (PopoverSurface's GrowingSurface). Same
    specificity on purpose: the reduced-motion rule below still wins. */
@@ -159,6 +150,8 @@
 .michi-menu-glyph { flex: 0 0 var(--m-iconSize); width: var(--m-iconSize); font-size: var(--m-iconSize); text-align: center; color: var(--term-mid); }
 .michi-menu-glyph > svg { display: block; margin: 0 auto; }
 .michi-menu-keys { flex-shrink: 0; min-width: 12px; text-align: right; color: var(--term-muted); font-size: var(--m-captionSize); }
+/* Where a row leads, at its end: the palette's Recent rows name their workspace. */
+.michi-menu-where { flex: 0 1 auto; max-width: 40%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; text-align: right; }
 .michi-menu-pinned { flex-shrink: 0; border-top: 1px solid var(--term-line); margin-top: 4px; padding-top: 4px; }
 .michi-menu-search { flex-shrink: 0; border-bottom: 1px solid var(--term-line); margin-bottom: 4px; }
 .michi-menu-search input {
@@ -180,6 +173,54 @@
 .michi-menu-badge { flex-shrink: 0; max-width: 35%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--term-muted); font-size: var(--m-captionSize); border: 1px solid var(--term-line); padding: 0 4px; border-radius: var(--m-itemRadius); }
 .michi-menu-command { flex-shrink: 0; max-width: 60%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .michi-menu-footer { flex-shrink: 0; margin-top: 4px; padding: 4px var(--m-rowX); border-top: 1px solid var(--term-line); color: var(--term-muted); font-size: var(--m-captionSize); font-weight: 400; }
+/* The / menu: `/name` rows, and the highlighted row's detail beside them
+   (under them on a narrow window). The typed part of each name stands out.
+   A list with no detail beside it (the /agent picker, a touch screen) fills
+   the menu. */
+.michi-slash-body { display: flex; min-height: 0; }
+.michi-slash-body > .michi-menu-list { flex: 0 1 288px; min-width: 0; }
+.michi-slash-body > .michi-menu-list:only-child { flex: 1 1 auto; }
+/* Of `/plugin:skill` the plugin part gives way first; the skill part
+   shortens only once it alone is too long for what follows the slash. */
+.michi-slash-name { flex: 1; min-width: 0; display: flex; overflow: hidden; white-space: nowrap; }
+.michi-slash-plugin { display: flex; min-width: 0; }
+.michi-slash-prefix { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.michi-slash-leaf { flex-shrink: 0; max-width: 100%; overflow: hidden; text-overflow: ellipsis; }
+.michi-slash-name:has(.michi-menu-match) { color: var(--term-mid); }
+.michi-menu-match { color: var(--term-fg); font-weight: 600; }
+.michi-slash-tag { flex-shrink: 0; color: var(--term-muted); font-size: var(--m-captionSize); font-weight: 400; }
+.michi-slash-detail {
+  flex: 1 1 0;
+  min-width: 0;
+  max-height: var(--m-maxHeight);
+  overflow-y: auto;
+  margin-left: var(--m-padding);
+  padding: var(--m-rowY) var(--m-rowX);
+  border-left: 1px solid var(--term-line);
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  scrollbar-width: thin;
+  overscroll-behavior: contain;
+}
+.michi-slash-detail-title { color: var(--term-fg); overflow-wrap: anywhere; }
+.michi-slash-detail-hint { color: var(--term-muted); font-weight: 400; }
+.michi-slash-detail-kind { color: var(--term-muted); font-size: var(--m-captionSize); }
+.michi-slash-detail-text { color: var(--term-mid); font-size: var(--fs-md); font-weight: 400; line-height: 1.5; white-space: pre-wrap; overflow-wrap: anywhere; }
+/* Touch: the description is the row's second line, so nothing a tap's hover
+   moves changes what is shown. */
+.michi-slash-touch .ui-menu-item { min-height: 44px; }
+.michi-slash-row { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: var(--m-textGap); }
+.michi-slash-line { display: flex; align-items: center; gap: var(--m-gap); min-width: 0; }
+.michi-slash-row-text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--term-muted); font-size: var(--m-captionSize); font-weight: 400; }
+@media (max-width: 700px), (pointer: coarse) and (max-height: 500px) {
+  .michi-slash-body { flex-direction: column; }
+  .michi-slash-body > .michi-menu-list { flex: 0 1 auto; }
+  /* A fixed height: the rows above it stay put while the highlight moves. */
+  .michi-slash-detail { flex: 0 0 auto; height: 96px; max-height: none; margin: 4px 0 0; border-left: 0; border-top: 1px solid var(--term-line); }
+  .michi-menu[data-menu='slash'] .ui-menu-item { min-height: 44px; }
+  .michi-menu[data-menu='slash'] .michi-menu-footer { display: none; }
+}
 /* The context-usage hover reads as a label, not a menu column: hug the content
    and keep the row inset small so it does not double the surface padding. */
 .michi-menu[data-menu='usage'] { --m-width: max-content; --m-rowX: 4px; --m-rowY: 2px; }

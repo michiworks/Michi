@@ -17,26 +17,35 @@ function firstFrame(stored: Record<string, string>) {
     setAttribute(name: string, value: string) { attributes[name] = value; },
   };
   const localStorage = { getItem: (key: string) => stored[key] ?? null };
+  const meta: Record<string, string> = {};
+  const themeColor = { setAttribute(name: string, value: string) { meta[name] = value; } };
   new Function('localStorage', 'document', 'navigator', bootScript)(
     localStorage,
-    { documentElement },
+    { documentElement, querySelector: (selector: string) => (selector === 'meta[name="theme-color"]' ? themeColor : null) },
     { language: 'en-US' },
   );
-  return { background: properties['--michi-boot-bg'], palette: attributes['data-terminal-palette'] };
+  return { background: properties['--michi-boot-bg'], palette: attributes['data-terminal-palette'], themeColor: meta.content };
 }
 
 describe('index.html first-frame palette', () => {
   it.each(Object.keys(PALETTES) as TerminalPalette[])('paints the saved %s palette background', (palette) => {
     const saved = JSON.stringify({ ...DEFAULT_PREFS, terminalPalette: palette });
-    expect(firstFrame({ [PREFS_KEY]: saved })).toEqual({ background: PALETTES[palette].bg, palette });
+    // The status-bar band starts in the palette's colour too (the Topbar then tracks itself).
+    expect(firstFrame({ [PREFS_KEY]: saved })).toEqual({ background: PALETTES[palette].bg, palette, themeColor: PALETTES[palette].bg });
   });
 
   it('falls back to the default palette without saved or valid prefs', () => {
-    const fallback = { background: PALETTES[DEFAULT_PREFS.terminalPalette].bg, palette: DEFAULT_PREFS.terminalPalette };
+    const bg = PALETTES[DEFAULT_PREFS.terminalPalette].bg;
+    const fallback = { background: bg, palette: DEFAULT_PREFS.terminalPalette, themeColor: bg };
     expect(firstFrame({})).toEqual(fallback);
     expect(firstFrame({ [PREFS_KEY]: JSON.stringify({ theme: 'night' }) })).toEqual(fallback);
     expect(firstFrame({ [PREFS_KEY]: JSON.stringify({ terminalPalette: 'constructor' }) })).toEqual(fallback);
     expect(firstFrame({ [PREFS_KEY]: '{not json' })).toEqual(fallback);
+  });
+
+  it('declares one theme-color, not a light/dark media pair', () => {
+    expect(head.match(/<meta name="theme-color"/g)).toHaveLength(1);
+    expect(head).toContain(`<meta name="theme-color" content="${PALETTES[DEFAULT_PREFS.terminalPalette].bg}" />`);
   });
 
   it('leaves the body background to the painted root', () => {

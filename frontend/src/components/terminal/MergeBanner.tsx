@@ -1,31 +1,39 @@
-import React, { useState } from 'react';
-import { useChatStore, useChatNodesSnapshot } from '../../state/chatStore';
+import { useEffect, useState } from 'react';
+import { useChatActions, useChatStore, useChatNodesSnapshot } from '../../state/chatStore';
 import {
   estimateMergePreambleTokens,
   MERGE_PREAMBLE_TOKEN_WARN,
+  mergeContextNodeIds,
 } from '../../state/mergePreamble';
 
 export default function MergeBanner({ nodeId }: { nodeId: string }) {
   const { activeProject } = useChatStore();
+  const { ensureCompleteHistory } = useChatActions();
   const nodes = useChatNodesSnapshot();
   const [dismissed, setDismissed] = useState(false);
+  const [failedLoad, setFailedLoad] = useState('');
 
   const node = nodes[nodeId];
-  if (!node || !node.mergeSources || node.mergeSources.length === 0) return null;
-  if (node.messages.length > 0) return null;
-  if (dismissed) return null;
-  if (!activeProject) return null;
-
+  // Before the first send only.
+  const sources = node && node.messages.length === 0 && !dismissed ? node.mergeSources ?? [] : [];
+  const edges = activeProject?.edges;
   const isAlive = (id: string) => !nodes[id]?.deletedAt;
-  const tokens = estimateMergePreambleTokens(
-    node.mergeSources,
-    nodes,
-    activeProject.edges,
-    isAlive,
-  );
+  // The send loads every merged history before it renders the preamble;
+  // a placeholder or a recent page alone would undercount it.
+  const unloaded = sources.length > 0 && edges
+    ? mergeContextNodeIds(sources, nodes, edges, isAlive).filter((id) => nodes[id]?.messagesLoaded === false).join('\n')
+    : '';
+  useEffect(() => {
+    if (!unloaded) return;
+    ensureCompleteHistory(unloaded.split('\n')).catch(() => setFailedLoad(unloaded));
+  }, [unloaded, ensureCompleteHistory]);
+
+  if (sources.length === 0 || !edges) return null;
+  if (unloaded && unloaded !== failedLoad) return null;
+  const tokens = estimateMergePreambleTokens(sources, nodes, edges, isAlive);
   if (tokens <= MERGE_PREAMBLE_TOKEN_WARN) return null;
 
-  const sourceTitles = node.mergeSources
+  const sourceTitles = sources
     .map((s) => nodes[s]?.title ?? 'Untitled')
     .join(' + ');
 

@@ -245,7 +245,7 @@
       },
       {
         "sessionUpdate": "permission_request",
-        "requestId": 19,
+        "requestId": "michi:19",
         "toolCall": {
           "toolCallId": "perm-19",
           "title": "Edit file"
@@ -288,7 +288,7 @@
     "p1": [
       {
         "sessionUpdate": "permission_request",
-        "requestId": 20,
+        "requestId": "michi:20",
         "toolCall": {
           "toolCallId": "perm-20",
           "title": "Edit file"

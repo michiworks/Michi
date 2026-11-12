@@ -1,4 +1,4 @@
-import { isChatPermissionMode, selectWindowComposerDraft } from 'michi-shared';
+import { isChatPermissionMode, parseWorkspaceSettings, readPendingSpawnPrompt, selectWindowComposerDraft, workspaceSystemOf } from 'michi-shared';
 import { WINDOW_ID } from '../config/windowIdentity';
 import { backendEntityId, mapBackendPayload, serverEntityId } from '../config/backendIdentity';
 import { finalizeAssistantBlocks, migrateAssistantToBlocks, parseAssistantBlocks } from './assistantBlocks';
@@ -8,16 +8,52 @@ import type {
   ComposerDraft,
   ArtifactEntry,
   FolderEntry,
+  NarrationOption,
   NodeKind,
   Project,
+  SubagentInfo,
   ToolCallState,
   Tree,
   TrimSnapshot,
 } from './chatTypes';
 import type { DigestState } from './digest';
-import { isSystemWorkspace, parseSystemWorkspace } from './assistant/systemWorkspace';
-import { BACKEND_RESTARTED_KIND, BACKEND_RESTARTED_MESSAGE } from './turnInterruption';
-import { parseBranchOverviewEntries, parseSteeringReports, parseSubagentRoster, parseThreadMessageSource, threadMessageBody } from 'michi-shared';
+import { firstLiveUserWorkspaceId, isLiveUserWorkspace } from './assistant/systemWorkspace';
+import { BACKEND_RESTARTED_KIND, BACKEND_RESTARTED_MESSAGE, classifiedErrorKind } from './turnInterruption';
+import { noteCompletionFactsBackend } from './completionFacts';
+import { isVisibleConversationNode, pickLandingTreeId } from './conversationVisibility';
+import {
+  appendBranchOverviewEntry, LEAN_NODE_FIELD_COLUMNS, parseBranchOverviewEntries, parseCompanionPostMetadata,
+  parseCompanionSendSource, parseCompanionTurnMetadata, parseCompanionTurnRefs, parseLeanNodeFields, parseSteeringReports,
+  parseSubagentRoster, parseThreadMessageSource, threadMessageBody, type BranchOverviewEntry, type CompanionTurnRef,
+  type LeanNodeField,
+} from 'michi-shared';
+import type { TreeMessagePageEntry } from '../services/api/persistence';
+import { LOCAL_BACKEND_CONNECTION_ID } from '../config/backendConnections';
+
+/** `userMetadata.companionRefs` (what a message to the agent referred to, F1a-review #1); nothing when malformed. */
+function parseStoredCompanionRefs(value: unknown): CompanionTurnRef[] | undefined {
+  if (value === undefined) return undefined;
+  try {
+    const refs = parseCompanionTurnRefs(value);
+    return refs.length ? refs : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/** The first run's closing question's options (`metaAgentNarration`, kind `end`); undefined for any other message. */
+function parseNarrationOptions(value: unknown): NarrationOption[] | undefined {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
+  const narration = value as { kind?: unknown; options?: unknown };
+  if (narration.kind !== 'end' || !Array.isArray(narration.options)) return undefined;
+  const options = narration.options.flatMap((entry): NarrationOption[] => {
+    if (!entry || typeof entry !== 'object' || typeof (entry as NarrationOption).label !== 'string') return [];
+    const { label, open } = entry as NarrationOption;
+    const valid = !!open && typeof open.nodeId === 'string' && typeof open.workspaceId === 'string' && typeof open.draft === 'string';
+    return [valid ? { label, open: { nodeId: open.nodeId, workspaceId: open.workspaceId, draft: open.draft } } : { label }];
+  });
+  return options.length ? options : undefined;
+}
 
 export const STATE_SCHEMA_VERSION = 6;
 
@@ -148,6 +184,17 @@ function parseMessageMetadata(raw: unknown): Record<string, unknown> {
     : {};
 }
 
+/** The skill a user message ran (DurableMessageMetadata.skill), as the backend recorded it. */
+function parseMessageSkill(raw: unknown): ChatMessage['skill'] {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return undefined;
+  const skill = raw as Record<string, unknown>;
+  const id = asString(skill.id);
+  const name = asString(skill.name);
+  if (!id || !name || (skill.origin !== 'library' && skill.origin !== 'builtin' && skill.origin !== 'runtime')) return undefined;
+  const runtimeId = asString(skill.runtimeId);
+  return { id, name, origin: skill.origin, ...(runtimeId ? { runtimeId } : {}), args: asString(skill.args) ?? '' };
+}
+
 function parseComposerDraft(raw: unknown): ComposerDraft | undefined {
   if (typeof raw === 'string') raw = selectWindowComposerDraft(raw, WINDOW_ID);
   let value = raw;
@@ -192,19 +239,76 @@ function parseComposerDraft(raw: unknown): ComposerDraft | undefined {
   return { value: text, mentions, quotedText, ...(quotedText && quoteSource ? { quoteSource } : {}) };
 }
 
-/** Read the server-owned spawn outbox without rendering it as a composer draft. */
-function parsePendingSpawnPrompt(raw: unknown): string | undefined {
-  let value = raw;
-  if (typeof value === 'string' && value.trim()) {
-    try {
-      value = JSON.parse(value);
-    } catch {
-      return undefined;
+// ── Lean node fields (shared/leanNodeFields) ──────────────────────────────
+
+function branchOverviewState(entries: BranchOverviewEntry[]): Pick<ChatNodeState, 'branchOverviewEntries' | 'branchOverview'> {
+  return {
+    branchOverviewEntries: entries.length > 0 ? entries : undefined,
+    branchOverview: entries.length > 0 ? entries[entries.length - 1].text : undefined,
+  };
+}
+
+/** The node state one lean field of a row maps to. */
+function leanFieldState(field: LeanNodeField, row: Record<string, unknown>): Partial<ChatNodeState> {
+  switch (field) {
+    case 'branch_overview':
+      return branchOverviewState(parseBranchOverviewEntries(row.branch_overview));
+    case 'follow_ups':
+      return {
+        followUps: parseJsonStringArray(row.follow_ups),
+        followUpsSourceMessageId: asString(row.follow_ups_source_message_id) || undefined,
+      };
+    case 'composer_draft':
+      return {
+        pendingSpawnPrompt: readPendingSpawnPrompt(row.composer_draft),
+        composerDraft: parseComposerDraft(row.composer_draft),
+      };
+  }
+}
+
+/** The lean fields a lean row left out: named by its workspace's marker, absent from the row. */
+function deferredFieldsOf(row: Record<string, unknown>, lean: readonly LeanNodeField[]): LeanNodeField[] {
+  return lean.filter((field) => !(LEAN_NODE_FIELD_COLUMNS[field][0] in row));
+}
+
+export function isNodeFieldDeferred(node: Pick<ChatNodeState, 'deferredNodeFields'> | undefined, field: LeanNodeField): boolean {
+  return !!node?.deferredNodeFields?.includes(field);
+}
+
+/**
+ * The marker update that settles `fields` on `node`: spread it into the next
+ * node. Empty when none of them was deferred.
+ */
+export function settleDeferredNodeFields(node: ChatNodeState, ...fields: LeanNodeField[]): Pick<ChatNodeState, 'deferredNodeFields'> | Record<string, never> {
+  const deferred = node.deferredNodeFields;
+  if (!deferred?.some((field) => fields.includes(field))) return {};
+  const rest = deferred.filter((field) => !fields.includes(field));
+  return { deferredNodeFields: rest.length > 0 ? rest : undefined };
+}
+
+/**
+ * Fill the node's deferred fields from a row that carries them (a tree page's
+ * `node`, a full structure read); the rest stay deferred. Overview entries
+ * that streamed in while deferred join the stored ones. Returns `node` itself
+ * when nothing applies.
+ */
+export function mergeDeferredNodeFields(node: ChatNodeState, row: Record<string, unknown> | null | undefined): ChatNodeState {
+  const deferred = node.deferredNodeFields;
+  if (!deferred?.length || !row || typeof row !== 'object') return node;
+  const present = deferred.filter((field) => LEAN_NODE_FIELD_COLUMNS[field][0] in row);
+  if (present.length === 0) return node;
+  let next: ChatNodeState = { ...node, ...settleDeferredNodeFields(node, ...present) };
+  for (const field of present) {
+    if (field === 'branch_overview') {
+      let entries = parseBranchOverviewEntries(row.branch_overview);
+      for (const entry of node.branchOverviewEntries ?? []) entries = appendBranchOverviewEntry(entries, entry.text, entry.at);
+      next = { ...next, ...branchOverviewState(entries) };
+    } else {
+      next = { ...next, ...leanFieldState(field, row) };
     }
   }
-  if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
-  const prompt = (value as Record<string, unknown>).__michiPendingSpawnPrompt;
-  return typeof prompt === 'string' && prompt.trim().length > 0 ? prompt : undefined;
+  if (next.deferredNodeFields === undefined) delete next.deferredNodeFields;
+  return next;
 }
 
 function parseTrimSnapshot(raw: unknown): TrimSnapshot | undefined {
@@ -395,29 +499,68 @@ export function carryClientKeys(previous: readonly ChatMessage[] | undefined, ne
  * history marked incomplete and retains its total count. Nodes absent from the
  * map are returned by reference (untouched). Shared by the hydration
  * eager-load and the `messages-loaded` reducer action so both converge.
+ * A node's latest turn row, read with its bodies, sets its turn state.
+ * A page's lean node fields (`pages[i].node`) fill what lean metadata
+ * deferred, on any node the page lists, bodies or not.
  */
 export function applyTreeMessages(
   nodes: Record<string, ChatNodeState>,
   messagesByNode: Record<string, ChatMessage[]>,
-  pages?: Array<{ nodeId: string; total: number; before: { seq: number; id: string } | null }>,
+  pages?: TreeMessagePageEntry[],
+  turns?: unknown[],
 ): Record<string, ChatNodeState> {
   const ids = Object.keys(messagesByNode);
-  if (ids.length === 0) return nodes;
+  const fieldPages = pages?.filter((page) => page.node && nodes[page.nodeId]?.deferredNodeFields?.length) ?? [];
+  if (ids.length === 0 && fieldPages.length === 0) return nodes;
   const next = { ...nodes };
   for (const nodeId of ids) {
     const prev = next[nodeId];
     if (!prev) continue; // node not present locally (e.g. trimmed) — skip
     const messages = carryClientKeys(prev.messages, messagesByNode[nodeId]);
     const page = pages?.find(item => item.nodeId === nodeId);
+    const turn = turns?.find((row): row is Record<string, unknown> =>
+      !!row && typeof row === 'object' && (row as Record<string, unknown>).node_id === nodeId);
     next[nodeId] = recoverRunningTurn({
       ...prev,
+      ...(turn ? latestTurnState(turn) : {}),
       messages,
       messagesLoaded: !page?.before,
       historyBefore: page?.before ?? undefined,
+      olderMessageCount: page?.before ? Math.max(0, page.total - messages.length) : undefined,
       messageCount: page?.total ?? messages.length,
     });
   }
+  for (const page of fieldPages) next[page.nodeId] = mergeDeferredNodeFields(next[page.nodeId], page.node);
   return next;
+}
+
+/**
+ * Bodies are stored together with their turn's replay cursor, and installing
+ * a running turn's body reattaches its stream from the node's cursor. The
+ * cursor hydration read came earlier than the bodies: replaying from it would
+ * append output they already hold, and a turn that has ended since must not
+ * reattach at all.
+ */
+function latestTurnState(row: Record<string, unknown>): Partial<ChatNodeState> {
+  const turnId = asString(row.turn_id);
+  const seq = asOptionalNumber(row.last_seq);
+  if (!turnId || seq === undefined) return {};
+  const cursor = {
+    lastAppliedTurnId: turnId, lastAppliedSeq: seq,
+    lastAppliedBackgroundTurnId: turnId, lastAppliedBackgroundSeq: seq,
+  };
+  if (row.status === 'active') return { ...cursor, status: 'streaming', activeTurnId: turnId };
+  return {
+    ...cursor,
+    status: row.status === 'error' ? 'error' : 'idle',
+    activeTurnId: undefined,
+    error: undefined, errorKind: undefined, errorTurnId: undefined,
+    errorCompletedAt: undefined, errorRecovery: undefined, errorRecoverable: undefined,
+    ...(row.status === 'error' ? persistedErrorState({
+      last_turn_id: turnId, last_turn_status: 'error',
+      last_turn_error: row.error, last_turn_completed_at: row.completed_at,
+    }) : {}),
+  };
 }
 
 /**
@@ -468,6 +611,28 @@ export function recoverPendingUserInput(node: ChatNodeState): ChatNodeState {
   };
 }
 
+/** Claude tools whose frames belong to an agent: the spawners, and SendMessage, which resumes one. */
+const CLAUDE_AGENT_TOOLS = new Set(['task', 'agent', 'sendmessage']);
+
+/**
+ * The roster without the entries an older Claude runtime made from a plain
+ * tool's own frames (a long-running Bash, an MCP call): a placeholder name,
+ * no task or steps, and a parent tool call in the same message that neither
+ * starts nor resumes an agent. They are not agents; without them the
+ * Background work drawer does not list them and the tool's chip does not
+ * read as a delegation.
+ */
+function withoutToolStandIns(roster: SubagentInfo[], toolCalls: readonly ToolCallState[]): SubagentInfo[] {
+  if (toolCalls.length === 0) return roster;
+  const kept = roster.filter((entry) => {
+    if (entry.source !== 'claude' || entry.description || entry.prompt || entry.activity?.length) return true;
+    if (entry.agentName.trim().toLowerCase() !== 'subagent') return true;
+    const parent = toolCalls.find((tool) => tool.id === entry.parentToolCallId);
+    return !parent || CLAUDE_AGENT_TOOLS.has(parent.title.trim().split(/\s+/)[0]?.toLowerCase() ?? '');
+  });
+  return kept.length === roster.length ? roster : kept;
+}
+
 export function mapMessageRow(row: Record<string, unknown>, fallbackSeq = 0): ChatMessage {
   const nodeId = asString(row.node_id) ?? '';
   const role = row.role === 'assistant' ? 'assistant' : 'user';
@@ -476,15 +641,31 @@ export function mapMessageRow(row: Record<string, unknown>, fallbackSeq = 0): Ch
   // The stored content of a relayed message is what the receiving runtime
   // got (attribution header + body); the bubble shows the body.
   const threadMessage = role === 'user' ? parseThreadMessageSource(metadata.threadMessage) : undefined;
+  const skill = role === 'user' ? parseMessageSkill(metadata.skill) : undefined;
+  const toolCalls = parseToolCalls(row.tool_calls);
+  // DESIGN-v2 §4: a follow-up the agent sent into a conversation it started, stored as its
+  // header + body like a relayed message (live rows come through here too, from observer-turn-start).
+  const companionSend = role === 'user' ? parseCompanionSendSource(metadata.companionSend) : undefined;
+  // DESIGN-v2 §3.3 / §1.3: a check-in's post (assistant rows) and what the route decided about a user message.
+  const companionPost = role === 'assistant' ? parseCompanionPostMetadata(metadata.companionPost) : undefined;
+  const companionTurn = role === 'user' ? parseCompanionTurnMetadata(metadata.companionTurn) : undefined;
+  const companionRefs = role === 'user' ? parseStoredCompanionRefs(metadata.companionRefs) : undefined;
+  const narrationOptions = role === 'assistant' ? parseNarrationOptions(metadata.metaAgentNarration) : undefined;
   const baseMsg: ChatMessage = {
     id: asString(row.id) ?? `${nodeId}-${asNumber(row.seq, fallbackSeq)}`,
     role,
-    text: threadMessage ? threadMessageBody(rawContent) : rawContent,
+    text: threadMessage || companionSend ? threadMessageBody(rawContent) : rawContent,
     ...(threadMessage ? { threadMessage } : {}),
+    ...(skill ? { skill } : {}),
+    ...(companionSend ? { companionSend } : {}),
+    ...(companionPost ? { companionPost } : {}),
+    ...(companionTurn ? { companionTurn } : {}),
+    ...(companionRefs ? { companionRefs } : {}),
+    ...(narrationOptions ? { narrationOptions } : {}),
     ...(role === 'user' && metadata.steered === true ? { steered: true } : {}),
     ...(role === 'user' && typeof metadata.scheduledJobId === 'string' && metadata.scheduledJobId
       ? { scheduledJobId: metadata.scheduledJobId } : {}),
-    toolCalls: parseToolCalls(row.tool_calls),
+    toolCalls,
     blocks: role === 'assistant' ? parseAssistantBlocks(row.blocks) : undefined,
     streaming: false,
     createdAt: asOptionalNumber(row.created_at),
@@ -511,7 +692,7 @@ export function mapMessageRow(row: Record<string, unknown>, fallbackSeq = 0): Ch
     ...(role === 'assistant' && Array.isArray(metadata.steeringReports)
       ? { steeringReports: parseSteeringReports(metadata.steeringReports) } : {}),
     ...(role === 'assistant' && Array.isArray(metadata.subagents)
-      ? { subagents: parseSubagentRoster(metadata.subagents) } : {}),
+      ? { subagents: withoutToolStandIns(parseSubagentRoster(metadata.subagents), toolCalls) } : {}),
   };
   return role === 'assistant' ? finalizeAssistantBlocks(migrateAssistantToBlocks(baseMsg)) : baseMsg;
 }
@@ -524,8 +705,9 @@ export function mapMessageRow(row: Record<string, unknown>, fallbackSeq = 0): Ch
  * must never authorize execution. The hydration payload therefore carries the
  * node's latest `turns` row (`last_turn_*`), written only by the backend's
  * finalization or startup recovery. A restart marker becomes the resumable
- * kind; any other finalized failure keeps its own message with an ordinary
- * retry, the same offer the live stream made. Without a receipt the outcome
+ * kind, and so does a failure whose message says the agent's credentials
+ * expired; any other finalized failure keeps its own message with an
+ * ordinary retry, the same offer the live stream made. Without a receipt the outcome
  * stays unknown and only a read-only check is offered.
  */
 function persistedErrorState(row: Record<string, unknown>): Partial<ChatNodeState> {
@@ -536,9 +718,29 @@ function persistedErrorState(row: Record<string, unknown>): Partial<ChatNodeStat
     if (reason === BACKEND_RESTARTED_KIND) {
       return { errorKind: BACKEND_RESTARTED_KIND, errorTurnId: turnId, error: BACKEND_RESTARTED_MESSAGE, errorCompletedAt: completedAt };
     }
-    if (reason) return { errorTurnId: turnId, error: reason, errorCompletedAt: completedAt };
+    if (reason) {
+      const errorKind = classifiedErrorKind(undefined, reason);
+      return { ...(errorKind ? { errorKind } : {}), errorTurnId: turnId, error: reason, errorCompletedAt: completedAt };
+    }
   }
   return { errorKind: 'turn_outcome_unknown', error: 'The previous turn outcome could not be confirmed.' };
+}
+
+/**
+ * The server's completion facts (migration 0064). A row without them comes
+ * from an older backend, whose nodes keep the lastAssistantAt/viewedAt rule.
+ */
+function completionFactsOf(row: Record<string, unknown>): Pick<ChatNodeState, 'completionSeq' | 'seenCompletionSeq' | 'lastCompletedAt' | 'lastCompletedTurnId'> {
+  const completionSeq = asOptionalNumber(row.completion_seq);
+  if (completionSeq === undefined) return {};
+  const lastCompletedTurnId = asString(row.last_completed_turn_id);
+  return {
+    completionSeq,
+    seenCompletionSeq: Math.min(asNumber(row.seen_completion_seq, 0), completionSeq),
+    lastCompletedAt: asOptionalNumber(row.last_completed_at),
+    // A replayed done of that turn is already counted.
+    ...(lastCompletedTurnId ? { lastCompletedTurnId } : {}),
+  };
 }
 
 /**
@@ -561,6 +763,7 @@ export function mapNodeRowScalars(row: Record<string, unknown>): Partial<ChatNod
     // intentionally read-only in the renderer and omitted from sync writes.
     pageId: asString(row.page_id) ?? null,
     maintenanceJobId: asString(row.maintenance_job_id) ?? null,
+    scheduledOnlyJobId: asString(row.scheduled_only_job_id) ?? null,
     // Compatibility marker only: a bound node always uses its nodeId on the
     // public API. Runtime-native ids remain in SQLite/backend adapters.
     chatId: hasRuntimeBinding ? nodeId : null,
@@ -573,17 +776,9 @@ export function mapNodeRowScalars(row: Record<string, unknown>): Partial<ChatNod
     forkedFromNodeId: asString(row.forked_from_node_id),
     forkBoundaryMessageId: asString(row.fork_boundary_message_id),
     inheritedMessageCount: asOptionalNumber(row.inherited_message_count),
-    followUps: parseJsonStringArray(row.follow_ups),
-    followUpsSourceMessageId: asString(row.follow_ups_source_message_id) || undefined,
+    ...leanFieldState('follow_ups', row),
     title: asString(row.title),
-    branchOverviewEntries: (() => {
-      const entries = parseBranchOverviewEntries(row.branch_overview);
-      return entries.length > 0 ? entries : undefined;
-    })(),
-    branchOverview: (() => {
-      const entries = parseBranchOverviewEntries(row.branch_overview);
-      return entries.length > 0 ? entries[entries.length - 1].text : undefined;
-    })(),
+    ...leanFieldState('branch_overview', row),
     status: row.status === 'streaming' ? 'streaming' : row.status === 'error' ? 'error' : 'idle',
     ...(row.status === 'error' ? persistedErrorState(row) : {}),
     activeTurnId: row.status === 'streaming' ? asString(row.last_applied_turn_id) : undefined,
@@ -594,17 +789,20 @@ export function mapNodeRowScalars(row: Record<string, unknown>): Partial<ChatNod
     minimized: row.minimized === 1 || row.minimized === true || undefined,
     position: posX !== undefined && posY !== undefined ? { x: posX, y: posY } : undefined,
     spawnedByAgent: row.spawned_by_agent === 1 || row.spawned_by_agent === true || undefined,
-    pendingSpawnPrompt: parsePendingSpawnPrompt(row.composer_draft),
+    multiModelRunId: asString(row.multi_model_run_id),
+    freshContext: row.fresh_context === 1 || row.fresh_context === true ? true : undefined,
+    ...leanFieldState('composer_draft', row),
     deletedAt: asOptionalNumber(row.deleted_at),
     deletionGroupId: asString(row.deletion_group_id),
     trimSnapshot: parseTrimSnapshot(row.trim_snapshot),
     pinnedAt: asOptionalNumber(row.pinned_at),
     viewedAt: asOptionalNumber(row.viewed_at),
+    ...completionFactsOf(row),
     currentModeId: asString(row.current_mode_id) ?? null,
     permissionMode: isChatPermissionMode(row.permission_mode) ? row.permission_mode : undefined,
     permissionApproveForMe: row.permission_mode === 'ask' && (row.permission_approve_for_me === 1 || row.permission_approve_for_me === true) ? true : undefined,
+    ultracode: row.ultracode === 1 || row.ultracode === true ? true : undefined,
     paneWidth: asOptionalNumber(row.pane_width),
-    composerDraft: parseComposerDraft(row.composer_draft),
   };
 }
 
@@ -616,7 +814,7 @@ export function mapNodeRowScalars(row: Record<string, unknown>): Partial<ChatNod
 export function hydrateBackendWorkspaces(
   rawWorkspaces: unknown[],
   preferredActiveProjectId?: string | null,
-  connectionId = 'local',
+  connectionId = LOCAL_BACKEND_CONNECTION_ID,
 ): HydratedState {
   if (!Array.isArray(rawWorkspaces) || rawWorkspaces.length === 0) return emptyHydrated();
 
@@ -682,70 +880,15 @@ export function hydrateBackendWorkspaces(
       trees = [{ id: backendEntityId(connectionId, `t-${serverEntityId(projectId)}-root`), rootNodeId: chatIds[0], createdAt, lastActiveAt: createdAt }];
     }
 
-    // A page helper's or maintenance run's tree is newest the moment it is
-    // created, but it is not a conversation the shell should land on: panes
-    // opened "beside chat" would join the hidden tree instead of the user's thread.
-    const helperRootIds = new Set(nodeRows.filter((row) => asString(row.page_id) || asString(row.maintenance_job_id)).map((row) => asString(row.id)));
-    const landable = (tree: Tree) => !tree.archivedAt && !helperRootIds.has(tree.rootNodeId);
-    const requestedActiveTreeId = asString(workspace.active_tree_id);
-    const requestedTree = requestedActiveTreeId ? trees.find((t) => t.id === requestedActiveTreeId) : undefined;
-    const activeTreeId = requestedTree && !helperRootIds.has(requestedTree.rootNodeId)
-      ? requestedTree.id
-      : [...trees].filter(landable).sort((a, b) => b.lastActiveAt - a.lastActiveAt)[0]?.id ?? null;
-
-    // Backend bulk loaders return artifact rows under the `contexts` wire key;
-    // accept `artifacts` too so a later key alignment can't silently drop them.
-    const rawArtifacts = Array.isArray(full.contexts)
-      ? full.contexts
-      : Array.isArray(full.artifacts)
-        ? full.artifacts
-        : [];
-    const artifacts: ArtifactEntry[] = rawArtifacts.flatMap((row) => {
-      const ctx = mapContextRow(row);
-      return ctx ? [ctx] : [];
-    });
-
-    // settings JSON column is opaque on the backend; the frontend owns its
-    // shape. Today it carries aiGlobalContext and instructions.
-    let instructions: string | undefined;
-    let aiGlobalContext: boolean | undefined;
-    let system: string | undefined;
-    const rawSettings = asString(workspace.settings);
-    if (rawSettings) {
-      try {
-        const parsed = JSON.parse(rawSettings) as Record<string, unknown>;
-        if (typeof parsed.instructions === 'string') instructions = parsed.instructions;
-        if (parsed.aiGlobalContext === false) aiGlobalContext = false;
-        system = parseSystemWorkspace(parsed);
-      } catch {
-        // ignore malformed JSON — defaults apply
-      }
-    }
-
-    const project: Project = {
-      id: projectId,
-      ...(connectionId !== 'local' ? { backendConnectionId: connectionId } : {}),
-      name: asString(workspace.name) ?? 'Untitled',
-      cwd: asString(workspace.cwd),
-      folders: hydrateFolders(workspace),
-      chatIds,
-      edges,
-      createdAt: asNumber(workspace.created_at, Date.now()),
-      trees,
-      activeTreeId,
-      artifacts,
-      deletedAt: asOptionalNumber(workspace.deleted_at),
-      archivedAt: asOptionalNumber(workspace.archived_at),
-      pinnedAt: asOptionalNumber(workspace.pinned_at),
-      aiGlobalContext,
-      instructions,
-      ...(system ? { system } : {}),
-    };
-    projects.push(project);
-
+    // Lean metadata names the fields its rows may leave out (stamped on each
+    // workspace by fetchAllWorkspacesMeta); a row without one defers it.
+    const leanFields = parseLeanNodeFields((full as { leanNodeFields?: unknown }).leanNodeFields);
     for (const row of nodeRows) {
       const nodeId = asString(row.id)!;
       const scalars = mapNodeRowScalars(row);
+      const deferredNodeFields = leanFields.length > 0 ? deferredFieldsOf(row, leanFields) : [];
+      if (deferredNodeFields.length > 0) scalars.deferredNodeFields = deferredNodeFields;
+      if (scalars.completionSeq !== undefined) noteCompletionFactsBackend(connectionId);
       let digest = parseDigest(row.digest);
       if (scalars.kind === 'digest' && !digest) {
         digest = {
@@ -778,16 +921,66 @@ export function hydrateBackendWorkspaces(
         digest,
       } as ChatNodeState);
     }
+
+    // A page helper's, maintenance run's or Scheduled-only run's tree is newest
+    // the moment it is created, but it is not a conversation the shell should land on: panes
+    // opened "beside chat" would join the hidden tree instead of the user's thread.
+    // Nor is one in Trash. An archived thread stays open: the archive opens one.
+    const requestedActiveTreeId = asString(workspace.active_tree_id);
+    const requestedTree = requestedActiveTreeId ? trees.find((t) => t.id === requestedActiveTreeId) : undefined;
+    const requestedRoot = requestedTree && nodes[requestedTree.rootNodeId];
+    const activeTreeId = requestedTree && requestedRoot && !requestedRoot.deletedAt && isVisibleConversationNode(requestedRoot)
+      ? requestedTree.id
+      : pickLandingTreeId(trees, nodes);
+
+    // Backend bulk loaders return artifact rows under the `contexts` wire key;
+    // accept `artifacts` too so a later key alignment can't silently drop them.
+    const rawArtifacts = Array.isArray(full.contexts)
+      ? full.contexts
+      : Array.isArray(full.artifacts)
+        ? full.artifacts
+        : [];
+    const artifacts: ArtifactEntry[] = rawArtifacts.flatMap((row) => {
+      const ctx = mapContextRow(row);
+      return ctx ? [ctx] : [];
+    });
+
+    // The window writes aiGlobalContext and instructions; the backend's
+    // assistant store owns system (shared SERVER_OWNED_WORKSPACE_SETTINGS).
+    const settings = parseWorkspaceSettings(asString(workspace.settings));
+    const instructions = typeof settings?.instructions === 'string' ? settings.instructions : undefined;
+    const aiGlobalContext = settings?.aiGlobalContext === false ? false : undefined;
+    const system = workspaceSystemOf(settings);
+
+    const project: Project = {
+      id: projectId,
+      ...(connectionId !== LOCAL_BACKEND_CONNECTION_ID ? { backendConnectionId: connectionId } : {}),
+      name: asString(workspace.name) ?? 'Untitled',
+      cwd: asString(workspace.cwd),
+      folders: hydrateFolders(workspace),
+      chatIds,
+      edges,
+      createdAt: asNumber(workspace.created_at, Date.now()),
+      trees,
+      activeTreeId,
+      artifacts,
+      deletedAt: asOptionalNumber(workspace.deleted_at),
+      archivedAt: asOptionalNumber(workspace.archived_at),
+      pinnedAt: asOptionalNumber(workspace.pinned_at),
+      aiGlobalContext,
+      instructions,
+      ...(system ? { system } : {}),
+    };
+    projects.push(project);
   }
 
   // A system workspace (the assistant's) never becomes the active one on load.
-  const isLive = (p: Project) => !p.deletedAt && !p.archivedAt && !isSystemWorkspace(p);
   const preferredIsLive =
     preferredActiveProjectId &&
-    projects.some((p) => p.id === preferredActiveProjectId && isLive(p));
+    isLiveUserWorkspace(projects.find((p) => p.id === preferredActiveProjectId));
   const activeProjectId = preferredIsLive
     ? preferredActiveProjectId!
-    : projects.find(isLive)?.id ?? null;
+    : firstLiveUserWorkspaceId(projects);
 
   return { projects, activeProjectId, nodes };
 }

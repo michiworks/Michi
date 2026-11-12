@@ -69,7 +69,8 @@ export function normalizeWorkspaceCwd(cwd: string): string {
     }
 }
 
-function isWithinRoot(candidate: string, root: string): boolean {
+/** Lexical: candidate is root or below it. Callers that need symlinks resolved use assertWithinCwd. */
+export function isWithinRoot(candidate: string, root: string): boolean {
     const relative = path.relative(root, candidate);
     return relative === ""
         || (relative !== ".." && !relative.startsWith(`..${sep}`) && !path.isAbsolute(relative));

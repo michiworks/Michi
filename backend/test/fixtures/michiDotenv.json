@@ -1,0 +1,25 @@
+{
+  "dotenv": "# Keys for every way of launching Michi\nexport OPENAI_API_KEY=sk-openai\nANTHROPIC_API_KEY=sk-ant-work # work account\nQUOTED=\"quoted value\" # note\nSINGLE='single # kept'\nMULTILINE=\"first\\nsecond\"\nEMPTY=\nCRLF=crlf-value\r\nMICHI_DATA_DIR=/Users/test/michi-data\nMICHI_CONFIG_DIR=/Users/test/michi-config\nMICHI_KIRO_MAX_PROCESSES=7\nMICHI_DEV_RENDERER=1\nMICHI_RENDERER_URL=http://127.0.0.1:5173\nMICHI_REMOTE_TOKEN=from-file\nMICHI_REMOTE_ACCESS=1\nPORT=9999\n",
+  "parsed": {
+    "OPENAI_API_KEY": "sk-openai",
+    "ANTHROPIC_API_KEY": "sk-ant-work",
+    "QUOTED": "quoted value",
+    "SINGLE": "single # kept",
+    "MULTILINE": "first\nsecond",
+    "EMPTY": "",
+    "CRLF": "crlf-value",
+    "MICHI_DATA_DIR": "/Users/test/michi-data",
+    "MICHI_CONFIG_DIR": "/Users/test/michi-config",
+    "MICHI_KIRO_MAX_PROCESSES": "7",
+    "MICHI_DEV_RENDERER": "1",
+    "MICHI_RENDERER_URL": "http://127.0.0.1:5173",
+    "MICHI_REMOTE_TOKEN": "from-file",
+    "MICHI_REMOTE_ACCESS": "1",
+    "PORT": "9999"
+  },
+  "dropped": [
+    "MICHI_REMOTE_TOKEN",
+    "MICHI_DEV_RENDERER",
+    "MICHI_RENDERER_URL"
+  ]
+}

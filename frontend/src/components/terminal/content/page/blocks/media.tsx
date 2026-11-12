@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import { useState } from 'react';
 import { AlertCircle, ImageOff } from 'lucide-react';
 import { loadableImageUrl } from '../../../../../lib/pictureAddress';
 import type { BlockProps } from '../blockTypes';

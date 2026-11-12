@@ -1,13 +1,19 @@
 import React, { useState } from 'react';
-import { isWorkflowRunTerminal, workflowProgress, type WorkflowAction, type WorkflowNodeDto, type WorkflowRunDtoV1 } from 'michi-shared';
+import { isWorkflowContainerNode, isWorkflowRunTerminal, workflowProgress, type WorkflowAction, type WorkflowNodeDto, type WorkflowRunDtoV1, type WorkflowRuntime } from 'michi-shared';
 import MarkdownContent from '../../MarkdownContent';
+import { modelDisplayLabel } from '../../../lib/modelLabel';
+import { resultProseVars } from '../resultProseVars';
 import { formatDurationMs } from '../toolCallGrouping';
-import { WorkflowActions, useLiveNow } from './WorkflowRunCard';
+import { WorkflowActions } from './WorkflowRunCard';
+import { useNow } from '../../../hooks/useNow';
+import { formatClockTime, formatMessageTime } from '../../../lib/messageTime';
 import { WorkflowApprovals } from './WorkflowApprovals';
+import type { WorkflowPendingKind } from '../../../state/workflowDomain';
 import {
   NODE_STATUS_COLOR,
   NODE_STATUS_LABEL,
   RUNTIME_LABEL,
+  RUN_NOUN,
   WORKFLOW_STATUS_COLOR,
   WORKFLOW_STATUS_LABEL,
   formatWorkflowTokens,
@@ -33,17 +39,6 @@ const capsLabel: React.CSSProperties = {
   color: 'var(--term-muted)',
   fontWeight: 500,
 };
-
-const proseVars: React.CSSProperties = {
-  '--tw-prose-body': 'var(--term-mid)',
-  '--tw-prose-headings': 'var(--term-fg)',
-  '--tw-prose-bold': 'var(--term-fg)',
-  '--tw-prose-code': 'var(--term-fg)',
-  '--tw-prose-quotes': 'var(--term-mid)',
-  '--tw-prose-links': 'var(--term-accent)',
-  '--tw-prose-counters': 'var(--term-muted)',
-  '--tw-prose-bullets': 'var(--term-muted)',
-} as React.CSSProperties;
 
 function Section({ label, aside, children }: { label: string; aside?: React.ReactNode; children: React.ReactNode }) {
   return (
@@ -73,17 +68,17 @@ function NodeGlyph({ node }: { node: WorkflowNodeDto }) {
 }
 
 const KIND_LABEL: Record<WorkflowNodeDto['kind'], string> = {
-  phase: 'phase', agent: 'agent', step: 'step', parallel: 'parallel', loop: 'loop', branch: 'branch', group: 'group',
+  phase: 'phase', agent: 'agent', step: 'step', parallel: 'parallel', loop: 'loop', branch: 'branch', group: 'group', watch: 'watch',
 };
 
-function NodeRow({ node, depth, now }: { node: WorkflowNodeDto; depth: number; now: number }) {
-  const container = node.kind === 'phase' || node.kind === 'parallel' || node.kind === 'loop' || node.kind === 'branch' || node.kind === 'group';
+function NodeRow({ node, runtime, depth, now }: { node: WorkflowNodeDto; runtime: WorkflowRuntime; depth: number; now: number }) {
+  const container = isWorkflowContainerNode(node);
   const hasDetail = !!(node.prompt || node.result || node.error);
   const [open, setOpen] = useState(node.status === 'failed' && !!node.error);
   const duration = nodeDurationMs(node, now);
   const meta = [
     node.agentName && node.agentName !== node.title ? node.agentName : undefined,
-    node.model,
+    node.model ? modelDisplayLabel(runtime, node.model, []) : undefined,
     node.iteration !== undefined ? `iteration ${node.iteration}` : undefined,
     node.attempt !== undefined && node.attempt > 1 ? `attempt ${node.attempt}` : undefined,
     node.toolCount ? `${node.toolCount} ${node.toolCount === 1 ? 'tool' : 'tools'}` : undefined,
@@ -99,7 +94,7 @@ function NodeRow({ node, depth, now }: { node: WorkflowNodeDto; depth: number; n
           fontWeight: container ? 500 : 600,
           letterSpacing: container ? 'var(--ls-caps)' : undefined,
           textTransform: container ? 'uppercase' : undefined,
-          color: node.status === 'failed' ? 'var(--term-danger)' : container ? 'var(--term-muted)' : 'var(--term-fg)',
+          color: node.status === 'failed' ? 'var(--term-danger-text)' : container ? 'var(--term-muted)' : 'var(--term-fg)',
           minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
         }}>
           {node.title}
@@ -119,7 +114,7 @@ function NodeRow({ node, depth, now }: { node: WorkflowNodeDto; depth: number; n
         {node.status === 'running' && (node.currentTool || node.statusMessage) && (
           <div style={{ fontFamily: MONO, fontSize: 'var(--fs-xs)', minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
             <span style={{ color: 'var(--term-muted)' }}>now ❯ </span>
-            <span style={{ color: 'var(--term-accent)' }}>{node.currentTool ?? node.statusMessage}</span>
+            <span style={{ color: 'var(--term-run)' }}>{node.currentTool ?? node.statusMessage}</span>
           </div>
         )}
         {node.status !== 'running' && node.statusMessage && !node.result && (
@@ -151,14 +146,14 @@ function NodeRow({ node, depth, now }: { node: WorkflowNodeDto; depth: number; n
             )}
             {node.error && (
               <div>
-                <div style={{ ...capsLabel, fontSize: 'var(--fs-2xs)', marginBottom: 2, color: 'var(--term-danger)' }}>error</div>
-                <pre style={{ margin: 0, fontFamily: MONO, fontSize: 'var(--fs-xs)', whiteSpace: 'pre-wrap', wordBreak: 'break-word', color: 'var(--term-danger)' }}>{node.error}</pre>
+                <div style={{ ...capsLabel, fontSize: 'var(--fs-2xs)', marginBottom: 2, color: 'var(--term-danger-text)' }}>error</div>
+                <pre style={{ margin: 0, fontFamily: MONO, fontSize: 'var(--fs-xs)', whiteSpace: 'pre-wrap', wordBreak: 'break-word', color: 'var(--term-danger-text)' }}>{node.error}</pre>
               </div>
             )}
             {node.result && (
               <div>
                 <div style={{ ...capsLabel, fontSize: 'var(--fs-2xs)', marginBottom: 2 }}>result</div>
-                <MarkdownContent text={node.result} size="sm" style={{ ...proseVars, fontSize: 'var(--fs-md)', lineHeight: 1.55 }} />
+                <MarkdownContent text={node.result} size="sm" style={{ ...resultProseVars, fontSize: 'var(--fs-md)', lineHeight: 1.55 }} />
               </div>
             )}
           </div>
@@ -176,9 +171,9 @@ function NodeRow({ node, depth, now }: { node: WorkflowNodeDto; depth: number; n
  */
 export function WorkflowRunDetail({ run, now, pending, error, onAction, onAnswer, onOpenParent, controls = false, className, style }: {
   run: WorkflowRunDtoV1;
-  /** Clock for elapsed times (useLiveNow). */
+  /** Clock for elapsed times (useNow). */
   now: number;
-  pending?: WorkflowAction | 'answer';
+  pending?: WorkflowPendingKind;
   error?: string;
   onAction?: (action: WorkflowAction) => void;
   onAnswer?: (approvalId: string, optionId: string) => void;
@@ -210,7 +205,7 @@ export function WorkflowRunDetail({ run, now, pending, error, onAction, onAnswer
       )}
       {run.description && <div style={{ fontSize: 'var(--fs-md)', color: 'var(--term-mid)', lineHeight: 1.5 }}>{run.description}</div>}
       {(run.statusDetail && run.status !== 'running') || error ? (
-        <div role={error ? 'alert' : undefined} style={{ fontSize: 'var(--fs-sm)', color: error || run.status === 'failed' ? 'var(--term-danger)' : run.status === 'paused' ? 'var(--term-select)' : 'var(--term-muted)' }}>
+        <div role={error ? 'alert' : undefined} style={{ fontSize: 'var(--fs-sm)', color: error || run.status === 'failed' ? 'var(--term-danger-text)' : run.status === 'paused' ? 'var(--term-select)' : 'var(--term-muted)' }}>
           {error ?? run.statusDetail}
         </div>
       ) : null}
@@ -236,8 +231,8 @@ export function WorkflowRunDetail({ run, now, pending, error, onAction, onAnswer
         </Section>
       )}
 
-      <Section label={run.runtime === 'claude' ? 'agents' : 'steps'} aside={progress.total > 0 ? (
-        <span style={{ fontFamily: MONO, fontSize: 'var(--fs-xs)', color: progress.running > 0 ? 'var(--term-accent)' : 'var(--term-muted)' }}>
+      <Section label={RUN_NOUN[run.runtime]} aside={progress.total > 0 ? (
+        <span style={{ fontFamily: MONO, fontSize: 'var(--fs-xs)', color: progress.running > 0 ? 'var(--term-run)' : 'var(--term-muted)' }}>
           {progress.done}/{progress.total}{progress.running > 0 ? ` · ${progress.running} running` : ''}{progress.failed > 0 ? ` · ${progress.failed} failed` : ''}
         </span>
       ) : undefined}>
@@ -245,7 +240,7 @@ export function WorkflowRunDetail({ run, now, pending, error, onAction, onAnswer
           <div style={{ fontSize: 'var(--fs-sm)', color: 'var(--term-muted)' }}>{live ? 'Waiting for the first step…' : 'The runtime reported no steps for this workflow.'}</div>
         ) : (
           <ol aria-label="Workflow steps" style={{ margin: 0, padding: 0, display: 'flex', flexDirection: 'column', gap: 7 }}>
-            {rows.map(({ node, depth }) => <NodeRow key={node.id} node={node} depth={depth} now={now} />)}
+            {rows.map(({ node, depth }) => <NodeRow key={node.id} node={node} runtime={run.runtime} depth={depth} now={now} />)}
           </ol>
         )}
       </Section>
@@ -256,10 +251,10 @@ export function WorkflowRunDetail({ run, now, pending, error, onAction, onAnswer
             {run.log.map((entry, index) => (
               <li key={`${entry.at}-${index}`} style={{ listStyle: 'none', display: 'flex', gap: 8, fontSize: 'var(--fs-sm)', lineHeight: 1.45, minWidth: 0 }}>
                 <span style={{ fontFamily: MONO, fontSize: 'var(--fs-xs)', color: 'var(--term-faint)', flexShrink: 0 }}>
-                  {new Date(entry.at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })}
+                  {formatClockTime(entry.at)}
                 </span>
                 {entry.nodeId && <span style={{ fontFamily: MONO, fontSize: 'var(--fs-xs)', color: 'var(--term-muted)', flexShrink: 0 }}>{entry.nodeId}</span>}
-                <span style={{ color: entry.severity === 'error' ? 'var(--term-danger)' : entry.severity === 'warning' ? 'var(--term-select)' : 'var(--term-mid)', overflowWrap: 'anywhere' }}>{entry.text}</span>
+                <span style={{ color: entry.severity === 'error' ? 'var(--term-danger-text)' : entry.severity === 'warning' ? 'var(--term-select)' : 'var(--term-mid)', overflowWrap: 'anywhere' }}>{entry.text}</span>
               </li>
             ))}
           </ol>
@@ -269,7 +264,7 @@ export function WorkflowRunDetail({ run, now, pending, error, onAction, onAnswer
       {run.result && (
         <Section label="result">
           <div data-testid="workflow-result" style={{ border: '1px solid var(--term-line)', background: 'var(--term-surface)', padding: '8px 10px' }}>
-            <MarkdownContent text={run.result} size="sm" style={{ ...proseVars, fontSize: 'var(--fs-lg)', lineHeight: 1.55 }} />
+            <MarkdownContent text={run.result} size="sm" style={{ ...resultProseVars, fontSize: 'var(--fs-lg)', lineHeight: 1.55 }} />
           </div>
         </Section>
       )}
@@ -281,7 +276,7 @@ export function WorkflowRunDetail({ run, now, pending, error, onAction, onAnswer
         {tokens && (<><span aria-hidden>·</span><span>{tokens}</span></>)}
         {run.usage?.toolUses ? (<><span aria-hidden>·</span><span>{run.usage.toolUses} tools</span></>) : null}
         <span aria-hidden>·</span>
-        <span>started {new Date(run.startedAt).toLocaleString()}</span>
+        <span>started {formatMessageTime(run.startedAt, new Date(now))}</span>
         {onOpenParent && run.nodeId && (
           <button type="button" onClick={onOpenParent} style={{ marginLeft: 'auto', border: 0, padding: 0, background: 'transparent', color: 'var(--term-accent)', font: 'inherit', cursor: 'pointer' }}>
             ↰ Open chat
@@ -294,7 +289,7 @@ export function WorkflowRunDetail({ run, now, pending, error, onAction, onAnswer
 
 export function WorkflowRunPane({ run, pending, error, onClose, onAction, onAnswer, onOpenParent }: {
   run: WorkflowRunDtoV1;
-  pending?: WorkflowAction | 'answer';
+  pending?: WorkflowPendingKind;
   error?: string;
   onClose: () => void;
   onAction?: (action: WorkflowAction) => void;
@@ -302,7 +297,7 @@ export function WorkflowRunPane({ run, pending, error, onClose, onAction, onAnsw
   onOpenParent?: () => void;
 }) {
   const live = !isWorkflowRunTerminal(run.status);
-  const now = useLiveNow(live);
+  const now = useNow(1_000, live);
   const color = WORKFLOW_STATUS_COLOR[run.status];
   return (
     <section data-testid="workflow-run-pane" style={{ display: 'flex', flexDirection: 'column', minWidth: 0, height: '100%', background: 'var(--term-bg)', color: 'var(--term-fg)', fontFamily: 'var(--ui-font)' }}>

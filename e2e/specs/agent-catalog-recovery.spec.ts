@@ -102,5 +102,6 @@ test('a missing Workspace folder stops background retries and shows a repairable
   await trigger.click();
   await expect(page.getByRole('menuitem', { name: 'Plan', exact: true })).toBeVisible();
   expect(modeRequests).toBe(initialModes + 1);
-  await expect(page.getByText(error, { exact: true })).toHaveCount(0);
+  // The closed menu's fade-out stays inert in the DOM: the fast-forwarded clock delays its exit.
+  await expect(page.getByRole('menu', { name: 'Agents', exact: true }).getByText(error, { exact: true })).toHaveCount(0);
 });

@@ -10,6 +10,7 @@ import {
   type ScheduledJobRunTrigger,
   type ScheduledJobSchedule,
   type ScheduledJobSessionMode,
+  type ScheduledJobVisibility,
 } from 'michi-shared';
 import { getDb, runInTransaction } from '../db';
 
@@ -27,6 +28,7 @@ interface JobRow {
   reasoning: string | null;
   permission_mode: string;
   session_mode: string;
+  visibility?: string | null;
   persistent_node_id: string | null;
   notify: number;
   enabled: number;
@@ -61,6 +63,8 @@ interface RunRow {
   notify_kind: string | null;
   attention: string | null;
   claimed_by: string;
+  /** Computed by RUN_COLUMNS: the run's thread is still Scheduled-only. */
+  scheduled_only?: number | null;
 }
 
 /** Everything the scheduler needs to persist about a job. */
@@ -80,6 +84,8 @@ export interface ScheduledJobRecord {
   reasoning: string | null;
   permissionMode: ChatPermissionMode;
   sessionMode: ScheduledJobSessionMode;
+  /** Absent: workspace. */
+  visibility?: ScheduledJobVisibility;
   persistentNodeId: string | null;
   notify: boolean;
   enabled: boolean;
@@ -102,7 +108,24 @@ export interface ScheduledJobRunRecord extends ScheduledJobRunDto {
   claimedBy: string;
 }
 
+/** How long past its time limit an unconfirmed execution keeps blocking admission. */
+const UNCONFIRMED_EXECUTION_GRACE_MS = 10 * 60_000;
+/** When claim x (joined to its job j, which may be gone) stops blocking unconfirmed: its start, plus the
+ * job's time limit (the default once the job is deleted), plus the grace. */
+const CLAIM_RELEASES_AT = `(CAST(x.acquired_at + COALESCE(j.timeout_seconds, ${SCHEDULED_JOB_LIMITS.defaultTimeoutSeconds}) * 1000 AS INTEGER) + ${UNCONFIRMED_EXECUTION_GRACE_MS})`;
+const AUTO_RELEASE_REASON = `Auto-released after the time limit plus ${UNCONFIRMED_EXECUTION_GRACE_MS / 60_000} minutes; the old process may still have been running`;
+
+interface ReleasedExecution {
+  runId: string;
+  jobId: string;
+  workspaceId: string;
+  acquiredAt: number;
+  releasesAt: number;
+}
+
 const JOB_COLUMNS = `j.*, (SELECT r.id FROM scheduled_job_runs r WHERE r.job_id = j.id AND r.status = 'running' ORDER BY r.started_at DESC LIMIT 1) AS active_run_id`;
+const RUN_COLUMNS = `r.*, EXISTS (SELECT 1 FROM nodes n WHERE n.id = r.node_id AND n.scheduled_only_job_id IS NOT NULL
+  AND n.purged_at IS NULL) AS scheduled_only`;
 
 function parseScheduleColumn(raw: string): ScheduledJobSchedule {
   const value = JSON.parse(raw) as ScheduledJobSchedule;
@@ -125,6 +148,7 @@ function toRecord(row: JobRow): ScheduledJobRecord {
     reasoning: row.reasoning,
     permissionMode: isChatPermissionMode(row.permission_mode) ? row.permission_mode : 'ask',
     sessionMode: row.session_mode === 'persistent' ? 'persistent' : 'fresh',
+    visibility: row.visibility === 'scheduled' ? 'scheduled' : 'workspace',
     persistentNodeId: row.persistent_node_id,
     notify: row.notify === 1,
     enabled: row.enabled === 1,
@@ -154,6 +178,7 @@ export function toJobDto(record: ScheduledJobRecord, activeRunId: string | null)
     reasoning: record.reasoning,
     permissionMode: record.permissionMode,
     sessionMode: record.sessionMode,
+    visibility: record.visibility ?? 'workspace',
     notify: record.notify,
     enabled: record.enabled,
     autoPaused: record.autoPaused,
@@ -189,6 +214,7 @@ function toRunRecord(row: RunRow): ScheduledJobRunRecord {
     notifyKind: row.notify_kind === 'finished' || row.notify_kind === 'attention' ? row.notify_kind : null,
     attention: row.attention === 'approval' || row.attention === 'input' ? row.attention : null,
     claimedBy: row.claimed_by,
+    scheduledOnly: row.scheduled_only === 1,
   };
 }
 
@@ -206,6 +232,7 @@ export function toRunDto(record: ScheduledJobRunRecord): ScheduledJobRunDto {
     finishedAt: record.finishedAt,
     summary: record.summary,
     error: record.error,
+    scheduledOnly: record.scheduledOnly === true,
   };
 }
 
@@ -249,6 +276,7 @@ const UPDATE_COLUMNS: Record<keyof JobUpdate, string> = {
   reasoning: 'reasoning',
   permissionMode: 'permission_mode',
   sessionMode: 'session_mode',
+  visibility: 'visibility',
   persistentNodeId: 'persistent_node_id',
   notify: 'notify',
   enabled: 'enabled',
@@ -267,6 +295,19 @@ function columnValue(key: keyof JobUpdate, value: unknown): string | number | nu
   if (key === 'schedule') return JSON.stringify(value);
   if (typeof value === 'boolean') return value ? 1 : 0;
   return value as string | number;
+}
+
+/**
+ * Whether an unattended run may still write: it is running, waits for no
+ * approval or input, and is claimed under `claimedBy`'s current, unexpired
+ * lease. ScheduledJobsRepository.ownsRun has no attention rule on purpose: the
+ * scheduler still records and finishes a run that waits for approval.
+ */
+export function ownsUnattendedRun(runId: string, claimedBy: string, now: number): boolean {
+  return !!getDb().prepare(`SELECT 1 FROM scheduled_job_runs r JOIN scheduler_lease l ON l.id = 1
+    JOIN scheduler_execution_claims x ON x.run_id = r.id AND x.holder = l.holder AND x.generation = l.generation
+    WHERE r.id = ? AND r.status = 'running' AND r.claimed_by = ? AND r.attention IS NULL AND l.holder = ? AND l.expires_at > ?`)
+    .get(runId, claimedBy, claimedBy, now);
 }
 
 export class ScheduledJobsRepository {
@@ -293,8 +334,9 @@ export class ScheduledJobsRepository {
       INSERT INTO scheduled_jobs (
         id, owner_user_id, workspace_id, name, prompt, schedule, runtime_id, provider_id, model_id, reasoning,
         permission_mode, session_mode, persistent_node_id, notify, enabled, auto_paused, consecutive_failures,
-        timeout_seconds, next_run_at, last_run_at, last_status, last_error, created_at, updated_at, conversation_cursor, execution_kind
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        timeout_seconds, next_run_at, last_run_at, last_status, last_error, created_at, updated_at, conversation_cursor, execution_kind,
+        visibility
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       record.id, record.ownerUserId, record.workspaceId, record.name, record.prompt, JSON.stringify(record.schedule),
       record.runtimeId, record.providerId, record.modelId, record.reasoning,
@@ -303,6 +345,7 @@ export class ScheduledJobsRepository {
       record.timeoutSeconds, record.nextRunAt, record.lastRunAt, record.lastStatus, record.lastError,
       record.createdAt, record.updatedAt,
       record.conversationCursor ?? null, record.executionKind ?? 'scheduled',
+      record.visibility ?? 'workspace',
     );
   }
 
@@ -341,6 +384,8 @@ export class ScheduledJobsRepository {
       }
       // A previous holder may still be starting/cancelling an executor. Lease
       // takeover fences commits but cannot prove external work has stopped.
+      // Claims past CLAIM_RELEASES_AT no longer count here or below:
+      // acquireOwnership releases them (releaseExpiredExecutions) before admission.
       const foreign = getDb().prepare(`SELECT 1 FROM scheduler_execution_claims
         WHERE holder != ? OR generation != ? OR quarantined_at IS NOT NULL LIMIT 1`).get(input.lease.holder, input.lease.generation);
       if (foreign) return { run: null, reason: 'unresolved_execution' };
@@ -371,12 +416,12 @@ export class ScheduledJobsRepository {
   }
 
   getRun(id: string): ScheduledJobRunRecord | null {
-    const row = getDb().prepare('SELECT * FROM scheduled_job_runs WHERE id = ?').get(id) as unknown as RunRow | undefined;
+    const row = getDb().prepare(`SELECT ${RUN_COLUMNS} FROM scheduled_job_runs r WHERE r.id = ?`).get(id) as unknown as RunRow | undefined;
     return row ? toRunRecord(row) : null;
   }
 
   listRuns(jobId: string, limit: number = SCHEDULED_JOB_LIMITS.runHistoryPerJob): ScheduledJobRunRecord[] {
-    const rows = getDb().prepare('SELECT * FROM scheduled_job_runs WHERE job_id = ? ORDER BY started_at DESC LIMIT ?')
+    const rows = getDb().prepare(`SELECT ${RUN_COLUMNS} FROM scheduled_job_runs r WHERE r.job_id = ? ORDER BY r.started_at DESC LIMIT ?`)
       .all(jobId, limit) as unknown as RunRow[];
     return rows.map(toRunRecord);
   }
@@ -416,21 +461,17 @@ export class ScheduledJobsRepository {
       if (progress && fields.status === 'succeeded') {
         // Cursor CAS and terminal result commit together. A stale/cancelled/blocked run or an
         // expired scheduler lease cannot consume input, even if its executor finishes late.
-        let maintenanceReady = true;
-        if (progress.maintenanceConfigRevision !== undefined) {
-          const config = getDb().prepare(`SELECT c.revision,c.completion_cursor,c.enabled,c.paused,j.enabled AS job_enabled,j.auto_paused,
-              r.status,r.claimed_by,r.attention,l.holder,l.expires_at
+        let maintenanceReady = ownsUnattendedRun(runId, progress.claimedBy, fields.finishedAt);
+        if (maintenanceReady && progress.maintenanceConfigRevision !== undefined) {
+          const config = getDb().prepare(`SELECT c.revision,c.completion_cursor,c.enabled,c.paused,j.enabled AS job_enabled,j.auto_paused
             FROM scheduled_job_runs r JOIN scheduled_jobs j ON j.id=r.job_id
-            JOIN page_maintenance_configs c ON c.job_id=j.id JOIN scheduler_lease l ON l.id=1
+            JOIN page_maintenance_configs c ON c.job_id=j.id
             WHERE r.id=? AND j.workspace_id=? AND c.workspace_id=? AND c.owner_user_id=?`)
             .get(runId, progress.workspaceId, progress.workspaceId, progress.maintenanceOwnerUserId ?? 'local-user') as
-            {revision:number;completion_cursor:number;enabled:number;paused:number;job_enabled:number;auto_paused:number;
-              status:string;claimed_by:string;attention:string|null;holder:string;expires_at:number}|undefined;
+            {revision:number;completion_cursor:number;enabled:number;paused:number;job_enabled:number;auto_paused:number}|undefined;
           maintenanceReady = !!config && config.revision === progress.maintenanceConfigRevision
             && config.completion_cursor === progress.after && config.enabled === 1 && config.paused === 0
-            && config.job_enabled === 1 && config.auto_paused === 0 && config.status === 'running'
-            && config.claimed_by === progress.claimedBy && config.attention === null
-            && config.holder === progress.claimedBy && config.expires_at > fields.finishedAt;
+            && config.job_enabled === 1 && config.auto_paused === 0;
           // A managed empty batch deliberately avoids a model/plan and leaves the
           // cursor unchanged. Any forward movement must name its durable terminal plan.
           if (maintenanceReady && !progress.maintenancePlanId && progress.nextAfter !== progress.after) maintenanceReady = false;
@@ -445,10 +486,8 @@ export class ScheduledJobsRepository {
           }
         }
         const advanced = maintenanceReady ? getDb().prepare(`UPDATE scheduled_jobs SET conversation_cursor = ?
-          WHERE id = (SELECT job_id FROM scheduled_job_runs WHERE id = ? AND status = 'running'
-            AND claimed_by = ? AND attention IS NULL) AND workspace_id = ? AND conversation_cursor = ?
-            AND EXISTS (SELECT 1 FROM scheduler_lease WHERE id = 1 AND holder = ? AND expires_at > ?)`)
-          .run(progress.nextAfter, runId, progress.claimedBy, progress.workspaceId, progress.after, progress.claimedBy, fields.finishedAt)
+          WHERE id = (SELECT job_id FROM scheduled_job_runs WHERE id = ?) AND workspace_id = ? AND conversation_cursor = ?`)
+          .run(progress.nextAfter, runId, progress.workspaceId, progress.after)
           : { changes: 0 };
         if (Number(advanced.changes) === 1 && progress.maintenanceConfigRevision !== undefined) {
           const updated = getDb().prepare(`UPDATE page_maintenance_configs SET completion_cursor=?,updated_at=?
@@ -561,10 +600,16 @@ export class ScheduledJobsRepository {
   }
 
   blockedExecutions(): ScheduledJobBlockedExecution[] {
-    return (getDb().prepare(`SELECT run_id, job_id, workspace_id, reason, quarantined_at FROM scheduler_execution_claims
-      WHERE quarantined_at IS NOT NULL ORDER BY quarantined_at`).all() as Array<{
-      run_id: string; job_id: string; workspace_id: string; reason: string; quarantined_at: number;
-    }>).map(row => ({ runId: row.run_id, jobId: row.job_id, workspaceId: row.workspace_id, reason: row.reason, since: row.quarantined_at }));
+    return (getDb().prepare(`SELECT x.run_id, x.job_id, x.workspace_id, x.reason, x.quarantined_at, ${CLAIM_RELEASES_AT} AS releases_at
+      FROM scheduler_execution_claims x LEFT JOIN scheduled_jobs j ON j.id = x.job_id
+      WHERE x.quarantined_at IS NOT NULL ORDER BY x.quarantined_at`).all() as Array<{
+      run_id: string; job_id: string; workspace_id: string; reason: string; quarantined_at: number; releases_at: number;
+    }>).map(row => ({ runId: row.run_id, jobId: row.job_id, workspaceId: row.workspace_id, reason: row.reason,
+      since: row.quarantined_at, releasesAt: row.releases_at }));
+  }
+
+  private deleteClaim(runId: string): number {
+    return Number(getDb().prepare('DELETE FROM scheduler_execution_claims WHERE run_id = ?').run(runId).changes);
   }
 
   confirmExecutionStopped(runId: string): 'released' | 'missing' | 'active' {
@@ -577,8 +622,39 @@ export class ScheduledJobsRepository {
         try { process.kill(row.process_id, 0); return 'active'; }
         catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ESRCH') return 'active'; }
       }
-      getDb().prepare('DELETE FROM scheduler_execution_claims WHERE run_id = ?').run(runId);
+      this.deleteClaim(runId);
       return 'released';
+    });
+  }
+
+  /**
+   * A foreign or quarantined claim past CLAIM_RELEASES_AT is released without
+   * proof that its execution stopped: the user accepted that an old run might
+   * overlap a new one (cleanup plan D13) over admission waiting indefinitely
+   * for confirmation. Lease handovers get the same bound. A live claim of this
+   * lease is not released by time; its own timeout quarantines it first.
+   */
+  releaseExpiredExecutions(lease: SchedulerLease, now: number): ReleasedExecution[] {
+    return runInTransaction(() => {
+      if (!this.ownsLease(lease, now)) return [];
+      const expired = getDb().prepare(`SELECT x.run_id, x.job_id, x.workspace_id, x.acquired_at, ${CLAIM_RELEASES_AT} AS releases_at
+        FROM scheduler_execution_claims x LEFT JOIN scheduled_jobs j ON j.id = x.job_id
+        WHERE (x.holder != ? OR x.generation != ? OR x.quarantined_at IS NOT NULL) AND ${CLAIM_RELEASES_AT} <= ?`)
+        .all(lease.holder, lease.generation, now) as Array<{
+        run_id: string; job_id: string; workspace_id: string; acquired_at: number; releases_at: number;
+      }>;
+      for (const claim of expired) {
+        // A run fenced as interrupted keeps its cause; the release is added to it.
+        getDb().prepare(`UPDATE scheduled_job_runs SET finished_at = COALESCE(finished_at, ?),
+            error = CASE WHEN status = 'running' OR error IS NULL THEN ? ELSE error || '. ' || ? END,
+            notify_state = CASE WHEN status = 'running' AND notify_state = 'pending' AND notify_kind = 'attention' THEN 'none' ELSE notify_state END,
+            status = 'interrupted'
+          WHERE id = ? AND status IN ('running', 'interrupted')`)
+          .run(now, AUTO_RELEASE_REASON, AUTO_RELEASE_REASON, claim.run_id);
+        this.deleteClaim(claim.run_id);
+      }
+      return expired.map(claim => ({ runId: claim.run_id, jobId: claim.job_id, workspaceId: claim.workspace_id,
+        acquiredAt: claim.acquired_at, releasesAt: claim.releases_at }));
     });
   }
 
@@ -595,7 +671,7 @@ export class ScheduledJobsRepository {
         try { process.kill(claim.process_id, 0); }
         catch (error) {
           if ((error as NodeJS.ErrnoException).code !== 'ESRCH') continue;
-          reaped += Number(getDb().prepare('DELETE FROM scheduler_execution_claims WHERE run_id = ?').run(claim.run_id).changes);
+          reaped += this.deleteClaim(claim.run_id);
         }
       }
       return reaped;

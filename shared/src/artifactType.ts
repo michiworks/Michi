@@ -10,3 +10,8 @@ export function artifactTypeForPath(path: string): 'doc' | 'file' | 'image' {
 export function artifactHasImagePreview(path: string): boolean {
   return /\.(png|jpe?g|gif|webp)$/i.test(path);
 }
+
+/** An artifact's identity in its workspace: names that differ only by case are one artifact. */
+export function artifactNameKey(name: string): string {
+  return name.toLowerCase();
+}

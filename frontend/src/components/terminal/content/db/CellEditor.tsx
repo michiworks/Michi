@@ -3,12 +3,13 @@ import { Check, MoveRight } from 'lucide-react';
 import type { MichiDatabase, MichiDbColumn, MichiDbEditOp, MichiDbRow } from 'michi-shared';
 import { DbPopover } from './DbPopover';
 import { OptionPill } from './CellView';
-import { convertValue, isDateValue, writableOptions, type CellValue } from './dbModel';
+import { convertValue, isDateValue, parseNumberText, writableOptions, type CellValue } from './dbModel';
 import { columnName, optionName } from './dbLabels';
 import { AUTO_STATE } from './dbOps';
 import { TASK_LIMITS } from 'michi-shared';
 import { ThreadStateDot, type MichiDotKind } from '../ThreadStateDot';
 import { liveConversation, threadCardKind, useLiveThreads, type ConversationChoice } from './liveThreads';
+import { isImeComposing } from '../../../../lib/ime';
 
 /** `ops` go before the cell's own change: a new option has to exist before a cell can hold it. */
 export interface CellEditorProps {
@@ -25,7 +26,6 @@ export interface CellEditorProps {
   onRefused?(reason: string): void;
 }
 
-export const composing = (event: React.KeyboardEvent) => event.nativeEvent.isComposing || event.keyCode === 229;
 /** Keys the page listens for (Esc closes the peek or clears a selection, ↑/↓ move the peek) stay with the editor. */
 const own = (event: React.KeyboardEvent) => event.stopPropagation();
 
@@ -87,10 +87,11 @@ function TextEditor({ db, column, value, onSave, onCancel }: CellEditorProps) {
         }}
         onKeyDown={(event) => {
           own(event);
+          if (isImeComposing(event)) return;
           if (event.key === 'Escape') {
             event.preventDefault();
             finish(false);
-          } else if (event.key === 'Enter' && !composing(event)) {
+          } else if (event.key === 'Enter') {
             event.preventDefault();
             finish(true);
           }
@@ -99,15 +100,6 @@ function TextEditor({ db, column, value, onSave, onCancel }: CellEditorProps) {
       {bad && <span className="michi-db-editor__error" role="alert">{bad}</span>}
     </span>
   );
-}
-
-/** What typed number text means: empty clears the cell; anything that is not a number is refused. Progress is typed in percent. */
-export function parseNumberText(text: string, pct: boolean): { ok: true; value: number | null } | { ok: false } {
-  const t = text.trim();
-  if (t === '') return { ok: true, value: null };
-  const n = Number(t.replace(/[,%\s]/g, ''));
-  if (!Number.isFinite(n)) return { ok: false };
-  return { ok: true, value: pct ? Math.min(1, Math.max(0, n / 100)) : n };
 }
 
 /** Enter saves a number (or clears the cell when empty) and stays open on anything else; leaving with a non-number gives it up. */
@@ -151,10 +143,11 @@ function NumberEditor({ db, column, value, onSave, onCancel }: CellEditorProps) 
         }}
         onKeyDown={(event) => {
           own(event);
+          if (isImeComposing(event)) return;
           if (event.key === 'Escape') {
             event.preventDefault();
             finish(false);
-          } else if (event.key === 'Enter' && !composing(event)) {
+          } else if (event.key === 'Enter') {
             event.preventDefault();
             finish(true);
           }
@@ -199,7 +192,7 @@ function DateEditor({ db, column, value, onSave, onCancel }: CellEditorProps) {
     if (event.key === 'Escape') {
       event.preventDefault();
       finish(false);
-    } else if (event.key === 'Enter' && !composing(event)) {
+    } else if (event.key === 'Enter' && !isImeComposing(event)) {
       event.preventDefault();
       finish(true);
     }
@@ -301,7 +294,7 @@ function OptionsEditor({ db, column, value, anchor, onSave, onCancel, onRefused 
             value={search}
             onChange={(event) => setSearch(event.currentTarget.value)}
             onKeyDown={(event) => {
-              if (event.key === 'Enter' && !composing(event)) {
+              if (event.key === 'Enter' && !isImeComposing(event)) {
                 event.preventDefault();
                 // The first option that can be picked; a worked-out status never is.
                 const first = q ? shown.find((o) => !locked(o.value)) : undefined;
@@ -439,7 +432,7 @@ function ThreadsEditor({ db, column, value, row, anchor, onSave, onCancel }: Cel
             value={search}
             onChange={(event) => setSearch(event.currentTarget.value)}
             onKeyDown={(event) => {
-              if (event.key !== 'Enter' || composing(event)) return;
+              if (event.key !== 'Enter' || isImeComposing(event)) return;
               event.preventDefault();
               if (q) {
                 const first = shown[0];

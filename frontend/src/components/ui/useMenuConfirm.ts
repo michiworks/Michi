@@ -1,4 +1,5 @@
 import { useCallback, useLayoutEffect, useRef, useState } from 'react';
+import { prefersReducedMotion } from '../../hooks/useReducedMotion';
 
 // Matches --m-clickDelay and ui-menu-blink. Navigation never uses this delay.
 export const MENU_CONFIRM_MS = 160;
@@ -16,7 +17,7 @@ export function useMenuConfirm() {
   }, []);
   const confirm = useCallback((id: string, action: () => void) => {
     if (timer.current !== null) return;
-    if (document.documentElement.dataset.reduceMotion === 'on' || window.matchMedia?.('(prefers-reduced-motion: reduce)').matches) {
+    if (prefersReducedMotion()) {
       action();
       return;
     }

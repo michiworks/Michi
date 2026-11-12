@@ -285,8 +285,6 @@ async function installPerfInit(page: Page, paneCount: number) {
     window.sessionStorage.clear();
     window.localStorage.setItem('michi:migrated', '1');
     window.localStorage.setItem('michi:v1:state', JSON.stringify(state));
-    window.localStorage.setItem('michi:perf', '1');
-    window.localStorage.setItem('michi:ff:markdownRenderer', 'react-markdown');
     if (streamingMarkdownBlocks === '0' || streamingMarkdownBlocks === '1') {
       window.localStorage.setItem('michi:ff:streamingMarkdownBlocks', streamingMarkdownBlocks);
     }

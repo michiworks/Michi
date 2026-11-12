@@ -1,41 +1,20 @@
 import { useMemo } from 'react';
+import { findUrlMatches } from '../lib/linkify';
+import { isLocalOnlyHref } from './rehypeLocalOnly';
 
-const URL_RE = /https?:\/\/[^\s<>()'"]+/g;
-const WWW_RE = /(?<![/@\w.-])www\.[^\s<>()'"]+/g;
-const TRAILING_PUNCT_RE = /[.,;:!?]+$/;
+/** The URLs in one line of code that become links, plain or highlighted. */
+export function codeLineLinks(line: string, httpsLinksOnly: boolean) {
+  const matches = findUrlMatches(line, { schemeOnly: true });
+  return httpsLinksOnly ? matches.filter(entry => isLocalOnlyHref(entry.href)) : matches;
+}
 
-function linkifyLine(line: string): React.ReactNode {
-  const matches: { start: number; end: number; url: string; href: string }[] = [];
-
-  URL_RE.lastIndex = 0;
-  let m: RegExpExecArray | null;
-  while ((m = URL_RE.exec(line)) !== null) {
-    let url = m[0];
-    const trailing = TRAILING_PUNCT_RE.exec(url)?.[0] ?? '';
-    if (trailing) url = url.slice(0, url.length - trailing.length);
-    matches.push({ start: m.index, end: m.index + url.length + trailing.length, url, href: url });
-  }
-
-  WWW_RE.lastIndex = 0;
-  while ((m = WWW_RE.exec(line)) !== null) {
-    let url = m[0];
-    const trailing = TRAILING_PUNCT_RE.exec(url)?.[0] ?? '';
-    if (trailing) url = url.slice(0, url.length - trailing.length);
-    matches.push({ start: m.index, end: m.index + url.length + trailing.length, url, href: `https://${url}` });
-  }
-
-  if (!matches.length) return line;
-  matches.sort((a, b) => a.start - b.start);
-  const deduped: typeof matches = [];
-  for (const entry of matches) {
-    const prev = deduped[deduped.length - 1];
-    if (prev && entry.start < prev.start + prev.url.length) continue;
-    deduped.push(entry);
-  }
+function linkifyLine(line: string, httpsLinksOnly: boolean): React.ReactNode {
+  const linked = codeLineLinks(line, httpsLinksOnly);
+  if (!linked.length) return line;
 
   const parts: React.ReactNode[] = [];
   let lastIndex = 0;
-  for (const { start, end, url, href } of deduped) {
+  for (const { start, end, url, href } of linked) {
     if (start > lastIndex) parts.push(line.slice(lastIndex, start));
     parts.push(
       <a key={start} href={href} target="_blank" rel="noopener noreferrer">
@@ -54,10 +33,13 @@ export default function CodeBlockPlainLines({
   source,
   tail,
   lineNumbers = false,
+  httpsLinksOnly = false,
 }: {
   source: string;
   tail?: React.ReactNode;
   lineNumbers?: boolean;
+  /** Only https URLs become links, as rehypeLocalOnly does for the rest of the Markdown. */
+  httpsLinksOnly?: boolean;
 }) {
   const lines = useMemo(() => source.split('\n'), [source]);
   return (
@@ -68,7 +50,7 @@ export default function CodeBlockPlainLines({
           data-line-number={lineNumbers ? index + 1 : undefined}
           key={index}
         >
-          {linkifyLine(line)}
+          {linkifyLine(line, httpsLinksOnly)}
           {index === lines.length - 1 ? tail : null}
         </span>
       ))}

@@ -130,6 +130,25 @@ describe('scheduled job routes', () => {
     }
   });
 
+  test('create approval is off by default and saved apart from the thread mode', async () => {
+    await startServer(true);
+    const original = await request('GET', '/api/scheduled-jobs/settings');
+    assert.equal(original.body.requireCreateApproval, false);
+    try {
+      await request('PATCH', '/api/scheduled-jobs/settings', { body: { sessionMode: 'fresh' } });
+      const on = await request('PATCH', '/api/scheduled-jobs/settings', { body: { requireCreateApproval: true } });
+      assert.equal(on.status, 200);
+      assert.deepEqual(on.body, { sessionMode: 'fresh', requireCreateApproval: true });
+      assert.deepEqual((await request('GET', '/api/scheduled-jobs/settings')).body, { sessionMode: 'fresh', requireCreateApproval: true });
+      const mode = await request('PATCH', '/api/scheduled-jobs/settings', { body: { sessionMode: 'persistent' } });
+      assert.deepEqual(mode.body, { sessionMode: 'persistent', requireCreateApproval: true });
+      assert.equal((await request('PATCH', '/api/scheduled-jobs/settings', { body: { requireCreateApproval: 'yes' } })).status, 400);
+      assert.equal((await request('PATCH', '/api/scheduled-jobs/settings', { body: {} })).status, 400);
+    } finally {
+      await request('PATCH', '/api/scheduled-jobs/settings', { body: original.body });
+    }
+  });
+
   test('creates, lists, updates and deletes jobs', async () => {
     await startServer(true);
     const created = await request('POST', '/api/scheduled-jobs', { body });
@@ -191,6 +210,7 @@ describe('scheduled job routes', () => {
     assert.deepEqual(listed.body.scheduler.blockedExecutions, [{
       runId: 'legacy-run', jobId: created.body.id, workspaceId: 'ws-1',
       reason: 'An earlier Michi version did not confirm that this execution stopped', since: 100,
+      releasesAt: 100 + 30 * 60_000 + 10 * 60_000, // the job's default time limit plus the grace
     }]);
     closeDb();
     initDb();

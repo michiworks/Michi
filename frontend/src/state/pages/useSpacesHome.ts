@@ -1,7 +1,5 @@
 import { useCallback, useEffect, useRef } from 'react';
 import type {
-  HomeConversationsDto,
-  HomeSectionKey,
   ProgressCardDto,
   SpaceActivityItem,
   SpacesHomeDto,
@@ -10,7 +8,6 @@ import type {
   WorkspaceHomeSummaryDto,
 } from 'michi-shared';
 import {
-  fetchHomeConversations,
   fetchHomeSections,
   fetchProgressCards,
   fetchSpaceActivity,
@@ -18,8 +15,9 @@ import {
   fetchWorkspaceHome,
   fetchWorkspaceHomes,
 } from '../../services/api/spacesHome';
+import { remoteFirstPainted, whenRemoteFirstPaint } from '../remoteFirstPaint';
 import { subscribePageChanges } from './pageEvents';
-import { commitResourceRead, failResourceRead, resourceKey, startResourceRead, useResource } from './resourceCache';
+import { loadResource, pollResource, resourceKey, useResource } from './resourceCache';
 
 export interface HomeResource<T> {
   data: T | null;
@@ -43,6 +41,7 @@ function useHomeResource<T>(
   connectionId: string,
   load: (signal: AbortSignal) => Promise<T>,
   enabled = true,
+  deferToFirstPaint = false,
 ): HomeResource<T> {
   const snapshot = useResource<T>(key);
   const loadRef = useRef(load);
@@ -54,33 +53,21 @@ function useHomeResource<T>(
     controllerRef.current?.abort();
     const controller = new AbortController();
     controllerRef.current = controller;
-    const generation = startResourceRead(key);
-    void loadRef.current(controller.signal).then(
-      (data) => { commitResourceRead(key, generation, data); },
-      (error: unknown) => {
-        if (controller.signal.aborted) return;
-        failResourceRead(key, generation, error);
-      },
-    );
-  }, [enabled, key]);
+    // A background reader (not the page the user opened) lets a remote paint its conversation first.
+    void loadResource(key, () => (deferToFirstPaint && !remoteFirstPainted(connectionId)
+      ? whenRemoteFirstPaint(connectionId).then(() => {
+        if (controller.signal.aborted) throw new DOMException('Aborted', 'AbortError');
+        return loadRef.current(controller.signal);
+      })
+      : loadRef.current(controller.signal)), controller.signal);
+  }, [enabled, key, connectionId, deferToFirstPaint]);
 
   useEffect(() => {
     refresh();
     return () => controllerRef.current?.abort();
   }, [refresh]);
   useEffect(() => (enabled ? subscribePageChanges({ backendConnectionId: connectionId }, refresh) : undefined), [connectionId, enabled, refresh]);
-  useEffect(() => {
-    if (!enabled) return undefined;
-    const onFocus = () => refresh();
-    const timer = window.setInterval(() => {
-      if (document.visibilityState === 'visible') refresh();
-    }, HOME_POLL_MS);
-    window.addEventListener('focus', onFocus);
-    return () => {
-      window.clearInterval(timer);
-      window.removeEventListener('focus', onFocus);
-    };
-  }, [enabled, refresh]);
+  useEffect(() => (enabled ? pollResource(key, HOME_POLL_MS, refresh, { deferred: deferToFirstPaint }) : undefined), [deferToFirstPaint, enabled, key, refresh]);
 
   return { data: snapshot.data, status: snapshot.status, error: snapshot.error, stale: snapshot.stale, refresh };
 }
@@ -112,15 +99,6 @@ export function useHomeSections(connectionId: string): HomeResource<SpacesHomeSe
   return useHomeResource(resourceKey('spaces-home-sections', connectionId), connectionId, (signal) => fetchHomeSections(connectionId, { signal }));
 }
 
-/** All threads: the connection's Michi conversations, or those in one Home section. */
-export function useHomeConversations(connectionId: string, state: HomeSectionKey | null): HomeResource<HomeConversationsDto> {
-  return useHomeResource(
-    resourceKey('spaces-home-conversations', connectionId, state ?? ''),
-    connectionId,
-    (signal) => fetchHomeConversations(connectionId, { state, signal }),
-  );
-}
-
 /** Recent page changes and conversations started from a Space. */
 export function useSpaceActivity(connectionId: string, limit?: number): HomeResource<SpaceActivityItem[]> {
   return useHomeResource(
@@ -131,6 +109,6 @@ export function useSpaceActivity(connectionId: string, limit?: number): HomeReso
 }
 
 /** Conversations started from a Space, shown as cards until a day after they are seen. */
-export function useProgressCards(connectionId: string): HomeResource<ProgressCardDto[]> {
-  return useHomeResource(resourceKey('spaces-home-progress', connectionId), connectionId, (signal) => fetchProgressCards(connectionId, signal));
+export function useProgressCards(connectionId: string, opts?: { deferToFirstPaint?: boolean }): HomeResource<ProgressCardDto[]> {
+  return useHomeResource(resourceKey('spaces-home-progress', connectionId), connectionId, (signal) => fetchProgressCards(connectionId, signal), true, opts?.deferToFirstPaint === true);
 }

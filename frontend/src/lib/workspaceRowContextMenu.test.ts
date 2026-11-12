@@ -2,6 +2,9 @@ import { describe, it, expect, vi } from 'vitest';
 import { buildWorkspaceRowContextMenu } from './workspaceRowContextMenu';
 import type { Project } from '../state/chatTypes';
 
+const confirmDialog = vi.hoisted(() => vi.fn(async (_opts: { message: string }) => true));
+vi.mock('../components/ui/ConfirmDialog', () => ({ confirmDialog }));
+
 const mkProject = (overrides: Partial<Project> = {}): Project => ({
   id: 'p1',
   name: 'p1',
@@ -32,13 +35,25 @@ describe('buildWorkspaceRowContextMenu — item ids and delete confirmation', ()
     expect(ids(mkProject({ pinnedAt: 1, archivedAt: 2 }))).toEqual(['manage', 'rename', 'unpin', 'unarchive', 'delete']);
   });
 
+  it('asks in the app’s confirm dialog before deleting', async () => {
+    const actions = mkActions();
+    const del = buildWorkspaceRowContextMenu({ project: mkProject({ name: 'Research' }), actions })
+      .flatMap((s) => s.items)
+      .find((i) => i.id === 'delete')!;
+    del.run();
+    await vi.waitFor(() => expect(actions.deleteProject).toHaveBeenCalledWith('p1'));
+    expect(confirmDialog.mock.calls[0][0]).toMatchObject({
+      message: 'Delete "Research" and all its threads? You can restore it from Trash.',
+    });
+  });
+
   it('lets the caller confirm deletion in its own UI', () => {
     const requestDelete = vi.fn();
     const actions = { ...mkActions(), requestDelete };
     const del = buildWorkspaceRowContextMenu({ project: mkProject(), actions })
       .flatMap((s) => s.items)
       .find((i) => i.id === 'delete')!;
-    del.onSelect();
+    del.run();
     expect(requestDelete).toHaveBeenCalledWith('p1');
     expect(actions.deleteProject).not.toHaveBeenCalled();
   });
@@ -51,7 +66,7 @@ describe('buildWorkspaceRowContextMenu — Manage workspace item', () => {
     const flat = sections.flatMap((s) => s.items);
     const manage = flat.find((i) => i.label.toLowerCase().includes('manage'));
     expect(manage).toBeDefined();
-    manage!.onSelect();
+    manage!.run();
     expect(actions.openManageWorkspace).toHaveBeenCalledWith('p1');
   });
 
@@ -61,7 +76,7 @@ describe('buildWorkspaceRowContextMenu — Manage workspace item', () => {
     const unlinked = buildWorkspaceRowContextMenu({ project: mkProject(), actions });
     const link = unlinked.flatMap((s) => s.items).find((i) => i.label === 'Link folder…');
     expect(link).toBeDefined();
-    link!.onSelect();
+    link!.run();
     expect(changeFolder).toHaveBeenCalledWith('p1');
 
     const linked = buildWorkspaceRowContextMenu({

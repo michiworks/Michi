@@ -11,7 +11,8 @@ const path = require('node:path');
 
 const root = path.resolve(__dirname, '../..');
 process.env.TS_NODE_PROJECT = path.join(root, 'backend/tsconfig.json');
-require('ts-node/register');
+// Under the test runner ts-node is already registered; a second instance would stack on it.
+if (!process[Symbol.for('ts-node.register.instance')]) require('ts-node/register');
 const { AcpClient } = require('michi-runtime/internal/adapters/kiro/acpClient');
 const { CrewGatewayClient } = require('michi-runtime/internal/adapters/crew/acp/gatewayClient');
 const { parseCrewAcpConfig } = require('michi-runtime/internal/adapters/crew/acp/main');

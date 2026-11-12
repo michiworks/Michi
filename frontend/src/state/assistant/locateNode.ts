@@ -1,21 +1,12 @@
-import { fetchNodeWorkspace, fetchWorkspace } from '../../services/api/persistence';
-import { remoteEntityIdentity } from '../../config/backendIdentity';
-
-/** The id names a thread on a remote connection (`remote:<connection>:<id>`). */
-function namesRemoteNode(nodeId: string): boolean {
-  try {
-    return remoteEntityIdentity(nodeId) !== null;
-  } catch {
-    // A malformed `remote:` id is still not this machine's.
-    return true;
-  }
-}
+import { fetchNodeWorkspace, fetchWorkspaceStructure } from '../../services/api/persistence';
+import { namesRemoteEntity } from '../../config/backendIdentity';
 
 /**
  * The workspace snapshot holding `nodeId`, for a thread this window doesn't
  * have yet: one created in another window since this one loaded, which the
  * assistant can name because it reads the backend. Asks the backend where
- * the node lives, then reads that one workspace.
+ * the node lives, then reads that one workspace's structure: its threads
+ * install as placeholders whose bodies load when opened.
  *
  * Null only when the backend confirms there is no live thread by that id (a
  * deleted one, or one in a deleted workspace, included); throws when it
@@ -28,9 +19,11 @@ export async function fetchWorkspaceHoldingNode(
   nodeId: string,
   signal?: AbortSignal,
 ): Promise<{ workspace: unknown; readStartedAt: number } | null> {
-  if (namesRemoteNode(nodeId)) throw new Error('A remote thread loads with its connection');
+  if (namesRemoteEntity(nodeId)) throw new Error('A remote thread loads with its connection');
   const where = await fetchNodeWorkspace(nodeId, signal);
   if (!where) return null;
   const readStartedAt = Date.now();
-  return { workspace: await fetchWorkspace(where.workspaceId, signal), readStartedAt };
+  const workspace = await fetchWorkspaceStructure(where.workspaceId, signal);
+  // Its workspace went away after the lookup: no live thread either.
+  return workspace === null ? null : { workspace, readStartedAt };
 }

@@ -1,10 +1,9 @@
-import React from 'react';
-import { fireEvent, render, screen } from '@testing-library/react';
+import { act, fireEvent, render, screen } from '@testing-library/react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import CommandPalette from './CommandPalette';
 
 const selectProject = vi.hoisted(() => vi.fn());
-const navigateToNode = vi.hoisted(() => vi.fn());
+const revealNode = vi.hoisted(() => vi.fn());
 
 vi.mock('../../state/chatStore', () => ({
   useChatStore: () => ({
@@ -21,7 +20,6 @@ vi.mock('../../state/chatStore', () => ({
     selection: new Set<string>(),
     clearSelection: vi.fn(),
     openPane: vi.fn(),
-    openPaneInTree: vi.fn(),
     createDigest: vi.fn(),
     createMergedChat: vi.fn(),
     createThread: vi.fn(),
@@ -29,7 +27,7 @@ vi.mock('../../state/chatStore', () => ({
     archiveTree: vi.fn(),
     unarchiveTree: vi.fn(),
     selectProject,
-    setFocusedNodeId: vi.fn(),
+    revealNode,
     setSearchHighlightTerm: vi.fn(),
   }),
   useChatNodesSnapshot: () => ({}),
@@ -50,8 +48,12 @@ vi.mock('../../state/prefs', () => ({
   }),
 }));
 
-vi.mock('../../state/navigateToNode', () => ({ navigateToNode }));
 vi.mock('../../lib/digestPrompt', () => ({ requestDigest: vi.fn() }));
+
+const messageSearch = vi.hoisted(() => ({ status: 'ready' as 'idle' | 'loading' | 'ready' | 'error' }));
+vi.mock('../../state/useNodeSearch', () => ({
+  useNodeSearch: () => ({ nodes: [], totalNodes: 0, status: messageSearch.status }),
+}));
 
 beforeEach(() => {
   Object.defineProperty(Element.prototype, 'scrollIntoView', {
@@ -59,7 +61,8 @@ beforeEach(() => {
     value: vi.fn(),
   });
   selectProject.mockReset();
-  navigateToNode.mockReset();
+  revealNode.mockReset();
+  messageSearch.status = 'ready';
 });
 
 describe('CommandPalette workspace routing', () => {
@@ -73,8 +76,8 @@ describe('CommandPalette workspace routing', () => {
     fireEvent.click(screen.getByText('Pricing · Workspace B'));
 
     expect(selectProject).toHaveBeenCalledWith('workspace-2');
-    expect(navigateToNode).toHaveBeenCalledWith(expect.any(Object), 'chat-2');
-    expect(setPage).toHaveBeenCalledWith('dashboard');
+    // revealNode opens it in its own slot and shows the Dashboard.
+    expect(revealNode).toHaveBeenCalledWith('chat-2');
   });
 });
 
@@ -105,6 +108,28 @@ describe('CommandPalette quick number shortcuts', () => {
   });
 });
 
+describe('CommandPalette message search', () => {
+  it('says No matches only after the message search answered with none', async () => {
+    messageSearch.status = 'loading';
+    const setPage = vi.fn();
+    const onClose = vi.fn();
+    const palette = () => <CommandPalette activePage="dashboard" setPage={setPage} onClose={onClose} />;
+    const view = render(palette());
+    fireEvent.change(screen.getByPlaceholderText('Search chats, commands, messages…'), { target: { value: 'zzz-unmatched' } });
+    expect(screen.getByText('Searching…')).toBeTruthy();
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 250)); });
+    expect(screen.getByText('Searching…')).toBeTruthy();
+
+    messageSearch.status = 'error';
+    view.rerender(palette());
+    expect(screen.getByText('Couldn’t search messages')).toBeTruthy();
+
+    messageSearch.status = 'ready';
+    view.rerender(palette());
+    expect(screen.getByText('No matches')).toBeTruthy();
+  });
+});
+
 describe('CommandPalette IME handling', () => {
   it('does not run the active command when Enter confirms IME composition', () => {
     const onClose = vi.fn();
@@ -117,5 +142,16 @@ describe('CommandPalette IME handling', () => {
     });
 
     expect(onClose).not.toHaveBeenCalled();
+  });
+
+  it.each([{ isComposing: true }, { keyCode: 229 }])('stays open on the Esc that dismisses IME candidates (%o)', (ime) => {
+    const onClose = vi.fn();
+    render(<CommandPalette activePage="dashboard" setPage={vi.fn()} onClose={onClose} />);
+    const input = screen.getByPlaceholderText('Search chats, commands, messages…');
+    fireEvent.keyDown(input, { key: 'Escape', ...ime });
+    fireEvent.keyDown(input, { key: 'Enter', ...ime });
+    expect(onClose).not.toHaveBeenCalled();
+    fireEvent.keyDown(input, { key: 'Escape' });
+    expect(onClose).toHaveBeenCalled();
   });
 });

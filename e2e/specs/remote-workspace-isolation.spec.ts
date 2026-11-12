@@ -3,8 +3,10 @@ import { installMockApi } from '../fixtures/mockApi';
 
 test('remote gap recovery keeps the same-ID Local copy separate and never writes remote data to Local', async ({ page }) => {
   const connection = { id: 'remote-isolation', name: 'Remote machine', transport: 'ssh', sshHost: 'build+', hasToken: true, createdAt: 1, updatedAt: 1 };
+  // Used today: a workspace idle for a month would fold into the sidebar's Earlier group.
+  const now = Date.now();
   const workspace = { workspace: { id: 'same-ws', name: 'Remote original', cwd: '/srv/project', active_tree_id: 'tree-1', created_at: 1 },
-    trees: [{ id: 'tree-1', workspace_id: 'same-ws', root_node_id: 'same-node', created_at: 1, last_active_at: 1 }],
+    trees: [{ id: 'tree-1', workspace_id: 'same-ws', root_node_id: 'same-node', created_at: 1, last_active_at: now }],
     nodes: [{ id: 'same-node', workspace_id: 'same-ws', tree_id: 'tree-1', title: 'Remote chat', runtime_id: 'mock', acp_session_id: 'same-node', status: 'idle', created_at: 1 }],
     edges: [], messages: [], contexts: [] };
   const writes: { remote: boolean; path: string; body: unknown }[] = [];
@@ -106,9 +108,18 @@ test('remote gap recovery keeps the same-ID Local copy separate and never writes
   const localWritesBeforeReload = writes.filter(write => !write.remote).length;
   await page.reload();
   await expect(page.getByTestId('workspace-row-same-ws')).toBeVisible();
-  await expect(remoteRow).toHaveCount(0);
+  // The window was on the remote workspace: it reopens on the local copy of
+  // what the remote last answered, read-only (provisional) until it answers.
+  const provisional = () => page.evaluate(async () => {
+    const modulePath = '/src/config/backendConnectionState.ts';
+    const { backendConnectionProvisional } = await import(modulePath);
+    return backendConnectionProvisional('remote-isolation');
+  });
+  await expect(remoteRow.getByText('Remote original', { exact: true })).toBeVisible();
+  expect(await provisional()).toBe(true);
   expect(await page.evaluate(() => Object.values(localStorage).join('\n'))).not.toContain('/srv/project');
   offline = false;
+  await expect.poll(provisional, { timeout: 15_000 }).toBe(false);
   await expect(remoteRow.getByText('Remote original', { exact: true })).toBeVisible({ timeout: 15_000 });
   expect(writes.filter(write => !write.remote).slice(localWritesBeforeReload).map(write => JSON.stringify(write.body)).join('\n')).not.toContain('/srv/project');
   expect(errors).toEqual([]);

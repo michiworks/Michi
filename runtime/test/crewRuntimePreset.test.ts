@@ -1,6 +1,7 @@
 import { afterEach, describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { spawnSync } from 'node:child_process';
+import { spawnSync, type SpawnOptions } from 'node:child_process';
+import { EventEmitter } from 'node:events';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -9,7 +10,8 @@ import type { AgentToolBridge } from '../src/contract/tools';
 import { createDefaultHost } from '../src/core/defaultHost';
 import { AcpAgentRuntime } from '../src/adapters/kiro/AcpAgentRuntime';
 import { KIRO_FLAVOR, joinSessionMetadata } from '../src/adapters/kiro/acpAgentFlavor';
-import type { AcpLaunch } from '../src/adapters/kiro/acpClient';
+import { AcpClient, type AcpLaunch } from '../src/adapters/kiro/acpClient';
+import * as processTree from '../src/core/processTree';
 import { CREW_APP_VERSION } from '../src/adapters/crew/crewAppVersion';
 import {
   CREW_KIRO_FLAVOR, CREW_STATIC_DESCRIPTOR, createCrewRuntime, type CrewAdapterOptions, type CrewRuntimeOptions,
@@ -167,6 +169,28 @@ describe('createCrewRuntime', () => {
     locations = { bundledScript };
     assert.equal(launch.bin, process.execPath);
     assert.deepEqual(launch.args(), [bundledScript, 'acp', '--agent-engine', 'v2']);
+  });
+
+  it('starts the adapter with spawnEnv as it is, read at each spawn; without spawnEnv it inherits ours', async (t) => {
+    const spawned: Array<NodeJS.ProcessEnv | undefined> = [];
+    t.mock.method(processTree, 'spawnAgentProcess', (_bin: string, _args: string[], options?: SpawnOptions) => {
+      spawned.push(options?.env);
+      return Object.assign(new EventEmitter(), { stdout: new EventEmitter(), stderr: new EventEmitter(), exitCode: 0, signalCode: null }) as never;
+    });
+    let reads = 0;
+    const spawnEnv = () => ({ CREW_ENV_MARKER: `read-${++reads}` });
+    const dir = tempDir();
+    const locations: CrewAdapterOptions = { acpBinOverride: executable(dir, 'crew-acp'), bundledScript: path.join(dir, 'crewAcp.js') };
+    const scrubbed = kiroOptions(crew({ crew: locations, spawnEnv })).launch;
+    const inherited = kiroOptions(crew({ crew: locations })).launch;
+    // As AcpAgentRuntime builds them: the runtime's spawnEnv is also the client's.
+    const clients = [scrubbed, scrubbed, inherited].map((launch) => new AcpClient(undefined, dir, undefined, 'v2', launch, 'crew', { spawnEnv }));
+    try {
+      for (const client of clients) client.start();
+      assert.deepEqual(spawned, [{ CREW_ENV_MARKER: 'read-1' }, { CREW_ENV_MARKER: 'read-2' }, undefined]);
+    } finally {
+      await Promise.all(clients.map((client) => client.shutdown()));
+    }
   });
 
   it('looks for the adapter next to its own module by default', () => {

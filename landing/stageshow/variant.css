@@ -1,0 +1,25 @@
+/* stageshow.html: the stageshow stage stands in for the hero's replica window.
+   html.js is set by the head script before first paint; data-ss-failed is set
+   if this bundle's script fails to load, which brings the replica back. */
+.ss-hero-mount { display: none; }
+
+html.js[data-hero='stageshow']:not([data-ss-failed]) .ss-hero-mount {
+  display: block;
+  width: 100%;
+  max-width: 1200px;
+  margin-inline: auto;
+  /* Reserve the stage's box before React mounts (no layout shift) */
+  aspect-ratio: 1200 / 660;
+}
+html.js[data-hero='stageshow']:not([data-ss-failed]) .ss-hero-mount[data-ss-mounted] { aspect-ratio: auto; }
+@media (max-width: 791px) {
+  html.js[data-hero='stageshow']:not([data-ss-failed]) .ss-hero-mount { max-width: 358px; aspect-ratio: 358 / 640; }
+}
+
+/* The figure sizes its column to the replica (min-content); give the stage
+   the content width instead, up to its design width */
+html.js[data-hero='stageshow']:not([data-ss-failed]) .hero-fig { grid-template-columns: minmax(0, 1200px); }
+
+/* The page's own take: its window, controls, caption and hints stay out */
+html.js[data-hero='stageshow']:not([data-ss-failed]) .hero-fit,
+html.js[data-hero='stageshow']:not([data-ss-failed]) .hero .take-bar { display: none; }

@@ -16,7 +16,7 @@ import { backendFetch } from './backendRequest';
  * alongside `backendConnectionId` rather than resolving it from some ambient/global state.
  *
  * Gateway resolution follows this codebase's existing convention (see
- * `frontend/src/services/api/agentRuns.ts` and `paneInspection.ts`): callers pass the
+ * `frontend/src/services/api/agentRuns.ts`): callers pass the
  * `backendConnectionId` they already know (from the pane's own project/workspace), and this
  * module resolves the base URL itself via `backendApiBase(backendConnectionId)` — never a
  * hardcoded `API_BASE_URL`.
@@ -32,25 +32,23 @@ import { backendFetch } from './backendRequest';
  * lives here; `fetchStream`/`StreamTransport` (in `./streamTransport.ts`) already own that.
  */
 
-import { encodePaneId } from 'michi-shared';
+import {
+  encodePaneId,
+  isRecord,
+  type PresenceKeepaliveRequest,
+  type PresenceKeepaliveResult,
+  type RemovePresenceRequest,
+  type RemovePresenceResult,
+  type SubmitPresenceRequest,
+  type SurfacePaneKind,
+} from 'michi-shared';
 import { backendApiBase } from '../../config/backendConnections';
 import { fetchStream } from './streamTransport';
 import type {
   PanePresenceTransport,
-  PresenceKeepaliveRequest,
-  PresenceKeepaliveResult,
-  RemovePresenceRequest,
-  RemovePresenceResult,
-  SubmitPresenceRequest,
+  PresenceRequestOptions,
   SubmitPresenceResult,
 } from '../../state/usePanePresenceReporter';
-
-/** The seven surface pane kinds `PanePresenceRegistry.allocateSurfaceRegistration` accepts
- *  (`backend/src/services/paneInspectionProjection.surface.ts`'s `SurfacePaneKind`). Re-declared
- *  here rather than imported for the same reason `usePanePresenceReporter.ts` re-declares the
- *  backend's wire types: that module is backend-only and this client must not pull backend code
- *  into the frontend bundle. */
-export type SurfacePaneKind = 'launcher' | 'files' | 'review' | 'file' | 'diff' | 'terminal' | 'browser';
 
 export interface AllocateSurfaceRegistrationResult {
   registrationId: string;
@@ -69,10 +67,6 @@ async function parseJsonBody(response: Response): Promise<unknown> {
 // distinguish from a real, empty-but-valid result — the reporter hook's generation/lease
 // bookkeeping depends on knowing whether a response was actually usable.
 // ---------------------------------------------------------------------------
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null;
-}
 
 function isNonEmptyString(value: unknown): value is string {
   return typeof value === 'string' && value.length > 0;
@@ -170,16 +164,18 @@ async function submit(
   return parseSubmitPresenceResult(response.status, body);
 }
 
-/** DELETE /api/panes/presence. */
+/** DELETE /api/panes/presence. While the page unloads, a `fetch` keepalive, so it is still sent. */
 async function remove(
   backendConnectionId: string,
   workspaceId: string,
   req: RemovePresenceRequest,
+  options?: PresenceRequestOptions,
 ): Promise<RemovePresenceResult> {
   const response = await backendFetch(`${backendApiBase(backendConnectionId)}/panes/presence`, {
     method: 'DELETE',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ ...req, workspaceId }),
+    ...(options?.unloading ? { keepalive: true } : {}),
   });
   if (!response.ok && response.status !== 403 && response.status !== 404) {
     throw new Error(`removePresence failed: ${response.status}`);
@@ -191,17 +187,23 @@ async function remove(
 /** POST /api/panes/presence/keepalive. Uses `fetchStream` so an upgraded gateway carries this
  *  over the existing shared per-window WebSocket instead of a fresh HTTP request every interval;
  *  an older gateway (or an isolated test harness with no negotiated socket) transparently falls
- *  back to plain HTTP via `fetchStream`'s own fallback path. */
+ *  back to plain HTTP via `fetchStream`'s own fallback path. While the page unloads the socket
+ *  goes with it, so that report is a plain `fetch` keepalive, which the browser still sends. */
 async function keepalive(
   backendConnectionId: string,
   workspaceId: string,
   req: PresenceKeepaliveRequest,
+  options?: PresenceRequestOptions,
 ): Promise<PresenceKeepaliveResult> {
-  const response = await fetchStream(`${backendApiBase(backendConnectionId)}/panes/presence/keepalive`, {
+  const url = `${backendApiBase(backendConnectionId)}/panes/presence/keepalive`;
+  const init: RequestInit = {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ ...req, workspaceId }),
-  });
+  };
+  const response = options?.unloading
+    ? await backendFetch(url, { ...init, keepalive: true })
+    : await fetchStream(url, init);
   if (!response.ok && response.status !== 404) {
     throw new Error(`presenceKeepalive failed: ${response.status}`);
   }

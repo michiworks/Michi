@@ -4,7 +4,7 @@
  * with one phase and two agents, and a Kiro CLI workflow with a parallel
  * node and a combine step.
  */
-import { afterEach, describe, it } from 'node:test';
+import { after, afterEach, before, describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
@@ -15,6 +15,7 @@ import {
   BACKGROUND_SUBAGENT_LIMITS,
   boundWorkflowRun,
   isBackgroundSubagentPending,
+  omittedLeafCounts,
   parseBackgroundSubagentsEnded,
   parseBackgroundSubagentsUpdate,
   parseWorkflowRunDto,
@@ -23,6 +24,7 @@ import {
   SUBAGENT_UNTRACKED_ERROR,
   untrackedSubagent,
   WORKFLOW_LIMITS,
+  workflowProgress,
   type SubagentInfo,
   type WorkflowRunDtoV1,
 } from 'michi-shared';
@@ -30,8 +32,9 @@ import { BackgroundSubagentRegistry } from '../src/services/backgroundSubagentRe
 import { WorkflowRunHub, workflowRunId, type WorkflowRunContext } from '../src/services/workflowRunHub';
 import type { WorkflowRunStore } from '../src/services/workflowRunsRepository';
 import { createClaudeWorkflowTap, readClaudeWorkflowOutput } from 'michi-runtime/internal/core/workflows/claudeWorkflowTap';
-import { claudeControlResponse } from 'michi-runtime/internal/core/workflows/claudeWorkflowFold';
+import { applyClaudeWorkflowEnvelope, claudeControlResponse } from 'michi-runtime/internal/core/workflows/claudeWorkflowFold';
 import { createKiroWorkflowBridge } from 'michi-runtime/internal/core/workflows/kiroWorkflowBridge';
+import { applyKiroWorkflowNotification } from 'michi-runtime/internal/core/workflows/kiroWorkflowFold';
 import { AcpClient } from 'michi-runtime/internal/adapters/kiro/acpClient';
 import { setupWorkflowRunRoutes, snapshotRuns } from '../src/routes/workflowRuns';
 import { michiTestHost } from './helpers/michiTestHost';
@@ -113,6 +116,38 @@ describe('Claude Code workflows', () => {
 
     await hub.act('owner-a', run.id, 'stop').then(() => assert.fail('a finished run cannot be stopped'), (error) => assert.match(String(error), /Cannot stop/));
     assert.deepEqual(stops, []);
+  });
+
+  it('keeps phases, running and the newest agents past the node limit, and counts the agents it drops', () => {
+    // 197 agents over three phases, 7 more in a fourth, one still running in a fifth.
+    const progress: Array<Record<string, unknown>> = [1, 2, 3, 4, 5].map((index) => ({ type: 'workflow_phase', index, title: `p${index}` }));
+    for (let index = 1; index <= 205; index += 1) {
+      const phaseIndex = index <= 197 ? 1 + Math.floor((index - 1) / 66) : index <= 204 ? 4 : 5;
+      progress.push(index === 205
+        ? { type: 'workflow_agent', index, label: `a${index}`, phaseIndex, startedAt: 1 }
+        : { type: 'workflow_agent', index, label: `a${index}`, phaseIndex, state: 'done', startedAt: 1, durationMs: 1 });
+    }
+    const base: WorkflowRunDtoV1 = {
+      version: 1, id: 'run-1', runtime: 'claude', nativeId: 't1', workspaceId: 'ws-a', nodeId: 'node-1', parentToolCallId: null,
+      name: 'big', status: 'running', nodes: [], log: [], actions: [], startedAt: 1, updatedAt: 1, revision: 1,
+    };
+    const run = applyClaudeWorkflowEnvelope(base, { type: 'system', subtype: 'task_progress', workflow_progress: progress }, 10);
+    assert.ok(run.nodes.length <= WORKFLOW_LIMITS.nodes);
+    assert.deepEqual(run.nodes.filter((node) => node.kind === 'phase').map((node) => [node.id, node.status]),
+      [['phase:1', 'completed'], ['phase:2', 'completed'], ['phase:3', 'completed'], ['phase:4', 'completed'], ['phase:5', 'running']]);
+    for (const id of ['agent:205', 'agent:204', 'agent:198']) assert.ok(run.nodes.some((node) => node.id === id), `${id} is kept`);
+    assert.ok(!run.nodes.some((node) => node.id === 'agent:1'), 'the oldest finished agent goes first');
+    assert.deepEqual(workflowProgress(run), { total: 205, done: 204, running: 1, failed: 0 });
+    assert.deepEqual(omittedLeafCounts(run, 'phase:1'), { completed: 10 });
+
+    const stored = parseWorkflowRunDto(JSON.parse(JSON.stringify(run)));
+    assert.deepEqual(stored?.omittedLeaves, run.omittedLeaves, 'the counts survive the stored copy');
+
+    const ended = applyClaudeWorkflowEnvelope(run, { type: 'system', subtype: 'task_updated', patch: { status: 'completed', end_time: 20 } }, 20);
+    assert.deepEqual(workflowProgress(ended), { total: 205, done: 205, running: 0, failed: 0 });
+
+    const small = applyClaudeWorkflowEnvelope(run, { type: 'system', subtype: 'task_progress', workflow_progress: progress.slice(0, 8) }, 30);
+    assert.equal(small.omittedLeaves, undefined, 'a snapshot that fits drops the old counts');
   });
 
   it('stops a running workflow through the control channel (real stop_task round-trip)', async () => {
@@ -198,6 +233,65 @@ describe('Claude Code workflows', () => {
     assert.equal(run.status, 'cancelled');
     assert.match(run.statusDetail ?? '', /session ended/);
     assert.deepEqual(run.actions, []);
+  });
+});
+
+describe('interrupted workflow runs', () => {
+  const open = (nativeId: string): WorkflowRunDtoV1 => ({
+    version: 1, id: workflowRunId('owner-a', 'kiro', nativeId), runtime: 'kiro', nativeId, workspaceId: 'ws-a', nodeId: 'node-1',
+    parentToolCallId: null, name: nativeId, status: 'running', nodes: [], log: [], actions: [], startedAt: 1, updatedAt: 1, revision: 1,
+  });
+
+  it('marks a run Michi ends because its driver went away, and the mark survives the stored copy', () => {
+    const store = memoryStore([{ ownerUserId: 'owner-a', run: open('after-restart') }]);
+    const hub = new WorkflowRunHub(store);
+    hub.recover();
+    const recovered = store.rows.get(workflowRunId('owner-a', 'kiro', 'after-restart'))!.run;
+    assert.deepEqual({ status: recovered.status, interrupted: recovered.interrupted }, { status: 'cancelled', interrupted: true });
+    assert.equal(parseWorkflowRunDto(JSON.parse(JSON.stringify(recovered)))?.interrupted, true);
+    assert.equal(parseWorkflowRunDto({ ...JSON.parse(JSON.stringify(recovered)), status: 'running' })?.interrupted, undefined,
+      'only a cancelled run carries it');
+
+    const bridge = createKiroWorkflowBridge({ hub: workflowSink(hub), resolve: () => PORT_CONTEXT, control: async () => {} });
+    bridge.handle('_kiro/workflow/run_start', { sessionId: 'parent', workflowId: 'session-ended', nodeTree: [] });
+    bridge.release('The Kiro session ended before this workflow finished');
+    const released = hub.get('owner-a', workflowRunId('owner-a', 'kiro', 'session-ended'));
+    assert.deepEqual({ status: released?.status, interrupted: released?.interrupted }, { status: 'cancelled', interrupted: true });
+  });
+
+  /** A Kiro run paused on a question (plan-write-declined): two steps paused, the rest queued. */
+  const waitingOnTheUser = (nativeId: string): WorkflowRunDtoV1 => ({
+    ...open(nativeId), status: 'paused', statusDetail: 'Paused',
+    nodes: [
+      { id: 'plan', kind: 'step', title: 'plan', status: 'completed', startedAt: 2, endedAt: 3 },
+      { id: 'poem-loop', kind: 'loop', title: 'poem-loop', status: 'paused', startedAt: 4 },
+      { id: 'draft', kind: 'step', title: 'draft', parentId: 'poem-loop', status: 'paused', startedAt: 4, statusMessage: 'Step requested user input via send_message.' },
+      { id: 'review', kind: 'step', title: 'review', parentId: 'poem-loop', status: 'queued' },
+      { id: 'publish', kind: 'step', title: 'publish', status: 'queued' },
+    ],
+  });
+  const nodeStates = (run: WorkflowRunDtoV1 | null | undefined) => run?.nodes.map((node) => [node.id, node.status, node.endedAt]);
+  const SETTLED = (at: number) => [['plan', 'completed', 3], ['poem-loop', 'cancelled', at], ['draft', 'cancelled', at], ['review', 'skipped', undefined], ['publish', 'skipped', undefined]];
+
+  it('closes the paused and queued steps of a run it marks interrupted, on restart and when its driver goes away', () => {
+    const store = memoryStore([{ ownerUserId: 'owner-a', run: waitingOnTheUser('after-restart') }]);
+    new WorkflowRunHub(store, () => 50).recover();
+    const recovered = store.rows.get(workflowRunId('owner-a', 'kiro', 'after-restart'))!.run;
+    assert.equal(recovered.status, 'cancelled');
+    assert.deepEqual(nodeStates(recovered), SETTLED(50));
+
+    const hub = new WorkflowRunHub(memoryStore(), () => 60);
+    const live = waitingOnTheUser('session-ended');
+    hub.update(CONTEXT, 'kiro', 'session-ended', () => live);
+    hub.releaseControls('owner-a', 'kiro', 'session-ended', 'Interrupted: the Kiro session ended before this workflow finished');
+    const released = hub.get('owner-a', live.id);
+    assert.equal(released?.status, 'cancelled');
+    assert.deepEqual(nodeStates(released), SETTLED(60));
+
+    const resumed = hub.update(CONTEXT, 'kiro', 'session-ended', (run) => applyKiroWorkflowNotification(run, '_kiro/workflow/node_start',
+      { workflowId: 'session-ended', nodeId: 'draft', nodePath: ['session-ended', 'poem-loop', 'draft'], type: 'step' }, 70));
+    const draft = resumed?.nodes.find((node) => node.id === 'draft');
+    assert.deepEqual([resumed?.status, draft?.status, draft?.startedAt, draft?.endedAt], ['running', 'running', 4, undefined]);
   });
 });
 
@@ -289,6 +383,12 @@ describe('Kiro CLI workflows', () => {
 });
 
 describe('workflow approvals', () => {
+  // The approval deadline these tests await unrefs its timer, so nothing
+  // else would keep the event loop alive and node:test would cancel the file.
+  let keepAlive: ReturnType<typeof setInterval>;
+  before(() => { keepAlive = setInterval(() => {}, 2 ** 30); });
+  after(() => clearInterval(keepAlive));
+
   it('Kiro: a step session\'s permission request waits on the run and the answer goes back to Kiro', async () => {
     const hub = new WorkflowRunHub(memoryStore());
     const client = new AcpClient(undefined, os.tmpdir(), undefined, 'v3');
@@ -851,7 +951,8 @@ describe('SqliteWorkflowRunStore (real migrations)', () => {
 
 describe('workflow run routes', () => {
   let server: ReturnType<express.Express['listen']> | undefined;
-  afterEach(async () => { if (server) await new Promise<void>((resolve) => server!.close(() => resolve())); server = undefined; });
+  // close() alone waits about 4 s for a subscribe connection fetch keeps alive.
+  afterEach(async () => { if (server) { server.closeAllConnections(); await new Promise<void>((resolve) => server!.close(() => resolve())); } server = undefined; });
 
   async function start(hub: WorkflowRunHub, backgroundSubagents?: BackgroundSubagentRegistry): Promise<string> {
     const app = express();

@@ -17,7 +17,7 @@ test('cold shell and Appearance do not request optional rendering engines', asyn
   const errors: string[] = [];
   page.on('pageerror', error => errors.push(error.message));
   page.on('request', request => {
-    if (request.resourceType() === 'script' && /MentionEditor|LegacyHighlightedCode|shiki|mermaid|elk[._-]|katex|editor-tiptap|markdown-code|markdown-streamdown/.test(request.url())) optional.push(request.url());
+    if (request.resourceType() === 'script' && /\/MentionEditor[.-]|LegacyHighlightedCode|shiki|mermaid|elk[._-]|katex|editor-tiptap|markdown-code|markdown-streamdown/.test(request.url())) optional.push(request.url());
   });
   await installMockApi(page, { workspaces: [workspace], custom: async route => {
     if (new URL(route.request().url()).pathname === '/api/workspaces/all') await pending;

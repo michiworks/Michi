@@ -1,4 +1,4 @@
-/* Settings › Meta agent. Palette, type and radius tokens only, so every palette
+/* Settings › <name> › Pages upkeep (Settings › Meta agent before v2). Palette, type and radius tokens only, so every palette
    and the Corner radius pref read. Settings are plain rows; colour is reserved for controls and status icons. */
 
 .meta-set {
@@ -6,12 +6,6 @@
   flex-direction: column;
   gap: 22px;
   font-family: var(--ui-font);
-  color: var(--term-fg);
-}
-.meta-set__lede {
-  margin: -13px 0 0;
-  font-size: var(--fs-2xl);
-  line-height: 1.6;
   color: var(--term-fg);
 }
 .meta-set__quiet {
@@ -22,7 +16,7 @@
 }
 .meta-set__quiet.is-error,
 .meta-set__error {
-  color: var(--term-danger-text, var(--term-danger));
+  color: var(--term-danger-text);
 }
 .meta-set__error { margin: 0; font-size: var(--fs-md); }
 .meta-set__link {
@@ -43,15 +37,27 @@
   border-top: 1px solid var(--term-line);
   scroll-margin-top: 24px;
 }
-.meta-set__sec > h2,
-.meta-set__head > h2 {
+.meta-set__sec > h3,
+.meta-set__head > h3 {
   margin: 0 0 10px;
-  font-size: var(--fs-xl);
+  font-size: var(--fs-lg);
   font-weight: 600;
   line-height: 1.55;
   color: var(--term-fg);
 }
 .meta-set__head { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; }
+/* In the card layout (Settings.css draws its sections as headed cards): the subsection
+   headings are h3s under Settings › <name>'s Pages upkeep heading, styled as the h2s there were. */
+.terminal-settings[data-cards] .meta-set__sec > h3,
+.terminal-settings[data-cards] .meta-set__head > h3 {
+  margin: 0;
+  color: var(--term-muted);
+  font-size: var(--fs-sm);
+  font-weight: 500;
+  letter-spacing: var(--ls-caps-wide);
+  text-transform: uppercase;
+}
+.terminal-settings[data-cards] .meta-set__sec > h3 { margin: 0 4px 7px; }
 /* A section's content under its heading; a phone draws it as a card (Settings.css). */
 .meta-set__body { display: contents; }
 .meta-set__saved { display: inline-flex; align-items: center; gap: 4px; color: var(--term-muted); font-size: var(--fs-sm); }
@@ -88,7 +94,7 @@
 .meta-set__radio-head input:checked { border: 4px solid var(--term-accent); }
 .meta-set__radio-head input:disabled { cursor: default; }
 .meta-set__radio-head input:focus-visible {
-  outline: 2px solid color-mix(in srgb, var(--term-accent) 62%, transparent);
+  outline: var(--focus-ring);
   outline-offset: 2px;
 }
 .meta-set__radio-t { display: block; font-size: var(--fs-xl); font-weight: 600; line-height: 1.45; color: var(--term-fg); }
@@ -190,6 +196,19 @@
   white-space: nowrap;
 }
 .meta-set__usage { margin: 0; font-size: var(--fs-md); color: var(--term-muted); }
+/* A section's explanation above its rows (Tool approvals). */
+.meta-set__note { margin: 0; font-size: var(--fs-md); line-height: 1.55; color: var(--term-muted); text-wrap: pretty; }
+/* A tool request waiting for a decision, pointed to from the top of the page. */
+.meta-set__pending {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 0;
+  font-size: var(--fs-md);
+  line-height: 1.5;
+  color: var(--term-fg);
+}
+.meta-set__pending > svg { flex: none; color: var(--term-select); }
 
 /* ── Guard failure ─────────────────────────────────────────────── */
 .meta-set__alert {

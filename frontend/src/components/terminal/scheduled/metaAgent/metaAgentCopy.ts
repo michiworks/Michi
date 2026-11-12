@@ -1,13 +1,19 @@
 import type { MetaAgentCursorRow, MetaAgentRecentRun, MetaAgentResolvedRuntime } from 'michi-shared';
-import { META_AGENT_DEFAULT_FIRST_RUN_DAYS } from 'michi-shared';
-import { metaAgentResolvedText, metaAgentRestriction, metaAgentRuntimeLabel } from '../../settings/metaAgent/runtimeCopy';
+import { joinAnd, META_AGENT_DEFAULT_FIRST_RUN_DAYS, plural } from 'michi-shared';
+import { metaAgentResolvedText, metaAgentRestriction } from '../../settings/metaAgent/runtimeCopy';
 import { MONTHS, formatMichiClock } from '../../content/michiFormat';
 
-export const runtimeLabel = metaAgentRuntimeLabel;
+/** The headline of each state that stops or holds Pages upkeep, for Scheduled and Settings › <name> › Pages upkeep: the same words as Pages and its sidebar. */
+export { UPKEEP_HEADLINE } from '../../../../state/metaAgent/metaAgentStatus';
+
+/** "<name> · Pages upkeep": the background maintenance, as Scheduled, the rail and toasts name it (DESIGN-v2 §1.5). */
+export function pagesUpkeepTitle(name: string): string {
+  return `${name} · Pages upkeep`;
+}
 
 export const restrictionText = (runtimeId: string) => metaAgentRestriction(runtimeId) ?? 'no checked limits for this AI service';
 
-/** The same words as Settings › Meta agent and the window's chip. */
+/** The same words as Settings › <name> › Pages upkeep. */
 export function runtimeText(runtime: MetaAgentResolvedRuntime): string {
   return metaAgentResolvedText(runtime);
 }
@@ -24,7 +30,6 @@ function dayStart(time: number): number {
 export const clock = (time: number) => { const d = new Date(time); return `${pad(d.getHours())}:${pad(d.getMinutes())}`; };
 const monthDay = (time: number) => { const d = new Date(time); return `${MONTHS[d.getMonth()]} ${d.getDate()}`; };
 const daysBefore = (time: number, now: number) => Math.round((dayStart(now) - dayStart(time)) / DAY);
-const plural = (n: number, one: string, many = `${one}s`) => `${n} ${n === 1 ? one : many}`;
 
 /** Today: 10:42; yesterday: Yesterday; within a week: N days ago; older: Oct 9. */
 export function lastSeen(time: number | null, now: number): string {
@@ -92,12 +97,10 @@ export function firstRunText(row: MetaAgentRecentRun): string {
   return `Read ${plural(row.turns, 'past conversation')} (${range}) once → wrote ${plural(row.workspaceCount, 'workspace home')}. Conversations that finished meanwhile are read in the next round.`;
 }
 
-const names = (list: readonly string[]) => (list.length <= 2 ? list.join(' and ') : `${list.slice(0, -1).join(', ')} and ${list[list.length - 1]}`);
-
 /** A Spaces Home summary: the workspace homes that changed, then what it rewrote. It never reads conversations. */
 export function summaryText(row: MetaAgentRecentRun): string {
   if (row.state === 'failed') return `Failed: ${row.error ?? 'the summary stopped before writing'}`;
-  const changed = row.changedHomes?.length ? `New in ${names(row.changedHomes)} → ` : '';
+  const changed = row.changedHomes?.length ? `New in ${joinAnd(row.changedHomes)} → ` : '';
   const did = row.state === 'running' ? 'reading the workspace homes…'
     : row.rewroteBlocks?.length ? `rewrote ${row.rewroteBlocks.map((title) => `“${title}”`).join(', ')}.` : 'nothing to change.';
   const text = `${changed}${did}`;

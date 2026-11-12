@@ -84,3 +84,39 @@ References: [Tailscale Serve](https://tailscale.com/docs/features/tailscale-serv
 [Serve target rules](https://github.com/tailscale/tailscale/blob/main/ipn/serve.go),
 [Serve identity headers](https://github.com/tailscale/tailscale/blob/main/ipn/ipnlocal/serve.go),
 [Windows service process](https://github.com/tailscale/tailscale/blob/main/cmd/tailscaled/tailscaled_windows.go).
+
+## Phone terminals
+
+Phones, browsers and the desktop's remote workspaces use terminals that the
+backend runs (`backend/src/services/terminalHost.ts`); Electron's local
+workspaces keep their own PTY. Several windows can show one shell, so a
+terminal opened on the desktop appears under **Running terminals** in a
+phone's New pane. The window that typed last sets the terminal's size. Output
+is numbered; a phone that reconnects after sleep or a network change receives
+only what it missed, and input whose delivery is uncertain is dropped rather
+than sent twice. Closing a pane ends the shell only when no other window shows
+it; a terminal no window has opened for 24 hours is closed.
+
+A shell runs any command as the backend's user, so phones get terminals only
+after **Settings → Phone access → Terminal** is turned on, on the computer.
+It is off by default, asks for confirmation before turning on, and turning it
+off disconnects the phones while the shells keep running. The setting is
+stored per machine in `phone-terminal.json` in the data directory. The phone
+gateway refuses every `/mobile-access` path, so a phone cannot change it.
+Requests through the gateway carry `x-michi-via: phone`, which may only
+remove access: the gateway always sets it, and the desktop proxy keeps it when
+it forwards a phone's request to a remote machine, whose own setting then
+applies. Signed-in and multi-user backends (`MICHI_REQUIRE_AUTH`,
+`MICHI_CLOUD`) run no terminals. Shells do not inherit the backend's
+`MICHI_*` tokens and keys.
+
+Terminals need node-pty, an optional dependency. macOS and Windows use its
+prebuilt binary; Linux compiles it during `npm install`, and
+`remote:launch` points node-gyp at Python 3.8 or newer when the default
+`python3` is older. Where it cannot be built, terminals report that they are
+unavailable and everything else installs as before; `npm rebuild node-pty`
+in the Michi folder retries the build.
+
+On a phone, a row above the keyboard adds esc, tab, ctrl, the arrow keys and
+`~ / | -`. Ctrl applies to the next key. The keys never take focus from the
+terminal, so the keyboard stays open.

@@ -2,6 +2,7 @@ import React from 'react';
 import type { BackendConnectionSummary } from '../../../config/backendConnections';
 import { workspaceMachineLabel } from '../../WorkspaceLocation';
 import { Button } from '../../ui/controls';
+import { formatMichiAge, formatMichiAgo } from '../content/michiFormat';
 
 // What the Workspaces page knows about each workspace, and the helpers both of
 // its layouts (the desktop table and the phone list) read it through.
@@ -29,26 +30,17 @@ export interface WorkspaceCardData {
    * search-result preview that replaces the latest thread while a query is
    * active. */
   nodes: NodeMeta[];
-  models: string[];
 }
 
 export function formatRelative(ts: number): string {
   if (!ts) return '—';
-  const diff = Date.now() - ts;
-  const m = Math.floor(diff / 60_000);
-  if (m < 1) return 'just now';
-  if (m < 60) return `${m}m`;
-  const h = Math.floor(m / 60);
-  if (h < 24) return `${h}h`;
-  const d = Math.floor(h / 24);
-  if (d < 7) return `${d}d`;
-  return `${Math.floor(d / 7)}w`;
+  const age = formatMichiAge(ts);
+  return age === 'now' ? 'just now' : age;
 }
 
 /** formatRelative as a time in the past: "5m ago", but never "just now ago". */
 export function formatAgo(ts: number): string {
-  const age = formatRelative(ts);
-  return age === 'just now' || age === '—' ? age : `${age} ago`;
+  return ts ? formatMichiAgo(ts) : '—';
 }
 
 /** `/Users/<name>/…`, `/home/<name>/…` and `/local/home/<name>/…` (a dev

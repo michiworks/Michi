@@ -1,9 +1,10 @@
 // Michi shim for agent-desk src/desk/peek/use-peek.ts: only what the contents block (Toc.tsx) calls. Blocks are
 // found by Michi's own markers (BlockFrame's data-block-id, a Markdown piece's data-segment-of) and lit with the
-// page's data-flash, as a link to a block lights it (DeskDocument.tsx).
+// page's data-flash, whose animation runs --t-slow (michiPage.css).
 import {parseSegmentId} from '../../../shared/markdown-segments';
 import {reveal} from '../blocks/catalog/text/outline';
-const MICHI_BLOCK_FLASH_MS = 600;
+import {DUR} from '../../../../../../../../motion/tokens';
+const MICHI_BLOCK_FLASH_MS = Math.round(DUR.slow*1000);
 
 /** What block `id` is drawn as on this page: its shell, else the pieces Michi cut its Markdown into. Desk cuts only top-level Markdown
  * (outline.ts names a heading inside a container by its whole block); Michi cuts it in containers too, so such a heading lands on its

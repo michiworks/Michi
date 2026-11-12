@@ -3,6 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import type { AcpLaunch } from "../kiro/acpClient";
 import type { RuntimeAvailability } from "../../contract/types";
+import { isRunnableFile } from "../../core/executableLookup";
 import { CREW_APP_VERSION, crewAppNeedsSync } from './crewAppVersion';
 
 /** Kiro Crew app the adapter authenticates as. */
@@ -42,16 +43,6 @@ function adapterArgs(model?: string): string[] {
     return ["acp", "--agent-engine", "v2", ...(model ? ["--model", model] : [])];
 }
 
-function isExecutableFile(file: string): boolean {
-    try {
-        if (!fs.statSync(file).isFile()) return false;
-        fs.accessSync(file, fs.constants.X_OK);
-        return true;
-    } catch {
-        return false;
-    }
-}
-
 function isFile(file: string): boolean {
     try { return fs.statSync(file).isFile(); } catch { return false; }
 }
@@ -73,7 +64,7 @@ function resolveTsNodeRegister(): string | null {
 export function resolveCrewAcpLaunchDetailed(locations: CrewAdapterOptions): CrewLaunchResolution {
     const override = locations.acpBinOverride?.trim();
     if (override) {
-        if (!isExecutableFile(override)) {
+        if (!isRunnableFile(override)) {
             return { launch: null, detail: `MICHI_CREW_ACP_BIN=${override} is not an executable file` };
         }
         return { launch: { bin: override, args: adapterArgs } };
@@ -113,9 +104,13 @@ export function crewAppSecretPath(app: CrewAppLocation): string {
     return path.join(crewAppDir(app), ".app_secret");
 }
 
+/** Kiro Crew's home: KIROCREW_HOME, else ~/.kiro/crew. */
+export function crewHomeDir(app: CrewAppLocation): string {
+    return app.kirocrewHome?.trim() || path.join(os.homedir(), ".kiro", "crew");
+}
+
 function crewAppDir(app: CrewAppLocation): string {
-    const home = app.kirocrewHome?.trim() || path.join(os.homedir(), ".kiro", "crew");
-    return path.join(home, "apps", crewAppName(app));
+    return path.join(crewHomeDir(app), "apps", crewAppName(app));
 }
 
 /** Installed configuration only. The next model call still has to prove the MCP is live. */

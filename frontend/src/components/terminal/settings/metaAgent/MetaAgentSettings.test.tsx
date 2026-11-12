@@ -6,8 +6,8 @@ import type { MetaAgentInfo } from '../../../../services/api/metaAgent';
 import type { AgentCapabilities, AgentModelInfo } from '../../../../services/api/agentRuntime';
 import { MetaAgentApiError } from '../../../../services/api/metaAgent';
 import { resetMetaAgentStore } from '../../../../state/metaAgent/useMetaAgent';
-import { resetMetaAgentOverviewStore } from '../../scheduled/metaAgent/useMetaAgentOverview';
-import { MetaAgentSettings } from './MetaAgentSettings';
+import { resetMetaAgentOverviewStore } from '../../../../state/metaAgent/useMetaAgentOverview';
+import { PagesUpkeepSettings } from './MetaAgentSettings';
 
 const api = vi.hoisted(() => ({
   decideMetaAgentToolApproval: vi.fn(),
@@ -47,9 +47,9 @@ vi.mock('../../../../services/api/metaAgentOverview', () => ({
   fetchMetaAgentOverview: api.fetchOverview,
   setMetaAgentPaused: api.setPaused,
 }));
-vi.mock('../../../../state/metaAgent/metaAgentUpdate', async (importOriginal) => ({
-  ...(await importOriginal<typeof import('../../../../state/metaAgent/metaAgentUpdate')>()),
-  runMetaAgentUpdate: api.runUpdate,
+vi.mock('../../../../services/api/pageMaintenance', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../../../services/api/pageMaintenance')>()),
+  runMetaAgentRoundNow: api.runUpdate,
 }));
 vi.mock('../../../../hooks/useRuntimeCatalog', () => ({
   useRuntimeCatalog: (opts: { runtime?: string | null }) => {
@@ -102,7 +102,7 @@ const flush = () => act(async () => { for (let i = 0; i < 6; i++) await Promise.
 async function mount(info: MetaAgentInfo | Error = FOLLOW) {
   if (info instanceof Error) api.fetchMetaAgent.mockRejectedValue(info);
   else api.fetchMetaAgent.mockResolvedValue(info);
-  render(<MetaAgentSettings />);
+  render(<PagesUpkeepSettings />);
   await flush();
 }
 
@@ -120,14 +120,14 @@ beforeEach(() => {
 });
 afterEach(() => cleanup());
 
-describe('Settings › Meta agent runtime', () => {
+describe('Settings › <name> › Pages upkeep runtime', () => {
   it('follows the global settings by default and says what it runs on now', async () => {
     await mount();
     const section = runtimeSection();
     expect(within(section).getByRole('radio', { name: /Follow global settings/ })).toHaveProperty('checked', true);
     expect(within(section).getByRole('radio', { name: /Custom/ })).toHaveProperty('checked', false);
-    expect(section.textContent).toContain('Now Claude · claude-opus-5.5 · reasoning high. Change the global settings and the Meta agent follows from its next run.');
-    expect(within(section).queryByRole('group', { name: 'Meta agent runtime' })).toBeNull();
+    expect(section.textContent).toContain('Now Claude · claude-opus-5.5 · reasoning high. Change the global settings and Pages upkeep follows from its next run.');
+    expect(within(section).queryByRole('group', { name: 'Pages upkeep runtime' })).toBeNull();
   });
 
   it('pins what it runs on now when Custom is chosen, then lists the supported available runtimes', async () => {
@@ -139,7 +139,7 @@ describe('Settings › Meta agent runtime', () => {
     fireEvent.click(screen.getByRole('radio', { name: /Custom/ }));
     await flush();
     expect(lastPatch()).toEqual({ runtimeId: 'claude', providerId: null, modelId: 'claude-opus-5.5', reasoning: 'high' });
-    const chips = within(screen.getByRole('group', { name: 'Meta agent runtime' })).getAllByRole('button');
+    const chips = within(screen.getByRole('group', { name: 'Pages upkeep runtime' })).getAllByRole('button');
     expect(chips.map((chip) => chip.textContent)).toEqual(['Claude', 'Pi', 'Codex', 'Kiro']);
     expect(chips.map((chip) => (chip as HTMLButtonElement).disabled)).toEqual([false, false, false, false]);
     expect(chips[0].getAttribute('aria-pressed')).toBe('true');
@@ -164,14 +164,14 @@ describe('Settings › Meta agent runtime', () => {
       resolved: { runtimeId: 'codex', providerId: null, modelId: 'gpt-5.5-codex', reasoning: 'high', followsGlobal: false },
     });
     const first = (name: string) => (screen.getByRole('combobox', { name }) as HTMLSelectElement).options[0]!.textContent;
-    expect(first('Meta agent model')).toBe('Default (GPT 5.5 Codex)');
-    expect(first('Meta agent reasoning')).toBe('Default (High)');
+    expect(first('Pages upkeep model')).toBe('Default (GPT 5.5 Codex)');
+    expect(first('Pages upkeep reasoning')).toBe('Default (High)');
     cleanup();
 
     // A value picked by hand needs no explanation.
     await mount(CUSTOM_CODEX);
-    expect(first('Meta agent model')).toBe('Default');
-    expect(first('Meta agent reasoning')).toBe('Default');
+    expect(first('Pages upkeep model')).toBe('Default');
+    expect(first('Pages upkeep reasoning')).toBe('Default');
   });
 
   it('explains when the runtime it follows cannot run it, and switches to the first runtime that can', async () => {
@@ -197,7 +197,7 @@ describe('Settings › Meta agent runtime', () => {
         : runtime.id === 'kiro' ? { ...runtime, available: false, unavailableReason: 'kiro-cli not found' } : runtime),
     });
     await mount({ ...CUSTOM_CODEX, settings: { ...CUSTOM_CODEX.settings, runtimeId: 'claude' } });
-    const choices = screen.getByRole('group', { name: 'Meta agent runtime' });
+    const choices = screen.getByRole('group', { name: 'Pages upkeep runtime' });
     expect(within(choices).getAllByRole('button').map((chip) => chip.textContent)).toEqual(['Pi', 'Codex']);
     expect(screen.getByText('Claude isn’t installed on this computer.')).toBeTruthy();
     expect(screen.queryByText('Kiro isn’t installed on this computer.')).toBeNull();
@@ -207,7 +207,7 @@ describe('Settings › Meta agent runtime', () => {
     expect(screen.queryByText(/Pi runs inside Michi/)).toBeNull();
     cleanup();
     await mount(CUSTOM_CODEX);
-    expect(screen.getByRole('group', { name: 'Meta agent runtime' }).nextElementSibling?.classList.contains('meta-set__hints')).toBe(false);
+    expect(screen.getByRole('group', { name: 'Pages upkeep runtime' }).nextElementSibling?.classList.contains('meta-set__hints')).toBe(false);
   });
 
   it('sends nulls for every field when going back to the global settings', async () => {
@@ -225,14 +225,14 @@ describe('Settings › Meta agent runtime', () => {
     await mount(CUSTOM_CODEX);
     expect(catalog.calls.at(-1)).toMatchObject({ runtime: 'codex', connectionId: 'local' });
     api.updateMetaAgentSettings.mockResolvedValue(CUSTOM_CODEX);
-    fireEvent.change(screen.getByRole('combobox', { name: 'Meta agent model' }), { target: { value: '' } });
+    fireEvent.change(screen.getByRole('combobox', { name: 'Pages upkeep model' }), { target: { value: '' } });
     await flush();
     expect(lastPatch()).toEqual({ modelId: null });
-    fireEvent.change(screen.getByRole('combobox', { name: 'Meta agent reasoning' }), { target: { value: 'low' } });
+    fireEvent.change(screen.getByRole('combobox', { name: 'Pages upkeep reasoning' }), { target: { value: 'low' } });
     await flush();
     expect(lastPatch()).toEqual({ reasoning: 'low' });
     // A model without reasoning drops the explicit level.
-    fireEvent.change(screen.getByRole('combobox', { name: 'Meta agent model' }), { target: { value: 'gpt-mini' } });
+    fireEvent.change(screen.getByRole('combobox', { name: 'Pages upkeep model' }), { target: { value: 'gpt-mini' } });
     await flush();
     expect(lastPatch()).toEqual({ modelId: 'gpt-mini', reasoning: null });
   });
@@ -247,18 +247,18 @@ describe('Settings › Meta agent runtime', () => {
   });
 });
 
-describe('Settings › Meta agent follow-global line', () => {
+describe('Settings › <name> › Pages upkeep follow-global line', () => {
   it('names the resolved runtime in the follow-global line', async () => {
     await mount(followOn('kiro', 'kiro_default'));
     expect(runtimeSection().textContent).toContain('Now Kiro · kiro_default. Change the global settings');
   });
 });
 
-describe('Settings › Meta agent guard failure', () => {
+describe('Settings › <name> › Pages upkeep guard failure', () => {
   it('shows a red box with the extra tools, and Retry clears the failed check', async () => {
     await mount({ ...followOn('kiro'), guard: { maintenance: failed(), chat: null } });
     const alert = screen.getByRole('alert');
-    expect(alert.textContent).toContain('Meta agent stopped: Kiro started with extra tools');
+    expect(alert.textContent).toContain('Michi stopped: Kiro started with extra tools');
     expect(within(alert).getAllByText(/^(execute_bash|fs_write)$/).map((node) => node.tagName)).toEqual(['CODE', 'CODE']);
 
     api.retryMetaAgentGuard.mockResolvedValue(followOn('kiro'));
@@ -266,7 +266,7 @@ describe('Settings › Meta agent guard failure', () => {
     await flush();
     expect(api.retryMetaAgentGuard).toHaveBeenCalledWith('maintenance');
     expect(api.fetchMetaAgent).toHaveBeenCalledTimes(1);
-    expect(screen.queryByText(/Meta agent stopped/)).toBeNull();
+    expect(screen.queryByText(/Michi stopped/)).toBeNull();
   });
 
   it('retries both checks when both failed, and keeps the box when the retry fails', async () => {
@@ -276,7 +276,7 @@ describe('Settings › Meta agent guard failure', () => {
     fireEvent.click(within(screen.getByRole('alert')).getByRole('button', { name: 'Retry' }));
     await flush();
     expect(api.retryMetaAgentGuard).toHaveBeenCalledWith(undefined);
-    expect(screen.getByText(/Meta agent stopped/)).toBeTruthy();
+    expect(screen.getByText(/Michi stopped/)).toBeTruthy();
     expect(within(screen.getByRole('alert')).getByRole('button', { name: 'Retry' })).toHaveProperty('disabled', false);
   });
 
@@ -284,10 +284,10 @@ describe('Settings › Meta agent guard failure', () => {
     await mount({ ...followOn('kiro'), guard: { maintenance: failed(), chat: failed({ toolset: 'chat', unexpectedTools: ['fs_write'], detail: undefined }) } });
     const alert = screen.getByRole('alert');
     expect(within(alert).getAllByText(/^(execute_bash|fs_write)$/)).toHaveLength(2);
-    expect(within(alert).queryByText('Background maintenance')).toBeNull();
+    expect(within(alert).queryByText('Pages upkeep')).toBeNull();
     fireEvent.click(within(alert).getByRole('button', { name: 'Details' }));
-    expect(within(alert).getByText('Background maintenance')).toBeTruthy();
-    expect(within(alert).getByText('Chat window')).toBeTruthy();
+    expect(within(alert).getByText('Pages upkeep')).toBeTruthy();
+    expect(within(alert).getByText('Check-ins')).toBeTruthy();
     expect(alert.textContent).toContain('Kiro published 2 tools outside the allow-list');
     expect(alert.textContent).toMatch(/Kiro · checked [A-Z][a-z]{2} \d{1,2}, \d{2}:41/);
 
@@ -301,22 +301,31 @@ describe('Settings › Meta agent guard failure', () => {
   });
 });
 
-describe('Settings › Meta agent stopped by errors', () => {
+describe('Settings › <name> › Pages upkeep stopped by errors', () => {
   const AUTH = 'Claude authentication failed. Refresh the CLI credentials and retry; the original session is retained.';
-  const stopped = (reason: 'other' | 'runtime-unsupported', message: string) => ({
-    ...overview('error'), error: message, stopped: { reason, message, workspaceIds: ['w1'] },
+  const stopped = (reason: 'other' | 'runtime-unsupported' | 'signed-out', message: string, detail?: string) => ({
+    ...overview('error'), error: message, stopped: { reason, message, ...(detail ? { detail } : {}), workspaceIds: ['w1'] },
+  });
+
+  it('a sign-in stop says it tries again on its own', async () => {
+    api.fetchOverview.mockResolvedValue(stopped('signed-out', 'Claude\'s credentials were rejected', AUTH));
+    await mount();
+    const alert = screen.getByRole('alert');
+    expect(alert.textContent).toContain('Claude\'s credentials were rejected. It tries again every hour, or press Retry once sign-in works.');
+    expect(alert.textContent).toContain(AUTH);
+    expect(alert.textContent).not.toContain('until it runs again');
   });
 
   it('says why it stopped, which is what raised the Settings dot, and Retry resumes and runs a round', async () => {
     api.fetchOverview.mockResolvedValue(stopped('other', AUTH));
     await mount();
     const alert = screen.getByRole('alert');
-    expect(alert.textContent).toContain('Meta agent stopped');
+    expect(alert.textContent).toContain('Pages upkeep stopped');
     expect(alert.textContent).toContain(AUTH);
 
     api.setPaused.mockResolvedValue(overview('running'));
     api.fetchOverview.mockResolvedValue(overview('running'));
-    api.runUpdate.mockResolvedValue(undefined);
+    api.runUpdate.mockResolvedValue({ workspaces: [] });
     fireEvent.click(within(alert).getByRole('button', { name: 'Retry' }));
     await flush();
     expect(api.setPaused).toHaveBeenCalledWith(false);
@@ -328,7 +337,7 @@ describe('Settings › Meta agent stopped by errors', () => {
     api.fetchOverview.mockResolvedValue(stopped('runtime-unsupported', 'Codex is not installed on this computer'));
     await mount();
     const alert = screen.getByRole('alert');
-    expect(alert.textContent).toContain('Meta agent is not running');
+    expect(alert.textContent).toContain('Pages upkeep isn’t running');
     expect(alert.textContent).toContain('Codex is not installed on this computer.');
     expect(within(alert).queryByRole('button', { name: 'Retry' })).toBeNull();
     fireEvent.click(within(alert).getByRole('button', { name: 'Change runtime' }));
@@ -343,7 +352,7 @@ describe('Settings › Meta agent stopped by errors', () => {
   });
 });
 
-describe('Settings › Meta agent background updates', () => {
+describe('Settings › <name> › Pages upkeep background updates', () => {
   const row = () => screen.getByRole('switch', { name: 'Background updates' }).closest('.meta-set__row') as HTMLElement;
 
   it('pauses and resumes them through the same switch as Scheduled, and says the chat window still works', async () => {
@@ -357,7 +366,7 @@ describe('Settings › Meta agent background updates', () => {
     await flush();
     expect(api.setPaused).toHaveBeenCalledWith(true);
     expect(within(row()).getByText('Paused')).toBeTruthy();
-    expect(row().textContent).toContain('The chat window in Pages still works.');
+    expect(row().textContent).toContain('Your conversation with Michi still works.');
     expect(screen.getByRole('heading', { name: 'Reading' }).parentElement!.textContent).toBe('ReadingSaved');
 
     api.setPaused.mockResolvedValue(overview('running'));
@@ -373,18 +382,18 @@ describe('Settings › Meta agent background updates', () => {
     fireEvent.click(screen.getByRole('switch', { name: 'Background updates' }));
     await flush();
     expect(screen.getByRole('alert').textContent).toBe('Scheduler is off');
-    expect(screen.getByRole('alert').closest('section')!.querySelector('h2')!.textContent).toBe('Reading');
+    expect(screen.getByRole('alert').closest('section')!.querySelector('h3')!.textContent).toBe('Reading');
     expect(api.fetchOverview.mock.calls.length).toBeGreaterThan(1);
     expect(within(row()).getByText('On')).toBeTruthy();
   });
 });
 
-describe('Settings › Meta agent reading, writing and usage', () => {
+describe('Settings › <name> › Pages upkeep reading, writing and usage', () => {
   it('shows the fixed rows, the locked rule, the defaults and today’s usage', async () => {
     await mount({ ...FOLLOW, usageToday: { checks: 342, modelCalls: 9, tokens: 41_200 } });
     expect(await screen.findByText(/Checks every workspace for new conversations every 60 seconds/)).toBeTruthy();
     expect(screen.getByText('Last 30 days of conversations, up to 1,000')).toBeTruthy();
-    expect(screen.getByText('Scheduled-job output, the Meta agent’s own chat, and archived or deleted conversations')).toBeTruthy();
+    expect(screen.getByText('Scheduled-job output, your conversation with Michi, and archived or deleted conversations')).toBeTruthy();
     const range = screen.getByRole('combobox', { name: 'First-run range' }) as HTMLSelectElement;
     expect(range.disabled).toBe(false);
     expect(range.value).toBe('30');
@@ -471,17 +480,17 @@ describe('Settings › Meta agent reading, writing and usage', () => {
   });
 });
 
-describe('Settings › Meta agent without a backend', () => {
+describe('Settings › <name> › Pages upkeep without a backend', () => {
   it('shows a quiet notice on 404', async () => {
     await mount(new MetaAgentApiError(404, 'Not found'));
-    expect(screen.getByRole('status').textContent).toContain('does not run the Meta agent yet');
+    expect(screen.getByRole('status').textContent).toContain('does not run Pages upkeep yet');
     expect(screen.queryByRole('radio')).toBeNull();
     expect(screen.queryByRole('alert')).toBeNull();
   });
 
   it('reports other failures with a retry', async () => {
     await mount(new MetaAgentApiError(500, 'Database is locked'));
-    expect(screen.getByRole('alert').textContent).toContain('Couldn’t load the Meta agent: Database is locked.');
+    expect(screen.getByRole('alert').textContent).toContain('Couldn’t load Pages upkeep: Database is locked.');
     api.fetchMetaAgent.mockReset();
     api.fetchMetaAgent.mockResolvedValue(FOLLOW);
     fireEvent.click(screen.getByRole('button', { name: 'Try again' }));
@@ -493,11 +502,33 @@ describe('Settings › Meta agent without a backend', () => {
 it('shows pending tool approval and saves persistent approval, then revokes it', async () => {
   const request = { id: 'abc', server: 'mail', tool: 'send', description: 'Send a message', state: 'pending' as const, requestedAt: 1, updatedAt: 1 };
   await mount({ ...FOLLOW, toolApprovals: [request] });
-  expect(screen.getByText(/Needs your approval; not executed/)).toBeTruthy();
+  expect(screen.getByText('Needs approval')).toBeTruthy();
+  expect(screen.getByText(/A tool is waiting for your approval/)).toBeTruthy();
   api.decideMetaAgentToolApproval.mockResolvedValue({ ...FOLLOW, toolApprovals: [{ ...request, state: 'approved' }] });
-  fireEvent.click(screen.getByRole('button', { name: 'Always allow this tool' })); await flush();
+  fireEvent.click(screen.getByRole('button', { name: 'Always allow' })); await flush();
+  expect(screen.queryByText(/A tool is waiting for your approval/)).toBeNull();
   expect(api.decideMetaAgentToolApproval).toHaveBeenLastCalledWith('abc', 'approved');
   api.decideMetaAgentToolApproval.mockResolvedValue({ ...FOLLOW, toolApprovals: [{ ...request, state: 'revoked' }] });
   fireEvent.click(screen.getByRole('button', { name: 'Revoke' })); await flush();
   expect(api.decideMetaAgentToolApproval).toHaveBeenLastCalledWith('abc', 'revoked');
+});
+
+describe('Settings › <name> › Pages upkeep names the agent', () => {
+  it('says the agent’s name where it acts, and never the Meta agent', async () => {
+    const { resetCompanionStoreForTests } = await import('../../../../state/companion/companionStore');
+    const { companionSnapshot } = await import('../../../../test/companionFixtures');
+    const snapshot = companionSnapshot();
+    resetCompanionStoreForTests({ snapshot: { ...snapshot, settings: { ...snapshot.settings, displayName: 'Robin' } } });
+    try {
+      await mount();
+      expect(screen.getByText('Scheduled-job output, your conversation with Robin, and archived or deleted conversations')).toBeTruthy();
+      expect(screen.getByText('Robin suggests a change and you accept it. On home pages it updates its own blocks directly, also after you tick or edit them')).toBeTruthy();
+      expect(document.body.textContent).not.toMatch(/meta agent/i);
+      // Subsections sit under Settings › <name>'s "Pages upkeep" heading.
+      expect(screen.getAllByRole('heading', { level: 3 }).map((heading) => heading.textContent)).toEqual(expect.arrayContaining(['Runtime', 'Reading', 'Writing', 'Usage']));
+      expect(screen.queryAllByRole('heading', { level: 2 })).toEqual([]);
+    } finally {
+      resetCompanionStoreForTests();
+    }
+  });
 });

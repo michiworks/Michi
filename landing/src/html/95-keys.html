@@ -1,0 +1,42 @@
+<!-- Keys sheet, copy-link status and footnote cards (owner: figures).
+     #keys: the non-modal keys sheet (brief §3.14, P14), opened by ? or the
+     footer's [data-keys-open] button; hidden without JS.
+     #copy-status: the polite live region for "Link copied" (88-copylink.js).
+     #fn-cards: the three footnote branch cards (brief §3.13), cloned into
+     <body> by 80-footnotes.js; no-JS footnotes stay plain links to the notes. -->
+<div class="keys-sheet" id="keys" role="dialog" aria-labelledby="keys-title" tabindex="-1" hidden>
+  <div class="keys-head">
+    <h2 class="keys-title" id="keys-title">Keys on this page</h2>
+    <button type="button" class="keys-close" data-keys-close>Close<kbd class="kbd" aria-hidden="true">Esc</kbd></button>
+  </div>
+  <dl class="keys-list">
+    <div><dt><kbd class="kbd">D</kbd></dt><dd>Download for macOS</dd></div>
+    <div><dt><kbd class="kbd">B</kbd></dt><dd>Branch a sentence in the example at the top</dd></div>
+    <div><dt><kbd class="kbd">M</kbd></dt><dd>Jump to the Map</dd></div>
+    <div><dt><kbd class="kbd">J</kbd> / <kbd class="kbd">K</kbd></dt><dd>Next / previous section</dd></div>
+    <div><dt><kbd class="kbd">R</kbd></dt><dd>Replay the example in view</dd></div>
+    <div><dt><kbd class="kbd">?</kbd></dt><dd>Show or hide this list</dd></div>
+    <div><dt><kbd class="kbd">Esc</kbd></dt><dd>Close</dd></div>
+  </dl>
+</div>
+<p class="sr-only" id="copy-status" aria-live="polite"></p>
+<template id="fn-cards">
+  <div class="mk mk-bcard fn-card e e-soft is-off" id="fn-card-knows" data-fn="note-knows" role="dialog" aria-labelledby="fn-t-knows">
+    <button type="button" class="mk-bcard-item" aria-label="Open note: What a branch knows" aria-describedby="fn-x-knows">
+      <span class="mk-bcard-head"><svg class="i i-r90 mk-bcard-glyph" width="13" height="13" viewBox="0 0 24 24" stroke-width="2.4" aria-hidden="true"><path d="M16 3h5v5"/><path d="M8 3H3v5"/><path d="M12 22v-8.3a4 4 0 0 0-1.172-2.872L3 3"/><path d="m15 9 6-6"/></svg><span class="mk-bcard-title" id="fn-t-knows">What a branch knows</span><span class="mk-bcard-state">now</span><svg class="i mk-bcard-open" width="13" height="13" viewBox="0 0 24 24" stroke-width="2" aria-hidden="true"><path d="M7 7h10v10"/><path d="M7 17 17 7"/></svg></span>
+      <span class="mk-bcard-ex" id="fn-x-knows"><span class="mk-bcard-who">you</span><span class="mk-bcard-q">Does a branch see what the main thread says later?</span><span class="mk-bcard-who">michi</span><span class="mk-bcard-r">No. It starts with everything above the sentence you branched from. Nothing leaks back up until you merge it or @ it.</span></span>
+    </button>
+  </div>
+  <div class="mk mk-bcard fn-card e e-soft is-off" id="fn-card-orchestrator" data-fn="note-orchestrator" role="dialog" aria-labelledby="fn-t-orchestrator">
+    <button type="button" class="mk-bcard-item" aria-label="Open note: Parallel agents?" aria-describedby="fn-x-orchestrator">
+      <span class="mk-bcard-head"><svg class="i i-r90 mk-bcard-glyph" width="13" height="13" viewBox="0 0 24 24" stroke-width="2.4" aria-hidden="true"><path d="M16 3h5v5"/><path d="M8 3H3v5"/><path d="M12 22v-8.3a4 4 0 0 0-1.172-2.872L3 3"/><path d="m15 9 6-6"/></svg><span class="mk-bcard-title" id="fn-t-orchestrator">Parallel agents?</span><span class="mk-bcard-state">now</span><svg class="i mk-bcard-open" width="13" height="13" viewBox="0 0 24 24" stroke-width="2" aria-hidden="true"><path d="M7 7h10v10"/><path d="M7 17 17 7"/></svg></span>
+      <span class="mk-bcard-ex" id="fn-x-orchestrator"><span class="mk-bcard-who">you</span><span class="mk-bcard-q">Is this another way to run agents in parallel?</span><span class="mk-bcard-who">michi</span><span class="mk-bcard-r">No. Those split one task and report back. Here you open each branch, keep talking to it, and choose what comes back.</span></span>
+    </button>
+  </div>
+  <div class="mk mk-bcard fn-card e e-soft is-off" id="fn-card-merge" data-fn="note-merge" role="dialog" aria-labelledby="fn-t-merge">
+    <button type="button" class="mk-bcard-item" aria-label="Open note: Merge" aria-describedby="fn-x-merge">
+      <span class="mk-bcard-head"><svg class="i i-r90 mk-bcard-glyph" width="13" height="13" viewBox="0 0 24 24" stroke-width="2.4" aria-hidden="true"><path d="M16 3h5v5"/><path d="M8 3H3v5"/><path d="M12 22v-8.3a4 4 0 0 0-1.172-2.872L3 3"/><path d="m15 9 6-6"/></svg><span class="mk-bcard-title" id="fn-t-merge">Merge</span><span class="mk-bcard-state">now</span><svg class="i mk-bcard-open" width="13" height="13" viewBox="0 0 24 24" stroke-width="2" aria-hidden="true"><path d="M7 7h10v10"/><path d="M7 17 17 7"/></svg></span>
+      <span class="mk-bcard-ex" id="fn-x-merge"><span class="mk-bcard-who">you</span><span class="mk-bcard-q">Does merging change the branches?</span><span class="mk-bcard-who">michi</span><span class="mk-bcard-r">No. Merge starts a new thread from the branches you picked. Nothing in them is rewritten.</span></span>
+    </button>
+  </div>
+</template>

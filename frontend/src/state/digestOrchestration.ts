@@ -1,6 +1,6 @@
 import { useCallback, useRef, type Dispatch, type MutableRefObject, type SetStateAction } from 'react';
 import { toast } from 'sonner';
-import { computeSourceFingerprint } from './digest';
+import { computeSourceFingerprint, visibleDigestMarkdown } from './digest';
 import { descendants, findTreeIdForNode } from './tree';
 import type { ChatAction, ChatNodeState, Project } from './chatTypes';
 
@@ -58,7 +58,7 @@ export function useDigestOrchestration({
           project,
           sources,
           sourceNodes,
-          previousDigest?.content,
+          previousDigest?.content === undefined ? undefined : visibleDigestMarkdown(previousDigest.content),
           previousDigest?.customPrompt,
         );
         const markdown = await streamDigest(snapshot, {

@@ -16,7 +16,8 @@ import {
   type PageMaintenanceIdentity,
   type PageMaintenanceWorkspace,
 } from '../../services/api/pageMaintenance';
-import { SCHEDULED_JOB_RUN_WINDOW_EVENT, SCHEDULED_JOBS_CHANGED_WINDOW_EVENT } from '../../components/terminal/scheduled/scheduledNav';
+import { SCHEDULED_JOB_RUN_WINDOW_EVENT, SCHEDULED_JOBS_CHANGED_WINDOW_EVENT } from '../scheduledRunNotice';
+import { useVisiblePoll } from '../visiblePoll';
 
 export interface PageMaintenanceState {
   value: PageMaintenanceWorkspace | null;
@@ -59,20 +60,17 @@ export function usePageMaintenance(identity: PageMaintenanceIdentity): PageMaint
       .then((next) => { if (current) setValue(next); })
       .catch((cause) => { if (current && !(cause instanceof DOMException && cause.name === 'AbortError')) setError(message(cause)); })
       .finally(() => { if (current) setLoading(false); });
-    const poll = window.setInterval(() => {
-      if (document.visibilityState === 'visible') refresh();
-    }, 15_000);
     const onScheduledChange = () => refresh();
     window.addEventListener(SCHEDULED_JOB_RUN_WINDOW_EVENT, onScheduledChange);
     window.addEventListener(SCHEDULED_JOBS_CHANGED_WINDOW_EVENT, onScheduledChange);
     return () => {
       current = false;
       controller.abort();
-      window.clearInterval(poll);
       window.removeEventListener(SCHEDULED_JOB_RUN_WINDOW_EVENT, onScheduledChange);
       window.removeEventListener(SCHEDULED_JOBS_CHANGED_WINDOW_EVENT, onScheduledChange);
     };
   }, [backendConnectionId, refresh, revision, workspaceId]);
+  useVisiblePoll(refresh, { intervalMs: 15_000, focus: false });
 
   const mutate = React.useCallback(async (action: (options: PageMaintenanceIdentity) => Promise<PageMaintenanceWorkspace | unknown>) => {
     setBusy(true);

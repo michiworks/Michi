@@ -1,9 +1,9 @@
 /** Development-only comparison surface. It uses the same native document and catalog as Pages. */
 import { useLayoutEffect, useMemo, useState } from 'react';
-import { PAGE_BLOCK_CATALOG, PAGE_BLOCK_TYPES, applyPageOps, type PageBlock, type PageDto } from 'michi-shared';
+import { PAGE_BLOCK_CATALOG, PAGE_BLOCK_TYPES, applyPageOps, randomUuid, type PageBlock, type PageDto } from 'michi-shared';
 import { cssVarsFor, DARK_PALETTES, PALETTES } from '../../tokens';
 import type { TerminalPalette } from '../../../../state/prefs';
-import { NativePageDocument } from '../../spaces/NativePageDocument';
+import NativePageDocument from '../../spaces/NativePageDocument';
 import { MichiMantine } from './mantine/MichiMantine';
 import { CHART_KINDS } from './vendor-blocks/shared/desk-catalog';
 import { chartSample } from './vendor-blocks/src/desk/component-samples';
@@ -22,7 +22,9 @@ export default function NativeBlocksSpecimen() {
     const only = params.get('only')?.split(',');
     const blocks = PAGE_BLOCK_TYPES.flatMap((type): PageBlock[] => {
       const sample = PAGE_BLOCK_CATALOG[type].example;
-      if (!sample || type === 'threads' || (only && !only.includes(type))) return [];
+      // Threads and Home sections read the live chat store, which this
+      // standalone page has no provider for: rendering them throws.
+      if (!sample || type === 'threads' || type === 'home-section' || (only && !only.includes(type))) return [];
       if (type === 'chart' && params.get('charts') === 'all') return CHART_KINDS.map((kind) => ({ ...chartSample(kind), id: `chart-${kind}`, rev: 1 } as unknown as PageBlock));
       return [{ ...sample, id: `sample-${type}`, rev: 1 }];
     });
@@ -35,7 +37,7 @@ export default function NativeBlocksSpecimen() {
       <MichiMantine dark={DARK_PALETTES.has(palette)}>
         <NativePageDocument page={page} onOpenPage={() => {}} renderDatabaseRef={() => null} onAskAssistant={() => {}}
           onEdit={async (ops) => {
-            const result = applyPageOps(page.blocks, ops, { actor: 'user', revision: page.revision + 1, now: Date.now(), newId: () => crypto.randomUUID() });
+            const result = applyPageOps(page.blocks, ops, { actor: 'user', revision: page.revision + 1, now: Date.now(), newId: randomUuid });
             if (result.rejected.length) return 'failed';
             setPage((current) => ({ ...current, blocks: result.blocks, revision: current.revision + 1 }));
             return 'ok';

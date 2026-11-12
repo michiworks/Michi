@@ -1,4 +1,3 @@
-import React from 'react';
 import { fireEvent, render, screen } from '@testing-library/react';
 import { describe, expect, it, vi } from 'vitest';
 import {
@@ -8,6 +7,7 @@ import {
 } from 'michi-shared';
 import type { LocatedAgentResource } from '../../../state/agentIdentity';
 
+import { kbd } from '../../../lib/platform';
 import { AgentRunPane } from './AgentRunPane';
 
 const HASH = 'b'.repeat(64);
@@ -46,6 +46,21 @@ describe('AgentRunPane', () => {
     expect(screen.queryByTestId('run-metadata-popover')).toBeNull();
   });
 
+  it('closes agent metadata on Esc, giving focus back to the name, and on a press outside it', () => {
+    render(<AgentRunPane run={resource} attempts={[attempt]} events={events} onClose={() => {}} />);
+    const name = screen.getByRole('button', { name: 'Agent metadata' });
+    fireEvent.click(name);
+    expect(screen.getByTestId('run-metadata-popover')).toBeTruthy();
+    fireEvent.keyDown(document.activeElement ?? document.body, { key: 'Escape' });
+    expect(screen.queryByTestId('run-metadata-popover')).toBeNull();
+    expect(document.activeElement).toBe(name);
+    expect(name.getAttribute('aria-expanded')).toBe('false');
+
+    fireEvent.click(name);
+    fireEvent.pointerDown(screen.getByText('FULL TRANSCRIPT DETAIL'));
+    expect(screen.queryByTestId('run-metadata-popover')).toBeNull();
+  });
+
   it('queues steering by default and exposes immediate stop as a distinct action', () => {
     const send = vi.fn();
     render(<AgentRunPane run={resource} attempts={[attempt]} onClose={() => {}} onSendInput={send} />);
@@ -59,6 +74,27 @@ describe('AgentRunPane', () => {
     fireEvent.change(input, { target: { value: 'Redirect now' } });
     fireEvent.click(screen.getByRole('button', { name: 'Stop & redirect' }));
     expect(send.mock.calls.at(-1)?.[1].mode).toBe('immediate');
+  });
+
+  it('queues on Enter and stops & redirects on Alt+Enter, as its buttons say', () => {
+    const send = vi.fn();
+    render(<AgentRunPane run={resource} attempts={[attempt]} onClose={() => {}} onSendInput={send} />);
+    const input = screen.getByLabelText('Steer Agent Run');
+    expect(screen.getByRole('button', { name: 'Queue input' }).textContent).toContain(kbd('enter'));
+    expect(screen.getByRole('button', { name: 'Stop & redirect' }).textContent).toContain(kbd('alt', 'enter'));
+    fireEvent.change(input, { target: { value: 'Keep going' } });
+    fireEvent.keyDown(input, { key: 'Enter', shiftKey: true });
+    fireEvent.keyDown(input, { key: 'Enter', isComposing: true });
+    expect(send).not.toHaveBeenCalled();
+    fireEvent.keyDown(input, { key: 'Enter' });
+    expect(send).toHaveBeenLastCalledWith(
+      { backendConnectionId: 'remote-b', id: 'run-pane' },
+      { version: 1, text: 'Keep going', mode: 'queued', expectedAttemptId: 'attempt-1' },
+    );
+    fireEvent.change(input, { target: { value: 'Redirect now' } });
+    fireEvent.keyDown(input, { key: 'Enter', altKey: true });
+    expect(send).toHaveBeenCalledTimes(2);
+    expect(send.mock.calls.at(-1)?.[1]).toMatchObject({ text: 'Redirect now', mode: 'immediate' });
   });
 
   it('removes pending actions after interaction resolution and closes by composite identity', () => {

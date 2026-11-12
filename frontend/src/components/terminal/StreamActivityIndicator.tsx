@@ -1,9 +1,10 @@
-import React, { useEffect, useRef, useState } from 'react';
-import type { AssistantBlock, ChatNodeState } from '../../state/chatTypes';
+import React, { useRef } from 'react';
+import type { AssistantBlock, ChatNodeState, ToolCallState } from '../../state/chatTypes';
 import type { PlanEntry } from '../../services/api';
 import { type AgentBlockStyle, useAgentBlockStyle } from '../../state/prefs';
 import { splitAssistantRuns, tailRunsFormAgentCluster } from '../../state/streamingProjection';
 import { isRunningStatus, isHiddenInternalTool } from './toolCallGrouping';
+import { useNow } from '../../hooks/useNow';
 
 /**
  * Phase 1 "backend is working" indicator — runtime-agnostic.
@@ -93,6 +94,31 @@ function thoughtHeaderIsLive(
 }
 
 /**
+ * The 'line' chrome keeps the newest tool group of a streaming turn live
+ * between its calls (the row says "Working…" after a pause), so that row is
+ * the live signal: true when the turn's last run ends in a group with a
+ * visible tool (MessageBlock passes that group `live`).
+ */
+function lineToolRowIsLive(
+  blocks: readonly AssistantBlock[],
+  toolCalls: readonly ToolCallState[],
+  ctx: StreamActivityRenderContext | undefined,
+): boolean {
+  if (ctx?.agentBlockStyle !== 'line') return false;
+  const runs = splitAssistantRuns(blocks);
+  const tail = runs[runs.length - 1];
+  if (!tail || tail.kind !== 'answer') return false;
+  for (let i = tail.blocks.length - 1; i >= 0; i--) {
+    const block = tail.blocks[i];
+    if (block.kind === 'answer' && !block.rawText?.trim()) continue;
+    if (block.kind !== 'tool') return false;
+    const tool = toolCalls.find((t) => t.id === block.toolCallId);
+    if (tool && !isHiddenInternalTool(tool.title)) return true;
+  }
+  return false;
+}
+
+/**
  * Pure label derivation. Returns null when no standalone row should render.
  * Exported for unit testing — keep it free of React/timing concerns.
  */
@@ -157,6 +183,8 @@ export function deriveStreamActivity(
   // The thought block's own header already says "Thinking…"/"Working…" with a
   // live timer; a second bare row underneath repeats it.
   if (thoughtHeaderIsLive(blocks, !!last.streaming, ctx)) return null;
+  // Likewise the line chrome's live tool row.
+  if (last.streaming && lineToolRowIsLive(blocks, last.toolCalls, ctx)) return null;
 
   // Tail block tells us what the model is mid-producing.
   if (tail?.kind === 'thinking' && tail.streaming) return { label: 'Thinking' };
@@ -189,21 +217,13 @@ function StreamActivityIndicatorInner({
   if (node.streamingStartedAt && node.streamingStartedAt !== startRef.current) {
     startRef.current = node.streamingStartedAt;
   }
-  const [elapsedMs, setElapsedMs] = useState(() => Date.now() - startRef.current);
   const isStreaming = node.status === 'streaming' && !node.visibleResponseComplete;
-  useEffect(() => {
-    // Only tick while the turn is actually streaming. The component stays
-    // mounted across label flips within a turn (and renders null when idle),
-    // but once the node goes idle/error there is nothing to count — leaving the
-    // 1Hz setState running on every idle pane that ever streamed was pure
-    // wasted re-render churn.
-    if (!isStreaming) return;
-    setElapsedMs(Date.now() - startRef.current);
-    const id = window.setInterval(() => {
-      setElapsedMs(Date.now() - startRef.current);
-    }, 1000);
-    return () => window.clearInterval(id);
-  }, [node.streamingStartedAt, isStreaming]);
+  // Only tick while the turn is actually streaming. The component stays
+  // mounted across label flips within a turn (and renders null when idle),
+  // but once the node goes idle/error there is nothing to count — leaving the
+  // 1Hz setState running on every idle pane that ever streamed was pure
+  // wasted re-render churn.
+  const elapsedMs = useNow(1_000, isStreaming) - startRef.current;
 
   // Render nothing (but stay mounted, preserving the timer across label flips
   // within a turn) when there's no standalone activity to show.
@@ -238,7 +258,7 @@ function StreamActivityIndicatorInner({
         <span className="typing-dot" style={{ animationDelay: '.3s' }} />
       </span>
       {activity.detail && (
-        <span style={{ color: 'var(--term-accent)', fontVariantNumeric: 'tabular-nums' }}>
+        <span style={{ color: 'var(--term-run)', fontVariantNumeric: 'tabular-nums' }}>
           {activity.detail}
         </span>
       )}

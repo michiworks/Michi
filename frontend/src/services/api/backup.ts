@@ -1,5 +1,6 @@
 import { API_BASE_URL } from '../../config/env';
 import { responseError } from './httpError';
+import { downloadText } from '../../lib/download';
 
 // Portable archives must retain their original IDs, without remote entity mapping.
 export interface PortableBackup {
@@ -40,13 +41,5 @@ export async function restoreBackup(backup: PortableBackup): Promise<{ workspace
 }
 
 export function downloadBackup(backup: PortableBackup): void {
-  const blob = new Blob([JSON.stringify(backup)], { type: 'application/json' });
-  const url = URL.createObjectURL(blob);
-  const anchor = document.createElement('a');
-  anchor.href = url;
-  anchor.download = `michi-backup-${new Date().toISOString().replace(/[:.]/g, '-')}.json`;
-  document.body.appendChild(anchor);
-  anchor.click();
-  anchor.remove();
-  setTimeout(() => URL.revokeObjectURL(url), 1000);
+  downloadText(`michi-backup-${new Date().toISOString().replace(/[:.]/g, '-')}.json`, JSON.stringify(backup), 'application/json');
 }

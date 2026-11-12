@@ -92,6 +92,22 @@ test('notifications route to thread-scoped handlers; unknown methods are ignored
   await client.shutdown();
 });
 
+test('a throwing thread handler reaches neither the stdout listener nor the handlers and lines after it', async (t) => {
+  t.mock.method(console, 'warn', () => {});
+  const child = fakeChild();
+  autoInit(child);
+  const client = makeClient(child);
+  await client.ensureStarted();
+  const seen: unknown[] = [];
+  client.onNotification('t-1', () => { throw new Error('translator failed'); });
+  client.onNotification('t-1', (_method, params) => { seen.push(params.delta); });
+  const line = (delta: string) => JSON.stringify({ method: 'item/agentMessage/delta', params: { threadId: 't-1', delta } }) + '\n';
+  child.stdout.write(line('a') + line('b'));
+  await new Promise((r) => setTimeout(r, 20));
+  assert.deepEqual(seen, ['a', 'b']);
+  await client.shutdown();
+});
+
 test('server requests (string AND numeric ids) dispatch and respond is wired back', async () => {
   const child = fakeChild();
   autoInit(child);
@@ -159,6 +175,43 @@ test('stdout EOF rejects local work and late old-child callbacks cannot kill a r
   first.stdin.emit('error', new Error('old pipe'));
   assert.equal(client.isRunning(), true);
   assert.doesNotMatch(second.written, /old-approval/);
+  await client.shutdown();
+});
+
+test("start handlers run after each app-server's initialize handshake, before ensureStarted resolves", async (t) => {
+  const children = [fakeChild(), fakeChild()];
+  for (const child of children) {
+    let buf = '';
+    child.stdin.on('data', (d: Buffer) => {
+      buf += d.toString();
+      for (let nl = buf.indexOf('\n'); nl >= 0; nl = buf.indexOf('\n')) {
+        const message = JSON.parse(buf.slice(0, nl));
+        buf = buf.slice(nl + 1);
+        if (message.id !== undefined) child.stdout.write(JSON.stringify({ id: message.id, result: {} }) + '\n');
+      }
+    });
+  }
+  const spawned = [...children];
+  const client = makeClient(children[0], { spawnFn: () => spawned.shift() });
+  const warn = t.mock.method(console, 'warn', () => {});
+  const events: string[] = [];
+  client.onStarted(async () => {
+    await client.request('probe/started', {});
+    events.push('first');
+    throw new Error('a failing handler does not fail the start');
+  });
+  client.onStarted(async () => { events.push('second'); });
+  await client.ensureStarted();
+  events.push('started');
+  children[0].emit('exit', 1);
+  await client.ensureStarted();
+  events.push('restarted');
+  assert.deepEqual(events, ['first', 'second', 'started', 'first', 'second', 'restarted']);
+  assert.equal(warn.mock.callCount(), 2);
+  for (const child of children) {
+    const methods = child.written.split('\n').filter(Boolean).map((line: string) => JSON.parse(line).method);
+    assert.deepEqual(methods, ['initialize', 'initialized', 'probe/started']);
+  }
   await client.shutdown();
 });
 

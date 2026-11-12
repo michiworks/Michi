@@ -19,7 +19,6 @@ import type {
   JsonValue,
   RecoveryEnvelopeV1,
   ResultBundleV1,
-  RuntimeProfileV1,
   StructuredRunErrorV1,
   WatchConditionV1,
 } from 'michi-shared';
@@ -84,6 +83,9 @@ export interface AgentRunRepositoryPort {
    * when no live lease exists (or the durable lease already expired). */
   administrativelyCancelRun(ownerUserId: string, runId: string,
     leaseToken: string | null, reason: string): AgentRunEventV1 | null;
+  /** Cancel a Run no live handle owns. Null, with nothing written, when it
+   * is gone, already terminal, or leased by a live owner. */
+  cancelRunWithoutHandle(ownerUserId: string, runId: string, reason: string | null): AgentRunEventV1 | null;
   createInteraction(ownerUserId: string, runId: string, attemptId: string | null,
     kind: AgentInteractionKind, request: JsonValue, operationId: string): AgentRunInteractionDtoV1;
   getInteraction(ownerUserId: string, interactionId: string): AgentRunInteractionDtoV1 | null;
@@ -259,4 +261,3 @@ export interface SpawnCoordinatedRunInput {
 }
 
 export type PreparedExecutionEnvironment = ExecutionEnvironmentLease;
-export type AttemptRuntimeProfile = RuntimeProfileV1;

@@ -1,7 +1,9 @@
 import {
   clampSubagentText,
   extractToolUsePurpose,
+  oneLine,
   SUBAGENT_LIMITS,
+  subagentInitialQuery,
   type SubagentActivityPayload,
   type SubagentInfo,
 } from 'michi-shared';
@@ -20,11 +22,6 @@ type Raw = Record<string, any>;
 
 function str(value: unknown): string | undefined {
   return typeof value === 'string' && value.length > 0 ? value : undefined;
-}
-
-function oneLine(text: string, max: number): string {
-  const flat = text.replace(/\s+/g, ' ').trim();
-  return flat.length > max ? `${flat.slice(0, max - 1)}…` : flat;
 }
 
 export function kiroSubtaskId(update: Raw | undefined): string | undefined {
@@ -133,7 +130,7 @@ export function kiroV2RosterEntry(raw: Raw, parentToolCallId?: string): Subagent
     sessionId: String(raw.sessionId ?? ''),
     sessionName: String(raw.sessionName ?? ''),
     agentName: String(raw.agentName ?? raw.role ?? ''),
-    initialQuery: initialQuery ? oneLine(initialQuery.split('\n')[0], 200) : '',
+    initialQuery: subagentInitialQuery(initialQuery),
     status: working ? 'working' : 'terminated',
     group: String(raw.group ?? ''),
     dependsOn: Array.isArray(raw.dependsOn) ? raw.dependsOn.map(String) : [],
@@ -196,7 +193,7 @@ export function kiroV3DelegationEntry(update: Raw): SubagentInfo | null {
     sessionId: id,
     sessionName: name,
     agentName: name,
-    initialQuery: explanation ? oneLine(explanation, 200) : prompt ? oneLine(prompt.split('\n')[0], 200) : '',
+    initialQuery: explanation ? oneLine(explanation, 200) : subagentInitialQuery(prompt),
     status: terminal ? 'terminated' : 'working',
     group: '',
     dependsOn: [],

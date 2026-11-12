@@ -1,3 +1,4 @@
+import { omitInlineImages } from '../../../contract/toolPayload';
 import { frameText, turnUsage, TOOL_CONTENT_MAX, TOOL_TITLE_MAX, type AcpUpdate, type CrewTurnUsage } from './crewFrames';
 import type { CrewChatFrame, CrewEvent, CrewGateway, CrewHistoryRow } from './gatewayTypes';
 import { createCrewSubagentFold } from './crewSubagents';
@@ -48,7 +49,8 @@ export class CrewTurn {
         const prior = this.pending.get(id) ?? {};
         const fields: Record<string, string> = {};
         for (const key of ['tool', 'kind', 'input_preview', 'output']) {
-            if (event.data[key] !== undefined) fields[key] = frameText(event.data[key]).slice(0, TOOL_CONTENT_MAX);
+            const value = key === 'output' ? omitInlineImages(event.data[key]) : event.data[key];
+            if (value !== undefined) fields[key] = frameText(value).slice(0, TOOL_CONTENT_MAX);
         }
         this.pending.set(id, { ...prior, ...fields });
         const card = this.cards.get(this.aliases.get(id) ?? id);
@@ -162,7 +164,8 @@ export class CrewTurn {
         if (typeof data.kind === 'string') card.kind = data.kind;
         const input = data.approval_input ?? data.input_preview ?? data.input;
         if (input !== undefined) card.input = frameText(input).slice(0, TOOL_CONTENT_MAX);
-        if (data.output !== undefined) card.output = frameText(data.output).slice(0, TOOL_CONTENT_MAX);
+        // The card is Michi's display copy; the Gateway's agent keeps the original output.
+        if (data.output !== undefined) card.output = frameText(omitInlineImages(data.output)).slice(0, TOOL_CONTENT_MAX);
         // Gateway drops the terminal/error flag and can publish partial results.
         // Keep the card running until the authoritative SSE turn boundary.
         const value = JSON.stringify([card.title, card.kind, card.input, card.output, card.status]);

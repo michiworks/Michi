@@ -25,7 +25,7 @@
   cursor: pointer;
 }
 .space-new-chat__ws:hover:not(:disabled) { border-color: var(--term-line-s); background: var(--term-hover-bg, var(--term-alt)); }
-.space-new-chat__ws:focus-visible { outline: 2px solid color-mix(in srgb, var(--term-accent) 60%, transparent); outline-offset: 1px; }
+.space-new-chat__ws:focus-visible { outline: var(--focus-ring); outline-offset: 1px; }
 .space-new-chat__ws span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .space-new-chat__spacer { flex: 1; min-width: 0; }
 /* Two lines of room, so a short ask does not look like a one-line search box. */
@@ -40,7 +40,7 @@
   white-space: nowrap;
 }
 .space-new-chat__hint { color: var(--term-muted); font-size: var(--fs-md); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
-.space-new-chat__error { margin: 6px 0 0; color: var(--term-danger); font-size: var(--fs-md); }
+.space-new-chat__error { margin: 6px 0 0; color: var(--term-danger-text); font-size: var(--fs-md); }
 
 .space-live-cards { display: flex; flex-direction: column; gap: 8px; }
 .space-live-card {
@@ -49,7 +49,7 @@
   gap: 4px;
   padding: 10px 12px;
   border: 1px solid var(--term-line);
-  border-left: 3px solid var(--term-select);
+  border-left: 3px solid var(--term-run);
   border-radius: 0 var(--ui-radius-lg) var(--ui-radius-lg) 0;
   background: var(--term-surface);
 }
@@ -57,7 +57,7 @@
 .space-live-card[data-status='failed'] { border-left-color: var(--term-danger); }
 .space-live-card[data-status='cancelled'],
 .space-live-card[data-status='idle'] { border-left-color: var(--term-line-s); }
-.space-live-card[data-awaiting] { border-left-color: var(--term-accent); }
+.space-live-card[data-awaiting] { border-left-color: var(--term-select); }
 .space-live-card__head {
   display: flex;
   align-items: center;
@@ -66,9 +66,9 @@
   font-size: var(--fs-lg);
 }
 .space-live-card__done { flex: none; color: var(--term-digest); }
-.space-live-card__failed { flex: none; color: var(--term-danger); }
+.space-live-card__failed { flex: none; color: var(--term-danger-text); }
 .space-live-card__stopped { flex: none; color: var(--term-muted); }
-.space-live-card__waiting { flex: none; color: var(--term-accent); }
+.space-live-card__waiting { flex: none; color: var(--term-select); }
 .space-live-card__title {
   min-width: 0;
   overflow: hidden;

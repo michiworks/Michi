@@ -342,7 +342,7 @@ describe('UserInputBanner', () => {
     ]);
   });
 
-  it('joins multiSelect selections and Other text', () => {
+  it('joins multiSelect selections and Other text, in either order', () => {
     const onSubmit = vi.fn();
     const r = req({
       questions: [
@@ -355,11 +355,62 @@ describe('UserInputBanner', () => {
     });
     render(<UserInputBanner userInput={r} onSubmit={onSubmit} onSkip={() => {}} />);
     fireEvent.click(screen.getByRole('checkbox', { name: /One/ }));
-    fireEvent.click(screen.getByRole('checkbox', { name: /Two/ }));
     fireEvent.change(screen.getByPlaceholderText(/Other/), { target: { value: 'custom' } });
+    fireEvent.click(screen.getByRole('checkbox', { name: /Two/ }));
+    expect((screen.getByPlaceholderText(/Other/) as HTMLInputElement).value).toBe('custom');
     fireEvent.click(screen.getByRole('button', { name: /Submit/ }));
     const answer = onSubmit.mock.calls[0][0][0].answer as string;
     expect(answer.split(', ').sort()).toEqual(['One', 'Two', 'custom'].sort());
+  });
+
+  it.each([{ isComposing: true }, { keyCode: 229 }])('sends no Other answer on the Enter that ends an IME composition (%o)', (ime) => {
+    const onSubmit = vi.fn();
+    render(<UserInputBanner userInput={req({ questions: [{ question: 'Pick one', options: [{ label: 'One' }], multiSelect: false }] })} onSubmit={onSubmit} onSkip={() => {}} />);
+    const other = screen.getByPlaceholderText(/Other/);
+    fireEvent.change(other, { target: { value: '自己' } });
+    fireEvent.keyDown(other, { key: 'Enter', ...ime });
+    expect(onSubmit).not.toHaveBeenCalled();
+    fireEvent.keyDown(other, { key: 'Enter' });
+    expect(onSubmit).toHaveBeenCalledOnce();
+  });
+
+  it('keeps a single-select Other and the options mutually exclusive', () => {
+    const onSubmit = vi.fn();
+    render(<UserInputBanner userInput={req()} onSubmit={onSubmit} onSkip={() => {}} />);
+    const other = screen.getByPlaceholderText(/Other/) as HTMLInputElement;
+    fireEvent.click(screen.getByRole('radio', { name: /Cookies/ }));
+    fireEvent.change(other, { target: { value: 'Sessions' } });
+    expect(screen.getByRole('radio', { name: /Cookies/ }).getAttribute('aria-checked')).toBe('false');
+    fireEvent.click(screen.getByRole('radio', { name: /JWT/ }));
+    // Picking an option turns Other off but keeps what was typed.
+    expect(other.value).toBe('Sessions');
+    expect(document.querySelector('.ask-card-opt-other')?.classList.contains('selected')).toBe(false);
+    fireEvent.click(screen.getByRole('button', { name: /Submit/ }));
+    expect(onSubmit.mock.calls[0][0][0].answer).toBe('JWT');
+  });
+
+  it('chooses the kept single-select Other text again when it is clicked', () => {
+    const onSubmit = vi.fn();
+    render(<UserInputBanner userInput={req()} onSubmit={onSubmit} onSkip={() => {}} />);
+    const other = screen.getByPlaceholderText(/Other/) as HTMLInputElement;
+    fireEvent.change(other, { target: { value: 'Sessions' } });
+    fireEvent.click(screen.getByRole('radio', { name: /JWT/ }));
+    fireEvent.click(other);
+    expect(screen.getByRole('radio', { name: /JWT/ }).getAttribute('aria-checked')).toBe('false');
+    expect(document.querySelector('.ask-card-opt-other')?.classList.contains('selected')).toBe(true);
+    fireEvent.click(screen.getByRole('button', { name: /Submit/ }));
+    expect(onSubmit.mock.calls[0][0][0].answer).toBe('Sessions');
+  });
+
+  it('drops a pending single-select advance when Other is typed', () => {
+    vi.useFakeTimers();
+    render(<UserInputBanner userInput={multiReq()} onSubmit={() => {}} onSkip={() => {}} />);
+    fireEvent.click(screen.getByRole('radio', { name: /A1/ }));
+    const [firstOther] = screen.getAllByPlaceholderText(/Other/);
+    fireEvent.change(firstOther, { target: { value: 'mine' } });
+    act(() => { vi.advanceTimersByTime(400); });
+    expect(screen.getByText('1 / 2')).toBeTruthy();
+    expect(screen.getByRole('radio', { name: /A1/ }).getAttribute('aria-checked')).toBe('false');
   });
 
   it('auto-advances to the next question 320ms after a single-select pick', () => {
@@ -402,6 +453,82 @@ describe('UserInputBanner', () => {
         { label: 'Prompt', value: 'Summarize 18:00 changes…', quoted: true },
       ],
     });
+  });
+
+  it('reads `Label: before → after` as a change and shows both values', () => {
+    const text = [
+      'Change scheduled job “Digest”?',
+      'Schedule: Every hour → Every day',
+      'Prompt: “Summarize → old.” → “Summarize the archive.”',
+      'Permissions (unchanged): Trust: tools run without asking for approval',
+    ].join('\n');
+    expect(questionLayout(text)?.details).toEqual([
+      { label: 'Schedule', before: 'Every hour', value: 'Every day' },
+      { label: 'Prompt', before: 'Summarize → old.', value: 'Summarize the archive.', quoted: true },
+      { label: 'Permissions (unchanged)', value: 'Trust: tools run without asking for approval' },
+    ]);
+    render(<UserInputBanner userInput={req({ questions: [{ question: text, options: [{ label: 'Save changes' }, { label: 'Cancel' }], multiSelect: false }] })} onSubmit={() => {}} onSkip={() => {}} />);
+    expect(document.querySelectorAll('.ask-change-before')[0]?.textContent).toBe('Every hour');
+    expect(document.querySelectorAll('.ask-change-after')[0]?.textContent).toBe('Every day');
+    // A quoted change stacks as Was / Now.
+    expect(document.querySelector('.ask-change.is-stacked .ask-change-before')?.textContent).toBe('Summarize → old.');
+    expect(screen.getByText('Summarize the archive.')).toBeTruthy();
+  });
+
+  it('reads a full prompt over several lines as the last fact, collapsed until opened', () => {
+    const prompt = [
+      // Its first line closes a quote of its own; the blank lines say it goes on.
+      'You are the unattended job “sync dev”',
+      '',
+      'Rules:',
+      '- Never force push.',
+      '  - Not even after a rejected push.',
+      '',
+      '**Step 1:** check the branch.',
+      'Step 2: report.',
+    ].join('\n');
+    const text = ['Create scheduled job “Sync”?', 'Thread: New thread each run', `Prompt: “${prompt}”`].join('\n');
+    expect(questionLayout(text)?.details).toEqual([
+      { label: 'Thread', value: 'New thread each run' },
+      { label: 'Prompt', value: prompt, quoted: true },
+    ]);
+    render(<UserInputBanner userInput={req({ questions: [{ question: text, options: [{ label: 'Create' }, { label: 'Cancel' }], multiSelect: false }] })} onSubmit={() => {}} onSkip={() => {}} />);
+    const value = document.querySelector('.ask-card-detail.is-quoted .ask-card-detail-value');
+    expect(value?.textContent).toBe(prompt);
+    expect(value?.classList.contains('is-clamped')).toBe(true);
+    const toggle = screen.getByRole('button', { name: 'Show all 8 lines' });
+    expect(toggle.getAttribute('aria-expanded')).toBe('false');
+    fireEvent.click(toggle);
+    expect(value?.classList.contains('is-clamped')).toBe(false);
+    expect(screen.getByRole('button', { name: 'Show less' }).getAttribute('aria-expanded')).toBe('true');
+    // The options are named by the title, not the whole prompt.
+    expect(screen.getByRole('radiogroup').getAttribute('aria-label')).toBe('Create scheduled job “Sync”?');
+  });
+
+  it('reads a changed multi-line prompt as Was / Now, each collapsed on its own', () => {
+    const before = 'Old rules.\n\nKeep them.';
+    const after = Array.from({ length: 8 }, (_, i) => `Rule ${i + 1}.`).join('\n');
+    const text = [
+      'Change scheduled job “Sync”?',
+      'Permissions (unchanged): Trust',
+      `Prompt: “${before}” → “${after}”`,
+    ].join('\n');
+    expect(questionLayout(text)?.details).toEqual([
+      { label: 'Permissions (unchanged)', value: 'Trust' },
+      { label: 'Prompt', before, value: after, quoted: true },
+    ]);
+    render(<UserInputBanner userInput={req({ questions: [{ question: text, options: [{ label: 'Save changes' }], multiSelect: false }] })} onSubmit={() => {}} onSkip={() => {}} />);
+    expect(document.querySelector('.ask-change.is-stacked .ask-change-before')?.textContent).toBe(before);
+    // Only the long new text collapses.
+    expect(screen.getAllByRole('button', { name: /^Show all/ })).toHaveLength(1);
+    expect(document.querySelector('.ask-change-after')?.classList.contains('is-clamped')).toBe(true);
+  });
+
+  it('keeps one-line quoted facts apart when no blank line follows', () => {
+    expect(questionLayout('Rename?\nOld: “a”\nNew: “b”')?.details).toEqual([
+      { label: 'Old', value: 'a', quoted: true },
+      { label: 'New', value: 'b', quoted: true },
+    ]);
   });
 
   it('keeps questions without labelled facts, or with a blank line, as written', () => {

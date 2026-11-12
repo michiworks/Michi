@@ -1,14 +1,12 @@
 import React from 'react';
 import { AnimatePresence } from 'motion/react';
-import { useChatStore, useChatNodesSnapshot, useStructuralSelector } from '../../../state/chatStore';
+import { useChatStore, useChatNodesSnapshot } from '../../../state/chatStore';
+import { useStreamingNodeIds } from '../../../state/nodeActivity';
 import { setManageWorkspaceId } from '../../../state/manageRoute';
 import { Dot } from '../primitives';
 import { initialOf, workspaceAccent } from '../workspaceAccent';
-import ContextMenu, { type MenuSection } from '../../ContextMenu';
-import {
-  buildWorkspaceRowContextMenu,
-  type ContextMenuSection,
-} from '../../../lib/workspaceRowContextMenu';
+import ContextMenu, { menuOpenKey, type MenuSection } from '../../ContextMenu';
+import { buildWorkspaceRowContextMenu } from '../../../lib/workspaceRowContextMenu';
 import type { PageId } from '../../../state/commands';
 import type { ChatNodeState, Project } from '../../../state/chatTypes';
 import { getElectron } from '../../../lib/electronBridge';
@@ -18,7 +16,8 @@ import { Button } from '../../ui/controls';
 import { WorkspaceLocation } from '../../WorkspaceLocation';
 import { useBackendConnections } from '../../../state/useBackendConnections';
 import { isSystemWorkspace } from '../../../state/assistant/systemWorkspace';
-import { isVisibleConversationNode } from '../../../state/conversationVisibility';
+import { isListedThread, isVisibleConversationNode } from '../../../state/conversationVisibility';
+import { threadDisplayTitle } from '../../../state/displayTitle';
 import { threadTitle } from '../../../state/spaceConversations/liveStatus';
 import { usePhoneLayout } from '../../../hooks/usePhoneLayout';
 import {
@@ -34,22 +33,20 @@ import {
   type WorkspaceCardData,
 } from './workspaceList';
 import PhoneWorkspaces from './WorkspacesPhone';
+import { InlineRenameInput } from '../../ui/InlineRenameInput';
 
-export function buildCard(p: Project, snapshot: Record<string, ChatNodeState>, streamingIds: Set<string>, activeProjectId: string | null): WorkspaceCardData {
+export function buildCard(p: Project, snapshot: Record<string, ChatNodeState>, streamingIds: ReadonlySet<string>, activeProjectId: string | null): WorkspaceCardData {
   // Page helpers and Meta agent maintenance runs are not the user's conversations.
   const liveIds = p.chatIds.filter((id) => !snapshot[id]?.deletedAt && isVisibleConversationNode(snapshot[id]));
   const liveCount = liveIds.length;
   const streaming = liveIds.filter((id) => streamingIds.has(id)).length;
   const digests = liveIds.filter((id) => snapshot[id]?.kind === 'digest').length;
 
-  const liveTrees = p.trees.filter((t) => !t.archivedAt && isVisibleConversationNode(snapshot[t.rootNodeId]));
+  const liveTrees = p.trees.filter((t) => isListedThread(t, snapshot[t.rootNodeId]));
   const sortedTrees = [...liveTrees].sort((a, b) => (b.lastActiveAt || 0) - (a.lastActiveAt || 0));
   const threads: ThreadPreview[] = sortedTrees.slice(0, 3).map((t) => {
     const root = snapshot[t.rootNodeId];
-    const title = (t.name && t.name.trim())
-      || (root?.title && root.title.trim())
-      || (root?.messages?.[0]?.text || '').slice(0, 60)
-      || '(untitled)';
+    const title = threadDisplayTitle(t, root, '(untitled)');
     let branches = 0;
     for (const id of liveIds) {
       const n = snapshot[id];
@@ -63,12 +60,6 @@ export function buildCard(p: Project, snapshot: Record<string, ChatNodeState>, s
       activeAt: t.lastActiveAt || t.createdAt,
     };
   });
-
-  const modelSet = new Set<string>();
-  for (const id of liveIds) {
-    const m = snapshot[id]?.modelId;
-    if (m) modelSet.add(shortModelLabel(m));
-  }
 
   const branchesTotal = Math.max(0, liveCount - liveTrees.length);
   // "Last conversation time": the most recent message timestamp across this
@@ -130,7 +121,6 @@ export function buildCard(p: Project, snapshot: Record<string, ChatNodeState>, s
     failed,
     threads,
     nodes,
-    models: Array.from(modelSet).slice(0, 3),
   };
 }
 
@@ -144,16 +134,6 @@ function treeContains(p: Project, snapshot: Record<string, ChatNodeState>, rootI
     cur = n.parentNodeId;
   }
   return false;
-}
-
-function shortModelLabel(modelId: string): string {
-  // claude-fable-5 -> fable, claude-opus-4-5 -> opus, claude-sonnet-4-5 -> sonnet, gpt-5 -> gpt-5
-  const m = modelId.toLowerCase();
-  if (m.includes('fable')) return 'fable';
-  if (m.includes('opus')) return 'opus';
-  if (m.includes('sonnet')) return 'sonnet';
-  if (m.includes('haiku')) return 'haiku';
-  return modelId.split('/').pop()!.split(':')[0];
 }
 
 type SortKey = 'name' | 'last';
@@ -221,19 +201,6 @@ const VISUALLY_HIDDEN: React.CSSProperties = {
   whiteSpace: 'nowrap',
 };
 
-function toMenuSections(sections: ContextMenuSection[]): MenuSection[] {
-  return sections.map((s, si) => ({
-    items: s.items.map((item, ii) => ({
-      id: `${si}-${ii}`,
-      label: item.label,
-      danger: item.danger,
-      disabled: item.disabled,
-      keys: item.keys,
-      run: item.onSelect,
-    })),
-  }));
-}
-
 export default function TerminalWorkspaces({ onNav }: { onNav: (p: PageId) => void }) {
   const {
     projects,
@@ -248,23 +215,9 @@ export default function TerminalWorkspaces({ onNav }: { onNav: (p: PageId) => vo
     unpinProject,
   } = useChatStore();
   const nodesSnapshot = useChatNodesSnapshot();
-  const streamingIds = useStructuralSelector(
-    (ns) => {
-      const out = new Set<string>();
-      for (const [id, n] of Object.entries(ns)) {
-        if (n.status === 'streaming') out.add(id);
-      }
-      return out;
-    },
-    (a, b) => {
-      if (a === b) return true;
-      if (a.size !== b.size) return false;
-      for (const id of a) if (!b.has(id)) return false;
-      return true;
-    },
-  );
+  const streamingIds = useStreamingNodeIds();
   const [hoverId, setHoverId] = React.useState<string | null>(null);
-  const [menu, setMenu] = React.useState<{ id: string; x: number; y: number } | null>(null);
+  const [menu, setMenu] = React.useState<{ id: string; x: number; y: number; trigger: HTMLElement } | null>(null);
   const [renamingId, setRenamingId] = React.useState<string | null>(null);
   const [sort, setSort] = React.useState<{ key: SortKey; dir: SortDir }>({ key: 'last', dir: 'desc' });
 
@@ -292,24 +245,22 @@ export default function TerminalWorkspaces({ onNav }: { onNav: (p: PageId) => vo
     if (!menu) return [];
     const p = projects.find((pp) => pp.id === menu.id);
     if (!p) return [];
-    return toMenuSections(
-      buildWorkspaceRowContextMenu({
-        project: p,
-        actions: {
-          archiveProject,
-          unarchiveProject,
-          pinProject,
-          unpinProject,
-          deleteProject,
-          beginInlineRename: (id) => setRenamingId(id),
-          openManageWorkspace: (id) => {
-            setManageWorkspaceId(id);
-            onNav('workspace-manage');
-          },
-          changeFolder: (id) => { void changeFolder(id); },
+    return buildWorkspaceRowContextMenu({
+      project: p,
+      actions: {
+        archiveProject,
+        unarchiveProject,
+        pinProject,
+        unpinProject,
+        deleteProject,
+        beginInlineRename: (id) => setRenamingId(id),
+        openManageWorkspace: (id) => {
+          setManageWorkspaceId(id);
+          onNav('workspace-manage');
         },
-      }),
-    );
+        changeFolder: (id) => { void changeFolder(id); },
+      },
+    });
   }, [menu, projects, archiveProject, unarchiveProject, pinProject, unpinProject, deleteProject, changeFolder, onNav]);
 
   const [query, setQuery] = React.useState('');
@@ -486,7 +437,7 @@ export default function TerminalWorkspaces({ onNav }: { onNav: (p: PageId) => vo
           <Metric
             label="streaming"
             value={totals.streaming}
-            color={totals.streaming > 0 ? 'var(--term-select, var(--term-accent))' : undefined}
+            color={totals.streaming > 0 ? 'var(--term-run)' : undefined}
             pulse={totals.streaming > 0}
           />
           <span style={{ flex: 1 }} />
@@ -564,15 +515,12 @@ export default function TerminalWorkspaces({ onNav }: { onNav: (p: PageId) => vo
                     setManageWorkspaceId(w.id);
                     onNav('workspace-manage');
                   }}
-                  onOpenMenu={(rect) => {
-                    setMenu({ id: w.id, x: rect.right, y: rect.bottom + 4 });
+                  onOpenMenu={(trigger) => {
+                    const rect = trigger.getBoundingClientRect();
+                    setMenu((open) => (open?.trigger === trigger ? null : { id: w.id, x: rect.right, y: rect.bottom + 4, trigger }));
                   }}
-                  onCommitRename={(name) => {
-                    const trimmed = name.trim();
-                    if (trimmed && trimmed !== w.name) renameProject(w.id, trimmed);
-                    setRenamingId(null);
-                  }}
-                  onCancelRename={() => setRenamingId(null)}
+                  onRename={(name) => renameProject(w.id, name)}
+                  onRenameEnd={() => setRenamingId(null)}
                 />
               ))}
             </tbody>
@@ -583,9 +531,10 @@ export default function TerminalWorkspaces({ onNav }: { onNav: (p: PageId) => vo
       <AnimatePresence>
         {menu && menuSections.length > 0 && (
           <ContextMenu
-            key={`${menu.x}:${menu.y}`}
+            key={menuOpenKey(menu)}
             x={menu.x}
             y={menu.y}
+            trigger={menu.trigger}
             sections={menuSections}
             onClose={() => setMenu(null)}
           />
@@ -662,8 +611,8 @@ function WorkspaceTableRow({
   onLeave,
   onOpen,
   onOpenMenu,
-  onCommitRename,
-  onCancelRename,
+  onRename,
+  onRenameEnd,
 }: {
   w: WorkspaceCardData;
   query: string;
@@ -672,9 +621,9 @@ function WorkspaceTableRow({
   onEnter: () => void;
   onLeave: () => void;
   onOpen: () => void;
-  onOpenMenu: (rect: DOMRect) => void;
-  onCommitRename: (name: string) => void;
-  onCancelRename: () => void;
+  onOpenMenu: (trigger: HTMLElement) => void;
+  onRename: (name: string) => void;
+  onRenameEnd: () => void;
 }) {
   // While the filter is active, the latest-thread cell shows the newest
   // matching node instead, so the user sees *why* this row matched. Falls back
@@ -684,16 +633,14 @@ function WorkspaceTableRow({
   const latest = w.threads[0];
   const accent = workspaceAccent(w.id);
   const renameRef = React.useRef<HTMLInputElement>(null);
-  const [draft, setDraft] = React.useState(w.name);
   React.useEffect(() => {
     if (renaming) {
-      setDraft(w.name);
       requestAnimationFrame(() => {
         renameRef.current?.focus();
         renameRef.current?.select();
       });
     }
-  }, [renaming, w.name]);
+  }, [renaming]);
 
   return (
     <tr
@@ -739,17 +686,13 @@ function WorkspaceTableRow({
             {initialOf(w.name)}
           </span>
           {renaming ? (
-            <input
+            <InlineRenameInput
               ref={renameRef}
-              value={draft}
-              onChange={(e) => setDraft(e.target.value)}
+              value={w.name}
+              onCommit={onRename}
+              onEnd={onRenameEnd}
               onClick={(e) => e.stopPropagation()}
-              onBlur={() => onCommitRename(draft)}
-              onKeyDown={(e) => {
-                e.stopPropagation();
-                if (e.key === 'Enter') { e.preventDefault(); onCommitRename(draft); }
-                if (e.key === 'Escape') { e.preventDefault(); onCancelRename(); }
-              }}
+              onKeyDown={(e) => e.stopPropagation()}
               style={{
                 flex: 1,
                 minWidth: 0,
@@ -796,13 +739,13 @@ function WorkspaceTableRow({
                 gap: 5,
                 flexShrink: 0,
                 fontSize: 'var(--fs-xs)',
-                color: 'var(--term-select, var(--term-accent))',
+                color: 'var(--term-run)',
                 fontWeight: 700,
                 textTransform: 'uppercase',
                 letterSpacing: 'var(--ls-caps)',
               }}
             >
-              <Dot color="var(--term-select, var(--term-accent))" size={6} pulse />
+              <Dot color="var(--term-run)" size={6} pulse />
               LIVE
             </span>
           )}
@@ -858,14 +801,12 @@ function WorkspaceTableRow({
           aria-label="More actions"
           onClick={(e) => {
             e.stopPropagation();
-            onOpenMenu(e.currentTarget.getBoundingClientRect());
+            onOpenMenu(e.currentTarget);
           }}
+          className="t-hover-frame"
           style={{
             width: 24,
             height: 24,
-            border: '1px solid transparent',
-            background: 'transparent',
-            color: 'var(--term-muted)',
             opacity: hover ? 1 : 0.45,
             transition: 'opacity var(--t-soft), background var(--t-soft), border-color var(--t-soft)',
             cursor: 'pointer',
@@ -875,16 +816,6 @@ function WorkspaceTableRow({
             fontSize: 'var(--fs-2xl)',
             lineHeight: 1,
             padding: 0,
-          }}
-          onMouseEnter={(e) => {
-            e.currentTarget.style.background = 'var(--term-hover-bg, var(--term-alt))';
-            e.currentTarget.style.borderColor = 'var(--term-line)';
-            e.currentTarget.style.color = 'var(--term-fg)';
-          }}
-          onMouseLeave={(e) => {
-            e.currentTarget.style.background = 'transparent';
-            e.currentTarget.style.borderColor = 'transparent';
-            e.currentTarget.style.color = 'var(--term-muted)';
           }}
         >
           ⋯
@@ -897,7 +828,7 @@ function WorkspaceTableRow({
 function Metric({ label, value, color, pulse }: { label: string; value: number; color?: string; pulse?: boolean }) {
   return (
     <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
-      {pulse && <Dot color={color || 'var(--term-accent)'} size={6} pulse />}
+      {pulse && <Dot color={color || 'var(--term-run)'} size={6} pulse />}
       <span
         style={{
           fontFamily: 'var(--font-mono, ui-monospace, monospace)',

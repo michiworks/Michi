@@ -1,53 +1,40 @@
-import { createSseObserver } from "../services/httpSse";
+import { beginSse } from "../services/httpSse";
 import express from "express";
-import path from "path";
-import fs from "fs";
 import { ChatManager } from "../services/chatManager";
 import {
     streamDigestGeneration,
     GenerationRequest,
 } from "../services/digestGenerator";
+import { workspaceCwdError } from "../services/workspaceCwd";
+import { ownedSandboxCwd } from "../services/workspaceSandbox";
 import { requireWorkspaceOwner } from "./middleware/ownership";
-
-function validateGenerationBody(body: GenerationRequest): string | null {
-    if (!body || !Array.isArray(body.nodes) || body.nodes.length === 0) {
-        return "nodes is required";
-    }
-    if (body.cwd !== undefined) {
-        if (typeof body.cwd !== "string" || !path.isAbsolute(body.cwd)) {
-            return "cwd must be an absolute path";
-        }
-        try {
-            const s = fs.statSync(body.cwd);
-            if (!s.isDirectory()) return "cwd is not a directory";
-        } catch {
-            return "cwd does not exist";
-        }
-    }
-    return null;
-}
 
 export function setupDigestRoutes(chatManager: ChatManager) {
     const router = express.Router();
 
     router.post("/digests/stream", requireWorkspaceOwner, async (req, res) => {
         const body = req.body as GenerationRequest;
-        const validation = validateGenerationBody(body);
-        if (validation) return res.status(400).json({ error: validation });
+        if (!body || !Array.isArray(body.nodes) || body.nodes.length === 0) {
+            return res.status(400).json({ error: "nodes is required" });
+        }
+        let cwd = body.cwd;
+        if (process.env.MICHI_CLOUD === "1") {
+            // requireWorkspaceOwner checked body.workspaceId; the digest runs in its sandbox, not a folder the body names.
+            const owned = ownedSandboxCwd(req.user!.id, req.body.workspaceId);
+            if ("error" in owned) return res.status(owned.status).json({ error: owned.error });
+            cwd = owned.cwd;
+        } else if (cwd !== undefined) {
+            const invalid = workspaceCwdError(cwd);
+            if (invalid) return res.status(400).json(invalid);
+        }
 
-        res.setHeader("Content-Type", "text/event-stream");
-        res.setHeader("Cache-Control", "no-cache");
-        res.setHeader("Connection", "keep-alive");
-        res.setHeader("X-Accel-Buffering", "no");
-        res.flushHeaders?.();
-
-        const observer = createSseObserver(res);
+        const observer = beginSse(res);
         const send = (event: string, data: unknown) => {
             observer.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
         };
 
         try {
-            for await (const ev of streamDigestGeneration(chatManager, body)) {
+            for await (const ev of streamDigestGeneration(chatManager, { ...body, cwd })) {
                 // Drain the producer after observer disconnect; do not cancel its turn.
                 if (ev.kind === "chunk" || ev.kind === "thought" || ev.kind === "status") {
                     send(ev.kind, { text: ev.text });

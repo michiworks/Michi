@@ -1,7 +1,7 @@
 import type { MaintenancePlan, MaintenanceWorkspaceResponse, MetaAgentRoundStatus, MetaAgentRunNowResponse } from 'michi-shared';
 import { backendApiBase } from '../../config/backendConnections';
 import { backendEntityId, serverEntityId } from '../../config/backendIdentity';
-import { pagesFetch, readPagesJson } from './pages';
+import { pageApiError, pagesFetch, readPagesJson } from './pages';
 
 export type PageMaintenanceWorkspace = MaintenanceWorkspaceResponse;
 
@@ -57,13 +57,8 @@ async function request<T>(url: string, options: { method?: string; body?: unknow
       body: JSON.stringify(options.body),
     }),
   });
-  const payload = await readPagesJson(response).catch(() => null);
-  if (!response.ok) {
-    const envelope = payload && typeof payload === 'object' ? (payload as { error?: unknown }).error : undefined;
-    const details = envelope && typeof envelope === 'object' ? envelope as { code?: unknown; message?: unknown } : {};
-    throw new Error(typeof details.message === 'string' ? details.message : `Page maintenance request failed (${response.status})`);
-  }
-  return payload as T;
+  if (!response.ok) throw await pageApiError(response, 'page_maintenance_request_failed', 'Page maintenance');
+  return await readPagesJson(response) as T;
 }
 
 function mapWorkspaceIdentity(value: PageMaintenanceWorkspace, connectionId: string): PageMaintenanceWorkspace {

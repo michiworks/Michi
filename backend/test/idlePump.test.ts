@@ -1,6 +1,6 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { EventQueue } from '../src/agents/eventQueue';
+import { EventQueue } from 'michi-runtime/internal/core/eventQueue';
 
 describe('EventQueue idle pump simulation', () => {
   it('dispose() unblocks pending pull with null', async () => {

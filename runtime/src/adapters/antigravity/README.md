@@ -36,6 +36,7 @@ Google; while it is signed out, a new chat fails with a sign-in message.
 | Michi tools (ask_user, follow-ups, branches, artifacts, …) | Yes, over HTTP MCP |
 | System prompt | Michi's stable instructions in `_meta.antigravity.systemPrompt.append` on session/new; kept across session/load |
 | Images | Sent as file links (`resource_link`) that agy reads itself |
+| Skills | Michi lists the workspace's `.agents/skills` and `~/.gemini/config/skills`. A skill run from the / menu, from there or from Michi's library, is sent as its instructions ahead of the message; agy itself does not see Michi's library |
 | Steer, compaction, plan modes, subagent roster | No |
 | Warm sessions, Agent Runs, Meta agent, restricted sessions | No |
 

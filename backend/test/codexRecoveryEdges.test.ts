@@ -2,7 +2,7 @@ import { test, type TestContext } from 'node:test';
 import assert from 'node:assert/strict';
 import { CodexRuntime } from 'michi-runtime/internal/adapters/codex/CodexRuntime';
 import { CodexSession } from 'michi-runtime/internal/adapters/codex/CodexSession';
-import type { CodexAppServerClient, NotificationHandler, ServerRequestHandler } from 'michi-runtime/internal/adapters/codex/CodexAppServerClient';
+import { CodexRpcError, CodexRpcTimeoutError, type CodexAppServerClient, type NotificationHandler, type ServerRequestHandler } from 'michi-runtime/internal/adapters/codex/CodexAppServerClient';
 import { generateCodexTitle } from 'michi-runtime/internal/adapters/codex/codexTitleGenerator';
 import type { NewAgentSessionOptions, RuntimePermissionDecision } from '../src/agents/types';
 import type { McpSlot, McpSlotRegistry } from '../src/services/mcpServer';
@@ -87,7 +87,7 @@ function registry(): FakeMcpRegistry {
   }, { mcpPort: 1 });
 }
 function runtime(t: TestContext, client = new Client()) {
-  const value = new CodexRuntime({ ...codexTestOptions(), bridge, mcpSlots: registry() }, { client: client.transport, followUpsHookPocEnabled: false });
+  const value = new CodexRuntime({ ...codexTestOptions(), bridge, mcpSlots: registry() }, { client: client.transport });
   t.after(async () => { client.shutdownError = null; await value.shutdown(); });
   return { runtime: value, client };
 }
@@ -367,6 +367,59 @@ test('late permission and user-input continuations cannot persist grants or leak
   assert.equal((await second).some((event) => event.kind === 'user_input_resolved'), false);
 });
 
+for (const kind of ['chat', 'run'] as const) {
+  test(`replacing the same Codex node ignores an old ${kind} approval reply`, async (t) => {
+    const client = new Client();
+    const make = () => new CodexSession({ nodeId: 'replaced', threadId: 'replaced-native', cwd: '/tmp', workspaceId: 'workspace',
+      client: client.transport, host: michiTestHost(), hostText: michiCodexHostText(), bridge, mcpRegistry: registry(),
+      ...(kind === 'run' ? { owner: runOwner('run', 'attempt'), permissionBroker: { requestPermission: async () => 'ask' as const } } : {}) });
+    const ask = async (session: CodexSession, command: string) => {
+      let response: unknown;
+      const done = session.askPermission('item/commandExecution/requestApproval',
+        { threadId: session.threadId, turnId: currentTurn(session), command }, (value) => { response = value; });
+      await tick();
+      return { id: [...session.pendingPermissions.keys()][0], done: done.then(() => response) };
+    };
+    const original = make();
+    original.wireNotifications();
+    const first = drain(original.send('A'));
+    await tick();
+    const old = await ask(original, 'old command');
+    assert.ok(Number.isSafeInteger(old.id));
+    await original.dispose();
+    assert.deepEqual(await old.done, { decision: 'decline' });
+    await first.catch(() => {});
+
+    const replacement = make();
+    replacement.wireNotifications();
+    t.after(() => replacement.dispose());
+    const second = drain(replacement.send('B'));
+    await tick();
+    const current = await ask(replacement, 'new command');
+    assert.ok(Number.isSafeInteger(current.id));
+    assert.ok(current.id > old.id);
+    replacement.respondToPermission(old.id, 'allow_once');
+    await tick();
+    assert.equal(replacement.pendingPermissions.has(current.id), true);
+    replacement.respondToPermission(current.id, 'reject_once');
+    assert.deepEqual(await current.done, { decision: 'decline' });
+    complete(client, replacement);
+    await second;
+  });
+}
+
+test('Codex rejects an unknown approval option, and allow_session from a run', () => {
+  const client = new Client();
+  const make = (owner?: ReturnType<typeof runOwner>) => new CodexSession({ nodeId: 'answers', threadId: 'answers-native', cwd: '/tmp',
+    workspaceId: null, client: client.transport, host: michiTestHost(), hostText: michiCodexHostText(), bridge, mcpRegistry: registry(),
+    ...(owner ? { owner } : {}) });
+  assert.throws(() => make().respondToPermission(1, 'forged'), /Invalid permission option/);
+  const run = make(runOwner('run', 'attempt'));
+  assert.throws(() => run.respondToPermission(1, 'allow_session'), /Invalid permission option/);
+  run.respondToPermission(1, 'allow_always');
+  make().respondToPermission(1, 'allow_session');
+});
+
 test('active-turn MCP user input and approvals still resolve normally', async (t) => {
   const client = new Client();
   const mcp = registry();
@@ -408,7 +461,8 @@ test('existing and pending sessions enforce canonical owner and profile on new/l
   const gate = deferred<unknown>();
   client.respond = ({ method }) => method === 'thread/start' ? gate.promise : undefined;
   const opts = options('guarded');
-  const first = value.newSession({ ...opts, sessionId: 'public-alias-a' });
+  await assert.rejects(value.newSession({ ...opts, sessionId: 'public-alias-a' }), /must equal attemptId/);
+  const first = value.newSession(opts);
   // A chat keyed like the pending Run session: the same public id under another owner.
   const wrongOwner = assert.rejects(value.newSession({ ...opts, sessionId: 'guarded',
     owner: chatOwner('guarded') }), /Owner mismatch/);
@@ -432,4 +486,34 @@ test('Codex chat restore uses legacy ACP-only identity and rejects a different r
   assert.deepEqual(client.calls.filter((call) => call.method === 'thread/resume').map((call) => call.params.threadId), ['legacy-native']);
   await assert.rejects(value.loadSession({ sessionId: 'wrong-runtime', cwd: '/tmp', model: 'test-model' }), /belongs to runtime claude/);
   assert.equal(client.calls.filter((call) => call.method === 'thread/resume').length, 1);
+});
+
+test('a turn/start the app-server answers with an error fails that message only: no crash, no daemon restart', async (t) => {
+  const { runtime: value, client } = runtime(t);
+  const session = await create(value, 'rejected-start');
+  let reject = true;
+  client.respond = ({ method }) => method === 'turn/start' && reject
+    ? Promise.reject(new CodexRpcError('turn/start', -32600, 'input exceeds the model context window'))
+    : undefined;
+  await assert.rejects(drain(session.send('too long')), /input exceeds the model context window/);
+  assert.equal(session.needsRecovery(), false, 'no native turn started, so nothing needs recovery');
+  assert.equal(session.requiresRestart, false);
+
+  reject = false;
+  const next = drain(session.send('shorter'));
+  await tick();
+  complete(client, session);
+  assert.equal((await next).at(-1)?.kind, 'turn_end');
+  assert.deepEqual(client.calls.filter((call) => call.method === 'shutdown' || call.method === 'thread/resume'), []);
+});
+
+test('a turn/start that times out still restarts the app-server before the next message: the turn may have started', async (t) => {
+  const { runtime: value, client } = runtime(t);
+  const session = await create(value, 'unknown-start');
+  client.respond = ({ method }) => method === 'turn/start'
+    ? Promise.reject(new CodexRpcTimeoutError('codex turn/start got no response within 30000ms'))
+    : undefined;
+  await assert.rejects(drain(session.send('lost')), /got no response/);
+  assert.equal(session.needsRecovery(), true);
+  assert.equal(session.requiresRestart, true);
 });

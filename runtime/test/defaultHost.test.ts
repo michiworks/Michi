@@ -87,12 +87,12 @@ describe('createDefaultHost', () => {
     const prompt = createDefaultHost({ logLevel: 'silent' }).prompt;
     assert.equal(prompt.firstTurnPrefix({ cwd: '/w' }), '');
     assert.equal(prompt.preamble({ cwd: '/w', enableFollowUps: true }), '');
-    assert.equal(prompt.stableSystemPrompt('structured-tool', true, true), '');
+    assert.equal(prompt.stableSystemPrompt('sentinel-followups-tool-overview', true, true), '');
     for (const metadataChannel of ['tools', 'inline'] as const) {
       assert.equal(prompt.turnSuffix({ metadataChannel, userTurnCount: 20, enableFollowUps: true, owner: chat }), '');
     }
     assert.equal(prompt.followUpsExperimentMode(), 'sentinel');
-    assert.equal(prompt.followUpsMetadataOutputMode(true, 'hook-tool'), 'sentinel');
+    assert.equal(prompt.followUpsMetadataOutputMode(true, 'sentinel'), 'sentinel');
     assert.equal(prompt.followUpsTurnReminder(20, true, 'sentinel', true), '');
     assert.equal(prompt.renderBranchContext({ parentNodeId: 'p', kind: 'exact', messages: [{ role: 'user', content: 'hi' }] }), null);
     assert.equal(prompt.workspaceInstructions('w1'), null);
@@ -136,16 +136,11 @@ describe('createDefaultHost', () => {
   });
 
   it('prompt hands out an inert turn-metadata tracker', () => {
-    const tracker = createDefaultHost().prompt.turnMetadata('hook-tool');
+    const tracker = createDefaultHost().prompt.turnMetadata('sentinel');
     tracker.begin();
-    assert.equal(tracker.validationActive, false);
-    assert.equal(tracker.acceptsFollowUps(true), false);
-    assert.equal(tracker.setFollowUps(['a', 'b', 'c'], true), null);
     assert.equal(tracker.setOverview('did things'), null);
     tracker.observeChunk('[FOLLOW-UP 3/3: x]', true);
-    assert.deepEqual(tracker.validate(true), { status: 'inactive', missingTools: [], response: {} });
     assert.equal(tracker.suppressOutput('chunk'), false);
-    assert.equal(tracker.completeOutputBoundary(), false);
     assert.deepEqual(tracker.finish(), { chunks: 0, thoughts: 0 });
   });
 

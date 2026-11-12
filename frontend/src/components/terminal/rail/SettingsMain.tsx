@@ -5,25 +5,37 @@ import type { ChatNodeState } from '../../../state/chatTypes';
 import { useChatProjects, useStructuralSelector } from '../../../state/chatStore';
 import { isArchiveGroupId } from '../../../state/trashActions';
 import { isVisibleConversationNode } from '../../../state/conversationVisibility';
+import { systemWorkspaceIds } from '../../../state/assistant/systemWorkspace';
 import { useMetaAgentSettingsAlert } from '../../../state/metaAgent/useMetaAgentOverview';
-import { useMemoryBadge } from '../../../state/memory/memoryNotifications';
 import { useBackendConnections } from '../../../state/useBackendConnections';
 import { useAuthSession } from '../../../services/auth';
 import { LOCAL_BACKEND_CONNECTION_ID } from '../../../config/backendConnections';
+import { useCompanionName } from '../../../state/companion/companionName';
+import { getElectron } from '../../../lib/electronBridge';
 import { AppearancePane } from '../pages/settings/AppearancePane';
-import { SettingsLayoutContext, SettingsTargetContext } from '../pages/settings/settingsPhone';
+import {
+  SettingsBackContext, SettingsHeaderActionContext, SettingsLayoutContext, SettingsOpenContext, SettingsPageTitleContext, SettingsTargetContext,
+  type SettingsHeaderAction,
+} from '../pages/settings/settingsPhone';
+import { Button } from '../../ui/controls';
 import { PhoneSettingsMenu } from './PhoneSettingsMenu';
-import { SETTINGS_GROUPS, SETTINGS_PAGES, type SettingsPage } from './settingsPages';
+import { SETTINGS_GROUPS, SETTINGS_PAGES, settingsPageLabel, type SettingsPage } from './settingsPages';
+import { subscribeSettingsRequests, takeSettingsReveal } from './settingsRequests';
 import { searchSettings, type SettingsSearchResult } from './settingsSearch';
+import { isImeComposing } from '../../../lib/ime';
 import '../pages/Settings.css';
+import './rail.css';
 
 // Keep the Settings shell and local appearance controls ready. Other pages
 // load only when opened, without suspending the navigation.
 const GeneralTopicPage = React.lazy(() => import('./GeneralTopicPage'));
 const ModelPane = React.lazy(() => import('../pages/settings/ModelPane').then(module => ({ default: module.ModelPane })));
-const MetaAgentSettings = React.lazy(() => import('../settings/metaAgent/MetaAgentSettings').then(module => ({ default: module.MetaAgentSettings })));
 const BackupPane = React.lazy(() => import('../pages/settings/BackupPane').then(module => ({ default: module.BackupPane })));
 const MemoryPane = React.lazy(() => import('../pages/settings/MemoryPane').then(module => ({ default: module.MemoryPane })));
+const TrashPane = React.lazy(() => import('../pages/settings/TrashPane').then(module => ({ default: module.TrashPane })));
+const ArchivedPane = React.lazy(() => import('../pages/settings/ArchivedPane').then(module => ({ default: module.ArchivedPane })));
+const SkillsPane = React.lazy(() => import('../pages/settings/SkillsPane').then(module => ({ default: module.SkillsPane })));
+const CompanionSettings = React.lazy(() => import('../companion/CompanionSettings'));
 
 function SectionContent({ children }: { children: React.ReactNode }) {
   return <React.Suspense fallback={<div role="status">Loading settings…</div>}>{children}</React.Suspense>;
@@ -37,21 +49,29 @@ function countGroups(nodes: Record<string, ChatNodeState>, belongs: (node: ChatN
   return groups.size;
 }
 
-/** What Trash and Archived hold: deleted thread groups plus deleted workspaces, and archived groups. */
+/**
+ * What Trash and Archived list: deleted thread groups plus deleted
+ * workspaces, and archived threads plus archived nodes. The assistant's
+ * system workspace keeps its history out of both.
+ */
 function useHistoryCounts(): { trash: number; archived: number } {
   const { projects } = useChatProjects();
-  const liveProjectIds = useMemo(() => new Set(projects.filter((project) => !project.deletedAt).map((project) => project.id)), [projects]);
-  const deletedProjects = useMemo(() => projects.filter((project) => project.deletedAt).length, [projects]);
+  const hidden = useMemo(() => systemWorkspaceIds(projects), [projects]);
+  const shown = useMemo(() => projects.filter((project) => !hidden.has(project.id)), [projects, hidden]);
+  const liveProjectIds = useMemo(() => new Set(shown.filter((project) => !project.deletedAt).map((project) => project.id)), [shown]);
+  const deletedProjects = shown.length - liveProjectIds.size;
   const trashGroups = useStructuralSelector(useCallback((nodes: Record<string, ChatNodeState>) => countGroups(nodes, (node) =>
     liveProjectIds.has(node.projectId) && !isArchiveGroupId(node.deletionGroupId) && isVisibleConversationNode(node)), [liveProjectIds]));
   const archived = useStructuralSelector(useCallback((nodes: Record<string, ChatNodeState>) => countGroups(nodes, (node) =>
-    isArchiveGroupId(node.deletionGroupId)), []));
+    liveProjectIds.has(node.projectId) && isArchiveGroupId(node.deletionGroupId))
+    + shown.reduce((sum, project) => sum + (project.deletedAt ? 0 : project.trees.filter((tree) => tree.archivedAt && nodes[tree.rootNodeId] && !nodes[tree.rootNodeId].deletedAt).length), 0),
+  [liveProjectIds, shown]));
   return { trash: trashGroups + deletedProjects, archived };
 }
 
 /** The element of a page that shows a setting, found by the name a search result carries. */
-const SETTING_NAMES = '.settings-row__label, .settings-field__label, .settings-section__title, .settings-backup__title, .meta-set__row-k, .meta-set__radio-t, .settings-shortcut-row__label';
-const SETTING_BLOCKS = '.settings-row, .settings-field, .meta-set__row, .meta-set__radio, .settings-shortcut-row, .settings-section, .settings-backup';
+const SETTING_NAMES = '.settings-row__label, .settings-section__title, .settings-backup__title, .meta-set__row-k, .meta-set__radio-t, .settings-shortcut-row__label';
+const SETTING_BLOCKS = '.settings-row, .meta-set__row, .meta-set__radio, .settings-shortcut-row, .settings-section, .settings-backup';
 function findSetting(root: HTMLElement, label: string): HTMLElement | null {
   const name = Array.from(root.querySelectorAll<HTMLElement>(SETTING_NAMES)).find((element) => element.textContent?.trim() === label);
   return name ? name.closest<HTMLElement>(SETTING_BLOCKS) ?? name : null;
@@ -59,31 +79,25 @@ function findSetting(root: HTMLElement, label: string): HTMLElement | null {
 
 export type SettingsLevel = 'menu' | 'section';
 
-/** "3", or "200+" past the pending list's limit; "" for none. */
-function memoryPendingLabel(count: number, more: boolean): string {
-  if (count <= 0) return '';
-  return more ? `${count}+` : String(count);
-}
-
 /** The desktop window's navigation: search, then every page in its group. */
-function WindowNav({ page, query, onQuery, onOpen, onNav, onSubmit, history, metaAgentAlert, memoryPending, searchRef }: {
+function WindowNav({ page, name, query, onQuery, onOpen, onSubmit, history, metaAgentAlert, searchRef }: {
   page: SettingsPage;
+  /** The agent's name: Settings › <name>'s label. */
+  name: string;
   query: string;
   onQuery: (query: string) => void;
   onOpen: (page: SettingsPage) => void;
-  onNav: (page: PageId) => void;
   onSubmit: () => void;
   history: { trash: number; archived: number };
+  /** Pages upkeep needs attention: Settings › <name> shows the red dot. */
   metaAgentAlert: boolean;
-  /** Memories waiting for approval, shown as Memory's count ("" for none). */
-  memoryPending: string;
   searchRef: React.RefObject<HTMLInputElement | null>;
 }) {
   const signedIn = !!useAuthSession()?.user;
   const machineIssue = useBackendConnections().some((connection) => connection.id !== LOCAL_BACKEND_CONNECTION_ID && connection.tunnelStatus === 'error');
   const baseId = useId();
   const alert: Partial<Record<SettingsPage, string>> = {
-    ...(metaAgentAlert ? { 'meta-agent': 'needs attention' } : {}),
+    ...(metaAgentAlert ? { companion: 'needs attention' } : {}),
     ...(machineIssue ? { machines: 'connection issue' } : {}),
   };
   return (
@@ -93,6 +107,7 @@ function WindowNav({ page, query, onQuery, onOpen, onNav, onSubmit, history, met
         <input ref={searchRef} type="search" aria-label="Search settings" placeholder="Search settings" autoFocus
           value={query} onChange={(event) => onQuery(event.target.value)}
           onKeyDown={(event) => {
+            if (isImeComposing(event)) return;
             // Escape clears a query first; with none, it reaches the window and closes it.
             if (event.key === 'Escape' && query) { event.preventDefault(); event.stopPropagation(); onQuery(''); }
             if (event.key === 'Enter' && query) { event.preventDefault(); onSubmit(); }
@@ -105,29 +120,20 @@ function WindowNav({ page, query, onQuery, onOpen, onNav, onSubmit, history, met
         const headingId = `${baseId}-${index}`;
         return <div key={group.title} className="settings-window__group" role="group" aria-labelledby={headingId}>
           <h2 id={headingId} className="settings-window__heading">{group.title}</h2>
-          {group.items.map((item) => {
-            if (item.kind === 'place') {
-              const count = history[item.place.id];
-              const countId = `${headingId}-${item.place.id}`;
-              const Icon = item.place.icon;
-              return <button key={item.place.id} type="button" className="settings-window__item" onClick={() => onNav(item.place.page)}
-                aria-describedby={count > 0 ? countId : undefined}>
-                <Icon size={14} strokeWidth={1.75} aria-hidden="true" /><span>{item.place.label}</span>
-                {count > 0 && <em id={countId} aria-hidden="true">{count}</em>}
-              </button>;
-            }
-            const info = SETTINGS_PAGES[item.page];
-            if ((item.page === 'account' && !signedIn) || info.only === 'phone') return null;
+          {group.pages.map((item) => {
+            const info = SETTINGS_PAGES[item];
+            if ((item === 'account' && !signedIn) || info.only === 'phone') return null;
             const Icon = info.icon;
-            const status = alert[item.page];
-            const count = item.page === 'memory' ? memoryPending : '';
-            const countId = `${headingId}-${item.page}`;
-            return <button key={item.page} type="button" className="settings-window__item"
-              aria-current={item.page === page && !query ? 'page' : undefined}
-              aria-label={status ? `${info.label}, ${status}` : undefined}
+            const label = settingsPageLabel(item, name);
+            const status = alert[item];
+            const count = item === 'trash' || item === 'archived' ? String(history[item] || '') : '';
+            const countId = `${headingId}-${item}`;
+            return <button key={item} type="button" className="settings-window__item"
+              aria-current={item === page && !query ? 'page' : undefined}
+              aria-label={status ? `${label}, ${status}` : undefined}
               aria-describedby={count ? countId : undefined}
-              onClick={() => onOpen(item.page)}>
-              <Icon size={14} strokeWidth={1.75} aria-hidden="true" /><span>{info.label}</span>
+              onClick={() => onOpen(item)}>
+              <Icon size={14} strokeWidth={1.75} aria-hidden="true" /><span>{label}</span>
               {count && <em id={countId} aria-hidden="true">{count}</em>}
               {status && <i className="settings-window__alert" aria-hidden="true" />}
             </button>;
@@ -173,9 +179,10 @@ function SearchResults({ query, results, onPick }: { query: string; results: Set
  * matching settings; picking one opens its page and points at the setting.
  *
  * The host owns the page, so Settings reopens where it was left and a request
- * (the Meta agent's alert) can open a page directly.
+ * (Pages upkeep's alert) can open a page directly. A request that names a
+ * setting (settingsRequests.ts) points at it once its page shows.
  */
-export default function SettingsMain({ page, onPageChange, workspaceReady = true, onNav, view: hostView, onViewChange, stacked = false }: {
+export default function SettingsMain({ page, onPageChange, workspaceReady = true, onNav, view: hostView, onViewChange, stacked = false, backRef, onHeaderAction }: {
   page: SettingsPage;
   onPageChange: (page: SettingsPage) => void;
   workspaceReady?: boolean;
@@ -183,19 +190,29 @@ export default function SettingsMain({ page, onPageChange, workspaceReady = true
   view?: SettingsLevel;
   onViewChange?: (view: SettingsLevel) => void;
   stacked?: boolean;
+  /**
+   * Closes a level the page has open inside it (an item opened from Trash),
+   * for the host's header Back on a phone; null when there is none.
+   */
+  backRef?: React.MutableRefObject<(() => void) | null>;
+  /** On a phone: the page's primary action, for the host's header (null when it has none). */
+  onHeaderAction?: (action: SettingsHeaderAction | null) => void;
 }) {
   const { activeProject } = useChatProjects();
   const history = useHistoryCounts();
   const metaAgentAlert = useMetaAgentSettingsAlert();
-  const memoryBadge = useMemoryBadge();
-  const memoryPending = workspaceReady ? memoryPendingLabel(memoryBadge.pendingCount, memoryBadge.pendingMore) : '';
-  const label = SETTINGS_PAGES[page].label;
+  const name = useCompanionName();
+  const label = settingsPageLabel(page, name);
   const contentId = useId();
   const [ownView, setOwnView] = useState<SettingsLevel>('menu');
   const view = hostView ?? ownView;
   const [query, setQuery] = useState('');
   // The setting a search result points at; a new pick remounts its page.
   const [target, setTarget] = useState<{ label: string; seq: number } | null>(null);
+  // The window shows a page's primary action beside its title; a phone's host puts it in its header.
+  const [headerAction, setHeaderAction] = useState<SettingsHeaderAction | null>(null);
+  // A level open inside the page that shows its own title (useSettingsPageTitle).
+  const [titled, setTitled] = useState(false);
   const searchRef = useRef<HTMLInputElement>(null);
   const contentRef = useRef<HTMLElement>(null);
   // Switching level in a stacked drawer hides what has focus (the picked row,
@@ -223,10 +240,21 @@ export default function SettingsMain({ page, onPageChange, workspaceReady = true
     setTarget(reveal ? (current) => ({ label: reveal, seq: (current?.seq ?? 0) + 1 }) : null);
   };
 
+  // A request from elsewhere that names a setting points at it once its page shows here.
+  useEffect(() => {
+    const take = () => {
+      const reveal = takeSettingsReveal(page);
+      if (reveal) setTarget((current) => ({ label: reveal, seq: (current?.seq ?? 0) + 1 }));
+    };
+    take();
+    return subscribeSettingsRequests(take);
+  }, [page]);
+
   const results = useMemo(() => stacked ? [] : searchSettings(query,
     (Object.keys(SETTINGS_PAGES) as SettingsPage[]).filter((id) => SETTINGS_PAGES[id].only !== 'phone'),
-    (id) => SETTINGS_GROUPS.find((group) => group.items.some((item) => item.kind === 'page' && item.page === id))?.title ?? ''),
-  [query, stacked]);
+    (id) => SETTINGS_GROUPS.find((group) => group.pages.includes(id))?.title ?? '',
+    { name, vibrancy: !!getElectron()?.hasVibrancy }),
+  [query, stacked, name]);
   const pick = (result: SettingsSearchResult) => {
     openPage(result.page, result.label);
     requestAnimationFrame(() => headingRef.current?.focus({ preventScroll: true }));
@@ -268,14 +296,14 @@ export default function SettingsMain({ page, onPageChange, workspaceReady = true
     return () => window.removeEventListener('keydown', onKey, { capture: true });
   }, [stacked]);
 
+  const registerBack = useCallback((close: (() => void) | null) => { if (backRef) backRef.current = close; }, [backRef]);
+
   const waiting = <div role="status">Loading workspaces…</div>;
+  const heading = <h1 ref={headingRef} tabIndex={-1} className="terminal-settings-heading">{label}</h1>;
   let body: React.ReactNode;
   switch (page) {
     case 'runtime':
       body = workspaceReady ? <ModelPane activeProjectId={activeProject?.id ?? null} /> : waiting;
-      break;
-    case 'meta-agent':
-      body = <MetaAgentSettings />;
       break;
     case 'appearance':
       body = <AppearancePane />;
@@ -286,15 +314,39 @@ export default function SettingsMain({ page, onPageChange, workspaceReady = true
     case 'memory':
       body = workspaceReady ? <MemoryPane onNav={onNav} /> : waiting;
       break;
+    case 'trash':
+      body = <TrashPane onNav={onNav} />;
+      break;
+    case 'archived':
+      body = <ArchivedPane onNav={onNav} />;
+      break;
+    case 'skills':
+      body = <SkillsPane />;
+      break;
+    case 'companion':
+      body = <CompanionSettings />;
+      break;
     default:
       body = <GeneralTopicPage page={page} workspaceReady={workspaceReady} onNav={onNav} />;
   }
+  const action = stacked ? null : headerAction;
   const content = (
     <section id={contentId} ref={contentRef} className="terminal-settings-content term-scrollbar" aria-label={label}
       key={`${page}:${target?.seq ?? 0}`}>
-      <h1 ref={headingRef} tabIndex={-1} className="terminal-settings-heading">{label}</h1>
+      {/* The heading keeps its place as an action comes and goes, so focus on it stays. */}
+      {!titled && <div className="settings-titlebar" data-action={action ? '' : undefined}>{heading}
+        {action && <Button variant="primary" onClick={action.onClick}>{action.icon && <action.icon size={13} aria-hidden="true" />}{action.label}</Button>}
+      </div>}
       <SettingsTargetContext.Provider value={target?.label ?? null}>
-        <SectionContent>{body}</SectionContent>
+        <SettingsOpenContext.Provider value={openPage}>
+          <SettingsBackContext.Provider value={registerBack}>
+            <SettingsHeaderActionContext.Provider value={stacked ? onHeaderAction ?? null : setHeaderAction}>
+              <SettingsPageTitleContext.Provider value={setTitled}>
+                <SectionContent>{body}</SectionContent>
+              </SettingsPageTitleContext.Provider>
+            </SettingsHeaderActionContext.Provider>
+          </SettingsBackContext.Provider>
+        </SettingsOpenContext.Provider>
       </SettingsTargetContext.Provider>
     </section>
   );
@@ -304,7 +356,7 @@ export default function SettingsMain({ page, onPageChange, workspaceReady = true
       <div className="terminal-settings terminal-settings--drawer" data-page={page} data-cards="" data-stacked="" data-view={view}>
         <div className="terminal-settings-layout">
           <aside className="terminal-settings-sidebar term-scrollbar">
-            <PhoneSettingsMenu onOpen={(next) => openPage(next)} onNav={onNav} metaAgentAlert={metaAgentAlert} memoryPending={memoryPending} rowRef={setRowRef}
+            <PhoneSettingsMenu name={name} onOpen={(next) => openPage(next)} metaAgentAlert={metaAgentAlert} rowRef={setRowRef}
               history={workspaceReady ? history : { trash: 0, archived: 0 }} />
           </aside>
           {content}
@@ -315,9 +367,9 @@ export default function SettingsMain({ page, onPageChange, workspaceReady = true
   return (
     <SettingsLayoutContext.Provider value="window">
       <div className="terminal-settings terminal-settings--window" data-page={page} data-cards="">
-        <WindowNav page={page} query={query} onQuery={setQuery} onOpen={(next) => openPage(next)} onNav={onNav}
+        <WindowNav page={page} name={name} query={query} onQuery={setQuery} onOpen={(next) => openPage(next)}
           onSubmit={() => { if (results[0]) pick(results[0]); }}
-          history={workspaceReady ? history : { trash: 0, archived: 0 }} metaAgentAlert={metaAgentAlert} memoryPending={memoryPending} searchRef={searchRef} />
+          history={workspaceReady ? history : { trash: 0, archived: 0 }} metaAgentAlert={metaAgentAlert} searchRef={searchRef} />
         {query.trim() ? <SearchResults query={query} results={results} onPick={pick} /> : content}
       </div>
     </SettingsLayoutContext.Provider>

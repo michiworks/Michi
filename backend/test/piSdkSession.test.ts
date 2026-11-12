@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'fs';
+import os from 'os';
 import path from 'path';
 import { PiSession, type PiSessionDeps } from '../src/agents/pi/PiSession';
 import { PiSdkSession, createPiSession, selectPiSessionKind, shouldNavigatePiTreeOnMichiBranch } from '../src/agents/pi/PiSdkSession';
@@ -191,6 +192,50 @@ test('SDK auto-compaction runs against a synthetic stream and finishes before ag
     assert(events.some(event => event.type === 'compaction_end' && !event.errorMessage));
     assert(harness.state.messages.some((message: any) => message.role === 'compactionSummary'));
     assert.equal(events.at(-1)?.type, 'agent_end');
+  } finally { await harness.dispose(); }
+});
+
+test('SDK names only the host skill folders, with SKILL.md paths for the read tool', async (t) => {
+  const ai: any = await loadPiAi();
+  const core = await loadPiAgentCore();
+  const { Type } = await loadPiTypebox();
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'pi-sdk-skills-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const writeSkill = (dir: string, name: string) => {
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(path.join(dir, 'SKILL.md'), `---\nname: ${name}\ndescription: Synthetic ${name} instructions\n---\nBody\n`);
+  };
+  const library = path.join(root, 'library', 'notes');
+  const project = path.join(root, 'project');
+  writeSkill(library, 'notes');
+  writeSkill(path.join(project, '.agents', 'skills', 'project-agents'), 'project-agents');
+  writeSkill(path.join(project, '.pi', 'skills', 'project-pi'), 'project-pi');
+  const model = ai.getModel('openai', 'gpt-4.1-mini');
+  const read = { name: 'read', label: 'Read', description: 'Read a file', parameters: Type.Object({}),
+    async execute() { return { content: [{ type: 'text', text: '' }], details: {} }; } };
+  let captured: any;
+  const harness = await createPiSdkHarness('sdk-skills', { ...deps, cwd: project }, core, {
+    initialState: { systemPrompt: deps.preamble, model, tools: [read], thinkingLevel: 'off', messages: [] },
+    streamFn: (_model: any, context: any) => {
+      captured = context;
+      const stream = ai.createAssistantMessageEventStream();
+      queueMicrotask(() => stream.push({ type: 'done', reason: 'stop', message: {
+        role: 'assistant', api: model.api, provider: model.provider, model: model.id, content: [{ type: 'text', text: 'OK' }],
+        usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, totalTokens: 2, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
+        stopReason: 'stop', timestamp: Date.now(),
+      } }));
+      return stream;
+    },
+  }, { skillPaths: [library] });
+  try {
+    await harness.configureAuth(model.provider, 'synthetic-test-key');
+    await harness.prompt('Which skills do you have?');
+    const system = captured.messages.filter((message: any) => message.role === 'system')
+      .map((message: any) => ai.getSystemMessageText(message)).join('\n');
+    assert.match(system, /<available_skills>/);
+    assert(system.includes(`<location>${path.join(library, 'SKILL.md')}</location>`), system);
+    assert.match(system, /Use the read tool/);
+    assert(!system.includes('project-agents') && !system.includes('project-pi'), "Pi's own skill discovery stays off");
   } finally { await harness.dispose(); }
 });
 

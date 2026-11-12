@@ -10,7 +10,7 @@
  */
 import { act, renderHook } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { usePanePresenceIntegration } from './usePanePresenceIntegration';
+import { PRESENCE_ON_SCREEN_SETTLE_MS, usePanePresenceIntegration } from './usePanePresenceIntegration';
 import type { Project } from './chatTypes';
 import type { PaneItem } from './paneItems';
 import * as persistenceApi from '../services/api/persistence';
@@ -1098,5 +1098,107 @@ describe('usePanePresenceIntegration', () => {
     const finalPaneIds = finalCall[2].views.map((v: { paneId: string }) => v.paneId);
     expect(finalPaneIds).toContain('surface:reg-b');
     expect(finalPaneIds).not.toContain('surface:reg-a-stale');
+  });
+});
+
+describe('usePanePresenceIntegration: visible means on screen', () => {
+  const strips: HTMLElement[] = [];
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+    setPanePresenceDashboardVisible(true);
+  });
+
+  afterEach(() => {
+    for (const strip of strips.splice(0)) strip.remove();
+    vi.useRealTimers();
+    vi.restoreAllMocks();
+  });
+
+  const rect = (left: number, width: number) => ({
+    left, right: left + width, width, top: 0, bottom: 100, height: 100, x: left, y: 0, toJSON: () => ({}),
+  }) as DOMRect;
+
+  /** The Dashboard's pane strip, 800px wide, with a 400px pane per id at the left edges given. */
+  function paintStrip(lefts: Record<string, number>): (next: Record<string, number>) => void {
+    const strip = document.createElement('div');
+    strip.setAttribute('data-pane-strip', '');
+    strip.getBoundingClientRect = () => rect(0, 800);
+    const positions = { ...lefts };
+    for (const id of Object.keys(lefts)) {
+      const pane = document.createElement('div');
+      pane.dataset.nodeId = id;
+      pane.getBoundingClientRect = () => rect(positions[id]!, 400);
+      strip.appendChild(pane);
+    }
+    document.body.appendChild(strip);
+    strips.push(strip);
+    return (next) => { Object.assign(positions, next); };
+  }
+
+  function mount(project: Project, openPanesMap: Record<string, string[]>, displayedPanes: string[]) {
+    vi.spyOn(persistenceApi, 'fetchPersistenceCapabilities').mockResolvedValue(capabilities('v1'));
+    const submit = vi.spyOn(panePresenceApi.panePresenceTransport, 'submit')
+      .mockResolvedValue({ ok: true, rendererLeaseId: 'lease-on-screen', accepted: 1, rejectedTargets: [] });
+    const hook = renderHook((props: { displayedPanes: string[] }) => usePanePresenceIntegration({
+      windowId: WINDOW_ID, hydrated: true, projects: [project], activeProjectId: project.id,
+      activeBackendConnectionId: CONN, openPanesMap, paneItems: {}, displayedPanes: props.displayedPanes,
+    }), { initialProps: { displayedPanes } });
+    const visible = () => Object.fromEntries(submit.mock.calls.at(-1)![2].views.map((view) => [view.uiPaneId, view.visible]));
+    return { hook, submit, visible };
+  }
+
+  it('a single-page tab in the background is open but not visible, and switching tabs swaps them', async () => {
+    const project = makeProject({ chatIds: ['root-1', 'n-2'] });
+    const openPanesMap = { [`${project.id}::tree-1`]: ['root-1', 'n-2'] };
+    const { hook, submit, visible } = mount(project, openPanesMap, ['n-2']);
+    await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+    expect(visible()).toEqual({ 'root-1': false, 'n-2': true });
+
+    hook.rerender({ displayedPanes: ['root-1'] });
+    await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+    expect(visible(), 'the old page leaves at once, the new one is in').toEqual({ 'root-1': true, 'n-2': false });
+    const sent = submit.mock.calls.length;
+    await act(async () => { await vi.advanceTimersByTimeAsync(1_000); });
+    expect(submit, 'the settled measure agrees: nothing more to send').toHaveBeenCalledTimes(sent);
+    hook.unmount();
+  });
+
+  it('a pane scrolled out of the strip turns invisible once the strip settles, once per scroll', async () => {
+    const project = makeProject({ chatIds: ['root-1', 'n-2', 'n-3'] });
+    const ids = ['root-1', 'n-2', 'n-3'];
+    const scrollTo = paintStrip({ 'root-1': 0, 'n-2': 400, 'n-3': 800 });
+    const { hook, submit, visible } = mount(project, { [`${project.id}::tree-1`]: ids }, ids);
+    await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+    await act(async () => { await vi.advanceTimersByTimeAsync(PRESENCE_ON_SCREEN_SETTLE_MS); });
+    expect(visible()).toEqual({ 'root-1': true, 'n-2': true, 'n-3': false });
+    await act(async () => { await vi.advanceTimersByTimeAsync(1_000); });
+    const settled = submit.mock.calls.length;
+
+    // A fling: many scroll events, one update once it stops.
+    for (const offset of [100, 200, 300, 400]) {
+      scrollTo({ 'root-1': -offset, 'n-2': 400 - offset, 'n-3': 800 - offset });
+      act(() => { window.dispatchEvent(new Event('michi:dashboard-scroll')); });
+      await act(async () => { await vi.advanceTimersByTimeAsync(50); });
+    }
+    expect(submit).toHaveBeenCalledTimes(settled);
+    await act(async () => { await vi.advanceTimersByTimeAsync(PRESENCE_ON_SCREEN_SETTLE_MS); });
+    expect(submit).toHaveBeenCalledTimes(settled + 1);
+    expect(visible()).toEqual({ 'root-1': false, 'n-2': true, 'n-3': true });
+    hook.unmount();
+  });
+
+  it('nothing is visible while another page is up', async () => {
+    const project = makeProject();
+    const { hook, visible } = mount(project, { [`${project.id}::tree-1`]: ['root-1'] }, ['root-1']);
+    await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+    expect(visible()).toEqual({ 'root-1': true });
+    await act(async () => { setPanePresenceDashboardVisible(false); });
+    await act(async () => { await vi.advanceTimersByTimeAsync(1_000); });
+    expect(visible()).toEqual({ 'root-1': false });
+    await act(async () => { setPanePresenceDashboardVisible(true); });
+    await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+    expect(visible(), 'back on the Dashboard').toEqual({ 'root-1': true });
+    hook.unmount();
   });
 });

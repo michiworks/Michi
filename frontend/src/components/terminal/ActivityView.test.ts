@@ -9,7 +9,6 @@ type TimeBucket = 'now' | 'today' | 'yesterday' | 'earlier';
 function getTimeBucket(lastActiveAt: number, isStreaming: boolean): TimeBucket {
   if (isStreaming) return 'now';
   const now = Date.now();
-  const d = new Date(lastActiveAt);
   const today = new Date(now);
   today.setHours(0, 0, 0, 0);
   if (lastActiveAt >= today.getTime()) return 'today';

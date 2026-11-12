@@ -4,18 +4,18 @@
  * branch — not on the destination tree's root.
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import React from 'react';
 import { render, act, waitFor } from '@testing-library/react';
-import { ChatProvider, useChatStore } from '../../state/chatStore';
+import { ChatProvider, useChatNodesSnapshot, useChatStore } from '../../state/chatStore';
 import { PrefsProvider } from '../../state/prefs';
 import type { ChatNodeState, Project } from '../../state/chatTypes';
+import { hasUnseenCompletion } from '../../state/completionFacts';
+import { useSidebarTreeController } from './sidebar/useSidebarTreeController';
 
 vi.mock('../../services/api', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../../services/api')>();
   return {
     ...actual,
     listAgentModes: vi.fn().mockResolvedValue({ availableModes: [], defaultModeId: null }),
-    fetchAllWorkspaces: vi.fn().mockResolvedValue([]),
     fetchAllWorkspacesMeta: vi.fn().mockResolvedValue([]),
     fetchTreeMessages: vi.fn().mockResolvedValue([]),
     fetchWorkspaces: vi.fn().mockResolvedValue([]),
@@ -131,5 +131,53 @@ describe('cross-thread branch click', () => {
     expect(storeRef.current?.focusedNodeId).toBe('branchB');
     expect(storeRef.current?.openPanes).toEqual(['branchB']);
     expect(storeRef.current?.focusedPane).toBe('branchB');
+  });
+});
+
+function SidebarProbe({ outRef }: { outRef: { current: SidebarProbeValue | null } }) {
+  outRef.current = {
+    store: useChatStore(),
+    nodes: useChatNodesSnapshot(),
+    sidebar: useSidebarTreeController({ branchIdsForProject: () => [] }),
+  };
+  return null;
+}
+interface SidebarProbeValue {
+  store: ReturnType<typeof useChatStore>;
+  nodes: Record<string, ChatNodeState>;
+  sidebar: ReturnType<typeof useSidebarTreeController>;
+}
+
+describe('sidebar thread row of another workspace', () => {
+  it("marks that workspace's shown thread read, as it does any other thread it opens", async () => {
+    const seed = crossWorkspaceFixture();
+    seed.nodes.branchB = { ...seed.nodes.branchB, lastAssistantAt: 2_000, viewedAt: 1_000 };
+    localStorage.setItem(
+      'michi:v1:state',
+      JSON.stringify({ version: 2, projects: seed.projects, nodes: seed.nodes, activeProjectId: 'p1' }),
+    );
+    localStorage.setItem('michi:migrated', '1');
+    const ref: { current: SidebarProbeValue | null } = { current: null };
+    render(
+      <PrefsProvider>
+        <ChatProvider>
+          <SidebarProbe outRef={ref} />
+        </ChatProvider>
+      </PrefsProvider>,
+    );
+    await waitFor(() => expect(ref.current?.store.activeProject?.id).toBe('p1'));
+    await waitFor(() => expect(ref.current?.nodes.branchB).toBeDefined());
+    expect(hasUnseenCompletion(ref.current!.nodes.branchB)).toBe(true);
+
+    const p2 = ref.current!.store.projects.find((p) => p.id === 'p2')!;
+    act(() => {
+      ref.current!.sidebar.clickThreadRow(p2.trees[0], p2, undefined, { hasBranches: true, expanded: false, isActive: false, shownTreeIds: [p2.trees[0].id] });
+    });
+
+    await waitFor(() => expect(ref.current?.store.activeProject?.id).toBe('p2'));
+    expect(ref.current!.store.activeProject?.activeTreeId).toBe('tB');
+    expect(ref.current!.store.focusedPane).toBe('rootB');
+    expect(ref.current!.store.focusedNodeId).toBe('rootB');
+    expect(hasUnseenCompletion(ref.current!.nodes.branchB)).toBe(false);
   });
 });

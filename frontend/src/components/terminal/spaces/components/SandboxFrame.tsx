@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { COMPONENT_SANDBOX_IFRAME, COMPONENT_SANDBOX_METHODS, COMPONENT_SANDBOX_THEME_VARS, COMPONENT_SANDBOX_TIMEOUT_MS, PAGE_COMPONENT_LIMITS, isComponentSandboxThemeValue, parseComponentSandboxMessage, type ComponentSandboxMethod, type ComponentSandboxTheme } from 'michi-shared';
 import { backendApiBase } from '../../../../config/backendConnections';
 import './components.css';

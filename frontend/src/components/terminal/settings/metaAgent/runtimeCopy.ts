@@ -1,7 +1,7 @@
-import { META_AGENT_RUNTIMES } from 'michi-shared';
+import { META_AGENT_RUNTIMES, runtimeShortLabel } from 'michi-shared';
 
-// The Meta agent's runtime names and restriction lines, shared by
-// Settings › Meta agent and Scheduled › Meta agent.
+// The runtime names and restriction lines of Pages upkeep, shared by
+// Settings › <name> › Pages upkeep and Scheduled › <name> · Pages upkeep.
 
 export type MetaAgentRuntimeId = typeof META_AGENT_RUNTIMES[number];
 
@@ -9,13 +9,13 @@ const LABELS: Record<MetaAgentRuntimeId, string> = {
   claude: 'Claude', pi: 'Pi', codex: 'Codex', kiro: 'Kiro', crew: 'Crew',
 };
 
-/** How each runtime is held to the Meta agent's own tools, in plain words. */
+/** How each runtime is held to Pages upkeep's own tools, in plain words. */
 const RESTRICTIONS: Record<MetaAgentRuntimeId, string> = {
   claude: 'Michi checks tool access; external tools are read-only',
   pi: 'Michi checks tool access; external tools are read-only',
   codex: 'Michi checks tool access; external tools are read-only',
   kiro: 'Michi checks tool access; external tools are read-only',
-  crew: 'the Meta agent can’t use Kiro Crew yet',
+  crew: 'Pages upkeep can’t use Kiro Crew yet',
 };
 
 export interface RuntimeUnavailableText {
@@ -48,7 +48,7 @@ export function runtimeUnavailableText(id: string, reason: string | null | undef
   return { text: `${label} can’t be used on this computer right now.`, install: [], detail: raw };
 }
 
-/** Runtimes listed for the Meta agent but not offered in this version. */
+/** Runtimes listed for Pages upkeep but not offered in this version. */
 const UNSUPPORTED: ReadonlySet<string> = new Set(['crew']);
 
 export function isMetaAgentRuntimeSupported(id: string): boolean {
@@ -59,8 +59,9 @@ export function isMetaAgentRuntime(id: string): id is MetaAgentRuntimeId {
   return (META_AGENT_RUNTIMES as readonly string[]).includes(id);
 }
 
+/** The Meta agent can follow the global runtime, which may be one it does not list. */
 export function metaAgentRuntimeLabel(id: string): string {
-  return isMetaAgentRuntime(id) ? LABELS[id] : id;
+  return isMetaAgentRuntime(id) ? LABELS[id] : runtimeShortLabel(id) ?? id;
 }
 
 export function metaAgentRestriction(id: string): string | null {
@@ -69,7 +70,7 @@ export function metaAgentRestriction(id: string): string | null {
 
 export interface MetaAgentProfile { runtimeId: string; modelId: string | null; reasoning: string | null }
 
-/** "Claude · sonnet · reasoning high": what the Meta agent runs on, worded the same in Settings and the window. */
+/** "Claude · sonnet · reasoning high": what Pages upkeep runs on, worded the same in Settings and Scheduled. */
 export function metaAgentProfileText(profile: MetaAgentProfile): string {
   return [
     metaAgentRuntimeLabel(profile.runtimeId),

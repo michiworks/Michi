@@ -1,9 +1,9 @@
-import { expect, test, type Browser, type Page } from '@playwright/test';
+import { expect, test, type Browser, type Locator, type Page } from '@playwright/test';
 import { installMockApi } from '../fixtures/mockApi';
 import { openArea } from '../fixtures/shell';
 
-// Phone layouts on a touch screen: Scheduled rows, Settings, Explore further
-// and the tap targets under messages and in the sidebar.
+// Phone layouts on a touch screen: Scheduled rows, Settings, Explore further,
+// the tap targets under messages and in the sidebar, and hover reveals.
 
 const questions = [
   'Where in the Michi source is the completion marker in the set_branch_overview result generated?',
@@ -63,6 +63,12 @@ async function boot(page: Page) {
       return true;
     }
     if (/^\/scheduled-jobs\/[^/]+\/runs$/.test(path)) { await route.fulfill({ json: { runs: [] } }); return true; }
+    if (path === '/uploads/web-cwd') { await route.fulfill({ json: { cwd: '/tmp/ws-1' } }); return true; }
+    if (path === '/workspaces/import-file') {
+      const { originalName } = route.request().postDataJSON() as { originalName: string };
+      await route.fulfill({ json: { name: originalName, filePath: `.attachments/${originalName}`, size: 5 } });
+      return true;
+    }
     return false;
   } });
   await page.addInitScript(prefs => {
@@ -85,6 +91,19 @@ async function openThread(page: Page) {
   return pane;
 }
 
+/** Attaches a text file through the composer's web picker; returns its pending remove button. */
+async function attachNotes(page: Page, pane: Locator) {
+  const chooser = page.waitForEvent('filechooser');
+  await pane.getByTitle('Attach file').click();
+  await (await chooser).setFiles({ name: 'notes.txt', mimeType: 'text/plain', buffer: Buffer.from('notes') });
+  return pane.getByRole('button', { name: 'Remove notes.txt', exact: true });
+}
+
+const shown = (control: Locator) => control.evaluate((el) => {
+  const style = getComputedStyle(el);
+  return style.opacity === '1' && style.pointerEvents !== 'none';
+});
+
 async function size(page: Page, selector: string) {
   const box = await page.locator(selector).filter({ visible: true }).first().boundingBox();
   expect(box, selector).not.toBeNull();
@@ -105,17 +124,44 @@ test('message actions, follow-up toggle and sidebar row buttons are finger-sized
 
   await page.getByRole('button', { name: 'Open sidebar', exact: true }).click();
   const sidebar = page.locator('.terminal-sidebar');
-  const kebab = await sidebar.getByRole('button', { name: 'Actions for Tool results', exact: true }).boundingBox();
-  expect(kebab!.width).toBeGreaterThanOrEqual(32);
-  expect(kebab!.height).toBeGreaterThanOrEqual(30);
-  for (const name of ['Workspace options', 'New chat in this workspace']) {
-    const box = await sidebar.getByRole('button', { name, exact: true }).boundingBox();
-    expect(Math.min(box!.width, box!.height), name).toBeGreaterThanOrEqual(32);
+  const newChat = await sidebar.getByRole('button', { name: 'New chat in this workspace', exact: true }).boundingBox();
+  expect(Math.min(newChat!.width, newChat!.height)).toBeGreaterThanOrEqual(32);
+  // A long press opens the rows' menus, so their ⋯ buttons stay only for screen readers.
+  const threadMenu = page.getByRole('button', { name: 'Actions for Tool results', exact: true });
+  const workspaceMenu = sidebar.getByRole('button', { name: 'Actions for Branch design', exact: true });
+  for (const clip of [sidebar.locator('.row-kebab', { has: threadMenu }), workspaceMenu]) {
+    const box = (await clip.boundingBox())!;
+    expect(box.width * box.height).toBeLessThanOrEqual(1);
+    expect(await clip.evaluate(el => getComputedStyle(el).clipPath)).toBe('inset(50%)');
   }
-  // The trailing caret moved left by the kebab's extra width, so they do not touch.
-  const caret = await sidebar.locator('.t-row-hover', { hasText: 'Tool results' }).first()
-    .locator('span[aria-hidden]', { hasText: /^[⌄›]$/ }).first().boundingBox();
-  if (caret) expect(caret.x + caret.width).toBeLessThanOrEqual(kebab!.x);
+});
+
+test('a pending attachment shows its remove button at rest on a touch screen; a pointer reveals it on hover or focus', async ({ browser, baseURL }) => {
+  const page = await phone(browser, baseURL);
+  await boot(page);
+  const pane = await openThread(page);
+  const remove = await attachNotes(page, pane);
+  expect(await shown(remove)).toBe(true);
+  await remove.tap();
+  await expect(pane.getByText('notes.txt', { exact: true })).toHaveCount(0);
+  await page.context().close();
+
+  const context = await browser.newContext({ baseURL, viewport: { width: 1280, height: 800 } });
+  const desktop = await context.newPage();
+  await boot(desktop);
+  const deskPane = await openThread(desktop);
+  const deskRemove = await attachNotes(desktop, deskPane);
+  await desktop.mouse.move(0, 0);
+  await expect.poll(() => shown(deskRemove)).toBe(false);
+  await deskPane.locator('.t-att-pending-item', { hasText: 'notes.txt' }).hover();
+  await expect.poll(() => shown(deskRemove)).toBe(true);
+  await desktop.mouse.move(0, 0);
+  await expect.poll(() => shown(deskRemove)).toBe(false);
+  await deskRemove.focus();
+  await expect.poll(() => shown(deskRemove)).toBe(true);
+  await desktop.keyboard.press('Enter');
+  await expect(deskPane.getByText('notes.txt', { exact: true })).toHaveCount(0);
+  await context.close();
 });
 
 for (const width of [390, 320]) test(`Explore further keeps Branch on one line at ${width}px`, async ({ browser, baseURL }) => {
@@ -211,7 +257,8 @@ test('a request for one Settings section opens straight on it on a phone', async
   });
   const drawer = page.getByRole('dialog', { name: 'Settings', exact: true });
   const nav = drawer.getByRole('navigation', { name: 'Settings sections' });
-  await expect(drawer.getByRole('heading', { level: 1, name: 'Meta agent', exact: true })).toBeVisible();
+  // The old meta-agent section opens Settings › <name> (DESIGN-v2 §1.5).
+  await expect(drawer.getByRole('heading', { level: 1, name: 'Michi', exact: true })).toBeVisible();
   await expect(nav).toBeHidden();
   await drawer.locator('.ui-overlay-header').getByRole('button', { name: 'Back', exact: true }).click();
   await expect(nav).toBeVisible();

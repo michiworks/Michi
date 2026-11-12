@@ -10,6 +10,7 @@ import type { McpSlotRegistry } from '../src/services/mcpServer';
 import type { AgentToolBridge } from '../src/agents/toolBridge';
 import { michiTestHost } from './helpers/michiTestHost';
 import { michiCodexHostText } from '../src/agents/michiCodexOptions';
+import type { NormalizedEvent } from '../src/services/chatEvents';
 
 // ---- Stubs ------------------------------------------------------------------
 
@@ -468,111 +469,25 @@ test('internal Michi metadata tool calls never enter the visible event stream', 
   assert.equal(events.some((event) => event.kind === 'tool_call_update'), false);
 });
 
-test('Codex metadata Hook POC requires overview and follow-ups while hiding repair text', async () => {
-  let callbacks: Record<string, (...args: any[]) => any> = {};
-  const capturedTurnStartParams: Record<string, unknown>[] = [];
-  const client = makeStubClient({
-    request: async (method: string, params: unknown) => {
-      if (method === 'turn/start') capturedTurnStartParams.push(params as Record<string, unknown>);
-      return {};
-    },
-  });
-  const registry = {
-    create: (_parentChatId: string, _cwd: string, _ownerUserId: string | null, cbs: typeof callbacks) => {
-      callbacks = cbs;
-      return { slotId: 'codex-poc-slot', ...cbs };
-    },
-    dispose: async () => {},
-    get: () => undefined,
-  } as unknown as McpSlotRegistry;
-  const session = new CodexSession({
-    nodeId: 'node-poc',
-    threadId: 'thread-poc',
-    cwd: '/tmp/test',
-    workspaceId: null,
-    client,
-    mcpRegistry: registry,
-    bridge: makeStubBridge(),
-    host: michiTestHost(),
-    hostText: michiCodexHostText(),
-    followUpsHookPocEnabled: true,
-    followUpsExperimentMode: 'hook-tool',
-  });
-  session.createMcpSlot();
-  session.wireNotifications();
-
-  const emitted: Array<Record<string, unknown>> = [];
-  const turnPromise = (async () => {
-    for await (const ev of session.send('hello')) emitted.push(ev as unknown as Record<string, unknown>);
-  })();
-  await new Promise((resolve) => setImmediate(resolve));
-
-  assert.equal(capturedTurnStartParams.length, 1);
-  assert.match(
-    String(((capturedTurnStartParams[0].input as Array<{ text: string }> | undefined)?.[0]?.text) ?? ''),
-    /set_follow_ups/,
-  );
-  assert.match(
-    String(((capturedTurnStartParams[0].input as Array<{ text: string }> | undefined)?.[0]?.text) ?? ''),
-    /set_branch_overview/,
-  );
-  (client as any)._emit('thread-poc', 'item/agentMessage/delta', {
-    threadId: 'thread-poc',
-    delta: 'ORIGINAL',
-  });
-
-  const firstDecision = callbacks.onValidateFollowUps();
-  assert.equal(firstDecision.decision, 'block');
-  assert.match(String(firstDecision.reason), /set_branch_overview/);
-  assert.match(String(firstDecision.reason), /set_follow_ups/);
-
-  (client as any)._emit('thread-poc', 'item/reasoning/textDelta', {
-    threadId: 'thread-poc',
-    delta: 'repair thought',
-  });
-  (client as any)._emit('thread-poc', 'item/agentMessage/delta', {
-    threadId: 'thread-poc',
-    delta: 'REPAIR TEXT',
-  });
-  callbacks.onSetBranchOverview(' Current durable branch state. ');
-  callbacks.onSetFollowUps([' first? ', 'second?', 'third?', 'fourth?']);
-  assert.deepEqual(callbacks.onValidateFollowUps(), {});
-
-  (client as any)._emit('thread-poc', 'turn/completed', {
-    threadId: 'thread-poc',
-    turn: { status: 'completed' },
-  });
+test("another MCP server's tool named like a Michi metadata tool stays in the stream", async () => {
+  const { session, client } = makeSession();
+  const events: NormalizedEvent[] = [];
+  const turnPromise = (async () => { for await (const ev of session.send('hello')) events.push(ev); })();
+  await new Promise((r) => setImmediate(r));
+  for (const status of ['inProgress', 'completed']) {
+    client._emit('thread-1', status === 'inProgress' ? 'item/started' : 'item/completed', {
+      item: { id: 'notion-title', type: 'mcpToolCall', server: 'notion', tool: 'set_title', status, arguments: { title: 'Plan' } },
+    });
+  }
+  client._emit('thread-1', 'turn/completed', { threadId: 'thread-1', turn: { status: 'completed' } });
   await turnPromise;
-
-  const chunks = emitted.filter((ev) => ev.kind === 'chunk').map((ev) => ev.text);
-  assert.deepEqual(chunks, ['ORIGINAL']);
-  assert.equal(emitted.some((ev) => ev.kind === 'thought'), false);
-  const followUps = emitted.map((ev) => hostPayload(ev, 'follow_ups')).find(Boolean);
-  assert.deepEqual(followUps?.followUps, ['first?', 'second?', 'third?']);
-  assert.deepEqual(
-    emitted.map((ev) => hostPayload(ev, 'follow_ups_status')).filter(Boolean).map((payload) => payload.status),
-    ['in_progress', 'completed'],
-  );
-  assert.ok(
-    emitted.findIndex((ev) => hostPayload(ev, 'follow_ups_status')?.status === 'in_progress')
-      < emitted.findIndex((ev) => hostPayload(ev, 'follow_ups')),
-  );
-  assert.ok(
-    emitted.findIndex((ev) => hostPayload(ev, 'follow_ups'))
-      < emitted.findIndex((ev) => hostPayload(ev, 'follow_ups_status')?.status === 'completed'),
-  );
-  const overview = emitted.map((ev) => hostPayload(ev, 'branch_overview')).find(Boolean);
-  assert.equal(overview?.overview, 'Current durable branch state.');
-  assert.equal(session.getHistory()[1].content, 'ORIGINAL');
+  const tools = events.filter((event): event is Extract<NormalizedEvent, { kind: 'tool_call' | 'tool_call_update' }> =>
+    event.kind === 'tool_call' || event.kind === 'tool_call_update');
+  assert.deepEqual(tools.map((event) => [event.kind, event.mcpServer, event.hostTool]),
+    [['tool_call', 'notion', false], ['tool_call_update', 'notion', false]]);
 });
 
-for (const hookEnabled of [false, true]) {
-}
-
-for (const hookEnabled of [false, true]) {
-}
-
-test('Codex disabled follow-ups retain overview validation without follow-up output', async () => {
+test('Codex disabled follow-ups keep the overview without follow-up output', async () => {
   let callbacks: any;
   const client = makeStubClient();
   const branchRequests: Array<{ enableFollowUps?: boolean }> = [];
@@ -580,7 +495,6 @@ test('Codex disabled follow-ups retain overview validation without follow-up out
     nodeId: 'disabled-metadata', threadId: 'disabled-metadata', cwd: '/tmp/test', workspaceId: null,
     client, host: michiTestHost(), hostText: michiCodexHostText(), enableFollowUps: false,
     bridge: { ...makeStubBridge(), spawnBranches: async (input) => { branchRequests.push(input); return []; } },
-    followUpsHookPocEnabled: true, followUpsExperimentMode: 'hook-tool',
     mcpRegistry: {
       create: (_id: string, _cwd: string, _owner: unknown, cbs: any) => { callbacks = cbs; return { slotId: 'disabled-metadata' }; },
       dispose: async () => {},
@@ -594,88 +508,12 @@ test('Codex disabled follow-ups retain overview validation without follow-up out
   await new Promise<void>((resolve) => setImmediate(resolve));
   await callbacks.onSpawnBranches([{ title: 'Child', prompt: 'Continue without follow-ups.' }]);
   assert.equal(branchRequests[0]?.enableFollowUps, false, 'actual child callback inherits disabled follow-ups');
-  const decision = callbacks.onValidateFollowUps();
-  assert.equal(decision.decision, 'block');
-  assert.match(String(decision.reason), /set_branch_overview/);
-  assert.doesNotMatch(String(decision.reason), /set_follow_ups/);
   callbacks.onSetBranchOverview(' Overview remains required. ');
-  assert.deepEqual(callbacks.onValidateFollowUps(), {});
   (client as any)._emit('disabled-metadata', 'turn/completed', { threadId: 'disabled-metadata', turn: { status: 'completed' } });
   await pending;
   assert.equal(events.some((event) => hostPayload(event, 'follow_ups') || hostPayload(event, 'follow_ups_status')), false);
   assert.equal(events.map((event) => hostPayload(event, 'branch_overview')).find(Boolean)?.overview, 'Overview remains required.');
   await session.dispose();
-});
-
-test('Codex metadata boundary completes at an agent message and remains complete at native turn end', async () => {
-  let callbacks: any;
-  const client = makeStubClient();
-  const session = new CodexSession({
-    nodeId: 'metadata-boundary', threadId: 'metadata-boundary', cwd: '/tmp/test', workspaceId: null,
-    client, bridge: makeStubBridge(), host: michiTestHost(), hostText: michiCodexHostText(),
-    followUpsHookPocEnabled: true, followUpsExperimentMode: 'hook-tool',
-    mcpRegistry: {
-      create: (_id: string, _cwd: string, _owner: unknown, cbs: any) => { callbacks = cbs; return { slotId: 'boundary' }; },
-      dispose: async () => {},
-    } as unknown as McpSlotRegistry,
-  });
-  session.createMcpSlot();
-  session.wireNotifications();
-  const events: any[] = [];
-  const pending = (async () => { for await (const event of session.send('answer')) events.push(event); })();
-  await new Promise<void>((resolve) => setImmediate(resolve));
-  callbacks.onSetBranchOverview('Done.');
-  callbacks.onSetFollowUps([' first? ', 'second?', 'third?']);
-  (client as any)._emit('metadata-boundary', 'item/completed', {
-    threadId: 'metadata-boundary', item: { id: 'answer', type: 'agentMessage', text: 'Answer.' },
-  });
-  await new Promise<void>((resolve) => setImmediate(resolve));
-  assert.deepEqual(events.map((event) => hostPayload(event, 'follow_ups_status')).filter(Boolean).map((payload) => payload.status), ['in_progress', 'completed']);
-  assert.equal(events.some((event) => event.kind === 'turn_end'), false, 'visible metadata boundary is separate from durable turn completion');
-  (client as any)._emit('metadata-boundary', 'turn/completed', { threadId: 'metadata-boundary', turn: { status: 'completed' } });
-  await pending;
-  assert.deepEqual(events.map((event) => hostPayload(event, 'follow_ups_status')).filter(Boolean).map((payload) => payload.status), ['in_progress', 'completed']);
-  await session.dispose();
-});
-
-test('Codex follow-ups Hook POC fails open after one missing repair attempt', async () => {
-  let callbacks: Record<string, (...args: any[]) => any> = {};
-  const client = makeStubClient();
-  const registry = {
-    create: (_parentChatId: string, _cwd: string, _ownerUserId: string | null, cbs: typeof callbacks) => {
-      callbacks = cbs;
-      return { slotId: 'codex-poc-fail-open-slot', ...cbs };
-    },
-    dispose: async () => {},
-    get: () => undefined,
-  } as unknown as McpSlotRegistry;
-  const session = new CodexSession({
-    nodeId: 'node-poc-fail-open',
-    threadId: 'thread-poc-fail-open',
-    cwd: '/tmp/test',
-    workspaceId: null,
-    client,
-    mcpRegistry: registry,
-    bridge: makeStubBridge(),
-    host: michiTestHost(),
-    hostText: michiCodexHostText(),
-    followUpsHookPocEnabled: true,
-  });
-  session.createMcpSlot();
-  session.wireNotifications();
-
-  const turnPromise = (async () => {
-    for await (const _ev of session.send('hello')) { /* drain */ }
-  })();
-  await new Promise((resolve) => setImmediate(resolve));
-
-  assert.equal(callbacks.onValidateFollowUps().decision, 'block');
-  assert.deepEqual(callbacks.onValidateFollowUps(), {});
-  (client as any)._emit('thread-poc-fail-open', 'turn/completed', {
-    threadId: 'thread-poc-fail-open',
-    turn: { status: 'completed' },
-  });
-  await turnPromise;
 });
 
 test('steer issues turn/steer and fork align does not change Michi node id', async () => {

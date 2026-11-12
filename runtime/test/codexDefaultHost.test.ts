@@ -1,6 +1,7 @@
 import { describe, it, type TestContext } from 'node:test';
 import assert from 'node:assert/strict';
 import os from 'node:os';
+import type { NormalizedEvent } from '../src/contract/events';
 import type { RuntimeHost } from '../src/contract/host';
 import type { McpSlot, McpSlotCallbacks, McpSlotProvider } from '../src/contract/mcp';
 import type { AgentToolBridge } from '../src/contract/tools';
@@ -9,8 +10,8 @@ import { createDefaultHost } from '../src/core/defaultHost';
 import type { CodexAppServerClient, ServerRequestHandler } from '../src/adapters/codex/CodexAppServerClient';
 import { CodexRuntime, type CodexHostText } from '../src/adapters/codex/CodexRuntime';
 import type { CodexSession } from '../src/adapters/codex/CodexSession';
-import { CODEX_HOST_MCP_SERVER, CODEX_SERVER_REQUESTS, CODEX_THREAD_FEATURES_OFF } from '../src/adapters/codex/codexProtocol';
-import { CODEX_RESTRICTED_FEATURES_OFF } from '../src/adapters/codex/codexRestrictedProfile';
+import { CODEX_HOST_MCP_SERVER, CODEX_MEMORIES_OFF, CODEX_SERVER_REQUESTS, CODEX_THREAD_FEATURES_OFF } from '../src/adapters/codex/codexProtocol';
+import { CODEX_RESTRICTED_FEATURES_OFF, CODEX_RESTRICTED_TOOLS_OFF } from '../src/adapters/codex/codexRestrictedProfile';
 
 interface Request { method: string; params: Record<string, any> }
 
@@ -90,14 +91,13 @@ function slotProvider(created: McpSlotCallbacks[]): McpSlotProvider {
     },
     dispose: async () => {},
     endpoint: (slotId: string) => ({ type: 'http', url: `http://127.0.0.1:1/api/mcp/${slotId}`, headers: [] }),
-    hookEndpoint: (slotId: string) => `http://127.0.0.1:1/mcp-hooks/${slotId}/stop`,
   } as unknown as McpSlotProvider;
 }
 
 const bridge: AgentToolBridge = { spawnBranches: async () => [], saveContext: () => null, updateContext: () => null };
 
 /** A Codex runtime on the fake app-server, without Michi's host or host text unless given. */
-function codexRuntime(t: TestContext, options: { host?: RuntimeHost; hostText?: CodexHostText; hookPoc?: boolean; userServers?: string[] } = {}) {
+function codexRuntime(t: TestContext, options: { host?: RuntimeHost; hostText?: CodexHostText; userServers?: string[] } = {}) {
   const server = fakeAppServer(options.userServers);
   const slots: McpSlotCallbacks[] = [];
   const runtime = new CodexRuntime(
@@ -107,7 +107,7 @@ function codexRuntime(t: TestContext, options: { host?: RuntimeHost; hostText?: 
       bridge,
       mcpSlots: slotProvider(slots),
     },
-    { client: server.client, ...(options.hookPoc ? { followUpsHookPocEnabled: true } : {}) },
+    { client: server.client },
   );
   const turns: Array<Promise<void>> = [];
   const threadIds: string[] = [];
@@ -122,14 +122,15 @@ function codexRuntime(t: TestContext, options: { host?: RuntimeHost; hostText?: 
     const threadStart = server.requests.filter((r) => r.method === 'thread/start' && !r.params.ephemeral).at(-1)!;
     const threadId = `thread-${server.requests.filter((r) => r.method === 'thread/start').indexOf(threadStart) + 1}`;
     threadIds.push(threadId);
-    turns.push((async () => { for await (const _event of session.send(text)) { /* drain */ } })());
+    const events: NormalizedEvent[] = [];
+    turns.push((async () => { for await (const event of session.send(text)) events.push(event); })());
     for (let i = 0; i < 200 && !server.find('turn/start', threadId); i += 1) await new Promise((resolve) => setTimeout(resolve, 5));
     const turnStart = server.find('turn/start', threadId);
     assert.ok(turnStart, `the turn of ${threadId} started`);
     const turnText = (turnStart.params.input as Array<{ type: string; text?: string }>).find((part) => part.type === 'text')!.text!;
-    return { session, threadId, threadStart, turnStart, turnText, slot: slots.at(-1)! };
+    return { session, threadId, threadStart, turnStart, turnText, events, slot: slots.at(-1)! };
   };
-  return { server, chat };
+  return { server, chat, runtime };
 }
 
 describe('CodexRuntime under createDefaultHost', () => {
@@ -149,6 +150,9 @@ describe('CodexRuntime under createDefaultHost', () => {
     assert.deepEqual(config.mcp_servers['user-mcp'], { enabled: false });
     assert.match(config.mcp_servers[CODEX_HOST_MCP_SERVER].url, /\/api\/mcp\/slot-1$/);
     assert.deepEqual(config.features, CODEX_RESTRICTED_FEATURES_OFF);
+    assert.equal(config.features.view_image, false);
+    // Codex's question tool (request_user_input) and plan tool off too.
+    assert.deepEqual(config.tools, CODEX_RESTRICTED_TOOLS_OFF);
     assert.equal(config.web_search, 'disabled');
     assert.equal(server.find('mcpServerStatus/list')?.params.threadId, restricted.threadId);
     // Read-only, offline turns.
@@ -164,6 +168,12 @@ describe('CodexRuntime under createDefaultHost', () => {
       }),
       { action: 'decline', content: null, _meta: null },
     );
+    // A question Codex asks anyway gets no answers at once, and never reaches the chat (no one may be watching).
+    const question = { questions: [{ id: 'q1', header: 'Confirm', question: 'Forward this mail?', options: [{ label: 'Yes' }, { label: 'No' }] }] };
+    const waiting = new Promise((resolve) => setTimeout(() => resolve('still waiting for an answer'), 500));
+    assert.deepEqual(await Promise.race([server.ask(CODEX_SERVER_REQUESTS.requestUserInput, restricted.threadId, question), waiting]), { answers: {} });
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    assert.deepEqual(restricted.events.filter((event) => event.kind === 'user_input_request' || event.kind === 'user_input_resolved'), []);
 
     const ordinary = await chat('chat-ordinary', 'hello');
     assert.equal(ordinary.session.isAssistant, false);
@@ -175,6 +185,14 @@ describe('CodexRuntime under createDefaultHost', () => {
     assert.deepEqual(ordinary.turnStart.params.sandboxPolicy, { type: 'dangerFullAccess' });
     assert.notDeepEqual(await server.ask(CODEX_SERVER_REQUESTS.commandApproval, ordinary.threadId, { command: 'ls' }), { decision: 'decline' },
       'the same request reaches an ordinary session, which YOLO mode does not decline');
+    assert.equal(ordinary.threadStart.params.config.tools, undefined, 'an ordinary thread keeps Codex\'s question tool');
+    const asked = server.ask(CODEX_SERVER_REQUESTS.requestUserInput, ordinary.threadId, question);
+    for (let i = 0; i < 200 && !ordinary.events.some((event) => event.kind === 'user_input_request'); i += 1) await new Promise((resolve) => setTimeout(resolve, 5));
+    const shown = ordinary.events.find((event) => event.kind === 'user_input_request');
+    assert.ok(shown && shown.kind === 'user_input_request', 'the same question reaches an ordinary chat');
+    assert.equal(shown.questions[0]?.question, 'Forward this mail?');
+    ordinary.session.skipUserInput(shown.requestId);
+    assert.deepEqual(await asked, { answers: {} });
   });
 
   it('adds no turn-metadata instruction without hostText.turnMetadataInstruction', async (t) => {
@@ -186,11 +204,28 @@ describe('CodexRuntime under createDefaultHost', () => {
     assert.equal(given.turnText, 'hello<metadata>');
   });
 
-  it('adds no hook POC instruction without hostText.followUpsHookPocInstruction', async (t) => {
-    const plain = await codexRuntime(t, { hookPoc: true }).chat('chat-poc-plain', 'hello');
-    assert.equal(plain.turnText, 'hello');
-    const given = await codexRuntime(t, { hookPoc: true, hostText: { followUpsHookPocInstruction: () => '<poc>' } }).chat('chat-poc-given', 'hello');
-    assert.equal(given.turnText, 'hello<poc>');
+  it("binds a maintenance send to the host's own principal", async (t) => {
+    const host = createDefaultHost({
+      logLevel: 'silent', principal: 'alice',
+      ports: { profile: { isMaintenance: (profile) => profile?.capabilitySnapshot === 'maintenance' } },
+    });
+    const { server, runtime } = codexRuntime(t, { host });
+    const session = await runtime.newSession({
+      sessionId: 'chat-maintenance', cwd: os.tmpdir(), model: 'test-model', workspaceId: 'ws-1',
+      toolProfile: { capabilitySnapshot: 'maintenance' },
+    }) as CodexSession;
+    const maintenanceContext = {
+      workspaceId: 'ws-1', ownerUserId: host.principal.resolve(null), jobId: 'job-1', runId: 'run-1',
+      claimedBy: 'worker-1', configRevision: 1, planId: 'plan-1', sources: [],
+    };
+    const events = session.send('maintain', { turnId: 'turn-1', assistantMessageId: 'a-1', maintenanceContext });
+    const first = events.next();
+    for (let i = 0; i < 200 && !server.find('turn/start'); i += 1) await new Promise((resolve) => setTimeout(resolve, 5));
+    assert.deepEqual(session.getActiveMaintenanceExecutionContext()?.execution,
+      { nodeId: 'chat-maintenance', turnId: 'turn-1', assistantId: 'a-1', runId: 'run-1' });
+    server.endTurn(String(server.find('turn/start')!.params.threadId));
+    await first;
+    for await (const _event of events) { /* drain */ }
   });
 
   it('starts the title thread with no developer instructions without hostText.titleInstructions', async (t) => {
@@ -205,5 +240,21 @@ describe('CodexRuntime under createDefaultHost', () => {
     };
     assert.equal((await titleStart())?.params.developerInstructions, '');
     assert.equal((await titleStart({ titleInstructions: () => '<title>' }))?.params.developerInstructions, '<title>');
+  });
+
+  it('keeps Codex memories out of the chat and its title thread when the host keeps memory itself', async (t) => {
+    const host = createDefaultHost({
+      logLevel: 'silent',
+      ports: { title: { enabled: () => true, prompt: () => '' }, config: { features: { workflows: () => false, nativeMemory: () => false } } },
+    });
+    const { server, chat } = codexRuntime(t, { host });
+    const { threadStart } = await chat('chat-memory-off', 'hello');
+    for (let i = 0; i < 200 && !server.requests.some((r) => r.method === 'thread/start' && r.params.ephemeral); i += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+    const titleStart = server.requests.find((r) => r.method === 'thread/start' && r.params.ephemeral);
+    assert.deepEqual(threadStart.params.config.memories, CODEX_MEMORIES_OFF);
+    assert.deepEqual(titleStart?.params.config.memories, CODEX_MEMORIES_OFF);
+    assert.deepEqual(titleStart?.params.config.features, CODEX_THREAD_FEATURES_OFF);
   });
 });

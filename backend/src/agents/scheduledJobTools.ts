@@ -12,22 +12,31 @@
  *    found. The Scheduled window names a new job's workspace, which its
  *    caller checks against the user's own rules (system, archived and
  *    AI-navigation-off workspaces are refused); every card names it.
- *  - Every change except pausing needs an explicit, single-use approval from
- *    the user. Trust/YOLO, "always allow" grants and session trust never
- *    approve it: a job runs prompts later with nobody watching, so a prompt
- *    injected into this conversation must not be able to plant one.
+ *  - Updating, running now and deleting need an explicit, single-use approval
+ *    from the user; pausing needs none. Creating asks when the user turned on
+ *    Settings › Background › "Ask before agents create scheduled jobs"
+ *    (deps.createNeedsApproval), and always in a turn that read content from
+ *    outside the conversation (web pages, tool output, check-in material:
+ *    services/turnTrust.ts), whose instructions a job would otherwise run
+ *    unattended; otherwise the result carries the saved job so the
+ *    conversation shows exactly what was scheduled. Trust/YOLO, "always
+ *    allow" grants and session trust never approve a change that asks.
  *  - Agent Runs and the turn of a scheduled run itself are refused: nobody is
  *    there to approve, and a job must not create or start jobs.
  *  - Inputs go through the same validation and limits as the Scheduled page.
  */
 
 import {
+  SCHEDULED_ONLY_KEPT_DAYS,
+  SCHEDULED_ONLY_RETENTION,
   type ChatPermissionMode,
   type ScheduledJobDto,
   type ScheduledJobRunDto,
   type ScheduledJobSchedule,
   type ScheduledJobSessionMode,
+  type ScheduledJobVisibility,
   type ScheduledJobsSchedulerStatus,
+  plural,
 } from "michi-shared";
 import { computeNextRun, systemTimeZone } from "../services/scheduledJobs/schedule";
 import {
@@ -37,8 +46,12 @@ import {
   type ScheduledJobScheduler,
 } from "../services/scheduledJobs/scheduler";
 import type { ParsedJobFields } from "../services/scheduledJobs/validation";
+import { activeCompanionTaint, activeTurnTrust } from "../services/turnTrust";
 
+import { askUserApprover, type HostApprovalRequest, type HostApprovalResult, type HostApprover } from "./hostApproval";
 import { type ScheduledJobToolName } from "./scheduledJobToolNames";
+import { declinedApprovalNext, type AskUser } from "./singleUseApproval";
+import { CodedToolError, codedErrorResult, jsonResult, type McpTextResult } from "./tools/types";
 
 export { SCHEDULED_JOB_TOOL_NAMES, isScheduledJobToolName, type ScheduledJobToolName } from "./scheduledJobToolNames";
 
@@ -52,28 +65,18 @@ export interface ScheduledJobToolCaller {
 
 export type ScheduledJobApprovalAction = "create" | "update" | "run" | "delete";
 
-export interface ScheduledJobApprovalRequest {
+/** A host approval (agents/hostApproval.ts) for one job change. */
+export interface ScheduledJobApprovalRequest extends HostApprovalRequest {
   toolName: ScheduledJobToolName;
   action: ScheduledJobApprovalAction;
   jobName: string;
-  title: string;
-  /** One fact per line: schedule, permissions, thread mode, prompt preview… */
+  /** One fact per line: schedule, permissions, thread mode…; the full prompt, when shown, comes last. */
   lines: string[];
-  /** Label of the approving choice ("Create", "Run now"…). */
-  approveLabel: string;
 }
 
-export type ScheduledJobApprovalResult =
-  | { approved: true }
-  | { approved: false; reason: "declined" | "no_answer" | "unavailable"; note?: string };
+export type ScheduledJobApprovalResult = HostApprovalResult;
 
-export type ScheduledJobApprover = (request: ScheduledJobApprovalRequest) => Promise<ScheduledJobApprovalResult>;
-
-export interface ScheduledJobToolResult {
-  [key: string]: unknown;
-  content: Array<{ type: "text"; text: string }>;
-  isError?: true;
-}
+export type ScheduledJobApprover = HostApprover<ScheduledJobApprovalRequest>;
 
 type SchedulerApi = Pick<ScheduledJobScheduler,
   | "status" | "listJobs" | "getJob" | "listRuns" | "validateCreate" | "createJob"
@@ -84,6 +87,8 @@ export interface ScheduledJobToolDeps {
   /** True while the given thread's current turn is a scheduled run. */
   isScheduledRunNode(nodeId: string): boolean;
   workspaceName?(workspaceId: string): string | null;
+  /** The user's create-approval setting, read per call. Absent: creating asks. */
+  createNeedsApproval?(): boolean;
   clock?: () => number;
   timeZone?: () => string;
 }
@@ -95,39 +100,28 @@ export function configureScheduledJobTools(deps: ScheduledJobToolDeps | null): v
   configuredDeps = deps;
 }
 
-class ToolError extends Error {
-  constructor(readonly code: string, message: string) {
-    super(message);
-  }
-}
-
-function errorResult(code: string, message: string): ScheduledJobToolResult {
-  return { content: [{ type: "text", text: `${code}: ${message}` }], isError: true };
-}
-
-function jsonResult(value: Record<string, unknown>): ScheduledJobToolResult {
-  return { content: [{ type: "text", text: JSON.stringify(value) }] };
-}
-
-function toolError(error: unknown): ScheduledJobToolResult {
-  if (error instanceof ToolError) return errorResult(error.code, error.message);
-  if (error instanceof JobValidationError) return errorResult("INVALID_ARGUMENT", error.message);
-  if (error instanceof ScheduledJobNotFoundError) return errorResult("NOT_FOUND", error.message);
-  if (error instanceof ScheduledJobConflictError) return errorResult("CONFLICT", error.message);
+function toolError(error: unknown): McpTextResult {
+  if (error instanceof CodedToolError) return codedErrorResult(error.code, error.message);
+  if (error instanceof JobValidationError) return codedErrorResult("INVALID_ARGUMENT", error.message);
+  if (error instanceof ScheduledJobNotFoundError) return codedErrorResult("NOT_FOUND", error.message);
+  if (error instanceof ScheduledJobConflictError) return codedErrorResult("CONFLICT", error.message);
   throw error;
 }
 
 // ── Formatting ───────────────────────────────────────────────────────────────
 
-const PREVIEW_CHARS = 280;
-
-function preview(text: string, max = PREVIEW_CHARS): string {
+function preview(text: string, max: number): string {
   const flat = text.replace(/\s+/g, " ").trim();
   return flat.length > max ? `${flat.slice(0, max)}…` : flat;
 }
 
-function plural(count: number, word: string): string {
-  return `${count} ${word}${count === 1 ? "" : "s"}`;
+/**
+ * A prompt as an approval card quotes it: whole, line breaks kept, since the
+ * user approves exactly what will run. It is always the card's last line, so
+ * the card can read a quoted text that runs over several lines to the end.
+ */
+function quotedPrompt(text: string): string {
+  return `“${text.replace(/\r\n?/g, "\n").trim()}”`;
 }
 
 function intervalText(seconds: number): string {
@@ -167,6 +161,15 @@ const SESSION_TEXT: Record<ScheduledJobSessionMode, string> = {
   persistent: "one thread that every run continues",
 };
 
+const VISIBILITY_TEXT: Record<ScheduledJobVisibility, string> = {
+  workspace: "in the workspace",
+  scheduled: `only in Scheduled (Michi keeps the latest ${SCHEDULED_ONLY_RETENTION.maxRuns} runs from the past ${SCHEDULED_ONLY_KEPT_DAYS} days, at least ${SCHEDULED_ONLY_RETENTION.minRuns})`,
+};
+
+function visibilityOf(job: Pick<ScheduledJobDto, "visibility">): ScheduledJobVisibility {
+  return job.visibility === "scheduled" ? "scheduled" : "workspace";
+}
+
 function minutes(seconds: number): string {
   return seconds % 60 === 0 ? plural(seconds / 60, "minute") : plural(seconds, "second");
 }
@@ -202,6 +205,7 @@ function jobView(job: ScheduledJobDto, env: Env, full: boolean): Record<string, 
     },
     permissionMode: job.permissionMode,
     sessionMode: job.sessionMode,
+    visibility: visibilityOf(job),
     notify: job.notify,
     timeoutSeconds: job.timeoutSeconds,
     ...(full ? { prompt: job.prompt } : { promptPreview: preview(job.prompt, 160) }),
@@ -217,20 +221,52 @@ function runView(run: ScheduledJobRunDto, env: Env): Record<string, unknown> {
     started: timeView(run.startedAt, env.timeZone),
     finished: timeView(run.finishedAt, env.timeZone),
     nodeId: run.nodeId,
+    ...(run.scheduledOnly ? { scheduledOnly: true } : {}),
     ...(run.summary ? { summary: run.summary } : {}),
     ...(run.error ? { error: run.error } : {}),
   };
 }
 
-function schedulerNote(status: ScheduledJobsSchedulerStatus): string | undefined {
-  if (!status.active) return "Another Michi instance on this computer schedules jobs right now; runs happen there.";
-  if (!status.serviceMode) return "Jobs run only while Michi's backend is running. Turning on Settings → Background keeps it running.";
-  return undefined;
+function durationText(ms: number): string {
+  const total = Math.max(0, Math.round(ms / 60_000));
+  if (total < 60) return plural(total, "minute");
+  const hours = Math.floor(total / 60);
+  return total % 60 ? `${plural(hours, "hour")} ${plural(total % 60, "minute")}` : plural(hours, "hour");
+}
+
+/** Blocked executions hold every job's runs; the caller sees only the names of jobs it may see. */
+function blockedNote(status: ScheduledJobsSchedulerStatus, env: Env, jobText: (jobId: string) => string): string | null {
+  const blocked = status.blockedExecutions ?? [];
+  if (!blocked.length) return null;
+  const one = blocked.length === 1;
+  const items = blocked.map((execution) => `${jobText(execution.jobId)}: blocked for ${durationText(env.now - execution.since)}`
+    + (execution.releasesAt === undefined ? "" : `, releases automatically at ${formatTime(execution.releasesAt, env.timeZone)}`));
+  return `New scheduled runs are on hold: ${one ? "an earlier run has" : `${blocked.length} earlier runs have`} not confirmed `
+    + `${one ? "it" : "they"} stopped. ${items.join("; ")}. Runs resume when ${one ? "it is" : "all are"} released, or sooner `
+    + "if the user checks the old Michi process and its agent have ended and confirms it on the Scheduled page.";
+}
+
+function schedulerNote(deps: ScheduledJobToolDeps, scope: JobScope, env: Env): string | undefined {
+  const status = deps.scheduler.status();
+  const jobText = (jobId: string): string => {
+    let job: ScheduledJobDto;
+    try { job = deps.scheduler.getJob(jobId); } catch (error) {
+      if (error instanceof ScheduledJobNotFoundError) return "A deleted job";
+      throw error;
+    }
+    if (!scope.sees(job)) return "A job in another workspace";
+    const workspace = scope.workspaceOf?.(job);
+    return `“${job.name}”${workspace ? ` in ${workspace.name}` : ""}`;
+  };
+  const notes = [blockedNote(status, env, jobText)];
+  if (!status.active) notes.push("Another Michi instance on this computer schedules jobs right now; runs happen there.");
+  else if (!status.serviceMode) notes.push("Jobs run only while Michi's backend is running. Turning on Settings → Background keeps it running.");
+  return notes.filter(Boolean).join(" ") || undefined;
 }
 
 // ── Arguments ────────────────────────────────────────────────────────────────
 
-const EDITABLE_FIELDS = ["name", "prompt", "schedule", "sessionMode", "permissionMode", "notify", "enabled", "timeoutSeconds"] as const;
+const EDITABLE_FIELDS = ["name", "prompt", "schedule", "sessionMode", "visibility", "permissionMode", "notify", "enabled", "timeoutSeconds"] as const;
 type EditableField = typeof EDITABLE_FIELDS[number];
 
 function asRecord(value: unknown): Record<string, unknown> {
@@ -242,7 +278,7 @@ function normalizeSchedule(value: unknown): unknown {
   const schedule = asRecord(value);
   if (schedule.kind !== "at" || typeof schedule.at !== "string") return value;
   const at = Date.parse(schedule.at);
-  if (!Number.isFinite(at)) throw new ToolError("INVALID_ARGUMENT", "schedule.at must be an ISO 8601 date-time, e.g. 2026-10-17T09:00:00+09:00");
+  if (!Number.isFinite(at)) throw new CodedToolError("INVALID_ARGUMENT", "schedule.at must be an ISO 8601 date-time, e.g. 2026-10-17T09:00:00+09:00");
   return { kind: "at", at };
 }
 
@@ -258,7 +294,7 @@ function pickFields(args: Record<string, unknown>): Partial<Record<EditableField
 
 function requireJobId(args: Record<string, unknown>): string {
   const id = typeof args.jobId === "string" ? args.jobId.trim() : "";
-  if (!id) throw new ToolError("INVALID_ARGUMENT", "jobId is required");
+  if (!id) throw new CodedToolError("INVALID_ARGUMENT", "jobId is required");
   return id;
 }
 
@@ -292,12 +328,16 @@ export interface AssistantScheduledJobCaller {
    * archived one, whose existing jobs stay reachable.
    */
   workspace(workspaceId: string, use: "create" | "existing"): ScheduleWorkspace | ScheduleWorkspaceRefusal;
+  /** The approved job was saved. */
+  jobCreated?(): void;
 }
 
 /** Which jobs a caller sees and where a new one goes. */
 interface JobScope {
   nodeId: string;
-  /** The checked workspace for a new job. Throws ToolError when the caller may not use it. */
+  /** The approved job was saved. */
+  jobCreated?(): void;
+  /** The checked workspace for a new job. Throws CodedToolError when the caller may not use it. */
   createWorkspace(args: Record<string, unknown>): { id: string; name: string | null };
   /** True for a job the caller may see and change; any other reads as missing. */
   sees(job: ScheduledJobDto): boolean;
@@ -312,13 +352,13 @@ interface JobScope {
 /** A chat thread: its own workspace, from the session binding. */
 function chatScope(caller: ScheduledJobToolCaller, deps: ScheduledJobToolDeps): JobScope {
   if (caller.isAgentRun) {
-    throw new ToolError("UNSUPPORTED", "scheduled jobs can be managed only from chat threads, not Agent Runs");
+    throw new CodedToolError("UNSUPPORTED", "scheduled jobs can be managed only from chat threads, not Agent Runs");
   }
   if (!caller.nodeId || !caller.workspaceId) {
-    throw new ToolError("SOURCE_UNAVAILABLE", "this session is not yet bound to a chat thread in a workspace");
+    throw new CodedToolError("SOURCE_UNAVAILABLE", "this session is not yet bound to a chat thread in a workspace");
   }
   if (deps.isScheduledRunNode(caller.nodeId)) {
-    throw new ToolError("UNSUPPORTED", "scheduled jobs cannot be managed from inside a scheduled run");
+    throw new CodedToolError("UNSUPPORTED", "scheduled jobs cannot be managed from inside a scheduled run");
   }
   const workspaceId = caller.workspaceId;
   const own = (job: ScheduledJobDto) => job.workspaceId === workspaceId;
@@ -334,11 +374,11 @@ function chatScope(caller: ScheduledJobToolCaller, deps: ScheduledJobToolDeps): 
 /** The Scheduled window: any workspace the user lets it use, named per job. */
 function assistantScope(caller: AssistantScheduledJobCaller): JobScope {
   if (!caller.nodeId) {
-    throw new ToolError("SOURCE_UNAVAILABLE", "this session is not yet bound to its conversation");
+    throw new CodedToolError("SOURCE_UNAVAILABLE", "this session is not yet bound to its conversation");
   }
   const resolve = (workspaceId: string, use: "create" | "existing"): ScheduleWorkspace => {
     const found = caller.workspace(workspaceId, use);
-    if ("refused" in found) throw new ToolError(found.refused, found.message);
+    if ("refused" in found) throw new CodedToolError(found.refused, found.message);
     return found;
   };
   const usable = (job: ScheduledJobDto): ScheduleWorkspace | null => {
@@ -347,9 +387,10 @@ function assistantScope(caller: AssistantScheduledJobCaller): JobScope {
   };
   return {
     nodeId: caller.nodeId,
+    jobCreated: caller.jobCreated,
     createWorkspace: (args) => {
       const id = typeof args.workspaceId === "string" ? args.workspaceId.trim() : "";
-      if (!id) throw new ToolError("INVALID_ARGUMENT", "workspaceId is required: the workspace the job runs in, from list_workspaces");
+      if (!id) throw new CodedToolError("INVALID_ARGUMENT", "workspaceId is required: the workspace the job runs in, from list_workspaces");
       return resolve(id, "create");
     },
     sees: (job) => usable(job) !== null,
@@ -383,9 +424,10 @@ function createLines(fields: ParsedJobFields, env: Env, workspace: string | null
       + (fields.enabled ? (next !== null ? `, first run ${formatTime(next, tz)}` : "") : " (starts paused)"),
     `Permissions: ${PERMISSION_TEXT[fields.permissionMode]}`,
     `Thread: ${SESSION_TEXT[fields.sessionMode]}`,
+    `Runs show: ${VISIBILITY_TEXT[fields.visibility]}`,
     `Notify: ${notifyText(fields.notify)}`,
     `Time limit: ${minutes(fields.timeoutSeconds)} per run`,
-    `Prompt: “${preview(fields.prompt)}”`,
+    `Prompt: ${quotedPrompt(fields.prompt)}`,
   ];
 }
 
@@ -393,17 +435,30 @@ function notifyText(notify: boolean): string {
   return notify ? "when each run finishes" : "off";
 }
 
+/**
+ * One `Label: before → after` line per changed field, so the user approves a
+ * change knowing what it replaces (the ask card draws these as a before/after
+ * pair). The current permissions follow when they stay as they are; a changed
+ * prompt comes last, whole.
+ */
 function updateLines(job: ScheduledJobDto, patch: Partial<ParsedJobFields>, env: Env): string[] {
   const lines: string[] = [];
-  if (patch.name !== undefined) lines.push(`Name → ${patch.name}`);
-  if (patch.schedule !== undefined) lines.push(`Schedule → ${describeJobSchedule(patch.schedule, env.timeZone)}`);
-  if (patch.enabled !== undefined) lines.push(patch.enabled ? "Turns the job back on" : "Pauses the job");
-  if (patch.permissionMode !== undefined) lines.push(`Permissions → ${PERMISSION_TEXT[patch.permissionMode]}`);
-  if (patch.sessionMode !== undefined) lines.push(`Thread → ${SESSION_TEXT[patch.sessionMode]}`);
-  if (patch.notify !== undefined) lines.push(`Notify → ${notifyText(patch.notify)}`);
-  if (patch.timeoutSeconds !== undefined) lines.push(`Time limit → ${minutes(patch.timeoutSeconds)} per run`);
-  if (patch.prompt !== undefined) lines.push(`Prompt → “${preview(patch.prompt)}”`);
+  const change = (label: string, before: string, after: string) => lines.push(`${label}: ${before} → ${after}`);
+  const status = (enabled: boolean) => (enabled ? "on" : "paused");
+  if (patch.name !== undefined) change("Name", job.name, patch.name);
+  if (patch.schedule !== undefined) {
+    change("Schedule", describeJobSchedule(job.schedule, env.timeZone), describeJobSchedule(patch.schedule, env.timeZone));
+  }
+  if (patch.enabled !== undefined) change("Status", status(job.enabled), status(patch.enabled));
+  if (patch.permissionMode !== undefined) change("Permissions", PERMISSION_TEXT[job.permissionMode], PERMISSION_TEXT[patch.permissionMode]);
+  if (patch.sessionMode !== undefined) change("Thread", SESSION_TEXT[job.sessionMode], SESSION_TEXT[patch.sessionMode]);
+  if (patch.visibility !== undefined) change("Runs show", VISIBILITY_TEXT[visibilityOf(job)], VISIBILITY_TEXT[patch.visibility]);
+  if (patch.notify !== undefined) change("Notify", notifyText(job.notify), notifyText(patch.notify));
+  if (patch.timeoutSeconds !== undefined) {
+    change("Time limit", `${minutes(job.timeoutSeconds)} per run`, `${minutes(patch.timeoutSeconds)} per run`);
+  }
   if (patch.permissionMode === undefined) lines.push(`Permissions (unchanged): ${PERMISSION_TEXT[job.permissionMode]}`);
+  if (patch.prompt !== undefined) change("Prompt", quotedPrompt(job.prompt), quotedPrompt(patch.prompt));
   return lines;
 }
 
@@ -411,22 +466,24 @@ function runLines(job: ScheduledJobDto): string[] {
   return [
     `Permissions: ${PERMISSION_TEXT[job.permissionMode]}`,
     `Thread: ${SESSION_TEXT[job.sessionMode]}`,
-    `Prompt: “${preview(job.prompt)}”`,
+    `Prompt: ${quotedPrompt(job.prompt)}`,
   ];
 }
 
-const DELETE_LINES = ["Removes the job and its run history. Threads it already created stay."];
+function deleteLines(job: ScheduledJobDto): string[] {
+  return [visibilityOf(job) === "scheduled"
+    ? "Removes the job, its run history and its runs' threads, which show only in Scheduled."
+    : "Removes the job and its run history. Threads it already created stay."];
+}
 
-function declined(approval: Exclude<ScheduledJobApprovalResult, { approved: true }>, what: string): ScheduledJobToolResult {
+function declined(approval: Exclude<ScheduledJobApprovalResult, { approved: true }>, what: string): McpTextResult {
   if (approval.reason === "unavailable") {
-    return errorResult("APPROVAL_UNAVAILABLE", `this runtime cannot ask the user for approval; ${what}`);
+    return codedErrorResult("APPROVAL_UNAVAILABLE", `this runtime cannot ask the user for approval; ${what}`);
   }
   return jsonResult({
     status: "declined",
     ...(approval.note ? { userNote: approval.note } : {}),
-    next: approval.reason === "no_answer"
-      ? `The user did not answer; ${what}. Do not retry unless the user asks.`
-      : `The user declined; ${what}. Do not retry unless the user asks.`,
+    next: declinedApprovalNext(approval.reason, what),
   });
 }
 
@@ -438,7 +495,7 @@ export async function scheduledJobTool(
   rawArgs: unknown,
   approve: ScheduledJobApprover,
   deps: ScheduledJobToolDeps | null = configuredDeps,
-): Promise<ScheduledJobToolResult> {
+): Promise<McpTextResult> {
   return runTool(name, (d) => chatScope(caller, d), rawArgs, approve, deps);
 }
 
@@ -446,8 +503,9 @@ export async function scheduledJobTool(
  * The same tools for the Scheduled window's assistant conversation: a new
  * job names its workspace (checked by `caller.workspace`), and every approval
  * card names the job's workspace. All other boundaries are the chat
- * version's: single-use approval for every change but pausing, maintenance
- * jobs invisible, the scheduler's own validation.
+ * version's: single-use approval for updating, running and deleting (and for
+ * creating when the user asks for it), maintenance jobs invisible, the
+ * scheduler's own validation.
  */
 export async function assistantScheduledJobTool(
   name: ScheduledJobToolName,
@@ -455,7 +513,7 @@ export async function assistantScheduledJobTool(
   rawArgs: unknown,
   approve: ScheduledJobApprover,
   deps: ScheduledJobToolDeps | null = configuredDeps,
-): Promise<ScheduledJobToolResult> {
+): Promise<McpTextResult> {
   return runTool(name, () => assistantScope(caller), rawArgs, approve, deps);
 }
 
@@ -465,8 +523,8 @@ async function runTool(
   rawArgs: unknown,
   approve: ScheduledJobApprover,
   deps: ScheduledJobToolDeps | null,
-): Promise<ScheduledJobToolResult> {
-  if (!deps) return errorResult("UNAVAILABLE", "scheduled jobs are not available on this server");
+): Promise<McpTextResult> {
+  if (!deps) return codedErrorResult("UNAVAILABLE", "scheduled jobs are not available on this server");
   const args = asRecord(rawArgs);
   const env: Env = { now: (deps.clock ?? Date.now)(), timeZone: (deps.timeZone ?? systemTimeZone)() };
   try {
@@ -489,9 +547,8 @@ function scopedJobView(scope: JobScope, job: ScheduledJobDto, env: Env, full: bo
   return { ...jobView(job, env, full), ...(workspace ? { workspace } : {}) };
 }
 
-function listJobs(deps: ScheduledJobToolDeps, scope: JobScope, args: Record<string, unknown>, env: Env): ScheduledJobToolResult {
-  const status = deps.scheduler.status();
-  const note = schedulerNote(status);
+function listJobs(deps: ScheduledJobToolDeps, scope: JobScope, args: Record<string, unknown>, env: Env): McpTextResult {
+  const note = schedulerNote(deps, scope, env);
   if (typeof args.jobId === "string" && args.jobId.trim()) {
     const job = ownJob(deps, scope, args.jobId.trim());
     const runs = deps.scheduler.listRuns(job.id).slice(0, 10).map((run) => runView(run, env));
@@ -507,37 +564,67 @@ function listJobs(deps: ScheduledJobToolDeps, scope: JobScope, args: Record<stri
   });
 }
 
+/**
+ * The chat's running turn read content from outside the conversation (an
+ * untrusted source: services/turnTrust.ts), or its live session took in
+ * check-in material on an earlier turn; a read that fails counts as one.
+ */
+function readOutsideContent(nodeId: string): boolean {
+  try {
+    return activeCompanionTaint(nodeId) !== null || activeTurnTrust(nodeId)?.untrusted === true;
+  } catch {
+    return true;
+  }
+}
+
+/** Why a create asks although the user's setting does not. */
+const OUTSIDE_CONTENT_LINE = "Michi asks because this conversation read content from outside it.";
+
 async function createJob(
   deps: ScheduledJobToolDeps, scope: JobScope, args: Record<string, unknown>, env: Env, approve: ScheduledJobApprover,
-): Promise<ScheduledJobToolResult> {
+): Promise<McpTextResult> {
   const workspace = scope.createWorkspace(args);
   const input = { ...pickFields(args), workspaceId: workspace.id };
   // Validate first so the user is never asked to approve something invalid,
   // and so the card shows the saved values (defaults applied).
   const fields = deps.scheduler.validateCreate(input);
-  const approval = await approve({
-    toolName: "create_scheduled_job",
-    action: "create",
-    jobName: fields.name,
-    title: `Create scheduled job “${fields.name}”?`,
-    lines: createLines(fields, env, workspace.name),
-    approveLabel: "Create",
-  });
-  if (!approval.approved) return declined(approval, "no job was created");
-  // The approval may have waited minutes: the workspace must still take jobs from this caller.
-  scope.createWorkspace(args);
+  // Missing setting reads as "ask": only an explicit off skips the card, and never in a turn that read outside content.
+  const setting = deps.createNeedsApproval?.() !== false;
+  const asks = setting || readOutsideContent(scope.nodeId);
+  if (asks) {
+    const approval = await approve({
+      toolName: "create_scheduled_job",
+      action: "create",
+      jobName: fields.name,
+      title: `Create scheduled job “${fields.name}”?`,
+      lines: [...createLines(fields, env, workspace.name), ...(setting ? [] : [OUTSIDE_CONTENT_LINE])],
+      approveLabel: "Create",
+    });
+    if (!approval.approved) return declined(approval, "no job was created");
+    // The approval may have waited minutes: the workspace must still take jobs from this caller.
+    scope.createWorkspace(args);
+  }
   const job = deps.scheduler.createJob(input);
-  const note = schedulerNote(deps.scheduler.status());
-  return jsonResult({ status: "created", job: scopedJobView(scope, job, env, false), ...(note ? { note } : {}) });
+  scope.jobCreated?.();
+  const note = schedulerNote(deps, scope, env);
+  return jsonResult({
+    status: "created",
+    job: scopedJobView(scope, job, env, false),
+    ...(note ? { note } : {}),
+    ...(asks ? {} : {
+      next: "Created without asking (the user's setting). Tell the user what you scheduled: its name, schedule and first run, "
+        + "permissions and thread mode. They can change or delete it on the Scheduled page.",
+    }),
+  });
 }
 
 async function updateJob(
   deps: ScheduledJobToolDeps, scope: JobScope, args: Record<string, unknown>, env: Env, approve: ScheduledJobApprover,
-): Promise<ScheduledJobToolResult> {
+): Promise<McpTextResult> {
   const jobId = requireJobId(args);
   const job = ownJob(deps, scope, jobId);
   const patch = pickFields(args);
-  if (Object.keys(patch).length === 0) throw new ToolError("INVALID_ARGUMENT", "pass at least one field to change");
+  if (Object.keys(patch).length === 0) throw new CodedToolError("INVALID_ARGUMENT", "pass at least one field to change");
   const changed = deps.scheduler.validateUpdate(job.id, patch);
   const keys = Object.keys(changed);
   if (keys.length === 0) return jsonResult({ status: "unchanged", job: scopedJobView(scope, job, env, false) });
@@ -562,7 +649,7 @@ async function updateJob(
 
 async function runJob(
   deps: ScheduledJobToolDeps, scope: JobScope, args: Record<string, unknown>, approve: ScheduledJobApprover,
-): Promise<ScheduledJobToolResult> {
+): Promise<McpTextResult> {
   const jobId = requireJobId(args);
   const job = ownJob(deps, scope, jobId);
   if (job.activeRunId) throw new ScheduledJobConflictError("This job is already running");
@@ -586,7 +673,7 @@ async function runJob(
 
 async function deleteJob(
   deps: ScheduledJobToolDeps, scope: JobScope, args: Record<string, unknown>, approve: ScheduledJobApprover,
-): Promise<ScheduledJobToolResult> {
+): Promise<McpTextResult> {
   const jobId = requireJobId(args);
   const job = ownJob(deps, scope, jobId);
   const approval = await approve({
@@ -594,7 +681,7 @@ async function deleteJob(
     action: "delete",
     jobName: job.name,
     title: `Delete scheduled job “${job.name}”?`,
-    lines: [...scope.workspaceLines(job), ...DELETE_LINES],
+    lines: [...scope.workspaceLines(job), ...deleteLines(job)],
     approveLabel: "Delete",
   });
   if (!approval.approved) return declined(approval, "the job was not deleted");
@@ -605,42 +692,10 @@ async function deleteJob(
 
 // ── Approvers ────────────────────────────────────────────────────────────────
 
-const DECLINE_LABEL = "Cancel";
-
-type AskUser = (questions: Array<{
-  question: string;
-  header?: string;
-  options: Array<{ label: string; description?: string }>;
-  multiSelect: boolean;
-}>) => Promise<Record<string, string> | null>;
-
 /**
  * Approval through the runtime's Michi-owned ask_user channel (Kiro, Claude,
- * Codex, Crew). Only the exact approve option counts; any other answer,
- * including a typed one, is a decline passed back as the user's note.
+ * Codex, Crew), under the "Schedule" header; see agents/hostApproval.ts.
  */
 export function askUserScheduledJobApprover(askUser: AskUser | undefined): ScheduledJobApprover {
-  return async (request) => {
-    if (!askUser) return { approved: false, reason: "unavailable" };
-    const question = `${request.title}\n${request.lines.join("\n")}`;
-    const answers = await askUser([{
-      question,
-      header: "Schedule",
-      options: [
-        { label: request.approveLabel, description: "Allow this one change. Agents never get standing permission for scheduled jobs." },
-        { label: DECLINE_LABEL, description: "Nothing changes; the agent is told you declined." },
-      ],
-      multiSelect: false,
-    }]);
-    if (!answers) return { approved: false, reason: "no_answer" };
-    const answer = (answers[question] ?? Object.values(answers)[0] ?? "").trim();
-    if (answer === request.approveLabel) return { approved: true };
-    if (!answer || answer === DECLINE_LABEL) return { approved: false, reason: "declined" };
-    return { approved: false, reason: "declined", note: answer.slice(0, 500) };
-  };
-}
-
-/** Title and detail for single-use permission prompts (Pi). */
-export function scheduledJobApprovalPrompt(request: ScheduledJobApprovalRequest): { title: string; detail: string } {
-  return { title: request.title, detail: request.lines.join("\n") };
+  return askUserApprover<ScheduledJobApprovalRequest>(askUser, "Schedule");
 }

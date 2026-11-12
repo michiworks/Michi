@@ -1,0 +1,102 @@
+/* ==========================================================================
+   95-monokai.css (owner: theme). Michi's Monokai palette, for monokai.html:
+   build.mjs writes it from the same partials with <html data-palette="monokai">,
+   color-scheme dark and theme-color = --ground below, and inlines this file
+   in its head after the styles.css link. It is not in styles.css, so
+   index.html never downloads it. Only token values change here (01-tokens.css
+   :root, the 30-kit.css .mk scope, the 55-map.css band), plus two rules a
+   dark page needs (the html colour, the tile ring).
+
+   Replicas (.mk) are the app in Monokai, exactly: tokens.ts MONOKAI with no
+   accent override (accent = cyan #66d9ef, mauve = purple #ae81ff), the dark
+   arm of cssVarsFor and index.css, every color-mix resolved to hex
+   (the Monokai theme). Two deliberate
+   exceptions where the app's own value fails text contrast, both reported as
+   app bugs: --mk-mention-fg and --map-bar-n-fg (see the theme rules,
+   "Monokai variant"). Page tokens are the landing's own dark page, built from
+   the same palette (same file, same section).
+   ========================================================================== */
+
+/* Page. The ground is bgDeep, so the product windows (canvas bg #272822,
+   panes #2d2e28, chrome #33342f) read as raised surfaces. Ink is fg / mid /
+   muted / 60 % fg on the ground / faint; rules and outlines are line, the
+   errand line is lineS, the figure edge is fg 25 % on the ground. The one
+   page accent is the app's accent; the primary button inverts (fg fill,
+   ground text). */
+html[data-palette="monokai"] {
+  --ground: #1d1e19; --surface: #272822;
+  --ink: #f8f8f2; --ink-2: #c0c0b8; --ink-3: #a2a298; --ink-60: #a0a19b; --ink-4: #868371;
+  --rule: #49483e; --line: #49483e; --line-s: #75715e; --edge: #54554f;
+  --violet: #66d9ef; --violet-ink: #83dff0; --violet-wash: #273837; --violet-f: #12292e;
+  --btn-hover: #dadad5; --keycap-fill: #2d2e28;   /* hover: color-mix(fg 88%, black), the app's primary-hover recipe */
+  --ink-on: #1d1e19; --ink-on-line: rgba(29, 30, 25, 0.35); --ink-30: rgba(248, 248, 242, 0.3);
+  --selection: rgba(102, 217, 239, 0.26);
+  color-scheme: dark;
+  color: var(--ink-2);   /* the UA's dark CanvasText would be #fff */
+}
+
+/* Replicas: the app's Monokai values (THEME-MONOKAI.md §1-2). */
+html[data-palette="monokai"] .mk {
+  --term-bg: #272822; --term-page-bg: #272822; --term-surface: #2d2e28; --term-alt: #383930; --term-alt2: #3e3f38;
+  --term-line: #49483e; --term-line-s: #75715e; --term-fg: #f8f8f2; --term-mid: #c0c0b8;
+  --term-muted: #a2a298; --term-faint: #868371;
+  --term-accent: #66d9ef; --term-accent-f: #12292e;   /* no override: the palette's own accent and fill */
+  --term-accent-dark: #83dff0;                         /* color-mix(accent 80%, fg): lighter on a dark palette */
+  --term-select: #e6db74; --term-select-f: #2a2810;
+  --term-digest: #a6e22e; --term-digest-f: #1a2210;
+  --term-mauve: #ae81ff; --term-mauve-f: #1e1428; --term-danger: #f92672;
+  /* Floating surfaces are a raised shade of the page; metadata rises to mid. */
+  --sel-bar-bg: #3d3e38; --sel-bar-fg: #f8f8f2; --sel-bar-mid: #c0c0b8; --sel-bar-muted: #c0c0b8;
+  --sel-bar-line: #565650; --sel-bar-hover: #4c4d47; --sel-bar-quote-bg: #33342e;
+  --sel-bar-action-bg: #c5edf1; --sel-bar-action-fg: #272822; --sel-bar-press: #53544e;
+  --term-float-shadow: 0 2px 8px rgba(0,0,0,.55), 0 16px 40px rgba(0,0,0,.4);
+  --sel-bar-shadow: var(--term-float-shadow);
+  --term-float-bg: #34352d;                            /* the branch card is lighter than the pane */
+  /* The composer sinks: page bg, lineS border, no shadow; focused it goes
+     darker with an inset well. */
+  --term-composer-bg: #272822; --term-composer-bg-focus: #1d1e19;
+  --term-composer-line: #75715e; --term-composer-line-focus: #75715e;
+  --term-composer-shadow: inset 0 1px 0 rgba(255,255,255,.05), inset 0 1px 3px rgba(0,0,0,.5);
+  --term-composer-shadow-muted: none;
+  /* Docked chrome (top row, rail, sidebar) is lighter than the panes; the
+     active row lightens (card rows, fg 11 %) under a muted caret; the open
+     rail is neutral at rest and glows accent while live (ThreadRow.tsx). */
+  --term-sidebar: #33342f; --mk-chrome: #33342f; --mk-chrome-line: rgba(73,72,62,.5);
+  --mk-split: #49483e; --mk-srow-sel: rgba(248,248,242,.11); --mk-srow-caret: var(--term-muted);
+  --mk-rail: #75715e; --mk-rail-glow: 0 0 6px 0 var(--term-accent);
+  /* The OS frame (not app): fg 9 % hairline and a deeper black drop, no glow. */
+  --mk-frame: rgba(248,248,242,.09); --mk-frame-shadow: 0 1px 2px rgba(0,0,0,.35), 0 24px 64px -32px rgba(0,0,0,.7);
+  --mk-fade: rgb(45 46 40 / 0);
+  --mk-user-bg: #2f3530;
+  --mk-user-shadow: 0 1px 0 rgba(102,217,239,.06), 0 1px 2px rgba(0,0,0,.03), 0 6px 18px -10px rgba(102,217,239,.22);
+  --mk-tool-run: rgba(102,217,239,.05);
+  --mk-sel: #3c5a5c; --mk-mark: #3e6164; --mk-anchor-wash: #403a48;
+  --mk-hot: #344340; --mk-hot-rest: #323c38;           /* accent 12 % / 8 %: one hue with the selection that follows */
+  --mk-flash: rgba(102,217,239,.14);
+  --mk-mention-bg: rgba(174,129,255,.12);
+  --mk-mention-fg: #bd99fc;                            /* app: mauve, 3.7:1 here; color-mix(mauve 80%, fg), the app's small-label recipe: 4.6:1 */
+  --mk-card-hover: rgba(248,248,242,.05); --mk-tray-line: rgba(73,72,62,.65);
+  /* Map: fg-tinted card shadows become faint light halos; the bar inverts. */
+  --map-card-line: rgba(248,248,242,.09);
+  --map-card-shadow: 0 2px 6px rgba(248,248,242,.05), 0 16px 40px -20px rgba(248,248,242,.22);
+  --map-merge-bg: #323131;
+  --map-source-shadow: 0 0 0 1px var(--term-mauve), 0 2px 12px -4px rgba(174,129,255,.4);
+  --map-breathe: 0 2px 6px rgba(102,217,239,.08), 0 16px 44px -14px rgba(102,217,239,.40), 0 0 0 1px rgba(102,217,239,.22);
+  --map-heat-track: #3b3b33; --map-heat-hot: #4a8993; --map-heat-mid: #4a848c;
+  --map-asked-bg: #33342c; --map-edge: rgba(248,248,242,.25);
+  --map-bar-shadow: 0 8px 24px rgba(248,248,242,.22);
+  --map-bar-n-fg: var(--term-surface);                 /* app: fg on select, 1.34:1; the bar's own text colour: 9.6:1 */
+  --map-btn-line: rgba(45,46,40,.42); --map-press: brightness(1.08);   /* dark buttons brighten, as every other press */
+}
+/* Map band: the app's Map frame, color-mix(bg 60%, surface) (pages/Map.tsx),
+   with its dots (line 55 % on bg) and the opaque stand-ins on that ground:
+   fg 25 % and 7.5 %, mauve .65 and .195. Slate keeps the brief's bg ground. */
+html[data-palette="monokai"] .map-band {
+  --map-ground: #292a24; --map-dot: #3a3a31; --map-e: #5d5e58; --map-e-dim: #393933;
+  --map-m: #7f63b2; --map-m-dim: #433b4f;
+}
+
+/* The black rabbit tile would lose its edge on the dark ground: a 1 px ring
+   on the page marks (the replica's top-row tile is the app's own, unringed). */
+html[data-palette="monokai"] .tile { border-radius: 21.9%; box-shadow: 0 0 0 1px var(--rule); }
+html[data-palette="monokai"] .get-tile { box-shadow: 0 0 0 1px var(--rule); }

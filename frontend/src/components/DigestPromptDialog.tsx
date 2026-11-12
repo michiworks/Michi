@@ -1,6 +1,7 @@
-import React, { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { ModalShell } from './ui/ModalShell';
 import { Button } from './ui/controls';
+import { isImeComposing } from '../lib/ime';
 
 interface DigestPromptDialogProps {
   open: boolean;
@@ -72,7 +73,7 @@ export default function DigestPromptDialog({ open, onConfirm, onCancel }: Digest
             value={value}
             onChange={(e) => setValue(e.target.value)}
             onKeyDown={(e) => {
-              if (e.nativeEvent.isComposing) return;
+              if (isImeComposing(e)) return;
               if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
                 e.preventDefault();
                 onConfirm(value.trim());

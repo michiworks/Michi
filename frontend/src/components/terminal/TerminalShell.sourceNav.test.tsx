@@ -61,7 +61,8 @@ vi.mock('../../state/chatStore', async () => {
     }),
     useStructuralSelector: (s: (n: Record<string, unknown>) => unknown) => s({}),
     useChatNodesSnapshot: () => ({}),
-    useNodesSelector: () => ({}),
+    useNodesSelector: (s: (n: Record<string, unknown>) => unknown) => s({}),
+    useChatNodeReader: () => () => undefined,
     useChatNode: () => null,
     chatLabel: () => '',
   };

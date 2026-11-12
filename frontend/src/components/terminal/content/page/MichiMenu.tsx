@@ -1,9 +1,11 @@
 import React, { useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { MenuItem, PopoverSurface } from '../../../ui/Popover';
+import { isImeComposing } from '../../../../lib/ime';
+import { useBackLayer } from '../../../../lib/backStack';
+import { placeBelowAnchor } from '../../../ui/useAnchoredPosition';
 import './michiPage.css';
 
 const GAP = 4;
-const PAD = 8;
 
 export interface MichiMenuItem {
   id: string;
@@ -62,17 +64,11 @@ export function MichiMenu({
   enabledRef.current = enabled;
   const onCloseRef = useRef(onClose);
   onCloseRef.current = onClose;
+  useBackLayer(true, { back: () => onCloseRef.current(true) });
 
   useLayoutEffect(() => {
-    const rect = anchor.getBoundingClientRect();
     const box = surfaceRef.current?.getBoundingClientRect();
-    const w = box?.width || width;
-    const h = box?.height || 0;
-    const wanted = align === 'end' ? rect.right - w : rect.left;
-    const left = Math.max(PAD, Math.min(window.innerWidth - w - PAD, wanted));
-    let top = rect.bottom + GAP;
-    if (top + h > window.innerHeight - PAD && rect.top - GAP - h >= PAD) top = rect.top - GAP - h;
-    setPosition({ left, top });
+    setPosition(placeBelowAnchor(anchor.getBoundingClientRect(), { width: box?.width || width, height: box?.height || 0 }, { align, gap: GAP }));
     listRef.current?.focus({ preventScroll: true });
   }, [align, anchor, width]);
 
@@ -83,7 +79,7 @@ export function MichiMenu({
       item.onSelect();
     };
     const onKey = (event: KeyboardEvent) => {
-      if (!plainKey(event) || event.isComposing) return;
+      if (!plainKey(event) || isImeComposing(event)) return;
       const list = enabledRef.current;
       const at = list.findIndex((i) => i.id === activeRef.current);
       if (event.key === 'Escape' || event.key === 'Tab') {

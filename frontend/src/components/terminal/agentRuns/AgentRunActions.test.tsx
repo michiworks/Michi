@@ -1,4 +1,3 @@
-import React from 'react';
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
@@ -133,6 +132,29 @@ describe('AgentRunActions', () => {
     await screen.findByText('Draft saved: Ephemeral Agent');
     expect(fetch.mock.calls[0][0]).toContain('/backend-connections/remote-save/proxy/agent-runs/same-run-id/save-as-agent');
     expect(JSON.stringify(run.value.effectiveDefinition)).toBe(before);
+  });
+
+  it.each([
+    ['Continue as Branch', () => jsonResponse({
+      version: 1, runId: 'same-run-id', workspaceId: 'ws', nodeId: 'child-node', treeId: 'tree-1',
+      parentNodeId: 'parent-node', mode: 'branch', imported: { task: true, result: true, transcript: false },
+    }, 201)],
+    ['Save as Custom Agent', () => jsonResponse({ version: 1, runId: 'same-run-id', definition: draftDefinition() }, 201)],
+  ])('%s retries a failed attempt under its key and starts a new operation after a success', async (name, ok) => {
+    const fetch = vi.fn().mockRejectedValueOnce(new TypeError('Failed to fetch'))
+      .mockResolvedValueOnce(ok()).mockResolvedValueOnce(ok());
+    vi.stubGlobal('fetch', fetch);
+    // The local backend: a remote's lost reply would also start its reachability check.
+    render(<AgentRunActions run={located('local')} />);
+    const button = () => screen.getByRole('button', { name });
+    for (let call = 1; call <= 3; call += 1) {
+      await waitFor(() => expect(button().hasAttribute('disabled')).toBe(false));
+      fireEvent.click(button());
+      await waitFor(() => expect(fetch).toHaveBeenCalledTimes(call));
+    }
+    const keys = fetch.mock.calls.map(([, init]) => ((init as RequestInit).headers as Record<string, string>)['x-idempotency-key']);
+    expect(keys[1]).toBe(keys[0]);
+    expect(keys[2]).not.toBe(keys[1]);
   });
 
   it('is actually mounted in the terminal Result area of AgentRunPane', () => {

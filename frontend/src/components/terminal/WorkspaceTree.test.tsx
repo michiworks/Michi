@@ -1,8 +1,8 @@
+import type React from 'react';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import React from 'react';
-import { render, screen, fireEvent, act, cleanup } from '@testing-library/react';
+import { render, screen, fireEvent, act, cleanup, waitFor, within } from '@testing-library/react';
 import WorkspaceTree from './WorkspaceTree';
-import { ChatProvider } from '../../state/chatStore';
+import { ChatProvider, useChatActions } from '../../state/chatStore';
 import { PrefsProvider } from '../../state/prefs';
 import type { ChatNodeState, Project } from '../../state/chatTypes';
 
@@ -14,7 +14,6 @@ vi.mock('../../services/api', async (importOriginal) => {
   return {
     ...actual,
     listAgentModes: vi.fn().mockResolvedValue({ availableModes: [], defaultModeId: null }),
-    fetchAllWorkspaces: vi.fn().mockResolvedValue([]),
     fetchAllWorkspacesMeta: vi.fn().mockResolvedValue([]),
     fetchTreeMessages: vi.fn().mockResolvedValue([]),
     fetchWorkspaces: vi.fn().mockResolvedValue([]),
@@ -47,29 +46,36 @@ function fixture() {
       title: 'P2 thread', messages: [], followUps: [], status: 'idle',
     },
   };
+  // Both used recently (A, then B, then P2), so neither folds into Earlier.
+  const now = Date.now();
   const projects: Project[] = [
     {
       id: 'p1', name: 'Active workspace', cwd: '~/x',
       chatIds: ['rootA', 'childA', 'rootB'],
       edges: [{ source: 'rootA', target: 'childA', kind: 'branch' }],
       trees: [
-        { id: 'tA', rootNodeId: 'rootA', createdAt: 0, lastActiveAt: 100 },
-        { id: 'tB', rootNodeId: 'rootB', createdAt: 0, lastActiveAt: 50 },
+        { id: 'tA', rootNodeId: 'rootA', createdAt: 0, lastActiveAt: now - 100 },
+        { id: 'tB', rootNodeId: 'rootB', createdAt: 0, lastActiveAt: now - 150 },
       ],
       activeTreeId: 'tA', createdAt: 0,
     },
     {
       id: 'p2', name: 'Other workspace', cwd: '~/y',
       chatIds: ['rootP2'], edges: [],
-      trees: [{ id: 'tP2', rootNodeId: 'rootP2', createdAt: 0, lastActiveAt: 0 }],
+      trees: [{ id: 'tP2', rootNodeId: 'rootP2', createdAt: 0, lastActiveAt: now - 200 }],
       activeTreeId: 'tP2', createdAt: 0,
     },
   ];
   return { nodes, projects };
 }
 
-function renderTreeWith(seed: { nodes: Record<string, ChatNodeState>; projects: Project[] }) {
-  // ChatProvider hydrates via fetchAllWorkspaces (mocked empty above); when
+const DAY = 24 * 60 * 60 * 1000;
+
+function renderTreeWith(
+  seed: { nodes: Record<string, ChatNodeState>; projects: Project[] },
+  props: React.ComponentProps<typeof WorkspaceTree> = {},
+) {
+  // ChatProvider hydrates via fetchAllWorkspacesMeta (mocked empty above); when
   // that returns nothing, persistence falls back to localStorage. Pre-seed
   // v2 state and mark the localStorage→SQLite migration as already done so
   // the fallback skips the migration path entirely.
@@ -86,7 +92,7 @@ function renderTreeWith(seed: { nodes: Record<string, ChatNodeState>; projects: 
   return render(
     <PrefsProvider>
       <ChatProvider>
-        <WorkspaceTree />
+        <WorkspaceTree {...props} />
       </ChatProvider>
     </PrefsProvider>,
   );
@@ -102,6 +108,16 @@ describe('WorkspaceTree', () => {
     renderTree();
     await screen.findByText('Child of A');
     expect(screen.queryByTestId('workspace-folder-icon')).toBeNull();
+  });
+
+  it('closes a branch menu on a second press of its ⋯', async () => {
+    renderTree();
+    const kebab = await screen.findByRole('button', { name: 'Actions for Child of A' });
+    fireEvent.click(kebab);
+    expect(screen.getByRole('menu')).toBeTruthy();
+    fireEvent.mouseDown(kebab);
+    fireEvent.click(kebab);
+    expect(screen.queryByRole('menu')).toBeNull();
   });
 
   it('hangs branches off their thread by indent alone, one step per level', async () => {
@@ -318,5 +334,168 @@ describe('WorkspaceTree', () => {
 
     expect(await screen.findByText('Merged 6')).toBeTruthy();
     expect(screen.queryByText('Thread 6')).toBeNull();
+  });
+
+  it('puts the way to Workspaces at the right end of the Projects header as "All N ›"', async () => {
+    const onOpenWorkspaces = vi.fn();
+    renderTreeWith(fixture(), { onOpenWorkspaces });
+    const header = await screen.findByTestId('section-label-projects');
+    expect(header.firstChild?.textContent).toBe('Projects');
+    const all = within(header).getByRole('button', { name: 'All 2 workspaces' });
+    expect(all.textContent).toBe('All 2 ›');
+    expect(all.hasAttribute('aria-current')).toBe(false);
+    fireEvent.click(all);
+    expect(onOpenWorkspaces).toHaveBeenCalledTimes(1);
+  });
+
+  it('folds workspaces left alone for 30 days into a closed Earlier group, in their own order, and remembers it open', async () => {
+    const { nodes, projects } = fixture();
+    const old = Date.now() - 31 * DAY;
+    const idle = (id: string, name: string): Project => {
+      nodes[`root-${id}`] = { nodeId: `root-${id}`, chatId: null, projectId: id, kind: 'chat', title: `${name} thread`, messages: [], followUps: [], status: 'idle' };
+      return {
+        id, name, cwd: `~/${id}`, chatIds: [`root-${id}`], edges: [],
+        trees: [{ id: `t-${id}`, rootNodeId: `root-${id}`, createdAt: old, lastActiveAt: old }],
+        activeTreeId: `t-${id}`, createdAt: old,
+      };
+    };
+    // p1 is old too, but it is the active workspace; p2 was used today.
+    projects.push(idle('p3', 'Dusty one'), idle('p4', 'Dusty two'));
+    localStorage.setItem('michi:v1:prefs', JSON.stringify({ workspaceOrder: ['p1', 'p4', 'p2', 'p3'] }));
+    renderTreeWith({ nodes, projects });
+
+    const toggle = await screen.findByRole('button', { name: 'Earlier, 2 workspaces' });
+    expect(toggle.textContent).toBe('›Earlier· 2');
+    expect(toggle.getAttribute('aria-expanded')).toBe('false');
+    expect(screen.queryByText('Dusty one')).toBeNull();
+    // Projects keeps the rest, active one included, in the manual order.
+    const names = () => [...document.querySelectorAll('[data-testid^="workspace-row-"]')].map((row) => row.getAttribute('data-testid'));
+    expect(names()).toEqual(['workspace-row-p1', 'workspace-row-p2']);
+    // Earlier sits at the end of Projects.
+    expect(screen.getByTestId('section-label-projects').nextElementSibling?.lastElementChild?.contains(toggle)).toBe(true);
+
+    fireEvent.click(toggle);
+    expect(toggle.getAttribute('aria-expanded')).toBe('true');
+    expect(within(screen.getByRole('group', { name: 'Earlier workspaces' })).getByText('Dusty two')).toBeTruthy();
+    expect(names()).toEqual(['workspace-row-p1', 'workspace-row-p2', 'workspace-row-p4', 'workspace-row-p3']);
+    await waitFor(() => {
+      expect(JSON.parse(localStorage.getItem('michi:v1:prefs') ?? '{}').sidebarExpanded?.groups?.earlier).toBe(true);
+    }, { timeout: 2000 });
+
+    // Enter on the focused group header folds it again.
+    toggle.focus();
+    fireEvent.keyDown(toggle, { key: 'Enter' });
+    expect(toggle.getAttribute('aria-expanded')).toBe('false');
+    expect(screen.queryByText('Dusty two')).toBeNull();
+  });
+
+  // Running work, open panes and pins: earlierWorkspaces.test.ts.
+  it('moves a workspace out of Earlier when it becomes the active one', async () => {
+    const { nodes, projects } = fixture();
+    projects[1].trees[0].lastActiveAt = Date.now() - 60 * DAY;
+    renderTreeWith({ nodes, projects });
+    fireEvent.click(await screen.findByRole('button', { name: 'Earlier, 1 workspace' }));
+    const group = screen.getByRole('group', { name: 'Earlier workspaces' });
+    fireEvent.click(within(group).getByText('Other workspace'));
+    expect(await screen.findByText('P2 thread')).toBeTruthy();
+    expect(screen.queryByRole('group', { name: 'Earlier workspaces' })).toBeNull();
+    expect(screen.queryByRole('button', { name: /^Earlier/ })).toBeNull();
+    // Now p1 is the one not active, but it was used today.
+    expect(screen.getByText('Active workspace')).toBeTruthy();
+  });
+
+  it('reaches workspace and thread rows with Tab and opens them with Enter or Space', async () => {
+    renderTreeWith(fixture());
+    const workspace = await screen.findByRole('button', { name: 'Other workspace' });
+    expect(workspace.tabIndex).toBe(0);
+    expect(workspace.getAttribute('aria-expanded')).toBe('false');
+    fireEvent.keyDown(workspace, { key: 'Enter' });
+    expect(await screen.findByText('P2 thread')).toBeTruthy();
+    expect(workspace.getAttribute('aria-expanded')).toBe('true');
+    // ← folds it.
+    fireEvent.keyDown(workspace, { key: 'ArrowLeft' });
+    expect(screen.queryByText('P2 thread')).toBeNull();
+
+    const thread = screen.getByRole('button', { name: 'Other thread' });
+    expect(thread.tabIndex).toBe(0);
+    expect(thread.hasAttribute('aria-current')).toBe(false);
+    fireEvent.keyDown(thread, { key: ' ' });
+    await waitFor(() => expect(thread.getAttribute('aria-current')).toBe('true'));
+    // The current row is marked, so its ⋯ stays showing (sidebar.css).
+    expect(screen.getByRole('button', { name: 'Active thread' }).hasAttribute('aria-current')).toBe(false);
+    // Keys inside the row belong to what has focus there.
+    const kebab = within(thread).getByRole('button', { name: 'Actions for Other thread' });
+    fireEvent.keyDown(kebab, { key: 'Enter' });
+    expect(screen.queryByRole('menu')).toBeNull();
+  });
+
+  it('leaves merge chats in Trash or the archive out of the Merged section', async () => {
+    const { nodes, projects } = fixture();
+    const merge = (nodeId: string, title: string, extra: Partial<ChatNodeState> = {}): ChatNodeState => ({
+      nodeId, chatId: null, projectId: 'p1', kind: 'chat', title, mergeSources: [], messages: [], followUps: [], status: 'idle', ...extra,
+    });
+    nodes.mLive = merge('mLive', 'Merged live');
+    nodes.mBinned = merge('mBinned', 'Merged binned', { deletedAt: 5, deletionGroupId: 'del-m' });
+    nodes.mOld = merge('mOld', 'Merged archived');
+    projects[0].chatIds.push('mLive', 'mBinned', 'mOld');
+    projects[0].trees.push(
+      { id: 'tmLive', rootNodeId: 'mLive', createdAt: 0, lastActiveAt: 30, kind: 'merge' },
+      { id: 'tmBinned', rootNodeId: 'mBinned', createdAt: 0, lastActiveAt: 20, kind: 'merge' },
+      { id: 'tmOld', rootNodeId: 'mOld', createdAt: 0, lastActiveAt: 10, kind: 'merge', archivedAt: 15 },
+    );
+
+    renderTreeWith({ nodes, projects });
+
+    expect(await screen.findByText('Merged live')).toBeTruthy();
+    expect(screen.queryByText('Merged binned')).toBeNull();
+    expect(screen.queryByText('Merged archived')).toBeNull();
+  });
+});
+
+describe('WorkspaceTree collapsed workspace rail', () => {
+  const actionsRef: { current: ReturnType<typeof useChatActions> | null } = { current: null };
+  function ActionsProbe() {
+    actionsRef.current = useChatActions();
+    return null;
+  }
+  function renderStyled(style: 'classic' | 'square-full') {
+    const { nodes, projects } = fixture();
+    localStorage.setItem('michi:v1:prefs', JSON.stringify({ sidebarRowStyle: style }));
+    localStorage.setItem('michi:v1:state', JSON.stringify({ version: 2, projects, nodes, activeProjectId: 'p1' }));
+    localStorage.setItem('michi:migrated', '1');
+    render(
+      <PrefsProvider>
+        <ChatProvider>
+          <ActionsProbe />
+          <WorkspaceTree />
+        </ChatProvider>
+      </PrefsProvider>,
+    );
+  }
+  const rail = (projectId: string) =>
+    screen.getByTestId(`workspace-row-${projectId}`).querySelector('[data-context-target]')!.lastElementChild as HTMLElement;
+
+  it.each([['classic', '2px'], ['square-full', '3px']] as const)('runs in the run colour while a chat inside streams (%s)', async (style, right) => {
+    renderStyled(style);
+    await screen.findByText('Child of A');
+    act(() => {
+      actionsRef.current!.dispatch({ type: 'user-send', nodeId: 'rootP2', userText: 'hi', assistantId: 'a1' });
+    });
+    await waitFor(() => expect(rail('p2').style.background).toBe('var(--term-run)'));
+    expect(rail('p2').style.color).toBe('var(--term-run)');
+    expect(rail('p2').style.right).toBe(right);
+  });
+
+  it.each([['classic', 'var(--term-accent)'], ['square-full', 'var(--term-line-s)']] as const)('marks an open pane inside with the threads\' idle rail (%s)', async (style, background) => {
+    renderStyled(style);
+    await screen.findByText('Child of A');
+    act(() => {
+      actionsRef.current!.openPane('childA');
+      actionsRef.current!.openPane('rootA');
+      actionsRef.current!.focusPane('rootA');
+    });
+    fireEvent.click(screen.getByText('Active workspace'));
+    await waitFor(() => expect(screen.queryByText('Child of A')).toBeNull());
+    expect(rail('p1').style.background).toBe(background);
   });
 });

@@ -1,0 +1,608 @@
+/* The in-chat multi-model card (mock variant A′: the plan, then progress in
+   place). Its shell, press tint and hover lift are the workflow card's
+   (.workflow-run-card in WorkflowRunCard.css); rows a phone shows at rest
+   look the same on touch. */
+.mm-card {
+  position: relative;
+  margin: 4px 0 10px;
+  color: var(--term-fg);
+}
+.mm-card.is-plan {
+  box-shadow: inset 2px 0 0 var(--term-select);
+}
+.mm-card button {
+  font: inherit;
+  color: inherit;
+}
+
+/* shared bits */
+.mm-card .dot {
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: currentColor;
+  flex-shrink: 0;
+}
+.mm-card .ellip {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.mm-card .glyph,
+.mm-sysline .glyph {
+  width: 18px;
+  height: 18px;
+  flex-shrink: 0;
+  display: inline-grid;
+  place-items: center;
+  border: 1px solid var(--term-line-s);
+  font: 600 10px/1 var(--font-mono);
+  color: var(--term-mid);
+  background: var(--term-surface);
+}
+.mm-card .qbtn {
+  border: 1px solid var(--term-line-s);
+  border-radius: var(--ui-radius);
+  background: var(--term-surface);
+  padding: 4px 10px;
+  font-size: var(--fs-sm);
+  cursor: pointer;
+  white-space: nowrap;
+}
+.mm-card .qbtn.pri {
+  border-color: transparent;
+  background: var(--term-fg);
+  color: var(--term-surface);
+  font-weight: 500;
+}
+.mm-card .qbtn.warn {
+  border-color: transparent;
+  background: var(--term-select);
+  color: var(--term-bg);
+  font-weight: 500;
+}
+.mm-card .qbtn:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+@media (hover: hover) {
+  .mm-card .qbtn:not(:disabled):hover { border-color: var(--term-muted); }
+  .mm-card .qbtn.pri:not(:disabled):hover,
+  .mm-card .qbtn.warn:not(:disabled):hover { border-color: transparent; opacity: 0.9; }
+}
+.mm-card .ibtn {
+  border: 0;
+  background: transparent;
+  width: 24px;
+  height: 24px;
+  display: inline-grid;
+  place-items: center;
+  color: var(--term-muted);
+  cursor: pointer;
+  font-size: 13px;
+  flex-shrink: 0;
+}
+@media (hover: hover) {
+  .mm-card .ibtn:hover { color: var(--term-fg); background: var(--term-alt); }
+}
+.mm-card .linkbtn {
+  border: 0;
+  background: transparent;
+  padding: 0;
+  color: var(--term-fg);
+  font-size: var(--fs-sm);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  cursor: pointer;
+}
+.mm-card .linkbtn:disabled {
+  color: var(--term-muted);
+  cursor: default;
+}
+.mm-card .c-ok { color: var(--term-digest); }
+.mm-card .c-run { color: var(--term-run); }
+.mm-card .c-wait { color: var(--term-select); }
+.mm-card .c-fail { color: var(--term-danger-text); }
+
+/* card shell */
+.mm-card .top {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+.mm-card .eb {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  color: var(--term-muted);
+  font-size: var(--fs-xs);
+  letter-spacing: var(--ls-caps);
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+.mm-card .eb .ic,
+.mm-sysline .ic {
+  display: inline-flex;
+  color: var(--term-mauve);
+  letter-spacing: 0;
+}
+.mm-card .title {
+  margin: 7px 0 0;
+  color: var(--term-fg);
+  font-size: var(--fs-xl);
+  font-weight: 600;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+}
+.mm-card .status {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 10px;
+  margin: 4px 0 0;
+  color: var(--term-mid);
+  font-size: var(--fs-md);
+  line-height: 1.5;
+}
+.mm-card .alert {
+  margin: 8px 0 0;
+  color: var(--term-danger-text);
+  font-size: var(--fs-xs);
+}
+
+/* steps */
+.mm-card .steps {
+  list-style: none;
+  margin: 12px 0 0;
+  padding: 0;
+}
+.mm-card .step {
+  position: relative;
+  padding: 0 0 12px 24px;
+}
+.mm-card .step::before {
+  content: "";
+  position: absolute;
+  left: 7px;
+  top: 18px;
+  bottom: 0;
+  width: 1px;
+  background: var(--term-line);
+}
+.mm-card .step:last-child { padding-bottom: 2px; }
+.mm-card .step:last-child::before { display: none; }
+.mm-card .step .n {
+  position: absolute;
+  left: 0;
+  top: 1px;
+  width: 15px;
+  height: 15px;
+  display: grid;
+  place-items: center;
+  border: 1px solid var(--term-line-s);
+  border-radius: 50%;
+  font: 500 9px/1 var(--font-mono);
+  color: var(--term-mid);
+  background: var(--workflow-card-bg);
+}
+.mm-card .step .n.ok {
+  background: var(--term-digest-f);
+  color: var(--term-digest);
+  border-color: color-mix(in srgb, var(--term-digest) 40%, transparent);
+}
+.mm-card .step .n.run {
+  border-color: var(--term-run);
+  color: var(--term-run);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--term-run) 18%, transparent);
+}
+.mm-card .step .n.fail {
+  color: var(--term-danger-text);
+}
+/* An intentional stop is not an error: a neutral mark. */
+.mm-card .step .n.stop {
+  color: var(--term-muted);
+}
+.mm-card .step.ok::before { background: color-mix(in srgb, var(--term-digest) 40%, var(--term-line)); }
+.mm-card .step.idle .sh { color: var(--term-mid); }
+.mm-card .step.idle .n { color: var(--term-faint); }
+.mm-card .sh {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  width: 100%;
+  border: 0;
+  padding: 0;
+  background: transparent;
+  text-align: left;
+  font-size: var(--fs-lg);
+  font-weight: 500;
+  color: var(--term-fg);
+}
+.mm-card .sh .sub {
+  font-size: var(--fs-sm);
+  font-weight: 400;
+  color: var(--term-muted);
+}
+.mm-card .sh.tog { cursor: pointer; }
+.mm-card .sh .chev {
+  margin-left: auto;
+  font-size: var(--fs-sm);
+  color: var(--term-muted);
+  font-weight: 400;
+}
+@media (hover: hover) {
+  .mm-card .sh.tog:hover .chev { color: var(--term-fg); }
+}
+.mm-card .sd {
+  margin: 3px 0 0;
+  font-size: var(--fs-md);
+  line-height: 1.5;
+  color: var(--term-mid);
+}
+.mm-card .sd .linkbtn { font-size: inherit; }
+.mm-card .sd .glyph {
+  width: 15px;
+  height: 15px;
+  font-size: 8.5px;
+  vertical-align: -3px;
+  margin-right: 4px;
+}
+.mm-card .gstack {
+  display: inline-flex;
+  gap: 3px;
+  margin-left: 2px;
+}
+.mm-card .gstack .glyph {
+  width: 15px;
+  height: 15px;
+  font-size: 8.5px;
+}
+
+/* plan rows */
+.mm-card .list2 { margin-top: 6px; }
+.mm-card .prow2 {
+  position: relative;
+  padding: 8px 0;
+  border-top: 1px solid var(--term-line);
+}
+.mm-card .prow2:first-child {
+  border-top: 0;
+  padding-top: 4px;
+}
+.mm-card .r1 {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+.mm-card .who {
+  flex: 1;
+  min-width: 0;
+  font-size: var(--fs-md);
+  color: var(--term-mid);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.mm-card .who b {
+  color: var(--term-fg);
+  font-weight: 500;
+}
+/* The dotted underline is a text decoration, not a border, so the touch
+   hit-area padding below cannot move it away from the word. */
+.mm-card .ctxq {
+  flex-shrink: 0;
+  border: 0;
+  text-decoration: underline dotted var(--term-line-s);
+  text-decoration-thickness: 1px;
+  text-underline-offset: 2px;
+  padding: 0;
+  background: transparent;
+  font-size: var(--fs-xs);
+  color: var(--term-muted);
+  cursor: help;
+  line-height: 1.3;
+}
+.mm-card .ctxx {
+  margin: 3px 0 0 26px;
+  font-size: var(--fs-xs);
+  color: var(--term-muted);
+}
+.mm-card .acts2 {
+  display: inline-flex;
+  flex-shrink: 0;
+}
+.mm-card .acts2 .ibtn { opacity: 0.6; }
+@media (hover: hover) {
+  .mm-card .acts2 .ibtn { opacity: 0.35; }
+  .mm-card .prow2:hover .acts2 .ibtn { opacity: 1; }
+}
+.mm-card .pp2 {
+  margin: 3px 0 0 26px;
+  font-size: var(--fs-sm);
+  line-height: 1.5;
+  color: var(--term-muted);
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  cursor: pointer;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.mm-card .pp2.open {
+  display: block;
+  color: var(--term-mid);
+}
+.mm-card .prow2.removed .who,
+.mm-card .prow2.removed .glyph {
+  opacity: 0.45;
+  text-decoration: line-through;
+}
+.mm-card .addwrap { position: relative; }
+.mm-card .addlink {
+  margin: 2px 0 0 26px;
+  border: 0;
+  background: transparent;
+  padding: 2px 0;
+  font-size: var(--fs-md);
+  color: var(--term-muted);
+  cursor: pointer;
+}
+.mm-card .addlink:disabled {
+  color: var(--term-faint);
+  cursor: default;
+}
+@media (hover: hover) {
+  .mm-card .addlink:not(:disabled):hover { color: var(--term-fg); }
+}
+.mm-card .meta2 {
+  margin-top: 10px;
+  padding-top: 9px;
+  border-top: 1px solid var(--term-line);
+  font-size: var(--fs-xs);
+  color: var(--term-muted);
+}
+.mm-card .btns {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 10px;
+}
+
+/* progress rows */
+.mm-card .trow.r2row {
+  position: relative;
+  display: block;
+  border-top: 1px solid var(--term-line);
+  padding: 8px 0;
+}
+.mm-card .trow.r2row:first-child {
+  border-top: 0;
+  padding-top: 4px;
+}
+.mm-card .trow.opens { cursor: pointer; }
+.mm-card .trow button.r1 {
+  width: 100%;
+  border: 0;
+  padding: 0;
+  background: transparent;
+  font: inherit;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+@media (hover: hover) {
+  .mm-card .trow.opens:hover { background: color-mix(in srgb, var(--term-alt) 45%, transparent); }
+}
+.mm-card .trow .st {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: var(--fs-xs);
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+.mm-card .trow .st.run { color: var(--term-run); }
+.mm-card .trow .st.ok { color: var(--term-digest); }
+.mm-card .trow .st.fail { color: var(--term-danger-text); }
+.mm-card .trow .st.wait { color: var(--term-select); }
+.mm-card .trow .st.skip,
+.mm-card .trow .st.stop,
+.mm-card .trow .st.idle { color: var(--term-muted); }
+.mm-card .trow .t {
+  font: var(--fs-xs) var(--font-mono);
+  color: var(--term-muted);
+  font-variant-numeric: tabular-nums;
+  flex-shrink: 0;
+  min-width: 42px;
+  text-align: right;
+}
+.mm-card .trow .line {
+  margin: 3px 0 0 26px;
+  font-size: var(--fs-sm);
+  line-height: 1.5;
+  color: var(--term-mid);
+  min-width: 0;
+}
+.mm-card .trow .line.now {
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+  color: var(--term-muted);
+}
+.mm-card .trow .line.now .k { color: var(--term-run); }
+.mm-card .trow .line.err { color: var(--term-danger-text); }
+.mm-card .trow .line.quiet { color: var(--term-muted); }
+.mm-card .trow .line.wait { color: var(--term-select); }
+/* How the step went, though it did not fail (an approval the runtime denied after waiting). */
+.mm-card .trow .line.notice {
+  margin-top: 1px;
+  font-size: var(--fs-xs);
+  color: var(--term-select);
+}
+.mm-card .fixl { cursor: auto; }
+.mm-card .fixl .linkbtn { font-size: var(--fs-sm); }
+.mm-card .apl {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 8px;
+  margin: 6px 0 2px 26px;
+  padding: 6px 8px;
+  border: 1px solid color-mix(in srgb, var(--term-select) 35%, var(--term-line));
+  background: color-mix(in srgb, var(--term-select-f) 55%, transparent);
+  cursor: auto;
+}
+.mm-card .apl .ak {
+  font-size: var(--fs-xs);
+  color: var(--term-select);
+  font-weight: 500;
+}
+.mm-card .apl code {
+  flex: 1;
+  min-width: 120px;
+  border: 0;
+  padding: 0;
+  background: transparent;
+  text-align: left;
+  font: var(--fs-xs) var(--font-mono);
+  color: var(--term-fg);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  cursor: pointer;
+}
+.mm-card .apl code.open {
+  flex-basis: 100%;
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 240px;
+  overflow: auto;
+}
+.mm-card .apl .bb {
+  display: flex;
+  gap: 4px;
+  margin-left: auto;
+}
+.mm-card .apl .note {
+  flex-basis: 100%;
+  font-size: var(--fs-xs);
+  color: var(--term-muted);
+}
+.mm-card .foot2 {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-top: 10px;
+  padding-top: 9px;
+  border-top: 1px solid var(--term-line);
+  font-size: var(--fs-xs);
+  color: var(--term-muted);
+}
+/* Stop all and Side by side, at the right. */
+.mm-card .foot2 .fa {
+  margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 18px;
+  flex-shrink: 0;
+}
+.mm-card .foot2 .linkbtn {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  text-decoration: none;
+  color: var(--term-mid);
+  font-size: var(--fs-sm);
+}
+@media (hover: hover) {
+  .mm-card .foot2 .linkbtn:hover { color: var(--term-fg); }
+}
+
+/* A cancelled proposal: one line. */
+.mm-card.is-compact {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding-block: 8px;
+}
+.mm-card.is-compact .title {
+  margin: 0;
+  flex: 1;
+  min-width: 0;
+  font-size: var(--fs-md);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.mm-card.is-compact .gone {
+  flex-shrink: 0;
+  font-size: var(--fs-sm);
+  color: var(--term-muted);
+}
+/* A run the receipt could not fetch (MultiModelReceipt). */
+.mm-card.is-compact .msg {
+  flex: 1;
+  min-width: 0;
+  font-size: var(--fs-sm);
+  color: var(--term-muted);
+}
+/* A finger needs 40px: ⇄, ×, the Fork/Fresh tag and the text links grow
+   their hit area through padding, and a matching negative margin keeps the
+   row's layout (the .t-msg-actions pattern in index.css). */
+@media (hover: none) and (pointer: coarse) {
+  .mm-card .acts2 .ibtn {
+    min-width: 40px;
+    min-height: 40px;
+    margin: -8px;
+  }
+  .mm-card .ctxq,
+  .mm-card .linkbtn,
+  .mm-card .addlink {
+    min-height: 40px;
+    padding: 12px 8px;
+    margin: -12px -8px;
+  }
+  .mm-card .addlink { margin: -10px -8px -12px 18px; }
+}
+
+/* "Started the plan · 3 branches · 11:42", above the progress card. */
+.mm-sysline {
+  margin: 2px 0 6px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font: var(--fs-sm) var(--font-mono);
+  color: var(--term-muted);
+}
+
+/* Messages a plan relayed (MessageBlock): a synthesis or addendum wake is a
+   one-line row in the caller, not a user bubble. */
+.mm-plan-result {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 6px;
+}
+.mm-plan-result__line {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--term-muted);
+  font-size: var(--fs-sm);
+}
+.mm-plan-result__line .ic {
+  display: inline-flex;
+  color: var(--term-mauve);
+}
+.mm-plan-caption-icon {
+  display: inline-flex;
+  margin-right: 4px;
+  color: var(--term-mauve);
+  vertical-align: -1px;
+}

@@ -1,6 +1,9 @@
-import React, { useEffect, useLayoutEffect, useRef, useState } from 'react';
+import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { PopoverSurface } from '../../../ui/Popover';
+import { useBackLayer } from '../../../../lib/backStack';
+import { placeBelowAnchor } from '../../../ui/useAnchoredPosition';
 import { ChatIcon, FileIcon } from '../../icons';
+import { isImeComposing } from '../../../../lib/ime';
 import './michiPage.css';
 
 const WIDTH = 340;
@@ -43,21 +46,16 @@ export function SourcesPopover({
   const [position, setPosition] = useState<{ left: number; top: number } | null>(null);
   const onCloseRef = useRef(onClose);
   onCloseRef.current = onClose;
+  useBackLayer(true, { back: () => { anchor.focus({ preventScroll: true }); onCloseRef.current(); } });
 
   useLayoutEffect(() => {
-    const rect = anchor.getBoundingClientRect();
     const box = surfaceRef.current?.getBoundingClientRect();
-    const width = box?.width || WIDTH;
-    const height = box?.height || 0;
-    const left = Math.max(PAD, Math.min(window.innerWidth - width - PAD, rect.right - width));
-    let top = rect.bottom + GAP;
-    if (top + height > window.innerHeight - PAD && rect.top - GAP - height >= PAD) top = rect.top - GAP - height;
-    setPosition({ left, top });
+    setPosition(placeBelowAnchor(anchor.getBoundingClientRect(), { width: box?.width || WIDTH, height: box?.height || 0 }, { align: 'end', gap: GAP, pad: PAD }));
   }, [anchor]);
 
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
-      if (event.key !== 'Escape') return;
+      if (event.key !== 'Escape' || isImeComposing(event)) return;
       event.preventDefault();
       event.stopPropagation();
       anchor.focus({ preventScroll: true });
@@ -86,6 +84,7 @@ export function SourcesPopover({
       ref={surfaceRef}
       role="dialog"
       aria-label={`Sources for ${label}`}
+      escapeLayer="over"
       width={WIDTH}
       maxWidth={`calc(100vw - ${PAD * 2}px)`}
       left={position?.left ?? 0}

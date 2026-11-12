@@ -43,6 +43,10 @@ test('an interrupted durable turn reports the restart instead of generic replay 
     });
 });
 
+test('a self-turn the hub still holds is handed to the background feed, not reported lost', () => {
+    assert.equal(chatReplayUnavailable('node', 'turn', true).code, 'turn_background_owned');
+});
+
 test('replay recovery never reads another node\'s turn or exposes its error', () => {
     assert.equal(chatReplayUnavailable('other-node', 'turn').code, 'turn_replay_unavailable');
     assert.equal(chatReplayUnavailable('node', 'other-turn').code, 'turn_replay_unavailable');

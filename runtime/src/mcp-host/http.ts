@@ -1,5 +1,5 @@
 import http, { type IncomingMessage, type ServerResponse } from 'node:http';
-import { isIPv4, type AddressInfo } from 'node:net';
+import type { AddressInfo } from 'node:net';
 import type { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import type { Tool } from '@modelcontextprotocol/sdk/types.js';
@@ -7,6 +7,7 @@ import { redactId, slotSnapshot, type GroupRecord, type SlotRecord } from './reg
 import { buildServer, groupTarget, slotTarget, type ServerContext, type ServerTarget } from './server';
 import { TOOL_CATALOG_UNAVAILABLE, ToolCatalogUnavailableError } from './tools';
 import type { McpHostHandler } from './types';
+import { isLoopbackAddress } from '../core/loopback';
 
 /**
  * HTTP surface of the MCP host. Every request passes these gates before any
@@ -27,15 +28,6 @@ const PROXY_HEADERS = ['forwarded', 'x-forwarded-for', 'x-forwarded-host', 'x-fo
 
 /** Default request body limit (McpHostOptions.maxBodyBytes). */
 export const MAX_BODY_BYTES = 4 * 1024 * 1024;
-
-/** 127.0.0.0/8, ::1 and IPv4-mapped 127.x (`::ffff:127.0.0.1`). */
-export function isLoopbackAddress(address: string | undefined): boolean {
-  if (!address) return false;
-  if (address === '::1') return true;
-  const lower = address.toLowerCase();
-  const v4 = lower.startsWith('::ffff:') ? lower.slice('::ffff:'.length) : lower;
-  return isIPv4(v4) && v4.startsWith('127.');
-}
 
 export interface HttpContext<B> extends ServerContext<B> {
   basePath: string;

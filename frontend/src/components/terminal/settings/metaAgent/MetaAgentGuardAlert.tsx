@@ -1,28 +1,34 @@
 import React, { useEffect, useId, useRef, useState } from 'react';
 import { TriangleAlert } from 'lucide-react';
 import { toast } from 'sonner';
-import type { MetaAgentGuardStatus, MetaAgentToolset } from 'michi-shared';
+import { joinAnd, type MetaAgentGuardStatus, type MetaAgentToolset } from 'michi-shared';
 import { Button } from '../../../ui/controls';
+import { useCompanionName } from '../../../../state/companion/companionName';
 import { formatMichiClock } from '../../content/michiFormat';
 import { metaAgentRuntimeLabel } from './runtimeCopy';
 import './metaAgentSettings.css';
 
+/** What each restricted toolset runs for (DESIGN-v2 §2.2: check-ins use the `chat` toolset). */
 const TOOLSET_LABELS: Record<MetaAgentToolset, string> = {
-  maintenance: 'Background maintenance',
-  chat: 'Chat window',
+  maintenance: 'Pages upkeep',
+  chat: 'Check-ins',
   memory: 'Automatic memory',
 };
 
-function joinWords(words: string[]): string {
-  return words.length < 2 ? words.join('') : `${words.slice(0, -1).join(', ')} and ${words[words.length - 1]}`;
-}
+/** What stops while each toolset's check fails (the `chat` toolset is the check-ins'). */
+const TOOLSET_STOPS: Record<MetaAgentToolset, string> = {
+  maintenance: 'pages won’t update',
+  chat: 'check-ins won’t run',
+  memory: 'automatic memory won’t suggest anything',
+};
 
-/** The red box shown while a Meta agent run is stopped by its restriction check. */
+/** The red box shown while one of the agent's own runs (Pages upkeep, check-ins, memory) is stopped by its restriction check. */
 export function MetaAgentGuardAlert({ failures, onRetry, onChangeRuntime }: {
   failures: readonly MetaAgentGuardStatus[];
   onRetry: () => Promise<void> | void;
   onChangeRuntime: () => void;
 }) {
+  const name = useCompanionName();
   const [open, setOpen] = useState(false);
   const [retrying, setRetrying] = useState(false);
   const mounted = useRef(true);
@@ -32,14 +38,15 @@ export function MetaAgentGuardAlert({ failures, onRetry, onChangeRuntime }: {
   }, []);
   const detailsId = useId();
   if (failures.length === 0) return null;
-  const runtimes = joinWords([...new Set(failures.map((failure) => metaAgentRuntimeLabel(failure.runtimeId)))]);
+  const runtimes = joinAnd([...new Set(failures.map((failure) => metaAgentRuntimeLabel(failure.runtimeId)))]);
   const tools = [...new Set(failures.flatMap((failure) => failure.unexpectedTools))];
+  const stops = joinAnd([...new Set(failures.map((failure) => TOOLSET_STOPS[failure.toolset] ?? 'it won’t run'))]);
   const retry = async () => {
     setRetrying(true);
     try {
       await onRetry();
     } catch (err) {
-      toast.error(err instanceof Error && err.message ? `Couldn’t retry: ${err.message}` : 'Couldn’t retry the Meta agent');
+      toast.error(err instanceof Error && err.message ? `Couldn’t retry: ${err.message}` : 'Couldn’t retry the tool check');
     } finally {
       if (mounted.current) setRetrying(false);
     }
@@ -51,14 +58,14 @@ export function MetaAgentGuardAlert({ failures, onRetry, onChangeRuntime }: {
       <div className="meta-set__alert-body">
         <b>
           {tools.length > 0
-            ? `Meta agent stopped: ${runtimes} started with extra tools`
-            : `Meta agent stopped: ${runtimes} did not pass its tool check`}
+            ? `${name} stopped: ${runtimes} started with extra tools`
+            : `${name} stopped: ${runtimes} did not pass its tool check`}
         </b>
         <p>
           {tools.length > 0 && <>Extra tools: {tools.map((tool, index) => (
             <React.Fragment key={tool}>{index > 0 && ', '}<code>{tool}</code></React.Fragment>
           ))}. </>}
-          The Meta agent may only read threads and edit pages, so it did not run and pages won’t update.
+          On its own, {name} may only read and edit inside Michi, so {failures.length === 1 ? 'this run' : 'these runs'} did not start and {stops}.
         </p>
       </div>
       <div className="meta-set__alert-actions">

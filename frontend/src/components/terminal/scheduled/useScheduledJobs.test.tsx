@@ -1,7 +1,7 @@
 import { act, renderHook, waitFor } from '@testing-library/react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { resetScheduledJobsStore, useScheduledJobs } from './useScheduledJobs';
-import { SCHEDULED_JOB_RUN_WINDOW_EVENT, SCHEDULED_JOBS_CHANGED_WINDOW_EVENT } from './scheduledNav';
+import { SCHEDULED_JOB_RUN_WINDOW_EVENT, SCHEDULED_JOBS_CHANGED_WINDOW_EVENT } from '../../../state/scheduledRunNotice';
 
 const state = vi.hoisted(() => ({ list: vi.fn() }));
 

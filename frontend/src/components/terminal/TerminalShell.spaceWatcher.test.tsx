@@ -1,9 +1,9 @@
 import React from 'react';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
-import { toast } from 'sonner';
 import type { ProgressCardDto } from 'michi-shared';
 import TerminalShell from './TerminalShell';
+import { presentAttention } from '../../services/attention/policy';
 import { PrefsProvider } from '../../state/prefs';
 import { resetSpaceConversationBadgesForTests } from '../../state/spaceConversations/watcher';
 
@@ -17,6 +17,10 @@ const cards = vi.hoisted(() => {
   };
 });
 
+vi.mock('../../services/attention/policy', async (importOriginal) => ({
+  ...await importOriginal<typeof import('../../services/attention/policy')>(),
+  presentAttention: vi.fn(),
+}));
 // The shell owns the watcher: it keeps working without the topbar.
 vi.mock('./Topbar', () => ({ default: () => null }));
 vi.mock('./pages/Home', () => ({ default: () => <div>Conversation home</div> }));
@@ -53,7 +57,8 @@ vi.mock('../../state/chatStore', async () => {
     }),
     useStructuralSelector: (s: (n: Record<string, unknown>) => unknown) => s({}),
     useChatNodesSnapshot: () => ({}),
-    useNodesSelector: () => ({}),
+    useNodesSelector: (s: (n: Record<string, unknown>) => unknown) => s({}),
+    useChatNodeReader: () => () => undefined,
     useChatNode: () => null,
     chatLabel: () => '',
   };
@@ -76,8 +81,8 @@ describe('TerminalShell: chats started from a Space, watched from every area', (
   it.each([
     ['scheduled', 'Scheduled page'],
     ['settings', 'Appearance pane'],
-  ])('shows the running dot, then the toast and the done dot, while %s is open', async (area, shown) => {
-    const success = vi.spyOn(toast, 'success').mockImplementation(() => 'toast');
+  ])('shows the running dot, then the notice and the done dot, while %s is open', async (area, shown) => {
+    vi.mocked(presentAttention).mockClear();
     render(<PrefsProvider><TerminalShell /></PrefsProvider>);
     fireEvent.click(rail(area));
     expect(await screen.findByText(shown)).toBeTruthy();
@@ -86,9 +91,10 @@ describe('TerminalShell: chats started from a Space, watched from every area', (
     await waitFor(() => expect(rail('scheduled').querySelector('.area-rail__dot[data-tone="run"]')).toBeTruthy());
 
     act(() => cards.set([card('done')]));
-    await waitFor(() => expect(success).toHaveBeenCalledWith('New chat “跑完事务回滚用例” finished', expect.objectContaining({ action: expect.objectContaining({ label: 'Open' }) })));
+    await waitFor(() => expect(presentAttention).toHaveBeenCalledWith(expect.objectContaining({
+      kind: 'finished', key: 'node:n-live', title: 'New chat “跑完事务回滚用例” finished', onOpen: expect.any(Function),
+    })));
     await waitFor(() => expect(rail('conversations').querySelector('.area-rail__dot[data-tone="done"]')).toBeTruthy());
     expect(rail('scheduled').querySelector('.area-rail__dot[data-tone="run"]')).toBeNull();
-    success.mockRestore();
   });
 });

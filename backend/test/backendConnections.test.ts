@@ -137,7 +137,9 @@ test('probe and streaming proxy authenticate to a Michi backend', async () => {
     next();
   });
   remote.get('/api/health', (_req, res) => res.json({ status: 'healthy', service: 'michi-backend', serverId: 'remote-1' }));
-  remote.get('/api/echo', (_req, res) => {
+  let echoVia: unknown;
+  remote.get('/api/echo', (req, res) => {
+    echoVia = req.headers['x-michi-via'];
     res.setHeader('Content-Type', 'text/event-stream');
     res.write('event: chunk\ndata: {"text":"hello"}\n\n');
     res.end();
@@ -163,15 +165,57 @@ test('probe and streaming proxy authenticate to a Michi backend', async () => {
     const gatewayAddress = gatewayServer.address();
     assert.ok(gatewayAddress && typeof gatewayAddress === 'object');
     try {
-      const response = await fetch(`http://127.0.0.1:${gatewayAddress.port}/api/backend-connections/${saved.id}/proxy/echo`);
+      // The proxy labels the hop for the remote's access log. A phone stays a
+      // phone there (the label only takes access away); any other value does not pass.
+      const proxied = (via?: string) => fetch(`http://127.0.0.1:${gatewayAddress.port}/api/backend-connections/${saved.id}/proxy/echo`,
+        via ? { headers: { 'x-michi-via': via } } : {});
+      const response = await proxied('phone');
       assert.equal(response.status, 200);
       assert.match(await response.text(), /event: chunk/);
+      assert.equal(echoVia, 'phone');
+      for (const via of [undefined, 'desktop', 'local']) {
+        await (await proxied(via)).text();
+        assert.equal(echoVia, 'desktop-proxy');
+      }
     } finally {
       await new Promise<void>((resolve, reject) => gatewayServer.close((err) => err ? reject(err) : resolve()));
     }
   } finally {
     await new Promise<void>((resolve, reject) => remoteServer.close((err) => err ? reject(err) : resolve()));
   }
+});
+
+test('the proxy forwards the request headers Michi\'s renderer sends', async (t) => {
+  let received: http.IncomingHttpHeaders = {};
+  const remote = http.createServer((req, res) => {
+    received = req.headers;
+    req.resume();
+    req.on('end', () => { res.setHeader('Content-Type', 'application/json'); res.end('{}'); });
+  });
+  await new Promise<void>((resolve) => remote.listen(0, '127.0.0.1', resolve));
+  t.after(() => new Promise<void>((resolve) => remote.close(() => resolve())));
+  const remoteAddress = remote.address();
+  assert.ok(remoteAddress && typeof remoteAddress === 'object');
+  const saved = saveBackendConnection({ name: 'Remote', apiUrl: `http://127.0.0.1:${remoteAddress.port}`, token: 'remote-secret-token' });
+  const gateway = express();
+  gateway.use(express.json());
+  gateway.use('/api', setupBackendConnectionRoutes());
+  const gatewayServer = http.createServer(gateway);
+  await new Promise<void>((resolve) => gatewayServer.listen(0, '127.0.0.1', resolve));
+  t.after(() => new Promise<void>((resolve) => gatewayServer.close(() => resolve())));
+  const gatewayAddress = gatewayServer.address();
+  assert.ok(gatewayAddress && typeof gatewayAddress === 'object');
+
+  const response = await fetch(`http://127.0.0.1:${gatewayAddress.port}/api/backend-connections/${saved.id}/proxy/agent-runs/run-1/continue-as-branch`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', 'x-michi-window-id': 'window-1', 'x-idempotency-key': 'operation-1' },
+    body: '{}',
+  });
+  assert.equal(response.status, 200);
+  await response.arrayBuffer();
+  assert.equal(received['x-michi-window-id'], 'window-1');
+  assert.equal(received['x-idempotency-key'], 'operation-1', 'a retry after a lost reply replays the remote\'s receipt');
+  assert.equal(received.authorization, 'Bearer remote-secret-token');
 });
 
 test('streaming proxy aborts upstream even before response headers arrive', async (t) => {

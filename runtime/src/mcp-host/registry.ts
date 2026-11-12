@@ -32,6 +32,8 @@ export interface SlotRecord<B> {
   /** Read on every request, so McpSlotHandle.rebind takes effect from the next one. */
   allowTools?: ReadonlySet<string>;
   readonly builtins: SlotBuiltins;
+  /** CreateSlotOptions.upFrontToolMeta. */
+  readonly upFrontToolMeta?: Readonly<Record<string, unknown>>;
   /** False for a slot without a URL of its own (CreateSlotOptions.routable). */
   readonly routable: boolean;
   disposed: boolean;

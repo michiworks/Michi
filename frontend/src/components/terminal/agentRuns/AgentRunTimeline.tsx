@@ -1,4 +1,3 @@
-import React from 'react';
 import { AgentRunEventType } from 'michi-shared';
 import type { AgentRunEventV1 } from 'michi-shared';
 

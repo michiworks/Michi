@@ -1,0 +1,22 @@
+/* A Claude phase's band on the Background work card (WorkflowWorkCard.tsx):
+   the code block header's recipe, a faint foreground tint, rather than
+   --term-alt, which marks hover and selection. */
+.workflow-phase-band {
+  background: color-mix(in srgb, var(--term-fg) 4%, transparent);
+}
+button.workflow-phase-band {
+  cursor: pointer;
+}
+button.workflow-phase-band:active {
+  background: color-mix(in srgb, var(--term-fg) 7%, transparent);
+}
+/* Touch screens keep :hover after a tap, so only pointers get the hover tint. */
+@media (hover: hover) {
+  button.workflow-phase-band:hover {
+    background: color-mix(in srgb, var(--term-fg) 7%, transparent);
+  }
+}
+button.workflow-phase-band:focus-visible {
+  outline: var(--focus-ring);
+  outline-offset: -2px;
+}

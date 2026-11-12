@@ -3,17 +3,22 @@ import { bindConversationBatch } from './conversationBatch';
 import { CHAT_STREAM_EVENTS, isSystemWorkspaceSettings } from 'michi-shared';
 import type { BackgroundSubscriber, StartedRequestedSelfTurn, StartRequestedSelfTurnArgs } from '../../agents/chatHub';
 import type { AgentReasoning, AgentRuntime, AgentSession } from '../../agents/types';
-import { getModelReasoningOptions } from '../../agents/modelReasoning';
 import { getRuntime } from '../../agents/registry';
-import { getAgentConfig, resolveModel, resolveProvider, resolveReasoning } from '../agentConfig';
+import { startUnderRestoreLock } from '../../agents/requestedTurnStart';
+import { getAgentConfig, resolveRuntimeProfile } from '../agentConfig';
 import { LOCAL_AGENT_OWNER_ID } from '../agentOwner';
 import { log } from '../logger';
 import { writeNodePermissionMode } from '../chatPermissions';
+import { chatNodeUnavailable } from '../chatTarget';
+import { acquireSessionRestoreLock } from '../nativeResume';
 import { getDb, runInTransaction } from '../db';
 import { getNode, getWorkspace, listMessages, markNodeMaintenanceJob, type WorkspaceRow } from '../dbRepository';
 import { ensureDurableGraphNode } from '../graphCommands';
 import { stripSentinelsStreamingSafe } from '../messageSerialization';
+import { resolveNewThreadProfile } from '../threadProfile';
+import { recordStructureChange } from '../structureEvents';
 import type { ScheduledJobRecord, ScheduledJobRunRecord } from './repository';
+import { carryOverPrompt, threadNeedsRotation } from './scheduledOnly';
 import type {
   ScheduledJobExecutor,
   ScheduledRunHandle,
@@ -31,13 +36,17 @@ export interface ScheduledChatHub {
 
 export interface ChatScheduledJobExecutorDeps {
   chatHub: ScheduledChatHub;
-  ensureSession(input: { ownerUserId: string; workspaceId: string; nodeId: string; maintenance?: boolean }): Promise<AgentSession | null>;
+  ensureSession(input: { ownerUserId: string; workspaceId: string; nodeId: string; maintenance?: boolean; maintenancePlanId?: string | null }): Promise<AgentSession | null>;
   /**
    * Release a fresh maintenance node's session once its run has ended (see
    * ChatManager.releaseMaintenanceSession); false while a turn still owns it.
    * Absent: sessions stay open, as for ordinary scheduled threads.
    */
   releaseMaintenanceSession?(input: { ownerUserId: string; workspaceId: string; nodeId: string }): Promise<boolean>;
+  /** Default nativeResume.acquireSessionRestoreLock. */
+  acquireRestoreLock?(nodeId: string): Promise<() => void>;
+  /** ThreadMessagingDeps.isLiveSession. */
+  isLiveSession?(session: AgentSession): boolean;
   /** Runtime lookup; defaults to the registered runtimes. */
   getRuntime?: (runtimeId: string) => AgentRuntime | undefined;
   clock?: () => number;
@@ -150,6 +159,10 @@ export class ChatScheduledJobExecutor implements ScheduledJobExecutor {
     if (isSystemWorkspaceSettings(workspace.settings)) {
       throw new Error('Scheduled jobs cannot run in a Michi system workspace');
     }
+    // An archived workspace is read-only (the scheduler skips its jobs first); maintenance has its own rules there.
+    if (workspace.archived_at != null && job.executionKind !== 'maintenance') {
+      throw new Error('The workspace for this job is archived');
+    }
     const now = this.clock();
     // A profile the scheduler resolved at run start is final; otherwise the job's null fields follow global.
     const resolved = hooks.runtimeProfile;
@@ -160,13 +173,22 @@ export class ChatScheduledJobExecutor implements ScheduledJobExecutor {
     let nodeId: string | null = null;
     let treeId: string | null = null;
     let created = false;
+    // A Scheduled-only job's threads show only on the Scheduled page.
+    const scheduledOnlyJobId = job.visibility === 'scheduled' ? job.id : null;
+    // Results of the ongoing thread a Scheduled-only job outgrew, for the new one.
+    let carryOver = '';
     if (job.sessionMode === 'persistent' && job.persistentNodeId) {
       const node = getNode(job.persistentNodeId);
-      const reusable = node
+      const sameShape = node
         && node.workspace_id === job.workspaceId
-        && node.kind === 'chat'
-        && !node.deleted_at
-        && (!(resolved?.runtimeId ?? job.runtimeId) || !node.runtime_id || node.runtime_id === runtimeId);
+        // Archived or in the Trash, the thread is closed and the job starts a new one (the workspace is checked above).
+        && chatNodeUnavailable(node) === null
+        && (!(resolved?.runtimeId ?? job.runtimeId) || !node.runtime_id || node.runtime_id === runtimeId)
+        // It shows where this job's threads show (moved to the workspace, it is the user's now).
+        && (node.scheduled_only_job_id ?? null) === scheduledOnlyJobId;
+      const outgrown = !!node && !!sameShape && !!scheduledOnlyJobId && threadNeedsRotation(node.id);
+      if (node && outgrown) carryOver = carryOverPrompt(job.id, node.id);
+      const reusable = sameShape && !outgrown;
       if (reusable) {
         nodeId = node.id;
         treeId = node.tree_id ?? null;
@@ -174,18 +196,18 @@ export class ChatScheduledJobExecutor implements ScheduledJobExecutor {
       }
     }
     if (!nodeId) {
-      // Resolve the profile the way ensure-session does for a new thread, so
-      // a default reasoning level the model cannot use is dropped instead of
-      // failing the session.
-      const providerId = !runtime.capabilities.providerModels ? null
-        : resolved ? resolved.providerId : job.providerId ?? resolveProvider(runtimeId) ?? null;
-      const requestedModel = resolved ? resolved.modelId : job.modelId ?? (resolveModel(runtimeId) || null);
-      const requestedReasoning = (resolved ? resolved.reasoning
-        : job.reasoning ?? resolveReasoning(runtimeId) ?? null) as AgentReasoning | null;
-      const effort = await getModelReasoningOptions(runtime, requestedModel, providerId, requestedReasoning);
+      // A profile the scheduler resolved is final; otherwise the job's fields
+      // are filled the way a new conversation's are (resolveRuntimeProfile).
+      // Then it opens the way ensure-session opens one, so a default
+      // reasoning level the model cannot use is dropped instead of failing.
+      const profile = resolved ?? resolveRuntimeProfile(runtimeId, runtime.capabilities.providerModels,
+        { providerId: job.providerId, modelId: job.modelId, reasoning: job.reasoning as AgentReasoning | null });
+      const { providerId, modelId, reasoning } = await resolveNewThreadProfile(runtime, {
+        providerId: profile.providerId,
+        modelId: profile.modelId,
+        reasoning: profile.reasoning as AgentReasoning | null,
+      });
       assertCurrent();
-      const modelId = effort.modelId ?? requestedModel;
-      const reasoning = effort.value ?? null;
       nodeId = `n-${randomUUID()}`;
       treeId = `t-${now}-${randomUUID().slice(0, 8)}`;
       ensureDurableGraphNode({
@@ -202,7 +224,7 @@ export class ChatScheduledJobExecutor implements ScheduledJobExecutor {
         node: { id: nodeId, treeId, parentNodeId: null, kind: 'chat', title: runTitle(job, now), createdAt: now },
         edges: [],
         ownerUserId: workspace.owner_user_id ?? null,
-      });
+      }, scheduledOnlyJobId ? { scheduledOnlyJobId } : {});
       created = true;
       // Seed the profile the session will be opened with; ensureParentSession
       // reads it from the node, exactly as for a thread the user created.
@@ -218,7 +240,7 @@ export class ChatScheduledJobExecutor implements ScheduledJobExecutor {
     let session: AgentSession | null;
     try {
       session = await this.deps.ensureSession({ ownerUserId: LOCAL_AGENT_OWNER_ID, workspaceId: job.workspaceId, nodeId,
-        ...(hooks.maintenanceContext ? { maintenance: true } : {}) });
+        ...(hooks.maintenanceContext ? { maintenance: true, maintenancePlanId: hooks.maintenanceContext.planId } : {}) });
       assertCurrent();
     } catch (error) {
       // Cancelled after the session opened: it would never be used.
@@ -247,18 +269,23 @@ export class ChatScheduledJobExecutor implements ScheduledJobExecutor {
     };
     hooks.signal?.addEventListener('abort', cancel, { once: true });
     let started: StartedRequestedSelfTurn;
+    const opened = session;
     try {
       assertCurrent();
-      started = await this.deps.chatHub.startRequestedSelfTurn({
-        chatId,
-        nodeId,
-        ownerUserId: LOCAL_AGENT_OWNER_ID,
-        turnId,
-        text: job.prompt + (batch?.prompt ?? ''),
-        displayText: job.prompt,
-        userMetadata: { scheduledJobId: job.id },
-        maintenanceContext: hooks.maintenanceContext,
-        session,
+      const release = await (this.deps.acquireRestoreLock ?? acquireSessionRestoreLock)(nodeId);
+      started = await startUnderRestoreLock(release, opened, this.deps.isLiveSession, () => {
+        assertCurrent();
+        return this.deps.chatHub.startRequestedSelfTurn({
+          chatId,
+          nodeId,
+          ownerUserId: LOCAL_AGENT_OWNER_ID,
+          turnId,
+          text: job.prompt + carryOver + (batch?.prompt ?? ''),
+          displayText: job.prompt,
+          userMetadata: { scheduledJobId: job.id },
+          maintenanceContext: hooks.maintenanceContext,
+          session: opened,
+        });
       });
     } catch (error) {
       hooks.signal?.removeEventListener('abort', cancel);
@@ -325,7 +352,8 @@ export class ChatScheduledJobExecutor implements ScheduledJobExecutor {
         `).get(nodeId, workspaceId, treeId) as { acp_session_id: string | null; message_count: number } | undefined;
         if (!row || row.acp_session_id || row.message_count > 0) return;
         // nodes.tree_id cascades, so this removes the root node too.
-        getDb().prepare('DELETE FROM trees WHERE id = ? AND workspace_id = ? AND root_node_id = ?').run(treeId, workspaceId, nodeId);
+        const removed = getDb().prepare('DELETE FROM trees WHERE id = ? AND workspace_id = ? AND root_node_id = ?').run(treeId, workspaceId, nodeId);
+        if (Number(removed.changes) > 0) recordStructureChange({ entity: 'tree', op: 'deleted', workspaceId, treeId });
       });
     } catch {
       // Leaving an empty thread behind is harmless; the run still reports the failure.

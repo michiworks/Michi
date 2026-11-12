@@ -7,14 +7,14 @@ import { COMPOSER_EDITOR } from '../fixtures/shell';
 //   2. The pane reads v1 content from disk.
 //   3. Push an `artifact_changed` frame down the persistent watch EventSource.
 //   4. The "● Changed on disk · refresh" badge appears (content is NOT auto-replaced).
-//      (getByText locators below must stay byte-identical to the ArtifactPane label.)
+//      (getByText locators below must stay byte-identical to the FilePane label.)
 //   5. Click the badge → the pane re-reads and swaps v1 → v2.
 //
 // EventSource needs a *pushable* stream: Playwright's route.fulfill sends a
 // complete body then closes, so we HOLD the /watch/stream connection open
 // (never fulfil on connect) and only fulfil it — with the change frame — once
 // the test decides to "push". That avoids the race where a change delivered
-// mid-initial-load gets cleared by the v1 `artifact-loaded`.
+// mid-initial-load gets cleared by the v1 load.
 
 test.describe('artifact-pane live refresh', () => {
   test('badge appears on disk change and click re-reads the file', async ({ page }) => {

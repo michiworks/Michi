@@ -1,4 +1,4 @@
-import { AgentRunStatus, type AgentRunDtoV1, type RecoveryEnvelopeV1, type StructuredRunErrorV1 } from 'michi-shared';
+import { AgentRunStatus, isAgentRunTerminal, type AgentRunDtoV1, type RecoveryEnvelopeV1, type StructuredRunErrorV1 } from 'michi-shared';
 
 export interface RetryPlan {
   action: 'retry' | 'fallback' | 'wait' | 'fail';
@@ -40,7 +40,7 @@ export function planAgentRunRecovery(input: {
 export function startupRecoveryAction(run: AgentRunDtoV1): 'claim' | 'resume_waiting' | 'audit_terminal' | 'ignore' {
   if (run.status === AgentRunStatus.Queued || run.status === AgentRunStatus.Recovering) return 'claim';
   if (run.status === AgentRunStatus.Waiting) return 'resume_waiting';
-  if ([AgentRunStatus.Completed, AgentRunStatus.Failed, AgentRunStatus.Cancelled].includes(run.status)) return 'audit_terminal';
+  if (isAgentRunTerminal(run.status)) return 'audit_terminal';
   if (run.status === AgentRunStatus.Preparing || run.status === AgentRunStatus.Running) return 'claim';
   return 'ignore';
 }

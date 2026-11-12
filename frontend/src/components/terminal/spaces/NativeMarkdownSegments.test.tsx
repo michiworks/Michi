@@ -1,9 +1,9 @@
-import React from 'react';
-import { describe, expect, it, vi } from 'vitest';
-import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { splitPageMarkdown, type PageDto } from 'michi-shared';
-import { NativePageDocument } from './NativePageDocument';
+import NativePageDocument from './NativePageDocument';
 import { NativeMarkdownSegments } from './NativeMarkdownSegments';
+import { parseSegmentId } from '../content/page/vendor-blocks/shared/markdown-segments';
 
 const a = { nodeId: 'a', turnId: 'ta', assistantId: 'ma' };
 const b = { nodeId: 'b', turnId: 'tb', assistantId: 'mb' };
@@ -30,6 +30,13 @@ describe('native Markdown item sources', () => {
     expect(within(second).queryByText('Alpha conversation')).toBeNull();
     fireEvent.click(within(second).getByRole('button', { name: 'Beta conversation' }));
     await waitFor(() => expect(onOpen).toHaveBeenLastCalledWith(b));
+  });
+
+  it('names cited passages with ids the Desk mirror parses back to the block and passage', () => {
+    const { container } = render(<NativeMarkdownSegments blockId="b:1/x" text={text} segmentSources={segmentSources} onOpenSource={vi.fn()} onError={vi.fn()} />);
+    expect([...container.querySelectorAll<HTMLElement>('.native-md-segment')].map(el => parseSegmentId(el.dataset.blockId ?? ''))).toEqual([
+      { blockId: 'b:1/x', index: 0 }, { blockId: 'b:1/x', index: 1 }, { blockId: 'b:1/x', index: 2 },
+    ]);
   });
 
   it('stale source anchors fall back to the full original Markdown and never reassociate old citations', () => {
@@ -99,5 +106,36 @@ describe('native Markdown item sources', () => {
     expect(screen.queryByRole('button', { name: /Sources for item/ })).toBeNull();
     expect(screen.getByRole('table')).toBeTruthy();
     expect(screen.getByRole('link', { name: 'Docs' }).getAttribute('title')).toBe('Full title');
+  });
+});
+
+describe('native Markdown headings in Contents', () => {
+  afterEach(() => { vi.useRealTimers(); });
+  const flashed = (container: HTMLElement) => [...container.querySelectorAll<HTMLElement>('[data-flash]')];
+  const contentsEntry = (name: string, index = 0) =>
+    within(screen.getByRole('navigation', { name: 'Contents' })).getAllByRole('button', { name })[index]!;
+
+  it('lands each entry of an uncited Markdown block on its own heading', () => {
+    vi.useFakeTimers();
+    const markdown = '## Goals\nShip it.\n\n## Risks\n- late\n\nSetext\n------\n\n## Timeline\nQ3\n\n## Risks\nagain';
+    const { container } = render(<NativePageDocument page={page([{ id: 'contents', rev: 1, type: 'toc' }, { id: 'intro', rev: 1, type: 'markdown', text: markdown }])}
+      onEdit={vi.fn()} onOpenPage={vi.fn()} renderDatabaseRef={() => null} />);
+    const land = (name: string, index = 0) => {
+      fireEvent.click(contentsEntry(name, index));
+      const lit = flashed(container);
+      expect(lit).toHaveLength(1);
+      act(() => { vi.advanceTimersByTime(1_000); });
+      return lit[0]!;
+    };
+    const goals = land('Goals');
+    const risks = land('Risks');
+    const timeline = land('Timeline');
+    const risksAgain = land('Risks', 1);
+    expect([goals, risks, timeline, risksAgain].map(el => [el.tagName, el.textContent, el.dataset.blockId])).toEqual([
+      ['H2', 'Goals', 'intro~0'], ['H2', 'Risks', 'intro~2'], ['H2', 'Timeline', 'intro~5'], ['H2', 'Risks', 'intro~7'],
+    ]);
+    expect(splitPageMarkdown(markdown).filter(segment => segment.kind === 'heading').map(segment => segment.index)).toEqual([0, 2, 5, 7]);
+    // The block stays one block for selection and dragging.
+    expect(container.querySelectorAll('.michi-doc-block[data-top]')).toHaveLength(2);
   });
 });

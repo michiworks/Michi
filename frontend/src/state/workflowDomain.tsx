@@ -1,19 +1,22 @@
 import React, { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 import {
+  isWorkflowRunActive,
   isWorkflowRunOpen,
+  isWorkflowRunTerminal,
   type BackgroundSubagentsEndedV1,
   type BackgroundSubagentsUpdateV1,
   type WorkflowAction,
   type WorkflowRunDtoV1,
+  type WorkflowRunStatus,
 } from 'michi-shared';
 import { backendConnectionIdForWorkspace } from '../config/backendConnections';
 import {
   actOnWorkflowRun,
   answerWorkflowApproval,
   getWorkflowRun,
-  listWorkflowRuns,
   subscribeWorkflowRuns,
 } from '../services/api/workflowRuns';
+import { createReconnectingFeed } from '../services/api/sseFeed';
 import { SseHttpError } from '../services/api/sseParser';
 import { agentResourceKey, type AgentResourceIdentity, type LocatedAgentResource } from './agentIdentity';
 
@@ -33,6 +36,9 @@ import { agentResourceKey, type AgentResourceIdentity, type LocatedAgentResource
  */
 
 export type LocatedWorkflowRun = LocatedAgentResource<WorkflowRunDtoV1>;
+
+/** What a run has in flight: a control, an approval answer, or a multi-model command (plan edit, Start, Cancel, a thread's). */
+export type WorkflowPendingKind = WorkflowAction | 'answer' | 'edit' | 'start' | 'cancel' | 'thread';
 
 /** One feed's live background subagents. */
 export interface LiveBackgroundSubagentFeed {
@@ -59,8 +65,8 @@ export interface StaleBackgroundSubagents {
 
 export interface WorkflowDomainState {
   runs: Record<string, LocatedWorkflowRun>;
-  /** Action or approval answer in flight per run key. */
-  pending: Record<string, WorkflowAction | 'answer' | undefined>;
+  /** Action, approval answer or multi-model command in flight per run key. */
+  pending: Record<string, WorkflowPendingKind | undefined>;
   /** Last action error per run key. */
   errors: Record<string, string | undefined>;
   /**
@@ -76,7 +82,7 @@ export const initialWorkflowDomainState: WorkflowDomainState = { runs: {}, pendi
 
 export type WorkflowDomainAction =
   | { type: 'upsert'; resources: LocatedWorkflowRun[] }
-  | { type: 'pending'; runKey: string; action: WorkflowAction | 'answer' | undefined }
+  | { type: 'pending'; runKey: string; action: WorkflowPendingKind | undefined }
   | { type: 'error'; runKey: string; message: string | undefined }
   | { type: 'backgroundSubagents'; feedKey: string; update: BackgroundSubagentsUpdateV1 }
   /** The feed disconnected at `at` and reconnects: its sets stay, stale (LiveBackgroundSubagentFeed.staleSince). */
@@ -195,7 +201,6 @@ export function workflowDomainReducer(state: WorkflowDomainState, action: Workfl
 }
 
 export interface WorkflowDomainApi {
-  list: typeof listWorkflowRuns;
   get: typeof getWorkflowRun;
   act: typeof actOnWorkflowRun;
   answer: typeof answerWorkflowApproval;
@@ -203,7 +208,7 @@ export interface WorkflowDomainApi {
 }
 
 const defaultApi: WorkflowDomainApi = {
-  list: listWorkflowRuns, get: getWorkflowRun, act: actOnWorkflowRun, answer: answerWorkflowApproval, subscribe: subscribeWorkflowRuns,
+  get: getWorkflowRun, act: actOnWorkflowRun, answer: answerWorkflowApproval, subscribe: subscribeWorkflowRuns,
 };
 
 export interface WorkflowDomainStore {
@@ -218,18 +223,35 @@ export interface WorkflowDomainContextValue {
   load(identity: AgentResourceIdentity): Promise<void>;
   act(identity: AgentResourceIdentity, action: WorkflowAction): Promise<void>;
   answer(identity: AgentResourceIdentity, approvalId: string, optionId: string): Promise<void>;
+  /**
+   * Run any command that answers with the updated run (multi-model plan
+   * edits, Start, thread Stop/Retry): `kind` is pending meanwhile, the run is
+   * stored when it answers, and a failure becomes the run's error.
+   */
+  perform(identity: AgentResourceIdentity, kind: WorkflowPendingKind, call: () => Promise<WorkflowRunDtoV1>): Promise<void>;
 }
 
 const WorkflowDomainContext = createContext<WorkflowDomainContextValue | null>(null);
 
 const RETRY_MIN_MS = 1_000;
 const RETRY_MAX_MS = 30_000;
+/** An open feed this old starts its retry delay over. */
+const RETRY_HEALTHY_MS = 4_000;
 /**
  * The workspace is not ours: retrying cannot help. A 404 is retried with
  * backoff, because a workspace created in this window answers 404 until its
  * first structural flush reaches the backend; a 401 recovers after sign-in.
  */
 const FATAL_STATUSES = new Set([403]);
+
+/** Workspaces with a run still open (running or paused). */
+function openRunWorkspaces(runs: WorkflowDomainState['runs']): Set<string> {
+  const workspaceIds = new Set<string>();
+  for (const resource of Object.values(runs)) {
+    if (isWorkflowRunOpen(resource.value)) workspaceIds.add(resource.value.workspaceId);
+  }
+  return workspaceIds;
+}
 
 /** A workspace feed's `background_subagents_ended`, with the workspace it came from. */
 export interface EndedBackgroundSubagentsOfWorkspace extends BackgroundSubagentsEndedV1 {
@@ -283,13 +305,22 @@ export function WorkflowDomainProvider({ children, api = defaultApi, now = Date.
       existing.refs += 1;
     } else {
       let stopped = false;
-      let unsubscribe: (() => void) | undefined;
-      let timer: ReturnType<typeof setTimeout> | undefined;
-      let delay = RETRY_MIN_MS;
-      const connect = () => {
-        if (stopped) return;
-        unsubscribe = api.subscribe(workspaceId, {
-          onOpen: () => { delay = RETRY_MIN_MS; },
+      const feed = createReconnectingFeed({
+        baseMs: RETRY_MIN_MS,
+        maxMs: RETRY_MAX_MS,
+        healthyMs: RETRY_HEALTHY_MS,
+        connectionId: backendConnectionId,
+        isFatal: (error) => error instanceof SseHttpError && FATAL_STATUSES.has(error.status),
+        // Refused, and no reconnect follows: nothing would ever refresh the
+        // last word, so it says nothing any more.
+        onFatal: () => dispatch({ type: 'backgroundSubagentsUnknown', feedKey: key }),
+        // Until the reconnect's snapshot, the last word still stands for
+        // agents that started before now; the rest are unknown. The snapshot
+        // brings every run back to its latest revision.
+        onRetry: () => dispatch({ type: 'backgroundSubagentsStale', feedKey: key, at: now() }),
+        open: ({ onOpen, onDisconnect }) => api.subscribe(workspaceId, {
+          onOpen,
+          onDisconnect,
           onRun: (run) => dispatch({ type: 'upsert', resources: [{ backendConnectionId, value: run }] }),
           onBackgroundSubagents: (update) => {
             if (!stopped) dispatch({ type: 'backgroundSubagents', feedKey: key, update });
@@ -302,28 +333,12 @@ export function WorkflowDomainProvider({ children, api = defaultApi, now = Date.
               console.warn('[workflowDomain] applying ended background subagents failed', error);
             }
           },
-          onDisconnect: (error) => {
-            if (stopped) return;
-            if (error instanceof SseHttpError && FATAL_STATUSES.has(error.status)) {
-              // Refused, and no reconnect follows: nothing would ever
-              // refresh the last word, so it says nothing any more.
-              dispatch({ type: 'backgroundSubagentsUnknown', feedKey: key });
-              return;
-            }
-            // Until the reconnect's snapshot, the last word still stands for
-            // agents that started before now; the rest are unknown.
-            dispatch({ type: 'backgroundSubagentsStale', feedKey: key, at: now() });
-            // A restarted or briefly unreachable backend: the snapshot on
-            // reconnect brings every run back to its latest revision.
-            timer = setTimeout(connect, delay);
-            delay = Math.min(delay * 2, RETRY_MAX_MS);
-          },
-        });
-      };
-      connect();
+        }),
+      });
+      feed.start();
       subscriptions.current.set(key, {
         refs: 1,
-        stop: () => { stopped = true; if (timer) clearTimeout(timer); unsubscribe?.(); },
+        stop: () => { stopped = true; feed.stop(); },
       });
     }
     let released = false;
@@ -342,12 +357,53 @@ export function WorkflowDomainProvider({ children, api = defaultApi, now = Date.
     };
   }, [api, dispatch, now]);
 
+  // A workspace's feed stays live while one of its runs is open, also once
+  // nothing that shows the workspace subscribes (another one is active): a
+  // run the user left still ends where the sidebar lists it as running.
+  // Reconciled after the dispatch that changed the runs, never inside it.
+  const subscribeWorkspaceRef = useRef(subscribeWorkspace);
+  useEffect(() => { subscribeWorkspaceRef.current = subscribeWorkspace; }, [subscribeWorkspace]);
+  useEffect(() => {
+    const held = new Map<string, () => void>();
+    let disposed = false;
+    let scheduled = false;
+    let seenRuns: WorkflowDomainState['runs'] | null = null;
+    const reconcile = () => {
+      scheduled = false;
+      const runs = stateRef.current.runs;
+      if (disposed || runs === seenRuns) return;
+      seenRuns = runs;
+      const open = openRunWorkspaces(runs);
+      for (const [workspaceId, release] of held) {
+        if (open.has(workspaceId)) continue;
+        held.delete(workspaceId);
+        release();
+      }
+      for (const workspaceId of open) {
+        if (!held.has(workspaceId)) held.set(workspaceId, subscribeWorkspaceRef.current(workspaceId));
+      }
+    };
+    const schedule = () => {
+      if (scheduled || disposed) return;
+      scheduled = true;
+      queueMicrotask(reconcile);
+    };
+    const unsubscribe = store.subscribe(schedule);
+    schedule();
+    return () => {
+      disposed = true;
+      unsubscribe();
+      for (const release of held.values()) release();
+      held.clear();
+    };
+  }, [store]);
+
   const load = useCallback(async (identity: AgentResourceIdentity) => {
     const run = await api.get(identity.backendConnectionId, identity.id);
     dispatch({ type: 'upsert', resources: [{ backendConnectionId: identity.backendConnectionId, value: run }] });
   }, [api, dispatch]);
 
-  const run = useCallback(async (identity: AgentResourceIdentity, kind: WorkflowAction | 'answer', call: () => Promise<WorkflowRunDtoV1>) => {
+  const run = useCallback(async (identity: AgentResourceIdentity, kind: WorkflowPendingKind, call: () => Promise<WorkflowRunDtoV1>) => {
     const runKey = workflowRunKey(identity);
     dispatch({ type: 'pending', runKey, action: kind });
     dispatch({ type: 'error', runKey, message: undefined });
@@ -367,8 +423,8 @@ export function WorkflowDomainProvider({ children, api = defaultApi, now = Date.
     run(identity, 'answer', () => api.answer(identity.backendConnectionId, identity.id, approvalId, optionId)), [api, run]);
 
   const value = useMemo<WorkflowDomainContextValue>(
-    () => ({ store, subscribeWorkspace, load, act, answer }),
-    [store, subscribeWorkspace, load, act, answer],
+    () => ({ store, subscribeWorkspace, load, act, answer, perform: run }),
+    [store, subscribeWorkspace, load, act, answer, run],
   );
   return <WorkflowDomainContext.Provider value={value}>{children}</WorkflowDomainContext.Provider>;
 }
@@ -391,7 +447,8 @@ const NO_PLACEMENTS: WorkflowPlacement[] = [];
 /**
  * Runs one chat node launched, oldest first. Identity-stable until a run is
  * added or relinked, so progress frames do not re-render the message list;
- * each card reads its own live run with `useWorkflowRun`.
+ * each card reads its own live run with `useWorkflowRun`. Multi-model runs
+ * are left out: their tool call's receipt places their card.
  */
 export function useWorkflowPlacementsForNode(nodeId: string): WorkflowPlacement[] {
   const store = useOptionalWorkflowDomain()?.store ?? EMPTY_STORE;
@@ -401,7 +458,7 @@ export function useWorkflowPlacementsForNode(nodeId: string): WorkflowPlacement[
     const cached = cache.current;
     if (cached.runs === runs && cached.nodeId === nodeId) return cached.value;
     const next = Object.values(runs)
-      .filter((resource) => resource.value.nodeId === nodeId)
+      .filter((resource) => resource.value.nodeId === nodeId && resource.value.runtime !== 'michi')
       .sort((a, b) => a.value.startedAt - b.value.startedAt)
       .map((resource): WorkflowPlacement => ({
         identity: { backendConnectionId: resource.backendConnectionId, id: resource.value.id },
@@ -422,12 +479,41 @@ export function useWorkflowPlacementsForNode(nodeId: string): WorkflowPlacement[
   return useSyncExternalStore(store.subscribe, select, select);
 }
 
+const NO_FINISHED: ReadonlyMap<string, WorkflowRunStatus> = new Map();
+
+/**
+ * The finished runs among `runKeys` (workflowRunKey) and how each ended, in
+ * `runKeys` order. A new map only when one finishes or resumes, so progress
+ * frames do not re-render the caller (a message's run list).
+ */
+export function useFinishedWorkflowRuns(runKeys: readonly string[]): ReadonlyMap<string, WorkflowRunStatus> {
+  const store = useOptionalWorkflowDomain()?.store ?? EMPTY_STORE;
+  const cache = useRef<{ runs: WorkflowDomainState['runs'] | null; runKeys: readonly string[]; value: ReadonlyMap<string, WorkflowRunStatus> }>({ runs: null, runKeys: [], value: NO_FINISHED });
+  const select = useCallback(() => {
+    const runs = store.getState().runs;
+    const cached = cache.current;
+    if (cached.runs === runs && cached.runKeys === runKeys) return cached.value;
+    const next = new Map<string, WorkflowRunStatus>();
+    for (const key of runKeys) {
+      const status = runs[key]?.value.status;
+      if (status && isWorkflowRunTerminal(status)) next.set(key, status);
+    }
+    const prev = [...cached.value];
+    const same = next.size === prev.length && [...next].every(([key, status], index) => prev[index][0] === key && prev[index][1] === status);
+    const value = same ? cached.value : next.size === 0 ? NO_FINISHED : next;
+    cache.current = { runs, runKeys, value };
+    return value;
+  }, [store, runKeys]);
+  return useSyncExternalStore(store.subscribe, select, select);
+}
+
 const NO_COUNTS: readonly number[] = [];
 
 /**
- * Running or paused runs per chat node, aligned with `nodeIds`. Identity
- * holds until a count changes, so progress frames do not re-render callers
- * (the pane-title badges).
+ * Running or paused runs per chat node, aligned with `nodeIds`; a proposed
+ * multi-model plan waiting for Start does not count. Identity holds until a
+ * count changes, so progress frames do not re-render callers (the
+ * pane-title badges).
  */
 export function useActiveWorkflowCounts(nodeIds: readonly string[]): readonly number[] {
   const store = useOptionalWorkflowDomain()?.store ?? EMPTY_STORE;
@@ -439,7 +525,7 @@ export function useActiveWorkflowCounts(nodeIds: readonly string[]): readonly nu
     const counts = new Map<string, number>();
     for (const resource of Object.values(runs)) {
       const nodeId = resource.value.nodeId;
-      if (nodeId && isWorkflowRunOpen(resource.value)) counts.set(nodeId, (counts.get(nodeId) ?? 0) + 1);
+      if (nodeId && isWorkflowRunActive(resource.value)) counts.set(nodeId, (counts.get(nodeId) ?? 0) + 1);
     }
     const next = nodeIds.map((nodeId) => counts.get(nodeId) ?? 0);
     const same = next.length === cached.value.length && next.every((count, index) => count === cached.value[index]);
@@ -448,6 +534,46 @@ export function useActiveWorkflowCounts(nodeIds: readonly string[]): readonly nu
     return value;
   }, [store, nodeIds]);
   return useSyncExternalStore(store.subscribe, select, select);
+}
+
+const NO_NODE_IDS: ReadonlySet<string> = Object.freeze(new Set<string>());
+
+/** Chat nodes with an active run that `matches`; a new set only when membership changes. */
+function useActiveWorkflowNodeIds(matches: (run: WorkflowRunDtoV1) => boolean): ReadonlySet<string> {
+  const store = useOptionalWorkflowDomain()?.store ?? EMPTY_STORE;
+  const cache = useRef<{ runs: WorkflowDomainState['runs'] | null; value: ReadonlySet<string> }>({ runs: null, value: NO_NODE_IDS });
+  const select = useCallback(() => {
+    const runs = store.getState().runs;
+    const cached = cache.current;
+    if (cached.runs === runs) return cached.value;
+    const next = new Set<string>();
+    for (const resource of Object.values(runs)) {
+      if (resource.value.nodeId && isWorkflowRunActive(resource.value) && matches(resource.value)) next.add(resource.value.nodeId);
+    }
+    const same = next.size === cached.value.size && [...next].every((id) => cached.value.has(id));
+    const value = same ? cached.value : next.size === 0 ? NO_NODE_IDS : next;
+    cache.current = { runs, value };
+    return value;
+  }, [store, matches]);
+  return useSyncExternalStore(store.subscribe, select, select);
+}
+
+const anyRun = () => true;
+const waitsOnApproval = (run: WorkflowRunDtoV1) => (run.approvals?.length ?? 0) > 0;
+
+/**
+ * Chat nodes with a run open (running or paused, not a proposed plan
+ * waiting for Start): conversations whose work goes on after their turn
+ * ended, which the sidebar lists as running. A new set only when one starts
+ * or ends, so progress frames do not re-render callers.
+ */
+export function useOpenWorkflowNodeIds(): ReadonlySet<string> {
+  return useActiveWorkflowNodeIds(anyRun);
+}
+
+/** Chat nodes with an active run waiting on a tool approval. Identity-stable like useOpenWorkflowNodeIds. */
+export function useWaitingWorkflowNodeIds(): ReadonlySet<string> {
+  return useActiveWorkflowNodeIds(waitsOnApproval);
 }
 
 const NO_RUNS: LocatedWorkflowRun[] = [];
@@ -494,20 +620,30 @@ export function useWorkflowRunDetail(runIdentity: AgentResourceIdentity): Return
     void load(identity).catch(() => { if (active) setMissing(true); });
     return () => { active = false; };
   }, [load, identity]);
-  // A run the bulk snapshot trimmed is fetched whole, once per trimmed
-  // revision (the full copy then replaces it in the store).
-  const partialRevision = live.resource?.value.partial ? live.resource.value.revision : null;
+  useRefetchPartialWorkflowRun(identity, live.resource);
+  return { ...live, missing };
+}
+
+/**
+ * A run the bulk snapshot trimmed is fetched whole, once per trimmed
+ * revision (the full copy then replaces it in the store). For views that
+ * need the run's detail without fetching it on mount (the in-chat
+ * multi-model card); useWorkflowRunDetail does both. `identity` must be
+ * stable across renders (memoize it).
+ */
+export function useRefetchPartialWorkflowRun(identity: AgentResourceIdentity, resource: LocatedWorkflowRun | undefined): void {
+  const load = useOptionalWorkflowDomain()?.load;
+  const partialRevision = resource?.value.partial ? resource.value.revision : null;
   const fetchedPartial = useRef<number | null>(null);
   useEffect(() => {
     if (!load || partialRevision === null || fetchedPartial.current === partialRevision) return;
     fetchedPartial.current = partialRevision;
     void load(identity).catch(() => {});
   }, [load, identity, partialRevision]);
-  return { ...live, missing };
 }
 
 /** One run plus its in-flight action and last error. */
-export function useWorkflowRun(runKey: string): { resource?: LocatedWorkflowRun; pending?: WorkflowAction | 'answer'; error?: string } {
+export function useWorkflowRun(runKey: string): { resource?: LocatedWorkflowRun; pending?: WorkflowPendingKind; error?: string } {
   const store = useOptionalWorkflowDomain()?.store ?? EMPTY_STORE;
   const resource = useSyncExternalStore(store.subscribe, () => store.getState().runs[runKey], () => store.getState().runs[runKey]);
   const pending = useSyncExternalStore(store.subscribe, () => store.getState().pending[runKey], () => store.getState().pending[runKey]);

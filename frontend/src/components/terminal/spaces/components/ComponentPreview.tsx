@@ -1,4 +1,3 @@
-import React from 'react';
 import { SandboxFrame } from './SandboxFrame';
 
 /** Gallery and editor preview always use synthetic data and omit the host capability. */

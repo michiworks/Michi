@@ -5,11 +5,12 @@ import { CODEX_HOST_MCP_SERVER, codexDisableMcpServers, codexOpenUserMcpServers 
  * (SessionProfilePort.isRestricted): a restricted session may call only the
  * host's own tools. Its turns run read-only and offline, its thread starts
  * read-only with Codex's shell, plugins and other tools off and every MCP
- * server but the host's disabled, and every approval or elicitation is
- * declined. Codex refuses its sub-agent spawns (CODEX_RESTRICTED_FEATURES_OFF),
- * and CodexSession stops the turn if a child starts anyway. The thread config
- * and MCP check below are Michi's assistant lockdown (assistant/policy.ts
- * re-exports them).
+ * server but the host's disabled, every approval or elicitation is declined,
+ * and a question gets no answer and never reaches the chat (CodexRuntime):
+ * no turn waits on a user who may not be watching. Codex refuses its
+ * sub-agent spawns (CODEX_RESTRICTED_FEATURES_OFF), and CodexSession stops
+ * the turn if a child starts anyway. The thread config and MCP check below
+ * are Michi's assistant lockdown (assistant/policy.ts re-exports them).
  */
 
 export interface CodexTurnPolicy {
@@ -34,13 +35,31 @@ export function codexThreadSandbox(restricted: boolean): 'read-only' | 'workspac
  * the JavaScript REPL and code mode (code execution a user may have turned
  * on), the node REPL host, freeform apply_patch, plugins and apps (which
  * bring their own MCP servers), browser / computer use, sub-agents, tool
- * suggestions and goals (which every Michi thread turns off). image_generation
- * is set off too, though 0.156.1 still offers its image tool (which neither
- * edits files nor runs commands). codex 0.165 still offers the multi-agent v2
+ * suggestions, goals (which every Michi thread turns off), image generation
+ * and view_image (which read local images outside the sandbox). The rest
+ * remove the tools a user's config can turn on: request_user_input in
+ * Codex's default mode, request_permissions, send_message_to_user_async,
+ * wait_for_environment (deferred_executor), new_context and
+ * get_context_remaining (token_budget), clock.curr_time
+ * (current_time_reminder), clock.sleep (sleep_tool), and on codex 0.166
+ * multi_env_copy_file and the skills.* tools
+ * (executor_capability_discovery_v2); a version without one of these keys
+ * only warns. shell_snapshot (stable, on by default in 0.156.1) and its v2
+ * are off too: a snapshot runs the user's login shell, rc files included,
+ * for a new thread (P3 saw `shell_snapshots/` written with the shell tools
+ * off). codex 0.165 still offers the multi-agent v2
  * `collaboration.*` tools with both multi_agent flags off, so multi_agent_v2
  * is the table form: off, and with a limit of one thread per session, which
  * the root thread already uses. spawn_agent then fails with "agent thread
  * limit reached" before any child thread exists (probed on codex 0.165.0).
+ *
+ * With these and CODEX_RESTRICTED_TOOLS_OFF, a thread of codex 0.156.1 or
+ * 0.166.0-alpha.5 offers the model one built-in tool: apply_patch, which has
+ * no switch and which the read-only sandbox and declined approvals keep from
+ * writing (probed offline with every user feature on, ChatGPT login or none).
+ * A model whose catalog entry asks for experimental tools still gets them
+ * (gpt-6's request_user_input_async and clock.curr_time); such models run in
+ * code mode, which is off here, so they get no built-in tool at all.
  */
 export const CODEX_RESTRICTED_MULTI_AGENT_V2 = Object.freeze({ enabled: false, max_concurrent_threads_per_session: 1 });
 
@@ -60,19 +79,42 @@ export const CODEX_RESTRICTED_FEATURES_OFF: Readonly<Record<string, false | Read
   computer_use: false,
   in_app_browser: false,
   image_generation: false,
+  view_image: false,
   multi_agent: false,
   multi_agent_v2: CODEX_RESTRICTED_MULTI_AGENT_V2,
   tool_suggest: false,
   skill_mcp_dependency_install: false,
   goals: false,
+  default_mode_request_user_input: false,
+  request_permissions_tool: false,
+  send_message_to_user_async: false,
+  deferred_executor: false,
+  token_budget: false,
+  current_time_reminder: false,
+  sleep_tool: false,
+  multi_env_copy_file: false,
+  executor_capability_discovery_v2: false,
+  shell_snapshot: false,
+  shell_snapshot_v2: false,
+});
+
+/**
+ * Codex's `[tools]` switches an assistant thread runs with off: the
+ * request_user_input question tool, which Codex offers by default, and
+ * update_plan, which a user's config can turn on. Codex's own read-only
+ * structured threads turn off the same two keys.
+ */
+export const CODEX_RESTRICTED_TOOLS_OFF: Readonly<Record<string, Readonly<{ enabled: false }>>> = Object.freeze({
+  experimental_request_user_input: Object.freeze({ enabled: false }),
+  update_plan: Object.freeze({ enabled: false }),
 });
 
 /**
  * An assistant thread's config: `base` (Michi's MCP slot and hooks) with the
- * features above off, web search off, and the named MCP servers (the user's,
- * from config/read) disabled. Michi's own server is never disabled. Only a
- * server the effective config defines can be named: an entry without a
- * transport fails the whole config.
+ * features and tools above off, web search off, and the named MCP servers
+ * (the user's, from config/read) disabled. Michi's own server is never
+ * disabled. Only a server the effective config defines can be named: an
+ * entry without a transport fails the whole config.
  */
 export function codexRestrictedThreadConfig(
   base: Record<string, unknown>,
@@ -80,9 +122,11 @@ export function codexRestrictedThreadConfig(
 ): Record<string, unknown> {
   const baseServers = isPlainObject(base.mcp_servers) ? base.mcp_servers : {};
   const baseFeatures = isPlainObject(base.features) ? base.features : {};
+  const baseTools = isPlainObject(base.tools) ? base.tools : {};
   return {
     ...base,
     features: { ...baseFeatures, ...CODEX_RESTRICTED_FEATURES_OFF },
+    tools: { ...baseTools, ...CODEX_RESTRICTED_TOOLS_OFF },
     web_search: 'disabled',
     mcp_servers: codexDisableMcpServers({ mcp_servers: baseServers }, configuredMcpServers).mcp_servers,
   };

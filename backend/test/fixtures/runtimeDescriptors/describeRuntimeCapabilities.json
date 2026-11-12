@@ -275,6 +275,53 @@
       "notes": "thread/tokenUsage/updated"
     }
   },
+  "antigravity": {
+    "steer": {
+      "availability": "invisible",
+      "confidence": "unverifiable",
+      "notes": "print CLI"
+    },
+    "followUp": {
+      "availability": "invisible",
+      "confidence": "unverifiable"
+    },
+    "interruptAck": {
+      "availability": "inferred",
+      "confidence": "unknown"
+    },
+    "compact": {
+      "availability": "invisible",
+      "confidence": "unverifiable"
+    },
+    "retry": {
+      "availability": "invisible",
+      "confidence": "unverifiable"
+    },
+    "sessionFork": {
+      "availability": "michi_simulated",
+      "confidence": "projected"
+    },
+    "nativeResume": {
+      "availability": "native",
+      "confidence": "native"
+    },
+    "permissions": {
+      "availability": "invisible",
+      "confidence": "unverifiable"
+    },
+    "sandbox": {
+      "availability": "invisible",
+      "confidence": "unverifiable"
+    },
+    "subagents": {
+      "availability": "invisible",
+      "confidence": "unverifiable"
+    },
+    "usage": {
+      "availability": "invisible",
+      "confidence": "unverifiable"
+    }
+  },
   "cursor": {
     "steer": {
       "availability": "invisible",

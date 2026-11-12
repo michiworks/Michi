@@ -5,6 +5,7 @@ import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/
 import { CallToolRequestSchema, ListToolsRequestSchema, type CallToolRequest, type ListToolsResult, type CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 import type { Readable, Writable } from 'node:stream';
 import { resolveCrewMcpEndpoint } from './crewMcpBinding';
+import { CREW_RELAY_CALL_TOOL, CREW_RELAY_LIST_TOOL } from './crewRelayTools';
 import { JSON_BODY_LIMIT_BYTES } from '../../core/constants';
 import { abortable, withDeadline } from '../../core/runtimeLifecycle';
 
@@ -39,8 +40,8 @@ export function createCrewMcpHandlers(directory?: string, lifecycle: {
 } = {}): CrewMcpHandlers {
     return {
     listTools: async (): Promise<ListToolsResult> => ({ tools: [
-        { name: 'michi_list_tools', description: 'Discover the Michi tools available to this exact conversation, including their JSON input schemas. Includes michi_docs: consult bundled docs for Michi usage, setup, permissions and troubleshooting. Call before using michi_call_tool.', inputSchema: { type: 'object', properties: {}, additionalProperties: false } },
-        { name: 'michi_call_tool', description: 'Call a tool returned by michi_list_tools for this conversation. Workspace and node identity are supplied by the host.', inputSchema: {
+        { name: CREW_RELAY_LIST_TOOL, description: 'Discover the Michi tools available to this exact conversation, including their JSON input schemas. Includes michi_docs: consult bundled docs for Michi usage, setup, permissions and troubleshooting; and michi_skills: the user\'s Michi skill library. Call before using michi_call_tool.', inputSchema: { type: 'object', properties: {}, additionalProperties: false } },
+        { name: CREW_RELAY_CALL_TOOL, description: 'Call a tool returned by michi_list_tools for this conversation. Workspace and node identity are supplied by the host.', inputSchema: {
             type: 'object', properties: { tool: { type: 'string' }, arguments: { type: 'object', additionalProperties: true } }, required: ['tool', 'arguments'], additionalProperties: false,
         } },
     ] }),
@@ -60,12 +61,12 @@ export function createCrewMcpHandlers(directory?: string, lifecycle: {
             clearTimeout(timer);
             signal.throwIfAborted();
             stage = 'Michi tool request';
-            if (request.params.name === 'michi_list_tools') {
+            if (request.params.name === CREW_RELAY_LIST_TOOL) {
                 const result = await client.listTools({}, { signal });
                 return { content: [{ type: 'text', text: JSON.stringify(result) }] };
             }
             const args = request.params.arguments;
-            if (request.params.name !== 'michi_call_tool' || typeof args?.tool !== 'string'
+            if (request.params.name !== CREW_RELAY_CALL_TOOL || typeof args?.tool !== 'string'
                 || !args.arguments || typeof args.arguments !== 'object' || Array.isArray(args.arguments)) throw new Error('Invalid Michi tool request');
             return await client.callTool({ name: args.tool, arguments: args.arguments as Record<string, unknown> }, undefined, { signal }) as CallToolResult;
         } catch (error) {

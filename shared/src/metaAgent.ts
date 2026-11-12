@@ -15,6 +15,18 @@ export const META_AGENT_RUNTIMES = ['claude', 'pi', 'codex', 'kiro', 'crew'] as 
 
 /** How many days of history a workspace's first read covers. */
 export const META_AGENT_FIRST_RUN_DAYS = [7, 30, 90] as const;
+
+/** The page tools that write. They run one at a time, and the Spaces chat window's ones wait while the first run writes. */
+export const PAGE_WRITE_TOOL_NAMES = [
+  'edit_home', 'edit_page', 'create_page', 'create_database', 'configure_database', 'edit_database',
+  'save_page_component', 'configure_database_view', 'open_task_database',
+] as const;
+
+/** The Spaces chat window's tools whose writes wait while the first run writes: the page writes and layout_rules. */
+export const META_AGENT_HELD_WRITE_TOOLS = [...PAGE_WRITE_TOOL_NAMES, 'layout_rules'] as const;
+
+/** How the answer of a write held for the first run starts (backend firstRunHold); the window shows it as waiting, not failed. */
+export const META_AGENT_FIRST_RUN_HELD_PREFIX = "HELD: Pages upkeep's first-time generation";
 export type MetaAgentFirstRunDays = typeof META_AGENT_FIRST_RUN_DAYS[number];
 export const META_AGENT_DEFAULT_FIRST_RUN_DAYS: MetaAgentFirstRunDays = 30;
 
@@ -75,11 +87,6 @@ export interface MetaAgentGuardStatus {
   unexpectedTools: string[];
   detail?: string;
   checkedAt: number;
-}
-
-/** POST /api/meta-agent/retry. Omitting `toolset` clears both. */
-export interface MetaAgentRetryRequest {
-  toolset?: MetaAgentToolset;
 }
 
 /** GET /api/meta-agent and the answer of PUT /api/meta-agent/settings and POST /api/meta-agent/retry. */

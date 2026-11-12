@@ -2,8 +2,8 @@ import React, { useEffect, useId, useLayoutEffect, useMemo, useRef, useState } f
 import type { AgentModelInfo } from '../../../../services/api';
 import { MenuItem, PopoverSurface } from '../../../ui/Popover';
 import { useAnchoredPosition } from '../../../ui/useAnchoredPosition';
-import { ChevronRightIcon } from '../../icons';
 import { filterModelCatalog } from './modelCatalogFilter';
+import { isImeComposing } from '../../../../lib/ime';
 
 const GAP = 4;
 const EDGE = 8;
@@ -88,6 +88,8 @@ export function ModelCombobox({
         aria-expanded={open}
         aria-controls={open ? listId : undefined}
         aria-busy={busy || undefined}
+        // A model without a display name shows its ID, set in the code face.
+        data-mono={value && !(selected?.label && selected.label !== selected.id) ? '' : undefined}
         disabled={inert}
         title={selected?.label && selected.label !== selected.id ? `${selected.label} (${selected.id})` : label}
         onClick={() => { if (!busy) setOpen((current) => !current); }}
@@ -98,8 +100,8 @@ export function ModelCombobox({
           }
         }}
       >
+        {/* The chevron is the selects' own (Settings.css). */}
         <span className="settings-model-combo__value">{label}</span>
-        <ChevronRightIcon size={12} className="settings-model-combo__chevron" />
       </button>
       {open && triggerRef.current && (
         <ModelList
@@ -198,7 +200,7 @@ function ModelList({
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
       // Esc closes the list, not the Settings window under it.
-      if (event.key !== 'Escape' || event.isComposing) return;
+      if (event.key !== 'Escape' || isImeComposing(event)) return;
       event.preventDefault();
       event.stopPropagation();
       onCloseRef.current(true);

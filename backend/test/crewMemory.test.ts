@@ -27,7 +27,11 @@ afterEach(() => {
 });
 
 test('memory defaults persist and graph saves cannot overwrite a native session mode', () => {
+  // Michi Memory learns from Michi's chats: by default Crew reads its own memory and writes nothing to it.
+  assert.equal(defaultCrewMemory(), 'incognito');
+  process.env.MICHI_CREW_MEMORY_MODE = 'persistent';
   assert.equal(defaultCrewMemory(), 'persistent');
+  delete process.env.MICHI_CREW_MEMORY_MODE;
   saveDefaultCrewMemory('temporary'); pinCrewMemory('chat', 'incognito');
   closeDb(); initDb();
   assert.equal(defaultCrewMemory(), 'temporary');
@@ -51,7 +55,7 @@ test('memory API isolates cloud defaults, validates input and hides foreign node
     assert.equal((await call('alice', 'wrong')).status, 400);
     assert.equal((await call('alice', 'temporary')).status, 200);
     assert.deepEqual(await (await call('alice')).json(), { defaultMode: 'temporary', mode: null });
-    assert.deepEqual(await (await call('bob')).json(), { defaultMode: 'persistent', mode: null });
+    assert.deepEqual(await (await call('bob')).json(), { defaultMode: 'incognito', mode: null });
     assert.equal((await call('bob', undefined, 'chat')).status, 404);
     pinCrewMemory('chat', 'incognito');
     assert.deepEqual(await (await call('alice', undefined, 'chat')).json(), { defaultMode: 'temporary', mode: 'incognito' });

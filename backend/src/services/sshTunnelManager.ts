@@ -1,6 +1,7 @@
 import { spawn, type ChildProcess } from 'node:child_process';
 import net from 'node:net';
 import type { BackendConnectionRecord } from './backendConnections';
+import { log } from './logger';
 
 // ProxyCommand transports (such as WSSH) can take over ten seconds to
 // establish a cold connection after the desktop backend hands over to launchd.
@@ -42,6 +43,8 @@ interface SshTunnelManagerDeps {
   probeFailureThreshold?: number;
   maxRecoveryAttempts?: number;
   recoveryDelayMs?: number;
+  /** Supervision events; they name the connection id only, never its host, user or token. */
+  logger?: Pick<typeof log, 'info' | 'warn'>;
 }
 
 function connectionConfigKey(connection: BackendConnectionRecord): string {
@@ -151,6 +154,7 @@ export class SshTunnelManager {
   private readonly probeFailureThreshold: number;
   private readonly maxRecoveryAttempts: number;
   private readonly recoveryDelayMs: number;
+  private readonly log: NonNullable<SshTunnelManagerDeps['logger']>;
 
   constructor(deps: SshTunnelManagerDeps = {}) {
     this.spawnSsh = deps.spawnSsh ?? defaultSpawn;
@@ -162,6 +166,7 @@ export class SshTunnelManager {
     this.probeFailureThreshold = deps.probeFailureThreshold ?? 3;
     this.maxRecoveryAttempts = deps.maxRecoveryAttempts ?? 6;
     this.recoveryDelayMs = deps.recoveryDelayMs ?? 1_000;
+    this.log = deps.logger ?? log;
   }
 
   isSupervising(connectionId: string): boolean {
@@ -198,20 +203,29 @@ export class SshTunnelManager {
     finally { if (intent.probe === controller) intent.probe = undefined; }
     if (controller.signal.aborted || this.intents.get(id) !== intent || this.states.get(id) !== state) return;
     if (alive) {
+      if (intent.failures > 0) this.log.info('tunnel', 'forward responding again', { connectionId: id, failures: intent.failures });
       intent.failures = 0;
       intent.attempts = 0; // A local bind alone never resets the retry budget.
     } else if (++intent.failures >= this.probeFailureThreshold) {
+      this.log.warn('tunnel', 'forward stopped responding; detaching', { connectionId: id, failures: intent.failures });
       this.detach(id);
       this.statuses.set(id, { phase: 'error', error: 'SSH forwarding stopped responding' });
       this.retry(id, intent);
       return;
+    } else {
+      this.log.warn('tunnel', 'forward probe failed', { connectionId: id, failures: intent.failures, threshold: this.probeFailureThreshold });
     }
     this.schedule(id, intent, alive ? this.probeIntervalMs : Math.min(2_000, this.probeIntervalMs), () => { void this.check(id, intent); });
   }
 
   private retry(id: string, intent: TunnelIntent): void {
-    if (this.intents.get(id) !== intent || intent.timer || intent.attempts >= this.maxRecoveryAttempts) return;
+    if (this.intents.get(id) !== intent || intent.timer) return;
+    if (intent.attempts >= this.maxRecoveryAttempts) {
+      this.log.warn('tunnel', 'reconnect attempts exhausted', { connectionId: id, attempts: intent.attempts });
+      return;
+    }
     const delay = Math.min(30_000, this.recoveryDelayMs * 2 ** intent.attempts++);
+    this.log.info('tunnel', 'reconnect scheduled', { connectionId: id, attempt: intent.attempts, delayMs: delay });
     this.schedule(id, intent, delay, () => {
       intent.failures = 0;
       void this.open(intent.connection, intent).catch(() => {});
@@ -282,6 +296,7 @@ export class SshTunnelManager {
         });
         child.once('exit', (code, signal) => {
           if (this.states.get(connection.id) !== state) return;
+          this.log.warn('tunnel', 'ssh exited', { connectionId: connection.id, code, signal });
           this.detach(connection.id);
           const detail = state.stderr.trim() || `SSH exited (${code ?? signal ?? 'unknown'})`;
           this.statuses.set(connection.id, { phase: 'error', error: detail });
@@ -299,11 +314,15 @@ export class SshTunnelManager {
           throw new Error('SSH tunnel was stopped');
         }
         this.statuses.set(connection.id, { phase: 'connected' });
+        // attempt > 0 until the first healthy probe: a reconnect after a drop.
+        this.log.info('tunnel', intent.attempts > 0 ? 'reconnected' : 'connected', { connectionId: connection.id, attempt: intent.attempts });
         this.schedule(connection.id, intent, this.probeIntervalMs, () => { void this.check(connection.id, intent); });
         return `http://127.0.0.1:${localPort}/api`;
       } catch (err) {
         const detail = state.stderr.trim();
         if (this.states.get(connection.id) === state) {
+          // The error text can name the host; the id is enough to correlate.
+          this.log.warn('tunnel', 'connect failed', { connectionId: connection.id, attempt: intent.attempts });
           this.states.delete(connection.id);
           this.statuses.set(connection.id, {
             phase: 'error',

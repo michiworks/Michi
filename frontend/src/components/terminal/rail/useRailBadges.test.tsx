@@ -3,7 +3,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { act, cleanup, render, renderHook, screen } from '@testing-library/react';
 import type { MetaAgentInfo } from '../../../services/api/metaAgent';
 import { resetMetaAgentStore } from '../../../state/metaAgent/useMetaAgent';
-import { notePendingMemories, resetMemoryNotifications } from '../../../state/memory/memoryNotifications';
+import { resetCompanionStoreForTests } from '../../../state/companion/companionStore';
+import { companionSnapshot } from '../../../test/companionFixtures';
+import { resetAttentionForTests, setAttentionPreferences } from '../../../services/attention/policy';
 import { AreaRail } from './AreaRail';
 import { useRailBadges } from './useRailBadges';
 
@@ -49,7 +51,6 @@ beforeEach(() => {
   api.sectionsSince = [];
   api.toastSuccess.mockReset();
   resetMetaAgentStore();
-  resetMemoryNotifications();
 });
 
 const workspace = (id: string, state: string, total: number) => ({
@@ -69,20 +70,6 @@ describe('useRailBadges', () => {
     expect(result.current.settingsAlert).toBe(true);
     render(<AreaRail area="spaces" onSelect={() => {}} badges={result.current} />);
     expect(screen.getByRole('button', { name: 'Settings, needs attention' })).toBeTruthy();
-  });
-
-  it('counts memories waiting for approval on Settings, unless the Meta agent needs attention', async () => {
-    api.fetchMetaAgent.mockResolvedValue(INFO);
-    const { result } = renderHook(() => useRailBadges());
-    await flush();
-    expect(result.current.memoryPending).toBe(0);
-    act(() => notePendingMemories(2));
-    expect(result.current.memoryPending).toBe(2);
-    const view = render(<AreaRail area="spaces" onSelect={() => {}} badges={result.current} />);
-    const settings = screen.getByRole('button', { name: 'Settings, 2 memories waiting for confirmation' });
-    expect(settings.querySelector('.area-rail__count')?.textContent).toBe('2');
-    view.rerender(<AreaRail area="spaces" onSelect={() => {}} badges={{ ...result.current, memoryPending: 1, settingsAlert: true }} />);
-    expect(screen.getByRole('button', { name: 'Settings, needs attention' }).querySelector('.area-rail__count')).toBeNull();
   });
 
   it('keeps Settings plain when the checks passed', async () => {
@@ -133,8 +120,39 @@ describe('useRailBadges', () => {
       summary: { state: 'done', summarizedAt: 2 }, haltedReason: null,
     }));
     expect(api.toastSuccess).toHaveBeenCalledWith(
-      'Meta agent finished: 2 workspace homes + the Pages Home (1 not written); from now on it reads only new conversations',
+      'Michi · Pages upkeep finished: 2 workspace homes + the Pages Home (1 not written); from now on it reads only new conversations',
     );
+  });
+
+  it('names the agent as the user calls it when its first read ends', async () => {
+    const snapshot = companionSnapshot();
+    resetCompanionStoreForTests({ snapshot: { ...snapshot, settings: { ...snapshot.settings, displayName: 'Robin' } } });
+    try {
+      api.fetchMetaAgent.mockResolvedValue(INFO);
+      renderHook(() => useRailBadges());
+      await flush();
+      act(() => api.finished[0]('local', {
+        requestedAt: 1, workspaces: [workspace('a', 'done', 3)], summary: { state: 'skipped', summarizedAt: null }, haltedReason: null,
+      }));
+      expect(api.toastSuccess).toHaveBeenCalledWith('Robin · Pages upkeep finished: 1 workspace home; from now on it reads only new conversations');
+      expect(String(api.toastSuccess.mock.calls.at(-1)?.[0])).not.toMatch(/meta agent/i);
+    } finally {
+      resetCompanionStoreForTests();
+    }
+  });
+
+  it('shows no finished toast when notifications are for approvals only, or off', async () => {
+    api.fetchMetaAgent.mockResolvedValue(INFO);
+    renderHook(() => useRailBadges());
+    await flush();
+    const status = { requestedAt: 1, workspaces: [workspace('a', 'done', 3)], summary: { state: 'done', summarizedAt: 2 }, haltedReason: null };
+    try {
+      for (const level of ['approval-only', 'off'] as const) {
+        setAttentionPreferences({ level, sounds: true });
+        act(() => api.finished[0]('local', status));
+      }
+      expect(api.toastSuccess).not.toHaveBeenCalled();
+    } finally { resetAttentionForTests(); }
   });
   it('suppresses Pages reminders without fetching Home sections for a badge', async () => {
     api.fetchMetaAgent.mockResolvedValue(INFO);

@@ -108,7 +108,7 @@ export function GroupHeading({
   );
 }
 
-const SUM = new Intl.NumberFormat(undefined, { maximumFractionDigits: 2 });
+const SUM = new Intl.NumberFormat('en-US', { maximumFractionDigits: 2 });
 
 /** The chosen number columns' sums (progress: the average) as a group heading says them. Empty cells count for neither. */
 export function groupSums(db: MichiDatabase, group: DbGroup, columns: readonly MichiDbColumn[], wanted: readonly string[]): string[] {

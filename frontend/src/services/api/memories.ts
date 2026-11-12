@@ -1,26 +1,36 @@
 import {
+  isConversationMemoryMode,
   isMemoryKind,
   isMemoryMode,
   isMemoryOrigin,
   isMemoryStatus,
+  type ConversationMemoryMode,
+  SSE_HEARTBEAT_MS,
+  sseSilenceTimeoutMs,
   type MemoryChangedEvent,
   type MemoryCreateRequest,
   type MemoryExtractionState,
   type MemoryListResponse,
   type MemoryMode,
+  type MemoryProfileCitation,
+  type MemoryProfileResponse,
   type MemoryRecord,
   type MemorySettings,
   type MemoryStatus,
   type MemoryUpdateRequest,
+  type ReplyMemorySource,
+  type ReplyMemorySourcesResponse,
 } from 'michi-shared';
 import { API_BASE_URL } from '../../config/env';
-import { readSseStream, SseHttpError } from './sseParser';
-import { fetchStream } from './streamTransport';
+import { backendFetch } from './backendRequest';
+import { openSseFeed } from './sseFeed';
 
 // Michi Memory on this machine's backend (backend/src/routes/memories.ts):
-// the records, the mode, the change feed, and automatic memory's status
-// (routes/memoryExtraction.ts). A backend without a route answers 404;
-// callers show that as unavailable rather than as a failure.
+// the records, the mode, the profile of the user, the change feed, and
+// automatic memory's status (routes/memoryExtraction.ts). A conversation's
+// memory setting is read from the backend that holds the conversation. A
+// backend without a route answers 404; callers show that as unavailable
+// rather than as a failure.
 
 export class MemoryApiError extends Error {
   readonly status: number;
@@ -80,12 +90,14 @@ function isMemoryChangedEvent(value: unknown): value is MemoryChangedEvent {
     && optionalString(value.nodeId) && (value.supersedesId === undefined || value.supersedesId === null || typeof value.supersedesId === 'string');
 }
 
-async function request(path: string, init: { method?: string; body?: unknown; signal?: AbortSignal } = {}): Promise<unknown> {
-  const response = await fetch(`${API_BASE_URL}${path}`, {
+/** `apiBase`: another backend's API (a conversation's), reached through backendFetch; absent: this machine's. */
+async function request(path: string, init: { method?: string; body?: unknown; signal?: AbortSignal } = {}, apiBase?: string): Promise<unknown> {
+  const options: RequestInit = {
     ...(init.signal ? { signal: init.signal } : {}),
     ...(init.method ? { method: init.method } : {}),
     ...(init.body !== undefined ? { headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(init.body) } : {}),
-  });
+  };
+  const response = apiBase === undefined ? await fetch(`${API_BASE_URL}${path}`, options) : await backendFetch(`${apiBase}${path}`, options);
   if (response.status === 204) return null;
   const body: unknown = await response.json().catch(() => null);
   if (!response.ok) {
@@ -144,29 +156,153 @@ export async function updateMemory(id: string, patch: MemoryUpdateRequest): Prom
   return recordOf(await request(`/memories/${encodeURIComponent(id)}`, { method: 'PATCH', body: patch }));
 }
 
-export async function deleteMemory(id: string): Promise<void> {
-  await request(`/memories/${encodeURIComponent(id)}`, { method: 'DELETE' });
+/** `apiBase`: the backend that holds the memory (a conversation's, for what a reply was based on); absent: this machine's. */
+export async function deleteMemory(id: string, apiBase?: string): Promise<void> {
+  await request(`/memories/${encodeURIComponent(id)}`, { method: 'DELETE' }, apiBase);
 }
 
-export async function approveMemory(id: string): Promise<MemoryRecord> {
-  return recordOf(await request(`/memories/${encodeURIComponent(id)}/approve`, { method: 'POST' }));
-}
-
-export async function rejectMemory(id: string): Promise<void> {
-  await request(`/memories/${encodeURIComponent(id)}/reject`, { method: 'POST' });
-}
-
+/** The mode, and the one-time notice's state where the backend has it. */
 function settingsOf(body: unknown): MemorySettings {
   if (!isObject(body) || !isMemoryMode(body.mode)) throw unexpected();
-  return { mode: body.mode };
+  return {
+    mode: body.mode,
+    ...(typeof body.migratedFromExplicit === 'boolean' ? { migratedFromExplicit: body.migratedFromExplicit } : {}),
+    ...(typeof body.noticeSeen === 'boolean' ? { noticeSeen: body.noticeSeen } : {}),
+  };
 }
 
-export async function fetchMemorySettings(signal?: AbortSignal): Promise<MemorySettings> {
-  return settingsOf(await request('/memory-settings', { signal }));
+/** `apiBase`: another backend's settings (a conversation's), else this machine's. */
+export async function fetchMemorySettings(signal?: AbortSignal, apiBase?: string): Promise<MemorySettings> {
+  return settingsOf(await request('/memory-settings', { signal }, apiBase));
 }
 
 export async function saveMemorySettings(mode: MemoryMode): Promise<MemorySettings> {
   return settingsOf(await request('/memory-settings', { method: 'PUT', body: { mode } }));
+}
+
+/** The one-time notice about memory was shown; the backend does not show it again. */
+export async function markMemoryNoticeSeen(): Promise<MemorySettings> {
+  return settingsOf(await request('/memory-settings', { method: 'PUT', body: { noticeSeen: true } }));
+}
+
+/** POST /api/memories/reset: every memory of the owner and their profile go; answers how many memories. Callers confirm with the user first. */
+export async function resetMemories(): Promise<{ removed: number }> {
+  const body = await request('/memories/reset', { method: 'POST', body: { confirm: true } });
+  if (!isObject(body) || typeof body.removed !== 'number') throw unexpected();
+  return { removed: body.removed };
+}
+
+// ── the profile of the user ("About the user") ─────────────────────────────
+
+/** A line of the profile; `index` is its place in the backend's list, which Remove names. */
+export interface MemoryProfileLine {
+  index: number;
+  topic: string;
+  text: string;
+  refs: MemoryProfileCitation[];
+}
+
+export interface MemoryProfileView extends Omit<MemoryProfileResponse, 'lines'> {
+  lines: MemoryProfileLine[];
+}
+
+const isCitation = (value: unknown): value is MemoryProfileCitation =>
+  isObject(value) && typeof value.ref === 'string' && typeof value.id === 'string' && typeof value.body === 'string';
+
+function profileOf(body: unknown): MemoryProfileView {
+  if (!isObject(body) || !Array.isArray(body.lines) || typeof body.version !== 'number'
+    || !(body.builtAt === null || typeof body.builtAt === 'number')) throw unexpected();
+  // A line of another shape is skipped; the others keep their index.
+  const lines = body.lines.flatMap((line, index): MemoryProfileLine[] => {
+    if (!isObject(line) || typeof line.text !== 'string' || !Array.isArray(line.refs)) return [];
+    return [{ index, topic: typeof line.topic === 'string' ? line.topic : '', text: line.text, refs: line.refs.filter(isCitation) }];
+  });
+  return { lines, builtAt: body.builtAt, version: body.version, rebuildRequested: body.rebuildRequested === true };
+}
+
+/** Null when this backend has no profile yet (404, or an answer of another shape). */
+export async function fetchMemoryProfile(signal?: AbortSignal): Promise<MemoryProfileView | null> {
+  try {
+    return profileOf(await request('/memory-profile', { signal }));
+  } catch (error) {
+    if (isMemoryUnavailable(error)) return null;
+    throw error;
+  }
+}
+
+/** Asks for a rebuild; automatic memory runs it soon (the answer's rebuildRequested stays true until then). */
+export async function rebuildMemoryProfile(): Promise<MemoryProfileView> {
+  return profileOf(await request('/memory-profile/rebuild', { method: 'POST', body: {} }));
+}
+
+/**
+ * Deletes the memories a line cites (the line goes with them) and asks for a
+ * rebuild. `version` is the profile's as read: a version_conflict
+ * MemoryApiError when it was rebuilt since, not_found when there is no such line.
+ */
+export async function removeMemoryProfileLine(index: number, version: number): Promise<MemoryProfileView> {
+  return profileOf(await request('/memory-profile/remove-line', { method: 'POST', body: { index, version } }));
+}
+
+// ── a conversation's memory setting ────────────────────────────────────────
+
+/** On the conversation's backend (`apiBase`). A conversation it does not have yet answers not_found. */
+export async function fetchConversationMemoryMode(apiBase: string, nodeId: string, signal?: AbortSignal): Promise<ConversationMemoryMode> {
+  const body = await request(`/nodes/${encodeURIComponent(nodeId)}/memory-mode`, { signal }, apiBase);
+  if (!isObject(body) || !isConversationMemoryMode(body.mode)) throw unexpected();
+  return body.mode;
+}
+
+export interface ConversationMemoryChange {
+  mode: ConversationMemoryMode;
+  /** Memories Michi had saved on its own from the conversation, removed as it left learn. */
+  removedMemories: number;
+}
+
+export async function saveConversationMemoryMode(apiBase: string, nodeId: string, mode: ConversationMemoryMode): Promise<ConversationMemoryChange> {
+  const body = await request(`/nodes/${encodeURIComponent(nodeId)}/memory-mode`, { method: 'PUT', body: { mode } }, apiBase);
+  if (!isObject(body) || !isConversationMemoryMode(body.mode)) throw unexpected();
+  return { mode: body.mode, removedMemories: typeof body.removedMemories === 'number' ? body.removedMemories : 0 };
+}
+
+// ── what a reply was based on ──────────────────────────────────────────────
+
+const IMPORT_SOURCES = ['claude', 'codex', 'kiro'];
+
+function isFrom(value: unknown, titleRequired: boolean): boolean {
+  return isObject(value) && typeof value.nodeId === 'string' && (value.messageId === null || typeof value.messageId === 'string')
+    && (typeof value.title === 'string' || (!titleRequired && value.title === null));
+}
+
+function isReplyMemorySource(value: unknown): value is ReplyMemorySource {
+  if (!isObject(value) || typeof value.text !== 'string' || typeof value.at !== 'number') return false;
+  if (value.kind === 'memory') {
+    return typeof value.memoryId === 'string' && (value.savedBy === 'user' || value.savedBy === 'michi' || value.savedBy === 'import')
+      && (value.importSource === undefined || IMPORT_SOURCES.includes(value.importSource as string))
+      && (value.from === null || isFrom(value.from, true));
+  }
+  return value.kind === 'conversation' && typeof value.docId === 'number' && isFrom(value.from, false);
+}
+
+/**
+ * GET /api/nodes/:nodeId/memory-sources on the conversation's backend
+ * (`apiBase`): for each of these assistant messages, the memories and past
+ * conversations its reply was based on. A message with none is left out. A
+ * backend without the route rejects with an unavailable MemoryApiError.
+ */
+export async function fetchReplyMemorySources(apiBase: string, nodeId: string, messageIds: readonly string[], signal?: AbortSignal): Promise<ReplyMemorySourcesResponse> {
+  const query = messageIds.map((id) => encodeURIComponent(id)).join(',');
+  const body = await request(`/nodes/${encodeURIComponent(nodeId)}/memory-sources?messages=${query}`, { signal }, apiBase);
+  if (!isObject(body) || !Array.isArray(body.messages)) throw unexpected();
+  return {
+    messages: body.messages.flatMap((message) => (isObject(message) && typeof message.messageId === 'string' && Array.isArray(message.sources)
+      ? [{ messageId: message.messageId, sources: message.sources.filter(isReplyMemorySource) }] : [])),
+  };
+}
+
+/** Don't recall: the conversation's backend stops recalling that past turn; the conversation itself is unchanged. */
+export async function hideRecalledTurn(apiBase: string, docId: number): Promise<void> {
+  await request('/memory-recall/hide', { method: 'POST', body: { docId } }, apiBase);
 }
 
 // ── automatic memory (C5) ──────────────────────────────────────────────────
@@ -177,7 +313,6 @@ export interface MemoryExtractionStatus {
   paused: boolean;
   lastRunAt: number | null;
   lastError: string | null;
-  pendingCount: number;
   todayTokens: number;
   dailyTokenLimit: number | null;
   state?: MemoryExtractionState;
@@ -194,13 +329,12 @@ const nullableNumber = (value: unknown) => value === null || value === undefined
 function extractionStatusOf(body: unknown): MemoryExtractionStatus | null {
   if (!isObject(body) || typeof body.enabled !== 'boolean' || typeof body.paused !== 'boolean'
     || !nullableNumber(body.lastRunAt) || !(body.lastError === null || body.lastError === undefined || typeof body.lastError === 'string')
-    || !nullableNumber(body.pendingCount) || !nullableNumber(body.todayTokens) || !nullableNumber(body.dailyTokenLimit)) return null;
+    || !nullableNumber(body.todayTokens) || !nullableNumber(body.dailyTokenLimit)) return null;
   return {
     enabled: body.enabled,
     paused: body.paused,
     lastRunAt: (body.lastRunAt as number | null | undefined) ?? null,
     lastError: (body.lastError as string | null | undefined) || null,
-    pendingCount: (body.pendingCount as number | null | undefined) ?? 0,
     todayTokens: (body.todayTokens as number | null | undefined) ?? 0,
     dailyTokenLimit: (body.dailyTokenLimit as number | null | undefined) ?? null,
     ...(EXTRACTION_STATES.includes(body.state as MemoryExtractionState) ? { state: body.state as MemoryExtractionState } : {}),
@@ -240,27 +374,16 @@ export interface MemoryChangeSubscription {
  * unsubscribe.
  */
 export function subscribeMemoryChanges(options: MemoryChangeSubscription): () => void {
-  const controller = new AbortController();
-  let stopped = false;
-  void (async () => {
-    let disconnectError: Error | undefined;
-    try {
-      const response = await fetchStream(`${API_BASE_URL}/memories/changes/stream`, { signal: controller.signal });
-      if (!response.ok) throw new SseHttpError(response.status, 'subscribeMemoryChanges failed');
-      if (!response.body) throw new Error('subscribeMemoryChanges response has no body');
-      if (stopped) return;
-      options.onOpen?.();
-      await readSseStream(response.body.getReader(), (event, data) => {
-        if (event !== 'memory_changed') return;
-        let json: unknown;
-        try { json = JSON.parse(data); } catch { return; }
-        if (isMemoryChangedEvent(json)) options.onEvent({ ...json, supersedesId: json.supersedesId ?? null });
-      }, { shouldStop: () => stopped });
-    } catch (error) {
-      if (!stopped) disconnectError = error instanceof Error ? error : new Error(String(error));
-    } finally {
-      if (!stopped) options.onDisconnect?.(disconnectError);
-    }
-  })();
-  return () => { stopped = true; controller.abort(); };
+  return openSseFeed(`${API_BASE_URL}/memories/changes/stream`, {
+    label: 'subscribeMemoryChanges',
+    silenceMs: sseSilenceTimeoutMs(SSE_HEARTBEAT_MS.memoryChanges),
+    onOpen: options.onOpen,
+    onDisconnect: options.onDisconnect,
+    onFrame: (event, data) => {
+      if (event !== 'memory_changed') return;
+      let json: unknown;
+      try { json = JSON.parse(data); } catch { return; }
+      if (isMemoryChangedEvent(json)) options.onEvent({ ...json, supersedesId: json.supersedesId ?? null });
+    },
+  });
 }

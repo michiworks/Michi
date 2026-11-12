@@ -6,7 +6,7 @@
 
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
-import { buildClaudeMcpConfig, MICHI_INTERNAL_MCP_NAME } from '../src/adapters/claude/claudeMcpConfig';
+import { buildClaudeMcpConfig, CLAUDE_UP_FRONT_TOOL_META, MICHI_INTERNAL_MCP_NAME } from '../src/adapters/claude/claudeMcpConfig';
 
 describe('claudeMcpConfig', () => {
 
@@ -24,5 +24,10 @@ describe('claudeMcpConfig', () => {
     });
     assert.deepEqual(JSON.parse(buildClaudeMcpConfig(endpoint, { alwaysLoad: true })).mcpServers[MICHI_INTERNAL_MCP_NAME],
       { type: 'http', url: endpoint.url, alwaysLoad: true });
+  });
+
+  test('a tool the host marks loadUpFront carries the tool _meta Claude Code reads to load it without a tool search', () => {
+    assert.deepEqual({ ...CLAUDE_UP_FRONT_TOOL_META }, { 'anthropic/alwaysLoad': true });
+    assert.equal(Object.isFrozen(CLAUDE_UP_FRONT_TOOL_META), true);
   });
 });

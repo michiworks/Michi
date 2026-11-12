@@ -7,6 +7,7 @@ import os from 'node:os';
 import express from 'express';
 import type { AddressInfo } from 'node:net';
 import { once } from 'node:events';
+import { SERVER_PREF_KEYS } from 'michi-shared';
 import { setupPersistenceRoutes } from '../src/routes/persistence';
 import { closeDb } from '../src/services/db';
 import { agentConfigEvents, getAgentConfig, updateAgentConfig, updateAgentModelForRuntime } from '../src/services/agentConfig';
@@ -35,6 +36,22 @@ afterEach(async () => {
     if (value === undefined) delete process.env[key]; else process.env[key] = value;
   }
   fs.rmSync(dataDir, { recursive: true, force: true });
+});
+
+test('prefs HTTP keeps the Settings prefs a new browser starts from and drops this browser\'s own', async () => {
+  // Trash retention decides what the trash sweep deletes for good.
+  const settings = { trashTTLDays: 0, homeRecommendations: false, paneWidthMode: 'fixed', paneSpawnAnimation: 'phosphor', cornerRadius: 8, sidebarRowStyle: 'classic', showSidebarTimestamps: true };
+  const local = { sidebarExpanded: { workspaces: { a: true } }, workspaceOrder: ['ws-1'], terminalSidebarWidth: 300, globalPermissions: true, reduceMotion: true, singlePageMode: true };
+  const put = await fetch(`${base}/prefs`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ...settings, ...local }) });
+  assert.equal(put.status, 200);
+  const { prefs } = await (await fetch(`${base}/prefs`)).json() as { prefs: Record<string, unknown> };
+  assert.deepEqual(Object.fromEntries(Object.keys(settings).map((key) => [key, prefs[key]])), settings);
+  assert.deepEqual(JSON.parse(fs.readFileSync(configPath, 'utf8')).prefs, { uiFont: 'Inter', ...settings });
+
+  // Every key of the shared list, and nothing else.
+  const every = Object.fromEntries(SERVER_PREF_KEYS.map((key) => [key, `saved-${key}`]));
+  await fetch(`${base}/prefs`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ...every, ...local }) });
+  assert.deepEqual(JSON.parse(fs.readFileSync(configPath, 'utf8')).prefs, every);
 });
 
 test('prefs HTTP refuses corrupt read and write without replacing the file', async () => {

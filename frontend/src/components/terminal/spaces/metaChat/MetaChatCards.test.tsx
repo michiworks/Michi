@@ -23,7 +23,7 @@ vi.mock('sonner', () => ({ toast }));
 const openSpacesPage = vi.hoisted(() => vi.fn());
 vi.mock('../../../../state/metaChat/spacesPages', () => ({ openSpacesPage }));
 const revealPage = vi.hoisted(() => vi.fn());
-vi.mock('./MetaChatArea', () => ({ useMetaChatRevealPage: () => revealPage }));
+vi.mock('./metaChatRevealPage', () => ({ useMetaChatRevealPage: () => revealPage }));
 const rulesApi = vi.hoisted(() => ({ fetchLayoutRules: vi.fn(), deleteLayoutRule: vi.fn(), addLayoutRule: vi.fn() }));
 vi.mock('../../../../services/api/spacesHome', () => rulesApi);
 vi.mock('../../assistant/AssistantLinks', () => ({
@@ -100,7 +100,7 @@ describe('MetaChatCards', () => {
     api.revertPageBatch.mockResolvedValue({ reverted: [], conflicts: [{ changeId: 'c1', message: 'edited since' }] });
     render(<MetaChatCards tools={[editTool('t-conflict', { applied: [block('c1', 7, 'x')] })]} context={context} />);
     await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Undo' })); });
-    expect(toast).toHaveBeenCalledWith("Some changes couldn't be undone: they were edited since.");
+    expect(toast.error).toHaveBeenCalledWith('Not undone: it changed again since.');
     expect(document.querySelector<HTMLElement>('[data-page-card]')!.className).not.toContain('is-undone');
     expect(screen.getByRole('button', { name: 'Undo' })).toBeTruthy();
   });
@@ -327,6 +327,25 @@ describe('MetaChatCards', () => {
     expect(cards.map((card) => card.querySelector('.meta-chat-card__label')!.textContent)).toEqual(['Created 1 task', 'Added a task board to rabbitholes']);
     fireEvent.click(within(cards[0]!).getByRole('button', { name: 'View' }));
     expect(openSpacesPage).toHaveBeenCalledWith({ pageId: 'pg-r', workspaceId: 'ws-r', backendConnectionId: 'local', currentPageId: 'pg-home' });
+  });
+
+  it('opens a database write on the page on screen, at the row it changed, when the write named no page', () => {
+    const rowWrite = (pages: string[], named?: string): ToolCallState => {
+      const tool = tasksTool('t-row', [taskRow('c1', 'Ship', true)], { added: 0, updated: 1, removed: 0 }, pages);
+      const output = JSON.parse(tool.output!);
+      const payload = JSON.parse(output.items[0].Json.content[0].text);
+      Object.assign(payload.michiPageWrite, { affectedTargetIds: ['row-c1'], ...(named ? { originatingPageId: named } : {}) });
+      return { ...tool, output: kiro(payload) };
+    };
+    const view = render(<MetaChatCards tools={[rowWrite(['pg-a', 'pg-home'])]} context={context} />);
+    fireEvent.click(screen.getByRole('button', { name: 'View' }));
+    expect(openSpacesPage).toHaveBeenCalledWith({ pageId: 'pg-home', workspaceId: 'ws-r', backendConnectionId: 'local', blockId: 'row-c1', databaseId: 'db-t', currentPageId: 'pg-home' });
+    view.unmount();
+    resetPageCardStatesForTests();
+    openSpacesPage.mockReset();
+    render(<MetaChatCards tools={[rowWrite(['pg-a', 'pg-home'], 'pg-a')]} context={context} />);
+    fireEvent.click(screen.getByRole('button', { name: 'View' }));
+    expect(openSpacesPage, 'the page the write named comes first').toHaveBeenCalledWith(expect.objectContaining({ pageId: 'pg-a', blockId: 'row-c1', databaseId: 'db-t' }));
   });
 
   it('opens each workspace\'s own board, and offers no View when only another workspace got one', () => {

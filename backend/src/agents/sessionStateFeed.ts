@@ -1,4 +1,4 @@
-import type { AgentSessionState } from 'michi-shared';
+import { isCheckinNodeId, type AgentSessionState } from 'michi-shared';
 import { createSessionStateFeed } from 'michi-runtime/internal/core/sessionStateFeed';
 import type { AgentSession } from './types';
 import { getRuntimeDeps } from './runtimeDeps';
@@ -25,7 +25,16 @@ function withNodeId(data: Record<string, unknown> | undefined): Record<string, u
     return { nodeId: sessionId, ...rest };
 }
 
+/**
+ * A check-in node's session is never tracked (DESIGN-v2 §3.1): its state
+ * would reach every window's session_state feed, which then discovers the
+ * hidden node S. Nothing about S is persisted from here either.
+ */
 export function trackSessionState(session: AgentSession, ownerUserId: string | null): void {
+    if (isCheckinNodeId(session.id)) {
+        feed.untrack(session.id);
+        return;
+    }
     feed.track(session, ownerUserId);
 }
 

@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import { useState } from 'react';
 import type { MichiContextItem } from 'michi-shared';
 import { AllThreadsIcon, ChatIcon, DocIcon } from '../icons';
 import { attachmentChipLabel, VISIBLE_ATTACHMENTS } from '../../../state/assistant/assistantContext';

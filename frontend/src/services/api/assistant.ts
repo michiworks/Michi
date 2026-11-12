@@ -1,4 +1,10 @@
-import type { MetaAgentChatTurnContext, MichiAssistantRuntimeSwitch, MichiAssistantConversations } from 'michi-shared';
+import {
+  COMPANION_TURN_REF_LIMITS,
+  type CompanionTurnRef,
+  type MetaAgentChatTurnContext,
+  type MichiAssistantConversations,
+  type MichiAssistantRuntimeSwitch,
+} from 'michi-shared';
 import { API_BASE_URL } from '../../config/env';
 import type { AgentReasoning, RuntimeId } from './agentRuntime';
 
@@ -32,6 +38,14 @@ export interface AssistantInfo {
   supportedRuntimes: RuntimeId[];
   /** Where the conversation moved to another runtime, oldest first. Absent from older backends. */
   runtimeSwitches?: MichiAssistantRuntimeSwitch[];
+  /** The Scheduled window's conversation created a job: opening the window starts a new one. Absent from older backends. */
+  jobCreated?: boolean;
+  /**
+   * The conversation held the user's own messages before the v2 merge
+   * (`v2_merged_at`): they used ⌘J before, so the panel shows the one-time
+   * upgrade note (DESIGN-v2 §1.5, D7). The backend decides; absent = false.
+   */
+  hadMessagesBeforeMerge?: boolean;
 }
 
 export type AssistantSettingsPatch = Partial<AssistantSettings> & {
@@ -107,20 +121,6 @@ export function resetAssistant(nodeId?: string): Promise<AssistantInfo> {
   return assistantJson('/reset', { method: 'POST', ...(nodeId ? { body: { nodeId } } : {}) });
 }
 
-/**
- * The Scheduled page's "Create with agent" conversation: the same assistant
- * workspace and settings, its own conversation and tools. Older backends
- * answer 404 (no such window there).
- */
-export function fetchScheduleAssistant(): Promise<AssistantInfo> {
-  return assistantJson('/schedule');
-}
-
-/** Starts the Scheduled window over in a fresh conversation; the Spaces one is untouched. */
-export function resetScheduleAssistant(nodeId?: string): Promise<AssistantInfo> {
-  return assistantJson('/schedule/reset', { method: 'POST', ...(nodeId ? { body: { nodeId } } : {}) });
-}
-
 export async function fetchAssistantConversations(cursor?: string, signal?: AbortSignal): Promise<MichiAssistantConversations> {
   const params = new URLSearchParams({ limit: '5', ...(cursor ? { cursor } : {}) });
   const res = await fetch(`${API_BASE_URL}/assistant/conversations?${params}`, { signal });
@@ -135,20 +135,90 @@ export function activateAssistantConversation(nodeId: string, currentNodeId: str
   return assistantJson(`/conversations/${encodeURIComponent(nodeId)}/activate`, { method: 'POST', body: { currentNodeId } });
 }
 
-const turnContexts = new Map<string, () => MetaAgentChatTurnContext | null>();
+/**
+ * Reads what one message to the assistant's conversation carries as
+ * `metaAgentContext`. `consume` is true for the user's own send: it takes the
+ * chips that send carried and the post it replies to, once. A retry reads it
+ * without taking anything another send is about to carry.
+ */
+type MetaAgentTurnContextReader = (options: { consume: boolean }) => MetaAgentChatTurnContext | null;
+
+const turnContexts = new Map<string, MetaAgentTurnContextReader>();
+/** The context of the message going out right now (withMetaAgentTurnContext); null: it carries none. */
+const carried = new Map<string, MetaAgentChatTurnContext | null>();
 
 /**
- * Supplies `metaAgentContext` for every message sent to the assistant's
- * conversation `nodeId` (the Spaces window registers it while it is shown).
- * The backend refuses the field on any other chat, so register only that node.
- * Returns the unregister function.
+ * Supplies `metaAgentContext` for messages sent to the assistant's
+ * conversation `nodeId` (state/companion/companionTurnSource.ts keeps one
+ * registered for V, whether or not the panel shows it). The backend refuses
+ * the field on any other chat, so register only that node. Returns the
+ * unregister function.
  */
-export function provideMetaAgentTurnContext(nodeId: string, read: () => MetaAgentChatTurnContext | null): () => void {
+export function provideMetaAgentTurnContext(nodeId: string, read: MetaAgentTurnContextReader): () => void {
   turnContexts.set(nodeId, read);
   return () => { if (turnContexts.get(nodeId) === read) turnContexts.delete(nodeId); };
 }
 
-/** The context the next message to `nodeId` carries, read when it is sent. */
+/**
+ * The context a message to `nodeId` carries, read the moment the user sends
+ * it (DESIGN-v2 §1.3; F1a-review #1): the store keeps it with that message
+ * (a queued entry, the message itself for a retry), so it goes out with it
+ * even after the panel closed. Undefined for a node nobody provides for.
+ */
+export function captureMetaAgentTurnContext(nodeId: string, options: { consume: boolean } = { consume: true }): MetaAgentChatTurnContext | null | undefined {
+  const read = turnContexts.get(nodeId);
+  return read ? read(options) : undefined;
+}
+
+/**
+ * Runs `start` (which builds and sends the request synchronously) with the
+ * context that was captured for this message: the request carries it, not
+ * whatever the screen shows now. `undefined` leaves the provider to answer.
+ */
+export function withMetaAgentTurnContext<T>(nodeId: string, context: MetaAgentChatTurnContext | null | undefined, start: () => T): T {
+  if (context === undefined) return start();
+  carried.set(nodeId, context);
+  try {
+    return start();
+  } finally {
+    carried.delete(nodeId);
+  }
+}
+
+const refKey = (ref: CompanionTurnRef): string => JSON.stringify(ref);
+
+/**
+ * One message made of several queued sends (F1a-review #1): the area fields of
+ * the last one that had any, every one's references (deduplicated, within
+ * the limit). Null when none carried anything; undefined when none was read.
+ */
+export function mergeMetaAgentTurnContexts(contexts: ReadonlyArray<MetaAgentChatTurnContext | null | undefined>): MetaAgentChatTurnContext | null | undefined {
+  if (contexts.every((context) => context === undefined)) return undefined;
+  const present = contexts.filter((context): context is MetaAgentChatTurnContext => !!context);
+  if (present.length === 0) return null;
+  const refs: CompanionTurnRef[] = [];
+  const seen = new Set<string>();
+  for (const ref of present.flatMap((context) => context.refs ?? [])) {
+    const key = refKey(ref);
+    if (seen.has(key) || refs.length >= COMPANION_TURN_REF_LIMITS.refs) continue;
+    seen.add(key);
+    refs.push(ref);
+  }
+  const lastWithArea = [...present].reverse().find((context) => Object.keys(context).some((key) => key !== 'refs'));
+  const { refs: _ignored, ...area } = lastWithArea ?? {};
+  void _ignored;
+  const merged: MetaAgentChatTurnContext = { ...area, ...(refs.length ? { refs } : {}) };
+  return Object.keys(merged).length ? merged : null;
+}
+
+/** A retry or an edit: the context read now (nothing taken) with the references the original message carried. */
+export function withCarriedRefs(context: MetaAgentChatTurnContext | null | undefined, refs: readonly CompanionTurnRef[] | undefined): MetaAgentChatTurnContext | null | undefined {
+  if (!refs?.length) return context;
+  return mergeMetaAgentTurnContexts([context ?? null, { refs: [...refs] }]);
+}
+
+/** The context the message to `nodeId` going out now carries (stream.ts reads it as it builds the request). */
 export function metaAgentTurnContextFor(nodeId: string): MetaAgentChatTurnContext | undefined {
-  return turnContexts.get(nodeId)?.() ?? undefined;
+  if (carried.has(nodeId)) return carried.get(nodeId) ?? undefined;
+  return turnContexts.get(nodeId)?.({ consume: true }) ?? undefined;
 }

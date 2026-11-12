@@ -47,6 +47,14 @@ describe('source api', () => {
     expect(citesMessage(cited, 'm4')).toBe(false);
   });
 
+  it('counts every conversation an old first run listed as cited by each block it wrote', () => {
+    // A change card names none of them (changeOrigin); whether this mark should follow is still open.
+    const legacy = change('b', { kind: 'maintenance', nodeId: 'run', turnId: 't', assistantId: 'r',
+      evidence: [{ nodeId: 'n1', turnId: 't1', assistantId: 'm1' }, { nodeId: 'n2', turnId: 't2', assistantId: 'm2' }] });
+    expect(citesMessage(legacy, 'm1')).toBe(true);
+    expect(citesMessage(legacy, 'm2')).toBe(true);
+  });
+
   it('describes the blocks that cite a user message', async () => {
     pages.fetchPage.mockResolvedValue({ blocks: [block('g', { type: 'heading', text: '目标' }), block('r', { type: 'heading', text: '风险' })] });
     pages.listPageChanges.mockResolvedValue({ changes: [

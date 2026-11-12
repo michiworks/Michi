@@ -1,4 +1,4 @@
-import type { RemoteConnectionDiagnostic } from 'michi-shared';
+import { randomUuid, type RemoteConnectionDiagnostic } from 'michi-shared';
 import { API_BASE_URL } from '../../config/env';
 
 export class RemoteConnectionFailure extends Error {
@@ -15,7 +15,7 @@ export async function streamRemoteOperation<T>(
   endpoint: string, input: unknown, host: string, onProgress: (message: string) => void, signal?: AbortSignal,
   onStage?: (stage: string) => void,
 ): Promise<T> {
-  const local: RemoteConnectionDiagnostic = { id: 'client-' + crypto.randomUUID(), host, startedAt: new Date().toISOString(), stage: 'request', log: '', truncated: false };
+  const local: RemoteConnectionDiagnostic = { id: 'client-' + randomUuid(), host, startedAt: new Date().toISOString(), stage: 'request', log: '', truncated: false };
   let attemptId: string | undefined;
   let result: T | undefined;
   try {

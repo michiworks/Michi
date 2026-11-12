@@ -9,6 +9,7 @@ describe('turn message snapshot hydration', () => {
         quotedText: 'quote',
         attachments: [{ name: 'a.txt', absPath: '/tmp/a.txt' }],
         comments: [{ id: 'c1', quotedText: 'old', body: 'new' }],
+        skill: { id: 'runtime:claude:user:review', name: 'review', origin: 'runtime', runtimeId: 'claude', args: 'the diff' },
       }),
     });
     const assistant = mapMessageRow({
@@ -21,10 +22,32 @@ describe('turn message snapshot hydration', () => {
     expect(user.quotedText).toBe('quote');
     expect(user.attachments).toEqual([{ name: 'a.txt', absPath: '/tmp/a.txt' }]);
     expect(user.comments?.[0]?.body).toBe('new');
+    expect(user.skill).toEqual({ id: 'runtime:claude:user:review', name: 'review', origin: 'runtime', runtimeId: 'claude', args: 'the diff' });
     expect(assistant.plan).toEqual([{ content: 'ship', priority: 'high', status: 'completed' }]);
     expect(assistant.toolCalls[0]).toMatchObject({
       detail: 'why', inputJson: '{"x":1}', output: 'ok', textOffset: 0,
     });
+  });
+});
+
+describe('subagent roster hydration', () => {
+  it('drops the nameless entries an older Claude runtime made from a long Bash, and keeps agents', () => {
+    const base = { sessionName: 'subagent', agentName: 'subagent', initialQuery: '', status: 'terminated', outcome: 'completed', group: '', dependsOn: [], source: 'claude' };
+    const assistant = mapMessageRow({
+      id: 'a1', node_id: 'n1', role: 'assistant', content: 'done', seq: 1, created_at: 2,
+      tool_calls: JSON.stringify([
+        { id: 'toolu_bash', title: 'Bash', status: 'completed', textOffset: 0 },
+        { id: 'toolu_agent', title: 'Agent', status: 'completed', textOffset: 0 },
+        { id: 'toolu_send', title: 'SendMessage', status: 'completed', textOffset: 0 },
+      ]),
+      metadata: JSON.stringify({ subagents: [
+        { ...base, sessionId: 'toolu_bash', parentToolCallId: 'toolu_bash', result: 'Run npm run check' },
+        { ...base, sessionId: 'toolu_agent', parentToolCallId: 'toolu_agent', agentName: 'general-purpose', description: 'Review the diff' },
+        { ...base, sessionId: 'toolu_send', parentToolCallId: 'toolu_send' },
+        { ...base, sessionId: 'toolu_gone', parentToolCallId: 'toolu_gone' },
+      ] }),
+    });
+    expect(assistant.subagents?.map((entry) => entry.sessionId)).toEqual(['toolu_agent', 'toolu_send', 'toolu_gone']);
   });
 });
 

@@ -2,6 +2,7 @@ import { expect, type Page, type Route } from '@playwright/test';
 import { composerEditor } from './shell';
 import { createSpacesHomeMock } from './spacesHomeFixtures';
 import { createMemoryMock } from './memoryFixtures';
+import { createCompanionMock } from './companionFixtures';
 import {
   AgentDefinitionStatus,
   AgentRunCompletionMode,
@@ -58,8 +59,16 @@ export interface MockOverrides {
   streamDelayMs?: number;
   /** Pre-seeded workspaces returned by GET /api/workspaces and /workspaces/all. */
   workspaces?: unknown[];
+  /** Server prefs GET /api/prefs returns besides onboardingCompletedAt (e.g. digestEnabled: true). */
+  prefs?: Record<string, unknown>;
   /** Custom route handler. Called BEFORE built-ins — return true to short-circuit. */
   custom?: (route: Route) => Promise<boolean>;
+  /**
+   * Skills GET /api/skills and /api/skills/catalog return (SkillSummary shapes).
+   * Default: none, with the library available. The catalog returns the
+   * enabled library skills and every skill of the requested runtime.
+   */
+  skills?: Array<Record<string, unknown>>;
 }
 
 const AGENT_HASH = 'a'.repeat(64);
@@ -452,6 +461,7 @@ export async function installMockApi(page: Page, overrides: MockOverrides = {}) 
   nodeIdCounter = 0;
   const spacesHome = createSpacesHomeMock();
   const memory = createMemoryMock();
+  const companion = createCompanionMock();
 
   // Match only real backend calls: `<origin>/api/...`. A plain `**/api/**`
   // glob also matches Vite dev module URLs like
@@ -478,6 +488,10 @@ export async function installMockApi(page: Page, overrides: MockOverrides = {}) 
         body,
       });
     }
+    // Every thread is as current as its seeded rows: nothing to catch up on.
+    if (method === 'POST' && path === '/chats/background/cursors') {
+      return route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ cursors: {} }) });
+    }
     if (method === 'POST' && path === '/chats/background/subscribe') {
       return route.fulfill({
         status: 200,
@@ -503,6 +517,50 @@ export async function installMockApi(page: Page, overrides: MockOverrides = {}) 
     // ── JSON endpoints ───────────────────────────────────────────────────
     const json = (data: unknown) =>
       route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(data) });
+
+    // ── Skills (backend/src/routes/skills.ts) ────────────────────────────
+    if (path === '/skills' || path.startsWith('/skills/')) {
+      const skills = overrides.skills ?? [];
+      if (method === 'GET' && path === '/skills') {
+        // The registry's runtimes that reported skills; a real backend names them itself.
+        const runtimes = [...new Set(skills.map((skill) => skill.runtimeId).filter((id): id is string => typeof id === 'string'))]
+          .map((id) => ({ id, label: `${id[0].toUpperCase()}${id.slice(1)}`, available: true }));
+        return json({ skills, errors: [], libraryAvailable: true, runtimes });
+      }
+      if (method === 'GET' && path === '/skills/catalog') {
+        // The / menu of one runtime: the enabled, user-invocable library
+        // skills, every skill of the runtime with its flags, and the commands
+        // it runs before a session lists them (the backend's
+        // AgentRuntime.hostCommands; the mock names a few).
+        const runtimeId = url.searchParams.get('runtimeId') ?? '';
+        const commands: Record<string, string[]> = {
+          claude: ['status', 'model', 'context', 'mcp'],
+          kiro: ['clear', 'tools', 'mcp', 'context', 'usage'],
+        };
+        return json({
+          skills: skills.filter((skill) => skill.origin === 'library'
+            ? skill.userInvocable !== false && skill.enabled !== false
+            : skill.runtimeId === runtimeId),
+          errors: [],
+          libraryAvailable: true,
+          runtimes: [{ id: runtimeId, label: runtimeId.charAt(0).toUpperCase() + runtimeId.slice(1), available: true }],
+          commands: (commands[runtimeId] ?? []).map((name) => ({ name, description: `Mock ${name}` })),
+        });
+      }
+      if (method === 'GET' && path === '/skills/detail') {
+        const skill = skills.find((entry) => entry.id === url.searchParams.get('id'));
+        if (!skill) return route.fulfill({ status: 404, contentType: 'application/json', body: JSON.stringify({ error: 'Skill not found', code: 'not_found' }) });
+        return json({ skill: { content: `---\nname: ${String(skill.name)}\ndescription: ${String(skill.description)}\n---\n`, files: [], ...skill } });
+      }
+      if (method === 'DELETE' && path.startsWith('/skills/library/')) return route.fulfill({ status: 204, body: '' });
+      if ((method === 'POST' || method === 'PUT') && path.startsWith('/skills/library')) {
+        let body: Record<string, unknown> = {};
+        try { body = route.request().postDataJSON() as Record<string, unknown>; } catch { body = {}; }
+        const name = typeof body.newName === 'string' ? body.newName : typeof body.name === 'string' ? body.name
+          : decodeURIComponent(path.slice('/skills/library/'.length));
+        return json({ skill: { id: `library:${name}`, name, description: '', origin: 'library', userInvocable: true, modelInvocable: true, enabled: body.enabled !== false } });
+      }
+    }
 
     // chat create
     if (method === 'POST' && path === '/chats') {
@@ -546,7 +604,7 @@ export async function installMockApi(page: Page, overrides: MockOverrides = {}) 
     // new-workspace dialog auto-open — the state every spec's bootWithWorkspace
     // expects.
     if (method === 'GET' && path === '/prefs') {
-      return json({ prefs: { onboardingCompletedAt: 1 } });
+      return json({ prefs: { onboardingCompletedAt: 1, ...overrides.prefs } });
     }
     if (method === 'PUT' && path === '/prefs') {
       return json({ ok: true });
@@ -554,6 +612,22 @@ export async function installMockApi(page: Page, overrides: MockOverrides = {}) 
     if (method === 'GET' && path === '/ready') {
       return json({ status: 'ready', error: null });
     }
+    // Terminals the backend runs (backend/src/routes/terminals.ts): available,
+    // none running. route.fulfill cannot hold a stream open, so the stream sends
+    // a prompt and ends (the pane then reconnects); specs that type into a live
+    // terminal use fixtures/terminalFixtures.ts.
+    if (path === '/terminals' && method === 'GET') return json({ available: true, terminals: [] });
+    if (path === '/terminals' && method === 'POST') {
+      const body = route.request().postDataJSON() as { terminalId: string; cwd: string; cols: number; rows: number };
+      return json({ terminalId: body.terminalId, instance: 'mock', cwd: body.cwd, createdAt: 1, lastActiveAt: 1,
+        exited: false, cols: body.cols, rows: body.rows, clients: { phone: 0, desktop: 0 } });
+    }
+    const terminalRoute = /^\/terminals\/[a-zA-Z0-9-]+(\/[a-z]+)?$/.exec(path);
+    if (terminalRoute?.[1] === '/stream') {
+      return route.fulfill({ status: 200, contentType: 'text/event-stream', headers: { 'cache-control': 'no-cache' },
+        body: 'event: reset\ndata: {"type":"reset","seq":2,"instance":"mock","data":"$ ","exited":false}\n\n' });
+    }
+    if (terminalRoute) return json(method === 'DELETE' ? { closed: true } : { ok: true });
     // Phone access is off and unavailable unless a spec routes it; Settings
     // reads it when its machines or phone access page opens.
     if (method === 'GET' && path === '/mobile-access') {
@@ -646,8 +720,10 @@ export async function installMockApi(page: Page, overrides: MockOverrides = {}) 
 
     // Spaces Home, Meta agent, Home cards and Scheduled jobs: empty, well-formed answers.
     if (await spacesHome.handle(route)) return;
-    // Michi Memory: no memories, explicit mode, a quiet change feed, no automatic memory.
+    // Michi Memory: no memories, memory on, a quiet change feed, no automatic memory status.
     if (await memory.handle(route)) return;
+    // The Companion: quiet (no items, no brief, no conversation), every route answered.
+    if (await companion.handle(route)) return;
 
     // Default: empty 200. Loud enough to find in traces if we missed something.
     return json({ __unmocked: path });

@@ -3,10 +3,9 @@ import assert from 'node:assert/strict';
 import type { Request, Response } from 'express';
 import {
   createLocalOriginGuard,
-  isLocalHostHeader,
   isTrustedRendererOrigin,
 } from '../src/routes/middleware/localControl';
-import { isAllowedLocalOrigin } from '../src/services/localOrigins';
+import { isAllowedLocalHost, isAllowedLocalOrigin } from '../src/services/localOrigins';
 
 /** `npm run dev`'s watch build sets MICHI_DEV_RENDERER=1; only then is the Vite renderer on loopback :3001 trusted (services/localOrigins.ts). */
 function withDevRenderer(t: { after: (fn: () => void) => void }): void {
@@ -86,8 +85,8 @@ describe('createLocalOriginGuard', () => {
   });
 
   test('helpers', () => {
-    assert.equal(isLocalHostHeader('[::1]:3000'), true);
-    assert.equal(isLocalHostHeader(undefined), false);
+    assert.equal(isAllowedLocalHost('[::1]:3000', new Set()), true);
+    assert.equal(isAllowedLocalHost('michi.example:3000', new Set()), false);
     assert.equal(isTrustedRendererOrigin({ headers: { host: '127.0.0.1:3000' } }, undefined), true);
   });
 });

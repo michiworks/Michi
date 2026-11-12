@@ -3,15 +3,17 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { act, cleanup, renderHook } from '@testing-library/react';
 import type { MetaAgentInfo } from '../../services/api/metaAgent';
 import { MetaAgentApiError } from '../../services/api/metaAgent';
+import { resetAttentionForTests, setAttentionPreferences } from '../../services/attention/policy';
 import {
   readMetaAgent,
   refreshMetaAgent,
   resetMetaAgentStore,
   saveMetaAgentSettings,
+  useMetaAgentApprovalReview,
   useMetaAgentGuardFailed,
 } from './useMetaAgent';
 
-vi.mock('sonner', () => ({ toast: vi.fn() }));
+vi.mock('sonner', () => ({ toast: Object.assign(vi.fn(), { dismiss: vi.fn() }) }));
 const api = vi.hoisted(() => ({ fetchMetaAgent: vi.fn(), updateMetaAgentSettings: vi.fn() }));
 vi.mock('../../services/api/metaAgent', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../../services/api/metaAgent')>()),
@@ -106,11 +108,55 @@ describe('Meta agent store', () => {
   });
 });
 
-it('notifies once per pending tool request while repeated polls keep the request visible', async () => {
-  vi.mocked(toast).mockClear();
-  const info: MetaAgentInfo = { ...OK, toolApprovals: [{ id: 'request', server: 'mail', tool: 'send', description: '', state: 'pending', requestedAt: 1, updatedAt: 1 }] };
-  api.fetchMetaAgent.mockResolvedValue(info);
-  await refreshMetaAgent(); await refreshMetaAgent();
-  expect(toast).toHaveBeenCalledTimes(1);
-  expect(readMetaAgent().info?.toolApprovals?.[0].state).toBe('pending');
+describe('the tool approval notice', () => {
+  const request = (id: string, tool = 'send') => ({ id, server: 'mail', tool, description: '', state: 'pending' as const, requestedAt: 1, updatedAt: 1 });
+  const read = async (...approvals: Array<ReturnType<typeof request>>) => {
+    api.fetchMetaAgent.mockResolvedValue({ ...OK, toolApprovals: approvals });
+    await refreshMetaAgent();
+  };
+  beforeEach(() => { vi.mocked(toast).mockClear(); vi.mocked(toast.dismiss).mockClear(); });
+
+  it('says nothing for what already waited at the first read, so a reload does not announce it again', async () => {
+    await read(request('old'));
+    await read(request('old'));
+    expect(toast).not.toHaveBeenCalled();
+  });
+
+  it('gathers new requests into one notice with Review, once each while polls keep them waiting', async () => {
+    const review = vi.fn();
+    const { unmount } = renderHook(() => useMetaAgentApprovalReview(review));
+    await read();
+    await read(request('a'));
+    await read(request('a'));
+    await read(request('a'), request('b', 'reply'));
+    expect(vi.mocked(toast).mock.calls.map(([title, options]) => [title, (options as { id?: string })?.id])).toEqual([
+      ['Pages upkeep needs approval for mail / send', 'meta-agent:approvals'],
+      ['Pages upkeep needs approval for 2 tools', 'meta-agent:approvals'],
+    ]);
+    // It points at the page the approvals are on now: Settings › <name> › Pages upkeep (there is no Settings › Meta agent).
+    expect(vi.mocked(toast).mock.calls[0][1]).toEqual(expect.objectContaining({
+      description: 'Review them in Settings › Michi › Pages upkeep › Tool approvals. Other permitted tools can still be used.',
+    }));
+    (vi.mocked(toast).mock.calls[1][1] as unknown as { action: { onClick: () => void } }).action.onClick();
+    expect(review).toHaveBeenCalledOnce();
+    expect(readMetaAgent().info?.toolApprovals?.[0].state).toBe('pending');
+    unmount();
+  });
+
+  it('withdraws the notice once nothing waits', async () => {
+    await read();
+    await read(request('a'));
+    expect(toast.dismiss).not.toHaveBeenCalled();
+    await read();
+    expect(toast.dismiss).toHaveBeenCalledWith('meta-agent:approvals');
+  });
+
+  it('shows nothing while notifications are off', async () => {
+    setAttentionPreferences({ level: 'off', sounds: true });
+    try {
+      await read();
+      await read(request('quiet'));
+      expect(toast).not.toHaveBeenCalled();
+    } finally { resetAttentionForTests(); }
+  });
 });

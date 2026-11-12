@@ -12,6 +12,7 @@ import {
   META_AGENT_FIRST_RUN_DAYS,
   isAssistantWorkspaceSettings,
   isReasoningLevel,
+  parseWorkspaceSettings,
   type MetaAgentFirstRunDays,
   type MetaAgentInfo,
   type MetaAgentResolvedRuntime,
@@ -24,7 +25,7 @@ import {
 import { getRuntime, listRuntimes } from '../../agents/registry';
 import { maintenanceRuntimeAvailability } from '../../agents/maintenancePolicy';
 import { LOCAL_AGENT_OWNER_ID } from '../agentOwner';
-import { getAgentConfig, resolveModel, resolveProvider, resolveReasoning } from '../agentConfig';
+import { getAgentConfig, resolveRuntimeProfile } from '../agentConfig';
 import { getDb } from '../db';
 import { listWorkspaces } from '../dbRepository';
 import { log } from '../logger';
@@ -49,7 +50,7 @@ const isCloud = () => process.env.MICHI_CLOUD === '1';
 
 function settingsKey(ownerUserId?: string | null): string {
   if (isCloud()) {
-    if (!ownerUserId) throw new Error('Meta agent settings require an authenticated owner');
+    if (!ownerUserId) throw new Error('Pages upkeep settings require an authenticated owner');
     return `meta_agent_settings:user:${ownerUserId}`;
   }
   return 'meta_agent_settings:desktop';
@@ -113,8 +114,7 @@ function legacyAssistantSettings(): MetaAgentSettings {
     .filter((ws) => ws.deleted_at == null && isAssistantWorkspaceSettings(ws.settings))
     .sort((a, b) => b.created_at - a.created_at)[0];
   if (!workspace) return { ...FOLLOW_GLOBAL };
-  let stored: unknown;
-  try { stored = (JSON.parse(workspace.settings ?? '{}') as Record<string, unknown>).assistant; } catch { return { ...FOLLOW_GLOBAL }; }
+  const stored = parseWorkspaceSettings(workspace.settings)?.assistant;
   if (!isObject(stored)) return { ...FOLLOW_GLOBAL };
   const runtimeId = idOrNull(stored.runtimeId);
   if (!runtimeId || !getRuntime(runtimeId)) return { ...FOLLOW_GLOBAL };
@@ -232,13 +232,7 @@ export function resolveMetaAgentRuntime(ownerUserId?: string | null): MetaAgentR
   const userId = isCloud() ? ownerUserId ?? undefined : undefined;
   const runtimeId = settings.runtimeId ?? getAgentConfig(userId).runtime;
   const usesProviders = getRuntime(runtimeId)?.capabilities.providerModels === true;
-  const globalProvider = usesProviders ? resolveProvider(runtimeId, userId) || null : null;
-  const providerId = usesProviders ? settings.providerId ?? globalProvider : null;
-  // The global model belongs to the global provider; another provider starts on its own default.
-  const modelId = settings.modelId
-    ?? (providerId !== globalProvider ? null : resolveModel(runtimeId, userId) || null);
-  const reasoning = settings.reasoning ?? (resolveReasoning(runtimeId, userId) as RuntimeReasoning | undefined) ?? null;
-  return { runtimeId, providerId, modelId, reasoning, followsGlobal: settings.runtimeId === null };
+  return { runtimeId, ...resolveRuntimeProfile(runtimeId, usesProviders, settings, userId), followsGlobal: settings.runtimeId === null };
 }
 
 /** GET /api/meta-agent. */

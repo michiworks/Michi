@@ -1,9 +1,10 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import type { MichiAssistantConversations } from 'michi-shared';
+import { localDay, type MichiAssistantConversations } from 'michi-shared';
+import { formatDay, formatMichiClock } from '../content/michiFormat';
 import { activateAssistantConversation, fetchAssistantConversations } from '../../../services/api/assistant';
-import { adoptAssistantInfo, useAssistantSnapshot } from '../../../state/assistant/assistantStore';
+import { adoptCompanionAssistant as adoptAssistantInfo, useCompanionAssistant as useAssistantSnapshot } from '../../../state/companion/companionStore';
 import { useChatActions, useStructuralSelector } from '../../../state/chatStore';
-import { fetchWorkspace } from '../../../services/api/persistence';
+import { fetchWorkspaceStructure } from '../../../services/api/persistence';
 
 /** Recent conversations live under Assistant; expanding loads five more from the durable history. */
 export function AssistantHistory({ onOpenAssistant, visible = false }: { onOpenAssistant(): void; visible?: boolean }) {
@@ -55,7 +56,11 @@ export function AssistantHistory({ onOpenAssistant, visible = false }: { onOpenA
       const info = await activateAssistantConversation(id, nodeId);
       // A previously loaded archived tree must become writable in the authoritative store too.
       const started = Date.now();
-      const workspace = await fetchWorkspace(info.workspaceId).catch(cause => {
+      // Structure only: the conversation's body loads in the embedded loader.
+      const workspace = await fetchWorkspaceStructure(info.workspaceId).then(raw => {
+        if (raw === null) throw new Error('The assistant workspace is no longer available');
+        return raw;
+      }).catch(cause => {
         // Activation already succeeded on the server; let the embedded loader retry
         // this conversation rather than leave subsequent activations using a stale ID.
         adoptAssistantInfo(info);
@@ -75,7 +80,7 @@ export function AssistantHistory({ onOpenAssistant, visible = false }: { onOpenA
       title={item.title} aria-current={visible && item.nodeId === nodeId ? 'page' : undefined}
       disabled={switching !== null || (status === 'streaming' && item.nodeId !== nodeId)} onClick={() => { void open(item.nodeId); }}>
       <span className="area-side__label">{item.title}</span>
-      <time dateTime={new Date(item.updatedAt).toISOString()} title={new Date(item.updatedAt).toLocaleString()}>{new Date(item.updatedAt).toLocaleDateString(undefined, { month: 'short', day: 'numeric' })}</time>
+      <time dateTime={new Date(item.updatedAt).toISOString()} title={formatMichiClock(item.updatedAt)}>{formatDay(localDay(new Date(item.updatedAt)))}</time>
     </button>)}
     {history.nextCursor && <button type="button" className="spaces-assistant-history__more" disabled={loading} onClick={() => { void more(); }}>{loading ? 'Loading…' : 'Show more'}</button>}
     {error && <div className="area-side__note" role="alert">{error} <button type="button" onClick={() => { setRetry(value => value + 1); }}>Retry</button></div>}

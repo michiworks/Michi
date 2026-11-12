@@ -9,6 +9,19 @@ import { getWorkspace, moveTreeToWorkspace } from '../src/services/dbRepository'
 import { ensureDurableGraphNode } from '../src/services/graphCommands';
 
 const REPAIR_MIGRATION = path.join(__dirname, '../src/db/migrations/0062_repair_moved_active_tree.sql');
+// The renderer's pickLandingTreeId reads the same table (conversationVisibility.test.ts).
+const LANDING_CASES = path.join(__dirname, 'fixtures/landingTree/cases.json');
+
+interface LandingCases {
+  leaving: string;
+  lands: string;
+  trees: Array<{
+    id: string;
+    lastActiveAt: number;
+    archived?: boolean;
+    root?: { deleted?: boolean; purged?: boolean; pageId?: string; maintenanceJobId?: string; scheduledOnlyJobId?: string };
+  }>;
+}
 
 function workspace(id: string, activeTreeId: string | null = null): void {
   getDb().prepare('INSERT INTO workspaces(id,name,active_tree_id,created_at,updated_at) VALUES (?,?,?,1,1)')
@@ -51,6 +64,27 @@ describe('moving a tree keeps the source active tree in its workspace', () => {
     moveTreeToWorkspace('moving', 'src', 'target');
     assert.equal(activeTree('src'), 'newer');
     assert.equal(activeTree('target'), null);
+  });
+
+  test('lands where the renderer does: never on a hidden helper\'s thread, ties by id', () => {
+    const cases = JSON.parse(fs.readFileSync(LANDING_CASES, 'utf8')) as LandingCases;
+    workspace('src', cases.leaving);
+    const db = getDb();
+    for (const t of cases.trees) {
+      const root = `root-${t.id}`;
+      if (t.root?.pageId) {
+        db.prepare("INSERT INTO pages(id,owner_user_id,workspace_id,title,blocks,updated_at,created_at) VALUES (?,'local','src',?,'[]',1,1)")
+          .run(t.root.pageId, t.root.pageId);
+      }
+      db.prepare('INSERT INTO trees(id,workspace_id,root_node_id,archived_at,last_active_at,created_at) VALUES (?,?,?,?,?,1)')
+        .run(t.id, 'src', root, t.archived ? 5 : null, t.lastActiveAt);
+      db.prepare(`INSERT INTO nodes(id,workspace_id,tree_id,kind,status,created_at,deleted_at,purged_at,page_id,maintenance_job_id,scheduled_only_job_id)
+        VALUES (?,?,?,'chat','idle',1,?,?,?,?,?)`)
+        .run(root, 'src', t.id, t.root?.deleted ? 5 : null, t.root?.purged ? 6 : null,
+          t.root?.pageId ?? null, t.root?.maintenanceJobId ?? null, t.root?.scheduledOnlyJobId ?? null);
+    }
+    moveTreeToWorkspace(cases.leaving, 'src', 'target');
+    assert.equal(activeTree('src'), cases.lands);
   });
 
   test('clears the active tree when no other tree qualifies, and leaves other choices alone', () => {

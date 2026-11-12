@@ -1,4 +1,4 @@
-import type { ChildProcessWithoutNullStreams } from 'node:child_process';
+import { spawnSync, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -47,6 +47,14 @@ export interface SpawnClaudeArgs {
   permissionPromptTool?: string;
   /** Inline Claude settings JSON, used by Michi-owned lifecycle hooks. */
   settingsInline?: string;
+  /**
+   * The session's Ultracode setting, sent explicitly so a user or project
+   * settings file cannot turn it on unseen. Session-scoped in the CLI: a
+   * resumed process starts without it, so every spawn passes it again.
+   * Undefined sends nothing; a session that loads no settings files has no
+   * file to override, so `false` is dropped there.
+   */
+  ultracode?: boolean;
   /** Include hook_started/progress/response envelopes in stream-json output. */
   includeHookEvents?: boolean;
   /**
@@ -94,12 +102,30 @@ export function resetClaudeBinaryCacheForTest(): void {
   _cached = null;
 }
 
-/** The claude executable: `binaryPath` when it exists, else PATH and the usual install locations. Cached once found. */
+/** Why `claude --version` fails for `file`, or null when it exits 0. */
+function claudeVersionFailure(file: string): string | null {
+  const result = spawnSync(file, ['--version'], {
+    stdio: ['ignore', 'ignore', 'pipe'],
+    encoding: 'utf8',
+    timeout: 10_000,
+  });
+  if (result.error) return result.error.message;
+  if (result.status === 0) return null;
+  const detail = result.stderr?.trim().split('\n')[0]?.slice(0, 160);
+  return result.signal ? `killed by ${result.signal}` : `exit ${result.status}${detail ? `: ${detail}` : ''}`;
+}
+
+/**
+ * The claude executable: `binaryPath` when it exists, else the first
+ * candidate on PATH or in the usual install locations whose `--version`
+ * succeeds, so a stale shim cannot shadow a working CLI. Cached once found.
+ */
 export function findClaudeBinary(binaryPath?: string): string {
   if (_cached !== null) return _cached;
 
   const { found, tried } = resolveNamedBinary('claude', {
     envValue: binaryPath,
+    unusableReason: claudeVersionFailure,
   });
   if (found) {
     _cached = found;
@@ -110,6 +136,24 @@ export function findClaudeBinary(binaryPath?: string): string {
     `claude binary not found. Tried: ${tried.join(', ')}. ` +
       'Install with: npm install -g @anthropic-ai/claude-code, irm https://claude.ai/install.ps1 | iex, or set CLAUDE_CLI_BIN.',
   );
+}
+
+/**
+ * The config directory Michi and every claude child it spawns share: the
+ * profile's configDir, else CLAUDE_CONFIG_DIR, else claude's default
+ * ~/.claude. An empty value counts as unset, and claudeChildEnv drops an
+ * empty CLAUDE_CONFIG_DIR, so the CLI lands on the same directory. Auth
+ * preflight, transcript lookups, settings and skill reads all go through it.
+ */
+export function claudeConfigRoot(configDir: string | undefined, spawnEnv: NodeJS.ProcessEnv): string {
+  return configDir || spawnEnv.CLAUDE_CONFIG_DIR || path.join(os.homedir(), '.claude');
+}
+
+/** A claude child's environment: `base`, the profile's CLAUDE_CONFIG_DIR, then `overrides`. */
+export function claudeChildEnv(base: NodeJS.ProcessEnv, configDir: string | undefined, overrides?: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  const env = { ...base, ...(configDir ? { CLAUDE_CONFIG_DIR: configDir } : {}), ...overrides };
+  if (!env.CLAUDE_CONFIG_DIR) delete env.CLAUDE_CONFIG_DIR;
+  return env;
 }
 
 /**
@@ -156,11 +200,9 @@ export function preflightClaudeAuth(configDir: string | undefined, env: NodeJS.P
 
   // OAuth path — claude stores creds under its config dir after `claude /login`.
   // Different versions use different filenames; presence of the directory
-  // plus a settings.json or session-env is a reasonable proxy. Must check the
-  // SAME dir the spawned process will use: an explicit override first, then an
-  // inherited CLAUDE_CONFIG_DIR, then claude's default ~/.claude.
-  const claudeDir =
-    configDir || env.CLAUDE_CONFIG_DIR || path.join(os.homedir(), '.claude');
+  // plus a settings.json or session-env is a reasonable proxy, in the same
+  // dir the spawned process will use.
+  const claudeDir = claudeConfigRoot(configDir, env);
   if (fs.existsSync(claudeDir)) {
     const candidates = ['auth.json', 'settings.json', 'session-env'];
     for (const f of candidates) {
@@ -261,11 +303,7 @@ export function spawnClaude(args: SpawnClaudeArgs): ChildProcessWithoutNullStrea
   const argv = buildClaudeArgv(args);
   return spawnAgentProcess(binary, argv, {
     cwd: args.cwd,
-    env: {
-      ...args.spawnEnv,
-      ...(args.configDir ? { CLAUDE_CONFIG_DIR: args.configDir } : {}),
-      ...args.env,
-    },
+    env: claudeChildEnv(args.spawnEnv, args.configDir, args.env),
     signal: args.signal,
   });
 }

@@ -12,9 +12,8 @@
  *    unavailable, or an unexpected throw) — a leaked listener is a leak AND, in this campaign's
  *    own test suite, a hung process (see the test file's header comment).
  *
- * NOT owned here: the HTTP route (`POST /api/panes/wait`) and the `wait_pane` agent tool — those
- * are P3-5b, a deliberate follow-up split from the original four-deliverable task (see this
- * task's report). This file exports exactly the service function P3-5b mounts against.
+ * NOT owned here: the agent tools that call it (`wait_pane` in
+ * backend/src/agents/paneInspectionTools.ts, and threadMessageTool.ts). There is no HTTP route.
  *
  * Built on P3-2/P3-4's `PaneFeed.oncePerObject` seam (`paneInspectionSubscribe.ts`), which this
  * task implements: a non-coalescing, ring-untouched one-shot change listener that reuses the
@@ -34,8 +33,8 @@ import {
   type WaitReason,
   type WaitUntil,
 } from 'michi-shared';
-import { authorizeCaller, inspect, resolvePaneTarget, scopeForCaller, type PaneInspectionCaller } from './paneInspection';
-import { paneInspectionRing } from './paneInspectionRing';
+import { authorizeCaller, inspect, paneContentSnapshot, resolvePaneTarget, scopeForCaller, type PaneInspectionCaller } from './paneInspection';
+import { contentEquals, paneInspectionRing } from './paneInspectionRing';
 import { PaneFeed, systemPaneSubscribeClock, type PaneSubscribeClock } from './paneInspectionSubscribe';
 import type { AgentRunEventBus } from '../agents/runs/agentRunEventBus';
 
@@ -53,6 +52,16 @@ export interface WaitPaneInput {
    *  `changed`). */
   executionRef?: ExecutionRef;
   timeoutMs: number;
+  /** A slot the caller already holds for this wait (reservePaneWaitSlot): the wait takes no second one. */
+  slot?: PaneWaitSlot;
+}
+
+/** One of an owner's concurrent-wait slots, held across the steps of one call (send_to_thread's wait). */
+export interface PaneWaitSlot {
+  readonly ownerUserId: string;
+  held(): boolean;
+  /** Gives the slot back; later calls do nothing. */
+  release(): void;
 }
 
 export interface WaitPaneDeps {
@@ -81,17 +90,21 @@ function releaseWaitSlot(ownerUserId: string): void {
   else activeWaitsByOwner.set(ownerUserId, count - 1);
 }
 
-function toContentSnapshot(descriptor: PaneDescriptorV1): unknown {
-  const { observation, presence, ...rest } = descriptor;
+/**
+ * Takes one of the owner's wait slots for a call that waits in several steps
+ * and passes it to waitPane (WaitPaneInput.slot); null when the owner is at
+ * the limit. The caller releases it when the call ends.
+ */
+export function reservePaneWaitSlot(ownerUserId: string): PaneWaitSlot | null {
+  if (!acquireWaitSlot(ownerUserId)) return null;
+  let held = true;
   return {
-    ...rest,
-    observation: { freshness: observation.freshness },
-    presence: {
-      coverage: presence.coverage,
-      views: presence.views.map((view) => ({
-        windowId: view.windowId, uiPaneId: view.uiPaneId, treeId: view.treeId,
-        visible: view.visible, openedAtClient: view.openedAtClient,
-      })),
+    ownerUserId,
+    held: () => held,
+    release: () => {
+      if (!held) return;
+      held = false;
+      releaseWaitSlot(ownerUserId);
     },
   };
 }
@@ -140,14 +153,15 @@ export async function waitPane(caller: PaneInspectionCaller, input: WaitPaneInpu
   const target = resolvePaneTarget(input.locator);
   authorizeCaller(caller, target);
 
-  if (!acquireWaitSlot(caller.ownerUserId)) {
+  const reserved = input.slot?.held() === true && input.slot.ownerUserId === caller.ownerUserId;
+  if (!reserved && !acquireWaitSlot(caller.ownerUserId)) {
     throw new PaneInspectionError('RATE_LIMITED', 'wait_pane', `at most ${PANE_INSPECTION_LIMITS.concurrentWaitsPerOwnerMax} concurrent waits are allowed per owner`);
   }
 
   try {
     return await runWait(caller, target, input, deps);
   } finally {
-    releaseWaitSlot(caller.ownerUserId);
+    if (!reserved) releaseWaitSlot(caller.ownerUserId);
   }
 }
 
@@ -172,7 +186,7 @@ function runWait(
     }
 
     const scope = scopeForCaller(caller);
-    const baselineContent = toContentSnapshot(descriptor);
+    const baselineContent = paneContentSnapshot(descriptor);
 
     if (input.until === 'terminal') {
       const { settled } = outcomeFor(descriptor);
@@ -235,7 +249,7 @@ function runWait(
           if (nowSettled) { finish(result('terminal', changedDescriptor, mintCursor(changedDescriptor, target, scope))); return; }
           // Not T1's own settlement (e.g. T2 starting) — keep waiting, re-armed against the new
           // content so the next distinct change (not this same one) is what wakes us again.
-          if (!settled) arm(toContentSnapshot(changedDescriptor));
+          if (!settled) arm(paneContentSnapshot(changedDescriptor));
         },
         () => finish(result('unavailable', null, '')),
         input.until === 'terminal' ? input.executionRef : undefined,
@@ -267,7 +281,7 @@ function runWait(
     if (input.until === 'terminal') {
       const { settled: nowSettled } = outcomeFor(secondDescriptor);
       if (nowSettled) { finish(result('terminal', secondDescriptor, mintCursor(secondDescriptor, target, scope))); return; }
-    } else if (!deepEqual(baselineContent, toContentSnapshot(secondDescriptor))) {
+    } else if (!contentEquals(baselineContent, paneContentSnapshot(secondDescriptor))) {
       finish(result('changed', secondDescriptor, mintCursor(secondDescriptor, target, scope)));
       return;
     }
@@ -276,7 +290,7 @@ function runWait(
       try {
         latestDescriptor = inspect(caller, { locator: input.locator, executionRef: input.executionRef });
         const reason = input.until === 'terminal' && outcomeFor(latestDescriptor).settled ? 'terminal'
-          : input.until === 'changed' && !deepEqual(baselineContent, toContentSnapshot(latestDescriptor)) ? 'changed' : 'timed_out';
+          : input.until === 'changed' && !contentEquals(baselineContent, paneContentSnapshot(latestDescriptor)) ? 'changed' : 'timed_out';
         finish(result(reason, latestDescriptor, latestDescriptor.observation.cursor));
       } catch (err) {
         if (err instanceof PaneInspectionError && (err.code === 'NOT_FOUND' || err.code === 'NAVIGATION_DISABLED')) {
@@ -290,8 +304,4 @@ function runWait(
 function mintCursor(descriptor: PaneDescriptorV1, target: ReturnType<typeof resolvePaneTarget>, scope: ReturnType<typeof scopeForCaller>): string {
   void target;
   return descriptor.observation.cursor;
-}
-
-function deepEqual(a: unknown, b: unknown): boolean {
-  return JSON.stringify(a) === JSON.stringify(b);
 }

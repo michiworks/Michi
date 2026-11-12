@@ -127,7 +127,7 @@ async function read(connectionId: string, call: () => Promise<SpacesFirstRunStat
     publish(connectionId, current, {
       ...current.snapshot,
       load: status === 404 ? 'unavailable' : current.snapshot.data ? 'ready' : 'error',
-      error: error instanceof Error ? error.message : 'Could not read the Meta agent’s first run',
+      error: error instanceof Error ? error.message : 'Could not read how Pages upkeep’s first run is going',
       unreachable: typeof status !== 'number',
     });
   }
@@ -256,9 +256,7 @@ export function newerFirstRun(a: FirstRunProgressDto | null | undefined, b: Firs
 
 // "New" on a workspace row: the first run wrote its home and it has not been opened since.
 const OPENED_KEY = 'michi.spaces-home.opened';
-const openedListeners = new Set<() => void>();
 let opened: Record<string, number> | null = null;
-let openedVersion = 0;
 
 function openedMap(): Record<string, number> {
   if (opened) return opened;
@@ -284,19 +282,9 @@ export function markWorkspaceHomeOpened(connectionId: string, workspaceId: strin
   if ((map[key] ?? 0) >= at) return;
   opened = { ...map, [key]: at };
   try { localStorage.setItem(OPENED_KEY, JSON.stringify(opened)); } catch { /* optional UI memory */ }
-  openedVersion += 1;
-  for (const listener of openedListeners) listener();
 }
 
-/** Changes whenever a workspace home is marked opened, so "New" badges re-render. */
-export function useWorkspaceHomesOpenedVersion(): number {
-  return useSyncExternalStore(
-    (listener) => { openedListeners.add(listener); return () => { openedListeners.delete(listener); }; },
-    () => openedVersion,
-    () => openedVersion,
-  );
-}
-
+/** @testonly */
 export function resetSpacesFirstRunStore(): void {
   for (const current of entries.values()) if (current.timer !== null) window.clearTimeout(current.timer);
   entries.clear();

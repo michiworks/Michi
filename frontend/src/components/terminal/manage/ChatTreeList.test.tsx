@@ -1,4 +1,3 @@
-import React from 'react';
 import { describe, it, expect, vi } from 'vitest';
 import { render, screen, fireEvent } from '@testing-library/react';
 import ChatTreeList from './ChatTreeList';
@@ -115,6 +114,30 @@ describe('ChatTreeList', () => {
     fireEvent.mouseEnter(rootItem);
     fireEvent.click(screen.getByLabelText(/more actions/i));
     expect(screen.queryByText('Unpin')).not.toBeNull();
+  });
+
+  it('shows a renamed thread by the name the user gave it, and offers no Rename it cannot carry out', () => {
+    const renamed = mkProject();
+    renamed.trees[0].name = 'Payment bug';
+    render(
+      <ChatTreeList
+        workspace={renamed}
+        nodes={NODES}
+        filter=""
+        onOpen={() => {}}
+        menuActions={{
+          activateTree: vi.fn(), archiveTree: vi.fn(), unarchiveTree: vi.fn(), pinTree: vi.fn(),
+          unpinTree: vi.fn(), renameTree: vi.fn(), deleteTree: vi.fn(), exportTree: vi.fn(),
+        }}
+      />,
+    );
+    const rootItem = screen.getAllByRole('listitem').find((el) => el.textContent?.includes('Payment bug'))!;
+    expect(rootItem.textContent).not.toContain('root chat');
+    expect(screen.getByText('failure modes regression')).toBeTruthy();
+    fireEvent.mouseEnter(rootItem);
+    fireEvent.click(screen.getByLabelText(/more actions/i));
+    expect(screen.queryByText('Pin')).not.toBeNull();
+    expect(screen.queryByText(/Rename/)).toBeNull();
   });
 
   it('keeps ⋯ visible on a screen that cannot hover, where a tap opens the thread', () => {

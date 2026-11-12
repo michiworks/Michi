@@ -43,7 +43,7 @@
  *    commit-before-broadcast already holds without a second listener path.
  *  - Presence: NOT a separate source. `PanePresenceRegistry` (P2-1's file, not owned here) has no
  *    listener/event hook of its own — registration, update, explicit close, and lease expiry all
- *    change what `getPresence()` returns on the NEXT read, and `toContentSnapshot`'s `presence`
+ *    change what `getPresence()` returns on the NEXT read, and `paneContentSnapshot`'s `presence`
  *    section already participates in this module's own content-equality diff. So every one of
  *    those four presence transitions is picked up as an ordinary `changed` the next time this
  *    object is re-inspected for ANY reason (a ChatHub event, a Run event, or — for an object with
@@ -71,8 +71,8 @@
 
 import type { AgentRunEventV1 } from 'michi-shared';
 import { AgentRunEventType, PANE_INSPECTION_LIMITS, PaneInspectionError, type PaneDescriptorV1, type PaneFeedEventV1 } from 'michi-shared';
-import { authorizeCaller, inspect, resolvePaneTarget, type PaneInspectionCaller } from './paneInspection';
-import { PaneInspectionRing, type AuthorizationScope } from './paneInspectionRing';
+import { authorizeCaller, inspect, paneContentSnapshot, resolvePaneTarget, scopeForCaller, type PaneInspectionCaller } from './paneInspection';
+import { contentEquals, PaneInspectionRing } from './paneInspectionRing';
 import type { AgentRunEventBus } from '../agents/runs/agentRunEventBus';
 import { chatHub as systemChatHub, type ChatObservationSnapshot, type HubSubscriber } from '../agents/chatHub';
 import { getNodesMetadataByIds, type NodeMetadataBatchEntry } from './dbRepository';
@@ -111,36 +111,6 @@ export const systemPaneSubscribeClock: PaneSubscribeClock = {
   setInterval: (fn, ms) => setInterval(fn, ms),
   clearInterval: (handle) => clearInterval(handle as NodeJS.Timeout),
 };
-
-// ---------------------------------------------------------------------------
-// Content-snapshot shaping — what participates in the ring's deep-equality change detection.
-// ---------------------------------------------------------------------------
-
-/** The subset of a PaneDescriptorV1 that constitutes "content" for revision purposes. Explicitly
- *  excludes `observation.observedAt` (a plain re-read must never look like a change — design §8:
- *  "快照中的这些采样时间不参与 cursor 的内容等价判断") and `presence.views[].lastSeenAt` (a
- *  keepalive renewing lastSeenAt is sampling-only, mirrors `recordPresenceKeepalive`'s own
- *  contract). Everything else — activity, execution, latestOutput, presence view membership,
- *  conversation/lineage/runtime — is real content and participates in the comparison.
- */
-function toContentSnapshot(descriptor: PaneDescriptorV1): unknown {
-  const { observation, presence, ...rest } = descriptor;
-  return {
-    ...rest,
-    observation: { freshness: observation.freshness }, // cursor/observedAt are sampling artefacts.
-    presence: {
-      coverage: presence.coverage,
-      views: presence.views.map((view) => ({
-        windowId: view.windowId,
-        uiPaneId: view.uiPaneId,
-        treeId: view.treeId,
-        visible: view.visible,
-        openedAtClient: view.openedAtClient,
-        // registeredAt/lastSeenAt deliberately omitted — sampling artefacts.
-      })),
-    },
-  };
-}
 
 function utf8Bytes(value: unknown): number {
   return Buffer.byteLength(JSON.stringify(value), 'utf8');
@@ -465,7 +435,7 @@ export class PaneFeed {
    */
   subscribe(caller: PaneInspectionCaller, paneId: string, resumeCursor: string | undefined, emitter: PaneFeedEmitter): void {
     if (this.stopped) return;
-    const scope = scopeFor(caller);
+    const scope = scopeForCaller(caller);
     this.ring.registerSubscriber(paneId, scope);
     this.states.set(paneId, { lastEmittedContent: undefined, pendingOutputTimer: undefined, pendingDescriptor: null, settled: false, caller, emitter });
 
@@ -536,9 +506,9 @@ export class PaneFeed {
      *  already performed before arming this listener — this method never re-derives its own
      *  baseline, so it agrees exactly with whatever the caller compared against). Never
      *  coalesces: `wait_pane` has no output-only throttling window (design §7.4 only speaks of
-     *  changed/terminal/timed_out/unavailable, none of which are a coalescing target), and never
-     *  touches the ring — recording ring events here would be observed by unrelated SSE
-     *  subscribers of the SAME object as if this one-shot check were itself a feed. When
+     *  changed/terminal/timed_out/unavailable, none of which are a coalescing target). Its inspect()
+     *  does publish to the ring, as it must: wait_pane returns the descriptor's cursor, which has
+     *  to be a ring token. When
      *  `executionRef` is supplied, the re-inspect is scoped to it (design §7.4's `until:
      *  'terminal'` needs T1's OWN status, not whatever the object's current/latest attempt is —
      *  the plain unscoped read a caller with no executionRef gets is exactly what `until:
@@ -558,7 +528,7 @@ export class PaneFeed {
         // Any other error (e.g. SOURCE_UNAVAILABLE) is transient — try again on the next trigger.
         return;
       }
-      if (deepEqual(baselineContent, toContentSnapshot(descriptor))) return; // unchanged — keep waiting.
+      if (contentEquals(baselineContent, paneContentSnapshot(descriptor))) return; // unchanged — keep waiting.
       done = true;
       stop();
       onChange(descriptor);
@@ -792,13 +762,13 @@ export class PaneFeed {
   private handlePotentialChange(caller: PaneInspectionCaller, paneId: string, descriptor: PaneDescriptorV1, emitter: PaneFeedEmitter): void {
     const state = this.states.get(paneId);
     if (!state || state.settled) return;
-    const nextContent = toContentSnapshot(descriptor);
+    const nextContent = paneContentSnapshot(descriptor);
 
-    if (state.lastEmittedContent !== undefined && deepEqual(state.lastEmittedContent, nextContent)) {
+    if (state.lastEmittedContent !== undefined && contentEquals(state.lastEmittedContent, nextContent)) {
       // Nothing changed at all — a pure re-read (e.g. a metadata-poll tick that found no actual
       // difference). Record it as a sampling-only touch so LRU ordering still reflects recent
       // activity without advancing revision.
-      this.ring.recordObservedAtRefresh(paneId, scopeFor(caller));
+      this.ring.recordObservedAtRefresh(paneId, scopeForCaller(caller));
       return;
     }
 
@@ -829,7 +799,7 @@ export class PaneFeed {
       const pending = state.pendingDescriptor;
       state.pendingOutputTimer = undefined;
       state.pendingDescriptor = null;
-      if (pending && !deepEqual(toContentSnapshot(pending), nextContent)) {
+      if (pending && !contentEquals(paneContentSnapshot(pending), nextContent)) {
         this.flush(caller, paneId, pending, emitter, 'output_changed');
       }
     }
@@ -845,14 +815,14 @@ export class PaneFeed {
   ): void {
     const state = this.states.get(paneId);
     if (!state || state.settled) return;
-    const scope = scopeFor(caller);
+    const scope = scopeForCaller(caller);
     // A coalesced preview may outlive a policy change; never flush it without a fresh check.
     try { authorizeCaller(caller, resolvePaneTarget({ paneId })); }
     catch (err) {
       if (err instanceof PaneInspectionError && (err.code === 'NOT_FOUND' || err.code === 'NAVIGATION_DISABLED')) this.revoke(caller, paneId, emitter);
       return;
     }
-    const content = toContentSnapshot(descriptor);
+    const content = paneContentSnapshot(descriptor);
     const payloadSizeHint = utf8Bytes(descriptor);
 
     let event: PaneFeedEventV1;
@@ -887,8 +857,8 @@ export class PaneFeed {
   private emitFreshSnapshot(caller: PaneInspectionCaller, paneId: string, emitter: PaneFeedEmitter): void {
     const descriptor = this.tryAuthorizedInspect(caller, paneId, emitter);
     if (!descriptor) return;
-    const scope = scopeFor(caller);
-    const content = toContentSnapshot(descriptor);
+    const scope = scopeForCaller(caller);
+    const content = paneContentSnapshot(descriptor);
     const payload: PaneFeedEventV1 = { version: 1, paneId, cursor: '', type: 'changed',
       changedSections: Object.keys(descriptor), descriptor, emittedAt: this.clock.now() };
     const cursor = this.ring.recordSnapshot(paneId, scope, content, { kind: 'changed', payload, sizeBytes: utf8Bytes(payload) });
@@ -926,7 +896,7 @@ export class PaneFeed {
     const state = this.states.get(paneId);
     if (state) state.settled = true;
     if (emitter) {
-      const cursor = this.ring.recordObservedAtRefresh(paneId, scopeFor(caller));
+      const cursor = this.ring.recordObservedAtRefresh(paneId, scopeForCaller(caller));
       emitter.emit({ version: 1, paneId, cursor, type: 'access_revoked', emittedAt: this.clock.now() });
     }
     // Stop watching immediately — no further poll ticks or run events should even attempt
@@ -951,10 +921,6 @@ export class PaneFeed {
 // Small pure helpers
 // ---------------------------------------------------------------------------
 
-function scopeFor(caller: PaneInspectionCaller): AuthorizationScope {
-  return { ownerUserId: caller.ownerUserId, workspaceId: caller.workspaceId, runOwnerId: caller.runOwner?.runId ?? null };
-}
-
 function safeResolveTarget(paneId: string) {
   try {
     return resolvePaneTarget({ paneId });
@@ -965,10 +931,6 @@ function safeResolveTarget(paneId: string) {
 
 function paneIdLocator(paneId: string) {
   return { paneId };
-}
-
-function deepEqual(a: unknown, b: unknown): boolean {
-  return JSON.stringify(a) === JSON.stringify(b);
 }
 
 /** Best-effort list of top-level descriptor sections that actually differ, for `changed`'s

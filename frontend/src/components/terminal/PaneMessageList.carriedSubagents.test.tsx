@@ -1,4 +1,3 @@
-import React from 'react';
 import { render, within } from '@testing-library/react';
 import { describe, expect, it, vi } from 'vitest';
 import type { ChatNodeState, SubagentInfo } from '../../state/chatTypes';
@@ -36,7 +35,6 @@ function inlineRoster(state: ChatNodeState, messageId: string) {
         prefs={DEFAULT_PREFS}
         contentStyle={{}}
         streaming
-        viewportHeight={800}
         onRetryTurn={() => {}}
         onEditUserMessage={() => {}}
         onContinueFollowUp={() => {}}
@@ -51,14 +49,42 @@ describe('PaneMessageList inline subagents', () => {
   it('the latest turn does not list agents that ended in an earlier turn', () => {
     const state = node({ id: 'a2', role: 'assistant', text: 'Rebasing.', toolCalls: [], streaming: true, subagents: [stage('codex'), stage('kiro')] });
     expect(inlineRoster(state, 'a2')).toBeNull();
-    expect(within(frame('a1')).getByTestId('message-subagents').textContent).toContain('2 done');
+    expect(within(frame('a1')).getByTestId('message-subagents').textContent).toContain('2 stopped');
   });
 
-  it('the latest turn still lists an agent it set working again', () => {
+  it('moves the one roster down to the turn that set an agent working again', () => {
     const state = node({ id: 'a2', role: 'assistant', text: 'Asking again.', toolCalls: [], streaming: true, subagents: [stage('codex'), stage('kiro', { status: 'working' })] });
     const roster = inlineRoster(state, 'a2');
     expect(roster?.textContent).toContain('1 working');
-    expect(roster?.textContent).toContain('Research kiro');
-    expect(roster?.textContent).not.toContain('Research codex');
+    // codex keeps the outcome its earlier turn recorded.
+    expect(roster?.textContent).toContain('1 stopped');
+    expect(within(frame('a1')).queryByTestId('message-subagents')).toBeNull();
+  });
+
+  it('shows background agents reporting one turn at a time as one roster under the newest report', () => {
+    const agent = (sessionId: string, patch: Partial<SubagentInfo> = {}): SubagentInfo => ({
+      sessionId, sessionName: sessionId, agentName: 'Explore', initialQuery: `Check ${sessionId}`, description: `Check ${sessionId}`,
+      status: 'terminated', background: true, group: '', dependsOn: [], parentToolCallId: `t-${sessionId}`, ...patch,
+    });
+    const done = (sessionId: string) => agent(sessionId, { outcome: 'completed', result: `${sessionId} is in dev` });
+    const ids = ['w', 'x', 'y', 'z'];
+    const state: ChatNodeState = {
+      nodeId: 'bg-node', kind: 'chat', chatId: null, projectId: 'bg-ws', status: 'idle', messagesLoaded: true, followUps: [],
+      messages: [
+        { id: 'u1', role: 'user', text: 'Check the worktrees.', toolCalls: [] },
+        {
+          id: 'a1', role: 'assistant', text: 'Four agents are reading them.', subagents: ids.map((id) => agent(id)),
+          toolCalls: ids.map((id) => ({ id: `t-${id}`, title: 'Agent', kind: 'tool', status: 'completed' })),
+        },
+        { id: 'a2', role: 'assistant', text: 'w is summarized.', toolCalls: [], subagents: [done('w'), agent('x'), agent('y'), agent('z')] },
+        { id: 'a3', role: 'assistant', text: 'x reported.', toolCalls: [], subagents: [done('x'), agent('y'), agent('z')] },
+        { id: 'a4', role: 'assistant', text: 'y reported.', toolCalls: [], subagents: [done('y'), agent('z')] },
+      ],
+    };
+    const roster = inlineRoster(state, 'a4');
+    expect(document.querySelectorAll('[data-testid="message-subagents"]')).toHaveLength(1);
+    // Each agent counted once, from its newest copy: three reported, one still runs.
+    expect(roster?.textContent).toContain('1 working');
+    expect(roster?.textContent).toContain('3 done');
   });
 });

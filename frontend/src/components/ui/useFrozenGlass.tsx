@@ -55,10 +55,10 @@ export function useFrozenGlass(
     const panel = panelRef.current;
     const capture = getElectron()?.captureBackdrop;
     const style = panel ? getComputedStyle(panel) : null;
-    // Reduced transparency (.term-glass turns solid) or a zero blur (the Glass
-    // blur setting): there is no live frost to replace. Not read from the
-    // panel's backdrop-filter, which the capturing phase itself turns off.
-    const blurPx = px(style?.getPropertyValue('--term-glass-blur') ?? '', 26);
+    // Reduced transparency (.term-glass turns solid) or a zero overlay blur:
+    // there is no live frost to replace. Not read from the panel's
+    // backdrop-filter, which the capturing phase itself turns off.
+    const blurPx = px(style?.getPropertyValue('--term-overlay-blur') ?? '', 48);
     const reducedTransparency = typeof window.matchMedia === 'function'
       && window.matchMedia('(prefers-reduced-transparency: reduce)').matches;
     if (!panel || !capture || blurPx <= 0 || reducedTransparency) {
@@ -88,7 +88,7 @@ export function useFrozenGlass(
       const canvas = url && performance.now() < deadline
         ? await blurSnapshot(url, {
             blurPx,
-            saturate: style?.getPropertyValue('--term-glass-saturate').trim() || '160%',
+            saturate: style?.getPropertyValue('--term-overlay-saturate').trim() || '110%',
             viewportWidth: width,
           }).catch(() => null)
         : null;

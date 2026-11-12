@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { ChatMessage } from './chatTypes';
-import { buildResumePrompt } from './turnInterruption';
+import { buildResumePrompt, classifiedErrorKind, CREDENTIALS_EXPIRED_KIND } from './turnInterruption';
 
 const user = (id: string, text: string, extra: Partial<ChatMessage> = {}): ChatMessage => ({ id, role: 'user', text, toolCalls: [], ...extra });
 const assistant = (id: string, text: string, extra: Partial<ChatMessage> = {}): ChatMessage => ({ id, role: 'assistant', text, toolCalls: [], ...extra });
@@ -28,6 +28,14 @@ describe('buildResumePrompt', () => {
     expect(prompt.text).toContain('[END INTERRUPTED TURN]');
     expect(prompt.text).toMatch(/Do NOT re-run steps or tools that already completed successfully/);
     expect(prompt.text.indexOf('[END INTERRUPTED TURN]')).toBeLessThan(prompt.text.indexOf('The user pressed Resume'));
+  });
+
+  it('names expired credentials, not a restart, as what cut the turn off', () => {
+    const turn = [user('u1', 'Deploy the stack'), assistant('a1', 'Synthesizing.')];
+    expect(buildResumePrompt(turn)!.text).toContain('cut off when Michi restarted');
+    const prompt = buildResumePrompt(turn, 'credentials')!;
+    expect(prompt.text).toContain("cut off when the agent's credentials expired");
+    expect(prompt.text).not.toContain('Michi restarted');
   });
 
   it('walks past mid-turn steering to the request and carries the steer in order', () => {
@@ -64,5 +72,16 @@ describe('buildResumePrompt', () => {
     expect(buildResumePrompt([])).toBeNull();
     expect(buildResumePrompt([assistant('a1', 'orphan')])).toBeNull();
     expect(buildResumePrompt([user('u1', '   ')])).toBeNull();
+  });
+});
+
+describe('classifiedErrorKind', () => {
+  it('names a credentials failure the stream sent no code for, and keeps every code it did send', () => {
+    expect(classifiedErrorKind(undefined, 'Claude authentication failed. Refresh the CLI credentials and retry; the original session is retained.'))
+      .toBe(CREDENTIALS_EXPIRED_KIND);
+    expect(classifiedErrorKind(undefined, 'stream disconnected before completion: failed to load AWS credentials: AWS credential export command failed'))
+      .toBe(CREDENTIALS_EXPIRED_KIND);
+    expect(classifiedErrorKind(undefined, 'DeepSeek API key not configured')).toBeUndefined();
+    expect(classifiedErrorKind('connection', 'authentication failed')).toBe('connection');
   });
 });

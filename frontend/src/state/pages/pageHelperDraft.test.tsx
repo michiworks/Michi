@@ -1,31 +1,35 @@
-import { afterEach, describe, expect, it, vi } from 'vitest';
-import { consumePageHelperDraft, dispatchPageHelperDraft, pendingPageHelperDrafts, PAGE_HELPER_DRAFT_EVENT } from './pageHelperDraft';
+import { afterEach, describe, expect, it } from 'vitest';
+import { dispatchPageHelperDraft, PAGE_HELPER_DRAFT_EVENT, type PageHelperDraftRequest } from './pageHelperDraft';
+
+let drafts: PageHelperDraftRequest[] = [];
+const record = (event: Event) => { drafts.push((event as CustomEvent<PageHelperDraftRequest>).detail); };
 
 afterEach(() => {
-  vi.restoreAllMocks();
-  const pending = pendingPageHelperDrafts({ backendConnectionId: 'local', workspaceId: 'w', pageId: 'p' });
-  pending.forEach((request) => request.requestId !== undefined && consumePageHelperDraft(request.requestId));
+  window.removeEventListener(PAGE_HELPER_DRAFT_EVENT, record);
+  drafts = [];
 });
 
+function listen() {
+  window.addEventListener(PAGE_HELPER_DRAFT_EVENT, record);
+}
+
 describe('page helper draft requests', () => {
-  it('queues by backend, workspace, and page and emits a scoped draft-only event', () => {
-    const listener = vi.fn();
-    window.addEventListener(PAGE_HELPER_DRAFT_EVENT, listener);
+  it('emits a draft-only event scoped to the backend, workspace and page, its text trimmed', () => {
+    listen();
     dispatchPageHelperDraft({ backendConnectionId: 'local', workspaceId: 'w', pageId: 'p', text: '  Help debug  ' });
-    window.removeEventListener(PAGE_HELPER_DRAFT_EVENT, listener);
-    expect(listener).toHaveBeenCalledTimes(1);
-    expect(pendingPageHelperDrafts({ backendConnectionId: 'local', workspaceId: 'w', pageId: 'p' })[0].text).toBe('Help debug');
-    expect(pendingPageHelperDrafts({ backendConnectionId: 'other', workspaceId: 'w', pageId: 'p' })).toEqual([]);
+    expect(drafts).toEqual([{ backendConnectionId: 'local', workspaceId: 'w', pageId: 'p', text: 'Help debug' }]);
   });
 
   it('rejects empty and oversized requests', () => {
+    listen();
     dispatchPageHelperDraft({ backendConnectionId: 'local', workspaceId: 'w', pageId: 'p', text: '  ' });
     dispatchPageHelperDraft({ backendConnectionId: 'local', workspaceId: 'w', pageId: 'p', text: 'x'.repeat(8001) });
-    expect(pendingPageHelperDrafts({ backendConnectionId: 'local', workspaceId: 'w', pageId: 'p' })).toEqual([]);
+    expect(drafts).toEqual([]);
   });
 
   it('accepts the shared component draft limit of 8,000 characters', () => {
+    listen();
     dispatchPageHelperDraft({ backendConnectionId: 'local', workspaceId: 'w', pageId: 'p', text: 'x'.repeat(8000) });
-    expect(pendingPageHelperDrafts({ backendConnectionId: 'local', workspaceId: 'w', pageId: 'p' })[0]?.text).toHaveLength(8000);
+    expect(drafts[0]?.text).toHaveLength(8000);
   });
 });

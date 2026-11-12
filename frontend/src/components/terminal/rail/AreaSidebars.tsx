@@ -1,14 +1,16 @@
 import React, { useMemo } from 'react';
 import { Clock, Loader2, Sparkles } from 'lucide-react';
 import { useChatProjects } from '../../../state/chatStore';
-import { SETTINGS_AREA_SECTIONS, type SettingsAreaSection } from '../../../state/shellArea';
+import { useCompanionName } from '../../../state/companion/companionName';
 import { useScheduledJobs } from '../scheduled/useScheduledJobs';
 import { describeSchedule } from '../scheduled/scheduleModel';
 import { closeMetaAgentDetail, openMetaAgentDetail, useMetaAgentDetailOpen } from '../scheduled/metaAgent/metaAgentNav';
-import { useMetaAgentOverview, type MetaAgentOverviewLoad } from '../scheduled/metaAgent/useMetaAgentOverview';
+import { pagesUpkeepTitle } from '../scheduled/metaAgent/metaAgentCopy';
+import { META_AGENT_PAGE_POLL_MS, useMetaAgentOverview, type MetaAgentOverviewLoad } from '../../../state/metaAgent/useMetaAgentOverview';
 import { useMetaAgentSnapshot } from '../../../state/metaAgent/useMetaAgent';
-import { metaAgentStatus } from '../../../state/metaAgent/metaAgentStatus';
+import { META_AGENT_ROW_WORD, metaAgentStatus } from '../../../state/metaAgent/metaAgentStatus';
 import type { MetaAgentInfo } from '../../../services/api/metaAgent';
+import { SidebarScroller } from '../SidebarScroller';
 
 function rowKeys(action: () => void) {
   return (event: React.KeyboardEvent) => {
@@ -18,16 +20,14 @@ function rowKeys(action: () => void) {
   };
 }
 
-/** The system row's sub-line: what the Meta agent's background maintenance is doing now. */
+/** The system row's sub-line: what Pages upkeep, the background maintenance, is doing now. */
 function systemSubline(load: MetaAgentOverviewLoad, info: MetaAgentInfo | null): string {
   if (load.kind === 'loading') return 'Checks every 60 s';
   if (load.kind !== 'ready') return load.kind === 'unavailable' ? 'Not set up yet' : 'Status unavailable';
   const { cursors } = load.overview;
   // The same status the Spaces sidebar, the Home and the detail page read.
-  const { kind } = metaAgentStatus({ info, overview: load.overview });
-  if (kind === 'stopped' || kind === 'guard-failed') return 'Error';
-  if (kind === 'not-running' || kind === 'unsupported') return 'Not running';
-  if (kind === 'paused') return 'Paused';
+  const word = META_AGENT_ROW_WORD[metaAgentStatus({ info, overview: load.overview }).kind];
+  if (word) return word.text;
   if (cursors.length === 0) return 'Running · no workspace yet';
   const waiting = cursors.filter((cursor) => cursor.state === 'next').length;
   return waiting > 0 ? `Running · ${waiting} need${waiting === 1 ? 's' : ''} reading`
@@ -35,22 +35,22 @@ function systemSubline(load: MetaAgentOverviewLoad, info: MetaAgentInfo | null):
 }
 
 /**
- * Scheduled area sidebar: the Meta agent's system task pinned first, then every
- * ordinary job. The per-workspace managed maintenance jobs are that one system
- * task, so they are not listed again.
+ * Scheduled area sidebar: the system task "<name> · Pages upkeep" pinned
+ * first, then every ordinary job. The per-workspace managed maintenance jobs
+ * are that one system task, so they are not listed again.
  */
 export function ScheduledSidebar({ selectedJobId, onSelectJob, onNavigate, systemTask }: {
   selectedJobId: string | null;
   onSelectJob: (jobId: string) => void;
   /** After a row opened its page in the main column. */
   onNavigate?: () => void;
-  /** The Meta agent's maintenance task; a placeholder row until it exists. */
+  /** The Pages upkeep task; a placeholder row until it exists. */
   systemTask?: React.ReactNode;
 }) {
   const { jobs, loading, unavailable } = useScheduledJobs();
   const descriptionId = React.useId();
   const { projects } = useChatProjects();
-  const overview = useMetaAgentOverview();
+  const overview = useMetaAgentOverview(META_AGENT_PAGE_POLL_MS);
   const agent = useMetaAgentSnapshot();
   const names = useMemo(() => new Map(projects.map((project) => [project.id, project.name] as const)), [projects]);
   const managed = overview.kind === 'ready' ? overview.overview.managedJobIds : undefined;
@@ -59,19 +59,20 @@ export function ScheduledSidebar({ selectedJobId, onSelectJob, onNavigate, syste
     return jobs.filter((job) => !hidden.has(job.id)).sort((a, b) => a.name.localeCompare(b.name));
   }, [jobs, managed]);
   const metaAgentOpen = useMetaAgentDetailOpen();
+  const upkeep = pagesUpkeepTitle(useCompanionName());
   const openMetaAgent = () => { openMetaAgentDetail(); onNavigate?.(); };
   return (
     <div className="area-side scheduled-side" aria-label="Scheduled jobs">
-      <div className="area-side__grow term-scrollbar">
+      <SidebarScroller className="area-side__grow">
         <div className="area-side__section">Scheduled</div>
         {systemTask ?? (
           <div className="area-side__item" data-pinned="">
             <div className="area-side__row is-strong" role="button" tabIndex={0} aria-current={metaAgentOpen ? 'true' : undefined}
-              aria-label="Meta agent · maintain Pages System" aria-describedby={`${descriptionId}-system`}
+              aria-label={`${upkeep} System`} aria-describedby={`${descriptionId}-system`}
               onClick={openMetaAgent} onKeyDown={rowKeys(openMetaAgent)}>
               <Sparkles size={15} strokeWidth={1.5} aria-hidden="true" />
               <span className="area-side__text">
-                <span className="area-side__label">Meta agent · maintain Pages</span>
+                <span className="area-side__label">{upkeep}</span>
                 <span className="area-side__sub" id={`${descriptionId}-system`}>{systemSubline(overview, agent.info)}</span>
               </span>
               <span className="area-side__tag">System</span>
@@ -98,34 +99,7 @@ export function ScheduledSidebar({ selectedJobId, onSelectJob, onNavigate, syste
             </div>
           );
         })}
-      </div>
+      </SidebarScroller>
     </div>
-  );
-}
-
-/** Settings area sidebar: one row per section. */
-export function SettingsSidebar({ section, onSelect }: {
-  section: SettingsAreaSection;
-  onSelect: (section: SettingsAreaSection) => void;
-}) {
-  return (
-    <nav className="area-side" aria-label="Settings sections">
-      <div className="area-side__grow term-scrollbar">
-        <div className="area-side__section">Settings</div>
-        {SETTINGS_AREA_SECTIONS.map(({ id, label }) => (
-          <div
-            key={id}
-            className="area-side__row is-strong is-flat"
-            role="button"
-            tabIndex={0}
-            aria-current={section === id ? 'page' : undefined}
-            onClick={() => onSelect(id)}
-            onKeyDown={rowKeys(() => onSelect(id))}
-          >
-            <span className="area-side__label">{label}</span>
-          </div>
-        ))}
-      </div>
-    </nav>
   );
 }

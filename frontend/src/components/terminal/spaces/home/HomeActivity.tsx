@@ -1,8 +1,10 @@
 import React from 'react';
 import { MessageSquare, Sparkles } from 'lucide-react';
-import type { SpaceActivityDetail, SpaceActivityItem } from 'michi-shared';
+import { joinAnd, type SpaceActivityDetail, type SpaceActivityItem } from 'michi-shared';
+import { useCompanionName } from '../../../../state/companion/companionName';
 import { michiOneLine } from '../../content/michiPlainText';
-import { homeAge } from './homeFormat';
+import { companionActorName } from '../../content/db/taskActivity';
+import { formatMichiAgo } from '../../content/michiFormat';
 
 export const SPACE_ACTIVITY_SHOWN = 7;
 
@@ -12,10 +14,11 @@ function activityKey(item: SpaceActivityItem): string {
   return item.kind === 'page-change' ? `change:${item.batchId}` : `thread:${item.threadNodeId}`;
 }
 
-function who(by: SpaceActivityDetail['by']): string {
+/** Who did it: you, the agent by its name (its Pages upkeep as "<name> · Pages upkeep"), a conversation, or an agent. */
+function who(by: SpaceActivityDetail['by'], name: string): string {
   switch (by.kind) {
     case 'user': return 'You';
-    case 'meta-agent': return 'Meta agent';
+    case 'companion': return companionActorName(by, name);
     case 'conversation': return `“${by.title}”`;
     default: return 'Agent';
   }
@@ -25,12 +28,12 @@ function who(by: SpaceActivityDetail['by']): string {
 function what(detail: SpaceActivityDetail): string {
   const named = detail.names.map((name) => `“${name}”`);
   if (named.length === 0 || named.length < detail.targets) return `${detail.targets} ${detail.targets === 1 ? 'place' : 'places'}`;
-  return named.length === 1 ? named[0]! : `${named.slice(0, -1).join(', ')} and ${named.at(-1)}`;
+  return joinAnd(named);
 }
 
-/** "Meta agent rewrote “本周重点”", "预算 ¥9,800 → ¥11,600", "“排查公证失败” updated 2 places, 1 waiting for you". */
-export function changeLabel(item: PageChangeItem, detail: SpaceActivityDetail): string {
-  const by = who(detail.by);
+/** "Michi rewrote “本周重点”", "预算 ¥9,800 → ¥11,600", "“排查公证失败” updated 2 places, 1 waiting for you"; `name` is the agent's. */
+export function changeLabel(item: PageChangeItem, detail: SpaceActivityDetail, name: string): string {
+  const by = who(detail.by, name);
   const target = what(detail);
   const one = detail.targets === 1;
   const removal = item.ops.length === 1 && item.ops[0] === 'delete';
@@ -49,9 +52,9 @@ export function changeLabel(item: PageChangeItem, detail: SpaceActivityDetail): 
   return detail.undone ? `${text} · undone` : text;
 }
 
-function activityText(item: SpaceActivityItem): string {
+function activityText(item: SpaceActivityItem, name: string): string {
   if (item.kind === 'conversation') return `New conversation “${item.title}”${item.startedFromPageTitle ? ` from ${item.startedFromPageTitle}` : ''}`;
-  if (item.detail) return changeLabel(item, item.detail);
+  if (item.detail) return changeLabel(item, item.detail, name);
   const changed = `${item.actor === 'agent' ? 'Agent' : 'You'} changed ${item.count} ${item.count === 1 ? 'place' : 'places'}`;
   const waiting = item.pending > 0 ? `, ${item.pending} waiting for you` : '';
   // A Markdown hard break (a backslash ending a line, already joined into one line here) is a space, not text.
@@ -69,6 +72,7 @@ export function SpaceActivityList({ items, clock, onOpen }: {
   clock: number;
   onOpen(item: SpaceActivityItem): void;
 }) {
+  const name = useCompanionName();
   const shown = (items ?? []).slice(0, SPACE_ACTIVITY_SHOWN);
   return (
     <section className="spaces-home-section" aria-labelledby="spaces-home-activity">
@@ -88,10 +92,10 @@ export function SpaceActivityList({ items, clock, onOpen }: {
             <span className="spaces-home-feed__text">
               <b>{item.kind === 'conversation' ? item.workspaceName : item.pageTitle}</b>
               <span aria-hidden="true"> · </span>
-              {activityText(item)}
+              {activityText(item, name)}
               {item.fresh && <span className="sr-only"> (new)</span>}
             </span>
-            <span className="spaces-home-feed__age">{homeAge(item.at, clock)}</span>
+            <span className="spaces-home-feed__age">{formatMichiAgo(item.at, clock)}</span>
           </button>
         ))}
       </div>}

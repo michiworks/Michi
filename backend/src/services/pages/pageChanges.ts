@@ -1,14 +1,22 @@
-import { parsePageBlockInput, parsePageDatabaseOps, retainUserPageSegmentSources, pageViewProblem } from 'michi-shared';
+import { blockLocation, changeTargetKey, parsePageBlockInput, parsePageDatabaseOps, retainUserPageSegmentSources, pageViewProblem, rowLocation } from 'michi-shared';
 import type { PageBlock, PageBlockInput, PageDatabase, PageDatabaseRow, PageDatabaseView } from 'michi-shared';
+import { checkinNodeId, companionCheckinTurnId } from 'michi-shared';
 import type {
-  BlockLocation, ChangeTarget, PageChangeDto, RowLocation, TargetMutation, TargetSnapshot,
+  BlockLocation, ChangeTarget, CompanionRunUndoResult, DatabaseTargetSnapshot, PageChangeDto, RowLocation, TargetMutation, TargetSnapshot,
 } from 'michi-shared';
-import { invalidateDatabasePages, invalidatePages, PageWriteError, pagesTransaction } from './core';
-import { getDatabase, getPage, requireDatabaseRecord, saveDatabase, savePageContent } from './repository';
-import { dismissPendingProposals, getChange, getTargetHead, listChangeBatch, setTargetHead, updateChange } from './historyRepository';
+import { presentChange } from './checkinSources';
+import { invalidateDatabasePages, invalidatePages, PageWriteError, pageTimestamp, pagesTransaction } from './core';
+import {
+  databaseShown, deletePage, getDatabase, getPage, hasChildPages, pageOwnDatabaseIds, pagesMadeBy, requireDatabaseRecord, requirePageRecord,
+  saveDatabase, savePageContent, setAsideUnshownDatabase, type MadePage,
+} from './repository';
+import {
+  dismissPendingProposals, getChange, getTargetHead, hasEarlierChanges, hasStandingChanges, listChangeBatch, listCheckinRunChanges, setTargetHead, updateChange,
+} from './historyRepository';
 import { pageComponents } from './components';
 import { pinHumanDatabaseViews, pinHumanPageComponentBlocks } from './componentReferences';
-import { canonical } from './canonicalJson';
+import { canonical, sameCanonical } from './canonicalJson';
+import { blockSnapshot, dbSnapshot, rowSnapshot } from './changeSnapshots';
 
 export { dismissPendingProposals };
 
@@ -18,48 +26,19 @@ type EditableProposal =
   | { kind: 'row'; values?: Record<string, PageDatabaseRow['values'][string]>; body?: string }
   | { kind: 'view'; config: Record<string, unknown> };
 
-const json = (value: unknown): string => JSON.stringify(value);
 const conflict = (message = 'The change can no longer be applied safely'): PageWriteError =>
   new PageWriteError(409, 'undo_conflict', message);
-const same = (a: unknown, b: unknown): boolean => json(canonical(a)) === json(canonical(b));
-
-function safeNow(value?: number): number {
-  const now = value ?? Date.now();
-  if (!Number.isSafeInteger(now) || now < 0) throw new PageWriteError(400, 'invalid', 'Invalid timestamp');
-  return now;
-}
 
 function readCurrent(target: SafeTarget, owner: string): { snapshot: TargetSnapshot; workspaceId: string } {
   if (target.kind === 'block') {
     const page = getPage(target.pageId, owner, { write: true });
     const index = page.blocks.findIndex((block) => block.id === target.blockId);
-    if (index < 0) return { snapshot: { kind: 'block', exists: false, id: target.blockId, location: null }, workspaceId: page.workspaceId };
-    return { snapshot: { kind: 'block', exists: true, block: page.blocks[index]!, location: blockLocation(page.blocks, index) }, workspaceId: page.workspaceId };
+    return { snapshot: blockSnapshot(page.blocks[index], index < 0 ? null : blockLocation(page.blocks, index), target.blockId), workspaceId: page.workspaceId };
   }
   const record = requireDatabaseRecord(target.databaseId, owner, { write: true });
   const database = getDatabase(target.databaseId, owner, { write: true });
-  if (target.kind === 'row') {
-    const row = database.rows.find((item) => item.id === target.rowId);
-    return { snapshot: row
-      ? { kind: 'row', exists: true, row: structuredClone(row), location: rowLocation(database, target.rowId) }
-      : { kind: 'row', exists: false, id: target.rowId, location: null }, workspaceId: record.workspace_id };
-  }
-  return { snapshot: databaseSnapshot(database), workspaceId: record.workspace_id };
-}
-
-function blockLocation(blocks: readonly PageBlock[], index: number): BlockLocation {
-  return { parentId: null, slot: null, previousId: index > 0 ? blocks[index - 1]!.id : null,
-    nextId: index + 1 < blocks.length ? blocks[index + 1]!.id : null };
-}
-function rowLocation(database: PageDatabase, rowId: string): RowLocation {
-  const position = database.rows.findIndex((row) => row.id === rowId);
-  if (position < 0) return { position: database.rows.length, after: database.rows.at(-1)?.id ?? null };
-  return { position, after: database.rows[position - 1]?.id ?? null };
-}
-function databaseSnapshot(database: PageDatabase): TargetSnapshot {
-  return { kind: 'database', exists: true, database: { id: database.id, workspaceId: database.workspaceId,
-    title: database.title, columns: structuredClone(database.columns), views: structuredClone(database.views),
-    revision: database.revision, updatedAt: database.updatedAt } };
+  if (target.kind === 'row') return { snapshot: rowSnapshot(database, target.rowId), workspaceId: record.workspace_id };
+  return { snapshot: dbSnapshot(database), workspaceId: record.workspace_id };
 }
 
 function assertExpected(current: TargetSnapshot, expected: TargetSnapshot | null): void {
@@ -70,17 +49,17 @@ function assertExpected(current: TargetSnapshot, expected: TargetSnapshot | null
     return;
   }
   if (current.kind === 'block' && expected.kind === 'block') {
-    if (!same(current.location, expected.location) || !same({ ...current.block, rev: undefined }, { ...expected.block, rev: undefined })) throw conflict();
+    if (!sameCanonical(current.location, expected.location) || !sameCanonical({ ...current.block, rev: undefined }, { ...expected.block, rev: undefined })) throw conflict();
   } else if (current.kind === 'row' && expected.kind === 'row') {
     // Order is compared through `location`; stored positions are not renumbered after a delete.
     const strip = (row: PageDatabaseRow) => ({ ...row, rev: undefined, updatedAt: undefined, position: undefined });
-    if (!same(current.location, expected.location) || !same(strip(current.row), strip(expected.row))) throw conflict();
+    if (!sameCanonical(current.location, expected.location) || !sameCanonical(strip(current.row), strip(expected.row))) throw conflict();
   } else if (current.kind === 'database' && expected.kind === 'database') {
     const strip = (database: TargetSnapshot & { kind: 'database'; exists: true }) => {
       const { revision: _revision, updatedAt: _updatedAt, ...content } = database.database;
       return content;
     };
-    if (!same(strip(current), strip(expected))) throw conflict();
+    if (!sameCanonical(strip(current), strip(expected))) throw conflict();
   } else throw conflict();
 }
 
@@ -107,7 +86,7 @@ function insertionPosition(blocks: readonly PageBlock[], location: BlockLocation
 
 function ensureBlockLocation(blocks: readonly PageBlock[], id: string, expected: BlockLocation): void {
   const index = blocks.findIndex((block) => block.id === id);
-  if (index < 0 || !same(blockLocation(blocks, index), expected)) throw conflict('The block location changed');
+  if (index < 0 || !sameCanonical(blockLocation(blocks, index), expected)) throw conflict('The block location changed');
 }
 
 function writePageMutation(target: Extract<SafeTarget, {kind:'block'}>, owner: string, mutation: TargetMutation,
@@ -170,7 +149,7 @@ function saveDatabaseMutation(target: Extract<SafeTarget, {kind:'row'|'database'
     const index = database.rows.findIndex((row) => row.id === target.rowId);
     let next: PageDatabase;
     if (mutation.op === 'delete') {
-      if (mutation.id !== target.rowId || index < 0 || !same(rowLocation(database, target.rowId), mutation.expectedLocation)) throw conflict('The row location changed');
+      if (mutation.id !== target.rowId || index < 0 || !sameCanonical(rowLocation(database, target.rowId), mutation.expectedLocation)) throw conflict('The row location changed');
       const rows = database.rows.filter((row) => row.id !== target.rowId).map((row, i) => ({ ...row, position: i, rev: row.rev }));
       next = { ...database, rows, revision, updatedAt: now };
     } else if (mutation.op === 'upsert') {
@@ -223,12 +202,12 @@ function resourceRevision(target: ChangeTarget, owner: string): number {
  * history stays for agent changes.
  */
 export function revertChange(changeId: string, ownerUserId: string, now?: number, options: { allowUser?: boolean } = {}): PageChangeDto {
-  return revertRecordedChange(changeId, ownerUserId, now, options);
+  return presentChange(revertRecordedChange(changeId, ownerUserId, now, options), ownerUserId);
 }
 
 function revertRecordedChange(changeId: string, ownerUserId: string, now?: number, options: { allowUser?: boolean; deferViewValidation?: boolean } = {}): PageChangeDto {
   return pagesTransaction(() => {
-    const timestamp = safeNow(now);
+    const timestamp = pageTimestamp(now);
     const change = getChange(changeId, ownerUserId, { write: true });
     if (change.applicationState === 'reverted') return change;
     if (change.applicationState !== 'applied' || (change.proposalState !== null && change.proposalState !== 'accepted') || (change.source.kind === 'user' && !options.allowUser)) throw conflict('Only applied agent changes can be reverted');
@@ -241,12 +220,12 @@ function revertRecordedChange(changeId: string, ownerUserId: string, now?: numbe
 
 /** Puts back a reverted change; a person's own change only through the batch redo (`allowUser`). */
 export function redoChange(changeId: string, ownerUserId: string, now?: number, options: { allowUser?: boolean } = {}): PageChangeDto {
-  return redoRecordedChange(changeId, ownerUserId, now, options);
+  return presentChange(redoRecordedChange(changeId, ownerUserId, now, options), ownerUserId);
 }
 
 function redoRecordedChange(changeId: string, ownerUserId: string, now?: number, options: { allowUser?: boolean; deferViewValidation?: boolean } = {}): PageChangeDto {
   return pagesTransaction(() => {
-    const timestamp = safeNow(now);
+    const timestamp = pageTimestamp(now);
     const change = getChange(changeId, ownerUserId, { write: true });
     if (change.applicationState === 'applied') return change;
     if (change.applicationState !== 'reverted' || (change.proposalState !== null && change.proposalState !== 'accepted') || (change.source.kind === 'user' && !options.allowUser)) throw conflict('Only reverted agent changes can be redone');
@@ -276,8 +255,8 @@ function revertOrder(records: PageChangeDto[]): PageChangeDto[] {
     for (const anchor of anchors) {
       if (anchor === null) continue;
       const anchorKey = record.target.kind === 'block'
-        ? `block:${record.target.pageId}:${anchor}`
-        : record.target.kind === 'row' ? `row:${record.target.databaseId}:${anchor}` : null;
+        ? changeTargetKey({ kind: 'block', pageId: record.target.pageId, blockId: anchor })
+        : record.target.kind === 'row' ? changeTargetKey({ kind: 'row', databaseId: record.target.databaseId, rowId: anchor }) : null;
       const anchorChange = anchorKey ? byTarget.get(anchorKey) : undefined;
       if (!anchorChange || anchorChange.id === record.id) continue;
       const anchorInverse = anchorChange.inverse;
@@ -320,17 +299,211 @@ export function redoBatch(batchId: string, ownerUserId: string, workspaceId: str
   return { redone: result.applied, conflicts: result.conflicts };
 }
 
+/** What revertRunPageChanges did; `reverted` lists the applied changes it put back (page_changes ids). */
+export interface RunPageChangesUndo extends CompanionRunUndoResult {
+  /** The suggestions it dismissed (page_changes ids). */
+  dismissed: string[];
+  /**
+   * What the run made and this took away, once nothing else had touched it:
+   * a page (to the Trash, with the databases only it shows) or a database no
+   * page shows (set aside, its data kept). A conflict on one of these names
+   * the page or database id as its `changeId`.
+   */
+  removed: Array<{ kind: 'page' | 'database'; id: string }>;
+  /**
+   * The run's applied changes left as they are: suggestions the person
+   * accepted (theirs now, with any edits they made), and changes on a page or
+   * database that is in the trash or gone, which no longer show. Restoring
+   * the page brings those back, and Undo all can then put them back too.
+   */
+  skipped: string[];
+  /** What of the run still stands afterwards: its changes and suggestions, and what it made. 0 = everything is undone. */
+  remaining: number;
+}
+
+type MadeDatabase = { id: string; firstSeq: number; createdAt: number; made: DatabaseTargetSnapshot['database'] };
+/** One thing to undo; `key` places it in change-sequence order, `at` (when it happened) breaks a tie. */
+type UndoStep =
+  | { kind: 'batch'; key: number; at: number; records: PageChangeDto[] }
+  | { kind: 'page'; key: number; at: number; page: MadePage }
+  | { kind: 'database'; key: number; at: number; database: MadeDatabase };
+type TakeBack = 'removed' | 'gone' | { message: string };
+
+const standing = (record: PageChangeDto): boolean => record.applicationState === 'applied' && record.proposalState !== 'accepted';
+
+/** Whether a change's page or database is still there to show it: not in the trash, not gone. */
+function targetShown(target: ChangeTarget, owner: string): boolean {
+  try {
+    const record = target.kind === 'block'
+      ? requirePageRecord(target.pageId, owner, { includeDeleted: true })
+      : requireDatabaseRecord(target.databaseId, owner, { includeDeleted: true });
+    return record.deleted_at === null;
+  } catch (error) {
+    if (error instanceof PageWriteError && error.status === 404) return false;
+    throw error;
+  }
+}
+
+/**
+ * The databases a run made (databaseWrites.ts createAgentDatabase): its first
+ * change to one is the first change anyone made to it, starts from revision 1
+ * and was recorded as the database was created. A database a page template
+ * made goes with its page instead.
+ */
+function databasesMadeBy(records: readonly PageChangeDto[], pages: readonly MadePage[], owner: string): MadeDatabase[] {
+  const first = new Map<string, PageChangeDto>();
+  for (const record of records) if (record.target.kind !== 'block' && !first.has(record.target.databaseId)) first.set(record.target.databaseId, record);
+  const pageBlocks = pages.map((page) => JSON.stringify(page.made.blocks));
+  const made: MadeDatabase[] = [];
+  for (const [id, record] of first) {
+    const before = record.before;
+    if (record.target.kind !== 'database' || before?.kind !== 'database' || !before.exists || before.database.revision !== 1) continue;
+    if (hasEarlierChanges(id, record.seq) || pageBlocks.some((blocks) => blocks.includes(JSON.stringify(id)))) continue;
+    let createdAt: number;
+    try { createdAt = requireDatabaseRecord(id, owner, { includeDeleted: true }).created_at; } catch (error) {
+      if (error instanceof PageWriteError && error.status === 404) continue;
+      throw error;
+    }
+    if (createdAt === record.createdAt) made.push({ id, firstSeq: record.seq, createdAt, made: before.database });
+  }
+  return made;
+}
+
+const blocksWithoutRevisions = (blocks: readonly PageBlock[]): unknown => canonical(blocks.map(({ rev: _rev, ...block }) => block));
+
+/** Puts a page the run made in the Trash when it is as the run left it once its own changes are undone; anything else keeps it. */
+function takeBackPage(page: MadePage, owner: string, now: number): TakeBack {
+  try {
+    if (requirePageRecord(page.id, owner, { includeDeleted: true }).deleted_at !== null) return 'gone';
+    const current = getPage(page.id, owner, { write: true });
+    const untouched = current.title === page.made.title && current.color === page.made.color && current.parentId === page.made.parentId
+      && sameCanonical(blocksWithoutRevisions(current.blocks), blocksWithoutRevisions(page.made.blocks))
+      && !hasChildPages(page.id) && !hasStandingChanges({ pageId: page.id }, owner)
+      && pageOwnDatabaseIds(page.id).every((databaseId) => !hasStandingChanges({ databaseId }, owner));
+    if (!untouched) return { message: `"${current.title}", which this check-in made, was changed since, so it stays` };
+    deletePage(page.id, owner, { now });
+    return 'removed';
+  } catch (error) {
+    if (error instanceof PageWriteError && error.status === 404) return 'gone';
+    if (error instanceof PageWriteError) return { message: error.message };
+    throw error;
+  }
+}
+
+/** Sets aside a database the run made when nothing else touched it: no rows, no page shows it, as the run first made it. */
+function takeBackDatabase(database: MadeDatabase, owner: string, now: number): TakeBack {
+  try {
+    if (requireDatabaseRecord(database.id, owner, { includeDeleted: true }).deleted_at !== null) return 'gone';
+    const current = getDatabase(database.id, owner, { write: true });
+    const shape = (value: Pick<PageDatabase, 'title' | 'columns' | 'views'>) => ({ title: value.title, columns: value.columns, views: value.views });
+    const untouched = !current.rows.length && !databaseShown(database.id) && !hasStandingChanges({ databaseId: database.id }, owner)
+      && sameCanonical(shape(current), shape(database.made));
+    if (!untouched) return { message: `The database "${current.title}", which this check-in made, was changed since, so it stays` };
+    setAsideUnshownDatabase(database.id, owner, { now });
+    return 'removed';
+  } catch (error) {
+    if (error instanceof PageWriteError && error.status === 404) return 'gone';
+    if (error instanceof PageWriteError) return { message: error.message };
+    throw error;
+  }
+}
+
+/** Whether something the run made is still there. */
+function madeStands(kind: 'page' | 'database', id: string, owner: string): boolean {
+  return targetShown(kind === 'page' ? { kind: 'block', pageId: id, blockId: '' } : { kind: 'database', databaseId: id }, owner);
+}
+
+/**
+ * "Undo all" on a check-in's receipt (DESIGN-v2 §2.7): puts back what run
+ * `runId` did to the owner's pages and databases, newest first, and stops at
+ * the first thing that no longer undoes cleanly (it changed since, or its
+ * page is read-only), leaving older things as they are:
+ * - each batch of its applied changes is reverted;
+ * - a page or database it made is taken away once the changes made in it are
+ *   undone, if nobody touched it since (takeBackPage, takeBackDatabase);
+ * - suggestions the person accepted, and changes on a page or database in
+ *   the trash, are skipped (RunPageChangesUndo.skipped).
+ * Its suggestions still waiting for review are dismissed either way. What is
+ * already undone, reviewed or taken away is skipped, so calling it again is
+ * safe and may clear what a conflict left once the person sorts it out.
+ * W2-G1a's POST /companion/runs/:runId/undo calls it, then reverts the run's
+ * Today and goal changes.
+ */
+export function revertRunPageChanges(runId: string, ownerUserId: string, now?: number): RunPageChangesUndo {
+  const timestamp = pageTimestamp(now);
+  const records = listCheckinRunChanges(runId, ownerUserId);
+  const pages = pagesMadeBy({ nodeId: checkinNodeId(runId), turnId: companionCheckinTurnId(runId) }, ownerUserId);
+  const databases = databasesMadeBy(records, pages, ownerUserId);
+  const skipped: string[] = [];
+  const batches = new Map<string, PageChangeDto[]>();
+  for (const record of records) {
+    if (record.applicationState !== 'applied') continue;
+    if (!standing(record) || !targetShown(record.target, ownerUserId)) { skipped.push(record.id); continue; }
+    batches.set(record.batchId, [...(batches.get(record.batchId) ?? []), record]);
+  }
+  // One order for everything, by change sequence: a page sits just before the
+  // first change recorded at or after it was made; a database just before its first change.
+  const seqAt = (at: number): number => records.find((record) => record.createdAt >= at)?.seq ?? Number.MAX_SAFE_INTEGER;
+  const steps: UndoStep[] = [
+    ...[...batches.values()].map((batch): UndoStep => ({ kind: 'batch', key: Math.max(...batch.map((record) => record.seq)),
+      at: Math.max(...batch.map((record) => record.createdAt)), records: batch })),
+    ...pages.map((page): UndoStep => ({ kind: 'page', key: seqAt(page.createdAt) - 0.5, at: page.createdAt, page })),
+    ...databases.map((database): UndoStep => ({ kind: 'database', key: database.firstSeq - 0.5, at: database.createdAt, database })),
+  ].sort((a, b) => b.key - a.key || b.at - a.at);
+  const reverted: string[] = [];
+  const conflicts: Array<{ changeId: string; message: string }> = [];
+  const removed: RunPageChangesUndo['removed'] = [];
+  // Its suggestions go first: they change nothing, and once dismissed they no longer count as someone working on what it made.
+  const dismissed: string[] = [];
+  for (const record of records) {
+    if (record.proposalState !== 'pending') continue;
+    try {
+      resolveProposal(record.id, ownerUserId, timestamp, undefined, 'dismiss');
+      dismissed.push(record.id);
+    } catch (error) {
+      if (!(error instanceof PageWriteError)) throw error;
+      conflicts.push({ changeId: record.id, message: error.message });
+    }
+  }
+  for (const step of steps) {
+    if (step.kind === 'batch') {
+      const result = applyHistoryBatch(revertOrder(step.records), ownerUserId, 'undo', timestamp, { stopAtConflict: true });
+      reverted.push(...result.applied);
+      if (result.conflicts.length) { conflicts.push(...result.conflicts); break; }
+      continue;
+    }
+    const id = step.kind === 'page' ? step.page.id : step.database.id;
+    const outcome = pagesTransaction(() => (step.kind === 'page' ? takeBackPage(step.page, ownerUserId, timestamp) : takeBackDatabase(step.database, ownerUserId, timestamp)));
+    if (outcome === 'removed') removed.push({ kind: step.kind, id });
+    else if (outcome !== 'gone') { conflicts.push({ changeId: id, message: outcome.message }); break; }
+  }
+  const remaining = listCheckinRunChanges(runId, ownerUserId)
+    .filter((record) => record.proposalState === 'pending' || (standing(record) && targetShown(record.target, ownerUserId))).length
+    + pages.filter((page) => madeStands('page', page.id, ownerUserId)).length
+    + databases.filter((database) => madeStands('database', database.id, ownerUserId)).length;
+  return { reverted, dismissed, conflicts, removed, skipped, remaining };
+}
+
 /** View definitions and their entries may be mutually dependent with the recorded
  * structural anchors. Replay that page's group atomically, checking its final graph;
- * ordinary pages and databases retain independent per-target undo behavior. */
-function applyHistoryBatch(records: PageChangeDto[], owner: string, action: 'undo' | 'redo', now?: number) {
+ * ordinary pages and databases retain independent per-target undo behavior.
+ * `stopAtConflict` (a check-in run's Undo all) stops at the first group that
+ * fails and counts any page write error as its conflict, the target being gone included. */
+function applyHistoryBatch(records: PageChangeDto[], owner: string, action: 'undo' | 'redo', now?: number, options: { stopAtConflict?: boolean } = {}) {
   const pageGroups = new Map<string, PageChangeDto[]>();
   for (const record of records) if (record.target.kind === 'block') {
     const id = record.target.pageId;
     pageGroups.set(id, [...(pageGroups.get(id) ?? []), record]);
   }
+  const liveBlocks = (pageId: string): PageBlock[] => {
+    try { return getPage(pageId, owner).blocks; } catch (error) {
+      // A page that is gone fails each of its changes as a conflict below.
+      if (options.stopAtConflict && error instanceof PageWriteError) return [];
+      throw error;
+    }
+  };
   const atomicPages = new Set([...pageGroups].filter(([id, group]) =>
-    getPage(id, owner).blocks.some(block => block.type === 'view') || group.some(record =>
+    liveBlocks(id).some(block => block.type === 'view') || group.some(record =>
       [record.before, record.after].some(snapshot => snapshot?.kind === 'block' && snapshot.exists && snapshot.block.type === 'view')),
   ).map(([id]) => id));
   const visited = new Set<string>();
@@ -352,17 +525,12 @@ function applyHistoryBatch(records: PageChangeDto[], owner: string, action: 'und
       applied.push(...group.map(item => item.id));
     }
     catch (error) {
-      if (error instanceof PageWriteError && (error.status === 409 || error.code === 'task_board_needs_workspace')) conflicts.push(...group.map(item => ({ changeId: item.id, message: error.message })));
+      if (error instanceof PageWriteError && (options.stopAtConflict || error.status === 409 || error.code === 'task_board_needs_workspace')) conflicts.push(...group.map(item => ({ changeId: item.id, message: error.message })));
       else throw error;
+      if (options.stopAtConflict) break;
     }
   }
   return { applied, conflicts };
-}
-
-function changeTargetKey(target: ChangeTarget): string {
-  return target.kind === 'block' ? `block:${target.pageId}:${target.blockId}`
-    : target.kind === 'row' ? `row:${target.databaseId}:${target.rowId}`
-      : `database:${target.databaseId}`;
 }
 
 function parseEditedContent(value: unknown): EditableProposal | undefined {
@@ -392,7 +560,7 @@ function parseEditedContent(value: unknown): EditableProposal | undefined {
 
 function resolveProposal(changeId: string, owner: string, now?: number, editedInput?: unknown, action: 'accept'|'dismiss'|'reopen' = 'accept'): PageChangeDto {
   return pagesTransaction(() => {
-    const timestamp = safeNow(now);
+    const timestamp = pageTimestamp(now);
     const change = getChange(changeId, owner, { write: true });
     if (action === 'dismiss') {
       if (change.proposalState === 'dismissed') return change;
@@ -418,9 +586,8 @@ function resolveProposal(changeId: string, owner: string, now?: number, editedIn
     const appliedRev = applyAccepted(change, owner, accepted.forward, current.snapshot, timestamp);
     const afterCurrent = readCurrent(change.target, owner).snapshot;
     const forward = mutationForAccepted(change.target, accepted.forward, afterCurrent);
-    if ((forward.kind === 'block' && forward.op === 'delete') || (forward.kind === 'row' && forward.op === 'delete')) {
-      dismissPendingProposals(current.workspaceId, change.target, timestamp, change.id);
-    }
+    // The target's revision moved on, so the other suggestions waiting on it can never be accepted.
+    dismissPendingProposals(current.workspaceId, change.target, timestamp, change.id);
     setTargetHead(current.workspaceId, change.target, { headId: change.id, targetRevision: Math.max(head.targetRevision + 1, resourceRevision(change.target, owner)) });
     return updateChange(change.id, owner, {
       before: accepted.before, after: afterCurrent, forward, inverse: accepted.inverse,
@@ -430,14 +597,15 @@ function resolveProposal(changeId: string, owner: string, now?: number, editedIn
   });
 }
 
+/** The review actions answer with the change as its owner is shown it (checkinSources.ts presentChange). */
 export function acceptProposal(changeId: string, ownerUserId: string, now?: number, editedContent?: unknown): PageChangeDto {
-  return resolveProposal(changeId, ownerUserId, now, editedContent, 'accept');
+  return presentChange(resolveProposal(changeId, ownerUserId, now, editedContent, 'accept'), ownerUserId);
 }
 export function dismissProposal(changeId: string, ownerUserId: string, now?: number): PageChangeDto {
-  return resolveProposal(changeId, ownerUserId, now, undefined, 'dismiss');
+  return presentChange(resolveProposal(changeId, ownerUserId, now, undefined, 'dismiss'), ownerUserId);
 }
 export function reopenProposal(changeId: string, ownerUserId: string, now?: number): PageChangeDto {
-  return resolveProposal(changeId, ownerUserId, now, undefined, 'reopen');
+  return presentChange(resolveProposal(changeId, ownerUserId, now, undefined, 'reopen'), ownerUserId);
 }
 
 function currentRevision(snapshot: TargetSnapshot): number {
@@ -478,7 +646,7 @@ function acceptedMutations(change: PageChangeDto, before: TargetSnapshot, edited
     if (edited && edited.kind !== 'block') throw new PageWriteError(400, 'invalid', 'Edited content does not match this proposal');
     if (change.forward.op === 'delete') {
       if (!original || edited) throw conflict('This block proposal cannot be edited');
-      if (!current.exists || !same(current.location, change.forward.expectedLocation)) throw new PageWriteError(409, 'proposal_stale', 'The proposed block location has changed');
+      if (!current.exists || !sameCanonical(current.location, change.forward.expectedLocation)) throw new PageWriteError(409, 'proposal_stale', 'The proposed block location has changed');
       return { before, after: { kind: 'block', exists: false, id: target.blockId, location: null },
         forward: change.forward, inverse: { kind: 'block', op: 'upsert', block: original, location: current.location } };
     }
@@ -490,7 +658,7 @@ function acceptedMutations(change: PageChangeDto, before: TargetSnapshot, edited
     } catch {
       throw new PageWriteError(409, 'proposal_stale', 'The proposed block location has changed');
     }
-    if (original && current.exists && !same(current.location, change.forward.location)) {
+    if (original && current.exists && !sameCanonical(current.location, change.forward.location)) {
       throw new PageWriteError(409, 'proposal_stale', 'The proposed block location has changed');
     }
     const content = edited?.kind === 'block' ? retainUserPageSegmentSources(edited.block, change.forward.block) : stripBlock(change.forward.block);
@@ -517,18 +685,18 @@ function acceptedMutations(change: PageChangeDto, before: TargetSnapshot, edited
       const { revision: _revision, updatedAt: _updatedAt, ...storedAfter } = change.after.database;
       const { revision: _beforeRevision, updatedAt: _beforeUpdatedAt, ...originalContent } = original;
       if (proposed.id !== original.id || proposed.workspaceId !== original.workspaceId || proposed.title !== original.title ||
-        !same(storedAfter, proposed) || !same(change.inverse.database, originalContent) ||
+        !sameCanonical(storedAfter, proposed) || !sameCanonical(change.inverse.database, originalContent) ||
         original.columns.some((column) => !proposed.columns.some((next) => next.id === column.id)) ||
         original.views.some((view) => !proposed.views.some((next) => next.id === view.id)) ||
         proposed.columns.some((column) => column.type === 'threads') ||
-        proposed.views.some((view) => view.type === 'custom' && !same(view, original.views.find((old) => old.id === view.id))) ||
-        original.views.some((view) => view.type === 'custom' && !same(view, proposed.views.find((next) => next.id === view.id)))) {
+        proposed.views.some((view) => view.type === 'custom' && !sameCanonical(view, original.views.find((old) => old.id === view.id))) ||
+        original.views.some((view) => view.type === 'custom' && !sameCanonical(view, proposed.views.find((next) => next.id === view.id)))) {
         throw conflict('The configuration proposal changed unsupported database content');
       }
       const live = getDatabase(change.target.databaseId, owner, { write: true });
       if (live.role) throw conflict('Task database configuration stays in the UI');
       const database = { ...proposed, views: proposed.views.map((view) =>
-        same(view, original.views.find((old) => old.id === view.id)) ? view : { ...view, edit: { at: now } }) };
+        sameCanonical(view, original.views.find((old) => old.id === view.id)) ? view : { ...view, edit: { at: now } }) };
       // saveDatabase validates the resulting schema against the live rows before committing.
       return { before, after: { kind: 'database', exists: true, database: { ...database, revision: original.revision + 1, updatedAt: now } },
         forward: { kind: 'database', op: 'replace', database }, inverse: change.inverse };
@@ -541,10 +709,10 @@ function acceptedMutations(change: PageChangeDto, before: TargetSnapshot, edited
     const proposedDatabase = change.forward.database;
     const storedAfter = change.after.database;
     if (proposedDatabase.id !== originalDatabase.id || proposedDatabase.workspaceId !== originalDatabase.workspaceId ||
-      !same(proposedDatabase.title, originalDatabase.title) || !same(proposedDatabase.columns, originalDatabase.columns) ||
+      !sameCanonical(proposedDatabase.title, originalDatabase.title) || !sameCanonical(proposedDatabase.columns, originalDatabase.columns) ||
       storedAfter.id !== proposedDatabase.id || storedAfter.workspaceId !== proposedDatabase.workspaceId ||
-      !same(storedAfter.title, proposedDatabase.title) || !same(storedAfter.columns, proposedDatabase.columns) ||
-      !same(proposedDatabase.views, storedAfter.views) || !same(change.inverse.database.views, originalDatabase.views)) {
+      !sameCanonical(storedAfter.title, proposedDatabase.title) || !sameCanonical(storedAfter.columns, proposedDatabase.columns) ||
+      !sameCanonical(proposedDatabase.views, storedAfter.views) || !sameCanonical(change.inverse.database.views, originalDatabase.views)) {
       throw conflict('The view proposal changed unrelated database content');
     }
     const beforeViews = new Map(originalDatabase.views.map((view) => [view.id, view]));
@@ -552,7 +720,7 @@ function acceptedMutations(change: PageChangeDto, before: TargetSnapshot, edited
     if (beforeViews.size !== originalDatabase.views.length || proposedViews.size !== proposedDatabase.views.length || beforeViews.size !== proposedViews.size) {
       throw conflict('The view proposal changed the view set');
     }
-    const changedViews = originalDatabase.views.filter((view) => !same(view, proposedViews.get(view.id)));
+    const changedViews = originalDatabase.views.filter((view) => !sameCanonical(view, proposedViews.get(view.id)));
     if (changedViews.length !== 1) throw conflict('The view proposal must change exactly one view');
     const originalView = changedViews[0]!;
     const proposedView = proposedViews.get(originalView.id);
@@ -560,13 +728,13 @@ function acceptedMutations(change: PageChangeDto, before: TargetSnapshot, edited
       ...view.config, componentId: undefined, pinnedVersion: undefined, props: undefined, height: undefined,
     } });
     if (!proposedView || originalView.edit === undefined || proposedView.type !== 'custom' || !proposedView.config.componentId ||
-      !same(stripComponentConfig(originalView), stripComponentConfig(proposedView))) {
+      !sameCanonical(stripComponentConfig(originalView), stripComponentConfig(proposedView))) {
       throw conflict('The protected view proposal changed fields outside its component configuration');
     }
     if (edited && edited.kind !== 'view') throw new PageWriteError(400, 'invalid', 'Edited content does not match this proposal');
     const configPatch = edited?.kind === 'view' ? edited.config : {};
     const proposedConfigKeys = ['componentId', 'pinnedVersion', 'props', 'height']
-      .filter((key) => !same(originalView.config[key as keyof PageDatabaseView['config']], proposedView.config[key as keyof PageDatabaseView['config']]));
+      .filter((key) => !sameCanonical(originalView.config[key as keyof PageDatabaseView['config']], proposedView.config[key as keyof PageDatabaseView['config']]));
     if (Object.keys(configPatch).some((key) => !['componentId', 'pinnedVersion', 'props', 'height'].includes(key)) ||
       Object.keys(configPatch).some((key) => !proposedConfigKeys.includes(key))) {
       throw new PageWriteError(400, 'invalid', 'Edited fields must be a subset of the proposed view configuration');

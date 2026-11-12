@@ -7,7 +7,7 @@ import { MetaAgentPauseError, metaAgentOverview, setMetaAgentPaused } from '../s
 import { PageWriteError } from '../services/pages/core';
 import type { ScheduledJobScheduler } from '../services/scheduledJobs/scheduler';
 
-const metaAgentLocalOnly = localOnlyGuard('The Meta agent requires local or authenticated remote access', { allowAuthenticatedRemote: true });
+const metaAgentLocalOnly = localOnlyGuard('Pages upkeep requires local or authenticated remote access', { allowAuthenticatedRemote: true });
 
 /**
  * Scheduled › Meta agent (services/metaAgent/overview.ts). Mounted
@@ -31,7 +31,7 @@ export function setupMetaAgentOverviewRoutes(deps: { scheduler: ScheduledJobSche
     if (err instanceof MetaAgentPauseError) { res.status(409).json({ error: err.message }); return; }
     if (err instanceof PageWriteError) { res.status(err.status).json({ error: err.message }); return; }
     log.warn('http', `meta agent ${what} failed`, { err: err instanceof Error ? err.message : String(err) });
-    res.status(500).json({ error: 'The Meta agent overview is not available' });
+    res.status(500).json({ error: 'The Pages upkeep overview is not available' });
   };
 
   router.get('/meta-agent/overview', async (_req, res) => {

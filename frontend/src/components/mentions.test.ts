@@ -1,33 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { reanchorMentions, expandMentions, type MentionRecord } from './mentions';
-
-const mk = (start: number, label: string): MentionRecord => ({
-  start,
-  end: start + 1 + label.length,
-  kind: 'node',
-  refId: 'n1',
-  label,
-});
-
-describe('reanchorMentions', () => {
-  it('treats edit at right seam (changeStart == end) as outside', () => {
-    const m = mk(0, 'Foo');
-    // "@Foo" -> "@FooX"; insert "X" at idx 4 (right after chip end).
-    const out = reanchorMentions('@Foo', '@FooX', [m], 4, 4);
-    expect(out).toEqual([m]);
-  });
-
-  it('handles multiple mentions independently', () => {
-    const a = mk(0, 'A');     // [0, 2)
-    const b = mk(5, 'BB');    // [5, 8)
-    // "@A @BB" -> "X@A @BB"; insert "X" at idx 0.
-    const out = reanchorMentions('@A @BB', 'X@A @BB', [a, b], 0, 0);
-    expect(out).toEqual([
-      { ...a, start: 1, end: 3 },
-      { ...b, start: 6, end: 9 },
-    ]);
-  });
-});
+import { expandMentions, type MentionRecord } from './mentions';
 
 describe('expandMentions', () => {
   it('handles two mentions in order', () => {

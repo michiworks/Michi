@@ -1,4 +1,3 @@
-import React from 'react';
 import { Copy, History, Pause, Pencil, Play, Trash2 } from 'lucide-react';
 import { ActionMenu } from '../../ui/ActionMenu';
 
@@ -11,13 +10,15 @@ export interface ScheduledJobMenuActions {
 }
 
 /** Row "more" menu; same keyboard and dismissal behavior as the Trash menu. */
-export function ScheduledJobMenu({ anchor, paused, onClose, actions }: {
+export function ScheduledJobMenu({ anchor, row, paused, onClose, actions }: {
   anchor: HTMLButtonElement;
+  /** The job's row, lifted with the menu on a phone. */
+  row?: HTMLElement | null;
   paused: boolean;
   onClose: () => void;
   actions: ScheduledJobMenuActions;
 }) {
-  return <ActionMenu anchor={anchor} onClose={onClose} label="Scheduled job actions" items={[
+  return <ActionMenu anchor={anchor} liftTarget={row} onClose={onClose} label="Scheduled job actions" items={[
     { id: 'edit', label: 'Edit', icon: <Pencil size={14} aria-hidden="true" />, onSelect: actions.onEdit },
     { id: 'runs', label: 'View runs', icon: <History size={14} aria-hidden="true" />, onSelect: actions.onRuns },
     { id: 'toggle', label: paused ? 'Resume' : 'Pause', icon: paused ? <Play size={14} aria-hidden="true" /> : <Pause size={14} aria-hidden="true" />, onSelect: actions.onToggle },

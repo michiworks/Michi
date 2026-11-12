@@ -6,6 +6,7 @@ import type { AddressInfo } from 'node:net';
 import { once } from 'node:events';
 import { setupArtifactRoutes } from '../src/routes/artifacts';
 import type { ArtifactWatchEvent } from '../src/services/artifactWatcher';
+import { SLOW_CONSUMER_LIMITS } from '../src/services/httpSse';
 
 async function createFixture(t: TestContext) {
   let resolveDetached!: () => void;
@@ -79,11 +80,13 @@ test('direct HTTP slow consumer is disconnected at the buffer bound while the so
   incoming.on('error', () => {}); incoming.pause();
   let sourceSteps = 0;
   const event: ArtifactWatchEvent = { filePath: 'x'.repeat(32 * 1024), removed: false, mtimeMs: 1, size: 1 };
-  for (let i = 0; i < 512; i++) { sourceSteps++; fixture.send?.(event); }
+  // Twice the hard limit: the paused client's socket buffers absorb some of it.
+  const steps = Math.ceil((2 * SLOW_CONSUMER_LIMITS.hardBytes) / event.filePath.length);
+  for (let i = 0; i < steps; i++) { sourceSteps++; fixture.send?.(event); }
   await fixture.detached;
   await fixture.closed;
   assert.equal(fixture.response!.destroyed, true);
   assert.equal(fixture.active, false);
   assert.equal(fixture.detachCount, 1);
-  assert.equal(sourceSteps, 512, 'observer failure must not stop the producer'); client.destroy(); incoming.destroy();
+  assert.equal(sourceSteps, steps, 'observer failure must not stop the producer'); client.destroy(); incoming.destroy();
 });

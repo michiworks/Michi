@@ -1,14 +1,14 @@
 /**
- * What the Meta agent's upkeep did to a workspace's tasks, worked out from the
- * task database's change records: the suggestions waiting on the person, the
- * tasks it added or changed in the last day, and its latest update (the one a
- * board's note offers to undo). Also who made a task.
+ * What the user's agent's Pages upkeep did to a workspace's tasks, worked out
+ * from the task database's change records: the suggestions waiting on the
+ * person, the tasks it added or changed in the last day, and its latest
+ * update (the one a board's note offers to undo). Also who made a task.
  */
 import {
-  isSystemWorkspaceSettings, isTaskDb, taskThreadIds, TASK_ACTIVITY_LIMITS, TASK_ACTIVITY_WINDOW_MS, TASK_COLUMN,
+  isTaskDb, taskThreadIds, TASK_ACTIVITY_LIMITS, TASK_ACTIVITY_WINDOW_MS, TASK_COLUMN,
   type PageChangeDto, type PageDatabase, type TaskActivity, type TaskMark, type TaskOrigin, type TaskUpkeep,
 } from 'michi-shared';
-import { getDb } from '../db';
+import { companionActorOf, presentChanges } from './checkinSources';
 import { PageWriteError } from './core';
 import { firstRowChange, pendingRowProposals, upkeepRowChanges } from './historyRepository';
 import { threadStates } from './homeSections';
@@ -27,8 +27,9 @@ function taskDatabase(databaseId: string, ownerUserId: string): PageDatabase {
 export function taskActivity(databaseId: string, ownerUserId: string, now = Date.now()): TaskActivity {
   const database = taskDatabase(databaseId, ownerUserId);
   const live = new Set(database.rows.map((row) => row.id));
-  const suggestions = pendingRowProposals(databaseId, ownerUserId, TASK_ACTIVITY_LIMITS.suggestions)
-    .filter((change) => isRow(change) && live.has(change.target.rowId));
+  // A check-in's suggestion opens the post it made (checkinSources.ts); the response is the outer edge.
+  const suggestions = presentChanges(pendingRowProposals(databaseId, ownerUserId, TASK_ACTIVITY_LIMITS.suggestions)
+    .filter((change) => isRow(change) && live.has(change.target.rowId)), ownerUserId);
   const recent = upkeepRowChanges(databaseId, ownerUserId, now - TASK_ACTIVITY_WINDOW_MS, TASK_ACTIVITY_LIMITS.upkeepChanges).filter(isRow);
   const marks = new Map<string, TaskMark>();
   for (const change of recent) {
@@ -71,7 +72,12 @@ function upkeepSource(change: PageChangeDto, ownerUserId: string, now: number): 
   return card ? { nodeId: entry.nodeId, turnId: entry.turnId, assistantId: entry.messageId ?? entry.assistantId, title: card.title } : null;
 }
 
-/** Who made a task, from its first change record; null when that is not its creation (a task the database was made with). */
+/**
+ * Who made a task, from its first change record; null when that is not its
+ * creation (a task the database was made with). The user's own agent (upkeep,
+ * a check-in, or a conversation in its workspace) is a CompanionActor, shown
+ * "Created by <name>".
+ */
 export function taskOrigin(databaseId: string, rowId: string, ownerUserId: string): TaskOrigin | null {
   const database = taskDatabase(databaseId, ownerUserId);
   if (!database.rows.some((row) => row.id === rowId)) throw new PageWriteError(404, 'not_found', 'Task not found');
@@ -81,14 +87,5 @@ export function taskOrigin(databaseId: string, rowId: string, ownerUserId: strin
   const source = first.source;
   if (source.kind === 'user') return { by: 'you', conversations: linked, at: first.createdAt };
   const read = source.kind === 'maintenance' ? new Set(source.evidence.map((entry) => entry.nodeId)).size : 0;
-  return { by: metaAgentSource(source) ? 'meta-agent' : 'agent', conversations: linked || read, at: first.createdAt };
-}
-
-/** Background maintenance is the Meta agent's; so is a chat in the assistant's own workspace (the Pages Assistant). */
-function metaAgentSource(source: PageChangeDto['source']): boolean {
-  if (source.kind === 'maintenance') return true;
-  if (source.kind !== 'chat') return false;
-  const row = getDb().prepare('SELECT w.settings FROM nodes n JOIN workspaces w ON w.id=n.workspace_id WHERE n.id=?')
-    .get(source.nodeId) as { settings: string | null } | undefined;
-  return !!row && isSystemWorkspaceSettings(row.settings);
+  return { by: companionActorOf(source) ?? 'agent', conversations: linked || read, at: first.createdAt };
 }

@@ -1,9 +1,10 @@
-import React, { useMemo, useRef, useState } from 'react';
+import { useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { Quote } from 'lucide-react';
-import { parsePageSegmentSources, splitPageMarkdown, uniquePageSources, type BlockSource } from 'michi-shared';
+import { parsePageSegmentSources, splitPageMarkdown, uniquePageSources, type BlockSource, type PageMarkdownSegment } from 'michi-shared';
 import { HoverTip } from '../../ui/Popover';
 import { MarkdownBlock } from '../content/page/blocks/text';
 import { SourcesPopover, type SourceRow } from '../content/page/SourcesPopover';
+import { segmentId } from '../content/page/vendor-blocks/shared/markdown-segments';
 import './nativeMarkdownSegments.css';
 
 export function nativeSourceRows(sources: readonly BlockSource[], label: ((source: BlockSource) => string | undefined) | undefined, open: ((source: BlockSource) => void | boolean | Promise<void | boolean>) | undefined, onError: () => void): SourceRow[] {
@@ -39,7 +40,7 @@ export function NativeMarkdownSegments({ blockId, text, segmentSources, sourceLa
   // These constructs need one Markdown document. Their evidence remains in the parent's Sources menu.
   if (!onOpenSource || !matched?.some(segment => segment.sources.length) || lazyContinuation || mixedTable || multilineReference ||
     /(^|\n) {0,3}(?:\[\^[^\]]+\]:|\$\$)/.test(text)) {
-    return <MarkdownBlock block={{ type: 'markdown', text }} ctx={{ depth: 0, loadImages }} />;
+    return <WholeMarkdown blockId={blockId} text={text} segments={segments} loadImages={loadImages} />;
   }
   // Reference definitions belong to the whole Markdown document. Give every piece the same definitions.
   const definitionOnly = (value: string) => value.split('\n').every(line => /^ {0,3}\[[^\]]+\]:\s*\S/.test(line));
@@ -53,10 +54,41 @@ export function NativeMarkdownSegments({ blockId, text, segmentSources, sourceLa
       orderedDelimiter = numbered ? numbered[2] : null;
       if (segment.kind === 'paragraph' && definitionOnly(segment.text)) return null;
       const displayText = numbered ? segment.text.replace(/^([ ]{0,3})\d+([.)])/, `$1${orderedNumber}$2`) : segment.text;
-      return <MarkdownSegment key={`${segment.index}:${segment.text}`} blockId={blockId ? `${blockId}~${segment.index}` : undefined} text={segment.text} renderText={definitions ? `${displayText}\n\n${definitions}` : displayText} index={segment.index} kind={segment.kind}
+      return <MarkdownSegment key={`${segment.index}:${segment.text}`} blockId={blockId ? segmentId(blockId, segment.index) : undefined} text={segment.text} renderText={definitions ? `${displayText}\n\n${definitions}` : displayText} index={segment.index} kind={segment.kind}
       // An explicit empty list means this passage has no cited source; the parent retains its whole-block Sources menu.
       rows={nativeSourceRows(matched[segment.index].sources, sourceLabel, onOpenSource, onError)} loadImages={loadImages} />;
     })}
+  </div>;
+}
+
+const headingWords = (value: string) => value.replace(/[*_`~]/g, '').replace(/\s+/g, ' ').trim();
+
+/**
+ * One Markdown document, with each top-level ATX heading carrying the
+ * `<block>~<n>` id Contents names it by (outline.ts), so its entry lands on
+ * that heading instead of the whole block. Headings are matched in order by
+ * level and words: a setext heading renders like one but is no segment.
+ */
+function WholeMarkdown({ blockId, text, segments, loadImages }: {
+  blockId?: string; text: string; segments: PageMarkdownSegment[]; loadImages?: boolean;
+}) {
+  const root = useRef<HTMLDivElement>(null);
+  useLayoutEffect(() => {
+    if (!blockId || !root.current) return;
+    const rendered = [...root.current.querySelectorAll<HTMLElement>('h1, h2, h3, h4, h5, h6')].filter(el => !el.closest('blockquote, li, table'));
+    let from = 0;
+    for (const segment of segments) {
+      if (segment.kind !== 'heading') continue;
+      const level = /^ {0,3}(#{1,6})/.exec(segment.text)?.[1].length;
+      const words = headingWords(segment.text.replace(/^ {0,3}#{1,6}[ \t]*/, '').replace(/[ \t]+#+[ \t]*$/, '').replace(/!?\[([^\]]*)\]\([^)]*\)/g, '$1'));
+      const at = rendered.findIndex((el, index) => index >= from && el.tagName === `H${level}` && headingWords(el.textContent ?? '') === words);
+      if (at < 0) continue;
+      rendered[at].dataset.blockId = segmentId(blockId, segment.index);
+      from = at + 1;
+    }
+  }, [blockId, segments]);
+  return <div ref={root} className="native-md-whole">
+    <MarkdownBlock block={{ type: 'markdown', text }} ctx={{ depth: 0, loadImages }} />
   </div>;
 }
 

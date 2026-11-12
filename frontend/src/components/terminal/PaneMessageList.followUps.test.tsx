@@ -16,7 +16,7 @@ const noop = () => {};
 function list(overrides: Partial<ChatNodeState> = {}, disabled = false, enableFollowUps = true) {
   return <PaneMessageList
     node={{ ...node, ...overrides }} prefs={{ ...prefs, enableFollowUps }} contentStyle={{}}
-    streaming={overrides.status === 'streaming'} viewportHeight={800}
+    streaming={overrides.status === 'streaming'}
     onRetryTurn={noop} onEditUserMessage={noop} onContinueFollowUp={noop} onBranchFollowUp={noop}
     followUpsDisabled={disabled}
   />;
@@ -46,6 +46,11 @@ describe('PaneMessageList follow-ups presentation', () => {
     expect(within(section).getByRole('status').textContent).toBe('Preparing next steps...');
     expect(section.querySelectorAll('.t-followup-skeleton')).toHaveLength(3);
     expect(section.querySelector('.t-followup-row, .t-followup-num')).toBeNull();
+  });
+
+  it('shows no follow-ups after a failed turn', () => {
+    render(list({ status: 'error', error: 'Claude authentication failed.' }));
+    expect(screen.queryByRole('region', { name: 'Suggested follow-ups' })).toBeNull();
   });
 
   it('keeps send and branch callbacks independent through the real section', () => {

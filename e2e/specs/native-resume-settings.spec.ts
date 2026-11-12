@@ -1,6 +1,6 @@
 import { test, expect } from '@playwright/test';
 import { installMockApi, bootWithWorkspace } from '../fixtures/mockApi';
-import { describeRuntimeCapabilities } from '../../backend/src/agents/capabilityDescriptors';
+import { staticRuntimeDescriptor } from '../../backend/src/agents/runtimeStaticDescriptors';
 import { openSettings } from '../fixtures/shell';
 
 test('Model settings retain Native Resume and Native Fork independently for each runtime', async ({ page }, testInfo) => {
@@ -19,7 +19,7 @@ test('Model settings retain Native Resume and Native Fork independently for each
         capabilities: { modes: false, permissions: false, models: false, providerModels: false,
           reasoning: false, apiKeys: false, warmSessions: false, saveContext: false,
           spawnBranches: true, nativeResume: runtime !== 'pi' },
-        capabilityDescriptor: describeRuntimeCapabilities(runtime),
+        capabilityDescriptor: staticRuntimeDescriptor(runtime).harness,
         availableRuntimes: runtimes, nativeResumeByRuntime: resumePreferences,
         nativeForkByRuntime: forkPreferences, hasRequiredKey: true } });
       return true;

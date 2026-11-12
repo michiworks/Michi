@@ -1,10 +1,11 @@
 import { useCallback, useEffect } from 'react';
 import type { PageDatabase, PageDatabaseEditOp, PageWriteResult } from 'michi-shared';
-import { editPageDatabase, fetchPageDatabase, type PageApiIdentity } from '../../services/api/pages';
+import { editPageDatabase, fetchPageDatabase, pageEditFailure, type PageApiIdentity } from '../../services/api/pages';
 import { notifyPageChanged, subscribePageChanges } from './pageEvents';
 import {
   commitResourceRead,
   failResourceRead,
+  pollResource,
   readResource,
   resourceKey,
   retainResource,
@@ -57,18 +58,7 @@ export function usePageDatabase({ backendConnectionId, workspaceId, databaseId, 
     if (!enabled) return undefined;
     return subscribePageChanges({ backendConnectionId, workspaceId, databaseId }, refresh);
   }, [backendConnectionId, databaseId, enabled, refresh, workspaceId]);
-  useEffect(() => {
-    if (!enabled) return undefined;
-    const onFocus = () => refresh();
-    const timer = window.setInterval(() => {
-      if (document.visibilityState === 'visible') refresh();
-    }, DATABASE_POLL_MS);
-    window.addEventListener('focus', onFocus);
-    return () => {
-      window.clearInterval(timer);
-      window.removeEventListener('focus', onFocus);
-    };
-  }, [enabled, refresh]);
+  useEffect(() => (enabled ? pollResource(key, DATABASE_POLL_MS, refresh) : undefined), [enabled, key, refresh]);
 
   const edit = useCallback(async (ops: PageDatabaseEditOp[]) => {
     const current = readResource<PageDatabase>(key);
@@ -81,7 +71,7 @@ export function usePageDatabase({ backendConnectionId, workspaceId, databaseId, 
       notifyPageChanged({ backendConnectionId, workspaceId, databaseId });
       return answer;
     } catch (error) {
-      if ((error as { status?: number })?.status === 409) refresh();
+      if (pageEditFailure(error) === 'stale') refresh();
       throw error;
     }
   }, [backendConnectionId, databaseId, enabled, key, refresh, workspaceId]);

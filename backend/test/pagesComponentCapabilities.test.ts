@@ -10,7 +10,7 @@ import { PageWriteError } from '../src/services/pages/core';
 import { PageComponents } from '../src/services/pages/components';
 import { callPageComponentCapability, clearPageComponentCapabilitiesForTests, mintPageComponentCapability } from '../src/services/pages/componentCapabilities';
 import { createDatabase, getDatabase } from '../src/services/pages/repository';
-import { COMPONENT_SANDBOX_CSP, COMPONENT_SANDBOX_HTML, COMPONENT_SANDBOX_WRAPPER_HTML, componentSandboxWrapper } from '../src/services/pages/sandboxDocument';
+import { COMPONENT_SANDBOX_CSP, COMPONENT_SANDBOX_HTML, componentSandboxWrapper } from '../src/services/pages/sandboxDocument';
 
 let dir: string;
 let oldData: string | undefined;
@@ -114,8 +114,8 @@ test('sandbox document blocks network, embeds no credentials, and uses an opaque
   assert.match(COMPONENT_SANDBOX_HTML, /Object\.defineProperty\(globalThis,key/);
   assert.match(COMPONENT_SANDBOX_HTML, /event\.source !== parent/);
   assert.doesNotMatch(COMPONENT_SANDBOX_HTML, /localStorage|electronBridge/);
-  assert.equal(COMPONENT_SANDBOX_WRAPPER_HTML, COMPONENT_SANDBOX_HTML);
   const local = componentSandboxWrapper('/api/component-sandbox-wrapper');
+  assert.deepEqual(local, { html: COMPONENT_SANDBOX_HTML, csp: COMPONENT_SANDBOX_CSP });
   assert.match(local.csp, /frame-src 'none'/);
   assert.match(local.csp, /worker-src blob:/);
   assert.doesNotMatch(local.html, /<iframe/);

@@ -1,4 +1,4 @@
-import React from 'react';
+import { markRemoteFirstPaint } from '../state/remoteFirstPaint';
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, expect, it, vi } from 'vitest';
 import { usePermissionPreferences } from './usePermissionPreferences';
@@ -64,6 +64,7 @@ it('discards the old connection generation on reconnect while the same controls 
     .mockResolvedValueOnce(new Response(JSON.stringify({ global: true, mode: 'trust' })));
   vi.stubGlobal('fetch', fetchMock);
   const base = '/api/backend-connections/permission-generation/proxy';
+  markRemoteFirstPaint('permission-generation');
   render(<Probe base={base} />);
   await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
   act(() => { markBackendConnectionUnavailable('permission-generation'); markBackendConnectionReady('permission-generation'); });

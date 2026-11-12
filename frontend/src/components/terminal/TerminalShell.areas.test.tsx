@@ -35,7 +35,8 @@ vi.mock('../../state/chatStore', async () => {
     }),
     useStructuralSelector: (s: (n: Record<string, unknown>) => unknown) => s({}),
     useChatNodesSnapshot: () => ({}),
-    useNodesSelector: () => ({}),
+    useNodesSelector: (s: (n: Record<string, unknown>) => unknown) => s({}),
+    useChatNodeReader: () => () => undefined,
     useChatNode: () => null,
     chatLabel: () => '',
   };
@@ -79,7 +80,8 @@ describe('TerminalShell areas', () => {
     fireEvent.click(rail('settings'));
     expect(await screen.findByText('Appearance pane')).toBeTruthy();
     expect(screen.getByText('Conversation dashboard')).toBe(dashboard);
-    expect(screen.getByText('Workspaces')).toBeTruthy();
+    // The conversation sidebar stays under the Settings window.
+    expect(screen.getByRole('tablist', { name: 'Sidebar view' })).toBeTruthy();
     expect(rail('conversations').getAttribute('aria-current')).toBe('page');
     expect(rail('settings').getAttribute('aria-expanded')).toBe('true');
     expect(document.documentElement.dataset.nativeSurfacesVisible).toBe('false');
@@ -98,7 +100,7 @@ describe('TerminalShell areas', () => {
 
     fireEvent.click(rail('scheduled'));
     expect(await screen.findByText('Scheduled page')).toBeTruthy();
-    expect(screen.getByText('Meta agent · maintain Pages')).toBeTruthy();
+    expect(screen.getByText('Michi · Pages upkeep')).toBeTruthy();
   });
 
   it('toggles the drawer with Cmd+, while preserving the page and its shortcuts underneath', async () => {
@@ -147,7 +149,7 @@ describe('TerminalShell areas', () => {
     render(<PrefsProvider><TerminalShell /></PrefsProvider>);
     fireEvent.click(rail('scheduled'));
     expect(await screen.findByText('Scheduled page')).toBeTruthy();
-    fireEvent.click(screen.getByText('Meta agent · maintain Pages'));
+    fireEvent.click(screen.getByText('Michi · Pages upkeep'));
     expect(await screen.findByText('Meta agent detail page')).toBeTruthy();
     fireEvent.click(screen.getByRole('button', { name: 'Navigate back' }));
     expect(await screen.findByText('Scheduled page')).toBeTruthy();
@@ -170,23 +172,23 @@ describe('TerminalShell areas', () => {
     expect(screen.queryByText('Meta agent detail page')).toBeNull();
   });
 
-  it('opens the Meta agent page from the pinned Scheduled row and Settings › Meta agent from its link event', async () => {
+  it('opens <name> · Pages upkeep from the pinned Scheduled row, its crumb under the agent’s name, and Settings from its link event', async () => {
     closeMetaAgentDetail();
     render(<PrefsProvider><TerminalShell /></PrefsProvider>);
     fireEvent.click(rail('scheduled'));
     expect(await screen.findByText('Scheduled page')).toBeTruthy();
     expect(crumb()).toBe('SCHEDULED');
-    fireEvent.click(screen.getByText('Meta agent · maintain Pages'));
+    fireEvent.click(screen.getByText('Michi · Pages upkeep'));
     expect(await screen.findByText('Meta agent detail page')).toBeTruthy();
     expect(screen.queryByText('Scheduled page')).toBeNull();
-    expect(crumb()).toBe('SCHEDULED›Meta agent · Maintain Pages');
+    expect(crumb()).toBe('SCHEDULED›Michi · Pages upkeep');
 
     act(() => { window.dispatchEvent(new CustomEvent(OPEN_SETTINGS_SECTION_EVENT, { detail: { section: 'runtime' } })); });
     expect(await screen.findByText('Model pane')).toBeTruthy();
     expect(screen.getByRole('dialog', { name: 'Settings' })).toBeTruthy();
     act(() => { window.dispatchEvent(new CustomEvent('michi:nav-page', { detail: { page: 'settings' } })); });
     expect(screen.getByRole('dialog', { name: 'Settings' })).toBeTruthy();
-    expect(crumb()).toBe('SCHEDULED›Meta agent · Maintain Pages');
+    expect(crumb()).toBe('SCHEDULED›Michi · Pages upkeep');
     closeMetaAgentDetail();
   });
 });

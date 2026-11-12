@@ -1,4 +1,5 @@
 import { isKiroSignInError, KiroSignedOutError } from './kiroSignIn';
+import { KIRO_AUTH_MARKERS, KIRO_CONNECTION_MARKERS, KIRO_QUOTA_MARKERS, KIRO_TRANSIENT_MARKERS } from './kiroErrorMarkers';
 import { ACPNativeSessionMissingError, ACPError, ACPProcessExitedError, ACPNotRunningError } from "./acpClient";
 import { NativeResumeFailedError } from "../../contract/errors";
 
@@ -44,49 +45,6 @@ export type AcpErrorClass = "connection" | "transient" | "auth" | "generic";
 /** UI-facing collapse: connection + transient both read as a "connection" banner. */
 export type AcpErrorKind = "connection" | "auth" | "generic";
 
-// SSO/OIDC re-authentication needed. Checked first (before quota/transient) so a
-// token error never masquerades as retryable.
-const AUTH_MARKERS = [
-  "expiredtokenexception",
-  "invalidgrantexception",
-  "unauthorizedclientexception",
-  "notauthorizedexception",
-  "authorizationpendingexception",
-];
-
-// Usage caps / capacity. Checked before transient + connection so a quota error
-// wrapped in the "response stream" envelope is never retried.
-const QUOTA_MARKERS = [
-  "monthlyrequestcount",
-  "dailyrequestcount",
-  "insufficientmodelcapacity",
-];
-
-// Service-side transient — connection is fine, a same-session resend clears it.
-const TRANSIENT_MARKERS = [
-  "throttl", // throttled / ThrottlingError
-  "modeltemporarilyunavailable",
-  "model_temporarily_unavailable",
-  "internalserver", // InternalServerError / InternalServerException
-  "failed to generate a response",
-];
-
-// Connection/transport layer is dead — the request never completed. Requires a
-// fresh kiro process. Checked last so more-specific classes win the envelope.
-const CONNECTION_MARKERS = [
-  "dispatch failure",
-  "dispatchfailure",
-  "response stream", // "Encountered an error in the response stream: ..."
-  "timed out",
-  "request has timed out",
-  "timeouterror",
-  "providertimedout",
-  "stalledstream",
-  "connection reset",
-  "host unreachable",
-  "responseerror",
-];
-
 function haystack(err: unknown): string {
   if (!(err instanceof Error)) return typeof err === "string" ? err.toLowerCase() : "";
   let text = err.message ?? "";
@@ -104,7 +62,7 @@ function safeStringify(v: unknown): string {
   }
 }
 
-function matchesAny(hay: string, markers: string[]): boolean {
+function matchesAny(hay: string, markers: readonly string[]): boolean {
   return markers.some((m) => hay.includes(m));
 }
 
@@ -116,10 +74,13 @@ export function classifyAcpError(err: unknown): AcpErrorClass {
     return "connection";
   }
   const hay = haystack(err);
-  if (matchesAny(hay, AUTH_MARKERS)) return "auth";
-  if (matchesAny(hay, QUOTA_MARKERS)) return "generic";
-  if (matchesAny(hay, TRANSIENT_MARKERS)) return "transient";
-  if (matchesAny(hay, CONNECTION_MARKERS)) return "connection";
+  // A token error never masquerades as retryable, a quota error wrapped in the
+  // "response stream" envelope is never retried, and the connection class,
+  // which needs a fresh kiro process, loses to every more specific class.
+  if (matchesAny(hay, KIRO_AUTH_MARKERS)) return "auth";
+  if (matchesAny(hay, KIRO_QUOTA_MARKERS)) return "generic";
+  if (matchesAny(hay, KIRO_TRANSIENT_MARKERS)) return "transient";
+  if (matchesAny(hay, KIRO_CONNECTION_MARKERS)) return "connection";
   return "generic";
 }
 

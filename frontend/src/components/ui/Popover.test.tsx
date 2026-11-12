@@ -148,6 +148,7 @@ describe('HoverTip', () => {
       fireEvent.mouseLeave(anchor);
       expect(screen.queryByRole('tooltip')).toBeNull();
 
+      fireEvent.keyDown(document, { key: 'Tab' });
       fireEvent.focus(anchor);
       expect(screen.getByRole('tooltip').textContent).toContain('Help');
       fireEvent.blur(anchor);
@@ -155,6 +156,48 @@ describe('HoverTip', () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it('stays closed when a mouse click focuses the anchor', () => {
+    render(<HoverTip label="Help" delayMs={400}><button type="button">?</button></HoverTip>);
+    const anchor = screen.getByRole('button');
+    fireEvent.pointerDown(anchor);
+    fireEvent.focus(anchor);
+    expect(screen.queryByRole('tooltip')).toBeNull();
+  });
+
+  it('opens the next tip at once just after one closes', () => {
+    vi.useFakeTimers();
+    try {
+      render(<>
+        <HoverTip label="First" delayMs={400}><button type="button">1</button></HoverTip>
+        <HoverTip label="Second" delayMs={400}><button type="button">2</button></HoverTip>
+      </>);
+      const [first, second] = screen.getAllByRole('button');
+      fireEvent.mouseEnter(first);
+      act(() => { vi.advanceTimersByTime(400); });
+      fireEvent.mouseLeave(first);
+      act(() => { vi.advanceTimersByTime(300); });
+      fireEvent.mouseEnter(second);
+      expect(screen.getByRole('tooltip').textContent).toContain('Second');
+
+      fireEvent.mouseLeave(second);
+      act(() => { vi.advanceTimersByTime(700); });
+      fireEvent.mouseEnter(first);
+      expect(screen.queryByRole('tooltip')).toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('closes on Escape and describes its anchor while open', () => {
+    render(<HoverTip label="Help" delayMs={0}><button type="button">?</button></HoverTip>);
+    const anchor = screen.getByRole('button');
+    fireEvent.mouseEnter(anchor);
+    expect(document.getElementById(anchor.getAttribute('aria-describedby')!)?.textContent).toBe('Help');
+    fireEvent.keyDown(window, { key: 'Escape' });
+    expect(screen.queryByRole('tooltip')).toBeNull();
+    expect(anchor.getAttribute('aria-describedby')).toBeNull();
   });
 
   it('closes an open tip when disabled and never opens while disabled', () => {

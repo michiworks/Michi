@@ -42,6 +42,13 @@ export interface ConformanceSession {
   nativeSessionId: string | null;
 }
 
+export interface AcquireOptions {
+  sessionId: string;
+  owner: RuntimeSessionOwner;
+  ownerUserId: string | null;
+  profileHash: string | null;
+}
+
 export interface ConformanceHarness {
   /** Human-readable runtime name for test descriptions. */
   runtimeLabel: string;
@@ -70,6 +77,12 @@ export interface ConformanceHarness {
     permissionBroker?: RuntimePermissionBroker;
   }): Promise<ConformanceSession>;
 
+  /**
+   * Acquire a session through the runtime's own new-session path, as a chat
+   * or Run caller would. Absent for a fake runtime, which has no such path.
+   */
+  acquireSession?(opts: AcquireOptions): Promise<AgentSession>;
+
   /** Release a session by public id with an expected owner guard. */
   releaseSession(sessionId: string, expectedOwner: RuntimeSessionOwner): Promise<void>;
 
@@ -92,6 +105,10 @@ export const RUN_OWNER: RuntimeSessionOwner = runOwner(CONFORMANCE_RUN_ID, CONFO
 export const WRONG_OWNER: RuntimeSessionOwner = runOwner('wrong-run', 'wrong-attempt');
 
 export const CHAT_OWNER: RuntimeSessionOwner = chatOwner('node-chat-conformance');
+
+const ACQUIRE: AcquireOptions = {
+  sessionId: CONFORMANCE_ATTEMPT_ID, owner: RUN_OWNER, ownerUserId: 'user-conformance', profileHash: 'hash-conformance',
+};
 
 export function makeConformanceBroker(
   decisions: Record<string, RuntimePermissionDecision> = {},
@@ -263,7 +280,45 @@ export function registerConformanceSuite(opts: ConformanceSuiteOptions): void {
     });
 
     // -----------------------------------------------------------------------
-    // 4. Resume (for runtimes that support it)
+    // 4. Acquisition reuse guard
+    // -----------------------------------------------------------------------
+
+    for (const [label, change, error] of [
+      ['owner', { owner: chatOwner(CONFORMANCE_ATTEMPT_ID) }, /Owner mismatch/],
+      ['user', { ownerUserId: 'other-user' }, /user owner mismatch/],
+      ['profile', { profileHash: 'other-hash' }, /profile hash mismatch/],
+    ] as const) {
+      test(`reuse under the same id refuses another ${label}, pending or settled`, async () => {
+        const harness = await createHarness();
+        try {
+          if (!harness.acquireSession) return;
+          const first = harness.acquireSession(ACQUIRE);
+          const joined = assert.rejects(harness.acquireSession({ ...ACQUIRE, ...change }), error,
+            `${harness.runtimeLabel}: a pending acquisition must refuse another ${label}`);
+          const session = await first;
+          await joined;
+          await assert.rejects(harness.acquireSession({ ...ACQUIRE, ...change }), error,
+            `${harness.runtimeLabel}: a live session must refuse another ${label}`);
+          assert.equal(await harness.acquireSession(ACQUIRE), session);
+        } finally {
+          await harness.cleanup();
+        }
+      });
+    }
+
+    test('a Run session opens under its attempt id only', async () => {
+      const harness = await createHarness();
+      try {
+        if (!harness.acquireSession) return;
+        await assert.rejects(harness.acquireSession({ ...ACQUIRE, sessionId: 'other-session' }), /must equal attemptId/,
+          `${harness.runtimeLabel}: a Run session must not open under another public id`);
+      } finally {
+        await harness.cleanup();
+      }
+    });
+
+    // -----------------------------------------------------------------------
+    // 5. Resume (for runtimes that support it)
     // -----------------------------------------------------------------------
 
     test('native token round-trip survives JSON persistence', async () => {

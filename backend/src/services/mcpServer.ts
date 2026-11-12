@@ -5,8 +5,10 @@ import { readConversationUpdatesTool } from '../agents/conversationUpdatesTool';
 import { isRunOwner, chatNodeOf, hostOwner, runIdOfOwner } from '../agents/ownerMapping';
 import { reportConversationNoChange } from './scheduledJobs/conversationBatch';
 import { michiDocsTool } from './michiDocs';
+import { michiSkillsTool } from './skills/michiSkillsTool';
 import { PAGE_TOOL_NAMES, type ActivePageTurnAttributionGetter, type PageToolName } from '../agents/pageToolNames';
 import { runPageTool } from '../agents/pageTools';
+import { askBeforeTaintedTool, taintGatedMichiTool, taintedMichiToolGate } from '../agents/taintedToolGate';
 import express, { Request, Response } from "express";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { ErrorCode, McpError } from "@modelcontextprotocol/sdk/types.js";
@@ -30,8 +32,11 @@ import {
     type ToolResult,
 } from "michi-runtime/internal/mcp-host/index";
 import { mcpSlotProviderInternals } from "michi-runtime/internal/mcp-host/slotProviderInternals";
+import { ASK_USER_DESCRIPTION, ASK_USER_NOT_ANSWERED, ASK_USER_TOOL, parseAskUserQuestions } from "michi-runtime/internal/mcp-host/askUser";
 import { z } from "zod";
-import { listThreads, searchMessages, readNode, readNodeOverview } from "./globalContext";
+import {
+    TEMPORARY_CHAT_MESSAGE, listThreads, paneArgumentNodeIds, readNode, readNodeOverview, searchMessages, temporaryChatRefuses,
+} from "./globalContext";
 import { getNodeSessionBinding } from "./dbRepository";
 import {
     listEnabledBuiltinTools,
@@ -57,11 +62,21 @@ import {
     sendToThreadTool,
 } from "../agents/threadMessageTool";
 import {
+    LIST_READY_MODELS_TOOL,
+    PROPOSE_MULTI_MODEL_PLAN_TOOL,
+    listReadyModelsTool,
+    proposeMultiModelPlanTool,
+    type MultiModelToolCaller,
+} from "../agents/multiModelTool";
+import {
     askUserScheduledJobApprover,
     isScheduledJobToolName,
     scheduledJobTool,
 } from "../agents/scheduledJobTools";
-import { MEMORY_TOOL_NAMES, memoryTool, type MemoryToolName } from "../agents/memoryTools";
+import { MEMORY_TOOL_NAMES, isMemoryToolName, memoryTool, type MemoryToolName } from "../agents/memoryTools";
+import { ARTIFACT_TOOL_NAMES, type ArtifactToolName } from "../agents/artifactToolNames";
+import { artifactTool, type ArtifactApprovalRequest } from "../agents/artifactTools";
+import { askUserApprover } from "../agents/hostApproval";
 import {
     AGENT_RUN_TOOL_NAMES,
     SUBMIT_AGENT_RESULT_TOOL,
@@ -84,8 +99,8 @@ import { isMemoryExtractionToolName } from './memory/extractionProfile';
 import { createMemoryExtractionTools } from './memory/extractionTools';
 import { log } from "./logger";
 import { JSON_BODY_LIMIT_BYTES } from "./requestBodyLimit";
-import { isLoopbackAddress } from "./remoteAccess";
-import { fullNodeSummaryExperimentEnabled, FULL_NODE_SUMMARY_INSTRUCTION } from "../agents/nodeSummaryExperiment";
+import { selfLoopbackBase } from "./remoteAccess";
+import { metadataDoneToolResult, SET_BRANCH_OVERVIEW_DESCRIPTION, SET_FOLLOW_UPS_DESCRIPTION } from "../agents/turnMetadataText";
 
 function paramToZod(spec: ParamSpec): z.ZodTypeAny {
     if (spec === "string") return z.string();
@@ -154,7 +169,6 @@ const MCP_SERVER_NAME = "michi-tools";
 const MCP_SERVER_VERSION = "1.0.0";
 /** Description of the session group's routing argument; Kiro's per-turn context names the current SessionID. */
 const SESSION_ANCHOR_DESCRIPTION = "Current ACP SessionID from the latest Michi session context.";
-const CODEX_STOP_HOOK = "stop";
 /** Where a tool's reports go when its call has no session sink (buildMcpServerForSlot): dropped. */
 const NO_HOST_EVENTS: SessionToolSink = { emit: () => {} };
 /** The backend's port when none is given, as in server.ts (PORT || 3000) and the runtime factories. */
@@ -169,6 +183,7 @@ const DEFAULT_MCP_PORT = 3000;
 export class McpSlotRegistry implements McpSlotProvider {
     private readonly host: McpHost<McpSlot>;
     private readonly mcpPort: () => number;
+    private readonly mcpHost: () => string;
     private readonly provider: McpSlotProvider;
 
     /**
@@ -179,9 +194,10 @@ export class McpSlotRegistry implements McpSlotProvider {
      * has bound a port (tests listening on port 0) and still keep one source
      * for the port.
      */
-    constructor(options: { mcpPort?: number | (() => number) } = {}) {
+    constructor(options: { mcpPort?: number | (() => number); mcpHost?: () => string } = {}) {
         const mcpPort = options.mcpPort ?? DEFAULT_MCP_PORT;
         this.mcpPort = typeof mcpPort === "function" ? mcpPort : () => mcpPort;
+        this.mcpHost = options.mcpHost ?? (() => "127.0.0.1");
         this.host = createMcpHost<McpSlot>({
             basePath: "/mcp",
             publicBaseUrl: () => this.baseUrl,
@@ -191,31 +207,20 @@ export class McpSlotRegistry implements McpSlotProvider {
             log: (level, msg, data) => log[level]("mcp", msg, data),
         });
         this.host.registerToolSource((view) => michiToolCatalog(view.binding).map(hostToolDef));
-        this.host.registerHook(CODEX_STOP_HOOK, async (view, body) => {
-            const result = codexStopHookResult(view.binding, body);
-            log.debug("mcp", "codex follow-ups hook poc validator request", {
-                nodeId: view.binding.nodeId ?? null,
-                decision: typeof result.decision === "string" ? result.decision : "allow",
-                stopHookActive: !!body && typeof body === "object"
-                    ? (body as Record<string, unknown>).stop_hook_active === true
-                    : false,
-            });
-            return result;
-        });
         this.provider = createMcpSlotProvider(this.host, {
             sessionAnchorDescription: SESSION_ANCHOR_DESCRIPTION,
-            // mountMcp's Express route `/api/codex-hooks/<slotId>/stop`, not the
-            // host's `/mcp-hooks` route: it answers an unknown slot with `{}`.
-            hookEndpoint: (slotId, hook) => {
-                if (hook !== CODEX_STOP_HOOK) throw new Error(`Unknown MCP slot hook: ${String(hook)}`);
-                return `${this.baseUrl}/codex-hooks/${slotId}/${CODEX_STOP_HOOK}`;
-            },
         });
     }
 
-    /** `http://127.0.0.1:<port>/api`: server.ts mounts mountMcp's routes under /api. */
+    /**
+     * `http://127.0.0.1:<port>/api` unless the backend listens elsewhere on
+     * loopback (`mcpHost`, the listener's address): server.ts mounts
+     * mountMcp's routes under /api. A listener beyond loopback has no URL
+     * agents could use; server.ts warns about it at startup.
+     */
     private get baseUrl(): string {
-        return `http://127.0.0.1:${this.mcpPort()}/api`;
+        const port = this.mcpPort();
+        return `${selfLoopbackBase(this.mcpHost(), port) ?? `http://127.0.0.1:${port}`}/api`;
     }
 
     /** Request handler for mountMcp's routes. */
@@ -283,14 +288,6 @@ export class McpSlotRegistry implements McpSlotProvider {
     /** `http://127.0.0.1:<port>/api/mcp-session/<groupId>`, as Kiro's michiSessionMcpServer builds it. */
     sessionEndpoint(groupId: string): McpHttpEndpoint {
         return this.provider.sessionEndpoint(groupId);
-    }
-
-    /**
-     * mountMcp's Express route `/api/codex-hooks/<slotId>/stop`, not the
-     * host's `/mcp-hooks` route: it answers an unknown slot with `{}`.
-     */
-    hookEndpoint(slotId: string, hook: "stop"): string {
-        return this.provider.hookEndpoint(slotId, hook);
     }
 
     /**
@@ -496,13 +493,24 @@ function registerMaintenanceTools(registerTool: AddTool, slot: McpSlot): void {
  * sends into an existing conversation is offered.
  */
 function registerAssistantTools(registerTool: AddTool, slot: McpSlot): void {
-    // The conversation's purpose picks the catalog: the Spaces window's, or
-    // the Scheduled window's (scheduled jobs, approved through ask_user).
+    // The conversation's purpose picks the catalog (DESIGN-v2 §2.3): V's
+    // (⌘J's tools, scheduled jobs approved through ask_user, Memory, the
+    // agent's own) or a check-in's (reads, guarded Page writes, the agent's
+    // hidden-turn tools and nothing_to_do; its closed slot exposes exactly
+    // those). Each call carries the runtime's turn attribution, from which
+    // the agent's tools tell a turn the user started from one Michi started.
     const purpose = assistantPurposeOf(resolveSlotBinding(slot).nodeId);
     // No Desk tools while Agent Desk is off, whatever the slot's allow-list says.
     for (const tool of assistantToolsFor(purpose)) {
         if (!isToolExposed(slot, tool.name)) continue;
-        registerTool(tool.name, { description: tool.description, inputSchema: paramObjectToZodShape(tool.parameters) }, async (args) => {
+        // As for every chat, a host that left out the image callback offers no show_image.
+        if (tool.name === "show_image" && !slot.onShowImage) continue;
+        registerTool(tool.name, {
+            description: tool.description,
+            inputSchema: paramObjectToZodShape(tool.parameters),
+            // V's Memory tools as an ordinary chat's: their hints, and loaded up front by a client that defers tools.
+            ...(isMemoryToolName(tool.name) ? { annotations: MEMORY_TOOL_ANNOTATIONS[tool.name], loadUpFront: true } : {}),
+        }, async (args, extra) => {
             const binding = resolveSlotBinding(slot);
             return runAssistantTool(tool, {
                 ownerUserId: slot.ownerUserId,
@@ -511,9 +519,20 @@ function registerAssistantTools(registerTool: AddTool, slot: McpSlot): void {
                 approveThreadMessage: askUserThreadMessageApprover(slot.onAskUser),
                 approveScheduledJob: askUserScheduledJobApprover(slot.onAskUser),
                 getActivePageTurnAttribution: slot.getActivePageTurnAttribution,
+                showImage: (inputPath, caption) => showSlotImage(slot, extra?.sink, inputPath, caption),
             }, args);
         });
     }
+}
+
+/** The host finds the image in its session's folder; the session shows it once that has succeeded. */
+function showSlotImage(slot: McpSlot, sink: SessionToolSink | undefined, inputPath: string, caption: string | undefined):
+    ReturnType<NonNullable<McpSlot["onShowImage"]>> | undefined {
+    const result = slot.onShowImage?.(inputPath, caption);
+    if (result && !("error" in result)) {
+        (sink ?? NO_HOST_EVENTS).emit({ type: "image", payload: { path: result.relPath, caption, mimeType: result.mimeType, size: result.size } });
+    }
+    return result;
 }
 
 /** The artifact_saved / artifact_updated payload for a context the bridge saved or updated. */
@@ -534,6 +553,8 @@ interface ToolCallExtra {
     signal?: AbortSignal;
     /** The slot's session sink (see hostToolDef); absent through buildMcpServerForSlot. */
     sink?: SessionToolSink;
+    /** The agent's own id for this call, when its client sends one. */
+    toolCallId?: string;
 }
 /** Gets the arguments as the tool's zod schema parsed them (see hostToolDef). */
 type ToolHandler = (args: any, extra?: ToolCallExtra) => unknown;
@@ -542,7 +563,31 @@ interface ToolConfig {
     description: string;
     inputSchema: ToolInputSchema;
     annotations?: ToolAnnotations;
+    /** HostToolDef.loadUpFront: the model needs the description from the start (the memory tools). */
+    loadUpFront?: boolean;
 }
+/**
+ * Every Michi tool call passes here (w3-fix D23, agents/taintedToolGate.ts):
+ * a tool that makes other work run or acts outside Michi, called from a turn
+ * that holds check-in or collector material, runs only after the user
+ * approved this call. Michi's runtime gate may already have asked (Claude's
+ * hook, Kiro's request_permission): then it runs. Otherwise it asks through
+ * the slot's ask_user channel, or is refused when there is none (Codex
+ * MCP calls, and Kiro tools the user's agent pre-allows, never reach the
+ * runtime gate). send_to_thread asks through its own requestApproval below.
+ */
+function taintGated(slot: McpSlot, name: string, handler: ToolHandler): ToolHandler {
+    if (name === SEND_TO_THREAD_TOOL || !taintGatedMichiTool(name)) return handler;
+    return async (args, extra) => {
+        const gate = taintedMichiToolGate(resolveSlotBinding(slot).nodeId, name);
+        if (gate.kind === "ask") {
+            const refused = await askBeforeTaintedTool(slot.onAskUser, name, args, gate.reason);
+            if (refused) return refused;
+        }
+        return handler(args, extra);
+    };
+}
+
 /** One tool of a slot's catalog, in the shape McpServer.registerTool takes. */
 interface MichiTool {
     name: string;
@@ -560,8 +605,9 @@ type AddTool = (name: string, config: ToolConfig, handler: ToolHandler) => void;
 function michiToolCatalog(slot: McpSlot): MichiTool[] {
     const tools: MichiTool[] = [];
     // A slot that is not serving (McpSlot.isServing) refuses every call.
-    const registerTool: AddTool = (name, config, handler) => {
+    const registerTool: AddTool = (name, config, rawHandler) => {
         const isServing = slot.isServing;
+        const handler = taintGated(slot, name, rawHandler);
         tools.push({
             name,
             config,
@@ -580,6 +626,11 @@ function michiToolCatalog(slot: McpSlot): MichiTool[] {
     // tools; only the user channel (ask_user) and the runtime's
     // turn-metadata tools below are shared with every chat.
     const catalog = slotCatalog(slot);
+    // A check-in's node gets its own catalog alone, whatever its session's
+    // allow-list (DESIGN-v2 §2.5): its hidden turn has no user to ask and no
+    // turn metadata, so neither shared channel is offered.
+    const checkinNode = catalog === "assistant" && assistantPurposeOf(resolveSlotBinding(slot).nodeId) === "checkin";
+    const shared = (name: string) => !checkinNode && isToolExposed(slot, name);
     if (catalog === 'maintenance') {
         registerMaintenanceTools(registerTool, slot);
         return tools;
@@ -600,7 +651,7 @@ function michiToolCatalog(slot: McpSlot): MichiTool[] {
             description: tool.description,
             inputSchema: builtinToZodShape(tool),
             annotations: {
-                readOnlyHint: name === 'read_home' || name === 'list_pages' || name === 'read_page' || name === 'read_database' || name === 'list_page_components' || name === 'read_page_component' || name === 'list_tasks',
+                readOnlyHint: name === 'read_home' || name === 'list_pages' || name === 'read_page' || name === 'preview_page' || name === 'read_database' || name === 'list_page_components' || name === 'read_page_component' || name === 'list_tasks',
                 destructiveHint: name === 'edit_home' || name === 'edit_page' || name === 'edit_database' || name === 'create_page' || name === 'create_database' || name === 'configure_database' || name === 'save_page_component' || name === 'configure_database_view',
                 openWorldHint: false,
             },
@@ -622,6 +673,13 @@ function michiToolCatalog(slot: McpSlot): MichiTool[] {
         inputSchema: builtinToZodShape(docsTool),
         annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
     }, async (args) => michiDocsTool(args));
+
+    const skillsTool = listEnabledBuiltinTools().find(tool => tool.name === 'michi_skills');
+    if (skillsTool && exposes(skillsTool.name)) registerTool(skillsTool.name, {
+        description: skillsTool.description,
+        inputSchema: builtinToZodShape(skillsTool),
+        annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
+    }, async (args) => michiSkillsTool(args));
 
     // Side-effect tools that mutate the chat graph or filesystem. The
     // globalContext tools (list_threads / search_messages / read_node) are
@@ -682,10 +740,9 @@ function michiToolCatalog(slot: McpSlot): MichiTool[] {
                     case "show_image": {
                         const p = typeof args?.path === "string" ? args.path : "";
                         const caption = typeof args?.caption === "string" ? args.caption : undefined;
-                        const result = slot.onShowImage?.(p, caption);
+                        const result = showSlotImage(slot, extra?.sink, p, caption);
                         if (!result) throw new Error("show_image is unavailable");
                         if ("error" in result) throw new Error(`show_image failed: ${result.error}`);
-                        report({ type: "image", payload: { path: result.relPath, caption, mimeType: result.mimeType, size: result.size } });
                         return { content: [{ type: "text", text: `Displayed ${result.relPath} to the user.` }] };
                     }
                 }
@@ -723,12 +780,11 @@ function michiToolCatalog(slot: McpSlot): MichiTool[] {
         );
     }
 
-    if (slot.onSetFollowUps && isToolExposed(slot, "set_follow_ups")) {
+    if (slot.onSetFollowUps && shared("set_follow_ups")) {
         registerTool(
             "set_follow_ups",
             {
-                description:
-                    "Set exactly three follow-up questions for this turn. Write them from the user's point of view and in the user's language. Call near the end of the reply.",
+                description: SET_FOLLOW_UPS_DESCRIPTION,
                 inputSchema: {
                     follow_ups: z.array(z.string().min(1)).min(1).max(3),
                 },
@@ -746,14 +802,11 @@ function michiToolCatalog(slot: McpSlot): MichiTool[] {
         );
     }
 
-    if (slot.onSetBranchOverview && isToolExposed(slot, "set_branch_overview")) {
+    if (slot.onSetBranchOverview && shared("set_branch_overview")) {
         registerTool(
             "set_branch_overview",
             {
-                description:
-                    fullNodeSummaryExperimentEnabled()
-                        ? `Record the experimental current-state node overview. ${FULL_NODE_SUMMARY_INSTRUCTION} Call near the end of every reply.`
-                        : "Append this turn's entry to the branch's durable journal. Summarize what this turn did — what was explored, decided, or discovered — in 1-3 concise sentences, matching the user's language. Do not restate earlier turns. Call near the end of every reply.",
+                description: SET_BRANCH_OVERVIEW_DESCRIPTION,
                 inputSchema: {
                     overview: z.string().min(1).max(4000),
                 },
@@ -766,7 +819,7 @@ function michiToolCatalog(slot: McpSlot): MichiTool[] {
                         type: "text",
                         text: overview
                             ? slot.metadataDoneSentinel
-                                ? `Branch overview recorded. This turn's user-facing response is already complete; emit ${slot.metadataDoneSentinel} as the runtime end-of-turn marker (auto-stripped before display).`
+                                ? metadataDoneToolResult(slot.metadataDoneSentinel)
                                 : "Branch overview updated."
                             : "Branch overview was empty; no update applied.",
                     }],
@@ -775,43 +828,21 @@ function michiToolCatalog(slot: McpSlot): MichiTool[] {
         );
     }
 
-    if (slot.onValidateFollowUps) {
-        const validateTurnMetadata = async () => ({
-            content: [{
-                type: "text" as const,
-                text: JSON.stringify(slot.onValidateFollowUps?.() ?? {}),
-            }],
-        });
-        if (isToolExposed(slot, "validate_follow_ups")) registerTool(
-            "validate_follow_ups",
-            {
-                description:
-                    "Legacy internal Stop-hook validator alias. The model must not call it directly.",
-                inputSchema: {},
-            },
-            validateTurnMetadata,
-        );
-        if (isToolExposed(slot, "validate_turn_metadata")) registerTool(
-            "validate_turn_metadata",
-            {
-                description:
-                    "Internal Claude Stop-hook validator for required turn metadata. Claude invokes this automatically; the model must not call it directly.",
-                inputSchema: {},
-            },
-            validateTurnMetadata,
-        );
-    }
+    // A conversation whose memory setting is off reads no other conversation (globalContext.temporaryChatRefuses).
+    const temporaryChat = { content: [{ type: "text" as const, text: TEMPORARY_CHAT_MESSAGE }] };
 
     if (exposes("list_threads")) registerTool(
         "list_threads",
         builtinRegistration("list_threads"),
         async (args) => {
             const binding = resolveSlotBinding(slot);
+            if (temporaryChatRefuses(binding.nodeId)) return temporaryChat;
             const result = listThreads(
                 binding.workspaceId,
                 slot.ownerUserId,
                 typeof args?.workspaceId === "string" ? args.workspaceId : undefined,
                 binding.nodeId ?? undefined,
+                { includeScheduledRuns: args?.includeScheduledRuns === true },
             );
             return { content: [{ type: "text", text: result.text }] };
         },
@@ -822,12 +853,14 @@ function michiToolCatalog(slot: McpSlot): MichiTool[] {
         builtinRegistration("search_messages"),
         async (args) => {
             const binding = resolveSlotBinding(slot);
+            if (temporaryChatRefuses(binding.nodeId)) return temporaryChat;
             const result = searchMessages(
                 binding.workspaceId,
                 slot.ownerUserId,
                 String(args?.query ?? ""),
                 args?.scope === "all" ? "all" : "current",
                 typeof args?.limit === "number" ? args.limit : 10,
+                { includeScheduledRuns: args?.includeScheduledRuns === true },
             );
             return { content: [{ type: "text", text: result.text }] };
         },
@@ -838,11 +871,14 @@ function michiToolCatalog(slot: McpSlot): MichiTool[] {
         builtinRegistration("read_node"),
         async (args) => {
             const binding = resolveSlotBinding(slot);
-            const opts: { role?: "user" | "assistant"; from?: "head" | "tail"; offset?: number; limit?: number } = {};
+            if (temporaryChatRefuses(binding.nodeId, [String(args?.nodeId ?? "")])) return temporaryChat;
+            const opts: { role?: "user" | "assistant"; from?: "head" | "tail"; offset?: number; limit?: number; messageId?: string; charOffset?: number } = {};
             if (args?.role === "user" || args?.role === "assistant") opts.role = args.role;
             if (args?.from === "head" || args?.from === "tail") opts.from = args.from;
             if (typeof args?.offset === "number") opts.offset = args.offset;
             if (typeof args?.limit === "number") opts.limit = args.limit;
+            if (typeof args?.messageId === "string") opts.messageId = args.messageId;
+            if (typeof args?.charOffset === "number") opts.charOffset = args.charOffset;
             const hasOpts = Object.keys(opts).length > 0;
             const result = readNode(binding.workspaceId, slot.ownerUserId, String(args?.nodeId ?? ""), hasOpts ? opts : undefined);
             return { content: [{ type: "text", text: result.text }] };
@@ -859,9 +895,8 @@ function michiToolCatalog(slot: McpSlot): MichiTool[] {
         "read_conversation_updates",
         builtinRegistration("read_conversation_updates"),
         async (args) => {
-            const binding = resolveSlotBinding(slot);
-            return readConversationUpdatesTool({ ownerUserId: slot.ownerUserId, workspaceId: binding.workspaceId,
-                runOwnerRunId: runIdOfOwner(slot.owner), backendConnectionId: 'local' }, args);
+            if (temporaryChatRefuses(resolveSlotBinding(slot).nodeId)) return temporaryChat;
+            return readConversationUpdatesTool(paneInspectionBinding(), args);
         },
     );
 
@@ -870,6 +905,7 @@ function michiToolCatalog(slot: McpSlot): MichiTool[] {
         builtinRegistration("read_node_overview"),
         async (args) => {
             const binding = resolveSlotBinding(slot);
+            if (temporaryChatRefuses(binding.nodeId, [String(args?.nodeId ?? "")])) return temporaryChat;
             const result = readNodeOverview(binding.workspaceId, slot.ownerUserId, String(args?.nodeId ?? ""));
             return { content: [{ type: "text", text: result.text }] };
         },
@@ -896,6 +932,7 @@ function michiToolCatalog(slot: McpSlot): MichiTool[] {
         builtinRegistration("inspect_pane"),
         async (args) => {
             if (!isToolExposed(slot, "inspect_pane")) throw new Error("Tool is not exposed: inspect_pane");
+            if (temporaryChatRefuses(resolveSlotBinding(slot).nodeId, paneArgumentNodeIds(args))) return temporaryChat;
             const binding = paneInspectionBinding();
             return inspectPaneTool(binding, {
                 paneId: typeof args?.paneId === "string" ? args.paneId : undefined,
@@ -911,6 +948,7 @@ function michiToolCatalog(slot: McpSlot): MichiTool[] {
         builtinRegistration("read_pane_output"),
         async (args) => {
             if (!isToolExposed(slot, "read_pane_output")) throw new Error("Tool is not exposed: read_pane_output");
+            if (temporaryChatRefuses(resolveSlotBinding(slot).nodeId, paneArgumentNodeIds(args))) return temporaryChat;
             const binding = paneInspectionBinding();
             return readPaneOutputTool(binding, {
                 paneId: typeof args?.paneId === "string" ? args.paneId : undefined,
@@ -948,6 +986,7 @@ function michiToolCatalog(slot: McpSlot): MichiTool[] {
         builtinRegistration("wait_pane"),
         async (args) => {
             if (!isToolExposed(slot, "wait_pane")) throw new Error("Tool is not exposed: wait_pane");
+            if (temporaryChatRefuses(resolveSlotBinding(slot).nodeId, paneArgumentNodeIds(args))) return temporaryChat;
             const binding = paneInspectionBinding();
             return waitPaneTool(binding, {
                 paneId: typeof args?.paneId === "string" ? args.paneId : undefined,
@@ -963,13 +1002,18 @@ function michiToolCatalog(slot: McpSlot): MichiTool[] {
 
     // Cross-thread messaging. Chat slots only: the caller identity is the
     // slot's bound node/workspace. Optional approval uses this slot's own
-    // ask_user channel; ordinary coordination sends without a prompt.
+    // ask_user channel; ordinary coordination sends without a prompt. A
+    // wait ends with the call (its signal).
     const sendToThreadSpec = listEnabledBuiltinTools().find((tool) => tool.name === SEND_TO_THREAD_TOOL);
     if (sendToThreadSpec && !isRunOwner(slot.owner) && exposes(SEND_TO_THREAD_TOOL)) registerTool(
         SEND_TO_THREAD_TOOL,
         { description: sendToThreadSpec.description, inputSchema: builtinToZodShape(sendToThreadSpec) },
-        async (args) => {
+        async (args, extra) => {
             const binding = resolveSlotBinding(slot);
+            const approver = askUserThreadMessageApprover(slot.onAskUser);
+            // w3-fix D23: from a turn that holds check-in material the message waits for the user's
+            // approval, unless Michi's runtime gate already asked for this call (taintGated, above).
+            const gate = taintedMichiToolGate(binding.nodeId, SEND_TO_THREAD_TOOL);
             return sendToThreadTool(
                 {
                     ownerUserId: slot.ownerUserId,
@@ -977,17 +1021,46 @@ function michiToolCatalog(slot: McpSlot): MichiTool[] {
                     nodeId: binding.nodeId,
                     isAgentRun: isRunOwner(slot.owner),
                 },
-                { nodeId: args?.nodeId, text: args?.text, requestApproval: args?.requestApproval },
-                askUserThreadMessageApprover(slot.onAskUser),
+                {
+                    nodeId: args?.nodeId, text: args?.text, requestApproval: gate.kind === "ask" ? true : args?.requestApproval,
+                    wait: args?.wait, wake: args?.wake, timeoutMs: args?.timeoutMs,
+                },
+                gate.kind === "ask" ? (request) => approver({ ...request, askReason: gate.reason }) : approver,
+                undefined,
+                { signal: extra?.signal },
             );
         },
     );
 
+    // Multi-model plans. Chat slots only: the caller is the slot's bound
+    // node, and the handler refuses what the catalog cannot see at list time
+    // (Kiro v3's shared session-group catalog, warm slots, a branch of a plan).
+    // Proposing only shows the plan card; the user starts it.
+    for (const name of [LIST_READY_MODELS_TOOL, PROPOSE_MULTI_MODEL_PLAN_TOOL] as const) {
+        const spec = listEnabledBuiltinTools().find((tool) => tool.name === name);
+        if (!spec || isRunOwner(slot.owner) || !exposes(name)) continue;
+        registerTool(name, {
+            description: spec.description,
+            inputSchema: builtinToZodShape(spec),
+            annotations: { readOnlyHint: name === LIST_READY_MODELS_TOOL, destructiveHint: false, openWorldHint: false },
+        }, async (args, extra) => {
+            const binding = resolveSlotBinding(slot);
+            const caller: MultiModelToolCaller = {
+                ownerUserId: slot.ownerUserId ?? null, workspaceId: binding.workspaceId, nodeId: binding.nodeId,
+                runtimeSessionId: slot.parentChatId ?? null, turn: slot.getActivePageTurnAttribution?.() ?? null,
+                isAgentRun: isRunOwner(slot.owner), assistant: false, maintenance: false,
+            };
+            return name === LIST_READY_MODELS_TOOL
+                ? listReadyModelsTool(caller)
+                : proposeMultiModelPlanTool(caller, args, { signal: extra?.signal });
+        });
+    }
+
     // Scheduled Job management: ordinary chat threads only (not a fenced
     // slot; the Spaces window has none and the Scheduled window gets the
-    // assistant's version above), workspace from the slot binding, and every
-    // change except pausing approved by the user through ask_user
-    // (permission modes cannot skip it). See agents/scheduledJobTools.ts.
+    // assistant's version above), workspace from the slot binding, and
+    // updates, runs and deletes (creates when the user's setting asks)
+    // approved by the user through ask_user (permission modes cannot skip it). See agents/scheduledJobTools.ts.
     if (!isRunOwner(slot.owner)) {
         for (const spec of listEnabledBuiltinTools()) {
             if (!isScheduledJobToolName(spec.name) || !exposes(spec.name)) continue;
@@ -1013,15 +1086,18 @@ function michiToolCatalog(slot: McpSlot): MichiTool[] {
         }
     }
 
-    // Michi Memory: ordinary chat threads only (not Agent Runs, the assistant
-    // or maintenance), owner and workspace from the slot binding, and turn
-    // trust from the bound node. See agents/memoryTools.ts.
+    // Michi Memory: ordinary chat threads (not Agent Runs or maintenance; the
+    // assistant's conversation has them in its own catalog, with the user
+    // scope as its own: registerAssistantTools), owner and workspace from the
+    // slot binding, and turn trust from the bound node. See
+    // agents/memoryTools.ts. Their descriptions say when to save and forget,
+    // so a client that defers tool definitions loads these four up front.
     if (!isRunOwner(slot.owner)) {
         for (const name of MEMORY_TOOL_NAMES) {
             if (!exposes(name)) continue;
             registerTool(
                 name,
-                { ...builtinRegistration(name), annotations: MEMORY_TOOL_ANNOTATIONS[name] },
+                { ...builtinRegistration(name), annotations: MEMORY_TOOL_ANNOTATIONS[name], loadUpFront: true },
                 async (args) => {
                     const binding = resolveSlotBinding(slot);
                     return memoryTool(name, {
@@ -1035,13 +1111,37 @@ function michiToolCatalog(slot: McpSlot): MichiTool[] {
         }
     }
 
-    if (slot.onAskUser && isToolExposed(slot, "ask_user")) registerTool(
-        "ask_user",
+    // Artifacts beyond save/update: ordinary chat threads only, like Memory.
+    // The workspace and owner come from the slot binding; a delete asks the
+    // user through ask_user every time (permission modes and Codex's own
+    // auto-approval cannot skip it), and a deletion is reported to the
+    // thread's stream so open windows drop the artifact. See agents/artifactTools.ts.
+    if (!isRunOwner(slot.owner)) {
+        const approveDeletion = askUserApprover<ArtifactApprovalRequest>(slot.onAskUser, "Artifacts");
+        for (const name of ARTIFACT_TOOL_NAMES) {
+            if (!exposes(name)) continue;
+            registerTool(
+                name,
+                { ...builtinRegistration(name), annotations: ARTIFACT_TOOL_ANNOTATIONS[name] },
+                async (args, extra) => {
+                    const binding = resolveSlotBinding(slot);
+                    return artifactTool(name, {
+                        ownerUserId: slot.ownerUserId,
+                        workspaceId: binding.workspaceId,
+                        cwd: slot.cwd,
+                    }, args, {
+                        approve: approveDeletion,
+                        onDeleted: (deleted) => (extra?.sink ?? NO_HOST_EVENTS).emit({ type: "artifact_deleted", payload: deleted }),
+                    });
+                },
+            );
+        }
+    }
+
+    if (slot.onAskUser && shared(ASK_USER_TOOL)) registerTool(
+        ASK_USER_TOOL,
         {
-            description:
-                "Ask the user one or more structured questions with selectable options. " +
-                "Use when you need the user to make a choice or provide input before proceeding. " +
-                "Each question can be single-select or multi-select, and users can always type a custom answer.",
+            description: ASK_USER_DESCRIPTION,
             inputSchema: {
                 questions: z.array(z.object({
                     question: z.string().describe("The question to ask the user."),
@@ -1055,35 +1155,11 @@ function michiToolCatalog(slot: McpSlot): MichiTool[] {
             },
         },
         async (args) => {
-            if (!slot.onAskUser) {
-                return {
-                    content: [{
-                        type: "text",
-                        text: JSON.stringify({ error: "ask_user callback not configured" }),
-                    }],
-                };
-            }
-            const questions = Array.isArray(args?.questions) ? args.questions : [];
-            const parsed = questions.map((q: any) => ({
-                question: String(q.question ?? ""),
-                header: typeof q.header === "string" ? q.header : undefined,
-                options: Array.isArray(q.options)
-                    ? q.options.map((o: any) => ({
-                        label: String(o.label ?? ""),
-                        description: typeof o.description === "string" ? o.description : undefined,
-                    }))
-                    : [],
-                multiSelect: q.multiSelect === true,
-            }));
-            const answers = await slot.onAskUser(parsed);
-            if (!answers) {
-                return {
-                    content: [{
-                        type: "text",
-                        text: "The user did not answer the questions (skipped or timed out).",
-                    }],
-                };
-            }
+            // zod checks types and counts; blank text is the shared rule's to reject.
+            const questions = parseAskUserQuestions(args?.questions);
+            if (typeof questions === "string") return { content: [{ type: "text", text: questions }], isError: true };
+            const answers = await slot.onAskUser!(questions);
+            if (!answers) return { content: [{ type: "text", text: ASK_USER_NOT_ANSWERED }] };
             return { content: [{ type: "text", text: JSON.stringify({ answers }) }] };
         },
     );
@@ -1099,13 +1175,24 @@ const MEMORY_TOOL_ANNOTATIONS: Record<MemoryToolName, ToolAnnotations> = {
     memory_delete: { readOnlyHint: false, destructiveHint: true, openWorldHint: false },
 };
 
+/**
+ * Hints for MCP clients; they decide no approval. Michi's policy
+ * (agents/permissionPolicy.ts) runs all three without a runtime prompt, and
+ * delete_artifact asks the user itself (agents/hostApproval.ts).
+ */
+const ARTIFACT_TOOL_ANNOTATIONS: Record<ArtifactToolName, ToolAnnotations> = {
+    list_artifacts: { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
+    search_artifacts: { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
+    delete_artifact: { readOnlyHint: false, destructiveHint: true, openWorldHint: false },
+};
+
 function registerAgentRunTools(registerTool: AddTool, invoker: AgentRunToolInvoker,
     allowedNames?: readonly AgentRunToolName[]): void {
     const allowed = allowedNames ? new Set(allowedNames) : null;
     for (const name of AGENT_RUN_TOOL_NAMES) {
         if (allowed && !allowed.has(name)) continue;
-        registerTool(name, { description: AGENT_RUN_TOOL_DEFINITIONS[name].description, inputSchema: paramObjectToZodShape(AGENT_RUN_TOOL_DEFINITIONS[name].parameters) }, async (args) => {
-            const result = await invoker.invoke(name, args ?? {});
+        registerTool(name, { description: AGENT_RUN_TOOL_DEFINITIONS[name].description, inputSchema: paramObjectToZodShape(AGENT_RUN_TOOL_DEFINITIONS[name].parameters) }, async (args, extra) => {
+            const result = await invoker.invoke(name, args ?? {}, { runtimeToolCallId: extra?.toolCallId ?? null });
             return { content: [{ type: 'text', text: JSON.stringify(result) }] };
         });
     }
@@ -1167,13 +1254,14 @@ function hostToolDef(tool: MichiTool): HostToolDef<McpSlot> {
         description: tool.config.description,
         inputSchema: wireInputSchema(schema),
         ...(tool.config.annotations ? { annotations: tool.config.annotations } : {}),
+        ...(tool.config.loadUpFront ? { loadUpFront: true } : {}),
         async handler(args, ctx) {
             const parsed = await safeParseAsync(normalizeObjectSchema(schema) ?? schema, args);
             if (!parsed.success) {
                 const error = argumentError(tool.name, "error" in parsed ? parsed.error : "Unknown error");
                 return { content: [{ type: "text", text: error.message }], isError: true };
             }
-            return await tool.handler(parsed.data, { signal: ctx.signal, sink: ctx.sink }) as ToolResult;
+            return await tool.handler(parsed.data, { signal: ctx.signal, sink: ctx.sink, toolCallId: ctx.toolCallId }) as ToolResult;
         },
     };
 }
@@ -1193,7 +1281,9 @@ export function buildMcpServerForSlot(slot: McpSlot, sessionAnchor?: string): Mc
     keepArgumentErrorText(server);
     for (const tool of michiToolCatalog(slot)) {
         const { config, handler } = sessionAnchor === undefined ? tool : anchoredTool(tool, sessionAnchor);
-        server.registerTool(tool.name, config as Parameters<McpServer["registerTool"]>[1], handler as never);
+        // Up-front loading is the host's tools/list's to say (with the slot's client key); the SDK server takes no such field.
+        const { loadUpFront: _loadUpFront, ...sdkConfig } = config;
+        server.registerTool(tool.name, sdkConfig as Parameters<McpServer["registerTool"]>[1], handler as never);
     }
     return server;
 }
@@ -1242,34 +1332,10 @@ function anchoredTool(tool: MichiTool, sessionAnchor: string): Pick<MichiTool, "
     };
 }
 
-function codexStopHookResult(slot: McpSlot, payload: unknown): Record<string, unknown> {
-    if (!slot.onValidateFollowUps) return {};
-    if (!payload || typeof payload !== "object" || Array.isArray(payload)) return {};
-    const eventName = (payload as Record<string, unknown>).hook_event_name;
-    if (eventName !== "Stop") return {};
-    return slot.onValidateFollowUps();
-}
-
 /**
- * Capability-URL validator used by the Codex command Stop Hook POC. The
- * unguessable MCP slot id binds the external Hook process to exactly one
- * Michi node/session, avoiding any global "current node" lookup when several
- * branches are running concurrently.
- */
-export function validateCodexStopHookForSlot(
-    registry: McpSlotRegistry,
-    slotId: string,
-    payload: unknown,
-): Record<string, unknown> {
-    const slot = registry.get(slotId);
-    return slot ? codexStopHookResult(slot, payload) : {};
-}
-
-/**
- * Mount Michi's MCP routes on the provided Express router: /mcp/:slotId,
- * /mcp-session/:groupId and the Codex Stop Hook at /codex-hooks/:slotId/stop.
- * The runtime package host serves them (its routes `/mcp/<slot>`,
- * `/mcp-session/<group>`, `/mcp-hooks/<slot>/stop`), behind its gates:
+ * Mount Michi's MCP routes on the provided Express router: /mcp/:slotId and
+ * /mcp-session/:groupId. The runtime package host serves them (its routes
+ * `/mcp/<slot>` and `/mcp-session/<group>`), behind its gates:
  * loopback peers only, no Origin or proxy forwarding headers, and the body
  * limit. express.json has parsed the body already and is passed through.
  *
@@ -1293,21 +1359,6 @@ export function mountMcp(
         req.url = path;
         void serve(req, res, req.body);
     };
-
-    router.post("/codex-hooks/:slotId/stop", (req: Request<{ slotId: string }>, res: Response) => {
-        const slotId = req.params.slotId;
-        if (!registry.get(slotId)) {
-            // No such slot: the Stop Hook fails open with {}, as it always has.
-            if (!isLoopbackAddress(req.socket.remoteAddress)) {
-                log.warn("mcp", "codex stop hook rejected non-loopback request", { remoteAddress: req.socket.remoteAddress });
-                res.status(403).json({});
-                return;
-            }
-            res.json({});
-            return;
-        }
-        forward(req, res, `/mcp-hooks/${slotId}/${CODEX_STOP_HOOK}`);
-    });
 
     const slotRoute = (req: Request<{ slotId: string }>, res: Response) =>
         forward(req, res, `/mcp/${encodeURIComponent(req.params.slotId)}`);

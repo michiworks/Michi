@@ -5,7 +5,7 @@ import {
   type PageComponentVersion,
 } from 'michi-shared';
 import { getDb } from '../db';
-import { PageWriteError, invalidateDatabasePages, invalidatePages, pagesTransaction, requireChatChangeSource, requirePagesWorkspace } from './core';
+import { PageWriteError, invalidateDatabasePages, invalidatePages, pageTimestamp, pagesTransaction, requireChatChangeSource, requirePagesWorkspace } from './core';
 
 type ComponentRow = {
   id:string; owner_user_id:string; workspace_id:string; name:string; description:string; enabled:number;
@@ -15,7 +15,6 @@ type ComponentRow = {
 type VersionRow = { component_id:string; version:number; code:string; props_schema:string|null; source:string; created_at:number };
 const db = () => getDb();
 function fail(message:string, status:400|404|409 = 400, code:'invalid'|'not_found'|'stale_revision'='invalid'):never { throw new PageWriteError(status,code,message); }
-const nowValue = (value?:number) => { const n=value??Date.now(); if(!Number.isSafeInteger(n)||n<0)fail('Invalid timestamp'); return n; };
 const decodeSource = (raw:string):PageComponentVersionSource => {
   let value:unknown;
   try { value=JSON.parse(raw); } catch { return fail('Invalid stored component version attribution'); }
@@ -111,7 +110,7 @@ export class PageComponents {
     });
   }
   private saveAttributed(workspaceId:string,ownerUserId:string,args:{expectedLibraryRevision:number;input:unknown;now?:number},attribution:()=>PageComponentVersionSource):{component:PageComponent;version:PageComponentVersion;revision:number} {
-    const now=nowValue(args.now),input=parsePageComponentInput(args.input);
+    const now=pageTimestamp(args.now),input=parsePageComponentInput(args.input);
     if(!input)return fail('Invalid component definition');
     return pagesTransaction(()=>{
       const source=attribution();
@@ -160,7 +159,7 @@ export class PageComponents {
     });
   }
   private change(workspaceId:string,ownerUserId:string,componentId:string,args:ComponentMutationOptions,mutate:(row:ComponentRow,revision:number,now:number)=>PageComponentReference[]):PageComponent {
-    const now=nowValue(args.now);
+    const now=pageTimestamp(args.now);
     return pagesTransaction(()=>{
       requireUserActor(workspaceId,ownerUserId,args.actor);
       const row=getRow(workspaceId,ownerUserId,componentId); const revision=bumpLibrary(workspaceId,ownerUserId,args.expectedLibraryRevision,now);
@@ -170,7 +169,7 @@ export class PageComponents {
   }
   /** Internal adapter for page/database writers. Validates cross-workspace references and preserves accepted version pins. */
   replaceReferences(ownerUserId:string,workspaceId:string,hostKind:'page_block'|'database_view',hostId:string,refsInput:unknown,now?:number,actor:'user'|'agent'='agent'):void {
-    const at=nowValue(now); requirePagesWorkspace(workspaceId,ownerUserId,true);
+    const at=pageTimestamp(now); requirePagesWorkspace(workspaceId,ownerUserId,true);
     if(!Array.isArray(refsInput)||refsInput.length>PAGE_COMPONENT_LIMITS.refsPerComponent)return fail('Invalid component reference batch');
     const referenceInputs=refsInput as unknown[];
     const host=hostKind==='page_block'

@@ -9,5 +9,9 @@
 }
 .native-md-segment:is(:hover, :focus-within, [data-sources-open]) .native-md-segment__sources { opacity: 1; pointer-events: auto; }
 .native-md-segment__sources:hover { color: var(--term-fg); background: var(--term-hover); }
-.native-md-segment__sources:focus-visible { opacity: 1; pointer-events: auto; outline: 2px solid var(--term-accent); outline-offset: 1px; }
+.native-md-segment__sources:focus-visible { opacity: 1; pointer-events: auto; outline: var(--focus-ring); outline-offset: 1px; }
 @media (hover: none) { .native-md-segment__sources { opacity: 1; pointer-events: auto; } }
+/* Uncited Markdown stays one document; Contents lights the heading it lands on as it lights a block. */
+.native-md-whole { display: contents; }
+.native-md-whole [data-flash] { animation: michi-doc-flash var(--t-slow, 600ms) ease-out; }
+@media (prefers-reduced-motion: reduce) { .native-md-whole [data-flash] { animation: none; background: var(--term-accent-f); } }

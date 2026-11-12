@@ -1,15 +1,12 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { ModalShell } from './ui/ModalShell';
-
-export interface MoveThreadTarget {
-  id: string;
-  name: string;
-}
+import { isImeComposing } from '../lib/ime';
+import type { MoveTargetWorkspace } from '../state/moveTargets';
 
 interface Props {
   open: boolean;
   threadLabel: string;
-  targets: readonly MoveThreadTarget[];
+  targets: readonly MoveTargetWorkspace[];
   onClose: () => void;
   onPick: (targetProjectId: string) => void;
 }
@@ -112,7 +109,7 @@ export default function MoveThreadDialog({ open, threadLabel, targets, onClose, 
             setActiveIndex(0);
           }}
           onKeyDown={(e) => {
-            if (e.nativeEvent.isComposing) return;
+            if (isImeComposing(e)) return;
             if (e.key === 'ArrowDown') {
               e.preventDefault();
               setActiveIndex((i) => Math.min(filtered.length - 1, i + 1));

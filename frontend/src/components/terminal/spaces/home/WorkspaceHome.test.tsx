@@ -63,7 +63,10 @@ vi.mock('../SpacesPage', () => ({
 }));
 vi.mock('../NativeDatabase', () => ({ default: () => null }));
 vi.mock('../PageChangeTargets', () => ({ PageChangeTargets: () => null }));
+// The home's blocks as the panel's targets are NativePageDocument.test's and HomeDocument.target.test's to show.
+const noTargeting = vi.hoisted(() => ({ selectedBlockIds: [] as string[], selectOnClick: false }));
 vi.mock('../NativePageDocument', () => ({
+  useCompanionTargeting: () => noTargeting,
   default: ({ page, visibleBlocks = page.blocks, onStartConversation }: { page: PageDto; visibleBlocks?: PageDto['blocks']; onStartConversation?(text: string, workspaceId: string): void }) => <div data-testid="segment">
     {visibleBlocks.map((block) => <p key={block.id}>{'text' in block ? block.text : block.id}</p>)}
     {!page.blocks.length && <div data-testid="empty-editor" />}
@@ -78,7 +81,7 @@ vi.mock('./homeLinks', async (importOriginal) => ({
   PageProgressCards: ({ scope }: { scope: unknown }) => <div data-testid="progress-cards" data-scope={JSON.stringify(scope)} />,
 }));
 
-import { workspaceConversations, WorkspaceHomeView } from './WorkspaceHome';
+import WorkspaceHomeView, { workspaceConversations } from './WorkspaceHome';
 
 const page = (blocks: PageBlock[]): PageDto => ({
   id: 'wh', workspaceId: 'ws-1', parentId: null, position: 0, title: 'rabbitholes', color: null, updatedAt: Date.now() - 12 * 60_000, updatedBy: 'agent',
@@ -240,13 +243,13 @@ describe('Workspace home', () => {
     mocks.retry.mockReset();
     render(<WorkspaceHomeView workspaceId="ws-1" backendConnectionId="remote-box" onOpenPage={vi.fn()} />);
     expect(screen.getByRole('heading', { level: 1, name: 'rabbitholes' })).toBeTruthy();
-    expect(screen.getByRole('status').textContent).toBe('Pages doesn’t support remote connections yet.rabbitholes is on a remote connection. The Meta agent reads only the workspaces on this computer, so it doesn’t write a home for this one. Its conversations are still in Conversations.');
+    expect(screen.getByRole('status').textContent).toBe('Pages doesn’t support remote connections yet.rabbitholes is on a remote connection. Pages upkeep reads only the workspaces on this computer, so it doesn’t write a home for this one. Its conversations are still in Conversations.');
     expect(screen.queryByText('Related conversations')).toBeNull();
     expect(screen.queryByText('Pages in this workspace')).toBeNull();
     expect(mocks.retry).not.toHaveBeenCalled();
   });
 
-  it('leaves the Meta agent’s maintenance runs and page helpers out of Related conversations', () => {
+  it('leaves Pages upkeep’s maintenance runs and page helpers out of Related conversations', () => {
     mocks.chatIds = ['u1', 'm1', 'p1'];
     mocks.trees = [
       { id: 't-u', rootNodeId: 'u1', createdAt: 1, lastActiveAt: 3 },
@@ -263,12 +266,34 @@ describe('Workspace home', () => {
     expect(rows).toEqual(['Notarize failure']);
   });
 
+  it('leaves a conversation in Trash out of Related conversations', () => {
+    const project = {
+      id: 'ws-1', chatIds: ['u1', 'gone'], edges: [],
+      trees: [
+        { id: 't-u', rootNodeId: 'u1', createdAt: 1, lastActiveAt: 3 },
+        { id: 't-gone', rootNodeId: 'gone', createdAt: 1, lastActiveAt: 9 },
+      ],
+    } as unknown as Parameters<typeof workspaceConversations>[0];
+    const nodes = {
+      u1: { kind: 'chat', title: 'Notarize failure', status: 'idle' },
+      gone: { kind: 'chat', title: 'Binned', status: 'idle', deletedAt: 10 },
+    } as unknown as Parameters<typeof workspaceConversations>[1];
+    expect(workspaceConversations(project, nodes, null).map((row) => row.title)).toEqual(['Notarize failure']);
+  });
+
   it('says when a workspace has no conversations to list, and leaves out digests', () => {
     expect(workspaceConversations(undefined, {}, null)).toEqual([]);
     const project = { id: 'ws-1', chatIds: ['d'], trees: [{ id: 't', rootNodeId: 'd', createdAt: 1, lastActiveAt: 1 }], edges: [] } as unknown as Parameters<typeof workspaceConversations>[0];
     expect(workspaceConversations(project, { d: { kind: 'digest' } } as unknown as Parameters<typeof workspaceConversations>[1], null)).toEqual([]);
     view();
     expect(screen.getByText('No conversations in this workspace yet.')).toBeTruthy();
+  });
+
+  it('labels an untitled conversation with its first user message', () => {
+    const project = { id: 'ws-1', chatIds: ['u'], trees: [{ id: 't', rootNodeId: 'u', createdAt: 1, lastActiveAt: 1 }], edges: [] } as unknown as Parameters<typeof workspaceConversations>[0];
+    const untitled = { kind: 'chat', title: '', status: 'idle', messages: [{ role: 'user', text: 'Plan the release' }] };
+    expect(workspaceConversations(project, { u: untitled } as unknown as Parameters<typeof workspaceConversations>[1], null)
+      .map((conversation) => conversation.title)).toEqual(['Plan the release']);
   });
 
   it('shows an empty workspace as a title, one line and New conversation', () => {
@@ -291,7 +316,7 @@ describe('Workspace home', () => {
     mocks.home = home([], run('reading'));
     mocks.page = (mocks.home as WorkspaceHomeDto).page;
     view();
-    expect(screen.getByRole('status').textContent).toContain('The Meta agent is reading rabbitholes’s 38 past conversations and writes them here when it is done.');
+    expect(screen.getByRole('status').textContent).toContain('Michi is reading rabbitholes’s 38 past conversations and writes them here when it is done.');
     expect(screen.queryByTestId('empty-editor')).toBeNull();
     expect(screen.queryByRole('heading', { name: 'Pages in this workspace' })).toBeNull();
     expect(mocks.opened).not.toHaveBeenCalled();
@@ -317,7 +342,7 @@ describe('Workspace home', () => {
     mocks.home = home([], null);
     mocks.page = (mocks.home as WorkspaceHomeDto).page;
     view();
-    expect(screen.getByText('The Meta agent writes this page from the workspace’s conversations.')).toBeTruthy();
+    expect(screen.getByText('Michi writes this page from the workspace’s conversations.')).toBeTruthy();
     expect(screen.getByTestId('empty-editor')).toBeTruthy();
   });
 

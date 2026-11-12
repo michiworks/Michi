@@ -3,11 +3,12 @@ import { toast } from 'sonner';
 import type { MichiDbEditOp, MichiDbView, MichiDbViewType, PageChangeDto, PageComponentSource, ThreadCardItem } from 'michi-shared';
 import { isTaskDb, taskThreadIds, TASK_COLUMN } from 'michi-shared';
 import { CustomDatabaseView } from './components/CustomDatabaseView';
-import { changePageChange, revertPageBatch } from '../../../services/api/pages';
+import { changePageChange, pageEditFailure } from '../../../services/api/pages';
 import { fetchTaskOrigin } from '../../../services/api/taskDatabase';
 import { useOptionalChatProjects } from '../../../state/chatStore';
-import { openExactSourcePopover } from '../../../state/sourceNav/sourceNav';
+import { openExactSourcePopover, openThreadCard } from '../../../state/sourceNav/sourceNav';
 import { notifyPageChanged } from '../../../state/pages/pageEvents';
+import { batchOutcomeNotice, revertPageBatches, UNDO_FAILED } from '../../../state/pages/pageUndo';
 import { usePageDatabase } from '../../../state/pages/usePageDatabase';
 import { DatabaseView } from '../content/db/DatabaseView';
 import { LiveThreadsContext, type LiveThreads } from '../content/db/liveThreads';
@@ -20,6 +21,9 @@ import { ChangeCard, type AcceptedPageEdit } from './ChangeCard';
 import { workspaceConversations } from './taskConversations';
 import { useTaskUpkeep } from './useTaskUpkeep';
 import { useThreadStates } from './useThreadStates';
+
+/** The toast after Undo on a task board's latest Pages upkeep update. */
+const UPKEEP_UNDONE = 'Undid the Pages upkeep update';
 import './nativeDatabase.css';
 
 export interface NativeDatabaseProps {
@@ -38,6 +42,8 @@ export interface NativeDatabaseProps {
   /** A task board's own title, in place of the database's. */
   heading?: string;
   onAskDraft?: (draft: string) => void;
+  /** Ask the page's assistant about one row; omitted hides the row drawer's Ask. */
+  onAskRow?: (row: { id: string; title: string }) => void;
   onNavigatePage?: (pageId: string) => void;
   onOpenSource?: (source: PageComponentSource) => void | boolean | Promise<void | boolean>;
   /** Opens a conversation a task links (its pill on a card, or its row in the task's details). */
@@ -57,7 +63,7 @@ const conversationCount = (n: number) => `${n} conversation${n === 1 ? '' : 's'}
  * Reads and writes stay on the Pages API and keep its revision metadata. A
  * task database also reads where its linked conversations stand, for its
  * cells, cards, filters and details. */
-export function NativeDatabase({ databaseId, workspaceId, connectionId, viewId, compact = false, readOnly: ownerReadOnly = false, presentation = 'full', heading, onAskDraft, onNavigatePage, onOpenSource, onOpenThread }: NativeDatabaseProps) {
+function NativeDatabase({ databaseId, workspaceId, connectionId, viewId, compact = false, readOnly: ownerReadOnly = false, presentation = 'full', heading, onAskDraft, onAskRow, onNavigatePage, onOpenSource, onOpenThread }: NativeDatabaseProps) {
   const { database, status, error, stale, refresh, edit } = usePageDatabase({
     backendConnectionId: connectionId,
     workspaceId,
@@ -86,19 +92,21 @@ export function NativeDatabase({ databaseId, workspaceId, connectionId, viewId, 
     workspaceId,
     ...(workspaceName ? { workspaceName } : {}),
     loadConversations,
-    ...(canOpenThread ? { open: (item: ThreadCardItem) => openThreadRef.current?.(item) } : {}),
-  } : null), [tasks, threadStates, workspaceId, workspaceName, loadConversations, canOpenThread]);
+    ...(canOpenThread ? { open: (item: ThreadCardItem) => openThreadCard(connectionId, item, (card) => openThreadRef.current?.(card)) } : {}),
+  } : null), [tasks, threadStates, workspaceId, workspaceName, loadConversations, canOpenThread, connectionId]);
 
   // Undo of a card moved on a board: the batch its edit made, put back.
   const undo = useCallback(async (batchId: string) => {
     try {
-      const { conflicts } = await revertPageBatch(batchId, { backendConnectionId: connectionId, workspaceId });
-      if (conflicts.length) toast.error('Not undone: it changed again since. Move it back yourself.');
+      const outcome = await revertPageBatches(connectionId, [{
+        batchId, workspaceId, changed: [{ backendConnectionId: connectionId, workspaceId, databaseId }],
+      }]);
+      const notice = batchOutcomeNotice(outcome, 'undone', 'Move it back yourself.');
+      if (notice) toast.error(notice);
     } catch {
-      toast.error("Couldn't undo that just now.");
+      toast.error(UNDO_FAILED);
     }
     refresh();
-    notifyPageChanged({ backendConnectionId: connectionId, workspaceId, databaseId });
   }, [connectionId, databaseId, refresh, workspaceId]);
 
   const saveRef = useRef<((ops: MichiDbEditOp[], label: string, options?: DbEditOptions, undoing?: boolean) => Promise<boolean>) | null>(null);
@@ -117,22 +125,21 @@ export function NativeDatabase({ databaseId, workspaceId, connectionId, viewId, 
       }
       return true;
     } catch (cause) {
+      // Changed meanwhile (here, in another pane, by the assistant): edit has already read it again to show where it stands.
+      const conflict = pageEditFailure(cause) === 'stale';
+      if (!conflict) refresh();
       if (undoing) {
         toast.error("Couldn't undo the move.");
-        refresh();
         return false;
       }
-      // Changed meanwhile (here, in another pane, by the assistant): the read that follows shows where it stands.
-      const conflict = (cause as { status?: number })?.status === 409;
       setWriteError(conflict ? 'This database just changed, so it was refreshed. Try again.' : cause instanceof Error ? cause.message : "Couldn't save this database");
       setFailedDraft({ ops, label });
-      refresh();
       return false;
     }
   }, [database, edit, ownerReadOnly, refresh, stale, status, undo]);
   saveRef.current = save;
 
-  // The Meta agent's upkeep of a task board: its marks, its suggestions, and its latest update with Undo.
+  // Pages upkeep of a task board: its marks, its suggestions, and its latest update with Undo.
   const upkeep = useTaskUpkeep({ connectionId, workspaceId, databaseId, revision: database?.revision ?? null, enabled: tasks });
   const refreshUpkeep = upkeep.refresh;
   const [undoing, setUndoing] = useState(false);
@@ -144,11 +151,13 @@ export function NativeDatabase({ databaseId, workspaceId, connectionId, viewId, 
   const undoUpkeep = useCallback(async (batchId: string) => {
     setUndoing(true);
     try {
-      const { conflicts } = await revertPageBatch(batchId, { backendConnectionId: connectionId, workspaceId });
-      if (conflicts.length) toast.error('Not all of it was undone: some tasks changed again since.');
-      else toast("Undid the Meta agent's update");
+      // afterChange tells the other views, whatever the outcome.
+      const outcome = await revertPageBatches(connectionId, [{ batchId, workspaceId, changed: [] }]);
+      const notice = batchOutcomeNotice(outcome, 'undone');
+      if (notice) toast.error(notice);
+      else toast(UPKEEP_UNDONE);
     } catch {
-      toast.error("Couldn't undo that just now.");
+      toast.error(UNDO_FAILED);
     }
     setUndoing(false);
     afterChange();
@@ -265,7 +274,7 @@ export function NativeDatabase({ databaseId, workspaceId, connectionId, viewId, 
         now={Date.now()}
         services={{
           notice: (message) => setWriteError(message),
-          copyText: (text) => navigator.clipboard.writeText(text),
+          ...(onAskRow ? { askRow: onAskRow } : {}),
         }}
         onAddCustomView={onAskDraft ? () => onAskDraft(customViewDraft(database.title)) : undefined}
         drawAs={compact ? narrowForm : undefined}

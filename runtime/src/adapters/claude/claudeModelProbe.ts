@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { isReasoningLevel, sanitizeReasoningLevels } from 'michi-shared';
 import type { ModelInfo } from '../../contract/types';
-import { findClaudeBinary, preflightClaudeAuth } from './claudeBinary';
+import { claudeChildEnv, findClaudeBinary, preflightClaudeAuth } from './claudeBinary';
 import { spawnAgentProcess, killProcessTree } from '../../core/processTree';
 import type { ClaudeAdapterOptions } from './claudeAdapterOptions';
 import { loadClaudeSdk, type ClaudeSdkModule } from './claudeSdkTransport';
@@ -95,10 +95,11 @@ export function parseClaudeInitializeModels(response: unknown): ModelInfo[] {
 export type ClaudeModelProbeConfig = Pick<ClaudeAdapterOptions, 'host' | 'spawnEnv' | 'binaryPath' | 'configDir'>;
 
 /**
- * Keep model discovery away from workspace settings and CLAUDE.md. Use a
- * stable data-dir folder because the toolbox CLI can stall in the OS temp dir.
+ * The cwd of one-shot CLI starts (model discovery, thread titles), away from
+ * workspace settings and CLAUDE.md. Use a stable data-dir folder because the
+ * toolbox CLI can stall in the OS temp dir.
  */
-function defaultClaudeModelProbeCwd(config: ClaudeModelProbeConfig): string {
+export function neutralClaudeCwd(config: Pick<ClaudeAdapterOptions, 'host'>): string {
   const dir = path.join(config.host.config.dataDir(), 'model-probe-cwd');
   fs.mkdirSync(dir, { recursive: true });
   return dir;
@@ -115,11 +116,11 @@ export async function probeClaudeModels(config: ClaudeModelProbeConfig, opts: Cl
   let query: Query | undefined;
   try {
     query = sdk.query({ prompt: '', options: {
-      cwd: opts.cwd ?? defaultClaudeModelProbeCwd(config),
+      cwd: opts.cwd ?? neutralClaudeCwd(config),
       pathToClaudeCodeExecutable: binary,
       persistSession: false,
       extraArgs: { bare: null },
-      env: { ...spawnEnv, ...(configDir ? { CLAUDE_CONFIG_DIR: configDir } : {}) },
+      env: claudeChildEnv(spawnEnv, configDir),
       spawnClaudeCodeProcess: (args) => {
         child = spawnAgentProcess(args.command, args.args, { cwd: args.cwd, env: args.env, signal: args.signal });
         return child;

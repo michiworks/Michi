@@ -1,4 +1,4 @@
-import './helpers/claudeSdkFixture';
+import { untilSpawned } from './helpers/claudeSdkFixture';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { claudeTestOptions } from './helpers/claudeTestOptions';
@@ -217,7 +217,7 @@ test('Claude ignores an old result during retirement and next turn resumes the s
   await stopping;
   await a;
   const b = drain(session.send('B'));
-  await tick();
+  await untilSpawned(() => spawns.length === 2);
   assert.equal(spawns.at(-1).resumeSessionId, 'native-claude');
   children[0].emit('exit', 0);
   children[0].send({ type: 'result', subtype: 'error', usage: {} });

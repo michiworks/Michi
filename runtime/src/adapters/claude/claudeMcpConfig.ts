@@ -1,6 +1,16 @@
+import { MICHI_MCP_SERVER } from 'michi-shared';
 import type { McpHttpEndpoint } from '../../contract/mcp';
 
-export const MICHI_INTERNAL_MCP_NAME = '__michi_internal__';
+export const MICHI_INTERNAL_MCP_NAME = MICHI_MCP_SERVER;
+
+/**
+ * The tool `_meta` Claude Code reads as "load this tool up front": without
+ * it Claude Code shows the model only the names of an MCP server's tools
+ * until it searches for them (tool search), so a description that says when
+ * to call a tool never reaches the model. The host puts it on the tools it
+ * marks loadUpFront (McpSlotCallbacks.upFrontToolMeta).
+ */
+export const CLAUDE_UP_FRONT_TOOL_META: Readonly<Record<string, unknown>> = Object.freeze({ 'anthropic/alwaysLoad': true });
 
 /** How Claude names a tool of Michi's MCP server: mcp____michi_internal____<tool>. */
 export const MICHI_MCP_TOOL_PREFIX = `mcp__${MICHI_INTERNAL_MCP_NAME}__`;

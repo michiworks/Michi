@@ -1,5 +1,5 @@
-import React, { useRef, useState } from 'react';
-import type { MichiDatabase, MichiDbColumn, MichiDbRow, ThreadCardItem } from 'michi-shared';
+import { useRef, useState } from 'react';
+import type { MichiDatabase, MichiDbColumn, MichiDbRow } from 'michi-shared';
 import { taskThreadIds } from 'michi-shared';
 import { ThreadStateDot } from '../ThreadStateDot';
 import { formatMichiAge } from '../michiFormat';

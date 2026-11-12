@@ -6,17 +6,18 @@ import path from 'node:path';
 import { HOME_SECTION_LIMIT } from 'michi-shared';
 import { closeDb, getDb, initDb } from '../src/services/db';
 import { LOCAL_AGENT_OWNER_ID } from '../src/services/agentOwner';
-import { createPage, deletePage, getPage } from '../src/services/pages/repository';
+import { createDatabase, createPage, deletePage, getPage } from '../src/services/pages/repository';
 import { applyAgentPageEdits, applyUserPageEdits } from '../src/services/pages/pageWrites';
+import { applyUserDatabaseEdits } from '../src/services/pages/databaseWrites';
 import { getSpacesHome, setWorkspaceHomeHidden } from '../src/services/pages/homePages';
 import {
   actOnHomeReminder, blockLine, chatHubLiveWait, homeConversations, homeSections, lastQuestion, markSpacesHomeLooked, STALLED_AFTER_MS,
-  type HomeLiveWaitReader,
+  threadCards, type HomeLiveWaitReader,
 } from '../src/services/pages/homeSections';
 import { seedConversation, type SeedTurn } from './helpers/homeConversations';
 import { applyWorkspaceCommands } from '../src/services/domainCommands';
 import { oneValueChange, spaceActivity } from '../src/services/pages/homeActivity';
-import { createProgressCard, dismissProgressCard } from '../src/services/pages/progressCards';
+import { createProgressCard, dismissProgressCard, listHomeProgressCards } from '../src/services/pages/progressCards';
 
 const OWNER = LOCAL_AGENT_OWNER_ID;
 let dir: string;
@@ -122,6 +123,37 @@ test('an early-ended last turn is Just done, never waiting or stalled; the row s
     'Stopped early: it reached its step limit', 'Stopped early: it reached its output limit', 'Stopped: the agent declined to continue',
   ]);
   assert.equal(read(undefined, NOW - DAY).done.total, 2, 'one that ended before the last look is in no section');
+});
+
+test('how the latest turn ended reads the same on Home rows, thread cards and progress cards', () => {
+  const page = createPage({ workspaceId: 'ws', ownerUserId: OWNER, title: 'Release', now: 1 });
+  // [turn, Home section and row, thread card state and summary, progress card status and error]
+  const cases: Array<[Pick<SeedTurn, 'status' | 'stopReason' | 'error'>, [string | null, string], [string, string], [string, string | null]]> = [
+    [{ status: 'completed', stopReason: 'end_turn' }, ['done', 'All set.'], ['done', 'All set.'], ['done', null]],
+    [{ status: 'completed', stopReason: 'max_tokens' }, ['done', 'Stopped early: it reached its output limit'],
+      ['done', 'Stopped early: it reached its output limit'], ['failed', 'The reply reached its length limit before it finished.']],
+    [{ status: 'completed', stopReason: 'max_turn_requests' }, ['done', 'Stopped early: it reached its step limit'],
+      ['done', 'Stopped early: it reached its step limit'], ['failed', 'The chat reached its step limit before it finished.']],
+    [{ status: 'completed', stopReason: 'refusal' }, ['done', 'Stopped: the agent declined to continue'],
+      ['done', 'Stopped: the agent declined to continue'], ['failed', 'The model declined to continue.']],
+    [{ status: 'cancelled', stopReason: 'cancelled' }, [null, ''], ['done', 'Stopped before it finished'], ['cancelled', null]],
+    [{ status: 'error', error: 'backend_restarted' }, ['waiting', 'Interrupted: Michi stopped while it was running'],
+      ['waiting', 'Interrupted: Michi stopped while it was running'], ['failed', 'Michi stopped while it was running.']],
+    [{ status: 'error', error: '\nboom\n  at stack' }, ['waiting', 'Failed: boom'], ['waiting', 'Failed: boom'], ['failed', 'boom']],
+  ];
+  for (const [turn, home, thread, card] of cases) {
+    const nodeId = chat({ ...turn, reply: 'All set.', startedAt: NOW - 5_000 });
+    createProgressCard({ ownerUserId: OWNER, threadNodeId: nodeId, startedFromPageId: page.id, now: NOW - 6_000 });
+    const sections = read();
+    const section = (['waiting', 'stalled', 'done'] as const).find((key) => ids(sections[key]).includes(nodeId)) ?? null;
+    const row = section ? sections[section].items.find((item) => item.id === `conversation:${nodeId}`)!.summary : '';
+    const [threadCard] = threadCards({ ownerUserId: OWNER, workspaceId: 'ws', nodeIds: [nodeId], now: NOW });
+    const progress = listHomeProgressCards(OWNER, NOW).find((item) => item.threadNodeId === nodeId)!;
+    const label = JSON.stringify(turn);
+    assert.deepEqual([section, row], home, `Home: ${label}`);
+    assert.deepEqual([threadCard!.state, threadCard!.summary], thread, `thread card: ${label}`);
+    assert.deepEqual([progress.status, progress.error], card, `progress card: ${label}`);
+  }
 });
 
 test('a reply ending in a question waits for your answer; the row quotes the question', () => {
@@ -265,6 +297,8 @@ test('chatHubLiveWait reads the pending permission or question of an active turn
   }) as unknown as Parameters<typeof chatHubLiveWait>[0];
   assert.deepEqual(chatHubLiveWait(hub(observation(true), { title: 'Run tests' }, null), 'n'), { kind: 'approval', text: 'Run tests' });
   assert.deepEqual(chatHubLiveWait(hub(observation(true), null, { questions: [{ question: 'Which?' }] }), 'n'), { kind: 'question', text: 'Which?' });
+  assert.deepEqual(chatHubLiveWait(hub(observation(true), null, { questions: [{ question: '', header: 'Branch?' }] }), 'n'), { kind: 'question', text: 'Branch?' },
+    'a question without text is named by its header, as progress cards and send_to_thread name it');
   assert.equal(chatHubLiveWait(hub(observation(false), null, null), 'n'), null);
   assert.equal(chatHubLiveWait(hub(observation(true, 'ended'), { title: 'x' }, null), 'n'), null);
   assert.equal(chatHubLiveWait(hub(null, null, null), 'n'), null);
@@ -297,6 +331,32 @@ test('waiting adds page proposals that wait for confirmation, newest first, capp
   const after = homeSections({ ownerUserId: OWNER, now: 3_000, since: LONG_AGO });
   assert.deepEqual(after.conversations, { available: true });
   assert.equal(after.waiting.total, 4, 'the four sample-notes proposals left');
+});
+
+test('a workspace hidden from Spaces leaves Waiting, its counts and Space activity, and comes back when shown', () => {
+  const page = createPage({ workspaceId: 'ws-2', ownerUserId: OWNER, title: 'Notes', now: 1 });
+  const changeId = propose(page.id, 'ws-2', OWNER, 'Agent idea', 2_000);
+  getDb().prepare("INSERT INTO nodes(id,workspace_id,kind,title,status) VALUES ('started','ws-2','chat','Follow-up','idle')").run();
+  createProgressCard({ ownerUserId: OWNER, threadNodeId: 'started', startedFromPageId: page.id, now: 2_100 });
+  const shown = () => {
+    const { waiting, byWorkspace } = homeSections({ ownerUserId: OWNER, now: 3_000, since: LONG_AGO });
+    return { waiting: ids(waiting).includes(`change:${changeId}`), counted: 'ws-2' in (byWorkspace ?? {}),
+      activity: spaceActivity(OWNER).filter((item) => item.workspaceId === 'ws-2').map((item) => item.kind).sort() };
+  };
+  assert.deepEqual(shown(), { waiting: true, counted: true, activity: ['conversation', 'page-change', 'page-change'] });
+  setWorkspaceHomeHidden('ws-2', OWNER, true, 2_500);
+  assert.deepEqual(shown(), { waiting: false, counted: false, activity: [] });
+  setWorkspaceHomeHidden('ws-2', OWNER, false, 2_600);
+  assert.deepEqual(shown(), { waiting: true, counted: true, activity: ['conversation', 'page-change', 'page-change'] });
+});
+
+test('a conversation started from a page leaves Space activity with its archived workspace, as the page changes do', () => {
+  const page = createPage({ workspaceId: 'ws-2', ownerUserId: OWNER, title: 'Notes', now: 1 });
+  getDb().prepare("INSERT INTO nodes(id,workspace_id,kind,title,status) VALUES ('started','ws-2','chat','Follow-up','idle')").run();
+  createProgressCard({ ownerUserId: OWNER, threadNodeId: 'started', startedFromPageId: page.id, now: 150 });
+  assert.deepEqual(spaceActivity(OWNER).map((item) => item.kind), ['conversation']);
+  getDb().prepare("UPDATE workspaces SET archived_at=5 WHERE id='ws-2'").run();
+  assert.deepEqual(spaceActivity(OWNER), []);
 });
 
 test('a suggestion row names the section it changes and quotes the suggested text without the title', () => {
@@ -413,7 +473,7 @@ test('Space activity groups a page\'s changes by turn, run or stretch of the per
   assert.equal(pageItems(page.id).length, 4);
 });
 
-test('Space activity names the Meta agent, counts entries a list gained, labels suggestions and marks what is new since the last look', () => {
+test('Space activity names the user\'s agent, counts entries a list gained, labels suggestions and marks what is new since the last look', () => {
   const home = getSpacesHome(OWNER, NOW - 300 * MIN);
   const assistantNode = (getDb().prepare("SELECT id FROM nodes WHERE workspace_id=? AND kind='chat'").get(home.page.workspaceId) as { id: string }).id;
   const page = createPage({ workspaceId: 'ws', ownerUserId: OWNER, title: 'rabbitholes', now: NOW - 300 * MIN });
@@ -426,7 +486,7 @@ test('Space activity names the Meta agent, counts entries a list gained, labels 
   ] });
   const [both] = pageItems(page.id);
   assert.ok(both?.kind === 'page-change');
-  assert.deepEqual({ ...both.detail, count: both.count, ops: both.ops }, { by: { kind: 'meta-agent' }, action: 'added', names: ['进展', '还没修的'], targets: 2, undone: false, count: 2, ops: ['insert'] });
+  assert.deepEqual({ ...both.detail, count: both.count, ops: both.ops }, { by: { kind: 'companion', via: 'conversation' }, action: 'added', names: ['进展', '还没修的'], targets: 2, undone: false, count: 2, ops: ['insert'] });
 
   markSpacesHomeLooked(OWNER, NOW - 50 * MIN);
   const timeline = getPage(page.id, OWNER).blocks.find((block) => block.type === 'timeline')!;
@@ -448,6 +508,19 @@ test('Space activity names the Meta agent, counts entries a list gained, labels 
   getDb().prepare("UPDATE page_changes SET proposal_state='accepted',application_state='applied' WHERE id=?").run(changeId);
   const accepted = spaceActivity(OWNER, { now: NOW }).find((item) => item.kind === 'page-change' && item.batchId === suggestion.batchId);
   assert.deepEqual({ action: accepted?.kind === 'page-change' && accepted.detail?.action, fresh: accepted?.fresh }, { action: 'accepted', fresh: false });
+});
+
+test('Space activity names a database row by its title column, whatever order its cells were written in', () => {
+  const page = createPage({ workspaceId: 'ws', ownerUserId: OWNER, title: 'Release', now: NOW - 100 * MIN });
+  const db = createDatabase({ workspaceId: 'ws', ownerUserId: OWNER, title: 'Tasks', now: NOW - 100 * MIN, views: [], rows: [],
+    columns: [{ id: 'status', name: 'Status', type: 'select', options: [{ value: 'doing' }, { value: 'done' }] }, { id: 'task', name: 'Task', type: 'text' }] });
+  getDb().prepare('INSERT INTO page_database_refs(page_id,database_id) VALUES (?,?)').run(page.id, db.id);
+  // A card added in a board's In progress lane: the lane's value is written before the title.
+  applyUserDatabaseEdits({ databaseId: db.id, ownerUserId: OWNER, revision: 1, now: NOW - 10 * MIN,
+    ops: [{ op: 'row.add', id: 'r1', values: { status: 'doing', task: 'Write the spec' } }] });
+  const [item] = pageItems(page.id);
+  assert.ok(item?.kind === 'page-change');
+  assert.deepEqual(item.detail?.names, ['Write the spec']);
 });
 
 test('one changed value is found only when every other value of the old text is still there', () => {

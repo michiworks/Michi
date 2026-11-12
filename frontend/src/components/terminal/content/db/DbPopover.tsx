@@ -1,9 +1,10 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { PopoverSurface } from '../../../ui/Popover';
-import { useAnchoredPosition } from '../../../ui/useAnchoredPosition';
+import { useBackLayer } from '../../../../lib/backStack';
+import { placeBelowAnchor, useAnchoredPosition } from '../../../ui/useAnchoredPosition';
+import { isImeComposing } from '../../../../lib/ime';
 
 const GAP = 4;
-const PAD = 8;
 
 interface Entry { surface: () => HTMLElement | null }
 /** Open popovers, innermost last: Esc and outside clicks belong to the innermost. */
@@ -49,16 +50,11 @@ export function DbPopover({
   const [pos, setPos] = useState<{ left: number; top: number } | null>(null);
   const onCloseRef = useRef(onClose);
   onCloseRef.current = onClose;
+  useBackLayer(true, { back: () => onCloseRef.current('escape') });
 
   useAnchoredPosition({ anchor: anchor instanceof HTMLElement ? anchor : null, surfaceRef: ref, dependencies: [anchor, align, width], measure: () => {
-    const rect = anchorRect(anchor);
     const box = ref.current?.getBoundingClientRect();
-    const w = box?.width || width || 240;
-    const h = box?.height || 0;
-    const wantLeft = align === 'end' ? rect.right - w : rect.left;
-    const left = Math.max(PAD, Math.min(window.innerWidth - w - PAD, wantLeft));
-    let top = rect.bottom + GAP;
-    if (top + h > window.innerHeight - PAD && rect.top - GAP - h >= PAD) top = rect.top - GAP - h;
+    const { left, top } = placeBelowAnchor(anchorRect(anchor), { width: box?.width || width || 240, height: box?.height || 0 }, { align, gap: GAP });
     setPos((prev) => (prev && prev.left === left && prev.top === top ? prev : { left, top }));
   } });
 
@@ -71,7 +67,7 @@ export function DbPopover({
     const returnTo = anchor instanceof HTMLElement ? anchor : null;
 
     const onKey = (event: KeyboardEvent) => {
-      if (!top()) return;
+      if (!top() || isImeComposing(event)) return;
       if (event.key === 'Escape') {
         event.preventDefault();
         event.stopPropagation();
@@ -106,6 +102,7 @@ export function DbPopover({
       animate={false}
       role={role}
       aria-label={label}
+      escapeLayer="over"
       width={width}
       left={pos?.left ?? 0}
       top={pos?.top ?? 0}

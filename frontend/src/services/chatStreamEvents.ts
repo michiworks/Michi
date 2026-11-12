@@ -16,6 +16,18 @@ import { recordBackendObservation } from './backendClock';
 import type { SavedTurn } from './api/stream';
 
 export { CHAT_STREAM_EVENTS, parseChatStreamEvent };
+
+/** A `done` frame's node completion facts (shared ChatStreamPayloads['done']). */
+export interface DoneCompletionFacts {
+  completionSeq: number;
+  seenCompletionSeq: number;
+}
+
+function doneCompletionFacts(data: ChatStreamPayloads['done']): DoneCompletionFacts | undefined {
+  return data.nodeCompletionSeq !== undefined && data.nodeSeenCompletionSeq !== undefined
+    ? { completionSeq: data.nodeCompletionSeq, seenCompletionSeq: data.nodeSeenCompletionSeq }
+    : undefined;
+}
 export type {
   AgentCommand,
   ChatStreamEnvelope,
@@ -53,6 +65,8 @@ export interface StreamHandlers {
   onCommands?: (commands: AgentCommand[]) => void;
   onArtifactSaved?: (name: string, filePath: string, size?: number, contextId?: string) => void;
   onArtifactUpdated?: (name: string, filePath: string, size?: number, contextId?: string) => void;
+  /** An agent removed an artifact's registration (delete_artifact); its file is kept. */
+  onArtifactDeleted?: (name: string, contextId?: string) => void;
   onImage?: (data: ChatStreamPayloads['image']) => void;
   onPermissionResolved?: (data: ChatStreamPayloads['permission_resolved']) => void;
   onPermissionRequest?: (data: ChatStreamPayloads['permission_request']) => void;
@@ -75,7 +89,8 @@ export interface StreamHandlers {
   /** Complete wire error; preferred over the legacy positional callback. */
   onErrorPayload?: (data: ChatStreamPayloads['error'] & ChatStreamEnvelope) => void;
   onMcpServerError?: (data: ChatStreamPayloads['mcp_server_error']) => void;
-  onDone?: (stopReason?: string, assistantId?: string, turnId?: string, persisted?: boolean, completedAt?: number) => void;
+  /** `completion`: the node's completion facts as the server committed them with this turn (a backend that keeps them). */
+  onDone?: (stopReason?: string, assistantId?: string, turnId?: string, persisted?: boolean, completedAt?: number, completion?: DoneCompletionFacts) => void;
   onAborted?: () => void;
   /** Local post-cancel observation, independent of the aborted output stream. */
   onCancelRecovery?: (status: CancelRecoveryStatus) => void;
@@ -162,6 +177,9 @@ export function dispatchChatStreamEvent(
         streamEvent.data.contextId,
       );
       return;
+    case CHAT_STREAM_EVENTS.artifactDeleted:
+      handlers.onArtifactDeleted?.(streamEvent.data.name, streamEvent.data.contextId);
+      return;
     case CHAT_STREAM_EVENTS.image:
       handlers.onImage?.(streamEvent.data);
       return;
@@ -222,25 +240,15 @@ export function dispatchChatStreamEvent(
     case CHAT_STREAM_EVENTS.mcpServerError:
       handlers.onMcpServerError?.(streamEvent.data);
       return;
-    case CHAT_STREAM_EVENTS.done:
-      if (typeof streamEvent.data.persisted === 'boolean') {
-        handlers.onDone?.(
-          streamEvent.data.stopReason,
-          streamEvent.data.assistantId,
-          streamEvent.data.turnId,
-          streamEvent.data.persisted,
-          streamEvent.data.completedAt,
-        );
-      } else {
-        handlers.onDone?.(
-          streamEvent.data.stopReason,
-          streamEvent.data.assistantId,
-          streamEvent.data.turnId,
-          undefined,
-          streamEvent.data.completedAt,
-        );
-      }
+    case CHAT_STREAM_EVENTS.done: {
+      const { stopReason, assistantId, turnId, completedAt } = streamEvent.data;
+      const persisted = typeof streamEvent.data.persisted === 'boolean' ? streamEvent.data.persisted : undefined;
+      const completion = doneCompletionFacts(streamEvent.data);
+      // Only a backend that keeps completion facts adds the last argument.
+      if (completion) handlers.onDone?.(stopReason, assistantId, turnId, persisted, completedAt, completion);
+      else handlers.onDone?.(stopReason, assistantId, turnId, persisted, completedAt);
       return;
+    }
     case CHAT_STREAM_EVENTS.error:
       if (handlers.onErrorPayload) handlers.onErrorPayload(streamEvent.data);
       else handlers.onError?.(streamEvent.data.message, streamEvent.data.assistantId, streamEvent.data.turnId, streamEvent.data.code);

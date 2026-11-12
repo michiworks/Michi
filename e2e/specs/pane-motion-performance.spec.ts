@@ -78,7 +78,8 @@ async function sample(page: Page, action: 'open' | 'close', count: number) {
 
 test.use({ viewport: { width: 1480, height: 1000 } });
 
-for (const width of [1480, 390]) for (const id of ['root', 'second']) {
+// Phones (≤700px) show one pane with no caption strip and no pane motion.
+for (const width of [1480]) for (const id of ['root', 'second']) {
   test(`sequential 2->1 closes ${id} before fullscreen at ${width}px`, async ({ page }, info) => {
     await page.setViewportSize({ width, height: 900 });
     await boot(page, 'soft-fade', 2);
@@ -295,6 +296,8 @@ test('rapid retarget, user interruption, reopen and reduced motion', async ({ pa
   expect(Math.abs(result.final - result.stopped)).toBeLessThan(2);
   await page.emulateMedia({ reducedMotion: 'reduce' });
   await page.setViewportSize({ width: 390, height: 844 });
+  // Phones keep the pane launcher in the Workspace views menu.
+  await page.getByRole('button', { name: 'Workspace views' }).click();
   await page.getByRole('button', { name: 'New pane', exact: true }).click();
   expect(await page.locator('.terminal-dashboard').evaluate(el => el.getAnimations({ subtree: true }).filter(a => a.effect?.getKeyframes().some(f => 'transform' in f)).length)).toBe(0);
   await page.evaluate(() => window.dispatchEvent(new KeyboardEvent('keydown', { key: 'w', ctrlKey: true, bubbles: true, cancelable: true })));
@@ -542,7 +545,8 @@ for (const mode of ['fixed', 'half', 'adaptive']) test(`${mode} sizing, immediat
   await expect.poll(async () => {
     const strip = await available();
     const width = await panes.last().evaluate(el => el.getBoundingClientRect().width);
-    return width - (mode === 'half' ? strip / 2 : strip);
+    // Phones show every pane at full width, whatever the sizing mode.
+    return width - strip;
   }).toBe(0);
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
 });

@@ -123,6 +123,23 @@ describe('claudeBinary', () => {
     assert.equal(findClaudeBinary(second), second);
   });
 
+  // ── A claude that exists but cannot run does not shadow a working one ──────
+
+  test('findClaudeBinary skips a claude on PATH whose --version fails', { skip: process.platform === 'win32' }, () => {
+    const staleDir = path.join(tmpDir, 'stale');
+    const workingDir = path.join(tmpDir, 'working');
+    for (const dir of [staleDir, workingDir]) fs.mkdirSync(dir);
+    fs.writeFileSync(path.join(staleDir, 'claude'), '#!/bin/sh\necho "toolbox: Unable to run claude" >&2\nexit 1\n', { mode: 0o755 });
+    fs.writeFileSync(path.join(workingDir, 'claude'), '#!/bin/sh\necho "2.1.0 (Claude Code)"\n', { mode: 0o755 });
+    const origPath = process.env.PATH;
+    process.env.PATH = `${staleDir}${path.delimiter}${workingDir}`;
+    try {
+      assert.equal(freshModule().findClaudeBinary(), path.join(workingDir, 'claude'));
+    } finally {
+      process.env.PATH = origPath;
+    }
+  });
+
   // ── Case 5: preflightClaudeAuth throws for Bedrock without AWS creds ─────────
 
   test('preflightClaudeAuth throws ClaudeAuthMissingError for Bedrock without AWS creds', () => {
@@ -312,5 +329,27 @@ describe('claudeBinary', () => {
 
     const { preflightClaudeAuth } = freshModule();
     assert.doesNotThrow(() => preflightClaudeAuth(altDir, process.env));
+  });
+});
+
+describe('Claude config directory', () => {
+  const home = path.join(os.homedir(), '.claude');
+
+  test('the profile wins, then CLAUDE_CONFIG_DIR, then ~/.claude; an empty value counts as unset', () => {
+    assert.equal(claudeBinary.claudeConfigRoot('/profile', { CLAUDE_CONFIG_DIR: '/env' }), '/profile');
+    assert.equal(claudeBinary.claudeConfigRoot(undefined, { CLAUDE_CONFIG_DIR: '/env' }), '/env');
+    assert.equal(claudeBinary.claudeConfigRoot('', { CLAUDE_CONFIG_DIR: '/env' }), '/env');
+    assert.equal(claudeBinary.claudeConfigRoot(undefined, {}), home);
+    assert.equal(claudeBinary.claudeConfigRoot(undefined, { CLAUDE_CONFIG_DIR: '' }), home);
+    assert.equal(claudeBinary.claudeConfigRoot('', { CLAUDE_CONFIG_DIR: '' }), home);
+  });
+
+  test("a child's environment names the same directory, and never an empty one", () => {
+    assert.deepEqual(claudeBinary.claudeChildEnv({ A: '1', CLAUDE_CONFIG_DIR: '/env' }, '/profile'), { A: '1', CLAUDE_CONFIG_DIR: '/profile' });
+    assert.deepEqual(claudeBinary.claudeChildEnv({ A: '1', CLAUDE_CONFIG_DIR: '/env' }, undefined), { A: '1', CLAUDE_CONFIG_DIR: '/env' });
+    assert.deepEqual(claudeBinary.claudeChildEnv({ A: '1', CLAUDE_CONFIG_DIR: '' }, undefined), { A: '1' });
+    assert.deepEqual(claudeBinary.claudeChildEnv({ A: '1', CLAUDE_CONFIG_DIR: '' }, ''), { A: '1' });
+    // Explicit per-spawn entries come last.
+    assert.deepEqual(claudeBinary.claudeChildEnv({ A: '1' }, '/profile', { A: '2', CLAUDE_CONFIG_DIR: '/spawn' }), { A: '2', CLAUDE_CONFIG_DIR: '/spawn' });
   });
 });

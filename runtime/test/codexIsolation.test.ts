@@ -112,7 +112,6 @@ function slotProvider(): McpSlotProvider {
       ({ slotId: `slot-${++slots}`, parentChatId, cwd, ownerUserId, nodeId: null, workspaceId: null, ...cbs }) as McpSlot,
     dispose: async () => {},
     endpoint: (slotId: string) => ({ type: 'http', url: `http://127.0.0.1:1/api/mcp/${slotId}`, headers: [] }),
-    hookEndpoint: (slotId: string) => `http://127.0.0.1:1/mcp-hooks/${slotId}/stop`,
   } as unknown as McpSlotProvider;
 }
 
@@ -127,7 +126,7 @@ function setup(t: TestContext, options: FakeOptions & { nodes?: Array<Record<str
     logLevel: 'warn', logSink: sink, nodes: (options.nodes ?? []) as never,
     ...(options.title ? { ports: { title: { enabled: () => true, prompt: () => '' } } } : {}),
   });
-  const runtime = new CodexRuntime({ host, bridge, mcpSlots: slotProvider() }, { client: server.client, followUpsHookPocEnabled: false });
+  const runtime = new CodexRuntime({ host, bridge, mcpSlots: slotProvider() }, { client: server.client });
   t.after(() => runtime.shutdown());
   return { server, runtime, warnings };
 }
@@ -148,7 +147,7 @@ const tick = () => new Promise((r) => setImmediate(r));
 describe('Codex MCP isolation in ordinary threads', () => {
   it('disables the user\'s servers by name on every open, keeps Michi\'s, and checks the result', async (t) => {
     const { server, runtime, warnings } = setup(t, {
-      userServers: ['builder-mcp', 'asana', CODEX_HOST_MCP_SERVER],
+      userServers: ['docs-server', 'asana', CODEX_HOST_MCP_SERVER],
       nodes: [{ id: 'chat-old', workspace_id: '', kind: 'chat', status: 'idle', runtime_id: 'codex', external_session_id: 'thread-old' }],
     });
     const chat = await runtime.newSession({ sessionId: 'chat-a', cwd: os.tmpdir(), model: 'm' }) as CodexSession;
@@ -156,13 +155,13 @@ describe('Codex MCP isolation in ordinary threads', () => {
     await runtime.loadSession({ sessionId: 'chat-old', cwd: os.tmpdir(), model: 'm' });
     for (const method of ['thread/start', 'thread/fork', 'thread/resume']) {
       const servers = server.find(method)!.params.config.mcp_servers;
-      assert.deepEqual(servers['builder-mcp'], { enabled: false }, method);
+      assert.deepEqual(servers['docs-server'], { enabled: false }, method);
       assert.deepEqual(servers.asana, { enabled: false }, method);
       assert.ok(servers[CODEX_HOST_MCP_SERVER].url, `${method} keeps Michi's own server`);
     }
     assert.deepEqual(server.all('config/read').map((r) => r.params), [{ cwd: os.tmpdir() }, { cwd: os.tmpdir() }, { cwd: os.tmpdir() }]);
     assert.equal(server.all('mcpServerStatus/list').length, 3);
-    assert.deepEqual(chat.userMcpServers.filter((name) => name !== CODEX_HOST_MCP_SERVER), ['builder-mcp', 'asana']);
+    assert.deepEqual(chat.userMcpServers.filter((name) => name !== CODEX_HOST_MCP_SERVER), ['docs-server', 'asana']);
     assert.deepEqual(warnings, []);
   });
 
@@ -203,14 +202,14 @@ describe('Codex MCP isolation in ordinary threads', () => {
   });
 
   it('disables the same servers in the title thread', async (t) => {
-    const { server, runtime } = setup(t, { userServers: ['builder-mcp'], title: true });
+    const { server, runtime } = setup(t, { userServers: ['docs-server'], title: true });
     const chat = await runtime.newSession({ sessionId: 'chat-a', cwd: os.tmpdir(), model: 'm' }) as CodexSession;
     const turn = startTurn(server, chat);
     await turn.started;
     for (let i = 0; i < 100 && !server.find('thread/start', (p) => p.ephemeral); i += 1) await tick();
     const title = server.find('thread/start', (p) => p.ephemeral);
     assert.ok(title, 'title thread started');
-    assert.deepEqual(title.params.config, { features: { goals: false }, mcp_servers: { 'builder-mcp': { enabled: false } } });
+    assert.deepEqual(title.params.config, { features: { goals: false }, mcp_servers: { 'docs-server': { enabled: false } } });
     server.emit(chat.threadId, 'turn/completed', { turn: { id: server.turnId(chat.threadId), status: 'completed' } });
     await turn.done;
   });

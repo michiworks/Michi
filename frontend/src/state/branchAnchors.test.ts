@@ -49,6 +49,27 @@ describe('buildAnchorMap', () => {
     expect(running.reply).toBeUndefined();
   });
 
+  it('counts a child whose history is only partly loaded by its total', () => {
+    const parent = node('A', [msg('m1')]);
+    const edges: ProjectEdge[] = [
+      { source: 'A', target: 'B', kind: 'branch', anchorMessageId: 'm1', createdAt: 100 },
+    ] as unknown as ProjectEdge[];
+    const page = node('B', [msg('b26'), msg('b27')], { messagesLoaded: false, historyBefore: { seq: 26, id: 'b26' }, olderMessageCount: 25, messageCount: 27 });
+    const placeholder = node('B', [], { messagesLoaded: false, messageCount: 40 });
+    expect(buildAnchorMap('A', edges, { A: parent, B: page }).get('m1')?.[0].messageCount).toBe(27);
+    expect(buildAnchorMap('A', edges, { A: parent, B: placeholder }).get('m1')?.[0].messageCount).toBe(40);
+  });
+
+  it('names an untitled branch by its first message, as the sidebar does', () => {
+    const parent = node('A', [msg('m1')]);
+    const edges: ProjectEdge[] = [
+      { source: 'A', target: 'B', kind: 'branch', anchorMessageId: 'm1', createdAt: 100 },
+    ] as unknown as ProjectEdge[];
+    const child = node('B', [msg('b1', 'user', '/branch > the quoted part\nWhich of these   should ship first, and why?')]);
+    const [anchor] = buildAnchorMap('A', edges, { A: parent, B: child }).get('m1')!;
+    expect(anchor.title).toBe('Which of these should ship first, and wh…');
+  });
+
   it('hides soft-deleted children', () => {
     const parent = node('A', [msg('m1')]);
     const child = node('B', [msg('x')], { deletedAt: 1 });
@@ -107,7 +128,7 @@ describe('cleanupOrphanedAnchors', () => {
   });
 });
 
-describe('computeSurvivingMessageIds — mirrors retry-trim at chatReducers.ts:416-440', () => {
+describe('computeSurvivingMessageIds', () => {
   const msgs = [msg('u1', 'user'), msg('a1'), msg('u2', 'user'), msg('a2')];
 
   it('with fromIndex, keeps strictly before fromIndex', () => {

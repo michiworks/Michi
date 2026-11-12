@@ -38,3 +38,9 @@ export interface EnsureDurableGraphNodeInput {
   }>;
   ownerUserId?: string | null;
 }
+
+/** What a tree upsert hands recordTreeRowChange: the stored row (null: none) and the row written. */
+export interface TreeRowChange {
+  before: { workspace_id: string; name: string | null; archived_at: number | null } | null;
+  after: { id: string; workspace_id: string; name: string | null; archived_at: number | null };
+}

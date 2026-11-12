@@ -1,17 +1,17 @@
-import React from 'react';
-import { render, screen, fireEvent } from '@testing-library/react';
+import { act, render, screen, fireEvent } from '@testing-library/react';
 import { vi, describe, it, expect, beforeEach } from 'vitest';
 import MergeBanner from './MergeBanner';
 
 // Mock the chatStore module so we can control hook return values.
 vi.mock('../../state/chatStore', () => ({
   useChatStore: vi.fn(),
+  useChatActions: vi.fn(),
   useChatNodesSnapshot: vi.fn(),
 }));
 
-// Mock mergePreamble so we can control token estimates.
-vi.mock('../../state/mergePreamble', () => ({
-  MERGE_PREAMBLE_TOKEN_WARN: 32_000,
+// Mock the estimate so we can control it; the merged node set stays real.
+vi.mock('../../state/mergePreamble', async (importOriginal) => ({
+  ...await importOriginal<typeof import('../../state/mergePreamble')>(),
   estimateMergePreambleTokens: vi.fn(),
 }));
 
@@ -69,9 +69,13 @@ function makeNodes(overrides: Record<string, unknown> = {}) {
   };
 }
 
+const ensureCompleteHistory = vi.fn();
+
 describe('MergeBanner', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    ensureCompleteHistory.mockResolvedValue({});
+    vi.mocked(chatStoreModule.useChatActions).mockReturnValue({ ensureCompleteHistory } as never);
     vi.mocked(chatStoreModule.useChatStore).mockReturnValue(makeStore() as never);
     vi.mocked(chatStoreModule.useChatNodesSnapshot).mockReturnValue(makeNodes() as never);
     vi.mocked(mergePreambleModule.estimateMergePreambleTokens).mockReturnValue(0);
@@ -110,5 +114,35 @@ describe('MergeBanner', () => {
     fireEvent.click(screen.getByRole('button', { name: /dismiss/i }));
 
     expect(screen.queryByRole('alert')).toBeNull();
+  });
+
+  it('loads a merged thread that has not been opened before estimating it', async () => {
+    let release!: () => void;
+    ensureCompleteHistory.mockReturnValue(new Promise<void>((resolve) => { release = resolve; }));
+    vi.mocked(mergePreambleModule.estimateMergePreambleTokens).mockReturnValue(40_000);
+    const placeholder = makeNodes({ 'n-2': { id: 'n-2', title: 'Thread B', messages: [], messagesLoaded: false } });
+    vi.mocked(chatStoreModule.useChatNodesSnapshot).mockReturnValue(placeholder as never);
+
+    const { rerender } = render(<MergeBanner nodeId="n-merge" />);
+    expect(ensureCompleteHistory).toHaveBeenCalledWith(['n-2']);
+    expect(screen.queryByRole('alert')).toBeNull();
+
+    // Loaded: the store now holds its whole history.
+    vi.mocked(chatStoreModule.useChatNodesSnapshot).mockReturnValue(makeNodes() as never);
+    await act(async () => { release(); });
+    rerender(<MergeBanner nodeId="n-merge" />);
+    expect(screen.getByRole('alert')).toBeTruthy();
+    expect(ensureCompleteHistory).toHaveBeenCalledTimes(1);
+  });
+
+  it('estimates what it has when the history cannot be loaded', async () => {
+    ensureCompleteHistory.mockRejectedValue(new Error('offline'));
+    vi.mocked(mergePreambleModule.estimateMergePreambleTokens).mockReturnValue(40_000);
+    vi.mocked(chatStoreModule.useChatNodesSnapshot).mockReturnValue(
+      makeNodes({ 'n-2': { id: 'n-2', title: 'Thread B', messages: [], messagesLoaded: false } }) as never,
+    );
+    render(<MergeBanner nodeId="n-merge" />);
+    expect(await screen.findByRole('alert')).toBeTruthy();
+    expect(ensureCompleteHistory).toHaveBeenCalledTimes(1);
   });
 });

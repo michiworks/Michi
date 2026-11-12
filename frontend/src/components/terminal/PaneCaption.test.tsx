@@ -1,4 +1,3 @@
-import React from 'react';
 import { describe, it, expect } from 'vitest';
 import { render, screen, fireEvent } from '@testing-library/react';
 import PaneCaption from './PaneCaption';
@@ -55,6 +54,20 @@ describe('PaneCaption', () => {
       expect(badge.getAttribute('title')).toBe('2 subagents · 1 workflow running');
       // Clickable inside the window's drag region (Electron).
       expect((badge.style as unknown as Record<string, string>).WebkitAppRegion).toBe('no-drag');
+    });
+
+    it('turns amber and says so while a run waits for an approval', () => {
+      const { rerender } = render(<PaneCaption {...baseProps} backgroundWork={{ subagents: 0, workflows: 1, waiting: true }} />);
+      const badge = screen.getByTestId('pane-background-work-badge');
+      expect(badge.textContent).toBe('◆1 · needs you');
+      expect(badge.getAttribute('aria-label')).toBe('Needs your approval. 1 workflow running. Show background work');
+      expect(badge.dataset.state).toBe('waiting');
+      expect(badge.style.color).toBe('var(--term-select)');
+      expect(badge.style.background).toBe('var(--term-select-f)');
+      rerender(<PaneCaption {...baseProps} backgroundWork={{ subagents: 0, workflows: 1 }} />);
+      expect(badge.textContent).toBe('◆1');
+      expect(badge.dataset.state).toBe('running');
+      expect(badge.style.color).toBe('var(--term-mid)');
     });
 
     it('is hidden while nothing runs and on non-chat panes', () => {

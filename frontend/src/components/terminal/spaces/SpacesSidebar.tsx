@@ -1,11 +1,11 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { AnimatePresence } from 'motion/react';
-import { ChevronRight, EyeOff, FileText, Home, Kanban, Plus, Settings2, Sparkles, Table2 } from 'lucide-react';
+import { ChevronRight, EyeOff, FileText, Home, Kanban, Plus, Settings2, Table2 } from 'lucide-react';
 import type { FirstRunProgressDto, PageSummaryDto, SpaceSummaryDto, WorkspaceHomeSummaryDto } from 'michi-shared';
 import type { Project } from '../../../state/chatTypes';
 import { useChatProjects } from '../../../state/chatStore';
 import { usePrefs } from '../../../state/prefs';
-import { backendConnectionIdForWorkspace } from '../../../config/backendConnections';
+import { backendConnectionIdForWorkspace, LOCAL_BACKEND_CONNECTION_ID } from '../../../config/backendConnections';
 import { useSpaces } from '../../../state/pages/useSpaces';
 import { useSpaceTree } from '../../../state/pages/useSpaceTree';
 import { subscribePageChanges } from '../../../state/pages/pageEvents';
@@ -17,14 +17,15 @@ import type { SpacesHomeTarget } from '../../../state/shellArea';
 import { firstRunActive, refreshSpacesFirstRun, useSpacesFirstRun } from '../../../state/metaAgent/spacesFirstRun';
 import { clearHeldWorkspaceHome } from '../../../state/pages/workspaceHomeNav';
 import { spacesSupportsConnection } from '../../../state/metaAgent/remoteSpaces';
+import { useCompanionName } from '../../../state/companion/companionName';
 import type { OpenNativePageRoute } from './SpacesPage';
 import { WorkspaceFirstRunBadge } from './home/MetaAgentSidebarStatus';
-import ContextMenu, { MenuPresence } from '../../ContextMenu';
+import ContextMenu, { MenuPresence, menuOpenKey } from '../../ContextMenu';
 import { RowKebab } from '../primitives';
 import '../rail/rail.css';
 import './spacesSidebar.css';
-import { AssistantHistory } from './AssistantHistory';
 import { pageIsWithin, usePageActions } from './usePageActions';
+import { SidebarScroller } from '../SidebarScroller';
 
 export type SpacesSidebarCurrent = SpacesHomeTarget | ({ kind: 'page' } & OpenNativePageRoute);
 type WorkspaceTarget = { workspaceId: string; backendConnectionId: string };
@@ -53,23 +54,27 @@ function useExpandedWorkspaces(): [ReadonlySet<string>, (key: string) => void] {
   return [expanded, toggle];
 }
 
-export function SpacesSidebar({ current, onOpenHome, onOpenWorkspace, onOpenPage, onOpenAssistant, onOpenAllTasks, onNewSpace, onOpenSettings, settingsOpen, assistantOpen }: {
+/**
+ * Pages navigation. The agent is not a row here any more: it is the one
+ * panel of every area, opened with ⌘J or the Topbar button, and its History
+ * is in that panel's menu (DESIGN-v2 §1.4).
+ */
+export function SpacesSidebar({ current, onOpenHome, onOpenWorkspace, onOpenPage, onOpenAllTasks, onNewSpace, onOpenSettings, settingsOpen }: {
   current: SpacesSidebarCurrent;
   /** Reminder counts are temporarily hidden in Pages navigation. */
   waitingCount?: number;
   onOpenHome: () => void;
   onOpenWorkspace: (target: WorkspaceTarget) => void;
   onOpenPage: (route: OpenNativePageRoute) => void;
-  onOpenAssistant: () => void;
   /** Opens All tasks; without it there is no All tasks row. */
   onOpenAllTasks?: () => void;
   onNewSpace: () => void;
   onOpenSettings?: () => void;
   settingsOpen?: boolean;
-  assistantOpen?: boolean;
 }) {
   const { projects } = useChatProjects();
   const { prefs } = usePrefs();
+  const name = useCompanionName();
   const [expanded, toggle] = useExpandedWorkspaces();
   const workspaces = useMemo(
     () => sortLiveProjects(projects.filter((project) => !project.system && !project.archivedAt && !project.deletedAt), prefs.workspaceOrder ?? []),
@@ -83,14 +88,15 @@ export function SpacesSidebar({ current, onOpenHome, onOpenWorkspace, onOpenPage
     }
     return [...byConnection.entries()];
   }, [workspaces]);
-  // Nothing is read from a remote connection: its databases are not listed either.
+  // A remote connection's pages are listed, read from that connection; its
+  // databases and tasks stay out of Databases and All tasks for now.
   const localGroups = useMemo(() => groups.filter(([connectionId]) => spacesSupportsConnection(connectionId)), [groups]);
   const databases = useWorkspaceDatabases(localGroups);
   // All tasks counts the tasks in every local workspace's task database.
   const taskCount = databases.reduce((sum, database) => sum + (database.role === 'tasks' ? database.rowCount : 0), 0);
   const allTasksCurrent = current.kind === 'all-tasks' && !settingsOpen;
   const homeCurrent = current.kind === 'home' && !settingsOpen;
-  const localFirstRun = useSpacesFirstRun('local');
+  const localFirstRun = useSpacesFirstRun(LOCAL_BACKEND_CONNECTION_ID);
   const homeReading = firstRunActive(localFirstRun.data);
   const openHome = useCallback(() => { clearHeldWorkspaceHome(); onOpenHome(); }, [onOpenHome]);
 
@@ -98,17 +104,12 @@ export function SpacesSidebar({ current, onOpenHome, onOpenWorkspace, onOpenPage
 
   return (
     <div className="area-side spaces-side" aria-label="Pages navigation">
-      <div className="area-side__grow term-scrollbar">
+      <SidebarScroller className="area-side__grow">
         <div className="area-side__row is-strong is-nav" role="button" tabIndex={0} aria-current={homeCurrent ? 'page' : undefined} onClick={openHome} onKeyDown={keys(openHome)}>
           <Home size={15} strokeWidth={1.5} aria-hidden="true" />
           <span className="area-side__label">Home</span>
-          {homeReading && <span className="agent-spinner" role="img" aria-label="Meta agent is reading" />}
+          {homeReading && <span className="agent-spinner" role="img" aria-label={`${name} is reading`} />}
         </div>
-        <div className="area-side__row is-strong is-nav" role="button" tabIndex={0} onClick={onOpenAssistant} onKeyDown={keys(onOpenAssistant)}>
-          <Sparkles size={15} strokeWidth={1.5} aria-hidden="true" />
-          <span className="area-side__label">Assistant</span>
-        </div>
-        <AssistantHistory onOpenAssistant={onOpenAssistant} visible={assistantOpen} />
         {onOpenAllTasks && (
           <div className="area-side__row is-strong is-nav" role="button" tabIndex={0} aria-current={allTasksCurrent ? 'page' : undefined} onClick={openAllTasks} onKeyDown={keys(openAllTasks)}>
             <Kanban size={15} strokeWidth={1.5} aria-hidden="true" />
@@ -119,14 +120,14 @@ export function SpacesSidebar({ current, onOpenHome, onOpenWorkspace, onOpenPage
         <div className="area-side__section">Pages
           <button type="button" className="area-side__section-btn" aria-label="New page" onClick={onNewSpace}><Plus size={14} strokeWidth={1.5} aria-hidden="true" /></button>
         </div>
-        {localGroups.map(([connectionId, list]) => (
+        {groups.map(([connectionId, list]) => (
           <ConnectionWorkspaces key={connectionId} connectionId={connectionId} workspaces={list} current={current} expanded={expanded}
             onToggle={toggle} onOpenWorkspace={onOpenWorkspace} onOpenPage={onOpenPage} />
         ))}
-        {localGroups.length === 0 && <div className="area-side__note">No pages yet.</div>}
+        {groups.length === 0 && <div className="area-side__note">No pages yet.</div>}
         <div className="area-side__section">Databases</div>
         <DatabaseRows databases={databases} />
-      </div>
+      </SidebarScroller>
       <div className="area-side__foot spaces-side__footer">
         <button type="button" className="area-side__row is-strong is-nav" aria-label="Pages settings" aria-current={settingsOpen ? 'page' : undefined} onClick={onOpenSettings}>
           <Settings2 size={15} strokeWidth={1.5} aria-hidden="true" /><span className="area-side__label">Settings</span>
@@ -194,7 +195,7 @@ function ConnectionWorkspaces({ connectionId, workspaces, current, expanded, onT
   const toggleHidden = () => setShowHidden((value) => !value);
   return <>
     {shown.map((workspace) => row(workspace, false))}
-    {available.length === 0 && <div className="area-side__note">No pages yet.</div>}
+    {available.length === 0 && spacesSupportsConnection(connectionId) && <div className="area-side__note">No pages yet.</div>}
     {hidden.length > 0 && <>
       <div className="area-side__row spaces-side__hidden" role="button" tabIndex={0} aria-expanded={showHidden} onClick={toggleHidden} onKeyDown={keys(toggleHidden)}>
         <EyeOff size={14} strokeWidth={1.5} aria-hidden="true" />
@@ -231,7 +232,7 @@ function WorkspaceRow({ workspace, connectionId, spaces, tone, open, run, hidden
     : { id: 'hide', label: 'Hide from Pages', run: () => onSetHidden(true) }] }];
   return <>
     <div className="area-side__row is-strong is-split t-row-hover" aria-current={isCurrent ? 'page' : undefined} data-workspace={workspace.id} data-first-run={run?.state}
-      data-hidden={hidden || undefined} data-menu-open={menu ? '' : undefined}
+      data-hidden={hidden || undefined} data-menu-open={menu ? '' : undefined} data-context-target=""
       onContextMenu={(event) => { event.preventDefault(); setMenu({ x: event.clientX, y: event.clientY }); }}>
       {hasChildren
         ? <button type="button" className="area-side__twist" aria-expanded={open} aria-label={`${open ? 'Collapse' : 'Expand'} ${workspace.name}`} onClick={onToggle}><ChevronRight size={11} strokeWidth={1.6} aria-hidden="true" /></button>
@@ -241,9 +242,9 @@ function WorkspaceRow({ workspace, connectionId, spaces, tone, open, run, hidden
         <span className="area-side__label">{workspace.name}</span>
         <WorkspaceFirstRunBadge run={run} />
       </button>
-      <RowKebab open={!!menu} onOpen={setMenu} ariaLabel={`Actions for ${workspace.name}`} />
+      <RowKebab open={!!menu} onOpen={point => setMenu(open => open ? null : point)} ariaLabel={`Actions for ${workspace.name}`} />
     </div>
-    <MenuPresence>{menu && <ContextMenu key={`${menu.x}:${menu.y}`} x={menu.x} y={menu.y} sections={sections} onClose={() => setMenu(null)} />}</MenuPresence>
+    <MenuPresence>{menu && <ContextMenu key={menuOpenKey(menu)} x={menu.x} y={menu.y} sections={sections} onClose={() => setMenu(null)} />}</MenuPresence>
     {open && hasChildren && <WorkspacePages workspaceId={workspace.id} connectionId={connectionId} spaces={spaces} current={current} onOpenPage={onOpenPage} onOpenWorkspace={onOpenWorkspace} />}
   </>;
 }
@@ -285,14 +286,14 @@ function WorkspacePages({ workspaceId, connectionId, spaces, current, onOpenPage
     return (
       <React.Fragment key={page.id}>
         <div className="area-side__row is-page is-split t-row-hover" style={{ '--page-depth': depth } as React.CSSProperties}
-          data-page-id={page.id} data-menu-open={menu?.page.id === page.id ? '' : undefined}
+          data-page-id={page.id} data-menu-open={menu?.page.id === page.id ? '' : undefined} data-context-target=""
           aria-current={isCurrent ? 'page' : undefined}
           onContextMenu={event => { event.preventDefault(); setMenu({ page, x: event.clientX, y: event.clientY }); }}>
           <button type="button" className="area-side__main" aria-current={isCurrent ? 'page' : undefined} onClick={open}>
             <FileText size={14} strokeWidth={1.5} aria-hidden="true" />
             <span className="area-side__label">{page.title || 'Untitled page'}</span>
           </button>
-          <RowKebab open={menu?.page.id === page.id} onOpen={point => setMenu({ page, ...point })} ariaLabel={`Actions for ${page.title || 'Untitled page'}`} />
+          <RowKebab open={menu?.page.id === page.id} onOpen={point => setMenu(open => open?.page.id === page.id ? null : { page, ...point })} ariaLabel={`Actions for ${page.title || 'Untitled page'}`} />
         </div>
         {(children.get(page.id) ?? []).filter((child) => !seen.has(child.id)).map((child) => row(child, depth + 1, nextSeen))}
       </React.Fragment>
@@ -300,7 +301,7 @@ function WorkspacePages({ workspaceId, connectionId, spaces, current, onOpenPage
   };
   return <>
     {roots.map((space) => row(space, 0, new Set()))}
-    <AnimatePresence>{menu && <ContextMenu key={`${menu.x}:${menu.y}`} x={menu.x} y={menu.y} onClose={() => setMenu(null)} sections={[
+    <AnimatePresence>{menu && <ContextMenu key={menuOpenKey(menu)} x={menu.x} y={menu.y} onClose={() => setMenu(null)} sections={[
       { items: [
         { id: 'child', label: 'Add a page inside', disabled: readOnly, run: () => actions.createChild(menu.page.id) },
         { id: 'rename', label: 'Rename', disabled: readOnly, run: () => actions.rename(menu.page) },
@@ -349,5 +350,3 @@ function DatabaseRows({ databases }: { databases: readonly PageDatabaseSummary[]
     </div>
   ))}</>;
 }
-
-export default SpacesSidebar;

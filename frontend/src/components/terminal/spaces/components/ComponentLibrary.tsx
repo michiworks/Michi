@@ -1,9 +1,11 @@
-import React, { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import type { PageComponent, PageComponentInput, PageComponentSource, PageComponentVersionSource, PageBlockInput } from 'michi-shared';
 import { deletePageComponent, listPageComponentReferences, listPageComponents, readPageComponent, savePageComponent, updatePageComponent } from '../../../../services/api/pageComponents';
+import { confirmDialog } from '../../../ui/ConfirmDialog';
 import { BuiltinComponents } from './BuiltinComponents';
 import { ComponentPreview } from './ComponentPreview';
 import { ComponentSourceAttribution } from './ComponentSourceAttribution';
+import { useVisiblePoll } from '../../../../state/visiblePoll';
 import './components.css';
 
 export interface ComponentLibraryProps { workspaceId: string; connectionId: string; onClose?: () => void; onSaved?: (component: PageComponent) => void; onInsert?: (component: PageComponent, version: number) => void | Promise<void>; onInsertBlock?: (block: PageBlockInput) => Promise<void>; onOpenSource?: (source: PageComponentSource) => void | boolean | Promise<void | boolean> }
@@ -75,12 +77,8 @@ function ComponentLibrarySession({ workspaceId, connectionId, onClose, onSaved, 
     finally { if (refreshPromise.current === request) refreshPromise.current = null; }
   }, [connectionId, workspaceId]);
   useEffect(() => { void refresh(); }, [refresh]);
-  useEffect(() => {
-    const onFocus = () => { if (document.visibilityState === 'visible') void refresh(); };
-    const timer = window.setInterval(() => { if (document.visibilityState === 'visible') void refresh(); }, 10_000);
-    window.addEventListener('focus', onFocus);
-    return () => { window.clearInterval(timer); window.removeEventListener('focus', onFocus); };
-  }, [refresh]);
+  const poll = useCallback(() => { void refresh(); }, [refresh]);
+  useVisiblePoll(poll, { intervalMs: 10_000 });
   useEffect(() => {
     let live = true;
     if (!selected) return;
@@ -173,7 +171,7 @@ function ComponentLibrarySession({ workspaceId, connectionId, onClose, onSaved, 
           }}>Insert selected component</button>}
           {selected && <><button type="button" disabled={busy} onClick={() => void action(selected, selected.enabled ? 'disable' : 'enable')}>{selected.enabled ? 'Disable' : 'Enable'}</button>
             {selectedVersion !== selected.activeVersion && <><button type="button" disabled={busy} onClick={() => void action(selected, 'activate', selectedVersion ?? undefined)}>Activate v{selectedVersion}</button><button type="button" disabled={busy} onClick={() => void action(selected, 'rollback', selectedVersion ?? undefined)}>Rollback to v{selectedVersion}</button></>}
-            <button type="button" disabled={busy} onClick={() => window.confirm(`Delete ${selected.name}? Existing references will show a fallback.`) && void action(selected, 'delete')}>Delete</button></>}
+            <button type="button" disabled={busy} onClick={() => void confirmDialog({ title: 'Delete component', message: `Delete ${selected.name}? Existing references will show a fallback.`, confirmLabel: 'Delete' }).then(ok => { if (ok) void action(selected, 'delete'); })}>Delete</button></>}
         </div>
         {selected && <div className="page-component-usage"><strong>Usage locations</strong>{references.length ? <ul>{references.map(ref => <li key={`${ref.kind}:${ref.pageId ?? ref.databaseId}:${ref.blockId ?? ref.viewId}`}>{ref.kind === 'page_block' ? `Page ${ref.pageId} · block ${ref.blockId}` : `Database ${ref.databaseId} · view ${ref.viewId}`}{ref.pinnedVersion ? ` · pinned v${ref.pinnedVersion}` : ' · follows active version'}{ref.protected ? ' · protected' : ''}</li>)}</ul> : <p>No active references found. Disable immediately stops every mounted version.</p>}</div>}
         <ComponentPreview connectionId={connectionId} name={draft.name || 'Component'} code={draft.code} />

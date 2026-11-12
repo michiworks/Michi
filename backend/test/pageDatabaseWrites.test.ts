@@ -122,6 +122,22 @@ test('an invalid user batch rolls back every operation', () => {
     (getDb().prepare('SELECT COUNT(*) AS count FROM page_changes').get() as { count: number }).count, 0);
 });
 
+test("a column's 101st option is refused with the reason, and the cell keeps its value", () => {
+  const db = createDatabase({ workspaceId: 'ws', ownerUserId: 'alice', title: 'Tags', now: 10,
+    columns: [{ id: 'tag', name: 'Tag', type: 'select', options: Array.from({ length: 100 }, (_, i) => ({ value: `t${i}` })) }],
+    views: [],
+    rows: [{ id: 'r1', position: 0, values: { tag: 't0' }, rev: 1, edited: {}, bodyEditedAt: null, updatedAt: 10 }],
+  });
+  // What the cell picker sends for a new value: the option first, then the cell.
+  assert.throws(() => applyUserDatabaseEdits({ databaseId: db.id, ownerUserId: 'alice', revision: 1,
+    ops: [{ op: 'option.add', id: 'tag', option: { value: 'new' } }, { op: 'row.update', id: 'r1', values: { tag: 'new' } }], now: 20 }),
+  (error: unknown) => error instanceof PageWriteError && error.status === 400 && error.message === 'A column holds at most 100 options');
+  const after = getDatabase(db.id, 'alice');
+  assert.equal(after.revision, 1);
+  assert.equal(after.columns[0]?.options?.length, 100);
+  assert.equal(after.rows[0]?.values.tag, 't0');
+});
+
 test('deleting a row with human-owned content creates a delete proposal', () => {
   const db = database();
   applyUserDatabaseEdits({ databaseId: db.id, ownerUserId: 'alice', revision: 1,
@@ -267,6 +283,27 @@ test('configure_database_view creates a view when omitted and clears a prior pin
     viewId: created.viewId, componentId: component.id, props: { mode: 'active' }, source, now: 40 });
   assert.equal(getDatabase(db.id, 'alice').views[0]?.config.pinnedVersion, undefined);
   assert.deepEqual(getDatabase(db.id, 'alice').views[0]?.config.props, { mode: 'active' });
+});
+
+test('repeating configure_database_view on a pinned view changes nothing, edited or not', () => {
+  const source = activeChatSource();
+  const component = pageComponents.save('ws', 'alice', { expectedLibraryRevision: 0, source, input: {
+    name: 'pinned-renderer', description: 'Pinned renderer', code: 'root.textContent = "Ready";',
+  } }).component;
+  const db = createDatabase({ workspaceId: 'ws', ownerUserId: 'alice', title: 'Release', now: 10,
+    columns: [{ id: 'task', name: 'Task', type: 'text' }], views: [], rows: [],
+  });
+  const args = { databaseId: db.id, workspaceId: 'ws', ownerUserId: 'alice', componentId: component.id,
+    props: { mode: 'active' }, pinnedVersion: 1, source };
+  const created = configureDatabaseView({ ...args, revision: 1, now: 20 });
+  const repeated = configureDatabaseView({ ...args, viewId: created.viewId, revision: 2, now: 30 });
+  assert.deepEqual([repeated.revision, repeated.applied.length, repeated.proposed.length], [2, 0, 0]);
+  const view = getDatabase(db.id, 'alice').views[0]!;
+  applyUserDatabaseEdits({ databaseId: db.id, ownerUserId: 'alice', revision: 2, now: 40,
+    ops: [{ op: 'view.save', view: { id: view.id, name: view.name, type: 'custom', config: view.config } }] });
+  const edited = configureDatabaseView({ ...args, viewId: created.viewId, revision: 3, now: 50 });
+  assert.deepEqual([edited.revision, edited.applied.length, edited.proposed.length], [3, 0, 0]);
+  assert.equal((getDb().prepare("SELECT COUNT(*) AS count FROM page_changes WHERE proposal_state='pending'").get() as { count: number }).count, 0);
 });
 
 test('moving a card back restores the order after a move to the top and after a move down one', () => {

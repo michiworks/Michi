@@ -1,4 +1,3 @@
-import React from 'react';
 import type { BlockProps } from '../blockTypes';
 
 export function DatabaseRefBlock({ block, ctx }: BlockProps) {

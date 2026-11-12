@@ -4,21 +4,23 @@ import { useChatPanes, useChatProjects, useChatActions, useChatNodesSnapshot, us
 import { EASE } from '../../motion/tokens';
 import { usePrefs } from '../../state/prefs';
 import type { Project, Tree, ProjectEdge, ChatNodeState } from '../../state/chatTypes';
-import { buildTree } from '../../state/tree';
+import { buildBranchChildrenOf, buildTree, findTreeIdForNode } from '../../state/tree';
 import ThreadRow from './ThreadRow';
 import BranchRow from './BranchRow';
-import ContextMenu from '../ContextMenu';
+import ContextMenu, { menuOpenKey } from '../ContextMenu';
 import { rowGeom, spinePadding, branchBlockGap } from './sidebarRowStyle';
-import { flattenBranchIds, useSidebarTreeController } from './sidebar/useSidebarTreeController';
+import { flattenBranchIds, useSidebarTreeController, type ThreadRowClick } from './sidebar/useSidebarTreeController';
 import {
   nodeOpenState,
   subtreeOpenState,
   selectProjectNodeStatuses,
   orderPinnedFirst,
+  treeHasUnread,
   type NodePinnedAt,
   type OpenState,
 } from '../../state/sidebarSelectors';
-import { useAgentDomain } from '../../state/agentDomain';
+import { useOptionalAgentDomain } from '../../state/agentDomain';
+import { useRunningWorkNodeIds } from '../../state/runningWork';
 import { agentResourceKey, identityOf } from '../../state/agentIdentity';
 import { AgentRunsActivity } from './agentRuns/AgentRunsActivity';
 import {
@@ -27,22 +29,17 @@ import {
   truncateActivityBuckets,
 } from './activityTruncation';
 import { withoutSystemWorkspaces } from '../../state/assistant/systemWorkspace';
-import { isVisibleConversationNode } from '../../state/conversationVisibility';
-
-function useOptionalAgentDomain() {
-  try {
-    return useAgentDomain();
-  } catch {
-    return null;
-  }
-}
+import { moveTargetsFor, type MoveTargetWorkspace } from '../../state/moveTargets';
+import { isListedThread } from '../../state/conversationVisibility';
+import { SidebarScroller } from './SidebarScroller';
 
 // ── Time bucket helpers ────────────────────────────────────────────────────
 
-type TimeBucket = 'now' | 'today' | 'yesterday' | 'earlier';
+type TimeBucket = 'unread' | 'now' | 'today' | 'yesterday' | 'earlier';
 
-function getTimeBucket(lastActiveAt: number, isStreaming: boolean): TimeBucket {
-  if (isStreaming) return 'now';
+function getTimeBucket(lastActiveAt: number, isRunning: boolean, isUnread: boolean): TimeBucket {
+  if (isRunning) return 'now';
+  if (isUnread) return 'unread';
   const now = Date.now();
   const d = new Date(lastActiveAt);
   const today = new Date(now);
@@ -54,16 +51,20 @@ function getTimeBucket(lastActiveAt: number, isStreaming: boolean): TimeBucket {
   return 'earlier';
 }
 
-const BUCKET_ORDER: TimeBucket[] = ['now', 'today', 'yesterday', 'earlier'];
+// Finished but unseen work sits above what is still running; everything the
+// user has read follows by recency.
+const BUCKET_ORDER: TimeBucket[] = ['unread', 'now', 'today', 'yesterday', 'earlier'];
 const BUCKET_LABELS: Record<TimeBucket, string> = {
+  unread: 'Unread',
   now: 'Now',
   today: 'Today',
   yesterday: 'Yesterday',
   earlier: 'Earlier',
 };
-// Streaming trees are what the user is waiting on right now; they never count
-// toward the preview cap and are never hidden behind "Show more".
-const CAP_EXEMPT_BUCKETS: ReadonlySet<TimeBucket> = new Set<TimeBucket>(['now']);
+// Unread trees wait on the user to read them, running trees (a turn streams,
+// or a workflow it launched still runs) on the agent; neither counts toward
+// the preview cap or is ever hidden behind "Show more".
+const CAP_EXEMPT_BUCKETS: ReadonlySet<TimeBucket> = new Set<TimeBucket>(['unread', 'now']);
 
 // ── Re-sort motion ─────────────────────────────────────────────────────────
 // When the list re-sorts (a thread starts or stops streaming, or a send moves
@@ -81,30 +82,35 @@ const RESORT_FROZEN = 'pointer-over';
 interface ActivityTree {
   tree: Tree;
   project: Project;
-  isStreaming: boolean;
+  isRunning: boolean;
   bucket: TimeBucket;
 }
 
-function hasStreamingNode(
+const NO_RUNNING_WORK: ReadonlySet<string> = new Set();
+const NO_TREES: ReadonlySet<string> = new Set();
+/** The list's preview cap for the life of the page; see visibleLimit below. */
+let rememberedVisibleLimit = ACTIVITY_PREVIEW_LIMIT;
+
+/**
+ * A node of the tree streams a turn, or runs work its turn left running
+ * (`workRunning`: nodes with an open workflow run or a running background
+ * subagent).
+ */
+function hasRunningNode(
   tree: Tree,
-  project: Project,
+  childrenOf: ReadonlyMap<string, readonly string[]>,
   nodes: Record<string, ChatNodeState>,
+  workRunning: ReadonlySet<string>,
 ): boolean {
   const stack = [tree.rootNodeId];
   const seen = new Set<string>();
-  const childrenOf = new Map<string, string[]>();
-  for (const e of project.edges) {
-    if (e.kind && e.kind !== 'branch') continue;
-    const arr = childrenOf.get(e.source) ?? [];
-    arr.push(e.target);
-    childrenOf.set(e.source, arr);
-  }
   while (stack.length > 0) {
     const id = stack.pop()!;
     if (seen.has(id)) continue;
     seen.add(id);
     const n = nodes[id];
     if (n?.status === 'streaming') return true;
+    if (n && !n.deletedAt && workRunning.has(id)) return true;
     for (const child of childrenOf.get(id) ?? []) stack.push(child);
   }
   return false;
@@ -113,17 +119,29 @@ function hasStreamingNode(
 export function deriveActivityData(
   projects: readonly Project[],
   nodes: Record<string, ChatNodeState>,
+  workRunning: ReadonlySet<string> = NO_RUNNING_WORK,
+  focusedNodeId: string | null = null,
+  /** Trees the list last showed under Unread (see `heldTreeId` below). */
+  shownUnread: ReadonlySet<string> = NO_TREES,
 ): ActivityTree[] {
   const items: ActivityTree[] = [];
+  const focusedProjectId = focusedNodeId !== null ? nodes[focusedNodeId]?.projectId : undefined;
   for (const project of projects) {
     if (project.deletedAt || project.archivedAt) continue;
+    const childrenOf = buildBranchChildrenOf(project.edges);
+    // The thread being read keeps the Unread place it was opened from until
+    // the user switches to another thread: reading it must not pull its row
+    // out from under them.
+    const heldTreeId = shownUnread.size > 0 && focusedNodeId !== null && project.id === focusedProjectId
+      ? findTreeIdForNode(focusedNodeId, project)
+      : null;
     for (const tree of project.trees) {
-      if (tree.archivedAt) continue;
-      const rootNode = nodes[tree.rootNodeId];
-      if (!rootNode || rootNode.deletedAt || !isVisibleConversationNode(rootNode)) continue;
-      const streaming = hasStreamingNode(tree, project, nodes);
-      const bucket = getTimeBucket(tree.lastActiveAt, streaming);
-      items.push({ tree, project, isStreaming: streaming, bucket });
+      if (!isListedThread(tree, nodes[tree.rootNodeId])) continue;
+      const running = hasRunningNode(tree, childrenOf, nodes, workRunning);
+      const held = tree.id === heldTreeId && shownUnread.has(tree.id);
+      const unread = !running && (held || treeHasUnread(tree, project.edges, nodes, focusedNodeId, childrenOf));
+      const bucket = getTimeBucket(tree.lastActiveAt, running, unread);
+      items.push({ tree, project, isRunning: running, bucket });
     }
   }
   items.sort((a, b) => {
@@ -139,10 +157,13 @@ export function deriveActivityData(
 
 export default function ActivityView({
   onActivate,
+  chatViewActive = true,
 }: {
   onActivate?: () => void;
+  /** False on Home and other pages: no row reads as the one on screen. */
+  chatViewActive?: boolean;
 }) {
-  const { projects: allProjects, activeProjectId, focusedNodeId, treeSelection } = useChatProjects();
+  const { projects: allProjects, activeProjectId, focusedNodeId } = useChatProjects();
   // The assistant's system workspace has no place in the activity list.
   const projects = useMemo(() => withoutSystemWorkspaces(allProjects), [allProjects]);
   const { openPanes, focusedPane } = useChatPanes();
@@ -154,7 +175,6 @@ export default function ActivityView({
     renameTree,
     deleteTree,
     moveTreeToWorkspace,
-    clearTreeSelection,
     renameNode,
     openAgentRunPane,
   } = useChatActions();
@@ -162,12 +182,23 @@ export default function ActivityView({
   const agentState = agentDomain?.state;
   const { prefs } = usePrefs();
   const nodes = useChatNodesSnapshot();
+  // Conversations whose workflow or background agents still run after their turn ended.
+  const workRunning = useRunningWorkNodeIds();
   const geom = rowGeom(prefs.sidebarRowStyle, prefs.sidebarInset);
 
+  // Trees under Unread at the last commit: opening one marks it read in the
+  // same update that focuses it, so only the list's previous state knows it
+  // was opened from there.
+  const shownUnreadRef = useRef<ReadonlySet<string>>(NO_TREES);
   const activityItems = useMemo(
-    () => deriveActivityData(projects, nodes),
-    [projects, nodes],
+    () => deriveActivityData(projects, nodes, workRunning, focusedNodeId, shownUnreadRef.current),
+    [projects, nodes, workRunning, focusedNodeId],
   );
+  useEffect(() => {
+    shownUnreadRef.current = new Set(
+      activityItems.filter((item) => item.bucket === 'unread').map((item) => item.tree.id),
+    );
+  }, [activityItems]);
   const agentRuns = useMemo(
     () => Object.values(agentState?.runs ?? {}).filter((resource) => resource.value.workspaceId === activeProjectId),
     [activeProjectId, agentState?.runs],
@@ -183,12 +214,19 @@ export default function ActivityView({
     return groups;
   }, [activityItems]);
 
-  // Preview cap. Session-local on purpose: reopening the sidebar returns to the
-  // default so the lens always starts as "recent", never as "everything".
-  const [visibleLimit, setVisibleLimit] = useState(ACTIVITY_PREVIEW_LIMIT);
+  // Preview cap, grown by scrolling to the end. It outlives the list like its
+  // scroll offset does (SidebarScroller's scrollKey): reopening the drawer at a
+  // thread past the default cap needs that thread rendered.
+  const [visibleLimit, setVisibleLimit] = useState(() => rememberedVisibleLimit);
+  useEffect(() => { rememberedVisibleLimit = visibleLimit; }, [visibleLimit]);
   const { visible: visibleBuckets, hidden: hiddenCount } = useMemo(
     () => truncateActivityBuckets(bucketGroups, BUCKET_ORDER, visibleLimit, CAP_EXEMPT_BUCKETS),
     [bucketGroups, visibleLimit],
+  );
+  // ⇧+click range selection walks the thread rows on screen, across workspaces.
+  const shownTreeIds = useMemo(
+    () => BUCKET_ORDER.flatMap((bucket) => visibleBuckets.get(bucket) ?? []).map((item) => item.tree.id),
+    [visibleBuckets],
   );
 
   // The visible order, the only thing whose change lets rows glide: streaming
@@ -232,6 +270,7 @@ export default function ActivityView({
     toggleThread,
     toggleBranch,
     openThreadRoot,
+    clickThreadRow,
     selectBranch,
     isBranchSelected,
     menu,
@@ -264,8 +303,8 @@ export default function ActivityView({
 
   const getNodeOpenState = useCallback(
     (id: string): OpenState =>
-      nodeOpenState(id, openPanes, focusedPane, nodeStatuses[id] ?? 'idle'),
-    [openPanes, focusedPane, nodeStatuses],
+      nodeOpenState(id, openPanes, focusedPane, nodeStatuses[id] ?? 'idle', workRunning.has(id)),
+    [openPanes, focusedPane, nodeStatuses, workRunning],
   );
 
   const getSubtreeOpenState = useCallback(
@@ -275,20 +314,13 @@ export default function ActivityView({
   );
 
   // ── Other live workspaces for the "Move to workspace" menu ──
-  const moveTargetsFor = useCallback(
-    (projectId: string) =>
-      projects
-        .filter((p) => p.id !== projectId && !p.deletedAt && !p.archivedAt)
-        .map((p) => ({ id: p.id, name: p.name })),
-    [projects],
-  );
+  const moveTargetsOf = useCallback((projectId: string) => moveTargetsFor(projects, projectId), [projects]);
 
   return (
-    <div
-      className="activity-view term-scrollbar"
+    <SidebarScroller
+      scrollKey="activity"
+      className="activity-view"
       style={{
-        flex: 1,
-        overflowY: 'auto',
         paddingLeft: 'var(--sb-inset, 0px)',
         paddingRight: 'var(--sb-inset, 0px)',
         fontSize: 'var(--sb-fs, var(--fs-xl))',
@@ -323,13 +355,12 @@ export default function ActivityView({
               display: 'flex',
               alignItems: 'center',
               gap: 6,
-              fontSize: geom.isCard ? 'var(--sb-ts-fs, var(--fs-md))' : 11,
+              // Sentence case in every mode, like the By project section labels.
+              fontSize: geom.isCard ? 'var(--sb-ts-fs, var(--fs-md))' : 'var(--fs-sm)',
               fontWeight: 600,
-              letterSpacing: geom.isCard ? 0 : 'var(--ls-wide)',
-              textTransform: geom.isCard ? 'none' : 'uppercase',
               color: 'var(--term-muted)',
               // Card modes drop the label onto the same text spine as the
-              // thread titles below it, sentence-case at one shared size.
+              // thread titles below it, at one shared size.
               padding: geom.isCard
                 ? `0 ${spinePadding(geom, geom.rightGap)} 6px ${spinePadding(geom, geom.titleX)}`
                 : 'var(--sb-row-py, 5px) 10px var(--sb-row-py, 4px) 6px',
@@ -337,16 +368,9 @@ export default function ActivityView({
             }}
           >
             {bucket === 'now' && (
-              <span
-                style={{
-                  width: 6,
-                  height: 6,
-                  borderRadius: '50%',
-                  background: 'var(--term-digest)',
-                  animation: 'pulse var(--t-loop-slow) ease-in-out infinite',
-                  flexShrink: 0,
-                }}
-              />
+              // Running colour, held still: the running rows below already pulse.
+              // Green stays for unread.
+              <span className="term-dot-i" style={{ width: 6, height: 6, background: 'var(--term-run)', opacity: 1 }} />
             )}
             {BUCKET_LABELS[bucket]}
           </motion.div>,
@@ -367,11 +391,13 @@ export default function ActivityView({
               getNodeOpenState={getNodeOpenState}
               getSubtreeOpenState={getSubtreeOpenState}
               onActivateTree={openThreadRoot}
+              onClickThread={clickThreadRow}
+              shownTreeIds={shownTreeIds}
               onSelectBranch={selectBranch}
               onBranchContextMenu={openBranchMenu}
-              moveTargets={moveTargetsFor(item.project.id)}
-              activeProjectId={activeProjectId}
-              focusedNodeId={focusedNodeId}
+              moveTargets={moveTargetsOf(item.project.id)}
+              activeProjectId={chatViewActive ? activeProjectId : null}
+              focusedNodeId={chatViewActive ? focusedNodeId : null}
               archiveTree={archiveTree}
               unarchiveTree={unarchiveTree}
               pinTree={pinTree}
@@ -379,8 +405,6 @@ export default function ActivityView({
               renameTree={renameTree}
               deleteTree={deleteTree}
               moveTreeToWorkspace={moveTreeToWorkspace}
-              treeSelection={treeSelection}
-              clearTreeSelection={clearTreeSelection}
               renamingNodeId={renamingNodeId}
               onRenameNode={renameNode}
               onRenameEnd={endRename}
@@ -406,7 +430,7 @@ export default function ActivityView({
       <AnimatePresence>
         {menu && (
           <ContextMenu
-            key={`${menu.x}:${menu.y}`}
+            key={menuOpenKey(menu)}
             x={menu.x}
             y={menu.y}
             sections={menuSections}
@@ -414,7 +438,7 @@ export default function ActivityView({
           />
         )}
       </AnimatePresence>
-    </div>
+    </SidebarScroller>
   );
 }
 
@@ -459,6 +483,8 @@ function ActivityTreeEntry({
   getNodeOpenState,
   getSubtreeOpenState,
   onActivateTree,
+  onClickThread,
+  shownTreeIds,
   onSelectBranch,
   onBranchContextMenu,
   moveTargets,
@@ -471,8 +497,6 @@ function ActivityTreeEntry({
   renameTree,
   deleteTree,
   moveTreeToWorkspace,
-  treeSelection,
-  clearTreeSelection,
   renamingNodeId,
   onRenameNode,
   onRenameEnd,
@@ -492,9 +516,11 @@ function ActivityTreeEntry({
   getNodeOpenState: (id: string) => OpenState;
   getSubtreeOpenState: (rootId: string, edges: readonly ProjectEdge[]) => OpenState;
   onActivateTree: (tree: Tree, project: Project) => void;
+  onClickThread: (tree: Tree, project: Project, event: React.MouseEvent | undefined, row: ThreadRowClick) => void;
+  shownTreeIds: readonly string[];
   onSelectBranch: (nodeId: string, event: React.MouseEvent) => void;
   onBranchContextMenu: (nodeId: string, event: React.MouseEvent) => void;
-  moveTargets: readonly { id: string; name: string }[];
+  moveTargets: readonly MoveTargetWorkspace[];
   activeProjectId: string | null;
   focusedNodeId: string | null;
   archiveTree: (treeId: string) => void;
@@ -504,8 +530,6 @@ function ActivityTreeEntry({
   renameTree: (treeId: string, name: string, projectId?: string) => void;
   deleteTree: (treeId: string) => void;
   moveTreeToWorkspace: (treeId: string, targetProjectId: string) => void;
-  treeSelection: ReadonlySet<string>;
-  clearTreeSelection: () => void;
   renamingNodeId: string | null;
   onRenameNode: (nodeId: string, title: string) => void;
   onRenameEnd: () => void;
@@ -534,16 +558,8 @@ function ActivityTreeEntry({
         hasBranches={hasBranches}
         expanded={threadOpen}
         openState={threadOpenState}
-        onActivate={(e?: React.MouseEvent) => {
-          if (e && (e.metaKey || e.ctrlKey || e.shiftKey)) return;
-          onActivateTree(tree, project);
-          // Expand on activate if collapsed
-          if (hasBranches && !threadOpen) {
-            toggleThread(tree.id);
-          } else if (hasBranches && threadOpen && isActive) {
-            toggleThread(tree.id);
-          }
-        }}
+        onActivate={(e?: React.MouseEvent) =>
+          onClickThread(tree, project, e, { hasBranches, expanded: threadOpen, isActive, shownTreeIds })}
         onToggleExpand={() => toggleThread(tree.id)}
         actions={{
           activateTree: (treeId) => {

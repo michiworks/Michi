@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
-import { nodeOpenState, subtreeOpenState, buildBranchChildrenOf } from './sidebarSelectors';
+import { nodeOpenState, subtreeOpenState } from './sidebarSelectors';
+import { buildBranchChildrenOf } from './tree';
 import type { OpenState } from './sidebarSelectors';
 import type { ProjectEdge } from './chatTypes';
 
@@ -9,6 +10,13 @@ describe('nodeOpenState', () => {
     // slot's panes, but a running turn must still surface in the sidebar.
     expect(nodeOpenState('a', [], null, 'streaming')).toBe('streaming');
     expect(nodeOpenState('a', ['b'], 'b', 'streaming')).toBe('streaming');
+  });
+
+  it('returns streaming while work the turn left running goes on, focused or not', () => {
+    // The turn ended (idle) with its workflow still running.
+    expect(nodeOpenState('a', [], null, 'idle', true)).toBe('streaming');
+    expect(nodeOpenState('a', ['a'], 'a', 'idle', true)).toBe('streaming');
+    expect(nodeOpenState('a', ['a'], 'a', 'idle', false)).toBe('none');
   });
 });
 
@@ -24,7 +32,6 @@ describe('subtreeOpenState', () => {
     { source: 'root', target: 'b', kind: 'branch' },
     { source: 'a', target: 'c', kind: 'branch' },
   ];
-  const isAlive = () => true;
 
   it('prunes entire subtree of a dead intermediate node', () => {
     const isAliveExceptA = (id: string) => id !== 'a'; // a is dead, c (child of a) is alive

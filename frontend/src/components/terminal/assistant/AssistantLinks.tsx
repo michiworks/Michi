@@ -1,8 +1,6 @@
-import React, { useEffect, useMemo, useRef, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { MarkdownLinkRendererContext, type MarkdownLinkRenderer } from '../../markdownLinkRenderer';
 import { useChatActions, useChatNode, useChatNodeReader, useChatProjects } from '../../../state/chatStore';
-import { navigateToNode } from '../../../state/navigateToNode';
-import { isSystemWorkspace } from '../../../state/assistant/systemWorkspace';
 import { parseAssistantLink, type AssistantLink } from '../../../state/assistant/assistantLinks';
 import { fetchWorkspaceHoldingNode } from '../../../state/assistant/locateNode';
 import { AssistantScopeContext } from './assistantScope';
@@ -23,26 +21,20 @@ function textOf(children: React.ReactNode): string {
  * backend doesn't have either, or that its workspace didn't bring in, says
  * so. One that couldn't be loaded says that, and the next click tries again;
  * so does a remote connection's thread the store doesn't hold (only that
- * connection's load brings it in, never this machine's backend).
+ * connection's load brings it in, never this machine's backend). A message
+ * link opens the thread at that message.
  */
-function NodeChip({ id, children }: { id: string; children: React.ReactNode }) {
+function NodeChip({ id, messageId, children }: { id: string; messageId?: string; children: React.ReactNode }) {
   const node = useChatNode(id);
-  const { projects, activeProjectId } = useChatProjects();
-  const { selectProject, openPane, openPaneInTree, activateTree, setFocusedNodeId, installWorkspaceSnapshot } = useChatActions();
+  const { projects } = useChatProjects();
+  const { revealNode, installWorkspaceSnapshot } = useChatActions();
   const readNode = useChatNodeReader();
   const label = textOf(children).trim() || node?.title || 'Thread';
   const [lookup, setLookup] = useState<'idle' | 'loading' | 'missing' | 'failed'>('idle');
   const openWhenLoadedRef = useRef(false);
   const owner = node ? projects.find((p) => p.id === node.projectId && p.chatIds.includes(id)) : undefined;
 
-  const navigate = (projectId: string) => {
-    navigateToNode(
-      { projects, activeProjectId, selectProject, openPane, openPaneInTree, activateTree, setFocusedNodeId },
-      id,
-      projectId,
-    );
-    window.dispatchEvent(new CustomEvent('michi:nav-page', { detail: { page: 'dashboard' } }));
-  };
+  const navigate = (projectId: string) => { revealNode(id, { workspaceId: projectId, messageId }); };
   const navigateRef = useRef(navigate);
   navigateRef.current = navigate;
 
@@ -114,7 +106,7 @@ function NodeChip({ id, children }: { id: string; children: React.ReactNode }) {
 }
 
 export function AssistantLinkChip({ link, children }: { link: AssistantLink; children: React.ReactNode }) {
-  if (link.kind === 'node') return <NodeChip id={link.id}>{children}</NodeChip>;
+  if (link.kind === 'node') return <NodeChip id={link.id} messageId={link.messageId}>{children}</NodeChip>;
   if (link.kind === 'page') return <PageLinkChip id={link.id} blockId={link.blockId}>{children}</PageLinkChip>;
 }
 
@@ -138,21 +130,10 @@ export function AssistantLinkScope({ children }: { children: React.ReactNode }) 
   );
 }
 
-/** The assistant's node opened as a normal pane gets the same chips as the panel. */
-export function AssistantPaneScope({ nodeId, children }: { nodeId: string; children: React.ReactNode }) {
-  const { projects } = useChatProjects();
-  // Projects only: streaming into the node must not re-render this wrapper.
-  const assistant = useMemo(
-    () => projects.some((p) => isSystemWorkspace(p) && p.chatIds.includes(nodeId)),
-    [nodeId, projects],
-  );
-  // Always the provider (null = Markdown's default links), so a pane never
-  // remounts if the answer to "is this the assistant?" changes.
-  return (
-    <AssistantScopeContext.Provider value={assistant}>
-      <MarkdownLinkRendererContext.Provider value={assistant ? ASSISTANT_LINKS : null}>
-        {children}
-      </MarkdownLinkRendererContext.Provider>
-    </AssistantScopeContext.Provider>
-  );
+/**
+ * The whole app: Markdown anywhere (chats, pages, digests, artifacts, drawers)
+ * renders native `michi://` links as chips. Inner scopes may add their own.
+ */
+export function MichiLinkScope({ children }: { children: React.ReactNode }) {
+  return <MarkdownLinkRendererContext.Provider value={ASSISTANT_LINKS}>{children}</MarkdownLinkRendererContext.Provider>;
 }

@@ -4,8 +4,9 @@ import { memoryEvents } from './memoryService';
 
 /**
  * Forwards memoryEvents 'changed' (C4) to the renderers of the owner who
- * made, or was the subject of, the change: Settings › Memory's list and
- * pending badge, and the "Remembered" toast. A listener only ever receives
+ * made, or was the subject of, the change: Settings › Memory's list and the
+ * "Remembered" toast (origin tells an explicit save from extraction). A
+ * listener only ever receives
  * its own owner's changes, whatever wrote them (Settings, an agent's memory
  * tools, background extraction).
  *

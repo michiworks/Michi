@@ -1,6 +1,10 @@
 import { MaintenanceCoordinator, maintenanceExecutionHasWork, maintenanceCoordinatorState } from '../metaAgent/maintenanceCoordinator';
 import { isMemoryExtractionJob } from '../memory/extractionRepository';
-import { failMemoryExtractionRun, planMemoryExtractionRun, settleMemoryExtractionRun } from '../memory/extractionRun';
+import type { MemoryDirectAnswerer, MemoryDirectRun } from '../memory/extractionDirect';
+import {
+  MEMORY_EXTRACTION_LIMITS, combineSettledExtractions, failMemoryExtractionRun, planMemoryExtractionRun, settleMemoryExtractionRun,
+  type ExtractionPlan, type SettledExtraction,
+} from '../memory/extractionRun';
 import { sweepMemoryExtraction } from '../memory/extractionService';
 import { getScheduledJobSettings } from './settings';
 import { randomUUID } from 'node:crypto';
@@ -32,9 +36,12 @@ import {
 import { failHomeRun, planHomeRun, settleHomeRun, sweepMetaAgentHome, type HomeRunPlan } from '../metaAgent/firstRun';
 import { failWatchRun, planWatchRun, settleWatchRun, withWorkspaceInstructions, type WatchRunPlan } from '../metaAgent/watches';
 import { registerScheduledWorkspacePurge } from './workspacePurge';
+import {
+  isScheduledOnlyThread, moveRunThreadToWorkspace, pruneAllScheduledOnlyThreads, pruneScheduledOnlyThreads, sweepDeletedJobThreads,
+} from './scheduledOnly';
 import { LOCAL_AGENT_OWNER_ID } from '../agentOwner';
 import { log } from '../logger';
-import type { AppLauncher } from './appLauncher';
+import { NOTIFIER_GRACE_MS, type AppLauncher } from './appLauncher';
 import type { ScheduledJobEventBus } from './events';
 import {
   toJobDto,
@@ -118,6 +125,18 @@ export interface ScheduledJobSchedulerDeps {
   executor: ScheduledJobExecutor;
   events: ScheduledJobEventBus;
   workspaceExists(workspaceId: string): boolean;
+  /**
+   * A workspace no job may run in that an internal maintenance execution may
+   * still be made for (the assistant's: automatic memory reads V there with
+   * direct calls only). Asked only when a maintenance execution is created.
+   */
+  maintenanceWorkspaceExists?(workspaceId: string): boolean;
+  /**
+   * An archived workspace is read-only, so its jobs do not run (Run now
+   * included) until it is unarchived; they stay editable and keep their
+   * schedule. Absent: no workspace is archived.
+   */
+  workspaceArchived?(workspaceId: string): boolean;
   runtimeExists(runtimeId: string): boolean;
   launcher?: AppLauncher;
   clock?: () => number;
@@ -127,10 +146,18 @@ export interface ScheduledJobSchedulerDeps {
   pollIntervalMs?: number;
   leaseTtlMs?: number;
   maxConcurrentRuns?: number;
-  /** How long a notifier must be gone before the app is woken. */
+  /** How long a notifier must be gone before the app is woken (default NOTIFIER_GRACE_MS, 30 s). */
   notifierGraceMs?: number;
+  /** Runs `callback` once after `delayMs`; returns a cancel (default: an unref'd setTimeout). Tests pass a fake clock's. */
+  setTimer?: (callback: () => void, delayMs: number) => () => void;
   /** Extra time a cancelled/timed-out turn gets to settle. */
   cancelGraceMs?: number;
+  /**
+   * Answers an automatic memory run with direct structured model calls when
+   * the run's runtime has them (memory/extractionDirect.ts); without it, or
+   * for another runtime, the run opens a maintenance session.
+   */
+  memoryDirect?: MemoryDirectAnswerer;
 }
 
 interface ActiveRun {
@@ -140,10 +167,12 @@ interface ActiveRun {
   jobId: string;
   handle: ScheduledRunHandle | null;
   cancelledHandle?: ScheduledRunHandle;
-  cancelRequested: boolean;
-  timedOut: boolean;
+  /** Why the scheduler asked the execution to stop. The first request is the run's outcome; only requestStop sets it. */
+  stopCause: 'cancelled' | 'timed_out' | null;
   finalized: boolean;
   executionEnded: boolean;
+  /** Its claim was released after its time limit plus grace; it holds no slot while its handle settles. */
+  released?: boolean;
   conversationBatch?: ConversationUpdates;
   maintenanceConfigRevision?: number;
   maintenancePlan?: MaintenancePlan;
@@ -154,10 +183,20 @@ interface ActiveRun {
   /** A workspace's automatic memory extraction (memory/extractionRun.ts); bound like a watch check. */
   memoryExtraction?: boolean;
   memoryRun?: { id: string; prompt: string };
+  /** The memory run planned a batch and asked a model: when it ends, the coordinator checks again soon for the next conversation. */
+  memoryAnswered?: boolean;
 }
 
 const NOTIFICATION_REPLAY_WINDOW_MS = 24 * 3_600_000;
 const MIN_TIMER_DELAY_MS = 1_000;
+/** How often runs that aged out of retention lose their Scheduled-only threads. */
+const SCHEDULED_ONLY_SWEEP_MS = 10 * 60_000;
+
+function unrefTimer(callback: () => void, delayMs: number): () => void {
+  const timer = setTimeout(callback, delayMs);
+  timer.unref?.();
+  return () => clearTimeout(timer);
+}
 
 /**
  * The turns of a claimed plan the feed can still read, without the sources
@@ -187,6 +226,9 @@ export class ScheduledJobScheduler {
   private readonly leaseTtlMs: number;
   private readonly maxConcurrentRuns: number;
   private readonly notifierGraceMs: number;
+  private readonly setTimer: (callback: () => void, delayMs: number) => () => void;
+  /** Cancels the one look again maybeWakeApp set while a notifier's grace runs; null when none is set. */
+  private cancelWakeCheck: (() => void) | null = null;
   private readonly cancelGraceMs: number;
   private readonly maintenance = new MaintenanceCoordinator();
   private readonly active = new Map<string, ActiveRun>();
@@ -197,6 +239,14 @@ export class ScheduledJobScheduler {
   private stopped = false;
   private unregisterWorkspacePurge: (() => void) | null = null;
   private unsubscribeGuardRetry: (() => void) | null = null;
+  private lastScheduledOnlySweepAt = Number.NEGATIVE_INFINITY;
+  /**
+   * When the next tick should come at the latest (MIN_TIMER_DELAY_MS after an
+   * automatic memory run that asked a model ended), so the next conversation
+   * waiting is read without waiting for the poll interval; null when nothing
+   * asked for one.
+   */
+  private soonAt: number | null = null;
 
   constructor(private readonly deps: ScheduledJobSchedulerDeps) {
     this.repo = deps.repository;
@@ -206,7 +256,8 @@ export class ScheduledJobScheduler {
     this.pollIntervalMs = deps.pollIntervalMs ?? 30_000;
     this.leaseTtlMs = deps.leaseTtlMs ?? 90_000;
     this.maxConcurrentRuns = Math.max(1, Math.floor(deps.maxConcurrentRuns ?? 2));
-    this.notifierGraceMs = deps.notifierGraceMs ?? 10_000;
+    this.notifierGraceMs = deps.notifierGraceMs ?? NOTIFIER_GRACE_MS;
+    this.setTimer = deps.setTimer ?? unrefTimer;
     this.cancelGraceMs = deps.cancelGraceMs ?? 15_000;
   }
 
@@ -215,8 +266,7 @@ export class ScheduledJobScheduler {
     this.unregisterWorkspacePurge = registerScheduledWorkspacePurge((workspaceId) => {
       for (const active of this.active.values()) {
         if (active.run.workspaceId !== workspaceId || active.finalized) continue;
-        active.cancelRequested = true;
-        this.requestCancel(active);
+        this.requestStop(active, 'cancelled');
       }
     });
   }
@@ -243,6 +293,8 @@ export class ScheduledJobScheduler {
     this.unsubscribeGuardRetry = null;
     if (this.timer) clearTimeout(this.timer);
     this.timer = null;
+    this.cancelWakeCheck?.();
+    this.cancelWakeCheck = null;
     await this.ticking?.catch(() => {});
     for (const active of this.active.values()) {
       this.finalize(active, 'interrupted', null, 'Michi stopped while this run was in progress', this.clock());
@@ -261,11 +313,11 @@ export class ScheduledJobScheduler {
 
   // ── Job management ──────────────────────────────────────────────────────
 
-  private validationContext(): JobValidationContext {
+  private validationContext(maintenance = false): JobValidationContext {
     return {
       now: this.clock(),
       defaultSessionMode: getScheduledJobSettings().sessionMode,
-      workspaceExists: (id) => this.deps.workspaceExists(id),
+      workspaceExists: (id) => this.deps.workspaceExists(id) || (maintenance && this.deps.maintenanceWorkspaceExists?.(id) === true),
       runtimeExists: (id) => this.deps.runtimeExists(id),
     };
   }
@@ -275,7 +327,7 @@ export class ScheduledJobScheduler {
   /** Reject ordinary job controls for internal maintenance execution identities. */
   requirePromptJob(id: string): void {
     const record = this.repo.getJob(id)?.record;
-    if (!record || record.executionKind === 'maintenance') throw new ScheduledJobNotFoundError('Scheduled job not found; open Meta agent maintenance');
+    if (!record || record.executionKind === 'maintenance') throw new ScheduledJobNotFoundError('Scheduled job not found; open Pages upkeep');
   }
 
   listJobs(): ScheduledJobDto[] {
@@ -326,7 +378,7 @@ export class ScheduledJobScheduler {
   }
 
   private createExecution(raw: unknown, maintenanceOwner?: string): ScheduledJobDto {
-    const fields = maintenanceOwner === undefined ? this.validateCreate(raw) : parseJobCreate(raw, this.validationContext());
+    const fields = maintenanceOwner === undefined ? this.validateCreate(raw) : parseJobCreate(raw, this.validationContext(true));
     const { conversationUpdates, ...jobFields } = fields;
     const now = this.clock();
     const record: ScheduledJobRecord = {
@@ -391,7 +443,9 @@ export class ScheduledJobScheduler {
     // A persistent thread is bound to one workspace and agent profile.
     const profileChanged = (['workspaceId', 'runtimeId', 'providerId', 'modelId', 'reasoning'] as const)
       .some((key) => patch[key] !== undefined && patch[key] !== current[key]);
-    if (profileChanged || (patch.sessionMode !== undefined && patch.sessionMode !== current.sessionMode)) {
+    // So is where it shows: a Scheduled-only thread is never continued in the workspace, or the reverse.
+    const placementChanged = patch.visibility !== undefined && patch.visibility !== (current.visibility ?? 'workspace');
+    if (profileChanged || placementChanged || (patch.sessionMode !== undefined && patch.sessionMode !== current.sessionMode)) {
       update.persistentNodeId = null;
     }
     if (current.executionKind === 'maintenance') update.nextRunAt = null;
@@ -440,7 +494,7 @@ export class ScheduledJobScheduler {
     }
     for (const key of ['runtimeId', 'providerId', 'modelId', 'reasoning'] as const) {
       if (patch[key] !== undefined && patch[key] !== config[key]) {
-        throw new JobValidationError('Space maintenance runs on the Meta agent settings; change the runtime there');
+        throw new JobValidationError('Space maintenance runs on the Pages upkeep settings; change the runtime there');
       }
     }
     if (patch.schedule !== undefined
@@ -453,14 +507,46 @@ export class ScheduledJobScheduler {
     const workspaceId = this.repo.getJob(id)?.record.workspaceId ?? null;
     for (const active of this.active.values()) {
       if (active.jobId !== id) continue;
-      active.cancelRequested = true;
-      this.requestCancel(active);
+      this.requestStop(active, 'cancelled');
       active.finalized = true;
       this.repo.quarantineExecution(active.run.id, active.lease, this.clock(), 'The job was deleted before its execution confirmed it stopped');
     }
     if (!this.repo.deleteJob(id)) throw new ScheduledJobNotFoundError('Scheduled job not found');
+    // Its Scheduled-only threads go with it: nothing else shows them.
+    this.sweepScheduledOnly(() => sweepDeletedJobThreads({ now: this.clock(), activeNodeIds: this.activeNodeIds() }));
     this.rearm();
     if (workspaceId) this.publishChange('deleted', id, workspaceId);
+  }
+
+  /**
+   * Show a Scheduled-only run's thread in its workspace from now on. The
+   * job's next run starts a new hidden thread if it was continuing this one.
+   */
+  moveRunToWorkspace(runId: string): ScheduledJobRunDto {
+    const result = moveRunThreadToWorkspace(runId, this.clock());
+    if (result.kind === 'missing') throw new ScheduledJobNotFoundError(result.reason);
+    if (!result.alreadyVisible) this.publishChange('updated', result.jobId, result.workspaceId);
+    return this.getRun(runId);
+  }
+
+  /** Threads this process's live executions hold. */
+  private activeNodeIds(): Set<string> {
+    const ids = new Set<string>();
+    for (const active of this.active.values()) {
+      if (active.run.nodeId) ids.add(active.run.nodeId);
+      if (active.handle?.nodeId) ids.add(active.handle.nodeId);
+    }
+    return ids;
+  }
+
+  /** Retention never fails the operation that triggered it. */
+  private sweepScheduledOnly(sweep: () => number): void {
+    try {
+      const purged = sweep();
+      if (purged > 0) log.info('scheduler', 'removed Scheduled-only run threads', { purged });
+    } catch (error) {
+      log.warn('scheduler', 'could not remove Scheduled-only run threads', { error: error instanceof Error ? error.message : String(error) });
+    }
   }
 
   listRuns(jobId: string): ScheduledJobRunDto[] {
@@ -506,7 +592,11 @@ export class ScheduledJobScheduler {
     if (!this.deps.workspaceExists(found.record.workspaceId)) {
       throw new JobValidationError('The workspace for this job is missing or in Trash');
     }
-    const refuse = (refused: ScheduledJobStartRefusal, message: string) => ({ refused, message, activeRunId: this.repo.getJob(jobId)?.activeRunId ?? null });
+    // Maintenance decides for itself whether an archived workspace has work (maintenanceExecutionHasWork).
+    if (found.record.executionKind !== 'maintenance' && this.deps.workspaceArchived?.(found.record.workspaceId)) {
+      throw new JobValidationError('The workspace for this job is archived');
+    }
+    const refuse =(refused: ScheduledJobStartRefusal, message: string) => ({ refused, message, activeRunId: this.repo.getJob(jobId)?.activeRunId ?? null });
     if (this.stopped) return refuse('stopping', 'The scheduler is stopping');
     const now = this.clock();
     if (found.record.executionKind === 'maintenance') {
@@ -535,8 +625,7 @@ export class ScheduledJobScheduler {
     let cancelled = false;
     for (const active of this.active.values()) {
       if (active.jobId !== jobId || active.finalized) continue;
-      active.cancelRequested = true;
-      this.requestCancel(active);
+      this.requestStop(active, 'cancelled');
       this.repo.quarantineExecution(active.run.id, active.lease, this.clock(), 'Cancellation requested; the execution has not confirmed it stopped');
       cancelled = true;
     }
@@ -584,20 +673,28 @@ export class ScheduledJobScheduler {
 
   private async tickOnce(): Promise<void> {
     if (this.stopped || (!this.running && this.active.size === 0)) return;
+    this.soonAt = null;
     try {
       const now = this.clock();
       for (const active of this.active.values()) if (active.executionEnded) this.releaseEndedExecution(active);
       if (!this.acquireOwnership(now) || !this.running) return;
       sweepMetaAgentHome(this, now);
       sweepMemoryExtraction(this, now);
+      // Age-based retention needs no new run to apply (a paused job's runs still expire).
+      if (now - this.lastScheduledOnlySweepAt >= SCHEDULED_ONLY_SWEEP_MS) {
+        this.lastScheduledOnlySweepAt = now;
+        this.sweepScheduledOnly(() => pruneAllScheduledOnlyThreads({ now, activeNodeIds: this.activeNodeIds() }));
+      }
       for (const job of this.repo.listScheduledJobs()) {
         if (job.nextRunAt === null || job.nextRunAt > now) break;
         if (this.activeCount() >= this.maxConcurrentRuns) break;
-        if (!this.deps.workspaceExists(job.workspaceId)) {
-          // Keep the schedule moving so a trashed workspace does not spin.
+        const unavailable = !this.deps.workspaceExists(job.workspaceId) ? 'the workspace is missing or in Trash'
+          : this.deps.workspaceArchived?.(job.workspaceId) ? 'the workspace is archived' : null;
+        if (unavailable) {
+          // Keep the schedule moving so the job does not spin, and resumes once its workspace is back.
           this.repo.updateJob(job.id, {
             nextRunAt: this.nextAfterScheduledRun(job, now),
-            lastError: 'Skipped: the workspace is missing or in Trash',
+            lastError: `Skipped: ${unavailable}`,
             updatedAt: now,
           });
           continue;
@@ -617,7 +714,18 @@ export class ScheduledJobScheduler {
       this.maintenance.check(now, this.repo.listMaintenanceExecutions(), (record) => {
         if (this.activeCount() >= this.maxConcurrentRuns || this.heldByMetaAgentGuard(record)
           || !maintenanceRuntimeAvailability(resolveMetaAgentRuntime(record.ownerUserId ?? LOCAL_AGENT_OWNER_ID).runtimeId).available) return false;
-        return !!this.launch(record, 'scheduled', now).run;
+        // A sign-in stop due for another try (maintenanceCoordinator.ts): the
+        // run goes ahead unpaused, and its failure count, already past the
+        // threshold, stops it again on one more failure.
+        const retried = record.autoPaused;
+        if (retried) this.repo.updateJob(record.id, { autoPaused: false });
+        let started = false;
+        try {
+          started = !!this.launch(retried ? { ...record, autoPaused: false } : record, 'scheduled', now).run;
+        } finally {
+          if (retried && !started) this.repo.updateJob(record.id, { autoPaused: true });
+        }
+        return started;
       });
     } catch (error) {
       log.warn('scheduler', 'tick failed', { error: error instanceof Error ? error.message : String(error) });
@@ -636,12 +744,15 @@ export class ScheduledJobScheduler {
     } catch {
       // Keep the poll cadence if the database is busy.
     }
+    if (this.soonAt !== null && this.running) delay = Math.min(delay, Math.max(1, this.soonAt - this.clock()));
     this.timer = setTimeout(() => { void this.tick(); }, delay);
     this.timer.unref?.();
   }
 
   private activeCount(): number {
-    return this.active.size;
+    let count = 0;
+    for (const active of this.active.values()) if (!active.released) count++;
+    return count;
   }
 
   private acquireOwnership(now: number): boolean {
@@ -654,7 +765,26 @@ export class ScheduledJobScheduler {
     const interrupted = this.repo.interruptStaleRuns(lease, now);
     if (interrupted > 0) log.warn('scheduler', 'fenced runs from previous scheduler ownership', { interrupted });
     this.repo.reapExitedExecutions(lease, now);
+    for (const released of this.repo.releaseExpiredExecutions(lease, now)) {
+      log.warn('scheduler', 'released an unconfirmed execution after its time limit plus grace; the old process may still be running', {
+        runId: released.runId, jobId: released.jobId, workspaceId: released.workspaceId,
+        startedAt: new Date(released.acquiredAt).toISOString(), releasesAt: new Date(released.releasesAt).toISOString(),
+      });
+      const active = this.active.get(released.runId);
+      if (active) {
+        active.finalized = true;
+        active.released = true;
+        this.requestCancel(active);
+      }
+    }
     return true;
+  }
+
+  /** Ask the execution to stop for `cause`. A cause asked for earlier stays the outcome; returns the one that holds. */
+  private requestStop(active: ActiveRun, cause: 'cancelled' | 'timed_out'): 'cancelled' | 'timed_out' {
+    active.stopCause ??= cause;
+    this.requestCancel(active);
+    return active.stopCause;
   }
 
   private requestCancel(active: ActiveRun): void {
@@ -728,7 +858,7 @@ export class ScheduledJobScheduler {
     if (!result.run) return result;
     const active: ActiveRun = {
       run: result.run, lease: this.lease, controller: new AbortController(),
-      jobId: job.id, handle: null, cancelRequested: false, timedOut: false, finalized: false, executionEnded: false,
+      jobId: job.id, handle: null, stopCause: null, finalized: false, executionEnded: false,
     };
     this.active.set(result.run.id, active);
     void this.execute(job, active);
@@ -744,11 +874,12 @@ export class ScheduledJobScheduler {
     try {
       timeoutTimer = setTimeout(() => {
         if (active.finalized) return;
-        active.timedOut = true;
-        this.requestCancel(active);
+        // After a cancel the limit only bounds how long stopping may take; the cancel stays the outcome.
+        const cause = this.requestStop(active, 'timed_out');
         this.repo.quarantineExecution(run.id, active.lease, this.clock(), 'Timed out; the execution has not confirmed it stopped');
         graceTimer = setTimeout(() => {
-          this.finalize(active, 'timed_out', null, `Timed out after ${Math.round(job.timeoutSeconds / 60)} min`, this.clock());
+          this.finalize(active, cause, null,
+            cause === 'timed_out' ? `Timed out after ${Math.round(job.timeoutSeconds / 60)} min` : 'Cancelled', this.clock());
         }, this.cancelGraceMs);
         graceTimer.unref?.();
       }, job.timeoutSeconds * 1000);
@@ -772,15 +903,25 @@ export class ScheduledJobScheduler {
         const { followsGlobal: _followsGlobal, ...profile } = resolveMetaAgentRuntime(ownerUserId);
         const availability = maintenanceRuntimeAvailability(profile.runtimeId);
         if (!availability.available) throw new Error(availability.reason ?? `Runtime "${profile.runtimeId}" is unavailable for automatic memory`);
-        const plan = planMemoryExtractionRun({ jobId: job.id, workspaceId: job.workspaceId, ownerUserId, runId: run.id, now: this.clock() });
+        const direct = this.deps.memoryDirect?.supports(profile.runtimeId) === true;
+        const plan = planMemoryExtractionRun({ jobId: job.id, workspaceId: job.workspaceId, ownerUserId, runId: run.id, now: this.clock(),
+          manual: run.trigger === 'manual', direct });
         if (plan.kind === 'skip') {
           // Nothing to read, or held since discovery: no session, no model call, not a failure.
           this.finalize(active, 'succeeded', plan.summary, null, this.clock());
           return;
         }
         active.memoryRun = { id: plan.id, prompt: plan.prompt };
+        active.memoryAnswered = true;
         active.runtimeProfile = profile;
         active.maintenanceConfigRevision = plan.configRevision;
+        if (direct) {
+          // Direct structured calls (and their repairs) answer the run: no node, no session. Several conversations, a few at once.
+          const settled = await this.answerMemoryDirect(job, active, ownerUserId, profile, plan);
+          if (active.finalized) return;
+          this.finalize(active, settled.status, settled.summary, settled.error, this.clock());
+          return;
+        }
       }
       if (managedMaintenance) {
         const plan = planHomeRun({ workspaceId: job.workspaceId, ownerUserId: job.ownerUserId ?? LOCAL_AGENT_OWNER_ID,
@@ -923,8 +1064,8 @@ export class ScheduledJobScheduler {
       const outcome = await done;
       if (outcome.status !== 'cancelled') this.recordMetaAgentCheck(job, active, outcome.status === 'succeeded' ? null : outcome.error);
       if (active.finalized) return;
-      let status: ScheduledJobRunStatus = active.timedOut ? 'timed_out'
-        : active.cancelRequested ? 'cancelled' : outcome.status === 'cancelled' ? 'failed' : outcome.status;
+      let status: ScheduledJobRunStatus = active.stopCause
+        ?? (outcome.status === 'cancelled' ? 'failed' : outcome.status);
       let error = status === 'timed_out' ? `Timed out after ${Math.round(job.timeoutSeconds / 60)} min`
         : status === 'cancelled' ? 'Cancelled'
           : status === 'failed' ? outcome.error ?? 'The agent stopped before finishing' : null;
@@ -944,7 +1085,7 @@ export class ScheduledJobScheduler {
         summary = settled.summary ?? summary;
       }
       if (active.memoryRun) {
-        // Commits the staged candidates and the cursor only with every receipt; the reply never settles it.
+        // Commits the staged memory_extract answer and the cursor together; the reply never settles it.
         const settled = settleMemoryExtractionRun({ id: active.memoryRun.id, ownerUserId: job.ownerUserId ?? LOCAL_AGENT_OWNER_ID,
           status, error, turnId: handle.turnId, claimedBy: this.instanceId, now: this.clock() });
         status = settled.status;
@@ -977,12 +1118,18 @@ export class ScheduledJobScheduler {
       }
       const message = error instanceof Error ? error.message : String(error);
       this.recordMetaAgentCheck(job, active, error ?? message);
-      if (active.homeRun) failHomeRun(active.homeRun.id, job.ownerUserId ?? LOCAL_AGENT_OWNER_ID, message, this.clock(), error);
-      if (active.watchRun) failWatchRun(active.watchRun.id, job.ownerUserId ?? LOCAL_AGENT_OWNER_ID, message, this.clock());
-      if (active.memoryRun) failMemoryExtractionRun(active.memoryRun.id, job.ownerUserId ?? LOCAL_AGENT_OWNER_ID, message, this.clock(), active.cancelRequested);
+      if (!active.finalized && !this.repo.ownsRun(run.id, active.lease, this.clock())) this.loseOwnership(active, this.clock());
+      // A run stopped from outside (shutdown, lost ownership) is not the agent's failure: as after
+      // setup, its home, watch or memory row is left for the next run's stale sweep. A timeout still counts.
+      if (!active.finalized || active.stopCause === 'timed_out') {
+        const ownerUserId = job.ownerUserId ?? LOCAL_AGENT_OWNER_ID;
+        if (active.homeRun) failHomeRun(active.homeRun.id, ownerUserId, message, this.clock(), error);
+        if (active.watchRun) failWatchRun(active.watchRun.id, ownerUserId, message, this.clock(), active.stopCause !== 'cancelled');
+        if (active.memoryRun) failMemoryExtractionRun(active.memoryRun.id, ownerUserId, message, this.clock(), active.stopCause === 'cancelled');
+      }
       if (!active.finalized) {
         log.warn('scheduler', 'scheduled run could not start', { jobId: job.id, runId: run.id, error: message });
-        const status = active.timedOut ? 'timed_out' : active.cancelRequested ? 'cancelled' : 'failed';
+        const status = active.stopCause ?? 'failed';
         this.finalize(active, status, null, message, this.clock());
       }
     } finally {
@@ -993,8 +1140,63 @@ export class ScheduledJobScheduler {
       // A returned handle must keep done pending until real execution ends.
       active.executionEnded = true;
       this.releaseEndedExecution(active);
+      // Automatic memory reads one conversation per session run: the next one waiting starts about a second later,
+      // not at the next poll. Only after a run that asked a model, so a run with nothing to read cannot spin.
+      if (active.memoryAnswered) this.soonAt = Math.min(this.soonAt ?? Number.POSITIVE_INFINITY, this.clock() + MIN_TIMER_DELAY_MS);
       this.rearm();
     }
+  }
+
+  /**
+   * An automatic memory run answered with direct structured calls: the
+   * planned batch, then more due conversations of the workspace, each a batch
+   * of its own planned as a call frees up (planMemoryExtractionRun leaves out
+   * those this run reads), up to MEMORY_EXTRACTION_LIMITS
+   * conversationsPerExecution, directConcurrency at once. Each batch settles
+   * on its own, checking its conversation's position and this run's lease as
+   * it commits; once the run is stopped (cancelled, timed out, its lease
+   * lost) nothing more is planned, and what still answers settles as
+   * stopped. A profile rebuild answers alone.
+   */
+  private async answerMemoryDirect(job: ScheduledJobRecord, active: ActiveRun, ownerUserId: string, profile: MemoryDirectRun['profile'],
+    first: Extract<ExtractionPlan, { kind: 'run' }>): Promise<SettledExtraction> {
+    const claimed = new Set<string>(first.nodeId ? [first.nodeId] : []);
+    const stopped = () => active.finalized || active.stopCause !== null || active.controller.signal.aborted;
+    const next = (): Extract<ExtractionPlan, { kind: 'run' }> | null => {
+      if (!first.nodeId || claimed.size >= MEMORY_EXTRACTION_LIMITS.conversationsPerExecution || stopped()) return null;
+      try {
+        const plan = planMemoryExtractionRun({ jobId: job.id, workspaceId: job.workspaceId, ownerUserId, runId: active.run.id,
+          now: this.clock(), manual: active.run.trigger === 'manual', direct: true, exclude: claimed });
+        if (plan.kind !== 'run' || !plan.nodeId) return null;
+        claimed.add(plan.nodeId);
+        return plan;
+      } catch (error) {
+        log.warn('scheduler', 'automatic memory: no further conversation was planned', { jobId: job.id, error: error instanceof Error ? error.message : String(error) });
+        return null;
+      }
+    };
+    const results: SettledExtraction[] = [];
+    const answerFrom = async (start: Extract<ExtractionPlan, { kind: 'run' }>): Promise<void> => {
+      for (let plan: Extract<ExtractionPlan, { kind: 'run' }> | null = start; plan; plan = next()) {
+        const answer = await this.deps.memoryDirect!.answer({ runId: plan.id, ownerUserId, profile, system: plan.system, prompt: plan.prompt,
+          signal: active.controller.signal });
+        // A stop the scheduler asked for is the outcome, the first cause asked for (requestStop).
+        const status = active.stopCause ?? answer.status;
+        const error = status === 'timed_out' ? `Timed out after ${Math.round(job.timeoutSeconds / 60)} min` : status === 'cancelled' ? 'Cancelled' : answer.error;
+        results.push(settleMemoryExtractionRun({ id: plan.id, ownerUserId, status, error, turnId: null, reportedTokens: answer.tokens ?? 0,
+          claimedBy: this.instanceId, now: this.clock() }));
+      }
+    };
+    const starts = [first];
+    for (let slot = 1; slot < MEMORY_EXTRACTION_LIMITS.directConcurrency; slot += 1) {
+      const plan = next();
+      if (!plan) break;
+      starts.push(plan);
+    }
+    // Every batch settles before the run ends; a settle that threw fails the run once the others are done.
+    const thrown = (await Promise.allSettled(starts.map(answerFrom))).find((outcome) => outcome.status === 'rejected');
+    if (thrown) throw (thrown as PromiseRejectedResult).reason;
+    return combineSettledExtractions(results);
   }
 
   private releaseEndedExecution(active: ActiveRun): void {
@@ -1082,6 +1284,10 @@ export class ScheduledJobScheduler {
     try {
       if (!this.repo.updateFinishedJob(active.run.id, active.lease, now, update)) return;
       this.repo.pruneRuns(job.id);
+      if (job.visibility === 'scheduled') {
+        const jobId = job.id;
+        this.sweepScheduledOnly(() => pruneScheduledOnlyThreads(jobId, { now, activeNodeIds: this.activeNodeIds() }));
+      }
     } catch (dbError) {
       log.warn('scheduler', 'could not update job after run', { jobId: job.id, error: (dbError as Error).message });
     }
@@ -1093,11 +1299,46 @@ export class ScheduledJobScheduler {
     this.rearm();
   }
 
+  /**
+   * A notification just went out (a run finished with notify on, or asks for
+   * approval or input): when no notifier has been connected for the grace,
+   * the launcher starts the app hidden and its notifier gets it from the
+   * replay. Within the grace the notifier may only be reconnecting (a feed's
+   * backoff, a backend restart, the first 30 s after boot), so nothing wakes
+   * yet; but the notification must not be left there either (the same gap
+   * as companion/delivery.ts wakeForNotice, H-review #2). One look again is
+   * set for when the grace is up: if no notifier has come back by then and a
+   * notification still waits, the app is woken.
+   */
   private maybeWakeApp(): void {
     if (!this.deps.launcher) return;
     if (this.deps.events.hasNotifier()) return;
-    if (this.deps.events.notifierAbsentForMs() < this.notifierGraceMs) return;
+    const absentFor = this.deps.events.notifierAbsentForMs();
+    if (absentFor < this.notifierGraceMs) {
+      this.lookAgainForWake(this.notifierGraceMs - absentFor);
+      return;
+    }
     this.deps.launcher.wake();
+  }
+
+  private lookAgainForWake(delayMs: number): void {
+    if (this.cancelWakeCheck || this.stopped) return;
+    this.cancelWakeCheck = this.setTimer(() => {
+      this.cancelWakeCheck = null;
+      const launcher = this.deps.launcher;
+      if (this.stopped || !launcher || this.deps.events.hasNotifier()) return;
+      const absentFor = this.deps.events.notifierAbsentForMs();
+      // A notifier came and went meanwhile: its grace starts over.
+      if (absentFor < this.notifierGraceMs) {
+        this.lookAgainForWake(this.notifierGraceMs - absentFor);
+        return;
+      }
+      try {
+        if (this.pendingNotifications().length > 0) launcher.wake();
+      } catch (error) {
+        log.warn('scheduler', 'could not look again for a notification to wake the app for', { error: String(error) });
+      }
+    }, Math.max(1, delayMs));
   }
 
   private eventFor(
@@ -1119,6 +1360,7 @@ export class ScheduledJobScheduler {
       error: run.error,
       notify: job.notify,
       ...(attention ? { attention } : {}),
+      ...(isScheduledOnlyThread(run.nodeId) ? { scheduledOnly: true } : {}),
       at: run.finishedAt ?? this.clock(),
     };
   }

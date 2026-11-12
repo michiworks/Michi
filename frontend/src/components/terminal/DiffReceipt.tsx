@@ -90,7 +90,7 @@ export function DiffReceipt({ message, workspaceId, enter = false }: DiffReceipt
             <>
               {' '}
               <span style={{ color: 'var(--term-digest)' }}>+{totalAdded}</span>{' '}
-              <span style={{ color: 'var(--term-danger)' }}>−{totalRemoved}</span>
+              <span style={{ color: 'var(--term-danger-text)' }}>−{totalRemoved}</span>
             </>
           )}
         </span>
@@ -131,7 +131,7 @@ export function DiffReceipt({ message, workspaceId, enter = false }: DiffReceipt
               {f.countsKnown && (
                 <span style={{ flexShrink: 0, marginLeft: 8 }}>
                   <span style={{ color: 'var(--term-digest)' }}>+{f.added}</span>{' '}
-                  <span style={{ color: 'var(--term-danger)' }}>−{f.removed}</span>
+                  <span style={{ color: 'var(--term-danger-text)' }}>−{f.removed}</span>
                 </span>
               )}
             </button>

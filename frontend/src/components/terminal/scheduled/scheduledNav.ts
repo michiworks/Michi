@@ -1,13 +1,21 @@
 import { useSyncExternalStore } from 'react';
 
-/** One visible destination shared by the shell, sidebar, list and notifications. */
-export type ScheduledRoute = { kind: 'list' } | { kind: 'meta-agent' } | { kind: 'job'; jobId: string };
+/**
+ * One visible destination shared by the shell, sidebar, list and notifications.
+ * A job with `runId` shows that run's thread (a Scheduled-only job's run).
+ */
+export type ScheduledRoute = { kind: 'list' } | { kind: 'meta-agent' } | { kind: 'job'; jobId: string; runId?: string };
 export const SCHEDULED_HOME: ScheduledRoute = { kind: 'list' };
 let route: ScheduledRoute = SCHEDULED_HOME;
 const listeners = new Set<() => void>();
 
+function sameRoute(a: ScheduledRoute, b: ScheduledRoute): boolean {
+  if (a.kind !== 'job' || b.kind !== 'job') return a.kind === b.kind;
+  return a.jobId === b.jobId && (a.runId ?? null) === (b.runId ?? null);
+}
+
 export function setScheduledRoute(next: ScheduledRoute): void {
-  if (route.kind === next.kind && (route.kind !== 'job' || (next.kind === 'job' && route.jobId === next.jobId))) return;
+  if (sameRoute(route, next)) return;
   route = next;
   for (const listener of listeners) listener();
 }
@@ -31,8 +39,25 @@ export function requestScheduledJobDetail(jobId: string): void {
   window.dispatchEvent(new CustomEvent(OPEN_SCHEDULED_JOB_EVENT, { detail: { jobId } }));
 }
 
-/** Fired by the chat store for every scheduled run lifecycle frame. */
-export const SCHEDULED_JOB_RUN_WINDOW_EVENT = 'michi:scheduled-job-run';
+/** Show one run's thread on the Scheduled page (a Scheduled-only job's runs open there). */
+export function requestScheduledRun(jobId: string, runId: string): void {
+  setScheduledRoute({ kind: 'job', jobId, runId });
+  window.dispatchEvent(new CustomEvent(OPEN_SCHEDULED_JOB_EVENT, { detail: { jobId, runId } }));
+}
 
-/** Fired by the chat store when a job is created, edited or deleted elsewhere. */
-export const SCHEDULED_JOBS_CHANGED_WINDOW_EVENT = 'michi:scheduled-jobs-changed';
+/** The top bar's title for a page inside Scheduled (a run's conversation); null: none. */
+let crumb: string | null = null;
+const crumbListeners = new Set<() => void>();
+
+export function setScheduledCrumb(next: string | null): void {
+  if (crumb === next) return;
+  crumb = next;
+  for (const listener of crumbListeners) listener();
+}
+
+export function useScheduledCrumb(): string | null {
+  return useSyncExternalStore((listener) => {
+    crumbListeners.add(listener);
+    return () => { crumbListeners.delete(listener); };
+  }, () => crumb, () => null);
+}

@@ -1,4 +1,3 @@
-import React from 'react';
 import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 import { cleanup, render, screen, waitFor } from '@testing-library/react';
 import type { MichiPageBlock } from 'michi-shared';

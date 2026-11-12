@@ -3,6 +3,8 @@ import { act, createEvent, fireEvent, render, screen } from '@testing-library/re
 import { MotionConfig } from 'motion/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { DrawerShell } from './DrawerShell';
+import { useBackSwipe } from '../../hooks/useBackNavigation';
+import { backTarget } from '../../lib/backStack';
 
 beforeEach(() => vi.useFakeTimers());
 afterEach(() => { vi.useRealTimers(); vi.unstubAllGlobals(); });
@@ -151,5 +153,109 @@ describe('DrawerShell close control', () => {
     expect(screen.getByRole('dialog', { name: 'Settings' })).toBeTruthy();
     fireEvent.click(back);
     expect(close).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('DrawerShell resize', () => {
+  const handleOf = () => screen.getByTitle('Drag to resize · Double-click to reset');
+  const drag = (from: number, to: number) => {
+    const panel = screen.getByRole('dialog');
+    panel.getBoundingClientRect = () => ({ width: 440 } as DOMRect);
+    const handle = handleOf();
+    handle.setPointerCapture = vi.fn();
+    // jsdom has no PointerEvent; a MouseEvent carries the pointer's x.
+    fireEvent(handle, new MouseEvent('pointerdown', { bubbles: true, cancelable: true, clientX: from }));
+    handle.dispatchEvent(new MouseEvent('pointermove', { clientX: to }));
+    handle.dispatchEvent(new MouseEvent('pointerup', { clientX: to }));
+  };
+
+  it('is fixed without a resize', () => {
+    render(<DrawerShell open onClose={vi.fn()} title="Task" width={440}>Content</DrawerShell>);
+    expect(screen.queryByTitle('Drag to resize · Double-click to reset')).toBeNull();
+  });
+
+  it('drags the left edge wider within the minimum and three quarters of the window, and double-click resets', () => {
+    const resize = { width: 560, set: vi.fn(), reset: vi.fn() };
+    render(<DrawerShell open onClose={vi.fn()} title="Task" width={440} resize={resize} modal={false}>Content</DrawerShell>);
+    expect(screen.getByRole('dialog').style.width).toBe('560px');
+    drag(1000, 900);
+    expect(resize.set).toHaveBeenLastCalledWith(540);
+    drag(1000, -2000);
+    expect(resize.set).toHaveBeenLastCalledWith(Math.round(window.innerWidth * 0.75));
+    drag(1000, 1400);
+    expect(resize.set).toHaveBeenLastCalledWith(320);
+    fireEvent.doubleClick(handleOf());
+    expect(resize.reset).toHaveBeenCalledTimes(1);
+  });
+
+  it('shows its own width until one is dragged', () => {
+    render(<DrawerShell open onClose={vi.fn()} title="Task" width={440} resize={{ width: undefined, set: vi.fn(), reset: vi.fn() }}>Content</DrawerShell>);
+    expect(screen.getByRole('dialog').style.width).toBe('440px');
+  });
+});
+
+describe('DrawerShell on a phone', () => {
+  const wideWidth = window.innerWidth;
+  beforeEach(() => { Object.defineProperty(window, 'innerWidth', { configurable: true, value: 390 }); });
+  afterEach(() => { Object.defineProperty(window, 'innerWidth', { configurable: true, value: wideWidth }); });
+
+  function BackSwipe() {
+    useBackSwipe(true);
+    return null;
+  }
+  const swipeFromEdge = (target: Element, moves: number[]) => {
+    fireEvent.touchStart(target, { touches: [{ identifier: 1, clientX: 6, clientY: 300 }] });
+    for (const x of moves) fireEvent.touchMove(target, { touches: [{ identifier: 1, clientX: x, clientY: 304 }] });
+    fireEvent.touchEnd(target, { touches: [] });
+  };
+
+  it('fills the screen at any dragged width, with no edge to drag', () => {
+    render(<DrawerShell open onClose={vi.fn()} title="Task" width={440} resize={{ width: 600, set: vi.fn(), reset: vi.fn() }}>Content</DrawerShell>);
+    expect(screen.queryByTitle('Drag to resize · Double-click to reset')).toBeNull();
+    expect(screen.getByRole('dialog').style.width).toBe('440px');
+  });
+
+  it('marks its panel data-phone, which steps its text up (mobile.css), and drops it in a wide window', () => {
+    render(<DrawerShell open onClose={vi.fn()} title="Settings">Content</DrawerShell>);
+    const panel = screen.getByRole('dialog');
+    expect(panel.hasAttribute('data-phone')).toBe(true);
+    Object.defineProperty(window, 'innerWidth', { configurable: true, value: 1280 });
+    act(() => { window.dispatchEvent(new Event('resize')); });
+    expect(panel.hasAttribute('data-phone')).toBe(false);
+  });
+
+  it('reads as a page: a back chevron leads the header instead of the trailing ×', () => {
+    render(<DrawerShell open onClose={vi.fn()} title="Background work">Content</DrawerShell>);
+    expect(screen.getByRole('button', { name: 'Back' })).toBeTruthy();
+    expect(screen.queryByRole('button', { name: 'Close' })).toBeNull();
+  });
+
+  it('follows a back swipe from the left edge, then closes, or settles back when released short', () => {
+    const close = vi.fn();
+    render(<><BackSwipe /><DrawerShell open onClose={close} title="Background work"><span>Content</span></DrawerShell></>);
+    const panel = screen.getByRole('dialog');
+    swipeFromEdge(screen.getByText('Content'), [40]);
+    expect(close).not.toHaveBeenCalled();
+    expect(panel.style.transform).toBe('');
+    fireEvent.touchStart(panel, { touches: [{ identifier: 1, clientX: 6, clientY: 300 }] });
+    fireEvent.touchMove(panel, { touches: [{ identifier: 1, clientX: 120, clientY: 300 }] });
+    expect(panel.style.transform).toBe('translateX(114px)');
+    fireEvent.touchMove(panel, { touches: [{ identifier: 1, clientX: 220, clientY: 300 }] });
+    fireEvent.touchEnd(panel, { touches: [] });
+    expect(close).toHaveBeenCalledTimes(1);
+    // Its own exit transition carries it on from where the finger left it.
+    expect(panel.style.transform).toBe('');
+  });
+
+  it('steps back a level inside it instead of closing, with the edge arrow', () => {
+    const close = vi.fn();
+    const back = vi.fn();
+    render(<><BackSwipe /><DrawerShell open onClose={close} onBack={back} title="Settings"><span>Content</span></DrawerShell></>);
+    swipeFromEdge(screen.getByText('Content'), [40, 90]);
+    expect(back).toHaveBeenCalledTimes(1);
+    expect(close).not.toHaveBeenCalled();
+    expect(screen.getByRole('dialog').style.transform).toBe('');
+    act(() => backTarget()?.back());
+    expect(back).toHaveBeenCalledTimes(2);
   });
 });

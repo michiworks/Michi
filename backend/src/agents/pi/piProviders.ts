@@ -1,6 +1,6 @@
 import { loadPiAi } from "./piAi";
 import { DEFAULT_MODELS } from "../agentConfig";
-import { fetchOpenRouterModels, type OpenRouterModelInfo } from "./openrouterModels";
+import { cachedOpenRouterModels, fetchOpenRouterModels, type OpenRouterModelInfo } from "./openrouterModels";
 import {
     cachedDiscoveredModels,
     discoverProviderModels,
@@ -341,33 +341,21 @@ export async function listPiModels(provider: string): Promise<PiModelInfo[]> {
         const upstreamProvider = getUpstreamProviderId(provider);
         const piMod = await loadPiAi();
         const model = (piMod as any).getModel(upstreamProvider, info.defaultModel);
-        return [{
-            model_id: String(model.id),
-            model_name: String(model.name || model.id),
-            description: typeof model.description === "string" ? model.description : undefined,
-            context_window_tokens:
-                typeof model.contextWindow === "number" ? model.contextWindow : undefined,
-            ...piModelReasoning(piMod, model, info.supportsReasoning),
-        }];
+        return [toPiModelInfo(piMod, model, info.supportsReasoning)];
     }
 
     // Cerebras: override stale pi-ai static catalog (removes decommissioned gemma-4-31b, adds qwen-3.8-27b)
     if (provider === "cerebras") {
         const piMod = await loadPiAi();
-        return Object.values(CEREBRAS_MODELS).map((m) => ({
-            model_id: String(m.id),
-            model_name: String(m.name || m.id),
-            description: typeof m.description === "string" ? m.description : undefined,
-            context_window_tokens:
-                typeof m.contextWindow === "number" ? m.contextWindow : undefined,
-            ...piModelReasoning(piMod, m, info.supportsReasoning),
-        }));
+        return Object.values(CEREBRAS_MODELS).map((m) => toPiModelInfo(piMod, m, info.supportsReasoning));
     }
 
     // OpenRouter: prefer dynamic fetch from live API, fall back to static list
     if (provider === "openrouter") {
-        const apiKey = getEnvProviderApiKey(provider);
-        const dynamic = await fetchOpenRouterModels(apiKey);
+        const dynamic = await withinDiscoveryBudget(
+            fetchOpenRouterModels(getEnvProviderApiKey(provider)),
+            cachedOpenRouterModels,
+        );
         if (dynamic && dynamic.length > 0) {
             const piMod = await loadPiAi();
             return dynamic.map((model) => ({ ...model, ...piModelReasoning(piMod, dynamicOpenRouterModel(model.model_id, model), info.supportsReasoning) }));
@@ -704,11 +692,15 @@ export async function resolvePiModel(provider: string, modelId: string): Promise
         ? { ...builtin, thinkingLevelMap: argonThinkingLevelMap(false) } : builtin;
 
     if (upstreamProvider === "openrouter") {
-        const catalog = await fetchOpenRouterModels(getEnvProviderApiKey(provider));
-        const dynamic = catalog?.find((model) => model.model_id === modelId);
-        // Even when the public catalog is temporarily unavailable, return a
-        // valid OpenRouter descriptor. OpenRouter remains the source of truth
-        // and will return a clear upstream error if the model id is invalid.
+        const listed = (catalog: OpenRouterModelInfo[] | null) => catalog?.find((model) => model.model_id === modelId);
+        // A turn waits on a cold or stale catalog only within the discovery
+        // budget. Without live data it still gets a valid OpenRouter
+        // descriptor: OpenRouter remains the source of truth and returns a
+        // clear upstream error if the model id is invalid.
+        const dynamic = listed(cachedOpenRouterModels()) ?? listed(await withinDiscoveryBudget(
+            fetchOpenRouterModels(getEnvProviderApiKey(provider)),
+            cachedOpenRouterModels,
+        ));
         return dynamicOpenRouterModel(modelId, dynamic);
     }
 
@@ -775,7 +767,8 @@ function formatVerifyError(error: unknown): string {
     }
 }
 
-import { resolveBedrockCredentials } from "../../services/bedrockCredentials";
+import { BEDROCK_NOT_CONFIGURED, prepareBedrockAuth, type BedrockAuth } from "../../services/bedrockCredentialManager";
+import { streamSimpleWithFallback } from "./piStreamFallback";
 
 /**
  * Verify a provider's API key by issuing a minimal streamSimple call
@@ -804,25 +797,20 @@ export async function verifyPiProviderKey(
     // Bedrock: authenticate via AWS credential chain, not a single API key.
     const isAwsCred = providerUsesAwsCredentials(provider);
     const apiKey = isAwsCred ? null : (opts.apiKey ?? opts.key);
-    let bedrockOpts: Record<string, unknown> = {};
+    let bedrock: BedrockAuth | null = null;
 
     if (isAwsCred) {
-        const creds = resolveBedrockCredentials();
-        if (!creds) {
+        // Verify the credentials a chat turn would use: refreshed first, and
+        // refreshed again once after an auth error.
+        bedrock = await prepareBedrockAuth();
+        if (!bedrock) {
             return {
                 ok: false,
                 provider,
                 model: "",
                 latencyMs: 0,
-                error: "Amazon Bedrock credentials not configured — add them in Settings or set AWS_PROFILE + AWS_REGION env vars.",
+                error: BEDROCK_NOT_CONFIGURED,
             };
-        }
-        bedrockOpts = { region: creds.region };
-        if (creds.bearerToken) bedrockOpts.bearerToken = creds.bearerToken;
-        if (creds.profile) bedrockOpts.profile = creds.profile;
-        if (creds.accessKeyId) {
-            bedrockOpts.accessKeyId = creds.accessKeyId;
-            bedrockOpts.secretAccessKey = creds.secretAccessKey;
         }
     } else if (!apiKey) {
         return {
@@ -852,7 +840,15 @@ export async function verifyPiProviderKey(
     const timeoutMs = opts.timeoutMs ?? (argon ? 60_000 : 15_000);
     const started = Date.now();
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    let timer = setTimeout(() => controller.abort(), timeoutMs);
+    // The refresh command has its own timeout; this one bounds each request.
+    const authRetry = bedrock && {
+        isAuthError: bedrock.authRetry.isAuthError,
+        refresh: async () => {
+            clearTimeout(timer);
+            try { return await bedrock.authRetry.refresh(); } finally { timer = setTimeout(() => controller.abort(), timeoutMs); }
+        },
+    };
 
     try {
         const messages = [
@@ -863,20 +859,21 @@ export async function verifyPiProviderKey(
             },
         ];
 
-        for await (const ev of piMod.streamSimple(
-            model,
-            { messages, tools: [] },
-            {
-                ...(apiKey ? { apiKey } : {}),
-                ...bedrockOpts,
-                reasoning: "low",
-                // Argon always thinks; a 16-token budget ends before it answers.
-                maxTokens: argon ? GEMINI_ARGON_MAX_OUTPUT : 16,
-                maxRetries: 0,
-                timeoutMs,
-                signal: controller.signal,
-            },
-        )) {
+        const context = { messages, tools: [] };
+        const options = {
+            ...(apiKey ? { apiKey } : {}),
+            ...bedrock?.streamOptions,
+            reasoning: "low",
+            // Argon always thinks; a 16-token budget ends before it answers.
+            maxTokens: argon ? GEMINI_ARGON_MAX_OUTPUT : 16,
+            maxRetries: 0,
+            timeoutMs,
+            signal: controller.signal,
+        };
+        const stream = authRetry
+            ? streamSimpleWithFallback(piMod, getUpstreamProviderId(provider), [model], context, options, authRetry)
+            : piMod.streamSimple(model, context, options);
+        for await (const ev of stream) {
             if (ev.type === "done") {
                 return {
                     ok: true,

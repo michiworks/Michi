@@ -1,8 +1,9 @@
 import { useCallback, useRef, type Dispatch, type MutableRefObject, type SetStateAction } from 'react';
 import { toast } from 'sonner';
+import { randomUuid } from 'michi-shared';
 import { extractNodeTree as apiExtractNodeTree } from '../services/api';
 import { buildMessagesByNode, mapTreeRow } from './chatHydration';
-import { descendants, findTreeIdForNode } from './tree';
+import { descendants, findTreeIdForNode, isBranchEdge } from './tree';
 import type { ChatNodeState, Project } from './chatTypes';
 import { backendConnectionIdForWorkspace } from '../config/backendConnections';
 import { backendEntityId } from '../config/backendIdentity';
@@ -49,7 +50,7 @@ export function useExtractNodeTree({
       return;
     }
     affected.forEach(id => commandsInFlightRef.current.add(id));
-    const treeId = pendingIds.current.get(nodeId) ?? backendEntityId(backendConnectionIdForWorkspace(project.id), `t-${crypto.randomUUID()}`);
+    const treeId = pendingIds.current.get(nodeId) ?? backendEntityId(backendConnectionIdForWorkspace(project.id), `t-${randomUuid()}`);
     pendingIds.current.set(nodeId, treeId);
     try {
       await runWorkspaceMutation(project.id, async () => {
@@ -73,7 +74,7 @@ export function useExtractNodeTree({
         const moved = new Set(result.nodeIds);
         setProjects(prev => prev.map(p => p.id === project.id ? {
           ...p, trees: [...p.trees.filter(t => t.id !== tree.id), tree], activeTreeId: tree.id,
-          edges: p.edges.filter(e => !((!e.kind || e.kind === 'branch') && e.target === nodeId)
+          edges: p.edges.filter(e => !(isBranchEdge(e) && e.target === nodeId)
             && !(e.kind === 'link' && moved.has(e.source) !== moved.has(e.target))),
         } : p));
         prunePaneIds(moved);

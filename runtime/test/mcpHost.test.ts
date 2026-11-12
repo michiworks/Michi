@@ -11,7 +11,6 @@ import {
   type McpSlotHandle,
   type SessionToolSink,
 } from '../src/mcp-host';
-import { isLoopbackAddress } from '../src/mcp-host/http';
 
 type Binding = { workspace: string };
 type Event = { type: string; payload?: unknown };
@@ -233,6 +232,20 @@ test('tools/list hides tools whose visible() is false and calls to them report a
   b.rebind({ binding: { workspace: 'w1' } });
   assert.deepEqual(await toolNames(clientB), ['echo', 'w1_only']);
   assert.equal(echoed(await call(clientB, 'w1_only', { text: 'x' })).binding.workspace, 'w1');
+});
+
+test('a tool marked loadUpFront carries the slot\'s up-front _meta in tools/list; other tools and slots without one carry none', async (t) => {
+  const { host } = await startHost(t);
+  host.registerTool(echoTool);
+  host.registerTool({ ...echoTool, name: 'upfront', loadUpFront: true });
+  const keyed = slotOn(host, 'a', 'w1', { upFrontToolMeta: { 'client/loadNow': true } });
+  const plain = slotOn(host, 'b', 'w1');
+  const listed = (await (await connect(t, keyed.endpoint().url)).listTools()).tools;
+  assert.deepEqual(listed.find((tool) => tool.name === 'upfront')?._meta, { 'client/loadNow': true });
+  assert.equal(listed.find((tool) => tool.name === 'echo')?._meta, undefined);
+  const unkeyed = (await (await connect(t, plain.endpoint().url)).listTools()).tools;
+  assert.equal(unkeyed.find((tool) => tool.name === 'upfront')?._meta, undefined);
+  assert.throws(() => slotOn(host, 'c', 'w1', { upFrontToolMeta: [] as never }), /upFrontToolMeta must be an object/);
 });
 
 test('tools/list exposes only allowTools entries, builtins included', async (t) => {
@@ -968,15 +981,6 @@ test('handler() mounted on a host server uses publicBaseUrl and refuses non-loop
   for (const forwarded of proxyHeaders) {
     const res = await rawRequest(slot.endpoint().url, { headers: { ...MCP_HEADERS, ...forwarded }, body: INITIALIZE });
     assert.equal(res.status, 403, JSON.stringify(forwarded));
-  }
-});
-
-test('isLoopbackAddress accepts only 127.0.0.0/8, ::1 and IPv4-mapped 127.x', () => {
-  for (const address of ['127.0.0.1', '127.1.2.3', '::1', '::ffff:127.0.0.1', '::FFFF:127.9.9.9']) {
-    assert.equal(isLoopbackAddress(address), true, address);
-  }
-  for (const address of [undefined, '', '10.0.0.1', '128.0.0.1', '::ffff:10.0.0.1', '::2', '0.0.0.0', '::', 'localhost', '127.0.0.256']) {
-    assert.equal(isLoopbackAddress(address), false, String(address));
   }
 });
 

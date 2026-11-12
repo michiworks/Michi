@@ -12,10 +12,6 @@ export function startupMark(name: string, extra?: Record<string, unknown>): void
   metrics.startupMark(name, extra);
 }
 
-export function startupMarkOnce(name: string, extra?: Record<string, unknown>): void {
-  metrics.startupMarkOnce(name, extra);
-}
-
 export function withStartupTraceQuery(rawUrl: string): string {
   const metricsEnabled = metrics.enabled();
   const frameMetricsEnabled = process.env.MICHI_FRAME_METRICS === '1';

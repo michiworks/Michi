@@ -30,8 +30,6 @@ export interface BranchAnchorRowProps {
   onOpen: () => void;
   /** Grow in on mount: the branch was made just now (read on mount only). */
   enter?: boolean;
-  /** The list's last row: rows keep their separators when wrapped to grow. */
-  last?: boolean;
 }
 
 const branchStatuses = {
@@ -56,8 +54,6 @@ export function BranchStatusLabel({ status, size = 13 }: { status: ChatNodeState
   );
 }
 
-const SEPARATOR: React.CSSProperties = { borderBottom: '1px solid var(--term-line)' };
-
 export const BranchAnchorRow = React.memo(function BranchAnchorRow({
   title,
   messageCount,
@@ -65,7 +61,6 @@ export const BranchAnchorRow = React.memo(function BranchAnchorRow({
   status,
   onOpen,
   enter = false,
-  last = true,
 }: BranchAnchorRowProps): React.JSX.Element {
   const msgLabel = messageCount === 1 ? '1 message' : `${messageCount} messages`;
   const timeLabel = relativeTime(createdAt);
@@ -80,8 +75,6 @@ export const BranchAnchorRow = React.memo(function BranchAnchorRow({
       aria-label={`Open branch: ${title}`}
       aria-describedby={metaId}
       onClick={onOpen}
-      // Wrapped, the row is its wrapper's last child, which drops the separator.
-      style={grows && !last ? SEPARATOR : undefined}
     >
       <span className="t-branch-anchor-glyph" aria-hidden><BranchIcon size={18} /></span>
       <span className="t-branch-anchor-name">{title}</span>

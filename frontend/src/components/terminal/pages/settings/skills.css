@@ -1,0 +1,121 @@
+/* Settings › Skills (SkillsPane.tsx): the layout the history list, rows and
+   detail (history.css) and the Settings cards (Settings.css) leave open. */
+
+.skills-section { margin-top: 18px; }
+.skills-section .settings-section__head { flex-wrap: wrap; align-items: center; row-gap: 6px; }
+.skills-section .settings-history__group { margin-top: 14px; }
+.skills-path { min-width: 0; overflow: hidden; font-family: var(--message-code-font); text-overflow: ellipsis; }
+.skills-note { margin: 0 4px 4px; }
+.skills-problem { color: var(--term-danger-text); }
+.skills-workspace { display: inline-flex; align-items: center; gap: 8px; min-width: 0; color: var(--term-muted); font-size: var(--fs-md); }
+.skills-workspace .ui-select { width: auto; max-width: 240px; background-color: var(--settings-card); }
+.settings-history__toolbar .skills-source { min-width: 150px; }
+
+.skills-more button {
+  display: block;
+  width: 100%;
+  padding: 11px var(--settings-inset) 11px 52px;
+  border: 0;
+  border-top: 1px solid var(--term-line);
+  background: transparent;
+  color: var(--term-accent);
+  font: inherit;
+  font-size: var(--fs-lg);
+  text-align: left;
+  cursor: pointer;
+}
+.skills-more button:hover { text-decoration: underline; text-underline-offset: 3px; }
+.skills-more button:focus-visible { outline: var(--focus-ring); outline-offset: -2px; }
+.skills-error {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 12px var(--settings-inset);
+  color: var(--term-danger-text);
+  font-size: var(--fs-lg);
+}
+.skills-error + .settings-history__row { border-top: 1px solid var(--term-line); }
+.skills-error > span { flex: 1; }
+.skills-error .ui-btn { color: var(--term-fg); }
+.skills-status { display: flex; align-items: center; gap: 10px; padding: 12px var(--settings-inset); color: var(--term-muted); font-size: var(--fs-lg); }
+.skills-status > span { flex: 1; }
+.skills-status + .settings-history__row { border-top: 1px solid var(--term-line); }
+
+/* Icon buttons (TrashIconButton: ↻, Copy path, Dismiss). Their own styles are
+   in Trash.css, which only Scheduled loads; these stand without it. */
+.skills-settings .trash-icon-button {
+  display: inline-flex;
+  flex-shrink: 0;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  padding: 0;
+  border: 0;
+  border-radius: var(--ui-radius);
+  background: transparent;
+  color: var(--term-muted);
+  cursor: pointer;
+}
+.skills-settings .trash-icon-button:disabled { opacity: .4; cursor: wait; }
+.skills-settings .trash-icon-button:focus-visible { outline: var(--focus-ring); outline-offset: 2px; }
+@media (hover: hover) and (pointer: fine) {
+  .skills-settings .trash-icon-button:hover { background: var(--term-alt); color: var(--term-fg); }
+}
+.skills-location .trash-icon-button { width: 22px; height: 22px; }
+@media (pointer: coarse) { .skills-settings .trash-icon-button { width: 44px; height: 44px; } }
+
+/* A skill's detail. */
+.skills-hint { color: var(--term-muted); font-family: var(--message-code-font); font-size: var(--fs-md); }
+.skills-location { display: inline-flex; align-items: center; gap: 4px; min-width: 0; max-width: 100%; }
+.skills-location code { min-width: 0; overflow-wrap: anywhere; }
+.skills-sub { display: block; margin-top: 2px; color: var(--term-muted); font-size: var(--fs-md); }
+.skills-files { display: flex; flex-wrap: wrap; gap: 4px 10px; }
+.skills-instructions .settings-section__head { align-items: center; }
+.skills-rendered { max-width: 72ch; padding: 10px 0 4px; }
+.skills-raw {
+  margin: 0;
+  padding: 12px 0;
+  color: var(--term-mid);
+  font-family: var(--message-code-font);
+  font-size: var(--fs-md);
+  line-height: 1.6;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.skills-file-error { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 12px 0; color: var(--term-danger-text); font-size: var(--fs-lg); }
+.skills-settings .settings-history__error ul { margin: 0; padding-left: 18px; }
+
+/* New skill and Edit. */
+.skills-field { padding: 12px 0; }
+.skills-field + .skills-field { border-top: 1px solid var(--term-line); }
+.skills-field .ui-input { width: 100%; margin-top: 8px; font-size: var(--fs-lg); }
+.skills-field textarea { resize: vertical; line-height: 1.55; }
+.skills-field .skills-mono { font-family: var(--message-code-font); font-size: var(--fs-md); }
+.skills-field__error { margin: 6px 0 0; color: var(--term-danger-text); font-size: var(--fs-md); }
+
+.skills-dialog { display: flex; flex-direction: column; gap: 10px; padding: 16px; }
+.skills-dialog p { margin: 0; color: var(--term-mid); font-size: var(--fs-lg); line-height: 1.5; }
+.skills-dialog .ui-input { font-size: var(--fs-lg); }
+.skills-dialog .skills-field__error { margin: 0; }
+.skills-dialog footer { display: flex; justify-content: flex-end; gap: 8px; margin-top: 6px; }
+
+/* Phone: the drawer's sizes. A touch screen's fields read 16px or more (index.css), so focusing one does not zoom the page. */
+.terminal-settings--drawer[data-stacked] .skills-workspace { width: 100%; font-size: var(--fs-sm); }
+.terminal-settings--drawer[data-stacked] .skills-workspace .ui-select { flex: 1; max-width: none; min-height: 40px; }
+.terminal-settings--drawer[data-stacked] .settings-history__toolbar .skills-source { flex: 1; max-width: none; min-height: 40px; }
+.terminal-settings--drawer[data-stacked] .skills-more button { min-height: 48px; padding-left: 56px; }
+.terminal-settings--drawer[data-stacked] :is(.skills-error, .skills-status) { flex-wrap: wrap; }
+.terminal-settings--drawer[data-stacked] .skills-settings .settings-history__toolbar .trash-icon-button { width: 40px; height: 40px; }
+.terminal-settings--drawer[data-stacked] .skills-location .trash-icon-button { width: 36px; height: 36px; }
+/* Finger-sized targets: small buttons 36px, the empty library's New skill 44px. */
+.terminal-settings--drawer[data-stacked] .skills-settings .ui-btn--sm { min-height: 36px; font-size: var(--fs-md); }
+.terminal-settings--drawer[data-stacked] .skills-settings .settings-history__empty .ui-btn:not(.ui-btn--sm) { min-height: 44px; font-size: var(--fs-md); }
+.terminal-settings--drawer[data-stacked] .skills-settings .settings-history__details .settings-row { grid-template-columns: minmax(0, 1fr); gap: 2px; }
+.terminal-settings--drawer[data-stacked] .skills-settings .settings-history__details dd { text-align: left; }
+.terminal-settings--drawer[data-stacked] .skills-field .ui-input { min-height: 44px; }
+/* The rename dialog sits outside the drawer. */
+@media (pointer: coarse) {
+  .skills-dialog .ui-input { min-height: 44px; }
+  .skills-dialog footer .ui-btn { min-height: 44px; }
+}

@@ -15,7 +15,6 @@ export * from './api/permissions';
 export * from './api/persistence';
 export * from './api/prefs';
 export * from './api/search';
-export * from './api/version';
 export * from './api/agentRuntime';
 export * from './api/artifacts';
 export * from './api/backendConnections';

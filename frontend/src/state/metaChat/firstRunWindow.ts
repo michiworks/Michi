@@ -1,13 +1,15 @@
+import type { NarrationOption } from 'michi-shared';
 import { buildMessagesByNode } from '../chatHydration';
-import type { ChatAction, ChatMessage, ChatNodeState } from '../chatTypes';
-import { firstRunActive, firstRunClosed } from '../metaAgent/spacesFirstRun';
+import type { ChatMessage } from '../chatTypes';
+import { firstRunActive } from '../metaAgent/spacesFirstRun';
 import { fetchTreeMessages } from '../../services/api/persistence';
 import type { SpacesFirstRunStatus } from '../../services/api/spacesHome';
 
 /**
- * The window's side of the Meta agent's first run: it opens the window once
- * per opening of Spaces, and re-reads the window conversation as the run
- * moves, since the run's messages are posted by the backend, not streamed.
+ * The panel's side of Pages upkeep's first run: it opens the panel once per
+ * opening of Spaces. The run's narration reaches V as Michi's own turns
+ * (chatHub.postSelfMessage); the Chat tab reads a question's options from the
+ * stored row (fetchWindowConversation).
  */
 
 const OPENED_KEY = 'michi:metaChat:firstRunOpened:v1';
@@ -37,19 +39,6 @@ export function noteFirstRunOpenedWindow(connectionId: string, requestedAt: numb
   } catch {
     // Quota or privacy mode: at worst the window opens once more.
   }
-}
-
-/** Changes whenever the first run posts something, so the window knows to re-read its conversation. Later summaries post nothing. */
-export function firstRunProgressKey(status: SpacesFirstRunStatus | null | undefined): string {
-  if (!status || status.requestedAt === null) return '';
-  const summary = firstRunClosed(status) ? 'closed' : status.summary.state;
-  return [status.requestedAt, summary, ...status.workspaces.map((home) => `${home.workspaceId}:${home.firstRun?.state ?? ''}`)].join('|');
-}
-
-/** One choice of a Meta agent question: answered by sending it, or (with `open`) by going to a conversation. */
-export interface NarrationOption {
-  label: string;
-  open?: { nodeId: string; workspaceId: string; draft: string };
 }
 
 export interface WindowConversation {
@@ -86,26 +75,4 @@ export async function fetchWindowConversation(ref: { workspaceId: string; treeId
   const lastRow = last ? own.find((row) => row.id === last.id) : undefined;
   const narration = lastRow ? narrationOf(lastRow) : null;
   return { messages, options: narration?.kind === 'end' ? parseOptions(narration.options) : [] };
-}
-
-const sameList = (a: readonly string[], b: readonly string[]) => a.length === b.length && a.every((value, i) => value === b[i]);
-
-/**
- * What brings the store's copy of the window conversation up to the backend's:
- * nothing while a turn runs or while the store holds a message the backend
- * does not have yet; otherwise the backend's messages, and the question's
- * options as follow-up rows.
- */
-export function windowConversationActions(local: ChatNodeState | undefined, fetched: WindowConversation): ChatAction[] {
-  if (!local || local.status === 'streaming' || local.messagesLoaded === false) return [];
-  const server = new Set(fetched.messages.map((message) => message.id));
-  if (local.messages.some((message) => !server.has(message.id))) return [];
-  const actions: ChatAction[] = [];
-  const known = new Set(local.messages.map((message) => message.id));
-  if (fetched.messages.some((message) => !known.has(message.id))) {
-    actions.push({ type: 'messages-loaded', nodeIds: [local.nodeId], messagesByNode: { [local.nodeId]: fetched.messages } });
-  }
-  const labels = fetched.options.map((option) => option.label);
-  if (labels.length && !sameList(labels, local.followUps ?? [])) actions.push({ type: 'set-follow-ups', nodeId: local.nodeId, followUps: labels });
-  return actions;
 }

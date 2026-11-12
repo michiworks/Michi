@@ -21,6 +21,8 @@ export interface AssistantComposerState {
   page: AssistantPageView | null;
   /** The page the last send already told the assistant about. */
   sentPageKey: string | null;
+  /** The page whose "On screen" chip the user removed: sends leave it out until another page is on screen. */
+  dismissedPageKey?: string | null;
   /**
    * Prompts a caller asked to send (`openMichiAssistant({ send: true })`).
    * The node's TPane sends them through its own send path (runtime binding,
@@ -101,21 +103,55 @@ export function removeAssistantAttachment(nodeId: string, item: Pick<MichiContex
   });
 }
 
+/** The page line the next send carries: with attachments, or a page the assistant hasn't heard about; never one the user removed. */
+function pageToSend(state: AssistantComposerState): AssistantPageView | null {
+  const pageKey = assistantPageKey(state.page);
+  if (!pageKey || (state.dismissedPageKey ?? null) === pageKey) return null;
+  return state.attachments.length > 0 || pageKey !== state.sentPageKey ? state.page : null;
+}
+
 /**
  * The quote the next send carries, or null. The page line goes along with
  * attachments, or when the user moved to a page the assistant hasn't heard
- * about — not on every follow-up.
+ * about — not on every follow-up, and not once its chip was removed.
  */
 export function pendingAssistantContext(nodeId: string): string | null {
   const state = states[nodeId];
   if (!state) return null;
-  const pageKey = assistantPageKey(state.page);
-  const page = state.attachments.length > 0 || (pageKey && pageKey !== state.sentPageKey) ? state.page : null;
-  return formatAssistantContext(page, state.attachments);
+  return formatAssistantContext(pageToSend(state), state.attachments);
+}
+
+/** What the "On screen: <caption>" chip above the composer names (DESIGN-v2 §1.3): the page the next send tells about. */
+export function pendingAssistantPage(state: AssistantComposerState): AssistantPageView | null {
+  return pageToSend(state);
+}
+
+/** The user removed the "On screen" chip: sends leave this page out until another one is on screen. */
+export function dismissAssistantPage(nodeId: string): void {
+  update(nodeId, (state) => {
+    const key = assistantPageKey(state.page);
+    return key && state.dismissedPageKey !== key ? { ...state, dismissedPageKey: key } : state;
+  });
 }
 
 /** The pending context went out with a send: chips clear, the page counts as told. */
+/**
+ * The chips the last send to each node carried, for the context that send
+ * reads a moment later (metaAgentContext.refs, DESIGN-v2 §1.3): the send
+ * clears the chips before its request goes out.
+ */
+const sentAttachments = new Map<string, MichiContextItem[]>();
+
+/** The chips of the send that is going out to `nodeId`, once. */
+export function takeSentAssistantAttachments(nodeId: string): MichiContextItem[] {
+  const sent = sentAttachments.get(nodeId) ?? [];
+  sentAttachments.delete(nodeId);
+  return sent;
+}
+
 export function noteAssistantContextSent(nodeId: string): void {
+  const attachments = states[nodeId]?.attachments ?? [];
+  if (attachments.length > 0) sentAttachments.set(nodeId, attachments);
   update(nodeId, (state) => {
     const sentPageKey = assistantPageKey(state.page) ?? state.sentPageKey;
     if (state.attachments.length === 0 && sentPageKey === state.sentPageKey) return state;
@@ -176,8 +212,12 @@ export function isUntouchedInjectedDraft(
     && !draft.quotedText;
 }
 
-/** Test seam. */
+/**
+ * Test seam.
+ * @testonly
+ */
 export function resetAssistantComposerForTests(): void {
   states = {};
+  sentAttachments.clear();
   emit();
 }

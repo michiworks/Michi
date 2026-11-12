@@ -1,5 +1,7 @@
-import type { MaintenanceConfig, ScheduledJobDto } from 'michi-shared';
+import { isSystemWorkspaceSettings, type MaintenanceConfig, type ScheduledJobDto } from 'michi-shared';
+import { getWorkspace } from '../dbRepository';
 import type { ScheduledJobScheduler } from '../scheduledJobs/scheduler';
+import { JobValidationError } from '../scheduledJobs/validation';
 import type { ScheduledJobSchedule } from 'michi-shared';
 import { PageWriteError } from './core';
 import {
@@ -22,7 +24,7 @@ type RuntimeProfileInput = Partial<Record<'runtimeId' | 'providerId' | 'modelId'
 function refuseRuntimeProfile(input: RuntimeProfileInput): void {
   for (const key of ['runtimeId', 'providerId', 'modelId', 'reasoning'] as const) {
     if (input[key] !== undefined && input[key] !== null) {
-      throw new PageWriteError(400, 'invalid', 'Space maintenance runs on the Meta agent settings; change the runtime there');
+      throw new PageWriteError(400, 'invalid', 'Space maintenance runs on the Pages upkeep settings; change the runtime there');
     }
   }
 }
@@ -44,6 +46,8 @@ export class PageMaintenanceConfigService {
     const now = this.clock();
     if (!current) {
       if (input.expectedRevision !== undefined) throw new Error('Maintenance config does not exist');
+      // A system workspace (the assistant's holds Spaces Home) never runs Space maintenance (maintenanceHasWork), so it gets none.
+      if (isSystemWorkspaceSettings(getWorkspace(input.workspaceId)?.settings)) throw new JobValidationError('Workspace not found');
       const job = this.scheduler.createMaintenanceExecution({
         workspaceId: input.workspaceId, name: 'Space maintenance', prompt: MANAGED_PROMPT,
         schedule: { kind: 'every', everySeconds: 60 } satisfies ScheduledJobSchedule,

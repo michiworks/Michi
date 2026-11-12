@@ -15,18 +15,20 @@
 
 import {
   encodePaneId,
+  isArchiveGroupId,
   PANE_INSPECTION_LIMITS,
   PaneInspectionError,
   type ListPanesRequestV1,
   type PaneKind,
   type PaneSummaryV1,
   type PaneTarget,
+  type SurfacePaneKind,
 } from 'michi-shared';
 import { assertPaneInspectionCaller, inspect, type PaneInspectionCaller } from './paneInspection';
 import { getWorkspace, listNodes, type NodeRow } from './dbRepository';
 import { AgentRunsRepository } from './agentRunsRepository';
 import { panePresenceRegistry as sharedPanePresenceRegistry } from './panePresence';
-import { surfaceToDescriptor, SURFACE_PANE_KINDS, type SurfacePaneKind } from './paneInspectionProjection.surface';
+import { surfaceToDescriptor, SURFACE_PANE_KINDS } from './paneInspectionProjection.surface';
 import type { PanePresenceRegistry } from './panePresence';
 
 const runsRepository = new AgentRunsRepository();
@@ -68,8 +70,8 @@ export interface ListPanesResult {
 
 /**
  * `scope=open`'s row source: every distinct PaneTarget with at least one live presence view in
- * this caller's workspace, from ANY of node/agent_run/surface. `getPresenceForTargets`/
- * `getPresence` only ANSWER "does this target have presence" for a target already named — for
+ * this caller's workspace, from ANY of node/agent_run/surface. `getPresence` only ANSWERS
+ * "does this target have presence" for a target already named — for
  * `scope=open` we instead need "which targets currently HAVE presence at all" without knowing
  * their ids up front, which the registry's public read API (by design; see panePresence.ts) does
  * not expose since it is not meant to leak cross-workspace/cross-caller registration lists.
@@ -149,7 +151,6 @@ export function list(caller: PaneInspectionCaller, request: ListPanesRequestV1):
 
   let anyPresenceReported = false;
   const summaries: PaneSummaryV1[] = [];
-  let lastAcceptedKey: string | null = null;
   let idx = 0;
   for (; idx < afterCursor.length && summaries.length < limit; idx++) {
     const row = afterCursor[idx];
@@ -157,7 +158,6 @@ export function list(caller: PaneInspectionCaller, request: ListPanesRequestV1):
     if (!summary) continue; // narrowed out by a real filter, archive visibility, or a delete/expiry race.
     if (summary.openedInViews > 0) anyPresenceReported = true;
     summaries.push(summary);
-    lastAcceptedKey = row.key;
   }
   // nextCursor walks the REMAINING candidate rows (not yet examined), keyed by the last row this
   // page actually consumed (accepted or rejected) — using the last ACCEPTED row's key would skip
@@ -279,9 +279,7 @@ function collectAllScopeTargets(caller: PaneInspectionCaller): SortableRow[] {
  *  alone. A node in the trash lane must never appear under any scope, matching "deleted objects
  *  never appear" — this is distinct from `includeArchived`, which only gates the archive lane. */
 function isTrashed(node: NodeRow): boolean {
-  if (!node.deleted_at) return false;
-  const groupId = node.deletion_group_id ?? '';
-  return !groupId.startsWith('arch-');
+  return !!node.deleted_at && !isArchiveGroupId(node.deletion_group_id);
 }
 
 // ---------------------------------------------------------------------------

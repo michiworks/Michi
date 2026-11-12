@@ -1,6 +1,6 @@
 # Response time, context and usage
 
-Applies to: ordinary chats; provider metrics vary by runtime/model. Source checked: 2026-10-16. No latency target, price or billing equivalence is implied.
+Applies to: ordinary chats; provider metrics vary by runtime/model. Source checked: 2026-11-08. No latency target, price or billing equivalence is implied.
 
 ## Why is a response taking so long?
 
@@ -42,7 +42,7 @@ Custom templates must preserve Michi's tool configuration and output conventions
 
 Reference relevant Artifacts and ask for original passages when details matter. An Artifact manifest or chat summary is not a full read. Use a fresh branch when exploring a separate direction, but remember that inherited context can still be large.
 
-Manual compaction is connected for appropriate Kiro CLI/Codex sessions and for Claude chats, where `/compact` runs between turns and reports the context size before and after. Crew manages automatic compaction and has no Michi manual compact command. Pi does not expose that command through the current integration. Compaction is a summary mechanism, not a backup or guaranteed exact retention of every detail.
+Manual compaction (`/compact`) is connected for Kiro CLI sessions whose engine supports it, for Codex, and for Claude chats, where `/compact` runs between turns and reports the context size before and after. It also works for Pi chats on the default SDK engine, between turns (it is unavailable under the `MICHI_PI_SESSION_SDK=0` rollback). For Crew, `/compact` on an idle chat runs Crew's own compaction on that chat's Gateway slot and takes no instructions; Crew also compacts automatically. On Antigravity, `/compact` reports that it is not supported; agy compacts on its own. Compaction is a summary mechanism, not a backup or guaranteed exact retention of every detail.
 
 Before a long handoff, save the current goal, verified state, files, decisions and unresolved questions as an Artifact. Keep sources so the next agent can refresh facts.
 

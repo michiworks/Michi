@@ -1,12 +1,30 @@
 /** Browser-safe native page block contracts and validators. */
+import { isCalendarDay } from '../calendarDay';
+import { isRecord } from '../guards';
 import { parseRichBlock, richChartSchema, type RichBlockContent, type RichChart } from './richBlocks';
-import { validatePageComponentProps } from './components';
+import { parsePageComponentHostConfig } from './components';
 import { parsePageSegmentSources, type PageSegmentSources } from './markdownSegments';
+import { HOME_SECTION_KEYS, type HomeSectionKey } from './home';
+import { PAGE_CONTAINER_LIMITS as CONTAINER, TOP_LEVEL_ONLY_BLOCK_TYPES, type TopLevelOnlyBlockType } from './containers';
 import { isPageViewId, parsePageViewAction, parsePageViewInteraction, type PageViewAction, type PageViewBlock, type PageViewLinkBlock, type PageViewInteraction } from './viewInteractions';
 export interface BlockSource {
   nodeId: string;
   turnId: string;
   assistantId: string;
+  /**
+   * DESIGN-v2 §2.6.2, §2.7: the source is a check-in. Set only in DTOs, by
+   * W1-C's read-time resolution (services/pages/checkinSources.ts) when it
+   * rewrites a check-in source to the conversation and its post (`nodeId`
+   * then names the conversation, so the id no longer tells). Never stored:
+   * the stored source keeps the check-in node, and the storage parsers
+   * (parseBlockSource, parseChangeSource) refuse this field, so resolve
+   * after parsing. W2-F1b keys "Load images" on isCheckinBlockSource
+   * (companion.ts), which reads both.
+   * A presented check-in source whose run posted nothing points to V with
+   * `turnId`/`assistantId` null (w2-fix D12); a change source with nowhere
+   * to open has `nodeId: ''`. The fields stay typed as strings.
+   */
+  checkin?: true;
 }
 
 export interface BlockEdit {
@@ -96,12 +114,12 @@ interface ThreadsBlock { type: 'threads'; title?: string; nodeIds: string[] }
  * is the view it opens on (its Board when unset). It names no database, so it
  * is no resource reference and may sit inside a container.
  */
-interface HomeSectionBlock { type: 'home-section'; section: 'waiting' | 'stalled' | 'done' }
+interface HomeSectionBlock { type: 'home-section'; section: HomeSectionKey }
 interface TaskViewBlock { type: 'task-view'; viewId?: string; title?: string }
 
 /** Containers are content groups, saved and versioned as one top-level block.
  * Resource references stay top-level so their identity, ownership and history remain explicit. */
-export type NestedPageBlock = Exclude<PageBlockContent, DatabaseRefBlock | PageLinkBlock | ComponentBlock | ThreadsBlock | ConflictBlock | HomeSectionBlock | PageViewBlock>;
+export type NestedPageBlock = Exclude<PageBlockContent, { type: TopLevelOnlyBlockType }>;
 /** A region keeps its identity when the person changes its width or reading order. */
 export interface PageGridRegion { id: string; span: number; tabletSpan?: number; title?: string; blocks: NestedPageBlock[] }
 export type ContainerBlock = { type: 'toggle'; title: string; blocks: NestedPageBlock[] }
@@ -121,10 +139,6 @@ const MAX_TEXT: number = PAGE_BLOCK_LIMITS.text;
 const MAX_TITLE: number = PAGE_BLOCK_LIMITS.title;
 const MAX_ID = 200;
 const MAX_SOURCES = 100;
-
-export function isRecord(value: unknown): value is Record<string, unknown> {
-  return value !== null && typeof value === 'object' && !Array.isArray(value);
-}
 
 function exactKeys(value: Record<string, unknown>, allowed: readonly string[]): boolean {
   return Object.keys(value).every((key) => allowed.includes(key));
@@ -147,9 +161,7 @@ const MAX_EPOCH_MS = 8_640_000_000_000_000;
 export function isTimelineAt(value: unknown): value is number | string {
   if (typeof value === 'number') return Number.isSafeInteger(value) && value >= 0 && value <= MAX_EPOCH_MS;
   if (typeof value !== 'string' || value.length > PAGE_BLOCK_LIMITS.at || !ISO_AT.test(value)) return false;
-  const [year, month, day] = value.slice(0, 10).split('-').map(Number);
-  const date = new Date(Date.UTC(year, month - 1, day));
-  return date.getUTCMonth() === month - 1 && date.getUTCDate() === day && Number.isFinite(Date.parse(value));
+  return isCalendarDay(value.slice(0, 10)) && Number.isFinite(Date.parse(value));
 }
 
 function optional(value: unknown, valid: (entry: unknown) => boolean): boolean {
@@ -217,15 +229,8 @@ function validAmount(value: unknown): value is number {
   return typeof value === 'number' && Number.isFinite(value) && value >= 0 && value <= PAGE_BLOCK_LIMITS.amount;
 }
 
-const ISO_DAY = /^\d{4}-(0[1-9]|1[0-2])-(0[1-9]|[12]\d|3[01])$/;
-
 /** A real day as YYYY-MM-DD. */
-export function isPageDay(value: unknown): value is string {
-  if (typeof value !== 'string' || !ISO_DAY.test(value)) return false;
-  const [year, month, day] = value.split('-').map(Number);
-  const date = new Date(Date.UTC(year, month - 1, day));
-  return date.getUTCMonth() === month - 1 && date.getUTCDate() === day;
-}
+export const isPageDay = isCalendarDay;
 
 /** An http or https address with a host. Only https pictures load; the rest show as their link. */
 export function isPageImageUrl(value: unknown): value is string {
@@ -311,7 +316,7 @@ export function parsePageBlockInput(value: unknown): PageBlockInput | null {
 }
 
 function parseContent(value: unknown, depth: number, budget: { left: number }): PageBlockInput | null {
-  if (depth > 2 || budget.left-- <= 0) return null;
+  if (depth > CONTAINER.depth || budget.left-- <= 0) return null;
   if (!isRecord(value) || typeof value.type !== 'string') return null;
   const { interaction, visibility, ...content } = value;
   if (visibility !== undefined && (visibility !== 'detail' || depth !== 0 || value.type === 'view')) return null;
@@ -379,13 +384,9 @@ function parseBaseContent(value: Record<string, unknown>, depth: number, budget:
     case 'page-link':
       return exactKeys(value, ['type', 'pageId']) && validId(value.pageId) ? { type: 'page-link', pageId: value.pageId } : null;
     case 'component': {
-      if (!exactKeys(value, ['type', 'componentId', 'pinnedVersion', 'props', 'height']) || !validId(value.componentId) ||
-        (value.pinnedVersion !== undefined && (!Number.isSafeInteger(value.pinnedVersion) || (value.pinnedVersion as number) < 1)) ||
-        (value.height !== undefined && (!Number.isSafeInteger(value.height) || (value.height as number) < 80 || (value.height as number) > 1600))) return null;
-      const props = validatePageComponentProps(null, value.props);
-      return props === null ? null : { type: 'component', componentId: value.componentId,
-        ...(value.pinnedVersion === undefined ? {} : { pinnedVersion: value.pinnedVersion as number }), props,
-        ...(value.height === undefined ? {} : { height: value.height as number }) };
+      const { type: _type, ...config } = value;
+      const host = parsePageComponentHostConfig(config);
+      return host ? { type: 'component', ...host } : null;
     }
     case 'plan-actual': {
       const title = titled(value);
@@ -453,7 +454,7 @@ function parseBaseContent(value: Record<string, unknown>, depth: number, budget:
       return nodeIds && new Set(nodeIds).size === nodeIds.length ? { type: 'threads', ...title, nodeIds } : null;
     }
     case 'home-section': {
-      if (!exactKeys(value, ['type', 'section']) || !['waiting', 'stalled', 'done'].includes(value.section as string)) return null;
+      if (!exactKeys(value, ['type', 'section']) || !HOME_SECTION_KEYS.includes(value.section as HomeSectionKey)) return null;
       return { type: 'home-section', section: value.section as HomeSectionBlock['section'] };
     }
     case 'task-view': {
@@ -466,10 +467,9 @@ function parseBaseContent(value: Record<string, unknown>, depth: number, budget:
     case 'tabs':
     case 'grid': {
       const slot = (raw: unknown): NestedPageBlock[] | null => {
-        if (!Array.isArray(raw) || raw.length > 20) return null;
+        if (!Array.isArray(raw) || raw.length > CONTAINER.slotBlocks) return null;
         const parsed = raw.map((child) => parseContent(child, depth + 1, budget));
-        const references = new Set(['database-ref', 'page-link', 'component', 'threads', 'conflict', 'home-section', 'view']);
-        return parsed.every((child) => child && !references.has(child.type)) ? parsed as NestedPageBlock[] : null;
+        return parsed.every((child) => child && !TOP_LEVEL_ONLY_BLOCK_TYPES.includes(child.type as TopLevelOnlyBlockType)) ? parsed as NestedPageBlock[] : null;
       };
       if (value.type === 'toggle') {
         if (!exactKeys(value, ['type', 'title', 'blocks']) || !validText(value.title, MAX_TITLE)) return null;
@@ -478,13 +478,13 @@ function parseBaseContent(value: Record<string, unknown>, depth: number, budget:
       }
       if (value.type === 'columns') {
         if (!exactKeys(value, ['type', 'columns'])) return null;
-        const columns = parseList(value.columns, 2, 4, slot);
+        const columns = parseList(value.columns, CONTAINER.columns.min, CONTAINER.columns.max, slot);
         return columns ? { type: 'columns', columns } : null;
       }
       if (value.type === 'grid') {
         if (!exactKeys(value, ['type', 'regions'])) return null;
-        const span = (entry: unknown): entry is number => Number.isInteger(entry) && (entry as number) >= 1 && (entry as number) <= 12;
-        const regions = parseList(value.regions, 1, 12, record((region): PageGridRegion | null => {
+        const span = (entry: unknown): entry is number => Number.isInteger(entry) && (entry as number) >= 1 && (entry as number) <= CONTAINER.gridColumns;
+        const regions = parseList(value.regions, CONTAINER.regions.min, CONTAINER.regions.max, record((region): PageGridRegion | null => {
           if (!exactKeys(region, ['id', 'span', 'tabletSpan', 'title', 'blocks']) || !validId(region.id) || !span(region.span)
             || !optional(region.tabletSpan, span) || !optional(region.title, (title) => validText(title, MAX_TITLE))) return null;
           const blocks = slot(region.blocks);
@@ -493,7 +493,7 @@ function parseBaseContent(value: Record<string, unknown>, depth: number, budget:
         return regions && new Set(regions.map((region) => region.id)).size === regions.length ? { type: 'grid', regions } : null;
       }
       if (!exactKeys(value, ['type', 'tabs'])) return null;
-      const tabs = parseList(value.tabs, 2, 6, record((tab) => {
+      const tabs = parseList(value.tabs, CONTAINER.tabs.min, CONTAINER.tabs.max, record((tab) => {
         if (!exactKeys(tab, ['label', 'blocks']) || !validText(tab.label, MAX_TITLE)) return null;
         const blocks = slot(tab.blocks);
         return blocks ? { label: tab.label, blocks } : null;
@@ -524,6 +524,3 @@ export function parsePageBlock(value: unknown): PageBlock | null {
   }
   return { ...content, id: value.id, rev: value.rev as number, ...(sources === undefined ? {} : { sources }), ...(edit === undefined ? {} : { edit }) } as PageBlock;
 }
-
-export function isPageBlockInput(value: unknown): value is PageBlockInput { return parsePageBlockInput(value) !== null; }
-export function isPageBlock(value: unknown): value is PageBlock { return parsePageBlock(value) !== null; }

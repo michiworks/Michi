@@ -242,18 +242,6 @@ export function wallClockInstants(
   return [Math.max(...candidates)];
 }
 
-/** First instant of a local wall-clock minute (see DST notes above). */
-export function wallClockToInstant(
-  year: number,
-  month: number,
-  day: number,
-  hour: number,
-  minute: number,
-  timeZone: string,
-): number {
-  return wallClockInstants(year, month, day, hour, minute, timeZone)[0];
-}
-
 function daysInMonth(year: number, month: number): number {
   return new Date(Date.UTC(year, month, 0)).getUTCDate();
 }

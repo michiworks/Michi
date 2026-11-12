@@ -27,6 +27,7 @@ interface NodeRecord {
   tree_id: string | null;
   deleted_at: number | null;
   branch_overview: string | null;
+  scheduled_only_job_id?: string | null;
 }
 
 interface TreeRecord {
@@ -57,6 +58,8 @@ interface ThreadJson {
   title: string | null;
   archived?: true;
   current?: true;
+  /** A Scheduled-only job's run: shown only on the Scheduled page (listed when asked for). */
+  scheduled_run?: true;
   node_count: number;
   latest_overview?: string;
   /** Present only for the current thread or when the thread is small enough to fit. */
@@ -115,6 +118,8 @@ function buildNodeJson(
  * accepts only node ids; the JSON makes that boundary obvious.
  *
  * Excludes deleted nodes and digest-kind nodes. Skips digest-source edges.
+ * Threads of Scheduled-only jobs are left out unless `includeScheduledRuns`
+ * (the current thread is always listed).
  * If the full output exceeds SIZE_CAP, the current thread keeps its `nodes`
  * array and other threads progressively drop theirs (collapsed entries still
  * carry id/title/node_count so the model can call list_threads again with a
@@ -124,6 +129,7 @@ export function buildTopology(
   db: DatabaseSync,
   workspaceId: string,
   currentNodeId?: string,
+  options: { includeScheduledRuns?: boolean } = {},
 ): TopologyResult {
   const wsRow = db
     .prepare('SELECT id, name FROM workspaces WHERE id = ?')
@@ -137,14 +143,19 @@ export function buildTopology(
     .prepare('SELECT id, name, archived_at FROM trees WHERE workspace_id = ? ORDER BY last_active_at DESC')
     .all(workspaceId) as unknown as Array<Pick<TreeRecord, 'id' | 'name' | 'archived_at'>>;
 
-  const allNodes = db
+  const listedNodes = db
     .prepare(`
-      SELECT id, parent_node_id, kind, title, tree_id, deleted_at, branch_overview
+      SELECT id, parent_node_id, kind, title, tree_id, deleted_at, branch_overview, scheduled_only_job_id
       FROM nodes
       WHERE workspace_id = ? AND deleted_at IS NULL AND kind != 'digest'
       ORDER BY created_at ASC
     `)
     .all(workspaceId) as unknown as NodeRecord[];
+  const currentTree = currentNodeId ? listedNodes.find((n) => n.id === currentNodeId)?.tree_id ?? null : null;
+  const allNodes = options.includeScheduledRuns
+    ? listedNodes
+    : listedNodes.filter((n) => !n.scheduled_only_job_id || (currentTree !== null && n.tree_id === currentTree));
+  const scheduledRunTrees = new Set(listedNodes.filter((n) => n.scheduled_only_job_id && n.tree_id).map((n) => n.tree_id!));
 
   const allEdges = db
     .prepare(`
@@ -187,6 +198,8 @@ export function buildTopology(
   for (const tree of allTrees) {
     const isCurrent = tree.id === currentTreeId;
     const nodeCount = nodeCountByTree.get(tree.id) ?? 0;
+    // A Scheduled-only run's thread left out above.
+    if (nodeCount === 0 && scheduledRunTrees.has(tree.id)) continue;
     const treeNodes = allNodes.filter((n) => n.tree_id === tree.id);
     const rootNode = treeNodes.find((n) => !n.parent_node_id);
     const resolvedTitle = tree.name ?? rootNode?.title ?? null;
@@ -211,6 +224,7 @@ export function buildTopology(
       }
     }
     if (tree.archived_at) t.archived = true;
+    if (scheduledRunTrees.has(tree.id)) t.scheduled_run = true;
     if (isCurrent) {
       t.current = true;
       currentThread = t;

@@ -6,6 +6,7 @@ import type { ChatNodeState } from '../chatTypes';
 const mocks = vi.hoisted(() => ({
   activeProjectId: 'w1' as string | null,
   focusedPane: null as string | null,
+  openPanes: [] as string[],
   nodes: {} as Record<string, unknown>,
   cards: [] as unknown[],
   refresh: vi.fn(),
@@ -16,11 +17,12 @@ const mocks = vi.hoisted(() => ({
   markProgressCardSeen: vi.fn(),
   toastSuccess: vi.fn(),
   toastError: vi.fn(),
+  presentAttention: vi.fn(),
 }));
 
 vi.mock('../chatStore', () => ({
   useChatProjects: () => ({ activeProjectId: mocks.activeProjectId, activeProject: mocks.activeProjectId ? { id: mocks.activeProjectId } : null }),
-  useChatPanes: () => ({ focusedPane: mocks.focusedPane }),
+  useChatPanes: () => ({ focusedPane: mocks.focusedPane, openPanes: mocks.openPanes }),
   useChatActions: () => ({ selectProject: mocks.selectProject, createThread: mocks.createThread, sendMessage: mocks.sendMessage }),
   useStructuralSelector: (selector: (nodes: Record<string, unknown>) => unknown) => selector(mocks.nodes),
   useChatNodesSnapshot: () => mocks.nodes,
@@ -33,7 +35,13 @@ vi.mock('../../services/api/spacesHome', () => ({
   markProgressCardSeen: mocks.markProgressCardSeen,
 }));
 vi.mock('sonner', () => ({ toast: { success: mocks.toastSuccess, error: mocks.toastError } }));
+vi.mock('../../services/attention/policy', async (importOriginal) => ({
+  ...await importOriginal<typeof import('../../services/attention/policy')>(),
+  presentAttention: mocks.presentAttention,
+}));
 
+import type { AttentionIntent } from '../../services/attention/policy';
+import { setPanePresenceDashboardVisible } from '../panePresenceVisibility';
 import { useSpaceConversationRunner } from './runner';
 import { resetSpaceConversationBadgesForTests, useSpaceConversationBadges, useSpaceConversationWatcher } from './watcher';
 import {
@@ -61,12 +69,16 @@ beforeEach(() => {
   resetSpaceConversationBadgesForTests();
   mocks.activeProjectId = 'w1';
   mocks.focusedPane = null;
+  mocks.openPanes = [];
   mocks.nodes = {};
   mocks.cards = [];
-  for (const fn of [mocks.refresh, mocks.selectProject, mocks.createThread, mocks.sendMessage, mocks.createProgressCard, mocks.markProgressCardSeen, mocks.toastSuccess, mocks.toastError]) fn.mockReset();
+  for (const fn of [mocks.refresh, mocks.selectProject, mocks.createThread, mocks.sendMessage, mocks.createProgressCard, mocks.markProgressCardSeen, mocks.toastSuccess, mocks.toastError, mocks.presentAttention]) fn.mockReset();
   mocks.markProgressCardSeen.mockResolvedValue({});
 });
-afterEach(() => { vi.useRealTimers(); });
+afterEach(() => {
+  vi.useRealTimers();
+  setPanePresenceDashboardVisible(false);
+});
 
 describe('the new-chat sheet store', () => {
   it('opens on the page on screen, in its workspace, or on Home in the last workspace used', () => {
@@ -126,12 +138,13 @@ describe('starting a conversation from a Space', () => {
 
 describe('the shell watcher', () => {
   const onOpen = vi.fn();
+  const finishedIntent = (): AttentionIntent => mocks.presentAttention.mock.calls.at(-1)![0];
   const watch = (page: 'space' | 'dashboard' = 'space') => renderHook(({ p }) => {
     useSpaceConversationWatcher({ page: p, onOpen });
     return useSpaceConversationBadges();
   }, { initialProps: { p: page } });
 
-  it('shows the Scheduled dot while one runs, then the toast and the Conversations dot when it finishes elsewhere', () => {
+  it('shows the Scheduled dot while one runs, then the notice and the Conversations dot when it finishes elsewhere', () => {
     mocks.cards = [card()];
     mocks.nodes = { n1: node() };
     const { result, rerender } = watch();
@@ -139,21 +152,29 @@ describe('the shell watcher', () => {
 
     mocks.nodes = { n1: finished() };
     rerender({ p: 'space' });
-    expect(mocks.toastSuccess).toHaveBeenCalledWith('New chat “Intel 手测” finished', expect.objectContaining({ action: expect.objectContaining({ label: 'Open' }) }));
+    // Through the attention policy, keyed like the thread's own "finished" notice.
+    expect(mocks.presentAttention).toHaveBeenCalledTimes(1);
+    expect(finishedIntent()).toMatchObject({
+      key: 'node:n1', kind: 'finished', title: 'New chat “Intel 手测” finished',
+      target: { type: 'node', nodeId: 'n1', backendConnectionId: 'local' },
+    });
+    expect(finishedIntent().isTargetVisible!()).toBe(false);
     expect(mocks.refresh).toHaveBeenCalled();
     expect(result.current).toEqual({ scheduledRunning: false, conversationsDone: true });
-    mocks.toastSuccess.mock.calls[0]![1].action.onClick();
+    finishedIntent().onOpen!();
     expect(onOpen).toHaveBeenCalledWith(expect.objectContaining({ threadNodeId: 'n1' }));
   });
 
-  it('marks a finished one seen once its conversation is on screen, with no toast there', async () => {
+  it('marks a finished one seen once its conversation is on screen, which keeps the notice quiet', async () => {
     mocks.cards = [card()];
     mocks.nodes = { n1: node() };
     mocks.focusedPane = 'n1';
+    mocks.openPanes = ['n1'];
+    setPanePresenceDashboardVisible(true);
     const { result, rerender } = watch('dashboard');
     mocks.nodes = { n1: finished() };
     rerender({ p: 'dashboard' });
-    expect(mocks.toastSuccess).not.toHaveBeenCalled();
+    expect(finishedIntent().isTargetVisible!()).toBe(true);
     expect(mocks.markProgressCardSeen).toHaveBeenCalledWith('n1', 'local');
     expect(result.current.conversationsDone).toBe(false);
     await waitFor(() => expect(mocks.refresh).toHaveBeenCalled());
@@ -162,7 +183,7 @@ describe('the shell watcher', () => {
   it('does not toast for cards that were already finished, nor mark them seen until opened', () => {
     mocks.cards = [card({ status: 'done' })];
     const { result, rerender } = watch('dashboard');
-    expect(mocks.toastSuccess).not.toHaveBeenCalled();
+    expect(mocks.presentAttention).not.toHaveBeenCalled();
     expect(mocks.markProgressCardSeen).not.toHaveBeenCalled();
     expect(result.current.conversationsDone).toBe(true);
     mocks.focusedPane = 'n1';

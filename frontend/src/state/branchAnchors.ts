@@ -1,5 +1,8 @@
+import { deriveConversationTitle } from 'michi-shared';
 import type { ChatMessage, ChatNodeState, ProjectEdge } from './chatTypes';
 import { visibleMessageText } from './assistantBlocks';
+import { nodeMessageCount } from './nodeMessageCount';
+import { isBranchEdge } from './tree';
 
 // Task 2 will widen ProjectEdge itself; this private alias keeps tsc green until then.
 type EdgeWithAnchor = ProjectEdge & { anchorMessageId?: string; createdAt?: number };
@@ -20,12 +23,13 @@ export interface ChildAnchor {
 }
 
 const QUESTION_CHARS = 160;
+export const BRANCH_TITLE_CHARS = 40;
 const REPLY_CHARS = 180;
 
 function childTitle(n: ChatNodeState): string {
   return (
     n.title ||
-    n.messages.find((m) => m.role === 'user')?.text.slice(0, 40) ||
+    deriveConversationTitle(n.messages.find((m) => m.role === 'user')?.text, BRANCH_TITLE_CHARS) ||
     'Untitled'
   );
 }
@@ -80,7 +84,7 @@ export function buildAnchorMap(
   const out = new Map<string, ChildAnchor[]>();
   for (const e of edges) {
     if (e.source !== parentNodeId) continue;
-    if (e.kind !== undefined && e.kind !== 'branch') continue;
+    if (!isBranchEdge(e)) continue;
     if (!e.anchorMessageId || !liveMsgIds.has(e.anchorMessageId)) continue;
     const child = nodes[e.target];
     if (!child || child.deletedAt) continue;
@@ -88,7 +92,7 @@ export function buildAnchorMap(
     arr.push({
       childNodeId: child.nodeId,
       title: childTitle(child),
-      messageCount: child.messages.length,
+      messageCount: nodeMessageCount(child),
       createdAt: e.createdAt ?? 0,
       status: child.status,
       quotedText: child.messages[0]?.quotedText,
@@ -118,7 +122,7 @@ export function cleanupOrphanedAnchors(
   let changed = false;
   const next = edges.map((e) => {
     if (e.source !== parentNodeId) return e;
-    if (e.kind !== undefined && e.kind !== 'branch') return e;
+    if (!isBranchEdge(e)) return e;
     if (!e.anchorMessageId) return e;
     if (liveMsgIds.has(e.anchorMessageId)) return e;
     changed = true;
@@ -128,26 +132,24 @@ export function cleanupOrphanedAnchors(
   return changed ? next : (edges as EdgeWithAnchor[]);
 }
 
-/**
- * Mirrors trim logic at chatReducers.ts:416-440 so callers can compute
- * post-trim surviving message ids BEFORE dispatching `retry-trim`.
- */
+/** The messages a retry or edit-and-resend keeps; the `retry-trim` reducer applies the same cut. */
+export function retryTrimmedMessages(
+  messages: readonly ChatMessage[],
+  fromIndex: number | undefined,
+): readonly ChatMessage[] {
+  if (fromIndex != null) return messages.slice(0, fromIndex);
+  const len = messages.length;
+  if (len >= 2 && messages[len - 1].role === 'assistant' && messages[len - 2].role === 'user') {
+    return messages.slice(0, len - 2);
+  }
+  if (len >= 1 && messages[len - 1].role === 'assistant') return messages.slice(0, len - 1);
+  return messages;
+}
+
+/** Ids that survive `retry-trim`, for anchor cleanup computed before the dispatch. */
 export function computeSurvivingMessageIds(
   messages: readonly ChatMessage[],
   fromIndex: number | undefined,
 ): Set<string> {
-  let kept: readonly ChatMessage[];
-  if (fromIndex != null) {
-    kept = messages.slice(0, fromIndex);
-  } else {
-    const len = messages.length;
-    if (len >= 2 && messages[len - 1].role === 'assistant' && messages[len - 2].role === 'user') {
-      kept = messages.slice(0, len - 2);
-    } else if (len >= 1 && messages[len - 1].role === 'assistant') {
-      kept = messages.slice(0, len - 1);
-    } else {
-      kept = messages;
-    }
-  }
-  return new Set(kept.map((m) => m.id));
+  return new Set(retryTrimmedMessages(messages, fromIndex).map((m) => m.id));
 }

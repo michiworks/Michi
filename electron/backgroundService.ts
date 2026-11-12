@@ -3,6 +3,9 @@
  * LaunchAgent, so it keeps running (and scheduled jobs keep firing) after the
  * desktop app quits. Electron attaches to it instead of forking a child.
  *
+ * It also builds the environment of the backend the app forks itself, so
+ * both modes apply one set of rules to ~/.michi/.env.
+ *
  * This module has no `electron` import so it can be tested with plain Node.
  */
 import { execFile } from 'node:child_process';
@@ -10,8 +13,59 @@ import { createHash } from 'node:crypto';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import { parseEnv } from 'node:util';
 
 export const SERVICE_LABEL = 'com.michi.backend';
+
+/** Where users keep variables (API keys) for every way of launching the app. */
+export function michiDotenvPath(home: string = os.homedir()): string {
+  return path.join(home, '.michi', '.env');
+}
+
+/**
+ * A .env file's variables; {} when it is missing or unreadable. Node's
+ * parser reads the dotenv format (export prefixes, inline comments,
+ * quoting, multi-line values); the background service's backend reads
+ * ~/.michi/.env with it too (backend/src/bootEnv.ts).
+ */
+export function readDotenvFile(file: string): Record<string, string> {
+  let content: string;
+  try {
+    content = fs.readFileSync(file, 'utf8');
+  } catch {
+    return {};
+  }
+  return parseEnv(content) as Record<string, string>;
+}
+
+/** Set on the desktop backend in both modes: it is the loopback desktop backend, never a remote one. */
+function forcedBackendEnv(port: number, logDir: string): Record<string, string> {
+  return { PORT: String(port), MICHI_LOG_DIR: logDir, MICHI_BIND_HOST: '127.0.0.1', MICHI_REMOTE_ACCESS: '0' };
+}
+
+/**
+ * The environment of the backend the app forks: ~/.michi/.env under the
+ * app's own environment (existing values win), then the forced keys. The
+ * remote token is dropped, and in the installed app the dev-renderer keys,
+ * which make the backend trust another local page's origin
+ * (backend/src/services/localOrigins.ts); the installed app serves its own
+ * UI. bootEnv.ts applies the same rules for the background service.
+ */
+export function desktopBackendEnv(input: {
+  base: NodeJS.ProcessEnv;
+  dotenv: Record<string, string>;
+  port: number;
+  logDir: string;
+  packaged: boolean;
+}): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = { ...input.dotenv, ...input.base, ...forcedBackendEnv(input.port, input.logDir) };
+  delete env.MICHI_REMOTE_TOKEN;
+  if (input.packaged) {
+    delete env.MICHI_DEV_RENDERER;
+    delete env.MICHI_RENDERER_URL;
+  }
+  return env;
+}
 
 /** Environment variables the service inherits from the app when set. */
 const PASSTHROUGH_ENV = [
@@ -72,7 +126,11 @@ export function writeServiceState(file: string, state: ServiceState): void {
   writeFileAtomic(file, `${JSON.stringify(state, null, 2)}\n`, 0o600);
 }
 
-/** Same derivation as the backend's /api/health serverId (remoteAccess.ts). */
+/**
+ * Same derivation as the backend's /api/health serverId (remoteAccess.ts).
+ * Pass ~/.michi/.env under the app's environment: the service reads that
+ * file's MICHI_DATA_DIR too.
+ */
 export function expectedServerId(env: NodeJS.ProcessEnv = process.env, home: string = os.homedir()): string {
   const dataDir = env.MICHI_DATA_DIR || path.join(home, '.michi');
   return createHash('sha256').update(dataDir).digest('hex').slice(0, 16);
@@ -108,11 +166,7 @@ export function buildServiceLaunchSpec(input: {
 }): ServiceLaunchSpec {
   const env: Record<string, string> = {
     ELECTRON_RUN_AS_NODE: '1',
-    PORT: String(input.port),
-    MICHI_LOG_DIR: input.logDir,
-    // The service is always the loopback desktop backend, never a remote one.
-    MICHI_BIND_HOST: '127.0.0.1',
-    MICHI_REMOTE_ACCESS: '0',
+    ...forcedBackendEnv(input.port, input.logDir),
     MICHI_SERVICE_MODE: '1',
     MICHI_SERVICE_BUILD: input.build,
     PATH: input.baseEnv.PATH || '/usr/bin:/bin:/usr/sbin:/sbin',

@@ -13,12 +13,12 @@ import type { AddressInfo } from 'node:net';
 import { afterEach, beforeEach, describe, test } from 'node:test';
 import express from 'express';
 import { setupAdminRoutes } from '../src/routes/admin';
-import { replaceWorkspaceInTransaction } from '../src/routes/backup';
 import { closeAuditDb, closeDb, getDb, initDb, runInTransaction } from '../src/services/db';
 import {
-  deleteTree, deleteWorkspace, emptyWorkspaceTrash, purgeWorkspaceNodes, runTombstoneGc,
+  deleteTree, deleteWorkspace, emptyWorkspaceTrash, purgeWorkspaceInTransaction, purgeWorkspaceNodes, runTombstoneGc,
   saveNode, saveTree, saveWorkspace, TOMBSTONE_TTL_MS,
 } from '../src/services/dbRepository';
+import { createAuthUser } from './helpers/authUsers';
 
 const DROP_MIGRATION = '0058_drop_harness_events';
 let dataDir: string;
@@ -49,17 +49,6 @@ function schemaObjects(db: DatabaseSync): string[] {
 
 function ledgerHasDrop(db: DatabaseSync): boolean {
   return Boolean(db.prepare('SELECT 1 FROM schema_migrations WHERE version = ?').get(DROP_MIGRATION));
-}
-
-function createAuthUser(id: string): void {
-  const db = new DatabaseSync(path.join(dataDir, 'auth.sqlite'));
-  db.exec(`
-    CREATE TABLE "user" (id TEXT PRIMARY KEY, email TEXT NOT NULL, name TEXT NOT NULL, created_at INTEGER NOT NULL);
-    CREATE TABLE "session" (id TEXT PRIMARY KEY, "userId" TEXT NOT NULL);
-    CREATE TABLE "account" (id TEXT PRIMARY KEY, "userId" TEXT NOT NULL);
-  `);
-  db.prepare('INSERT INTO "user" (id,email,name,created_at) VALUES (?,?,?,1)').run(id, `${id}@example.com`, id);
-  db.close();
 }
 
 beforeEach(() => {
@@ -162,7 +151,7 @@ describe('deletion paths work without harness_events', () => {
   test('backup replace removes the replaced workspace', () => {
     seedWorkspace('ws-replaced');
     seedNode('ws-replaced', 'n-replaced', { tree: true });
-    runInTransaction(() => replaceWorkspaceInTransaction('ws-replaced'));
+    runInTransaction(() => purgeWorkspaceInTransaction('ws-replaced'));
     assert.deepEqual(nodeIds(), ['n-keep']);
   });
 
@@ -170,7 +159,7 @@ describe('deletion paths work without harness_events', () => {
     process.env.MICHI_CLOUD = '1';
     process.env.MICHI_REQUIRE_AUTH = 'true';
     process.env.MICHI_ADMIN_EMAILS = 'admin@example.com';
-    createAuthUser('owner-a');
+    createAuthUser(dataDir, 'owner-a');
     seedWorkspace('ws-owned', 'owner-a');
     seedNode('ws-owned', 'n-owned', { tree: true });
     const app = express();

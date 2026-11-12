@@ -1,10 +1,48 @@
 import { useEffect, useRef } from 'react';
-import { keyboardInsetOf } from './useKeyboardInset';
+import { KEYBOARD_UP_PX, keyboardInsetOf } from './useKeyboardInset';
 
-/** Above this inset the on-screen keyboard is up. */
-const KEYBOARD_UP_PX = 120;
 /** Below this inset it has gone down again (the gap avoids flicker mid-animation). */
 const KEYBOARD_DOWN_PX = 60;
+/** After a file picker closes, the keyboard's moves still belong to it for this long. */
+const PICKER_SETTLE_MS = 800;
+
+let releasePicker: ((graceMs: number) => void) | null = null;
+let pickerHeldUntil = 0;
+
+function filePickerHoldsKeyboard(): boolean {
+  return releasePicker !== null || performance.now() < pickerHeldUntil;
+}
+
+/**
+ * Opens a file input's native picker. On a phone the picker takes the
+ * keyboard down while it covers the page, and the browser raises it again
+ * for the same field when the picker closes. Until then a keyboard going
+ * down is not the user dismissing it, so useKeyboardDismiss leaves the field
+ * focused and the composer open. Choosing, cancelling or touching the page
+ * again ends that.
+ */
+export function openFilePicker(input: HTMLInputElement): void {
+  releasePicker?.(0);
+  const onClose = () => release(PICKER_SETTLE_MS);
+  // A browser without `cancel` on file inputs: a touch on the page means the picker is gone.
+  const onTouch = () => release(0);
+  const release = (graceMs: number) => {
+    if (releasePicker !== release) return;
+    releasePicker = null;
+    pickerHeldUntil = performance.now() + graceMs;
+    input.removeEventListener('change', onClose);
+    input.removeEventListener('cancel', onClose);
+    window.removeEventListener('focus', onClose);
+    document.removeEventListener('pointerdown', onTouch, true);
+  };
+  releasePicker = release;
+  pickerHeldUntil = 0;
+  input.addEventListener('change', onClose);
+  input.addEventListener('cancel', onClose);
+  window.addEventListener('focus', onClose);
+  document.addEventListener('pointerdown', onTouch, true);
+  input.click();
+}
 
 /**
  * Calls onDismiss when the on-screen keyboard goes down after it came up for
@@ -35,7 +73,7 @@ export function useKeyboardDismiss(active: boolean, owns: () => boolean, onDismi
         if (!up && ownsRef.current()) up = true;
       } else if (up && inset <= KEYBOARD_DOWN_PX) {
         up = false;
-        onDismissRef.current();
+        if (!filePickerHoldsKeyboard()) onDismissRef.current();
       }
     };
     measure();

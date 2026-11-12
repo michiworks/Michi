@@ -163,6 +163,60 @@ test('Pi surfaces the Bedrock auth error without a retry when the refresh fails'
   assert.equal(providerCalls.length, 3);
 });
 
+// --- Settings › Verify: the same refresh and retry as a chat turn ---
+
+/** Verify against stubbed Bedrock credentials; `reply` answers each provider request. */
+async function stubVerify(t: TestContext, authRefreshCommand: string, reply: () => any) {
+  const piAi = require('../src/agents/pi/piAi') as typeof import('../src/agents/pi/piAi');
+  const real: any = await piAi.loadPiAi();
+  t.mock.method(require('../src/services/bedrockCredentials'), 'resolveBedrockCredentials',
+    () => ({ region: 'us-east-1', profile: 'test-profile', authRefreshCommand }));
+  const providerCalls: any[] = [];
+  t.mock.method(piAi, 'loadPiAi', async () => ({
+    ...real,
+    streamSimple(_model: unknown, _context: unknown, options: unknown) {
+      providerCalls.push(options);
+      const inner = real.createAssistantMessageEventStream();
+      inner.push(reply());
+      return inner;
+    },
+  }));
+  const { verifyPiProviderKey } = require('../src/agents/pi/piProviders') as typeof import('../src/agents/pi/piProviders');
+  return { verify: (timeoutMs?: number) => verifyPiProviderKey({ provider: 'amazon-bedrock', timeoutMs }), providerCalls };
+}
+
+test('Verify runs the Bedrock refresh command before its request, as a chat turn does', async (t) => {
+  __resetBedrockRefreshStateForTest();
+  quietLogs(t);
+  const { command, runs } = refreshScript(t, 'echo run >> "$1"');
+  // Expired on disk until the refresh command has run.
+  const { verify, providerCalls } = await stubVerify(t, command, () => runs() > 0 ? done : expired);
+  const result = await verify();
+  assert.equal(result.ok, true, result.error);
+  assert.equal(runs(), 1);
+  assert.equal(providerCalls.length, 1);
+  assert.equal(providerCalls[0].profile, 'test-profile');
+  assert.equal(providerCalls[0].maxRetries, 0);
+});
+
+test('Verify refreshes Bedrock credentials after an auth error and retries once; its timeout leaves the refreshes out', async (t) => {
+  __resetBedrockRefreshStateForTest();
+  quietLogs(t);
+  t.mock.timers.enable({ apis: ['Date'], now: 1_800_000_000_000 });
+  // Slower than the verification's own timeout.
+  const { command, runs } = refreshScript(t, 'sleep 0.3\necho run >> "$1"');
+  let valid = true;
+  const { verify, providerCalls } = await stubVerify(t, command, () => valid || runs() > 1 ? done : expired);
+  assert.equal((await verify(200)).ok, true);
+  assert.equal(runs(), 1, 'the first verify refreshes proactively');
+  t.mock.timers.tick(31_000);
+  valid = false;
+  const result = await verify(200);
+  assert.equal(result.ok, true, result.error);
+  assert.equal(runs(), 2, 'the auth error runs the refresh command');
+  assert.equal(providerCalls.length, 3, 'the failed request is retried once');
+});
+
 function quoted(value: string): string {
   return process.platform === 'win32' ? `"${value.replace(/"/g, '\\"')}"` : `'${value.replace(/'/g, "'\\''")}'`;
 }

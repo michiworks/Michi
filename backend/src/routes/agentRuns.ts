@@ -1,6 +1,6 @@
 import express, { type Request, type Response } from 'express';
 import {
-  AgentRunContractError,
+  IDEMPOTENCY_KEY_HEADER,
   parseAgentRunInputRequestV1,
   parseAgentRunListQueryV1,
   parseCancelAgentRunRequestV1,
@@ -8,7 +8,7 @@ import {
   parseRespondAgentRunInteractionRequestV1,
   parseSpawnAgentRunRequestV1,
   parseUpdateAgentRunWatchRequestV1,
-  type AgentRunAttemptDtoV1,
+  type AgentRunDetailV1,
   type AgentRunDtoV1,
   type AgentRunEventV1,
   type AgentRunInputRequestV1,
@@ -28,19 +28,13 @@ import { AgentRunsRepository } from '../services/agentRunsRepository';
 import { createAgentRunSseHandler, type AgentRunSseDeps } from './agentRunSse';
 import { AgentRunActionsService } from '../services/agentRunActions';
 import { mountAgentRunActionRoutes } from './agentRunActions';
+import { agentRouteError } from './agentRouteErrors';
 import {
   requireAgentRunInteractionOwner,
   requireAgentRunOwner,
   requireAgentRunWatchOwner,
 } from './middleware/agentOwnership';
 import type { NextFunction } from 'express';
-
-export interface AgentRunDetailV1 {
-  run: AgentRunDtoV1;
-  attempts: AgentRunAttemptDtoV1[];
-  events: AgentRunEventV1[];
-  interactions: AgentRunInteractionDtoV1[];
-}
 
 export interface AgentRunRouteService {
   spawn(ownerUserId: string, request: SpawnAgentRunRequestV1, operationId: string): Promise<AgentRunDtoV1>;
@@ -122,14 +116,6 @@ function routeId(req: Request, key: string): string {
   return Array.isArray(value) ? value[0] ?? '' : value;
 }
 
-function status(error: unknown): number {
-  if (error instanceof AgentRunContractError) return 400;
-  const message = error instanceof Error ? error.message : '';
-  if (/authentication required/.test(message)) return 401;
-  if (/conflict|reused with a different payload|expected Attempt/.test(message)) return 409;
-  return 400;
-}
-
 function readListQuery(req: Request): AgentRunListQueryV1 {
   const rawStatuses = req.query.status;
   const statuses = rawStatuses === undefined ? undefined : Array.isArray(rawStatuses) ? rawStatuses : [rawStatuses];
@@ -151,14 +137,17 @@ export function setupAgentRunRoutes(deps: AgentRunRouteDeps): express.Router {
   const router = express.Router();
   let generated = 0;
   const operationId = (req: Request): string => {
-    const value = req.header('x-idempotency-key')?.trim()
+    const value = req.header(IDEMPOTENCY_KEY_HEADER)?.trim()
       || deps.createOperationId?.() || `agent-run-route-${Date.now()}-${++generated}`;
     if (value.length > 256) throw new Error('idempotency key must be at most 256 characters');
     return value;
   };
   const handle = (fn: (req: Request, res: Response) => Promise<void> | void) => async (req: Request, res: Response): Promise<void> => {
     try { await fn(req, res); }
-    catch (error) { res.status(status(error)).json({ error: error instanceof Error ? error.message : 'invalid request' }); }
+    catch (error) {
+      const { status, message } = agentRouteError(error, `${req.method} ${req.path}`);
+      res.status(status).json({ error: message });
+    }
   };
   const routeRoots = ['/agent-runs', '/agent-run-watches'];
   router.use(routeRoots, (_req, res, next) => {

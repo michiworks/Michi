@@ -1,8 +1,10 @@
 import { restrictedChatProfile } from './helpers/restrictedChatProfile';
-import { test, afterEach } from 'node:test';
+import { test, afterEach, mock } from 'node:test';
 import assert from 'node:assert/strict';
 import { configureRuntimeDeps, __resetRuntimeDeps } from '../src/agents/runtimeDeps';
 import { chatOwner, runOwner } from './helpers/owners';
+import { askUserThreadMessageApprover } from '../src/agents/threadMessageTool';
+import { piAskUserChannel } from '../src/agents/pi/piAskUser';
 
 type Restore = () => void;
 
@@ -165,6 +167,7 @@ test('PiSession resolves model and reasoning against pi runtime, not the active 
   const pending = beforeToolCall!({ toolCall: { name: 'write' }, args: { path: 'notes.md' } });
   await new Promise((resolve) => setImmediate(resolve));
   assert.equal(permissionEvent.kind, 'permission_request');
+  assert.equal(permissionEvent.detail, 'File: notes.md');
   session.respondToPermission(permissionEvent.requestId, 'allow_once');
   assert.equal(await pending, undefined);
 
@@ -182,6 +185,12 @@ test('PiSession resolves model and reasoning against pi runtime, not the active 
   });
   for await (const event of chat.send('permission test')) { if (event.kind === 'turn_end') break; }
   (chat as any).activePush = (event: unknown) => { permissionEvent = event; };
+  const command = `npm test -- ${'x'.repeat(288)}`;
+  const bashPending = beforeToolCall!({ toolCall: { name: 'bash' }, args: { command } });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(permissionEvent.detail, `Command: ${command}`, 'the card shows the whole command the title cuts');
+  chat.respondToPermission(permissionEvent.requestId, 'allow_once');
+  assert.equal(await bashPending, undefined);
   const chatPending = beforeToolCall!({ toolCall: { name: 'write' }, args: { path: 'test' } });
   await new Promise((resolve) => setImmediate(resolve));
   assert.equal(permissionEvent.options.length, 4);
@@ -191,7 +200,7 @@ test('PiSession resolves model and reasoning against pi runtime, not the active 
   assert.equal((chat as any).pendingPermissions.size, 0);
 });
 
-test('PiSession sends thread messages directly but explicitly requested approval stays single-use', async () => {
+test('PiSession sends thread messages directly and asks a requested approval through ask_user, single-use', async () => {
   delete process.env.MICHI_CLOUD;
   const piAiPath = require.resolve('../src/agents/pi/piAi');
   const piToolsPath = require.resolve('../src/agents/pi/piTools');
@@ -235,39 +244,70 @@ test('PiSession sends thread messages directly but explicitly requested approval
     owner: chatOwner('n-a'),
   });
   for await (const event of chat.send('build tools')) { if (event.kind === 'turn_end') break; }
-  assert.equal(typeof toolOpts?.requestThreadMessageApproval, 'function');
+  assert.equal(typeof toolOpts?.requestUserInput, 'function');
 
   const events: any[] = [];
   (chat as any).activePush = (event: unknown) => { events.push(event); };
+  (chat as any).turnAbort = new AbortController();
   assert.equal(await beforeToolCall!({ toolCall: { name: 'send_to_thread' }, args: { nodeId: 'n-b', text: 'progress' } }), undefined);
   assert.equal(events.length, 0, 'routine messages do not open a runtime permission card');
   const request = { targetNodeId: 'n-b', targetTitle: 'Implementation', text: 'Please review' };
+  const mcpQuestions = await new Promise((resolve) => {
+    void askUserThreadMessageApprover(async (questions) => { resolve(questions); return null; })(request);
+  });
+  const approve = askUserThreadMessageApprover(piAskUserChannel(toolOpts.requestUserInput));
+  const lastQuestion = () => events.filter((event) => event.kind === 'user_input_request').at(-1);
 
-  const approval = toolOpts.requestThreadMessageApproval(request);
+  const approval = approve(request);
   await new Promise((resolve) => setImmediate(resolve));
-  const explicit = events.at(-1);
-  assert.equal(explicit.kind, 'permission_request');
-  assert.equal(explicit.title, 'Send a message to "Implementation"?');
-  assert.equal(explicit.detail, 'Please review');
-  assert.deepEqual(explicit.options.map((option: any) => option.optionId).sort(), ['allow_once', 'reject_once']);
+  const asked = lastQuestion();
+  assert.deepEqual(asked.questions, mcpQuestions, 'the same question card as on the other runtimes');
+  assert.equal(events.some((event) => event.kind === 'permission_request'), false);
 
-  // Granting session trust to another tool must not approve the pending message.
+  // Granting session trust to a tool must not approve the pending message.
   const other = beforeToolCall!({ toolCall: { name: 'write' }, args: { path: 'x' } });
   await new Promise((resolve) => setImmediate(resolve));
   chat.respondToPermission(events.at(-1).requestId, 'allow_session');
   assert.equal(await other, undefined);
-  assert.equal((chat as any).pendingPermissions.has(explicit.requestId), true, 'explicit approval must still be pending');
+  assert.equal((chat as any).pendingUserInputs.has(asked.requestId), true, 'the approval must still be pending');
 
-  chat.respondToPermission(explicit.requestId, 'allow_once');
+  chat.respondToUserInput(asked.requestId, [{ question: asked.questions[0].question, answer: 'Send' }]);
   assert.deepEqual(await approval, { approved: true });
 
-  // Session trust does not pre-approve the next message, and only allow_once approves.
-  const next = toolOpts.requestThreadMessageApproval(request);
+  // A typed answer declines and goes back to the agent as the user's note.
+  const next = approve(request);
   await new Promise((resolve) => setImmediate(resolve));
-  const second = events.at(-1);
-  assert.notEqual(second.requestId, explicit.requestId);
-  chat.respondToPermission(second.requestId, 'allow_always');
-  assert.deepEqual(await next, { approved: false, reason: 'declined' });
+  const second = lastQuestion();
+  assert.notEqual(second.requestId, asked.requestId);
+  chat.respondToUserInput(second.requestId, [{ question: second.questions[0].question, answer: 'not yet' }]);
+  assert.deepEqual(await next, { approved: false, reason: 'declined', note: 'not yet' });
+
+  // Unanswered for five minutes: no answer, and the card is withdrawn.
+  mock.timers.enable({ apis: ['setTimeout'] });
+  try {
+    const unanswered = approve(request);
+    await new Promise((resolve) => setImmediate(resolve));
+    const third = lastQuestion();
+    mock.timers.tick(5 * 60 * 1000);
+    assert.deepEqual(await unanswered, { approved: false, reason: 'no_answer' });
+    assert.deepEqual(events.at(-1), { kind: 'user_input_resolved', requestId: third.requestId, answers: [], outcome: 'skipped' });
+  } finally {
+    mock.timers.reset();
+  }
+
+  // A follow-up of the agent's (companion_session_send, DESIGN-v2 §4) offers "Send, and stop asking" as a third answer (G2-review #3).
+  const followUp = approve({ ...request, exact: true, offerStopAsking: true, permissionNote: 'It runs in Trust: its tools run without asking.' });
+  await new Promise((resolve) => setImmediate(resolve));
+  const fourth = lastQuestion();
+  assert.deepEqual(fourth.questions[0].options.map((option: any) => option.label), ['Send', 'Send, and stop asking for this conversation', "Don't send"]);
+  assert.ok(fourth.questions[0].question.includes('It runs in Trust: its tools run without asking.'), fourth.questions[0].question);
+  chat.respondToUserInput(fourth.requestId, [{ question: fourth.questions[0].question, answer: 'Send, and stop asking for this conversation' }]);
+  assert.deepEqual(await followUp, { approved: true, stopAsking: true });
+  const once = approve({ ...request, offerStopAsking: true });
+  await new Promise((resolve) => setImmediate(resolve));
+  const fifth = lastQuestion();
+  chat.respondToUserInput(fifth.requestId, [{ question: fifth.questions[0].question, answer: 'Send' }]);
+  assert.deepEqual(await once, { approved: true }, 'Send alone does not stop asking');
 });
 
 function stubPiForMetaAgent(builtTools: string[]): { agentTools: () => string[] | undefined; buildCalls: () => number; prompts: string[] } {
@@ -406,7 +446,7 @@ test('Pi Meta agent maintenance: only the dedicated maintenance tools, never the
   assert.deepEqual(stub.agentTools(), [...META_AGENT_MAINTENANCE_TOOL_NAMES]);
 });
 
-test('Pi automatic memory: only the four extraction tools, never maintenance or chat tools', async () => {
+test('Pi automatic memory: only the extraction tool, never maintenance or chat tools', async () => {
   const { memoryExtractionToolProfile, MEMORY_EXTRACTION_TOOL_NAMES } = require('../src/services/memory/extractionProfile') as typeof import('../src/services/memory/extractionProfile');
   const stub = stubPiForMetaAgent(['list_threads', 'memory_search', 'bash']);
   const session = newPiMetaSession('n-memory', memoryExtractionToolProfile());

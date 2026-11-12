@@ -105,9 +105,9 @@ test('human edits cannot add source claims, including edited proposals', () => {
 test('first-run segment citations require read-message evidence and summary runs strip conversation claims', () => {
   const rawOps = [{ op: 'insert', after: null, block: content }];
   const input = { runId: 'run', rawOps, nodeIds: new Set([a.nodeId, b.nodeId]) };
-  noteReadMessages('run', a.nodeId, `assistant [message ${a.assistantId}]: Alpha`);
+  noteReadMessages('run', a.nodeId, [a.assistantId]);
   assert.throws(() => citedOps(input), /read_node showed/);
-  noteReadMessages('run', b.nodeId, `assistant [message ${b.assistantId}]: Beta`);
+  noteReadMessages('run', b.nodeId, [b.assistantId]);
   assert.deepEqual(citedOps(input).evidence, [[a, b]]);
   assert.deepEqual(withoutSources(rawOps, true).ops, [{ op: 'insert', after: null, block: { type: 'markdown', text } }]);
 });

@@ -190,6 +190,41 @@ describe('AcpAgentRuntime reasoning for a standard ACP agent', () => {
     });
 });
 
+describe('AcpAgentRuntime reasoning on Kiro v3', () => {
+    const AUTO_ONLY = { id: 'model', category: 'model', type: 'select', currentValue: 'auto', options: [{ value: 'auto', name: 'Auto' }] };
+    const EFFORT = { id: 'effortLevel', type: 'select', currentValue: 'low', options: [{ group: 'Effort', options: [{ value: 'low' }, { value: 'high' }] }] };
+
+    function v3(): AcpAgentRuntime {
+        return new AcpAgentRuntime({ host: createDefaultHost({ logLevel: 'silent' }), bridge: {}, engine: 'v3', defaultCwd: '/w', isolatedSession: true });
+    }
+
+    it('sets effortLevel when the session offers it', async () => {
+        const client = { calls: [] as unknown[][], getSessionInfo: () => ({ configOptions: [AUTO_ONLY, EFFORT] }),
+            setConfigOption: async (...args: unknown[]) => { client.calls.push(args); return []; } };
+        await (v3() as any).applyReasoning(client, 'S1', 'high');
+        assert.deepEqual(client.calls, [['S1', 'effortLevel', 'high']]);
+    });
+
+    it("opens the first chat after a start on Kiro's default model, which has no effort, with the level the host chose", async () => {
+        // The catalog probe was answered before Kiro listed its models, so the host knew no default model and kept the
+        // configured level; the session's model (auto) offers no effort option (round-12 live, 2 of 6 boots).
+        const rt = v3();
+        const calls: unknown[][] = [];
+        const client = {
+            newSession: async () => ({ sessionId: 'S1', configOptions: [AUTO_ONLY],
+                models: { currentModelId: 'auto', availableModels: [{ modelId: 'auto', name: 'Auto' }] } }),
+            getSessionInfo: () => ({ configOptions: [AUTO_ONLY] }),
+            setConfigOption: async (...args: unknown[]) => { calls.push(args); return []; },
+            destroySession: () => {}, cancel: async () => false, shutdown: async () => {},
+        };
+        (rt as any).ensureClient = async () => client;
+        const session = await rt.newSession({ cwd: '/w', sessionId: 'node-1', reasoning: 'high' });
+        assert.equal(session.nativeSessionId, 'S1');
+        assert.deepEqual(calls, [], 'the session keeps its own reasoning');
+        await rt.shutdown();
+    });
+});
+
 describe('AcpAgentRuntime model catalog for a standard ACP agent', () => {
     it('marks every model with the thought_level levels', async () => {
         const rt = runtime();
@@ -402,6 +437,20 @@ describe('AcpAgentSession tool calls of a standard ACP agent', () => {
         assert.deepEqual(events.map((event) => event.title), ['Run mcp_michi_set_follow_ups', 'File hello.txt', '']);
         assert.deepEqual(events.slice(1).map((event) => event.output), ['{}', '{"output":"a.txt\\n"}']);
     });
+
+    it('shows an image a tool read as a placeholder, for Kiro and a standard agent alike', async () => {
+        const bytes = [137, 80, 78, 71, 13, 10, 26, 10, ...new Array(30_000).fill(9)];
+        const kiro = { sessionUpdate: 'tool_call_update', toolCallId: 'r', status: 'completed', title: 'Reading image shot.png',
+            rawOutput: { items: [{ Image: { format: 'png', source: { kind: 'bytes', data: bytes } } }] } };
+        const before = structuredClone(kiro);
+        const [kiroEvent] = await toolEvents([kiro], false);
+        assert.deepEqual(kiro, before, 'the update the agent sent is untouched');
+        assert.deepEqual(JSON.parse(kiroEvent.output!), { items: [{ Image: { format: 'png', source: { kind: 'bytes', data: '[image image/png 29 KB omitted]' } } }] });
+        const data = Buffer.from(bytes).toString('base64');
+        const [standardEvent] = await toolEvents([{ sessionUpdate: 'tool_call_update', toolCallId: 's', name: 'view_file', status: 'completed',
+            rawOutput: [{ type: 'image', data, mimeType: 'image/png' }] }]);
+        assert.deepEqual(JSON.parse(standardEvent.output!), [{ type: 'image', data: '[image image/png 29 KB omitted]', mimeType: 'image/png' }]);
+    });
 });
 
 describe('AcpAgentSession usage of a standard ACP agent', () => {
@@ -537,6 +586,18 @@ describe('Kiro tool names', () => {
         assert.equal(kiroBrokerToolName({ title: 'ls -la' }, undefined, undefined, () => '  '), 'unknown');
     });
 
+    it("names every tool of the host's MCP server for chat grants, as Kiro titles it or as its v3 tool id", () => {
+        assert.equal(acpPermissionToolName({ title: '@michi/companion_session_send' }), '@michi/companion_session_send');
+        assert.equal(acpPermissionToolName({ title: 'Rename' }, { kiro: { toolId: 'michi::companion_set_name' } }), '@michi/companion_set_name');
+        assert.equal(acpPermissionToolName({ title: 'Using a tool' }, undefined, undefined, '@michi/companion_item'), '@michi/companion_item');
+        // No Michi tool: another server's, a prose title, a built-in update name.
+        assert.equal(acpPermissionToolName({ title: '@github/create_issue' }), undefined);
+        assert.equal(acpPermissionToolName({ title: 'Ask @michi/companion_item' }), undefined);
+        assert.equal(acpPermissionToolName({ title: 'Using a tool' }, undefined, undefined, 'shell'), undefined);
+        // The Run broker names a Michi tool by its own name, as Claude's adapter does.
+        assert.equal(kiroBrokerToolName({ title: '@michi/companion_item' }), 'companion_item');
+    });
+
     it("maps Antigravity's tools to Michi's names and leaves Kiro's mappings", () => {
         assert.deepEqual(['write_file', 'replace_file_content', 'multi_replace_file_content', 'read_file', 'view_file',
             'run_command', 'list_dir', 'find_by_name', 'grep_search', 'invoke_subagent', 'mcp_michi_ask_user'].map(canonicalKiroToolName),
@@ -559,9 +620,51 @@ describe('Kiro tool names', () => {
 
 describe('Session state reasoning', () => {
     it('reads the thought_level config option, after Kiro v3 effortLevel', () => {
-        const snapshots = new KiroSessionSnapshots('antigravity');
+        const snapshots = new KiroSessionSnapshots('antigravity', { engine: 'v2', standardAcp: true });
         assert.equal(snapshots.state('s', { configOptions: [MODEL_OPTION, { ...THOUGHT_LEVEL, currentValue: 'high' }] } as any).reasoning, 'high');
         const effort = { id: 'effortLevel', type: 'select', currentValue: 'low' };
         assert.equal(snapshots.state('s', { configOptions: [{ ...THOUGHT_LEVEL, id: 'other' }, effort] } as any).reasoning, 'low');
+    });
+});
+
+describe('AcpAgentSession approval details', () => {
+    const V3_OPTIONS = [{ optionId: 'accept', name: 'Allow', kind: 'allow_once' }, { optionId: 'reject', name: 'Deny', kind: 'reject_once' }];
+    const v3Shell = (command: string, kiro: Record<string, unknown> = {}) => ({ toolCall: { toolCallId: 'run_toolu', status: 'pending', title: command },
+        _meta: { kiro: { toolId: 'run_command', command, consent: { capability: 'shell', resource: command, workspaceRoot: '/tmp' }, ...kiro } } });
+    const REQUESTS: Array<[string, Record<string, unknown>, string | undefined]> = [
+        ['a V3 write names its file', { toolCall: { toolCallId: 'w', status: 'pending', title: 'Write File' },
+            _meta: { kiro: { toolId: 'fs_write', consent: { capability: 'fs_write', resource: 'probe.txt', workspaceRoot: '/tmp' } } } }, 'Write /tmp/probe.txt'],
+        ['a V3 command shows the command', v3Shell('echo hi'), '$ echo hi'],
+        ['a V3 command named like a built-in is still a command', v3Shell('write'), '$ write'],
+        ['a watch command asked in the chat has no watch note', v3Shell('date', { workflowWatch: { workflowId: 'wf', nodeId: 'ticker' } }), '$ date'],
+        ['a V2 request shows its rawInput as compact JSON', { toolCall: { toolCallId: 's', title: 'Running: echo hi',
+            rawInput: { command: 'echo hi', __tool_use_purpose: 'Print' } } }, '{"command":"echo hi","__tool_use_purpose":"Print"}'],
+        ["a Crew request shows the approval's input", { toolCall: { toolCallId: 'c', title: 'bash', rawInput: 'ls -la',
+            content: [{ type: 'content', content: { type: 'text', text: 'ls -la' } }] }, _meta: { toolName: 'bash' } }, 'ls -la'],
+    ];
+
+    for (const [label, request, detail] of REQUESTS) it(`chat: ${label}`, async () => {
+        const client = fakeClient();
+        const session = new AcpAgentSession('node', 'sid', standIn(client, { standard: false }), '/w', { owner: interactive('node') });
+        const turn = startTurn(session);
+        client.push({ sessionUpdate: 'permission_request', requestId: 7, options: V3_OPTIONS, ...request });
+        const event = await turn.until((e) => e.kind === 'permission_request');
+        assert.equal(event.detail, detail);
+        session.respondToPermission(7, 'reject');
+        client.push({ sessionUpdate: 'turn_end', stopReason: 'end_turn' });
+        await turn.done;
+    });
+
+    it("an Agent Run's question shows the same detail as the chat", async () => {
+        const client = fakeClient();
+        const broker: RuntimePermissionBroker = { requestPermission: async () => 'ask' };
+        const session = new AcpAgentSession('node', 'sid', standIn(client, { standard: false }), '/w', { owner: headless('node'), permissionBroker: broker });
+        const turn = startTurn(session);
+        client.push({ sessionUpdate: 'permission_request', requestId: 8, options: V3_OPTIONS, ...REQUESTS[0][1] });
+        const event = await turn.until((e) => e.kind === 'permission_request');
+        assert.equal(event.detail, 'Write /tmp/probe.txt');
+        session.respondToPermission(8, 'reject');
+        client.push({ sessionUpdate: 'turn_end', stopReason: 'end_turn' });
+        await turn.done;
     });
 });

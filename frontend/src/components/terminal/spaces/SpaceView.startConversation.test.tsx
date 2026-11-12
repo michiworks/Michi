@@ -23,12 +23,14 @@ vi.mock('../../../state/pages/usePage', () => ({ usePage: () => ({
 vi.mock('../../../state/pages/useSpacesHome', () => ({ useProgressCards: () => ({ data: [], status: 'ready', error: null, stale: false, refresh: vi.fn() }) }));
 vi.mock('../../../state/pages/useSpaces', () => ({ useSpaces: () => ({ spaces: [], status: 'ready', error: null, refresh: vi.fn() }) }));
 vi.mock('../../../state/pages/revealSource', () => ({ revealPageSource: vi.fn() }));
-vi.mock('../../../state/pages/pageEvents', () => ({ notifyPageChanged: vi.fn() }));
-vi.mock('../../../services/api/pages', () => ({
+vi.mock('../../../state/pages/pageEvents', () => ({ notifyPageChanged: vi.fn(), subscribePageChanges: vi.fn(() => () => {}) }));
+vi.mock('../../../services/api/pages', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../../services/api/pages')>()),
   createWorkspaceDatabase: vi.fn(), listWorkspaceDatabases: vi.fn(), createPage: vi.fn(), deletePage: vi.fn(), fetchPage: vi.fn(), patchPage: vi.fn(),
 }));
 vi.mock('./MaintenanceStatus', () => ({ MaintenanceStatus: () => null }));
-vi.mock('./NativePageDocument', () => ({
+vi.mock('./NativePageDocument', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('./NativePageDocument')>()),
   default: ({ onStartConversation }: { onStartConversation?: (text: string, workspaceId: string) => void }) => {
     mocks.received.push(Boolean(onStartConversation));
     return onStartConversation
@@ -37,7 +39,7 @@ vi.mock('./NativePageDocument', () => ({
   },
 }));
 
-import { SpaceView } from './SpaceView';
+import SpaceView from './SpaceView';
 import { readSpaceConversations, resetSpaceConversationsForTests } from '../../../state/spaceConversations/store';
 
 const route = { type: 'space' as const, pageId: 'page-1', workspaceId: 'workspace-1', backendConnectionId: 'local' };

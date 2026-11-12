@@ -4,7 +4,8 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { closeDb, getDb, initDb } from '../src/services/db';
-import { createDatabase, createPage, getDatabase, getPage, saveDatabase } from '../src/services/pages/repository';
+import { createDatabase, createPage, getDatabase, getPage, insertHomePage, isHomePage, saveDatabase } from '../src/services/pages/repository';
+import { getChange } from '../src/services/pages/historyRepository';
 import { applyAgentPageEdits, applyUserPageEdits } from '../src/services/pages/pageWrites';
 import { applyAgentDbEdits, applyUserDatabaseEdits, configureDatabaseView } from '../src/services/pages/databaseWrites';
 import { pageComponents } from '../src/services/pages/components';
@@ -226,7 +227,7 @@ test('accepted protected view proposal pins its acceptance-time component versio
   assert.deepEqual(current.views[1], siblingBefore);
 });
 
-test('dismiss and reopen are idempotent, and a later target head makes an old proposal stale', () => {
+test('dismiss and reopen are idempotent, and a later edit of the block dismisses the suggestion it left stale', () => {
   const page = createPage({ workspaceId: 'ws', ownerUserId: 'alice', title: 'Proposal', now: 40 });
   const result = applyUserPageEdits({ pageId: page.id, ownerUserId: 'alice', revision: page.revision, now: 41,
     ops: [{ op: 'insert', block: { type: 'markdown', text: 'human' }, after: null }] });
@@ -241,7 +242,79 @@ test('dismiss and reopen are idempotent, and a later target head makes an old pr
   const edited = getPage(page.id, 'alice');
   applyUserPageEdits({ pageId: page.id, ownerUserId: 'alice', revision: edited.revision, now: 46,
     ops: [{ op: 'update', id: blockId, block: { type: 'markdown', text: 'new human value' } }] });
-  assert.throws(() => acceptProposal(proposal.id, 'alice', 47), (error: unknown) => error instanceof PageWriteError && error.code === 'proposal_stale');
+  assert.equal(getChange(proposal.id, 'alice').proposalState, 'dismissed');
+  // Reopened, it is still stale and refuses to apply over the newer content.
+  reopenProposal(proposal.id, 'alice', 47);
+  assert.throws(() => acceptProposal(proposal.id, 'alice', 48), (error: unknown) => error instanceof PageWriteError && error.code === 'proposal_stale');
+  assert.equal(blockText(page.id, blockId), 'new human value');
+});
+
+test('accepting one suggestion dismisses the others on the same block, which could no longer apply', () => {
+  const page = createPage({ workspaceId: 'ws', ownerUserId: 'alice', title: 'Suggestions', now: 60 });
+  const inserted = applyUserPageEdits({ pageId: page.id, ownerUserId: 'alice', revision: page.revision, now: 61,
+    ops: [{ op: 'insert', block: { type: 'markdown', text: 'human' }, after: null }] });
+  const blockId = inserted.applied[0]!.target.kind === 'block' ? inserted.applied[0]!.target.blockId : '';
+  const source = makeActiveChatSource();
+  const suggest = (text: string, now: number) => {
+    const block = getPage(page.id, 'alice').blocks.find((item) => item.id === blockId)!;
+    return applyAgentPageEdits({ pageId: page.id, workspaceId: 'ws', ownerUserId: 'alice', source, now,
+      ops: [{ op: 'update', id: blockId, expectRev: block.rev, block: { type: 'markdown', text } }] }).proposed[0]!;
+  };
+  const first = suggest('first', 62);
+  const second = suggest('second', 63);
+  assert.equal(getChange(first.id, 'alice').proposalState, 'pending');
+  acceptProposal(second.id, 'alice', 64);
+  assert.equal(blockText(page.id, blockId), 'second');
+  assert.equal(getChange(first.id, 'alice').proposalState, 'dismissed');
+});
+
+test('on a home an agent change to its block a person ticked applies directly and clears items already ticked', () => {
+  const homeId = insertHomePage({ ownerUserId: 'alice', workspaceId: 'ws', title: 'Workspace', role: 'workspace-home', now: 70 });
+  const source = makeActiveChatSource();
+  const inserted = applyAgentPageEdits({ pageId: homeId, workspaceId: 'ws', ownerUserId: 'alice', source, now: 71,
+    ops: [{ op: 'insert', after: null, block: { type: 'checklist', title: 'Focus', items: [
+      { text: 'Ship it', done: false }, { text: 'Write notes', done: false }, { text: 'Fix the build', done: false },
+    ] } }] });
+  const blockId = inserted.applied[0]!.target.kind === 'block' ? inserted.applied[0]!.target.blockId : '';
+  const ticked = getPage(homeId, 'alice');
+  applyUserPageEdits({ pageId: homeId, ownerUserId: 'alice', revision: ticked.revision, now: 72,
+    ops: [{ op: 'update', id: blockId, block: { type: 'checklist', title: 'Focus', items: [
+      { text: 'Ship it', done: false }, { text: 'Write notes', done: true }, { text: 'Fix the build', done: false },
+    ] } }] });
+  const block = getPage(homeId, 'alice').blocks.find((item) => item.id === blockId)!;
+  assert.ok(block.edit);
+  const result = applyAgentPageEdits({ pageId: homeId, workspaceId: 'ws', ownerUserId: 'alice', source, now: 73,
+    ops: [{ op: 'update', id: blockId, expectRev: block.rev, block: { type: 'checklist', title: 'Focus', items: [
+      { text: 'Ship it', done: false }, { text: 'Write notes', done: true }, { text: 'Fix the build', done: true }, { text: 'Plan B-5', done: false },
+    ] } }] });
+  assert.equal(result.proposed.length, 0);
+  assert.equal(result.applied.length, 1);
+  const after = getPage(homeId, 'alice').blocks.find((item) => item.id === blockId)!;
+  assert.equal(after.type, 'checklist');
+  // Ticked before this write: cleared. Ticked in this write: kept until the next one.
+  if (after.type === 'checklist') assert.deepEqual(after.items, [
+    { text: 'Ship it', done: false }, { text: 'Fix the build', done: true }, { text: 'Plan B-5', done: false },
+  ]);
+  assert.equal(isHomePage(homeId), true);
+
+  // Of two items with one text, only as many go as were ticked before.
+  const twins = getPage(homeId, 'alice').blocks.find((item) => item.id === blockId)!;
+  applyAgentPageEdits({ pageId: homeId, workspaceId: 'ws', ownerUserId: 'alice', source, now: 74,
+    ops: [{ op: 'update', id: blockId, expectRev: twins.rev, block: { type: 'checklist', title: 'Focus', items: [
+      { text: 'Fix the build', done: true }, { text: 'Fix the build', done: true }, { text: 'Plan B-5', done: false },
+    ] } }] });
+  const afterTwins = getPage(homeId, 'alice').blocks.find((item) => item.id === blockId)!;
+  if (afterTwins.type === 'checklist') assert.deepEqual(afterTwins.items, [{ text: 'Fix the build', done: true }, { text: 'Plan B-5', done: false }]);
+
+  // A block the person added to the home stays theirs: a change to it waits as a suggestion.
+  const own = applyUserPageEdits({ pageId: homeId, ownerUserId: 'alice', revision: getPage(homeId, 'alice').revision, now: 75,
+    ops: [{ op: 'insert', after: null, block: { type: 'markdown', text: 'Mine' } }] });
+  const ownId = own.applied[0]!.target.kind === 'block' ? own.applied[0]!.target.blockId : '';
+  const ownBlock = getPage(homeId, 'alice').blocks.find((item) => item.id === ownId)!;
+  const suggested = applyAgentPageEdits({ pageId: homeId, workspaceId: 'ws', ownerUserId: 'alice', source, now: 76,
+    ops: [{ op: 'update', id: ownId, expectRev: ownBlock.rev, block: { type: 'markdown', text: 'Better' } }] });
+  assert.equal(suggested.proposed.length, 1);
+  assert.equal(blockText(homeId, ownId), 'Mine');
 });
 
 test('revertBatch reverses a multi-target batch newest first', () => {
@@ -506,4 +579,21 @@ test('reverting an agent-added row succeeds, but a row whose list cell was reord
   applyUserDatabaseEdits({ databaseId: database.id, ownerUserId: 'alice', revision: getDatabase(database.id, 'alice').revision, now: 84,
     ops: [{ op: 'row.update', id: row.id, expectRev: row.rev, values: { tags: ['b', 'a'] } }] });
   assert.throws(() => revertChange(added.applied[0]!.id, 'alice', 85), (error: unknown) => error instanceof PageWriteError && error.status === 409);
+});
+
+test('undoing a deletion on a page that filled up again names the block cap', () => {
+  const page = createPage({ workspaceId: 'ws', ownerUserId: 'alice', title: 'Full', now: 10 });
+  const source = makeActiveChatSource();
+  const room = 40 - getPage(page.id, 'alice').blocks.length;
+  applyAgentPageEdits({ pageId: page.id, workspaceId: 'ws', ownerUserId: 'alice', source, now: 11,
+    ops: Array.from({ length: room }, (_, i) => ({ op: 'insert', block: { type: 'markdown', text: `Block ${i}` }, after: null })) });
+  const victim = getPage(page.id, 'alice').blocks.at(-1)!;
+  const deletion = applyAgentPageEdits({ pageId: page.id, workspaceId: 'ws', ownerUserId: 'alice', source, now: 12,
+    ops: [{ op: 'delete', id: victim.id, expectRev: victim.rev }] }).applied[0]!;
+  const refilled = getPage(page.id, 'alice');
+  applyUserPageEdits({ pageId: page.id, ownerUserId: 'alice', revision: refilled.revision, now: 13,
+    ops: [{ op: 'insert', block: { type: 'markdown', text: 'Human block' }, after: null }] });
+  assert.throws(() => revertChange(deletion.id, 'alice', 14),
+    (error: unknown) => error instanceof PageWriteError && error.status === 400 && error.message === 'A page may contain at most 40 blocks');
+  assert.equal(getPage(page.id, 'alice').blocks.length, 40);
 });

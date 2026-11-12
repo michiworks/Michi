@@ -1,14 +1,7 @@
 import type { IncomingHttpHeaders } from 'node:http';
 import type { NextFunction, Request, RequestHandler, Response } from 'express';
-import { isLoopbackAddress } from '../../services/remoteAccess';
+import { isLoopbackAddress, isLoopbackHost } from '../../services/remoteAccess';
 import { allowedHostNames, isAllowedLocalHost, isAllowedLocalOrigin } from '../../services/localOrigins';
-
-function isLocalHostname(hostname: string): boolean {
-  return hostname === 'localhost'
-    || hostname === '127.0.0.1'
-    || hostname === '[::1]'
-    || hostname === '::1';
-}
 
 /**
  * A browser Origin Michi's own renderer can have. The rule is
@@ -21,18 +14,9 @@ export function isTrustedRendererOrigin(req: { headers: IncomingHttpHeaders }, o
   return isAllowedLocalOrigin(origin, req.headers.host);
 }
 
-/** True when the Host header names this machine's loopback interface. */
-export function isLocalHostHeader(host: string | undefined): boolean {
-  if (!host) return false;
-  try {
-    return isLocalHostname(new URL(`http://${host}`).hostname);
-  } catch {
-    return false;
-  }
-}
-
+/** The rule resolveListenHost applies before it allows a listener without auth. */
 export function isLoopbackListenHost(host: string): boolean {
-  return host === '127.0.0.1' || host === 'localhost' || host === '::1' || host === '[::1]';
+  return isLoopbackHost(host);
 }
 
 /** True when the request comes from this machine's own app (or an authenticated remote session). */

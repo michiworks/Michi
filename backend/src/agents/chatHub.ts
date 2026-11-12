@@ -3,17 +3,32 @@ import {
   applyTurnEvent,
   CHAT_STREAM_EVENTS,
   createDurableTurn,
+  extractBranchOverview,
   isActiveToolStatus,
   userInputInteractionId,
   normalizeUserInputQuestions,
   normalizeUserInputAnswers,
+  threadMessageBody,
+  COMPANION_CHECKIN_TURN_PREFIX,
+  COMPANION_SEND_TURN_PREFIX,
+  checkinRunId,
+  companionCheckinTurnRunId,
+  companionPostId,
+  companionPostRunId,
+  isCheckinNodeId,
+  parseCompanionPostMetadata,
+  extractTurnMetadata,
+  finalizeTurnContent,
+  TURN_ERROR_CODES,
+  selfTurnAssistantId,
+  userTurnAssistantId,
   type UserInputAnswer,
   type ChatStreamEvent,
   type SteerMessageOptions,
   type DurableMessageMetadata,
   type DurableTurnSnapshot,
 } from "michi-shared";
-import type { AgentSession, CompactResult, SteerResult, CancelAck, MaintenanceTurnContext } from "./types";
+import type { AgentSession, CompactResult, SteerResult, CancelAck, MaintenanceTurnContext, SkillTurnInvocation } from "./types";
 import { getRuntime } from "./registry";
 import type { NormalizedEvent } from "../services/chatEvents";
 import { chatStreamErrorCode, createChatStreamError, toChatStreamEvent, withStreamErrorCode } from "../routes/chatStreamEvents";
@@ -21,20 +36,23 @@ import { decodeMichiHostEvent } from "./hostEvents";
 import { beginTurn, checkpointTurn, finalizeTurn, getNode } from "../services/dbRepository";
 import { BACKEND_RESTARTED_ERROR, BACKEND_RESTARTED_MESSAGE } from "../services/turnPersistence.recipes";
 import { getDb } from "../services/db";
-import { extractBranchOverview } from "../services/messageSerialization";
 import { log as appLog } from "../services/logger";
 import { ACPError } from "michi-runtime/internal/adapters/kiro/acpClient";
 import { CANCEL_TIMEOUT_MS } from "../config/constants";
 import { dbWorker, isDbWorkerReady } from "../services/dbWorkerClient";
 import { RuntimeRecoveryRequiredError } from './runtimeLifecycle';
 import { buildPageManifest } from '../services/pages/pageManifest';
-import { isAssistantNode } from '../assistant/identity';
+import { assistantPurposeOf, isAssistantNode } from '../assistant/identity';
 import { assistantCwd } from '../assistant/store';
 import { prepareAssistantAttachments } from '../assistant/attachments';
 import { ReportedRuntimeError } from 'michi-runtime/internal/contract/errors';
 import { descriptorOf } from "michi-runtime/internal/core/descriptors";
+import { discardBackgroundTurn } from "michi-runtime/internal/core/backgroundTurns";
 import { chatNodeOf, isRunOwner } from './ownerMapping';
-import { observeTurnTrust } from '../services/turnTrust';
+import { observeTurnTrust, recordUntrustedSource, type RecordSourceOptions, type TrustSource, type TurnRef } from '../services/turnTrust';
+import { recordTypedText, releaseTypedText } from '../services/memory/typedText';
+import { coreBeginAndFinalizeTurn } from '../services/turnPersistence.core';
+import { mainThreadDb } from '../services/turnPersistence.mainAdapter';
 import { memoryInjector as defaultMemoryInjector, type MemoryInjector, type PreparedMemoryContext } from './memoryInjection';
 
 export interface HubSubscriber {
@@ -84,6 +102,14 @@ interface TurnLog {
   ownerUserId: string | null;
   /** See StartTurnArgs.humanOrigin. */
   humanOrigin?: boolean;
+  /** The runtime the turn ran on, for TurnFinalizedEvent. */
+  runtimeId?: string | null;
+  /** onTurnFinalized listeners have been told about this turn. */
+  finalizedNotified?: boolean;
+  /** See StartTurnArgs.skill. */
+  skill?: SkillTurnInvocation;
+  /** See AgentTurnInput.titleSource. */
+  titleSource?: { text: string; context?: string };
   /** Stops the runtime turn behind a self-turn (see StartSelfTurnArgs.cancel). */
   selfCancel?: () => Promise<CancelAck | void> | CancelAck | void;
   /** Permission handles remain transient. Keep unresolved interaction handles
@@ -95,6 +121,11 @@ interface TurnLog {
   /** Runtime completion and the cancel timeout share one durability boundary. */
   finalization?: Promise<void>;
   /**
+   * done or error holds its seq while finalize commits, and goes out only
+   * after it: append() drops anything later, so no event overtakes it.
+   */
+  terminalStamped?: boolean;
+  /**
    * Set only inside the existing finishWithPersistenceError path, beside its
    * pre-existing effects (log.status = "error", the live broadcast event).
    * This is IN-MEMORY ONLY and does not survive a process restart — nothing
@@ -105,12 +136,42 @@ interface TurnLog {
    * a restart as proof the commit succeeded.
    */
   lastPersistenceError?: { message: string; recoverable: boolean; occurredAt: number };
+  /**
+   * DESIGN-v2 §3.2: no subscriber of any kind sees this turn, live or in a
+   * replay, and getSnapshot does not report it: a Companion check-in in its
+   * throwaway node, which no window may discover (a window installs any node
+   * a frame names). Set by StartRequestedSelfTurnArgs.private and for every
+   * turn of a check-in node.
+   */
+  private?: boolean;
+  /** whenTurnSettled callers waiting for this turn to leave `active`. */
+  settleWaiters?: Array<() => void>;
+}
+
+/** A node's completion facts (migration 0064), as a turn's `done` frame carries them. */
+export interface NodeCompletionFacts {
+  nodeCompletionSeq: number;
+  nodeSeenCompletionSeq: number;
 }
 
 export interface TurnPersistence {
   begin(snapshot: DurableTurnSnapshot): void | Promise<void>;
   checkpoint(snapshot: DurableTurnSnapshot): void;
   finalize(snapshot: DurableTurnSnapshot): void | Promise<void>;
+  /**
+   * The node's completion facts as committed, read once its turn finalized.
+   * `done` carries them so a window counts exactly what the server counted;
+   * without this (a test harness) the frame carries none.
+   */
+  completionFacts?(nodeId: string): NodeCompletionFacts | null;
+  /**
+   * Writes a turn that is already terminal (a posted message) as begin and
+   * finalize in ONE transaction (turnPersistence.core coreBeginAndFinalizeTurn).
+   * `existing`: the turn, or its message, was already there and nothing was
+   * written. Optional so test harnesses that never post need not provide it;
+   * postSelfMessage refuses to run without it.
+   */
+  beginAndFinalize?(snapshot: DurableTurnSnapshot): PostSelfMessageResult | Promise<PostSelfMessageResult>;
 }
 
 const repositoryTurnPersistence: TurnPersistence = {
@@ -146,6 +207,16 @@ const repositoryTurnPersistence: TurnPersistence = {
     }
     finalizeTurn(snapshot);
   },
+  // A read on this thread's connection sees what the worker committed.
+  completionFacts: (nodeId) => {
+    const node = getNode(nodeId);
+    if (typeof node?.completion_seq !== 'number' || typeof node.seen_completion_seq !== 'number') return null;
+    return { nodeCompletionSeq: node.completion_seq, nodeSeenCompletionSeq: node.seen_completion_seq };
+  },
+  // Always on the main thread's connection: the worker has no such call, and
+  // a post waits for the conversation's previous turn to finalize first (its
+  // late checkpoints then find that turn terminal and write nothing).
+  beginAndFinalize: (snapshot) => coreBeginAndFinalizeTurn(mainThreadDb, snapshot).posted ? 'posted' : 'existing',
 };
 
 export interface StartTurnArgs {
@@ -160,6 +231,8 @@ export interface StartTurnArgs {
   ownerUserId?: string | null;
   /** The text came from a person (the composer route), not from an agent. */
   humanOrigin?: boolean;
+  /** The skill this message runs, resolved by the route; the runtime receives it as AgentTurnInput.skill. */
+  skill?: SkillTurnInvocation;
 }
 
 export interface SidecarTitleRequest {
@@ -276,10 +349,199 @@ export interface StartRequestedSelfTurnArgs {
   userMetadata?: DurableMessageMetadata;
   /** Trusted, server-created maintenance plan bindings for an isolated scheduled session. */
   maintenanceContext?: MaintenanceTurnContext;
+  /**
+   * Asked once, when the turn's place in the chat's queue comes up, before
+   * anything is saved: false withdraws it (the start rejects and nothing is
+   * shown or sent). Not asked for a turn that already began.
+   */
+  shouldStart?: () => boolean;
+  /**
+   * DESIGN-v2 §3.2: no window ever sees the turn (TurnLog.private): it is
+   * broadcast to nobody and left out of every replay. A Companion check-in
+   * (W2-G1a) passes it; every turn of a check-in node is private anyway.
+   */
+  private?: true;
+  /**
+   * The turn's Michi Memory block as the caller built it, sent as it is
+   * without asking the memory injector: a Companion check-in's resident pack
+   * (contextBuilder consumer 'checkin', built as it starts); null for none.
+   * Omitted: the injector's, as for any turn.
+   */
+  memoryContext?: string | null;
 }
 
 export interface StartedRequestedSelfTurn extends StartedTurn {
   existing: boolean;
+}
+
+/** A Stop for one turn (ChatHub.cancel): the running turn, or one that has not started. */
+export interface CancelRequest {
+  chatId: string;
+  turnId: string;
+}
+
+/** A message a person steered into a turn (ChatHub.steer); always typed by a person. */
+export interface FinalizedTurnSteer {
+  messageId: string;
+  text: string;
+  quotedText: string | null;
+  createdAt: number;
+}
+
+/**
+ * A turn reached its terminal state (ChatHub.onTurnFinalized): after its
+ * done or error frame was committed and broadcast, or after its terminal
+ * commit failed (persisted false; the turn's begin rows, and so the user's
+ * message, were committed before the runtime saw it).
+ */
+export interface TurnFinalizedEvent {
+  chatId: string;
+  nodeId: string;
+  turnId: string;
+  workspaceId: string;
+  /** As the route or server caller gave it; null on the desktop. */
+  ownerUserId: string | null;
+  /** A person typed userText in the composer (StartTurnArgs.humanOrigin). */
+  humanOrigin: boolean;
+  selfInitiated: boolean;
+  /** The user message as displayed: '' when the turn has none. */
+  userText: string;
+  userMessageId: string | null;
+  userMessageAt: number | null;
+  /** Text the user selected and replied to. */
+  quotedText: string | null;
+  steers: FinalizedTurnSteer[];
+  /** The visible reply. */
+  assistantText: string;
+  /** 'ended' after a committed done; 'error' after an error or a failed commit. */
+  status: 'ended' | 'error';
+  /** The durable outcome; 'error' when the terminal commit failed. */
+  outcome: DurableTurnSnapshot['status'];
+  /** False when the terminal commit failed. */
+  persisted: boolean;
+  runtimeId: string | null;
+  completedAt: number;
+}
+
+/**
+ * A message Michi posts into a conversation as a turn of its own, complete
+ * before anyone sees it (DESIGN-v2 §3.3): a check-in's post (W2-G1a
+ * services/companion/posts.ts) or first-run narration. It has no user
+ * message and no runtime session.
+ */
+export interface PostSelfMessageArgs {
+  /** The conversation: an assistant conversation that is not a check-in node (`main`). */
+  chatId: string;
+  nodeId: string;
+  /**
+   * The turn's id, which makes the post idempotent. A check-in's post is
+   * `cmp-post-<runId>` (companionPostId) for turn and message alike; never a
+   * check-in's own turn id (`cmp-<runId>`) nor a follow-up's (`cms-<runId>`).
+   */
+  turnId: string;
+  /** The assistant message's id; defaults to turnId (first-run narration passes its `mna-*` id). */
+  messageId?: string;
+  /**
+   * The message's text; FOLLOW-UP sentinels in it become the conversation's
+   * chips (sent as a follow_ups frame). TITLE and BRANCH-OVERVIEW sentinels
+   * are removed before anything is sent or stored (postVisibleText).
+   */
+  text: string;
+  /**
+   * The assistant message's stored metadata. `companionPost` (validated with
+   * parseCompanionPostMetadata, stored as parsed) requires both ids to be
+   * the post id of its run, and a post id requires it; any other field (such
+   * as first-run narration's `metaAgentNarration`) is stored as given. Only
+   * `companionPost` travels on the live turn_start (assistantMetadata).
+   */
+  metadata?: DurableMessageMetadata & Record<string, unknown>;
+  /** The conversation's chips after the post, overriding any in the text. */
+  followUps?: string[];
+  /**
+   * Recorded as the turn's untrusted source before it is written (turn_trust,
+   * so memory extraction never follows it). A post defaults to
+   * `{tool:'companion_post', detail:'checkin'}`; `runtimeId` defaults to 'michi'.
+   * Never carried to the conversation's later turns (w4-fix D25).
+   */
+  untrusted?: { tool: string; detail?: string; runtimeId?: string };
+  ownerUserId?: string | null;
+  /**
+   * Asked once, when the post's place in the conversation's queue comes up,
+   * right before anything is written: false withdraws it (`withdrawn`). A
+   * check-in's post goes out only while what its memory pack showed holds.
+   */
+  shouldPost?: () => boolean;
+}
+
+/**
+ * `existing`: the turn (or its message) was already there; `withdrawn`:
+ * shouldPost said no. Nothing was written or broadcast for either.
+ */
+export type PostSelfMessageResult = 'posted' | 'existing' | 'withdrawn';
+
+/** A post that passed postSelfMessage's checks: what it stores and records. */
+interface PreparedPost {
+  messageId: string;
+  metadata: DurableMessageMetadata | undefined;
+  untrusted: PostSelfMessageArgs['untrusted'];
+  /** The text every window is sent and the message stores (postVisibleText). */
+  text: string;
+  /** The chips after the post: PostSelfMessageArgs.followUps, else the text's own. */
+  followUps: string[];
+}
+
+/**
+ * A post's text as every window receives it and its message stores it: the
+ * finalized content (finalizeTurnContent), taken again until no title,
+ * branch-overview or follow-up sentinel is left that a window could read
+ * from it. An open window's `done` reducer reads all three from the text it
+ * streamed and saves the title and branch overview to the node, so the text
+ * a post streams must carry none (its chips travel as a follow_ups frame).
+ * One pass removes every bracketed sentinel; each further pass removes at
+ * most a prose title line or what an earlier removal joined together, so the
+ * bound is generous. null when the text still carries one: refuse the post.
+ */
+function postVisibleText(text: string): string | null {
+  const bound = 4 + (text.match(/[[\n]/g)?.length ?? 0);
+  let visible = text;
+  for (let pass = 0; pass < bound; pass += 1) {
+    const next = finalizeTurnContent(visible);
+    const left = extractTurnMetadata(next);
+    if (next === visible && !left.title && !left.branchOverview && !left.followUps) return visible;
+    visible = next;
+  }
+  return null;
+}
+
+/** Assistant purposes that are closed: never a conversation a post lands in (§2.2; W2-E renames them to 'checkin'). */
+const CLOSED_ASSISTANT_PURPOSES: ReadonlySet<string> = new Set(['companion', 'checkin']);
+
+/** What whenTurnSettled reports: the turn's committed terminal status, or null when unknown. */
+export type SettledTurnStatus = Exclude<DurableTurnSnapshot['status'], 'active'>;
+
+/**
+ * A turn chatHub refuses to start because of the node it is for or the id it
+ * carries (DESIGN-v2 §2.5); nothing was written. `checkin_node`: a check-in
+ * node runs only its own private check-in turn, and nothing is ever posted
+ * into one; `reserved_turn_id`: the id is a check-in's (`cmp-`) or a
+ * follow-up's (`cms-`) and this is not its node, or a user turn carries one;
+ * `not_main_node`: only an assistant conversation that is neither a check-in
+ * node nor recorded closed (meta purpose 'companion') takes posts;
+ * `invalid_post`: the post's ids and its `companionPost` do not agree, or its
+ * text is nothing but sentinels. W2-E's routes answer `checkin_node` with 409.
+ */
+export type TurnGuardCode = 'checkin_node' | 'reserved_turn_id' | 'not_main_node' | 'invalid_post';
+
+export class TurnGuardError extends Error {
+  constructor(readonly code: TurnGuardCode, message: string) {
+    super(message);
+    this.name = 'TurnGuardError';
+  }
+}
+
+/** Turn-id prefixes only the backend's own Companion paths may use (a user turn never does). */
+function hasReservedTurnPrefix(turnId: string): boolean {
+  return turnId.startsWith(COMPANION_CHECKIN_TURN_PREFIX) || turnId.startsWith(COMPANION_SEND_TURN_PREFIX);
 }
 
 interface DurableTurnIdentity {
@@ -311,6 +573,14 @@ function reportsBranchOverview(ev: NormalizedEvent): boolean {
   if (ev.kind !== "host_event" || ev.type !== "branch_overview") return false;
   const product = decodeMichiHostEvent(ev);
   return product?.type === "branch_overview" && product.payload.overview.trim().length > 0;
+}
+
+/** The user's message as shown and the text it quotes, for titles; none for an empty message. */
+function titleSourceOf(args: StartTurnArgs): { text: string; context?: string } | undefined {
+  const text = (args.displayText ?? args.text).trim();
+  if (!text) return undefined;
+  const context = args.userMetadata?.quotedText?.trim();
+  return context ? { text, context } : { text };
 }
 
 /** What a turn stops with on a runtime_error event; ReportedRuntimeError keeps its code. */
@@ -350,6 +620,7 @@ export class ChatHub {
   private readonly cancelRequestedAt = new Map<string, number>();
   /** Force-finish timers keyed by chatId. Cleared when the turn ends naturally. */
   private readonly cancelTimers = new Map<string, ReturnType<typeof setTimeout>>();
+  private readonly cancelListeners = new Set<(request: CancelRequest) => void>();
   private shuttingDown = false;
   private readonly retentionMs: number;
   private readonly persistence: TurnPersistence;
@@ -360,6 +631,10 @@ export class ChatHub {
   private readonly nodeTitle: (nodeId: string) => string | null;
   private readonly pageManifestBuilder: typeof buildPageManifest;
   private readonly memoryInjector: Pick<MemoryInjector, 'prepare' | 'forget'> | null;
+  private readonly turnFinalizedListeners = new Set<(turn: TurnFinalizedEvent) => void>();
+  private readonly isAssistantNode: (nodeId: string) => boolean;
+  private readonly assistantPurposeOf: (nodeId: string) => string;
+  private readonly recordUntrusted: (ref: TurnRef, source: TrustSource, options?: RecordSourceOptions) => void;
 
   constructor(opts: {
     retentionMs?: number;
@@ -378,7 +653,16 @@ export class ChatHub {
      * harness) sends none unless the test passes one.
      */
     memoryInjector?: Pick<MemoryInjector, 'prepare' | 'forget'> | null;
+    /** Whether a node is an assistant conversation (assistant/identity); injectable for harness tests. */
+    isAssistantNode?: (nodeId: string) => boolean;
+    /** An assistant conversation's recorded purpose (assistant/identity); injectable for harness tests. */
+    assistantPurposeOf?: (nodeId: string) => string;
+    /** turnTrust.recordUntrustedSource; injectable for harness tests. */
+    recordUntrustedSource?: (ref: TurnRef, source: TrustSource, options?: RecordSourceOptions) => void;
   } = {}) {
+    this.isAssistantNode = opts.isAssistantNode ?? isAssistantNode;
+    this.assistantPurposeOf = opts.assistantPurposeOf ?? assistantPurposeOf;
+    this.recordUntrusted = opts.recordUntrustedSource ?? recordUntrustedSource;
     this.retentionMs = opts.retentionMs ?? ENDED_LOG_RETENTION_MS;
     this.persistence = opts.persistence ?? repositoryTurnPersistence;
     this.checkpointIntervalMs = opts.checkpointIntervalMs ?? TURN_CHECKPOINT_INTERVAL_MS;
@@ -417,6 +701,86 @@ export class ChatHub {
     this.shuttingDown = true;
   }
 
+  /** prepareForShutdown has run: this process is going away. */
+  isShuttingDown(): boolean {
+    return this.shuttingDown;
+  }
+
+  /**
+   * Called for every Stop cancel() takes, with the turn it names: running,
+   * or not yet started (a reserved cancellation). Explicit cancellation
+   * only: a renderer disconnecting calls nothing. Listeners run
+   * synchronously; one that throws is logged and skipped.
+   */
+  onCancel(listener: (request: CancelRequest) => void): () => void {
+    this.cancelListeners.add(listener);
+    return () => { this.cancelListeners.delete(listener); };
+  }
+
+  /**
+   * Called once for every turn that reaches a terminal state: done
+   * (completed or cancelled, including the cancel timeout's force-finish),
+   * error, or a failed terminal commit (persisted false). Listeners run
+   * synchronously after the terminal frame is broadcast; one that throws is
+   * logged and skipped, never the turn's failure. A post (postSelfMessage)
+   * ran nothing and is not reported.
+   */
+  onTurnFinalized(listener: (turn: TurnFinalizedEvent) => void): () => void {
+    this.turnFinalizedListeners.add(listener);
+    return () => { this.turnFinalizedListeners.delete(listener); };
+  }
+
+  private notifyTurnFinalized(chatId: string, log: TurnLog, persisted: boolean): void {
+    if (log.finalizedNotified) return;
+    log.finalizedNotified = true;
+    releaseTypedText(log.nodeId, log.turnId);
+    if (this.turnFinalizedListeners.size === 0) return;
+    const { snapshot } = log;
+    const user = snapshot.userMessage;
+    const event: TurnFinalizedEvent = {
+      chatId,
+      nodeId: log.nodeId,
+      turnId: log.turnId,
+      workspaceId: snapshot.workspaceId,
+      ownerUserId: log.ownerUserId,
+      humanOrigin: log.humanOrigin === true,
+      selfInitiated: log.selfInitiated,
+      userText: user?.content ?? '',
+      userMessageId: user?.id ?? null,
+      userMessageAt: user?.createdAt ?? null,
+      quotedText: user?.metadata?.quotedText ?? null,
+      steers: (snapshot.steeredMessages ?? []).map((message) => ({
+        messageId: message.id,
+        text: message.content,
+        quotedText: message.metadata?.quotedText ?? null,
+        createdAt: message.createdAt,
+      })),
+      assistantText: snapshot.assistantMessage.content || this.rawAnswer(log),
+      status: log.status === 'ended' ? 'ended' : 'error',
+      outcome: persisted ? snapshot.status : 'error',
+      persisted,
+      runtimeId: log.runtimeId ?? null,
+      completedAt: snapshot.completedAt ?? Date.now(),
+    };
+    for (const listener of this.turnFinalizedListeners) {
+      try {
+        listener(event);
+      } catch (err) {
+        appLog.warn('chat', 'turn finalized listener failed', { chatId, turnId: log.turnId, error: err instanceof Error ? err.message : String(err) });
+      }
+    }
+  }
+
+  private notifyCancel(chatId: string, turnId: string): void {
+    for (const listener of this.cancelListeners) {
+      try {
+        listener({ chatId, turnId });
+      } catch (err) {
+        appLog.warn('chat', 'cancel listener failed', { chatId, turnId, error: err instanceof Error ? err.message : String(err) });
+      }
+    }
+  }
+
   isActive(chatId: string): boolean {
     return this.turns.get(chatId)?.status === "active";
   }
@@ -430,6 +794,17 @@ export class ChatHub {
    * chat as `turn_active` instead of a begin failure. */
   hasPendingSelfTurn(chatId: string): boolean {
     return this.pendingSelfTurns.has(chatId);
+  }
+
+  /** A turn still holds this chat's session: it runs, or its runtime cleanup
+   * has not ended. Releasing, reloading or replacing the session waits. */
+  holdsSession(chatId: string): boolean {
+    return this.isActive(chatId) || this.isOwnerTurnActive(chatId);
+  }
+
+  /** holdsSession, or a self-turn is queued or running: startTurn rejects. */
+  isBusy(chatId: string): boolean {
+    return this.holdsSession(chatId) || this.hasPendingSelfTurn(chatId);
   }
 
   activeOwnerTurnId(chatId: string): string | undefined {
@@ -492,15 +867,16 @@ export class ChatHub {
    */
   getSnapshot(nodeId: string): ChatObservationSnapshot | null {
     const direct = this.turns.get(nodeId);
-    const log = direct && direct.nodeId === nodeId ? direct : this.findLogByNodeId(nodeId);
+    const log = direct && direct.nodeId === nodeId && !direct.private ? direct : this.findLogByNodeId(nodeId);
     if (!log) return null;
     return this.toObservationSnapshot(log);
   }
 
+  /** Private turns (TurnLog.private) are never observed: a pane or tool cannot read a check-in through them. */
   private findLogByNodeId(nodeId: string): TurnLog | null {
     let bestActive: TurnLog | null = null;
     for (const candidate of this.turns.values()) {
-      if (candidate.nodeId !== nodeId) continue;
+      if (candidate.nodeId !== nodeId || candidate.private) continue;
       if (candidate.status === "active") return candidate;
       if (!bestActive) bestActive = candidate;
     }
@@ -508,7 +884,7 @@ export class ChatHub {
     let bestEnded: TurnLog | null = null;
     for (const candidates of this.retainedTurns.values()) {
       for (const candidate of candidates) {
-        if (candidate.nodeId !== nodeId) continue;
+        if (candidate.nodeId !== nodeId || candidate.private) continue;
         if (!bestEnded || candidate.snapshot.startedAt > bestEnded.snapshot.startedAt) {
           bestEnded = candidate;
         }
@@ -560,7 +936,16 @@ export class ChatHub {
   }
 
   async startTurn(args: StartTurnArgs): Promise<StartedTurn> {
-    if (this.isActive(args.chatId) || this.isOwnerTurnActive(args.chatId) || this.pendingSelfTurns.has(args.chatId)) {
+    // DESIGN-v2 §2.5: a check-in node runs only its own private check-in
+    // turn, and the Companion's turn ids are the backend's alone, so a
+    // client-minted id can never pass for (or squat on) a post or a check-in.
+    if (isCheckinNodeId(args.nodeId)) {
+      throw new TurnGuardError('checkin_node', `check-in node ${args.nodeId} takes no ordinary turns`);
+    }
+    if (args.turnId !== undefined && hasReservedTurnPrefix(args.turnId)) {
+      throw new TurnGuardError('reserved_turn_id', `turn id ${args.turnId} is reserved for Michi's own turns`);
+    }
+    if (this.isBusy(args.chatId)) {
       throw new Error('a turn is already active for this chat');
     }
     // Claim the chat before the first await: a self-turn that starts while
@@ -590,7 +975,7 @@ export class ChatHub {
       this.cancelRequestedAt.delete(turnId);
       throw new Error(`turn ${turnId} was cancelled before it started`);
     }
-    const assistantId = `a-${args.nodeId}-${turnId}`;
+    const assistantId = userTurnAssistantId(args.nodeId, turnId);
     const log = this.createLog({
       chatId: args.chatId,
       turnId,
@@ -603,6 +988,10 @@ export class ChatHub {
       ownerUserId: args.ownerUserId ?? null,
     });
     if (args.humanOrigin) log.humanOrigin = true;
+    log.runtimeId = args.session.runtimeId;
+    if (args.skill) log.skill = args.skill;
+    const titleSource = titleSourceOf(args);
+    if (titleSource) log.titleSource = titleSource;
     // The durable provisional rows are the prerequisite for both runtime
     // execution and the visible turn_start frame.
     const persistStartedAt = Date.now();
@@ -614,6 +1003,8 @@ export class ChatHub {
     });
     this.turns.set(args.chatId, log);
     this.activeSessions.set(args.chatId, args.session);
+    // What a person typed backs the memory tools' writes in a turn that reads outside content (services/memory/typedText.ts).
+    if (log.humanOrigin) recordTypedText(log.nodeId, turnId, log.snapshot.userMessage?.content ?? '');
     this.append(args.chatId, log, {
       event: CHAT_STREAM_EVENTS.turnStart,
       data: {
@@ -651,7 +1042,7 @@ export class ChatHub {
     // Generic internal subscribers retain historical all-turn semantics.
     // Public foreground routes use subscribeTurn() below, which is strictly
     // foreground-only and pinned to a concrete turn id.
-    const logs = this.replayableLogs(chatId);
+    const logs = this.replayableLogs(chatId).filter((log) => !log.private);
     if (logs.length > 0) {
       const matchingIndex = opts.fromTurnId
         ? logs.findIndex((log) => log.turnId === opts.fromTurnId)
@@ -693,9 +1084,8 @@ export class ChatHub {
       // retainedTurns is append-only oldest→newest. Current is newer than a
       // retained predecessor; preserve that order so reconnect never sends a
       // prior turn after a later turn has advanced the reducer watermark.
-      const logs = [...(this.retainedTurns.get(chatId) ?? [])];
-      const current = this.turns.get(chatId);
-      if (current && !logs.includes(current)) logs.push(current);
+      // Private turns (a check-in) are never replayed to anyone.
+      const logs = this.replayableLogs(chatId).filter((log) => !log.private);
       const cursor = cursors[chatId];
       let replayCursor = cursor;
       let startIndex = 0;
@@ -793,6 +1183,14 @@ export class ChatHub {
     };
   }
 
+  /**
+   * A runtime self-turn this hub still holds. subscribeTurn() refuses it: the background feed delivers it.
+   * A private turn (a check-in) is delivered to nobody, so it is never reported here either.
+   */
+  isSelfTurn(chatId: string, turnId: string): boolean {
+    return this.replayableLogs(chatId).some((log) => log.turnId === turnId && log.selfInitiated && !log.private);
+  }
+
   private replayableLogs(chatId: string): TurnLog[] {
     const retained = this.retainedTurns.get(chatId) ?? [];
     const current = this.turns.get(chatId);
@@ -803,7 +1201,10 @@ export class ChatHub {
   cancel(chatId: string, requestedTurnId?: string): boolean {
     const log = this.turns.get(chatId);
     if (!log || log.status !== "active") {
-      if (requestedTurnId) this.reserveCancellation(requestedTurnId);
+      if (requestedTurnId) {
+        this.reserveCancellation(requestedTurnId);
+        this.notifyCancel(chatId, requestedTurnId);
+      }
       return false;
     }
     const turnId = requestedTurnId ?? log.turnId;
@@ -811,6 +1212,7 @@ export class ChatHub {
       // Stop for a send still waiting behind the active turn (409 turn_active):
       // the active turn keeps running, and the waiting one must never start.
       this.reserveCancellation(turnId);
+      this.notifyCancel(chatId, turnId);
       return false;
     }
     this.cancelledTurnIds.add(log.turnId);
@@ -847,6 +1249,7 @@ export class ChatHub {
     // within the deadline, force the turn into a terminal state so the chat
     // is never stuck on "Cancel requested" indefinitely.
     this.scheduleCancelTimeout(chatId, log);
+    this.notifyCancel(chatId, log.turnId);
     return true;
   }
 
@@ -942,6 +1345,7 @@ export class ChatHub {
     const operation = (async () => {
       const result = await steer(text);
       if (result.accepted) {
+        if (!log.finalizedNotified) recordTypedText(log.nodeId, log.turnId, options.displayText ?? text);
         const message = {
           text: options.displayText ?? text,
           pending: result.pending ?? true,
@@ -968,33 +1372,6 @@ export class ChatHub {
     (log.pendingSteers ??= new Set()).add(operation);
     try { return await operation; }
     finally { log.pendingSteers.delete(operation); }
-  }
-
-  async followUp(chatId: string, text: string): Promise<SteerResult> {
-    return this.callOptionalControl(chatId, "followUp", async (session, log) => {
-      if (!session.followUp) return { accepted: false, reason: "invisible" };
-      const result = await session.followUp(text);
-      if (result.accepted) {
-        this.append(chatId, log, {
-          event: CHAT_STREAM_EVENTS.queueUpdate,
-          data: {
-            steering: [],
-            followUp: [text],
-            source: "native",
-            confidence: "native",
-            nativeMethod: "followUp",
-          },
-        });
-      }
-      return result;
-    }, { accepted: false, reason: "invisible" });
-  }
-
-  async clearQueue(chatId: string): Promise<{ cleared: boolean; reason?: string }> {
-    const session = this.activeSessions.get(chatId);
-    if (!session?.clearQueue) return { cleared: false, reason: "invisible" };
-    await session.clearQueue();
-    return { cleared: true };
   }
 
   /**
@@ -1065,11 +1442,24 @@ export class ChatHub {
    */
   private prepareMemory(session: AgentSession, log: TurnLog): PreparedMemoryContext | null {
     if (!this.memoryInjector) return null;
-    if (log.wireText.trimStart().startsWith('/')) {
+    // A skill turn's text is what followed the skill's name, never a runtime command.
+    if (!log.skill && log.wireText.trimStart().startsWith('/')) {
       this.memoryInjector.forget(session);
       return null;
     }
-    return this.memoryInjector.prepare({ session, ownerUserId: log.ownerUserId, workspaceId: log.snapshot.workspaceId });
+    const visible = log.snapshot.userMessage?.content ?? '';
+    return this.memoryInjector.prepare({
+      session,
+      ownerUserId: log.ownerUserId,
+      workspaceId: log.snapshot.workspaceId,
+      nodeId: log.nodeId,
+      turnId: log.turnId,
+      // What selects related notes: the user's words, a scheduled job's prompt or a delivered
+      // message's body (without its thread-message framing); never the wire text, which can
+      // carry context prefixes and mention expansions.
+      query: log.humanOrigin ? visible : threadMessageBody(visible),
+      scheduledJob: !!log.snapshot.userMessage?.metadata?.scheduledJobId,
+    });
   }
 
   /** Follows a runtime event for the memory block: a compaction drops it, a completed turn delivers it. */
@@ -1084,23 +1474,17 @@ export class ChatHub {
     memory.delivered();
   }
 
-  private async callOptionalControl<T>(
-    chatId: string,
-    _method: string,
-    fn: (session: AgentSession, log: TurnLog) => Promise<T>,
-    missing: T,
-  ): Promise<T> {
-    const session = this.activeSessions.get(chatId);
-    const log = this.turns.get(chatId);
-    if (!session || !log || log.status !== "active") return missing;
-    return fn(session, log);
-  }
-
+  /**
+   * Clears the pending permission and tells every window (and the
+   * multi-model approval mirror) with a permission_resolved frame. Only ACP
+   * echoes one itself; a duplicate is a no-op downstream (matched by id).
+   */
   resolvePermission(chatId: string, requestId: number): void {
     const log = this.turns.get(chatId);
     const pending = log?.pendingPermission;
-    if (pending?.event !== CHAT_STREAM_EVENTS.permissionRequest) return;
-    if (pending.data.requestId === requestId) log!.pendingPermission = undefined;
+    if (!log || pending?.event !== CHAT_STREAM_EVENTS.permissionRequest || pending.data.requestId !== requestId) return;
+    log.pendingPermission = undefined;
+    this.append(chatId, log, { event: CHAT_STREAM_EVENTS.permissionResolved, data: { requestId } });
   }
 
   getPendingPermission(chatId: string) {
@@ -1143,12 +1527,7 @@ export class ChatHub {
         // single EventQueue waiter and runtime mutex are always released.
         // A runtime that can stop its turn does so first: nobody will see
         // it, so nothing it asks for (approvals) could be answered.
-        try { await args.cancel?.(); } catch { /* draining still ends it */ }
-        try {
-          for await (const discarded of args.events) void discarded;
-        } catch {
-          // The original initialization error is the actionable one.
-        }
+        await discardBackgroundTurn(args);
         appLog.warn('chat', 'self turn discarded before durable begin', {
           nodeId: args.nodeId,
           errorClass: err instanceof Error ? err.name : 'Error',
@@ -1156,17 +1535,18 @@ export class ChatHub {
         });
       });
     this.selfTurnQueues.set(args.chatId, queued);
-    void queued.then(() => {
-      if (this.selfTurnQueues.get(args.chatId) === queued) {
-        this.selfTurnQueues.delete(args.chatId);
-        this.pendingSelfTurns.delete(args.chatId);
+    this.releaseSelfTurnQueueWhenSettled(args.chatId, queued);
+  }
+
+  /** Once the chat's last queued self turn settles, the chat has none pending. */
+  private releaseSelfTurnQueueWhenSettled(chatId: string, queued: Promise<void>): void {
+    const release = () => {
+      if (this.selfTurnQueues.get(chatId) === queued) {
+        this.selfTurnQueues.delete(chatId);
+        this.pendingSelfTurns.delete(chatId);
       }
-    }, () => {
-      if (this.selfTurnQueues.get(args.chatId) === queued) {
-        this.selfTurnQueues.delete(args.chatId);
-        this.pendingSelfTurns.delete(args.chatId);
-      }
-    });
+    };
+    void queued.then(release, release);
   }
 
   /**
@@ -1176,6 +1556,7 @@ export class ChatHub {
    * resumes an active turn that survived a crash but is absent in memory.
    */
   async startRequestedSelfTurn(args: StartRequestedSelfTurnArgs): Promise<StartedRequestedSelfTurn> {
+    this.assertRequestedTurnAllowed(args);
     const durable = this.lookupDurableTurn(args.turnId);
     if (durable) {
       this.assertRequestedTurnIdentity(durable, args);
@@ -1209,20 +1590,181 @@ export class ChatHub {
           reject(error);
         });
       this.selfTurnQueues.set(args.chatId, queued);
-      void queued.then(() => {
-        if (this.selfTurnQueues.get(args.chatId) === queued) {
-          this.selfTurnQueues.delete(args.chatId);
-          this.pendingSelfTurns.delete(args.chatId);
-        }
-      }, () => {
-        if (this.selfTurnQueues.get(args.chatId) === queued) {
-          this.selfTurnQueues.delete(args.chatId);
-          this.pendingSelfTurns.delete(args.chatId);
-        }
-      });
+      this.releaseSelfTurnQueueWhenSettled(args.chatId, queued);
     });
     await began;
     return started;
+  }
+
+  /**
+   * Posts a message into an assistant conversation as a complete turn of its
+   * own (DESIGN-v2 §3.3): a check-in's post (`cmp-post-<runId>`, W2-G1a) or
+   * first-run narration (`mna-*`). In order:
+   * - queued like a self turn (hasPendingSelfTurn holds, so a user send gets
+   *   409 turn_active and retries) and behind any turn running there, so it
+   *   never lands under a reply still streaming; when its place comes up,
+   *   shouldPost may still withdraw it (`withdrawn`);
+   * - the untrusted source is recorded first (turn_trust is not keyed on the
+   *   turn row, so a failed write below leaves at most a stray mark, never an
+   *   unmarked post);
+   * - the turn is written as begin + finalize in ONE transaction with no user
+   *   message (TurnPersistence.beginAndFinalize): chips, watermark and node
+   *   status go through the normal finalize projection, and a crash leaves
+   *   either the whole post or nothing, never an active conversation;
+   * - only after the commit, `turn_start{selfInitiated, assistantMetadata}` →
+   *   `chunk` → (`follow_ups`) → `done` go to the log and every window.
+   * Idempotent per turnId: `existing` when it was posted before (or its
+   * message already exists in this conversation), with nothing written or
+   * broadcast. Throws TurnGuardError for a node or id it may not post with;
+   * a post never sets the conversation's title or branch overview.
+   */
+  async postSelfMessage(args: PostSelfMessageArgs): Promise<PostSelfMessageResult> {
+    const prepared = this.preparePost(args);
+    const durable = this.lookupDurableTurn(args.turnId);
+    if (durable) {
+      this.assertPostIdentity(durable, args, prepared.messageId);
+      return 'existing';
+    }
+    this.pendingSelfTurns.add(args.chatId);
+    const previous = this.selfTurnQueues.get(args.chatId) ?? Promise.resolve();
+    const posting = previous
+      .catch(() => {})
+      .then(async () => {
+        const activeForeground = this.activeTurnCompletions.get(args.chatId);
+        if (activeForeground) await activeForeground.catch(() => {});
+        return this.commitPost(args, prepared);
+      });
+    const queued = posting.then(() => {}, () => {});
+    this.selfTurnQueues.set(args.chatId, queued);
+    void queued.then(() => {
+      if (this.selfTurnQueues.get(args.chatId) === queued) {
+        this.selfTurnQueues.delete(args.chatId);
+        this.pendingSelfTurns.delete(args.chatId);
+      }
+    });
+    return posting;
+  }
+
+  /** postSelfMessage's checks, before anything is queued or written; the metadata to store. */
+  private preparePost(args: PostSelfMessageArgs): PreparedPost {
+    const messageId = args.messageId ?? args.turnId;
+    if (!args.text.trim()) throw new TurnGuardError('invalid_post', 'a post needs text');
+    if (isCheckinNodeId(args.nodeId) || isCheckinNodeId(args.chatId)) {
+      throw new TurnGuardError('checkin_node', `nothing is posted into check-in node ${args.nodeId}`);
+    }
+    if (!this.isAssistantNode(args.nodeId)) {
+      throw new TurnGuardError('not_main_node', `node ${args.nodeId} is not an assistant conversation`);
+    }
+    // A closed conversation (the MVP Companion's, meta purpose 'companion') is not the main one either.
+    if (CLOSED_ASSISTANT_PURPOSES.has(this.assistantPurposeOf(args.nodeId))) {
+      throw new TurnGuardError('not_main_node', `node ${args.nodeId} is a closed assistant conversation, not the main one`);
+    }
+    const text = postVisibleText(args.text);
+    if (!text) {
+      throw new TurnGuardError('invalid_post', text === null
+        ? `post ${args.turnId} still names the conversation after its sentinels are removed`
+        : 'a post needs text besides its sentinels');
+    }
+    // Of the Companion's ids, a post may use only a post id (`cmp-post-<runId>`).
+    const reservedForOthers = (id: string) => id.startsWith(COMPANION_SEND_TURN_PREFIX)
+      || (id.startsWith(COMPANION_CHECKIN_TURN_PREFIX) && companionPostRunId(id) === null);
+    if (reservedForOthers(args.turnId) || reservedForOthers(messageId)) {
+      throw new TurnGuardError('reserved_turn_id', `post ${args.turnId} uses a check-in's or a follow-up's id`);
+    }
+    const hasPost = args.metadata?.companionPost !== undefined;
+    const post = hasPost ? parseCompanionPostMetadata(args.metadata!.companionPost) : undefined;
+    if (hasPost && !post) throw new TurnGuardError('invalid_post', `post ${args.turnId} carries malformed companionPost metadata`);
+    const postRun = companionPostRunId(args.turnId) ?? companionPostRunId(messageId);
+    if ((post || postRun !== null) && !(post
+      && args.turnId === companionPostId(post.runId) && messageId === companionPostId(post.runId))) {
+      // A post id without its metadata would replay its text in full (§2.8 T2), and metadata under another id would hide which run it is.
+      throw new TurnGuardError('invalid_post', `post ${args.turnId} must carry the companionPost of run ${postRun ?? post?.runId} under that run's post id`);
+    }
+    const metadata = args.metadata ? { ...args.metadata, ...(post ? { companionPost: post } : {}) } : undefined;
+    const untrusted = args.untrusted ?? (post ? { tool: 'companion_post', detail: 'checkin' } : undefined);
+    const given = args.followUps?.map((value) => value.trim()).filter(Boolean) ?? [];
+    const followUps = given.length ? given : extractTurnMetadata(args.text).followUps ?? [];
+    return { messageId, metadata, untrusted, text, followUps };
+  }
+
+  private assertPostIdentity(durable: DurableTurnIdentity, args: PostSelfMessageArgs, messageId: string): void {
+    if (durable.nodeId !== args.nodeId || durable.assistantId !== messageId) {
+      throw new TurnGuardError('invalid_post', `post ${args.turnId} was reused with a different durable identity`);
+    }
+  }
+
+  /** postSelfMessage once its queue position is reached: write, then show. */
+  private async commitPost(args: PostSelfMessageArgs, prepared: PreparedPost): Promise<PostSelfMessageResult> {
+    const raced = this.lookupDurableTurn(args.turnId);
+    if (raced) {
+      this.assertPostIdentity(raced, args, prepared.messageId);
+      return 'existing';
+    }
+    if (args.shouldPost && !args.shouldPost()) return 'withdrawn';
+    const write = this.persistence.beginAndFinalize;
+    if (!write) throw new Error('this hub cannot post: its persistence has no beginAndFinalize');
+    const log = this.createLog({
+      chatId: args.chatId,
+      turnId: args.turnId,
+      assistantId: prepared.messageId,
+      nodeId: args.nodeId,
+      wireText: '',
+      displayText: '',
+      selfInitiated: true,
+      ownerUserId: args.ownerUserId ?? null,
+    });
+    if (prepared.metadata) {
+      log.snapshot = { ...log.snapshot, assistantMessage: { ...log.snapshot.assistantMessage, metadata: prepared.metadata } };
+    }
+    const companionPost = prepared.metadata?.companionPost;
+    const { followUps } = prepared;
+    const frames = [
+      {
+        event: CHAT_STREAM_EVENTS.turnStart,
+        data: {
+          turnId: args.turnId,
+          assistantId: prepared.messageId,
+          nodeId: args.nodeId,
+          userText: '',
+          selfInitiated: true,
+          startedAt: log.snapshot.startedAt,
+          ...(companionPost ? { assistantMetadata: { companionPost } } : {}),
+        },
+      },
+      // The visible text only: a window reads a title, branch overview or chips from what it streamed.
+      { event: CHAT_STREAM_EVENTS.chunk, data: { text: prepared.text } },
+      ...(followUps.length ? [{ event: CHAT_STREAM_EVENTS.followUps, data: { followUps } }] : []),
+      { event: CHAT_STREAM_EVENTS.done, data: { stopReason: 'end_turn', persisted: true, completedAt: Date.now() } },
+    ] as ChatStreamEvent[];
+    for (const frame of frames) {
+      const stamped = this.stamp(log, frame);
+      log.snapshot = applyTurnEvent(log.snapshot, stamped.ev);
+      log.events.push(stamped);
+    }
+    // Only the chips project onto the conversation: a post never names it
+    // or journals its branch overview (its streamed text carries neither).
+    const chips = log.snapshot.nodeMetadata.followUps;
+    log.snapshot = { ...log.snapshot, nodeMetadata: chips !== undefined ? { followUps: chips } : {} };
+    if (prepared.untrusted) {
+      // The post's own record only: its text never reaches the conversation's native session (§2.8 T2), so the
+      // session's later turns carry nothing from it (w4-fix D25); a turn that reads or replies to it records that itself.
+      this.recordUntrusted({ nodeId: args.nodeId, turnId: args.turnId }, {
+        tool: prepared.untrusted.tool,
+        runtimeId: prepared.untrusted.runtimeId ?? 'michi',
+        ...(prepared.untrusted.detail ? { detail: prepared.untrusted.detail } : {}),
+      }, { carry: false });
+    }
+    const outcome = await write(log.snapshot);
+    if (outcome === 'existing') return 'existing';
+    // Its `done` carries the node's committed completion facts, as persistDone's does: a post adds
+    // none (coreBeginAndFinalizeTurn), and a window without them would count the post itself.
+    log.events = log.events.map((entry) => this.withCompletionFacts(entry, args.nodeId));
+    log.status = 'ended';
+    this.turns.set(args.chatId, log);
+    logInfo('post committed', log, { chars: prepared.text.length });
+    for (const { ev } of log.events) this.broadcast(args.chatId, log, ev);
+    this.scheduleEvict(args.chatId, log);
+    return 'posted';
   }
 
   /** The body of a requested self-turn once its queue position is reached. */
@@ -1232,7 +1774,10 @@ export class ChatHub {
   ): Promise<void> {
     const existing = this.lookupDurableTurn(args.turnId);
     if (existing) this.assertRequestedTurnIdentity(existing, args);
-    const assistantId = existing?.assistantId ?? `self-${args.nodeId}-${args.turnId}`;
+    else if (args.shouldStart && !args.shouldStart()) {
+      throw new Error(`requested turn ${args.turnId} was withdrawn before it started`);
+    }
+    const assistantId = existing?.assistantId ?? selfTurnAssistantId(args.nodeId, args.turnId);
     const displayText = args.displayText ?? '';
     const keepUserMessage = displayText.length > 0;
     const log = this.createLog({
@@ -1247,6 +1792,8 @@ export class ChatHub {
       keepUserMessage,
       ownerUserId: args.ownerUserId ?? null,
     });
+    log.runtimeId = args.session.runtimeId;
+    if (args.private === true || isCheckinNodeId(args.nodeId)) log.private = true;
     await this.persistence.begin(log.snapshot);
     this.turns.set(args.chatId, log);
     this.activeSessions.set(args.chatId, args.session);
@@ -1267,8 +1814,11 @@ export class ChatHub {
       workspaceId: log.snapshot.workspaceId, nodeId: log.nodeId, ownerUserId: log.ownerUserId,
       now: Date.now(), turnId: log.turnId,
     }) : '';
-    // Pages maintenance gets no Michi Memory; every other requested turn runs in an ordinary chat.
-    const memory = args.maintenanceContext ? null : this.prepareMemory(args.session, log);
+    // Pages maintenance gets no Michi Memory; a turn whose caller brings its
+    // own (a check-in's) sends that; every other requested turn runs in an
+    // ordinary chat.
+    const memory = args.maintenanceContext || args.memoryContext !== undefined ? null : this.prepareMemory(args.session, log);
+    const memoryContext = args.maintenanceContext ? null : args.memoryContext ?? memory?.text ?? null;
     const events = (async function* (): AsyncIterableIterator<NormalizedEvent> {
       // Stop can reserve this id while begin() commits, or arrive from
       // a synchronous turn_start subscriber. Never dispatch that work.
@@ -1279,7 +1829,7 @@ export class ChatHub {
       yield* args.session.send(args.text, {
         assistantMessageId: assistantId,
         ...(log.snapshot.userMessage?.id ? { userMessageId: log.snapshot.userMessage.id } : {}),
-        ...(memory ? { memoryContext: memory.text } : {}),
+        ...(memoryContext ? { memoryContext } : {}),
         ...(pageContext ? { pageContext } : {}),
         ...(args.maintenanceContext ? { maintenanceContext: args.maintenanceContext } : {}),
         turnId: log.turnId,
@@ -1295,14 +1845,43 @@ export class ChatHub {
     await done;
   }
 
+  /**
+   * DESIGN-v2 §2.5, fail closed: a `cmp-` turn id (a check-in's own turn,
+   * and so also a post's `cmp-post-`) runs only on a check-in node, and a
+   * check-in node runs only its own run's check-in turn (`cmp-<runId>` on
+   * `n-cmph-<runId>`), so a hidden note can never reach the conversation; a
+   * `cms-` turn (a follow-up the agent sends) runs only outside the
+   * assistant's workspace, so it never lands in V or a check-in.
+   */
+  private assertRequestedTurnAllowed(args: StartRequestedSelfTurnArgs): void {
+    const checkinNode = isCheckinNodeId(args.nodeId);
+    if (args.turnId.startsWith(COMPANION_CHECKIN_TURN_PREFIX) && !checkinNode) {
+      throw new TurnGuardError('reserved_turn_id', `turn ${args.turnId} is a check-in's and runs only on its check-in node`);
+    }
+    if (checkinNode) {
+      const runId = companionCheckinTurnRunId(args.turnId);
+      if (!runId || runId !== checkinRunId(args.nodeId)) {
+        throw new TurnGuardError('checkin_node', `check-in node ${args.nodeId} runs only its own check-in turn`);
+      }
+    }
+    if (args.turnId.startsWith(COMPANION_SEND_TURN_PREFIX) && (checkinNode || this.isAssistantNode(args.nodeId))) {
+      throw new TurnGuardError('reserved_turn_id', `follow-up turn ${args.turnId} cannot run in the assistant's own conversations`);
+    }
+  }
+
   private assertRequestedTurnIdentity(durable: DurableTurnIdentity, args: StartRequestedSelfTurnArgs): void {
-    const expectedAssistantId = `self-${args.nodeId}-${args.turnId}`;
+    const expectedAssistantId = selfTurnAssistantId(args.nodeId, args.turnId);
     if (durable.nodeId !== args.nodeId || durable.assistantId !== expectedAssistantId) {
       throw new Error(`requested Parent turn ${args.turnId} was reused with a different durable identity`);
     }
   }
 
   private async beginSelfTurn(args: StartSelfTurnArgs): Promise<void> {
+    // A turn the runtime starts on its own in a check-in's session would run
+    // unrequested and unwatched: startSelfTurn stops and drains it instead.
+    if (isCheckinNodeId(args.nodeId)) {
+      throw new TurnGuardError('checkin_node', `check-in node ${args.nodeId} takes no turns the runtime starts on its own`);
+    }
     if (args.session && (
       args.session.id !== args.chatId
       || chatNodeOf(args.session.owner) !== args.nodeId
@@ -1310,7 +1889,7 @@ export class ChatHub {
       throw new Error('self turn runtime does not match its chat node owner');
     }
     const turnId = randomUUID();
-    const assistantId = `self-${args.nodeId}-${turnId}`;
+    const assistantId = selfTurnAssistantId(args.nodeId, turnId);
     const log = this.createLog({
       chatId: args.chatId,
       turnId,
@@ -1322,6 +1901,7 @@ export class ChatHub {
       ownerUserId: args.ownerUserId ?? null,
     });
     if (args.cancel) log.selfCancel = args.cancel;
+    log.runtimeId = args.session?.runtimeId ?? null;
     const persistStartedAt = Date.now();
     await this.persistence.begin(log.snapshot);
     logInfo('self turn begin committed', log, { durationMs: Date.now() - persistStartedAt });
@@ -1391,44 +1971,9 @@ export class ChatHub {
     memory: PreparedMemoryContext | null = null,
   ): Promise<void> {
     try {
-      let branchOverviewPublished = false;
-      for await (const ev of events) {
-        if (log.status !== 'active' || this.turns.get(chatId) !== log) break;
-        if (log.finalization) { await log.finalization; break; }
-        if (reportsBranchOverview(ev)) branchOverviewPublished = true;
-        observeTurnTrust({ nodeId: log.nodeId, turnId: log.turnId }, session?.runtimeId, ev);
-        if (ev.kind === "runtime_error") throw runtimeEventError(ev);
-        this.trackMemory(session, memory, log, ev);
-        if (ev.kind === "turn_end") {
-          if (!branchOverviewPublished) {
-            branchOverviewPublished = this.publishBranchOverview(chatId, log);
-          }
-          await this.finishWithDone(
-            chatId,
-            log,
-            this.cancelledTurnIds.has(log.turnId) ? 'cancelled' : ev.stopReason,
-          );
-          break;
-        }
-        const wire = toChatStreamEvent(ev);
-        if (wire) this.append(chatId, log, wire);
-      }
-      if (log.finalization) await log.finalization;
-      if (log.status === 'active' && this.turns.get(chatId) === log) {
-        if (!branchOverviewPublished) this.publishBranchOverview(chatId, log);
-        this.memoryDelivered(memory, log, 'end_turn');
-        await this.finishWithDone(
-          chatId,
-          log,
-          this.cancelledTurnIds.has(log.turnId) ? 'cancelled' : 'end_turn',
-        );
-      }
+      await this.pumpTurnEvents(chatId, log, events, session, memory);
     } catch (err) {
-      if (this.cancelledTurnIds.has(log.turnId) && !(err instanceof RuntimeRecoveryRequiredError)) {
-        await this.finishWithDone(chatId, log, 'cancelled');
-      } else {
-        await this.finishWithError(chatId, log, err);
-      }
+      await this.failTurn(chatId, log, err);
     } finally {
       this.cancelledTurnIds.delete(log.turnId);
       this.cancelRequestedAt.delete(log.turnId);
@@ -1437,6 +1982,61 @@ export class ChatHub {
         if (session && this.activeSessions.get(chatId) === session) this.activeSessions.delete(chatId);
       }
       this.scheduleEvict(chatId, log);
+    }
+  }
+
+  /**
+   * Folds a turn's runtime events into its log until the turn ends, and ends
+   * it as end_turn (or cancelled) when the stream stops without turn_end.
+   * Stops reading once the log is no longer the chat's active one.
+   */
+  private async pumpTurnEvents(
+    chatId: string,
+    log: TurnLog,
+    events: AsyncIterable<NormalizedEvent>,
+    session: AgentSession | undefined,
+    memory: PreparedMemoryContext | null,
+  ): Promise<void> {
+    let branchOverviewPublished = false;
+    for await (const ev of events) {
+      if (log.status !== 'active' || this.turns.get(chatId) !== log) break;
+      if (log.finalization) { await log.finalization; break; }
+      if (reportsBranchOverview(ev)) branchOverviewPublished = true;
+      observeTurnTrust({ nodeId: log.nodeId, turnId: log.turnId }, session?.runtimeId, ev);
+      if (ev.kind === "runtime_error") throw runtimeEventError(ev);
+      this.trackMemory(session, memory, log, ev);
+      if (ev.kind === "turn_end") {
+        if (!branchOverviewPublished) {
+          branchOverviewPublished = this.publishBranchOverview(chatId, log);
+        }
+        await this.finishWithDone(
+          chatId,
+          log,
+          this.cancelledTurnIds.has(log.turnId) ? 'cancelled' : ev.stopReason,
+        );
+        break;
+      }
+      const wire = toChatStreamEvent(ev);
+      if (wire) this.append(chatId, log, wire);
+    }
+    if (log.finalization) await log.finalization;
+    if (log.status === 'active' && this.turns.get(chatId) === log) {
+      if (!branchOverviewPublished) this.publishBranchOverview(chatId, log);
+      this.memoryDelivered(memory, log, 'end_turn');
+      await this.finishWithDone(
+        chatId,
+        log,
+        this.cancelledTurnIds.has(log.turnId) ? 'cancelled' : 'end_turn',
+      );
+    }
+  }
+
+  /** A turn that threw: a Stop's runtime error is a graceful cancellation, unless the runtime needs recovery. */
+  private async failTurn(chatId: string, log: TurnLog, err: unknown): Promise<void> {
+    if (this.cancelledTurnIds.has(log.turnId) && !(err instanceof RuntimeRecoveryRequiredError)) {
+      await this.finishWithDone(chatId, log, 'cancelled');
+    } else {
+      await this.finishWithError(chatId, log, err);
     }
   }
 
@@ -1488,6 +2088,7 @@ export class ChatHub {
     ev: ChatStreamEvent,
     checkpoint = true,
   ): void {
+    if (log.terminalStamped) return;
     const stamped = this.stamp(log, ev);
     log.snapshot = applyTurnEvent(log.snapshot, stamped.ev);
     log.events.push(stamped);
@@ -1551,6 +2152,8 @@ export class ChatHub {
   }
 
   private broadcast(chatId: string, log: TurnLog, event: ChatStreamEvent): void {
+    // A private turn reaches no subscriber at all, background or direct.
+    if (log.private) return;
     for (const sub of this.backgroundSubscribers) {
       if (!log.selfInitiated && !sub.includeForeground) continue;
       try {
@@ -1619,6 +2222,7 @@ export class ChatHub {
       event: CHAT_STREAM_EVENTS.done,
       data: { stopReason, persisted: true, completedAt: Date.now() },
     });
+    log.terminalStamped = true;
     const terminalSnapshot = applyTurnEvent(log.snapshot, stamped.ev);
     // This is the durability boundary: successful done is not observable until
     // the transaction containing messages + node metadata + turn receipt commits.
@@ -1629,16 +2233,36 @@ export class ChatHub {
       this.finishWithPersistenceError(chatId, log, err);
       return;
     }
+    const committed = this.withCompletionFacts(stamped, log.nodeId);
     log.snapshot = terminalSnapshot;
-    log.events.push(stamped);
-    this.trackPendingInteraction(log, stamped.ev);
+    log.events.push(committed);
+    this.trackPendingInteraction(log, committed.ev);
     log.status = "ended";
     logInfo('turn finalized', log, {
       durationMs: Date.now() - persistStartedAt,
       status: terminalSnapshot.status,
       payloadBytes: Buffer.byteLength(JSON.stringify(terminalSnapshot)),
     });
-    this.broadcast(chatId, log, stamped.ev);
+    this.broadcast(chatId, log, committed.ev);
+    this.markSettled(log);
+    this.notifyTurnFinalized(chatId, log, true);
+  }
+
+  /**
+   * The finalized `done` with the node's committed completion facts, so every
+   * window (live or replaying) holds the server's count, whether or not it
+   * watched the reply stream. Without facts the frame goes out as it was.
+   */
+  private withCompletionFacts(entry: { seq: number; ev: ChatStreamEvent }, nodeId: string): { seq: number; ev: ChatStreamEvent } {
+    const ev = entry.ev;
+    if (ev.event !== CHAT_STREAM_EVENTS.done) return entry;
+    let facts: NodeCompletionFacts | null = null;
+    try {
+      facts = this.persistence.completionFacts?.(nodeId) ?? null;
+    } catch {
+      // The receipt committed; only the facts are missing from the frame.
+    }
+    return facts ? { ...entry, ev: { ...ev, data: { ...ev.data, ...facts } } } : entry;
   }
 
   private finishWithError(chatId: string, log: TurnLog, err: unknown): Promise<void> {
@@ -1682,6 +2306,7 @@ export class ChatHub {
         event: CHAT_STREAM_EVENTS.error,
         data: { message, completedAt: Date.now(), ...(code ? { code } : {}) },
       });
+      log.terminalStamped = true;
       const terminalSnapshot = applyTurnEvent(log.snapshot, stamped.ev);
       // Keep the durable restart marker used by startup recovery and replay;
       // the live event above carries the human-readable explanation.
@@ -1692,9 +2317,12 @@ export class ChatHub {
       this.trackPendingInteraction(log, stamped.ev);
       log.status = "error";
       this.broadcast(chatId, log, stamped.ev);
+      this.markSettled(log);
     } catch (persistErr) {
       this.finishWithPersistenceError(chatId, log, persistErr);
+      return;
     }
+    this.notifyTurnFinalized(chatId, log, true);
   }
 
   private finishWithPersistenceError(chatId: string, log: TurnLog, err: unknown): void {
@@ -1723,7 +2351,7 @@ export class ChatHub {
       ...persistenceError.ev,
       data: {
         ...persistenceError.ev.data,
-        code: 'turn_persistence_failed',
+        code: TURN_ERROR_CODES.persistenceFailed,
         recoverable: true,
         completedAt: Date.now(),
       },
@@ -1731,6 +2359,48 @@ export class ChatHub {
     log.events.push(persistenceError);
     this.trackPendingInteraction(log, persistenceError.ev);
     this.broadcast(chatId, log, persistenceError.ev);
+    this.markSettled(log);
+    this.notifyTurnFinalized(chatId, log, false);
+  }
+
+  /** The turn left `active`: release whenTurnSettled's waiters. */
+  private markSettled(log: TurnLog): void {
+    const waiters = log.settleWaiters;
+    log.settleWaiters = undefined;
+    for (const waiter of waiters ?? []) waiter();
+  }
+
+  /** The in-memory log of a turn, current or retained, or null. */
+  private findLogByTurnId(turnId: string): TurnLog | null {
+    for (const log of this.turns.values()) if (log.turnId === turnId) return log;
+    for (const logs of this.retainedTurns.values()) {
+      for (const log of logs) if (log.turnId === turnId) return log;
+    }
+    return null;
+  }
+
+  /**
+   * Resolves once the turn has settled, with the terminal status that was
+   * committed for it: `completed` means it ran to its normal end (DESIGN-v2
+   * §3.5: what the next turn was told counts as delivered only then).
+   * Null when the outcome is unknown: no such turn, a turn this process
+   * does not hold that is still active in the database (another process's,
+   * or one a crash interrupted), or one whose final write failed. A turn
+   * already over answers from memory or the database at once. Never rejects;
+   * a turn stuck after Stop settles when the cancel timeout force-finishes it.
+   */
+  async whenTurnSettled(turnId: string): Promise<SettledTurnStatus | null> {
+    const log = this.findLogByTurnId(turnId);
+    if (log) {
+      if (log.status === 'active') {
+        await new Promise<void>((resolve) => { (log.settleWaiters ??= []).push(resolve); });
+      }
+      if (log.lastPersistenceError) return null;
+      const status = log.snapshot.status;
+      return status === 'active' ? null : status;
+    }
+    const durable = this.lookupDurableTurn(turnId);
+    return durable && durable.status !== 'active' ? durable.status : null;
   }
 
   /**
@@ -1746,9 +2416,9 @@ export class ChatHub {
     const generator = this.titleGenerator;
     if (!generator) return;
     if (isRunOwner(args.session.owner)) return;
-    const userText = (args.displayText ?? args.text).trim();
-    if (!userText) return;
-    const contextText = args.userMetadata?.quotedText?.trim() || undefined;
+    const source = titleSourceOf(args);
+    if (!source) return;
+    const { text: userText, context: contextText } = source;
     let existing: string | null;
     try {
       existing = this.nodeTitle(log.nodeId);
@@ -1802,8 +2472,6 @@ export class ChatHub {
         await this.finishWithDone(chatId, log, 'cancelled');
         return;
       }
-      let terminalSeen = false;
-      let branchOverviewPublished = false;
       const pageContext = this.pageManifestBuilder({
         workspaceId: log.snapshot.workspaceId,
         nodeId: log.nodeId,
@@ -1816,7 +2484,7 @@ export class ChatHub {
       const input = uploaded?.length && isAssistantNode(log.nodeId)
         ? prepareAssistantAttachments(log.wireText, uploaded, assistantCwd())
         : { text: log.wireText, attachments: uploaded };
-      for await (const ev of session.send(input.text, {
+      await this.pumpTurnEvents(chatId, log, session.send(input.text, {
         attachments: input.attachments,
         assistantMessageId: log.assistantId,
         userMessageId: log.snapshot.userMessage?.id,
@@ -1824,47 +2492,11 @@ export class ChatHub {
         ...(pageContext ? { pageContext } : {}),
         turnId: log.turnId,
         ...(log.humanOrigin ? { humanOrigin: true } : {}),
-      })) {
-        if (log.status !== 'active' || this.turns.get(chatId) !== log) return;
-        if (log.finalization) { await log.finalization; return; }
-        if (reportsBranchOverview(ev)) branchOverviewPublished = true;
-        observeTurnTrust({ nodeId: log.nodeId, turnId: log.turnId }, session.runtimeId, ev);
-        if (ev.kind === "runtime_error") throw runtimeEventError(ev);
-        this.trackMemory(session, memory, log, ev);
-        if (ev.kind === "turn_end") {
-          if (!branchOverviewPublished) {
-            branchOverviewPublished = this.publishBranchOverview(chatId, log);
-          }
-          await this.finishWithDone(
-            chatId,
-            log,
-            this.cancelledTurnIds.has(log.turnId) ? 'cancelled' : ev.stopReason,
-          );
-          terminalSeen = true;
-          break;
-        }
-        const wire = toChatStreamEvent(ev);
-        if (wire) this.append(chatId, log, wire);
-      }
-      if (!terminalSeen) {
-        if (log.status !== 'active' || this.turns.get(chatId) !== log) return;
-        if (log.finalization) { await log.finalization; return; }
-        if (!branchOverviewPublished) this.publishBranchOverview(chatId, log);
-        this.memoryDelivered(memory, log, 'end_turn');
-        await this.finishWithDone(
-          chatId,
-          log,
-          this.cancelledTurnIds.has(log.turnId) ? 'cancelled' : 'end_turn',
-        );
-      }
+        ...(log.skill ? { skill: log.skill } : {}),
+        ...(log.titleSource ? { titleSource: log.titleSource } : {}),
+      }), session, memory);
     } catch (err) {
-      if (this.cancelledTurnIds.has(log.turnId) && !(err instanceof RuntimeRecoveryRequiredError)) {
-        // Cancel was requested — treat the resulting runtime error as a
-        // graceful cancellation rather than a hard error.
-        await this.finishWithDone(chatId, log, 'cancelled');
-      } else {
-        await this.finishWithError(chatId, log, err);
-      }
+      await this.failTurn(chatId, log, err);
     } finally {
       this.cancelledTurnIds.delete(log.turnId);
       this.cancelRequestedAt.delete(log.turnId);

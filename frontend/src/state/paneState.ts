@@ -8,6 +8,7 @@ type PaneUpdater<T> = T | ((prev: T) => T);
 const PANE_OPEN_KEY = 'michi:panes:open';
 const PANE_FOCUS_KEY = 'michi:panes:focus';
 const PANE_ITEMS_KEY = 'michi:panes:items:v1';
+const PANE_ZOOM_KEY = 'michi:panes:zoom';
 
 function paneSlotKey(projectId: string, treeId: string | null): string {
   return `${projectId}::${treeId ?? 'workspace'}`;
@@ -25,6 +26,27 @@ function writePaneMap(key: string, value: unknown): void {
   try {
     window.sessionStorage.setItem(key, JSON.stringify(value));
   } catch { /* quota or private browsing */ }
+}
+
+/**
+ * The threads this window had panes in for `projectId`, from the pane maps a
+ * reload keeps (sessionStorage). Boot uses it to guess the visible thread of
+ * a remote workspace before its metadata answers.
+ */
+export function rememberedPaneTreeIds(projectId: string): string[] {
+  if (typeof window === 'undefined') return [];
+  const prefix = `${projectId}::`;
+  const keys = [
+    ...Object.keys(readPaneMap<Record<string, unknown>>(PANE_FOCUS_KEY, {})),
+    ...Object.keys(readPaneMap<Record<string, unknown>>(PANE_OPEN_KEY, {})),
+  ];
+  return [...new Set(keys.filter((key) => key.startsWith(prefix) && key !== `${prefix}workspace`)
+    .map((key) => key.slice(prefix.length)))];
+}
+
+/** The pane that takes the focus when the focused `closedId` closes: the one before it, else the first left. */
+export function paneAfterClose(panes: readonly string[], closedId: string): string | null {
+  return panes[panes.indexOf(closedId) - 1] ?? panes.find((id) => id !== closedId) ?? null;
 }
 
 function readPaneItems(): Record<string, PaneItem> {
@@ -88,6 +110,25 @@ export function prunePaneMaps(
 }
 
 /**
+ * The pane a zoomed slot fills the strip with, or null. Zoom follows focus
+ * across the strip's panes; while a browser item (which lives in the dock,
+ * not the strip) has focus, the strip keeps the pane it zoomed last. A strip
+ * with one pane is already full width, so nothing is zoomed.
+ */
+function resolveZoomedPane(
+  target: string | null | undefined,
+  panes: readonly string[],
+  items: Record<string, PaneItem>,
+  focused: string | null,
+): string | null {
+  if (!target) return null;
+  const strip = panes.filter((id) => items[id]?.kind !== 'browser');
+  if (strip.length < 2) return null;
+  if (focused && strip.includes(focused)) return focused;
+  return strip.includes(target) ? target : null;
+}
+
+/**
  * Single-page mode keeps every slot pane as a tab and shows one page: the
  * focused tab, else the last one. Browser items live in the dock, not in tabs.
  */
@@ -129,6 +170,10 @@ export function usePaneState({ projects, activeProjectId, singlePage = false }: 
     () => readPaneMap<Record<string, string | null>>(PANE_FOCUS_KEY, {}),
   );
   const [paneItems, setPaneItems] = useState<Record<string, PaneItem>>(readPaneItems);
+  // Slot key -> the pane it zoomed last. Present only while the slot is zoomed.
+  const [zoomMap, setZoomMap] = useState<Record<string, string>>(
+    () => readPaneMap<Record<string, string>>(PANE_ZOOM_KEY, {}),
+  );
   const [viewMode, setViewModeState] = useState<ViewMode>('two');
 
   const activeProjectForPane = useMemo(
@@ -157,6 +202,11 @@ export function usePaneState({ projects, activeProjectId, singlePage = false }: 
     [singlePage, slotPanes, paneItems],
   );
   const pagePane = singlePage ? openPanes.find((id) => paneItems[id]?.kind !== 'browser') ?? '' : '';
+  const zoomTarget = paneKey ? zoomMap[paneKey] ?? null : null;
+  const zoomedPane = useMemo(
+    () => resolveZoomedPane(zoomTarget, openPanes, paneItems, focusedPane),
+    [zoomTarget, openPanes, paneItems, focusedPane],
+  );
 
   const setOpenPanes = useCallback((updater: PaneUpdater<string[]>) => {
     const key = paneKeyRef.current;
@@ -196,6 +246,13 @@ export function usePaneState({ projects, activeProjectId, singlePage = false }: 
       }
       return next;
     });
+    setZoomMap((prev) => {
+      const next: typeof prev = {};
+      for (const [key, value] of Object.entries(prev)) {
+        if (projectId && key.startsWith(`${projectId}::`)) next[key] = value;
+      }
+      return next;
+    });
   }, []);
 
   const setPaneSlot = useCallback(
@@ -222,16 +279,40 @@ export function usePaneState({ projects, activeProjectId, singlePage = false }: 
   focusedPaneMapRef.current = focusedPaneMap;
   const paneItemsRef = useRef(paneItems);
   paneItemsRef.current = paneItems;
+  const zoomMapRef = useRef(zoomMap);
+  zoomMapRef.current = zoomMap;
+
+  const clearZoom = useCallback((keys: readonly string[]) => {
+    setZoomMap((prev) => {
+      if (!keys.some((key) => key in prev)) return prev;
+      const next = { ...prev };
+      for (const key of keys) delete next[key];
+      return next;
+    });
+  }, []);
+
+  // Remember where zoom followed focus, and drop a zoom with nothing left to fill.
+  useEffect(() => {
+    if (!paneKey || !zoomTarget) return;
+    if (zoomedPane === null) {
+      const strip = (slotPanes ?? []).filter((id) => paneItems[id]?.kind !== 'browser');
+      if (strip.length < 2 || !strip.includes(zoomTarget)) clearZoom([paneKey]);
+      return;
+    }
+    if (zoomedPane !== zoomTarget) setZoomMap((prev) => ({ ...prev, [paneKey]: zoomedPane }));
+  }, [paneKey, zoomTarget, zoomedPane, slotPanes, paneItems, clearZoom]);
 
   // Persist pane layout to sessionStorage so refresh restores it.
   useEffect(() => { writePaneMap(PANE_OPEN_KEY, openPanesMap); }, [openPanesMap]);
   useEffect(() => { writePaneMap(PANE_FOCUS_KEY, focusedPaneMap); }, [focusedPaneMap]);
   useEffect(() => { writePaneMap(PANE_ITEMS_KEY, paneItems); }, [paneItems]);
+  useEffect(() => { writePaneMap(PANE_ZOOM_KEY, zoomMap); }, [zoomMap]);
   useEffect(() => {
     const flush = () => {
       writePaneMap(PANE_OPEN_KEY, openPanesMapRef.current);
       writePaneMap(PANE_FOCUS_KEY, focusedPaneMapRef.current);
       writePaneMap(PANE_ITEMS_KEY, paneItemsRef.current);
+      writePaneMap(PANE_ZOOM_KEY, zoomMapRef.current);
     };
     window.addEventListener('beforeunload', flush);
     return () => window.removeEventListener('beforeunload', flush);
@@ -252,7 +333,11 @@ export function usePaneState({ projects, activeProjectId, singlePage = false }: 
     );
     if (nextOpen !== openPanesMapRef.current) setOpenPanesMap(nextOpen);
     if (nextFocused !== focusedPaneMapRef.current) setFocusedPaneMap(nextFocused);
-  }, []);
+    // A zoomed pane that died ends its slot's zoom rather than passing it on.
+    clearZoom(Object.entries(zoomMapRef.current)
+      .filter(([key, target]) => deadIds.has(target) || deadIds.has(focusedPaneMapRef.current[key] ?? ''))
+      .map(([key]) => key));
+  }, [clearZoom]);
 
   const openPane = useCallback(
     (nodeId: string) => {
@@ -331,17 +416,21 @@ export function usePaneState({ projects, activeProjectId, singlePage = false }: 
 
   const closePane = useCallback(
     (nodeId: string) => {
+      const key = paneKeyRef.current;
+      if (key && zoomMapRef.current[key]) {
+        const panes = openPanesMapRef.current[key] ?? [];
+        const items = paneItemsRef.current;
+        const zoomed = resolveZoomedPane(zoomMapRef.current[key], panes, items, focusedPaneMapRef.current[key] ?? null);
+        const strip = panes.filter((id) => id !== nodeId && items[id]?.kind !== 'browser');
+        // Closing the zoomed pane ends the zoom; focus moves on unzoomed.
+        if (zoomed === nodeId || strip.length < 2) clearZoom([key]);
+      }
       setOpenPanes((prev) => {
-        const next = prev.filter((id) => id !== nodeId);
-        setFocusedPane((cur) => {
-          if (cur !== nodeId) return cur;
-          const index = prev.indexOf(nodeId);
-          return prev[index - 1] ?? next[0] ?? null;
-        });
-        return next;
+        setFocusedPane((cur) => (cur === nodeId ? paneAfterClose(prev, nodeId) : cur));
+        return prev.filter((id) => id !== nodeId);
       });
     },
-    [setFocusedPane, setOpenPanes],
+    [clearZoom, setFocusedPane, setOpenPanes],
   );
 
   const [focusNonce, setFocusNonce] = useState(0);
@@ -353,6 +442,21 @@ export function usePaneState({ projects, activeProjectId, singlePage = false }: 
       setFocusNonce((n) => n + 1);
     },
     [setFocusedPane, setOpenPanes],
+  );
+
+  /** Zoom `nodeId` (focusing it) so it fills the strip, or end the zoom with null. */
+  const zoomPane = useCallback(
+    (nodeId: string | null) => {
+      const key = paneKeyRef.current;
+      if (!key) return;
+      if (nodeId === null) {
+        clearZoom([key]);
+        return;
+      }
+      focusPane(nodeId);
+      setZoomMap((prev) => (prev[key] === nodeId ? prev : { ...prev, [key]: nodeId }));
+    },
+    [clearZoom, focusPane],
   );
 
   // Reorder an open pane: move `fromId` so it sits at the index currently
@@ -381,9 +485,12 @@ export function usePaneState({ projects, activeProjectId, singlePage = false }: 
 
   return {
     openPanes,
+    /** Every pane of the active slot; openPanes shows only some in single-page mode. */
+    slotPanes,
     tabPanes,
     pagePane,
     focusedPane,
+    zoomedPane,
     focusNonce,
     paneItems,
     viewMode,
@@ -405,6 +512,7 @@ export function usePaneState({ projects, activeProjectId, singlePage = false }: 
     appendPaneInTree,
     closePane,
     focusPane,
+    zoomPane,
     reorderPane,
     setViewMode,
     retainProjectPaneKeys,

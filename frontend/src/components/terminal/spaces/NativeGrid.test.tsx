@@ -1,8 +1,7 @@
-import React from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import type { PageBlock, PageDto, PageEditOp } from 'michi-shared';
-import { NativePageDocument } from './NativePageDocument';
+import NativePageDocument from './NativePageDocument';
 
 const grid = (): Extract<PageBlock, { type: 'grid' }> => ({ id: 'grid', type: 'grid', rev: 3, regions: [
   { id: 'main', span: 8, title: 'Main', blocks: [{ type: 'checklist', items: [{ text: 'Review', done: false }] }] },

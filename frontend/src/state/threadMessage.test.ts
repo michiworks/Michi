@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
-import { formatThreadMessage, parseChatStreamEvent } from 'michi-shared';
+import { formatThreadMessage, formatThreadReply, parseChatStreamEvent } from 'michi-shared';
 
+import { mapMessageRow } from './chatHydration';
 import { reduceNodes } from './chatReducers';
 import type { ChatNodeState } from './chatTypes';
 
@@ -35,5 +36,20 @@ describe('cross-thread messages', () => {
       turnId: 't1', assistantId: 'a', nodeId: 'n-b', userText: '', userMetadata: ['x'],
     }));
     expect(invalid?.event === 'turn_start' && invalid.data.userMetadata).toBeUndefined();
+  });
+
+  it('shows a woken thread reply as its body, live and after reload', () => {
+    const reply = { fromNodeId: 'n-b', fromTitle: 'Implementation', kind: 'reply' as const, hop: 2 };
+    const content = formatThreadReply({
+      fromNodeId: 'n-b', fromTitle: 'Implementation', turnId: 't1', outcome: 'failed', text: 'Partial review.',
+    });
+    const hydrated = mapMessageRow({ id: 'u-1', node_id: 'n-a', role: 'user', content, metadata: JSON.stringify({ threadMessage: reply }), seq: 0 });
+    expect(hydrated.text).toBe('Its turn ended with an error before it finished.\n\nPartial review.');
+    expect(hydrated.threadMessage).toEqual(reply);
+    const live = reduceNodes({ 'n-a': { ...node(), nodeId: 'n-a', chatId: 'n-a' } }, {
+      type: 'observer-turn-start', nodeId: 'n-a', turnId: 'thread-reply-t1', assistantId: 'self-n-a-thread-reply-t1',
+      userText: content, selfInitiated: true, userMetadata: { threadMessage: reply }, cursor: 'background',
+    });
+    expect(live['n-a'].messages[0]).toMatchObject({ role: 'user', text: hydrated.text, threadMessage: reply });
   });
 });

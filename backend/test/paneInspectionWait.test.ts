@@ -11,13 +11,13 @@ import assert from 'node:assert/strict';
 import { afterEach, describe, test } from 'node:test';
 
 import type { ExecutionRef, PaneDescriptorV1, PaneTarget } from 'michi-shared';
-import { PaneInspectionError } from 'michi-shared';
+import { PANE_INSPECTION_LIMITS, PaneInspectionError } from 'michi-shared';
 import * as paneInspectionModule from '../src/services/paneInspection';
 import { PaneInspectionRing } from '../src/services/paneInspectionRing';
 import type { PaneInspectionCaller } from '../src/services/paneInspection';
 import type { PaneSubscribeClock } from '../src/services/paneInspectionSubscribe';
 import * as paneInspectionRingModule from '../src/services/paneInspectionRing';
-import { waitPane, type WaitPaneInput } from '../src/services/paneInspectionWait';
+import { reservePaneWaitSlot, waitPane, type WaitPaneInput } from '../src/services/paneInspectionWait';
 
 // ---------------------------------------------------------------------------
 // Fake clock — identical shape/semantics to paneInspectionSubscribe.test.ts's own.
@@ -299,5 +299,36 @@ describe('waitPane — rate limiting', () => {
     // this test does not leak state into the next one.
     advance(20_000);
     await Promise.all(pending);
+  });
+
+  test('a reserved slot counts once: a wait passing it takes no second one, and a released one no longer counts', async () => {
+    stubService();
+    const { clock, advance } = makeFakeClock();
+    authorizeImpl = () => {};
+    inspectImpl = () => baseDescriptor();
+    const owner = { ...CALLER, ownerUserId: 'owner-reserved-slot-test' };
+    const slots = Array.from({ length: PANE_INSPECTION_LIMITS.concurrentWaitsPerOwnerMax }, () => reservePaneWaitSlot(owner.ownerUserId));
+    assert.ok(slots.every(Boolean));
+    assert.equal(reservePaneWaitSlot(owner.ownerUserId), null, 'the owner is at the limit');
+    const input = { locator: { nodeId: 'n-1' }, until: 'terminal' as const, executionRef: EXECUTION_REF, timeoutMs: 1_000 };
+    const waiting = waitPane(owner, { ...input, slot: slots[0]! }, { clock });
+    await assert.rejects(() => waitPane(owner, input, { clock }),
+      (err: unknown) => err instanceof PaneInspectionError && err.code === 'RATE_LIMITED');
+    advance(1_000);
+    assert.equal((await waiting).reason, 'timed_out');
+    assert.equal(slots[0]!.held(), true, 'the wait leaves the reservation to its holder');
+
+    slots[0]!.release();
+    slots[0]!.release();
+    assert.equal(slots[0]!.held(), false);
+    // A released slot is no pass: the wait takes a slot of its own, the one just freed.
+    const own = waitPane(owner, { ...input, slot: slots[0]! }, { clock });
+    assert.equal(reservePaneWaitSlot(owner.ownerUserId), null);
+    advance(1_000);
+    await own;
+    for (const slot of slots.slice(1)) slot!.release();
+    const after = Array.from({ length: PANE_INSPECTION_LIMITS.concurrentWaitsPerOwnerMax }, () => reservePaneWaitSlot(owner.ownerUserId));
+    assert.ok(after.every(Boolean), 'every slot is back');
+    for (const slot of after) slot!.release();
   });
 });

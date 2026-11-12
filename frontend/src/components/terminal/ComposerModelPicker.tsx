@@ -4,15 +4,33 @@ import type { AgentCapabilities, AgentModelInfo, AgentProviderInfo, AgentReasoni
 import type { ResolvedNodeBinding } from '../../state/nodeBindingResolution';
 import { measureSurface, PopoverSurface } from '../ui/Popover';
 import { useMenuConfirm } from '../ui/useMenuConfirm';
+import { pickMenuSide, useAnchoredPosition } from '../ui/useAnchoredPosition';
+import { useBackLayer } from '../../lib/backStack';
 import { ChevronLeftIcon, ChevronRightIcon, RetryIcon } from './icons';
-import { REASONING_LABELS, type PaneMenuAnchor } from './PaneComposerToolbarLeft';
+import { REASONING_LABELS, composerMenuBelowEdge, type PaneMenuAnchor } from './PaneComposerToolbarLeft';
 import './ComposerModelPicker.css';
 import { resolveComposerReasoning } from './composerReasoning';
-import { composerModelLabel } from './composerModelLabel';
+import { modelDisplayLabel } from '../../lib/modelLabel';
 import { filterAvailableRuntimes } from '../../lib/runtimeVisibility';
+import { isImeComposing } from '../../lib/ime';
 
 type PickerPage = 'overview' | 'model' | 'runtime' | 'provider';
 type SelectionHandler<T> = (value: T) => void | Promise<void>;
+
+/** A chat's Ultracode choice and the live session's report of it. */
+export interface ComposerUltracode {
+  enabled: boolean;
+  /** False when the live session cannot run it (its model or setup); unknown when absent. */
+  available?: boolean;
+}
+
+/** What the Ultracode switch says under its label. */
+function ultracodeNote(ultracode: ComposerUltracode): string {
+  if (ultracode.available === false) return ultracode.enabled
+    ? 'On, but this model or setup cannot run it'
+    : 'Not available with this model or setup';
+  return 'A multi-agent workflow for each task. Uses many more tokens.';
+}
 
 export interface ComposerModelPickerProps {
   anchor: PaneMenuAnchor;
@@ -30,6 +48,9 @@ export interface ComposerModelPickerProps {
   onSaveReasoning: SelectionHandler<AgentReasoning>;
   onRetryModels: () => void;
   onClose: () => void;
+  /** The chat's Ultracode choice; offered when the runtime has it (capabilities.ultracode). */
+  ultracode?: ComposerUltracode;
+  onSaveUltracode?: SelectionHandler<boolean>;
 }
 
 const focusableSelector = 'button:not(:disabled), input:not(:disabled)';
@@ -37,7 +58,7 @@ const focusableSelector = 'button:not(:disabled), input:not(:disabled)';
 export function ComposerModelPicker({
   anchor, agentStatus, resolvedBinding, catalogCapabilities, providerModels, providers = [],
   modelsLoading, modelsWaiting = false, modelsError, onSwitchRuntime, onSaveProvider,
-  onSaveModel, onSaveReasoning, onRetryModels, onClose,
+  onSaveModel, onSaveReasoning, onRetryModels, onClose, ultracode, onSaveUltracode,
 }: ComposerModelPickerProps) {
   const surfaceRef = useRef<HTMLDivElement>(null);
   const bodyRef = useRef<HTMLDivElement>(null);
@@ -45,10 +66,17 @@ export function ComposerModelPicker({
   const searchRef = useRef<HTMLInputElement>(null);
   const [page, setPage] = useState<PickerPage>('overview');
   const [query, setQuery] = useState('');
-  const [saving, setSaving] = useState(false);
+  // A list pick waits on its page with a "Saving…" row; the effort slider and
+  // the Ultracode switch show the pick themselves, so the summary keeps its size.
+  const [saving, setSaving] = useState<'list' | 'inline' | null>(null);
+  const listSaving = saving === 'list';
+  const [ultracodePending, setUltracodePending] = useState<boolean | null>(null);
   const [saveError, setSaveError] = useState<string | null>(null);
   const { blinkingId, confirm, cancel } = useMenuConfirm();
   const busyRef = useRef(false);
+  const queuedRef = useRef<{ run: () => Promise<boolean>; resolve: (saved: boolean) => void } | null>(null);
+  const ultracodeSaves = useRef(0);
+  const ultracodeEnabledRef = useRef(ultracode?.enabled);
   const savingFocusRef = useRef<HTMLElement | null>(null);
   const mountedRef = useRef(true);
   const [position, setPosition] = useState({ left: anchor.x, top: anchor.y, maxHeight: 240 });
@@ -58,12 +86,12 @@ export function ComposerModelPicker({
   const searchable = page === 'model' && providerModels.length > 7;
   const effort = resolveComposerReasoning(resolvedBinding, agentStatus, catalogCapabilities, providerModels, providers);
   const runtimeLabel = agentStatus?.availableRuntimes?.find((runtime) => runtime.id === resolvedBinding.runtime)?.label || resolvedBinding.runtime;
-  const modelLabel = composerModelLabel(resolvedBinding.runtime, resolvedBinding.model, providerModels);
+  const modelLabel = modelDisplayLabel(resolvedBinding.runtime, resolvedBinding.model, providerModels);
   const providerLabel = providers.find((provider) => provider.id === resolvedBinding.provider)?.label || resolvedBinding.provider || 'Default provider';
   const closeRef = useRef(onClose);
   const returnTarget = useRef<PickerPage>('runtime');
   const pageRef = useRef(page);
-  useLayoutEffect(() => { closeRef.current = onClose; pageRef.current = page; });
+  useLayoutEffect(() => { closeRef.current = onClose; pageRef.current = page; ultracodeEnabledRef.current = ultracode?.enabled; });
 
   const dismiss = useCallback((restoreFocus: boolean) => {
     cancel();
@@ -105,72 +133,50 @@ export function ComposerModelPicker({
     }
   }, [effort.adjustable, page]);
 
-  useLayoutEffect(() => {
+  useAnchoredPosition({ anchor: anchor.trigger ?? null, surfaceRef, dependencies: [anchor, page, searchable], measure: () => {
     const surface = surfaceRef.current;
     if (!surface) return;
-    const reposition = () => {
-      const trigger = anchor.trigger?.getBoundingClientRect();
-      const aboveEdge = trigger ? trigger.top - 6 : anchor.anchorBottom;
-      const belowEdge = trigger ? trigger.bottom + 6 : anchor.y;
-      const viewport = window.visualViewport;
-      const viewportTop = viewport?.offsetTop ?? 0;
-      const viewportLeft = viewport?.offsetLeft ?? 0;
-      const height = viewport?.height ?? window.innerHeight;
-      const width = viewport?.width ?? window.innerWidth;
-      const aboveSpace = aboveEdge === undefined ? 0 : aboveEdge - viewportTop - 8;
-      const belowSpace = viewportTop + height - belowEdge - 8;
-      const frame = getComputedStyle(surface);
-      // The surface grows in (scale .97→1); a pass during that measures the
-      // box it settles to, not the scaled one on screen.
-      const rect = measureSurface(surface);
-      // The exported cap belongs to the scrolling list, not its search/back chrome.
-      const listHeight = parseFloat(frame.getPropertyValue('--m-maxHeight')) || 240;
-      const content = contentRef.current;
-      // Measured down to the list's top edge: the search page reserves height
-      // under its list, and counting that as chrome would grow it each pass.
-      const chromeHeight = content
-        ? (content.getBoundingClientRect().top - rect.box.top) / rect.scaleY
-          + (parseFloat(frame.paddingBottom) || 0) + (parseFloat(frame.borderBottomWidth) || 0)
-        : 0;
-      // The summary page picks the side: the preferred one (above, or below
-      // with preferBelow) when all of it fits there, else the other when it
-      // fits there, else the roomier side. Its sub-pages keep that side so
-      // moving between them never flips the surface.
-      let above: boolean;
-      if (page === 'overview' || side.current === null) {
-        const wanted = chromeHeight + (searchable || !content ? listHeight : Math.min(listHeight, content.scrollHeight));
-        above = anchor.preferBelow
-          ? belowSpace < wanted && aboveSpace > belowSpace
-          : aboveSpace >= wanted || (belowSpace < wanted && aboveSpace > belowSpace);
-        side.current = above ? 'above' : 'below';
-      } else {
-        above = side.current === 'above';
-      }
-      const maxHeight = Math.max(80, Math.min(listHeight + chromeHeight, above ? aboveSpace : belowSpace, height - 16));
-      const top = above && aboveEdge !== undefined ? aboveEdge - Math.min(rect.height, maxHeight) : belowEdge;
-      const next = {
-        left: Math.max(viewportLeft + 8, Math.min(anchor.align === 'end' ? (trigger?.right ?? anchor.x) - rect.width : trigger?.left ?? anchor.x, viewportLeft + width - rect.width - 8)),
-        top: Math.max(viewportTop + 8, Math.min(top, viewportTop + height - Math.min(rect.height, maxHeight) - 8)),
-        maxHeight,
-      };
-      setPosition((previous) => Object.keys(next).every((key) => previous[key as keyof typeof next] === next[key as keyof typeof next]) ? previous : next);
+    const trigger = anchor.trigger?.getBoundingClientRect();
+    const aboveEdge = trigger ? trigger.top - 6 : anchor.anchorBottom;
+    const belowEdge = anchor.trigger ? composerMenuBelowEdge(anchor.trigger) : anchor.y;
+    const viewport = window.visualViewport;
+    const viewportTop = viewport?.offsetTop ?? 0;
+    const viewportLeft = viewport?.offsetLeft ?? 0;
+    const height = viewport?.height ?? window.innerHeight;
+    const width = viewport?.width ?? window.innerWidth;
+    const aboveSpace = aboveEdge === undefined ? 0 : aboveEdge - viewportTop - 8;
+    const belowSpace = viewportTop + height - belowEdge - 8;
+    const frame = getComputedStyle(surface);
+    // The surface grows in (scale .97→1); a pass during that measures the
+    // box it settles to, not the scaled one on screen.
+    const rect = measureSurface(surface);
+    const content = contentRef.current;
+    // The exported cap belongs to the scrolling list, not its search/back
+    // chrome; the summary page's own cap (CSS) is a little higher.
+    const contentCap = content ? parseFloat(getComputedStyle(content).maxHeight) : NaN;
+    const listHeight = Number.isFinite(contentCap) ? contentCap : parseFloat(frame.getPropertyValue('--m-maxHeight')) || 240;
+    // Measured down to the list's top edge: the search page reserves height
+    // under its list, and counting that as chrome would grow it each pass.
+    const chromeHeight = content
+      ? (content.getBoundingClientRect().top - rect.box.top) / rect.scaleY
+        + (parseFloat(frame.paddingBottom) || 0) + (parseFloat(frame.borderBottomWidth) || 0)
+      : 0;
+    // The summary page picks the side; its sub-pages keep that side so
+    // moving between them never flips the surface.
+    if (page === 'overview' || side.current === null) {
+      const wanted = chromeHeight + (searchable || !content ? listHeight : Math.min(listHeight, content.scrollHeight));
+      side.current = pickMenuSide({ aboveSpace, belowSpace, wanted, preferBelow: anchor.preferBelow });
+    }
+    const above = side.current === 'above';
+    const maxHeight = Math.max(80, Math.min(listHeight + chromeHeight, above ? aboveSpace : belowSpace, height - 16));
+    const top = above && aboveEdge !== undefined ? aboveEdge - Math.min(rect.height, maxHeight) : belowEdge;
+    const next = {
+      left: Math.max(viewportLeft + 8, Math.min(anchor.align === 'end' ? (trigger?.right ?? anchor.x) - rect.width : trigger?.left ?? anchor.x, viewportLeft + width - rect.width - 8)),
+      top: Math.max(viewportTop + 8, Math.min(top, viewportTop + height - Math.min(rect.height, maxHeight) - 8)),
+      maxHeight,
     };
-    reposition();
-    const observer = new ResizeObserver(reposition);
-    observer.observe(surface);
-    if (anchor.trigger) observer.observe(anchor.trigger);
-    window.addEventListener('resize', reposition);
-    window.addEventListener('scroll', reposition, true);
-    window.visualViewport?.addEventListener('resize', reposition);
-    window.visualViewport?.addEventListener('scroll', reposition);
-    return () => {
-      observer.disconnect();
-      window.removeEventListener('resize', reposition);
-      window.removeEventListener('scroll', reposition, true);
-      window.visualViewport?.removeEventListener('resize', reposition);
-      window.visualViewport?.removeEventListener('scroll', reposition);
-    };
-  }, [anchor, page, searchable]);
+    setPosition((previous) => Object.keys(next).every((key) => previous[key as keyof typeof next] === next[key as keyof typeof next]) ? previous : next);
+  } });
 
   // Inside the caller's <AnimatePresence> a closed picker fades out for a
   // moment (PopoverSurface); meanwhile it takes no clicks, keys or selections.
@@ -178,6 +184,14 @@ export function ComposerModelPicker({
   useEffect(() => {
     if (!present) cancel();
   }, [present, cancel]);
+
+  // Esc and the phone's Back: a list goes back to the summary, the summary closes.
+  const stepBack = useCallback(() => {
+    cancel();
+    if (pageRef.current !== 'overview') { setPage('overview'); setQuery(''); }
+    else dismiss(true);
+  }, [cancel, dismiss]);
+  useBackLayer(present, { back: stepBack });
 
   useEffect(() => {
     mountedRef.current = true;
@@ -188,12 +202,10 @@ export function ComposerModelPicker({
       dismiss(false);
     };
     const keyboard = (event: KeyboardEvent) => {
-      if (event.key !== 'Escape') return;
+      if (event.key !== 'Escape' || isImeComposing(event)) return;
       event.preventDefault();
       event.stopPropagation();
-      cancel();
-      if (pageRef.current !== 'overview') { setPage('overview'); setQuery(''); }
-      else dismiss(true);
+      stepBack();
     };
     document.addEventListener('pointerdown', outside, true);
     window.addEventListener('keydown', keyboard, true);
@@ -202,28 +214,59 @@ export function ComposerModelPicker({
       document.removeEventListener('pointerdown', outside, true);
       window.removeEventListener('keydown', keyboard, true);
     };
-  }, [present, anchor.trigger, dismiss, cancel]);
+  }, [present, anchor.trigger, dismiss, stepBack]);
 
   useLayoutEffect(() => { cancel(); }, [resolvedBinding.runtime, resolvedBinding.provider, resolvedBinding.model, cancel]);
 
-  const select = async (action: () => void | Promise<void>, nextPage = page) => {
-    if (busyRef.current) return;
+  const select = async (action: () => void | Promise<void>, nextPage = page, inline = false): Promise<boolean> => {
+    if (busyRef.current) {
+      if (!inline) return false;
+      // An inline control stays live while it saves: its newest pick saves
+      // next, and one it replaces before then did not fail.
+      queuedRef.current?.resolve(true);
+      return new Promise((resolve) => { queuedRef.current = { run: () => select(action, nextPage, true), resolve }; });
+    }
     busyRef.current = true;
     setSaveError(null);
     try {
       const result = action();
       if (result) {
-        savingFocusRef.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
-        setSaving(true);
+        if (!inline) savingFocusRef.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+        setSaving(inline ? 'inline' : 'list');
         await result;
       }
       if (mountedRef.current) navigate(nextPage);
+      return true;
     } catch (error) {
       if (mountedRef.current) setSaveError(error instanceof Error ? error.message : 'Could not save selection');
+      return false;
     } finally {
       busyRef.current = false;
-      if (mountedRef.current) setSaving(false);
+      const queued = queuedRef.current;
+      queuedRef.current = null;
+      if (queued && mountedRef.current) void queued.run().then(queued.resolve);
+      else {
+        queued?.resolve(false);
+        if (mountedRef.current) setSaving(null);
+      }
     }
+  };
+
+  // The switch shows its pick until the chat's choice arrives with it (a
+  // render after the save can settle); a failed last save returns it.
+  useLayoutEffect(() => {
+    if (ultracodeSaves.current === 0 && ultracodePending === ultracode?.enabled) setUltracodePending(null);
+  }, [ultracode?.enabled, ultracodePending]);
+  const toggleUltracode = () => {
+    if (!ultracode || !onSaveUltracode) return;
+    const next = !(ultracodePending ?? ultracode.enabled);
+    ultracodeSaves.current += 1;
+    setUltracodePending(next);
+    void select(() => onSaveUltracode(next), page, true).then((saved) => {
+      ultracodeSaves.current -= 1;
+      if (!mountedRef.current || ultracodeSaves.current > 0) return;
+      setUltracodePending((shown) => !saved || shown === ultracodeEnabledRef.current ? null : shown);
+    });
   };
 
   const onKeyDown = (event: React.KeyboardEvent) => {
@@ -238,7 +281,8 @@ export function ComposerModelPicker({
     if (event.key === 'ArrowLeft' && !input && page !== 'overview') {
       event.preventDefault(); navigate('overview'); return;
     }
-    if (event.key === 'ArrowRight' && !input && page === 'overview') {
+    // Right opens a summary row's page; a switch is toggled with Space or Enter only.
+    if (event.key === 'ArrowRight' && !input && page === 'overview' && (event.target as HTMLElement).getAttribute('role') !== 'switch') {
       event.preventDefault(); (event.target as HTMLButtonElement).click(); return;
     }
     if (!['ArrowUp', 'ArrowDown', 'Home', 'End'].includes(event.key)) return;
@@ -272,13 +316,13 @@ export function ComposerModelPicker({
   const filteredModels = providerModels.filter((model) => `${model.label ?? ''} ${model.id} ${model.description ?? ''}`.toLowerCase().includes(query.trim().toLowerCase()));
   const summaryRow = (target: PickerPage, label: string, value: string) => (
     <button type="button" className="composer-picker-row composer-picker-summary" data-picker-page={target}
-      aria-label={`Select ${label.toLowerCase()}: ${value}`} onClick={() => navigate(target)} disabled={saving}>
+      aria-label={`Select ${label.toLowerCase()}: ${value}`} onClick={() => navigate(target)} disabled={listSaving}>
       <span className="composer-picker-copy"><span className="composer-picker-caption">{label}</span><span className="composer-picker-value">{value}</span></span>
       <ChevronRightIcon />
     </button>
   );
   const option = (id: string, label: string, checked: boolean, action: () => void | Promise<void>, description?: string, disabled = false) => (
-    <button key={id} type="button" role="menuitemradio" aria-checked={checked} disabled={disabled || saving}
+    <button key={id} type="button" role="menuitemradio" aria-checked={checked} disabled={disabled || listSaving}
       className={`composer-picker-row${blinkingId === `${page}-${id}` ? ' ui-menu-blink' : ''}`}
       onClick={() => confirm(`${page}-${id}`, () => { if (checked) navigate('overview'); else void select(action, 'overview'); })}>
       <span className="composer-picker-copy"><span className="composer-picker-value">{label}</span>{description && <span className="composer-picker-caption">{description}</span>}</span>
@@ -288,13 +332,13 @@ export function ComposerModelPicker({
 
   return (
     <PopoverSurface ref={surfaceRef} menuKind="composer" left={position.left} top={position.top} width="var(--m-width)" maxWidth="calc(100vw - 16px)" maxHeight={position.maxHeight}
-      role="dialog" aria-label="Model settings" className="composer-picker"
+      role="dialog" aria-label="Model settings" escapeLayer="over" className="composer-picker"
       style={{
         overflow: 'hidden',
         // Reserve the search page height so filtering cannot move its navigation.
         height: searchable ? position.maxHeight : undefined,
       }} onMouseDown={(event) => event.stopPropagation()} onClick={(event) => event.stopPropagation()}>
-      <div ref={bodyRef} onKeyDown={onKeyDown} className="composer-picker-body" aria-busy={saving}>
+      <div ref={bodyRef} onKeyDown={onKeyDown} className="composer-picker-body" aria-busy={saving !== null}>
         {page !== 'overview' && (
           <div className="composer-picker-header">
             <button type="button" className="composer-picker-icon" aria-label="Back to model settings" title="Back" onClick={() => navigate('overview')}><ChevronLeftIcon /></button>
@@ -305,14 +349,25 @@ export function ComposerModelPicker({
             <input ref={searchRef} type="search" aria-label="Search models" placeholder="Search models" value={query} onChange={(event) => { cancel(); setQuery(event.target.value); }} />
           </div>
         )}
-        <div ref={contentRef} className="composer-picker-content">
+        <div ref={contentRef} className="composer-picker-content" data-page={page}>
           {page === 'overview' ? (
             <>
               {summaryRow('runtime', 'Runtime', runtimeLabel)}
               {caps?.providerModels && onSaveProvider && providers.length > 0 && summaryRow('provider', 'Provider', providerLabel)}
               {hasModels && summaryRow('model', 'Model', modelLabel)}
-              {effort.adjustable && <EffortControl key={JSON.stringify([resolvedBinding.runtime, resolvedBinding.provider, resolvedBinding.model, effort.levels])} levels={effort.levels} value={effort.value} disabled={saving}
-                onSelect={(value) => select(() => onSaveReasoning(value))} />}
+              {effort.adjustable && <EffortControl key={JSON.stringify([resolvedBinding.runtime, resolvedBinding.provider, resolvedBinding.model, effort.levels])} levels={effort.levels} value={effort.value} disabled={listSaving}
+                onSelect={(value) => select(() => onSaveReasoning(value), page, true)} />}
+              {caps?.ultracode && ultracode && onSaveUltracode && (
+                <button type="button" role="switch" aria-checked={ultracodePending ?? ultracode.enabled} disabled={listSaving}
+                  className="composer-picker-row composer-picker-switch" data-unavailable={ultracode.available === false || undefined}
+                  onClick={toggleUltracode}>
+                  <span className="composer-picker-copy">
+                    <span className="composer-picker-value">Ultracode</span>
+                    <span className="composer-picker-caption">{ultracodeNote(ultracode)}</span>
+                  </span>
+                  <span className="composer-picker-switch-track" aria-hidden="true"><span className="composer-picker-switch-thumb" /></span>
+                </button>
+              )}
               {!caps && catalogStatus}
             </>
           ) : page === 'model' ? (
@@ -334,7 +389,7 @@ export function ComposerModelPicker({
               {providers.map((provider) => option(provider.id, provider.label || provider.id, provider.id === resolvedBinding.provider, () => onSaveProvider?.(provider.id), provider.hasKey === false ? 'No API key configured' : undefined))}
             </div>
           )}
-          {saving && <div role="status" className="composer-picker-status">Saving…</div>}
+          {listSaving && <div role="status" className="composer-picker-status">Saving…</div>}
           {saveError && <div role="alert" className="composer-picker-status composer-picker-error">{saveError}</div>}
         </div>
       </div>
@@ -344,17 +399,36 @@ export function ComposerModelPicker({
 
 function EffortControl({ levels, value, disabled, onSelect }: {
   levels: AgentReasoning[]; value?: AgentReasoning; disabled: boolean;
-  onSelect: (value: AgentReasoning) => Promise<void>;
+  onSelect: (value: AgentReasoning) => Promise<boolean>;
 }) {
   const [preview, setPreview] = useState<AgentReasoning | null>(null);
   const dragging = useRef(false);
+  // The newest pick until the value shows it, and every pick made here.
+  const awaiting = useRef<AgentReasoning | null>(null);
+  const picked = useRef(new Set<AgentReasoning>());
   const current = preview ?? value;
   const index = Math.max(0, levels.findIndex((level) => level === current));
   const label = current ? REASONING_LABELS[current] ?? current : 'Default';
+  // A save can settle before the caller's binding catches up (Home reloads
+  // agent status afterwards), so a saved pick stays shown until the value
+  // arrives, through an earlier pick's value on the way; only a failed save
+  // returns the slider to the saved value.
+  useLayoutEffect(() => {
+    if (dragging.current) return;
+    if (awaiting.current !== null && value !== awaiting.current && value !== undefined && picked.current.has(value)) return;
+    awaiting.current = null;
+    setPreview(null);
+  }, [value]);
   const commit = (next: AgentReasoning) => {
-    if (next === value) { setPreview(null); return; }
+    if (next === value && awaiting.current === null) { setPreview(null); return; }
+    awaiting.current = next;
+    picked.current.add(next);
     setPreview(next);
-    void onSelect(next).finally(() => setPreview(null));
+    void onSelect(next).then((saved) => {
+      if (saved || awaiting.current !== next) return;
+      awaiting.current = null;
+      setPreview(null);
+    });
   };
   return (
     <div className="composer-picker-effort">

@@ -10,39 +10,17 @@ import {
   type SteeringReport,
   type SteeringSegment,
   type ChatStreamEvent,
-  type DurableAssistantBlock,
-  type DurableToolCall,
   type DurableTurnSnapshot,
 } from 'michi-shared';
-
-export type AssistantSection = 'answer' | 'thinking';
-
-function stableBlockId(message: ChatMessage, index: number): string {
-  return `${message.id}-b-${index}`;
-}
-
-function nextBlockId(message: ChatMessage, blocks: readonly AssistantBlock[]): string {
-  return stableBlockId(message, blocks.length);
-}
 
 function isTextBlock(block: AssistantBlock): block is Extract<AssistantBlock, { kind: 'answer' | 'thinking' }> {
   return block.kind === 'answer' || block.kind === 'thinking';
 }
 
-// Shallow array copy. Append helpers only REPLACE the tail element (`blocks[i] = {...}`)
-// or PUSH a new block, then return `{...message, blocks}` — they never mutate a block
-// object in place (verified). Preserving element identity lets `sameBlockRefs`
+// Shallow array copy. Preserving element identity lets `sameBlockRefs`
 // short-circuit React.memo for unchanged runs during streaming.
 function cloneBlocks(blocks: readonly AssistantBlock[] | undefined): AssistantBlock[] {
   return (blocks ?? []).slice();
-}
-
-function closeTrailingTextBlock(blocks: AssistantBlock[]): void {
-  const index = blocks.length - 1;
-  const last = blocks[index];
-  if (last && isTextBlock(last) && last.streaming !== false) {
-    blocks[index] = { ...last, streaming: false };
-  }
 }
 
 export function isValidAssistantBlocks(value: unknown): value is AssistantBlock[] {
@@ -139,8 +117,8 @@ export function projectAssistantStreamEvent(
       // every chunk (O(L²) over a streaming turn) just to throw it away.
       // Persistence/fingerprints derive content lazily via assistantPersistenceContent.
       content: '',
-      blocks: (message.blocks ?? []) as DurableAssistantBlock[],
-      toolCalls: message.toolCalls as DurableToolCall[],
+      blocks: message.blocks ?? [],
+      toolCalls: message.toolCalls,
       plan: message.plan,
       subagents: message.subagents,
       metadata: { steeringReports: message.steeringReports, usageSummary: message.usageSummary, warnings: message.warnings },
@@ -154,8 +132,8 @@ export function projectAssistantStreamEvent(
   const projected = applyTurnEvent(snapshot, event);
   return {
     ...message,
-    blocks: projected.assistantMessage.blocks as AssistantBlock[],
-    toolCalls: projected.assistantMessage.toolCalls as ToolCallState[],
+    blocks: projected.assistantMessage.blocks,
+    toolCalls: projected.assistantMessage.toolCalls,
     plan: projected.assistantMessage.plan,
     ...(projected.assistantMessage.subagents ? { subagents: projected.assistantMessage.subagents } : {}),
     usageSummary: projected.assistantMessage.metadata?.usageSummary,
@@ -164,109 +142,6 @@ export function projectAssistantStreamEvent(
       ? { steeringReports: projected.assistantMessage.metadata.steeringReports } : {}),
     streaming: projected.status === 'active' ? message.streaming : false,
   };
-}
-
-function currentSection(blocks: readonly AssistantBlock[]): AssistantSection {
-  // Non-text blocks preserve the current semantic section. In particular,
-  // consecutive tools after a thought must all remain inside that thinking
-  // run instead of the second tool falling back to the answer section.
-  for (let index = blocks.length - 1; index >= 0; index -= 1) {
-    const block = blocks[index];
-    if (block.kind === 'answer' || block.kind === 'thinking') return block.kind;
-    if (block.kind === 'tool' || block.kind === 'user-input') return block.section;
-  }
-  return 'answer';
-}
-
-function currentRunRawLength(blocks: readonly AssistantBlock[], section: AssistantSection): number {
-  let total = 0;
-  for (let i = blocks.length - 1; i >= 0; i -= 1) {
-    const b = blocks[i];
-    if (section === 'answer') {
-      if (b.kind === 'thinking') break;
-      if (b.kind === 'answer') total += b.rawText.length;
-    } else {
-      if (b.kind === 'answer') break;
-      if (b.kind === 'thinking') total += b.rawText.length;
-    }
-  }
-  return total;
-}
-
-export function nextToolBlockPlacement(message: ChatMessage): { section: AssistantSection; rawOffset: number } {
-  const blocks = cloneBlocks(message.blocks);
-  const section = currentSection(blocks);
-  return { section, rawOffset: currentRunRawLength(blocks, section) };
-}
-
-export function appendAnswerBlockText(message: ChatMessage, text: string): ChatMessage {
-  const blocks = cloneBlocks(message.blocks);
-  const last = blocks[blocks.length - 1];
-  if (last?.kind === 'answer') {
-    blocks[blocks.length - 1] = { ...last, rawText: last.rawText + text, streaming: message.streaming };
-  } else {
-    closeTrailingTextBlock(blocks);
-    blocks.push({ id: nextBlockId(message, blocks), kind: 'answer', rawText: text, streaming: message.streaming });
-  }
-  return { ...message, blocks };
-}
-
-export function appendThinkingBlockText(message: ChatMessage, text: string): ChatMessage {
-  const blocks = cloneBlocks(message.blocks);
-  const last = blocks[blocks.length - 1];
-  if (last?.kind === 'thinking') {
-    blocks[blocks.length - 1] = { ...last, rawText: last.rawText + text, streaming: message.streaming };
-  } else {
-    closeTrailingTextBlock(blocks);
-    blocks.push({ id: nextBlockId(message, blocks), kind: 'thinking', rawText: text, streaming: message.streaming });
-  }
-  return { ...message, blocks };
-}
-
-export function appendToolBlock(message: ChatMessage, toolCallId: string): ChatMessage {
-  const blocks = cloneBlocks(message.blocks);
-  const { section, rawOffset } = nextToolBlockPlacement({ ...message, blocks });
-  closeTrailingTextBlock(blocks);
-  blocks.push({
-    id: nextBlockId(message, blocks),
-    kind: 'tool',
-    toolCallId,
-    section,
-    rawOffset,
-  });
-  return { ...message, blocks };
-}
-
-export function appendUserInputBlock(message: ChatMessage, requestId: number): ChatMessage {
-  const blocks = cloneBlocks(message.blocks);
-  const rawOffset = currentRunRawLength(blocks, 'answer');
-  closeTrailingTextBlock(blocks);
-  blocks.push({
-    id: nextBlockId(message, blocks),
-    kind: 'user-input',
-    requestId,
-    section: 'answer',
-    rawOffset,
-  });
-  return { ...message, blocks };
-}
-
-export function appendImageBlock(
-  message: ChatMessage,
-  img: { workspaceId: string; path: string; caption?: string; mimeType: string; size: number },
-): ChatMessage {
-  const blocks = cloneBlocks(message.blocks);
-  closeTrailingTextBlock(blocks);
-  const block: AssistantBlock = {
-    id: nextBlockId(message, blocks),
-    kind: 'image',
-    workspaceId: img.workspaceId,
-    path: img.path,
-    caption: img.caption,
-    mimeType: img.mimeType,
-    size: img.size,
-  };
-  return { ...message, blocks: [...blocks, block] };
 }
 
 export function finalizeAssistantBlocks(message: ChatMessage): ChatMessage {

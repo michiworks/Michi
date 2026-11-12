@@ -21,6 +21,7 @@ remote_node() {
   minimum="$(michi_node_minimum "$INSTALL_DIR")" \
     || remote_fail "Could not read engines.node from $INSTALL_DIR/package.json"
   # Prefer the Node that the desktop app's remote setup installed.
+  REMOTE_PATH="$PATH"
   michi_select_node "$minimum" "$REMOTE_ROOT/node/bin/node" \
     || remote_fail "Michi needs Node.js $minimum or newer"
   REMOTE_NODE="$MICHI_NODE"
@@ -66,11 +67,12 @@ remote_revision() {
   remote_control "$1" status 2>/dev/null | sed -n 's/^revision: //p' || true
 }
 
-# Same order as the desktop app's update: build beside the running backend,
+# Same order as the desktop app's update (buildRemoteUpdateScript in
+# backend/src/services/remoteDesktopSetup.ts): build beside the running backend,
 # stop it from its own checkout, start the new build, and restore the old one
 # if the new build does not start.
 remote_update() {
-  local force=0 arg old_repo repo url ref revision attempt log
+  local force=0 arg old_repo repo url ref revision attempt log minimum
   for arg in "$@"; do
     case "$arg" in
       --force|-f) force=1 ;;
@@ -113,6 +115,15 @@ remote_update() {
     tail -n 20 "$log"
     remote_fail "Could not fetch $ref; Michi keeps running $old_repo"
   fi
+  # The new build can need a newer Node than the running one: choose it from
+  # the new checkout's engines.node, as the desktop app's update does, among
+  # the Node binaries on the PATH that this command started with.
+  minimum="$(michi_node_minimum "$repo")" \
+    || remote_fail "Could not read engines.node from $repo/package.json; Michi keeps running $old_repo"
+  PATH="$REMOTE_PATH"
+  michi_select_node "$minimum" "$REMOTE_ROOT/node/bin/node" \
+    || remote_fail "The new build needs Node.js $minimum or newer; Michi keeps running $old_repo"
+  REMOTE_NODE="$MICHI_NODE"
   if ! (cd "$repo" && MICHI_DATA_DIR="$REMOTE_DATA" MICHI_CONFIG_DIR="$REMOTE_DATA" MICHI_LOG_DIR="$REMOTE_DATA/logs" \
     npm run remote:setup) >>"$log" 2>&1; then
     tail -n 20 "$log"

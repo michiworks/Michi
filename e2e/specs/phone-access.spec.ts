@@ -43,11 +43,14 @@ test('Tailscale setup guides login and HTTPS consent before showing a private re
   const evidence = resolve('.artifacts/tailscale-phone-access'); mkdirSync(evidence, { recursive: true });
   await section.screenshot({ path: resolve(evidence, 'desktop.png') });
   await page.setViewportSize({ width: 390, height: 844 });
+  // A phone swaps the Settings window for a drawer, which loads the section (and its link) afresh.
+  await expect(page.getByRole('dialog', { name: 'Settings', exact: true }).getByRole('button', { name: 'Back', exact: true })).toBeVisible();
   await expect(section.getByRole('img')).toBeVisible();
-  expect(await section.evaluate(element => element.scrollWidth <= element.clientWidth)).toBe(true);
+  await expect.poll(() => section.evaluate(element => element.scrollWidth <= element.clientWidth)).toBe(true);
   await section.screenshot({ path: resolve(evidence, 'phone.png') });
   await section.getByRole('button', { name: 'Turn off' }).click();
   await expect(section.getByRole('img')).toHaveCount(0);
-  expect(actions).toEqual(['/login', '/start', '/link', '/stop']);
+  // The phone drawer may ask for the link again; the order is what matters.
+  expect([...new Set(actions)]).toEqual(['/login', '/start', '/link', '/stop']);
   expect(errors).toEqual([]);
 });

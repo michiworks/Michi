@@ -1,6 +1,6 @@
 .page-view-entry{color:var(--term-accent);cursor:pointer;text-decoration:underline;text-decoration-thickness:1px;text-underline-offset:3px}
 .page-view-entry[aria-disabled=true]{color:var(--term-dim);cursor:default;text-decoration-style:dotted}
-.page-view-entry:focus-visible,.page-view-back:focus-visible{outline:2px solid var(--term-accent);outline-offset:3px;border-radius:3px}
+.page-view-entry:focus-visible,.page-view-back:focus-visible{outline: var(--focus-ring);outline-offset:3px;border-radius:3px}
 .page-view-block-entry{margin-top:10px;font-size:var(--fs-md)}
 .page-view-content{min-width:0;min-height:0;overflow:auto;flex:1;padding:40px 24px 16px;color:var(--term-fg);font-family:var(--message-latin-font),var(--message-cjk-font)}
 .page-view-content__page[hidden]{display:none}

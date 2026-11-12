@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react';
-import { workflowProgress } from 'michi-shared';
+import { ActionMenu } from '../../ui/ActionMenu';
 import { DrawerShell, type DrawerShellProps } from '../../ui/DrawerShell';
 import { usePhoneLayout } from '../../../hooks/usePhoneLayout';
 import {
@@ -8,7 +8,7 @@ import {
   useChatProjects,
   useNodesSelector,
 } from '../../../state/chatStore';
-import type { ChatNodeState, SubagentInfo } from '../../../state/chatTypes';
+import type { ChatNodeState } from '../../../state/chatTypes';
 import { findTreeIdForNode } from '../../../state/tree';
 import {
   selectBackgroundWork,
@@ -19,61 +19,35 @@ import {
 import {
   useBackgroundSubagentLiveness,
   useOptionalWorkflowDomain,
-  useWorkflowRun,
-  useWorkflowRunDetail,
   useWorkflowRunsForNodes,
 } from '../../../state/workflowDomain';
-import { formatDurationMs } from '../toolCallGrouping';
-import { SubagentDetail, subagentDetailDomId } from '../subagents/SubagentDetail';
-import { SubagentSummaryText } from '../subagents/SubagentRoster';
-import {
-  SUBAGENT_TONE_COLOR,
-  SUBAGENT_TONE_LABEL,
-  firstPlainLine,
-  subagentDisplayName,
-  subagentShownDurationMs,
-  subagentSummary,
-  subagentToolCount,
-  subagentTone,
-} from '../subagents/subagentPresentation';
-import { useLiveNow } from '../workflows/WorkflowRunCard';
-import { WorkflowRunDetail } from '../workflows/WorkflowRunPane';
-import { WORKFLOW_STATUS_COLOR, WORKFLOW_STATUS_LABEL, workflowNowLine } from '../workflows/workflowPresentation';
 import type { BackgroundWorkFocus, OpenBackgroundWorkDetail } from './backgroundWorkEvents';
+import { MultiModelWorkCard } from './MultiModelWorkCard';
+import { SubagentCard } from './SubagentCard';
+import { WorkflowWorkCard } from './WorkflowWorkCard';
+import { GLYPH_BOX, useFinishedFold } from './workCardParts';
 
 /**
  * Background work: what a conversation's subagents and workflows are doing,
- * one line each, in a right drawer. A line expands in place to the full
- * subagent detail (task, activity, result) or workflow run (steps, messages,
- * result, controls, approvals). Opened only by a user click (pane-title
- * badge, in-chat card); live while open. Which items it lists is
+ * in a right drawer. A workflow is a card (what it is, where it is, its
+ * controls and approvals, then one line per agent, opened in place; a
+ * multi-model run lists its steps with one row per branch); the
+ * subagents are one card in the same language (SubagentCard), a line each
+ * that expands to its detail (task, steps, result). The header says what
+ * needs you and what runs; the scope is a
+ * quiet menu beside it. Opened only by a user click (pane-title badge,
+ * in-chat card); live while open. Which items it lists is
  * `selectBackgroundWork`; finished work it lists while other work runs
- * folds behind one line (`foldedItems`).
+ * folds behind one line, or the subagents' Finished band (`foldedItems`).
  */
 
 type Scope = 'conversation' | 'thread';
 
-const MONO = 'var(--font-mono)';
 const DRAWER_WIDTH = 640;
 
 const ellipsis: React.CSSProperties = { minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' };
 
 const BODY: React.CSSProperties = { flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column' };
-
-/**
- * A phone fills its screen with the drawer and reads it at arm's length:
- * the chrome scale (sized for a desktop window) steps up for everything in
- * it, expanded agent and workflow detail included, and each row takes two
- * lines (stackedRow) so the larger name, summary and status still fit.
- */
-const PHONE_BODY = {
-  ...BODY,
-  '--fs-2xs': '11px',
-  '--fs-xs': '12px',
-  '--fs-sm': '13px',
-  '--fs-md': '15px',
-  '--fs-lg': '16px',
-} as React.CSSProperties;
 
 function itemKey(nodeId: string, focus: BackgroundWorkFocus): string {
   return JSON.stringify([nodeId, focus.kind, focus.kind === 'subagent' ? focus.sessionId : focus.runKey]);
@@ -163,13 +137,14 @@ function runningCount(work: BackgroundWork): number {
 
 const rowButton: React.CSSProperties = {
   display: 'flex',
-  alignItems: 'baseline',
-  gap: 8,
+  alignItems: 'center',
+  gap: 10,
   width: '100%',
   minWidth: 0,
   boxSizing: 'border-box',
-  padding: '5px 14px',
+  padding: '6px 8px',
   border: 0,
+  borderRadius: 'var(--ui-radius)',
   margin: 0,
   background: 'transparent',
   color: 'var(--term-fg)',
@@ -178,198 +153,6 @@ const rowButton: React.CSSProperties = {
   textAlign: 'left',
   cursor: 'pointer',
 };
-
-/** A phone's row: name and status, then (under the name) summary and meta. */
-const stackedRow: React.CSSProperties = { ...rowButton, flexDirection: 'column', alignItems: 'stretch', gap: 3, padding: '8px 14px' };
-const rowLine: React.CSSProperties = { display: 'flex', alignItems: 'baseline', gap: 8, width: '100%', minWidth: 0 };
-/** The status dot and the gap after it: the second line starts under the name. */
-const subLine: React.CSSProperties = { ...rowLine, paddingLeft: 16, boxSizing: 'border-box' };
-
-function nameStyle(stacked: boolean, failed: boolean): React.CSSProperties {
-  return {
-    ...ellipsis,
-    ...(stacked ? { flex: 1, fontSize: 'var(--fs-md)' } : { flexShrink: 0, maxWidth: '35%', fontSize: 'var(--fs-sm)' }),
-    fontWeight: 600,
-    color: failed ? 'var(--term-danger)' : 'var(--term-fg)',
-  };
-}
-
-function Chevron({ open }: { open: boolean }) {
-  return <span aria-hidden style={{ flexShrink: 0, width: 10, textAlign: 'center', fontSize: 'var(--fs-xs)', color: 'var(--term-muted)' }}>{open ? '▾' : '▸'}</span>;
-}
-
-function StatusDot({ color, live }: { color: string; live: boolean }) {
-  return (
-    <span aria-hidden style={{ width: 8, flexShrink: 0, display: 'inline-flex', alignSelf: 'center' }}>
-      <span className={live ? 'term-dot-i term-dot-i--run' : 'term-dot-i'} style={{ background: color }} />
-    </span>
-  );
-}
-
-/**
- * Elapsed time, ticking while the agent runs (a background agent's too:
- * since it started, not its launch turn's length). Still once it stopped.
- */
-function SubagentDuration({ subagent, active }: { subagent: SubagentInfo; active: boolean }) {
-  const now = useLiveNow(active);
-  const duration = subagentShownDurationMs(subagent, active, now);
-  return duration === undefined ? null : <span>{formatDurationMs(duration)}</span>;
-}
-
-const SubagentWorkRow = React.memo(function SubagentWorkRow({ subagent, active, rowKey, expanded, onToggle }: {
-  subagent: SubagentInfo;
-  active: boolean;
-  rowKey: string;
-  expanded: boolean;
-  onToggle: (key: string) => void;
-}) {
-  // A `working` entry the conversation no longer counts reads as ended.
-  const tone = subagentTone(subagent, active);
-  const summary = subagentSummary(subagent, { running: tone === 'running' });
-  const tools = subagentToolCount(subagent);
-  const name = subagentDisplayName(subagent);
-  const stacked = usePhoneLayout();
-  const dot = <StatusDot color={SUBAGENT_TONE_COLOR[tone]} live={active} />;
-  const nameText = <span style={nameStyle(stacked, tone === 'failed')}>{name}</span>;
-  const summaryText = summary ? <SubagentSummaryText summary={summary} /> : <span style={{ flex: 1 }} />;
-  const meta = (
-    <span style={{ display: 'inline-flex', gap: 6, flexShrink: 0, fontFamily: MONO, fontSize: 'var(--fs-xs)', color: 'var(--term-muted)' }}>
-      <SubagentDuration subagent={subagent} active={active} />
-      {tools > 0 && <span>{tools} {tools === 1 ? 'tool' : 'tools'}</span>}
-    </span>
-  );
-  const status = <span style={{ flexShrink: 0, fontSize: 'var(--fs-xs)', color: SUBAGENT_TONE_COLOR[tone] }}>{SUBAGENT_TONE_LABEL[tone]}</span>;
-  return (
-    <div data-testid="background-subagent-row" data-background-work-key={rowKey} data-subagent-id={subagent.sessionId} data-active={active ? 'true' : undefined} data-stacked={stacked ? 'true' : undefined}>
-      <button
-        type="button"
-        aria-expanded={expanded}
-        aria-controls={expanded ? subagentDetailDomId(subagent) : undefined}
-        aria-label={`${name}, ${SUBAGENT_TONE_LABEL[tone]}${summary ? `: ${summary.text}` : ''}`}
-        onClick={() => onToggle(rowKey)}
-        className="t-hover-bg-alt"
-        style={stacked ? stackedRow : rowButton}
-      >
-        {stacked ? (
-          <>
-            <span data-row-line="" style={rowLine}>{dot}{nameText}{status}<Chevron open={expanded} /></span>
-            <span data-row-line="" style={subLine}>{summaryText}{meta}</span>
-          </>
-        ) : (
-          <>{dot}{nameText}{summaryText}{meta}{status}<Chevron open={expanded} /></>
-        )}
-      </button>
-      {expanded && (
-        <div style={{ padding: '2px 14px 10px 30px' }}>
-          <SubagentDetail subagent={subagent} active={active} bounded={false} />
-        </div>
-      )}
-    </div>
-  );
-});
-
-/** The full run, fetched whole when the bulk snapshot trimmed it. */
-function WorkflowRunExpanded({ backendConnectionId, runId }: { backendConnectionId: string; runId: string }) {
-  const domain = useOptionalWorkflowDomain();
-  const identity = useMemo(() => ({ backendConnectionId, id: runId }), [backendConnectionId, runId]);
-  const { resource, pending, error } = useWorkflowRunDetail(identity);
-  const run = resource?.value;
-  const now = useLiveNow(!!run && (run.status === 'running' || run.status === 'paused'));
-  if (!run) return null;
-  return (
-    <WorkflowRunDetail
-      run={run}
-      now={now}
-      pending={pending}
-      error={error}
-      controls
-      onAction={domain ? (action) => { void domain.act(identity, action); } : undefined}
-      onAnswer={domain ? (approvalId, optionId) => { void domain.answer(identity, approvalId, optionId); } : undefined}
-      style={{ padding: '6px 14px 14px 30px' }}
-    />
-  );
-}
-
-const WorkflowWorkRow = React.memo(function WorkflowWorkRow({ runKey, rowKey, expanded, onToggle }: {
-  runKey: string;
-  rowKey: string;
-  expanded: boolean;
-  onToggle: (key: string) => void;
-}) {
-  const { resource } = useWorkflowRun(runKey);
-  const stacked = usePhoneLayout();
-  if (!resource) return null;
-  const run = resource.value;
-  const live = run.status === 'running' || run.status === 'paused';
-  const progress = workflowProgress(run);
-  const now = workflowNowLine(run);
-  const finished = live ? undefined : firstPlainLine(run.result) ?? firstPlainLine(run.statusDetail);
-  const approvals = run.approvals?.length ?? 0;
-  const color = WORKFLOW_STATUS_COLOR[run.status];
-  const lead = (
-    <>
-      <StatusDot color={color} live={run.status === 'running'} />
-      <span aria-hidden style={{ flexShrink: 0, color: 'var(--term-mauve)', fontSize: 'var(--fs-xs)' }}>⧉</span>
-      <span style={nameStyle(stacked, run.status === 'failed')}>{run.name}</span>
-    </>
-  );
-  const nowText = (
-    <span data-testid="background-workflow-now" style={{ ...ellipsis, flex: 1, fontFamily: now ? MONO : undefined, fontSize: now ? 'var(--fs-xs)' : 'var(--fs-sm)' }}>
-      {now ? (
-        <>
-          <span style={{ color: 'var(--term-muted)' }}>now ❯ </span>
-          <span style={{ color: run.status === 'paused' ? 'var(--term-select)' : 'var(--term-accent)' }}>{now}</span>
-        </>
-      ) : finished ? (
-        <span style={{ color: run.status === 'failed' ? 'var(--term-danger)' : 'var(--term-mid)' }}>{finished}</span>
-      ) : null}
-    </span>
-  );
-  const approval = approvals > 0 && <span style={{ flexShrink: 0, fontSize: 'var(--fs-xs)', color: 'var(--term-select)' }}>needs approval</span>;
-  const steps = progress.total > 0 && (
-    <span style={{ flexShrink: 0, fontFamily: MONO, fontSize: 'var(--fs-xs)', color: 'var(--term-muted)' }}>
-      {progress.done}/{progress.total} {run.runtime === 'claude' ? 'agents' : 'steps'}
-    </span>
-  );
-  const status = <span style={{ flexShrink: 0, fontSize: 'var(--fs-xs)', color }}>{WORKFLOW_STATUS_LABEL[run.status]}</span>;
-  return (
-    <div data-testid="background-workflow-row" data-background-work-key={rowKey} data-run-key={runKey} data-active={live ? 'true' : undefined} data-stacked={stacked ? 'true' : undefined}>
-      <button
-        type="button"
-        aria-expanded={expanded}
-        aria-label={`Workflow ${run.name}, ${WORKFLOW_STATUS_LABEL[run.status]}${approvals > 0 ? ', needs approval' : ''}`}
-        onClick={() => onToggle(rowKey)}
-        className="t-hover-bg-alt"
-        style={stacked ? stackedRow : rowButton}
-      >
-        {stacked ? (
-          <>
-            <span data-row-line="" style={rowLine}>{lead}{approval}{status}<Chevron open={expanded} /></span>
-            {(now || finished || steps) && <span data-row-line="" style={subLine}>{nowText}{steps}</span>}
-          </>
-        ) : (
-          <>{lead}{nowText}{approval}{steps}{status}<Chevron open={expanded} /></>
-        )}
-      </button>
-      {expanded && <WorkflowRunExpanded backendConnectionId={resource.backendConnectionId} runId={run.id} />}
-    </div>
-  );
-});
-
-function SectionLabel({ label, total, running }: { label: string; total: number; running: number }) {
-  return (
-    <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '8px 14px 3px', fontSize: 'var(--fs-2xs)', letterSpacing: 'var(--ls-caps-wide)', textTransform: 'uppercase', color: 'var(--term-muted)' }}>
-      <span>{label}</span>
-      <span aria-hidden style={{ flex: 1, borderTop: '1px solid var(--term-line)' }} />
-      <span style={{ fontFamily: MONO, textTransform: 'none', letterSpacing: 0, color: running > 0 ? 'var(--term-accent)' : 'var(--term-muted)' }}>
-        {running > 0 ? `${running} running` : total}
-      </span>
-    </div>
-  );
-}
-
-/** A fold of one row is no shorter than the row: one stays inline. */
-const FOLD_MIN = 2;
 
 function FoldLine({ count, failed, noun, open, controls, onClick }: {
   count: number;
@@ -389,25 +172,24 @@ function FoldLine({ count, failed, noun, open, controls, onClick }: {
       aria-label={`${count} finished ${noun}${failed > 0 ? `, ${failed} failed` : ''}`}
       onClick={onClick}
       className="t-hover-bg-alt"
-      style={stacked ? { ...rowButton, padding: stackedRow.padding } : rowButton}
+      // A finger-sized target on a phone.
+      style={stacked ? { ...rowButton, padding: 8 } : rowButton}
     >
-      <span aria-hidden style={{ width: 8, flexShrink: 0, textAlign: 'center', fontSize: 'var(--fs-xs)', color: 'var(--term-muted)' }}>{open ? '▾' : '▸'}</span>
+      <span aria-hidden style={{ ...GLYPH_BOX, fontSize: 'var(--fs-xs)', color: 'var(--term-faint)' }}>{open ? '▾' : '▸'}</span>
       <span style={{ fontSize: 'var(--fs-sm)', color: 'var(--term-muted)' }}>{count} finished</span>
-      {failed > 0 && <span style={{ fontSize: 'var(--fs-sm)', color: 'var(--term-danger)' }}>· {failed} failed</span>}
+      {failed > 0 && <span style={{ fontSize: 'var(--fs-sm)', color: 'var(--term-danger-text)' }}>· {failed} failed</span>}
     </button>
   );
 }
 
 /**
- * One section of a conversation's work: its running items, then finished
- * ones, those `foldedItems` picked behind one line. The fold opens on a
- * click, or by itself while it holds the expanded item (a focused
- * finished agent, or one the user expanded before it finished), and then
- * stays open so collapsing that row does not close it under the user.
+ * A conversation's workflow cards: the running ones, then finished ones,
+ * those `foldedItems` picked behind one line (useFinishedFold). Workflow
+ * cards say what they are, so their section has no label. The subagents
+ * fold the same way, behind their card's Finished band.
  */
-function WorkSection<T extends { active: boolean }>({ label, noun, items, keyOf, isFailed, renderItem, folded, foldKey, foldOpen, onSetFold, expandedKey, onToggle }: {
-  label: string;
-  /** The fold line's noun: "subagents", "workflows". */
+function WorkSection<T extends { active: boolean }>({ noun, items, keyOf, isFailed, renderItem, folded, foldKey, foldOpen, onSetFold, expandedKey, onToggle, gap = 0 }: {
+  /** The fold line's noun: "workflows". */
   noun: string;
   items: readonly T[];
   keyOf: (item: T) => string;
@@ -419,103 +201,100 @@ function WorkSection<T extends { active: boolean }>({ label, noun, items, keyOf,
   onSetFold: (key: string, open: boolean) => void;
   expandedKey: string | null;
   onToggle: (key: string) => void;
+  /** Space between items (cards). */
+  gap?: number;
 }) {
   const listId = useId();
-  const keyed = items.map((item) => ({ item, key: keyOf(item) }));
-  const tucked = keyed.filter(({ item, key }) => !item.active && folded.has(key));
-  const folds = tucked.length >= FOLD_MIN;
-  const inline = folds ? keyed.filter((entry) => !tucked.includes(entry)) : keyed;
-  const holdsExpanded = folds && expandedKey !== null && tucked.some(({ key }) => key === expandedKey);
-  useEffect(() => {
-    if (holdsExpanded && !foldOpen) onSetFold(foldKey, true);
-  }, [holdsExpanded, foldOpen, foldKey, onSetFold]);
-  const open = foldOpen || holdsExpanded;
-  const running = items.filter((item) => item.active).length;
+  const { inline, tucked, folds, open, toggle } = useFinishedFold({ items, keyOf, folded, foldKey, foldOpen, onSetFold, expandedKey, onToggle });
+  const list: React.CSSProperties | undefined = gap ? { display: 'flex', flexDirection: 'column', gap } : undefined;
   return (
     <>
-      <SectionLabel label={label} total={items.length} running={running} />
-      {inline.map(({ item, key }) => renderItem(item, key))}
+      <div style={list}>{inline.map(({ item, key }) => renderItem(item, key))}</div>
       {folds && (
         <>
-          <FoldLine
-            count={tucked.length}
-            failed={tucked.filter(({ item }) => isFailed(item)).length}
-            noun={noun}
-            open={open}
-            controls={listId}
-            onClick={() => {
-              if (!open) {
-                onSetFold(foldKey, true);
-                return;
-              }
-              // Closing hides the row it holds: collapse that too.
-              if (holdsExpanded && expandedKey) onToggle(expandedKey);
-              onSetFold(foldKey, false);
-            }}
-          />
-          {open && <div id={listId}>{tucked.map(({ item, key }) => renderItem(item, key))}</div>}
+          <div style={gap ? { marginTop: gap / 2 } : undefined}>
+            <FoldLine
+              count={tucked.length}
+              failed={tucked.filter(({ item }) => isFailed(item)).length}
+              noun={noun}
+              open={open}
+              controls={listId}
+              onClick={toggle}
+            />
+          </div>
+          {open && <div id={listId} style={list}>{tucked.map(({ item, key }) => renderItem(item, key))}</div>}
         </>
       )}
     </>
   );
 }
 
-function WorkGroup({ group, showHeader, expandedKey, onToggle, openFolds, onSetFold }: {
+/** The row of a multi-model run the open request names (a click on a row of its in-chat card), with the request's requestSeq. */
+type RowFocus = { key: string; threadKey: string; step?: number; seq: number };
+
+function WorkGroup({ group, showHeader, expandedKey, onToggle, openFolds, onSetFold, rowFocus, onClose, onMenuOpenChange }: {
   group: WorkGroupValue;
   showHeader: boolean;
   expandedKey: string | null;
   onToggle: (key: string) => void;
   openFolds: ReadonlySet<string>;
   onSetFold: (key: string, open: boolean) => void;
+  rowFocus: RowFocus | null;
+  /** Closes the drawer: it is modal, so a pane an item opens stays hidden behind it otherwise. */
+  onClose: () => void;
+  /** An item's own menu opened or closed (Escape closes that menu first). */
+  onMenuOpenChange: (open: boolean) => void;
 }) {
   const { node, work, loading, folded } = group;
   const empty = work.subagents.length === 0 && work.workflows.length === 0;
   const subagentsFold = JSON.stringify([node.nodeId, 'subagents']);
+  // The subagents' list band is open unless closed: what it records is the closing.
+  const subagentsClosed = JSON.stringify([node.nodeId, 'subagents', 'closed']);
   const workflowsFold = JSON.stringify([node.nodeId, 'workflows']);
   return (
-    <section data-testid="background-work-group" data-node-id={node.nodeId} aria-label={showHeader ? group.title : undefined} style={{ paddingBottom: 6 }}>
+    <section data-testid="background-work-group" data-node-id={node.nodeId} aria-label={showHeader ? group.title : undefined} style={{ paddingBottom: showHeader ? 18 : 6 }}>
       {showHeader && (
-        <div style={{ display: 'flex', alignItems: 'baseline', gap: 8, padding: '10px 14px 2px', minWidth: 0 }}>
-          <span data-testid="background-work-group-title" style={{ ...ellipsis, fontSize: 'var(--fs-md)', fontWeight: 600, color: 'var(--term-fg)' }}>{group.title}</span>
+        <div style={{ display: 'flex', alignItems: 'baseline', gap: 8, padding: '4px 2px 10px', minWidth: 0 }}>
+          <span data-testid="background-work-group-title" style={{ ...ellipsis, fontSize: 'var(--fs-lg)', fontWeight: 600, color: 'var(--term-fg)' }}>{group.title}</span>
           {group.current && <span style={{ flexShrink: 0, fontSize: 'var(--fs-xs)', color: 'var(--term-muted)' }}>this conversation</span>}
         </div>
       )}
       {loading && empty && (
-        <div role="status" className="term-hydrating" style={{ padding: '4px 14px', fontSize: 'var(--fs-sm)', color: 'var(--term-muted)' }}>loading…</div>
-      )}
-      {work.subagents.length > 0 && (
-        <WorkSection
-          label="subagents"
-          noun="subagents"
-          items={work.subagents}
-          keyOf={(item) => itemKey(node.nodeId, { kind: 'subagent', sessionId: item.subagent.sessionId })}
-          isFailed={(item) => subagentTone(item.subagent, item.active) === 'failed'}
-          renderItem={(item, key) => (
-            <SubagentWorkRow key={key} subagent={item.subagent} active={item.active} rowKey={key} expanded={expandedKey === key} onToggle={onToggle} />
-          )}
-          folded={folded}
-          foldKey={subagentsFold}
-          foldOpen={openFolds.has(subagentsFold)}
-          onSetFold={onSetFold}
-          expandedKey={expandedKey}
-          onToggle={onToggle}
-        />
+        <div role="status" className="term-hydrating" style={{ padding: '4px 8px', fontSize: 'var(--fs-sm)', color: 'var(--term-muted)' }}>loading…</div>
       )}
       {work.workflows.length > 0 && (
         <WorkSection
-          label="workflows"
           noun="workflows"
           items={work.workflows}
           keyOf={(item) => itemKey(node.nodeId, { kind: 'workflow', runKey: item.runKey })}
           isFailed={(item) => item.run.value.status === 'failed'}
-          renderItem={(item, key) => <WorkflowWorkRow key={key} runKey={item.runKey} rowKey={key} expanded={expandedKey === key} onToggle={onToggle} />}
+          renderItem={(item, key) => (item.run.value.runtime === 'michi'
+            ? <MultiModelWorkCard key={key} runKey={item.runKey} rowKey={key} expanded={expandedKey === key}
+              focus={rowFocus?.key === key ? rowFocus : undefined} onClose={onClose} onMenuOpenChange={onMenuOpenChange} />
+            : <WorkflowWorkCard key={key} runKey={item.runKey} rowKey={key} expanded={expandedKey === key} onToggle={onToggle} />)}
           folded={folded}
           foldKey={workflowsFold}
           foldOpen={openFolds.has(workflowsFold)}
           onSetFold={onSetFold}
           expandedKey={expandedKey}
           onToggle={onToggle}
+          gap={12}
         />
+      )}
+      {work.subagents.length > 0 && (
+        <div style={work.workflows.length > 0 ? { marginTop: 12 } : undefined}>
+          <SubagentCard
+            items={work.subagents}
+            keyOf={(item) => itemKey(node.nodeId, { kind: 'subagent', sessionId: item.subagent.sessionId })}
+            folded={folded}
+            foldKey={subagentsFold}
+            listKey={subagentsClosed}
+            openFolds={openFolds}
+            onSetFold={onSetFold}
+            expandedKey={expandedKey}
+            onToggle={onToggle}
+          />
+        </div>
       )}
     </section>
   );
@@ -528,36 +307,55 @@ const SCOPES: Array<{ value: Scope; label: string }> = [
   { value: 'thread', label: 'Whole thread' },
 ];
 
-function ScopeSwitch({ scope, onChange, phone }: { scope: Scope; onChange: (scope: Scope) => void; phone: boolean }) {
+/** The scope, as a quiet menu beside the title: secondary to what it lists. */
+function ScopeMenu({ scope, onChange, open, onOpenChange, phone }: {
+  scope: Scope;
+  onChange: (scope: Scope) => void;
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+  phone: boolean;
+}) {
+  const anchor = useRef<HTMLButtonElement>(null);
+  const label = SCOPES.find((entry) => entry.value === scope)?.label ?? '';
   return (
-    <div role="group" aria-label="Show background work for" style={{ display: 'inline-flex', border: '1px solid var(--term-line)', flexShrink: 0 }}>
-      {SCOPES.map(({ value, label }, index) => {
-        const active = scope === value;
-        return (
-          <button
-            key={value}
-            type="button"
-            aria-pressed={active}
-            onClick={() => onChange(value)}
-            className={active ? undefined : 't-hover-fg'}
-            style={{
-              border: 0,
-              borderLeft: index > 0 ? '1px solid var(--term-line)' : 0,
-              // A finger-sized target on a phone.
-              padding: phone ? '8px 12px' : '3px 10px',
-              background: active ? 'var(--term-alt)' : 'transparent',
-              color: active ? 'var(--term-fg)' : 'var(--term-muted)',
-              fontFamily: 'var(--ui-font)',
-              fontSize: 'var(--fs-sm)',
-              fontWeight: active ? 600 : 400,
-              cursor: 'pointer',
-            }}
-          >
-            {label}
-          </button>
-        );
-      })}
-    </div>
+    <>
+      <button
+        ref={anchor}
+        type="button"
+        aria-haspopup="menu"
+        aria-expanded={open}
+        aria-label={`Show background work for: ${label}`}
+        onClick={() => onOpenChange(!open)}
+        className="t-hover-bg-alt"
+        style={{
+          display: 'inline-flex', alignItems: 'center', gap: 5, flexShrink: 0,
+          border: 0, borderRadius: 'var(--ui-radius)',
+          // A finger-sized target on a phone.
+          padding: phone ? '8px 10px' : '4px 7px',
+          background: open ? 'var(--term-alt)' : 'transparent',
+          color: open ? 'var(--term-fg)' : 'var(--term-muted)',
+          fontFamily: 'var(--ui-font)', fontSize: 'var(--fs-sm)', whiteSpace: 'nowrap', cursor: 'pointer',
+        }}
+      >
+        {label}
+        <span aria-hidden style={{ fontSize: 'var(--fs-2xs)' }}>▾</span>
+      </button>
+      {open && anchor.current && (
+        <ActionMenu
+          anchor={anchor.current}
+          onClose={() => onOpenChange(false)}
+          label="Show background work for"
+          width={208}
+          items={SCOPES.map(({ value, label: text }) => ({
+            id: value,
+            label: text,
+            checked: value === scope,
+            icon: <span aria-hidden style={{ width: 14, flexShrink: 0, display: 'inline-flex', justifyContent: 'center', color: 'var(--term-accent)' }}>{value === scope ? '✓' : ''}</span>,
+            onSelect: () => onChange(value),
+          }))}
+        />
+      )}
+    </>
   );
 }
 
@@ -572,13 +370,18 @@ export default function BackgroundWorkDrawer({ open, onClose, motion, onPresence
   const focusKey = request.focus ? itemKey(request.nodeId, request.focus) : null;
   const [scope, setScope] = useState<Scope>('conversation');
   const [expandedKey, setExpandedKey] = useState<string | null>(focusKey);
-  // Fold lines the user (or an expanded item, see WorkSection) opened.
+  // Fold lines and subagent bands the user (or an expanded item) opened, and the subagents' list band they closed.
   const [openFolds, setOpenFolds] = useState<ReadonlySet<string>>(NO_FOLDS);
+  const [scopeMenuOpen, setScopeMenuOpen] = useState(false);
+  // Item menus open now (a multi-model card's Replace model): Escape is theirs while any is.
+  const [itemMenus, setItemMenus] = useState(0);
+  const onItemMenuOpenChange = useCallback((value: boolean) => setItemMenus((count) => count + (value ? 1 : -1)), []);
   const [appliedSeq, setAppliedSeq] = useState(requestSeq);
   if (appliedSeq !== requestSeq) {
     // A new open request: back to its conversation, its focus expanded.
     setAppliedSeq(requestSeq);
     setScope('conversation');
+    setScopeMenuOpen(false);
     setExpandedKey(focusKey);
     setOpenFolds(NO_FOLDS);
   }
@@ -632,6 +435,11 @@ export default function BackgroundWorkDrawer({ open, onClose, motion, onPresence
   }, [open, workspaceId, subscribeWorkspace]);
 
   const requestFocus = request.focus;
+  const rowFocus = useMemo<RowFocus | null>(() => (
+    focusKey && requestFocus?.kind === 'workflow' && requestFocus.threadKey !== undefined
+      ? { key: focusKey, threadKey: requestFocus.threadKey, step: requestFocus.step, seq: requestSeq }
+      : null
+  ), [focusKey, requestFocus, requestSeq]);
   const groups = useMemo<WorkGroupValue[]>(() => {
     const listed = sticky.current.token === stickyToken ? sticky.current : undefined;
     const kept: ListedItem[] = listed ? [...listed.items.values()] : [];
@@ -669,6 +477,8 @@ export default function BackgroundWorkDrawer({ open, onClose, motion, onPresence
     ? groups.filter((group) => group.loading || group.work.subagents.length > 0 || group.work.workflows.length > 0)
     : groups;
   const running = groups.reduce((sum, group) => sum + runningCount(group.work), 0);
+  // Runs that wait on an approval: the header says these first.
+  const waiting = groups.reduce((sum, group) => sum + group.work.workflows.filter((item) => (item.run.value.approvals?.length ?? 0) > 0).length, 0);
   const nothing = shown.every((group) => !group.loading && group.work.subagents.length === 0 && group.work.workflows.length === 0);
 
   const onToggle = useCallback((key: string) => setExpandedKey((current) => (current === key ? null : key)), []);
@@ -689,7 +499,6 @@ export default function BackgroundWorkDrawer({ open, onClose, motion, onPresence
     row.scrollIntoView?.({ block: 'start' });
   }, [open, focusKey, requestSeq, groups]);
 
-  const conversationTitle = scope === 'conversation' ? groups[0]?.title : undefined;
   const phone = usePhoneLayout();
 
   return (
@@ -700,17 +509,25 @@ export default function BackgroundWorkDrawer({ open, onClose, motion, onPresence
       onPresenceChange={onPresenceChange}
       title="Background work"
       width={DRAWER_WIDTH}
-      titleBadge={running > 0 ? (
-        <span data-testid="background-work-running" style={{ fontSize: 'var(--fs-sm)', color: 'var(--term-accent)', fontFamily: 'var(--ui-font)' }}>{running} running</span>
+      closeOnEscape={itemMenus === 0}
+      titleBadge={running > 0 || waiting > 0 ? (
+        <span style={{ display: 'inline-flex', alignItems: 'center', gap: 10, fontSize: 'var(--fs-sm)', fontFamily: 'var(--ui-font)', whiteSpace: 'nowrap' }}>
+          {waiting > 0 && (
+            <span data-testid="background-work-waiting" style={{ display: 'inline-flex', alignItems: 'center', gap: 6, color: 'var(--term-select)' }}>
+              <span aria-hidden className="term-dot-i" style={{ background: 'var(--term-select)', opacity: 1 }} />{waiting} needs you
+            </span>
+          )}
+          {running > 0 && (
+            <span data-testid="background-work-running" style={{ display: 'inline-flex', alignItems: 'center', gap: 6, color: 'var(--term-muted)' }}>
+              {running} running
+            </span>
+          )}
+        </span>
       ) : undefined}
+      headerActions={<ScopeMenu scope={scope} onChange={setScope} open={scopeMenuOpen} onOpenChange={setScopeMenuOpen} phone={phone} />}
     >
-      <div data-testid="background-work-body" style={phone ? PHONE_BODY : BODY}>
-        {/* A title the switch leaves no room for takes its own line on a phone. */}
-        <div style={{ display: 'flex', flexWrap: phone ? 'wrap' : undefined, alignItems: 'center', gap: phone ? '8px 10px' : 10, padding: '8px 14px', borderBottom: '1px solid var(--term-line)', minWidth: 0 }}>
-          <ScopeSwitch scope={scope} onChange={setScope} phone={phone} />
-          {conversationTitle && <span style={{ ...ellipsis, fontSize: 'var(--fs-sm)', color: 'var(--term-muted)' }}>{conversationTitle}</span>}
-        </div>
-        <div ref={listRef} data-testid="background-work-list" className="term-scrollbar" style={{ flex: 1, minHeight: 0, overflowY: 'auto', padding: '4px 0 18px' }}>
+      <div data-testid="background-work-body" style={BODY}>
+        <div ref={listRef} data-testid="background-work-list" className="term-scrollbar" style={{ flex: 1, minHeight: 0, overflowY: 'auto', padding: '14px 14px 24px' }}>
           {nothing ? (
             <div style={{ padding: '28px 18px', textAlign: 'center', display: 'flex', flexDirection: 'column', gap: 6 }}>
               <span style={{ fontSize: 'var(--fs-md)', color: 'var(--term-mid)' }}>
@@ -721,7 +538,8 @@ export default function BackgroundWorkDrawer({ open, onClose, motion, onPresence
               </span>
             </div>
           ) : shown.map((group) => (
-            <WorkGroup key={group.node.nodeId} group={group} showHeader={scope === 'thread'} expandedKey={expandedKey} onToggle={onToggle} openFolds={openFolds} onSetFold={onSetFold} />
+            <WorkGroup key={group.node.nodeId} group={group} showHeader={scope === 'thread'} expandedKey={expandedKey} onToggle={onToggle} openFolds={openFolds} onSetFold={onSetFold}
+              rowFocus={rowFocus} onClose={onClose} onMenuOpenChange={onItemMenuOpenChange} />
           ))}
         </div>
       </div>

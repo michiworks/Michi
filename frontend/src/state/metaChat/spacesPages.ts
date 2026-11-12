@@ -1,16 +1,22 @@
 import { toast } from 'sonner';
-import type { MetaAgentChatPageRef, PageSummaryDto, SpaceSummaryDto } from 'michi-shared';
-import { META_AGENT_CHAT_CONTEXT_LIMITS } from 'michi-shared';
-import { API_BASE_URL } from '../../config/env';
+import type { MetaAgentChatPageRef, PageSummaryDto, SpacesHomeDto, SpaceSummaryDto, WorkspaceHomeSummaryDto } from 'michi-shared';
+import { isMetaAgentChatId, META_AGENT_CHAT_CONTEXT_LIMITS } from 'michi-shared';
 import { fetchPage, PageApiError } from '../../services/api/pages';
-import { readResource, resourceKey, subscribeResource } from '../pages/resourceCache';
-import { openNativePageRoute } from '../../components/terminal/spaces/SpacesPage';
+import { fetchSpacesHome, fetchWorkspaceHomes } from '../../services/api/spacesHome';
+import { loadResource, readResource, resourceKey, startResourceRead, writeResource } from '../pages/resourceCache';
+import { openNativePageRoute } from '../pages/nativePageRoute';
 import { requestWorkspaceHome } from '../pages/workspaceHomeNav';
+import { revealPageTarget } from '../pages/revealPageTarget';
+import { navPageEvent } from '../appEvents';
+import { namesRemoteEntity } from '../../config/backendIdentity';
+import { LOCAL_BACKEND_CONNECTION_ID } from '../../config/backendConnections';
 
-// The cache keys useSpaces and useSpaceTree read into (spacesResourceKey, spaceTreeResourceKey);
-// built here so modules that mock those hooks still mount the window.
+// The cache keys useSpaces, useSpaceTree, useSpacesHome and useSpacesHomeWorkspaces
+// read into; built here so modules that mock those hooks still mount the window.
 const spacesKey = (connectionId: string) => resourceKey('spaces', connectionId);
 const treeKey = (connectionId: string, workspaceId: string) => resourceKey('page-tree', connectionId, workspaceId);
+const spacesHomeKey = (connectionId: string) => resourceKey('spaces-home', connectionId);
+const workspaceHomesKey = (connectionId: string) => resourceKey('spaces-home-workspaces', connectionId);
 
 /**
  * The Spaces pages the Meta agent window knows by id: the Spaces Home, each
@@ -22,48 +28,38 @@ export interface SpacesHomeIds {
   workspaces: Record<string, string>;
 }
 
-const LOCAL = 'local';
-let homeIds: SpacesHomeIds = { home: null, workspaces: {} };
-let loading: Promise<SpacesHomeIds> | null = null;
-const listeners = new Set<() => void>();
+type HomeRead = Pick<SpacesHomeDto, 'page'> | null;
+type WorkspaceHomesRead = Array<Pick<WorkspaceHomeSummaryDto, 'workspaceId' | 'homePageId'>> | null;
+let derived: { home: HomeRead; workspaces: WorkspaceHomesRead; ids: SpacesHomeIds } | null = null;
 
-export function getSpacesHomeIds(): SpacesHomeIds { return homeIds; }
-
-export function subscribeSpacesHomeIds(listener: () => void): () => void {
-  listeners.add(listener);
-  return () => { listeners.delete(listener); };
+/** The ids in the shared cache, which the Spaces Home and sidebar hooks keep fresh too. */
+export function getSpacesHomeIds(): SpacesHomeIds {
+  const home = readResource<HomeRead>(spacesHomeKey(LOCAL_BACKEND_CONNECTION_ID)).data;
+  const workspaces = readResource<WorkspaceHomesRead>(workspaceHomesKey(LOCAL_BACKEND_CONNECTION_ID)).data;
+  if (derived?.home !== home || derived.workspaces !== workspaces) {
+    const ids: SpacesHomeIds = { home: home?.page ? { id: home.page.id, title: typeof home.page.title === 'string' ? home.page.title : 'Home' } : null, workspaces: {} };
+    for (const item of workspaces ?? []) if (item.homePageId) ids.workspaces[item.workspaceId] = item.homePageId;
+    derived = { home, workspaces, ids };
+  }
+  return derived.ids;
 }
 
-async function getJson(path: string): Promise<unknown> {
-  const response = await fetch(`${API_BASE_URL}${path}`);
-  if (!response.ok) throw new Error(`${path}: ${response.status}`);
-  return response.json();
+/**
+ * Reads the home page ids again, into the cache. A failed read keeps the ids
+ * known so far; older backends without the routes leave them empty.
+ */
+export async function loadSpacesHomeIds(): Promise<SpacesHomeIds> {
+  await Promise.all([
+    loadResource(spacesHomeKey(LOCAL_BACKEND_CONNECTION_ID), () => fetchSpacesHome(LOCAL_BACKEND_CONNECTION_ID)),
+    loadResource(workspaceHomesKey(LOCAL_BACKEND_CONNECTION_ID), () => fetchWorkspaceHomes(LOCAL_BACKEND_CONNECTION_ID)),
+  ]);
+  return getSpacesHomeIds();
 }
 
-/** Reads the home page ids once (again with `force`); older backends without the routes leave them empty. */
-export function loadSpacesHomeIds(force = false): Promise<SpacesHomeIds> {
-  if (loading && !force) return loading;
-  loading = (async () => {
-    const [home, workspaces] = await Promise.all([
-      getJson('/spaces-home').catch(() => null) as Promise<{ page?: { id?: unknown; title?: unknown } } | null>,
-      getJson('/spaces-home/workspaces').catch(() => null) as Promise<{ items?: Array<{ workspaceId?: unknown; homePageId?: unknown }> } | null>,
-    ]);
-    const next: SpacesHomeIds = {
-      home: typeof home?.page?.id === 'string' ? { id: home.page.id, title: typeof home.page.title === 'string' ? home.page.title : 'Home' } : null,
-      workspaces: {},
-    };
-    for (const item of workspaces?.items ?? []) {
-      if (typeof item.workspaceId === 'string' && typeof item.homePageId === 'string') next.workspaces[item.workspaceId] = item.homePageId;
-    }
-    homeIds = next;
-    for (const listener of listeners) listener();
-    return next;
-  })();
-  return loading;
-}
+/** Nothing in this window has read the Spaces Home yet. */
+const homeIdsUnread = () => readResource(spacesHomeKey(LOCAL_BACKEND_CONNECTION_ID)).status === 'loading';
 
-const VALID_ID = /^[^\s\p{Cc}]+$/u;
-const sendable = (id: string) => VALID_ID.test(id) && id.length <= META_AGENT_CHAT_CONTEXT_LIMITS.idChars && !id.startsWith('remote:');
+const sendable = (id: string) => isMetaAgentChatId(id) && !namesRemoteEntity(id);
 
 /** The pages the sidebar knows, for the turn context: Home, workspace homes, then Spaces and their pages. */
 export function knownSpacesPages(workspaces: ReadonlyArray<{ id: string; name: string }>): MetaAgentChatPageRef[] {
@@ -72,68 +68,54 @@ export function knownSpacesPages(workspaces: ReadonlyArray<{ id: string; name: s
     if (out.has(id) || !sendable(id) || out.size >= META_AGENT_CHAT_CONTEXT_LIMITS.pages) return;
     out.set(id, { id, title: title.slice(0, META_AGENT_CHAT_CONTEXT_LIMITS.titleChars), ...(workspaceId && sendable(workspaceId) ? { workspaceId } : {}) });
   };
+  const homeIds = getSpacesHomeIds();
   if (homeIds.home) add(homeIds.home.id, homeIds.home.title);
   for (const ws of workspaces) {
     const homeId = homeIds.workspaces[ws.id];
     if (homeId) add(homeId, ws.name, ws.id);
   }
-  for (const space of readResource<SpaceSummaryDto[]>(spacesKey(LOCAL)).data ?? []) add(space.id, space.title || 'Untitled', space.workspaceId);
+  for (const space of readResource<SpaceSummaryDto[]>(spacesKey(LOCAL_BACKEND_CONNECTION_ID)).data ?? []) add(space.id, space.title || 'Untitled', space.workspaceId);
   for (const ws of workspaces) {
-    for (const page of readResource<PageSummaryDto[]>(treeKey(LOCAL, ws.id)).data ?? []) add(page.id, page.title || 'Untitled', page.workspaceId);
+    for (const page of readResource<PageSummaryDto[]>(treeKey(LOCAL_BACKEND_CONNECTION_ID, ws.id)).data ?? []) add(page.id, page.title || 'Untitled', page.workspaceId);
   }
   return [...out.values()];
-}
-
-/** Re-runs `listener` when the sidebar's page lists change. */
-export function subscribeKnownSpacesPages(workspaceIds: readonly string[], listener: () => void): () => void {
-  const stops = [
-    subscribeSpacesHomeIds(listener),
-    subscribeResource(spacesKey(LOCAL), listener),
-    ...workspaceIds.map((id) => subscribeResource(treeKey(LOCAL, id), listener)),
-  ];
-  return () => { for (const stop of stops) stop(); };
 }
 
 export interface SpacesPageTarget {
   pageId: string;
   workspaceId?: string;
   backendConnectionId?: string;
+  /** A block to show; with `databaseId`, a row of that database. */
   blockId?: string;
+  databaseId?: string;
   /** The page already on screen: opening it only scrolls to the block. */
   currentPageId?: string | null;
 }
 
-const FLASH_MS = 1_200;
-const FIND_MS = 4_000;
-
-/** Scrolls the open page to the block and flashes it, waiting a little for the page to render. */
-export function flashSpacesBlock(blockId: string, root: ParentNode = document): void {
-  const deadline = Date.now() + FIND_MS;
-  const attempt = () => {
-    const target = Array.from(root.querySelectorAll<HTMLElement>('[data-block-id]'))
-      .find((el) => el.dataset.blockId === blockId && !el.closest('.meta-chat-panel'));
-    if (!target) {
-      if (Date.now() < deadline) window.setTimeout(attempt, 80);
-      return;
-    }
-    const block = target.closest<HTMLElement>('.michi-doc-block') ?? target;
-    block.scrollIntoView?.({ behavior: 'smooth', block: 'center' });
-    block.removeAttribute('data-flash');
-    void block.offsetWidth;
-    block.setAttribute('data-flash', '');
-    window.setTimeout(() => block.removeAttribute('data-flash'), FLASH_MS);
-  };
-  attempt();
-}
-
 export const PAGE_DELETED_MESSAGE = 'This page has been deleted.';
+
+/** The workspace whose default home `pageId` is: from the Spaces Home's list, or the ids this window loaded. */
+function workspaceHomeOf(connectionId: string, pageId: string): string | undefined {
+  const listed = readResource<WorkspaceHomeSummaryDto[]>(workspaceHomesKey(connectionId)).data
+    ?.find((home) => home.homePageId === pageId)?.workspaceId;
+  if (listed || connectionId !== LOCAL_BACKEND_CONNECTION_ID) return listed;
+  return Object.entries(getSpacesHomeIds().workspaces).find(([, homePageId]) => homePageId === pageId)?.[0];
+}
 
 /**
  * Opens a Spaces page (the Spaces Home and a workspace's home as their own views) and flashes `blockId`.
  * A page that is gone shows a toast instead. Resolves to what happened.
  */
 export async function openSpacesPage(target: SpacesPageTarget): Promise<'opened' | 'deleted' | 'failed'> {
-  const backendConnectionId = target.backendConnectionId ?? LOCAL;
+  const backendConnectionId = target.backendConnectionId ?? LOCAL_BACKEND_CONNECTION_ID;
+  const reveal = () => { if (target.blockId) revealPageTarget({ targetId: target.blockId, ...(target.databaseId ? { databaseId: target.databaseId } : {}) }); };
+  if (target.currentPageId === target.pageId) {
+    // Already on screen.
+    reveal();
+    return 'opened';
+  }
+  // A home row can name a home before anything in this window has read the home ids.
+  const ids = backendConnectionId === LOCAL_BACKEND_CONNECTION_ID && homeIdsUnread() ? loadSpacesHomeIds() : null;
   let workspaceId = target.workspaceId;
   try {
     const page = await fetchPage(target.pageId, { backendConnectionId, workspaceId: workspaceId ?? '' });
@@ -152,24 +134,30 @@ export async function openSpacesPage(target: SpacesPageTarget): Promise<'opened'
     toast(PAGE_DELETED_MESSAGE);
     return 'deleted';
   }
-  const workspaceHomeOf = backendConnectionId === LOCAL
-    ? Object.entries(homeIds.workspaces).find(([, homePageId]) => homePageId === target.pageId)?.[0]
-    : undefined;
-  if (target.currentPageId === target.pageId) {
-    // Already on screen.
-  } else if (backendConnectionId === LOCAL && homeIds.home?.id === target.pageId) {
-    window.dispatchEvent(new CustomEvent('michi:nav-page', { detail: { page: 'spaces' } }));
-  } else if (workspaceHomeOf) {
-    requestWorkspaceHome({ workspaceId: workspaceHomeOf, backendConnectionId });
+  await ids;
+  const workspaceHome = workspaceHomeOf(backendConnectionId, target.pageId);
+  if (backendConnectionId === LOCAL_BACKEND_CONNECTION_ID && getSpacesHomeIds().home?.id === target.pageId) {
+    navPageEvent.dispatch({ page: 'spaces' });
+  } else if (workspaceHome) {
+    requestWorkspaceHome({ workspaceId: workspaceHome, backendConnectionId });
   } else {
     openNativePageRoute({ pageId: target.pageId, workspaceId, backendConnectionId });
   }
-  if (target.blockId) flashSpacesBlock(target.blockId);
+  reveal();
   return 'opened';
 }
 
-/** Test seam. */
-export function resetSpacesPagesForTests(next: SpacesHomeIds = { home: null, workspaces: {} }): void {
-  homeIds = next;
-  loading = null;
+/**
+ * Test seam.
+ * @testonly
+ */
+export function resetSpacesPagesForTests(next?: SpacesHomeIds): void {
+  const homeKey = spacesHomeKey(LOCAL_BACKEND_CONNECTION_ID);
+  const homesKey = workspaceHomesKey(LOCAL_BACKEND_CONNECTION_ID);
+  writeResource<HomeRead>(homeKey, next?.home ? { page: next.home as SpacesHomeDto['page'] } : null);
+  writeResource<WorkspaceHomesRead>(homesKey, next ? Object.entries(next.workspaces).map(([workspaceId, homePageId]) => ({ workspaceId, homePageId })) : null);
+  if (next) return;
+  // Unread again: data null with a read pending, which nothing will finish.
+  startResourceRead(homeKey);
+  startResourceRead(homesKey);
 }

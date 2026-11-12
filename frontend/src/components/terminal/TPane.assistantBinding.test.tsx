@@ -31,6 +31,7 @@ vi.mock('../../services/api', async (importOriginal) => ({
   allocateNodeIdsLocal: (() => { let i = 0; return (count = 1) => Array.from({ length: count }, () => `n-ab-${++i}`); })(),
   listAgentModes: () => Promise.resolve({ availableModes: [], defaultModeId: null }),
   fetchAgentStatus: () => Promise.resolve(GLOBAL_STATUS),
+  fetchAgentStatusAfterFirstPaint: () => Promise.resolve(GLOBAL_STATUS),
   fetchRuntimeCatalog: () => Promise.resolve({
     models: [{ id: 'gpt-6-mini', label: 'GPT 6 mini', isDefault: true }],
     providers: [],
@@ -72,7 +73,7 @@ import * as api from '../../services/api';
 import { fetchAssistant, updateAssistantSettings } from '../../services/api/assistant';
 import { ChatProvider, useChatActions, useChatStore, useChatNodesSnapshot } from '../../state/chatStore';
 import { PrefsProvider } from '../../state/prefs';
-import { resetAssistantStoreForTests } from '../../state/assistant/assistantStore';
+import { resetCompanionStoreForTests } from '../../state/companion/companionStore';
 
 if (typeof CSS === 'undefined') (globalThis as { CSS?: unknown }).CSS = {};
 if (!(CSS as unknown as { highlights?: unknown }).highlights) (CSS as unknown as { highlights: Map<string, unknown> }).highlights = new Map();
@@ -115,7 +116,7 @@ beforeAll(() => {
 });
 afterAll(() => {
   vi.unstubAllGlobals();
-  act(() => resetAssistantStoreForTests());
+  act(() => resetCompanionStoreForTests());
 });
 
 describe('TPane — the assistant runs on its conversation\'s own settings', () => {
@@ -129,7 +130,7 @@ describe('TPane — the assistant runs on its conversation\'s own settings', () 
     act(() => { store.createThread(); });
     act(() => { actions.installWorkspaceSnapshot(SYSTEM); });
     await waitFor(() => expect(nodes['n-sys']).toBeTruthy());
-    act(() => resetAssistantStoreForTests({ open: true, status: 'ready', info: INFO }));
+    act(() => resetCompanionStoreForTests({ assistant: { status: 'ready', info: INFO, error: null } }));
     shown = 'n-sys';
     view.rerender(<PrefsProvider><ChatProvider><Harness /></ChatProvider></PrefsProvider>);
 

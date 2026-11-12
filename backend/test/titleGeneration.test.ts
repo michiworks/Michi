@@ -1,9 +1,15 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { buildTitlePrompt, titleModelConfig } from '../src/services/titleGeneration';
+import { buildTitleInput, buildTitlePrompt, TITLE_RULES, titleModelConfig } from '../src/services/titleGeneration';
 import { KiroTitleGenerator, type KiroTitleClient } from 'michi-runtime/internal/adapters/kiro/kiroTitleGenerator';
 
 describe('titleGeneration helpers', () => {
+  it('keeps the output lines out of the shared rules and lays out the title input', () => {
+    assert.doesNotMatch(TITLE_RULES, /Plain text only|Output ONLY/);
+    assert.equal(buildTitleInput('Why?'), 'USER MESSAGE:\nWhy?');
+    assert.equal(buildTitleInput('Why?', ' passage '), 'CONTEXT (the user is replying to or quoting this):\npassage\n\nUSER MESSAGE:\nWhy?');
+  });
+
   it('caps the embedded context length', () => {
     const prompt = buildTitlePrompt('q', 'y'.repeat(5_000));
     assert.ok(Array.from(prompt.match(/CONTEXT[\s\S]*?USER MESSAGE:/)?.[0] ?? '').length < 1_200);
@@ -13,14 +19,26 @@ describe('titleGeneration helpers', () => {
     const saved = { ...process.env };
     try {
       delete process.env.MICHI_TITLE_MODEL_KIRO;
-      assert.equal(titleModelConfig('kiro').model, 'gpt-5.6-luna');
-      assert.equal(titleModelConfig('codex').model, 'gpt-5.6-luna');
+      delete process.env.MICHI_TITLE_MODEL_CODEX;
+      delete process.env.MICHI_TITLE_MODEL_CLAUDE;
+      assert.equal(titleModelConfig('kiro')?.model, 'gpt-5.6-luna');
+      assert.equal(titleModelConfig('codex')?.model, 'gpt-5.6-luna');
+      assert.equal(titleModelConfig('claude')?.model, 'haiku');
       process.env.MICHI_TITLE_MODEL_KIRO = 'off';
-      assert.equal(titleModelConfig('kiro').model, null);
+      assert.equal(titleModelConfig('kiro')?.model, null);
+      process.env.MICHI_TITLE_MODEL_CLAUDE = 'off';
+      assert.equal(titleModelConfig('claude')?.model, null);
       process.env.MICHI_TITLE_MODEL_KIRO = 'claude-haiku-4.5';
-      assert.equal(titleModelConfig('kiro').model, 'claude-haiku-4.5');
+      assert.equal(titleModelConfig('kiro')?.model, 'claude-haiku-4.5');
       process.env.MICHI_TITLE_TIMEOUT_MS = '250';
-      assert.equal(titleModelConfig('kiro').timeoutMs, 250);
+      assert.equal(titleModelConfig('kiro')?.timeoutMs, 250);
+      assert.equal(titleModelConfig('claude')?.timeoutMs, 250);
+      assert.equal(titleModelConfig('kiro', {})?.timeoutMs, 15_000);
+      assert.equal(titleModelConfig('claude', {})?.timeoutMs, 15_000);
+      assert.equal(titleModelConfig('codex', {})?.timeoutMs, 10_000);
+      assert.equal(titleModelConfig('codex', { MICHI_CODEX_TITLE_TIMEOUT_MS: 'soon' })?.timeoutMs, 10_000);
+      assert.equal(titleModelConfig('crew'), undefined);
+      assert.equal(titleModelConfig('constructor'), undefined);
     } finally {
       process.env = saved;
     }

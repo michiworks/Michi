@@ -27,7 +27,7 @@ const port = await reservePort();
 const childArgs = useBundle ? ['dist/server.js'] : ['--require', 'ts-node/register', 'src/server.ts'];
 const child = spawn(process.execPath, childArgs, {
   cwd: path.join(root, 'backend'),
-  env: { ...process.env, PORT: String(port), HOST: '127.0.0.1', MICHI_DATA_DIR: dataDir, MICHI_CONFIG_DIR: configDir, MICHI_LOG_DIR: logDir },
+  env: { ...process.env, PORT: String(port), HOST: '127.0.0.1', MICHI_DATA_DIR: dataDir, MICHI_CONFIG_DIR: configDir, MICHI_LOG_DIR: logDir, MICHI_DISABLE_COMPANION: '1' },
   stdio: ['ignore', 'pipe', 'pipe'],
 });
 let stderr = '';

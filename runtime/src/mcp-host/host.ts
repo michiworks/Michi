@@ -9,7 +9,8 @@ import {
   type GroupRecord,
   type SlotRecord,
 } from './registry';
-import { ASK_USER_TOOL, DEFAULT_ANCHOR_DESCRIPTION, isObjectSchema } from './tools';
+import { ASK_USER_TOOL } from './askUser';
+import { DEFAULT_ANCHOR_DESCRIPTION, isObjectSchema } from './tools';
 import type {
   CreateSlotOptions,
   HostHookHandler,
@@ -149,6 +150,9 @@ export function createMcpHost<B = unknown>(options: McpHostOptions = {}): McpHos
       if (typeof o.cwd !== 'string') throw new Error('MCP slot cwd must be a string');
       if (typeof o.sink?.emit !== 'function') throw new Error('MCP slot sink must implement emit()');
       if (o.routable !== undefined && typeof o.routable !== 'boolean') throw new Error('MCP slot routable must be a boolean');
+      if (o.upFrontToolMeta !== undefined && (typeof o.upFrontToolMeta !== 'object' || o.upFrontToolMeta === null || Array.isArray(o.upFrontToolMeta))) {
+        throw new Error('MCP slot upFrontToolMeta must be an object');
+      }
       const structuredResult = o.builtins?.structuredResult;
       if (structuredResult) {
         assertName('tool', structuredResult.name);
@@ -167,6 +171,7 @@ export function createMcpHost<B = unknown>(options: McpHostOptions = {}): McpHos
           ...(o.builtins?.askUser !== undefined ? { askUser: o.builtins.askUser } : {}),
           ...(structuredResult ? { structuredResult } : {}),
         },
+        ...(o.upFrontToolMeta ? { upFrontToolMeta: Object.freeze({ ...o.upFrontToolMeta }) } : {}),
         routable: o.routable !== false,
         disposed: false,
         inflight: new Set(),

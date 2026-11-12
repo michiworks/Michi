@@ -26,9 +26,13 @@ export interface HomeSummaryInput {
 const SUMMARY_RETRY_BASE_MS = 5 * 60_000;
 const SUMMARY_RETRY_MAX_MS = 60 * 60_000;
 
-/** Content of the blocks the Meta agent owns; blocks a person edited are theirs. */
+/**
+ * Content of the blocks the Meta agent owns. A block a person added is theirs; a block an
+ * agent wrote stays the agent's after a person ticks or edits it, so a change there counts.
+ */
 function agentBlocks(blocks: readonly PageBlock[]): unknown[] {
-  return blocks.filter((block) => !block.edit).map(({ rev: _rev, sources: _sources, edit: _edit, ...content }) => content);
+  return blocks.filter((block) => !block.edit || !!block.sources?.length)
+    .map(({ rev: _rev, sources: _sources, edit: _edit, ...content }) => content);
 }
 
 export function homeSummaryInput(ownerUserId: string): HomeSummaryInput {
@@ -86,7 +90,8 @@ export function homeSummaryPrompt(input: {
     '   - a markdown block that starts with the heading "#### Cross-workspace decisions" followed by a list of decisions that affect more than one workspace.',
     '   Each heading goes inside its block: add no separate heading blocks, and delete one that only repeats a block\'s heading.',
     `   ${HOME_WRITE_ORDER_NOTE}`,
-    '   Leave blocks a person wrote alone; a change to one becomes a proposal. If a workspace failed, say in the table that its home is missing.',
+    '   Your changes to these blocks apply directly, also after a person edited them: keep their wording, and treat an item they ticked as done. Leave every block a person added alone; a change to one becomes a proposal. If a workspace failed, say in the table that its home is missing.',
+    '   In "This week\'s focus", list the open items first and leave out the items already ticked done: they are finished.',
     '   Write in the language the workspace homes use. Use only facts from the homes; never invent numbers.',
     '   If the current blocks already say all of this, call maintenance_no_change for the Spaces Home with the reason instead.',
     'Layout rules for the Spaces Home (follow them):',

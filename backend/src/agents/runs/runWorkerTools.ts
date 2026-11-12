@@ -11,6 +11,7 @@ import {
 } from 'michi-shared';
 import type { RuntimeSessionOwner } from '../types';
 import { isRunOwner, sameHostOwner } from '../ownerMapping';
+import { canonicalString } from '../../services/pages/canonicalJson';
 import { SUBMIT_AGENT_RESULT_TOOL, type RunWorkerToolProfile } from 'michi-runtime/internal/contract/tools';
 
 // The result tool's name and profile shape live in michi-runtime
@@ -18,16 +19,6 @@ import { SUBMIT_AGENT_RESULT_TOOL, type RunWorkerToolProfile } from 'michi-runti
 // working. The collector stays here: it builds Michi's Result Bundles.
 export { SUBMIT_AGENT_RESULT_TOOL } from 'michi-runtime/internal/contract/tools';
 export type { RunWorkerToolProfile } from 'michi-runtime/internal/contract/tools';
-
-function canonical(value: unknown): string {
-  if (Array.isArray(value)) return `[${value.map(canonical).join(',')}]`;
-  if (value && typeof value === 'object') {
-    return `{${Object.entries(value as Record<string, unknown>)
-      .sort(([a], [b]) => a.localeCompare(b))
-      .map(([key, child]) => `${JSON.stringify(key)}:${canonical(child)}`).join(',')}}`;
-  }
-  return JSON.stringify(value);
-}
 
 function trimConclusion(text: string): string {
   const trimmed = text.trim();
@@ -63,7 +54,7 @@ export class RunResultCollector {
       throw new Error('submit_agent_result payload must be a Result Bundle object');
     }
     const bundle = parseResultBundleV1({ ...(payload as Record<string, unknown>), source: 'submitted' }, 'submit_agent_result');
-    const serialized = canonical(bundle);
+    const serialized = canonicalString(bundle);
     if (this.submittedCanonical !== null) {
       if (serialized !== this.submittedCanonical) throw new Error('submit_agent_result already received a different Result Bundle');
       return this.submitted!;

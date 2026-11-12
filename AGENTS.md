@@ -10,11 +10,10 @@ project guidance. Keep personal preferences and machine-specific notes separate.
 
 Install with `npm install` from the root. The npm workspaces are `frontend/`,
 `backend/`, `shared/` and `runtime/` (`michi-runtime`, the agent runtime
-layer; TypeScript source, no build step), plus the Electron wrapper in `electron/`.
-The backend requires Node.js 22+ for built-in SQLite.
-After pulling the commit that introduced `runtime/`, run `npm install` once from
-the root to create its workspace link; predev and preelectron:dev fail fast
-until that link exists.
+layer; the repo uses its TypeScript source unbuilt, and its `build` and
+`pack:check` scripts serve only the published package), plus the Electron
+wrapper in `electron/`. Node.js 22.19+ is required (`engines.node` in
+package.json): the backend uses built-in SQLite, and the Pi packages need 22.19.
 
 - `npm run dev`: builds shared code, then starts the backend esbuild watcher
   and Vite frontend. Default ports are backend 3000 and frontend 3001.
@@ -32,15 +31,19 @@ until that link exists.
   frontend test/watch commands do not need `shared:build`; builds, typechecks,
   backend tests and E2E still do.
   Filter with `npm test -w frontend -- src/state/chatStreamRunner.test.ts`.
-- `npm test -w backend`: builds shared code and runs node --test through
-  ts-node on backend/test/*.test.ts, with a per-test timeout.
+- `npm test -w backend`: builds shared code, runs `typecheck:tests`, then
+  node --test through transpile-only ts-node on backend/test/*.test.ts, with a
+  per-test timeout.
+- `npm run test:file -w backend -- test/<name>.test.ts`: runs explicit backend
+  test files the same way, four at a time; run `npm run shared:build` first.
+  It does not type-check; `npm run typecheck:tests -w backend` (incremental)
+  checks backend src and tests, the only check that covers test files.
 - `npm test -w michi-runtime`: builds shared code and runs node --test
   through ts-node on runtime/test/*.test.ts: the tests that need only the
   package, adapter tests included. Tests that use Michi's host, backend code
   or crew-app packaging stay in backend/test: crewLauncher and
   crewLauncherStdio exercise the Crew App as Michi installs it (crew-app/ and
   backend/dist), and crewLauncherStdio also needs backend's express.
-  The package-only acpDualEngine and acpErrors tests have not moved yet.
   `npm run test:runtime` runs it plus the runtime boundary ratchet
   (backend/test/runtimeBoundary.test.ts).
   `npm run typecheck -w michi-runtime` builds shared code, then checks src
@@ -48,21 +51,36 @@ until that link exists.
 - `npm test -w michi-shared`: runs node --test through ts-node on
   shared/test/*.test.ts against shared source; no shared:build needed. Parity
   and integration tests of shared code stay with their consumers.
+- `npm run preflight`: fails if `workspace` resolves outside this checkout or
+  NODE_ENV=production; warns when installs differ from package-lock.json.
+- `node scripts/worktree-setup.mjs <worktree>`: links a worktree's node_modules
+  to the main checkout's; never install there. Tests: `npm run test:worktree`.
 - `npm run test:e2e`: builds shared code and runs Playwright against the web UI.
   The mock API fixture intercepts backend requests; this suite does not require
   a real backend, SQLite, credentials or an agent CLI. Preserve that isolation.
   Use `npm run test:e2e -- e2e/specs/chat-stream.spec.ts` for a focused spec,
   or `npm run test:e2e:ui` for UI mode. Set E2E_PORT to an unused port to
   isolate a checkout; this disables reuse of an existing server.
-- `npm run check`: runs `test:contracts` (root scripts/*.test.mjs contract
-  tests no other test:* script runs), the shared tests, `check:knip` and
-  `check:deps`. check:knip (scripts/knip-baseline.mjs) and check:deps
-  (backend/scripts/dependencyRules.cjs: agents/** -> services/db or chatHub,
-  routes/** -> services/db, frontend state/** -> components/**) fail only on
-  findings missing from scripts/knip-baseline.json and
-  backend/test/fixtures/dependencyRules/edges.txt. Do not add entries to pass;
-  fix knip.json for a false positive, and run the script with `--write` after
-  removing code so the baseline shrinks.
+- `npm run check`: runs `test:contracts` (builds shared code and the Electron
+  main process, then runs the root scripts/*.test.mjs files it lists), the
+  shared tests, `check:knip` and `check:deps`. Every root scripts/*.test.mjs
+  belongs in test:contracts or in a narrower test:* script (test:worktree,
+  test:dev-port, test:perf and others). check:knip (scripts/knip-baseline.mjs)
+  and check:deps (backend/scripts/dependencyRules.cjs: agents/** -> services/db
+  or chatHub, routes/** -> services/db, frontend state/** -> components/**)
+  compare findings with scripts/knip-baseline.json and
+  backend/test/fixtures/dependencyRules/edges.txt. The baselines only shrink:
+  new findings fail, and so do entries that no longer occur. After removing
+  code, run the script with `--prune`, which drops stale entries and never adds.
+  Do not add entries to pass; fix knip.config.ts for a false positive. Only for an
+  unavoidable entry, run it with `--accept-new "<reason>"` and put the reason in
+  the commit body. `--write` is a deprecated alias of `--prune`.
+  scripts/doc-freshness.test.mjs checks living docs' paths, links, npm scripts.
+- `npm run check:unused` (scripts/check-unused.mjs): reports unused locals and
+  imports through the check-only tsconfig.unused.json of backend, runtime,
+  shared and electron (noUnusedLocals, noFallthroughCasesInSwitch), then
+  frontend's own check:unused. Builds never read those files; do not move the
+  flags into a tsconfig a build reads. Report-only: `npm run check` does not run it yet.
 
 predev and preelectron:dev run scripts/kill-stale-dev.mjs. Development launchers
 and packaging are not side-effect-free test commands.
@@ -99,11 +117,16 @@ Choose validation by the behavior and dependencies affected:
   resolutions and interactions with newer changes. Repeat passed checks only when
   the resulting code, environment or evidence gives a reason to do so. A routine
   local merge does not require another full suite.
+- Merging into dev is a release: any session may push dev, and a push triggers
+  the remote install. Finish validation before merging, not after.
 
 During edits, use explicit test files, `test:related` with this task's source files,
 or a focused watch loop. In a shared dirty checkout, prefer these over
 `test:changed`, which can include unrelated work. Include affected dependencies
 and consumers when selecting tests; file ownership alone does not define impact.
+`test:related` and `test:changed` print the selected files and fail when there are
+none. In a symlinked worktree, where related selection has come back empty, list
+the test files explicitly.
 Reuse passing results unless later code, dependency, configuration or environment
 changes could invalidate them. Run builds when needed to validate bundling,
 resource paths, packaging or generated artifacts; do not automatically append a
@@ -129,12 +152,10 @@ npm run test:dom -w frontend
 npm run typecheck -w frontend
 
 # Backend typecheck/tests consume built shared code; select explicit test files.
-# The isolateUserDirs preload keeps tests out of ~/.michi (data.db, config, logs).
+# test:file's isolateUserDirs preload keeps tests out of ~/.michi (data.db, config, logs).
 npm run shared:build
-npm exec -w backend -- tsc --noEmit
-npm exec -w backend -- node --require ts-node/register \
-  --require ./test/helpers/isolateUserDirs.cjs --test \
-  --test-timeout=30000 --test-concurrency=1 test/kiroCancelResume.integration.test.ts
+npm run typecheck:tests -w backend
+npm run test:file -w backend -- test/kiroCancelResume.integration.test.ts
 
 # Full suites when the scope above warrants them.
 npm test -w frontend
@@ -144,13 +165,14 @@ npm run test:runtime
 
 - `test:changed` includes staged, unstaged and untracked changes. Common modules
   may select most tests. For committed branch changes, use an appropriate comparison
-  ref (for example `npm run test:changed -w frontend -- --changed=dev` on a feature
-  branch) or explicit test files. Check what was selected; zero tests is not
+  ref (for example `npm test -w frontend -- --changed=dev --passWithNoTests=false`
+  on a feature branch; test:changed rejects a second --changed) or explicit test
+  files. Check what was selected; zero tests is not
   validation. Dependency selection can miss indirect/runtime relationships.
 - Keep file isolation enabled. Frontend Vitest has a worker cap of four; use
   `npm test -w frontend -- --maxWorkers=2` to reduce load. Backend Node tests use
   `--test-concurrency`, not Vitest's `--maxWorkers`. For focused browser checks on
-  a busy machine, use an unused E2E_PORT and Playwright `--workers=1`.
+  a busy machine, use an unused E2E_PORT and Playwright `--workers=4`.
 - Avoid concurrent full suites across checkouts on the same machine. On resource
   exhaustion, hangs or timeouts, inspect the failing test/worker before rerunning;
   stop only processes started for the current task. Lower concurrency or rerun
@@ -160,6 +182,13 @@ npm run test:runtime
   rerun does not make an earlier failed full run a full-suite pass.
 - `frontend/vitest.config.mts` owns Node globs and DOM exceptions. Some `.ts`
   files render hooks or use window-backed storage; keep those in the DOM project.
+- Golden write switches (e.g. MICHI_UPDATE_MCP_GOLDEN=1) take effect only with
+  MICHI_GOLDEN_WRITE_CONFIRM=1; the test preloads drop inherited ones otherwise.
+- Cleanup branches: `npm run test:integrity -- dev` reports added
+  .only/.skip/.todo/fixme, raised timeouts, new retries, golden or snapshot
+  edits (approve with a `Golden-Change: approved <reason>` commit line) and new
+  baseline entries, and lists changed test files; `--strict` exits 1.
+  Only a new test may skip on a platform or env condition.
 - Use stable array/Set/Map props in hook tests and fake timers for long waits.
   The DOM setup fails fast on React effect loops; fix the loop, not the guard.
 
@@ -180,9 +209,11 @@ npm run test:runtime
   runtime package also provides a separate `createAntigravityRuntime` preset
   for `agy acp`; it is not the registered public backend adapter.
   CLI requirements depend on the selected runtime.
+- Give agent processes agentSpawnEnv() (backend/src/agents/agentSpawnEnv.ts; cloud mode: cloudSubprocessEnv()), not process.env.
 - backend/src/agents/chatHub.ts owns durable turns and subscriber replay;
-  sessionRegistry.ts tracks live sessions. services/chatManager.ts is a
-  compatibility facade and binding helper, not the owner of a global ACP pool.
+  sessionRegistry.ts tracks live sessions. services/chatManager.ts is a binding
+  helper (primary-agent bindings, parent-session restore, idle and maintenance
+  session release), not the owner of a global ACP pool.
   Kiro pooling lives under runtime/src/adapters/kiro/, including
   runtime/src/adapters/kiro/acpClient.ts, which extends the generic ACP client
   core in runtime/src/adapters/acp/.
@@ -224,14 +255,18 @@ npm run test:runtime
   `npm run build` ratchet imports from runtime-layer files into app code,
   `process.env` reads in those files, and runtime-id literal comparisons outside
   adapter directories. Do not add new entries; inject the dependency through a
-  runtime port or option instead. If an entry is unavoidable, add it to
-  `backend/test/fixtures/runtimeBoundary/` with the reason in the commit message.
+  runtime port or option instead. If an entry is unavoidable, run
+  `node backend/scripts/runtimeBoundary.cjs --accept-new "<reason>"` and put the
+  reason in the commit body. Entries that no longer occur fail the test and the
+  script's check, never the build (every remote install runs it); drop them with
+  `--prune`.
 
 ## Persistence and frontend
 
 - SQLite data.db is the durable source of truth for workspaces, messages, turns,
   runtime bindings, artifacts and related state. See backend/src/services/dbRepository.ts
   and backend/src/db/migrations/.
+- After adding a migration, regenerate the schema snapshot with `MICHI_UPDATE_SCHEMA_GOLDEN=1 MICHI_GOLDEN_WRITE_CONFIRM=1 npm run test:file -w backend -- test/schemaSnapshot.test.ts`; its diff must contain only that migration's objects.
 - frontend/src/state/workspacePersistence.ts handles backend hydration and
   persistence; chatHydration.ts maps stored data. Preserve the hydration barrier:
   an unavailable backend is not an empty workspace that may overwrite saved data.
@@ -242,12 +277,16 @@ npm run test:runtime
 - Recovery uses persisted runtime bindings where supported and history-based
   reconstruction otherwise. Preserve owner/workspace isolation in persistence,
   resume, search, export and runtime lookups.
-- The live UI is a page-routed terminal shell, not the removed React Flow canvas.
+- The live UI is a page-routed terminal shell.
   frontend/src/components/terminal/TerminalShell.tsx owns shell routing and
-  keyboard handling; pages/Dashboard.tsx displays resizable panes. pages/Map.tsx
-  is graph navigation, not a replacement editor. Preserve the pane-oriented workflow.
-- TPane.tsx composes chat rendering and the composer. The shared TipTap composer
-  is components/terminal/manage/ManageComposer.tsx under frontend/src/.
+  keyboard handling; frontend/src/components/terminal/pages/Dashboard.tsx
+  displays resizable panes, and pages/Map.tsx in the same directory is graph
+  navigation, not a replacement editor. Preserve the pane-oriented workflow.
+- TPane.tsx composes chat rendering and its composer. The chat composers share
+  frontend/src/components/terminal/ComposerShell.tsx and the TipTap editor
+  frontend/src/components/MentionEditor.tsx: TPane (the Companion panel's
+  CompanionChatTab.tsx embeds one), ManageComposer.tsx (Home, Digest,
+  WorkspaceManage) and NewChatSheet.tsx.
 - frontend/src/state/chatStore.tsx coordinates domain reducers and helpers.
   nodesRef updates synchronously with dispatch so node creation followed immediately
   by sending works before the next React render; do not move this into an effect.
@@ -259,9 +298,8 @@ npm run test:runtime
   explicit workspace slot. Open/focused pane maps and pane items use sessionStorage.
   Do not collapse keys to workspace-only or describe this state as never persisted.
   Background stream events must not steal focus or switch the active tree.
-- Reusable material uses artifacts and mention resolution. Consult
-  frontend/src/state/contextBudget.ts and artifact paths rather than restoring
-  the historical Project.contexts/save_context model or obsolete budget constants.
+- Reusable material uses artifacts and mention resolution. Take budgets from
+  frontend/src/state/contextBudget.ts, not older constants.
 - Use theme tokens from frontend/src/index.css and Tailwind's @theme mapping
   (bg-app, bg-surface, text-fg, border-line, etc.), not hardcoded surface/text hex
   colors. Workspace badge palette colors are an intentional decorative exception.
@@ -281,19 +319,24 @@ npm run test:runtime
   electron/main.ts retains a file:// fallback when no backend port exists;
   that is not the normal production topology.
 - frontend/vite.config.mts sets base: './' and outDir: 'build'. Frontend env vars
-  use VITE_*, not CRA's REACT_APP_*. frontend/tsconfig.json includes tests and
-  Vitest globals; there is no Jest/Babel or react-scripts build path to restore.
+  use VITE_*. frontend/tsconfig.json includes tests and Vitest globals.
 - electron/preload.ts exposes folder/file, notification and other native operations.
   Feature-detect via frontend/src/lib/electronBridge.ts; it is absent in browsers.
 - Root package.json owns packaging. Frontend assets, bundled backend and compiled
   Electron main/preload ship together. Do not mirror bundled backend dependencies
-  into root dependencies as a packaging whitelist. Native Electron modules such
+  into root dependencies as a packaging allowlist. Native Electron modules such
   as node-pty require the existing rebuild/unpack setup.
-- Preserve Electron's NODE_OPTIONS handling; flags accepted by Node in a shell
-  may be rejected by Electron.
+- Scripts that launch Electron clear NODE_OPTIONS, because flags Node accepts in
+  a shell may be rejected by Electron: scripts/electron-dev-wait.mjs,
+  run-electron-smoke.mjs, pages-electron-sandbox-acceptance.mjs and
+  bench-startup.sh. A new launcher must do the same.
 
 ## Docs
 
 README.md describes current architecture, runtime setup, persistence and packaging.
 The removed canvas is on archive/canvas-view-2026-04-29, not in the live frontend.
 Read historical documents only when relevant to the task.
+Removed, do not restore: the React Flow canvas (last present in 3a2fcb33^),
+CRA/Jest/react-scripts (b2460bcc), and Project.contexts state with the
+save_context tool (04cebeb1); artifacts still use the legacy `contexts` table
+and wire key and AgentToolBridge.saveContext.

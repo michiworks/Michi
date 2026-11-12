@@ -3,6 +3,7 @@ export const PAGE_TOOL_NAMES = [
   'edit_home',
   'list_pages',
   'read_page',
+  'preview_page',
   'edit_page',
   'create_page',
   'create_database',
@@ -22,6 +23,13 @@ export type PageToolName = typeof PAGE_TOOL_NAMES[number];
 export interface ActivePageTurnAttribution {
   turnId: string;
   assistantId: string;
+  /**
+   * The session the turn runs on may approve the turn's later tools on its
+   * own (Kiro's Approve for me, McpSlot.getActivePageTurnAttribution), so a
+   * taint recorded mid-turn would not make it ask: page tools hand such a
+   * turn what a check-in wrote as stubs (pageTools.ts markedRead).
+   */
+  approveForMe?: true;
 }
 
 export type ActivePageTurnAttributionGetter = () => ActivePageTurnAttribution | null;

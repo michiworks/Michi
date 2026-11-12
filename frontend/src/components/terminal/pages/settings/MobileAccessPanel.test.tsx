@@ -2,8 +2,8 @@ import { act, fireEvent, render, screen } from '@testing-library/react';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { MobileAccessPanel } from './MobileAccessPanel';
 import type { MobileAccessStatus } from 'michi-shared';
-const mocks = vi.hoisted(() => ({ request: vi.fn(), link: vi.fn(), open: vi.fn(), confirm: vi.fn() }));
-vi.mock('../../../../services/api/mobileAccess', () => ({ mobileAccessRequest: mocks.request, createMobileAccessLink: mocks.link }));
+const mocks = vi.hoisted(() => ({ request: vi.fn(), link: vi.fn(), open: vi.fn(), confirm: vi.fn(), terminal: vi.fn() }));
+vi.mock('../../../../services/api/mobileAccess', () => ({ mobileAccessRequest: mocks.request, createMobileAccessLink: mocks.link, setPhoneTerminal: mocks.terminal }));
 vi.mock('../../../../services/openUrl', () => ({ openExternalUrl: mocks.open }));
 vi.mock('../../../ui/ConfirmDialog', () => ({ confirmDialog: mocks.confirm }));
 const off: MobileAccessStatus = { state: 'stopped', url: '', error: '', available: true };
@@ -13,7 +13,7 @@ function deferred<T>() {
   let resolve!: (value: T) => void;
   return { promise: new Promise<T>(done => { resolve = done; }), resolve: (value: T) => resolve(value) };
 }
-beforeEach(() => { mocks.request.mockReset().mockResolvedValue(off); mocks.link.mockReset(); mocks.open.mockReset(); mocks.confirm.mockReset(); });
+beforeEach(() => { mocks.request.mockReset().mockResolvedValue(off); mocks.link.mockReset(); mocks.open.mockReset(); mocks.confirm.mockReset(); mocks.terminal.mockReset(); });
 afterEach(() => { vi.useRealTimers(); });
 
 it('enables the selected machine, renders a local QR and removes an expired sign-in link', async () => {
@@ -154,4 +154,42 @@ it('turns off phone access opened elsewhere without asking', async () => {
   fireEvent.click(await screen.findByRole('button', { name: 'Turn off' })); await act(async () => {});
   expect(mocks.confirm).not.toHaveBeenCalled();
   expect(mocks.request).toHaveBeenCalledWith('local', 'stop');
+});
+
+it('is one row: what it does on the left, the machine and the switch for it on the right', async () => {
+  mocks.request.mockRejectedValue(new Error('Couldn’t reach Michi on this machine to check phone access. Check that it is running, then try again.'));
+  render(<MobileAccessPanel connections={connections} />); await act(async () => {});
+  const row = screen.getByText('Open on your phone').closest<HTMLElement>('.settings-row')!;
+  expect(row.querySelector('.settings-row__desc')!.textContent).toBe('Open this machine’s Michi on your phone.');
+  const control = row.querySelector<HTMLElement>('.settings-row__control')!;
+  expect(control.contains(screen.getByLabelText('Machine'))).toBe(true);
+  expect(control.contains(screen.getByRole('button', { name: 'Enable phone access' }))).toBe(true);
+  // A request that never reached Michi reads as a sentence, under the row.
+  expect(row.querySelector('[role="alert"]')!.textContent).toMatch(/^Couldn’t reach Michi on this machine/);
+});
+
+it('turns on terminals from the phone only after confirming what that allows, and off without asking', async () => {
+  mocks.request.mockResolvedValue({ ...connected, terminal: false });
+  render(<MobileAccessPanel connections={connections} />); await act(async () => {});
+  const toggle = screen.getByRole('switch', { name: 'Terminal on phone' });
+  expect(toggle.getAttribute('aria-checked')).toBe('false');
+  mocks.confirm.mockResolvedValueOnce(false);
+  fireEvent.click(toggle); await act(async () => {});
+  expect(mocks.confirm).toHaveBeenCalledWith(expect.objectContaining({ title: 'Allow terminals from your phone?', confirmLabel: 'Allow' }));
+  expect(mocks.terminal).not.toHaveBeenCalled();
+  mocks.confirm.mockResolvedValueOnce(true);
+  mocks.terminal.mockResolvedValueOnce({ ...connected, terminal: true });
+  fireEvent.click(toggle); await act(async () => {});
+  expect(mocks.terminal).toHaveBeenCalledWith('local', true);
+  expect(screen.getByRole('switch', { name: 'Terminal on phone' }).getAttribute('aria-checked')).toBe('true');
+  mocks.terminal.mockResolvedValueOnce({ ...connected, terminal: false });
+  fireEvent.click(screen.getByRole('switch', { name: 'Terminal on phone' })); await act(async () => {});
+  expect(mocks.confirm).toHaveBeenCalledTimes(2);
+  expect(mocks.terminal).toHaveBeenLastCalledWith('local', false);
+});
+
+it('hides the Terminal row for a backend that predates it', async () => {
+  mocks.request.mockResolvedValue(connected);
+  render(<MobileAccessPanel connections={connections} />); await act(async () => {});
+  expect(screen.queryByRole('switch', { name: 'Terminal on phone' })).toBeNull();
 });

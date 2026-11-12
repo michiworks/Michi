@@ -10,7 +10,7 @@ import { META_AGENT_TOOLSETS, retryMetaAgentGuard } from '../services/metaAgent/
 import { MetaAgentSettingsError, metaAgentInfo, updateMetaAgentSettings } from '../services/metaAgent/settings';
 
 /** The Meta agent reads every workspace: only this machine's app or its authenticated remote owner may configure it. */
-const metaAgentLocalOnly = localOnlyGuard('The Meta agent requires local or authenticated remote access', { allowAuthenticatedRemote: true });
+const metaAgentLocalOnly = localOnlyGuard('Pages upkeep requires local or authenticated remote access', { allowAuthenticatedRemote: true });
 
 const FIELDS = ['runtimeId', 'providerId', 'modelId', 'reasoning', 'writeWorkspaceHomes', 'maintainSpacesHome', 'firstRunDays'] as const;
 
@@ -63,7 +63,7 @@ export function setupMetaAgentRoutes(): Router {
       return;
     }
     log.warn('http', `meta agent ${what} failed`, { err: err instanceof Error ? err.message : String(err) });
-    res.status(500).json({ error: 'The Meta agent settings are not available' });
+    res.status(500).json({ error: 'The Pages upkeep settings are not available' });
   };
 
   router.get('/meta-agent', async (_req, res) => {

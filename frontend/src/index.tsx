@@ -20,7 +20,6 @@ function reportGlobalError(source: string, error: unknown) {
   const key = `${source}:${message}`;
   if (_reportedErrors.has(key)) return;
   _reportedErrors.add(key);
-  // eslint-disable-next-line no-console
   console.error(`[GlobalErrorCapture:${source}]`, error);
 }
 window.addEventListener('error', (event) => {
@@ -46,7 +45,16 @@ startupMark('react_render_start');
 const specimen = import.meta.env.DEV
   ? new URLSearchParams(window.location.search).get('specimen')
   : null;
-if (specimen === 'agent-blocks') {
+const previewParams = new URLSearchParams(window.location.search);
+const previewPageId = previewParams.get('pagePreview');
+const previewWorkspaceId = previewParams.get('workspace');
+if (previewPageId && previewWorkspaceId) {
+  // An agent's read-only look at one Page, opened from a preview_page link
+  // (backend/src/services/pages/pagePreview.ts); no app shell.
+  void import('./components/terminal/spaces/PagePreview').then(({ default: PagePreview }) => {
+    root.render(<PagePreview pageId={previewPageId} workspaceId={previewWorkspaceId} palette={previewParams.get('palette')} />);
+  });
+} else if (specimen === 'agent-blocks') {
   // Dev-only specimen sheet for visual verification of the agent-block
   // variants — bypasses the app shell entirely.
   void import('./components/terminal/AgentBlocksSpecimen').then(({ default: AgentBlocksSpecimen }) => {

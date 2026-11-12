@@ -85,10 +85,6 @@ before(() => {
   // The MCP routes look the slot's chat up in the database.
   dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'michi-product-events-data-'));
   setEnv('MICHI_DATA_DIR', dataDir);
-  // Both adapters read the follow-ups experiment mode from the environment.
-  setEnv('MICHI_FOLLOW_UPS_EXPERIMENT_MODE', 'hook-tool');
-  setEnv('MICHI_CLAUDE_FOLLOW_UPS_HOOK_POC', undefined);
-  setEnv('MICHI_NODE_SUMMARY_EXPERIMENT_MODE', undefined);
 });
 
 after(() => {
@@ -280,14 +276,14 @@ async function callMichiTools(callTool: CallTool): Promise<void> {
 }
 
 /**
- * The turn-metadata callbacks, called directly: the adapter reports these
- * itself, and four follow-ups (more than set_follow_ups accepts) pin the
- * adapter's own cleaning.
+ * The turn-metadata callbacks the slot offers, called directly: the adapter
+ * reports these itself, and four follow-ups (more than set_follow_ups
+ * accepts) pin the adapter's own cleaning. A Claude slot offers neither and
+ * a Codex slot only the overview: their answers carry the rest as sentinels.
  */
 function setTurnMetadata(slot: McpSlot): void {
-  assert.ok(slot.onSetBranchOverview && slot.onSetFollowUps, 'the slot takes turn metadata');
-  slot.onSetBranchOverview('  Explored alpha and beta.  ');
-  slot.onSetFollowUps([' First? ', 'Second?', 'Third?', 'Fourth?']);
+  slot.onSetBranchOverview?.('  Explored alpha and beta.  ');
+  slot.onSetFollowUps?.([' First? ', 'Second?', 'Third?', 'Fourth?']);
 }
 
 // ---- Claude ----------------------------------------------------------------------
@@ -337,7 +333,7 @@ async function claudeScenario(resume: boolean): Promise<NormalizedEvent[]> {
     workspaceId: null,
     mcpRegistry: mcp.registry,
     bridge: goldenBridge(resume ? 'claude-resume' : 'claude-fresh'),
-    options: claudeTestOptions({ followUpsHookPoc: () => true }),
+    options: claudeTestOptions(),
     backgroundSubagents: new BackgroundSubagentRegistry({ resolveWorkspace: () => 'ws-golden' }),
   } as any);
   try {
@@ -365,7 +361,7 @@ async function claudeScenario(resume: boolean): Promise<NormalizedEvent[]> {
   }
 }
 
-test('Claude: a fresh session reports branches, artifacts, images, overview and follow-ups', async () => {
+test('Claude: a fresh session reports branches, artifacts and images', async () => {
   await record('claude-fresh', await claudeScenario(false));
 });
 
@@ -393,13 +389,12 @@ function codexClient(): CodexAppServerClient & { emit: (method: string, params: 
   return client;
 }
 
-test('Codex: a session reports branches, artifacts, images, overview and follow-ups', async () => {
+test('Codex: a session reports branches, artifacts, images and the overview', async () => {
   const client = codexClient();
   const mcp = await michiMcp();
   const session = new CodexSession({
     nodeId: 'codex-golden', threadId: 'codex-golden-thread', cwd, workspaceId: null,
     client, mcpRegistry: mcp.registry, bridge: goldenBridge('codex'), host: michiTestHost(), hostText: michiCodexHostText(),
-    followUpsHookPocEnabled: true, followUpsExperimentMode: 'hook-tool',
   });
   session.createMcpSlot();
   session.wireNotifications();

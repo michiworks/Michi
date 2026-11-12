@@ -34,6 +34,15 @@ describe('MapCard (expanded)', () => {
   });
 });
 
+describe('MapCard message count', () => {
+  it('shows the node total when only its latest page is loaded', () => {
+    const latest = Array.from({ length: 15 }, (_, i) => ({ id: `m${i}`, role: 'user' as const, text: '', toolCalls: [] }));
+    render(<MapCard now={NOW} ribbon={null} expanded={false} onToggle={() => {}} onOpenPane={() => {}}
+      node={node({ title: 'X', messages: latest, messagesLoaded: false, historyBefore: { seq: 25, id: 'm0' }, olderMessageCount: 25, messageCount: 40 })} />);
+    expect(screen.getByText('40 msgs')).toBeTruthy();
+  });
+});
+
 describe('MapCard (B effects)', () => {
   it('marks unread nodes with data-unread', () => {
     const { container } = render(<MapCard now={NOW} ribbon={null} expanded={false}

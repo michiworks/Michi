@@ -1,5 +1,6 @@
 import { expect, test, type Page } from '@playwright/test';
 import { installMockApi } from '../fixtures/mockApi';
+import { openThreadFromSidebar } from '../fixtures/shell';
 
 async function boot(page: Page, palette = 'bone', reduceMotion = false) {
   await installMockApi(page);
@@ -40,8 +41,6 @@ test('Home adapts to desktop, phone and a short window without clipping its comp
     expect(bounds!.x + bounds!.width).toBeLessThanOrEqual(width);
     expect(bounds!.y + bounds!.height).toBeLessThanOrEqual(height);
     expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBe(width);
-    if (width <= 700) await expect(page.getByRole('button', { name: 'Workspace views', exact: true })).toBeVisible();
-    else await expect(page.getByRole('button', { name: 'Workspace views', exact: true })).toBeHidden();
     await page.screenshot({ animations: 'disabled', path: info.outputPath(`home-${width}.png`) });
   }
 });
@@ -49,6 +48,8 @@ test('Home adapts to desktop, phone and a short window without clipping its comp
 test('narrow toolbar retains view navigation, keyboard escape and focus', async ({ page }, info) => {
   await page.setViewportSize({ width: 390, height: 844 });
   await boot(page);
+  // The view toolbar acts on a conversation on screen; Home has none.
+  await openThreadFromSidebar(page, 'A quieter way to work');
   const trigger = page.getByRole('button', { name: 'Workspace views', exact: true });
   await trigger.click();
   await expect(trigger).toHaveAttribute('aria-expanded', 'true');
@@ -60,16 +61,18 @@ test('narrow toolbar retains view navigation, keyboard escape and focus', async 
   await expect(map).toBeHidden();
   await trigger.click();
   await page.screenshot({ animations: 'disabled', path: info.outputPath('mobile-views.png') });
-  await page.getByRole('button', { name: 'Overview', exact: true }).click();
+  await expect(page.getByRole('button', { name: 'Overview', exact: true })).toHaveCount(0);
+  await page.getByRole('button', { name: 'Map', exact: true }).click();
   await expect(trigger).toHaveAttribute('aria-expanded', 'false');
   await expect(trigger).toBeFocused();
-  await expect(page.locator('.terminal-topbar')).toHaveAttribute('data-page', 'branches');
+  await expect(page.locator('.terminal-topbar')).toHaveAttribute('data-page', 'map');
 });
 
 test('system reduced motion also disables the narrow toolbar entrance', async ({ page }) => {
   await page.setViewportSize({ width: 390, height: 844 });
   await page.emulateMedia({ reducedMotion: 'reduce' });
   await boot(page);
+  await openThreadFromSidebar(page, 'A quieter way to work');
   await page.getByRole('button', { name: 'Workspace views', exact: true }).click();
   await expect(page.getByRole('group', { name: 'Workspace view controls' })).toHaveCSS('animation-name', 'none');
 });
@@ -89,13 +92,14 @@ test('placeholder is not draft content and clearing restores the empty state', a
   await expect(page.getByRole('button', { name: 'Send (Enter)', exact: true })).toBeDisabled();
 });
 
-test('a phone lists workspaces as rows, acts on them from a sheet and manages one in a single column', async ({ browser, baseURL }, info) => {
+test('a phone lists workspaces as rows, acts on them from a menu beside the row and manages one in a single column', async ({ browser, baseURL }, info) => {
   const context = await browser.newContext({ baseURL, viewport: { width: 390, height: 844 }, hasTouch: true, isMobile: true });
   const page = await context.newPage();
   try {
     await boot(page);
     await page.getByLabel('Open sidebar', { exact: true }).click();
-    await page.getByRole('button', { name: 'Workspaces', exact: true }).click();
+    // Workspaces is the "All N ›" link on the drawer's Projects header.
+    await page.getByRole('button', { name: /^All \d+ workspaces$/ }).click();
     const row = page.getByTestId('workspace-row-design');
     await expect(row).toBeVisible();
     await expect(page.getByRole('table')).toHaveCount(0);
@@ -110,16 +114,26 @@ test('a phone lists workspaces as rows, acts on them from a sheet and manages on
     }
     await page.screenshot({ animations: 'disabled', path: info.outputPath('mobile-workspaces.png') });
 
+    const rowBox = (await row.boundingBox())!;
     await row.getByRole('button', { name: 'More actions' }).tap();
-    const sheet = page.getByRole('dialog', { name: 'Research journal' });
-    await expect(sheet).toBeVisible();
-    // It rises from below; once settled it sits on the bottom edge, full width.
+    const menu = page.getByRole('menu', { name: 'Actions' });
+    await expect(menu).toBeVisible();
+    // The row lifts out in its own shape, square and full width, and the menu
+    // opens beside it on screen; the row itself hides behind its copy.
+    const lifted = page.locator('.phone-menu-lift');
+    await expect(lifted).toBeVisible();
+    await expect(row).toBeHidden();
     await expect.poll(async () => {
-      const box = (await sheet.boundingBox())!;
-      return [Math.round(box.y + box.height), Math.round(box.width)];
-    }).toEqual([844, 390]);
-    await page.screenshot({ animations: 'disabled', path: info.outputPath('mobile-workspace-sheet.png') });
-    await sheet.getByRole('button', { name: 'Rename…' }).tap();
+      const box = (await lifted.boundingBox())!;
+      return [Math.round(box.x), Math.round(box.width), await lifted.evaluate((el) => getComputedStyle(el).borderTopLeftRadius)];
+    }).toEqual([Math.round(rowBox.x), Math.round(rowBox.width), '0px']);
+    const menuBox = (await menu.boundingBox())!;
+    expect(menuBox.x).toBeGreaterThanOrEqual(0);
+    expect(menuBox.x + menuBox.width).toBeLessThanOrEqual(390);
+    expect(menuBox.y + menuBox.height).toBeLessThanOrEqual(844);
+    await page.screenshot({ animations: 'disabled', path: info.outputPath('mobile-workspace-menu.png') });
+    await menu.getByRole('menuitem', { name: 'Rename…' }).tap();
+    await expect(row).toBeVisible();
     const field = page.getByRole('textbox', { name: 'Workspace name' });
     await expect(field).toBeFocused();
     await field.fill('Field notes');
@@ -156,8 +170,6 @@ test('resizing to desktop restores its original design without losing the draft'
   await expect(page.locator('.terminal-composer__input')).toHaveCSS('padding', '10px 12px 4px');
   await expect(page.locator('.terminal-composer__toolbar')).toHaveCSS('padding', '4px 10px 8px');
   await expect(page.locator('.mention-editor-placeholder')).toBeHidden();
-  await expect(page.getByRole('button', { name: 'Workspace views', exact: true })).toBeHidden();
-  await expect(page.getByRole('button', { name: 'Map', exact: true })).toBeVisible();
   await page.setViewportSize({ width: 390, height: 844 });
   await expect(page.locator('.home-default-headline')).toBeVisible();
   await expect(editor).toHaveText('Keep this draft through resize');
@@ -179,6 +191,8 @@ for (const palette of ['bone', 'monokai']) {
         expect(box.x).toBeGreaterThanOrEqual(bounds.x);
         expect(box.x + box.width).toBeLessThanOrEqual(bounds.x + bounds.width);
       }
+      // The view toolbar acts on a conversation on screen; Home has none.
+      await openThreadFromSidebar(page, 'A quieter way to work');
       await page.getByRole('button', { name: 'Workspace views', exact: true }).click();
       await expect(page.getByRole('group', { name: 'Workspace view controls' })).toHaveCSS('animation-name', 'none');
       await page.screenshot({animations: 'disabled', path: info.outputPath(`touch-${palette}.png`)});

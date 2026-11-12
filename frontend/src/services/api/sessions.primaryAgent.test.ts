@@ -40,6 +40,21 @@ describe('primary Agent session API routing', () => {
     expect(body.agentDefinitionId).toBe('same-id');
   });
 
+  it('asks for enabled Definitions and keeps the status of a refusal', async () => {
+    const fetchMock = vi.spyOn(globalThis, 'fetch')
+      .mockResolvedValueOnce(new Response(JSON.stringify({ definitions: [definition] }), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ error: 'custom_agents_disabled' }), { status: 404 }));
+    const [listed] = await listPrimaryAgentDefinitions('remote-ws');
+    expect(listed).toMatchObject({ backendConnectionId: 'remote-a', definition: { id: 'same-id', name: 'Remote Agent' } });
+    expect(new URL(String(fetchMock.mock.calls[0][0]), 'http://x').searchParams.get('discover')).toBe('enabled');
+    await expect(listPrimaryAgentDefinitions('remote-ws')).rejects.toMatchObject({ status: 404, message: 'custom_agents_disabled' });
+  });
+
+  it('lists no Definitions from a body without a list, as before', async () => {
+    vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(new Response(JSON.stringify({}), { status: 200 }));
+    await expect(listPrimaryAgentDefinitions('remote-ws')).resolves.toEqual([]);
+  });
+
   it('rejects a same-ID Definition selected from another Backend', () => {
     expect(() => bindPendingPrimaryAgent('remote-node', {
       workspaceId: 'remote-ws', backendConnectionId: 'local', definitionId: 'same-id',

@@ -1,13 +1,15 @@
 import {
-  PROGRESS_CARD_TTL_MS, isSystemWorkspaceSettings, parseBranchOverviewEntries, progressCardStatusLine, progressReplyConclusion, progressReplyText,
-  progressTurnSummary,
-  type ProgressCardAwaiting, type ProgressCardDto, type ProgressCardStatus, type ProgressReplyShape,
+  PROGRESS_CARD_TTL_MS, RESTART_INTERRUPTION, conversationEnding, isSystemWorkspaceSettings, parseBranchOverviewEntries, progressCardStatusLine,
+  oneLine as oneLineText, progressReplyConclusion, progressReplyText, progressTurnSummary,
+  type ConversationEndingOutcome, type ProgressCardAwaiting, type ProgressCardDto, type ProgressCardStatus, type ProgressReplyShape,
 } from 'michi-shared';
 import { getDb } from '../db';
 import type { ChatHub } from '../../agents/chatHub';
+import { chatHubAwaitingUser } from '../chatAwaitingUser';
 import { workspaceOwnerMatches } from '../agentOwner';
 import { PageWriteError, pagesTransaction } from './core';
 import { pageRecord } from './repository';
+import { homeHiddenJoin, workspaceShownOnHome } from './homeVisibility';
 
 type CardRow = {
   owner_user_id: string; thread_node_id: string; started_from_page_id: string;
@@ -17,6 +19,7 @@ type NodeRow = {
   id: string; title: string | null; status: string; runtime_id: string | null; tree_id: string | null; workspace_id: string;
   deleted_at: number | null; purged_at: number | null; workspace_name: string; workspace_owner: string | null;
   workspace_settings: string | null; workspace_deleted_at: number | null; workspace_purged_at: number | null;
+  workspace_archived_at: number | null; home_hidden_at: number | null;
   turn_status: string | null; turn_completed_at: number | null; turn_stop_reason: string | null; turn_error: string | null;
   turn_started_at: number | null; branch_overview: string | null;
 };
@@ -37,20 +40,13 @@ export function configureProgressCardLiveTurns(reader: LiveTurnReader | null): v
 export function chatHubLiveTurn(hub: Pick<ChatHub, 'getSnapshot' | 'getPendingPermission' | 'getPendingUserInput'>, nodeId: string): ProgressCardLiveTurn | null {
   const observation = hub.getSnapshot(nodeId);
   if (!observation || observation.durableStatus !== 'active') return null;
-  const permission = hub.getPendingPermission(observation.chatId);
-  const input = permission ? null : hub.getPendingUserInput(observation.chatId);
-  const awaiting: ProgressCardAwaiting | null = permission ? 'approval'
-    : input ? 'question'
-      : observation.pendingInteraction.waiting ? 'approval' : null;
-  const question = input?.questions?.[0];
-  const detail = permission ? permission.title : question ? question.question || question.header : null;
-  return { awaiting, awaitingDetail: oneLine(detail, DETAIL_MAX), reply: observation.snapshot.assistantMessage };
+  const pending = chatHubAwaitingUser(hub, observation.chatId);
+  const awaiting: ProgressCardAwaiting | null = pending?.kind ?? (observation.pendingInteraction.waiting ? 'approval' : null);
+  return { awaiting, awaitingDetail: oneLine(pending?.detail, DETAIL_MAX), reply: observation.snapshot.assistantMessage };
 }
 
 function oneLine(text: string | null | undefined, max: number): string | null {
-  const line = text?.replace(/\s+/g, ' ').trim();
-  if (!line) return null;
-  return line.length > max ? `${line.slice(0, max - 1)}…` : line;
+  return text ? oneLineText(text, max) || null : null;
 }
 
 const LIST_LIMIT = 50;
@@ -59,34 +55,40 @@ const DETAIL_MAX = 160;
 const ERROR_MAX = 200;
 const db = () => getDb();
 
-const TURN_STATUS: Record<string, ProgressCardStatus> = { active: 'running', completed: 'done', error: 'failed', cancelled: 'cancelled' };
 /** A turn the runtime ended early is not done, though its status reads completed. */
+const CARD_STATUS: Record<ConversationEndingOutcome, ProgressCardStatus> = {
+  done: 'done', stopped_early: 'failed', cancelled: 'cancelled', interrupted: 'failed', failed: 'failed',
+};
 const ABNORMAL_STOP: Record<string, string> = {
   max_tokens: 'The reply reached its length limit before it finished.',
   max_turn_requests: 'The chat reached its step limit before it finished.',
   refusal: 'The model declined to continue.',
 };
 
+const nodeEnding = (node: NodeRow) => conversationEnding({ status: node.turn_status, stopReason: node.turn_stop_reason, error: node.turn_error });
+
 function cardStatus(node: NodeRow): ProgressCardStatus {
-  const status = node.turn_status ? TURN_STATUS[node.turn_status] ?? 'idle' : 'idle';
-  return status === 'done' && node.turn_stop_reason && ABNORMAL_STOP[node.turn_stop_reason] ? 'failed' : status;
+  if (node.turn_status === 'active') return 'running';
+  const ending = nodeEnding(node);
+  return ending ? CARD_STATUS[ending.outcome] : 'idle';
 }
 
 function cardError(node: NodeRow, status: ProgressCardStatus): string | null {
   if (status !== 'failed') return null;
-  const early = node.turn_stop_reason ? ABNORMAL_STOP[node.turn_stop_reason] : undefined;
-  if (early && node.turn_status === 'completed') return early;
-  return oneLine(node.turn_error?.split('\n').find((line) => line.trim()), ERROR_MAX);
+  const ending = nodeEnding(node);
+  if (ending?.outcome === 'stopped_early') return ABNORMAL_STOP[node.turn_stop_reason!] ?? null;
+  if (ending?.outcome === 'interrupted') return `${RESTART_INTERRUPTION}.`;
+  return oneLine(ending?.note, ERROR_MAX);
 }
 
-function threadNode(nodeId: string): NodeRow | undefined {
+function threadNode(nodeId: string, ownerUserId: string): NodeRow | undefined {
   return db().prepare(`SELECT n.id,n.title,n.status,n.runtime_id,n.tree_id,n.workspace_id,n.deleted_at,n.purged_at,n.branch_overview,
       w.name AS workspace_name,w.owner_user_id AS workspace_owner,w.settings AS workspace_settings,
-      w.deleted_at AS workspace_deleted_at,w.purged_at AS workspace_purged_at,t.status AS turn_status,t.completed_at AS turn_completed_at,
+      w.deleted_at AS workspace_deleted_at,w.purged_at AS workspace_purged_at,w.archived_at AS workspace_archived_at,hp.hidden_at AS home_hidden_at,t.status AS turn_status,t.completed_at AS turn_completed_at,
       t.stop_reason AS turn_stop_reason,t.error AS turn_error,t.started_at AS turn_started_at
-    FROM nodes n JOIN workspaces w ON w.id=n.workspace_id
+    FROM nodes n JOIN workspaces w ON w.id=n.workspace_id ${homeHiddenJoin('w')}
     LEFT JOIN turns t ON t.turn_id=(SELECT l.turn_id FROM turns l WHERE l.node_id=n.id ORDER BY l.started_at DESC,l.rowid DESC LIMIT 1)
-    WHERE n.id=? AND n.kind='chat'`).get(nodeId) as NodeRow | undefined;
+    WHERE n.id=? AND n.kind='chat'`).get(ownerUserId, nodeId) as NodeRow | undefined;
 }
 
 function liveFor(node: NodeRow | undefined, ownerUserId: string): node is NodeRow {
@@ -149,7 +151,7 @@ export function createProgressCard(input: CreateProgressCardInput): ProgressCard
   const now = input.now ?? Date.now();
   return pagesTransaction(() => {
     pageRecord(input.startedFromPageId, input.ownerUserId);
-    const node = threadNode(input.threadNodeId);
+    const node = threadNode(input.threadNodeId, input.ownerUserId);
     if (!liveFor(node, input.ownerUserId) || isSystemWorkspaceSettings(node.workspace_settings)) {
       throw new PageWriteError(404, 'not_found', 'Conversation not found');
     }
@@ -171,7 +173,7 @@ function shownCards(ownerUserId: string, now: number, pageId: string | null): Pr
     .all(ownerUserId, pageId, pageId, now - PROGRESS_CARD_TTL_MS, LIST_LIMIT) as unknown as CardRow[];
   const cards: ProgressCardDto[] = [];
   for (const row of rows) {
-    const node = threadNode(row.thread_node_id);
+    const node = threadNode(row.thread_node_id, ownerUserId);
     if (liveFor(node, ownerUserId)) cards.push(dto(row, node));
   }
   return cards;
@@ -190,7 +192,7 @@ export function listHomeProgressCards(ownerUserId: string, now = Date.now()): Pr
 
 function stamp(ownerUserId: string, threadNodeId: string, column: 'seen_at' | 'dismissed_at', now: number): ProgressCardDto {
   return pagesTransaction(() => {
-    const node = threadNode(threadNodeId);
+    const node = threadNode(threadNodeId, ownerUserId);
     if (!cardRow(ownerUserId, threadNodeId) || !node || !workspaceOwnerMatches(node.workspace_owner, ownerUserId)) {
       throw new PageWriteError(404, 'not_found', 'Progress card not found');
     }
@@ -217,8 +219,12 @@ export function startedConversations(ownerUserId: string, limit: number): Array<
     .all(ownerUserId, limit) as unknown as Array<CardRow & { page_title: string | null }>;
   const result: Array<{ card: CardRow; node: NodeRow; pageTitle: string | null }> = [];
   for (const row of rows) {
-    const node = threadNode(row.thread_node_id);
-    if (liveFor(node, ownerUserId) && !isSystemWorkspaceSettings(node.workspace_settings)) result.push({ card: row, node, pageTitle: row.page_title });
+    const node = threadNode(row.thread_node_id, ownerUserId);
+    if (node && node.deleted_at === null && node.purged_at === null && workspaceShownOnHome({ owner_user_id: node.workspace_owner,
+      settings: node.workspace_settings, deleted_at: node.workspace_deleted_at, archived_at: node.workspace_archived_at,
+      purged_at: node.workspace_purged_at, home_hidden_at: node.home_hidden_at }, ownerUserId)) {
+      result.push({ card: row, node, pageTitle: row.page_title });
+    }
   }
   return result;
 }

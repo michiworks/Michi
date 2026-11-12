@@ -1,4 +1,4 @@
-import { META_AGENT_FIRST_RUN_DAYS, type FirstRunProgressDto, type SpacesFirstRunStatus, type WorkspaceHomeSummaryDto } from 'michi-shared';
+import { META_AGENT_FIRST_RUN_DAYS, PAGE_LIMITS, type FirstRunProgressDto, type SpacesFirstRunStatus, type WorkspaceHomeSummaryDto } from 'michi-shared';
 import type { ScheduledJobScheduler } from '../scheduledJobs/scheduler';
 import { getAiGlobalContext } from '../dbRepository';
 import { conversationCompletionCounter } from '../conversationUpdates';
@@ -66,12 +66,12 @@ function enrollWorkspace(scheduler: ScheduledJobScheduler, workspaceId: string, 
     if (queued.state === 'queued') failNow(workspaceId, ownerUserId, error, now);
     return null;
   };
-  if (!getAiGlobalContext(workspaceId, ownerUserId)) return queueFailed('AI navigation is turned off for this workspace, so the Meta agent cannot read it');
+  if (!getAiGlobalContext(workspaceId, ownerUserId)) return queueFailed('AI navigation is turned off for this workspace, so Pages upkeep cannot read it');
   let config = getMaintenanceConfig(workspaceId, ownerUserId);
   try {
     if (!config) config = new PageMaintenanceConfigService(scheduler, () => now).enable({ workspaceId, ownerUserId }).config;
   } catch (error) {
-    return queueFailed(`Could not schedule the Meta agent for this workspace: ${error instanceof Error ? error.message : String(error)}`);
+    return queueFailed(`Could not schedule Pages upkeep for this workspace: ${error instanceof Error ? error.message : String(error)}`);
   }
   if (!writesHomes) return null;
   if (!config.enabled || config.paused) return queueFailed('Space maintenance is paused for this workspace');
@@ -187,7 +187,7 @@ function firstRunPrompt(input: { runId: string; workspaceName: string; workspace
     'Steps:',
     '1. Page through list_threads until nextOffset is null. Read the conversations that matter with read_node_overview and read_node; you need not read every message, but read the messages behind each fact you will write.',
     '2. Read the home page with maintenance_read_page.',
-    '3. Make one maintenance_write_page call with every operation (at most 50; a page holds at most 40 blocks).',
+    `3. Make one maintenance_write_page call with every operation (at most ${PAGE_LIMITS.opsPerEdit}; a page holds at most ${PAGE_LIMITS.blocks} blocks).`,
     '   Open with a callout of at most two sentences on where things stand: for work, how far it got; for thinking still in motion, what the person is still torn about.',
     '   Then add 2 to 5 blocks chosen by the shape of what you read. There is no fixed set and no template: workspaces doing different work should get different blocks, and one page may hold different shapes where the work does (an open question can sit above settled steps). Where the conversations are thinking rather than building, center the page on the person\'s own thinking, not a digest of the assistant\'s answers: what they have not settled, how their view shifted, and which ideas are still growing. Keep whose thinking is whose: count a view or a change of mind as the person\'s only when they said it, and mark the assistant\'s proposals as proposals, saying whether the person answered them. Use a type only when the content has its shape; any other block the tool accepts is allowed when it fits better:',
     '   - thinking that diverges, hesitates or argues with itself: conflict with each version and the conversation it came from, leaving resolution unset while the question stays open; compare or pros-cons for options still being weighed; quote for the user\'s own words where they collide;',
@@ -201,7 +201,7 @@ function firstRunPrompt(input: { runId: string; workspaceName: string; workspace
     '   Give every insert and update its sources: the messages its facts come from, as {nodeId, messageId} pairs, where messageId is an id read_node showed you as [message <id>]. Cite only the messages that say what the block says (at most 5 per block); a block drawn from many conversations at once may leave sources out. Michi drops any message you did not read.',
     '   The page lists the workspace\'s conversations itself: do not add a heading or a list of them.',
     `   ${HOME_WRITE_ORDER_NOTE}`,
-    '   Blocks a person edited stay as they are; a change to one becomes a proposal.',
+    '   A change to a block you wrote applies directly, also after a person edited it: keep their wording, and leave out checklist items already ticked done. A change to a block the person added becomes a proposal.',
     '   Write in the language the conversations mostly use. Use only facts you read; never invent numbers.',
     '   If nothing in the history is worth a page, call maintenance_no_change for the home page with the reason instead.',
     'Layout rules for this page (follow them):',
@@ -242,7 +242,7 @@ export function planHomeRun(input: PlanHomeRunInput): HomeRunPlan | null {
   const progress = getFirstRun(input.workspaceId, input.ownerUserId);
   if (behaviour.writeWorkspaceHomes && progress && IN_PROGRESS.has(progress.state)) {
     if (state.haltedReason) {
-      const error = `Meta agent stopped: ${state.haltedReason}`;
+      const error = `Pages upkeep stopped: ${state.haltedReason}`;
       failNow(input.workspaceId, input.ownerUserId, error, input.now);
       return { kind: 'refuse', error };
     }
@@ -273,7 +273,8 @@ export function planHomeRun(input: PlanHomeRunInput): HomeRunPlan | null {
       closesFirstRun: !firstRunClosed(input.ownerUserId) }) };
 }
 
-const GUARD_FAILURE = /Meta agent restriction check failed/;
+/** MetaAgentGuardError's message, and its older wording that stored rows keep. */
+const GUARD_FAILURE = /(?:Michi|Meta agent) restriction check failed/;
 
 function isGuardFailure(cause: unknown, message: string): boolean {
   return isMetaAgentGuardError(cause) || GUARD_FAILURE.test(message);
@@ -319,8 +320,8 @@ export function settleHomeRun(input: SettleHomeRunInput): { status: SettleHomeRu
     return { status: input.status, summary, error: input.status === 'succeeded' ? null : input.error };
   }
   const error = input.status === 'succeeded'
-    ? (run.kind === 'first-run' ? 'The Meta agent finished without writing this workspace\'s home' : 'The Meta agent finished without updating the Spaces Home')
-    : input.error ?? 'The Meta agent stopped before finishing';
+    ? (run.kind === 'first-run' ? 'Pages upkeep finished without writing this workspace\'s home' : 'Pages upkeep finished without updating the Spaces Home')
+    : input.error ?? 'Pages upkeep stopped before finishing';
   failHomeRun(run.id, input.ownerUserId, error, input.now);
   return { status: input.status === 'succeeded' ? 'failed' : input.status, summary: null, error };
 }

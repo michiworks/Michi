@@ -1,31 +1,44 @@
 /**
- * `start_conversation`: the Meta agent's chat window opens an ordinary
- * conversation in one of the user's workspaces and sends its first message.
- * The conversation runs on the user's global runtime settings, exactly as one
- * the user started; the Meta agent's own settings never reach it, and the
- * Meta agent does not do the work itself. The user approves every start.
+ * `start_conversation`: the agent's conversation (V, in the assistant's
+ * workspace) opens an ordinary conversation in one of the user's workspaces
+ * and sends its first message. The conversation runs on the user's global
+ * runtime settings, exactly as one the user started; the agent's own
+ * settings never reach it, and the agent does not do the work itself. The
+ * user approves every start (an applied conversation.start card is that
+ * approval, services/companion/service.ts).
+ *
+ * The agent then follows the conversation (DESIGN-v2 §4): every start from
+ * V records a delegation (origin `start_conversation`; an applied card
+ * names itself the origin afterwards), so its replies come back as worker
+ * reports and it may take follow-ups (companion_session_send).
  */
 
 import { randomUUID } from 'node:crypto';
 import {
   THREAD_MESSAGE_MAX_CHARS,
-  isSystemWorkspaceSettings,
+  type MichiConversationStart,
   type ProgressCardDto,
 } from 'michi-shared';
-import type { AgentReasoning, AgentSession } from '../../agents/types';
+import type { AgentSession } from '../../agents/types';
 import type { StartedRequestedSelfTurn } from '../../agents/chatHub';
-import { getModelReasoningOptions } from '../../agents/modelReasoning';
 import { getRuntime } from '../../agents/registry';
+import { startUnderRestoreLock } from '../../agents/requestedTurnStart';
 import { threadMessagingDeps, type ThreadMessageApprover, type ThreadMessagingDeps } from '../../agents/threadMessageTool';
-import { isAssistantWorkspace } from '../../assistant/identity';
-import { getAgentConfig, resolveModel, resolveProvider, resolveReasoning } from '../agentConfig';
+import { declinedApprovalNext } from '../../agents/singleUseApproval';
+import { assistantPurposeOf, assistantTargetWorkspace, isAssistantWorkspace } from '../../assistant/identity';
+import { getAgentConfig, resolveRuntimeProfile } from '../agentConfig';
 import { LOCAL_AGENT_OWNER_ID, workspaceOwnerMatches } from '../agentOwner';
 import { getDb, runInTransaction } from '../db';
-import { getWorkspace, type WorkspaceRow } from '../dbRepository';
+import type { WorkspaceRow } from '../dbRepository';
+import { workspaceIdKindHint } from '../idKindHint';
 import { ensureDurableGraphNode } from '../graphCommands';
 import { log } from '../logger';
+import { recordDelegation } from '../companion/repository';
 import { getPage } from '../pages/repository';
+import { recordStructureChange } from '../structureEvents';
+import { resolveNewThreadProfile } from '../threadProfile';
 import { createProgressCard } from '../pages/progressCards';
+import { CodedToolError, codedErrorResult, jsonResult, type McpTextResult } from '../../agents/tools/types';
 
 export const START_CONVERSATION_TITLE_MAX_CHARS = 80;
 
@@ -43,37 +56,6 @@ export interface StartConversationArgs {
   pageId?: unknown;
 }
 
-export interface StartConversationResult {
-  [key: string]: unknown;
-  content: Array<{ type: 'text'; text: string }>;
-  isError?: true;
-}
-
-/** What the chat window's conversation card shows. */
-export interface MichiConversationStart {
-  kind: 'michiConversationStart';
-  nodeId: string;
-  treeId: string;
-  workspaceId: string;
-  workspaceName: string;
-  title: string;
-  runtimeId: string;
-  modelId: string | null;
-  startedFromPageId: string | null;
-}
-
-class StartConversationError extends Error {
-  constructor(readonly code: string, message: string) { super(message); }
-}
-
-function errorResult(code: string, message: string): StartConversationResult {
-  return { content: [{ type: 'text', text: `${code}: ${message}` }], isError: true };
-}
-
-function jsonResult(value: Record<string, unknown>): StartConversationResult {
-  return { content: [{ type: 'text', text: JSON.stringify(value) }] };
-}
-
 function oneLine(value: string): string {
   return value.replace(/\s+/g, ' ').trim();
 }
@@ -86,36 +68,35 @@ function clipTitle(value: string): string {
 
 function parseArgs(args: StartConversationArgs): { workspaceId: string; text: string; title: string; pageId: string | null } {
   const workspaceId = typeof args.workspaceId === 'string' ? args.workspaceId.trim() : '';
-  if (!workspaceId || workspaceId.length > 160) throw new StartConversationError('INVALID_ARGUMENT', 'workspaceId is required; get one from list_workspaces');
+  if (!workspaceId || workspaceId.length > 160) throw new CodedToolError('INVALID_ARGUMENT', 'workspaceId is required; get one from list_workspaces');
   const text = typeof args.text === 'string' ? args.text.trim() : '';
-  if (!text) throw new StartConversationError('INVALID_ARGUMENT', 'text is required');
-  if (text.length > THREAD_MESSAGE_MAX_CHARS) throw new StartConversationError('INVALID_ARGUMENT', `text exceeds ${THREAD_MESSAGE_MAX_CHARS} characters`);
-  if (args.title !== undefined && typeof args.title !== 'string') throw new StartConversationError('INVALID_ARGUMENT', 'title must be a string');
+  if (!text) throw new CodedToolError('INVALID_ARGUMENT', 'text is required');
+  if (text.length > THREAD_MESSAGE_MAX_CHARS) throw new CodedToolError('INVALID_ARGUMENT', `text exceeds ${THREAD_MESSAGE_MAX_CHARS} characters`);
+  if (args.title !== undefined && typeof args.title !== 'string') throw new CodedToolError('INVALID_ARGUMENT', 'title must be a string');
   const title = clipTitle(typeof args.title === 'string' && args.title.trim() ? args.title : text.split('\n').find((line) => line.trim()) ?? text);
   if (args.pageId !== undefined && (typeof args.pageId !== 'string' || !args.pageId || args.pageId.length > 200)) {
-    throw new StartConversationError('INVALID_ARGUMENT', 'pageId must be a page id');
+    throw new CodedToolError('INVALID_ARGUMENT', 'pageId must be a page id');
   }
   return { workspaceId, text, title, pageId: typeof args.pageId === 'string' ? args.pageId : null };
 }
 
 function callerOwner(caller: StartConversationCaller): string {
   if (!caller.nodeId || !isAssistantWorkspace(caller.workspaceId)) {
-    throw new StartConversationError('UNSUPPORTED', 'start_conversation is only available in the Meta agent chat');
+    throw new CodedToolError('UNSUPPORTED', 'start_conversation is only available in Michi’s own conversation, the one ⌘J opens');
   }
   const ownerUserId = caller.ownerUserId ?? (process.env.MICHI_CLOUD === '1' ? null : LOCAL_AGENT_OWNER_ID);
-  if (!ownerUserId) throw new StartConversationError('UNSUPPORTED', 'start_conversation needs a signed-in owner');
+  if (!ownerUserId) throw new CodedToolError('UNSUPPORTED', 'start_conversation needs a signed-in owner');
   return ownerUserId;
 }
 
 /** One of the owner's own workspaces that takes new conversations: not deleted, archived or a system one. */
 function targetWorkspace(ownerUserId: string, workspaceId: string): WorkspaceRow {
-  const workspace = getWorkspace(workspaceId, ownerUserId);
-  if (!workspace || workspace.deleted_at != null || isSystemWorkspaceSettings(workspace.settings)
-    || !workspaceOwnerMatches(workspace.owner_user_id ?? null, ownerUserId)) {
-    throw new StartConversationError('NOT_FOUND', `workspace not found: ${workspaceId}. Get ids from list_workspaces.`);
+  const workspace = assistantTargetWorkspace(ownerUserId, workspaceId);
+  if (!workspace || !workspaceOwnerMatches(workspace.owner_user_id ?? null, ownerUserId)) {
+    throw new CodedToolError('NOT_FOUND', `workspace not found: ${workspaceId}.${workspaceIdKindHint(workspaceId)} Get ids from list_workspaces.`);
   }
   if (workspace.archived_at != null) {
-    throw new StartConversationError('READ_ONLY', `${workspace.name} is archived; ask the user to restore it first`);
+    throw new CodedToolError('READ_ONLY', `${workspace.name} is archived; ask the user to restore it first`);
   }
   return workspace;
 }
@@ -125,7 +106,7 @@ function checkPage(ownerUserId: string, pageId: string | null): void {
   try {
     getPage(pageId, ownerUserId);
   } catch {
-    throw new StartConversationError('INVALID_ARGUMENT', `page not found: ${pageId}`);
+    throw new CodedToolError('INVALID_ARGUMENT', `page not found: ${pageId}`);
   }
 }
 
@@ -134,12 +115,10 @@ async function globalProfile(ownerUserId: string) {
   const userId = process.env.MICHI_CLOUD === '1' ? ownerUserId : undefined;
   const runtimeId = getAgentConfig(userId).runtime;
   const runtime = getRuntime(runtimeId);
-  if (!runtime) throw new StartConversationError('UNAVAILABLE', `the ${runtimeId} runtime is not available`);
-  const providerId = runtime.capabilities.providerModels ? resolveProvider(runtimeId, userId) || null : null;
-  const requestedModel = resolveModel(runtimeId, userId) || null;
-  const requestedReasoning = (resolveReasoning(runtimeId, userId) ?? null) as AgentReasoning | null;
-  const effort = await getModelReasoningOptions(runtime, requestedModel, providerId, requestedReasoning);
-  return { runtimeId, providerId, modelId: effort.modelId ?? requestedModel, reasoning: effort.value ?? null };
+  if (!runtime) throw new CodedToolError('UNAVAILABLE', `the ${runtimeId} runtime is not available`);
+  const profile = await resolveNewThreadProfile(runtime,
+    resolveRuntimeProfile(runtimeId, runtime.capabilities.providerModels, {}, userId));
+  return { runtimeId, ...profile };
 }
 
 /** Removes a conversation whose session never opened. */
@@ -151,7 +130,8 @@ function rollback(nodeId: string, workspaceId: string, treeId: string): void {
           FROM nodes n WHERE n.id = ? AND n.workspace_id = ? AND n.tree_id = ?
       `).get(nodeId, workspaceId, treeId) as { acp_session_id: string | null; message_count: number } | undefined;
       if (!row || row.acp_session_id || row.message_count > 0) return;
-      getDb().prepare('DELETE FROM trees WHERE id = ? AND workspace_id = ? AND root_node_id = ?').run(treeId, workspaceId, nodeId);
+      const removed = getDb().prepare('DELETE FROM trees WHERE id = ? AND workspace_id = ? AND root_node_id = ?').run(treeId, workspaceId, nodeId);
+      if (Number(removed.changes) > 0) recordStructureChange({ entity: 'tree', op: 'deleted', workspaceId, treeId });
     });
   } catch {
     // An empty thread left behind is harmless; the tool still reports the failure.
@@ -171,8 +151,8 @@ function waitForStart(start: Promise<StartedRequestedSelfTurn>, waitMs: number):
   });
 }
 
-function errorOf(error: unknown): StartConversationResult {
-  if (error instanceof StartConversationError) return errorResult(error.code, error.message);
+function errorOf(error: unknown): McpTextResult {
+  if (error instanceof CodedToolError) return codedErrorResult(error.code, error.message);
   throw error;
 }
 
@@ -181,7 +161,7 @@ export async function startConversationTool(
   args: StartConversationArgs,
   approve: ThreadMessageApprover,
   deps: ThreadMessagingDeps | null = threadMessagingDeps(),
-): Promise<StartConversationResult> {
+): Promise<McpTextResult> {
   let request: ReturnType<typeof parseArgs>;
   let ownerUserId: string;
   let workspace: WorkspaceRow;
@@ -193,7 +173,7 @@ export async function startConversationTool(
   } catch (error) {
     return errorOf(error);
   }
-  if (!deps) return errorResult('UNAVAILABLE', 'starting conversations is not configured on this backend');
+  if (!deps) return codedErrorResult('UNAVAILABLE', 'starting conversations is not configured on this backend');
 
   const nodeId = `n-${randomUUID()}`;
   const approval = await approve({
@@ -205,14 +185,12 @@ export async function startConversationTool(
   });
   if (!approval.approved) {
     if (approval.reason === 'unavailable') {
-      return errorResult('APPROVAL_UNAVAILABLE', 'this runtime cannot ask the user for approval; no conversation was started');
+      return codedErrorResult('APPROVAL_UNAVAILABLE', 'this runtime cannot ask the user for approval; no conversation was started');
     }
     return jsonResult({
       status: 'declined',
       ...(approval.note ? { userNote: approval.note } : {}),
-      next: approval.reason === 'no_answer'
-        ? 'The user did not answer; nothing was started. Do not retry unless the user asks.'
-        : 'The user declined; nothing was started. Do not retry unless the user asks.',
+      next: declinedApprovalNext(approval.reason, 'nothing was started'),
     });
   }
 
@@ -247,30 +225,26 @@ export async function startConversationTool(
     session = await deps.ensureSession({ ownerUserId, workspaceId: workspace.id, nodeId });
   } catch (error) {
     rollback(nodeId, workspace.id, treeId);
-    return errorResult('UNAVAILABLE', error instanceof Error ? error.message : String(error));
+    return codedErrorResult('UNAVAILABLE', error instanceof Error ? error.message : String(error));
   }
   if (!session) {
     rollback(nodeId, workspace.id, treeId);
-    return errorResult('UNAVAILABLE', 'could not open a session for the new conversation');
+    return codedErrorResult('UNAVAILABLE', 'could not open a session for the new conversation');
   }
 
   const turnId = deps.newTurnId();
-  let start: Promise<StartedRequestedSelfTurn>;
-  const release = await deps.acquireRestoreLock(nodeId);
-  try {
-    start = deps.startTurn({
-      chatId: session.id, nodeId, ownerUserId, turnId, text: request.text, displayText: request.text, session,
-    });
-  } finally {
-    release();
-  }
+  const opened = session;
+  const start = startUnderRestoreLock(await deps.acquireRestoreLock(nodeId), opened, deps.isLiveSession, () => deps.startTurn({
+    chatId: opened.id, nodeId, ownerUserId, turnId, text: request.text, displayText: request.text, session: opened,
+  }));
   start.then((started) => { void started.done.catch(() => {}); }, (error) => {
     log.warn('chat', 'Meta agent conversation failed to begin', { nodeId, turnId, error: error instanceof Error ? error.message : String(error) });
   });
   const outcome = await waitForStart(start, deps.startWaitMs);
   if (outcome.kind === 'failed') {
-    return errorResult('UNAVAILABLE', outcome.error instanceof Error ? outcome.error.message : String(outcome.error));
+    return codedErrorResult('UNAVAILABLE', outcome.error instanceof Error ? outcome.error.message : String(outcome.error));
   }
+  const followed = followStartedConversation(caller, { workspaceId: workspace.id, nodeId, title: request.title, now });
 
   let progressCard: ProgressCardDto | null = null;
   if (request.pageId) {
@@ -290,6 +264,27 @@ export async function startConversationTool(
     conversation,
     ...(progressCard ? { progressCard } : {}),
     next: `The conversation runs on its own. Tell the user it started and link it as [${request.title.replace(/[[\]]/g, '')}](michi://node/${nodeId}); `
-      + 'they follow it from its progress card or the conversation page. Do not do its work yourself or message it.',
+      + 'they follow it from its progress card or the conversation page. Do not do its work yourself. '
+      + (followed
+        ? 'Its replies come back to you as worker reports; when it needs a next step the user asks for, send it with companion_session_send.'
+        : 'Do not message it.'),
   });
+}
+
+/**
+ * The agent follows a conversation its own conversation started (DESIGN-v2
+ * §4): a delegation, origin `start_conversation`, recorded only for a caller
+ * on V's open profile (purpose `main`), never for a closed one. A failed
+ * record leaves the conversation started, unfollowed. Returns whether it is
+ * followed.
+ */
+function followStartedConversation(caller: StartConversationCaller, started: { workspaceId: string; nodeId: string; title: string; now: number }): boolean {
+  if (!caller.nodeId || assistantPurposeOf(caller.nodeId) !== 'main') return false;
+  try {
+    recordDelegation({ ...started, origin: 'start_conversation' });
+    return true;
+  } catch (error) {
+    log.warn('chat', 'started conversation is not followed', { nodeId: started.nodeId, error: error instanceof Error ? error.message : String(error) });
+    return false;
+  }
 }

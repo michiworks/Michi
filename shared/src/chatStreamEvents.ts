@@ -1,6 +1,17 @@
-import { parseSessionState, type AgentCommand, type AgentSessionState } from './sessionState';
+import { parseAgentCommands, parseSessionState, type AgentCommand, type AgentSessionState } from './sessionState';
 import { parseSteeringReports, type SteeringReport } from './kiroSteering';
+// The Companion's metadata types come from companionMessageMetadata, never
+// companion: the runtime package vendors this module with every module it
+// imports, and companion's would bring product code it must not ship (W0b
+// recheck A-2).
+import {
+  parseCompanionPostMetadata,
+  type CompanionPostMetadata,
+  type CompanionSendSource,
+  type CompanionTurnMetadata,
+} from './companionMessageMetadata';
 import type { ThreadMessageSource } from './threadMessage';
+import type { SkillMessageMetadata } from './skills';
 import {
   parseSubagentActivityPayload,
   parseSubagentPatches,
@@ -25,6 +36,43 @@ export interface DurableMessageMetadata {
   comments?: Array<Record<string, unknown>>;
   /** This user message was relayed, with user approval, from another thread. */
   threadMessage?: ThreadMessageSource;
+  /** The user ran a skill with this message (`/name args`); set by the backend from the resolved skill. */
+  skill?: SkillMessageMetadata;
+  /**
+   * DESIGN-v2 §3.3: this assistant message was posted into the agent's
+   * conversation by a check-in (chatHub.postSelfMessage), not written as a
+   * reply to the user; its text is check-in material. Written by W2-G1a,
+   * replayed as a fact by W1-B, rendered by W2-F1a. See CompanionPostMetadata.
+   */
+  companionPost?: CompanionPostMetadata;
+  /**
+   * DESIGN-v2 §4: this user message is a follow-up the agent sent into a
+   * conversation it started, beside `threadMessage`. Written by W3-G2; the
+   * Michi source does not count it as the user taking over. See CompanionSendSource.
+   */
+  companionSend?: CompanionSendSource;
+  /**
+   * DESIGN-v2 §1.3, §2.8 T4: on a user message to the agent, the lines shown
+   * under it (its rules could not be read; the turn started with check-in or
+   * collector material and runs in Ask). Written by W2-E, rendered by
+   * W2-F1a. See CompanionTurnMetadata.
+   */
+  companionTurn?: CompanionTurnMetadata;
+}
+
+/**
+ * What a `turn_start` frame says about the turn's assistant message before
+ * its first chunk (DESIGN-v2 §3.3): the metadata a window needs to render it
+ * live as it will render after a reload. Only the fields listed here travel;
+ * the stored row's metadata stays the whole DurableMessageMetadata.
+ */
+export type TurnStartAssistantMetadata = Pick<DurableMessageMetadata, 'companionPost'>;
+
+/** Validates `turn_start.assistantMetadata`: undefined unless one of its fields is well-formed. */
+export function parseTurnStartAssistantMetadata(value: unknown): TurnStartAssistantMetadata | undefined {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
+  const companionPost = parseCompanionPostMetadata((value as Record<string, unknown>).companionPost);
+  return companionPost ? { companionPost } : undefined;
 }
 
 export interface SteerMessageOptions {
@@ -121,6 +169,7 @@ export const CHAT_STREAM_EVENTS = {
   sessionState: "session_state",
   artifactSaved: "artifact_saved",
   artifactUpdated: "artifact_updated",
+  artifactDeleted: "artifact_deleted",
   permissionRequest: "permission_request",
   permissionResolved: "permission_resolved",
   userInputRequest: "user_input_request",
@@ -165,6 +214,8 @@ export interface ChatStreamPayloads {
   session_state: AgentSessionState;
   artifact_saved: { contextId?: string; name: string; filePath: string; size?: number };
   artifact_updated: { contextId?: string; name: string; filePath: string; size?: number };
+  /** An agent removed this artifact's registration (delete_artifact); its file stays on disk. */
+  artifact_deleted: { contextId?: string; name: string };
   permission_resolved: { requestId: number };
   permission_request: {
     requestId: number;
@@ -215,7 +266,20 @@ export interface ChatStreamPayloads {
   };
   mcp_server_error: { serverName: string; error: string };
   warning: RuntimeWarning;
-  done: { stopReason?: string; persisted?: boolean; completedAt?: number };
+  done: {
+    stopReason?: string;
+    persisted?: boolean;
+    completedAt?: number;
+    /**
+     * The node's completion facts (backend migration 0064) once this turn is
+     * final: how many of its turns completed with an answer, and how many of
+     * those a focused window has seen. Not the workspace's conversation
+     * completion counter (turns.completion_seq). Both or neither; absent from
+     * a backend without the facts.
+     */
+    nodeCompletionSeq?: number;
+    nodeSeenCompletionSeq?: number;
+  };
   /** `code` is machine-readable when present, e.g. META_AGENT_GUARD_ERROR_CODE (metaAgent.ts). */
   error: { message: string; code?: string; recoverable?: boolean; completedAt?: number };
   turn_start: {
@@ -227,6 +291,15 @@ export interface ChatStreamPayloads {
     startedAt?: number;
     /** Present when the turn carries a visible user message with metadata (e.g. a cross-thread message). */
     userMetadata?: DurableMessageMetadata;
+    /**
+     * DESIGN-v2 §3.3: present when the turn's assistant message carries
+     * metadata a window renders by: `companionPost` on a check-in's post,
+     * which chatHub.postSelfMessage (W1-B) broadcasts as turn_start
+     * {selfInitiated, assistantMetadata} → chunk → done, so an open panel
+     * shows it as a post at once, not only after a reload. W2-F1a carries it
+     * onto the live message. The parser keeps only well-formed fields.
+     */
+    assistantMetadata?: TurnStartAssistantMetadata;
   };
   image: { path: string; caption?: string; mimeType: string; size: number };
 }
@@ -270,6 +343,33 @@ function optionalString(value: unknown): string | undefined {
 
 function optionalFiniteNumber(value: unknown): number | undefined {
   return typeof value === "number" && Number.isFinite(value) ? value : undefined;
+}
+
+/**
+ * The tokens a usage_summary reports for the reply: its total, else input
+ * plus output (a runtime may send only those). Meta agent usage counts the
+ * same in SQL (services/metaAgent/todayUsage.ts tokensSince).
+ */
+export function usageSummaryTotalTokens(usage: unknown): number | undefined {
+  if (!usage || typeof usage !== "object") return undefined;
+  const { totalTokens, inputTokens, outputTokens } = usage as Record<string, unknown>;
+  const total = optionalFiniteNumber(totalTokens);
+  if (total !== undefined) return total;
+  const input = optionalFiniteNumber(inputTokens);
+  const output = optionalFiniteNumber(outputTokens);
+  return input !== undefined && output !== undefined ? input + output : undefined;
+}
+
+function isCount(value: unknown): value is number {
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
+}
+
+/** done's node completion facts: both counts, the seen one held to the completed one, or neither. */
+function nodeCompletionFacts(data: Record<string, unknown>): { nodeCompletionSeq?: number; nodeSeenCompletionSeq?: number } {
+  const completed = data.nodeCompletionSeq;
+  const seen = data.nodeSeenCompletionSeq;
+  if (!isCount(completed) || !isCount(seen)) return {};
+  return { nodeCompletionSeq: completed, nodeSeenCompletionSeq: Math.min(seen, completed) };
 }
 
 function parseUsageCharge(value: unknown): UsageCharge | undefined {
@@ -337,19 +437,12 @@ function parseStringList(value: unknown): string[] {
 
 function parseCommands(value: unknown): AgentCommand[] {
   if (!Array.isArray(value)) return [];
-  return value
-    .map((command) => {
-      const raw = objectOrEmpty(command);
-      const input = objectOrEmpty(raw.input);
-      return {
-        name: stringOrEmpty(raw.name),
-        description: optionalString(raw.description),
-        input: raw.input && typeof raw.input === "object"
-          ? { type: String(input.type ?? "unstructured") }
-          : undefined,
-      };
-    })
-    .filter((command) => command.name.length > 0);
+  // An input object without a type still means the command takes free text.
+  return parseAgentCommands(value.map((command) => {
+    const raw = objectOrEmpty(command);
+    const input = raw.input && typeof raw.input === "object" ? objectOrEmpty(raw.input) : undefined;
+    return input && typeof input.type !== "string" ? { ...raw, input: { ...input, type: "unstructured" } } : raw;
+  }));
 }
 
 const parsers = {
@@ -382,6 +475,10 @@ const parsers = {
     name: stringOrEmpty(data.name),
     filePath: stringOrEmpty(data.filePath),
     size: optionalFiniteNumber(data.size),
+  }),
+  artifact_deleted: (data) => ({
+    contextId: optionalString(data.contextId),
+    name: stringOrEmpty(data.name),
   }),
   permission_resolved: (data) => ({ requestId: optionalFiniteNumber(data.requestId) ?? 0 }),
   permission_request: (data) => {
@@ -473,6 +570,7 @@ const parsers = {
     stopReason: optionalString(data.stopReason),
     ...(typeof data.persisted === 'boolean' ? { persisted: data.persisted } : {}),
     completedAt: optionalFiniteNumber(data.completedAt),
+    ...nodeCompletionFacts(data),
   }),
   error: (data) => ({
     message: stringOrEmpty(data.message),
@@ -480,16 +578,20 @@ const parsers = {
     ...(typeof data.recoverable === 'boolean' ? { recoverable: data.recoverable } : {}),
     completedAt: optionalFiniteNumber(data.completedAt),
   }),
-  turn_start: (data) => ({
-    turnId: stringOrEmpty(data.turnId),
-    assistantId: stringOrEmpty(data.assistantId),
-    nodeId: stringOrEmpty(data.nodeId),
-    userText: stringOrEmpty(data.userText),
-    ...(data.selfInitiated ? { selfInitiated: true } : {}),
-    startedAt: optionalFiniteNumber(data.startedAt),
-    ...(data.userMetadata && typeof data.userMetadata === 'object' && !Array.isArray(data.userMetadata)
-      ? { userMetadata: data.userMetadata as DurableMessageMetadata } : {}),
-  }),
+  turn_start: (data) => {
+    const assistantMetadata = parseTurnStartAssistantMetadata(data.assistantMetadata);
+    return {
+      turnId: stringOrEmpty(data.turnId),
+      assistantId: stringOrEmpty(data.assistantId),
+      nodeId: stringOrEmpty(data.nodeId),
+      userText: stringOrEmpty(data.userText),
+      ...(data.selfInitiated ? { selfInitiated: true } : {}),
+      startedAt: optionalFiniteNumber(data.startedAt),
+      ...(data.userMetadata && typeof data.userMetadata === 'object' && !Array.isArray(data.userMetadata)
+        ? { userMetadata: data.userMetadata as DurableMessageMetadata } : {}),
+      ...(assistantMetadata ? { assistantMetadata } : {}),
+    };
+  },
   image: (d) => ({
     path: stringOrEmpty(d.path),
     caption: optionalString(d.caption),

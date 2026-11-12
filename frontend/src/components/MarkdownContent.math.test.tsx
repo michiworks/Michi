@@ -24,4 +24,13 @@ describe('MarkdownContent math', () => {
     // reveal must not inject its per-char spans inside katex output
     expect(katex.querySelector('.stream-token-reveal')).toBeNull();
   });
+
+  it('leaves URLs inside a formula unlinked', async () => {
+    const { container } = render(
+      <MarkdownContent text={'$\\text{see www.example.com or https://example.org/x}$'} />,
+    );
+    await waitFor(() => expect(container.querySelector('.katex')).toBeTruthy());
+    expect(container.querySelector('.katex')!.textContent).toContain('www.example.com');
+    expect(container.querySelector('.katex a')).toBeNull();
+  });
 });

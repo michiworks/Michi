@@ -1,6 +1,7 @@
 import { useMemo } from 'react';
 import { useEmbeddedChatNode } from '../useEmbeddedChatNode';
 import type { AssistantInfo } from '../../services/api/assistant';
+import { LOCAL_BACKEND_CONNECTION_ID } from '../../config/backendConnections';
 
 export type AssistantNodeState = 'loading' | 'ready' | 'failed';
 
@@ -11,7 +12,7 @@ export function useAssistantNode(info: AssistantInfo | null): { state: Assistant
   const nodeId = info?.nodeId;
   // Store updates and panel renders must not abort and restart an in-flight read.
   const descriptor = useMemo(() => workspaceId && nodeId ? {
-    backendConnectionId: 'local',
+    backendConnectionId: LOCAL_BACKEND_CONNECTION_ID,
     workspaceId,
     treeId: treeId ?? '',
     nodeId,

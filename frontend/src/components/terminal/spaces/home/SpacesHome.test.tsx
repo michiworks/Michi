@@ -6,6 +6,7 @@ import type { MetaAgentInfo } from '../../../../services/api/metaAgent';
 import type { SpacesFirstRunStatus } from '../../../../services/api/spacesHome';
 import type { FirstRunSnapshot } from '../../../../state/metaAgent/spacesFirstRun';
 import type { MetaAgentUpdateState } from '../../../../state/metaAgent/metaAgentUpdate';
+import type { MetaAgentOverviewLoad } from '../../../../state/metaAgent/useMetaAgentOverview';
 
 const mocks = vi.hoisted(() => ({
   page: null as unknown as PageDto,
@@ -26,11 +27,13 @@ const mocks = vi.hoisted(() => ({
   lastSeen: 0,
   firstRun: null as unknown as FirstRunSnapshot,
   agent: { status: 'ready', info: null, error: null } as { status: string; info: MetaAgentInfo | null; error: string | null },
-  overview: { status: 'ready', overview: null, error: null } as { status: string; overview: MetaAgentOverview | null; error: string | null },
+  overview: { kind: 'loading' } as MetaAgentOverviewLoad,
   update: { phase: 'idle', workspaces: 0, error: null } as MetaAgentUpdateState,
   retryFirstRun: vi.fn(),
   retryGuard: vi.fn(),
   resume: vi.fn(),
+  refreshOverview: vi.fn(),
+  toastError: vi.fn(),
   runUpdate: vi.fn(),
   retryStopped: vi.fn(),
   openDetail: vi.fn(),
@@ -51,7 +54,7 @@ const resource = (data: unknown) => {
 
 vi.mock('../../../../state/pages/useSpacesHome', () => ({
   useSpacesHome: () => resource({ role: 'spaces-home', page: mocks.page, layoutRules: mocks.layoutRules }),
-  useSpacesHomeWorkspaces: () => resource([{ workspaceId: 'ws-1', workspaceName: 'rabbitholes', homePageId: 'wh', hiddenAt: null, firstRun: null }]),
+  useSpacesHomeWorkspaces: () => resource([{ workspaceId: 'ws-1', workspaceName: 'sample-project', homePageId: 'wh', hiddenAt: null, firstRun: null }]),
   useHomeSections: () => resource(mocks.sections),
   useSpaceActivity: () => resource(mocks.activity),
   useProgressCards: () => resource([]),
@@ -63,7 +66,12 @@ vi.mock('../../../../state/pages/usePage', () => ({
     refresh: vi.fn(), edit: vi.fn(), accept: vi.fn(), dismiss: vi.fn(), reopen: vi.fn(), revert: vi.fn(), redo: vi.fn(), acknowledgeThrough: mocks.acknowledge,
   }),
 }));
-vi.mock('../../../../services/api/pages', () => ({ fetchPageActivitySeen: () => Promise.resolve({ lastSeenChangeSeq: mocks.lastSeen }) }));
+vi.mock('../../../../services/api/pages', async (importOriginal) => ({
+  PageApiError: (await importOriginal<typeof import('../../../../services/api/pages')>()).PageApiError,
+  fetchPageActivitySeen: () => Promise.resolve({ lastSeenChangeSeq: mocks.lastSeen }),
+  // Opening a page reads where it lives: the Home's own page is in its system workspace.
+  fetchPage: (pageId: string) => Promise.resolve({ id: pageId, workspaceId: pageId === 'home' ? 'sys' : 'ws-1' }),
+}));
 vi.mock('../../../../state/chatStore', () => ({
   useChatActions: () => ({ revealBackendNode: mocks.revealBackendNode }),
   useChatNodesSnapshot: () => ({ 'src-node': { title: '排查公证失败' } }),
@@ -76,6 +84,7 @@ vi.mock('../../../../services/api/spacesHome', async (importOriginal) => ({
   fetchHomeConversations: mocks.fetchHomeConversations,
 }));
 vi.mock('../SpacesPage', () => ({ openNativePageRoute: mocks.openNativePageRoute }));
+vi.mock('../../../../state/pages/nativePageRoute', () => ({ openNativePageRoute: mocks.openNativePageRoute }));
 vi.mock('../../../../state/metaAgent/spacesFirstRun', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../../../../state/metaAgent/spacesFirstRun')>()),
   useSpacesFirstRun: () => mocks.firstRun,
@@ -86,7 +95,10 @@ vi.mock('../../../../state/metaAgent/useMetaAgent', async (importOriginal) => ({
   useMetaAgent: () => mocks.agent,
   retryMetaAgentGuard: mocks.retryGuard,
 }));
-vi.mock('../../../../state/metaAgent/useMetaAgentOverview', () => ({ useMetaAgentOverview: () => mocks.overview, resumeMetaAgent: mocks.resume }));
+vi.mock('../../../../state/metaAgent/useMetaAgentOverview', () => ({
+  useMetaAgentOverview: () => mocks.overview, pauseMetaAgentMaintenance: mocks.resume, refreshMetaAgentOverview: mocks.refreshOverview,
+}));
+vi.mock('sonner', () => ({ toast: { error: mocks.toastError } }));
 vi.mock('../../../../state/metaAgent/metaAgentUpdate', () => ({ useMetaAgentUpdate: () => mocks.update, runMetaAgentUpdate: mocks.runUpdate, retryStoppedMetaAgent: mocks.retryStopped }));
 vi.mock('../../scheduled/metaAgent/metaAgentNav', () => ({ openMetaAgentDetail: mocks.openDetail, requestMetaAgentSettings: mocks.openSettings }));
 vi.mock('../../../../state/pages/workspaceHomeNav', () => ({ requestWorkspaceHome: mocks.requestWorkspaceHome }));
@@ -109,11 +121,14 @@ vi.mock('./homeLinks', async (importOriginal) => ({
     <div data-testid="progress-cards" data-scope={JSON.stringify(scope)} data-count={cards.length} data-every={String(everyPage === true)} />
   ),
 }));
+// The home's blocks as the panel's targets are NativePageDocument.test's and HomeDocument.target.test's to show.
+const noTargeting = vi.hoisted(() => ({ selectedBlockIds: [] as string[], selectOnClick: false }));
 vi.mock('../NativePageDocument', () => ({
+  useCompanionTargeting: () => noTargeting,
   default: ({ page, visibleBlocks = page.blocks, renderDecorations }: { page: PageDto; visibleBlocks?: readonly PageBlock[]; renderDecorations?: (block: PageBlock) => React.ReactNode }) => (
     <div data-testid="segment">
-      {visibleBlocks.map((block) => <div key={block.id} id={`page-block-${block.id}`} data-testid="page-block">
-        {block.type === 'home-section' ? <NativeHomeSection section={block.section} connectionId="local" pageId={page.id} readOnly={false} /> : block.id.startsWith('tbl') ? <table><tbody><tr><td>rabbitholes</td><td>Release next week</td></tr><tr><td>Unknown</td><td>-</td></tr></tbody></table> : 'text' in block ? block.text : block.id}
+      {visibleBlocks.map((block) => <div key={block.id} id={`page-block-${block.id}`} className="michi-doc-block" data-block-id={block.id} data-testid="page-block">
+        {block.type === 'home-section' ? <NativeHomeSection section={block.section} connectionId="local" pageId={page.id} readOnly={false} /> : block.id.startsWith('tbl') ? <table><tbody><tr><td>sample-project</td><td>Release next week</td></tr><tr><td>Unknown</td><td>-</td></tr></tbody></table> : 'text' in block ? block.text : block.id}
         {renderDecorations?.(block)}
       </div>)}
       {!page.blocks.length && <div data-testid="empty-editor" />}
@@ -122,7 +137,8 @@ vi.mock('../NativePageDocument', () => ({
 }));
 
 import { NativeHomeSection } from './NativeHomeSection';
-import { SpacesHomeView } from './SpacesHome';
+import SpacesHomeView from './SpacesHome';
+import { resetSpacesPagesForTests } from '../../../../state/metaChat/spacesPages';
 
 const source = [{ nodeId: 'n', turnId: 't', assistantId: 'a' }];
 const block = (id: string, extra: Partial<PageBlock> = {}) => ({ id, rev: 1, type: 'markdown', text: `Block ${id}`, sources: source, ...extra }) as PageBlock;
@@ -131,7 +147,7 @@ const homePage = (blocks: PageBlock[]): PageDto => ({
   pendingProposals: 0, helperNodeId: null, revision: 2, viewVersion: 2, blocks,
 });
 const row = (id: string, extra: Partial<HomeSectionItem> = {}): HomeSectionItem => ({
-  id, kind: 'conversation', workspaceId: 'ws-1', workspaceName: 'rabbitholes', title: `Thread ${id}`, at: Date.now() - 60_000, summary: `About ${id}`, agentClaim: false,
+  id, kind: 'conversation', workspaceId: 'ws-1', workspaceName: 'sample-project', title: `Thread ${id}`, at: Date.now() - 60_000, summary: `About ${id}`, agentClaim: false,
   target: { kind: 'conversation', nodeId: `node-${id}`, workspaceId: 'ws-1', messageId: null }, ...extra,
 });
 const INFO: MetaAgentInfo = {
@@ -150,7 +166,7 @@ const home = (workspaceId: string, workspaceName: string, firstRun: FirstRunProg
 const midRun = (over: Partial<SpacesFirstRunStatus> = {}): SpacesFirstRunStatus => ({
   requestedAt: 1,
   workspaces: [
-    home('ws-1', 'rabbitholes', run('ws-1', 'done', 38, 38, { startSeq: 1289 })),
+    home('ws-1', 'sample-project', run('ws-1', 'done', 38, 38, { startSeq: 1289 })),
     home('ws-2', 'agent-desk', run('ws-2', 'done', 112, 112, { startSeq: 4012 })),
     home('ws-3', 'sample-dashboard', run('ws-3', 'reading', 12, 21)),
     home('ws-4', 'sample-notes', run('ws-4', 'queued', 0, 17)),
@@ -180,15 +196,18 @@ beforeEach(() => {
   mocks.acknowledge.mockReset().mockResolvedValue(undefined);
   mocks.firstRun = snapshot(null);
   mocks.agent = { status: 'ready', info: INFO, error: null };
-  mocks.overview = { status: 'ready', overview: null, error: null };
+  mocks.overview = { kind: 'loading' };
   mocks.update = { phase: 'idle', workspaces: 0, error: null };
-  for (const fn of [mocks.retryFirstRun, mocks.retryGuard, mocks.resume, mocks.runUpdate, mocks.retryStopped, mocks.openDetail, mocks.openSettings, mocks.requestWorkspaceHome]) fn.mockReset();
+  for (const fn of [mocks.retryFirstRun, mocks.retryGuard, mocks.resume, mocks.refreshOverview, mocks.toastError, mocks.runUpdate, mocks.retryStopped, mocks.openDetail, mocks.openSettings, mocks.requestWorkspaceHome]) fn.mockReset();
+  mocks.resume.mockResolvedValue(undefined);
   mocks.markLooked.mockReset().mockResolvedValue({ lookedAt: 1 });
   mocks.nodes = {};
   mocks.focusedNodeId = null;
   mocks.spaces = [];
   mocks.retryGuard.mockResolvedValue(undefined);
   mocks.retryFirstRun.mockResolvedValue(undefined);
+  // The home ids a row's page is checked against; seeded, so no test reads them from a backend.
+  resetSpacesPagesForTests({ home: { id: 'home', title: 'Home' }, workspaces: {} });
 });
 afterEach(() => { document.body.innerHTML = ''; });
 
@@ -198,7 +217,7 @@ describe('Spaces Home', () => {
   it('reads top to bottom: lead, Waiting, longer blocks, activity, workspaces, Stalled and Done, the rest; no agenda', () => {
     render(<SpacesHomeView now={new Date(2026, 9, 23)} />);
     expect(screen.getByRole('heading', { level: 1, name: 'Home' })).toBeTruthy();
-    expect(screen.queryByText('Across all workspaces · kept up to date by the Meta agent')).toBeNull();
+    expect(screen.queryByText(/^Across all workspaces · kept up to date by/)).toBeNull();
     expect(document.querySelector('.spaces-home-status')).toBeNull();
     expect(screen.queryByRole('group', { name: "Today's agenda" })).toBeNull();
     const text = (value: string) => screen.getByText(value);
@@ -220,13 +239,13 @@ describe('Spaces Home', () => {
   it('shows this page’s update time below the title without a different workspace’s write time', () => {
     const updatedAt = Date.now() - 5 * 60_000;
     mocks.page = { ...homePage([block('a')]), updatedAt };
-    render(<SpacesHomeView meta={{ lastWrite: { workspaceName: 'rabbitholes', at: Date.now() - 12 * 60_000 } }} />);
+    render(<SpacesHomeView meta={{ lastWrite: { workspaceName: 'sample-project', at: Date.now() - 12 * 60_000 } }} />);
     const title = screen.getByRole('heading', { level: 1, name: 'Home' });
     const updated = screen.getByText('Updated 5m ago');
     expect(title.closest('header')?.contains(updated)).toBe(true);
     expect(before(title, updated)).toBe(true);
     expect(updated.getAttribute('datetime')).toBe(new Date(updatedAt).toISOString());
-    expect(screen.queryByText(/wrote rabbitholes/)).toBeNull();
+    expect(screen.queryByText(/wrote sample-project/)).toBeNull();
   });
 
   it('does not give an unwritten Home an update time', () => {
@@ -260,7 +279,7 @@ describe('Spaces Home', () => {
   it('shows placeholders without recreating a deleted Waiting block', () => {
     mocks.page = homePage([]);
     render(<SpacesHomeView />);
-    expect(screen.getAllByText('The Meta agent writes this after it has written each workspace home.')).toHaveLength(4);
+    expect(screen.getAllByText('Michi writes this after it has written each workspace home.')).toHaveLength(4);
     expect(screen.getByRole('region', { name: 'This week’s focus' })).toBeTruthy();
     expect(screen.getByRole('region', { name: 'Workspaces' })).toBeTruthy();
     expect(screen.getByRole('region', { name: 'Cross-workspace decisions' })).toBeTruthy();
@@ -438,17 +457,19 @@ describe('Spaces Home', () => {
       })], total: 1 } });
       const view = render(<SpacesHomeView />);
       fireEvent.click(screen.getByRole('button', { name: 'Review: Release' }));
+      await act(async () => { await vi.advanceTimersByTimeAsync(0); });
       expect(mocks.openNativePageRoute).toHaveBeenCalledWith({ pageId: 'release', workspaceId: 'ws-1', backendConnectionId: 'local' });
       // Opening the page replaces the Home; the block shows up once that page has loaded.
       view.unmount();
       act(() => { vi.advanceTimersByTime(1000); });
       const target = document.createElement('div');
-      target.id = 'page-block-risk';
+      target.className = 'michi-doc-block';
+      target.dataset.blockId = 'risk';
       document.body.appendChild(target);
       act(() => { vi.advanceTimersByTime(150); });
-      expect(target.hasAttribute('data-home-flash')).toBe(true);
+      expect(target.hasAttribute('data-reveal-flash')).toBe(true);
       act(() => { vi.advanceTimersByTime(1700); });
-      expect(target.hasAttribute('data-home-flash')).toBe(false);
+      expect(target.hasAttribute('data-reveal-flash')).toBe(false);
     } finally {
       vi.useRealTimers();
     }
@@ -461,23 +482,56 @@ describe('Spaces Home', () => {
     render(<SpacesHomeView />);
     fireEvent.click(screen.getByRole('button', { name: 'Review: Home' }));
     expect(mocks.openNativePageRoute).not.toHaveBeenCalled();
-    expect(document.getElementById('page-block-b')?.hasAttribute('data-home-flash')).toBe(true);
+    expect(document.getElementById('page-block-b')?.hasAttribute('data-reveal-flash')).toBe(true);
+  });
+
+  it('opens a workspace home from Space activity and from a waiting suggestion as that workspace\'s home, not as a plain page', async () => {
+    resetSpacesPagesForTests({ home: { id: 'home', title: 'Home' }, workspaces: { 'ws-1': 'wh' } });
+    mocks.activity = [
+      { kind: 'page-change', batchId: 'b1', pageId: 'wh', pageTitle: 'sample-project', workspaceId: 'ws-1', workspaceName: 'sample-project', at: Date.now(), count: 1, pending: 0, ops: ['update'], summary: 'Status updated', actor: 'agent', sourceKind: 'chat', sourceNodeId: 'n1' },
+    ];
+    mocks.sections = sections({ waiting: { items: [row('p3', {
+      kind: 'proposal', title: 'sample-project', target: { kind: 'page', pageId: 'wh', blockId: 'b', changeId: 'chg' },
+    })], total: 1 } });
+    render(<SpacesHomeView />);
+    fireEvent.click(screen.getByText(/Agent changed/).closest('button')!);
+    fireEvent.click(screen.getByRole('button', { name: 'Review: sample-project' }));
+    await waitFor(() => expect(mocks.requestWorkspaceHome).toHaveBeenCalledTimes(2));
+    expect(mocks.requestWorkspaceHome).toHaveBeenCalledWith({ workspaceId: 'ws-1', backendConnectionId: 'local' });
+    expect(mocks.openNativePageRoute).not.toHaveBeenCalled();
+  });
+
+  it('a Spaces Home suggestion in a waiting list on another page opens the Spaces Home, never a page with no workspace', async () => {
+    mocks.sections = sections({ waiting: { items: [row('p4', {
+      kind: 'proposal', workspaceId: null, title: 'Home', target: { kind: 'page', pageId: 'home', blockId: 'b', changeId: 'chg' },
+    })], total: 1 } });
+    const navs: unknown[] = [];
+    const onNav = (event: Event) => navs.push((event as CustomEvent).detail);
+    window.addEventListener('michi:nav-page', onNav);
+    try {
+      render(<NativeHomeSection section="waiting" connectionId="local" pageId="release" readOnly={false} />);
+      fireEvent.click(screen.getByRole('button', { name: 'Review: Home' }));
+      await waitFor(() => expect(navs).toEqual([{ page: 'spaces' }]));
+      expect(mocks.openNativePageRoute).not.toHaveBeenCalled();
+    } finally {
+      window.removeEventListener('michi:nav-page', onNav);
+    }
   });
 
   it('opens Space activity rows', async () => {
     mocks.activity = [
-      { kind: 'page-change', batchId: 'b1', pageId: 'release', pageTitle: 'Release', workspaceId: 'ws-1', workspaceName: 'rabbitholes', at: Date.now(), count: 2, pending: 1, ops: ['update'], summary: '**Risk** rewritten\\ today', actor: 'agent', sourceKind: 'chat', sourceNodeId: 'n1' },
-      { kind: 'conversation', threadNodeId: 'n2', title: 'Perf', workspaceId: 'ws-1', workspaceName: 'rabbitholes', startedFromPageId: 'release', startedFromPageTitle: 'Release', at: Date.now() },
+      { kind: 'page-change', batchId: 'b1', pageId: 'release', pageTitle: 'Release', workspaceId: 'ws-1', workspaceName: 'sample-project', at: Date.now(), count: 2, pending: 1, ops: ['update'], summary: '**Risk** rewritten\\ today', actor: 'agent', sourceKind: 'chat', sourceNodeId: 'n1' },
+      { kind: 'conversation', threadNodeId: 'n2', title: 'Perf', workspaceId: 'ws-1', workspaceName: 'sample-project', startedFromPageId: 'release', startedFromPageTitle: 'Release', at: Date.now() },
     ];
     render(<SpacesHomeView />);
     expect(screen.getByText(/Agent changed 2 places, 1 waiting for you: Risk rewritten today/)).toBeTruthy();
     fireEvent.click(screen.getByText(/Agent changed 2 places/).closest('button')!);
-    expect(mocks.openNativePageRoute).toHaveBeenCalledWith({ pageId: 'release', workspaceId: 'ws-1', backendConnectionId: 'local' });
+    await waitFor(() => expect(mocks.openNativePageRoute).toHaveBeenCalledWith({ pageId: 'release', workspaceId: 'ws-1', backendConnectionId: 'local' }));
     fireEvent.click(screen.getByText(/New conversation “Perf”/).closest('button')!);
     await waitFor(() => expect(mocks.revealBackendNode).toHaveBeenCalledWith('ws-1', 'n2'));
   });
 
-  it('runs Update through its callback, or runs a Meta agent round and re-reads the Home without one', () => {
+  it('runs Update through its callback, or runs a Pages upkeep round and re-reads the Home without one', () => {
     const onUpdate = vi.fn();
     const first = render(<SpacesHomeView onUpdate={onUpdate} />);
     fireEvent.click(screen.getByRole('button', { name: 'Update' }));
@@ -518,18 +572,18 @@ describe('Spaces Home', () => {
     mocks.firstRun = snapshot(midRun());
     render(<SpacesHomeView />);
     expect(document.querySelector('.spaces-home-status__text')?.textContent)
-      .toContain('First time opening Pages · Meta agent (Claude) is reading the last 30 days · 162 / 194 · writing sample-dashboard’s home');
+      .toContain('First time opening Pages · Michi (Claude) is reading the last 30 days · 162 / 194 · writing sample-dashboard’s home');
     expect(screen.getByText('sample-dashboard', { selector: 'b' })).toBeTruthy();
     const bar = screen.getByRole('progressbar', { name: 'First read' });
     expect(bar.getAttribute('aria-valuenow')).toBe('162');
     expect(bar.getAttribute('aria-valuemax')).toBe('194');
-    const list = screen.getByRole('list', { name: 'Meta agent per workspace' });
+    const list = screen.getByRole('list', { name: 'Pages upkeep per workspace' });
     expect(within(list).getByText('History 38 · home written · continues from #1289')).toBeTruthy();
     expect(within(list).getByText('Reading history 12/21')).toBeTruthy();
     expect(within(list).getByText('Queued · history 17')).toBeTruthy();
     expect(within(list).getByText('Waits for every workspace home')).toBeTruthy();
     expect(screen.getByRole('button', { name: 'Hide' }).getAttribute('aria-expanded')).toBe('true');
-    expect(screen.getAllByText('The Meta agent writes this after it has written each workspace home.')).toHaveLength(4);
+    expect(screen.getAllByText('Michi writes this after it has written each workspace home.')).toHaveLength(4);
     expect(screen.queryByTestId('empty-editor')).toBeNull();
     fireEvent.click(within(list).getByRole('button', { name: 'Open agent-desk' }));
     expect(mocks.requestWorkspaceHome).toHaveBeenCalledWith({ workspaceId: 'ws-2', backendConnectionId: 'local' });
@@ -540,7 +594,7 @@ describe('Spaces Home', () => {
     status.workspaces[3] = home('ws-4', 'sample-notes', run('ws-4', 'failed', 3, 17, { error: 'Claude usage limit reached' }));
     mocks.firstRun = snapshot(status);
     render(<SpacesHomeView />);
-    const list = screen.getByRole('list', { name: 'Meta agent per workspace' });
+    const list = screen.getByRole('list', { name: 'Pages upkeep per workspace' });
     expect(within(list).getByText('Not written: Claude usage limit reached')).toBeTruthy();
     fireEvent.click(within(list).getByRole('button', { name: 'Retry sample-notes' }));
     expect(mocks.retryFirstRun).toHaveBeenCalledWith('local', 'ws-4');
@@ -551,8 +605,8 @@ describe('Spaces Home', () => {
     done.workspaces = done.workspaces.map((item) => ({ ...item, firstRun: run(item.workspaceId, 'done', item.firstRun!.total, item.firstRun!.total) }));
     mocks.firstRun = snapshot(done, { justFinished: true });
     render(<SpacesHomeView />);
-    expect(screen.getByText(/Meta agent just read the history; from now on it checks new conversations every 60 s · wrote 5 workspace homes and this page · Claude \(follows global\)/)).toBeTruthy();
-    expect(within(screen.getByRole('list', { name: 'Meta agent per workspace' })).getByText('Written · read 5 workspace homes, not conversations')).toBeTruthy();
+    expect(screen.getByText(/Pages upkeep just read the history; from now on it checks new conversations every 60 s · wrote 5 workspace homes and this page · Claude \(follows global\)/)).toBeTruthy();
+    expect(within(screen.getByRole('list', { name: 'Pages upkeep per workspace' })).getByText('Written · read 5 workspace homes, not conversations')).toBeTruthy();
   });
 
   it('after the first run, a workspace home change updates the Home in the background, not as a first run', () => {
@@ -565,7 +619,7 @@ describe('Spaces Home', () => {
     const view = render(<SpacesHomeView />);
     expect(screen.queryByText(/First time opening Pages/)).toBeNull();
     expect(screen.queryByRole('progressbar')).toBeNull();
-    expect(screen.queryByRole('list', { name: 'Meta agent per workspace' })).toBeNull();
+    expect(screen.queryByRole('list', { name: 'Pages upkeep per workspace' })).toBeNull();
     expect(document.querySelector('.spaces-home-status')).toBeNull();
     expect(screen.queryByText('updating the Pages Home…')).toBeNull();
     view.unmount();
@@ -584,10 +638,10 @@ describe('Spaces Home', () => {
     mocks.firstRun = snapshot(midRun({ haltedReason: 'kiro: fs_write, execute_bash' }));
     render(<SpacesHomeView />);
     const box = screen.getByRole('alert');
-    expect(within(box).getByText('Meta agent stopped: Kiro started with extra tools')).toBeTruthy();
+    expect(within(box).getByText('Michi stopped: Kiro started with extra tools')).toBeTruthy();
     expect(within(box).getByText('fs_write')).toBeTruthy();
     expect(within(box).getByText('execute_bash')).toBeTruthy();
-    expect(screen.queryByText(/Meta agent checks new conversations/)).toBeNull();
+    expect(screen.queryByText(/Pages upkeep checks new conversations/)).toBeNull();
     fireEvent.click(within(box).getByRole('button', { name: 'Change runtime' }));
     expect(mocks.openSettings).toHaveBeenCalledTimes(1);
     fireEvent.click(within(box).getByRole('button', { name: 'Retry' }));
@@ -595,28 +649,38 @@ describe('Spaces Home', () => {
     expect(mocks.retryGuard).toHaveBeenCalledTimes(1);
   });
 
-  it('says the Meta agent is paused and resumes it', () => {
-    mocks.overview = { status: 'ready', overview: { state: 'paused' } as MetaAgentOverview, error: null };
+  it('says Pages upkeep is paused and resumes it', () => {
+    mocks.overview = { kind: 'ready', overview: { state: 'paused' } as MetaAgentOverview, at: 0 };
     render(<SpacesHomeView />);
-    expect(screen.getByText('Meta agent is paused')).toBeTruthy();
+    expect(screen.getByText('Pages upkeep is paused')).toBeTruthy();
     fireEvent.click(screen.getByRole('button', { name: 'Resume' }));
     expect(mocks.resume).toHaveBeenCalledTimes(1);
+    expect(mocks.resume).toHaveBeenCalledWith(false);
   });
 
-  it('says the Meta agent stopped and why, retries it and offers another runtime', async () => {
+  it('says so when resuming fails, and reads the status again', async () => {
+    mocks.overview = { kind: 'ready', overview: { state: 'paused' } as MetaAgentOverview, at: 0 };
+    mocks.resume.mockRejectedValue(new Error('A workspace is still stopping'));
+    render(<SpacesHomeView />);
+    fireEvent.click(screen.getByRole('button', { name: 'Resume' }));
+    await waitFor(() => expect(mocks.toastError).toHaveBeenCalledWith('A workspace is still stopping'));
+    expect(mocks.refreshOverview).toHaveBeenCalledTimes(1);
+  });
+
+  it('says Pages upkeep stopped and why, retries it and offers another runtime', async () => {
     mocks.retryStopped.mockResolvedValue(undefined);
     mocks.agent = { status: 'ready', info: { ...INFO, resolved: { ...INFO.resolved, runtimeId: 'codex', followsGlobal: false } }, error: null };
-    mocks.overview = { status: 'ready', error: null, overview: { state: 'error', error: 'Codex is not installed on this computer',
+    mocks.overview = { kind: 'ready', at: 0, overview: { state: 'error', error: 'Codex is not installed on this computer',
       stopped: { reason: 'runtime-missing', message: 'Codex is not installed on this computer', workspaceIds: ['ws-1'], detail: 'codex binary not found' },
-      cursors: [{ workspaceId: 'ws-1', workspaceName: 'rabbitholes', cursor: 3, unread: 2, lastRunAt: null, state: 'error', error: 'codex binary not found',
+      cursors: [{ workspaceId: 'ws-1', workspaceName: 'sample-project', cursor: 3, unread: 2, lastRunAt: null, state: 'error', error: 'codex binary not found',
         problem: { reason: 'runtime-missing', message: 'Codex is not installed on this computer', stopped: true } }],
       recentRuns: [] } as unknown as MetaAgentOverview };
     render(<SpacesHomeView />);
     const line = document.querySelector('.spaces-home-status[data-mode="stopped"]')!;
-    expect(line.textContent).toBe('Meta agent stopped: Codex is not installed on this computer·Retry·Change runtime·Details·Scheduled');
+    expect(line.textContent).toBe('Pages upkeep stopped: Codex is not installed on this computer·Retry·Change runtime·Details·Scheduled');
     expect(screen.queryByText(/checks new conversations/)).toBeNull();
     fireEvent.click(screen.getByRole('button', { name: 'Details' }));
-    expect(within(screen.getByRole('list', { name: 'Meta agent per workspace' })).getByText('Stopped: Codex is not installed on this computer')).toBeTruthy();
+    expect(within(screen.getByRole('list', { name: 'Pages upkeep per workspace' })).getByText('Stopped: Codex is not installed on this computer')).toBeTruthy();
     fireEvent.click(screen.getByRole('button', { name: 'Change runtime' }));
     expect(mocks.openSettings).toHaveBeenCalledTimes(1);
     fireEvent.click(screen.getByRole('button', { name: 'Retry' }));
@@ -630,32 +694,32 @@ describe('Spaces Home', () => {
     const view = render(<SpacesHomeView />);
     expect(document.querySelector('.spaces-home-status__text')?.textContent).toContain('is reading the last 7 days');
     view.unmount();
-    mocks.overview = { status: 'ready', error: null, overview: { state: 'running', cursors: [], recentRuns: [{ kind: 'first-run', firstRunDays: 90 }] } as unknown as MetaAgentOverview };
+    mocks.overview = { kind: 'ready', at: 0, overview: { state: 'running', cursors: [], recentRuns: [{ kind: 'first-run', firstRunDays: 90 }] } as unknown as MetaAgentOverview };
     render(<SpacesHomeView />);
     expect(document.querySelector('.spaces-home-status__text')?.textContent).toContain('is reading the last 90 days');
   });
 
-  it('gives the reason when the Meta agent cannot run on its runtime and leads to its settings', () => {
-    mocks.agent = { status: 'ready', info: { ...INFO, resolved: { ...INFO.resolved, runtimeId: 'crew' }, availability: { available: false, reason: 'The Meta agent does not run on Kiro Crew yet.' } }, error: null };
+  it('gives the reason when Pages upkeep cannot run on its runtime and leads to its settings', () => {
+    mocks.agent = { status: 'ready', info: { ...INFO, resolved: { ...INFO.resolved, runtimeId: 'crew' }, availability: { available: false, reason: 'Pages upkeep does not run on Kiro Crew yet.' } }, error: null };
     render(<SpacesHomeView />);
-    expect(screen.getByText('Meta agent is not running · The Meta agent does not run on Kiro Crew yet.')).toBeTruthy();
-    fireEvent.click(screen.getByRole('button', { name: 'Settings › Meta agent' }));
+    expect(screen.getByText('Pages upkeep isn’t running · Pages upkeep does not run on Kiro Crew yet.')).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: 'Settings › Michi › Pages upkeep' }));
     expect(mocks.openSettings).toHaveBeenCalledTimes(1);
   });
 
-  it('says the Meta agent cannot run where scheduled jobs are off', () => {
+  it('says Pages upkeep cannot run where scheduled jobs are off', () => {
     mocks.firstRun = snapshot(midRun({ requestedAt: null }), { schedulerOff: true });
     render(<SpacesHomeView />);
-    expect(screen.getByText('Meta agent is not running · Scheduled jobs are off on this backend')).toBeTruthy();
+    expect(screen.getByText('Pages upkeep isn’t running · Scheduled jobs are off on this backend')).toBeTruthy();
     // Settings cannot turn scheduled jobs on.
-    expect(screen.queryByRole('button', { name: 'Settings › Meta agent' })).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Settings › Michi › Pages upkeep' })).toBeNull();
   });
 
   it('says not running when the overview reports scheduled jobs off, though the first-run start never answered 409', () => {
-    mocks.overview = { status: 'ready', error: null, overview: { state: 'running', stopped: null, cursors: [], recentRuns: [],
+    mocks.overview = { kind: 'ready', at: 0, overview: { state: 'running', stopped: null, cursors: [], recentRuns: [],
       notRunning: { reason: 'scheduler-off', message: 'Scheduled jobs are off on this backend' } } as unknown as MetaAgentOverview };
     render(<SpacesHomeView />);
-    expect(screen.getByText('Meta agent is not running · Scheduled jobs are off on this backend')).toBeTruthy();
+    expect(screen.getByText('Pages upkeep isn’t running · Scheduled jobs are off on this backend')).toBeTruthy();
     expect(screen.queryByText(/checks new conversations/)).toBeNull();
   });
 
@@ -669,7 +733,7 @@ describe('Spaces Home', () => {
   it('opens a workspace’s home from its name on a row and from a table row naming it', () => {
     mocks.page = homePage([block('a'), { id: 'waiting', rev: 1, type: 'home-section', section: 'waiting' }, block('tbl-ws')]);
     render(<SpacesHomeView />);
-    fireEvent.click(screen.getByRole('button', { name: 'rabbitholes' }));
+    fireEvent.click(screen.getByRole('button', { name: 'sample-project' }));
     expect(mocks.requestWorkspaceHome).toHaveBeenLastCalledWith({ workspaceId: 'ws-1', backendConnectionId: 'local' });
     mocks.requestWorkspaceHome.mockReset();
     fireEvent.click(screen.getByText('Unknown'));
@@ -681,8 +745,23 @@ describe('Spaces Home', () => {
     expect(screen.getByText('Unknown').closest('tr')!.hasAttribute('data-michi-interactive')).toBe(false);
   });
 
+  it('keeps the Home when a click ends a text selection inside a workspace row', () => {
+    mocks.page = homePage([block('a'), block('tbl-ws')]);
+    render(<SpacesHomeView />);
+    const cell = screen.getByText('Release next week');
+    window.getSelection()!.selectAllChildren(cell);
+    try {
+      fireEvent.click(cell);
+      expect(mocks.requestWorkspaceHome).not.toHaveBeenCalled();
+    } finally {
+      window.getSelection()!.removeAllRanges();
+    }
+    fireEvent.click(cell);
+    expect(mocks.requestWorkspaceHome).toHaveBeenCalledWith({ workspaceId: 'ws-1', backendConnectionId: 'local' });
+  });
+
   it('starts a table row naming a workspace with that workspace’s sidebar dot', () => {
-    mocks.page = homePage([block('a'), block('tbl-ws', { text: '#### 各 workspace\n\n| Workspace | 现在 |\n|---|---|\n| rabbitholes | Release next week |' })]);
+    mocks.page = homePage([block('a'), block('tbl-ws', { text: '#### 各 workspace\n\n| Workspace | 现在 |\n|---|---|\n| sample-project | Release next week |' })]);
     mocks.sections = sections({ byWorkspace: { 'ws-1': { waiting: 0, stalled: 2 } } });
     const view = render(<SpacesHomeView />);
     const linked = () => screen.getByText('Release next week').closest('tr')!;
@@ -695,10 +774,10 @@ describe('Spaces Home', () => {
   });
 
   it('keeps the normal Home free of maintenance status overrides', () => {
-    render(<SpacesHomeView meta={{ intervalSeconds: 60, lastWrite: { workspaceName: 'rabbitholes', at: Date.now() - 12 * 60_000 }, runtimeLabel: 'Claude', followsGlobal: true }} />);
-    expect(screen.queryByText(/Meta agent checks new conversations/)).toBeNull();
-    expect(screen.queryByText(/wrote rabbitholes/)).toBeNull();
+    render(<SpacesHomeView meta={{ intervalSeconds: 60, lastWrite: { workspaceName: 'sample-project', at: Date.now() - 12 * 60_000 }, runtimeLabel: 'Claude', followsGlobal: true }} />);
+    expect(screen.queryByText(/Pages upkeep checks new conversations/)).toBeNull();
+    expect(screen.queryByText(/wrote sample-project/)).toBeNull();
     expect(screen.queryByRole('button', { name: 'Details' })).toBeNull();
-    expect(screen.queryByRole('list', { name: 'Meta agent per workspace' })).toBeNull();
+    expect(screen.queryByRole('list', { name: 'Pages upkeep per workspace' })).toBeNull();
   });
 });

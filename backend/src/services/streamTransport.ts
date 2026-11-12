@@ -5,12 +5,16 @@ import express from 'express';
 import { WebSocket, WebSocketServer } from 'ws';
 import { STREAM_TRANSPORT_PATH, STREAM_MAX_BODY_BYTES, STREAM_MAX_FRAME_BYTES, type StreamTransportResponse } from 'michi-shared';
 import { isAllowedLocalOrigin } from './localOrigins';
+import { VIA_HEADER } from './accessLog';
+import { createSlowConsumerGuard } from './httpSse';
+import { log } from './logger';
 
 const ENDPOINT = `/api${STREAM_TRANSPORT_PATH}`;
 const TICKET_TTL_MS = 30_000;
 const MAX_CHANNELS = 256;
-const MAX_BUFFER_BYTES = 8 * 1024 * 1024;
-const STREAM_PATH = /^\/api\/(?:backend-connections\/[a-zA-Z0-9_-]+\/proxy\/)?(chats\/background\/subscribe|chats\/[a-zA-Z0-9_-]+\/(message|stream)|workspaces\/[a-zA-Z0-9_-]+\/watch\/stream|agent-runs\/subscribe|workflow-runs\/subscribe|digests\/stream|panes\/subscribe|panes\/presence\/keepalive|memories\/changes\/stream)$/;
+// Renderer feeds only: the Companion's notifications stream is read by the
+// Electron main process over plain HTTP, so it is deliberately not here.
+const STREAM_PATH = /^\/api\/(?:backend-connections\/[a-zA-Z0-9_-]+\/proxy\/)?(chats\/background\/subscribe|chats\/[a-zA-Z0-9_-]+\/(message|stream)|workspaces\/[a-zA-Z0-9_-]+\/watch\/stream|agent-runs\/subscribe|workflow-runs\/subscribe|digests\/stream|panes\/presence\/keepalive|memories\/changes\/stream|companion\/events|terminals\/[a-zA-Z0-9-]+\/(stream|input|resize))$/;
 
 interface Ticket {
   expires: number;
@@ -39,7 +43,8 @@ export function createStreamTransport() {
     const headers: IncomingHttpHeaders = {};
     // Capture credentials from the authenticated HTTP request, never from a
     // WebSocket message. Each forwarded request still runs all route guards.
-    for (const name of ['host', 'origin', 'cookie', 'authorization', 'x-forwarded-proto']) {
+    // The via label only names the hop in the access log.
+    for (const name of ['host', 'origin', 'cookie', 'authorization', 'x-forwarded-proto', VIA_HEADER]) {
       if (req.headers[name] !== undefined) headers[name] = req.headers[name];
     }
     tickets.set(token, {
@@ -55,13 +60,21 @@ export function createStreamTransport() {
   wss.on('connection', (socket: WebSocket, _req: IncomingMessage, ticket: Ticket) => {
     const channels = new Map<string, ClientRequest>();
     let alive = true;
+    // The loopback hop reads every upstream eagerly, so a slow renderer shows
+    // up only here. Each channel reconnects from its cursor after a close.
+    const guard = createSlowConsumerGuard({
+      bufferedBytes: () => socket.bufferedAmount,
+      active: () => socket.readyState === WebSocket.OPEN,
+      onSlow: (reason, bufferedBytes) => {
+        log.warn('http', 'Stream transport consumer too slow; closing', { reason, bufferedBytes, channels: channels.size });
+        socket.terminate();
+      },
+    });
     const send = (frame: StreamTransportResponse) => {
       if (socket.readyState !== WebSocket.OPEN) return;
-      if (socket.bufferedAmount > MAX_BUFFER_BYTES) {
-        socket.terminate();
-        return;
-      }
+      if (!guard.check()) return;
       socket.send(JSON.stringify(frame));
+      guard.check();
     };
     const heartbeat = setInterval(() => {
       if (!alive) { socket.terminate(); return; }
@@ -72,6 +85,7 @@ export function createStreamTransport() {
     socket.on('pong', () => { alive = true; });
     socket.on('error', () => socket.terminate());
     socket.on('close', () => {
+      guard.dispose();
       clearInterval(heartbeat);
       for (const upstream of channels.values()) upstream.destroy();
       channels.clear();
@@ -112,7 +126,10 @@ export function createStreamTransport() {
         const expectedMethod = target.pathname.endsWith('/message')
           || target.pathname.endsWith('/background/subscribe')
           || target.pathname.endsWith('/digests/stream')
-          || target.pathname.endsWith('/panes/presence/keepalive') ? 'POST' : 'GET';
+          || target.pathname.endsWith('/panes/presence/keepalive')
+          // Keystrokes ride the open socket: through a phone tunnel a new
+          // HTTPS request per key would add a round trip.
+          || /\/terminals\/[^/]+\/(?:input|resize)$/.test(target.pathname) ? 'POST' : 'GET';
         if (target.origin !== 'http://stream.local' || !match || target.hash
           || frame.method !== expectedMethod
           || (frame.body !== undefined && typeof frame.body !== 'string')) throw new Error();

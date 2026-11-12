@@ -53,21 +53,31 @@ function errorOf(error: unknown): Record<string, unknown> {
     return out;
 }
 
-/** JSON-safe copy that keeps undefined-valued keys visible and masks clock-derived state versions. */
-function normalize(value: unknown, key?: string): unknown {
+/** Michi request IDs come from a timestamp-seeded allocator; none is smaller than this. */
+const MICHI_ID_FLOOR = 1e15;
+
+/**
+ * JSON-safe copy that keeps undefined-valued keys visible, masks clock-derived
+ * state versions and writes a Michi request ID as its label ("michi:<rpc id>").
+ */
+function normalize(value: unknown, labels: ReadonlyMap<number, string>, key?: string): unknown {
     if (value === undefined) return "<undefined>";
     if (value instanceof Error) return errorOf(value);
     if (typeof value === "function") return "<function>";
     if (typeof value === "number" && key === "version" && value > 1e9) return "<version>";
-    if (Array.isArray(value)) return value.map((item) => normalize(item));
+    if (typeof value === "number" && labels.has(value)) return labels.get(value);
+    if (typeof value === "number" && Number.isSafeInteger(value) && value >= MICHI_ID_FLOOR) return "michi:unknown";
+    if (Array.isArray(value)) return value.map((item) => normalize(item, labels));
     if (value && typeof value === "object") {
-        return Object.fromEntries(Object.entries(value).map(([k, v]) => [k, normalize(v, k)]));
+        return Object.fromEntries(Object.entries(value).map(([k, v]) => [k, normalize(v, labels, k)]));
     }
     return value;
 }
 
 class Recorder {
     readonly steps: Step[] = [{ step: "setup" }];
+    /** Michi request ID -> its label in the record. */
+    readonly labels = new Map<number, string>();
 
     begin(name: string): void {
         this.steps.push({ step: name });
@@ -77,7 +87,7 @@ class Recorder {
         const step = this.steps[this.steps.length - 1];
         const list = (step[channel] as unknown[] | undefined) ?? [];
         step[channel] = list;
-        list.push(normalize(value));
+        list.push(normalize(value, this.labels));
     }
 }
 
@@ -295,6 +305,24 @@ function scenario(t: TestContext, options: Options = {}) {
             ...(options.spawnEnv ? { spawnEnv: options.spawnEnv } : {}),
             ...(options.preloadTools ? { preloadTools: options.preloadTools } : {}),
         });
+    // The client gives each agent permission request a Michi request ID; keep
+    // which rpc id it answers, so steps answer by it and the record shows its label.
+    const permissionIds: Array<{ id: number; rpcId: string | number }> = [];
+    const internal = client as unknown as { registerPendingPermission(rpcId: string | number, entry: unknown): number };
+    const register = internal.registerPendingPermission.bind(client);
+    internal.registerPendingPermission = (rpcId, entry) => {
+        const id = register(rpcId, entry);
+        const repeat = permissionIds.filter((p) => p.rpcId === rpcId).length;
+        permissionIds.push({ id, rpcId });
+        rec.labels.set(id, `michi:${rpcId}${repeat ? `#${repeat + 1}` : ""}`);
+        return id;
+    };
+    /** The Michi request ID of the agent's permission request with this rpc id (`nth` counts repeats from 0). */
+    const permissionId = (rpcId: string | number, nth = 0): number => {
+        const found = permissionIds.filter((p) => p.rpcId === rpcId)[nth];
+        if (!found) throw new Error(`no permission request ${rpcId} #${nth + 1}`);
+        return found.id;
+    };
     const engine = options.engine ?? "v2";
     agent.on("initialize", (msg) => [rpc(msg, engine === "v3" ? V3_INIT : V2_INIT)]);
     let sessions = 0;
@@ -349,7 +377,7 @@ function scenario(t: TestContext, options: Options = {}) {
         await step("initialize", () => track("initialize", () => client.initialize(), true));
         await step("session/new", () => track("newSession", () => client.newSession([])));
     };
-    return { rec, agent, client, step, track, consume, prompt, state, open };
+    return { rec, agent, client, step, track, consume, prompt, state, open, permissionId };
 }
 
 function assertGolden(name: string, rec: Recorder): void {
@@ -640,13 +668,13 @@ test("S06 permission requests, answers and consent", async (t) => {
         permission(1.5, "S1", ALLOW_REJECT),
     ));
     await s.step("answers", () => {
-        s.track("respond5", () => s.client.respondToPermission(5, "allow"));
-        s.track("respond5again", () => s.client.respondToPermission(5, "allow"));
-        s.track("respondUnknownOption", () => s.client.respondToPermission(-1, "maybe"));
-        s.track("respondKindReject", () => s.client.respondToPermissionKind(-1, "reject_once"));
-        s.track("respondAlwaysWithConsent", () => s.client.respondToPermission(6, "always"));
-        s.track("respondAlwaysNoTrigger", () => s.client.respondToPermission(7, "always"));
-        s.track("respondKindMissing", () => s.client.respondToPermissionKind(-2, "allow_once"));
+        s.track("respond5", () => s.client.respondToPermission(s.permissionId(5), "allow"));
+        s.track("respond5again", () => s.client.respondToPermission(s.permissionId(5), "allow"));
+        s.track("respondUnknownOption", () => s.client.respondToPermission(s.permissionId("abc"), "maybe"));
+        s.track("respondKindReject", () => s.client.respondToPermissionKind(s.permissionId("abc"), "reject_once"));
+        s.track("respondAlwaysWithConsent", () => s.client.respondToPermission(s.permissionId(6), "always"));
+        s.track("respondAlwaysNoTrigger", () => s.client.respondToPermission(s.permissionId(7), "always"));
+        s.track("respondKindMissing", () => s.client.respondToPermissionKind(s.permissionId(5, 1), "allow_once"));
     });
     await s.step("resolved elsewhere", () => s.agent.send(
         note("_michi/permission_resolved", { sessionId: "other", requestId: 1.5 }),
@@ -657,9 +685,9 @@ test("S06 permission requests, answers and consent", async (t) => {
         s.agent.send(permission(10, "S1", ALLOW_REJECT), permission(11, "S1", [{ optionId: "only", name: "Only" }]));
     });
     await s.step("cancel the session's permissions", () => s.client.cancelPermissionsForSession("S1"));
-    await s.step("answer after cancellation", () => s.track("respondLate", () => s.client.respondToPermission(10, "allow")));
+    await s.step("answer after cancellation", () => s.track("respondLate", () => s.client.respondToPermission(s.permissionId(10), "allow")));
     await s.step("an option-less request accepts any option", () => s.agent.send(request(12, "session/request_permission", { sessionId: "S1", toolCall: {} })));
-    await s.step("answer it", () => s.track("respondFree", () => s.client.respondToPermission(12, "whatever")));
+    await s.step("answer it", () => s.track("respondFree", () => s.client.respondToPermission(s.permissionId(12), "whatever")));
     await s.step("prompt result", () => s.agent.answer("session/prompt", (msg) => [rpc(msg, { stopReason: "end_turn" })]));
     assertGolden("S06-permissions", s.rec);
 });
@@ -669,7 +697,7 @@ test("S06b v2 permission consent is not forwarded", async (t) => {
     await s.open();
     await s.step("prompt", () => s.prompt("p1", "S1", "edit"));
     await s.step("request", () => s.agent.send(permission(3, "S1", ALLOW_REJECT, { kiro: { consent: { capability: "fs.write", resource: "/a" } } })));
-    await s.step("answer", () => s.track("respond", () => s.client.respondToPermission(3, "always")));
+    await s.step("answer", () => s.track("respond", () => s.client.respondToPermission(s.permissionId(3), "always")));
     await s.step("prompt result", () => s.agent.answer("session/prompt", (msg) => [rpc(msg, { stopReason: "end_turn" })]));
     assertGolden("S06b-v2-permission", s.rec);
 });
@@ -826,7 +854,7 @@ test("S10 v3 workflows: notifications, step sessions and controls", async (t) =>
         permission(42, "W9", ALLOW_REJECT),
         request(43, "session/request_permission", { sessionId: "W1", options: "not-a-list" }),
     ));
-    await s.step("approve the step", () => s.track("respondStep", () => s.client.respondToPermission(41, "allow")));
+    await s.step("approve the step", () => s.track("respondStep", () => s.client.respondToPermission(s.permissionId(41), "allow")));
     await s.step("launch result", () => s.agent.send(
         update("S1", { sessionUpdate: "tool_call_update", toolCallId: "run", status: "completed", rawOutput: { workflowId: "wf1" } }),
         update("S1", { sessionUpdate: "tool_call_update", toolCallId: "run2", status: "completed", rawOutput: { workflowId: "" } }),
@@ -869,7 +897,7 @@ test("S11 v3 turns Kiro starts on its own", async (t) => {
     await s.step("state during the wake", () => { s.state("S1"); s.rec.add("hasAgentTurn", s.client.hasAgentTurn("S1")); });
     await s.step("inject during the wake", () => s.track("inject", () => s.client.injectUpdate("S1", { sessionUpdate: "tool_call_update", toolCallId: "mcp" })));
     await s.step("answer and end", () => {
-        s.client.respondToPermission(50, "allow");
+        s.client.respondToPermission(s.permissionId(50), "allow");
         s.agent.send(
             info("S1", { kind: "turn_completion", promptTurnSummaries: [{ unit: "credit", usage: 1 }] }),
             info("S1", { kind: "turn_end", turnEnd: { stopReason: "end_turn" } }),

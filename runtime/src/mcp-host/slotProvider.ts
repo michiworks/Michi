@@ -10,13 +10,6 @@ export interface McpSlotProviderOptions {
    * description.
    */
   sessionAnchorDescription?: string;
-  /**
-   * The URL a slot's hook posts to. Default mcpHost.hookUrl(slotId, hook),
-   * the host's own hook route, which answers 404 for an unknown slot. A host
-   * that serves the hook on a route of its own returns that route's URL.
-   * @experimental Follow-ups Stop-hook POC; outside the v1 compatibility guarantee.
-   */
-  hookEndpoint?: (slotId: string, hook: 'stop') => string;
 }
 
 /**
@@ -56,11 +49,10 @@ const hasOwn = (value: object, key: string) => Object.prototype.hasOwnProperty.c
  * after it has assigned the patch on the binding.
  */
 export function createMcpSlotProvider(mcpHost: McpHost<McpSlot>, options: McpSlotProviderOptions = {}): McpSlotProvider {
-  const { sessionAnchorDescription, hookEndpoint } = options;
+  const { sessionAnchorDescription } = options;
   if (sessionAnchorDescription !== undefined && (typeof sessionAnchorDescription !== 'string' || sessionAnchorDescription.trim() === '')) {
     throw new Error('MCP slot provider sessionAnchorDescription must be a non-empty string');
   }
-  if (hookEndpoint !== undefined && typeof hookEndpoint !== 'function') throw new Error('MCP slot provider hookEndpoint must be a function');
 
   const slots = new Map<string, McpSlotHandle<McpSlot>>();
   const sessionGroups = new Map<string, {
@@ -84,8 +76,8 @@ export function createMcpSlotProvider(mcpHost: McpHost<McpSlot>, options: McpSlo
 
   const provider: McpSlotProvider = {
     create(parentChatId, cwd, ownerUserId, cbs, opts) {
-      // The session's sink goes to the host slot, where tool calls get it; the binding never carries it.
-      const { sink, ...callbacks } = cbs;
+      // The session's sink and its client's up-front key go to the host slot; the binding never carries them.
+      const { sink, upFrontToolMeta, ...callbacks } = cbs;
       const slot: McpSlot = {
         slotId: '',
         owner: callbacks.owner,
@@ -99,6 +91,7 @@ export function createMcpSlotProvider(mcpHost: McpHost<McpSlot>, options: McpSlo
       };
       const handle = mcpHost.createSlot({
         sessionKey: parentChatId, cwd, binding: slot, sink: sink ?? NO_HOST_EVENTS, allowTools: slot.exposedToolNames,
+        ...(upFrontToolMeta ? { upFrontToolMeta } : {}),
       });
       slot.slotId = handle.slotId;
       slots.set(handle.slotId, handle);
@@ -184,10 +177,6 @@ export function createMcpSlotProvider(mcpHost: McpHost<McpSlot>, options: McpSlo
 
     sessionEndpoint(groupId): McpHttpEndpoint {
       return mcpHost.sessionGroupEndpoint(groupId);
-    },
-
-    hookEndpoint(slotId, hook) {
-      return hookEndpoint ? hookEndpoint(slotId, hook) : mcpHost.hookUrl(slotId, hook);
     },
 
     /**

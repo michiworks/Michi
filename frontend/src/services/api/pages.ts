@@ -9,17 +9,13 @@ import type {
   PageWriteResult,
   SpaceSummaryDto,
 } from 'michi-shared';
-import { parsePageBlockInput } from 'michi-shared';
+import { parsePageBlockInput, readApiError } from 'michi-shared';
+import { spaceCreatorFrom } from './legacyActor';
 import { backendApiBase } from '../../config/backendConnections';
-import { backendEntityId, backendRequestUrl, connectionIdFromApiUrl, serverEntityId } from '../../config/backendIdentity';
-import {
-  backendConnectionGeneration,
-  backendConnectionUnavailable,
-  markBackendConnectionUnavailable,
-} from '../../config/backendConnectionState';
+import { backendEntityId, serverEntityId } from '../../config/backendIdentity';
+import { backendFetch } from './backendRequest';
 import {
   mapDatabaseIdentity,
-  mapHelperDescriptorIdentity,
   mapPageBlockIdentity,
   mapPageBlockInputIdentity,
   mapPageChangeIdentity,
@@ -42,15 +38,23 @@ export class PageApiError extends Error {
   }
 }
 
+/** What a refused page or database write means to the person: changed meanwhile, no longer there, or failed. */
+export function pageEditFailure(error: unknown): 'stale' | 'gone' | 'failed' {
+  const status = (error as { status?: unknown } | null | undefined)?.status;
+  if (status === 409) return 'stale';
+  if (status === 404 || status === 410) return 'gone';
+  return 'failed';
+}
+
+/** A failed response's `{ error: { code, message } }` envelope (or another error body), with fallbacks for what it lacks. */
+export async function pageApiError(response: Response, fallbackCode: string, label: string): Promise<PageApiError> {
+  const { message, code } = readApiError(await response.json().catch(() => null));
+  return new PageApiError(response.status, code ?? fallbackCode, message ?? `${label} request failed (${response.status})`);
+}
+
 export interface PageApiIdentity {
   backendConnectionId: string;
   workspaceId: string;
-}
-
-export interface PageHelperDescriptor {
-  workspaceId: string;
-  treeId: string;
-  nodeId: string;
 }
 
 export interface PageApiOptions extends PageApiIdentity {
@@ -124,60 +128,21 @@ async function json<T>(url: string, options: { method?: string; body?: unknown; 
       body: JSON.stringify(options.body),
     }),
   });
-  if (!response.ok) {
-    const payload: unknown = await readPagesJson(response).catch(() => null);
-    const envelope = payload && typeof payload === 'object'
-      ? (payload as { error?: unknown }).error
-      : undefined;
-    const error = envelope && typeof envelope === 'object' ? envelope as { code?: unknown; message?: unknown } : {};
-    throw new PageApiError(
-      response.status,
-      typeof error.code === 'string' ? error.code : 'page_request_failed',
-      typeof error.message === 'string' ? error.message : `Pages request failed (${response.status})`,
-    );
-  }
+  if (!response.ok) throw await pageApiError(response, 'page_request_failed', 'Pages');
   return await readPagesJson(response) as T;
 }
 
 // Pages block/row/column/view `id` fields are opaque within an owned resource.
 // backendFetch's generic body transform interprets every JSON `id` as an
-// entity ID, so this API applies its structural DTO mapping itself and avoids
-// that second broad conversion.
-const responseGeneration = new WeakMap<Response, { connectionId: string; generation: number; signal?: AbortSignal }>();
-
-export async function pagesFetch(url: string, options: RequestInit = {}): Promise<Response> {
-  const connectionId = connectionIdFromApiUrl(url);
-  const generation = backendConnectionGeneration(connectionId);
-  if (backendConnectionUnavailable(connectionId) && options.method && options.method !== 'GET') {
-    throw new Error('Remote connection is unavailable');
-  }
-  let response: Response;
-  try {
-    response = await globalThis.fetch(backendRequestUrl(url), options);
-  } catch (error) {
-    if (error instanceof TypeError) markBackendConnectionUnavailable(connectionId);
-    throw error;
-  }
-  if ([502, 503, 504].includes(response.status)) markBackendConnectionUnavailable(connectionId);
-  responseGeneration.set(response, { connectionId, generation, signal: options.signal ?? undefined });
-  return response;
+// entity ID, so this API applies its structural DTO mapping itself and turns
+// that one off (mapPayload: false).
+export function pagesFetch(url: string, options: RequestInit = {}): Promise<Response> {
+  return backendFetch(url, options, { mapPayload: false });
 }
 
-export async function readPagesJson(response: Response): Promise<unknown> {
-  const captured = responseGeneration.get(response);
-  let value: unknown;
-  try {
-    value = await response.json();
-  } catch (error) {
-    if (error instanceof TypeError && !captured?.signal?.aborted && captured) {
-      markBackendConnectionUnavailable(captured.connectionId);
-    }
-    throw error;
-  }
-  if (captured && captured.generation !== backendConnectionGeneration(captured.connectionId)) {
-    throw new DOMException('Remote connection changed while reading data', 'AbortError');
-  }
-  return value;
+/** The body of a pagesFetch response (backendFetch's reachability and generation checks included). */
+export function readPagesJson(response: Response): Promise<unknown> {
+  return response.json();
 }
 
 function base(connectionId: string): string {
@@ -192,7 +157,8 @@ export async function fetchSpaces(connectionId: string, signal?: AbortSignal): P
       `${base(connectionId)}/spaces${query({ cursor })}`,
       { signal },
     );
-    spaces.push(...(answer.items ?? []).map((space) => mapSpaceSummaryIdentity(space, connectionId, 'renderer')));
+    spaces.push(...(answer.items ?? []).map((space) => mapSpaceSummaryIdentity(
+      space.createdBy === undefined ? space : { ...space, createdBy: spaceCreatorFrom(space.createdBy) }, connectionId, 'renderer')));
     cursor = answer.nextCursor ?? undefined;
   } while (cursor);
   return spaces;
@@ -244,7 +210,7 @@ export async function fetchPage(
   const { backendConnectionId: connectionId, signal } = options;
   const response = await pagesFetch(`${base(connectionId)}/pages/${pathId(pageId, connectionId)}${query({ since: options.since })}`, { signal });
   if (response.status === 204) return null;
-  if (!response.ok) return await throwPageError(response);
+  if (!response.ok) throw await pageApiError(response, 'page_request_failed', 'Pages');
   const answer = await readPagesJson(response) as { page?: PageDto } | PageDto;
   const page = unwrap<PageDto>(answer, 'page');
   if (!page) throw new Error('Pages returned an empty page response');
@@ -352,26 +318,6 @@ export async function acknowledgePageActivity(pageId: string, throughSeq: number
   });
 }
 
-export async function ensurePageHelper(pageId: string, options: PageApiOptions): Promise<PageHelperDescriptor> {
-  const answer = await json<PageHelperDescriptor | { helper: PageHelperDescriptor }>(
-    `${base(options.backendConnectionId)}/pages/${pathId(pageId, options.backendConnectionId)}/helper`,
-    { method: 'POST', body: {}, signal: options.signal },
-  );
-  const descriptor = unwrap<PageHelperDescriptor>(answer, 'helper');
-  if (!descriptor) throw new Error('Pages returned an empty helper descriptor');
-  return mapHelperDescriptorIdentity(descriptor, options.backendConnectionId, 'renderer');
-}
-
-export async function promotePageHelper(pageId: string, options: PageApiOptions): Promise<PageHelperDescriptor> {
-  const answer = await json<PageHelperDescriptor | { helper: PageHelperDescriptor }>(
-    `${base(options.backendConnectionId)}/pages/${pathId(pageId, options.backendConnectionId)}/helper/promote`,
-    { method: 'POST', body: {}, signal: options.signal },
-  );
-  const descriptor = unwrap<PageHelperDescriptor>(answer, 'helper');
-  if (!descriptor) throw new Error('Pages returned an empty helper descriptor');
-  return mapHelperDescriptorIdentity(descriptor, options.backendConnectionId, 'renderer');
-}
-
 export type PageChangeAction = 'revert' | 'redo' | 'accept' | 'dismiss' | 'reopen';
 /** An edited block goes to its backend with that backend's own ids for the pages, databases, components and conversations it names. */
 function serverEditedContent(edited: unknown, connectionId: string): unknown {
@@ -461,7 +407,7 @@ export async function fetchPageDatabase(databaseId: string, options: PageApiOpti
   const connectionId = options.backendConnectionId;
   const response = await pagesFetch(`${base(connectionId)}/databases/${pathId(databaseId, connectionId)}${query({ since: options.since })}`, { signal: options.signal });
   if (response.status === 204) return null;
-  if (!response.ok) return await throwPageError(response);
+  if (!response.ok) throw await pageApiError(response, 'page_request_failed', 'Pages');
   const answer = await readPagesJson(response) as { database?: PageDatabase } | PageDatabase;
   const database = unwrap<PageDatabase>(answer, 'database');
   return database ? mapDatabaseIdentity(database, connectionId, 'renderer') : null;
@@ -480,15 +426,4 @@ export async function editPageDatabase(databaseId: string, body: { revision: num
     database: mapDatabaseIdentity(answer.database, connectionId, 'renderer'),
     changes: mapPageWriteIdentity(answer.changes, connectionId, 'renderer'),
   };
-}
-
-async function throwPageError(response: Response): Promise<never> {
-  const payload: unknown = await response.json().catch(() => null);
-  const envelope = payload && typeof payload === 'object' ? (payload as { error?: unknown }).error : undefined;
-  const error = envelope && typeof envelope === 'object' ? envelope as { code?: unknown; message?: unknown } : {};
-  throw new PageApiError(
-    response.status,
-    typeof error.code === 'string' ? error.code : 'page_request_failed',
-    typeof error.message === 'string' ? error.message : `Pages request failed (${response.status})`,
-  );
 }

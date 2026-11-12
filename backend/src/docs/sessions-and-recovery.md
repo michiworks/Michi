@@ -1,6 +1,6 @@
 # Task states, queued messages and session recovery
 
-Applies to: ordinary desktop/web chats, including remote workspaces. Agent Runs use the lifecycle in `custom-agents`. Source checked: 2026-10-16; native behavior depends on installed runtimes.
+Applies to: ordinary desktop/web chats, including remote workspaces. Agent Runs use the lifecycle in `custom-agents`. Source checked: 2026-11-11; native behavior depends on installed runtimes.
 
 ## Is the task working or stuck?
 
@@ -27,6 +27,7 @@ The composer follows current session capabilities.
 | Codex | Native `turn/steer` |
 | Claude | Native steer in chats: joins the running turn at its next tool round, or runs right after it within the same Michi turn. Agent Runs queue for the next turn |
 | Crew | Queues for the next turn; official App callers cannot same-turn steer |
+| Antigravity (opt-in: `MICHI_ENABLE_ANTIGRAVITY=1`, or `antigravity` listed in `MICHI_ENABLED_RUNTIMES`) | No steering; a busy send waits for the next turn |
 
 Steering does not instantly roll back an executing command. If execution must stop, use Stop, inspect actual effects, then send the corrected request. Queueing and steering do not undo prior effects.
 
@@ -35,11 +36,11 @@ Steering does not instantly roll back an executing command. If execution must st
 | Action | Effect |
 | --- | --- |
 | Stop a chat | Requests targeted cancellation; prior file/external changes remain |
-| Close a pane | Closes the view; does not delete history or request cancellation |
+| Close a chat pane | Closes the view; does not delete history or request cancellation |
 | Refresh/reload | Detaches subscriptions, then rehydrates/reconnects |
 | Close a desktop window | Does not itself send cancellation; process lifetime depends on platform/app |
-| Quit local app/backend | A stopped backend cannot continue local execution; saved history remains |
-| Quit desktop using a remote workspace | Stops local connections/tunnels, not the remote backend/turns |
+| Quit the local app | An app-owned backend stops with the app, and its local execution ends; saved history remains. On macOS, with **Keep Michi running in the background** (Settings → Scheduled jobs) on, the backend keeps running after you quit, and so do its turns, scheduled jobs and SSH tunnels |
+| Quit desktop using a remote workspace | Does not stop the remote backend or its turns. For an SSH machine, the local tunnel stops only when the local backend stops (not in macOS background-service mode) |
 | Restart a backend | Interrupts running processes; durable records support recovery, not uninterrupted work |
 
 Cancellation may take time while output drains. Stop is not proof of external rollback. Check actual resources before repeating consequential actions.
@@ -51,13 +52,17 @@ Cancellation may take time while output drains. Stop is not proof of external ro
 3. Determine whether the original turn is active, completed, cancelled or failed.
 4. Continue once its state is known; check effects before repeating an action.
 
-A stream HTTP 410 means the live reply is no longer held: Michi keeps it in memory only briefly after a turn ends, and not across a backend restart. Michi then reads the turn's saved record. A turn that finished shows its saved reply with no error. A turn a restart cut short shows **Turn interrupted** with **Resume**, which asks the agent to carry on from the kept partial output instead of sending the request again; its tool calls may already have taken effect. Otherwise the error stays, and **Check original turn** reads the saved record again. A 410 does not prove provider failure or lost history. A `409` with code `turn_active` identifies a busy durable turn; Michi handles its supported retry internally. Other conflicts and ambiguous failures do not justify blind resending.
+A stream HTTP 410 means the live reply is no longer held: Michi keeps it in memory only briefly after a turn ends, and not across a backend restart. Michi then reads the turn's saved record. A turn that finished shows its saved reply with no error. A turn a restart cut short shows **Turn interrupted** with **Resume**, which asks the agent to carry on from the kept partial output instead of sending the request again; its tool calls may already have taken effect. A turn the agent's credentials expiring stopped (for example a lapsed Auth session: Claude's "authentication failed", a Bedrock 403, AWS credentials that cannot load, a Kiro SSO token exception) shows **Credentials expired** with the same **Resume**; sign in again first. Otherwise the error stays, and **Check original turn** reads the saved record again. A 410 does not prove provider failure or lost history. A `409` with code `turn_active` identifies a busy durable turn; Michi handles its supported retry internally. Other conflicts and ambiguous failures do not justify blind resending.
+
+### Interrupted tasks notice
+
+After a restart, an update or expired credentials, a notice in the top-right corner (under the agent's questions, where toasts appear) lists every task that stopped before finishing, across workspaces and connected backends. It does not close by itself. Each task has **Resume** (opens the chat and carries the turn on, as above; never a resend) and **×** (dismiss); its title opens the chat. **Resume all** carries every listed task on at once, without opening them; **All N** lists more than three; **Dismiss all** clears them. **–** (or Esc inside it) shrinks the notice to a tab with the count, and it stays shrunk after a reload of the window; a new interruption opens it again. On a phone it starts as the tab. While you type in a composer or the pane's find bar that the notices would cover, they step aside off the edge and come back when you leave it. A task leaves the list once its chat moves on (Resume, or any new message) or is dismissed; dismissals are kept on the backend. Tasks older than 7 days, Scheduled Job runs (see the Scheduled page), multi-model runs and maintenance chats are not listed.
 
 If unclear, collect timestamp, runtime, visible status and a small adjacent log excerpt. Preserve the chat rather than deleting it to force a binding.
 
 ## Native Resume and Native Fork
 
-Settings → Model shows these switches for runtimes that expose them. They are per runtime and independent.
+Settings → Runtime & model (Model section) shows a **Native Resume** and a **Native Fork** switch for the currently selected runtime when it supports them. Each runtime keeps its own setting, and the two switches are independent. Choosing a different **Runtime** there to reach its switches also makes it the default for new chats; existing chats keep their runtime.
 
 Native Resume restores provider-side state when available. Disabling it changes cold-session reconstruction and does not interrupt live sessions. Text reconstruction uses persisted conversation material; hidden native state and every original tool result may not be restored.
 

@@ -1,22 +1,23 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, onTestFinished, vi } from 'vitest';
 import { act, cleanup, renderHook } from '@testing-library/react';
 import type { MemoryChangedEvent, MemoryRecord } from 'michi-shared';
 import type { MemoryChangeSubscription } from '../../services/api/memories';
 import { MemoryApiError } from '../../services/api/memories';
 import { SseHttpError } from '../../services/api/sseParser';
 import {
-  readMemoryBadge,
+  onMemoryChanged,
   resetMemoryNotifications,
   runSelfCreate,
   runSelfMutation,
-  useMemoryBadge,
+  useMemoryNotice,
   useMemoryNotifications,
 } from './memoryNotifications';
 
 const api = vi.hoisted(() => ({
   subscriptions: [] as Array<{ options: MemoryChangeSubscription; stop: ReturnType<typeof vi.fn> }>,
-  listMemories: vi.fn(),
   deleteMemory: vi.fn(),
+  fetchMemorySettings: vi.fn(),
+  markMemoryNoticeSeen: vi.fn(),
 }));
 const toasts = vi.hoisted(() => {
   const toast = Object.assign(vi.fn(), { success: vi.fn(), error: vi.fn(), dismiss: vi.fn() });
@@ -26,8 +27,9 @@ const toasts = vi.hoisted(() => {
 vi.mock('sonner', () => ({ toast: toasts.toast }));
 vi.mock('../../services/api/memories', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../../services/api/memories')>()),
-  listMemories: api.listMemories,
   deleteMemory: api.deleteMemory,
+  fetchMemorySettings: api.fetchMemorySettings,
+  markMemoryNoticeSeen: api.markMemoryNoticeSeen,
   subscribeMemoryChanges: (options: MemoryChangeSubscription) => {
     const stop = vi.fn();
     api.subscriptions.push({ options, stop });
@@ -45,14 +47,10 @@ const record = (id: string): MemoryRecord => ({
   status: 'active', origin: 'explicit', version: 1, supersedesId: null, sourceRisk: null, createdAt: 1, updatedAt: 1,
 });
 
-const page = (count: number, nextCursor: string | null = null) => ({
-  items: Array.from({ length: count }, (_, i) => ({ ...record(`p-${i}`), status: 'pending' })), nextCursor,
-});
-
 const flush = () => act(async () => { for (let i = 0; i < 8; i++) await Promise.resolve(); });
 
 function mount(onReview = vi.fn()) {
-  const view = renderHook(() => { useMemoryNotifications(onReview); return useMemoryBadge(); });
+  const view = renderHook(() => useMemoryNotifications(onReview));
   return { ...view, onReview, feed: () => api.subscriptions[api.subscriptions.length - 1] };
 }
 
@@ -62,8 +60,9 @@ const shown = () => toasts.toast.mock.calls.map(([message, options]) => ({ messa
 beforeEach(() => {
   resetMemoryNotifications();
   api.subscriptions = [];
-  api.listMemories.mockReset().mockResolvedValue(page(0));
   api.deleteMemory.mockReset().mockResolvedValue(undefined);
+  api.fetchMemorySettings.mockReset().mockResolvedValue({ mode: 'auto', migratedFromExplicit: false, noticeSeen: false });
+  api.markMemoryNoticeSeen.mockReset().mockResolvedValue({ mode: 'auto', noticeSeen: true });
   toasts.toast.mockReset();
   toasts.toast.success.mockReset();
   toasts.toast.error.mockReset();
@@ -110,32 +109,27 @@ describe('memory change toasts', () => {
     expect(toasts.toast.error).toHaveBeenCalledWith('Couldn’t remove the memory: offline');
   });
 
-  it('announces a memory waiting for approval with Review, counting the ones that follow in the same toast', async () => {
-    const { feed, onReview } = mount();
+  it('stays quiet for what automatic memory saves or corrects, and for a pending memory an older backend wrote', async () => {
+    const { feed } = mount();
     await flush();
-    act(() => feed().options.onEvent(event({ memoryId: 'p1', status: 'pending', body: 'Deploy on Fridays' })));
-    act(() => feed().options.onEvent(event({ memoryId: 'p2', status: 'pending' })));
-    const [first, second] = shown();
-    expect(first.message).toBe('1 memory is waiting for your confirmation');
-    expect(first.options.description).toBe('Deploy on Fridays');
-    expect(second.message).toBe('2 memories are waiting for your confirmation');
-    expect(second.options.id).toBe(first.options.id);
-    second.options.action.onClick();
-    expect(onReview).toHaveBeenCalledOnce();
-    // Once dismissed, the next one counts from one again.
-    act(() => second.options.onDismiss());
-    act(() => feed().options.onEvent(event({ memoryId: 'p3', status: 'pending' })));
-    expect(shown()[2].message).toBe('1 memory is waiting for your confirmation');
+    act(() => feed().options.onEvent(event({ memoryId: 'auto', origin: 'extracted', body: 'Deploys go out on Fridays' })));
+    act(() => feed().options.onEvent(event({ memoryId: 'auto-fix', origin: 'extracted', supersedesId: 'auto' })));
+    act(() => feed().options.onEvent(event({ memoryId: 'legacy', status: 'pending' })));
+    expect(shown()).toHaveLength(0);
+    act(() => feed().options.onEvent(event({ memoryId: 'asked' })));
+    expect(shown().map(({ message }) => message)).toEqual(['Remembered: Answer in Chinese']);
   });
 
   it('offers Review rather than Undo for a correction, since deleting it would not restore the old memory', async () => {
-    const { feed } = mount();
+    const { feed, onReview } = mount();
     await flush();
     act(() => feed().options.onEvent(event({ memoryId: 'new', supersedesId: 'old', body: 'Use 4 spaces' })));
     act(() => feed().options.onEvent(event({ memoryId: 'old', action: 'superseded', status: 'superseded' })));
     expect(shown()).toHaveLength(1);
     expect(shown()[0].message).toBe('Memory updated: Use 4 spaces');
     expect(shown()[0].options.action.label).toBe('Review');
+    shown()[0].options.action.onClick();
+    expect(onReview).toHaveBeenCalledOnce();
   });
 
   it('shows nothing for updates, approvals and deletions, or twice for one memory', async () => {
@@ -151,6 +145,21 @@ describe('memory change toasts', () => {
   });
 });
 
+describe('what consolidation does', () => {
+  it('a note put away (superseded) or brought back (updated) by Michi shows nothing, and is passed on to the views that list memories', async () => {
+    const { feed } = mount();
+    await flush();
+    const listener = vi.fn();
+    const stop = onMemoryChanged(listener);
+    act(() => feed().options.onEvent(event({ memoryId: 'dup', action: 'superseded', status: 'superseded', origin: 'extracted' })));
+    act(() => feed().options.onEvent(event({ memoryId: 'back', action: 'updated', status: 'active', origin: 'extracted' })));
+    expect(shown()).toHaveLength(0);
+    expect(toasts.toast.success).not.toHaveBeenCalled();
+    expect(listener.mock.calls.map(([change]) => [change.memoryId, change.action])).toEqual([['dup', 'superseded'], ['back', 'updated']]);
+    stop();
+  });
+});
+
 describe('changes Settings makes itself', () => {
   it('stays quiet for a memory Settings is changing, and for a while after', async () => {
     const { feed } = mount();
@@ -160,7 +169,7 @@ describe('changes Settings makes itself', () => {
     act(() => feed().options.onEvent(event({ memoryId: 'mem-self' })));
     finish();
     await act(async () => { await done; });
-    act(() => feed().options.onEvent(event({ memoryId: 'mem-self', status: 'pending' })));
+    act(() => feed().options.onEvent(event({ memoryId: 'mem-self' })));
     expect(shown()).toHaveLength(0);
     // Another memory meanwhile still shows.
     act(() => feed().options.onEvent(event({ memoryId: 'mem-agent' })));
@@ -191,46 +200,6 @@ describe('changes Settings makes itself', () => {
   });
 });
 
-describe('the pending count', () => {
-  it('reads the count when the feed opens and again shortly after each change', async () => {
-    vi.useFakeTimers();
-    api.listMemories.mockResolvedValue(page(2));
-    const { result, feed } = mount();
-    await act(async () => { await vi.advanceTimersByTimeAsync(0); });
-    expect(api.listMemories).toHaveBeenCalledWith({ status: ['pending'], limit: 200 });
-    expect(result.current).toEqual({ pendingCount: 2, pendingMore: false });
-    api.listMemories.mockResolvedValue(page(200, 'next'));
-    act(() => feed().options.onOpen?.());
-    await act(async () => { await vi.advanceTimersByTimeAsync(0); });
-    expect(result.current).toEqual({ pendingCount: 200, pendingMore: true });
-    api.listMemories.mockClear().mockResolvedValue(page(1));
-    act(() => {
-      feed().options.onEvent(event({ memoryId: 'a', action: 'approved' }));
-      feed().options.onEvent(event({ memoryId: 'b', action: 'rejected', status: 'pending' }));
-    });
-    await act(async () => { await vi.advanceTimersByTimeAsync(250); });
-    expect(api.listMemories).toHaveBeenCalledOnce();
-    expect(result.current.pendingCount).toBe(1);
-  });
-
-  it('shows none on a backend without Memory', async () => {
-    api.listMemories.mockRejectedValue(new MemoryApiError(404, 'Not found'));
-    const { result } = mount();
-    await flush();
-    expect(result.current.pendingCount).toBe(0);
-  });
-
-  it('re-reads the count when the window regains focus', async () => {
-    mount();
-    await flush();
-    api.listMemories.mockClear().mockResolvedValue(page(4));
-    act(() => { window.dispatchEvent(new Event('focus')); });
-    await flush();
-    expect(api.listMemories).toHaveBeenCalledOnce();
-    expect(readMemoryBadge().pendingCount).toBe(4);
-  });
-});
-
 describe('the feed', () => {
   it('opens one feed for every listener and closes it with the last', async () => {
     const first = mount();
@@ -245,6 +214,9 @@ describe('the feed', () => {
 
   it('reconnects with a growing delay, and stops on a backend without the feed', async () => {
     vi.useFakeTimers();
+    // No jitter: the delays below are the base ones.
+    const random = vi.spyOn(Math, 'random').mockReturnValue(0.5);
+    onTestFinished(() => random.mockRestore());
     const { feed } = mount();
     await act(async () => { await vi.advanceTimersByTimeAsync(0); });
     act(() => feed().options.onDisconnect?.(new Error('network')));
@@ -262,6 +234,19 @@ describe('the feed', () => {
     expect(api.subscriptions).toHaveLength(3);
   });
 
+  it('reconnects at once when the window comes back online, but not once the backend has no feed', async () => {
+    vi.useFakeTimers();
+    const { feed } = mount();
+    await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+    act(() => feed().options.onDisconnect?.(new Error('network')));
+    act(() => { window.dispatchEvent(new Event('online')); });
+    expect(api.subscriptions).toHaveLength(2);
+    act(() => feed().options.onDisconnect?.(new SseHttpError(404)));
+    act(() => { window.dispatchEvent(new Event('online')); });
+    await act(async () => { await vi.advanceTimersByTimeAsync(60_000); });
+    expect(api.subscriptions).toHaveLength(2);
+  });
+
   it('never moves focus or navigates when a change arrives', async () => {
     const { feed, onReview } = mount();
     await flush();
@@ -270,10 +255,71 @@ describe('the feed', () => {
     button.focus();
     act(() => {
       feed().options.onEvent(event({ memoryId: 'a' }));
-      feed().options.onEvent(event({ memoryId: 'b', status: 'pending' }));
+      feed().options.onEvent(event({ memoryId: 'b', supersedesId: 'old' }));
     });
     expect(document.activeElement).toBe(button);
     expect(onReview).not.toHaveBeenCalled();
     button.remove();
+  });
+});
+
+describe('the one-time notice', () => {
+  function notice(ready: boolean, onReview = vi.fn()) {
+    const view = renderHook(({ on }) => useMemoryNotice(on, onReview), { initialProps: { on: ready } });
+    return { ...view, onReview };
+  }
+
+  it('waits until setup is done, then tells a new user once, and counts as seen when it closes', async () => {
+    const { rerender, unmount } = notice(false);
+    await flush();
+    expect(api.fetchMemorySettings).not.toHaveBeenCalled();
+    rerender({ on: true });
+    await flush();
+    expect(shown().map(({ message }) => message)).toEqual(['Michi remembers what matters']);
+    const { options } = shown()[0];
+    expect(options.description).toContain('Review it or turn it off in Settings › Memory.');
+    expect(options.duration).toBe(20_000);
+    expect(api.markMemoryNoticeSeen).not.toHaveBeenCalled();
+    options.onAutoClose();
+    options.onDismiss();
+    expect(api.markMemoryNoticeSeen).toHaveBeenCalledOnce();
+    unmount();
+    // Another mount in this window does not ask again.
+    notice(true);
+    await flush();
+    expect(api.fetchMemorySettings).toHaveBeenCalledOnce();
+  });
+
+  it('tells someone whose explicit-only memory became on, and Review opens Settings', async () => {
+    api.fetchMemorySettings.mockResolvedValue({ mode: 'auto', migratedFromExplicit: true, noticeSeen: false });
+    const { onReview } = notice(true);
+    await flush();
+    const [{ message, options }] = shown();
+    expect(message).toBe('Memory now learns from your conversations');
+    expect(options.description).toContain('It used to save only what you asked it to remember.');
+    options.action.onClick();
+    expect(onReview).toHaveBeenCalledOnce();
+    expect(api.markMemoryNoticeSeen).toHaveBeenCalledOnce();
+  });
+
+  it.each([
+    ['once seen', { mode: 'auto', noticeSeen: true }],
+    ['with memory off', { mode: 'off', noticeSeen: false }],
+    ['on a backend without the notice', { mode: 'auto' }],
+  ])('shows nothing %s', async (_case, settings) => {
+    api.fetchMemorySettings.mockResolvedValue(settings);
+    notice(true);
+    await flush();
+    expect(shown()).toEqual([]);
+  });
+
+  it('asks again on a later mount when the settings could not be read', async () => {
+    api.fetchMemorySettings.mockRejectedValueOnce(new Error('offline'));
+    const first = notice(true);
+    await flush();
+    first.unmount();
+    notice(true);
+    await flush();
+    expect(shown().map(({ message }) => message)).toEqual(['Michi remembers what matters']);
   });
 });

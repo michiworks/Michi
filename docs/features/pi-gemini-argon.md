@@ -1,6 +1,6 @@
 # Gemini 4 Argon in Pi
 
-更新：2026-11-03 · 阶段：已合入（流式改走 Pi 官方 Google provider）
+更新：2026-11-08 · 阶段：已合入（流式改走 Pi 官方 Google provider）
 
 实现已包含在当前源码中；已安装版本：未核对。
 

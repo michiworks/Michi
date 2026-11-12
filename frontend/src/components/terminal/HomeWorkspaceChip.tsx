@@ -1,10 +1,10 @@
-import React, { useId, useState } from 'react';
+import { useId, useState } from 'react';
 import { AnimatePresence } from 'motion/react';
 import ContextMenu, { menuOpenKey, type MenuSection } from '../ContextMenu';
 import { workspaceRemoteNote } from '../WorkspaceLocation';
 import { useBackendConnections } from '../../state/useBackendConnections';
 import { FolderIcon } from './icons';
-import { composerMenusOpenBelow } from './PaneComposerToolbarLeft';
+import { composerMenuBelowEdge, composerMenusOpenBelow } from './PaneComposerToolbarLeft';
 
 interface MinimalProject {
   id: string;
@@ -107,7 +107,7 @@ export function HomeWorkspaceChip({
           const trigger = e.currentTarget;
           const r = trigger.getBoundingClientRect();
           const preferBelow = composerMenusOpenBelow(trigger);
-          setMenu((open) => (open ? null : { x: r.left, y: r.bottom + 6, anchorBottom: r.top - 6, preferBelow, trigger }));
+          setMenu((open) => (open ? null : { x: r.left, y: composerMenuBelowEdge(trigger), anchorBottom: r.top - 6, preferBelow, trigger }));
         }}
         style={{
           color: active ? 'var(--term-fg)' : 'var(--term-muted)',

@@ -1,6 +1,6 @@
 import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { isRemoteCredentialWarning, REMOTE_CREDENTIALS, remoteCredentialCheckPython } from 'michi-shared';
+import { isMichiBackendHealth, isRemoteCredentialWarning, REMOTE_CREDENTIALS, remoteCredentialCheckPython } from 'michi-shared';
 import type { RemoteDiagnosticLog } from './remoteDiagnostics';
 import {
   getBackendConnection, listBackendConnections, normalizeBackendConnection,
@@ -8,7 +8,7 @@ import {
 } from './backendConnections';
 import { HOST_DIRECTORIES_PATH, validHostDirectoryRequest, type HostDirectory } from './hostDirectories';
 import { SSH_CONNECT_TIMEOUT_SECONDS, sshTunnelManager, type SshTunnelManager } from './sshTunnelManager';
-import type { MichiBuildInfo, RemoteUpdateStatus } from 'michi-shared';
+import type { RemoteUpdateStatus } from 'michi-shared';
 import { compareRemoteBuild, runningBuild, type BuildInfo } from './buildInfo';
 
 export class RemoteDesktopError extends Error {
@@ -236,8 +236,28 @@ function readRemoteJson<T>(output: string): T {
   catch { throw new RemoteDesktopError('invalid_response', 'The remote machine returned an invalid setup response.'); }
 }
 
+// Choose Node as install.sh and bin/michi do: with the bin/lib/node-select.sh
+// and engines.node of the checkout in $repo, which is the one that will run.
+// Checkouts from before that file get this app's own minimum. Sets node_bin
+// (empty when none qualifies) and minimum.
+function remoteNodeSelection(preferred: string, fallbackMinimum = runningBuild.nodeMinimum ?? ''): string {
+  return `node_bin=""
+if [ -f "$repo/bin/lib/node-select.sh" ]; then
+  . "$repo/bin/lib/node-select.sh"
+  minimum="$(michi_node_minimum "$repo" || true)"
+  if [ -n "$minimum" ] && michi_select_node "$minimum" ${preferred}; then node_bin="$MICHI_NODE"; fi
+else
+  minimum=${shellQuote(fallbackMinimum)}
+  for candidate in ${preferred} "$HOME"/.nvm/versions/node/*/bin/node; do
+    [ -n "$minimum" ] && [ -x "$candidate" ] || continue
+    if "$candidate" -e 'const want=process.argv[1].split(".").map(Number),have=process.versions.node.split(".").map(Number);for(let i=0;i<3;i++)if(have[i]!==want[i])process.exit(have[i]>want[i]?0:1)' "$minimum" 2>/dev/null; then node_bin="$candidate"; break; fi
+  done
+fi`;
+}
+
 // Build in a new checkout while the current service stays available. The old
 // installation remains intact for rollback; data and credentials stay in place.
+// bin/michi remote_update is the command-line twin.
 export function buildRemoteUpdateScript(info: { repo: string; dataDir: string; token: string; port: number }, sourceUrl: string, ref: string, revision: string, attemptId: string): string {
   if (!/^[a-f0-9]{40}$/i.test(revision) || !/^[a-zA-Z0-9-]+$/.test(attemptId)) throw new Error('Invalid update identity');
   return `set -eu
@@ -253,13 +273,6 @@ trap 'rmdir "$root/setup.lock" "$data/remote-recovery.lock" 2>/dev/null || true'
 log="$root/update.${attemptId}.log"
 touch "$log"; chmod 600 "$log"
 [ -z "$(git -C "$old_repo" status --porcelain --untracked-files=normal -- . ':!package-lock.json')" ] || { echo MICHI_ERROR:modified_source; exit 1; }
-node_bin=""
-for candidate in "$root/node/bin/node" "$(command -v node || true)" "$HOME"/.nvm/versions/node/*/bin/node; do
-  [ -x "$candidate" ] || continue
-  if "$candidate" -e 'const [a,b]=process.versions.node.split(".").map(Number);process.exit(a>22||(a===22&&b>=19)?0:1)' 2>/dev/null; then node_bin="$candidate"; break; fi
-done
-[ -n "$node_bin" ] || { echo MICHI_ERROR:node_compatibility; exit 1; }
-export PATH="$(dirname "$node_bin"):$PATH"
 export GIT_SSH_COMMAND='ssh -o BatchMode=yes -o StrictHostKeyChecking=yes -o ConnectTimeout=10'
 repo="$root/releases/${revision}-${attemptId}"
 echo MICHI_PROGRESS:source
@@ -267,6 +280,9 @@ if ! (git clone --no-checkout --single-branch --branch ${shellQuote(ref)} -- ${s
   git -C "$repo" cat-file -e '${revision}^{commit}' && git -C "$repo" checkout --detach ${shellQuote(revision)}) >>"$log" 2>&1; then
   tail -c 32000 "$log"; echo MICHI_ERROR:update_source; exit 1
 fi
+${remoteNodeSelection('"$root/node/bin/node" "$(command -v node || true)"')}
+[ -n "$node_bin" ] || { echo MICHI_ERROR:node_compatibility; exit 1; }
+export PATH="$(dirname "$node_bin"):$PATH"
 export MICHI_DATA_DIR="$data" MICHI_CONFIG_DIR="$data" MICHI_LOG_DIR="$data/logs"
 echo MICHI_PROGRESS:build
 if ! (cd "$repo" && npm run remote:setup) >>"$log" 2>&1; then tail -c 32000 "$log"; echo MICHI_ERROR:build; exit 1; fi
@@ -293,11 +309,7 @@ data=${shellQuote(info.dataDir)}
 [ -f "$repo/backend/dist/server.js" ] && [ -f "$repo/scripts/remote-control.mjs" ] && [ -f "$data/remote.env" ] || { echo MICHI_ERROR:missing_install; exit 1; }
 mkdir "$data/remote-recovery.lock" 2>/dev/null || { echo MICHI_ERROR:busy; exit 1; }
 trap 'rmdir "$data/remote-recovery.lock" 2>/dev/null || true' EXIT
-node_bin=""
-for candidate in "$HOME/.local/share/michi/devdesktop/node/bin/node" "$(command -v node || true)" "$HOME"/.nvm/versions/node/*/bin/node; do
-  [ -x "$candidate" ] || continue
-  if "$candidate" -e 'const [a,b]=process.versions.node.split(".").map(Number);process.exit(a>22||(a===22&&b>=19)?0:1)' 2>/dev/null; then node_bin="$candidate"; break; fi
-done
+${remoteNodeSelection('"$HOME/.local/share/michi/devdesktop/node/bin/node" "$(command -v node || true)"')}
 [ -n "$node_bin" ] || { echo MICHI_ERROR:node_compatibility; exit 1; }
 export PATH="$(dirname "$node_bin"):$PATH"
 export MICHI_DATA_DIR="$data" MICHI_CONFIG_DIR="$data" MICHI_LOG_DIR="$data/logs"
@@ -308,7 +320,7 @@ cd "$repo"
 ${inspectRemoteScript(info.expected, info.dataDir)}`;
 }
 
-export function buildRemoteInstallScript(sourceUrl: string, ref: string, experimentBundle?: string, attemptId?: string, dataDir?: string): string {
+export function buildRemoteInstallScript(sourceUrl: string, ref: string, attemptId?: string, dataDir?: string): string {
   return `set -eu
 umask 077
 export PATH="$HOME/.local/bin:$HOME/bin:/usr/local/bin:$PATH"
@@ -321,21 +333,28 @@ mkdir "$root/setup.lock" 2>/dev/null || { echo MICHI_ERROR:busy; exit 1; }
 trap 'rmdir "$root/setup.lock" 2>/dev/null || true' EXIT
 log="$root/setup${attemptId ? "." + attemptId : ""}.log"
 touch "$log"; chmod 600 "$log"
+export GIT_SSH_COMMAND='ssh -o BatchMode=yes -o StrictHostKeyChecking=yes -o ConnectTimeout=10'
+repo="$root/source"
+echo MICHI_PROGRESS:source
+if [ ! -d "$repo/.git" ]; then
+  staging=$(mktemp -d "$root/source.XXXXXX")
+  if ! git clone --single-branch --branch ${shellQuote(ref)} -- ${shellQuote(sourceUrl)} "$staging" >>"$log" 2>&1; then echo MICHI_ERROR:source; exit 1; fi
+  mv "$staging" "$repo"
+else
+  [ -z "$(git -C "$repo" status --porcelain --untracked-files=no -- . ':!package-lock.json')" ] || { echo MICHI_ERROR:modified_source; exit 1; }
+fi
 echo MICHI_PROGRESS:node
-node_bin=""
-for candidate in "$(command -v node || true)" "$root/node/bin/node" "$HOME"/.nvm/versions/node/*/bin/node; do
-  [ -x "$candidate" ] || continue
-  if "$candidate" -e 'const [a,b]=process.versions.node.split(".").map(Number);process.exit(a>22||(a===22&&b>=19)?0:1)' 2>/dev/null; then node_bin="$candidate"; break; fi
-done
+${remoteNodeSelection('"$(command -v node || true)" "$root/node/bin/node"')}
 if [ -z "$node_bin" ]; then
+  [ -n "$minimum" ] || { echo MICHI_ERROR:node_compatibility; exit 1; }
   case "$(uname -m)" in aarch64|arm64) arch=arm64;; x86_64) arch=x64;; *) echo MICHI_ERROR:prerequisites; exit 1;; esac
   download="$root/node-download"; mkdir -p "$download"
   if ! (
     cd "$download"
-    curl -fsSL --connect-timeout 15 --max-time 60 https://nodejs.org/dist/latest-v22.x/SHASUMS256.txt -o SHASUMS256.txt
+    curl -fsSL --connect-timeout 15 --max-time 60 "https://nodejs.org/dist/latest-v\${minimum%%.*}.x/SHASUMS256.txt" -o SHASUMS256.txt
     archive=$(awk -v suffix="linux-$arch.tar.xz" '$2 ~ suffix "$" {print $2; exit}' SHASUMS256.txt)
     [ -n "$archive" ]
-    curl -fsSL --connect-timeout 15 --max-time 300 "https://nodejs.org/dist/latest-v22.x/$archive" -o "$archive"
+    curl -fsSL --connect-timeout 15 --max-time 300 "https://nodejs.org/dist/latest-v\${minimum%%.*}.x/$archive" -o "$archive"
     awk -v name="$archive" '$2 == name' SHASUMS256.txt | sha256sum -c -
     mkdir -p "$root/node"; tar -xJf "$archive" --strip-components=1 -C "$root/node"
   ) >>"$log" 2>&1; then echo MICHI_ERROR:node_download; exit 1; fi
@@ -362,17 +381,6 @@ MICHI_NODE
   "$node_bin" --version >>"$log" 2>&1 || { echo MICHI_ERROR:node_compatibility; exit 1; }
 fi
 export PATH="$(dirname "$node_bin"):$PATH"
-export GIT_SSH_COMMAND='ssh -o BatchMode=yes -o StrictHostKeyChecking=yes -o ConnectTimeout=10'
-repo="$root/source"
-echo MICHI_PROGRESS:source
-if [ ! -d "$repo/.git" ]; then
-  staging=$(mktemp -d "$root/source.XXXXXX")
-  if ! git clone --single-branch --branch ${shellQuote(ref)} -- ${shellQuote(sourceUrl)} "$staging" >>"$log" 2>&1; then echo MICHI_ERROR:source; exit 1; fi
-  ${experimentBundle ? `if ! (git -C "$staging" fetch ${shellQuote(experimentBundle)} 'refs/heads/codex/remote-devdesktop-connect' && git -C "$staging" checkout --detach FETCH_HEAD) >>"$log" 2>&1; then echo MICHI_ERROR:source; exit 1; fi` : ''}
-  mv "$staging" "$repo"
-else
-  [ -z "$(git -C "$repo" status --porcelain --untracked-files=no -- . ':!package-lock.json')" ] || { echo MICHI_ERROR:modified_source; exit 1; }
-fi
 echo MICHI_PROGRESS:build
 export MICHI_DATA_DIR="$data" MICHI_CONFIG_DIR="$data" MICHI_LOG_DIR="$data/logs"
 if [ ! -f "$repo/backend/dist/server.js" ]; then
@@ -406,8 +414,8 @@ export class RemoteDesktopSetup {
     const requestSignal = AbortSignal.any([AbortSignal.timeout(8000), ...(signal ? [signal] : [])]);
     const response = await fetch(`${apiUrl}/health`, { headers, signal: requestSignal });
     if (!response.ok) throw new RemoteDesktopError('version', 'Could not check the remote version (HTTP ' + response.status + ').');
-    const health = await response.json() as { service?: string; status?: string; build?: MichiBuildInfo };
-    if (health.service !== 'michi-backend' || health.status !== 'healthy') throw new RemoteDesktopError('version', 'This connection is not a healthy Michi backend.');
+    const health: unknown = await response.json();
+    if (!isMichiBackendHealth(health)) throw new RemoteDesktopError('version', 'This connection is not a healthy Michi backend.');
     let remote = health.build ?? null;
     if (!remote) {
       // Older installations already expose this Git identity, so they can be
@@ -556,7 +564,7 @@ export class RemoteDesktopSetup {
         info = readRemoteJson<RemoteInfo>(await run(target, buildRemoteInstallScript(
           this.deps.sourceUrl ?? process.env.MICHI_REMOTE_SOURCE_URL ?? 'https://github.com/michiworks/Michi.git',
           this.deps.ref ?? process.env.MICHI_REMOTE_SOURCE_REF ?? 'main',
-          process.env.MICHI_REMOTE_EXPERIMENT_BUNDLE, diagnostics?.report.id, installDataDir,
+          diagnostics?.report.id, installDataDir,
         ), signal, progress, diagnostics));
         diagnostics?.protect(info.token);
       }

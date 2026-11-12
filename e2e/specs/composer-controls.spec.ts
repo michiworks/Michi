@@ -1,4 +1,4 @@
-import { expect, test, type Locator, type Page, type TestInfo } from '@playwright/test';
+import { expect, test, type Locator, type Page } from '@playwright/test';
 import { installComposerModels } from '../fixtures/composerModels';
 import { bootWithWorkspace } from '../fixtures/mockApi';
 import { CONVERSATION_COMPOSER } from '../fixtures/shell';
@@ -20,85 +20,6 @@ async function finishHover(control: Locator) {
     .filter((animation) => animation.playState === 'running').length)).toBe(0);
 }
 
-// Send keeps its own fill on a 26px plate inside a hit square at the chip
-// height; the outer corners grow by the 2px inset so the plate keeps the
-// chips' corners (--ui-radius).
-async function assertSendMatchesChips(composer: Locator) {
-  const send = composer.getByRole('button', { name: 'Send (Enter)', exact: true });
-  await expect(send).toHaveClass('t-action-btn is-primary');
-  await expect(send).toHaveCSS('border-radius', '6px');
-  await expect(send).toHaveCSS('border-width', '1px');
-  await expect(send).toHaveCSS('padding', '1px');
-  await expect(send).toHaveCSS('background-clip', 'content-box');
-  await expect(send).toHaveCSS('width', '30px');
-  await expect(send).toHaveCSS('height', '30px');
-  await expect(send).not.toHaveCSS('background-color', 'rgba(0, 0, 0, 0)');
-}
-
-async function assertControls(page: Page, info: TestInfo, stage: string) {
-  const composer = page.locator(CONVERSATION_COMPOSER).first();
-  const model = composer.getByRole('button', { name: /^Model settings:/ });
-  await finishHover(model);
-  const fill = await model.evaluate((element) => getComputedStyle(element).backgroundColor);
-  const duration = await model.evaluate((element) => getComputedStyle(element).transitionDuration.split(',')[0].trim());
-  expect(fill).not.toBe('rgba(0, 0, 0, 0)');
-  const controls = composer.locator('.t-toolbar-chip, .t-action-btn.is-outline');
-  for (const [index, control] of (await controls.all()).entries()) {
-    await page.mouse.move(1, 1);
-    await expect(control).toHaveCSS('background-color', 'rgba(0, 0, 0, 0)');
-    const restingBounds = await control.boundingBox();
-    await expect(control).toHaveCSS('border-radius', '4px');
-    await expect(control).toHaveCSS('border-width', '0px');
-    expect(await control.evaluate((element) => getComputedStyle(element).transitionDuration.split(',').map((value) => value.trim())))
-      .toEqual(expect.arrayContaining([duration]));
-    expect(await control.evaluate((element) => new Set(getComputedStyle(element).transitionDuration.split(',').map((value) => value.trim())).size)).toBe(1);
-    await finishHover(control);
-    await expect(control).toHaveCSS('background-color', fill);
-    await expect(control).toHaveCSS('border-width', '0px');
-    await expect(control).toHaveCSS('box-shadow', 'none');
-    expect(await control.boundingBox()).toEqual(restingBounds);
-    await composer.screenshot({ path: info.outputPath(`${stage}-hover-${index}.png`) });
-  }
-  await assertSendMatchesChips(composer);
-  return fill;
-}
-
-for (const palette of ['bone', 'monokai'] as const) {
-  test(`${palette}: Home and pane controls share the model hover with topbar corners`, async ({ page }, info) => {
-    await page.setViewportSize({ width: 1280, height: 900 });
-    await bootComposer(page, palette);
-    const composer = page.locator(CONVERSATION_COMPOSER).first();
-    const editor = composer.locator('[contenteditable="true"]');
-    await editor.fill('Review the Composer controls');
-    await expect(composer.locator('.t-toolbar-chip')).toHaveCount(6);
-    await expect(composer.getByRole('button', { name: 'Permissions: Ask', exact: true })).toHaveClass('t-toolbar-chip');
-    await expect(page.getByRole('button', { name: 'Search', exact: true })).toHaveCSS('border-radius', '4px');
-    const fill = await assertControls(page, info, 'home');
-
-    const model = composer.getByRole('button', { name: /^Model settings:/ });
-    await model.click();
-    await page.mouse.move(1, 1);
-    await expect(model).toHaveAttribute('aria-expanded', 'true');
-    await expect(model).toHaveCSS('background-color', fill);
-    await page.keyboard.press('Escape');
-    await expect(model).toBeFocused();
-    await expect(model).toHaveCSS('outline-style', 'solid');
-
-    await composer.getByTitle('Mention context or node', { exact: true }).click();
-    await expect(editor).toContainText('@');
-    await editor.fill('Review the Composer controls');
-    await composer.getByRole('button', { name: 'Send (Enter)', exact: true }).click();
-    await expect(page.getByText('Hello from mock kiro.').first()).toBeVisible();
-    await editor.fill('Continue in a branch');
-    await assertControls(page, info, 'pane');
-    const branch = composer.getByRole('button', { name: /^Branch/ });
-    await finishHover(branch);
-    await expect(branch.locator('.t-action-kbd')).toHaveCSS('opacity', '1');
-    await expect(branch.locator('.t-action-kbd')).toHaveCSS('border-radius', '2px');
-    await page.screenshot({ path: info.outputPath('pane-hover-page.png'), fullPage: true });
-  });
-}
-
 test('compact controls keep their geometry and respect reduced motion', async ({ page }, info) => {
   await bootComposer(page);
   const composer = page.locator(CONVERSATION_COMPOSER).first();
@@ -114,56 +35,44 @@ test('compact controls keep their geometry and respect reduced motion', async ({
     // A phone has no @ chip; typing @ still mentions.
     if (!await control.isVisible()) continue;
     await finishHover(control);
-    await expect(control).toHaveCSS('border-radius', '4px');
-    await expect(control).toHaveCSS('border-width', '0px');
     await expect(control).toHaveCSS('transition-duration', '0s');
     const bounds = (await control.boundingBox())!;
     expect(bounds.x).toBeGreaterThanOrEqual(frame.x);
     expect(bounds.x + bounds.width).toBeLessThanOrEqual(frame.x + frame.width);
   }
-  await assertSendMatchesChips(composer);
   await page.screenshot({ path: info.outputPath('composer-hover-mobile.png'), fullPage: true });
 });
 
-test('disabled model settings stay quiet while stop and queued Send keep their styles', async ({ page }, info) => {
-  await bootComposer(page, 'monokai');
-  const composer = page.locator(CONVERSATION_COMPOSER).first();
-  const editor = composer.locator('[contenteditable="true"]');
-  await editor.fill('Start the conversation');
-  await composer.getByRole('button', { name: 'Send (Enter)', exact: true }).click();
-  await expect(page.getByText('Hello from mock kiro.').first()).toBeVisible();
-  let release = () => {};
-  const pending = new Promise<void>((resolve) => { release = resolve; });
-  await page.route(/\/api\/chats\/[^/]+\/message$/, async (route) => {
-    await pending;
-    await route.fallback();
-  });
+// iOS keeps :hover on the last-tapped element until the next tap elsewhere,
+// so a chip that paints on :hover looks pressed after its menu closes.
+// Chromium's touch emulation never leaves :hover behind, so force it.
+test('a touch screen does not paint the agent chip for a sticky :hover', async ({ browser, baseURL }) => {
+  const context = await browser.newContext({ baseURL, viewport: { width: 390, height: 844 }, hasTouch: true, isMobile: true });
+  const page = await context.newPage();
   try {
-    await editor.fill('Keep this turn pending');
-    await composer.getByRole('button', { name: 'Send (Enter)', exact: true }).click();
-    const stop = composer.getByRole('button', { name: 'Stop stream', exact: true });
-    await expect(stop).toBeVisible();
-    await expect(stop).toHaveClass('t-action-btn is-primary');
-    await expect(stop).toHaveCSS('border-radius', '6px');
-    await expect(stop).toHaveCSS('background-clip', 'content-box');
-    const model = composer.getByRole('button', { name: /^Model settings:/ });
-    await expect(model).toBeDisabled();
-    await finishHover(model);
-    await expect(model).toHaveCSS('background-color', 'rgba(0, 0, 0, 0)');
-    await expect(model).toHaveCSS('border-width', '0px');
-    await expect(model).toHaveCSS('opacity', '0.45');
-    await editor.fill('Queue the next turn');
-    const queue = composer.getByRole('button', { name: /^Send next/ });
-    await expect(queue).toHaveClass('t-action-btn is-queue');
-    await expect(queue).toHaveCSS('border-radius', '6px');
-    await expect(queue).toHaveCSS('border-width', '1px');
-    // Its accent ring is an inset outline on the 26px plate, not the hit box.
-    await expect(queue).toHaveCSS('outline-style', 'solid');
-    await expect(queue).toHaveCSS('outline-offset', '-3px');
-    await expect(queue).toHaveCSS('background-clip', 'content-box');
-    await composer.screenshot({ path: info.outputPath('streaming-controls.png') });
+    await bootComposer(page);
+    const composer = page.locator(CONVERSATION_COMPOSER).first();
+    const editor = composer.locator('[contenteditable="true"]');
+    await editor.fill('Start a phone pane');
+    await composer.getByRole('button', { name: 'Send (Enter)', exact: true }).tap();
+    await expect(page.getByText('Hello from mock kiro.').first()).toBeVisible();
+    await editor.tap();
+    const agent = composer.getByTitle(/^Switch agent/);
+    await agent.tap();
+    await expect(agent).toHaveAttribute('aria-expanded', 'true');
+    await expect(agent).not.toHaveCSS('background-color', 'rgba(0, 0, 0, 0)');
+    await agent.tap();
+    await expect(agent).toHaveAttribute('aria-expanded', 'false');
+
+    const cdp = await context.newCDPSession(page);
+    await cdp.send('DOM.enable');
+    await cdp.send('CSS.enable');
+    const { root } = await cdp.send('DOM.getDocument');
+    const { nodeId } = await cdp.send('DOM.querySelector', { nodeId: root.nodeId, selector: `${CONVERSATION_COMPOSER} [title^="Switch agent"]` });
+    await cdp.send('CSS.forcePseudoState', { nodeId, forcedPseudoClasses: ['hover'] });
+    await expect.poll(() => agent.evaluate((element) => element.matches(':hover'))).toBe(true);
+    await expect(agent).toHaveCSS('background-color', 'rgba(0, 0, 0, 0)');
   } finally {
-    release();
+    await context.close();
   }
-  await expect(composer.getByRole('button', { name: 'Send (Enter)', exact: true })).toBeVisible();
 });

@@ -1,13 +1,67 @@
+import { CHECKIN_TITLE_STUB, heldCheckinPageTitles } from '../../assistant/checkinPageGuard';
 import { LOCAL_AGENT_OWNER_ID } from '../agentOwner';
 import { getDb } from '../db';
 import { getPage } from './repository';
 import { requirePagesWorkspace } from './core';
-import { PAGE_LIMITS, pageBlockText, type PageBlockInput } from 'michi-shared';
+import {
+  isCheckinBlockSource, PAGE_LIMITS, pageBlockText, pageSegmentSources,
+  type PageBlock, type PageBlockContent, type PageBlockInput, type PageSegmentSources,
+} from 'michi-shared';
 
 export const PAGE_MANIFEST_ENTRY_LIMIT = PAGE_LIMITS.manifestEntries;
 const HELPER_BLOCK_LIMIT = 40;
 const HELPER_CONTENT_LIMIT = 12_000;
 const DATABASE_REFERENCE_LIMIT = 50;
+/**
+ * Stands in, in a helper chat's manifest, for each block or passage a
+ * check-in wrote (w3-fix D16). Page writes refuse it (agents/pageTools.ts):
+ * an update copied from the manifest would save it over that text.
+ */
+export const CHECKIN_MANIFEST_STUB = '[Written by a check-in; read the page to see it]';
+
+/** A markdown text with each passage a check-in wrote (by its segment sources) replaced by `stub`; all of it when a passage is not where its sources say. */
+function stubbedMarkdown(text: string, segments: readonly PageSegmentSources[], stub: string): string {
+  let shown = '';
+  let at = 0;
+  for (const segment of segments) {
+    const found = text.indexOf(segment.text, at);
+    if (found < 0) return stub;
+    shown += text.slice(at, found) + (segment.sources.some(isCheckinBlockSource) ? stub : segment.text);
+    at = found + segment.text.length;
+  }
+  return shown + text.slice(at);
+}
+
+/**
+ * A block's content with each markdown passage a check-in wrote replaced by
+ * `stub`, inside toggles, columns, tabs and grids too, and those passages'
+ * segment sources dropped; the same object when it has none. What a
+ * check-in wrote reaches a turn only through a read that taints it (DESIGN-v2
+ * §2.8 T5): the helper manifest here, and page tools' reads for a turn that
+ * could not be made to ask (agents/pageTools.ts withheldBlock), show this instead.
+ */
+export function checkinPassagesStubbed<T extends PageBlockContent>(content: T, stub: string): T {
+  if (!pageSegmentSources(content).some(isCheckinBlockSource)) return content;
+  const nested = <B extends PageBlockContent>(blocks: readonly B[]): B[] => blocks.map((block) => checkinPassagesStubbed(block, stub));
+  const value: PageBlockContent = content;
+  switch (value.type) {
+    case 'markdown': {
+      const { segmentSources, ...rest } = value;
+      return { ...rest, text: stubbedMarkdown(value.text, segmentSources ?? [], stub) } as T;
+    }
+    case 'toggle': return { ...value, blocks: nested(value.blocks) } as T;
+    case 'columns': return { ...value, columns: value.columns.map((column) => nested(column)) } as T;
+    case 'tabs': return { ...value, tabs: value.tabs.map((tab) => ({ ...tab, blocks: nested(tab.blocks) })) } as T;
+    case 'grid': return { ...value, regions: value.regions.map((region) => ({ ...region, blocks: nested(region.blocks) })) } as T;
+    default: return content;
+  }
+}
+
+/** A helper page block as its manifest shows it: a stub for a block a check-in wrote, the rest with its check-in passages stubbed (D16). */
+function manifestRendered(block: PageBlock): string {
+  if ((block.sources ?? []).some(isCheckinBlockSource)) return CHECKIN_MANIFEST_STUB;
+  return renderBlock(checkinPassagesStubbed(block, CHECKIN_MANIFEST_STUB) as unknown as Record<string, unknown>);
+}
 
 export interface BuildPageManifestInput {
   workspaceId: string;
@@ -57,19 +111,6 @@ function renderBlock(block: Record<string, unknown>): string {
       }).filter(Boolean) : [];
       return [typeof block.title === 'string' ? block.title : '', ...lines].filter(Boolean).join('\n');
     }
-    case 'metrics':
-    case 'next-steps':
-    case 'timeline': {
-      const lines = Array.isArray(block.items) ? block.items.map((item) => {
-        if (!item || typeof item !== 'object') return '';
-        const entry = item as Record<string, unknown>;
-        const parts = block.type === 'metrics' ? [entry.label, entry.value, entry.note]
-          : block.type === 'next-steps' ? [entry.who, entry.text, entry.unblocks]
-          : [typeof entry.at === 'number' ? (Number.isFinite(new Date(entry.at).getTime()) ? new Date(entry.at).toISOString() : String(entry.at)) : entry.at, entry.title, entry.detail];
-        return `- ${parts.filter((part) => typeof part === 'string').join(' · ')}`;
-      }).filter((line) => line !== '- ') : [];
-      return [typeof block.title === 'string' ? block.title : '', ...lines].filter(Boolean).join('\n');
-    }
     case 'database-ref': return '';
     case 'page-link': return '';
     case 'component': return '';
@@ -78,7 +119,7 @@ function renderBlock(block: Record<string, unknown>): string {
   }
 }
 
-function helperPage(nodeId: string, workspaceId: string, ownerUserId: string): unknown | null {
+function helperPage(nodeId: string, workspaceId: string, ownerUserId: string, shownTitle: (pageId: string, title: string) => string): unknown | null {
   const row = getDb().prepare(`SELECT page_id FROM nodes
     WHERE id=? AND workspace_id=? AND kind='chat' AND deleted_at IS NULL AND purged_at IS NULL`)
     .get(nodeId, workspaceId) as { page_id: string | null } | undefined;
@@ -97,7 +138,8 @@ function helperPage(nodeId: string, workspaceId: string, ownerUserId: string): u
   let remaining = HELPER_CONTENT_LIMIT;
   let truncated = page.blocks.length > HELPER_BLOCK_LIMIT;
   for (const block of page.blocks.slice(0, HELPER_BLOCK_LIMIT)) {
-    const rendered = renderBlock(block as unknown as Record<string, unknown>);
+    // Every turn of a helper chat gets this, untainted: what a check-in wrote is only a stub here.
+    const rendered = manifestRendered(block);
     const limited = rendered.slice(0, remaining);
     if (limited.length < rendered.length) truncated = true;
     remaining -= limited.length;
@@ -106,7 +148,7 @@ function helperPage(nodeId: string, workspaceId: string, ownerUserId: string): u
   }
   return {
     id: page.id,
-    title: page.title,
+    title: shownTitle(page.id, page.title),
     revision: page.revision,
     blocks,
     ...(refs.length ? { referencedDatabaseIds: refs.slice(0, DATABASE_REFERENCE_LIMIT) } : {}),
@@ -149,18 +191,25 @@ export function buildPageManifest(input: BuildPageManifestInput): string {
       .get(input.nodeId, turnStartedAt) as { started_at: number | null } | undefined;
     const previousTurnAt = previous?.started_at ?? null;
 
-    const pages = rows.map((page) => {
-      const space = db.prepare(`WITH RECURSIVE ancestors(id,parent_id,title,depth) AS (
+    const spaces = rows.map((page) => db.prepare(`WITH RECURSIVE ancestors(id,parent_id,title,depth) AS (
         SELECT id,parent_id,title,0 FROM pages WHERE id=? AND workspace_id=? AND deleted_at IS NULL
         UNION ALL
         SELECT p.id,p.parent_id,p.title,a.depth+1 FROM pages p JOIN ancestors a ON p.id=a.parent_id
         WHERE p.workspace_id=? AND p.deleted_at IS NULL AND a.depth < 64
-      ) SELECT title FROM ancestors WHERE parent_id IS NULL ORDER BY depth DESC LIMIT 1`)
-        .get(page.id, input.workspaceId, input.workspaceId) as { title: string } | undefined;
+      ) SELECT id,title FROM ancestors WHERE parent_id IS NULL ORDER BY depth DESC LIMIT 1`)
+      .get(page.id, input.workspaceId, input.workspaceId) as { id: string; title: string } | undefined);
+    const helperPageId = (db.prepare(`SELECT page_id FROM nodes WHERE id=? AND workspace_id=?`)
+      .get(input.nodeId, input.workspaceId) as { page_id: string | null } | undefined)?.page_id ?? null;
+    // Every chat gets this, untainted: a title a check-in made or last renamed is check-in material (§2.8 T1, D24).
+    const held = heldCheckinPageTitles([...rows.map((page) => page.id), ...spaces.flatMap((space) => (space ? [space.id] : [])),
+      ...(helperPageId ? [helperPageId] : [])], 'the Pages manifest');
+    const shownTitle = (pageId: string, title: string) => (held.has(pageId) ? CHECKIN_TITLE_STUB : title);
+    const pages = rows.map((page, index) => {
+      const space = spaces[index];
       return {
         id: page.id,
-        title: page.title,
-        space: space?.title ?? page.title,
+        title: shownTitle(page.id, page.title),
+        space: space ? shownTitle(space.id, space.title) : shownTitle(page.id, page.title),
         activity: relativeActivity(page.updated_at, input.now),
         actor: page.updated_by,
         changedSincePreviousTurn: previousTurnAt !== null && page.updated_at > previousTurnAt && page.updated_at <= turnStartedAt,
@@ -173,7 +222,7 @@ export function buildPageManifest(input: BuildPageManifestInput): string {
       pages,
       ...(total > rows.length ? { more: `and ${total - rows.length} more — use list_pages` } : {}),
     };
-    const ownPage = helperPage(input.nodeId, input.workspaceId, ownerUserId);
+    const ownPage = helperPage(input.nodeId, input.workspaceId, ownerUserId, shownTitle);
     if (ownPage) manifest.helperPage = ownPage;
 
     return [

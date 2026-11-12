@@ -1,11 +1,12 @@
-import React, { useCallback, useMemo, useRef, useState } from 'react';
+import { useCallback, useMemo, useRef, useState } from 'react';
 import { toast } from 'sonner';
 import type { MichiDbEditOp, MichiDbRow, ThreadCardItem } from 'michi-shared';
 import { ALL_TASKS_COLUMN, taskThreadIds, TASK_COLUMN, TASK_VIEW } from 'michi-shared';
-import { editPageDatabase, revertPageBatch } from '../../../../services/api/pages';
+import { editPageDatabase, pageEditFailure } from '../../../../services/api/pages';
 import { fetchTaskOrigin, saveAllTasksViews } from '../../../../services/api/taskDatabase';
 import { notifyPageChanged } from '../../../../state/pages/pageEvents';
-import { openConversationFromSpaces } from '../../../../state/sourceNav/sourceNav';
+import { batchOutcomeNotice, revertPageBatches, UNDO_FAILED } from '../../../../state/pages/pageUndo';
+import { openConversationFromSpaces, openThreadCard } from '../../../../state/sourceNav/sourceNav';
 import { DatabaseView } from '../../content/db/DatabaseView';
 import { LiveThreadsContext, type LiveThreads } from '../../content/db/liveThreads';
 import { pageViewOps } from '../../content/db/nativeDatabaseAdapter';
@@ -17,9 +18,9 @@ import { allTasksBoard, conversationsInTaskWorkspaces, planAllTasksEdit, replace
 import { useAllTasks } from './useAllTasks';
 import '../home/home.css';
 import './allTasks.css';
+import { LOCAL_BACKEND_CONNECTION_ID } from '../../../../config/backendConnections';
 
 /** All tasks reads this computer's task databases only. */
-const LOCAL = 'local';
 
 /** A write All tasks made to one workspace's task database, for Undo. */
 interface WrittenBatch { batchId: string; workspaceId: string; databaseId: string }
@@ -41,13 +42,13 @@ export default function AllTasksPage() {
   const [notice, setNotice] = useState<string | null>(null);
 
   const linked = useMemo(() => (dto ? dto.rows.flatMap(({ row }) => taskThreadIds(row.values[TASK_COLUMN.threads])) : []), [dto]);
-  const states = useThreadStates(LOCAL, linked, !!dto);
-  const open = useCallback((item: ThreadCardItem) => {
-    void openConversationFromSpaces({ backendConnectionId: LOCAL, workspaceId: item.workspaceId, nodeId: item.nodeId, messageId: item.messageId, focus: false });
-  }, []);
+  const states = useThreadStates(LOCAL_BACKEND_CONNECTION_ID, linked, !!dto);
+  const open = useCallback((item: ThreadCardItem) => openThreadCard(LOCAL_BACKEND_CONNECTION_ID, item, (card) => {
+    void openConversationFromSpaces({ backendConnectionId: LOCAL_BACKEND_CONNECTION_ID, workspaceId: card.workspaceId, nodeId: card.nodeId, messageId: card.messageId, focus: false });
+  }), []);
   const loadConversations = useCallback((row?: MichiDbRow) => {
     const workspaceId = row?.values[ALL_TASKS_COLUMN.workspace];
-    return typeof workspaceId === 'string' && workspaceId ? workspaceConversations(LOCAL, workspaceId) : Promise.resolve([]);
+    return typeof workspaceId === 'string' && workspaceId ? workspaceConversations(LOCAL_BACKEND_CONNECTION_ID, workspaceId) : Promise.resolve([]);
   }, []);
   const { byNode: stateByNode, loaded: statesLoaded, failed: statesFailed } = states;
   const live = useMemo<LiveThreads | null>(() => (dto ? {
@@ -62,29 +63,23 @@ export default function AllTasksPage() {
     const at = splitAllTasksRowId(rowId);
     const source = at && dtoRef.current?.sources.find((item) => item.databaseId === at.databaseId);
     return at && source
-      ? fetchTaskOrigin({ backendConnectionId: LOCAL, workspaceId: source.workspaceId, databaseId: at.databaseId, rowId: at.rowId })
+      ? fetchTaskOrigin({ backendConnectionId: LOCAL_BACKEND_CONNECTION_ID, workspaceId: source.workspaceId, databaseId: at.databaseId, rowId: at.rowId })
       : Promise.resolve(null);
   }, []);
   // All tasks says who made a task; the Meta agent's marks and suggestions stay on each workspace's board.
   const activity = useMemo<TaskActivityView>(() => ({ loadOrigin }), [loadOrigin]);
 
   const undo = useCallback(async (batches: readonly WrittenBatch[]) => {
-    let conflicts = 0;
-    let reverted = 0;
     try {
-      for (const batch of [...batches].reverse()) {
-        const answer = await revertPageBatch(batch.batchId, { backendConnectionId: LOCAL, workspaceId: batch.workspaceId });
-        conflicts += answer.conflicts.length;
-        reverted += answer.reverted.length;
-        notifyPageChanged({ backendConnectionId: LOCAL, workspaceId: batch.workspaceId, databaseId: batch.databaseId });
-      }
-      if (conflicts) {
-        toast.error(reverted
-          ? 'Not all of it was undone: some of it changed again since.'
-          : 'Not undone: it changed again since. Change it back yourself.');
-      }
+      const outcome = await revertPageBatches(LOCAL_BACKEND_CONNECTION_ID, batches.map((batch) => ({
+        batchId: batch.batchId,
+        workspaceId: batch.workspaceId,
+        changed: [{ backendConnectionId: LOCAL_BACKEND_CONNECTION_ID, workspaceId: batch.workspaceId, databaseId: batch.databaseId }],
+      })));
+      const notice = batchOutcomeNotice(outcome, 'undone', 'Change it back yourself.');
+      if (notice) toast.error(notice);
     } catch {
-      toast.error("Couldn't undo that just now.");
+      toast.error(UNDO_FAILED);
     }
     refresh();
   }, [refresh]);
@@ -121,7 +116,7 @@ export default function AllTasksPage() {
       // One write per workspace's task database, not one atomic write: Undo puts back each one written.
       for (const [databaseId, rowOps] of plan.rows) {
         const source = current.sources.find((item) => item.databaseId === databaseId)!;
-        const identity = { backendConnectionId: LOCAL, workspaceId: source.workspaceId };
+        const identity = { backendConnectionId: LOCAL_BACKEND_CONNECTION_ID, workspaceId: source.workspaceId };
         const answer = await editPageDatabase(databaseId, { revision: source.revision, ops: rowOps }, identity);
         replace((next) => replaceSource(next, answer.database));
         const batchId = answer.changes.applied[0]?.batchId;
@@ -129,7 +124,7 @@ export default function AllTasksPage() {
         notifyPageChanged({ ...identity, databaseId });
       }
     } catch (cause) {
-      const conflict = (cause as { status?: number })?.status === 409;
+      const conflict = pageEditFailure(cause) === 'stale';
       setNotice(conflict ? 'All tasks just changed, so it was refreshed. Try again.' : cause instanceof Error ? cause.message : "Couldn't save that just now.");
       if (written.length) toast('Only part of it was saved', { action: { label: 'Undo', onClick: () => { void undo(written); } } });
       refresh();
@@ -141,7 +136,6 @@ export default function AllTasksPage() {
 
   const services = useMemo(() => ({
     notice: (message: string) => setNotice(message),
-    copyText: (text: string) => navigator.clipboard.writeText(text),
   }), []);
 
   return (

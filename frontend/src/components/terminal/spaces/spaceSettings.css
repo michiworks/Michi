@@ -8,7 +8,7 @@
 .space-settings__section button { align-self: flex-start; flex: none; padding: 8px 12px; border: 1px solid var(--term-line); border-radius: var(--ui-radius); background: transparent; color: var(--term-fg); font: inherit; font-size: var(--fs-md); cursor: pointer; }
 .space-settings__section button:hover:not(:disabled) { background: var(--term-hover); }
 .space-settings__section button:disabled { opacity: .45; cursor: default; }
-.space-settings :is(button, input):focus-visible { outline: 2px solid var(--term-accent); outline-offset: 2px; }
+.space-settings :is(button, input):focus-visible { outline: var(--focus-ring); outline-offset: 2px; }
 .space-settings__suggestions { display: flex; flex-wrap: wrap; gap: 6px; }
 .space-settings__suggestions button { padding: 4px 8px; color: var(--term-muted); font-size: var(--fs-sm); }
 .space-settings__rules { margin: 0; padding: 0; list-style: none; }
@@ -18,5 +18,5 @@
 .space-settings__rules button { border: 0; padding-right: 0; color: var(--term-muted); }
 .space-settings__row { flex-direction: row; align-items: center; justify-content: space-between; }
 .space-settings__row p { margin-top: 6px; }
-.space-settings [role='alert'] { color: var(--term-danger); }
+.space-settings [role='alert'] { color: var(--term-danger-text); }
 @media (max-width: 640px) { .space-settings__row { flex-direction: column; align-items: flex-start; } }

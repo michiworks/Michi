@@ -2,9 +2,6 @@ import { describe, expect, it } from 'vitest';
 import type { PendingComment } from '../state/chatTypes';
 import { formatCommentsBlock, joinMessageParts, renderComment, truncateQuotePreview } from './commentFormat';
 
-const QUOTED_CONTEXT =
-  'Context: The user selected the passage below from the previous assistant reply. Treat it as source context, not as text authored by the user.';
-
 function mkComment(
   id: string,
   quotedText: string,

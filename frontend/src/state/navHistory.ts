@@ -110,6 +110,14 @@ export class NavHistoryStore<Entry = NavEntry> {
     return changed;
   }
 
+  /** Forget both directions: the current location starts a new history. */
+  clear(): boolean {
+    const changed = this.backStack.length > 0 || this.forwardStack.length > 0;
+    this.backStack = [];
+    this.forwardStack = [];
+    return changed;
+  }
+
   canBack(): boolean {
     return this.backStack.length > 0;
   }
@@ -128,6 +136,8 @@ export interface NavHistory<Entry = NavEntry> {
   forward: (isLive: IsLive<Entry>) => Entry | null;
   /** Drop dead entries (call when nodes/workspaces are deleted). */
   prune: (isLive: IsLive<Entry>) => void;
+  /** Forget both directions. */
+  clear: () => void;
   canBack: boolean;
   canForward: boolean;
 }
@@ -185,5 +195,9 @@ export function useNavHistory<Entry = NavEntry>(
     [store, sync],
   );
 
-  return { record, back, forward, prune, canBack, canForward };
+  const clear = useCallback(() => {
+    if (store.clear()) sync();
+  }, [store, sync]);
+
+  return { record, back, forward, prune, clear, canBack, canForward };
 }

@@ -8,6 +8,7 @@
 import './isolatedConfigDir';
 import { after, test } from 'node:test';
 import assert from 'node:assert/strict';
+import { RUNTIME_SHORT_LABELS, shortRuntimeLabel } from 'michi-shared';
 import { RUNTIME_FACTORIES } from '../src/agents/runtimeFactories';
 import { AcpAgentRuntime } from 'michi-runtime/internal/adapters/kiro/AcpAgentRuntime';
 import { McpSlotRegistry } from '../src/services/mcpServer';
@@ -36,6 +37,16 @@ test('extracted runtime factories receive deps.host; app-owned adapters retain t
     assert.equal(storedHost(runtime), ['kiro', 'crew', 'claude', 'codex'].includes(factory.id) ? host : undefined, factory.id);
   }
   assert.deepEqual(seen.sort(), ['antigravity', 'claude', 'codex', 'crew', 'cursor', 'grok', 'kiro', 'pi']);
+});
+
+test('the shared short runtime names are the ones the runtimes register', () => {
+  const host = michiTestHost();
+  for (const factory of RUNTIME_FACTORIES) {
+    const runtime = factory.create({ bridge, mcpRegistry: new McpSlotRegistry(), mcpPort: 0, defaultCwd: '/tmp/michi-factory-host', host });
+    created.push(runtime);
+    assert.equal(shortRuntimeLabel(runtime.label), RUNTIME_SHORT_LABELS[factory.id], factory.id);
+  }
+  assert.deepEqual(Object.keys(RUNTIME_SHORT_LABELS).sort(), RUNTIME_FACTORIES.map(({ id }) => id).sort());
 });
 
 test('a Kiro v3 session worker gets its parent runtime\'s host', async () => {

@@ -15,30 +15,25 @@
  */
 
 import { useEffect, useRef } from 'react';
-import { encodePaneId, PANE_INSPECTION_LIMITS, type PaneTarget } from 'michi-shared';
+import {
+  encodePaneId,
+  PANE_INSPECTION_LIMITS,
+  type PaneTarget,
+  type PresenceKeepaliveRequest,
+  type PresenceKeepaliveResult,
+  type PresenceViewInput,
+  type RemovePresenceRequest,
+  type RemovePresenceResult,
+  type SubmitPresenceRequest,
+} from 'michi-shared';
+import { isWindowAttentive } from './completionFacts';
 
 // ---------------------------------------------------------------------------
-// Public wire types — mirrors backend/src/services/panePresence.ts's request/result shapes.
-// Re-declared here (not imported) because that module is backend-only and this hook must not
-// pull backend code into the frontend bundle; keep the two in sync by hand.
+// Wire types. The request bodies and the remove/keepalive results come from the shared presence
+// wire format (shared/src/paneInspection.ts §9). The submit result stays here: it reads a
+// rejected target's reason as any string, where the backend's type
+// (backend/src/services/panePresence.ts) names two reasons.
 // ---------------------------------------------------------------------------
-
-export interface PresenceViewInput {
-  paneId: string;
-  windowId: string;
-  uiPaneId: string;
-  treeId: string | null;
-  visible: boolean;
-  openedAtClient: number | null;
-  surfaceTitle?: string | null;
-}
-
-export interface SubmitPresenceRequest {
-  rendererLeaseId?: string;
-  viewRevision: number;
-  windowId: string;
-  views: PresenceViewInput[];
-}
 
 export type SubmitPresenceResult =
   | { ok: true; rendererLeaseId: string; accepted: number; rejectedTargets: Array<{ paneId: string; reason: string }> }
@@ -46,23 +41,11 @@ export type SubmitPresenceResult =
   | { ok: false; code: 'WRONG_WINDOW' }
   | { ok: false; code: 'EMPTY_SNAPSHOT_IGNORED'; rendererLeaseId: string };
 
-export interface RemovePresenceRequest {
-  rendererLeaseId: string;
-  paneIds?: string[];
+/** `unloading`: the page is going away, so the request must outlive it (a `fetch` keepalive, not
+ *  the window's shared socket) and nobody waits for its answer. */
+export interface PresenceRequestOptions {
+  unloading?: boolean;
 }
-
-export type RemovePresenceResult =
-  | { ok: true; removed: number }
-  | { ok: false; code: 'WRONG_WINDOW' }
-  | { ok: false; code: 'NOT_FOUND' };
-
-export interface PresenceKeepaliveRequest {
-  rendererLeaseId: string;
-}
-
-export type PresenceKeepaliveResult =
-  | { ok: true; renewedViews: number }
-  | { ok: false; code: 'NOT_FOUND' };
 
 /** The transport seam. `backendConnectionId` identifies which backend a call targets — a window
  *  may hold leases against several backends (local + remote) at once (design §9), so every call
@@ -80,8 +63,8 @@ export type PresenceKeepaliveResult =
  *  given. */
 export interface PanePresenceTransport {
   submit(backendConnectionId: string, workspaceId: string, req: SubmitPresenceRequest): Promise<SubmitPresenceResult>;
-  remove(backendConnectionId: string, workspaceId: string, req: RemovePresenceRequest): Promise<RemovePresenceResult>;
-  keepalive(backendConnectionId: string, workspaceId: string, req: PresenceKeepaliveRequest): Promise<PresenceKeepaliveResult>;
+  remove(backendConnectionId: string, workspaceId: string, req: RemovePresenceRequest, options?: PresenceRequestOptions): Promise<RemovePresenceResult>;
+  keepalive(backendConnectionId: string, workspaceId: string, req: PresenceKeepaliveRequest, options?: PresenceRequestOptions): Promise<PresenceKeepaliveResult>;
 }
 
 // ---------------------------------------------------------------------------
@@ -102,10 +85,16 @@ export interface PanePresenceBackendSlots {
   openPanesMap: Record<string, string[]>;
   /** The slot key that is currently VISIBLE for this backend (the active project's active tree
    *  slot), or null if this backend has no active slot right now (e.g. a different backend's
-   *  project is focused). Only panes in this slot are reported `visible: true`; every other open
-   *  pane is still reported, just with `visible: false` — a pane saved in a background tree slot
-   *  is still open (design §9 / brief). */
+   *  project is focused). Only panes in this slot can be reported `visible: true`; every other
+   *  open pane is still reported, just with `visible: false` — a pane saved in a background tree
+   *  slot is still open (design §9 / brief). */
   activeSlotKey: string | null;
+  /** The panes of the active slot that are on screen right now (a single-page tab in the
+   *  background, or a pane scrolled out of the strip, is open but not on screen). Only these are
+   *  reported `visible: true` — the server suppresses and resolves notifications for what a
+   *  focused window shows, and Pane Inspection tells agents what the user can see. Absent: every
+   *  pane of the active slot. */
+  visibleUiPaneIds?: readonly string[];
 }
 
 /** Maps a bare/prefixed UI pane id to the shape presence needs to submit it. `uiPaneId` is kept
@@ -163,7 +152,22 @@ export interface UsePanePresenceReporterArgs {
   onLeaseInvalidated?: (connectionId: string, workspaceId: string) => void;
   /** Injectable for tests; defaults to `Date.now`. */
   now?: () => number;
+  /** Whether this window is focused and visible; defaults to the document's own state. Sent with
+   *  every submission and keepalive, and on its own when focus or visibility changes: at once
+   *  when the window loses it, debounced when it gains it. While focused, the keepalive refreshes
+   *  it every WINDOW_FOCUS_REFRESH_MS. */
+  windowFocused?: () => boolean;
 }
+
+/** Focus and visibility events settle for this long before a gained focus is reported. A lost
+ *  one goes out at once: until the server hears it, a window the user left still counts as
+ *  showing its panes to them. */
+export const WINDOW_FOCUS_REPORT_DEBOUNCE_MS = 250;
+/** While the window is focused and visible its keepalive goes out this often, refreshing the
+ *  focus report: the server trusts one only briefly (an unrefreshed report reads as unfocused).
+ *  Unfocused, the keepalive only renews the lease, every presenceKeepaliveSeconds. */
+export const WINDOW_FOCUS_REFRESH_MS = 10_000;
+const TICKS_PER_LEASE_KEEPALIVE = Math.max(1, Math.round(PANE_INSPECTION_LIMITS.presenceKeepaliveSeconds * 1_000 / WINDOW_FOCUS_REFRESH_MS));
 
 // ---------------------------------------------------------------------------
 // Internal per-connection lease state
@@ -182,6 +186,9 @@ interface ConnectionState {
    *  original open time instead of resetting it every render. */
   openedAtClientByPaneId: Map<string, number>;
   keepaliveTimer: ReturnType<typeof setInterval> | null;
+  /** Keepalive ticks so far (one per WINDOW_FOCUS_REFRESH_MS): an unfocused window renews only
+   *  every TICKS_PER_LEASE_KEEPALIVE-th. */
+  keepaliveTicks: number;
   /** Bumped on every state-changing SUBMIT dispatch for this connection (a normal render-driven
    *  PUT, a forced reacquire, or the drop/unmount cleanup DELETE) — never by keepalive itself.
    *  Captured by each in-flight request at dispatch time and compared against the CURRENT value
@@ -212,13 +219,15 @@ function computeViewsForConnection(
 ): { views: PresenceViewInput[]; openUiPaneIds: Set<string> } {
   const views: PresenceViewInput[] = [];
   const openUiPaneIds = new Set<string>();
+  const onScreen = slot.visibleUiPaneIds ? new Set(slot.visibleUiPaneIds) : null;
 
   for (const [slotKey, uiPaneIds] of Object.entries(slot.openPanesMap)) {
-    const visible = slotKey === slot.activeSlotKey;
+    const activeSlot = slotKey === slot.activeSlotKey;
     const treeId = slotKey.includes('::') ? (slotKey.slice(slotKey.indexOf('::') + 2)) : null;
     const treeIdOrNull = treeId === 'workspace' ? null : treeId;
 
     for (const uiPaneId of uiPaneIds) {
+      const visible = activeSlot && (!onScreen || onScreen.has(uiPaneId));
       openUiPaneIds.add(uiPaneId);
       const source = resolveViewSource(uiPaneId);
       if (!source) continue; // No server-allocated surface id yet — nothing to report.
@@ -261,6 +270,7 @@ export function usePanePresenceReporter({
   transport,
   onLeaseInvalidated,
   now = Date.now,
+  windowFocused = isWindowAttentive,
 }: UsePanePresenceReporterArgs): void {
   const connectionsRef = useRef(new Map<string, ConnectionState>());
   // Tracks, per connection, which paneIds were reported as open on the LAST successful
@@ -275,6 +285,8 @@ export function usePanePresenceReporter({
   resolveRef.current = resolveViewSource;
   const nowRef = useRef(now);
   nowRef.current = now;
+  const windowFocusedRef = useRef(windowFocused);
+  windowFocusedRef.current = windowFocused;
   const windowIdRef = useRef(windowId);
   windowIdRef.current = windowId;
   const hydratedRef = useRef(hydrated);
@@ -339,6 +351,7 @@ export function usePanePresenceReporter({
       viewRevision: state.viewRevision,
       windowId: windowIdRef.current,
       views,
+      windowFocused: windowFocusedRef.current(),
     };
 
     // Design §9 / brief: an empty PUT is ignored by the server once a lease has reported
@@ -409,13 +422,19 @@ export function usePanePresenceReporter({
 
     function ensureKeepalive(connectionId: string, state: ConnectionState): void {
       if (state.keepaliveTimer) return;
+      state.keepaliveTicks = 0;
       state.keepaliveTimer = setInterval(() => {
+        state.keepaliveTicks += 1;
         if (!hydratedRef.current || !state.rendererLeaseId || state.inFlight) return;
+        // Every tick while focused refreshes the focus report; otherwise renewing the lease once
+        // per presenceKeepaliveSeconds is enough.
+        const windowFocused = windowFocusedRef.current();
+        if (!windowFocused && state.keepaliveTicks % TICKS_PER_LEASE_KEEPALIVE !== 0) return;
         const slotNow = backendsRef.current.find((s) => s.backendConnectionId === connectionId && s.workspaceId === state.lastWorkspaceId);
         if (!slotNow || !Object.values(slotNow.openPanesMap).some((ids) => ids.length > 0)) return;
         const rendererLeaseId = state.rendererLeaseId;
         const dispatchedGeneration = state.generation;
-        void transportRef.current.keepalive(connectionId, slotNow.workspaceId, { rendererLeaseId })
+        void transportRef.current.keepalive(connectionId, slotNow.workspaceId, { rendererLeaseId, windowFocused })
           .then((result) => {
             if (state.generation !== dispatchedGeneration) return;
             if (result.ok) return;
@@ -460,7 +479,7 @@ export function usePanePresenceReporter({
             submitForConnection(connectionId, state, latestSlot, lastReportedPaneIdsRef.current, { forceNewLease: true });
           })
           .catch(() => { /* Best-effort; TTL expiry is the fallback if keepalives keep failing. */ });
-      }, PANE_INSPECTION_LIMITS.presenceKeepaliveSeconds * 1_000);
+      }, WINDOW_FOCUS_REFRESH_MS);
     }
   }
 
@@ -491,6 +510,7 @@ export function usePanePresenceReporter({
           viewRevision: nowRef.current(),
           openedAtClientByPaneId: new Map(),
           keepaliveTimer: null,
+          keepaliveTicks: 0,
           generation: 0,
           lastWorkspaceId: null,
         };
@@ -526,13 +546,66 @@ export function usePanePresenceReporter({
   }, [hydrated, windowId, backends, resolveViewSource, transport, onLeaseInvalidated]);
 
   // ---------------------------------------------------------------------
+  // Window focus reports — server attention asks whether a FOCUSED window shows a pane (it
+  // suppresses and resolves notifications by that). A change of focus or visibility goes out as
+  // a keepalive on every lease this window holds: a lost focus at once, a gained one debounced;
+  // a page that is going away reports its lost focus with a request that outlives it. Focus is
+  // not view state: it never re-submits the views, so it cannot advance a pane-inspection
+  // revision. (The periodic keepalive above keeps a focused report fresh.)
+  // ---------------------------------------------------------------------
+  useEffect(() => {
+    if (typeof window === 'undefined' || typeof document === 'undefined') return;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    let reported: boolean | null = null;
+    const send = (focused: boolean, options?: PresenceRequestOptions) => {
+      for (const state of connectionsRef.current.values()) {
+        if (!state.rendererLeaseId || !state.lastWorkspaceId) continue;
+        void transportRef.current.keepalive(state.connectionId, state.lastWorkspaceId, {
+          rendererLeaseId: state.rendererLeaseId,
+          windowFocused: focused,
+        }, options).catch(() => { /* Best-effort: every later submission and keepalive carries the focus too. */ });
+      }
+    };
+    const report = () => {
+      if (timer) { clearTimeout(timer); timer = null; }
+      if (!hydratedRef.current) return;
+      const focused = windowFocusedRef.current();
+      if (focused === reported) return;
+      reported = focused;
+      send(focused);
+    };
+    const changed = () => {
+      if (!windowFocusedRef.current()) { report(); return; }
+      if (timer) clearTimeout(timer);
+      timer = setTimeout(report, WINDOW_FOCUS_REPORT_DEBOUNCE_MS);
+    };
+    const leaving = () => {
+      if (timer) { clearTimeout(timer); timer = null; }
+      if (!hydratedRef.current) return;
+      reported = false;
+      send(false, { unloading: true });
+    };
+    window.addEventListener('focus', changed);
+    window.addEventListener('blur', changed);
+    document.addEventListener('visibilitychange', changed);
+    window.addEventListener('pagehide', leaving);
+    return () => {
+      if (timer) clearTimeout(timer);
+      window.removeEventListener('focus', changed);
+      window.removeEventListener('blur', changed);
+      document.removeEventListener('visibilitychange', changed);
+      window.removeEventListener('pagehide', leaving);
+    };
+  }, []);
+
+  // ---------------------------------------------------------------------
   // Unmount / window-close cleanup — remove every view this renderer holds
   // across every connection, and stop all keepalive timers. Never cancels a
   // chat or a Run; presence records views and nothing else.
   // ---------------------------------------------------------------------
   useEffect(() => {
     const connections = connectionsRef.current;
-    const cleanup = () => {
+    const cleanup = (unloading: boolean) => {
       for (const state of connections.values()) {
         const connectionId = state.connectionId;
         if (state.keepaliveTimer) {
@@ -542,7 +615,9 @@ export function usePanePresenceReporter({
         state.generation += 1;
         if (state.retryTimer) { clearTimeout(state.retryTimer); state.retryTimer = null; }
         if (state.rendererLeaseId && state.lastWorkspaceId) {
-          void transportRef.current.remove(connectionId, state.lastWorkspaceId, { rendererLeaseId: state.rendererLeaseId })
+          // A closing window's DELETE must outlive the page, or its panes linger until the TTL.
+          void transportRef.current.remove(connectionId, state.lastWorkspaceId, { rendererLeaseId: state.rendererLeaseId },
+            unloading ? { unloading: true } : undefined)
             .catch(() => { /* Best-effort on unmount/unload; TTL is the fallback. */ });
         }
       }
@@ -551,10 +626,11 @@ export function usePanePresenceReporter({
       connections.clear();
       lastReportedPaneIdsRef.current.clear();
     };
-    window.addEventListener('beforeunload', cleanup);
+    const unload = () => cleanup(true);
+    window.addEventListener('beforeunload', unload);
     return () => {
-      window.removeEventListener('beforeunload', cleanup);
-      cleanup();
+      window.removeEventListener('beforeunload', unload);
+      cleanup(false);
     };
   }, []);
 }
@@ -570,15 +646,17 @@ export function usePanePresenceReporter({
 //      status distinct from the typed `ok:false` codes above rejects the promise so this hook's
 //      `.catch` retries on the next render rather than corrupting state.
 //
-// remove(backendConnectionId, workspaceId, req)
-//   -> DELETE the same path with `{ ...req, workspaceId }` as the JSON body.
+// remove(backendConnectionId, workspaceId, req, options?)
+//   -> DELETE the same path with `{ ...req, workspaceId }` as the JSON body; `{ unloading: true }`
+//      (beforeunload) sends it as a `fetch` keepalive so it outlives the page.
 //
-// keepalive(backendConnectionId, workspaceId, req)
+// keepalive(backendConnectionId, workspaceId, req, options?)
 //   -> POST `${backendApiBase(backendConnectionId)}/panes/presence/keepalive` via `fetchStream`
 //      (never bare `fetch`), so an upgraded gateway carries it over the existing shared
 //      per-window WebSocket and an older gateway falls back to HTTP transparently. One socket
 //      per backendConnectionId; a lease is renewed only on the connection that owns it. On
 //      NOT_FOUND (lease expired or the backend restarted), this hook reacquires a fresh lease
 //      immediately — see `ensureKeepalive`'s NOT_FOUND branch above — rather than waiting for an
-//      unrelated rerender to notice.
+//      unrelated rerender to notice. `{ unloading: true }` (pagehide) is the exception: the shared
+//      socket goes with the page, so that one is a plain `fetch` keepalive.
 // ---------------------------------------------------------------------------

@@ -1,5 +1,27 @@
 // Vitest setup hook.
 import { MotionGlobalConfig } from 'motion/react';
+// Import the module, not the 'michi-shared' barrel: the barrel would load every shared
+// module (shared/src/remoteCredentials among them) before a test's vi.mock of it can apply.
+import { COMPANION_CHAT_NOTIFICATION_LEVEL_PATH } from '../../shared/src/companion';
+
+// PrefsProvider tells the backend its chat notification level 500ms after it mounts
+// (services/api/prefs putChatNotificationLevel). Many tests keep a provider mounted that long
+// with services/api mocked but not that call: answer its path here, so no test reaches a real
+// backend on :3000 and overwrites the level a dev backend keeps (W3-F3-review #2). A test that
+// stubs fetch itself sees the call as usual.
+const networkFetch = globalThis.fetch;
+if (typeof networkFetch === 'function') {
+  globalThis.fetch = ((input: RequestInfo | URL, init?: RequestInit) => {
+    const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
+    const method = (init?.method ?? (typeof input === 'object' && 'method' in input ? input.method : 'GET')).toUpperCase();
+    if (method === 'PUT' && new URL(url, 'http://localhost').pathname.endsWith(COMPANION_CHAT_NOTIFICATION_LEVEL_PATH)) {
+      return Promise.resolve(new Response(typeof init?.body === 'string' ? init.body : '{}', {
+        status: 200, headers: { 'Content-Type': 'application/json' },
+      }));
+    }
+    return networkFetch(input, init);
+  }) as typeof fetch;
+}
 
 // motion (motion.dev) animations finish instantly in tests, so AnimatePresence
 // exits resolve on the next frame instead of after their real duration.

@@ -45,6 +45,7 @@ function makeStubClient(overrides: Partial<Record<string, unknown>> = {}): Codex
     onServerRequest: (_h: unknown) => {},
     onGlobalNotification: (_h: unknown) => () => {},
     onExit: (_cb: () => void) => () => {},
+    onStarted: (_h: unknown) => () => {},
     shutdown: async () => {},
     isRunning: () => true,
     _emit: (threadId: string, method: string, params: Record<string, unknown>) => {
@@ -109,14 +110,14 @@ test('CodexRuntime refuses the old positional arguments with a TypeError', () =>
   assert.throws(() => new Untyped({ ...codexTestOptions(), host: undefined, bridge: makeStubBridge(), mcpSlots: makeStubMcpRegistry() }, { client }), expected);
 });
 
-test('codexAdapterOptions parses the environment as the adapter did, with a 10s Codex title deadline', () => {
+test('codexAdapterOptions parses the environment as the adapter did; the title deadline is the host\'s', () => {
   const host = michiTestHost();
   const defaults = codexAdapterOptions({ host }, {});
   assert.equal(defaults.host, host);
-  assert.equal(defaults.titleTimeoutMs?.(), 10_000);
+  assert.equal(defaults.titleTimeoutMs, undefined, 'the adapter reads the host deadline');
   if (process.env.MICHI_CODEX_TITLE_TIMEOUT_MS === undefined) {
-    // Not the title model's 15s default the host reports for the sidecar-title runtimes.
-    assert.equal(host.config.titleModel?.('codex').timeoutMs, 15_000);
+    // The host reports the deadline Codex uses.
+    assert.equal(host.config.titleModel?.('codex').timeoutMs, 10_000);
   }
   assert.equal(defaults.binaryPath, undefined);
   assert.equal(defaults.codexHome, undefined);
@@ -124,35 +125,35 @@ test('codexAdapterOptions parses the environment as the adapter did, with a 10s 
   assert.equal(defaults.initTimeoutMs, 30_000);
   assert.equal(defaults.approveTimeoutMs, 300_000);
   assert.ok(Number.isNaN(defaults.maxConcurrent), 'no cap');
-  assert.equal(defaults.followUpsHook, undefined);
 
   const env: NodeJS.ProcessEnv = {
     CODEX_CLI_BIN: '/opt/codex', CODEX_HOME: '', MICHI_CODEX_RPC_TIMEOUT_MS: '5',
     MICHI_CODEX_INIT_TIMEOUT_MS: 'soon', MICHI_APPROVE_TIMEOUT_MS: '7', MICHI_CODEX_MAX_CONCURRENT: '2',
-    MICHI_CODEX_FOLLOW_UPS_HOOK_POC: ' On ', MICHI_DATA_DIR: '/data',
+    MICHI_DATA_DIR: '/data',
   };
   const parsed = codexAdapterOptions({ host }, env);
   assert.equal(parsed.binaryPath, '/opt/codex');
   assert.equal(parsed.codexHome, '');
-  assert.equal(parsed.spawnEnv?.(), env);
+  assert.deepEqual(parsed.spawnEnv?.(), { CODEX_CLI_BIN: '/opt/codex', CODEX_HOME: '' }, "app-server gets env less the backend's MICHI_* settings");
   assert.equal(parsed.rpcTimeoutMs, 5);
   assert.ok(Number.isNaN(parsed.initTimeoutMs));
   assert.equal(parsed.approveTimeoutMs, 7);
+  assert.equal(codexAdapterOptions({ host }, { MICHI_APPROVE_TIMEOUT_MS: 'soon' }).approveTimeoutMs, 300_000);
   assert.equal(parsed.maxConcurrent, 2);
-  assert.deepEqual(parsed.followUpsHook, { isolatedCodexHome: path.resolve('/data/codex-follow-ups-hook-poc') });
-  env.MICHI_CODEX_TITLE_TIMEOUT_MS = '2500';
-  assert.equal(parsed.titleTimeoutMs?.(), 2_500, 'read at each title');
-
-  assert.deepEqual(codexAdapterOptions({ host }, {
-    MICHI_CODEX_FOLLOW_UPS_HOOK_POC: '1', MICHI_CODEX_FOLLOW_UPS_HOOK_HOME: 'poc-home', MICHI_DATA_DIR: '/data',
-  }).followUpsHook, { isolatedCodexHome: path.resolve('poc-home') });
-  assert.equal(codexAdapterOptions({ host }, { MICHI_CODEX_FOLLOW_UPS_HOOK_POC: '0' }).followUpsHook, undefined);
 });
 
-for (const [label, env, deadlineMs] of [
-  ['unset', {}, 10_000],
-  ['2500', { MICHI_CODEX_TITLE_TIMEOUT_MS: '2500' }, 2_500],
+for (const [label, value, deadlineMs] of [
+  ['unset', undefined, 10_000],
+  ['2500', '2500', 2_500],
+  ['abc', 'abc', 10_000],
 ] as const) test(`a chat's title thread times out after ${deadlineMs}ms (MICHI_CODEX_TITLE_TIMEOUT_MS ${label})`, async (t) => {
+  const saved = process.env.MICHI_CODEX_TITLE_TIMEOUT_MS;
+  if (value === undefined) delete process.env.MICHI_CODEX_TITLE_TIMEOUT_MS;
+  else process.env.MICHI_CODEX_TITLE_TIMEOUT_MS = value;
+  t.after(() => {
+    if (saved === undefined) delete process.env.MICHI_CODEX_TITLE_TIMEOUT_MS;
+    else process.env.MICHI_CODEX_TITLE_TIMEOUT_MS = saved;
+  });
   const host = michiTestHost();
   host.title = { ...host.title, enabled: () => true };
   const failures: string[] = [];
@@ -170,7 +171,7 @@ for (const [label, env, deadlineMs] of [
     }
     return {};
   } });
-  const runtime = new CodexRuntime({ ...codexAdapterOptions({ host }, env), bridge: makeStubBridge(), mcpSlots: makeStubMcpRegistry() }, { client });
+  const runtime = new CodexRuntime({ ...codexAdapterOptions({ host }, {}), bridge: makeStubBridge(), mcpSlots: makeStubMcpRegistry() }, { client });
   t.after(() => runtime.shutdown());
   const session = await runtime.newSession({ sessionId: `deadline-${label}`, cwd: '/tmp', model: 'm', enableFollowUps: false });
   const flush = async (until: () => boolean = () => false) => {
@@ -190,6 +191,38 @@ for (const [label, env, deadlineMs] of [
   await drained;
   assert.deepEqual(failures, [`codex title generation timed out after ${deadlineMs}ms`]);
   assert.ok(kinds.includes('title') && kinds.includes('turn_end'), kinds.join(', '));
+});
+
+for (const outcome of ['titled', 'failed'] as const) test(`a chat's title thread reads the message and its quote, not the framed turn text (${outcome})`, async (t) => {
+  const host = michiTestHost();
+  host.title = { ...host.title, enabled: () => true };
+  const titleInputs: string[] = [];
+  const client = makeStubClient({ request: async (method: string, params: any) => {
+    if (method === 'thread/start') return { thread: { id: params.ephemeral ? 'source-title' : 'source-main' } };
+    if (method === 'turn/start' && params.threadId === 'source-title') {
+      titleInputs.push(params.input[0].text);
+      setImmediate(() => {
+        if (outcome === 'titled') (client as any)._emit('source-title', 'item/agentMessage/delta', { delta: '{"title":"Quoted fix"}' });
+        (client as any)._emit('source-title', 'turn/completed', { turn: { status: outcome === 'titled' ? 'completed' : 'failed' } });
+      });
+      return { turn: { id: 'title-turn' } };
+    }
+    if (method === 'turn/start') {
+      setImmediate(() => (client as any)._emit('source-main', 'turn/completed', { threadId: 'source-main', turn: { status: 'completed' } }));
+      return { turn: { id: 'main-turn' } };
+    }
+    return {};
+  } });
+  const runtime = new CodexRuntime({ ...codexAdapterOptions({ host }, {}), bridge: makeStubBridge(), mcpSlots: makeStubMcpRegistry() }, { client });
+  t.after(() => runtime.shutdown());
+  const session = await runtime.newSession({ sessionId: `source-${outcome}`, cwd: '/tmp', model: 'm', enableFollowUps: false });
+  const framed = 'Context: The user selected the passage below from the previous assistant reply.\n\n> The cache is stale.\n\nUser\'s branch question:\nWhy is it stale? Explain.';
+  const titles: string[] = [];
+  for await (const event of session.send(framed, { titleSource: { text: 'Why is it stale? Explain.', context: 'The cache is stale.' } })) {
+    if (event.kind === 'title') titles.push(event.title);
+  }
+  assert.deepEqual(titleInputs, ['CONTEXT (the user is replying to or quoting this):\nThe cache is stale.\n\nUSER MESSAGE:\nWhy is it stale? Explain.']);
+  assert.deepEqual(titles, [outcome === 'titled' ? 'Quoted fix' : 'Why is it stale']);
 });
 
 test('a chat binding resumes the external session id, else the ACP column; the host asks Codex first', async () => {
@@ -346,60 +379,6 @@ test('empty Codex model RPC keeps its cached snapshot without persisting an empt
     assert.deepEqual(await runtime.refreshModels(), cached);
     assert.deepEqual(saved, []);
   } finally { await runtime.shutdown(); }
-});
-
-test('Codex follow-ups Hook POC injects temporary Hook config alongside the MCP slot', async () => {
-  const capturedStartParams: Record<string, unknown>[] = [];
-  const client = makeStubClient({
-    request: async (method: string, params: unknown): Promise<unknown> => {
-      if (method === 'model/list') {
-        return {
-          data: [{
-            id: 'codex-default',
-            displayName: 'Codex Default',
-            description: '',
-            hidden: false,
-            isDefault: true,
-            supportedReasoningEfforts: [],
-            defaultReasoningEffort: 'medium',
-          }],
-        };
-      }
-      if (method === 'thread/start') {
-        capturedStartParams.push(params as Record<string, unknown>);
-        return { threadId: 'thread-hook-poc' };
-      }
-      return {};
-    },
-  });
-  const runtime = new CodexRuntime(
-    { ...codexTestOptions(), bridge: makeStubBridge(), mcpSlots: makeStubMcpRegistry(3456) },
-    { client, followUpsHookPocEnabled: true, followUpsExperimentMode: 'hook-tool' },
-  );
-
-  await runtime.newSession({
-    sessionId: 'node-hook-poc',
-    cwd: '/tmp/test',
-    model: '',
-  });
-
-  assert.equal(capturedStartParams.length, 1);
-  const developerInstructions = String(capturedStartParams[0].developerInstructions ?? '');
-  assert.match(developerInstructions, /runtime's structured metadata tool/);
-  assert.doesNotMatch(developerInstructions, /\[FOLLOW-UP/);
-  assert.doesNotMatch(developerInstructions, /\[BRANCH-OVERVIEW:/);
-  const config = capturedStartParams[0].config as Record<string, unknown>;
-  assert.ok(config.mcp_servers, 'existing MCP config must be preserved');
-  assert.deepEqual(config.features, { hooks: true, goals: false });
-  assert.equal(config.bypass_hook_trust, true);
-  const hooks = config.hooks as { Stop: Array<{ hooks: Array<Record<string, unknown>> }> };
-  assert.equal(hooks.Stop[0].hooks[0].type, 'command');
-  assert.match(String(hooks.Stop[0].hooks[0].command), /127\.0\.0\.1:3456/);
-  const mcpServers = config.mcp_servers as Record<string, Record<string, unknown>>;
-  assert.equal(mcpServers.__michi_internal__.default_tools_approval_mode, 'approve');
-  assert.equal(mcpServers.__michi_internal__.tools, undefined);
-
-  await runtime.shutdown();
 });
 
 test('explicit cap counts pending allocations and preserves same-id deduplication', async (t) => {

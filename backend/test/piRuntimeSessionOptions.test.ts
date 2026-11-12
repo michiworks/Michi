@@ -50,7 +50,7 @@ test('Pi fresh and loaded sessions honor follow-up options without mutating an a
     assert.match((fresh as any).firstUserGlue, /\[TITLE:/, 'ordinary fresh chats retain title guidance');
 
     const wrongOwner = chatOwner(loadedId);
-    await assert.rejects(runtime.loadSession({ sessionId: loadedId, owner: wrongOwner, cwd: dataDir }), /different owner/);
+    await assert.rejects(runtime.loadSession({ sessionId: loadedId, owner: wrongOwner, cwd: dataDir }), /Owner mismatch/);
     await assert.rejects(runtime.releaseSession(loadedId, wrongOwner), /Owner mismatch/);
     assert.equal(getSession(loadedId), loaded, 'wrong-owner release preserves the real session');
     await runtime.releaseSession(loadedId, owner(loadedId));

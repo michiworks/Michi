@@ -1,11 +1,11 @@
 import type {
   ScheduledJobDto,
-  ScheduledJobSessionMode,
   ScheduledJobInput,
   ScheduledJobPatch,
   ScheduledJobPreviewResponse,
   ScheduledJobRunDto,
   ScheduledJobSchedule,
+  ScheduledJobSettings,
   ScheduledJobsListResponse,
 } from 'michi-shared';
 import { backendApiBase } from '../../config/backendConnections';
@@ -74,18 +74,24 @@ export async function getScheduledJobRun(runId: string, signal?: AbortSignal): P
   return json(await fetch(`${base()}/runs/${encodeURIComponent(runId)}`, { signal }), 'getScheduledJobRun');
 }
 
+/** Show a Scheduled-only run's thread among its workspace's conversations; returns the run as it is now. */
+export async function moveScheduledRunToWorkspace(runId: string): Promise<ScheduledJobRunDto> {
+  return json(await fetch(`${base()}/runs/${encodeURIComponent(runId)}/move-to-workspace`, { method: 'POST' }), 'moveScheduledRunToWorkspace');
+}
+
 export async function previewScheduledJobSchedule(schedule: ScheduledJobSchedule, signal?: AbortSignal): Promise<ScheduledJobPreviewResponse> {
   return json(await fetch(`${base()}/preview`, {
     method: 'POST', headers: jsonHeaders, body: JSON.stringify({ schedule }), signal,
   }), 'previewScheduledJobSchedule');
 }
 
-export async function getScheduledJobSettings(): Promise<{ sessionMode: ScheduledJobSessionMode }> {
+export async function getScheduledJobSettings(): Promise<ScheduledJobSettings> {
   return json(await fetch(`${base()}/settings`), 'getScheduledJobSettings');
 }
 
-export async function updateScheduledJobSettings(sessionMode: ScheduledJobSessionMode): Promise<{ sessionMode: ScheduledJobSessionMode }> {
+/** Saves only the named fields; returns every setting as saved. */
+export async function updateScheduledJobSettings(patch: Partial<ScheduledJobSettings>): Promise<ScheduledJobSettings> {
   return json(await fetch(`${base()}/settings`, {
-    method: 'PATCH', headers: jsonHeaders, body: JSON.stringify({ sessionMode }),
+    method: 'PATCH', headers: jsonHeaders, body: JSON.stringify(patch),
   }), 'updateScheduledJobSettings');
 }

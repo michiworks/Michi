@@ -1,5 +1,5 @@
 import { getScheduledJobSettings, updateScheduledJobSettings } from '../services/scheduledJobs/settings';
-import { createSseObserver } from '../services/httpSse';
+import { beginSse } from '../services/httpSse';
 import { Router, type Request, type Response } from 'express';
 import { requireLocalControlRequest } from './middleware/localControl';
 import { encodeScheduledJobEvent, type ScheduledJobEventBus } from '../services/scheduledJobs/events';
@@ -82,12 +82,7 @@ export function setupScheduledJobRoutes(deps: {
    * undelivered notifications on connect; the client acknowledges each one.
    */
   router.get('/scheduled-jobs/notifications/stream', (_req, res) => {
-    res.setHeader('Content-Type', 'text/event-stream');
-    res.setHeader('Cache-Control', 'no-cache');
-    res.setHeader('Connection', 'keep-alive');
-    res.setHeader('X-Accel-Buffering', 'no');
-    res.flushHeaders?.();
-    const observer = createSseObserver(res);
+    const observer = beginSse(res);
     for (const event of scheduler().pendingNotifications()) {
       if (!observer.write(encodeEvent(event))) return;
     }
@@ -111,6 +106,11 @@ export function setupScheduledJobRoutes(deps: {
 
   router.get('/scheduled-jobs/runs/:runId', handle((req, res) => {
     res.json(scheduler().getRun(String(req.params.runId)));
+  }));
+
+  /** Show a Scheduled-only run's thread among its workspace's conversations. */
+  router.post('/scheduled-jobs/runs/:runId/move-to-workspace', handle((req, res) => {
+    res.json(scheduler().moveRunToWorkspace(String(req.params.runId)));
   }));
 
   // Internal execution IDs are not editable/runnable/deletable prompt jobs.

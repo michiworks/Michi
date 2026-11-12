@@ -1,0 +1,60 @@
+<!-- 60-recall.html (owner: verbs). Recall (#recall), brief §3.8, §4.7, §5.9. A new chat a month
+     later; the HTML is the settled frame tB (answer streamed, "A stale account" struck). The ⁄⁄ 31.0d
+     hairline above the replica is page-native and static (MapTimeline idle break, formatGap). -->
+<section class="sec sec--m rec" id="recall" aria-labelledby="recall-title">
+  <div class="wrap grid rec-grid">
+    <div class="rec-text">
+      <h2 class="h2" id="recall-title"><span class="claim">A month later, just ask.</span> <span class="consequence" data-live-for="recall">It reads the whole tree back, dead ends <span class="nowrap">included.<span class="live-caret" aria-hidden="true"></span></span></span></h2>
+      <p class="body rec-body">Threads are kept. Ask a new chat how you fixed it, and the agent reads the branches back: what you ruled out, what caused it, and what is still unverified.</p>
+    </div>
+    <div class="rec-fig" data-take="recall">
+      <p class="rec-gap" aria-hidden="true">⁄⁄ 31.0d</p>
+      <div class="mk-fit rec-fit" data-w="760" data-h="520" data-take-observe>
+        <div class="mk mk-canvas" aria-hidden="true">
+          <div class="mk-window">
+            <div class="mk-strip">
+              <div class="mk-pane is-focused rec-pane">
+                <div class="mk-head"><i class="mk-dot"></i><span class="mk-head-title rec-title" data-ta-text="New chat">How did we fix the Tokyo deploy?</span><span class="mk-head-icons"><span class="mk-hplus">+</span><svg class="i" width="14" height="14" viewBox="0 0 16 16" stroke-width="1.6"><path d="M4 3.5V12.5"/><path d="M7 4h5M7 8h4M7 12h5"/><circle cx="4" cy="4" r="1.2" fill="currentColor" stroke="none"/><circle cx="4" cy="8" r="1.2" fill="currentColor" stroke="none"/><circle cx="4" cy="12" r="1.2" fill="currentColor" stroke="none"/></svg><svg class="i" width="14" height="14" viewBox="0 0 16 16" stroke-width="1.6"><circle cx="8" cy="3.4" r="1.5"/><circle cx="4" cy="12.6" r="1.5"/><circle cx="12" cy="12.6" r="1.5"/><path d="M8 4.9V7.4"/><path d="M8 7.4H4V11.1"/><path d="M8 7.4H12V11.1"/></svg><svg class="i" width="14" height="14" viewBox="0 0 16 16" stroke-width="1.6"><path d="M4 2.5h5.4l2.6 2.6v8.4H4z"/><path d="M9.4 2.5v2.6h2.6"/><path d="M6 8.2h4M6 10.4h2.6"/></svg><svg class="i" width="14" height="14" viewBox="0 0 16 16" stroke-width="1.6"><path d="M8 2l6 3-6 3-6-3 6-3z"/><path d="M2 8l6 3 6-3"/><path d="M2 11l6 3 6-3"/></svg><span class="mk-hmore"><svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor"><circle cx="5" cy="12" r="1.5"/><circle cx="12" cy="12" r="1.5"/><circle cx="19" cy="12" r="1.5"/></svg></span></span></div>
+                <div class="mk-view"><div class="mk-list" data-follow><i class="rec-top" data-tail></i><div class="mk-col">
+                  <div class="mk-user e e-up6 rec-u" data-ta="off"><span class="mk-over">You · 09:40</span>How did we fix the Tokyo deploy?</div>
+                  <div class="mk-msg">
+                    <div class="mk-label e e-up rec-l" data-ta="off">&gt; michi</div>
+                    <div class="mk-group is-open e e-up rec-g" data-ta="off">
+                      <div class="mk-group-head"><span class="mk-group-ic"><svg class="i" width="13" height="13" viewBox="0 0 14 14" stroke-width="1.2"><path d="M2.5 4l3 3-3 3"/><path d="M7.5 10.5h4"/></svg><i class="mk-spin"></i></span><span class="mk-group-label">3 tool calls</span><span class="mk-group-meta rec-gm" data-ta-text="0/3">0.3s</span><span class="mk-chev">▾</span></div>
+                      <div class="mk-group-rows">
+                        <div class="grow rec-r rec-r1" data-ta="off"><div><div class="mk-tool-row is-line"><span class="mk-tool-name">list_threads</span><span class="mk-tool-detail">tokyo-rollout</span><span class="mk-tool-st"><i class="mk-spin"></i><svg class="mk-check" width="10" height="10" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M2.5 7.5l3 3 6-6.5"/></svg></span></div></div></div>
+                        <div class="grow rec-r rec-r2" data-ta="off"><div><div class="mk-tool-row is-line"><span class="mk-tool-name">read_node_overview</span><span class="mk-tool-detail">Tokyo deployment</span><span class="mk-tool-st"><i class="mk-spin"></i><svg class="mk-check" width="10" height="10" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M2.5 7.5l3 3 6-6.5"/></svg></span></div></div></div>
+                        <div class="grow rec-r rec-r3" data-ta="off"><div><div class="mk-tool-row is-line"><span class="mk-tool-name">read_node</span><span class="mk-tool-detail">Tokyo deployment RCA</span><span class="mk-tool-st"><i class="mk-spin"></i><svg class="mk-check" width="10" height="10" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M2.5 7.5l3 3 6-6.5"/></svg></span></div></div></div>
+                      </div>
+                    </div>
+                    <div class="mk-prose" data-stream data-ta="hide">
+                      <p class="rec-s1"><b>Symptom.</b> Tokyo’s deploy failed with “Invalid principal”.</p>
+                      <p><span class="rec-s1"><b>Ruled out.</b> <span class="strike rec-strike" data-ta="off">A stale account</span>.</span> <span class="rec-s2">All 11 developer accounts were valid.</span></p>
+                      <p class="rec-s2"><b>Cause.</b> The policy ran before bootstrap created the task runner role.</p>
+                      <p class="rec-s2"><b>Fix.</b> Create the role in Tokyo before the policy runs. Other regions unchanged.</p>
+                      <p class="rec-s2"><b>Status.</b> Fix proposed. Validation pending.</p>
+                    </div>
+                  </div>
+                </div><i class="rec-sp rec-p1 is-off" data-ta="on"></i><i class="rec-sp rec-p2 is-off" data-ta="on"></i><i class="rec-sp rec-p3 is-off" data-ta="on"></i></div></div>
+                <div class="mk-composer is-focused">
+                  <div class="mk-cin"><span class="mk-prompt">›_</span><div class="mk-input"><span class="rec-draft is-sent" data-type data-ta="hide" data-ta-cls="-is-sent">How did we fix the Tokyo deploy?</span></div></div>
+                  <div class="mk-tools"><span class="mk-tchip is-icon"><svg class="i" width="16" height="16" viewBox="0 0 24 24" stroke-width="2.4"><path d="M5 12h14"/><path d="M12 5v14"/></svg></span><span class="mk-tchip is-icon"><svg class="i" width="16" height="16" viewBox="0 0 24 24" stroke-width="2.4"><circle cx="12" cy="12" r="4"/><path d="M16 8v5a3 3 0 0 0 6 0v-1a10 10 0 1 0-4 8"/></svg></span><span class="mk-tools-gap"></span><span class="mk-tchip is-perm"><svg class="i" width="14" height="14" viewBox="0 0 16 16" stroke-width="1.6"><path d="M8 1.8l5 2v4.1c0 3-2.1 5.1-5 6.3-2.9-1.2-5-3.3-5-6.3V3.8z"/><path d="M5.8 8.1l1.6 1.6 3-3.1"/></svg><span>Ask</span></span><span class="mk-tchip is-model">Opus 5<span class="mk-tchip-effort">High</span><svg class="i i-r90 vb-chev" width="12" height="12" viewBox="0 0 16 16" stroke-width="1.6"><path d="M6 3l5 5-5 5"/></svg></span><span class="mk-tbranch"><svg class="i i-r90" width="16" height="16" viewBox="0 0 24 24" stroke-width="2.4"><path d="M16 3h5v5"/><path d="M8 3H3v5"/><path d="M12 22v-8.3a4 4 0 0 0-1.172-2.872L3 3"/><path d="m15 9 6-6"/></svg></span><span class="mk-send is-empty rec-send" data-ta-cls="+is-empty -is-stop"><svg class="i when-send" width="14" height="14" viewBox="0 0 16 16" stroke-width="1.8"><path d="M8 13V3"/><path d="M3.5 7.5L8 3l4.5 4.5"/></svg><svg class="i fill when-stop" width="14" height="14" viewBox="0 0 16 16"><rect x="3" y="3" width="10" height="10" rx="1.5"/></svg></span></div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+      <p class="sr-only">Animated example, a month later. A new chat is asked “How did we fix the Tokyo deploy?”. The agent lists the workspace’s threads and reads the overview and the RCA, then answers: the symptom was Invalid principal; a stale account was ruled out because all 11 developer accounts were valid; the cause was the policy running before bootstrap created the task runner role; the fix is to create the role in Tokyo before the policy runs; the status is fix proposed, validation pending.</p>
+      <div class="take-bar">
+        <div class="take-end">
+          <div class="take-ctls">
+            <button type="button" class="take-ctl" data-take-control="pause" aria-label="Pause the recall example" aria-pressed="false" hidden>Pause</button>
+            <button type="button" class="take-ctl" data-take-control="replay" aria-label="Replay the recall example" hidden>Replay</button>
+            <button type="button" class="take-ctl" data-take-control="play" aria-label="Play the example as steps" hidden>Play</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>

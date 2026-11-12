@@ -201,7 +201,7 @@ export default function FirstRunSetup() {
           </div>
         )}
         {waitingForStatus && <Button onClick={refreshAgentStatus}>Refresh selection</Button>}
-        {error && <div role="alert" style={{ color: 'var(--term-danger)' }}>{error}</div>}
+        {error && <div role="alert" style={{ color: 'var(--term-danger-text)' }}>{error}</div>}
 
         {activeRuntime && needsKey && (
           <div
@@ -261,7 +261,7 @@ export default function FirstRunSetup() {
               ))}
             </select>
             {modelCatalog.error && (
-              <span style={{ fontSize: 'var(--fs-sm)', color: 'var(--term-danger)' }}>{modelCatalog.error}</span>
+              <span style={{ fontSize: 'var(--fs-sm)', color: 'var(--term-danger-text)' }}>{modelCatalog.error}</span>
             )}
           </div>
         )}

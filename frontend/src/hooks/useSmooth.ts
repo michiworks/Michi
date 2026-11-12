@@ -663,7 +663,6 @@ export function useSmooth(
         ? (streamingRef.current ? 'CAUGHT_UP' : 'IDLE')
         : (displayedDeltaGraphemes === 0 ? 'BUFFERING' : 'DRAINING');
       const controllerType = useLeakyController ? 'HYBRID_LEAKY' : 'PROPORTIONAL';
-      // eslint-disable-next-line no-console
       console.log(
         `[SMOOTH] cps=${Math.round(cps)} backlog=${backlogNow} ` +
         `source=${boundaries.length} displayed=${cursorRef.current} ` +
@@ -711,7 +710,6 @@ export function useSmooth(
       firstBufferedAtRef.current = null;
       // --- Diagnostic: buffer exhausted ---
       if (smoothDiagEnabled() && streamingRef.current) {
-        // eslint-disable-next-line no-console
         console.warn(
           `[SMOOTH:EMPTY] Buffer exhausted while streaming! ` +
           `profile=${configRef.current.name} agentCps=${Math.round(agentCpsRef.current)} ` +
@@ -843,7 +841,6 @@ export function useSmooth(
         const gapMs = lastArrival !== null ? Math.round(now - lastArrival) : 0;
         const backlogNow = Math.max(0, sourceBoundaries.length - cursorRef.current);
         if (gapMs > 200 || lastArrival === null) {
-          // eslint-disable-next-line no-console
           console.log(
             `[SMOOTH:BURST] +${delta} graphemes after ${gapMs}ms gap. ` +
             `backlog=${backlogNow} wasCaughtUp=${wasCaughtUp} ` +
@@ -897,7 +894,6 @@ export function useSmooth(
         firstBufferedAtRef.current = windowMs > 0 ? now : null;
         // --- Diagnostic: re-buffer triggered ---
         if (smoothDiagEnabled() && windowMs > 0) {
-          // eslint-disable-next-line no-console
           console.warn(
             `[SMOOTH:REBUFFER] Caught up → re-buffering for ${windowMs}ms. ` +
             `This pauses display! profile=${cfg.name}`,

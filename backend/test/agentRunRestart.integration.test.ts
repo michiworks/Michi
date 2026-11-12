@@ -111,7 +111,14 @@ describe('Agent Run restart integration', () => {
     }
   });
 
-  test('Parent delivery acknowledges only a completed requested turn', async () => {
+  test('Parent delivery acknowledges only a completed requested turn', async (t) => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'michi-run-parent-'));
+    process.env.MICHI_DATA_DIR = tmpDir;
+    closeDb();
+    t.after(() => { closeDb(); fs.rmSync(tmpDir, { recursive: true, force: true }); });
+    // A live parent chat: continueParent refuses one that is gone, archived or in the Trash.
+    initDb().exec(`INSERT INTO workspaces (id, name, created_at, updated_at) VALUES ('workspace-1', 'W', 1, 1);
+      INSERT INTO nodes (id, workspace_id, kind, title, status, created_at) VALUES ('parent-node', 'workspace-1', 'chat', 'Parent', 'idle', 1);`);
     for (const status of ['completed', 'error', 'cancelled'] as const) {
       const target = new ProductionParentTarget({
         ensureParentSession: async () => ({ id: 'parent-chat' }),
@@ -120,7 +127,7 @@ describe('Agent Run restart integration', () => {
           turnId: 'requested-turn', assistantId: 'assistant', existing: false, done: Promise.resolve(),
         }),
         requestedTurnStatus: () => status,
-      } as any, {} as any);
+      } as any, {} as any, { acquireRestoreLock: async () => () => {} });
       const result = await target.continueParent({
         deliveryId: `delivery-${status}`, requestedTurnId: 'requested-turn', ownerUserId: 'owner-1',
         workspaceId: 'workspace-1', parentRunId: null, parentNodeId: 'parent-node', parentTurnId: 'parent-turn',

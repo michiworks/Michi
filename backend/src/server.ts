@@ -1,28 +1,41 @@
+// First: the background service reads ~/.michi/.env before any module reads its settings.
+import './bootEnv';
 import { startMetaAgentMetrics, stopMetaAgentMetrics } from './services/metaAgentMetrics';
 import { nextPerformanceContext, startEventLoopDiagnostics, withPerformanceContext } from './services/performanceDiagnostics';
 import { jsonConfigErrorResponse } from "./routes/jsonConfigErrorResponse";
 import { persistSessionState } from './services/sessionStatePersistence';
 import express from 'express';
-import cors from 'cors';
 import dotenv from 'dotenv';
 import path from 'path';
 import fs from 'fs';
-import os from 'os';
 import { randomUUID } from 'node:crypto';
-import { tryForkChatSession } from './services/nativeFork';
+import { createSpawnChild } from './services/spawnChild';
 import { fromNodeHeaders, toNodeHandler } from 'better-auth/node';
 import { setupSpaFallback } from './routes/spaFallback';
 import { setupMobileAccessRoutes } from './routes/mobileAccess';
+import { setupTerminalRoutes } from './routes/terminals';
+import { loadNodePty, TerminalHost } from './services/terminalHost';
 import { setupSelfUpdateRoutes } from './routes/selfUpdate';
 import { SelfUpdater } from './services/selfUpdate';
-import { readMobileAccessChoice, saveMobileAccessChoice } from './services/mobileAccess';
+import { readMobileAccessChoice, readPhoneTerminalChoice, saveMobileAccessChoice, savePhoneTerminalChoice } from './services/mobileAccess';
 import { createMobileAccess, defaultMobileAccessProvider } from './services/mobileAccessManager';
 import { setupAssistantRoutes } from './routes/assistant';
+import { isAssistantWorkspace } from './assistant/identity';
+import { currentAssistantNodeId, migrateAssistantV2 } from './assistant/store';
+import { createCompanionRouter } from './routes/companion';
+import { bootCompanion, type RunningCompanion } from './services/companion/boot';
+import { setCompanionCardDeps } from './services/companion/cards';
+import { startChatNotices, type RunningChatNotices } from './services/companion/chatNotices';
+import { companionEvents } from './services/companion/delivery';
+import { CompanionPresence } from './services/companion/presence';
+import { createNoopCompanionService, startCompanionDelegation } from './services/companion/service';
+import { getCompanionSettings } from './services/companion/settings';
+import type { CompanionService } from './services/companion/types';
 import { setupMetaAgentRoutes } from './routes/metaAgent';
 import { setupMetaAgentOverviewRoutes } from './routes/metaAgentOverview';
 import { setupMetaAgentRunNowRoutes } from './routes/metaAgentRunNow';
 import { log } from './services/logger';
-import { shouldLogAccess } from './services/accessLog';
+import { observeAccess } from './services/accessLog';
 import { setupMichiRoutes } from './routes/michi';
 import { setupDigestRoutes } from './routes/digests';
 import { setupPersistenceRoutes } from './routes/persistence';
@@ -36,6 +49,7 @@ import { setupSpacesHomeRunRoutes } from './routes/spacesHomeRuns';
 import { configureHomeCardsSink } from './services/metaAgent/homeCardsGenerator';
 import { repositoryHomeCardsSink } from './services/metaAgent/homeCardsSink';
 import { chatHubLiveTurn, configureProgressCardLiveTurns } from './services/pages/progressCards';
+import { configurePagePreview, createPagePreviewMiddleware } from './services/pages/pagePreview';
 import { setupPageHelperRoutes } from './routes/pageHelpers';
 import { setupPageComponentRoutes } from './routes/pageComponents';
 import { setupPageMaintenanceRoutes } from './routes/pageMaintenance';
@@ -48,10 +62,18 @@ import { setupAgentRoutes } from './routes/agent';
 import { setupCustomAgentRoutes } from './routes/customAgents';
 import { setupAgentRunRoutes } from './routes/agentRuns';
 import { setupWorkflowRunRoutes } from './routes/workflowRuns';
+import { setupMultiModelRunRoutes } from './routes/multiModelRuns';
+import { configureMultiModelTools } from './agents/multiModelTool';
+import { answerChatPermission } from './services/chatPermissionAnswers';
+import { createChildThread } from './services/multiModel/childThreads';
+import { MultiModelOrchestrator } from './services/multiModel/orchestrator';
+import { ReadyModelsService } from './services/multiModel/readyModels';
+import { isMultiModelStepTurn, SqliteMultiModelStore } from './services/multiModel/store';
+import { threadTurnReceipt } from './services/threadMessageWakeStore';
 import { workflowRunHub } from './services/workflowRunHub';
 import { backgroundSubagentRegistry } from './services/backgroundSubagentRegistry';
 import { endNodeBackgroundSubagents, endOrphanedBackgroundSubagents } from './services/backgroundSubagentEndsRepository';
-import { installLocalAccessGuards } from './services/localOrigins';
+import { authModeOrigins, createAuthCors, installLocalAccessGuards } from './services/localOrigins';
 import { setupUploadsRoutes } from './routes/uploads';
 import { setupFilesRoutes } from './routes/files';
 import { setupArtifactRoutes } from './routes/artifacts';
@@ -66,10 +88,12 @@ import { resolveAccessPolicy } from './services/accessPolicy';
 import { createSessionAccessMiddleware } from './routes/middleware/sessionAccess';
 import { McpSlotRegistry, mountMcp } from './services/mcpServer';
 import { JSON_BODY_LIMIT_BYTES } from './services/requestBodyLimit';
-import { initDb, getDb, getDbPath, closeDb, closeAuditDb } from './services/db';
+import { initDb, getDb, getDbPath, closeDb, closeAuditDb, openExistingAuditDb } from './services/db';
 import { initDbWorker, shutdownDbWorker } from './services/dbWorkerClient';
-import { recordAudit } from './services/audit';
-import { getAgentConfig, loadAgentConfig, updateAgentConfig, reconcileRuntimeWithRegistered, resolveModel, resolveReasoning, resolveProvider } from './services/agentConfig';
+import { auditLogHealth, recordAudit } from './services/audit';
+import { installStartupSignalHandlers } from './services/startupSignals';
+import { scanGraphIntegrity } from './services/graphIntegrity';
+import { getAgentConfig, loadAgentConfig, updateAgentConfig, reconcileRuntimeWithRegistered, resolveModel, resolveReasoning } from './services/agentConfig';
 import { setProviderEnvBindings, getProviderApiKey } from './services/secrets';
 import { getWarmStatus, markReady, markFailed } from './services/readyState';
 import { getRuntime, listRuntimes, registerRuntime } from './agents/registry';
@@ -78,6 +102,7 @@ import { getEnabledFactories } from './agents/runtimeFactories';
 import { createMichiRuntimeHost } from './agents/michiRuntimeHost';
 import { agentRunToolsBindingFor } from './agents/agentRunInvocation';
 import { createAgentToolBridge } from './agents/toolBridge';
+import type { MichiBackendHealth } from 'michi-shared';
 import type { ProviderEnvBinding } from './agents/types';
 import * as sessionRegistry from './agents/sessionRegistry';
 import type { AgentRuntime } from './agents/types';
@@ -86,8 +111,7 @@ import { printEnvInfo } from './envDetect';
 import { startupMark } from './services/startupTrace';
 import { configureRuntimeDeps } from './agents/runtimeDeps';
 import { resolveChatPermissionMode, resolveChatApproveForMe, hasChatToolGrant, grantChatTool, chatPermissionResetToken } from './services/chatPermissions';
-import { getNode, getNodeSessionBinding, listMessages, listTrees, getWorkspace, getWorkspaceInstructions, recoverInterruptedTurns, updateNodeResumeBinding, upsertAgentContextMetadata } from './services/dbRepository';
-import { ensureDurableGraphNode, rollbackProvisionalSpawnNode } from './services/graphCommands';
+import { getNode, getNodeSessionBinding, listMessages, getWorkspace, getWorkspaceInstructions, recoverInterruptedTurns, upsertAgentContextMetadata } from './services/dbRepository';
 import { sessionPlanSnapshot } from './services/planSnapshot';
 import { getMichiDataDir } from './services/dataDir';
 import {
@@ -96,6 +120,7 @@ import {
   remoteAccessToken,
   remoteServerId,
   resolveListenHost,
+  selfLoopbackBase,
   validateRemoteAccessConfiguration,
 } from './services/remoteAccess';
 import { sshTunnelManager } from './services/sshTunnelManager';
@@ -104,36 +129,52 @@ import { FileRuntimeCatalogCache } from './agents/runtimeModelCache';
 import { refreshRuntimeModelsInBackground } from './agents/runtimeModelRefresh';
 import { createAgentRunAssembly, type AgentRunAssembly } from './agents/agentRunAssembly';
 import { chatHub } from './agents/chatHub';
-import { configureThreadMessaging } from './agents/threadMessageTool';
+import { configureThreadMessaging, recoverThreadMessageWakes } from './agents/threadMessageTool';
+import { isRegisteredLiveSession } from './agents/requestedTurnStart';
+import { chatHubAwaitingUser } from './services/chatAwaitingUser';
+import { settleStoppedThreadWakes } from './agents/threadMessageWakes';
 import { acquireSessionRestoreLock } from './services/nativeResume';
 import { AgentRunAdministrativeLifecycle } from './services/agentRunAdministrativeLifecycle';
 import { createStreamTransport } from './services/streamTransport';
 import { setupScheduledJobRoutes } from './routes/scheduledJobs';
 import { setupMemoryRoutes } from './routes/memories';
+import { setupSkillRoutes } from './routes/skills';
 import { setupMemoryExtractionRoutes } from './routes/memoryExtraction';
-import { attachMemoryExtractionScheduler, installMemoryExtractionHooks } from './services/memory/extractionService';
+import {
+  attachMemoryExtractionScheduler, installMemoryExtractionHooks, migrateRetiredExplicitMode, wakeMemoryExtraction,
+} from './services/memory/extractionService';
+import { watchConversationSwitches } from './services/memory/typedText';
+import { activateLegacyPendingMemories } from './services/memory/activateLegacyPending';
+import { indexTurn, startRecallBackfill } from './services/memory/recallIndex';
+import { attributeTurn } from './services/memory/replySources';
+import { startNativeMemoryImport } from './services/memory/nativeMemoryImport';
+import { createMemoryDirectAnswerer } from './services/memory/extractionDirect';
+import { markExtractionBoot, watchConversationPresence } from './services/memory/extractionRun';
 import { createLocalOriginGuard, isLoopbackListenHost } from './routes/middleware/localControl';
 import { ScheduledJobsRepository } from './services/scheduledJobs/repository';
 import { ScheduledJobScheduler } from './services/scheduledJobs/scheduler';
 import { ChatScheduledJobExecutor, isSchedulableWorkspace } from './services/scheduledJobs/chatExecutor';
 import { scheduledJobEvents } from './services/scheduledJobs/events';
+import { structureEvents } from './services/structureEvents';
 import { createDesktopAppLauncher } from './services/scheduledJobs/appLauncher';
 import { scheduledJobsFeatureEnabled } from './services/scheduledJobs/feature';
 import { configureScheduledJobTools } from './agents/scheduledJobTools';
+import { scheduledJobCreateNeedsApproval } from './services/scheduledJobs/settings';
 import { CustomAgentsFeatureGate } from './services/customAgentsFeatureGate';
+import { AttentionService } from './services/attention/attentionService';
+import { setupAttentionRoutes } from './routes/attention';
+import { setupInterruptedTurnRoutes } from './routes/interruptedTurns';
+import { subscribeNodeCompletionSeen, subscribePermissionAnswered } from './services/attentionSignals';
+import { panePresenceRegistry } from './services/panePresence';
+import { AgentRunsRepository } from './services/agentRunsRepository';
 
 // Load backend/.env explicitly. The default `dotenv.config()` looks in
 // process.cwd(), but in the electron + monorepo dev loop the cwd is the
 // repo root, so `backend/.env` would silently be missed. Resolving from
 // __dirname makes us cwd-independent.
 dotenv.config({ path: path.join(__dirname, '..', '.env') });
-// The desktop app forwards ~/.michi/.env into the backend it forks. The
-// always-on background service is started by launchd instead, so it reads the
-// same file itself (existing environment variables still win).
+// The background service has read ~/.michi/.env already (./bootEnv).
 const SERVICE_MODE = process.env.MICHI_SERVICE_MODE === '1';
-if (SERVICE_MODE) {
-  dotenv.config({ path: path.join(os.homedir(), '.michi', '.env') });
-}
 // Reject unsupported combinations before opening databases or starting runtimes.
 const accessPolicy = resolveAccessPolicy();
 const REQUIRE_AUTH = accessPolicy.requireAuth;
@@ -189,8 +230,12 @@ const app = express();
 const stopEventLoopDiagnostics = startEventLoopDiagnostics();
 const port = process.env.PORT || 3000;
 
+// Until the graceful shutdown below is installed, SIGINT/SIGTERM wait instead
+// of killing startup mid-snapshot (services/startupSignals.ts).
+const releaseStartupSignals = installStartupSignalHandlers();
 // Initialize SQLite before anything that might need it
 initDb();
+openExistingAuditDb();
 if (process.env.MICHI_CLOUD !== '1') startMetaAgentMetrics();
 // Spin up the async database worker thread. It opens its own WAL connection
 // to the same data.db file so writes execute off the main thread. Hot-path
@@ -208,6 +253,32 @@ const interruptedTurns = recoverInterruptedTurns(Date.now(), pendingAgentDeliver
 if (interruptedTurns > 0) {
   log.warn('boot', 'recovered interrupted turns', { count: interruptedTurns });
 }
+// Server attention (services/attention/): decides notifications once, from
+// every turn the hub runs, presence (window focus and visible panes) and the
+// view marks that record a completion as seen; every window of the owner
+// receives them on the background feed. Subscribed before any turn starts.
+const attentionRuns = new AgentRunsRepository();
+const attentionService = new AttentionService({
+  presence: panePresenceRegistry,
+  getRun: (ownerUserId, runId) => attentionRuns.getRun(ownerUserId, runId),
+  // A multi-model branch's answer or review notifies nobody; the synthesis does.
+  isHandOffTurn: isMultiModelStepTurn,
+  // The agent's own conversation speaks under the name the user gave it.
+  assistantName: () => getCompanionSettings().displayName,
+});
+chatHub.subscribeBackground({
+  includeForeground: true,
+  send: (_chatId, event) => attentionService.observeChatEvent(event),
+  close: () => {},
+});
+panePresenceRegistry.subscribeAttentionSignals((ownerUserId, shown) => attentionService.presenceChanged(ownerUserId, shown));
+subscribeNodeCompletionSeen((event) => attentionService.nodeCompletionSeen(event));
+subscribePermissionAnswered((event) => attentionService.permissionAnswered(event));
+// Approvals that wait only on a workflow run: a Claude workflow agent asking between turns, a Kiro step.
+workflowRunHub.subscribe((_ownerUserId, run) => attentionService.observeWorkflowRun(run));
+// Trash, archive, moves and purges reach the records of their targets.
+structureEvents.subscribe({ send: (frame) => attentionService.structureChanged(frame) });
+attentionService.start();
 // Before any agent session starts: the background subagents stored as still
 // waiting for an outcome ran in processes the previous backend owned, which
 // are gone, so their outcome never comes. A failed sweep leaves them as they
@@ -218,6 +289,13 @@ try {
   if (ended.subagents > 0) log.info('boot', 'recorded background subagents ended by the restart', { ...ended });
 } catch (error) {
   log.warn('boot', 'background subagent sweep failed', { error: (error as Error).message });
+}
+// Reported, never repaired here: a fix has to know what each window meant.
+try {
+  const integrity = scanGraphIntegrity();
+  if (Object.values(integrity).some((count) => count > 0)) log.warn('boot', 'graph rows break placement invariants', integrity);
+} catch (error) {
+  log.warn('boot', 'graph integrity scan failed', { error: (error as Error).message });
 }
 // A session whose process ends with background subagents still running
 // records how they ended on the node's stored rosters.
@@ -244,7 +322,9 @@ configureRuntimeDeps({
   agentConfig: { getAgentConfig, resolveModel, resolveReasoning },
 });
 
-const mcpRegistry = new McpSlotRegistry({ mcpPort: Number(port) });
+// The listener's address once bound: a host name such as localhost binds one of its addresses.
+let boundListenAddress: string | undefined;
+const mcpRegistry = new McpSlotRegistry({ mcpPort: Number(port), mcpHost: () => boundListenAddress ?? resolveListenHost() });
 const runtimeModelCache = new FileRuntimeCatalogCache(getMichiDataDir());
 // One host for every runtime: the adapters read Michi through its ports.
 const runtimeHost = createMichiRuntimeHost();
@@ -253,8 +333,8 @@ sessionRegistry.configureRuntimeManager(runtimeHost);
 
 // Register the enabled runtimes (filtered by MICHI_ENABLED_RUNTIMES, or
 // all of them locally) through a single factory loop. Each factory
-// creates its runtime with a bridge whose createChild calls
-// runtime.newSession and registers the child in sessionRegistry. Provider
+// creates its runtime with a bridge whose createChild opens a
+// spawn_branches child (services/spawnChild.ts) in that runtime. Provider
 // env bindings are collected here and pushed into secrets.ts after
 // registration.
 const allEnvBindings: ProviderEnvBinding[] = [];
@@ -263,100 +343,7 @@ let agentRunAssembly: AgentRunAssembly | null = null;
 for (const factory of getEnabledFactories()) {
     let runtime!: AgentRuntime;
     const bridge = createAgentToolBridge({
-        createChild: async (args) => {
-            const parentBinding = getNodeSessionBinding(args.parentChatId, args.ownerUserId ?? undefined);
-            const parentNode = parentBinding
-              ? getNode(parentBinding.nodeId)
-              : process.env.MICHI_CLOUD === '1'
-                ? null
-                : getNode(args.parentChatId);
-            if (!parentNode) throw new Error(`spawn parent node not found for ${args.parentChatId}`);
-            const workspace = getWorkspace(parentNode.workspace_id);
-            if (!workspace) throw new Error(`spawn workspace ${parentNode.workspace_id} not found`);
-            const tree = parentNode.tree_id
-              ? listTrees(parentNode.workspace_id).find((candidate) => candidate.id === parentNode.tree_id)
-              : undefined;
-            const nodeId = `n-${randomUUID()}`;
-            ensureDurableGraphNode({
-              workspace: {
-                id: workspace.id,
-                name: workspace.name,
-                cwd: workspace.cwd ?? null,
-                createdAt: workspace.created_at,
-                activeTreeId: workspace.active_tree_id ?? parentNode.tree_id ?? null,
-              },
-              ...(tree ? {
-                tree: {
-                  id: tree.id,
-                  rootNodeId: tree.root_node_id,
-                  name: tree.name ?? null,
-                  archivedAt: tree.archived_at ?? null,
-                  pinnedAt: tree.pinned_at ?? null,
-                  lastActiveAt: tree.last_active_at,
-                  createdAt: tree.created_at,
-                },
-              } : {}),
-              node: {
-                id: nodeId,
-                treeId: parentNode.tree_id ?? null,
-                parentNodeId: parentNode.id,
-                kind: 'chat',
-                title: args.title,
-                spawnedByAgent: true,
-                // A tiny durable outbox. It lets hydration restart the child
-                // even when the parent spawn SSE frame expired from the ring.
-                composerDraft: JSON.stringify({ __michiPendingSpawnPrompt: args.prompt }),
-                createdAt: Date.now(),
-              },
-              edges: [{
-                id: `branch-${parentNode.id}-${nodeId}`,
-                sourceNodeId: parentNode.id,
-                targetNodeId: nodeId,
-                kind: 'branch',
-                createdAt: Date.now(),
-              }],
-              ownerUserId: workspace.owner_user_id ?? null,
-            });
-            let child: Awaited<ReturnType<AgentRuntime['newSession']>> | undefined;
-            const userId = process.env.MICHI_CLOUD === '1' ? workspace.owner_user_id ?? undefined : undefined;
-            const model = resolveModel(runtime.id, userId);
-            const provider = resolveProvider(runtime.id, userId);
-            const reasoning = resolveReasoning(runtime.id, userId);
-            try {
-                const sessionOptions = {
-                    cwd: args.cwd,
-                    parentChatId: args.parentChatId,
-                    enableFollowUps: args.enableFollowUps,
-                    sessionId: nodeId,
-                    workspaceId: parentNode.workspace_id,
-                    ownerUserId: workspace.owner_user_id ?? null,
-                    model, provider, reasoning,
-                };
-                child = await tryForkChatSession(runtime, sessionOptions) ?? await runtime.newSession(sessionOptions);
-                updateNodeResumeBinding(nodeId, {
-                  acp_session_id: child.nativeSessionId ?? child.id,
-                  runtime_id: child.runtimeId,
-                  runtime_engine: child.nativeEngine ?? null,
-                  provider_id: provider,
-                  model_id: child.currentModelId ?? model,
-                  reasoning,
-                  current_mode_id: child.currentModeId ?? null,
-                });
-                sessionRegistry.registerSession(child, workspace.owner_user_id ?? null);
-            } catch (err) {
-                if (child) {
-                  await runtime.releaseSession(child.id);
-                  sessionRegistry.dropSession(child.id);
-                }
-                rollbackProvisionalSpawnNode(
-                  nodeId,
-                  parentNode.workspace_id,
-                  workspace.owner_user_id ?? null,
-                );
-                throw err;
-            }
-            return { chatId: child.id, nodeId };
-        },
+        createChild: (args) => createSpawnChild(runtime, args),
         persistContext: ({ chatId, ownerUserId, name, filePath, size }) => {
             const userId = ownerUserId ?? undefined;
             const binding = getNodeSessionBinding(chatId, userId);
@@ -397,6 +384,21 @@ for (const factory of getEnabledFactories()) {
 setProviderEnvBindings(allEnvBindings);
 reconcileRuntimeWithRegistered(listRuntimes().map((r) => r.id));
 
+// The Companion v2 merge (DESIGN-v2 §7): the assistant's conversations become
+// the one conversation V, once, synchronously, before any route opens or any
+// agent session starts. It reads the registered runtimes and the agent config,
+// so it runs after both; reading the registry earlier would claim the runtime
+// manager before configureRuntimeManager. The assistant exists only in the
+// desktop app.
+if (process.env.MICHI_CLOUD !== '1') {
+  try {
+    const merged = migrateAssistantV2();
+    log.info('boot', 'assistant v2 merge', { mergedAt: merged.mergedAt });
+  } catch (error) {
+    log.error('boot', 'assistant v2 merge failed', { error: (error as Error).message });
+  }
+}
+
 // kiroRuntime may be undefined in Pi-only / Claude-only deployments;
 // ChatManager guards its Kiro-specific methods accordingly.
 const chatManager = new ChatManager(kiroRuntime, defaultCwd);
@@ -404,14 +406,41 @@ configureThreadMessaging({
   ensureSession: (input) => chatManager.ensureParentSession(input),
   startTurn: (args) => chatHub.startRequestedSelfTurn(args),
   acquireRestoreLock: acquireSessionRestoreLock,
+  isLiveSession: isRegisteredLiveSession,
   newTurnId: () => randomUUID(),
   startWaitMs: 3_000,
+  awaitingUser: (chatId) => chatHubAwaitingUser(chatHub, chatId),
+  isShuttingDown: () => chatHub.isShuttingDown(),
 });
+// A Stop ends the send_to_thread wake chain the stopped turn is part of.
+chatHub.onCancel(({ turnId }) => settleStoppedThreadWakes(turnId));
+// Multi-model plans (services/multiModel/): proposed by a chat agent, run by
+// the backend once the user presses Start.
+const multiModelStore = new SqliteMultiModelStore();
+const multiModel = new MultiModelOrchestrator({
+  hub: workflowRunHub,
+  store: multiModelStore,
+  chat: chatHub,
+  ensureSession: (input) => chatManager.ensureParentSession(input),
+  acquireRestoreLock: acquireSessionRestoreLock,
+  isLiveSession: isRegisteredLiveSession,
+  hasLiveSession: (nodeId) => !!sessionRegistry.peekLiveSession(nodeId),
+  createChild: (input) => createChildThread(input, { defaultCwd, store: multiModelStore }),
+  answerPermission: answerChatPermission,
+  subscribePermissionAnswered,
+  turnError: (turnId) => threadTurnReceipt(turnId)?.error ?? null,
+  readyModels: new ReadyModelsService({ catalogCache: runtimeModelCache }),
+});
+configureMultiModelTools(multiModel);
+// A branch deleted, restored or archived after its run ended updates the run's rows (branchGone).
+structureEvents.subscribe({ send: (frame) => multiModel.structureChanged(frame) });
 agentRunAssembly = createAgentRunAssembly({
   isEnabled: () => customAgentsFeature.isEnabled(),
   chatManager,
   defaultCwd,
   dataDir: getMichiDataDir(),
+  // Watches in notify mode become attention records (finished/failed per Run).
+  notifier: attentionService.agentRunNotifier,
 });
 
 const agentRunLifecycle = new AgentRunAdministrativeLifecycle({
@@ -452,6 +481,17 @@ retryAgentRunCleanup();
 const agentRunCleanupTimer = setInterval(retryAgentRunCleanup, 60_000);
 agentRunCleanupTimer.unref();
 
+// Idle Kiro chats give their live session back (ChatManager.releaseIdleSessions);
+// the next message resumes it. One pass at a time.
+let idleSessionPass: Promise<unknown> | null = null;
+const idleSessionTimer = setInterval(() => {
+  if (idleSessionPass) return;
+  idleSessionPass = chatManager.releaseIdleSessions()
+    .catch((error) => log.warn('chat', 'idle session sweep failed', { error: error instanceof Error ? error.message : String(error) }))
+    .finally(() => { idleSessionPass = null; });
+}, 60_000);
+idleSessionTimer.unref();
+
 const agentRunRecoveryPromise = agentRunAssembly.start()
   .then((summary) => {
     if (customAgentsFeature.isEnabled()) {
@@ -472,11 +512,17 @@ const agentRunRecoveryPromise = agentRunAssembly.start()
 // are a desktop feature: cloud deployments have per-user owners and no local
 // notification path, so the scheduler stays off there.
 const SCHEDULED_JOBS_ENABLED = scheduledJobsFeatureEnabled();
+// The one launcher that wakes a quit app to show what it missed (only the
+// macOS background service may: createDesktopAppLauncher). The scheduler and
+// the Companion's notices share it, so one wake a minute between them
+// (DESIGN-v2 §5.1).
+const appLauncher = createDesktopAppLauncher();
 const scheduledJobExecutor = SCHEDULED_JOBS_ENABLED
   ? new ChatScheduledJobExecutor({
       chatHub,
       ensureSession: (input) => chatManager.ensureParentSession(input),
       releaseMaintenanceSession: (input) => chatManager.releaseMaintenanceSession(input),
+      isLiveSession: isRegisteredLiveSession,
     })
   : null;
 const scheduledJobScheduler = scheduledJobExecutor
@@ -485,33 +531,112 @@ const scheduledJobScheduler = scheduledJobExecutor
       executor: scheduledJobExecutor,
       events: scheduledJobEvents,
       // A hidden system workspace (the Michi assistant's) is not a place a
-      // job may run in: to the scheduler it does not exist.
+      // job may run in: to the scheduler it does not exist. Automatic memory
+      // still reads V there, with direct calls only (extractionRun's hold).
       workspaceExists: (id) => isSchedulableWorkspace(getWorkspace(id)),
+      maintenanceWorkspaceExists: (id) => isAssistantWorkspace(id),
+      workspaceArchived: (id) => getWorkspace(id)?.archived_at != null,
       runtimeExists: (id) => !!getRuntime(id),
-      launcher: createDesktopAppLauncher(),
+      launcher: appLauncher,
       serviceMode: SERVICE_MODE,
+      // Automatic memory answers with one direct structured call where the Meta agent's runtime has one.
+      memoryDirect: createMemoryDirectAnswerer({ runtime: (id) => getRuntime(id) }),
     })
   : null;
 // Tombstones for deleted/rejected memories are written on every backend; extraction runs only with the scheduler.
 installMemoryExtractionHooks();
+// Memory is on for everyone and nothing waits for approval: once per database, the retired explicit-only mode
+// becomes auto and the pending memories older versions left become active. After the tombstone hook above,
+// before the scheduler and the HTTP listener start; a failure is retried at the next start.
+try {
+  const moved = migrateRetiredExplicitMode();
+  if (moved?.length) log.info('boot', 'memory: explicit-only mode moved to auto', { owners: moved.length });
+} catch (error) {
+  log.warn('boot', 'memory: explicit-only mode migration failed', { error: (error as Error).message });
+}
+try {
+  const activated = activateLegacyPendingMemories();
+  if (activated && (activated.activated || activated.merged)) log.info('boot', 'memory: activated legacy pending memories', { ...activated });
+} catch (error) {
+  log.warn('boot', 'memory: legacy pending activation failed', { error: (error as Error).message });
+}
+// Each completed human turn becomes searchable for recall in other conversations.
+chatHub.onTurnFinalized(indexTurn);
+// Then what its reply repeated of the memories and past chats it was given is stored for the line under it.
+chatHub.onTurnFinalized((turn) => { attributeTurn(turn); });
+// Automatic extraction reads a conversation once it is quiet, or once the user left it (no window shows it, or
+// they typed in another one); what waited when the last process stopped is read now.
+markExtractionBoot(Date.now());
+// V shows in the Companion panel, which reports no pane presence: the panel's own beacons (fed below, at the Companion
+// routes) say when it has focus, and V counts as shown while it does, as a visible pane for any other conversation.
+const companionPanel = new CompanionPresence(Date.now());
+watchConversationPresence((nodeId) => panePresenceRegistry.getPresence({ kind: 'node', nodeId }).views.some((view) => view.visible)
+  || (companionPanel.isPanelFocused(Date.now()) && nodeId === currentAssistantNodeId()));
+// Leaving a conversation wakes extraction at once rather than at its next check: no window shows it any more, or the
+// user typed in another one.
+panePresenceRegistry.subscribeConversationsLeft(() => wakeMemoryExtraction());
+watchConversationSwitches(() => wakeMemoryExtraction());
 if (scheduledJobScheduler) attachMemoryExtractionScheduler(scheduledJobScheduler);
 configureScheduledJobTools(scheduledJobScheduler && scheduledJobExecutor
   ? {
       scheduler: scheduledJobScheduler,
       isScheduledRunNode: (nodeId) => scheduledJobExecutor.isRunningOn(nodeId),
       workspaceName: (id) => getWorkspace(id)?.name ?? null,
+      createNeedsApproval: scheduledJobCreateNeedsApproval,
     }
   : null);
 // Resolved once the HTTP listener is bound (see app.listen below).
 let markListening!: () => void;
 const listeningPromise = new Promise<void>((resolve) => { markListening = resolve; });
+
+// The Companion's engine (services/companion/boot.ts): the desktop app only,
+// never with MICHI_DISABLE_COMPANION=1. It starts with the scheduler below and
+// ticks only while this process holds the scheduler lease (DESIGN R2.14), so
+// without a scheduler (MICHI_SCHEDULED_JOBS=0) it does not start at all. Until
+// it runs, the Companion's routes answer from storage (createNoopCompanionService).
+let companion: RunningCompanion | null = null;
+// The conversations' notices while no window is open (services/companion/chatNotices.ts); the desktop app only.
+let chatNotices: RunningChatNotices | null = null;
+function startCompanionEngine(): void {
+  const scheduler = scheduledJobScheduler;
+  if (process.env.MICHI_CLOUD === '1' || process.env.MICHI_DISABLE_COMPANION === '1' || !scheduler || shuttingDown || companion) return;
+  try {
+    companion = bootCompanion({ chatHub, chatManager, isLeaseHolder: () => scheduler.status().active });
+    log.info('boot', 'companion started');
+  } catch (error) {
+    log.warn('boot', 'companion did not start', { err: error instanceof Error ? error.message : String(error) });
+  }
+}
+
 // Start after interrupted-turn recovery so a run never races boot repair, and
 // only once this process is reachable: a backend that failed to bind must not
-// hold the scheduler lease and run jobs no window can see.
+// hold the scheduler lease and run jobs (or the Companion) no window can see.
 void Promise.all([agentRunRecoveryPromise.catch(() => undefined), listeningPromise])
   .then(() => {
     scheduledJobScheduler?.start();
     if (scheduledJobScheduler) log.info('boot', 'scheduled jobs started', { serviceMode: SERVICE_MODE });
+    startCompanionEngine();
+  });
+// Memories and conversations from before the recall index: indexed once per database, in the background.
+void listeningPromise
+  .then(() => startRecallBackfill())
+  .catch((error) => {
+    log.warn('boot', 'memory recall index backfill failed', { error: error instanceof Error ? error.message : String(error) });
+  });
+// What Claude Code, Codex and Kiro remember in their own files (read, never written) becomes Michi memories, and again as they change.
+void listeningPromise.then(() => startNativeMemoryImport());
+// Thread-message wakes the previous process left open (send_to_thread wake)
+// start their reply turns in the scheduler's order: after interrupted-turn
+// recovery, and once this process is reachable.
+void Promise.all([agentRunRecoveryPromise.catch(() => undefined), listeningPromise])
+  .then(() => recoverThreadMessageWakes())
+  .then((summary) => {
+    if (summary.delivered || summary.undeliverable || summary.open || summary.failed) {
+      log.info('boot', 'thread message wakes recovered', { ...summary });
+    }
+  })
+  .catch((error) => {
+    log.warn('boot', 'thread message wake recovery failed', { error: error instanceof Error ? error.message : String(error) });
   });
 
 async function warmConfiguredRuntime(): Promise<void> {
@@ -570,23 +695,7 @@ refreshRuntimeModelsInBackground(listRuntimes().filter(runtime => runtime.id ===
 // keep other web pages out (services/localOrigins.ts).
 
 if (REQUIRE_AUTH) {
-  // CORS — credentials:true is required so the browser sends the auth
-  // cookie cross-origin (frontend dev server runs on :3001, backend on
-  // :3000). origin must echo the request origin (not '*') for
-  // credentialed CORS to be allowed.
-  const ALLOWED_ORIGINS = (process.env.MICHI_CORS_ORIGINS || 'http://localhost:3001,http://localhost:3000')
-    .split(',')
-    .map((s) => s.trim())
-    .filter(Boolean);
-  app.use(cors({
-    origin: (origin, cb) => {
-      if (!origin || ALLOWED_ORIGINS.includes(origin)) return cb(null, true);
-      return cb(new Error(`CORS: origin ${origin} not allowed`));
-    },
-    credentials: true,
-    methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE'],
-    allowedHeaders: ['Content-Type', 'Authorization'],
-  }));
+  app.use(createAuthCors(authModeOrigins()));
 
   // Better-Auth handler must be mounted BEFORE express.json() — its
   // internal node-handler reads the raw request stream itself, and a
@@ -674,6 +783,9 @@ app.use(express.json({ limit: JSON_BODY_LIMIT_BYTES }));
 
 // A server explicitly launched for remote control is protected by a shared
 // bearer token. Desktop/dev remain unchanged unless MICHI_REMOTE_ACCESS=1.
+// Page preview links (loopback, one page, reads only) come first: they open
+// with their own ticket and mark the reads the token check lets through.
+if (!REQUIRE_AUTH) app.use('/api', createPagePreviewMiddleware());
 app.use('/api', createRemoteAccessMiddleware());
 
 if (!REQUIRE_AUTH) {
@@ -718,16 +830,8 @@ const ACCESS_LOG_SILENT_2XX = [
 const redactCapabilityIds = (path: string) =>
   path.replace(/(?<=\/)[0-9a-f]{32}(?=\/|$)/g, (id) => `${id.slice(0, 4)}…`);
 app.use((req, res, next) => {
-  const t0 = Date.now();
   const requestId = nextPerformanceContext();
-  res.on('finish', () => {
-    const dur = Date.now() - t0;
-    const status = res.statusCode;
-    if (!shouldLogAccess(req.method, req.path, status)) return;
-    const stage = status >= 500 ? 'error' : status >= 400 ? 'warn' : 'info';
-    const fn = stage === 'error' ? log.error : stage === 'warn' ? log.warn : log.info;
-    fn('http', `${req.method} ${redactCapabilityIds(req.path)}`, { status, durMs: dur, requestId });
-  });
+  observeAccess(req, res, requestId, (line) => log[line.level]('http', `${req.method} ${redactCapabilityIds(req.path)}`, line.meta));
   withPerformanceContext(requestId, next);
 });
 
@@ -742,7 +846,8 @@ app.get('/api/health', (req, res) => {
     // child and restart the service after an app update.
     serviceMode: SERVICE_MODE,
     serviceBuild: SERVICE_MODE ? process.env.MICHI_SERVICE_BUILD ?? null : null,
-  });
+    ...auditLogHealth(),
+  } satisfies MichiBackendHealth);
 });
 
 // Auth-config probe — frontend hits this on boot to decide whether to
@@ -798,27 +903,56 @@ app.use('/api', setupAgentRunRoutes({
 // launch one.
 // Runs a previous process left open lost their runtime with it.
 workflowRunHub.recover();
+// Multi-model runs re-attach (proposed) or settle (running) over what recover() wrote.
+multiModel.start();
 app.use('/api', setupWorkflowRunRoutes({ hub: workflowRunHub, backgroundSubagents: backgroundSubagentRegistry }));
+app.use('/api', setupMultiModelRunRoutes({ orchestrator: multiModel, hub: workflowRunHub }));
 const mobileAccessChoice = path.join(getMichiDataDir(), 'mobile-access.json');
 const mobileAccess = createMobileAccess({
   target: () => {
     const address = server.address();
     if (!address || typeof address === 'string') throw new Error('Michi is not listening yet');
-    const host = address.address === '::1' || address.address === '::' ? '[::1]' : '127.0.0.1';
-    return `http://${host}:${address.port}`;
+    const base = selfLoopbackBase(address.address, address.port);
+    if (!base) throw new Error('Phone access needs Michi to listen on loopback or on every interface.');
+    return base;
   },
   token: () => remoteAccessEnabled() ? remoteAccessToken() : null,
   unavailableReason: () => REQUIRE_AUTH || process.env.MICHI_CLOUD === '1'
     ? 'Mobile tunnels are available on personal Michi backends.'
+    : !selfLoopbackBase(boundListenAddress ?? resolveListenHost(), Number(port))
+      ? 'Phone access needs Michi to listen on loopback or on every interface.'
     : !servingFrontend
       ? 'Build the web UI with npm run build, then restart this backend before enabling phone access.' : null,
 });
+// Terminals for windows without Electron's PTY: phones, browsers and the
+// desktop's remote workspaces. Electron's local terminals stay on IPC.
+const ptyModule = loadNodePty();
+if ('error' in ptyModule) log.info('boot', 'terminals unavailable: node-pty did not load', { error: ptyModule.error });
+const terminalHost = new TerminalHost({
+  spawn: 'spawn' in ptyModule ? ptyModule.spawn : null,
+  unsupportedReason: 'Terminals need node-pty, which is not built on this machine. Run npm rebuild node-pty in its Michi folder, then restart Michi.',
+});
+const phoneTerminalChoice = path.join(getMichiDataDir(), 'phone-terminal.json');
+let phoneTerminalEnabled = readPhoneTerminalChoice(phoneTerminalChoice);
+const phoneTerminal = {
+  enabled: () => phoneTerminalEnabled,
+  set(enabled: boolean) {
+    savePhoneTerminalChoice(phoneTerminalChoice, enabled);
+    phoneTerminalEnabled = enabled;
+    if (!enabled) terminalHost.disconnectPhones();
+  },
+};
+app.use('/api', setupTerminalRoutes(terminalHost, {
+  hosted: REQUIRE_AUTH || process.env.MICHI_CLOUD === '1',
+  phoneAllowed: phoneTerminal.enabled,
+}));
 // The choice belongs to this personal backend, including the desktop host.
 app.use('/api', setupMobileAccessRoutes(mobileAccess, {
   remember: (enabled, provider) => {
     try { saveMobileAccessChoice(mobileAccessChoice, enabled, provider); }
     catch (error) { log.warn('http', 'could not save phone access choice', { error: (error as Error).message }); }
   },
+  terminal: phoneTerminal,
 }));
 // Settings → Update: a remote backend replaces itself with the latest main branch.
 // Elsewhere the status explains why it cannot, and nothing runs.
@@ -849,6 +983,8 @@ app.use('/api', setupDiffRoutes());
 app.use('/api', setupMichiRoutes(chatManager));
 app.use('/api', setupDigestRoutes(chatManager));
 app.use('/api', setupPersistenceRoutes());
+app.use('/api', setupAttentionRoutes(attentionService));
+app.use('/api', setupInterruptedTurnRoutes());
 configurePaneInspectionEventBus(agentRunAssembly.enabled ? agentRunAssembly.coordinator.events : undefined);
 app.use('/api', setupPaneInspectionRoutes({ agentRunEvents: agentRunAssembly.enabled ? agentRunAssembly.coordinator.events : undefined }));
 app.use('/api', setupConversationUpdatesRoutes());
@@ -873,9 +1009,42 @@ if (process.env.MICHI_CLOUD !== '1') {
   app.use('/api', setupAssistantRoutes());
   app.use('/api', setupMetaAgentRoutes());
   app.use('/api', setupMetaAgentOverviewRoutes({ scheduler: scheduledJobScheduler }));
+  // The Companion's storage and streams. The running engine's service once it
+  // started (startCompanionEngine, after the listener and the scheduler);
+  // until then, or when it does not run here, the no-op one stands in. Only
+  // the scheduler lease holder runs the Companion (DESIGN R2.14).
+  const idleCompanionService = createNoopCompanionService({
+    conversationBusy: (nodeId) => chatHub.isActive(nodeId) || chatHub.isOwnerTurnActive(nodeId) || chatHub.hasPendingSelfTurn(nodeId),
+    holdsSchedulerLease: () => scheduledJobScheduler?.status().active === true,
+  });
+  // An applied conversation.start card starts its conversation as the Meta agent's start_conversation does.
+  setCompanionCardDeps({ startConversation: startCompanionDelegation });
+  app.use('/api', createCompanionRouter({
+    service: (): CompanionService => {
+      const service = companion?.service ?? idleCompanionService;
+      // Every beacon also tells automatic memory whether the panel still shows V (companionPanel); leaving it wakes extraction.
+      return { ...service, onPresence: (input) => {
+        if (companionPanel.update(input, Date.now()).leftPanel) wakeMemoryExtraction();
+        return service.onPresence(input);
+      } };
+    },
+    // The tray's "<name> is waiting for you": V's running turn asks for an approval or an answer.
+    conversationWaiting: (nodeId) => chatHub.getPendingPermission(nodeId) !== null || chatHub.getPendingUserInput(nodeId) !== null,
+  }));
+  // A notice stored while no notifier has been connected for 30 s wakes the quit app (DESIGN-v2 §5.1).
+  companionEvents.configureWake({ launcher: appLauncher });
+  // While no window is open, conversations' approvals, questions and replies are notified from here (DESIGN-v2 §5.2).
+  // The attention service's records of the same events keep it to one OS notification each: what a window raised
+  // is not notified here, and what is notified here no window raises again.
+  chatNotices = startChatNotices({
+    hub: chatHub,
+    isScheduledRun: (nodeId) => scheduledJobExecutor?.isRunningOn(nodeId) ?? false,
+    attention: attentionService,
+  });
 }
 app.use('/api', setupScheduledJobRoutes({ scheduler: scheduledJobScheduler, events: scheduledJobEvents }));
 app.use('/api', setupMemoryRoutes());
+app.use('/api', setupSkillRoutes());
 app.use('/api', setupMemoryExtractionRoutes({ scheduler: scheduledJobScheduler }));
 
 const frontendBuild = path.join(__dirname, '../../frontend/build');
@@ -918,6 +1087,20 @@ const server = app.listen(Number(port), listenHost, (error?: Error) => {
   }
   log.info('boot', 'listening', { port: Number(port), host: listenHost });
   markListening();
+  const bound = server.address();
+  if (bound && typeof bound !== 'string') boundListenAddress = bound.address;
+  const selfBase = bound && typeof bound !== 'string' ? selfLoopbackBase(bound.address, bound.port) : null;
+  if (!selfBase) {
+    log.warn('boot', 'not listening on loopback: agents get no Michi tools, and phone access and page previews are off', { host: listenHost });
+  }
+  // Preview links point at this backend over loopback; the page view itself
+  // is the built UI here, or the dev renderer under `npm run dev`.
+  const devRenderer = process.env.MICHI_RENDERER_URL?.trim()
+    || (process.env.MICHI_DEV_RENDERER === '1' ? 'http://localhost:3001' : '');
+  configurePagePreview(REQUIRE_AUTH || process.env.MICHI_CLOUD === '1' || !selfBase
+    || (!servingFrontend && !devRenderer)
+    ? null
+    : { apiBase: selfBase, renderer: servingFrontend ? '' : devRenderer });
   if (process.env.MICHI_MOBILE_ACCESS === '1' || readMobileAccessChoice(mobileAccessChoice, defaultMobileAccessProvider())) void mobileAccess.start().catch(error => log.warn('boot', 'mobile access start failed', { error: (error as Error).message }));
   startupMark('express_listen_ready', { port: Number(port) });
   printEnvInfo(Number(port));
@@ -944,10 +1127,22 @@ const gracefulShutdown = async (): Promise<void> => {
   shuttingDown = true;
   stopEventLoopDiagnostics();
   log.info('boot', 'shutting down');
+  // First, so no poll or hidden turn starts any more; its MCP connections
+  // close alongside the rest, and its last writes land before the DB closes.
+  const companionStopped = companion?.stop().catch((error) => {
+    log.warn('boot', 'companion stop failed', { err: error instanceof Error ? error.message : String(error) });
+  });
+  chatNotices?.stop();
+  chatNotices = null;
+  companionEvents.configureWake(null);
   chatHub.prepareForShutdown();
+  // Decides pending notifications while the database is open; ignores teardown.
+  attentionService.stop();
   streamTransport.close();
   clearInterval(agentRunCleanupTimer);
+  clearInterval(idleSessionTimer);
   await agentRunCleanupPass;
+  await idleSessionPass;
   // Record in-flight scheduled runs as interrupted while the DB is open.
   await scheduledJobScheduler?.stop().catch(() => {});
   scheduledJobExecutor?.dispose();
@@ -959,11 +1154,13 @@ const gracefulShutdown = async (): Promise<void> => {
   // instance 404s them ("unknown mcp slot").
   await Promise.allSettled(listRuntimes().map((runtime) => runtime.shutdown()));
   await mobileAccess.stop();
+  terminalHost.dispose();
   sshTunnelManager.shutdown();
   closeAllArtifactWatchers();
   // Coalesced workflow snapshots would otherwise lose their last revisions.
   workflowRunHub.flush();
   await stopMetaAgentMetrics();
+  await companionStopped;
   closeDb();
   closeAuditDb();
   await shutdownDbWorker();
@@ -991,6 +1188,8 @@ const shutdownAndExit = () => {
 };
 process.on('SIGINT', shutdownAndExit);
 process.on('SIGTERM', shutdownAndExit);
+// After the listeners above, so a signal that arrived during startup reaches them.
+releaseStartupSignals();
 
 // SIGUSR2 → nodemon's dev-restart signal. Node's default action for an
 // unhandled SIGUSR2 is to terminate immediately, which orphaned the claude

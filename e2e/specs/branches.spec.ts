@@ -1,9 +1,16 @@
 import { expect, test, type Page } from '@playwright/test';
 import { installMockApi } from '../fixtures/mockApi';
+import { openThreadFromSidebar } from '../fixtures/shell';
 
 const PROJECT_ID = 'branches-ws';
 const BASE_T = 1_781_000_000_000;
 const LONG_BRANCH_TITLE = 'Multi-device session family revocation across OAuth providers';
+
+/** The branch overview lives in Map › Doc (the topbar Overview button is gone). */
+async function openMapDoc(page: Page) {
+  await page.getByRole('button', { name: 'Map', exact: true }).click();
+  await page.getByRole('tab', { name: 'Doc' }).click();
+}
 
 function node(nodeId: string, title: string, branchOverview: string) {
   return {
@@ -70,8 +77,10 @@ async function seed(page: Page) {
 test('Branches renders only the active thread as a heading-based document', async ({ page }) => {
   await seed(page);
   await page.goto('/');
+  // Home shows no conversation, so the topbar offers Map only once one is open.
+  await openThreadFromSidebar(page, 'Authentication redesign');
 
-  await page.getByRole('button', { name: 'Overview' }).click();
+  await openMapDoc(page);
 
   await expect(page.getByRole('heading', { level: 1, name: 'Authentication redesign' })).toBeVisible();
   await expect(page.getByRole('heading', { level: 2, name: 'Token refresh model' })).toBeVisible();
@@ -83,8 +92,9 @@ test('Branches renders only the active thread as a heading-based document', asyn
 test('Branches directory mirrors the active thread hierarchy and navigates the document', async ({ page }) => {
   await seed(page);
   await page.goto('/');
+  await openThreadFromSidebar(page, 'Authentication redesign');
 
-  await page.getByRole('button', { name: 'Overview' }).click();
+  await openMapDoc(page);
 
   const directory = page.getByRole('navigation', { name: 'Branch directory' });
   await expect(directory.getByRole('treeitem', { name: 'Authentication redesign' })).toHaveAttribute('aria-level', '1');
@@ -106,8 +116,9 @@ test('Branches directory mirrors the active thread hierarchy and navigates the d
 test('opening a Branches node centers its focused Dashboard pane', async ({ page }) => {
   await seed(page);
   await page.goto('/');
+  await openThreadFromSidebar(page, 'Authentication redesign');
 
-  await page.getByRole('button', { name: 'Overview' }).click();
+  await openMapDoc(page);
   await page.getByRole('button', { name: `Open ${LONG_BRANCH_TITLE}` }).click();
 
   const landing = await page.locator('.terminal-dashboard').evaluate((strip) => {
@@ -166,7 +177,8 @@ async function openLongRead(page: Page) {
   }, longReadState());
   await installMockApi(page);
   await page.goto('/');
-  await page.getByRole('button', { name: 'Overview' }).click();
+  await openThreadFromSidebar(page, 'Long read');
+  await openMapDoc(page);
 }
 
 /** Whether the outline item is fully visible inside both the outline card and the page scroller. */

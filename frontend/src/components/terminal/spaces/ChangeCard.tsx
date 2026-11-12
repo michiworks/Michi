@@ -1,13 +1,17 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { motion, useIsPresent } from 'motion/react';
 import { Sparkles } from 'lucide-react';
-import { pageBlockText, parsePageBlockInput } from 'michi-shared';
-import type { ChangeReadScope, PageBlockInput, PageChangeDto, PageDatabaseColumn, PageDatabaseRow, PageDatabaseView } from 'michi-shared';
+import { pageBlockName, pageBlockText, parsePageBlockInput, splitPageMarkdown } from 'michi-shared';
+import type { PageBlockInput, PageChangeDto, PageDatabaseColumn, PageDatabaseRow, PageDatabaseView } from 'michi-shared';
 import MarkdownContent from '../../MarkdownContent';
-import { MICHI_MARKDOWN_FEATURES, InlineMarkdownParagraphs } from '../content/page/blocks/text';
-import { joinMarkdown, splitMarkdown } from '../content/page/markdownSegments';
+import { InlineMarkdownParagraphs } from '../content/page/blocks/text';
+import { INHERIT_PROSE_STYLE, UNTRUSTED_MARKDOWN } from '../../markdownProse';
+import { timelineWhen } from '../content/page/michiPageModel';
 import { SourceTrace, type ExactPageSource } from './SourceTrace';
+import { changeOrigin, readLabel, type ChangeOrigin } from '../../../state/pages/changeOrigin';
 import { EASE } from '../../../motion/tokens';
+import { useCompanionName } from '../../../state/companion/companionName';
+import { pagesUpkeepTitle } from '../scheduled/metaAgent/metaAgentCopy';
 import './pageChanges.css';
 
 export type AcceptedPageEdit =
@@ -118,8 +122,11 @@ function proposedRow(change: PageChangeDto) {
   return { values, ...(change.target.body && change.forward.body !== undefined ? { body: change.forward.body } : {}) };
 }
 
+/** What the change does, not how it was recorded: every row change is op 'row', a removal included. */
+const removes = (change: PageChangeDto) => change.forward.op === 'delete';
+
 function canEditProposal(change: PageChangeDto): boolean {
-  if (change.op === 'delete' || change.op === 'move') return false;
+  if (removes(change) || change.op === 'move') return false;
   return proposedBlock(change) !== null || proposedRow(change) !== null;
 }
 
@@ -155,13 +162,8 @@ function DatabaseConfigurationPreview({ change }: { change: PageChangeDto }) {
 function targetName(change: PageChangeDto): string {
   if (change.target.kind === 'block') {
     const snapshot = change.after?.kind === 'block' && change.after.exists ? change.after.block : change.before?.kind === 'block' && change.before.exists ? change.before.block : null;
-    if (snapshot?.type === 'heading' && snapshot.text.trim()) return `“${snapshot.text.trim()}”`;
-    if (snapshot?.type === 'callout' && snapshot.title?.trim()) return `“${snapshot.title.trim()}”`;
-    if ((snapshot?.type === 'markdown' || snapshot?.type === 'callout') && snapshot.text.trim()) {
-      const words = snapshot.text.trim().replace(/\s+/g, ' ');
-      return `“${words.length > 24 ? `${words.slice(0, 24)}…` : words}”`;
-    }
-    return 'this block';
+    const name = snapshot ? pageBlockName(snapshot) : '';
+    return name ? `“${name}”` : 'this block';
   }
   if (change.target.kind === 'row') return 'this row';
   if (change.target.kind === 'database') return 'this database';
@@ -170,7 +172,7 @@ function targetName(change: PageChangeDto): string {
 
 function operationLabel(change: PageChangeDto): string {
   if (change.op === 'schema') return 'Suggested database configuration';
-  if (change.op === 'delete') return change.target.kind === 'row' ? 'Suggested row deletion' : `Suggested deletion of ${targetName(change)}`;
+  if (removes(change)) return change.target.kind === 'row' ? 'Suggested row deletion' : `Suggested deletion of ${targetName(change)}`;
   if (change.op === 'move') return 'Suggested move';
   if (change.target.kind === 'row') return 'Suggested field update';
   return `Suggested rewrite of ${targetName(change)}`;
@@ -184,7 +186,7 @@ function previewText(block: PageBlockInput): string {
     case 'checklist': return [block.title, ...block.items.map((item) => `${item.done ? '✓' : '○'} ${item.text}`)].filter(Boolean).join('\n');
     case 'metrics': return block.items.map((item) => [item.label, item.value, item.note].filter(Boolean).join(' · ')).join('\n');
     case 'next-steps': return [block.title, ...block.items.map((item) => `${item.who === 'user' ? 'You' : 'Agent'} · ${item.text}${item.unblocks ? ` → ${item.unblocks}` : ''}`)].filter(Boolean).join('\n');
-    case 'timeline': return [block.title, ...block.items.map((item) => [item.title, item.detail].filter(Boolean).join(' · '))].filter(Boolean).join('\n');
+    case 'timeline': return [block.title, ...block.items.map((item) => [timelineWhen(item.at).text, item.title, item.detail].filter(Boolean).join(' · '))].filter(Boolean).join('\n');
     case 'database-ref': return 'Database view';
     case 'page-link': return 'Page link';
     case 'component': return `Component · ${block.componentId}${block.pinnedVersion ? ` v${block.pinnedVersion}` : ''}`;
@@ -199,7 +201,7 @@ export interface PreviewPiece {
 }
 
 function previewPieces(block: PageBlockInput): PreviewPiece[] {
-  if (block.type === 'markdown') return splitMarkdown(block.text).map((segment) => ({ kind: 'markdown', text: segment.text }));
+  if (block.type === 'markdown') return splitPageMarkdown(block.text).map((segment) => ({ kind: 'markdown', text: segment.text }));
   if (block.type === 'callout') {
     const lines = block.text.split(/\n+/).map((line) => line.trim()).filter(Boolean).map((text): PreviewPiece => ({ kind: 'callout', text }));
     return block.title?.trim() ? [{ kind: 'line', text: block.title.trim() }, ...lines] : lines;
@@ -227,9 +229,6 @@ export function changedPieces(before: PageBlockInput | null, after: PageBlockInp
   return removed.length || added.length ? { removed, added } : { removed: [], added: b };
 }
 
-/** Sizes and colours come from the card; Markdown only draws its marks. */
-const PIECE_STYLE: React.CSSProperties = { color: 'inherit', fontFamily: 'inherit', fontSize: 'inherit', lineHeight: 'inherit' };
-
 /** Pieces drawn as the page draws them: Markdown formatted, callout lines with their inline marks, plain lines as text. */
 function Pieces({ pieces }: { pieces: readonly PreviewPiece[] }) {
   const runs: PreviewPiece[][] = [];
@@ -240,7 +239,7 @@ function Pieces({ pieces }: { pieces: readonly PreviewPiece[] }) {
   }
   return <>{runs.map((run, index) => {
     if (run[0]!.kind === 'markdown') {
-      return <MarkdownContent key={index} text={joinMarkdown(run.map((piece) => piece.text))} size="sm" className="wrap-break-word" style={PIECE_STYLE} features={MICHI_MARKDOWN_FEATURES} />;
+      return <MarkdownContent key={index} text={run.map((piece) => piece.text).join('\n\n')} size="sm" className="wrap-break-word" style={INHERIT_PROSE_STYLE} features={UNTRUSTED_MARKDOWN} />;
     }
     if (run[0]!.kind === 'callout') return <InlineMarkdownParagraphs key={index} text={run.map((piece) => piece.text).join('\n')} />;
     return <p key={index}>{run[0]!.text}</p>;
@@ -261,31 +260,7 @@ function staleMessage(error: string | null | undefined, change: PageChangeDto): 
   return `This ${target} changed after the suggestion was made. Your draft is still here. Review the current ${target}, then try again or dismiss the suggestion.`;
 }
 
-/** Where a change came from: the messages it cites, else what its run read, else the run itself. */
-interface ChangeOrigin {
-  cited: ExactPageSource[];
-  read: ChangeReadScope | null;
-  run: ExactPageSource | null;
-}
-
 const CITED_SHOWN = 2;
-
-export function changeOrigin(source: PageChangeDto['source']): ChangeOrigin {
-  if (source.kind === 'chat' || source.kind === 'helper') return { cited: [source], read: null, run: null };
-  if (source.kind !== 'maintenance') return { cited: [], read: null, run: null };
-  // Background maintenance cites the conversation message it read; its own run is only the writer.
-  const cited = source.evidence.map((entry): ExactPageSource => ({ kind: 'chat', nodeId: entry.nodeId, turnId: entry.turnId, assistantId: entry.messageId ?? entry.assistantId }));
-  if (source.read) return { cited, read: source.read, run: null };
-  // Before blocks named their sources a first run listed every conversation it read, so none of them is this block's.
-  if (cited.length > 1) return { cited: [], read: { kind: 'conversations', count: cited.length }, run: null };
-  const run: ExactPageSource = { kind: 'chat', nodeId: source.nodeId, turnId: source.turnId, assistantId: source.assistantId };
-  return { cited, read: null, run: cited.length ? null : run };
-}
-
-function readLabel(read: ChangeReadScope): string {
-  const noun = read.kind === 'conversations' ? 'conversation' : 'workspace home';
-  return `${read.count} ${noun}${read.count === 1 ? '' : 's'}`;
-}
 
 /** "from “A”", "from “A” and “B”", "from 3 conversations": only conversation titles are quoted. */
 function OriginLine({ origin, sourceLabel, onOpenSource, separator = true }: {
@@ -294,6 +269,7 @@ function OriginLine({ origin, sourceLabel, onOpenSource, separator = true }: {
   onOpenSource: ChangeCardProps['onOpenSource'];
   separator?: boolean;
 }) {
+  const name = useCompanionName();
   const link = (item: ExactPageSource, fallback: string, key?: string) => {
     const title = sourceLabel?.(item);
     return <button key={key} type="button" className="page-change-link" onClick={() => { void onOpenSource(item); }}>{title ? `“${title}”` : fallback}</button>;
@@ -312,7 +288,7 @@ function OriginLine({ origin, sourceLabel, onOpenSource, separator = true }: {
   } else if (origin.read && origin.read.count > 0) {
     body = readLabel(origin.read);
   } else if (origin.run) {
-    body = link(origin.run, 'the Meta agent');
+    body = link(origin.run, pagesUpkeepTitle(name));
   }
   if (!body) return null;
   return <>
@@ -365,6 +341,26 @@ export function ChangeCard({ change, onAccept, onDismiss, onReopen, onRevert, on
       answer('accept', () => onAccept(change, { kind: 'row', values, ...(change.target.kind === 'row' && change.target.body ? { body: rowBodyDraft } : {}) }));
     }
   };
+  // Both variants preview and edit a suggestion the same way: what Accept would write, the row's text included.
+  const rowPreview = rowValue && <pre className="page-change-preview">{JSON.stringify(rowValue, null, 2)}</pre>;
+  const editor = editing && (
+    <>
+      {blockValue && (
+        <label className="page-change-edit">
+          <span>Proposed block content</span>
+          <textarea value={blockDraft} onChange={(event) => setBlockDraft(event.target.value)} rows={5} spellCheck={false} />
+        </label>
+      )}
+      {rowValue && (
+        <div className="page-change-edit">
+          <label><span>Proposed row fields</span><textarea value={rowValuesDraft} onChange={(event) => setRowValuesDraft(event.target.value)} rows={4} spellCheck={false} /></label>
+          {change.target.kind === 'row' && change.target.body && (
+            <label><span>Proposed row text</span><textarea value={rowBodyDraft} onChange={(event) => setRowBodyDraft(event.target.value)} rows={3} /></label>
+          )}
+        </div>
+      )}
+    </>
+  );
 
   if (variant === 'inline') {
     const reverted = change.applicationState === 'reverted' && change.proposalState !== 'dismissed';
@@ -377,7 +373,7 @@ export function ChangeCard({ change, onAccept, onDismiss, onReopen, onRevert, on
       return (
         <div className="page-change-line" data-state="pending" data-chosen={chosen ?? undefined}>
           <Sparkles size={12} strokeWidth={1.7} aria-hidden="true" />
-          <span className="page-change-line__lead">Waiting for you: {change.op === 'delete' ? 'remove' : 'rewrite'} {targetName(change)}</span>
+          <span className="page-change-line__lead">Waiting for you: {removes(change) ? 'remove' : 'rewrite'} {targetName(change)}</span>
           {from}
           <span aria-hidden="true">·</span>
           <button type="button" className="page-change-link" data-chosen={chosen === 'accept' || undefined} disabled={loading || !!chosen} onClick={() => answer('accept', () => onAccept(change))}>Accept</button>
@@ -392,7 +388,7 @@ export function ChangeCard({ change, onAccept, onDismiss, onReopen, onRevert, on
         <article className="page-change-prop" data-state="pending" data-chosen={chosen ?? undefined} aria-label={operationLabel(change)}>
           <header className="page-change-prop__head">
             <Sparkles size={13} strokeWidth={1.7} aria-hidden="true" />
-            <strong>{change.op === 'schema' ? 'Suggested database configuration' : change.op === 'delete' ? 'Suggested removal' : change.op === 'move' ? 'Suggested move' : change.target.kind === 'row' ? 'Suggested field update' : 'Suggested rewrite'}</strong>
+            <strong>{change.op === 'schema' ? 'Suggested database configuration' : removes(change) ? 'Suggested removal' : change.op === 'move' ? 'Suggested move' : change.target.kind === 'row' ? 'Suggested field update' : 'Suggested rewrite'}</strong>
             <span>{change.op === 'schema' ? '· Review changes to existing columns or views' : '· You edited this, so it asks first'}</span>
           </header>
           <DatabaseConfigurationPreview change={change} />
@@ -402,18 +398,9 @@ export function ChangeCard({ change, onAccept, onDismiss, onReopen, onRevert, on
               {diff.added.length > 0 && <ins className="page-change-prop__new"><Pieces pieces={diff.added} /></ins>}
             </div>
           )}
-          {!editing && change.op === 'delete' && <p className="page-change-card__why">Accepting removes {change.target.kind === 'row' ? 'the row' : 'the block'}.</p>}
-          {editing && blockValue && (
-            <label className="page-change-edit">
-              <span>Proposed block content</span>
-              <textarea value={blockDraft} onChange={(event) => setBlockDraft(event.target.value)} rows={5} spellCheck={false} />
-            </label>
-          )}
-          {editing && rowValue && (
-            <div className="page-change-edit">
-              <label><span>Proposed row fields</span><textarea value={rowValuesDraft} onChange={(event) => setRowValuesDraft(event.target.value)} rows={4} spellCheck={false} /></label>
-            </div>
-          )}
+          {!editing && rowPreview}
+          {!editing && removes(change) && <p className="page-change-card__why">Accepting removes {change.target.kind === 'row' ? 'the row' : 'the block'}.</p>}
+          {editor}
           {(draftError || stale || (error && !stale)) && <p role="alert" className="page-change-card__error">{draftError ?? stale ?? error}</p>}
           <footer className="page-change-prop__actions">
             <button type="button" className="page-change-primary" data-chosen={chosen === 'accept' || undefined} disabled={loading || !!chosen}
@@ -428,7 +415,7 @@ export function ChangeCard({ change, onAccept, onDismiss, onReopen, onRevert, on
     }
     const state = change.proposalState === 'dismissed' ? 'dismissed' : change.applicationState === 'reverted' ? 'reverted' : change.proposalState === 'accepted' ? 'accepted' : 'applied';
     const what = showTarget ? ` ${change.target.kind === 'row' ? (change.op === 'insert' ? 'a new row' : 'a row') : change.op === 'insert' ? `a new block ${targetName(change)}` : targetName(change)}` : '';
-    const lead = state === 'dismissed' ? `Suggestion dismissed${what}` : state === 'reverted' ? `Undone${what}` : state === 'accepted' ? `You accepted this rewrite${what}` : `${change.op === 'insert' ? 'Agent added' : change.op === 'delete' ? 'Agent removed' : 'Agent updated'}${what.replace(' a new block', '').replace(' a new row', ' a row')}`;
+    const lead = state === 'dismissed' ? `Suggestion dismissed${what}` : state === 'reverted' ? `Undone${what}` : state === 'accepted' ? `You accepted this rewrite${what}` : `${change.op === 'insert' ? 'Agent added' : removes(change) ? 'Agent removed' : 'Agent updated'}${what.replace(' a new block', '').replace(' a new row', ' a row')}`;
     return (
       <div className="page-change-line" data-state={state} data-quiet={quiet || undefined}>
         {!quiet && <Sparkles size={12} strokeWidth={1.7} aria-hidden="true" />}
@@ -458,25 +445,12 @@ export function ChangeCard({ change, onAccept, onDismiss, onReopen, onRevert, on
 
       {change.proposalState === 'pending' && <p className="page-change-card__why">{change.op === 'schema' ? 'Review changes to existing columns or views before applying them.' : 'You edited this content, so it asks first.'}</p>}
       {isProposal && <DatabaseConfigurationPreview change={change} />}
-      {change.op === 'delete' && <p className="page-change-card__why">Accepting removes {change.target.kind === 'row' ? 'the row' : 'the block'}.</p>}
+      {isProposal && removes(change) && <p className="page-change-card__why">Accepting removes {change.target.kind === 'row' ? 'the row' : 'the block'}.</p>}
       {change.op === 'move' && <p className="page-change-card__why">Accepting moves this block to the proposed position.</p>}
       {isProposal && blockValue && <pre className="page-change-preview">{previewText(blockValue)}</pre>}
-      {isProposal && rowValue && <pre className="page-change-preview">{JSON.stringify(rowValue, null, 2)}</pre>}
+      {isProposal && rowPreview}
 
-      {editing && blockValue && (
-        <label className="page-change-edit">
-          <span>Proposed block content</span>
-          <textarea value={blockDraft} onChange={(event) => setBlockDraft(event.target.value)} rows={5} spellCheck={false} />
-        </label>
-      )}
-      {editing && rowValue && (
-        <div className="page-change-edit">
-          <label><span>Proposed row fields</span><textarea value={rowValuesDraft} onChange={(event) => setRowValuesDraft(event.target.value)} rows={4} spellCheck={false} /></label>
-          {change.target.kind === 'row' && change.target.body && (
-            <label><span>Proposed row text</span><textarea value={rowBodyDraft} onChange={(event) => setRowBodyDraft(event.target.value)} rows={3} /></label>
-          )}
-        </div>
-      )}
+      {editor}
 
       {(draftError || stale || (error && !stale)) && <p role="alert" className="page-change-card__error">{draftError ?? stale ?? error}</p>}
       {source && <SourceTrace source={source} onOpenSource={onOpenSource} />}

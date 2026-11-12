@@ -1,10 +1,14 @@
 import {
   clampWorkflowText,
   isWorkflowRunTerminal,
+  settledWorkflowNodeStatus,
+  settleWorkflowNodes,
+  type SubagentUsage,
   WORKFLOW_LIMITS,
   type WorkflowLogEntry,
   type WorkflowNodeDto,
   type WorkflowNodeStatus,
+  type WorkflowOmittedLeaves,
   type WorkflowRunDtoV1,
   type WorkflowRunStatus,
   type WorkflowUsage,
@@ -48,12 +52,13 @@ export function claudeTaskId(env: Envelope): string | undefined {
     : undefined;
 }
 
-function usageFrom(raw: Record<string, unknown> | undefined): WorkflowUsage | undefined {
+/** Task usage: snake_case in system task frames, camelCase in Task tool results. */
+export function claudeTaskUsage(raw: Record<string, unknown> | undefined): SubagentUsage | undefined {
   if (!raw) return undefined;
-  const usage: WorkflowUsage = {};
-  const tokens = num(raw['total_tokens']);
-  const tools = num(raw['tool_uses']);
-  const duration = num(raw['duration_ms']);
+  const usage: SubagentUsage = {};
+  const tokens = num(raw['total_tokens']) ?? num(raw['totalTokens']);
+  const tools = num(raw['tool_uses']) ?? num(raw['totalToolUseCount']);
+  const duration = num(raw['duration_ms']) ?? num(raw['totalDurationMs']);
   if (tokens !== undefined) usage.totalTokens = tokens;
   if (tools !== undefined) usage.toolUses = tools;
   if (duration !== undefined) usage.durationMs = duration;
@@ -88,9 +93,15 @@ function phaseStatus(children: readonly WorkflowNodeDto[]): WorkflowNodeStatus {
   return 'running';
 }
 
-/** Rebuild the node list from a `workflow_progress` snapshot. */
-export function claudeWorkflowNodes(progress: unknown, now: number): WorkflowNodeDto[] {
-  if (!Array.isArray(progress)) return [];
+type ClaudeWorkflowGraph = Pick<WorkflowRunDtoV1, 'nodes' | 'omittedLeaves'>;
+
+/**
+ * Rebuild the node list from a `workflow_progress` snapshot. Beyond
+ * WORKFLOW_LIMITS.nodes, phases stay, and so do running and the newest
+ * agents; the rest are only counted, in `omittedLeaves`.
+ */
+export function claudeWorkflowNodes(progress: unknown, now: number): ClaudeWorkflowGraph {
+  if (!Array.isArray(progress)) return { nodes: [] };
   const phases: WorkflowNodeDto[] = [];
   const agents: WorkflowNodeDto[] = [];
   for (const raw of progress) {
@@ -139,13 +150,47 @@ export function claudeWorkflowNodes(progress: unknown, now: number): WorkflowNod
       phases.push({ id: agent.parentId, kind: 'phase', title: agent.parentId.replace('phase:', 'Phase '), status: 'queued' });
     }
   }
-  const nodes: WorkflowNodeDto[] = [];
-  for (const phase of phases.sort((a, b) => Number(a.id.slice(6)) - Number(b.id.slice(6)))) {
-    const children = agents.filter((agent) => agent.parentId === phase.id);
-    nodes.push({ ...phase, status: phaseStatus(children) }, ...children);
+  // Phase status counts every child, kept or not.
+  const shownPhases = phases
+    .sort((a, b) => Number(a.id.slice(6)) - Number(b.id.slice(6)))
+    .slice(0, WORKFLOW_LIMITS.nodes)
+    .map((phase) => ({ ...phase, status: phaseStatus(agents.filter((agent) => agent.parentId === phase.id)) }));
+  const kept = keptAgents(agents, WORKFLOW_LIMITS.nodes - shownPhases.length);
+  const omittedLeaves: WorkflowOmittedLeaves = {};
+  for (const agent of agents) {
+    if (kept.has(agent)) continue;
+    const counts = omittedLeaves[agent.parentId ?? ''] ??= {};
+    counts[agent.status] = (counts[agent.status] ?? 0) + 1;
   }
-  nodes.push(...agents.filter((agent) => !agent.parentId));
-  return nodes.slice(0, WORKFLOW_LIMITS.nodes);
+  const nodes: WorkflowNodeDto[] = [];
+  for (const phase of shownPhases) {
+    nodes.push(phase, ...agents.filter((agent) => agent.parentId === phase.id && kept.has(agent)));
+  }
+  nodes.push(...agents.filter((agent) => !agent.parentId && kept.has(agent)));
+  return { nodes, ...(Object.keys(omittedLeaves).length > 0 ? { omittedLeaves } : {}) };
+}
+
+function agentIndex(agent: WorkflowNodeDto): number {
+  return Number(agent.id.slice(6));
+}
+
+/**
+ * The agents a capped run keeps: running and paused ones, then the newest.
+ * The oldest finished agents are dropped first; their counts stay.
+ */
+function keptAgents(agents: readonly WorkflowNodeDto[], budget: number): ReadonlySet<WorkflowNodeDto> {
+  if (agents.length <= budget) return new Set(agents);
+  const open = (agent: WorkflowNodeDto) => agent.status === 'running' || agent.status === 'paused';
+  const ranked = [...agents].sort((a, b) => Number(open(b)) - Number(open(a)) || agentIndex(b) - agentIndex(a));
+  return new Set(ranked.slice(0, Math.max(0, budget)));
+}
+
+/** `run` with the node list (and omitted counts) of `graph`. */
+function withGraph(run: WorkflowRunDtoV1, graph: ClaudeWorkflowGraph): WorkflowRunDtoV1 {
+  const next: WorkflowRunDtoV1 = { ...run, nodes: graph.nodes };
+  if (graph.omittedLeaves) next.omittedLeaves = graph.omittedLeaves;
+  else delete next.omittedLeaves;
+  return next;
 }
 
 function terminalStatus(raw: string | undefined): WorkflowRunStatus | undefined {
@@ -155,12 +200,20 @@ function terminalStatus(raw: string | undefined): WorkflowRunStatus | undefined 
   return undefined;
 }
 
-/** Close nodes still open when the run ends. */
-function closeNodes(nodes: readonly WorkflowNodeDto[], status: WorkflowRunStatus, now: number): WorkflowNodeDto[] {
-  const closed: WorkflowNodeStatus = status === 'completed' ? 'completed' : 'cancelled';
-  return nodes.map((node) => node.status === 'running' || (node.status === 'queued' && status !== 'completed')
-    ? { ...node, status: node.status === 'queued' ? 'skipped' : closed, currentTool: undefined, endedAt: node.endedAt ?? now }
-    : node);
+/** Close nodes, omitted ones included, still open when the run ends. */
+function closeNodes(graph: ClaudeWorkflowGraph, status: WorkflowRunStatus, now: number): ClaudeWorkflowGraph {
+  const nodes = settleWorkflowNodes(graph.nodes, status, now);
+  if (!graph.omittedLeaves) return { nodes };
+  const omittedLeaves: WorkflowOmittedLeaves = {};
+  for (const [parentId, counts] of Object.entries(graph.omittedLeaves)) {
+    const next: Partial<Record<WorkflowNodeStatus, number>> = {};
+    for (const [from, count] of Object.entries(counts) as Array<[WorkflowNodeStatus, number]>) {
+      const to = settledWorkflowNodeStatus(from, status) ?? from;
+      next[to] = (next[to] ?? 0) + count;
+    }
+    omittedLeaves[parentId] = next;
+  }
+  return { nodes, omittedLeaves };
 }
 
 export function appendWorkflowLog(log: readonly WorkflowLogEntry[], entry: WorkflowLogEntry): WorkflowLogEntry[] {
@@ -186,12 +239,11 @@ export function applyClaudeWorkflowEnvelope(run: WorkflowRunDtoV1, env: Envelope
   if (subtype === 'task_started') return { ...run, ...claudeWorkflowSeed(env), status: 'running' };
   if (isWorkflowRunTerminal(run.status) && subtype !== 'task_notification') return run;
   if (subtype === 'task_progress') {
-    const usage = usageFrom(rec(env['usage']));
+    const usage = claudeTaskUsage(rec(env['usage']));
     const progress = env['workflow_progress'];
     return {
-      ...run,
+      ...(Array.isArray(progress) ? withGraph(run, claudeWorkflowNodes(progress, now)) : run),
       ...(usage ? { usage: { ...run.usage, ...usage } } : {}),
-      ...(Array.isArray(progress) ? { nodes: claudeWorkflowNodes(progress, now) } : {}),
       ...(clampWorkflowText(env['description'], WORKFLOW_LIMITS.line) && run.status === 'running'
         ? { statusDetail: clampWorkflowText(env['description'], WORKFLOW_LIMITS.line) }
         : {}),
@@ -204,26 +256,24 @@ export function applyClaudeWorkflowEnvelope(run: WorkflowRunDtoV1, env: Envelope
     const endedAt = num(patch?.['end_time']) ?? now;
     const error = clampWorkflowText(patch?.['error'], WORKFLOW_LIMITS.line);
     return {
-      ...run,
+      ...withGraph(run, closeNodes(run, status, endedAt)),
       status,
       endedAt: run.endedAt ?? endedAt,
-      nodes: closeNodes(run.nodes, status, endedAt),
       ...(error ? { statusDetail: error } : {}),
     };
   }
   if (subtype === 'task_notification') {
     const status = terminalStatus(str(env['status'])) ?? run.status;
     const summary = clampWorkflowText(env['summary'], WORKFLOW_LIMITS.line);
-    const usage = usageFrom(rec(env['usage']));
+    const usage = claudeTaskUsage(rec(env['usage']));
     const endedAt = run.endedAt ?? now;
     // The summary restates the workflow's description; on a stop or failure
     // it must not replace the reason already recorded.
     const keepDetail = status !== 'completed' && isWorkflowRunTerminal(run.status) && !!run.statusDetail;
     return {
-      ...run,
+      ...(isWorkflowRunTerminal(status) ? withGraph(run, closeNodes(run, status, endedAt)) : run),
       status,
       endedAt,
-      nodes: isWorkflowRunTerminal(status) ? closeNodes(run.nodes, status, endedAt) : run.nodes,
       ...(summary && !keepDetail ? { statusDetail: summary } : {}),
       ...(usage ? { usage: { ...run.usage, ...usage } } : {}),
     };
@@ -251,10 +301,10 @@ export function applyClaudeWorkflowOutput(run: WorkflowRunDtoV1, output: unknown
       if (text) log = appendWorkflowLog(log, { at: now, text });
     }
   }
-  const nodes = Array.isArray(raw['workflowProgress'])
+  const graph = Array.isArray(raw['workflowProgress'])
     ? closeNodes(claudeWorkflowNodes(raw['workflowProgress'], now), run.status, run.endedAt ?? now)
-    : run.nodes;
-  return { ...run, ...(result ? { result } : {}), log, nodes: nodes.length > 0 ? nodes : run.nodes };
+    : undefined;
+  return { ...(graph && graph.nodes.length > 0 ? withGraph(run, graph) : run), ...(result ? { result } : {}), log };
 }
 
 /**

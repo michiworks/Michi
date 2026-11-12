@@ -130,6 +130,7 @@ test('all real migrations apply on a fresh database and a second pass is a no-op
   assert.deepEqual(versions(db), expected);
   assert.ok(objectExists(db, 'index', 'idx_turns_node_completion'));
   assert.ok(columns(db, 'scheduled_jobs').includes('conversation_cursor'));
+  assert.ok(columns(db, 'nodes').includes('fresh_context'));
   const ledger = db.prepare('SELECT * FROM schema_migrations ORDER BY version').all();
   runMigrations(db, migrationsDir);
   assert.deepEqual(db.prepare('SELECT * FROM schema_migrations ORDER BY version').all(), ledger);

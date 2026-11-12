@@ -43,7 +43,8 @@
         ],
         "historyReplay": "messages",
         "backgroundTurns": false,
-        "titles": "none"
+        "titles": "none",
+        "ephemeralSessions": "native"
       },
       "run": {
         "toolMode": "allowlist",
@@ -61,7 +62,8 @@
         ],
         "historyReplay": "preamble",
         "backgroundTurns": true,
-        "titles": "none"
+        "titles": "sidecar",
+        "ephemeralSessions": "native"
       },
       "run": {
         "toolMode": "allowlist",
@@ -78,7 +80,8 @@
         ],
         "historyReplay": "preamble",
         "backgroundTurns": false,
-        "titles": "in-stream"
+        "titles": "in-stream",
+        "ephemeralSessions": "native"
       },
       "run": {
         "toolMode": "runtime_default",
@@ -267,6 +270,29 @@
         "supportsNativeResume": true
       }
     },
+    "kiro-v3-with-checkins": {
+      "topology": {
+        "identityTiming": "on-open",
+        "cancel": "native-ack",
+        "toolDelivery": [
+          "mcp-http-grouped",
+          "mcp-http"
+        ],
+        "historyReplay": "preamble",
+        "backgroundTurns": true,
+        "titles": "sidecar",
+        "hostTitleRequiresOptIn": true,
+        "workflowsRequireOptIn": true,
+        "clearCreatesNewNativeSession": true,
+        "ephemeralSessions": "discard-after-release"
+      },
+      "run": {
+        "toolMode": "runtime_default",
+        "steering": "native",
+        "immediateSteering": "next_turn",
+        "supportsNativeResume": true
+      }
+    },
     "crew": {
       "topology": {
         "identityTiming": "on-open",
@@ -302,7 +328,8 @@
         ],
         "historyReplay": "preamble",
         "backgroundTurns": false,
-        "titles": "in-stream"
+        "titles": "in-stream",
+        "ephemeralSessions": "native"
       },
       "run": {
         "toolMode": "runtime_default",
@@ -320,7 +347,8 @@
         ],
         "historyReplay": "preamble",
         "backgroundTurns": true,
-        "titles": "none"
+        "titles": "sidecar",
+        "ephemeralSessions": "native"
       },
       "run": {
         "toolMode": "allowlist",
@@ -337,7 +365,8 @@
         ],
         "historyReplay": "messages",
         "backgroundTurns": false,
-        "titles": "none"
+        "titles": "none",
+        "ephemeralSessions": "native"
       },
       "run": {
         "toolMode": "allowlist",

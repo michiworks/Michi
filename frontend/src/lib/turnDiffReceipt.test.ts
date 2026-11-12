@@ -27,7 +27,24 @@ describe('deriveDiffReceipt', () => {
       tool('edit', { path: 'e.ts', old_string: 'a', new_string: 'a\nc' }),
     ]);
     const r = deriveDiffReceipt(m);
-    expect(r!.files).toEqual([{ path: 'e.ts', added: 4, removed: 1, kind: 'write', countsKnown: true }]);
+    // The edit adds one line; its unchanged 'a' is not a removal.
+    expect(r!.files).toEqual([{ path: 'e.ts', added: 3, removed: 0, kind: 'write', countsKnown: true }]);
+  });
+
+  it('counts an edit\'s lines as its step row does', () => {
+    const r = deriveDiffReceipt(msg([tool('Edit', { file_path: 'a.ts', old_string: 'a\nb\nc', new_string: 'a\nB\nc\nd' })]));
+    expect(r).toMatchObject({ totalAdded: 2, totalRemoved: 1 });
+  });
+
+  it('counts Kiro edits and writes', () => {
+    const r = deriveDiffReceipt(msg([
+      tool('Editing x.ts', { path: 'x.ts', command: 'strReplace', oldStr: 'a', newStr: 'a\nb' }),
+      tool('Writing y.ts', { path: 'y.ts', command: 'create', text: 'p\nq\n' }),
+    ]));
+    expect(r!.files).toEqual([
+      { path: 'x.ts', added: 1, removed: 0, kind: 'edit', countsKnown: true },
+      { path: 'y.ts', added: 2, removed: 0, kind: 'write', countsKnown: true },
+    ]);
   });
 
   it('skips interrupted tool calls (turn cancelled/errored mid-flight)', () => {

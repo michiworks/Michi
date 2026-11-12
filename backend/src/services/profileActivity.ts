@@ -54,9 +54,9 @@ export function loadProfileActivity({
     `CAST(${column} / ${BUCKET_MS} AS INTEGER) * ${BUCKET_MS}`;
   const liveWorkspace = 'w.deleted_at IS NULL AND w.purged_at IS NULL';
   // Page helpers and Meta agent maintenance runs are not the user's conversations.
-  const liveNode = "n.deleted_at IS NULL AND n.purged_at IS NULL AND n.kind = 'chat' AND n.page_id IS NULL AND n.maintenance_job_id IS NULL";
+  const liveNode = "n.deleted_at IS NULL AND n.purged_at IS NULL AND n.kind = 'chat' AND n.page_id IS NULL AND n.maintenance_job_id IS NULL AND n.scheduled_only_job_id IS NULL";
   const visibleTree = `NOT EXISTS (SELECT 1 FROM nodes r WHERE r.id = t.root_node_id
-        AND (r.page_id IS NOT NULL OR r.maintenance_job_id IS NOT NULL))`;
+        AND (r.page_id IS NOT NULL OR r.maintenance_job_id IS NOT NULL OR r.scheduled_only_job_id IS NOT NULL))`;
 
   const totalNodes = scalarCount(
     `SELECT COUNT(*) AS count

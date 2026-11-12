@@ -7,11 +7,12 @@
  * fixture diff.
  *
  * Slot kinds mirror the runtimes' own callbacks: a Kiro chat slot, an Agent
- * Run Attempt (Agent Run tools and submit_agent_result), the Michi assistant,
- * the Kiro shared session-group catalog and a Claude chat slot.
+ * Run Attempt (Agent Run tools and submit_agent_result), the user's
+ * conversation with the Michi assistant (V, as Claude opens it), the Kiro
+ * shared session-group catalog and a Claude chat slot.
  *
  * Regenerate the fixture only for an intended catalog change:
- *   MICHI_UPDATE_MCP_GOLDEN=1 npm exec -w backend -- node --require ts-node/register --test test/mcpToolCatalogGolden.test.ts
+ *   MICHI_UPDATE_MCP_GOLDEN=1 MICHI_GOLDEN_WRITE_CONFIRM=1 npm run test:file -w backend -- test/mcpToolCatalogGolden.test.ts
  */
 
 import { after, before, test } from 'node:test';
@@ -27,7 +28,6 @@ import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/
 import { closeDb, initDb } from '../src/services/db';
 import { McpSlotRegistry, mountMcp, type McpSlotCallbacks } from '../src/services/mcpServer';
 import { ensureAssistant } from '../src/assistant/store';
-import { ASSISTANT_ALLOWED_TOOL_NAMES } from '../src/assistant/policy';
 import { AGENT_RUN_TOOL_NAMES } from '../src/agents/runToolBridge';
 import type { ResultBundleV1 } from 'michi-shared';
 import { chatOwner, runOwner } from './helpers/owners';
@@ -40,8 +40,8 @@ const PINNED_ENV: Record<string, string | undefined> = {
     MICHI_DESK: '1',
     MICHI_SCHEDULED_JOBS: undefined,
     MICHI_WEB_SEARCH_ENABLED: '0',
-    MICHI_NODE_SUMMARY_EXPERIMENT_MODE: undefined,
     MICHI_CUSTOM_AGENTS: undefined,
+    MICHI_DISABLE_MULTI_MODEL: undefined,
     RAILWAY_PROJECT_ID: undefined,
     RAILWAY_ENVIRONMENT_ID: undefined,
     RAILWAY_SERVICE_ID: undefined,
@@ -123,17 +123,16 @@ function kiroChatCallbacks(): McpSlotCallbacks {
     };
 }
 
-/** The callbacks ClaudeSession gives a chat slot with the follow-ups hook experiment on. */
+/** The callbacks ClaudeSession gives a chat slot. */
 function claudeChatCallbacks(): McpSlotCallbacks {
     return {
         owner: chatOwner('n-claude'),
+        // Claude Code's key for a tool it must load up front (runtime claudeMcpConfig.CLAUDE_UP_FRONT_TOOL_META): the memory tools carry it.
+        upFrontToolMeta: { 'anthropic/alwaysLoad': true },
         onSpawnBranches: async () => [],
         onSaveArtifact: () => null,
         onUpdateArtifact: () => null,
         onShowImage: () => ({ error: 'unsupported in test' }),
-        onSetFollowUps: () => {},
-        onSetBranchOverview: () => {},
-        onValidateFollowUps: () => ({}),
         onAskUser: noAnswer,
         agentRunToolNames: [...AGENT_RUN_TOOL_NAMES],
     };
@@ -157,13 +156,13 @@ async function snapshot(): Promise<Record<string, ServedCatalog>> {
         onSubmitAgentResult: () => ({}) as ResultBundleV1,
     }, { nodeId: null, workspaceId: 'ws-run' });
 
+    // V as ClaudeSession opens it: the open profile (no allow-list, not restricted) and, as an assistant, no
+    // follow-up callbacks; the conversation's purpose picks the catalog.
     const assistant = ensureAssistant();
+    const { onSetFollowUps: _followUps, onSetBranchOverview: _overview, ...claudeOpen } = claudeChatCallbacks();
     const assistantSlot = registry.create(assistant.nodeId, dataDir, null, {
-        ...claudeChatCallbacks(),
+        ...claudeOpen,
         owner: chatOwner(assistant.nodeId),
-        restricted: true,
-        exposedToolNames: new Set(ASSISTANT_ALLOWED_TOOL_NAMES),
-        isServing: () => true,
     }, { nodeId: assistant.nodeId, workspaceId: assistant.workspaceId });
 
     // AcpAgentRuntime.chatMcpServer: the shared catalog is a copy of the warm

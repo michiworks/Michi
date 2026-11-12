@@ -70,7 +70,7 @@ test('a runtime choice for one workspace is refused; explicit nulls are accepted
   const jobs = scheduler();
   const service = new PageMaintenanceConfigService(jobs, () => ++now);
   assert.throws(() => service.enable({ workspaceId: 'ws', ownerUserId: 'local-user', runtimeId: 'pi' }),
-    (error: unknown) => error instanceof PageWriteError && error.status === 400 && /Meta agent/.test(error.message));
+    (error: unknown) => error instanceof PageWriteError && error.status === 400 && /Pages upkeep/.test(error.message));
   assert.equal(getMaintenanceConfig('ws', 'local-user'), null, 'nothing was created');
 
   const { config } = service.enable({ workspaceId: 'ws', ownerUserId: 'local-user', ...NO_PROFILE });

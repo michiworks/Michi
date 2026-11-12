@@ -39,10 +39,8 @@ const MICHI_TOOL = 'mcp____michi_internal____';
 /** Environment that changes what the adapter sends, pinned so the snapshot does not depend on the machine. */
 const PINNED_ENV: Record<string, string | undefined> = {
   MICHI_CLOUD: undefined,
-  MICHI_CLAUDE_FOLLOW_UPS_HOOK_POC: undefined,
-  MICHI_FOLLOW_UPS_EXPERIMENT_MODE: undefined,
-  MICHI_NODE_SUMMARY_EXPERIMENT_MODE: undefined,
   MICHI_SCHEDULED_JOBS: undefined,
+  MICHI_DISABLE_MULTI_MODEL: undefined,
   MICHI_CLAUDE_BARE: undefined,
   MICHI_CLAUDE_STRICT_MCP: undefined,
   MICHI_CLAUDE_SUBAGENT_TEXT: undefined,
@@ -76,7 +74,8 @@ before(() => {
   cwd = path.join(root, 'work');
   claudeConfigDir = path.join(root, 'claude-config');
   fs.mkdirSync(cwd);
-  setEnv(PINNED_ENV);
+  // The skill library's plugin mount lives in the data dir and reaches every spawn.
+  setEnv({ ...PINNED_ENV, MICHI_DATA_DIR: path.join(root, 'data') });
   transportModule.createClaudeSdkTransport = (args) => recorder.transport(args);
 });
 
@@ -474,28 +473,6 @@ test('agent run: resume from the explicit token, never from a node row', async (
     });
     recordSlots(registry, 'after loadSession');
     await drainTurn(session, 'Continue the run.');
-  });
-});
-
-for (const mode of ['sentinel', 'hook-tool'] as const) {
-  test(`follow-ups experiment: Stop-hook POC in ${mode} mode`, async (t) => {
-    await scenario(t, `hook-poc-${mode}`, {
-      env: { MICHI_CLAUDE_FOLLOW_UPS_HOOK_POC: '1', MICHI_FOLLOW_UPS_EXPERIMENT_MODE: mode },
-    }, async ({ runtime, registry }) => {
-      const session = await runtime.newSession({ sessionId: `hook-${mode}`, cwd, workspaceId: 'ws-hook' });
-      recordSlots(registry, 'after newSession');
-      await drainTurn(session, 'Hook question one');
-      await drainTurn(session, 'Hook question two');
-    });
-  });
-}
-
-test('follow-ups experiment: hook-tool mode without the Stop-hook POC', async (t) => {
-  await scenario(t, 'follow-ups-hook-tool-without-poc', {
-    env: { MICHI_FOLLOW_UPS_EXPERIMENT_MODE: 'hook-tool' },
-  }, async ({ runtime }) => {
-    const session = await runtime.newSession({ sessionId: 'hook-tool-plain', cwd, workspaceId: 'ws-hook' });
-    await drainTurn(session, 'Plain hook-tool question');
   });
 });
 

@@ -1,14 +1,16 @@
 import React from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { backTarget } from '../../lib/backStack';
 import TerminalShell from './TerminalShell';
 import { PrefsProvider } from '../../state/prefs';
 
-const topbar = vi.hoisted(() => ({ rail: [] as Array<boolean | undefined> }));
+const topbar = vi.hoisted(() => ({ rail: [] as Array<boolean | undefined>, phoneBack: undefined as (() => void) | undefined }));
 
 vi.mock('./Topbar', () => ({
-  default: ({ sidebarRail, onToggleSidebar }: { sidebarRail?: boolean; onToggleSidebar: () => void }) => {
+  default: ({ sidebarRail, onToggleSidebar, phoneBack }: { sidebarRail?: boolean; onToggleSidebar: () => void; phoneBack?: () => void }) => {
     topbar.rail.push(sidebarRail);
+    topbar.phoneBack = phoneBack;
     return <button type="button" data-sidebar-rail={String(!!sidebarRail)} onClick={onToggleSidebar}>toggle sidebar</button>;
   },
 }));
@@ -37,7 +39,8 @@ vi.mock('../../state/chatStore', async () => {
     }),
     useStructuralSelector: (s: (n: Record<string, unknown>) => unknown) => s({}),
     useChatNodesSnapshot: () => ({}),
-    useNodesSelector: () => ({}),
+    useNodesSelector: (s: (n: Record<string, unknown>) => unknown) => s({}),
+    useChatNodeReader: () => () => undefined,
     useChatNode: () => null,
     chatLabel: () => '',
   };
@@ -56,6 +59,49 @@ describe('TerminalShell in a narrow window', () => {
     Object.defineProperty(window, 'innerWidth', { configurable: true, value: 390 });
   });
   afterEach(() => { Object.defineProperty(window, 'innerWidth', { configurable: true, value: wideWidth }); });
+
+  // With no workspace yet, the first load opens New workspace; Back closes it.
+  const closeFirstLoadDialog = async () => {
+    await screen.findByRole('dialog');
+    act(() => backTarget()?.back());
+    await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
+  };
+
+  it('opens its drawer with a back swipe from the left edge at a root, and Back closes it', async () => {
+    render(<PrefsProvider><TerminalShell /></PrefsProvider>);
+    const home = await screen.findByText('Conversation home');
+    await closeFirstLoadDialog();
+    fireEvent.touchStart(home, { touches: [{ identifier: 1, clientX: 6, clientY: 300 }] });
+    fireEvent.touchMove(home, { touches: [{ identifier: 1, clientX: 40, clientY: 300 }] });
+    expect(areas()).toBeTruthy();
+    fireEvent.touchMove(home, { touches: [{ identifier: 1, clientX: 260, clientY: 300 }] });
+    fireEvent.touchEnd(home, { touches: [] });
+    expect(areas()).toBeTruthy();
+    act(() => backTarget()?.back());
+    await waitFor(() => expect(areas()).toBeNull());
+  });
+
+  it('goes Back to the page a page opened, but starts afresh from a drawer choice', async () => {
+    render(<PrefsProvider><TerminalShell /></PrefsProvider>);
+    await screen.findByText('Conversation home');
+    await closeFirstLoadDialog();
+    expect(topbar.phoneBack).toBeUndefined();
+    act(() => { window.dispatchEvent(new CustomEvent('michi:nav-page', { detail: { page: 'scheduled' } })); });
+    expect(await screen.findByText('Scheduled page')).toBeTruthy();
+    expect(topbar.phoneBack).toBeTypeOf('function');
+    act(() => backTarget()?.back());
+    expect(await screen.findByText('Conversation home')).toBeTruthy();
+    expect(topbar.phoneBack).toBeUndefined();
+
+    // Picked with the drawer open: a root, with nothing to go back to.
+    fireEvent.click(toggle());
+    act(() => { window.dispatchEvent(new CustomEvent('michi:nav-page', { detail: { page: 'scheduled' } })); });
+    expect(await screen.findByText('Scheduled page')).toBeTruthy();
+    fireEvent.click(toggle());
+    await waitFor(() => expect(areas()).toBeNull());
+    expect(topbar.phoneBack).toBeUndefined();
+    expect(backTarget()).toBeNull();
+  });
 
   it('has no area rail; its drawer opens with the areas as the first row', async () => {
     render(<PrefsProvider><TerminalShell /></PrefsProvider>);
@@ -119,15 +165,15 @@ describe('TerminalShell in a narrow window', () => {
     await waitFor(() => expect(reopened.querySelector('.terminal-settings--drawer')?.getAttribute('data-view')).toBe('menu'));
   });
 
-  it('keeps the drawer open on the Scheduled list and closes it when the Meta agent row is picked', async () => {
+  it('keeps the drawer open on the Scheduled list and closes it when the Pages upkeep row is picked', async () => {
     render(<PrefsProvider><TerminalShell /></PrefsProvider>);
     fireEvent.click(toggle());
     fireEvent.click(rail('scheduled'));
     expect(await screen.findByText('Scheduled page')).toBeTruthy();
     expect(rail('scheduled').getAttribute('aria-current')).toBe('page');
-    fireEvent.click(screen.getByText('Meta agent · maintain Pages'));
+    fireEvent.click(screen.getByText('Michi · Pages upkeep'));
     expect(await screen.findByText('Meta agent detail page')).toBeTruthy();
-    await waitFor(() => expect(screen.queryByText('Meta agent · maintain Pages')).toBeNull());
+    await waitFor(() => expect(screen.queryByText('Michi · Pages upkeep')).toBeNull());
   });
 
   it('keeps the overlay open when the window is wide, where there is none', async () => {

@@ -8,6 +8,7 @@ import {
   AgentRunEventType,
   AgentRunInvocationMode,
   AgentRunStatus,
+  AgentRunWaitingReason,
   type EffectiveAgentDefinitionV1,
 } from 'michi-shared';
 import { closeDb, getDb, initDb } from '../src/services/db';
@@ -15,6 +16,7 @@ import { AgentRunsRepository, type CreateAgentRunInput } from '../src/services/a
 import { AgentRunCoordinator } from '../src/agents/runs/agentRunCoordinator';
 import { RuntimeRunExecutor } from '../src/agents/runs/runtimeRunExecutor';
 import { PiRunAdapter } from '../src/agents/runs/piRunAdapter';
+import { FileRunContextSnapshotStore } from '../src/agents/runs/runContextSnapshotStore';
 import type { RunWorkerToolProfile } from '../src/agents/runs/runWorkerTools';
 import type { AgentRuntime, NewAgentSessionOptions, RuntimeSessionOwner } from '../src/agents/types';
 import type { NormalizedEvent } from '../src/services/chatEvents';
@@ -78,6 +80,54 @@ describe('AgentRunsRepository', () => {
     assert.equal(first.completionMode, AgentRunCompletionMode.Detach);
     assert.equal((getDb().prepare('SELECT COUNT(*) AS count FROM agent_run_events').get() as { count: number }).count, 1);
     assert.throws(() => runs.createRun({ ...createInput(), task: 'changed' }), /different payload/);
+  });
+
+  test('a spawn sent again returns the same Run and keeps its context snapshot', async () => {
+    const runs = repo();
+    const contexts = new FileRunContextSnapshotStore({ dataDir: tmpDir });
+    const cleanedLeases: string[] = [];
+    let prepared = 0;
+    const coordinator = new AgentRunCoordinator({
+      repository: runs, definitions: { get: () => null },
+      capabilities: { assertRuntimeReady() {}, resolve: () => ({ version: 1, entries: [] }) },
+      contexts,
+      environments: { async prepare(input) {
+        // Like a Git worktree: every prepare gets its own directory and time.
+        const leaseId = `lease-${++prepared}`;
+        return {
+          leaseId, ownerRunId: input.runId, access: 'read_write',
+          snapshot: { version: 1, kind: 'git_worktree', cwd: path.join(tmpDir, leaseId), baseCommit: 'b'.repeat(40),
+            sourceWorkspaceId: input.workspaceId, snapshotHash: HASH, createdAt: ++now },
+          provenance: { version: 1, sourceRepositoryRoot: null, baseCommit: null, stagedPatchHash: null,
+            unstagedPatchHash: null, untrackedFiles: [], skippedSensitivePaths: [] },
+          async buildChangeSet() { return null; },
+          async cleanup() { cleanedLeases.push(leaseId); return { removed: true }; },
+        };
+      } },
+      executor: { async start() { throw new Error('not started in this test'); } } as never,
+      workspaces: { resolve: () => ({ cwd: tmpDir, permissionPolicy: effectiveDefinition.permissionPolicy }) },
+      notifier: { notify: async () => {} }, parentSink: { deliver: async () => 'delivered' },
+      resourceCleaner: { cleanup: async () => {} }, instanceId: 'replay-test',
+      platformPermissionPolicy: effectiveDefinition.permissionPolicy, maxRunTtlMs: 60_000,
+      clock: { now: () => ++now, setTimeout: () => null, clearTimeout() {} },
+    });
+    const spawn = () => coordinator.spawn({
+      operationId: 'spawn-retry', ownerUserId: 'owner-a', workspaceId: 'ws-a', definitionId: null,
+      ephemeralDefinition: effectiveDefinition, invocationMode: AgentRunInvocationMode.Manual,
+      completionMode: AgentRunCompletionMode.Detach, parentRunId: null, parentAttemptId: null,
+      parentNodeId: null, parentTurnId: null, parentMessageId: null, parentToolCallId: null,
+      task: 'Research SQLite leases', contextManifest: { version: 1, entries: [], assembledAt: 1, estimatedChars: 0 },
+      permissionRestriction: null, environment: { version: 1, kind: 'git_worktree' }, expectedResult: null, runTtlMs: null,
+    });
+
+    const first = await spawn();
+    const again = await spawn();
+
+    assert.equal(again.id, first.id);
+    assert.deepEqual(again.executionEnvironment, first.executionEnvironment);
+    assert.equal(fs.existsSync(path.join(tmpDir, 'agent-runs', 'context-snapshots', 'spawn-retry', 'manifest.json')), true);
+    assert.deepEqual(cleanedLeases, ['lease-2'], 'only the environment prepared for the repeat is released');
+    assert.equal((getDb().prepare('SELECT COUNT(*) AS count FROM agent_runs').get() as { count: number }).count, 1);
   });
 
   test('persists an exact nested parent Attempt and rejects mismatched ancestry', () => {
@@ -153,6 +203,59 @@ describe('AgentRunsRepository', () => {
     assert.equal(done.status, AgentRunStatus.Completed);
     assert.equal(done.latestEventSeq, 3);
     assert.equal(done.resultBundle?.handoff.conclusion, 'Done');
+  });
+
+  test('a status write the transition table forbids, or a waiting reason that disagrees with the status, writes nothing', () => {
+    const runs = repo();
+    const created = runs.createRun(createInput());
+    // The payload of a non-status event cannot carry the check: the projector holds it.
+    assert.throws(() => runs.appendEventAndProject('owner-a', created.id, 0, {
+      type: AgentRunEventType.InteractionRequested, payload: { version: 1, interactionId: 'i-1', kind: 'permission' },
+    }, { status: AgentRunStatus.Running }), /invalid Agent Run transition: queued -> running/);
+    runs.claimRun('owner-a', created.id, 'worker-a', 'lease-a', 5000, 0);
+    runs.appendEventAndProject('owner-a', created.id, 1, {
+      type: AgentRunEventType.RunStatusChanged, payload: { version: 1, from: AgentRunStatus.Preparing, to: AgentRunStatus.Running },
+    }, { status: AgentRunStatus.Running });
+    assert.throws(() => runs.appendEventAndProject('owner-a', created.id, 2, {
+      type: AgentRunEventType.InteractionRequested, payload: { version: 1, interactionId: 'i-1', kind: 'permission' },
+    }, { status: AgentRunStatus.Waiting }), /waitingReason must be set exactly while a Run is waiting/);
+    const row = getDb().prepare('SELECT status, latest_event_seq FROM agent_runs WHERE id = ?').get(created.id) as any;
+    assert.deepEqual({ status: row.status, seq: row.latest_event_seq }, { status: 'running', seq: 2 });
+    assert.equal((getDb().prepare('SELECT COUNT(*) AS count FROM agent_run_events WHERE run_id = ?').get(created.id) as { count: number }).count, 3);
+  });
+
+  test('a Run no handle owns is cancelled with its Attempt and open question, and one with a live lease is left to its owner', () => {
+    const runs = repo();
+    const created = runs.createRun(createInput());
+    runs.claimRun('owner-a', created.id, 'worker-a', 'lease-a', 5000, 0);
+    const attempt = runs.createAttempt({ operationId: 'attempt-op', ownerUserId: 'owner-a', runId: created.id,
+      profileIndex: 0, runtimeProfile: effectiveDefinition.runtimeProfile, recoveryEnvelope: null });
+    runs.appendEventAndProject('owner-a', created.id, 1, {
+      type: AgentRunEventType.RunStatusChanged, attemptId: attempt.id,
+      payload: { version: 1, from: AgentRunStatus.Preparing, to: AgentRunStatus.Running },
+    }, { status: AgentRunStatus.Running });
+    const interaction = runs.createInteraction('owner-a', created.id, attempt.id, 'permission', { tool: 'bash' }, 'ask-1');
+    runs.appendEventAndProject('owner-a', created.id, 2, {
+      type: AgentRunEventType.InteractionRequested, attemptId: attempt.id,
+      payload: { version: 1, interactionId: interaction.id, kind: 'permission' },
+    }, { status: AgentRunStatus.Waiting, waitingReason: AgentRunWaitingReason.Permission });
+
+    assert.equal(runs.cancelRunWithoutHandle('owner-a', created.id, 'stop'), null, 'lease-a has not expired');
+    assert.equal(runs.getRun('owner-a', created.id)?.status, AgentRunStatus.Waiting);
+
+    now = 6000;
+    assert.equal(runs.cancelRunWithoutHandle('owner-b', created.id, 'stop'), null, 'another owner cannot cancel it');
+    assert.equal(runs.getRun('owner-a', created.id)?.status, AgentRunStatus.Waiting);
+    const event = runs.cancelRunWithoutHandle('owner-a', created.id, 'stop');
+    assert.deepEqual(event?.payload, { version: 1, from: AgentRunStatus.Waiting, to: AgentRunStatus.Cancelled });
+    const run = runs.getRun('owner-a', created.id)!;
+    assert.deepEqual({ status: run.status, waitingReason: run.waitingReason, seq: run.latestEventSeq },
+      { status: AgentRunStatus.Cancelled, waitingReason: null, seq: 4 });
+    assert.equal(runs.listAttempts('owner-a', created.id)[0].status, 'cancelled');
+    assert.equal(runs.listInteractions('owner-a', created.id)[0].status, 'cancelled');
+    const lease = getDb().prepare('SELECT lease_token FROM agent_runs WHERE id = ?').get(created.id) as { lease_token: string | null };
+    assert.equal(lease.lease_token, null);
+    assert.equal(runs.cancelRunWithoutHandle('owner-a', created.id, 'again'), null, 'a terminal Run is left as it is');
   });
 
   test('legacy public session metadata reads as the Attempt id without rewriting native recovery metadata', () => {
@@ -274,6 +377,17 @@ describe('AgentRunsRepository', () => {
     assert.equal(runs.deleteRun('owner-a', created.id), true);
     assert.equal(runs.deleteRun('owner-a', sibling.id), true);
     assert.deepEqual(runs.getWatch('owner-a', watch.id)?.runIds, []);
+  });
+
+  test('a Watch is replayed only to its own owner, whatever the key order', () => {
+    const runs = repo();
+    const created = runs.createRun(createInput());
+    const parent = { parentRunId: null, parentNodeId: null, parentTurnId: null };
+    const watch = runs.createWatch('owner-a', 'ws-a', [created.id], { version: 1, kind: 'all' }, 'notify', parent, 'watch-op');
+    assert.deepEqual(runs.createWatch('owner-a', 'ws-a', [created.id], { kind: 'all', version: 1 }, 'notify',
+      { parentTurnId: null, parentNodeId: null, parentRunId: null }, 'watch-op'), watch);
+    assert.throws(() => runs.createWatch('owner-b', 'ws-a', [created.id], { version: 1, kind: 'all' }, 'notify', parent, 'watch-op'),
+      /workspace not found/);
   });
 
   test('startup recovery discovery pages active and fired Watches with pending delivery across owners', () => {

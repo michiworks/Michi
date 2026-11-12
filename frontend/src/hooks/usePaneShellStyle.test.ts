@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { renderHook } from '@testing-library/react';
-import { usePaneShellStyle } from './usePaneShellStyle';
+import { paneDimOpacity, usePaneShellStyle } from './usePaneShellStyle';
 
 // --- Mocks ---
 
@@ -14,6 +14,8 @@ vi.mock('../state/chatStore', () => ({
   useChatStore: () => ({ focusedPane: mockFocusedPane }),
 }));
 
+const dimOf = (style: React.CSSProperties) => (style as Record<string, unknown>)['--pane-dim'];
+
 describe('usePaneShellStyle', () => {
   beforeEach(() => {
     mockFocusedPane = null;
@@ -21,15 +23,38 @@ describe('usePaneShellStyle', () => {
     mockPrefs.focusDim = 40;
   });
 
-  it('dims with brightness only when another pane is focused', () => {
+  it('dims an unfocused pane with the veil, not a filter or opacity on the pane', () => {
     mockFocusedPane = 'other-node';
-    mockPrefs.focusDim = 40;
     const { result } = renderHook(() => usePaneShellStyle('node-1'));
-    // No opacity dim: the Topbar caption cell dims with brightness() only, and
-    // stacking opacity here made the pane body darker than its title strip.
+    // The filter re-ran over the whole subtree; the veil (.terminal-pane::after) reads this.
+    expect(result.current.filter).toBeUndefined();
     expect(result.current.opacity).toBeUndefined();
-    // brightness = 1 - 40/100 * 0.6 = 0.76 (same formula as Topbar.tsx)
-    expect(result.current.filter).toBe('brightness(0.76)');
-    expect(result.current.transition).not.toContain('opacity');
+    // 40% focus dim at the old brightness factor: brightness(0.76) is a 0.24 black veil.
+    expect(dimOf(result.current)).toBeCloseTo(0.24);
+    expect(result.current.isolation).toBe('isolate');
+    expect(result.current.position).toBe('relative');
+  });
+
+  it('leaves the focused pane, and every pane while none is focused, without a veil', () => {
+    mockFocusedPane = 'node-1';
+    expect(dimOf(renderHook(() => usePaneShellStyle('node-1')).result.current)).toBe(0);
+    mockFocusedPane = null;
+    expect(dimOf(renderHook(() => usePaneShellStyle('node-1')).result.current)).toBe(0);
+  });
+
+  it('never dims a pane that opts out', () => {
+    mockFocusedPane = 'other-node';
+    const { result } = renderHook(() => usePaneShellStyle('node-1', { dim: false }));
+    expect(dimOf(result.current)).toBe(0);
+  });
+
+  it('matches the brightness() the Topbar caption cell keeps', () => {
+    for (const focusDim of [0, 20, 40, 100]) {
+      // A black veil at opacity a over color c leaves c * (1 - a): brightness(1 - a).
+      expect(1 - paneDimOpacity(focusDim)).toBeCloseTo(1 - (focusDim / 100) * 0.6);
+    }
   });
 });
+// The veil itself (.terminal-pane::after in index.css: black, pointer-events
+// none, over the pane's raised children) is checked in a real browser by
+// e2e/specs/pane-focus-dim.spec.ts; Vitest loads no CSS.

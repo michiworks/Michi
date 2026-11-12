@@ -6,7 +6,7 @@ import React from 'react';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, screen, fireEvent, act, waitFor } from '@testing-library/react';
 import ManageComposer, { __resetManageComposerSessionStateForTests } from './ManageComposer';
-import { fetchRuntimeCatalog, importWorkspaceFileUpload, saveAgentOptions } from '../../../services/api';
+import { copyWorkspaceFile, fetchRuntimeCatalog, importWorkspaceFileUpload, saveAgentOptions } from '../../../services/api';
 import { toast } from 'sonner';
 
 // The agent switcher menu is a searchable ContextMenu: it renders a `filter…`
@@ -18,15 +18,11 @@ const composerTextarea = () =>
 afterEach(() => {
   vi.useRealTimers();
 });
-function flushBlink() {
-  act(() => {
-    vi.advanceTimersByTime(200);
-  });
-}
 
 const createThread = vi.fn(async () => 'new-node-id');
 const createChildChat = vi.fn(async (..._args: unknown[]) => 'child-node-id');
 const sendMessage = vi.fn();
+const setChatUltracode = vi.fn(async (_nodeId: string, _enabled: boolean) => {});
 const selectProject = vi.fn();
 const createContext = vi.fn();
 
@@ -35,6 +31,7 @@ const storeState: Record<string, unknown> = {
   createThread,
   createChildChat,
   sendMessage,
+  setChatUltracode,
   selectProject,
   createContext,
   agentStatus: null,
@@ -60,15 +57,17 @@ vi.mock('../../../services/api', () => ({
   saveAgentOptions: vi.fn(async () => ({})),
   getWebUploadCwd: vi.fn(async () => '/tmp'),
   importWorkspaceFileUpload: vi.fn(),
+  copyWorkspaceFile: vi.fn(),
 }));
 
 vi.mock('sonner', () => ({ toast: { error: vi.fn() } }));
 
+const editorFocus = vi.hoisted(() => vi.fn());
 // Replace MentionEditor with a plain textarea so we can drive it via fireEvent.
 vi.mock('../../MentionEditor', () => ({
   default: React.forwardRef<any, any>(function MentionStub(props, ref) {
     const { value, onChange } = props;
-    React.useImperativeHandle(ref, () => ({ focus: () => {}, editor: null }));
+    React.useImperativeHandle(ref, () => ({ focus: editorFocus, editor: null }));
     return (
       <textarea
         value={value}
@@ -93,6 +92,32 @@ describe('ManageComposer', () => {
     vi.mocked(importWorkspaceFileUpload).mockReset().mockResolvedValue({
       name: 'notes', filePath: '.attachments/notes.txt', displayName: 'notes.txt', size: 5,
     });
+  });
+
+  it('focuses itself on mount, but not away from a control in an open dialog', async () => {
+    const frames = () => act(() => new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))));
+    // Load the lazy editor first, so a mount can reach it in the next frame.
+    render(<ManageComposer workspaceId="ws1" onSubmitted={vi.fn()} />).unmount();
+    await screen.findByRole('textbox').catch(() => {});
+    await frames();
+    editorFocus.mockClear();
+
+    const dialog = document.createElement('div');
+    dialog.setAttribute('role', 'dialog');
+    const toggle = document.createElement('button');
+    dialog.appendChild(toggle);
+    document.body.appendChild(dialog);
+    toggle.focus();
+    const view = render(<ManageComposer workspaceId="ws1" onSubmitted={vi.fn()} />);
+    await frames();
+    expect(editorFocus).not.toHaveBeenCalled();
+    expect(document.activeElement).toBe(toggle);
+    view.unmount();
+    dialog.remove();
+
+    render(<ManageComposer workspaceId="ws1" onSubmitted={vi.fn()} />);
+    await frames();
+    expect(editorFocus).toHaveBeenCalledOnce();
   });
 
   it('shows the runtime default when the remembered agent is not in the current catalog', async () => {
@@ -156,6 +181,34 @@ describe('ManageComposer', () => {
     expect(createChildChat).toHaveBeenCalledTimes(2);
   });
 
+  it('removes a pending attachment with a named button the keyboard reaches', async () => {
+    render(<ManageComposer workspaceId="ws1" onSubmitted={vi.fn()} />);
+    await screen.findByRole('textbox');
+    fireEvent.click(screen.getByTitle('Attach file'));
+    fireEvent.change(document.querySelector('input[type="file"]')!, { target: { files: [new File(['notes'], 'notes.txt', { type: 'text/plain' })] } });
+    await screen.findByText('notes.txt');
+    const remove = screen.getByRole('button', { name: 'Remove notes.txt' });
+    expect(remove.tabIndex).toBe(0);
+    expect(remove.classList.contains('t-reveal')).toBe(true);
+    fireEvent.click(remove);
+    expect(screen.queryByText('notes.txt')).toBeNull();
+  });
+
+  it('says why a new thread could not start and keeps the draft', async () => {
+    createThread.mockImplementationOnce(async () => { throw new TypeError('crypto.randomUUID is not a function'); });
+    const onSubmitted = vi.fn();
+    render(<ManageComposer workspaceId="ws1" onSubmitted={onSubmitted} />);
+    fireEvent.change(await screen.findByRole('textbox'), { target: { value: 'Keep this draft' } });
+    fireEvent.click(screen.getByRole('button', { name: /send/i }));
+
+    await waitFor(() => expect(toast.error).toHaveBeenCalledWith('Could not start thread', {
+      description: 'crypto.randomUUID is not a function',
+    }));
+    expect(sendMessage).not.toHaveBeenCalled();
+    expect(onSubmitted).not.toHaveBeenCalled();
+    expect(composerTextarea().value).toBe('Keep this draft');
+  });
+
   it('uploads and sends attachment-only follow-ups and removes the file picker on unmount', async () => {
     const view = render(<ManageComposer workspaceId="ws1" parentNodeId="digest-1" onSubmitted={vi.fn()} />);
     await screen.findByRole('textbox');
@@ -171,6 +224,132 @@ describe('ManageComposer', () => {
     ));
     view.unmount();
     expect(document.querySelector('input[type="file"]')).toBeNull();
+  });
+
+  describe('after a workspace switch', () => {
+    // Home keeps one composer across workspaces: attach in ws1, then switch.
+    async function attachInWs1ThenSwitch() {
+      storeState.projects = [
+        { id: 'ws1', name: 'First', cwd: '/tmp', artifacts: [] },
+        { id: 'ws2', name: 'Second', cwd: '/tmp/ws2', artifacts: [] },
+      ];
+      vi.mocked(importWorkspaceFileUpload).mockResolvedValueOnce({
+        name: 'shot', filePath: '.attachments/shot.png', displayName: 'shot.png', size: 5,
+      });
+      const view = render(<ManageComposer workspaceId="ws1" onSubmitted={vi.fn()} />);
+      await screen.findByRole('textbox');
+      fireEvent.click(screen.getByTitle('Attach file'));
+      fireEvent.change(document.querySelector('input[type="file"]')!, {
+        target: { files: [new File(['png'], 'shot.png', { type: 'image/png' })] },
+      });
+      await screen.findByAltText('shot.png');
+      view.rerender(<ManageComposer workspaceId="ws2" onSubmitted={vi.fn()} />);
+    }
+
+    it('keeps the thumbnail and copies the file into the workspace the thread starts in', async () => {
+      vi.mocked(copyWorkspaceFile).mockReset().mockResolvedValue({
+        name: 'shot', filePath: '.attachments/shot.png', displayName: 'shot.png', size: 5,
+      });
+      await attachInWs1ThenSwitch();
+      expect(screen.getByAltText('shot.png').getAttribute('src')).toContain('/files/ws1/.attachments/shot.png');
+
+      fireEvent.click(screen.getByRole('button', { name: /send/i }));
+      await waitFor(() => expect(sendMessage).toHaveBeenCalledWith(
+        'new-node-id', expect.stringContaining('/tmp/ws2/.attachments/shot.png'), expect.objectContaining({
+          attachments: [{ name: 'shot.png', absPath: '/tmp/ws2/.attachments/shot.png', relPath: '.attachments/shot.png' }],
+        }),
+      ));
+      expect(copyWorkspaceFile).toHaveBeenCalledExactlyOnceWith('ws2', '/tmp/ws2', '/tmp/.attachments/shot.png', { subdir: '.attachments' });
+    });
+
+    it('keeps the draft and does not start a thread when the copy fails', async () => {
+      vi.mocked(copyWorkspaceFile).mockReset().mockRejectedValue(new Error('sourcePath does not exist'));
+      await attachInWs1ThenSwitch();
+      fireEvent.click(screen.getByRole('button', { name: /send/i }));
+      await waitFor(() => expect(toast.error).toHaveBeenCalledWith('Could not copy attachments into Second', {
+        description: 'sourcePath does not exist. Remove them and attach them again.',
+      }));
+      expect(createThread).not.toHaveBeenCalled();
+      expect(screen.getByAltText('shot.png')).toBeTruthy();
+    });
+  });
+
+  it('keeps a drop to itself, so the workspace page does not also import it as context', async () => {
+    const pageDrop = vi.fn();
+    render(<div onDrop={pageDrop} onDragEnter={pageDrop}><ManageComposer workspaceId="ws1" onSubmitted={vi.fn()} /></div>);
+    const editor = await screen.findByRole('textbox');
+    const dataTransfer = { types: ['Files'], items: [{ kind: 'file' }], files: [new File(['x'], 'a.md')] };
+    await act(async () => {
+      fireEvent.dragEnter(editor, { dataTransfer });
+      fireEvent.drop(editor, { dataTransfer });
+    });
+    expect(pageDrop).not.toHaveBeenCalled();
+    expect(importWorkspaceFileUpload).toHaveBeenCalledOnce();
+  });
+
+  it('keeps a dropped file\'s original name, which the upload stores under a sanitized one', async () => {
+    vi.mocked(importWorkspaceFileUpload).mockResolvedValue({
+      name: '__', filePath: '.attachments/__.pdf', displayName: '报告.pdf', size: 5,
+    });
+    render(<ManageComposer workspaceId="ws1" parentNodeId="digest-1" onSubmitted={vi.fn()} />);
+    const file = new File(['%PDF'], '报告.pdf', { type: 'application/pdf' });
+    const editor = await screen.findByRole('textbox');
+    await act(async () => {
+      fireEvent.drop(editor, { dataTransfer: { types: ['Files'], files: [file] } });
+    });
+    await screen.findByText('报告.pdf');
+    fireEvent.click(screen.getByRole('button', { name: /send/i }));
+    await waitFor(() => expect(createChildChat).toHaveBeenCalledWith(
+      'digest-1', expect.stringContaining('[Attached files: 报告.pdf — /tmp/.attachments/__.pdf]'), expect.objectContaining({
+        attachments: [{ name: '报告.pdf', absPath: '/tmp/.attachments/__.pdf', relPath: '.attachments/__.pdf' }],
+      }), expect.any(Object),
+    ));
+  });
+});
+
+// Home has no chat yet: the switch holds the choice, and the send saves it to
+// the new chat before the first message, whose spawn reads it.
+describe('ManageComposer Home Ultracode', () => {
+  beforeEach(() => {
+    __resetManageComposerSessionStateForTests();
+    createThread.mockClear();
+    sendMessage.mockReset();
+    setChatUltracode.mockReset().mockResolvedValue(undefined);
+    vi.mocked(toast.error).mockClear();
+    storeState.availableModes = [];
+    storeState.projects = [{ id: 'ws1', name: 'Workspace', cwd: '/tmp', artifacts: [] }];
+    storeState.agentStatus = { runtime: 'claude', model: 'opus', capabilities: { models: true, ultracode: true } };
+  });
+
+  async function sendWithUltracode(text: string) {
+    render(<ManageComposer workspaceId="ws1" onSubmitted={vi.fn()} />);
+    fireEvent.click(screen.getByRole('button', { name: /^Model settings:/ }));
+    const toggle = screen.getByRole('switch', { name: /Ultracode/ });
+    await act(async () => { fireEvent.click(toggle); });
+    expect(toggle.getAttribute('aria-checked')).toBe('true');
+    expect(screen.getByRole('button', { name: /^Model settings:/ }).getAttribute('aria-label')).toMatch(/Ultracode on/);
+    fireEvent.change(composerTextarea(), { target: { value: text } });
+    fireEvent.click(screen.getByRole('button', { name: /send/i }));
+    await waitFor(() => expect(sendMessage).toHaveBeenCalledOnce());
+  }
+
+  it('saves the choice to the new chat before its first message, then starts the next one off', async () => {
+    const order: string[] = [];
+    setChatUltracode.mockImplementation(async () => { order.push('ultracode'); });
+    sendMessage.mockImplementation(() => { order.push('send'); });
+    await sendWithUltracode('Build it');
+    expect(setChatUltracode).toHaveBeenCalledExactlyOnceWith('new-node-id', true);
+    expect(order).toEqual(['ultracode', 'send']);
+    expect(screen.getByRole('button', { name: /^Model settings:/ }).getAttribute('aria-label')).not.toMatch(/Ultracode/);
+  });
+
+  it('still sends, without Ultracode, when saving it fails', async () => {
+    setChatUltracode.mockRejectedValue(new Error('Failed to save Ultracode'));
+    await sendWithUltracode('Build it');
+    expect(sendMessage).toHaveBeenCalledWith('new-node-id', 'Build it', undefined);
+    expect(toast.error).toHaveBeenCalledWith('Could not turn on Ultracode', {
+      description: expect.stringContaining('Failed to save Ultracode'),
+    });
   });
 });
 

@@ -1,4 +1,3 @@
-import React from 'react';
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { ChatNodeState } from '../../../state/chatTypes';
@@ -83,7 +82,7 @@ describe('highlighted message in the conversation', () => {
       }] },
     ],
   } as unknown as ChatNodeState;
-  const list = () => <PaneMessageList node={node} prefs={DEFAULT_PREFS} contentStyle={{}} streaming={false} viewportHeight={800}
+  const list = () => <PaneMessageList node={node} prefs={DEFAULT_PREFS} contentStyle={{}} streaming={false}
     onRetryTurn={() => {}} onEditUserMessage={() => {}} onContinueFollowUp={() => {}} onBranchFollowUp={() => {}} />;
 
   it('frames the cited reply with the page that references it; its page receipt counts places', async () => {
@@ -93,7 +92,7 @@ describe('highlighted message in the conversation', () => {
     const frame = container.querySelector('[data-source-referenced="true"]')!;
     expect(frame.getAttribute('data-msg-id')).toBe('m4');
     expect(frame.textContent).toContain('Referenced by page “Michi 0.9 发布 · 进展, 风险”');
-    expect(frame.querySelector('[data-page-receipt]')?.textContent).toContain('Updated Michi 0.9 发布 · 2 places · 1 waiting for you');
+    expect(frame.querySelector('[data-receipt="page"]')?.textContent).toContain('Updated Michi 0.9 发布 2 places · 1 waiting for you');
     expect(container.querySelectorAll('[data-source-referenced]')).toHaveLength(1);
   });
 

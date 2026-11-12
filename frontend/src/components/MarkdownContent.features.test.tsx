@@ -1,24 +1,12 @@
-import { fireEvent, render, waitFor } from '@testing-library/react';
+import { fireEvent, render } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import MarkdownContent, { type MarkdownFeatureProfile } from './MarkdownContent';
-
-const { mermaidRenderSpy } = vi.hoisted(() => ({
-  mermaidRenderSpy: vi.fn(async () => ({ svg: '<svg><text>diagram</text></svg>' })),
-}));
-
-vi.mock('mermaid', () => ({
-  default: {
-    initialize: vi.fn(),
-    render: mermaidRenderSpy,
-  },
-}));
 
 const features: MarkdownFeatureProfile = {
   autoDirection: true,
   cjk: true,
   codeDownload: true,
   codeLineNumbers: true,
-  linkSafety: true,
   normalizeHtmlIndentation: true,
   strikethrough: true,
   tableControls: true,
@@ -39,20 +27,6 @@ describe('MarkdownContent optional Streamdown-parity features', () => {
 
     expect(container.querySelector('strong')?.textContent).toBe('该强调包含句号。');
     expect(container.querySelector('del')?.textContent).toBe('该删除线包含句号。');
-  });
-
-  it('asks before opening external links when link safety is enabled', () => {
-    const confirm = vi.spyOn(window, 'confirm').mockReturnValue(false);
-    const { container } = render(
-      <MarkdownContent features={features} text="[external](https://example.com/path)" />,
-    );
-    const anchor = container.querySelector('a')!;
-
-    const event = new MouseEvent('click', { bubbles: true, cancelable: true });
-    anchor.dispatchEvent(event);
-
-    expect(confirm).toHaveBeenCalledWith('Open external link?\nhttps://example.com/path');
-    expect(event.defaultPrevented).toBe(true);
   });
 
   it('normalizes indented raw HTML instead of turning it into a code block', () => {
@@ -99,19 +73,5 @@ describe('MarkdownContent optional Streamdown-parity features', () => {
     expect(value.classList.contains('michi-table-cell')).toBe(true);
     expect(value.querySelector('code')?.textContent).toBe('~/.local/bin/sample-cli');
     expect(value.textContent).toBe('~/.local/bin/sample-cli is a local shim');
-  });
-
-  it('renders completed Mermaid fences with diagram controls', async () => {
-    const { container } = render(
-      <MarkdownContent
-        features={{ ...features, mermaid: true }}
-        text={'```mermaid\ngraph TD\n  A --> B\n```'}
-      />,
-    );
-
-    await waitFor(() => expect(container.querySelector('[data-michi-mermaid] svg')).not.toBeNull());
-    expect(mermaidRenderSpy).toHaveBeenCalledOnce();
-    expect(container.querySelectorAll('.michi-mermaid-controls button')).toHaveLength(5);
-    expect(container.querySelector('.michi-code-block')).toBeNull();
   });
 });

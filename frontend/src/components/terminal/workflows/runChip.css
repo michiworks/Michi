@@ -1,0 +1,26 @@
+/* A run's status chip, on the chat's workflow and multi-model cards and on
+   their Background work cards; each gives it the status's colour and fill. */
+.run-chip {
+  margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 20px;
+  padding: 0 9px;
+  border-radius: var(--ui-radius-pill);
+  font-size: var(--fs-sm);
+  font-weight: 500;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+.run-chip .term-dot-i {
+  background: currentColor;
+  opacity: 1;
+}
+.run-chip__time {
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+  font-weight: 400;
+  font-variant-numeric: tabular-nums;
+  opacity: 0.85;
+}

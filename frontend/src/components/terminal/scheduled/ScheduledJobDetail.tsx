@@ -5,8 +5,10 @@ import { ModalShell } from '../../ui/ModalShell';
 import { Button } from '../../ui/controls';
 import { listScheduledJobRuns } from '../../../services/api/scheduledJobs';
 import { PERMISSION_CHOICES } from '../ComposerPermissionControl';
+import { SCHEDULED_ONLY_KEPT_DAYS, SCHEDULED_ONLY_RETENTION } from 'michi-shared';
 import { TrashIconButton } from '../pages/TrashControls';
-import { SCHEDULED_JOB_RUN_WINDOW_EVENT } from './scheduledNav';
+import { SCHEDULED_JOB_RUN_WINDOW_EVENT } from '../../../state/scheduledRunNotice';
+import { useVisiblePoll } from '../../../state/visiblePoll';
 import {
   RUN_STATUS_LABELS,
   describeSchedule,
@@ -39,20 +41,22 @@ function useRuns(jobId: string, refreshKey: string) {
       const detail = (event as CustomEvent<{ jobId?: string }>).detail;
       if (detail?.jobId === jobId) load();
     };
-    const poll = window.setInterval(() => load(), 10_000);
     window.addEventListener(SCHEDULED_JOB_RUN_WINDOW_EVENT, onRun);
     return () => {
       controller.abort();
-      window.clearInterval(poll);
       window.removeEventListener(SCHEDULED_JOB_RUN_WINDOW_EVENT, onRun);
     };
   }, [jobId, load, refreshKey]);
+  const poll = React.useCallback(() => load(), [load]);
+  useVisiblePoll(poll, { intervalMs: 10_000, focus: false });
   return { runs, error };
 }
 
-export function ScheduledJobDetail({ job, workspaceName, now, busy, runBlocked = false, onClose, onEdit, onRunNow, onCancelRun, onDelete, onOpenRun }: {
+export function ScheduledJobDetail({ job, workspaceName, workspaceArchived = false, now, busy, runBlocked = false, onClose, onEdit, onRunNow, onCancelRun, onDelete, onOpenRun }: {
   job: ScheduledJobDto;
   workspaceName: string;
+  /** The backend skips the job's runs until the workspace is unarchived. */
+  workspaceArchived?: boolean;
   now: number;
   busy: boolean;
   runBlocked?: boolean;
@@ -65,7 +69,8 @@ export function ScheduledJobDetail({ job, workspaceName, now, busy, runBlocked =
 }) {
   const { runs, error } = useRuns(job.id, `${job.activeRunId ?? ''}:${job.lastRunAt ?? ''}`);
   const permission = PERMISSION_CHOICES.find((choice) => choice.mode === job.permissionMode)?.label ?? job.permissionMode;
-  const next = job.nextRunAt
+  const next = workspaceArchived && job.enabled && !job.autoPaused ? 'Workspace archived'
+    : job.nextRunAt
     ? `${formatDateTime(job.nextRunAt, now)} (${relativeTime(job.nextRunAt, now)})`
     : job.autoPaused ? 'Paused after repeated failures' : job.enabled ? 'No upcoming run' : 'Paused';
   return (
@@ -80,6 +85,7 @@ export function ScheduledJobDetail({ job, workspaceName, now, busy, runBlocked =
             <dt>Agent</dt><dd>{job.runtimeId ? [job.runtimeId, job.modelId].filter(Boolean).join(' · ') : 'Default from Settings'}</dd>
             <dt>Permissions</dt><dd>{permission}</dd>
             <dt>Thread</dt><dd>{job.sessionMode === 'persistent' ? 'One ongoing thread' : 'New thread each run'}</dd>
+            <dt>Runs show</dt><dd>{job.visibility === 'scheduled' ? 'Only in Scheduled' : 'In the workspace'}</dd>
             <dt>Notify</dt><dd>{job.notify ? 'When a run finishes' : 'Off'}</dd>
           </dl>
           {job.lastError && <p className="sched-detail-error" role="status">{job.lastError}</p>}
@@ -94,7 +100,7 @@ export function ScheduledJobDetail({ job, workspaceName, now, busy, runBlocked =
               {runs.map((run) => (
                 <li key={run.id}>
                   <button type="button" className="sched-run" disabled={!run.nodeId} onClick={() => onOpenRun(run)}
-                    aria-label={`${RUN_STATUS_LABELS[run.status]} run from ${formatDateTime(run.startedAt, now)}${run.nodeId ? ', open thread' : ''}`}>
+                    aria-label={`${RUN_STATUS_LABELS[run.status]} run from ${formatDateTime(run.startedAt, now)}${run.nodeId ? run.scheduledOnly ? ', open run' : ', open thread' : ''}`}>
                     <StatusDot status={run.status} />
                     <span className="sched-run-main">
                       <span className="sched-run-title">
@@ -110,6 +116,12 @@ export function ScheduledJobDetail({ job, workspaceName, now, busy, runBlocked =
                 </li>
               ))}
             </ul>
+          )}
+          {job.visibility === 'scheduled' && (
+            <p className="sched-detail-note">
+              Runs open here, read-only. Michi keeps the latest {SCHEDULED_ONLY_RETENTION.maxRuns} runs from the past {SCHEDULED_ONLY_KEPT_DAYS} days,
+              and always the latest {SCHEDULED_ONLY_RETENTION.minRuns}.
+            </p>
           )}
         </div>
         <footer>

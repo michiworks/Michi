@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useSyncExternalStore } from 'react';
-import { chatPermissionChoice, type ChatPermissionSettings } from 'michi-shared';
+import { chatPermissionChoice, type ChatPermissionChoice, type ChatPermissionSettings } from 'michi-shared';
 import { API_BASE_URL } from '../config/env';
+import type { ChatNodeState } from '../state/chatTypes';
 import { usePrefs } from '../state/prefs';
 import { useBackendScope } from './useBackendScope';
 import { loadPermissionPreferences, permissionSnapshot, saveScopedPermissionPreferences, subscribePermissionPreferences } from '../services/permissionPreferences';
@@ -13,14 +14,15 @@ export function usePermissionPreferences(apiBase = API_BASE_URL) {
   const subscribe = useCallback((listener: () => void) => subscribePermissionPreferences(scope.key, listener), [scope.key]);
   const getSnapshot = useCallback(() => permissionSnapshot(scope.key), [scope.key]);
   const snapshot = useSyncExternalStore(subscribe, getSnapshot);
-  const retry = useCallback(() => loadPermissionPreferences(scope.key, apiBase), [scope.key, apiBase]);
+  const retry = useCallback(() => loadPermissionPreferences(scope.key, apiBase, { fresh: true }), [scope.key, apiBase]);
+  const mount = useCallback(() => loadPermissionPreferences(scope.key, apiBase), [scope.key, apiBase]);
   useEffect(() => {
     if (!remote) return;
-    void retry();
+    void mount();
     const refresh = () => { void retry(); };
     window.addEventListener('focus', refresh);
     return () => window.removeEventListener('focus', refresh);
-  }, [remote, retry]);
+  }, [remote, mount, retry]);
   const mode = remote ? snapshot.settings?.mode ?? 'ask' : prefs.permissionMode;
   const approveForMe = remote ? snapshot.settings?.approveForMe === true : prefs.permissionApproveForMe === true;
   return {
@@ -35,4 +37,16 @@ export function usePermissionPreferences(apiBase = API_BASE_URL) {
       ? saveScopedPermissionPreferences(scope.key, apiBase, settings)
       : setPermissionSettings(settings),
   };
+}
+
+/**
+ * The choice a chat's turns run with, as the backend resolves it
+ * (resolveChatPermissionMode, resolveChatApproveForMe): the global one while
+ * Settings › Permissions applies it to every chat, else the chat's own.
+ */
+export function effectiveChatPermissionChoice(
+  preferences: Pick<ReturnType<typeof usePermissionPreferences>, 'global' | 'choice'>,
+  chat: Pick<ChatNodeState, 'permissionMode' | 'permissionApproveForMe'>,
+): ChatPermissionChoice {
+  return preferences.global ? preferences.choice : chatPermissionChoice(chat.permissionMode ?? 'ask', chat.permissionApproveForMe);
 }

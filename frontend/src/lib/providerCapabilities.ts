@@ -1,4 +1,4 @@
-import type { AgentProviderInfo } from '../services/api';
+import type { AgentProviderInfo, AgentStatus } from '../services/api';
 
 export function providerRequiresUserKey(provider: Partial<AgentProviderInfo>): boolean {
   return provider.requiresUserKey !== false;
@@ -22,4 +22,15 @@ export function providerOptionSuffix(provider: Partial<AgentProviderInfo>): stri
 /** True when switching to this provider should open the API-key window. */
 export function shouldPromptForProviderKey(provider: Partial<AgentProviderInfo>): boolean {
   return providerRequiresUserKey(provider) && !provider.hasKey;
+}
+
+/**
+ * The model a key check runs against: the active provider's selected model,
+ * so the check does not surprise the user, or another provider's default.
+ */
+export function verifyModelFor(
+  provider: Pick<AgentProviderInfo, 'id' | 'defaultModel'>,
+  status: Pick<AgentStatus, 'provider' | 'model'>,
+): string | undefined {
+  return provider.id === status.provider ? status.model : provider.defaultModel;
 }

@@ -1,4 +1,4 @@
-import React, { useMemo } from 'react';
+import { useMemo } from 'react';
 import type { MichiDatabase, MichiDbColumn, MichiDbRow, DatabaseRowStatus } from 'michi-shared';
 import { loadableImageUrl } from '../../../../../lib/pictureAddress';
 import { ThreadStateDot } from '../../ThreadStateDot';

@@ -3,9 +3,11 @@ import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-libra
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { PrefsProvider, usePrefs } from './prefs';
 
-const api = vi.hoisted(() => ({ fetchPrefs: vi.fn(), savePrefs: vi.fn(), savePermissionSettings: vi.fn() }));
+const api = vi.hoisted(() => ({
+  fetchPrefs: vi.fn(), savePrefs: vi.fn(), savePermissionSettings: vi.fn(), putChatNotificationLevel: vi.fn(async () => 'saved' as const),
+}));
 vi.mock('../services/api', () => ({ fetchPrefs: api.fetchPrefs, savePrefs: api.savePrefs }));
-vi.mock('../services/api/prefs', () => ({ savePermissionSettings: api.savePermissionSettings }));
+vi.mock('../services/api/prefs', () => ({ savePermissionSettings: api.savePermissionSettings, putChatNotificationLevel: api.putChatNotificationLevel }));
 function Probe() {
   const { prefs, setPermissionSettings } = usePrefs();
   return <>

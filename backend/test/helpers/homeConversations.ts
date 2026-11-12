@@ -25,6 +25,8 @@ export interface SeedConversation {
   nodeStatus?: string;
   maintenanceJobId?: string;
   deletedAt?: number;
+  /** With deletedAt: Trash's group, or the archive lane's (`arch-`). */
+  deletionGroupId?: string;
   treeArchivedAt?: number;
 }
 
@@ -36,9 +38,9 @@ export function seedConversation(input: SeedConversation): void {
   const treeId = `${input.nodeId}-tree`;
   db.prepare('INSERT INTO trees(id,workspace_id,root_node_id,name,archived_at,last_active_at,created_at) VALUES (?,?,?,?,?,?,?)')
     .run(treeId, input.workspaceId, input.nodeId, null, input.treeArchivedAt ?? null, first, first);
-  db.prepare(`INSERT INTO nodes(id,workspace_id,tree_id,kind,title,status,deleted_at,maintenance_job_id,created_at)
-    VALUES (?,?,?,'chat',?,?,?,?,?)`).run(input.nodeId, input.workspaceId, treeId, input.title === undefined ? `Chat ${input.nodeId}` : input.title,
-    input.nodeStatus ?? 'idle', input.deletedAt ?? null, input.maintenanceJobId ?? null, first - 1);
+  db.prepare(`INSERT INTO nodes(id,workspace_id,tree_id,kind,title,status,deleted_at,deletion_group_id,maintenance_job_id,created_at)
+    VALUES (?,?,?,'chat',?,?,?,?,?,?)`).run(input.nodeId, input.workspaceId, treeId, input.title === undefined ? `Chat ${input.nodeId}` : input.title,
+    input.nodeStatus ?? 'idle', input.deletedAt ?? null, input.deletionGroupId ?? null, input.maintenanceJobId ?? null, first - 1);
   let seq = 0;
   const message = db.prepare('INSERT INTO messages(id,node_id,role,content,seq,created_at,metadata) VALUES (?,?,?,?,?,?,?)');
   turns.forEach((turn, index) => {

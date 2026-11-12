@@ -1,4 +1,5 @@
 import React, { useRef, useState, useMemo, useCallback, useEffect } from 'react';
+import { formatTokenCount } from 'michi-shared';
 import { usePhoneLayout } from '../../hooks/usePhoneLayout';
 import { lastInputWasTouch } from '../../lib/inputModality';
 import { PopoverSurface } from '../ui/Popover';
@@ -35,11 +36,7 @@ function ringColor(pct: number): string {
   return 'var(--term-danger)';
 }
 
-function formatTokens(n: number): string {
-  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
-  if (n >= 1_000) return `${(n / 1_000).toFixed(1)}K`;
-  return String(n);
-}
+const formatTokens = (n: number) => formatTokenCount(n, { precise: true });
 
 /**
  * Minimal SVG donut ring showing context-window usage, without a number.

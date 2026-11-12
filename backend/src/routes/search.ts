@@ -104,6 +104,8 @@ export interface KeywordSearchOptions {
    * (settings.aiGlobalContext === false, as getAiGlobalContext reads it).
    */
   excludeNavigationDisabled?: boolean;
+  /** Also search the threads of Scheduled-only jobs (an agent asked about such a job's results). */
+  includeScheduledRuns?: boolean;
 }
 
 const NAVIGATION_ALLOWED = "(CASE WHEN json_valid(w.settings) THEN json_type(w.settings, '$.aiGlobalContext') END) IS NOT 'false'";
@@ -132,6 +134,7 @@ export function keywordSearch(query: string, workspaceId?: string, limit = 20, u
   }
   if (opts.excludeDeletedWorkspaces) sql += ' AND w.deleted_at IS NULL';
   if (opts.excludeNavigationDisabled) sql += ` AND ${NAVIGATION_ALLOWED}`;
+  if (!opts.includeScheduledRuns) sql += ' AND n.scheduled_only_job_id IS NULL';
   sql += ' AND n.page_id IS NULL';
   sql += ' AND n.deleted_at IS NULL AND n.page_id IS NULL AND n.maintenance_job_id IS NULL AND n.kind != \'digest\' ORDER BY rank LIMIT ?';
   params.push(limit);
@@ -177,7 +180,7 @@ export function nodeGroupedSearch(
       JOIN nodes n ON m.node_id = n.id
       JOIN workspaces w ON n.workspace_id = w.id
       WHERE messages_fts MATCH ?
-        AND n.deleted_at IS NULL AND n.page_id IS NULL AND n.maintenance_job_id IS NULL AND n.kind != 'digest'
+        AND n.deleted_at IS NULL AND n.page_id IS NULL AND n.maintenance_job_id IS NULL AND n.scheduled_only_job_id IS NULL AND n.kind != 'digest'
   `;
   const params: (string | number)[] = [ftsQuery];
   sql += workspaceScope(workspaceId, params);
@@ -272,9 +275,6 @@ export function nodeGroupedSearch(
  * in JS to avoid per-node recursive CTEs.
  */
 function buildBreadcrumbs(db: ReturnType<typeof getDb>, results: NodeGroupedResult[]): void {
-  // Collect all unique node IDs we need ancestors for.
-  const nodeIds = new Set(results.map((r) => r.nodeId));
-
   // Collect all workspace IDs involved.
   const workspaceIds = new Set(results.map((r) => r.workspaceId));
 
@@ -286,7 +286,7 @@ function buildBreadcrumbs(db: ReturnType<typeof getDb>, results: NodeGroupedResu
   for (const wsId of workspaceIds) {
     const rows = db.prepare(
       `SELECT id, parent_node_id, title FROM nodes
-       WHERE workspace_id = ? AND deleted_at IS NULL AND page_id IS NULL AND maintenance_job_id IS NULL AND kind != 'digest'`
+       WHERE workspace_id = ? AND deleted_at IS NULL AND page_id IS NULL AND maintenance_job_id IS NULL AND scheduled_only_job_id IS NULL AND kind != 'digest'`
     ).all(wsId) as unknown as Array<{ id: string; parent_node_id: string | null; title: string | null }>;
     for (const r of rows) {
       allNodes.set(r.id, { id: r.id, parentNodeId: r.parent_node_id, title: r.title });
@@ -373,7 +373,7 @@ function searchNodesByTitleFts(
     JOIN nodes n ON nodes_fts.rowid = n.rowid
     JOIN workspaces w ON n.workspace_id = w.id
     WHERE nodes_fts MATCH ?
-      AND n.deleted_at IS NULL AND n.page_id IS NULL AND n.maintenance_job_id IS NULL AND n.kind != 'digest'
+      AND n.deleted_at IS NULL AND n.page_id IS NULL AND n.maintenance_job_id IS NULL AND n.scheduled_only_job_id IS NULL AND n.kind != 'digest'
       AND n.purged_at IS NULL AND w.purged_at IS NULL
       AND n.title IS NOT NULL AND TRIM(n.title) != ''
   `;
@@ -452,7 +452,7 @@ function searchNodesByTitleLike(
            ) AS last_message_at
     FROM nodes n
     JOIN workspaces w ON n.workspace_id = w.id
-    WHERE n.deleted_at IS NULL AND n.page_id IS NULL AND n.maintenance_job_id IS NULL AND n.kind != 'digest'
+    WHERE n.deleted_at IS NULL AND n.page_id IS NULL AND n.maintenance_job_id IS NULL AND n.scheduled_only_job_id IS NULL AND n.kind != 'digest'
       AND n.purged_at IS NULL AND w.purged_at IS NULL
       AND n.title IS NOT NULL AND TRIM(n.title) != ''
       AND ${likeClauses.join(' AND ')}
@@ -545,7 +545,7 @@ function semanticSearch(query: string, workspaceId?: string, limit = 20, userId?
     sql += ' AND w.owner_user_id = ?';
     params.push(userId);
   }
-  sql += ' AND n.deleted_at IS NULL AND n.page_id IS NULL AND n.maintenance_job_id IS NULL AND n.kind != \'digest\' ORDER BY rank LIMIT ?';
+  sql += ' AND n.deleted_at IS NULL AND n.page_id IS NULL AND n.maintenance_job_id IS NULL AND n.scheduled_only_job_id IS NULL AND n.kind != \'digest\' ORDER BY rank LIMIT ?';
   params.push(candidateLimit);
 
   const candidates = db.prepare(sql).all(...params) as unknown as RawSemanticResult[];

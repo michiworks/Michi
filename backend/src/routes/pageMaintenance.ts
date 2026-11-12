@@ -1,5 +1,5 @@
-import { Router, type NextFunction, type Request, type Response } from 'express';
-import { LOCAL_AGENT_OWNER_ID } from '../services/agentOwner';
+import { Router, type Request } from 'express';
+import { requestAgentOwner } from '../services/agentOwner';
 import { PageWriteError, requirePagesWorkspace } from '../services/pages/core';
 import { getAiGlobalContext } from '../services/dbRepository';
 import { queueMaintenanceCatchup, queueMaintenanceReconsider, setInitialSpaceMaintenanceExcluded, setSpaceMaintenanceExcluded } from '../services/pages/maintenanceRepository';
@@ -8,16 +8,8 @@ import { MaintenanceRuntimeUnavailableError, PageMaintenanceConfigService } from
 import { createWatch, deleteWatch, requestWatchRun, saveWorkspaceInstructions, updateWatch } from '../services/metaAgent/watches';
 import type { ScheduledJobScheduler } from '../services/scheduledJobs/scheduler';
 import { JobValidationError, ScheduledJobConflictError, ScheduledJobNotFoundError } from '../services/scheduledJobs/scheduler';
-
-type Obj = Record<string, unknown>;
-const isObject = (value: unknown): value is Obj => typeof value === 'object' && value !== null && !Array.isArray(value);
-const owner = (req: Request): string => process.env.MICHI_CLOUD === '1'
-  ? (req as Request & { user?: { id?: string } }).user?.id ?? ''
-  : LOCAL_AGENT_OWNER_ID;
-const id = (value: unknown, name: string): string => {
-  if (typeof value !== 'string' || !value.trim() || value.length > 200) throw new PageWriteError(400, 'invalid', `Invalid ${name}`);
-  return value;
-};
+import { pageBody, pageErrors, pageId as id, route, type Obj } from './pageRouteKit';
+const owner = (req: Request): string => requestAgentOwner((req as Request & { user?: { id?: string } }).user?.id);
 const revision = (value: unknown): number => {
   if (!Number.isSafeInteger(value) || (value as number) < 1) throw new PageWriteError(400, 'invalid', 'expectedRevision must be a positive integer');
   return value as number;
@@ -26,24 +18,18 @@ class MaintenanceNavigationDisabledError extends Error {}
 function requireMaintenanceNavigation(workspaceId: string, ownerUserId: string): void {
   if (!getAiGlobalContext(workspaceId, ownerUserId)) throw new MaintenanceNavigationDisabledError('AI navigation is disabled for this workspace');
 }
-function checkBody(req: Request, allowed: string[]): Obj {
-  if (req.body === undefined && allowed.length === 0) return {};
-  if (!isObject(req.body) || Object.keys(req.body).some((key) => !allowed.includes(key))) throw new PageWriteError(400, 'invalid', 'Invalid request body');
-  return req.body;
-}
-function route(fn: (req: Request, res: Response) => unknown | Promise<unknown>) {
-  return (req: Request, res: Response, next: NextFunction) => { Promise.resolve().then(() => fn(req, res)).catch(next); };
-}
-function errors(error: unknown, _req: Request, res: Response, _next: NextFunction): void {
-  if (error instanceof MaintenanceNavigationDisabledError) { res.status(403).json({ error: { code: 'navigation_disabled', message: error.message } }); return; }
-  if (error instanceof MaintenanceRuntimeUnavailableError) { res.status(409).json({ error: { code: 'runtime_unavailable', message: error.message } }); return; }
-  if (error instanceof PageWriteError) { res.status(error.status).json({ error: { code: error.code, message: error.message } }); return; }
-  if (error instanceof ScheduledJobNotFoundError) { res.status(404).json({ error: { code: 'not_found', message: error.message } }); return; }
-  if (error instanceof ScheduledJobConflictError || error instanceof Error && /revision|config changed|already exists/.test(error.message)) {
-    res.status(409).json({ error: { code: 'conflict', message: error.message } }); return;
+/** Maintenance bodies are small and capped per field, so they skip the Pages write limit. */
+const checkBody = (req: Request, allowed: string[]): Obj => pageBody(req, allowed, { sizeCap: false });
+function maintenanceError(error: unknown): { status: number; code: string; message: string } | null {
+  if (!(error instanceof Error)) return null;
+  if (error instanceof MaintenanceNavigationDisabledError) return { status: 403, code: 'navigation_disabled', message: error.message };
+  if (error instanceof MaintenanceRuntimeUnavailableError) return { status: 409, code: 'runtime_unavailable', message: error.message };
+  if (error instanceof ScheduledJobNotFoundError) return { status: 404, code: 'not_found', message: error.message };
+  if (error instanceof ScheduledJobConflictError || /revision|config changed|already exists/.test(error.message)) {
+    return { status: 409, code: 'conflict', message: error.message };
   }
-  if (error instanceof JobValidationError) { res.status(400).json({ error: { code: 'invalid', message: error.message } }); return; }
-  res.status(500).json({ error: { code: 'internal_error', message: 'Unable to complete maintenance request' } });
+  if (error instanceof JobValidationError) return { status: 400, code: 'invalid', message: error.message };
+  return null;
 }
 
 /** Workspace-scoped maintenance controls backed by the regular Scheduled Jobs service. */
@@ -216,6 +202,6 @@ export function setupPageMaintenanceRoutes(deps: { scheduler: ScheduledJobSchedu
     res.status(202).json(view(workspaceId, ownerUserId));
   }));
 
-  router.use(errors);
+  router.use(pageErrors('Unable to complete maintenance request', maintenanceError));
   return router;
 }

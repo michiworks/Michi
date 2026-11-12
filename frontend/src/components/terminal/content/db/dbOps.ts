@@ -9,7 +9,7 @@ import type {
   MichiDbViewConfig,
   MichiDbViewType,
 } from 'michi-shared';
-import { MICHI_DB_LIMITS } from 'michi-shared';
+import { dayAt, dayIndex, MICHI_DB_LIMITS } from 'michi-shared';
 import {
   byPosition,
   cellEditable,
@@ -25,7 +25,6 @@ import {
   OPS_FOR,
   sameValue,
   shownColumns,
-  timeOf,
   titleColumn,
   writableOptions,
   type CellValue,
@@ -223,18 +222,6 @@ export function boardKeyValue(by: MichiDbColumn, key: string | null): CellValue 
 
 // ── Calendar ─────────────────────────────────────────────────────────
 
-const DAY_MS = 86_400_000;
-
-function shiftDay(day: string, by: number): string {
-  const [y, m, d] = day.split('-').map(Number);
-  const next = new Date(y, m - 1, d + by);
-  return `${next.getFullYear()}-${String(next.getMonth() + 1).padStart(2, '0')}-${String(next.getDate()).padStart(2, '0')}`;
-}
-
-function dayCount(a: string, b: string): number {
-  return Math.round((timeOf(b) - timeOf(a)) / DAY_MS);
-}
-
 /** A row's date moved to `day`: a range keeps its length. Times become plain days. */
 export function calendarMoveOps(db: MichiDatabase, row: MichiDbRow, column: MichiDbColumn, day: string): EditCheck {
   if (!cellEditable(column)) return { ok: false, reason: `${columnName(db, column)} can't be changed` };
@@ -242,7 +229,8 @@ export function calendarMoveOps(db: MichiDatabase, row: MichiDbRow, column: Mich
   const start = isDateValue(v) ? dayOf(v.start) : typeof v === 'string' ? dayOf(v) : null;
   if (start === day) return { ok: true, ops: [] };
   const end = isDateValue(v) && v.end ? dayOf(v.end) : null;
-  const value = start && end ? { start: day, end: shiftDay(day, dayCount(start, end)) } : { start: day };
+  // dayOf gives only real days, so each has an index.
+  const value = start && end ? { start: day, end: dayAt(dayIndex(day)! + dayIndex(end)! - dayIndex(start)!) } : { start: day };
   return { ok: true, ops: [{ op: 'row.update', id: row.id, values: { [column.id]: value } }] };
 }
 

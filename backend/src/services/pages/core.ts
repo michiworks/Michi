@@ -1,7 +1,8 @@
 import { randomUUID } from 'node:crypto';
 import { isAssistantWorkspaceSettings, isSystemWorkspaceSettings, parseChangeSource, type BlockSource, type ChangeSource } from 'michi-shared';
-import { getDb } from '../db';
+import { getDb, runInTransaction } from '../db';
 import { workspaceOwnerMatches } from '../agentOwner';
+import { savedChatHomePageId } from '../homeCards/chatHomePage';
 
 export class PageWriteError extends Error {
   constructor(
@@ -11,25 +12,20 @@ export class PageWriteError extends Error {
   ) { super(message); this.name = 'PageWriteError'; }
 }
 
+/** A write's timestamp: the caller's, or now. */
+export function pageTimestamp(value?: number): number {
+  const now = value ?? Date.now();
+  if (!Number.isSafeInteger(now) || now < 0) throw new PageWriteError(400, 'invalid', 'Invalid timestamp');
+  return now;
+}
+
 export function newPageId(prefix: 'pg' | 'db' | 'row' | 'chg' | 'batch' | 'block' | 'column' | 'view' | 'del'): string {
   return `${prefix}-${randomUUID()}`;
 }
 
-let transactionSerial = 0;
-/** Savepoints compose with the content transaction and internal receipt writers. */
+/** Composes with the content transaction and internal receipt writers (a savepoint inside one). */
 export function pagesTransaction<T>(fn: () => T): T {
-  const db = getDb();
-  const name = `pages_${++transactionSerial}`;
-  db.exec(`SAVEPOINT ${name}`);
-  try {
-    const result = fn();
-    db.exec(`RELEASE SAVEPOINT ${name}`);
-    return result;
-  } catch (error) {
-    db.exec(`ROLLBACK TO SAVEPOINT ${name}`);
-    db.exec(`RELEASE SAVEPOINT ${name}`);
-    throw error;
-  }
+  return runInTransaction(fn);
 }
 
 export interface PagesWorkspace {
@@ -103,9 +99,9 @@ export function requireChatChangeSource(workspaceId: string, ownerUserId: string
   // An explicit Chat Home binding is owner-wide, but grants no authority to
   // other pages or databases in the selected Page's workspace.
   const chatHome = !!row && !!pageId && workspaceOwnerMatches(row.workspace_owner, ownerUserId) &&
-    !!getDb().prepare(`SELECT 1 FROM home_customization h JOIN pages p ON p.id=json_extract(h.preferences,'$.pageId')
-      WHERE h.owner_user_id=? AND p.id=? AND p.workspace_id=? AND p.owner_user_id=? AND p.deleted_at IS NULL`)
-      .get(ownerUserId, pageId, workspaceId, ownerUserId);
+    savedChatHomePageId(ownerUserId) === pageId &&
+    !!getDb().prepare('SELECT 1 FROM pages WHERE id=? AND workspace_id=? AND owner_user_id=? AND deleted_at IS NULL')
+      .get(pageId, workspaceId, ownerUserId);
   if (chatHome) requirePagesWorkspace(row!.workspace_id, ownerUserId, true);
   if (!row || (row.workspace_id !== workspaceId && !metaAgentChat && !chatHome) || row.kind !== 'chat' || row.deleted_at !== null ||
     row.purged_at !== null || row.archived_at !== null || row.node_status === 'archived' || row.status !== 'active' ||

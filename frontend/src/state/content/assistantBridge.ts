@@ -1,4 +1,5 @@
 import type { MichiContextItem } from 'michi-shared';
+import { openCompanionPanel } from '../companion/companionPanel';
 
 /** Where the user was when they called the assistant; it answers with that page in mind. */
 export interface MichiAssistantPage {
@@ -17,12 +18,18 @@ export interface OpenMichiAssistantOptions {
   page?: MichiAssistantPage;
 }
 
-export const MICHI_ASSISTANT_OPEN_EVENT = 'michi:assistant-open';
-
 /**
- * Open the ⌘J assistant panel. Any surface may call this; the panel listens
- * for the event, so callers never import the panel itself.
+ * Open the agent's panel on Chat (DESIGN-v2 §1.2: "Hand to agent…" and the
+ * other callers are unchanged and land in the one panel): the chips above its
+ * composer, the prompt left in it, or sent when the caller asked. Any surface
+ * may call this. The page the caller names is not passed on: the panel names
+ * what is on screen itself.
  */
 export function openMichiAssistant(options: OpenMichiAssistantOptions = {}): void {
-  window.dispatchEvent(new CustomEvent<OpenMichiAssistantOptions>(MICHI_ASSISTANT_OPEN_EVENT, { detail: options }));
+  const prompt = options.prompt?.trim();
+  openCompanionPanel({
+    ...(options.attachments?.length ? { attachments: options.attachments } : {}),
+    ...(prompt ? (options.send ? { send: prompt } : { draft: prompt }) : {}),
+    tab: 'chat',
+  });
 }

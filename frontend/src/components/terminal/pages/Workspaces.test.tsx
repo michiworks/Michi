@@ -1,11 +1,12 @@
-import React from 'react';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { act, render, screen, fireEvent, within } from '@testing-library/react';
 import TerminalWorkspaces, { buildCard } from './Workspaces';
+import { selectWorkspaceLive } from './WorkspacesPhone';
 import type { ChatNodeState, Project } from '../../../state/chatTypes';
 import { displayPath, formatAgo } from './workspaceList';
 import { _resetForTest, getManageWorkspaceId } from '../../../state/manageRoute';
 import { setKnownBackendConnections } from '../../../config/backendConnections';
+import { installTouchContextMenu, LONG_PRESS_MS } from '../../../lib/touchContextMenu';
 
 const base = { chatIds: [], edges: [], activeTreeId: null, artifacts: [] };
 const tree = (id: string, lastActiveAt: number) => ({ id, rootNodeId: `${id}-root`, createdAt: 0, lastActiveAt });
@@ -77,6 +78,16 @@ it('shows workspace machines, filters by host or remote, and updates renamed con
   } finally { view.unmount(); setKnownBackendConnections([]); }
 });
 
+it('labels a running workspace LIVE in the running colour, not waiting on you’s', () => {
+  const running: ChatNodeState = { nodeId: 'a-run', projectId: 'ws-a', kind: 'chat', chatId: null, title: 'Run', status: 'streaming', followUps: [], messages: [] };
+  store.projects = projects.map((p) => (p.id === 'ws-a' ? { ...p, chatIds: ['a-run'] } : p)) as Project[];
+  store.nodes = { 'a-run': running };
+  try {
+    render(<TerminalWorkspaces onNav={vi.fn()} />);
+    expect(screen.getByText('LIVE').style.color).toBe('var(--term-run)');
+  } finally { store.projects = projects as Project[]; store.nodes = {}; }
+});
+
 describe('TerminalWorkspaces — header controls', () => {
   beforeEach(() => _resetForTest());
 
@@ -116,6 +127,18 @@ describe('TerminalWorkspaces — row click', () => {
     expect(onNav).not.toHaveBeenCalled();
     expect(getManageWorkspaceId()).toBeNull();
   });
+
+  it('closes the row menu on a second press of its kebab', async () => {
+    render(<TerminalWorkspaces onNav={vi.fn()} />);
+    const kebab = within(screen.getByTestId('workspace-table-row-ws-x')).getByRole('button', { name: 'More actions' });
+    fireEvent.click(kebab);
+    expect(screen.getByRole('menu')).toBeTruthy();
+    // The menu listens for outside presses from its next frame.
+    await act(() => new Promise<void>((resolve) => requestAnimationFrame(() => resolve())));
+    fireEvent.mouseDown(kebab);
+    fireEvent.click(kebab);
+    expect(screen.queryByRole('menu')).toBeNull();
+  });
 });
 
 describe('TerminalWorkspaces — table', () => {
@@ -134,6 +157,26 @@ describe('TerminalWorkspaces — table', () => {
 
     fireEvent.click(screen.getByRole('button', { name: /^last/i }));
     expect(rowOrder()).toEqual(['ws-x', 'ws-a', 'ws-z', 'ws-s']);
+  });
+});
+
+describe('TerminalWorkspaces — rename in the table', () => {
+  beforeEach(() => _resetForTest());
+
+  it.each([{ isComposing: true }, { keyCode: 229 }])('leaves Enter and Esc that end an IME composition to the field (%o)', async (ime) => {
+    store.actions.renameProject.mockReset();
+    render(<TerminalWorkspaces onNav={vi.fn()} />);
+    const row = screen.getByTestId('workspace-table-row-ws-x');
+    fireEvent.click(within(row).getByRole('button', { name: 'More actions' }));
+    fireEvent.click(within(screen.getByRole('menu')).getByText(/Rename/));
+    const field = await within(row).findByRole('textbox');
+    fireEvent.change(field, { target: { value: '网页平台' } });
+    fireEvent.keyDown(field, { key: 'Enter', ...ime });
+    fireEvent.keyDown(field, { key: 'Escape', ...ime });
+    expect(store.actions.renameProject).not.toHaveBeenCalled();
+    expect(within(row).getByRole('textbox')).toBe(field);
+    fireEvent.keyDown(field, { key: 'Enter' });
+    expect(store.actions.renameProject).toHaveBeenCalledWith('ws-x', '网页平台');
   });
 });
 
@@ -180,6 +223,38 @@ describe('TerminalWorkspaces — cards', () => {
     expect(card.threads.map((t) => t.title)).toEqual(['My thread']);
     expect(card.nodes.map((n) => n.title)).toEqual(['My thread', 'My branch']);
   });
+
+  it('leave a thread in Trash out of the thread count and the latest thread', () => {
+    const node = (nodeId: string, title: string, extra: Partial<ChatNodeState> = {}): ChatNodeState => ({
+      nodeId, projectId: 'ws-t', kind: 'chat', chatId: null, title, status: 'idle', followUps: [], messages: [], ...extra,
+    });
+    const project: Project = {
+      ...base, id: 'ws-t', name: 'trashed', createdAt: 0,
+      chatIds: ['kept', 'binned'],
+      trees: [
+        { id: 't-kept', rootNodeId: 'kept', createdAt: 0, lastActiveAt: 100 },
+        { id: 't-binned', rootNodeId: 'binned', createdAt: 0, lastActiveAt: 900 },
+      ],
+    };
+    const snapshot = { kept: node('kept', 'Kept thread'), binned: node('binned', 'Binned thread', { deletedAt: 950 }) };
+    const card = buildCard(project, snapshot, new Set(), null);
+    expect(card.threadCount).toBe(1);
+    expect(card.threads.map((t) => t.title)).toEqual(['Kept thread']);
+  });
+
+  it('label an untitled thread with its first user message, as the sidebar does', () => {
+    const project: Project = { ...base, id: 'ws-u', name: 'untitled', createdAt: 0, chatIds: ['u'], trees: [{ id: 't-u', rootNodeId: 'u', createdAt: 0, lastActiveAt: 1 }] };
+    const snapshot: Record<string, ChatNodeState> = {
+      u: {
+        nodeId: 'u', projectId: 'ws-u', kind: 'chat', chatId: null, title: '', status: 'idle', followUps: [],
+        messages: [
+          { id: 'u-a', role: 'assistant', text: 'Welcome back.', toolCalls: [], createdAt: 1 },
+          { id: 'u-u', role: 'user', text: '/btw Why does the build fail?', toolCalls: [], createdAt: 2 },
+        ],
+      },
+    };
+    expect(buildCard(project, snapshot, new Set(), null).threads.map((t) => t.title)).toEqual(['Why does the build fail?']);
+  });
 });
 
 describe('TerminalWorkspaces — phone', () => {
@@ -215,7 +290,9 @@ describe('TerminalWorkspaces — phone', () => {
   };
   const rowOf = (id: string) => screen.getByTestId(`workspace-row-${id}`);
   const phoneRows = () => screen.getAllByTestId(/^workspace-row-/).map((row) => row.dataset.testid!.replace('workspace-row-', ''));
-  const openSheetFor = (id: string) => fireEvent.click(within(rowOf(id)).getByRole('button', { name: 'More actions' }));
+  const openMenuFor = (id: string) => fireEvent.click(within(rowOf(id)).getByRole('button', { name: 'More actions' }));
+  const menuItems = () => within(screen.getByRole('menu', { name: 'Actions' })).getAllByRole('menuitem').map((item) => item.textContent);
+  const touch = { pointerType: 'touch', isPrimary: true, clientX: 20, clientY: 20 };
 
   // jsdom has no PointerEvent; without one, fired pointer events carry no
   // coordinates or pointer type. A MouseEvent with the two pointer fields will do.
@@ -274,11 +351,13 @@ describe('TerminalWorkspaces — phone', () => {
     fireEvent.click(screen.getByRole('button', { name: /Archived workspaces/ }));
     fireEvent.click(within(rowOf('ws-old')).getByText('old-archive'));
     expect(onNav).not.toHaveBeenCalled();
-    const sheet = screen.getByRole('dialog', { name: 'old-archive' });
-    expect(within(sheet).getAllByRole('button').map((button) => button.textContent))
-      .toEqual(['Rename…', 'Unarchive', 'Delete workspace…', 'Cancel']);
-    fireEvent.click(within(sheet).getByRole('button', { name: 'Unarchive' }));
+    expect(menuItems()).toEqual(['Rename…', 'Unarchive', 'Delete workspace…']);
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Unarchive' }));
     expect(store.actions.unarchiveProject).toHaveBeenCalledWith('ws-old');
+  });
+
+  it('reads a workspace whose workflow waits on a tool approval as waiting', () => {
+    expect(selectWorkspaceLive(phoneNodes, new Set(['p-1'])).get('ws-p')).toEqual({ waiting: 'p-1', running: null });
   });
 
   it('filters to what needs you or is running from the counts at the top', () => {
@@ -312,23 +391,21 @@ describe('TerminalWorkspaces — phone', () => {
     expect(onNav).toHaveBeenCalledWith('workspace-manage');
   });
 
-  it('offers the row menu’s actions in a sheet, and archives from it', () => {
+  it('offers the row menu’s actions beside the row, and archives from it', () => {
     const onNav = vi.fn();
     render(<TerminalWorkspaces onNav={onNav} />);
-    openSheetFor('ws-x');
-    const sheet = screen.getByRole('dialog', { name: 'web-platform' });
-    const actions = within(sheet).getAllByRole('button').map((button) => button.textContent);
-    expect(actions).toEqual(['Manage workspace', 'Rename…', 'Pin', 'Archive', 'Delete workspace…', 'Cancel']);
+    openMenuFor('ws-x');
+    expect(menuItems()).toEqual(['Manage workspace', 'Rename…', 'Pin', 'Archive', 'Delete workspace…']);
     expect(onNav).not.toHaveBeenCalled();
-    fireEvent.click(within(sheet).getByRole('button', { name: 'Archive' }));
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Archive' }));
     expect(store.actions.archiveProject).toHaveBeenCalledWith('ws-x');
-    expect(screen.queryByRole('dialog')).toBeNull();
+    expect(screen.queryByRole('menu')).toBeNull();
   });
 
   it('renames in the sheet, with the field ready to type into', () => {
     render(<TerminalWorkspaces onNav={vi.fn()} />);
-    openSheetFor('ws-x');
-    fireEvent.click(screen.getByRole('button', { name: 'Rename…' }));
+    openMenuFor('ws-x');
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Rename…' }));
     const field = screen.getByRole('textbox', { name: 'Workspace name' }) as HTMLInputElement;
     expect(screen.getByRole('dialog', { name: 'Rename workspace' })).toBeTruthy();
     expect(document.activeElement).toBe(field);
@@ -341,8 +418,8 @@ describe('TerminalWorkspaces — phone', () => {
 
   it('asks before deleting, and says the files stay', () => {
     render(<TerminalWorkspaces onNav={vi.fn()} />);
-    openSheetFor('ws-x');
-    fireEvent.click(screen.getByRole('button', { name: 'Delete workspace…' }));
+    openMenuFor('ws-x');
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Delete workspace…' }));
     const confirm = screen.getByRole('dialog', { name: 'Delete “web-platform”?' });
     expect(confirm.textContent).toContain('Its 1 thread moves to Trash with it. You can restore it from Trash. Files in its folder stay on disk.');
     // The safe choice holds focus.
@@ -350,44 +427,51 @@ describe('TerminalWorkspaces — phone', () => {
     fireEvent.click(within(confirm).getByRole('button', { name: 'Cancel' }));
     expect(store.actions.deleteProject).not.toHaveBeenCalled();
 
-    openSheetFor('ws-x');
-    fireEvent.click(screen.getByRole('button', { name: 'Delete workspace…' }));
+    openMenuFor('ws-x');
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Delete workspace…' }));
     fireEvent.click(screen.getByRole('button', { name: 'Delete workspace' }));
     expect(store.actions.deleteProject).toHaveBeenCalledWith('ws-x');
     expect(screen.queryByRole('dialog')).toBeNull();
   });
 
-  it('opens the sheet on a long press without also opening the workspace', () => {
+  it('opens the menu on a long press without also opening the workspace', () => {
     vi.useFakeTimers();
+    const uninstall = installTouchContextMenu();
     const onNav = vi.fn();
     render(<TerminalWorkspaces onNav={onNav} />);
     const open = within(rowOf('ws-f')).getByText('flaky').closest('button')!;
-    fireEvent.pointerDown(open, { pointerType: 'touch', isPrimary: true, clientX: 20, clientY: 20 });
-    act(() => { vi.advanceTimersByTime(500); });
-    expect(screen.getByRole('dialog', { name: 'flaky' })).toBeTruthy();
+    fireEvent.pointerDown(open, touch);
+    act(() => { vi.advanceTimersByTime(LONG_PRESS_MS); });
+    expect(menuItems()).toContain('Archive');
     // The release's click neither opens the workspace nor lands as a scrim tap.
+    fireEvent.pointerUp(open, touch);
     fireEvent.click(open);
-    fireEvent.click(document.querySelector('.ui-scrim')!);
+    fireEvent.click(document.querySelector('.phone-menu-scrim')!);
     expect(onNav).not.toHaveBeenCalled();
-    expect(screen.getByRole('dialog', { name: 'flaky' })).toBeTruthy();
-    // A tap that starts on the scrim closes the sheet.
-    const scrim = document.querySelector('.ui-scrim')!;
-    fireEvent.pointerDown(scrim);
+    expect(screen.getByRole('menu', { name: 'Actions' })).toBeTruthy();
+    // A tap that starts on the scrim closes it.
+    const scrim = document.querySelector('.phone-menu-scrim')!;
+    fireEvent.pointerDown(scrim, touch);
+    fireEvent.pointerUp(scrim, touch);
     fireEvent.click(scrim);
-    expect(screen.queryByRole('dialog')).toBeNull();
+    expect(screen.queryByRole('menu')).toBeNull();
+    uninstall();
   });
 
-  it('lets a press that moves scroll instead, and closes the sheet on Escape', () => {
+  it('lets a press that moves scroll instead, and closes the menu on Escape', () => {
     vi.useFakeTimers();
+    const uninstall = installTouchContextMenu();
     render(<TerminalWorkspaces onNav={vi.fn()} />);
     const open = within(rowOf('ws-f')).getByText('flaky').closest('button')!;
-    fireEvent.pointerDown(open, { pointerType: 'touch', isPrimary: true, clientX: 20, clientY: 20 });
-    fireEvent.pointerMove(open, { pointerType: 'touch', isPrimary: true, clientX: 20, clientY: 60 });
+    fireEvent.pointerDown(open, touch);
+    fireEvent.pointerMove(open, { ...touch, clientY: 60 });
     act(() => { vi.advanceTimersByTime(800); });
-    expect(screen.queryByRole('dialog')).toBeNull();
+    expect(screen.queryByRole('menu')).toBeNull();
+    fireEvent.pointerUp(open, { ...touch, clientY: 60 });
 
-    openSheetFor('ws-f');
+    openMenuFor('ws-f');
     fireEvent.keyDown(window, { key: 'Escape' });
-    expect(screen.queryByRole('dialog')).toBeNull();
+    expect(screen.queryByRole('menu')).toBeNull();
+    uninstall();
   });
 });

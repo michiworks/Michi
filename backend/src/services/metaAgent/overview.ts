@@ -154,7 +154,7 @@ function firstRunEntry(ownerUserId: string, workspaceIds: Set<string>): Entry | 
 
 interface SummaryRunRow { state: string; error: string | null; result_json: string | null; created_at: number; live: number }
 
-/** A block's name as the Home shows it: its title, else its heading text. */
+/** A block's name for the overview: its title, else a heading line; unlike Home activity (pageBlockName), never its first words. */
 function blockName(block: unknown): string | null {
   if (!block || typeof block !== 'object') return null;
   const { title, text, type } = block as { title?: unknown; text?: unknown; type?: unknown };
@@ -248,7 +248,7 @@ function overallState(
   if (maintenanceCoordinatorState(ownerUserId).paused) return { state: 'paused', stopped: null };
   const availability = maintenanceRuntimeAvailability(runtime.runtimeId);
   if (!availability.available) {
-    return stoppedBy({ reason: 'runtime-unsupported', message: availability.reason ?? `The Meta agent cannot run on ${runtimeLabel(runtime.runtimeId)}`, workspaceIds: [] });
+    return stoppedBy({ reason: 'runtime-unsupported', message: availability.reason ?? `Pages upkeep cannot run on ${runtimeLabel(runtime.runtimeId)}`, workspaceIds: [] });
   }
   const guard = getMetaAgentGuardStatus('maintenance', () => runtime, ownerUserId);
   if (guard?.state === 'failed') {
@@ -256,7 +256,7 @@ function overallState(
     return stoppedBy({
       reason: 'restriction-check', workspaceIds: [],
       message: guard.unexpectedTools.length > 0
-        ? `${label} started with tools outside the Meta agent's list: ${guard.unexpectedTools.join(', ')}`
+        ? `${label} started with tools outside Pages upkeep's list: ${guard.unexpectedTools.join(', ')}`
         : `${label} did not pass its tool check`,
       ...(guard.detail ? { detail: errorFirstLine(guard.detail) } : {}),
     });

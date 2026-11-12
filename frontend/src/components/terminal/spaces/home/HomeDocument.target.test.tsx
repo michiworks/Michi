@@ -1,23 +1,17 @@
 import React from 'react';
-import { cleanup, fireEvent, render, screen } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { PageDto } from 'michi-shared';
-import { resetAssistantStoreForTests } from '../../../../state/assistant/assistantStore';
-import { getAssistantComposer, resetAssistantComposerForTests } from '../../../../state/assistant/assistantComposer';
-import { metaAgentTurnContextFor } from '../../../../services/api/assistant';
-import { useMetaChatWindow } from '../../../../state/metaChat/useMetaChatWindow';
-import { SpacesMetaChat } from '../metaChat/SpacesMetaChat';
+import { getCompanionPanelState, openCompanionPanel, resetCompanionPanelForTests } from '../../../../state/companion/companionPanel';
+import { resetCompanionStoreForTests } from '../../../../state/companion/companionStore';
 import { useHomeDocument } from './HomeDocument';
 
-vi.mock('../../../MentionEditor', () => import('../../../../test/mentionEditorStub'));
-vi.mock('../../TPane', () => import('../../../../test/assistantPaneStub'));
 vi.mock('../../../../state/chatStore', () => ({
   useChatActions: () => ({ openPagePane: vi.fn(), revealBackendNode: vi.fn() }),
   useChatNodesSnapshot: () => ({}),
   useChatProjects: () => ({ projects: [{ id: 'ws-1', name: 'rabbitholes' }], agentStatus: null }),
   useStructuralSelector: (selector: (nodes: Record<string, unknown>) => unknown) => selector({}),
 }));
-vi.mock('../../../../state/assistant/useAssistantNode', () => ({ useAssistantNode: () => ({ state: 'ready', retry: vi.fn() }) }));
 vi.mock('../../../../state/metaAgent/spacesFirstRun', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../../../../state/metaAgent/spacesFirstRun')>()),
   useSpacesFirstRun: () => ({ load: 'ready', data: null, error: null, unreachable: false, schedulerOff: false, justFinished: false }),
@@ -45,30 +39,23 @@ function HomeBlocks() {
   return <>{doc.renderBlocks(HOME.blocks.slice(0, 1), 'lead')}{doc.renderBlocks(HOME.blocks.slice(1), 'rest')}</>;
 }
 
-function Harness() {
-  const chat = useMetaChatWindow({ storage: null });
-  return (
-    <SpacesMetaChat controller={chat} active view={{ kind: 'workspace', workspaceId: 'ws-1', name: 'rabbitholes' }}>
-      <HomeBlocks />
-    </SpacesMetaChat>
-  );
-}
-
 const block = (id: string) => document.querySelector<HTMLElement>(`.michi-doc-block[data-block-id="${id}"]`)!;
-const chip = () => document.querySelector<HTMLElement>('.meta-chat-panel__target');
+const target = () => getCompanionPanelState().target;
 
+// DESIGN-v2 §1.3: a home's blocks are the panel's targets, as a Space page's are.
 describe('Block targeting on a home page', () => {
   beforeEach(() => {
-    resetAssistantStoreForTests({ status: 'ready', info: { nodeId: 'assistant-node', workspaceId: 'system', treeId: 't', settings: { runtimeId: 'claude', modelId: null, reasoning: null }, supportedRuntimes: ['claude'] } });
-    resetAssistantComposerForTests();
+    resetCompanionPanelForTests();
+    resetCompanionStoreForTests();
   });
-  afterEach(cleanup);
+  afterEach(() => { cleanup(); act(() => resetCompanionPanelForTests()); });
 
-  it('outlines a clicked block in any segment, names it in the window and clears on a second click', () => {
-    render(<Harness />);
+  it('with the panel open, outlines a clicked block in any segment, names it and clears on a second click', () => {
+    act(() => openCompanionPanel({ tab: 'chat', focusComposer: false }));
+    render(<HomeBlocks />);
     fireEvent.click(screen.getByText('Confirm the risk rewrite'));
     expect(block('next').dataset.selected).toBe('true');
-    expect(chip()?.textContent).toContain('Targeting: Next steps');
+    expect(target()).toMatchObject({ pageId: 'wh', blockId: 'next', title: 'Next steps' });
 
     fireEvent.click(screen.getByText('Michi merged into dev.'));
     expect(block('lead').dataset.selected).toBe('true');
@@ -76,28 +63,21 @@ describe('Block targeting on a home page', () => {
 
     fireEvent.click(screen.getByText('Michi merged into dev.'));
     expect(block('lead').dataset.selected).toBeUndefined();
-    expect(chip()).toBeNull();
+    expect(target()).toBeNull();
   });
 
-  it('Ask assistant targets the block and a send carries the home page and block', async () => {
-    render(<Harness />);
-    await screen.findByLabelText('Message the assistant');
-    const ask = block('next').querySelector<HTMLButtonElement>('[aria-label="Ask assistant"]')!;
-    expect(ask.getAttribute('aria-label')).toBe('Ask assistant');
+  it('Ask <name> opens the panel about the home block, from any area', () => {
+    render(<HomeBlocks />);
+    const ask = block('next').querySelector<HTMLButtonElement>('[aria-label="Ask Michi"]')!;
+    expect(ask).toBeTruthy();
     fireEvent.click(ask);
-    expect(chip()?.textContent).toContain('Targeting: Next steps');
-    const input = screen.getByLabelText('Message the assistant') as HTMLTextAreaElement;
-    expect(document.activeElement).toBe(input);
-    fireEvent.change(input, { target: { value: 'Keep one step' } });
-    fireEvent.keyDown(input, { key: 'Enter' });
-    expect(getAssistantComposer('assistant-node').sends.map((send) => send.prompt)).toEqual(['Keep one step']);
-    expect(metaAgentTurnContextFor('assistant-node')).toMatchObject({ pageId: 'wh', blockId: 'next' });
+    expect(getCompanionPanelState()).toMatchObject({ open: true, tab: 'chat', target: { pageId: 'wh', blockId: 'next', workspaceId: 'ws-1' } });
   });
 
-  it('selects nothing outside Spaces, where no window takes the target', () => {
+  it('selects nothing while the panel is closed', () => {
     render(<HomeBlocks />);
     fireEvent.click(screen.getByText('Confirm the risk rewrite'));
     expect(block('next').dataset.selected).toBeUndefined();
-    expect(block('next').querySelector('.michi-doc-toolbar__btn')?.textContent).not.toBe('Ask assistant');
+    expect(target()).toBeNull();
   });
 });

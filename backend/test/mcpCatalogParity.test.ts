@@ -3,6 +3,10 @@ import assert from 'node:assert/strict';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import Ajv from 'ajv';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { resolveShowImage } from 'michi-runtime/internal/core/showImage';
 import { McpSlotRegistry, buildMcpServerForSlot } from '../src/services/mcpServer';
 import { buildPiTools } from '../src/agents/pi/piTools';
 import { loadPiAi, loadPiTypebox } from '../src/agents/pi/piAi';
@@ -63,7 +67,7 @@ test('real SDK catalogs and real TypeBox schemas share navigation, Agent Run and
   const piTools = [...buildPiTools(commonOpts), ...buildPiTools({ ...commonOpts, owner, toolProfile: profile } as any)];
   const mcpTools = await catalog(t, { agentRuns: invoker });
   const runTools = await catalog(t, { owner, onSubmitAgentResult: () => ({}) });
-  for (const name of ['list_threads', 'search_messages', 'read_node', 'read_node_overview', 'read_conversation_updates', 'report_conversation_no_change', 'inspect_pane', 'read_pane_output', 'list_panes', 'wait_pane', 'send_to_thread', 'list_tasks', 'open_task_database', ...AGENT_RUN_TOOL_NAMES, 'submit_agent_result']) {
+  for (const name of ['list_threads', 'search_messages', 'read_node', 'read_node_overview', 'read_conversation_updates', 'report_conversation_no_change', 'inspect_pane', 'read_pane_output', 'list_panes', 'wait_pane', 'send_to_thread', 'list_tasks', 'open_task_database', 'list_artifacts', 'search_artifacts', 'delete_artifact', ...AGENT_RUN_TOOL_NAMES, 'submit_agent_result']) {
     const mcp = [...mcpTools, ...runTools].find(tool => tool.name === name)!;
     const tool = piTools.find(tool => tool.name === name)!;
     assert.ok(mcp, `${name} missing in real MCP listTools`); assert.ok(tool, `${name} missing in Pi tools`);
@@ -98,4 +102,53 @@ test('invalid arguments get the same text from the SDK McpServer as from the hos
   // (1.32's McpServer would say "Invalid input: expected string, received number at body").
   assert.equal(invalid.content.map((part: any) => part.text).join(''), 'MCP error -32602: Input validation error: Invalid arguments for tool save_artifact: '
     + JSON.stringify([{ expected: 'string', code: 'invalid_type', path: ['body'], message: 'Invalid input: expected string, received number' }], null, 2));
+});
+
+test('side-effect tools answer the model the same on MCP and Pi', async t => {
+  configureRuntimeDeps({ historyStore: store as any, agentConfig: baseCfg, dataDir: '/tmp/mcp-parity' });
+  t.after(() => __resetRuntimeDeps());
+  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), 'side-effect-parity-'));
+  t.after(() => fs.rmSync(cwd, { recursive: true, force: true }));
+  fs.writeFileSync(path.join(cwd, 'shot.png'), Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]));
+  let stored = true;
+  const branches = (topics: Array<{ title: string; prompt: string }>) => topics.map((topic, i) => ({ ...topic, chatId: `child-${i}`, nodeId: `child-${i}` }));
+  const artifact = (name: string) => stored ? { id: 'ctx-1', name, filePath: `/tmp/${name}.md`, size: 4 } : null;
+  const client = await connect(t, {
+    onSpawnBranches: async (topics: any) => branches(topics),
+    onSaveArtifact: (name: string) => artifact(name),
+    onUpdateArtifact: (name: string) => artifact(name),
+    onShowImage: (input: string) => {
+      const r = resolveShowImage(cwd, input);
+      return r.ok ? { relPath: r.relPath, mimeType: r.mimeType, size: r.size } : { error: r.error };
+    },
+  });
+  const piTools = buildPiTools({
+    bridge: {
+      spawnBranches: async (args: any) => branches(args.topics),
+      saveContext: (args: any) => artifact(args.name),
+      updateContext: (args: any) => artifact(args.name),
+    } as any,
+    cwd, parentChatId: 'p', workspaceId: null, enableFollowUps: true, imageQuota: { usedBytes: 0, limitBytes: 1 } as any,
+    seenPaths: new Set<string>(), Type: (await loadPiTypebox()).Type, owner: chatOwner('node-fixture'),
+  });
+  const text = (result: any) => result.content.map((part: any) => part.text).join('');
+  const viaPi = async (name: string, args: Record<string, unknown>) => {
+    try { return text(await piTools.find((tool: any) => tool.name === name).execute('call-1', args)); }
+    catch (error) { return (error as Error).message; }
+  };
+  const viaMcp = async (name: string, args: Record<string, unknown>) => text(await client.callTool({ name, arguments: args }));
+  const calls: Array<[string, Record<string, unknown>]> = [
+    ['spawn_branches', { topics: [{ title: 'A', prompt: 'Explore A' }, { title: 'B', prompt: 'Explore B' }] }],
+    ['spawn_branches', { topics: [{ title: 'A', prompt: 'Explore A' }] }],
+    ['save_artifact', { name: ' notes ', body: 'text' }],
+    ['save_artifact', { name: 'notes', body: 'text', path: 'notes.md' }],
+    ['update_artifact', { name: ' notes ', body: 'more' }],
+    ['show_image', { path: 'shot.png' }],
+    ['show_image', { path: 'missing.png' }],
+  ];
+  for (const [name, args] of calls) assert.equal(await viaPi(name, args), await viaMcp(name, args), `${name} ${JSON.stringify(args)}`);
+  stored = false;
+  for (const [name, args] of [['save_artifact', { name: 'notes', body: 'text' }], ['update_artifact', { name: 'gone', body: 'more' }]] as const) {
+    assert.equal(await viaPi(name, args), await viaMcp(name, args), `${name} when the bridge refuses`);
+  }
 });

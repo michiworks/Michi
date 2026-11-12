@@ -1,17 +1,18 @@
 import { Router } from 'express';
 import path from 'path';
 import fs from 'fs';
-import { DatabaseSync } from 'node:sqlite';
 import { getDb } from '../services/db';
+import { openAuthUserStore, type AuthUserStore } from '../services/auth';
 import { getMichiDataDir } from '../services/dataDir';
 import { recordAudit } from '../services/audit';
 import { requireAdmin } from './middleware/admin';
 import { listUserProviderKeys } from '../services/userKeys';
 import {
   exportAgentRunBackup,
-  portableBackupRelativePath,
+  portableContextRow,
+  portableEncodedJson,
+  portableMessageRow,
   sanitizeAgentNodeForBackup,
-  sanitizePortableBackupJson,
 } from '../services/agentRunBackup';
 import {
   AgentRunAdministrativeLifecycle,
@@ -19,6 +20,8 @@ import {
   type PreparedAgentOwnerDeletion,
 } from '../services/agentRunAdministrativeLifecycle';
 import { purgeOwnerMemories } from '../services/memory/memoryRepository';
+import { deleteCommandReceipts } from '../services/commandReceipts';
+import { agentDefinitionGlobalLedgerId } from '../services/agentDefinitionsRepository';
 
 export interface AdminRouteDeps {
   agentRunLifecycle?: AgentRunAdministrativeLifecycle;
@@ -30,13 +33,9 @@ router.use(requireAdmin);
 
 // ─── helpers ──────────────────────────────────────────────────────────────────
 
-function getAuthDb(): DatabaseSync {
-  const dbPath = path.join(getMichiDataDir(), 'auth.sqlite');
-  // Open read-write (auth DB is always present when REQUIRE_AUTH is active).
-  const db = new DatabaseSync(dbPath);
-  db.exec('PRAGMA journal_mode = WAL');
-  db.exec('PRAGMA busy_timeout = 15000');
-  return db;
+function withAuthUsers<T>(read: (store: AuthUserStore) => T): T {
+  const store = openAuthUserStore();
+  try { return read(store); } finally { store.close(); }
 }
 
 function actorFromReq(req: any): { id: string | null; email: string | null } {
@@ -70,49 +69,16 @@ function portableWorkspaceRow(row: Record<string, unknown>): Record<string, unkn
       folders = null;
     }
   }
-  let settings: unknown = null;
-  if (typeof row.settings === 'string') {
-    try { settings = JSON.stringify(sanitizePortableBackupJson(JSON.parse(row.settings))); }
-    catch { settings = null; }
-  }
-  return { ...row, cwd: null, folders, settings };
-}
-
-function portableContextRow(row: Record<string, unknown>): Record<string, unknown> {
-  const filePath = typeof row.file_path === 'string' ? row.file_path : '';
-  return {
-    ...row,
-    file_path: portableBackupRelativePath(filePath),
-  };
-}
-
-function portableMessageRow(row: Record<string, unknown>): Record<string, unknown> {
-  const copy = { ...row };
-  for (const field of ['blocks', 'tool_calls', 'metadata'] as const) {
-    const encoded = copy[field];
-    if (typeof encoded !== 'string') continue;
-    try { copy[field] = JSON.stringify(sanitizePortableBackupJson(JSON.parse(encoded))); }
-    catch { copy[field] = null; }
-  }
-  return copy;
+  return { ...row, cwd: null, folders, settings: portableEncodedJson(row.settings) };
 }
 
 // ─── GET /api/admin/users ──────────────────────────────────────────────────────
 
 router.get('/users', async (req, res) => {
   try {
-    const authDb = getAuthDb();
     const dataDb = getDb();
 
-    // Read all users from auth.sqlite
-    // Current Better Auth migrations use camelCase; older deployments used
-    // snake_case. Choose only a known schema identifier, never request input.
-    const columns = authDb.prepare('PRAGMA table_info("user")').all() as Array<{ name: string }>;
-    const createdColumn = columns.some(column => column.name === 'createdAt') ? 'createdAt' : 'created_at';
-    const authUsers = authDb.prepare(
-      `SELECT id, email, name, "${createdColumn}" AS createdAt FROM "user" ORDER BY "${createdColumn}" DESC`
-    ).all() as Array<{ id: string; email: string; name: string; createdAt: number }>;
-    authDb.close();
+    const authUsers = withAuthUsers((store) => store.listUsers());
 
     // Build counts from data.db per owner_user_id
     const wsCounts = dataDb.prepare(
@@ -197,16 +163,8 @@ router.get('/workspaces', async (req, res) => {
     // Enrich with owner email from auth.sqlite
     let emailMap = new Map<string, string>();
     if (workspaces.length > 0) {
-      const authDb = getAuthDb();
       const ownerIds = [...new Set(workspaces.map((w) => w.ownerUserId).filter(Boolean))];
-      if (ownerIds.length > 0) {
-        const placeholders = ownerIds.map(() => '?').join(',');
-        const rows = authDb.prepare(
-          `SELECT id, email FROM "user" WHERE id IN (${placeholders})`
-        ).all(...ownerIds) as Array<{ id: string; email: string }>;
-        emailMap = new Map(rows.map((r) => [r.id, r.email]));
-      }
-      authDb.close();
+      emailMap = withAuthUsers((store) => store.emailsById(ownerIds));
     }
 
     const result = workspaces.map((w) => ({
@@ -235,18 +193,15 @@ router.post('/users/:id/export', async (req, res) => {
   try {
     const dataDb = getDb();
 
-    // User info from auth.sqlite
-    const authDb = getAuthDb();
-    const user = authDb.prepare('SELECT id, email, name, created_at FROM "user" WHERE id = ?').get(targetId) as
-      | { id: string; email: string; name: string; created_at: number }
-      | undefined;
-    authDb.close();
-
-    if (!user) {
+    const authUser = withAuthUsers((store) => store.getUser(targetId));
+    if (!authUser) {
       return res.status(404).json({ error: 'user_not_found' });
     }
+    const user = { id: authUser.id, email: authUser.email, name: authUser.name, created_at: authUser.createdAt };
 
-    // Tombstoned rows (purged_at) are excluded, as in dbRepository's listWorkspaces/listNodes.
+    // A full dump of the owner's live rows, not a backup: it is never imported,
+    // so helper threads and system workspaces stay in. Tombstoned rows
+    // (purged_at) are excluded, as in dbRepository's listWorkspaces/listNodes.
     const rawWorkspaces = dataDb.prepare(
       'SELECT * FROM workspaces WHERE owner_user_id = ? AND purged_at IS NULL'
     ).all(targetId) as Array<Record<string, unknown>>;
@@ -321,7 +276,11 @@ router.post('/users/:id/export', async (req, res) => {
 router.delete('/users/:id', async (req, res) => {
   const targetId = req.params.id;
   let preparedAgentDeletion: PreparedAgentOwnerDeletion | null = null;
+  let authUsers: AuthUserStore | null = null;
   try {
+    // Opened first: an auth schema the store cannot handle fails here, before
+    // anything is deleted.
+    authUsers = openAuthUserStore();
     const dataDb = getDb();
     const runCount = (dataDb.prepare(
       'SELECT COUNT(*) as cnt FROM agent_runs WHERE owner_user_id = ?'
@@ -393,6 +352,7 @@ router.delete('/users/:id', async (req, res) => {
         dataDb.prepare(`DELETE FROM workspace_permission_grants WHERE workspace_id IN (${ph})`).run(...wsIds);
       }
 
+      deleteCommandReceipts([...wsIds, agentDefinitionGlobalLedgerId(targetId)]);
       dataDb.prepare('DELETE FROM user_agent_configs WHERE user_id = ?').run(targetId);
       dataDb.prepare('DELETE FROM user_provider_keys WHERE user_id = ?').run(targetId);
       purgeOwnerMemories(targetId);
@@ -409,20 +369,7 @@ router.delete('/users/:id', async (req, res) => {
       agentCleanup = await deps.agentRunLifecycle.cleanupPreparedDeletion(preparedAgentDeletion);
     }
 
-    // ── auth.sqlite transaction: delete session / account / user ──────────
-    const authDb = getAuthDb();
-    authDb.exec('BEGIN');
-    try {
-      authDb.prepare('DELETE FROM "session" WHERE "userId" = ?').run(targetId);
-      authDb.prepare('DELETE FROM "account" WHERE "userId" = ?').run(targetId);
-      authDb.prepare('DELETE FROM "user" WHERE id = ?').run(targetId);
-      authDb.exec('COMMIT');
-    } catch (err) {
-      authDb.exec('ROLLBACK');
-      authDb.close();
-      throw err;
-    }
-    authDb.close();
+    authUsers.deleteUser(targetId);
 
     // ── fs cleanup (best-effort, post-commit) ──────────────────────────────
     const dataDir = getMichiDataDir();
@@ -485,6 +432,8 @@ router.delete('/users/:id', async (req, res) => {
     const message = (err as Error).message;
     res.status(message.includes('could not be quiesced') || message.includes('deletion is already in progress')
       || message.includes('deletion lease was lost') ? 409 : 500).json({ error: message });
+  } finally {
+    authUsers?.close();
   }
 });
 

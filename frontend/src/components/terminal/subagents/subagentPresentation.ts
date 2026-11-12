@@ -2,7 +2,9 @@ import type { SubagentInfo, ToolCallState } from '../../../state/chatTypes';
 import type { ConversationSubagentState } from '../../../state/backgroundWork';
 import {
   delegationToolInfo,
+  filterSubagentRelayedTools,
   isFailedStatus,
+  isHiddenInternalTool,
   isRunningStatus,
   prettifyToolTitle,
   subagentTitleMatches,
@@ -38,7 +40,7 @@ export const SUBAGENT_TONE_LABEL: Record<SubagentTone, string> = {
 };
 
 export const SUBAGENT_TONE_COLOR: Record<SubagentTone, string> = {
-  running: 'var(--term-accent)',
+  running: 'var(--term-run)',
   completed: 'var(--term-muted)',
   failed: 'var(--term-danger)',
   cancelled: 'var(--term-muted)',
@@ -102,6 +104,21 @@ export function subagentDisplayName(subagent: SubagentInfo): string {
     return `${humanize(subagent.source)} ${subagent.sessionId.slice(0, 8)}`;
   }
   return 'Subagent';
+}
+
+/**
+ * What a Background work row calls the agent: what it was asked to do, which
+ * tells agents of one type apart, else its name. `kind` is its type as the
+ * runtime names it ("general-purpose", "Explore"), for a quiet label beside
+ * a task title; absent when the title already is the name.
+ */
+export function subagentRowTitle(subagent: SubagentInfo): { title: string; kind?: string } {
+  const mission = summaryLine(subagentMission(subagent));
+  if (!mission) return { title: subagentDisplayName(subagent) };
+  const agent = subagent.agentName?.trim() ?? '';
+  // A plugin agent's name carries its plugin ("Plugin:agent").
+  const kind = PLACEHOLDER_NAMES.has(agent.toLowerCase()) ? undefined : agent.split(':').pop()?.trim() || undefined;
+  return { title: mission, ...(kind ? { kind } : {}) };
 }
 
 /** Agent name for a delegation chip: tool-declared type first, then the roster's. */
@@ -207,12 +224,6 @@ export function subagentShownDurationMs(subagent: SubagentInfo, active: boolean,
   return subagentDurationMs(subagent, now);
 }
 
-export function formatTokenCount(tokens: number): string {
-  if (tokens < 1_000) return `${tokens} tokens`;
-  if (tokens < 1_000_000) return `${(tokens / 1_000).toFixed(tokens < 10_000 ? 1 : 0)}k tokens`;
-  return `${(tokens / 1_000_000).toFixed(1)}M tokens`;
-}
-
 export function subagentToolCount(subagent: SubagentInfo): number {
   const counted = (subagent.activity ?? []).filter((item) => item.kind === 'tool').length + (subagent.activityDropped ?? 0);
   return Math.max(counted, subagent.usage?.toolUses ?? 0);
@@ -263,6 +274,20 @@ export function withDelegationStatus(
     return { ...tool, status };
   });
   return changed ? next : tools;
+}
+
+/**
+ * The calls a tool group shows, for its rows and for every count and summary
+ * about them: none a SubAgent relayed from its own session, no hidden
+ * metadata tools.
+ */
+export function ownGroupTools(tools: readonly ToolCallState[], roster: readonly SubagentInfo[] | undefined): ToolCallState[] {
+  return filterSubagentRelayedTools(tools, roster).filter((tool) => !isHiddenInternalTool(tool.title));
+}
+
+/** ownGroupTools as the rows show them: each delegation chip with its agents' status (withDelegationStatus). */
+export function visibleGroupTools(tools: readonly ToolCallState[], roster: readonly SubagentInfo[] | undefined): ToolCallState[] {
+  return withDelegationStatus(ownGroupTools(tools, roster), roster);
 }
 
 /**

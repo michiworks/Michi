@@ -6,7 +6,6 @@ interface ImportMetaEnv {
   readonly VITE_API_URL?: string;
   readonly VITE_MICHI_METRICS?: string;
   readonly VITE_MICHI_METRICS_RUN_ID?: string;
-  readonly VITE_MICHI_PERF?: string;
   readonly VITE_MICHI_STARTUP_TRACE?: string;
   readonly VITE_MICHI_STARTUP_RUN_ID?: string;
   readonly VITE_MICHI_FRAME_METRICS?: string;

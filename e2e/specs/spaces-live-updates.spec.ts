@@ -38,11 +38,10 @@ for (const scenario of [
     const status = main.locator('[data-block-id="live-status"]');
     await expect(status).toContainText('Release status: draft.');
 
-    const panel = page.getByRole('region', { name: 'Assistant', exact: true });
-    const launcher = page.locator('button.meta-chat-pill');
-    await panel.or(launcher).first().waitFor();
-    if (!await panel.isVisible()) await launcher.click();
-    await expect(panel).toContainText(`Viewing: ${scenario.title}`);
+    // The one panel, docked beside the page (DESIGN-v2 §1.2); its messages carry the page on screen.
+    await page.keyboard.press('ControlOrMeta+j');
+    const panel = page.getByRole('complementary', { name: 'Michi', exact: true });
+    await expect(panel).toHaveAttribute('data-layout', 'docked');
     await panel.locator('.terminal-composer [contenteditable="true"]').fill(prompt);
     await panel.getByRole('button', { name: 'Send (Enter)', exact: true }).click();
     await expect.poll(async () => (await controlledStreamState(page)).requests.length).toBe(1);
@@ -58,8 +57,8 @@ for (const scenario of [
       frame('tool_call', 3, { toolCallId: 'tool-a', title: 'edit_page', status: 'in_progress', inputJson: JSON.stringify({ pageId: scenario.pageId }) }),
     ]);
     await expect(panel).toContainText('Working on the release.');
-    await panel.getByRole('button', { name: 'Minimize', exact: true }).click();
-    const working = launcher.getByRole('status', { name: 'Assistant is working' });
+    // The page stays usable beside the docked panel while the turn runs.
+    const working = panel.locator('.terminal-composer').getByRole('button', { name: /Stop/ });
     await expect(working).toBeVisible();
 
     // Real per-block React state and a real unsaved editor must survive refetches.
@@ -123,7 +122,7 @@ for (const scenario of [
       frame('chunk', 8, { text: 'A is saved. Checking the next action. ' }),
       frame('tool_call', 9, { toolCallId: 'tool-b', title: 'edit_page', status: 'in_progress' }),
     ]);
-    await expect(page.locator('section.meta-chat-panel')).toContainText('Checking the next action.');
+    await expect(panel).toContainText('Checking the next action.');
     await expect(status).toContainText('Release status: QA approved.');
     await retained();
 

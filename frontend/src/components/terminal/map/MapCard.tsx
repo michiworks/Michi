@@ -2,6 +2,7 @@ import React from 'react';
 import type { ChatNodeState } from '../../../state/chatTypes';
 import { latestOverviewFirstSentence, nodeHeat, overviewTrail, type NodeHeat } from '../../../state/mapOverviewSelectors';
 import { relativeTime } from '../../../lib/relativeTime';
+import { nodeMessageCount } from '../../../state/nodeMessageCount';
 
 export interface MapCardProps {
   node: ChatNodeState;
@@ -50,7 +51,7 @@ export function MapCard({
   const shownTrail = trail.slice(-MAX_TRAIL_ENTRIES);
   const hiddenTrailCount = trail.length - shownTrail.length;
   const streaming = node.status === 'streaming';
-  const msgCount = node.messages.length || node.messageCount || 0;
+  const msgCount = nodeMessageCount(node);
   const classNames = ['map-card',
     streaming ? 'map-card--breathe' : '',
     grow ? 'map-card--in' : '',

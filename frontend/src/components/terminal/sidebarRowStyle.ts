@@ -180,12 +180,15 @@ export function spinePadding(g: RowGeom, x: number): string {
   return `${x - g.inset}px`;
 }
 
-/** Horizontal space the hover-revealed ⋯ occupies at a row's right edge in card
- *  modes: a 16px button plus the 6px padding-right the card-mode rule gives its
- *  wrapper (see `.row-kebab` in index.css). The wrapper is `right: 0` against
- *  the row's PADDING box. */
-const KEBAB_FOOTPRINT = 22;
-/** Air between the trailing expand caret and the kebab. */
+/** Horizontal space the hover-revealed ⋯ occupies at a thread or branch row's
+ *  right edge in card modes, measured to its visible 22px hover box: the box
+ *  ends 8px from the row edge, 3px clear of the 2px rail at `right: 3`
+ *  (`[data-sidebar-row] > .row-kebab` in index.css). The wrapper is `right: 0`
+ *  against the row's PADDING box. Counting the 16px layout footprint instead
+ *  left the box 3px wider on each side than this reserve, on the caret and on
+ *  the rail. */
+const KEBAB_FOOTPRINT = 22 + 8;
+/** Air between the trailing expand caret and the kebab's hover box. */
 const CARET_KEBAB_GAP = 2;
 
 /** Right margin the trailing expand caret needs so the ⋯ never lands on top of
@@ -199,14 +202,21 @@ const CARET_KEBAB_GAP = 2;
  *  caret/⋯ cluster ate visibly too much of the row.
  *
  *  Reserved unconditionally rather than only while hovered, so the caret doesn't
- *  jump sideways as the pointer enters the row.
- *
- *  Touch screens widen the ⋯; callers add `var(--row-kebab-extra)` (set in
- *  index.css for coarse pointers) on top of this value. */
+ *  jump sideways as the pointer enters the row. */
 export function caretKebabClearance(g: RowGeom): number {
   if (!g.isCard) return 0;
   const paddingRight = parseFloat(rowPadding(g).paddingRight);
   return Math.max(0, KEBAB_FOOTPRINT + CARET_KEBAB_GAP - paddingRight);
+}
+
+/** Right margin for a pin star that ends a card-mode row with no caret after it.
+ *  The star then takes the caret's footprint: its width (larger in the phone
+ *  drawer, mobile.css), its clearance from the kebab and the row's flex `gap`
+ *  before it. So pinned rows' stars form one column whether or not a row has
+ *  branches, and the hover-revealed ⋯ (no background in card modes) never lands
+ *  on the star. `rowGap` is the row's flex gap between the star and the caret. */
+export function pinMarkEndMargin(g: RowGeom, rowGap: number): string {
+  return `calc(var(--sb-caret-w, 9px) + ${caretKebabClearance(g) + rowGap}px)`;
 }
 
 /** Vertical gap between a thread row and its first branch row.

@@ -24,12 +24,42 @@ export function resolveKiroEngine(value: string | undefined): KiroEngine {
 }
 
 /**
+ * What a restricted session (SessionProfilePort.toolset) is called in an error
+ * the person can see, as "the <name> session": the host's toolsets are Pages
+ * upkeep (`maintenance`), a check-in (`chat`) and memory extraction (`memory`).
+ */
+export function restrictedSessionName(toolset: string | null | undefined): string {
+    switch (toolset) {
+        case 'maintenance': return 'Pages upkeep';
+        case 'chat': return 'check-in';
+        case 'memory': return 'memory extraction';
+        default: return 'restricted';
+    }
+}
+
+/**
  * Kiro V3's "Approve for me" policy preset: workspace edits and read-only
  * shell are allowed, and its trust classifier judges what no rule settles
  * (approve, or fall back to asking). Seeded only by session/new and
  * session/load (`_meta.kiro.policyPreset`).
  */
 export const KIRO_APPROVE_FOR_ME_PRESET = 'approve-for-me';
+
+/**
+ * A Kiro chat turn as its page tools are told it
+ * (McpSlot.getActivePageTurnAttribution), with `approveForMe` while the
+ * session it runs on holds Approve for me (KIRO_APPROVE_FOR_ME_PRESET).
+ * Kiro's classifier may then approve the turn's later tools without asking
+ * the host, and only reopening the session takes the preset away, which
+ * cannot happen mid-turn: a host keeps material that would make the turn
+ * ask away from such a turn (Michi: check-in material, pageTools.ts
+ * markedRead). A session its Kiro process does not know counts as holding it.
+ */
+export interface KiroPageTurnAttribution {
+    turnId: string;
+    assistantId: string;
+    approveForMe?: true;
+}
 
 /**
  * kiro-cli 2.35 drops a classifier preset unless its process runs the trust
@@ -81,6 +111,13 @@ export interface AcpSessionOptions extends AcpCoreSessionOptions {
     workflowsEnabled?: boolean;
     /** V3 policy presets seeded into the session (KIRO_APPROVE_FOR_ME_PRESET). */
     policyPresets?: readonly string[];
+    /**
+     * Folders the session works in besides its cwd (V3 `additionalDirectories`,
+     * at session/new and again at each session/load, which takes the session's
+     * folders from its request). Kiro loads their `.kiro/skills` as workspace
+     * skills. v2 has no such field.
+     */
+    additionalDirectories?: readonly string[];
 }
 
 export interface AcpInitializeResult {

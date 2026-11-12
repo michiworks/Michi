@@ -6,27 +6,17 @@ interface IconProps {
   className?: string;
 }
 
-const base = (size: number): React.SVGProps<SVGSVGElement> => ({
+const base = (size: number, strokeWidth = 1.6): React.SVGProps<SVGSVGElement> => ({
   width: size,
   height: size,
   viewBox: '0 0 16 16',
   fill: 'none',
   stroke: 'currentColor',
-  strokeWidth: 1.6,
+  strokeWidth,
   strokeLinecap: 'round',
   strokeLinejoin: 'round',
   'aria-hidden': true,
 });
-
-/** The Activity lens: the same filled dot in a ring as the Topbar's Activity button. */
-export function ActivityIcon({ size = 14, className }: IconProps) {
-  return (
-    <svg {...base(size)} className={className}>
-      <circle cx="8" cy="8" r="3" fill="currentColor" stroke="none" />
-      <circle cx="8" cy="8" r="6" />
-    </svg>
-  );
-}
 
 export function HomeIcon({ size = 14, className }: IconProps) {
   return (
@@ -211,17 +201,17 @@ export function ExternalLinkIcon({ size = 14, className }: IconProps) {
   );
 }
 
-export function ChevronLeftIcon({ size = 14, className }: IconProps) {
+export function ChevronLeftIcon({ size = 14, className, strokeWidth }: IconProps & { strokeWidth?: number }) {
   return (
-    <svg {...base(size)} className={className}>
+    <svg {...base(size, strokeWidth)} className={className}>
       <path d="M10 3L5 8l5 5" />
     </svg>
   );
 }
 
-export function ChevronRightIcon({ size = 14, className }: IconProps) {
+export function ChevronRightIcon({ size = 14, className, strokeWidth }: IconProps & { strokeWidth?: number }) {
   return (
-    <svg {...base(size)} className={className}>
+    <svg {...base(size, strokeWidth)} className={className}>
       <path d="M6 3l5 5-5 5" />
     </svg>
   );
@@ -365,6 +355,16 @@ export function AgentIcon({ size = 14, className }: IconProps) {
   );
 }
 
+export function SkillIcon({ size = 14, className }: IconProps) {
+  // An open book: instructions an agent can read when a task calls for them.
+  return (
+    <svg {...base(size)} className={className}>
+      <path d="M8 4.3C6.6 3.3 4.6 2.9 2.5 3.1v9.1c2.1-.2 4.1.2 5.5 1.2 1.4-1 3.4-1.4 5.5-1.2V3.1C11.4 2.9 9.4 3.3 8 4.3z" />
+      <path d="M8 4.3v9.1" />
+    </svg>
+  );
+}
+
 export function ShieldIcon({ size = 14, className }: IconProps) {
   // Permission prompts on: a shield with a check.
   return (
@@ -385,12 +385,24 @@ export function ShieldOffIcon({ size = 14, className }: IconProps) {
   );
 }
 
-export function EyeOffIcon({ size = 14, className }: IconProps) {
-  // Ignore: an open eye, struck through — stop watching this.
+/** Multi-model fork: two branches joining into one. */
+export function ForkIcon({ style }: { style?: React.CSSProperties }) {
   return (
-    <svg {...base(size)} className={className}>
-      <path d="M2 8s2.2-4 6-4 6 4 6 4-2.2 4-6 4-6-4-6-4z" />
-      <path d="M3 13L13 3" />
+    <svg width="11" height="11" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" aria-hidden="true" style={style}>
+      <circle cx="4" cy="3" r="1.6" />
+      <circle cx="12" cy="3" r="1.6" />
+      <circle cx="8" cy="13" r="1.6" />
+      <path d="M4 4.6v1c0 2.2 4 2.6 4 5.8M12 4.6v1c0 2.2-4 2.6-4 5.8" />
+    </svg>
+  );
+}
+
+/** Side by side. */
+export function ColumnsIcon({ style }: { style?: React.CSSProperties }) {
+  return (
+    <svg width="11" height="11" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" aria-hidden="true" style={style}>
+      <rect x="1.5" y="2.5" width="13" height="11" rx="1" />
+      <path d="M6 2.5v11M10.5 2.5v11" />
     </svg>
   );
 }

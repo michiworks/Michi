@@ -33,7 +33,7 @@ export interface TerminalTokens {
   accent: string;
   /** Accent fill — pale tinted background for accent-bordered chips. */
   accentF: string;
-  /** Amber — streaming, selection. */
+  /** Amber — waiting on the person, selection. */
   select: string;
   /** Selection fill — pale amber background. */
   selectF: string;
@@ -47,6 +47,14 @@ export interface TerminalTokens {
   mauveF: string;
   /** Error / destructive. */
   danger: string;
+  /**
+   * Something is running right now: a streaming turn, a working agent, a
+   * running workflow. Fixed per palette, not the user's accent, so a picked
+   * accent never makes running read as failed, waiting or done.
+   */
+  run: string;
+  /** Run fill — pale tinted background for running chips. */
+  runF: string;
 }
 
 export const BONE: TerminalTokens = {
@@ -58,6 +66,8 @@ export const BONE: TerminalTokens = {
   digest: '#2f6b4e', digestF: '#d7e7df',
   mauve: '#6d4aa8', mauveF: '#ebe4f6',
   danger: '#a8261a',
+  // Blue: Bone's accent is rust, too close to danger to mark running.
+  run: '#1b6396', runF: '#ddeaf4',
 };
 
 export const SLATE: TerminalTokens = {
@@ -69,6 +79,7 @@ export const SLATE: TerminalTokens = {
   digest: '#2f6b4e', digestF: '#d1fae5',
   mauve: '#6d4aa8', mauveF: '#ede9fe',
   danger: '#b91c1c',
+  run: '#1b6396', runF: '#ddeaf4',
 };
 
 export const MONOKAI: TerminalTokens = {
@@ -83,6 +94,7 @@ export const MONOKAI: TerminalTokens = {
   digest: '#a6e22e', digestF: '#1a2210',
   mauve: '#ae81ff', mauveF: '#1e1428',
   danger: '#f92672',
+  run: '#66d9ef', runF: '#12292e',
 };
 
 export const GRUVBOX: TerminalTokens = {
@@ -96,6 +108,7 @@ export const GRUVBOX: TerminalTokens = {
   digest: '#b8bb26', digestF: '#1e2210',
   mauve: '#d3869b', mauveF: '#281a20',
   danger: '#fb4934',
+  run: '#83a598', runF: '#1e2826',
 };
 
 export const PALETTES: Record<TerminalPalette, TerminalTokens> = {
@@ -164,6 +177,18 @@ export function dangerTextFor(palette: TerminalPalette): string {
 }
 
 /**
+ * Waiting TEXT colour (the Needs you and Paused chips, an asking count; icons
+ * and fills keep --term-waiting). The light palettes' amber reads only
+ * 2.6–3.2:1 on surface, alt and its own waiting fill, so there it mixes 65:35
+ * toward the foreground (4.7:1 or better). The dark palettes' amber already
+ * clears the floor and is used as is. tokens.test.ts checks the 4.5:1 floor.
+ */
+export function waitingTextFor(palette: TerminalPalette): string {
+  const p = PALETTES[palette];
+  return DARK_PALETTES.has(palette) ? p.select : `color-mix(in srgb, ${p.select} 65%, ${p.fg})`;
+}
+
+/**
  * Build a CSS custom-property map for a palette + user overrides.
  * Apply these as `style={cssVarsFor(...)}` on the shell root; all terminal
  * components read `var(--term-fg)` etc.
@@ -182,6 +207,10 @@ export function cssVarsFor(
   return {
     '--term-bg': p.bg,
     '--term-page-bg': p.bg,
+    // Native controls on page-colored surfaces (the phone selection sheet).
+    '--term-color-scheme': isLight ? 'light' : 'dark',
+    // A recessed well below the page (agent-block payload output).
+    '--term-bg-deep': p.bgDeep,
     '--term-surface': p.surface,
     '--term-sidebar-tint': `color-mix(in srgb, ${p.surface} 88%, #ffffff)`,
     '--term-alt': p.alt,
@@ -214,6 +243,13 @@ export function cssVarsFor(
     // worn with --term-float-shadow: the pane surface in light themes, one
     // step lighter in dark ones, where a raised surface reads as lighter.
     '--term-float-bg': isLight ? p.surface : `color-mix(in srgb, ${p.surface} 40%, ${p.alt})`,
+    // The dim behind modals and drawers (index.css --scrim-modal). It darkens
+    // what is behind: the palette's own ink on light pages, so it stays warm
+    // on Bone and cool on Slate, and black on dark pages, where a wash of the
+    // page colour would only fade the text.
+    '--term-scrim': isLight
+      ? `color-mix(in srgb, ${p.fg} 20%, transparent)`
+      : 'color-mix(in srgb, black 42%, transparent)',
     '--term-line': p.line,
     '--term-line-s': p.lineS,
     '--term-fg': p.fg,
@@ -223,8 +259,15 @@ export function cssVarsFor(
     // Accent is an override (user-picked) layered over palette default.
     '--term-accent': accent,
     '--term-accent-f': p.accentF,
+    '--term-run': p.run,
+    '--term-run-f': p.runF,
     '--term-select': p.select,
     '--term-select-f': p.selectF,
+    // Waiting on you: the select hue, which also marks selection and pins in the sidebar.
+    '--term-waiting': p.select,
+    '--term-waiting-f': p.selectF,
+    // Waiting text (icons and fills keep --term-waiting); see waitingTextFor.
+    '--term-waiting-text': waitingTextFor(palette),
     '--term-digest': p.digest,
     '--term-digest-f': p.digestF,
     '--term-mauve': p.mauve,

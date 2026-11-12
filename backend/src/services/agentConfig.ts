@@ -65,8 +65,8 @@ const BUILTIN_DEFAULT_REASONING_BY_RUNTIME: Record<string, AgentReasoning> = {
 };
 
 /**
- * Read when defaults are built, not at import: server.ts loads backend/.env,
- * and ~/.michi/.env for the background service, after its imports run.
+ * Read when defaults are built, not at import: server.ts loads backend/.env
+ * after its imports run.
  */
 function envDefaultWebSearchProvider(): WebSearchProviderId | null {
   const provider = process.env.MICHI_DEFAULT_WEB_SEARCH_PROVIDER;
@@ -128,7 +128,6 @@ function readDiskFile(): Record<string, any> | null {
 }
 
 function readRuntimeFromEnv(): RuntimeId | undefined {
-  // Prefer the new env var; fall back to legacy MICHI_AGENT for one release.
   // The registry (not this module) decides whether the id is real, so we
   // accept any non-empty string here.
   const newEnv = process.env.MICHI_AGENT_RUNTIME;
@@ -500,20 +499,28 @@ export function resolveProvider(runtimeId: string, userId?: string): string {
   return cfg.providerByRuntime[runtimeId] ?? cfg.provider;
 }
 
+export interface RuntimeProfileFields {
+  providerId: string | null;
+  modelId: string | null;
+  reasoning: AgentReasoning | null;
+}
+
 /**
- * Record a per-runtime provider choice. Called when the user explicitly
- * switches providers — persists the mapping so switching back to this
- * runtime later restores their last-used provider.
+ * The fields a new conversation on `runtimeId` uses: each one given, else the
+ * global setting. The global model belongs to the global provider, so under
+ * another provider the model stays null and the catalog supplies its default.
  */
-export function updateProviderForRuntime(
+export function resolveRuntimeProfile(
   runtimeId: string,
-  providerId: string,
+  usesProviders: boolean,
+  given: Partial<RuntimeProfileFields> = {},
   userId?: string,
-): AgentConfig {
-  return updateAgentConfig(
-    { provider: providerId, providerByRuntime: { [runtimeId]: providerId } },
-    userId,
-  );
+): RuntimeProfileFields {
+  const globalProvider = usesProviders ? resolveProvider(runtimeId, userId) || null : null;
+  const providerId = usesProviders ? given.providerId ?? globalProvider : null;
+  const modelId = given.modelId ?? (providerId !== globalProvider ? null : resolveModel(runtimeId, userId) || null);
+  const reasoning = given.reasoning ?? resolveReasoning(runtimeId, userId) ?? null;
+  return { providerId, modelId, reasoning };
 }
 
 /**

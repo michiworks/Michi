@@ -9,7 +9,7 @@ const workspaceId = 'folder-workspace';
 async function openManage(page: Page) {
   const row = page.getByTestId(`workspace-row-${workspaceId}`);
   await row.locator('.t-row-hover').first().hover();
-  await row.getByRole('button', { name: 'Workspace options', exact: true }).click();
+  await row.getByRole('button', { name: 'Actions for Folder workspace', exact: true }).click();
   await page.getByRole('menuitem', { name: /^Manage workspace/ }).click();
   await expect(page.getByRole('heading', { name: 'Folders', exact: true })).toBeVisible();
 }

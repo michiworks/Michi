@@ -1,6 +1,8 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { AnimatePresence } from 'motion/react';
 import { ModalShell } from './ui/ModalShell';
+import { copyText } from '../lib/clipboard';
+import { downloadText } from '../lib/download';
 
 function tableRows(table: HTMLTableElement): string[][] {
   return Array.from(table.rows).map((row) => (
@@ -25,16 +27,6 @@ function tableAsMarkdown(table: HTMLTableElement): string {
     `| ${header.map(() => '---').join(' | ')} |`,
     ...normalized.slice(1).map((row) => `| ${row.join(' | ')} |`),
   ].join('\n');
-}
-
-function downloadText(filename: string, text: string, type: string): void {
-  if (typeof document === 'undefined' || typeof URL.createObjectURL !== 'function') return;
-  const url = URL.createObjectURL(new Blob([text], { type }));
-  const anchor = document.createElement('a');
-  anchor.href = url;
-  anchor.download = filename;
-  anchor.click();
-  URL.revokeObjectURL(url);
 }
 
 /**
@@ -160,10 +152,9 @@ export default function MarkdownFeatureTable({
     table.setAttribute('data-cards', '');
   }, [settled]);
 
-  const copy = async () => {
+  const copy = () => {
     const table = tableRef.current;
-    if (!table || !navigator.clipboard?.writeText) return;
-    await navigator.clipboard.writeText(tableAsMarkdown(table));
+    if (table) void copyText(tableAsMarkdown(table));
   };
 
   const download = () => {
@@ -175,7 +166,7 @@ export default function MarkdownFeatureTable({
   return (
     <div className="michi-table-feature" data-michi-table-feature>
       <div className="michi-table-controls" data-michi-table-controls>
-        <button aria-label="Copy table" onClick={() => void copy()} type="button">copy</button>
+        <button aria-label="Copy table" onClick={copy} type="button">copy</button>
         <button aria-label="Download table" onClick={download} type="button">download</button>
         <button
           aria-label="View table fullscreen"
@@ -201,7 +192,7 @@ export default function MarkdownFeatureTable({
             key="fullscreen"
             sourceTable={tableRef.current}
             onClose={() => setFullscreen(false)}
-            onCopy={() => void copy()}
+            onCopy={copy}
             onDownload={download}
           />
         )}

@@ -15,6 +15,21 @@ export interface AtMentionItem {
   token: string;
 }
 
+/**
+ * Whether a node has anything to mention. A thread not opened yet this
+ * session is a placeholder (`messagesLoaded: false`, no bodies) that carries
+ * its stored `messageCount`; it is a real conversation and must be listed.
+ * Only a node with no messages at all (a blank new chat) is left out.
+ */
+export function hasMentionableContent(node: ChatNodeState): boolean {
+  return node.messages.length > 0 || (node.messagesLoaded === false && (node.messageCount ?? 0) > 0);
+}
+
+/** The node's message count, including the bodies a placeholder has not loaded. */
+function mentionMessageCount(node: ChatNodeState): number {
+  return node.messagesLoaded === false ? Math.max(node.messages.length, node.messageCount ?? 0) : node.messages.length;
+}
+
 /** A group of nodes from another thread, with the thread's display title. */
 export interface CrossTreeGroup {
   treeTitle: string;
@@ -44,11 +59,11 @@ export function buildAtMentionItems(
 
   for (const node of sameTreeNodes) {
     if (node.nodeId === currentNodeId) continue;
-    if (node.messages.length === 0) continue;
+    if (!hasMentionableContent(node)) continue;
     const title = node.title || node.messages.find(m => m.role === 'user')?.text.slice(0, 50) || node.nodeId;
     const token = `node:${node.nodeId}`;
     if (q && !title.toLowerCase().includes(q) && !node.nodeId.toLowerCase().includes(q)) continue;
-    const msgCount = node.messages.length;
+    const msgCount = mentionMessageCount(node);
     items.push({
       id: `node-${node.nodeId}`,
       label: title,
@@ -78,10 +93,10 @@ export function buildAtMentionItems(
     for (const { treeTitle, nodes } of crossTreeNodes) {
       for (const node of nodes) {
         if (node.nodeId === currentNodeId) continue;
-        if (node.messages.length === 0) continue;
+        if (!hasMentionableContent(node)) continue;
         const title = node.title || node.messages.find(m => m.role === 'user')?.text.slice(0, 50) || node.nodeId;
         if (q && !title.toLowerCase().includes(q) && !treeTitle.toLowerCase().includes(q)) continue;
-        const msgCount = node.messages.length;
+        const msgCount = mentionMessageCount(node);
         items.push({
           id: `node-${node.nodeId}`,
           label: title,

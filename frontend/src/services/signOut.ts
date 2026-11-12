@@ -1,5 +1,6 @@
 import { authClient } from './auth';
 import { STATE_KEY_PREFIX, LEGACY_STATE_KEY, MIGRATED_KEY } from '../state/workspacePersistence';
+import { clearRemoteSnapshotCache } from '../state/remoteSnapshotCache';
 
 /**
  * Clear all per-user workspace state from localStorage, then sign out and
@@ -24,6 +25,11 @@ export async function signOutAndReset(): Promise<void> {
       localStorage.removeItem(k);
     }
   }
+  // Remote workspace copies kept for fast reloads are this user's too (bounded: never hold up sign-out).
+  await Promise.race([
+    clearRemoteSnapshotCache().catch(() => {}),
+    new Promise((resolve) => setTimeout(resolve, 1000)),
+  ]);
   try {
     await authClient.signOut();
   } catch {

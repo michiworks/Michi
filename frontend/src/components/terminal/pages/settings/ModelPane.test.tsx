@@ -120,8 +120,25 @@ describe('ModelPane Kiro sidecar title setting', () => {
     fireEvent.click(within(list).getByRole('option', { name: /Sonnet 5\.5/ }));
     await waitFor(() => expect(saveAgentOptions).toHaveBeenCalledExactlyOnceWith({ model: 'sonnet-5.5', expectedRuntime: 'kiro' }));
     expect(screen.queryByRole('listbox', { name: 'Models' })).toBeNull();
-    fireEvent.change(screen.getByDisplayValue('low'), { target: { value: 'high' } });
+    // A few effort levels read side by side, named as the composer names them.
+    const effort = screen.getByRole('radiogroup', { name: 'Reasoning effort' });
+    expect(within(effort).getAllByRole('radio').map((radio) => radio.getAttribute('value'))).toEqual(['low', 'high']);
+    expect((within(effort).getByRole('radio', { name: 'Low' }) as HTMLInputElement).checked).toBe(true);
+    fireEvent.click(within(effort).getByRole('radio', { name: 'High' }));
     await waitFor(() => expect(saveAgentOptions).toHaveBeenLastCalledWith({ reasoning: 'high', expectedRuntime: 'kiro' }));
+  });
+
+  it('lists effort in a select when there are more levels than fit side by side', async () => {
+    agentStatus = { runtime: 'codex', label: 'Codex', model: 'gpt', reasoning: 'medium', hasRequiredKey: true, availableRuntimes: [],
+      capabilities: { models: true, reasoning: true, supportedReasoningLevels: ['minimal', 'low', 'medium', 'high', 'xhigh', 'max'] } };
+    listAgentModels.mockResolvedValue({ models: [{ id: 'gpt', label: 'GPT' }], sanitizedModel: null });
+    render(<ModelPane activeProjectId={null} />);
+    expect(screen.queryByRole('radiogroup', { name: 'Reasoning effort' })).toBeNull();
+    const effort = screen.getByRole('combobox', { name: 'Reasoning effort' }) as HTMLSelectElement;
+    expect(within(effort).getAllByRole('option').map((option) => option.textContent)).toEqual(['Minimal', 'Low', 'Medium', 'High', 'Extra high', 'Max']);
+    expect(effort.value).toBe('medium');
+    fireEvent.change(effort, { target: { value: 'xhigh' } });
+    await waitFor(() => expect(saveAgentOptions).toHaveBeenLastCalledWith({ reasoning: 'xhigh', expectedRuntime: 'codex' }));
   });
 
   it('filters the Pi catalog inside the model list and picks with the keyboard', async () => {
@@ -203,6 +220,24 @@ describe('ModelPane Kiro sidecar title setting', () => {
     await waitFor(() => expect(verifyProviderKey).toHaveBeenCalledExactlyOnceWith('google', { key: 'first-key', model: 'gemini-4-argon' }));
     fireEvent.click(save);
     await waitFor(() => expect(saveProviderKey).toHaveBeenCalledExactlyOnceWith('google', 'first-key'));
+  });
+
+  it('reports a key save or clear that throws and frees its button', async () => {
+    agentStatus = keyStatus(keyProvider({ hasKey: false }));
+    saveProviderKey.mockRejectedValueOnce(new TypeError('Failed to fetch'));
+    const view = render(<ModelPane activeProjectId={null} />);
+    fireEvent.change(screen.getByLabelText('Google AI API key'), { target: { value: 'first-key' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Save key' }));
+    expect((await screen.findByRole('alert')).textContent).toBe('Failed to fetch');
+    expect((screen.getByRole('button', { name: 'Save key' }) as HTMLButtonElement).disabled).toBe(false);
+
+    agentStatus = keyStatus();
+    view.rerender(<ModelPane activeProjectId={null} />);
+    refreshAgentStatus.mockClear();
+    clearProviderKey.mockRejectedValueOnce(new Error('Remote connection is unavailable'));
+    fireEvent.click(screen.getByRole('button', { name: 'Clear' }));
+    await waitFor(() => expect(screen.getByRole('alert').textContent).toBe('Remote connection is unavailable'));
+    expect(refreshAgentStatus).toHaveBeenCalledOnce();
   });
 
   it('sets the global permission mode in its own row, offering the modes its runtimes support', async () => {
@@ -346,5 +381,31 @@ describe('ModelPane Kiro sidecar title setting', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Save key' }));
     await waitFor(() => expect(saveWebSearchKey).toHaveBeenCalledWith('jina', 'jina-test-key'));
     expect(refreshAgentStatus).toHaveBeenCalled();
+  });
+
+  it('saves a web-search key on Enter, from the shared key field', async () => {
+    agentStatus = { runtime: 'kiro', label: 'Kiro', capabilities: {}, availableRuntimes: [], hasRequiredKey: true,
+      webSearchProvider: 'jina', webSearchProviders: [
+        { id: 'jina', label: 'Jina Search', keyLabel: 'Jina API key', keyUrl: 'https://jina.ai/reader/', description: '', hasKey: false },
+      ] };
+    render(<ModelPane activeProjectId={null} />);
+    const field = screen.getByLabelText('Jina Search API key');
+    expect(field.className).toBe('ui-input');
+    expect(field.getAttribute('style')).toBeNull();
+    expect(screen.getByRole('button', { name: 'Save key' }).className).toContain('ui-btn');
+    fireEvent.change(field, { target: { value: 'jina-test-key' } });
+    fireEvent.keyDown(field, { key: 'Enter' });
+    await waitFor(() => expect(saveWebSearchKey).toHaveBeenCalledWith('jina', 'jina-test-key'));
+  });
+
+  it('shows a web-search key clear that throws', async () => {
+    agentStatus = { runtime: 'kiro', label: 'Kiro', capabilities: {}, availableRuntimes: [], hasRequiredKey: true,
+      webSearchProvider: 'tavily', webSearchProviders: [
+        { id: 'tavily', label: 'Tavily', keyLabel: 'Tavily API key', keyUrl: 'https://app.tavily.com/home', description: '', hasKey: true },
+      ] };
+    clearWebSearchKey.mockRejectedValueOnce(new TypeError('Failed to fetch'));
+    render(<ModelPane activeProjectId={null} />);
+    fireEvent.click(screen.getByRole('button', { name: 'Clear' }));
+    expect((await screen.findByText('Failed to fetch')).getAttribute('role')).toBe('alert');
   });
 });

@@ -1,9 +1,9 @@
 import { createHash } from 'node:crypto';
-import { agentPageOpProblem, parseAgentPageOps, type AgentPageEditOp, parsePageDatabaseOps, type PageDatabaseEditOp } from 'michi-shared';
-import type { BlockSource, MaintenancePlan, MaintenanceResourceKind, MaintenanceResourceRef, MaintenanceReceipt, PageWriteResult } from 'michi-shared';
+import { agentPageOpProblem, PAGE_LIMITS, parseAgentPageOps, type AgentPageEditOp, parsePageDatabaseOps, type PageDatabaseEditOp } from 'michi-shared';
+import type { BlockSource, MaintenancePlan, MaintenanceResourceKind, MaintenanceResourceRef, PageWriteResult } from 'michi-shared';
 import {
   assertMaintenanceAuthority, assertMaintenanceResourceCurrent, freezeMaintenanceResourcePayload, getMaintenancePlan, getMaintenanceReceipt,
-  assertMaintenanceSourceCoverageComplete, listEligibleMaintenanceManifest, maintenanceOperationKey, recordMaintenanceRouting, type AuthorityInput,
+  assertMaintenanceSourceCoverageComplete, listEligibleMaintenanceManifest, maintenanceAuthority, maintenanceOperationKey, maintenancePayloadHash, recordMaintenanceRouting, type AuthorityInput,
   refreshMaintenanceSourceManifest, reobserveRoutedMaintenanceResource, listMaintenanceResourceStates, type MaintenanceResourceState,
 } from './maintenanceRepository';
 import { applyMaintenancePageSet } from './pageWrites';
@@ -13,7 +13,7 @@ import { deferMaintenancePageForEditLease } from './maintenanceRepository';
 import { livePageEditLease, maintenanceBusyError, PageEditBusyError } from './editLeases';
 import { runInTransaction } from '../db';
 import { getPage } from './repository';
-import { canonical } from './canonicalJson';
+import { canonical, sameCanonical } from './canonicalJson';
 import { validateMaintenanceSegmentSourceReferences } from './segmentSources';
 
 /** Trusted scheduler identity bound to the live maintenance chat session. */
@@ -23,7 +23,7 @@ export interface MaintenanceExecutionContext extends AuthorityInput {
   execution: BlockSource & { runId: string };
 }
 
-const MAX_OPS = 50;
+const MAX_OPS = PAGE_LIMITS.opsPerEdit;
 const MAX_CANDIDATES = 2000;
 /** `role: 'tasks'` names the workspace's task database to the maintenance agent. */
 type MaintenanceSourceResourceEntry = { kind: MaintenanceResourceKind; id: string; revision: number; title: string; pagePath?: string; role?: 'tasks'; decision?: MaintenanceResourceState; available?: false };
@@ -31,8 +31,7 @@ const now = () => Date.now();
 const invalid = (message: string) => new PageWriteError(400, 'invalid', message);
 
 function contextPlan(context: MaintenanceExecutionContext, allowTerminal = false): MaintenancePlan {
-  assertMaintenanceAuthority({ workspaceId: context.workspaceId, ownerUserId: context.ownerUserId, jobId: context.jobId,
-    runId: context.runId, claimedBy: context.claimedBy, configRevision: context.configRevision }, now());
+  assertMaintenanceAuthority(context, now());
   const plan = getMaintenancePlan(context.planId, context.ownerUserId);
   if (!plan || plan.workspaceId !== context.workspaceId || plan.jobId !== context.jobId ||
       plan.runId !== context.runId || plan.configRevision !== context.configRevision ||
@@ -83,21 +82,16 @@ function stableIds(operationKey: string, payload: unknown, count: number, prefix
   return Array.from({ length: count }, (_, index) => `${prefix}-${digest}-${index.toString(36)}`);
 }
 
-function sameCanonical(a: unknown, b: unknown): boolean {
-  return JSON.stringify(canonical(a)) === JSON.stringify(canonical(b));
-}
-
 function replayResult(operationKey: string, context: MaintenanceExecutionContext, sourceTurnId: string,
   payload: unknown, assignedIds: unknown): PageWriteResult | null {
   const plan = contextPlan(context, true);
   return runInTransaction(() => {
-    assertMaintenanceAuthority({ workspaceId: context.workspaceId, ownerUserId: context.ownerUserId, jobId: context.jobId,
-      runId: context.runId, claimedBy: context.claimedBy, configRevision: context.configRevision }, now());
+    assertMaintenanceAuthority(context, now());
     const receipt = getMaintenanceReceipt(operationKey);
     if (!receipt) return null;
     const selected = context.sources.find((source) => source.sourceTurnId === sourceTurnId);
     if (!selected || receipt.planId !== plan.id || receipt.jobId !== context.jobId || receipt.sourceTurnId !== sourceTurnId ||
-        receipt.generation !== plan.generation || receipt.payloadHash !== createHash('sha256').update(JSON.stringify({ payload, assignedIds })).digest('hex') || !sameCanonical(receipt.payload, payload) ||
+        receipt.generation !== plan.generation || receipt.payloadHash !== maintenancePayloadHash(payload, assignedIds) || !sameCanonical(receipt.payload, payload) ||
         !sameCanonical(receipt.assignedIds, assignedIds) || !sameCanonical(receipt.evidence, selected.evidence)) {
       throw new PageWriteError(409, 'stale_revision', 'Maintenance receipt does not match this operation set');
     }
@@ -110,7 +104,7 @@ function replayResult(operationKey: string, context: MaintenanceExecutionContext
 }
 
 function normalizedPageOps(raw: unknown): AgentPageEditOp[] {
-  if (!Array.isArray(raw) || raw.length < 1 || raw.length > MAX_OPS) throw invalid('Page operation set must contain 1-50 operations');
+  if (!Array.isArray(raw) || raw.length < 1 || raw.length > MAX_OPS) throw invalid(`Page operation set must contain 1-${MAX_OPS} operations`);
   const parsed = parseAgentPageOps(raw);
   if (!parsed) {
     const index = raw.findIndex((op) => agentPageOpProblem(op) !== '');
@@ -156,9 +150,7 @@ export function routeMaintenanceSource(context: MaintenanceExecutionContext, sou
 /** Scheduler-only preparation for the next source; requires all prior sources to be terminal. */
 export function refreshMaintenanceSource(context: MaintenanceExecutionContext, sourceTurnId: string): MaintenancePlan {
   requireMaintenanceSource(context, sourceTurnId);
-  return refreshMaintenanceSourceManifest({ workspaceId: context.workspaceId, ownerUserId: context.ownerUserId,
-    jobId: context.jobId, runId: context.runId, claimedBy: context.claimedBy, configRevision: context.configRevision,
-    planId: context.planId, sourceTurnId, now: now() });
+  return refreshMaintenanceSourceManifest({ ...maintenanceAuthority(context), planId: context.planId, sourceTurnId, now: now() });
 }
 
 /** Lists a bounded page of still-eligible frozen candidates with trusted display metadata only. */
@@ -219,15 +211,10 @@ export function listMaintenanceSourceResources(
 
 const ROUTED_NOTE = 'This source is already routed and routing is final: no resource can be added. These are its routed resources with their decisions. Read each resource whose decision is "pending" again from its first page: that read refreshes its revision. Then write it or record no change; leave the decided ones alone. An entry with available:false left its routed pages (deleted, excluded or moved) and cannot be written: read it once from its first page and the system records it as skipped. Do this for every such entry, or the source stays unfinished.';
 
-function authorityOf(context: MaintenanceExecutionContext): AuthorityInput {
-  return { workspaceId: context.workspaceId, ownerUserId: context.ownerUserId, jobId: context.jobId,
-    runId: context.runId, claimedBy: context.claimedBy, configRevision: context.configRevision };
-}
-
 /** Read-side refresh of one routed resource, before its first range is read; a resource the system had to skip fails the read. */
 export function reobserveRoutedResource(context: MaintenanceExecutionContext, sourceTurnId: string, kind: MaintenanceResourceKind, resourceId: string): void {
   if (!requireMaintenanceSource(context, sourceTurnId).routingComplete) return;
-  const result = reobserveRoutedMaintenanceResource({ ...authorityOf(context), planId: context.planId, sourceTurnId, kind, resourceId, now: now() });
+  const result = reobserveRoutedMaintenanceResource({ ...maintenanceAuthority(context), planId: context.planId, sourceTurnId, kind, resourceId, now: now() });
   if (result.outcome === 'skipped') throw new PageWriteError(409, 'stale_revision', `${result.reason}. It needs no more work in this run; continue with the source's other resources.`);
 }
 
@@ -257,10 +244,6 @@ export function maintenancePagePath(pageId: string, pages: Map<string, { id: str
 }
 
 export function createMaintenanceWriter() {
-  function authority(context: MaintenanceExecutionContext): AuthorityInput {
-    return { workspaceId: context.workspaceId, ownerUserId: context.ownerUserId, jobId: context.jobId,
-      runId: context.runId, claimedBy: context.claimedBy, configRevision: context.configRevision };
-  }
   function page(context: MaintenanceExecutionContext, sourceTurnId: string, pageId: string, rawOps: unknown): PageWriteResult {
     const plan = contextPlan(context, true);
     const resource = getPlannedMaintenanceResource(context, sourceTurnId, 'page', pageId, true);
@@ -279,7 +262,7 @@ export function createMaintenanceWriter() {
     const page = getPage(pageId, context.ownerUserId);
     validateMaintenanceSegmentSourceReferences(page.workspaceId, context.ownerUserId,
       ops.flatMap(op => op.op === 'insert' || op.op === 'update' ? [op.block] : []), page.blocks, resourceEvidence(context, sourceTurnId));
-    const frozen = freezeMaintenanceResourcePayload({ ...authority(context), planId: context.planId, sourceTurnId,
+    const frozen = freezeMaintenanceResourcePayload({ ...maintenanceAuthority(context), planId: context.planId, sourceTurnId,
       kind: 'page', resourceId: pageId, payload, assignedIds, now: now() });
     let result: PageWriteResult;
     try {
@@ -288,7 +271,7 @@ export function createMaintenanceWriter() {
           jobId: context.jobId, runId: context.runId, evidence: [resourceEvidence(context, sourceTurnId)] },
         evidence: resourceEvidence(context, sourceTurnId), operationKey, payloadHash: frozen.payloadHash, planId: context.planId,
         sourceTurnId, generation: plan.generation, ops,
-        assignedIds: frozen.assignedIds as { blockIds: string[] }, execution: context.execution, authority: authority(context), now: now() });
+        assignedIds: frozen.assignedIds as { blockIds: string[] }, execution: context.execution, authority: maintenanceAuthority(context), now: now() });
     } catch (error) {
       // A conversation took the lease after the checks above; the write rolled back, so record the deferral outside it.
       if (error instanceof PageEditBusyError) {
@@ -311,9 +294,9 @@ export function createMaintenanceWriter() {
     assertMaintenanceSourceCoverageComplete(context.planId, context.ownerUserId, sourceTurnId);
     assertMaintenanceResourceCurrent({ workspaceId: context.workspaceId, ownerUserId: context.ownerUserId,
       planId: context.planId, sourceTurnId, resource });
-    const frozen = freezeMaintenanceResourcePayload({ ...authority(context), planId: context.planId, sourceTurnId,
+    const frozen = freezeMaintenanceResourcePayload({ ...maintenanceAuthority(context), planId: context.planId, sourceTurnId,
       kind: 'database', resourceId: databaseId, payload, assignedIds, now: now() });
-    const result = applyMaintenanceDatabaseSet({ ...authority(context), planId: context.planId, sourceTurnId,
+    const result = applyMaintenanceDatabaseSet({ ...maintenanceAuthority(context), planId: context.planId, sourceTurnId,
       resource, databaseId, payloadHash: frozen.payloadHash, payload: frozen.payload, assignedIds: frozen.assignedIds,
       ops, execution: context.execution,
       evidence: resourceEvidence(context, sourceTurnId), now: now() });
@@ -330,8 +313,4 @@ function requireSuccessfulResourceResult(result: PageWriteResult): PageWriteResu
   if (result.rejected.length) throw new PageWriteError(409, 'stale_revision', 'Maintenance operation set was rejected atomically and nothing was applied; read the resource again and send a corrected operation set');
   if (!result.applied.length && !result.proposed.length) throw invalid('The operation set made no verified change; record an explicit no-change decision');
   return result;
-}
-
-export function maintenanceReceiptOutcome(result: PageWriteResult): MaintenanceReceipt['outcome'] {
-  return result.applied.length ? 'written' : 'proposed';
 }

@@ -2,7 +2,7 @@ import React from 'react';
 import { PAGE_LAYOUT_PREFERENCES_LIMIT, type PageLayoutPreferences } from 'michi-shared';
 import { fetchLayoutPreferences, saveLayoutPreferences } from '../../../../services/api/spacesHome';
 import { PageApiError } from '../../../../services/api/pages';
-import { notifyPageChanged, type PageEventIdentity } from '../../../../state/pages/pageEvents';
+import { notifyPageChanged, subscribePageChanges } from '../../../../state/pages/pageEvents';
 import { Button } from '../../../ui/controls';
 import './layoutRules.css';
 
@@ -54,15 +54,11 @@ function PreferencesDocument({ pageId, backendConnectionId, readOnly }: {
   React.useEffect(() => {
     alive.current = true;
     void refresh();
-    const onChanged = (event: Event) => {
-      const detail = (event as CustomEvent<PageEventIdentity>).detail;
-      if (detail?.backendConnectionId === backendConnectionId && (!detail.pageId || detail.pageId === pageId)) void refresh();
-    };
-    window.addEventListener('michi:page-changed', onChanged);
+    const stop = subscribePageChanges({ backendConnectionId, pageId }, () => { void refresh(); });
     return () => {
       alive.current = false;
       controller.current?.abort();
-      window.removeEventListener('michi:page-changed', onChanged);
+      stop();
     };
   }, [backendConnectionId, pageId, refresh]);
 

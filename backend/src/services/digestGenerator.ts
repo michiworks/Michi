@@ -1,4 +1,5 @@
 import { ChatManager } from "./chatManager";
+import { stripSentinelsStreamingSafe } from "./messageSerialization";
 
 export interface NodeSnapshot {
     nodeId: string;
@@ -20,8 +21,9 @@ export interface GenerationRequest {
 }
 
 /**
- * Strip the workspace's Title:/Follow-up Questions: scaffolding from the
- * kiro response so digest output comes out clean.
+ * Strip the workspace's prose Title:/Follow-up Questions: scaffolding from the
+ * kiro response so digest output comes out clean. Metadata sentinels go first,
+ * in stripSentinelsStreamingSafe.
  */
 export function stripScaffolding(markdown: string): string {
     let s = markdown;
@@ -131,7 +133,7 @@ export async function* streamDigestGeneration(
             break;
         }
     }
-    const finalMarkdown = stripScaffolding(chunks.join(""));
+    const finalMarkdown = stripScaffolding(stripSentinelsStreamingSafe(chunks.join("")));
     if (!finalMarkdown) throw new Error("Digest generation returned no content. Please rebuild to try again.");
     yield { kind: "done", finalMarkdown };
 }

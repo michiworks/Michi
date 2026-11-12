@@ -1,60 +1,45 @@
 import { beforeEach, expect, it, vi } from 'vitest';
-import { parseChatCommand, nextQueuedBatch, executeComposerCommand } from './chatCommands';
+import { nextQueuedBatch, executeComposerCommand } from './chatCommands';
 import { executeChatCommand } from '../services/api/sessions';
 import { compactChat } from '../services/api';
 import type { PendingQueuedMessage } from './chatTypes';
+import { buildSlashEntries } from './slashEntries';
 vi.mock('../services/api/sessions', () => ({ executeChatCommand: vi.fn() }));
 vi.mock('../services/api', () => ({ compactChat: vi.fn() }));
 beforeEach(() => vi.clearAllMocks());
-const queued = (value: string): PendingQueuedMessage => ({ id: value, value, mentions: [], attachments: [], queuedAt: 0 });
+const queued = (value: string, extra: Partial<PendingQueuedMessage> = {}): PendingQueuedMessage =>
+  ({ id: value, value, mentions: [], attachments: [], queuedAt: 0, ...extra });
 
-it('routes idle and queued Kiro commands through the same execution path and displays data', async () => {
-  vi.mocked(executeChatCommand).mockResolvedValue({ success: true, data: { tokens: 123 } });
-  const commands = ['context', 'tools', 'mcp', 'effort high', 'clear', 'unknown'];
-  for (const text of commands) {
-    const idle = parseChatCommand(`/${text}`, 'kiro')!;
-    const batch = nextQueuedBatch([queued(`/${text}`), queued('ordinary message')], 'kiro');
-    expect(batch.map((entry) => entry.value)).toEqual([`/${text}`]);
-    expect(parseChatCommand(batch[0].value, 'kiro')).toEqual(idle);
-    const result = await executeComposerCommand('node', idle);
-    expect(result.message).toContain('123');
-    expect(executeChatCommand).toHaveBeenLastCalledWith('node', idle.name, idle.value ? { value: idle.value } : undefined);
-  }
+const entries = buildSlashEntries({
+  runtimeId: 'kiro',
+  catalog: { commands: [{ name: 'context' }, { name: 'tools' }], skills: [
+    { id: 'library:review', name: 'review', origin: 'library', description: 'Review', userInvocable: true, modelInvocable: true, enabled: true },
+    { id: 'library:context', name: 'context', origin: 'library', description: 'Gather', userInvocable: true, modelInvocable: true, enabled: true },
+  ] },
 });
 
-it('preserves ordering between messages and command boundaries', () => {
-  const queue = [queued('one'), queued('two'), queued('/clear'), queued('three')];
-  expect(nextQueuedBatch(queue, 'kiro')).toEqual(queue.slice(0, 2));
-  expect(nextQueuedBatch(queue.slice(2), 'kiro')).toEqual(queue.slice(2, 3));
-  expect(parseChatCommand('/tmp/file', 'kiro')).toBeNull();
-  expect(parseChatCommand('/tools\nexplain this', 'kiro')).toBeNull();
-  expect(parseChatCommand('/branch topic', 'kiro')).toBeNull();
-  expect(parseChatCommand('/tools', 'claude')).toBeNull();
+it('drains commands and skills one at a time, merging the ordinary messages between them', () => {
+  const queue = [queued('one'), queued('two'), queued('/tools'), queued('/review the diff'), queued('three'), queued('/unknown'), queued('four')];
+  expect(nextQueuedBatch(queue, entries)).toEqual(queue.slice(0, 2));
+  expect(nextQueuedBatch(queue.slice(2), entries)).toEqual(queue.slice(2, 3));
+  expect(nextQueuedBatch(queue.slice(3), entries)).toEqual(queue.slice(3, 4));
+  // A /word nothing runs is a message like any other.
+  expect(nextQueuedBatch(queue.slice(4), entries)).toEqual(queue.slice(4));
+  // The skill row picked for `/context` runs alone too.
+  const picked = entries.find((entry) => entry.skill?.id === 'library:context')!;
+  expect(nextQueuedBatch([queued('/context why', { slash: { entry: picked, runtimeId: 'kiro' } }), queued('more')], entries)).toHaveLength(1);
 });
 
-it('compact stays runtime agnostic and unsupported commands return visible failures', async () => {
+it('runs compact through Michi and other commands through the runtime, with visible results and failures', async () => {
   vi.mocked(compactChat).mockResolvedValue({ started: true, detail: 'Completed' });
-  expect(await executeComposerCommand('node', parseChatCommand('/compact keep decisions', 'codex')!)).toEqual({ success: true, message: 'Completed' });
+  expect(await executeComposerCommand('node', { name: 'compact', value: 'keep decisions' })).toEqual({ success: true, message: 'Completed' });
   expect(compactChat).toHaveBeenCalledWith('node', 'keep decisions');
+  vi.mocked(executeChatCommand).mockResolvedValue({ success: true, data: { tokens: 123 },
+    sessionState: { runtimeId: 'claude', nativeEngine: 'agent-sdk', modelId: 'claude-sonnet-4-6' } });
+  const result = await executeComposerCommand('node', { name: 'model', value: 'claude-sonnet-4-6' });
+  expect(result).toMatchObject({ success: true, sessionState: { runtimeId: 'claude', nativeEngine: 'agent-sdk' } });
+  expect(result.message).toContain('123');
+  expect(executeChatCommand).toHaveBeenLastCalledWith('node', 'model', { value: 'claude-sonnet-4-6' });
   vi.mocked(executeChatCommand).mockResolvedValue({ success: false, message: 'Unsupported by server' });
   expect((await executeComposerCommand('node', { name: 'unknown' })).message).toBe('Unsupported by server');
-});
-
-it('routes only supported Claude host commands and keeps queued boundaries intact', async () => {
-  vi.mocked(executeChatCommand).mockResolvedValue({ success: true, message: 'SDK is connected',
-    sessionState: { runtimeId: 'claude', nativeEngine: 'agent-sdk', modelId: 'claude-sonnet-4-6' } });
-  for (const name of ['status', 'model', 'context', 'mcp']) {
-    expect(parseChatCommand(`/${name}`, 'claude')).toEqual({ name, value: undefined });
-  }
-  const command = parseChatCommand('/model claude-sonnet-4-6', 'claude')!;
-  expect(command).toEqual({ name: 'model', value: 'claude-sonnet-4-6' });
-  expect(await executeComposerCommand('node', command)).toMatchObject({ success: true,
-    sessionState: { runtimeId: 'claude', nativeEngine: 'agent-sdk' } });
-  expect(executeChatCommand).toHaveBeenLastCalledWith('node', 'model', { value: 'claude-sonnet-4-6' });
-  const queue = [queued('one'), queued('/model claude-sonnet-4-6'), queued('two')];
-  expect(nextQueuedBatch(queue, 'claude')).toEqual(queue.slice(0, 1));
-  expect(nextQueuedBatch(queue.slice(1), 'claude')).toEqual(queue.slice(1, 2));
-  expect(parseChatCommand('/status\nexplain this', 'claude')).toBeNull();
-  expect(parseChatCommand('/tmp/file', 'claude')).toBeNull();
-  expect(parseChatCommand('/review', 'claude')).toBeNull();
 });

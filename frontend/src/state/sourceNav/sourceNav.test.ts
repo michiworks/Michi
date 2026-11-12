@@ -7,8 +7,8 @@ const toast = vi.hoisted(() => ({ error: vi.fn() }));
 vi.mock('sonner', () => ({ toast }));
 
 import {
-  claimSourceJump, dismissSourceBack, getSourceNavState, openConversationFromSpaces, openExactSourcePopover, openPopoverSource,
-  registerSourceNavigator, resetSourceNavForTests, returnToSourceOrigin, useSourceJump, type SourceOrigin,
+  claimSourceJump, dismissSourceBack, getSourceNavState, openConversationFromSpaces, openExactSourcePopover, openPopoverSource, openThreadCard,
+  registerSourceNavigator, requestMessageJump, resetSourceNavForTests, returnToSourceOrigin, useSourceJump, type SourceOrigin,
 } from './sourceNav';
 
 const origin: SourceOrigin = { kind: 'page', backendConnectionId: 'local', workspaceId: 'ws-1', pageId: 'p1', title: 'Michi 0.9 发布' };
@@ -59,6 +59,19 @@ describe('source navigation', () => {
     });
   });
 
+  it('a thread card archived out of its thread opens read-only in the popover; any other goes to its opener', () => {
+    const open = vi.fn();
+    const card = { nodeId: 'n1', workspaceId: 'ws-1', title: 'Side idea', state: 'done' as const, summary: '', at: 1, messageId: 'm4' };
+    openThreadCard('local', card, open);
+    expect(open).toHaveBeenCalledWith(card);
+    expect(getSourceNavState().popover).toBeNull();
+    open.mockReset();
+    openThreadCard('local', { ...card, archived: true }, open);
+    expect(open).not.toHaveBeenCalled();
+    expect(getSourceNavState().popover?.target).toEqual({ backendConnectionId: 'local', workspaceId: 'ws-1', nodeId: 'n1', messageId: 'm4' });
+    expect(navigator.reveal).not.toHaveBeenCalled();
+  });
+
   it('Continue opens the conversation at the message, marks it with the citing blocks and asks for the composer', async () => {
     api.describePageReference.mockResolvedValue('进展, 风险');
     const link = document.createElement('button');
@@ -83,6 +96,35 @@ describe('source navigation', () => {
     rerender();
     expect(result.current).toMatchObject({ messageId: 'm2', focus: 'composer' });
     expect(getSourceNavState().reference?.label).toBeNull();
+  });
+
+  it('a jump from outside the pane flashes its message without a back bar, and the newest request wins', async () => {
+    await openConversationFromSpaces({ backendConnectionId: 'local', workspaceId: 'ws-1', nodeId: 'n1', messageId: 'm4', page });
+    const back = getSourceNavState().back;
+    const { result, rerender } = renderHook(() => useSourceJump('n1'));
+    act(() => { requestMessageJump('n1', 'm2'); });
+    rerender();
+    expect(result.current).toMatchObject({ messageId: 'm2', focus: null, flash: true });
+    expect(getSourceNavState().back).toBe(back);
+    claimSourceJump(result.current!.token);
+    rerender();
+    // The older Spaces jump it replaced is not carried out later, even once
+    // the jump slot moves on to another conversation.
+    expect(renderHook(() => useSourceJump('n1')).result.current).toBeNull();
+    act(() => { requestMessageJump('n2', 'm9'); });
+    rerender();
+    expect(result.current).toBeNull();
+  });
+
+  it('a Spaces jump replaces an outside jump still waiting for the pane, and closing its bar does not bring it back', async () => {
+    requestMessageJump('n1', 'm2');
+    await openConversationFromSpaces({ backendConnectionId: 'local', workspaceId: 'ws-1', nodeId: 'n1', messageId: 'm4', page });
+    const { result, rerender } = renderHook(() => useSourceJump('n1'));
+    expect(result.current).toMatchObject({ messageId: 'm4', focus: 'message' });
+    claimSourceJump(result.current!.token);
+    act(() => { dismissSourceBack(); });
+    rerender();
+    expect(result.current).toBeNull();
   });
 
   it('Back returns to the page at the scroll position it had and clears the bar; closing the bar only clears it', async () => {

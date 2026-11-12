@@ -6,7 +6,9 @@ import { HttpResponseError } from '../../../../services/api/httpError';
 import { requestScheduledJobDetail } from '../scheduledNav';
 import MetaAgentScheduledPage, { MetaAgentDetail } from './MetaAgentDetail';
 import { closeMetaAgentDetail, openMetaAgentDetail, useMetaAgentDetailOpen } from './metaAgentNav';
-import { resetMetaAgentOverviewStore } from './useMetaAgentOverview';
+import { resetMetaAgentOverviewStore } from '../../../../state/metaAgent/useMetaAgentOverview';
+import { resetCompanionStoreForTests } from '../../../../state/companion/companionStore';
+import { companionSnapshot } from '../../../../test/companionFixtures';
 
 const api = vi.hoisted(() => ({ fetch: vi.fn(), setPaused: vi.fn() }));
 vi.mock('../../../../services/api/metaAgentOverview', () => ({
@@ -20,9 +22,9 @@ vi.mock('../../../../state/chatStore', () => ({ useChatProjects: () => ({ projec
 const toasts = vi.hoisted(() => ({ error: vi.fn() }));
 vi.mock('sonner', () => ({ toast: { error: toasts.error } }));
 const round = vi.hoisted(() => ({ run: vi.fn(), refreshInfo: vi.fn() }));
-vi.mock('../../../../state/metaAgent/metaAgentUpdate', async (importOriginal) => ({
-  ...(await importOriginal<typeof import('../../../../state/metaAgent/metaAgentUpdate')>()),
-  runMetaAgentUpdate: (...args: unknown[]) => round.run(...args),
+vi.mock('../../../../services/api/pageMaintenance', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../../../services/api/pageMaintenance')>()),
+  runMetaAgentRoundNow: (...args: unknown[]) => round.run(...args),
 }));
 vi.mock('../../../../state/metaAgent/useMetaAgent', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../../../../state/metaAgent/useMetaAgent')>()),
@@ -71,12 +73,26 @@ beforeEach(() => {
   api.fetch.mockResolvedValue(overview());
   resetMetaAgentOverviewStore();
 });
-afterEach(() => { act(() => closeMetaAgentDetail()); });
+afterEach(() => { act(() => closeMetaAgentDetail()); resetCompanionStoreForTests(); });
 
-describe('Scheduled › Meta agent detail', () => {
+describe('Scheduled › Pages upkeep names the agent', () => {
+  it('titles the page, its links and its sidebar row by the name the user gave it, never the Meta agent', async () => {
+    const snapshot = companionSnapshot();
+    resetCompanionStoreForTests({ snapshot: { ...snapshot, settings: { ...snapshot.settings, displayName: 'Robin' } } });
+    detail(overview({ state: 'paused', stopped: undefined }));
+    expect(screen.getByRole('heading', { level: 1, name: 'Robin · Pages upkeep' })).toBeTruthy();
+    expect(screen.getByText(/Your conversation with Robin still works/)).toBeTruthy();
+    const { ScheduledSidebar } = await import('../../rail/AreaSidebars');
+    render(<ScheduledSidebar selectedJobId={null} onSelectJob={vi.fn()} />);
+    expect(screen.getByRole('button', { name: /^Robin · Pages upkeep System$/ })).toBeTruthy();
+    expect(document.body.textContent).not.toMatch(/meta agent/i);
+  });
+});
+
+describe('Scheduled › <name> · Pages upkeep detail', () => {
   it('shows the status, explanation, runtime, restriction and today', () => {
     detail(overview());
-    expect(screen.getByRole('heading', { level: 1, name: 'Meta agent · Maintain Pages' })).toBeTruthy();
+    expect(screen.getByRole('heading', { level: 1, name: 'Michi · Pages upkeep' })).toBeTruthy();
     expect(screen.getByText('Running')).toBeTruthy();
     expect(screen.getByText('One background check every 60 seconds finds pending work across workspaces. AI runs only when there is work to process.')).toBeTruthy();
     expect(screen.getByText(/Claude · claude-opus-5\.5 · reasoning high \(follows global\)/)).toBeTruthy();
@@ -144,9 +160,9 @@ describe('Scheduled › Meta agent detail', () => {
     expect(onOpenRun).toHaveBeenCalledWith({ workspaceId: 'r', nodeId: 'n-maint' });
   });
 
-  it('opens Settings › Meta agent from Change, and pauses or resumes', () => {
+  it('opens Settings › <name> › Pages upkeep from Change, and pauses or resumes', () => {
     const handlers = detail(overview());
-    fireEvent.click(screen.getByRole('button', { name: 'Change the Meta agent’s AI service' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Change the AI service Pages upkeep runs on' }));
     expect(handlers.onOpenSettings).toHaveBeenCalledTimes(1);
     fireEvent.click(screen.getByRole('button', { name: 'Pause background updates' }));
     expect(handlers.onTogglePause).toHaveBeenCalledWith(true);
@@ -155,23 +171,23 @@ describe('Scheduled › Meta agent detail', () => {
   it('shows a paused state with a resume button', () => {
     const handlers = detail(overview({ state: 'paused' }));
     expect(screen.getByText('Paused')).toBeTruthy();
-    expect(screen.getByText('Background updates are paused: new conversations aren’t read and pages aren’t updated. The chat window in Pages still works.')).toBeTruthy();
+    expect(screen.getByText('Background updates are paused: new conversations aren’t read and pages aren’t updated. Your conversation with Michi still works.')).toBeTruthy();
     fireEvent.click(screen.getByRole('button', { name: 'Resume background updates' }));
     expect(handlers.onTogglePause).toHaveBeenCalledWith(false);
   });
 
-  it('shows why the Meta agent stopped, with a link to its settings', () => {
+  it('shows why Pages upkeep stopped, with a link to its settings', () => {
     const handlers = detail(overview({
       state: 'error', error: 'The Meta agent does not run on Kiro Crew yet.',
       runtime: { runtimeId: 'crew', providerId: null, modelId: null, reasoning: null, followsGlobal: true },
     }));
     const alert = screen.getByRole('alert');
-    expect(alert.textContent).toContain('Meta agent stopped: The Meta agent does not run on Kiro Crew yet.');
-    fireEvent.click(within(alert).getByRole('button', { name: 'Open Settings › Meta agent' }));
+    expect(alert.textContent).toContain('Pages upkeep stopped: The Meta agent does not run on Kiro Crew yet.');
+    fireEvent.click(within(alert).getByRole('button', { name: 'Open Settings › Michi › Pages upkeep' }));
     expect(handlers.onOpenSettings).toHaveBeenCalledTimes(1);
     expect(screen.getByText('Error', { selector: '.meta-sched__tag' })).toBeTruthy();
     expect(screen.getByText(/Crew · default model \(follows global\)/)).toBeTruthy();
-    expect(screen.getByText('Limits: the Meta agent can’t use Kiro Crew yet')).toBeTruthy();
+    expect(screen.getByText('Limits: Pages upkeep can’t use Kiro Crew yet')).toBeTruthy();
   });
 
   it('shows Error with the reason a job stopped, the error’s first line, and Retry', () => {
@@ -185,7 +201,7 @@ describe('Scheduled › Meta agent detail', () => {
     }), { onRetry });
     expect(screen.getByText('Error', { selector: '.meta-sched__tag' })).toBeTruthy();
     const alert = screen.getByRole('alert');
-    expect(alert.textContent).toBe('Meta agent stopped: Codex is not installed on this computer · Retry · Open Settings › Meta agentcodex binary not found');
+    expect(alert.textContent).toBe('Pages upkeep stopped: Codex is not installed on this computer · Retry · Open Settings › Michi › Pages upkeepcodex binary not found');
     fireEvent.click(within(alert).getByRole('button', { name: 'Retry' }));
     expect(onRetry).toHaveBeenCalledTimes(1);
     const states = within(screen.getByRole('table')).getAllByRole('row').slice(1).map((row) => within(row).getAllByRole('cell')[4]);
@@ -209,15 +225,15 @@ describe('Scheduled › Meta agent detail', () => {
     }), { onRetry: vi.fn() });
     expect(screen.getByText('Not running', { selector: '.meta-sched__tag' })).toBeTruthy();
     const alert = screen.getByRole('alert');
-    expect(alert.textContent).toBe('Meta agent is not running: The Meta agent does not run on Kiro Crew yet. · Open Settings › Meta agent');
-    fireEvent.click(within(alert).getByRole('button', { name: 'Open Settings › Meta agent' }));
+    expect(alert.textContent).toBe('Pages upkeep isn’t running: The Meta agent does not run on Kiro Crew yet. · Open Settings › Michi › Pages upkeep');
+    fireEvent.click(within(alert).getByRole('button', { name: 'Open Settings › Michi › Pages upkeep' }));
     expect(handlers.onOpenSettings).toHaveBeenCalledTimes(1);
   });
 
   it('says not running where scheduled jobs are off, as the Spaces sidebar and Home do', () => {
     detail(overview({ notRunning: { reason: 'scheduler-off', message: 'Scheduled jobs are off on this backend' } }));
     expect(screen.getByText('Not running', { selector: '.meta-sched__tag' })).toBeTruthy();
-    expect(screen.getByRole('status').textContent).toBe('Meta agent is not running: Scheduled jobs are off on this backend');
+    expect(screen.getByRole('status').textContent).toBe('Pages upkeep isn’t running: Scheduled jobs are off on this backend');
     expect(screen.queryByRole('alert')).toBeNull();
     expect(screen.queryByText('Running')).toBeNull();
     expect(screen.queryByRole('button', { name: /background updates/ })).toBeNull();
@@ -233,23 +249,23 @@ describe('Scheduled › Meta agent detail', () => {
   });
 });
 
-describe('Scheduled › Meta agent page', () => {
+describe('Scheduled › <name> · Pages upkeep page', () => {
   it('loads the overview, then pauses through the API', async () => {
     api.fetch.mockResolvedValue(overview());
     api.setPaused.mockResolvedValue(overview({ state: 'paused' }));
     render(<MetaAgentScheduledPage onOpenSettings={vi.fn()} />);
-    expect(screen.getByRole('status', { name: 'Loading the Meta agent’s status' })).toBeTruthy();
+    expect(screen.getByRole('status', { name: 'Loading the Pages upkeep status' })).toBeTruthy();
     fireEvent.click(await screen.findByRole('button', { name: 'Pause background updates' }));
     expect(api.setPaused).toHaveBeenCalledWith(true);
     expect(await screen.findByText('Paused')).toBeTruthy();
   });
 
-  it('retries a stopped Meta agent: resumes, then runs one round, then reads the overview again', async () => {
+  it('retries a stopped Pages upkeep: resumes, then runs one round, then reads the overview again', async () => {
     const stoppedOverview = overview({ state: 'error', error: 'Kiro is not signed in',
       stopped: { reason: 'signed-out', message: 'Kiro is not signed in', workspaceIds: ['p'] } });
     api.fetch.mockResolvedValueOnce(stoppedOverview).mockResolvedValue(overview());
     api.setPaused.mockResolvedValue(overview());
-    round.run.mockReset().mockResolvedValue(undefined);
+    round.run.mockReset().mockResolvedValue({ workspaces: [] });
     round.refreshInfo.mockReset().mockResolvedValue(undefined);
     render(<MetaAgentScheduledPage onOpenSettings={vi.fn()} />);
     fireEvent.click(within(await screen.findByRole('alert')).getByRole('button', { name: 'Retry' }));
@@ -277,7 +293,14 @@ describe('Scheduled › Meta agent page', () => {
   it('shows a quiet notice when the backend has no overview route', async () => {
     api.fetch.mockRejectedValue(new HttpResponseError('Not found', 404));
     render(<MetaAgentScheduledPage onOpenSettings={vi.fn()} />);
-    expect(await screen.findByText('This Michi backend does not report the Meta agent’s maintenance yet.')).toBeTruthy();
+    expect(await screen.findByText('This Michi backend does not report Pages upkeep yet.')).toBeTruthy();
+  });
+
+  it('shows the backend’s reason, without Retry, when it refuses the read', async () => {
+    api.fetch.mockRejectedValue(new HttpResponseError('The Meta agent requires local or authenticated remote access', 403));
+    render(<MetaAgentScheduledPage onOpenSettings={vi.fn()} />);
+    expect(await screen.findByText('The Meta agent requires local or authenticated remote access')).toBeTruthy();
+    expect(screen.queryByRole('button', { name: 'Retry' })).toBeNull();
   });
 
   it('offers a retry when the overview cannot be read', async () => {
@@ -290,7 +313,7 @@ describe('Scheduled › Meta agent page', () => {
   });
 });
 
-describe('Meta agent row in the Scheduled sidebar', () => {
+describe('Pages upkeep row in the Scheduled sidebar', () => {
   function Probe() { return <span data-testid="open">{String(useMetaAgentDetailOpen())}</span>; }
   const job = (id: string, name: string) => ({ id, name, workspaceId: 'r', schedule: { kind: 'every', everySeconds: 3600 }, activeRunId: null });
 
@@ -304,7 +327,7 @@ describe('Meta agent row in the Scheduled sidebar', () => {
 
   it('opens the detail page and is marked current; opening another job closes it', async () => {
     await sidebar();
-    const row = screen.getByRole('button', { name: /Meta agent · maintain Pages/ });
+    const row = screen.getByRole('button', { name: /Michi · Pages upkeep/ });
     expect(row.getAttribute('aria-current')).toBeNull();
     fireEvent.click(row);
     expect(screen.getByTestId('open').textContent).toBe('true');
@@ -322,7 +345,7 @@ describe('Meta agent row in the Scheduled sidebar', () => {
     api.fetch.mockResolvedValue(overview({ managedJobIds: ['job-m1', 'job-m2'] }));
     await sidebar();
     const rows = screen.getAllByRole('button').map((button) => button.getAttribute('aria-label'));
-    expect(rows).toEqual(['Meta agent · maintain Pages System', 'Daily summary']);
+    expect(rows).toEqual(['Michi · Pages upkeep System', 'Daily summary']);
     expect(screen.getByText('Running · 1 needs reading')).toBeTruthy();
   });
 
@@ -339,18 +362,18 @@ describe('Meta agent row in the Scheduled sidebar', () => {
     expect(screen.getByText(text)).toBeTruthy();
   });
 
-  it('says when the backend reports no Meta agent', async () => {
+  it('says when the backend reports no Pages upkeep', async () => {
     api.fetch.mockRejectedValue(new HttpResponseError('Not found', 404));
     await sidebar();
     expect(screen.getByText('Not set up yet')).toBeTruthy();
   });
 
-  it('does not highlight the last job while the Meta agent page is open; an explicit job request always opens that job', async () => {
+  it('does not highlight the last job while the Pages upkeep page is open; an explicit job request always opens that job', async () => {
     jobs.list = [job('job-daily', 'Daily summary'), job('job-weekly', 'Weekly report')];
     const { onSelectJob } = await sidebar({ selectedJobId: 'job-daily' });
     const daily = screen.getByRole('button', { name: 'Daily summary' });
     expect(daily.getAttribute('aria-current')).toBe('true');
-    fireEvent.click(screen.getByRole('button', { name: /Meta agent · maintain Pages/ }));
+    fireEvent.click(screen.getByRole('button', { name: /Michi · Pages upkeep/ }));
     expect(daily.getAttribute('aria-current')).toBeNull();
 
     // A notification for the previously selected job must leave the Meta agent page.

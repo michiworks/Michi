@@ -1,0 +1,145 @@
+<!-- ==========================================================================
+     5. Map (#map), owner: map. Brief §3.7, §4.8, §5.8 (take 3), §6.2 M1-M9.
+     The HTML is tB: merged, with the RCA's lineage lit (brief §9). The take
+     (js/50-map.js) resets to tA (root card only) and plays once. After the
+     hold the cards are buttons (shipped hidden; JS shows them); each one's
+     data-crumb is the breadcrumb once it is pinned (brief §3.7 variants).
+     >= 1024: the 1180 x 740 world, fitted with --k (css/55-map.css).
+     <  1024: the same DOM as a top-down tree; the .map-cx elbows are its
+     connectors (data-e: which draw reveals it, data-v/data-t: which edges its
+     vertical/tick belong to, data-flow: which merge edge flows through it).
+     ========================================================================== -->
+<section class="sec sec--xl map-sec" id="map" aria-labelledby="map-title">
+  <div class="wrap">
+    <h2 class="h2" id="map-title"><span class="claim">See how you got here.</span> <span class="consequence" data-live-for="map">Merge the branches that <span class="nowrap">matter.<span class="live-caret" aria-hidden="true"></span></span></span></h2>
+    <p class="body map-body">The Map shows every branch and where it came from. Select a few and merge them into a new thread. <a class="fn" href="#note-merge">The originals stay as they were</a>, and you can still @ any of them.</p>
+  </div>
+  <figure class="map-fig" data-take="map">
+    <p class="sr-only">Animated example. The Map shows the main thread, Tokyo deployment, with three branches: Identity check, Task runner role and Why Tokyo only?. Hovering Task runner role lights its path back to the main thread. Then Why Tokyo only? and Task runner role are selected and merged into a new thread, Tokyo deployment RCA, whose summary reads: the policy runs before bootstrap creates the role, validation pending. After the animation each card is a button: hover or focus one to trace its path, press Enter to go there.</p>
+    <div class="map-band">
+      <div class="wrap map-stage">
+        <div class="mk-fit map-fit" data-w="1180" data-h="740" data-k-min=".8" data-take-observe>
+          <div class="mk mk-canvas map-world">
+            <svg class="mk-medges" width="1180" height="740" viewBox="0 0 1180 740" aria-hidden="true" focusable="false">
+              <defs>
+                <mask id="map-k1" maskUnits="userSpaceOnUse" x="0" y="0" width="1180" height="740"><path class="map-k draw" data-ta="off" data-e="m1" pathLength="1" d="M740,342 H790 V452 H840"/></mask>
+                <mask id="map-k2" maskUnits="userSpaceOnUse" x="0" y="0" width="1180" height="740"><path class="map-k draw" data-ta="off" data-e="m2" pathLength="1" d="M740,562 H790 V452"/></mask>
+              </defs>
+              <g class="map-eg">
+                <path class="mk-medge map-e draw is-dim" data-ta="off" data-e="1" data-v="1" pathLength="1" d="M340,342 H390 V122 H440"/>
+                <path class="mk-medge map-e draw is-dim" data-ta="off" data-e="2" data-v="2" pathLength="1" d="M340,342 H440"/>
+                <path class="mk-medge map-e draw is-dim" data-ta="off" data-e="3" data-v="3" pathLength="1" d="M340,342 H390 V562 H440"/>
+              </g>
+              <path class="mk-medge is-merge is-lit" data-v="m" data-flow="m1" mask="url(#map-k1)" d="M740,342 H790 V452 H840"/>
+              <path class="mk-medge is-merge is-lit" data-v="m" data-flow="m2" mask="url(#map-k2)" d="M740,562 H790 V452"/>
+            </svg>
+
+            <div class="map-s map-s0" data-n="0">
+              <div class="mk-mslot map-box">
+                <div class="mk-mcard is-dim" aria-hidden="true">
+                  <div class="mk-heat"><i></i></div>
+                  <div class="mk-asked"><span class="mk-asked-k">ASKED</span><span class="mk-asked-q">Tokyo’s deploy failed with “Invalid principal”. The same release works in the other regions. Can you check?</span></div>
+                  <div class="mk-mbody">
+                    <div class="mk-mtitle-row"><span class="mk-mtitle">Tokyo deployment</span><span class="mk-mchev">▾</span></div>
+                    <div class="mk-msum">Prepared post-deploy checks while the investigation continues.</div>
+                    <div class="mk-mchips"><span class="mk-mchip is-main">MAIN</span><span class="mk-mchip is-msgs">8 msgs</span><span class="mk-mtime">4m</span></div>
+                  </div>
+                </div>
+                <button type="button" class="map-hit" data-n="0" data-crumb="You’re in: Tokyo deployment" aria-label="Tokyo deployment, main thread, 8 messages" hidden></button>
+              </div>
+            </div>
+
+            <div class="map-s map-s1" data-n="1">
+              <div class="mk-mslot map-box">
+                <div class="e e-rise" data-ta="off" aria-hidden="true"><div class="mk-mcard is-dim">
+                  <div class="mk-heat" data-ta="off"><i></i></div>
+                  <div class="mk-asked"><span class="mk-asked-k">ASKED</span><span class="mk-asked-q">Check every identity the Tokyo policy references.</span></div>
+                  <div class="mk-mbody">
+                    <div class="mk-mtitle-row"><span class="mk-mtitle">Identity check</span><span class="mk-mchev">▾</span></div>
+                    <div class="mk-msum">Create the role in Tokyo before the policy runs; keep every permission.</div>
+                    <div class="mk-mchips"><span class="mk-mchip is-msgs">4 msgs</span><span class="mk-mtime">7m</span></div>
+                  </div>
+                </div></div>
+                <button type="button" class="map-hit" data-n="1" data-crumb="You’re in: Tokyo deployment › Identity check" aria-label="Identity check, 4 messages" hidden></button>
+              </div>
+              <i class="map-cx map-cx-up is-dim" data-ta="off" data-e="1" data-v="1 2 3" data-t="1"></i>
+              <i class="map-cx map-cx-dn is-dim" data-ta="off" data-e="2" data-v="2 3"></i>
+            </div>
+
+            <div class="map-s map-s2" data-n="2">
+              <div class="mk-mslot map-box">
+                <div class="e e-rise" data-ta="off" aria-hidden="true"><div class="mk-mcard is-source">
+                  <div class="mk-heat" data-ta="off"><i></i></div>
+                  <div class="mk-asked"><span class="mk-asked-k">ASKED</span><span class="mk-asked-q">task runner role</span></div>
+                  <div class="mk-mbody">
+                    <div class="mk-mtitle-row"><span class="mk-mtitle">Task runner role</span><span class="mk-mchev">▾</span></div>
+                    <div class="mk-msum">Bootstrap creates the role; Tokyo applies the policy before it.</div>
+                    <div class="mk-mchips"><span class="mk-mchip is-msgs">2 msgs</span><span class="mk-mtime">14m</span></div>
+                  </div>
+                </div></div>
+                <button type="button" class="map-hit" data-n="2" data-crumb="You’re in: Tokyo deployment › Task runner role" aria-label="Task runner role, 2 messages" hidden></button>
+              </div>
+              <i class="map-cx map-cx-up is-dim" data-ta="off" data-e="2" data-v="2 3" data-t="2"></i>
+              <i class="map-cx map-cx-dn is-dim" data-ta="off" data-e="3" data-v="3"></i>
+              <i class="map-cx map-cx-out is-m is-lit" data-ta="off" data-e="m1" data-v="m" data-flow="m1"></i>
+            </div>
+
+            <div class="map-s map-s3" data-n="3">
+              <div class="mk-mslot map-box">
+                <div class="e e-rise" data-ta="off" aria-hidden="true"><div class="mk-mcard is-source">
+                  <div class="mk-heat" data-ta="off"><i></i></div>
+                  <div class="mk-asked"><span class="mk-asked-k">ASKED</span><span class="mk-asked-q">Why did the same release work in the other regions?</span></div>
+                  <div class="mk-mbody">
+                    <div class="mk-mtitle-row"><span class="mk-mtitle">Why Tokyo only?</span><span class="mk-mchev">▾</span></div>
+                    <div class="mk-msum">Other regions got the role from an earlier bootstrap; Tokyo starts empty.</div>
+                    <div class="mk-mchips"><span class="mk-mchip is-msgs">2 msgs</span><span class="mk-mtime">11m</span></div>
+                  </div>
+                </div></div>
+                <button type="button" class="map-hit" data-n="3" data-crumb="You’re in: Tokyo deployment › Why Tokyo only?" aria-label="Why Tokyo only?, 2 messages" hidden></button>
+              </div>
+              <i class="map-cx map-cx-up is-dim" data-ta="off" data-e="3" data-v="3"></i>
+              <i class="map-cx map-cx-thru is-m is-lit" data-ta="off" data-e="m1" data-v="m" data-flow="m1"></i>
+              <i class="map-cx map-cx-tick is-m is-lit" data-ta="off" data-e="m2" data-v="m" data-flow="m2"></i>
+            </div>
+
+            <div class="map-barslot">
+              <div class="mk-mapbar e e-lift is-off" aria-hidden="true"><span class="mk-mapbar-n">2</span><span class="mk-mapbar-k">SELECTED</span><span class="mk-mapbar-dot">·</span><span class="mk-mapbar-names">Why Tokyo only?, Task runner role</span><span class="map-bar-btns"><span class="mk-mapbar-btn map-merge">Merge</span><span class="mk-mapbar-btn">Digest</span><span class="mk-mapbar-btn">Export</span><span class="mk-mapbar-btn">Clear</span></span></div>
+            </div>
+
+            <div class="map-s map-s4" data-n="4">
+              <div class="mk-mslot map-box">
+                <div class="e e-rise" data-ta="off" aria-hidden="true"><div class="mk-mcard is-merge is-anc">
+                  <div class="mk-heat" data-ta="off"><i></i></div>
+                  <div class="mk-asked"><span class="mk-asked-k">ASKED</span><span class="mk-asked-q">Write the RCA from what both branches found.</span></div>
+                  <div class="mk-mbody">
+                    <div class="mk-mtitle-row"><span class="mk-mtitle">Tokyo deployment RCA</span><span class="mk-mchev">▾</span></div>
+                    <div class="mk-msum e" data-ta="off">Cause: the policy runs before bootstrap creates the role. Validation pending.</div>
+                    <div class="mk-mchips"><span class="mk-mchip is-merged">MERGED</span><span class="mk-mchip is-msgs">2 msgs</span><span class="xf"><span class="mk-mlive is-off"><span class="mk-mlive-dot">●</span> streaming</span><span class="mk-mtime">now</span></span></div>
+                  </div>
+                </div></div>
+                <button type="button" class="map-hit" data-n="4" data-crumb="You’re in: Tokyo deployment RCA · merged from Why Tokyo only? + Task runner role" aria-label="Tokyo deployment RCA, merged, 2 messages" hidden></button>
+              </div>
+              <i class="map-cx map-cx-in is-m is-lit" data-ta="off" data-e="m1" data-v="m" data-flow="m1"></i>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="wrap">
+      <div class="map-under">
+        <div class="take-bar">
+          <p class="take-caption mono-sm map-crumb" data-take-hold><span class="map-crumb-t" aria-live="polite">You’re in: Tokyo deployment RCA</span><span class="map-crumb-s" aria-hidden="true">You’re in: Tokyo deployment RCA · merged from Why Tokyo only? + Task runner role</span></p>
+          <div class="take-end">
+            <p class="take-hint" data-take-hold><span class="pointer-only">Hover a card to trace its way back. Click to go there.</span><span class="touch-only">Tap a card to trace its way back.</span></p>
+            <div class="take-ctls">
+              <button type="button" class="take-ctl" data-take-control="pause" aria-label="Pause the Map example" aria-pressed="false" hidden>Pause</button>
+              <button type="button" class="take-ctl" data-take-control="replay" aria-label="Replay the Map example" hidden>Replay</button>
+              <button type="button" class="take-ctl" data-take-control="play" aria-label="Play the example as steps" hidden>Play</button>
+            </div>
+          </div>
+        </div>
+        <p class="meta map-digest" data-take-hold>Or digest the whole tree into one document that links back to every branch.</p>
+      </div>
+    </div>
+  </figure>
+</section>

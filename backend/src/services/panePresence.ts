@@ -12,7 +12,6 @@ import { randomUUID } from 'node:crypto';
 
 import { getNode, getWorkspace } from './dbRepository';
 import { AgentRunsRepository } from './agentRunsRepository';
-import { LOCAL_AGENT_OWNER_ID } from './agentOwner';
 import {
   PANE_INSPECTION_LIMITS,
   PaneInspectionError,
@@ -21,6 +20,12 @@ import {
   type PaneTarget,
   type PaneViewV1,
   type PaneDescriptorV1,
+  type PresenceKeepaliveRequest,
+  type PresenceKeepaliveResult,
+  type PresenceViewInput,
+  type RemovePresenceRequest,
+  type RemovePresenceResult,
+  type SubmitPresenceRequest,
 } from 'michi-shared';
 
 /** Maximum number of surface registrations a single caller scope (ownerUserId+workspaceId+
@@ -36,9 +41,17 @@ import {
  *  number of registrations that would otherwise sit in memory until their unclaimed-TTL sweep. */
 export const MAX_SURFACE_REGISTRATIONS_PER_SCOPE = PANE_INSPECTION_LIMITS.subscribeMaxPanes;
 
+/** How long a window's last focus report (`windowFocused`) stays current, apart from its lease's
+ *  TTL. A focused renderer repeats the report with every keepalive (20 s) and with its focus
+ *  heartbeat (10 s), and reports a blur at once, so a focused window reports again well within
+ *  this; a late keepalive still fits. If a blur report is lost, the window stops counting as
+ *  focused (and suppressing attention, services/attention/) this long after its last report,
+ *  instead of for the whole 60 s presence TTL. */
+export const WINDOW_FOCUS_FRESH_MS = 25_000;
+
 // ---------------------------------------------------------------------------
-// Public request/result types (this module's own contract — not part of the
-// shared PaneInspection DTOs, which do not model the presence wire format).
+// Public request/result types. The request bodies and the remove/keepalive results are the
+// shared presence wire format (shared/src/paneInspection.ts §9).
 // ---------------------------------------------------------------------------
 
 /** The authenticated identity submitting a presence update. Mirrors how the rest of this
@@ -47,33 +60,6 @@ export interface PresenceCaller {
   ownerUserId: string;
   workspaceId: string;
   connectionId: string;
-}
-
-/** One reported view, as the renderer sees it. `paneId` is the opaque public id (see
- *  shared/src/paneInspection.ts's encodePaneId/decodePaneId); the server decodes it to validate
- *  node/run ownership and to derive the PaneTarget for storage. */
-export interface PresenceViewInput {
-  paneId: string;
-  windowId: string;
-  uiPaneId: string;
-  treeId: string | null;
-  visible: boolean;
-  openedAtClient: number | null;
-  /** Renderer-supplied surface title (for `surface:` targets only). Stored verbatim as
-   *  renderer-provided data — never treated as fact, never executed or interpolated. */
-  surfaceTitle?: string | null;
-}
-
-/** PUT /api/panes/presence body, after the route layer's JSON/auth extraction. */
-export interface SubmitPresenceRequest {
-  /** Absent on the very first submission from a renderer instance; the registry allocates one
-   *  and returns it. Present on every subsequent submission. */
-  rendererLeaseId?: string;
-  /** Monotonically increasing per rendererLeaseId. The first submission (no rendererLeaseId yet)
-   *  may pass any value; the registry seeds its counter from it. */
-  viewRevision: number;
-  windowId: string;
-  views: PresenceViewInput[];
 }
 
 export type SubmitPresenceResult =
@@ -86,27 +72,6 @@ export interface RejectedTarget {
   paneId: string;
   reason: 'INVALID_ARGUMENT' | 'NOT_FOUND';
 }
-
-/** DELETE /api/panes/presence body. Removes specific views (or, if `paneIds` is omitted, the
- *  whole lease — e.g. window close). Never touches chat/run execution state. */
-export interface RemovePresenceRequest {
-  rendererLeaseId: string;
-  paneIds?: string[];
-}
-
-export type RemovePresenceResult =
-  | { ok: true; removed: number }
-  | { ok: false; code: 'WRONG_WINDOW' }
-  | { ok: false; code: 'NOT_FOUND' };
-
-/** Body for the independent presence keepalive POST; unrelated to native ping/pong frames. */
-export interface PresenceKeepaliveRequest {
-  rendererLeaseId: string;
-}
-
-export type PresenceKeepaliveResult =
-  | { ok: true; renewedViews: number }
-  | { ok: false; code: 'NOT_FOUND' };
 
 /** Read side consumed by P1-6 (inspect) and P2-4 (list). */
 export type PanePresenceSectionV1 = PaneDescriptorV1['presence'];
@@ -149,6 +114,13 @@ interface Tombstone {
   expiredAt: number;
 }
 
+/** A window's last focus report (`windowFocused` on submit/keepalive), kept per window rather than
+ *  per lease: one window holds a lease per workspace it reports, and its focus is one fact. */
+interface WindowFocus {
+  focused: boolean;
+  reportedAt: number;
+}
+
 /** A surface registration's own bookkeeping record — see `registrations` above for why this
  *  exists and what replaces the old bare-kind map. `ownerUserId`/`workspaceId`/`connectionId` are
  *  the caller scope the registration is bound to; a submit/resolve attempt from any other scope
@@ -173,7 +145,16 @@ export interface PanePresenceRegistryOptions {
   /** How long an expired lease's views remain visible as a tombstone marker before release.
    *  Defaults to one keepalive interval, matching design §9's "short tombstone, then release". */
   tombstoneRetentionMs?: number;
+  /** See WINDOW_FOCUS_FRESH_MS (the default). */
+  focusFreshMs?: number;
 }
+
+/** Told the owner whose views or window focus changed, with what that window now shows (see
+ *  subscribeAttentionSignals). */
+export type PresenceAttentionListener = (ownerUserId: string, shownTargets: readonly PaneTarget[]) => void;
+
+/** Conversations (node targets) that some window showed and none shows any more: the user left them. */
+export type PresenceLeftListener = (nodeIds: readonly string[]) => void;
 
 /** In-process, TTL'd registry. One instance per backend process — presence is never persisted
  *  into an authoritative table (design §9); a restart means every lease starts as `unknown` and
@@ -184,6 +165,7 @@ export class PanePresenceRegistry {
   private readonly keepaliveIntervalMs: number;
   private readonly ttlMs: number;
   private readonly tombstoneRetentionMs: number;
+  private readonly focusFreshMs: number;
 
   private readonly leases = new Map<string, Lease>();
   /** Recently-expired leases, kept briefly so a caller mid-race with an expiry doesn't see a view
@@ -193,11 +175,9 @@ export class PanePresenceRegistry {
   /** registrationId -> the surface registration record. Superseded `registrationKinds: Map<string,
    *  string>` (which stored only the kind — 'launcher' | 'files' | 'review' | 'file' | 'diff' |
    *  'terminal' | 'browser' — chosen at allocation time). `kind` is still typed as `string` rather
-   *  than importing `SurfacePaneKind` from paneInspectionProjection.surface.ts (P2-3's file) —
-   *  that type is presentation-layer, not a presence concern, and importing it would create a
-   *  cross-task dependency in the wrong direction. Callers that need the narrower type (P1-6's
-   *  `inspect`) already know it is one of the seven surface kinds because that is the only thing
-   *  `allocateSurfaceRegistration` accepts.
+   *  than `SurfacePaneKind`: the allocate route checks it against `SURFACE_PANE_KINDS` before it
+   *  calls `allocateSurfaceRegistration`, and the readers (P1-6's `inspect`, P2-4's `list`) check
+   *  it again, so narrowing the field and that method's parameter is a separate change.
    *
    *  Now that allocation is an authenticated call, a registration must be BOUND to the caller who
    *  allocated it (`ownerUserId`/`workspaceId`/`connectionId` — the same triple a lease is bound
@@ -209,6 +189,12 @@ export class PanePresenceRegistry {
    *  Never persisted — like every other registration in this registry, it disappears on a backend
    *  restart along with the lease that reported it. */
   private readonly registrations = new Map<string, SurfaceRegistration>();
+  /** windowKey(owner, connection, window) -> its last focus report. Current for `focusFreshMs`,
+   *  swept after `ttlMs`. Never part of a view or of `getPresence`, so focus reports cannot
+   *  advance a pane's revision. */
+  private readonly windowFocus = new Map<string, WindowFocus>();
+  private readonly attentionListeners = new Set<PresenceAttentionListener>();
+  private readonly leftListeners = new Set<PresenceLeftListener>();
 
   constructor(private readonly runs: AgentRunsRepository = new AgentRunsRepository(), opts: PanePresenceRegistryOptions = {}) {
     this.now = opts.now ?? Date.now;
@@ -216,6 +202,7 @@ export class PanePresenceRegistry {
     this.keepaliveIntervalMs = opts.keepaliveIntervalMs ?? PANE_INSPECTION_LIMITS.presenceKeepaliveSeconds * 1_000;
     this.ttlMs = opts.ttlMs ?? PANE_INSPECTION_LIMITS.presenceTtlSeconds * 1_000;
     this.tombstoneRetentionMs = opts.tombstoneRetentionMs ?? this.keepaliveIntervalMs;
+    this.focusFreshMs = opts.focusFreshMs ?? WINDOW_FOCUS_FRESH_MS;
   }
 
   // -------------------------------------------------------------------------
@@ -341,7 +328,13 @@ export class PanePresenceRegistry {
 
   submitPresence(caller: PresenceCaller, req: SubmitPresenceRequest): SubmitPresenceResult {
     this.sweepExpired();
+    const shownBefore = this.shownNodeIds();
+    const result = this.submitPresenceViews(caller, req);
+    if (result.ok) this.signalLeft(shownBefore);
+    return result;
+  }
 
+  private submitPresenceViews(caller: PresenceCaller, req: SubmitPresenceRequest): SubmitPresenceResult {
     let lease = req.rendererLeaseId ? this.leases.get(req.rendererLeaseId) : undefined;
 
     if (req.rendererLeaseId && !lease) {
@@ -362,9 +355,13 @@ export class PanePresenceRegistry {
         // that is otherwise valid — a duplicated tab must hold its OWN lease.
         return { ok: false, code: 'WRONG_WINDOW' };
       }
+      // The lease is this window's own: its focus report holds whatever happens to the views.
+      this.recordWindowFocus(caller, lease.windowId, req.windowFocused);
       if (req.viewRevision <= lease.viewRevision) {
         return { ok: false, code: 'STALE_REVISION', currentRevision: lease.viewRevision };
       }
+    } else {
+      this.recordWindowFocus(caller, req.windowId, req.windowFocused);
     }
 
     const isNewLease = !lease;
@@ -432,6 +429,7 @@ export class PanePresenceRegistry {
     activeLease.lastKeepaliveAt = now;
     if (resolved.length > 0) activeLease.hasReportedNonEmpty = true;
     this.tombstones.delete(activeLease.rendererLeaseId);
+    this.signalAttention(caller.ownerUserId, caller.connectionId, activeLease.windowId);
 
     return {
       ok: true,
@@ -454,10 +452,12 @@ export class PanePresenceRegistry {
     if (lease.ownerUserId !== caller.ownerUserId || lease.workspaceId !== caller.workspaceId || lease.connectionId !== caller.connectionId) {
       return { ok: false, code: 'WRONG_WINDOW' };
     }
+    const shownBefore = this.shownNodeIds();
 
     if (!req.paneIds) {
       const removed = lease.views.size;
       this.leases.delete(lease.rendererLeaseId);
+      this.signalLeft(shownBefore);
       return { ok: true, removed };
     }
 
@@ -465,7 +465,39 @@ export class PanePresenceRegistry {
     for (const paneId of req.paneIds) {
       if (lease.views.delete(paneId)) removed += 1;
     }
+    this.signalLeft(shownBefore);
     return { ok: true, removed };
+  }
+
+  /** Calls `listener` with the conversations no window shows any more after a presence change or a lease's expiry. Returns the unsubscribe function. */
+  subscribeConversationsLeft(listener: PresenceLeftListener): () => void {
+    this.leftListeners.add(listener);
+    return () => { this.leftListeners.delete(listener); };
+  }
+
+  /** The conversations (node targets) some live lease shows in a visible slot. */
+  private shownNodeIds(): Set<string> {
+    const shown = new Set<string>();
+    if (this.leftListeners.size === 0) return shown;
+    for (const lease of this.leases.values()) {
+      for (const view of lease.views.values()) if (view.visible && view.target.kind === 'node') shown.add(view.target.nodeId);
+    }
+    return shown;
+  }
+
+  /** Tells the left listeners which of `before` no live lease shows now. */
+  private signalLeft(before: ReadonlySet<string>): void {
+    if (this.leftListeners.size === 0 || before.size === 0) return;
+    const now = this.shownNodeIds();
+    const left = [...before].filter((nodeId) => !now.has(nodeId));
+    if (left.length === 0) return;
+    for (const listener of [...this.leftListeners]) {
+      try {
+        listener(left);
+      } catch {
+        // A listener failure must not fail the renderer's presence request.
+      }
+    }
   }
 
   // -------------------------------------------------------------------------
@@ -482,7 +514,84 @@ export class PanePresenceRegistry {
     const now = this.now();
     lease.lastKeepaliveAt = now;
     for (const view of lease.views.values()) view.lastSeenAt = now;
+    if (this.recordWindowFocus(caller, lease.windowId, req.windowFocused)) {
+      this.signalAttention(caller.ownerUserId, caller.connectionId, lease.windowId);
+    }
     return { ok: true, renewedViews: lease.views.size };
+  }
+
+  // -------------------------------------------------------------------------
+  // Window focus — read by the attention service (services/attention/)
+  // -------------------------------------------------------------------------
+
+  private windowKey(ownerUserId: string, connectionId: string, windowId: string): string {
+    return JSON.stringify([ownerUserId, connectionId, windowId]);
+  }
+
+  /** Stores a boolean focus report; anything else (absent on an older renderer) is ignored.
+   *  Returns true when the window's known focus changed, including from unknown or stale. */
+  private recordWindowFocus(caller: PresenceCaller, windowId: string, windowFocused: unknown): boolean {
+    if (typeof windowFocused !== 'boolean') return false;
+    const key = this.windowKey(caller.ownerUserId, caller.connectionId, windowId);
+    const now = this.now();
+    const previous = this.windowFocus.get(key);
+    this.windowFocus.set(key, { focused: windowFocused, reportedAt: now });
+    return !previous || previous.focused !== windowFocused || now - previous.reportedAt > this.focusFreshMs;
+  }
+
+  /** Focused by a report no older than `focusFreshMs` (WINDOW_FOCUS_FRESH_MS). */
+  private isWindowFocused(ownerUserId: string, connectionId: string, windowId: string): boolean {
+    const focus = this.windowFocus.get(this.windowKey(ownerUserId, connectionId, windowId));
+    return !!focus && focus.focused && this.now() - focus.reportedAt <= this.focusFreshMs;
+  }
+
+  /** True when some window of this owner whose focus report is current (WINDOW_FOCUS_FRESH_MS) has
+   *  `target` open in its visible slot: the user can see it now (Herdr's "seen" rule). Unknown or
+   *  stale focus, an expired lease or a pane open only in a background slot all answer false. */
+  isTargetVisibleInFocusedWindow(ownerUserId: string, target: PaneTarget): boolean {
+    this.sweepExpired();
+    const paneId = encodePaneId(target);
+    for (const lease of this.leases.values()) {
+      if (lease.ownerUserId !== ownerUserId) continue;
+      const view = lease.views.get(paneId);
+      if (view?.visible && this.isWindowFocused(lease.ownerUserId, lease.connectionId, lease.windowId)) return true;
+    }
+    return false;
+  }
+
+  /** Called after a presence submission or a focus change, the two moments a target may have come
+   *  into view in a focused window, with the owner and the node and Agent Run targets that window
+   *  now shows in a visible slot: none while it is not focused. Only that window changed, so only
+   *  those targets can have come into view. Returns the unsubscribe function. */
+  subscribeAttentionSignals(listener: PresenceAttentionListener): () => void {
+    this.attentionListeners.add(listener);
+    return () => { this.attentionListeners.delete(listener); };
+  }
+
+  private signalAttention(ownerUserId: string, connectionId: string, windowId: string): void {
+    if (this.attentionListeners.size === 0) return;
+    const shown = this.shownInFocusedWindow(ownerUserId, connectionId, windowId);
+    for (const listener of [...this.attentionListeners]) {
+      try {
+        listener(ownerUserId, shown);
+      } catch {
+        // A listener failure must not fail the renderer's presence request.
+      }
+    }
+  }
+
+  /** The node and Agent Run targets this window shows in a visible slot, across its leases (one per
+   *  workspace it reports); empty unless the window is focused now. */
+  private shownInFocusedWindow(ownerUserId: string, connectionId: string, windowId: string): PaneTarget[] {
+    if (!this.isWindowFocused(ownerUserId, connectionId, windowId)) return [];
+    const shown = new Map<string, PaneTarget>();
+    for (const lease of this.leases.values()) {
+      if (lease.ownerUserId !== ownerUserId || lease.connectionId !== connectionId || lease.windowId !== windowId) continue;
+      for (const view of lease.views.values()) {
+        if (view.visible && view.target.kind !== 'surface') shown.set(view.paneId, view.target);
+      }
+    }
+    return [...shown.values()];
   }
 
   // -------------------------------------------------------------------------
@@ -510,8 +619,8 @@ export class PanePresenceRegistry {
 
   /**
    * Added for P2-4 (`list_panes` `scope=open`): every distinct PaneTarget with at least one live
-   * view currently registered in this workspace, across all leases. Unlike `getPresence`/
-   * `getPresenceForTargets`, which answer "does THIS already-named target have presence", this
+   * view currently registered in this workspace, across all leases. Unlike `getPresence`,
+   * which answers "does THIS already-named target have presence", this
    * answers "which targets currently HAVE presence at all" — the only way to enumerate
    * `scope=open`'s row set, since a caller cannot pre-name every possible pane id up front. Scoped
    * to `workspaceId` because presence has no cross-workspace query anywhere else in this
@@ -526,24 +635,6 @@ export class PanePresenceRegistry {
       }
     }
     return Array.from(byPaneId.values());
-  }
-
-  /** Bulk variant for list_panes (P2-4), avoiding one registry scan per row. */
-  getPresenceForTargets(targets: readonly PaneTarget[]): Map<string, PanePresenceSectionV1> {
-    this.sweepExpired();
-    const byPaneId = new Map<string, PaneViewV1[]>();
-    for (const target of targets) byPaneId.set(encodePaneId(target), []);
-    for (const lease of this.leases.values()) {
-      for (const [paneId, view] of lease.views) {
-        const bucket = byPaneId.get(paneId);
-        if (bucket) bucket.push(this.toPaneViewV1(view));
-      }
-    }
-    const out = new Map<string, PanePresenceSectionV1>();
-    for (const [paneId, views] of byPaneId) {
-      out.set(paneId, views.length > 0 ? { coverage: 'reported', views } : { coverage: 'unknown', views: [] });
-    }
-    return out;
   }
 
   /** Added for P1-6b: resolves a `surface` registration's own identity — the fields
@@ -582,12 +673,6 @@ export class PanePresenceRegistry {
     return null;
   }
 
-  /** How many distinct views (across all leases) currently have this pane open — used by
-   *  list_panes' `openedInViews` summary field. */
-  countOpenViews(target: PaneTarget): number {
-    return this.getPresence(target).views.length;
-  }
-
   private toPaneViewV1(view: StoredView): PaneViewV1 {
     return {
       windowId: view.windowId,
@@ -606,16 +691,22 @@ export class PanePresenceRegistry {
 
   private sweepExpired(): void {
     const now = this.now();
+    let shownBefore: Set<string> | null = null;
     for (const [id, lease] of this.leases) {
       if (now - lease.lastKeepaliveAt > this.ttlMs) {
+        shownBefore ??= this.shownNodeIds();
         this.leases.delete(id);
         this.tombstones.set(id, { rendererLeaseId: id, expiredAt: now });
       }
     }
+    if (shownBefore) this.signalLeft(shownBefore);
     for (const [id, tombstone] of this.tombstones) {
       if (now - tombstone.expiredAt > this.tombstoneRetentionMs) {
         this.tombstones.delete(id);
       }
+    }
+    for (const [key, focus] of this.windowFocus) {
+      if (now - focus.reportedAt > this.ttlMs) this.windowFocus.delete(key);
     }
     this.sweepUnclaimedRegistrations(now);
   }
@@ -673,12 +764,6 @@ export class PanePresenceRegistry {
   }
 }
 
-/** Resolves the caller's ownerUserId the same way the rest of the routes do: `req.user?.id` in
- *  cloud mode, the fixed desktop identity otherwise. P1-8 should use this rather than reading
- *  `req.user` directly, so presence's desktop/cloud behaviour matches every other route. */
-export function resolvePresenceOwnerUserId(reqUserId: string | undefined): string {
-  return process.env.MICHI_CLOUD === '1' ? (reqUserId ?? '') : LOCAL_AGENT_OWNER_ID;
-}
 
 // ---------------------------------------------------------------------------
 // What backend/src/routes/paneInspection.ts (P1-8) must mount
@@ -686,7 +771,7 @@ export function resolvePresenceOwnerUserId(reqUserId: string | undefined): strin
 //
 // PUT /api/panes/presence
 //   body: SubmitPresenceRequest
-//   caller: { ownerUserId: resolvePresenceOwnerUserId(req.user?.id), workspaceId: <from body or
+//   caller: { ownerUserId: requestAgentOwner(req.user?.id) (agentOwner.ts), workspaceId: <from body or
 //            route, validated the same way other workspace-scoped routes do>, connectionId:
 //            <the route's own backendConnectionId / socket identity> }
 //   -> registry.submitPresence(caller, body)
@@ -702,7 +787,7 @@ export function resolvePresenceOwnerUserId(reqUserId: string | undefined): strin
 //
 // A single shared `PanePresenceRegistry` instance must be constructed once (module scope, like
 // other in-process registries in this codebase) and imported by both the route handlers and
-// whatever P1-6/P2-4 use to read `getPresence`/`getPresenceForTargets`/`countOpenViews`.
+// whatever P1-6/P2-4 use to read `getPresence`.
 
 /**
  * The one process-wide presence registry.

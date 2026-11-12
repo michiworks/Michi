@@ -1,46 +1,5 @@
-import React from 'react';
 import type { FirstRunProgressDto } from 'michi-shared';
-import { useMetaAgent } from '../../../../state/metaAgent/useMetaAgent';
-import { firstRunProgress, useSpacesFirstRun } from '../../../../state/metaAgent/spacesFirstRun';
-import { useMetaAgentOverview } from '../../../../state/metaAgent/useMetaAgentOverview';
-import { META_AGENT_HEADLINE, metaAgentStatus } from '../../../../state/metaAgent/metaAgentStatus';
-import { metaAgentRuntimeLabel } from '../../settings/metaAgent/runtimeCopy';
 import './sidebarStatus.css';
-
-/** The Spaces sidebar's bottom row: what the Meta agent is doing, or why it is not. The Home says why in full. */
-export function MetaAgentSidebarStatus({ connectionId = 'local', onOpenHome }: { connectionId?: string; onOpenHome(): void }) {
-  const agent = useMetaAgent();
-  const firstRun = useSpacesFirstRun(connectionId);
-  const overview = useMetaAgentOverview();
-  const info = agent.info;
-  const status = metaAgentStatus({ info, infoStatus: agent.status, firstRun, overview: overview.overview, runtimeLabel: metaAgentRuntimeLabel });
-  const seeWhy = (headline: string, tone?: 'warn') => (
-    <span title={status.reason ?? undefined}>
-      {headline} · <button type="button" className="spaces-side-foot-link" data-tone={tone} onClick={onOpenHome}>See why</button>
-    </span>
-  );
-  switch (status.kind) {
-    case 'offline':
-      return <><span className="area-side__foot-dot" data-tone="off" aria-hidden="true" /><span>{META_AGENT_HEADLINE.offline}</span></>;
-    case 'guard-failed':
-    case 'stopped':
-      return <><span className="area-side__foot-dot" data-tone="danger" aria-hidden="true" />{seeWhy(META_AGENT_HEADLINE[status.kind])}</>;
-    case 'not-running':
-    case 'unsupported':
-      return <><span className="area-side__foot-dot" data-tone="warn" aria-hidden="true" />{seeWhy(META_AGENT_HEADLINE[status.kind], 'warn')}</>;
-    case 'first-run': {
-      const progress = firstRunProgress(firstRun.data);
-      return <><span className="agent-spinner" aria-hidden="true" /><span>Meta agent is reading {progress.read}/{progress.total}</span></>;
-    }
-    case 'paused':
-      return <><span className="area-side__foot-dot" data-tone="off" aria-hidden="true" /><span>{META_AGENT_HEADLINE.paused}</span></>;
-    default:
-      return <>
-        <span className="area-side__foot-dot" data-tone="ok" aria-hidden="true" />
-        <span>Meta agent{info ? ` · ${metaAgentRuntimeLabel(info.resolved.runtimeId)}` : ''} · checks new conversations every 60 s</span>
-      </>;
-  }
-}
 
 /** First-read execution progress only; completed homes do not show reminders. */
 export function WorkspaceFirstRunBadge({ run }: { run: FirstRunProgressDto | null | undefined }) {

@@ -1,4 +1,3 @@
-import React from 'react';
 import type { BlockProps } from '../blockTypes';
 
 /** A task board: the host draws the workspace's task database; without one it says so. */

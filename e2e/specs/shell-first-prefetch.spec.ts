@@ -88,7 +88,8 @@ for (const width of [1280, 390]) {
       await page.goto('/');
       await expect(page.locator('.terminal-topbar')).toBeVisible();
       await expect(page.getByRole('status', { name: 'Loading workspaces' })).toBeVisible();
-      await expect(page.getByRole('button', { name: 'Search', exact: true })).toBeDisabled();
+      // A phone's topbar leaves Search out (mobile.css).
+      if (width > 700) await expect(page.getByRole('button', { name: 'Search', exact: true })).toBeDisabled();
       await expect(page.getByPlaceholder('Untitled workspace')).toHaveCount(0);
       await expect(page.locator(COMPOSER_EDITOR)).toHaveCount(0);
       await page.keyboard.press('Control+,');

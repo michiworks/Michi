@@ -2,7 +2,8 @@ import { execSync } from 'node:child_process';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { resolveNamedBinary } from '../../core/executableLookup';
+import { writeFileAtomicSync } from '../../core/atomicFile';
+import { isRunnableFile, resolveNamedBinary } from '../../core/executableLookup';
 
 export class CodexBinaryNotFoundError extends Error {
   constructor(message: string) {
@@ -87,35 +88,11 @@ function readPersistedCodexBinary(): string | null {
 function writePersistedCodexBinary(resolvedPath: string): void {
   const cacheFile = getCacheFilePath();
   if (!cacheFile) return;
-  const dir = path.dirname(cacheFile);
-  const tmpFile = `${cacheFile}.${process.pid}.tmp`;
   try {
-    fs.mkdirSync(dir, { recursive: true });
-    fs.writeFileSync(
-      tmpFile,
-      JSON.stringify({ binaryPath: resolvedPath, updatedAt: Date.now() }, null, 2),
-      { mode: 0o600 },
-    );
-    fs.renameSync(tmpFile, cacheFile);
+    fs.mkdirSync(path.dirname(cacheFile), { recursive: true });
+    writeFileAtomicSync(cacheFile, JSON.stringify({ binaryPath: resolvedPath, updatedAt: Date.now() }, null, 2));
   } catch {
-    try {
-      fs.rmSync(tmpFile, { force: true });
-    } catch {
-      // Ignore cleanup errors.
-    }
-  }
-}
-
-function isRunnableExecutable(filePath: string): boolean {
-  try {
-    const stat = fs.statSync(filePath);
-    if (!stat.isFile()) return false;
-    if (process.platform !== 'win32') {
-      fs.accessSync(filePath, fs.constants.X_OK);
-    }
-    return true;
-  } catch {
-    return false;
+    // Unwritable cache: the binary is resolved again next time.
   }
 }
 
@@ -142,7 +119,7 @@ export function findExecutableInDirBounded(
     for (const entry of entries) {
       if (entry.name === targetName && (entry.isFile() || entry.isSymbolicLink())) {
         const candidate = path.join(current.dir, entry.name);
-        if (isRunnableExecutable(candidate)) {
+        if (isRunnableFile(candidate)) {
           return candidate;
         }
       }

@@ -2,9 +2,13 @@
  * use in both the browser and backend. Client input types intentionally omit
  * server-owned identity, revision, ownership and provenance fields. */
 
-import { MICHI_DB_COLUMN_TYPES, MICHI_DB_FILTER_OPS, MICHI_DB_VIEW_TYPES } from '../databaseModel';
+import { isRecord } from '../guards';
+import { MICHI_DB_COLUMN_TYPES, MICHI_DB_VIEW_TYPES } from '../databaseModel';
 import { parsePageBlock, type BlockSource, type PageBlock, type PageBlockWithSources } from './blocks';
-import type { PageDatabase, PageDatabaseColumn, PageDatabaseRow, PageDatabaseView } from './database';
+import {
+  isPageDatabaseCellValues, isPageDatabaseFilter, isPageDatabaseOptionList, isPageDatabaseSort,
+  type PageDatabase, type PageDatabaseColumn, type PageDatabaseRow, type PageDatabaseView,
+} from './database';
 import { parsePageComponentHostConfig } from './components';
 
 /**
@@ -33,8 +37,46 @@ export type ChangeTarget =
   | { kind: 'row'; databaseId: string; rowId: string; columnIds: string[]; body?: true }
   | { kind: 'database'; databaseId: string };
 
+/** The key change history stores a target's changes under (page_changes.target_key). */
+export function changeTargetKey(target: ChangeTarget | { kind: 'row'; databaseId: string; rowId: string }): string {
+  if (target.kind === 'block') return `block:${target.pageId}:${target.blockId}`;
+  if (target.kind === 'row') return `row:${target.databaseId}:${target.rowId}`;
+  return `database:${target.databaseId}`;
+}
+
 export type ProposalState = 'pending' | 'accepted' | 'dismissed' | null;
 export type ApplicationState = 'applied' | 'reverted' | null;
+
+/**
+ * How the user's own agent (the one they name in Settings, DESIGN-v2 §2.7)
+ * wrote something: `conversation` = a conversation in the assistant's
+ * workspace (the one the user talks to, and the archived ⌘J and Scheduled
+ * ones); `checkin` = a check-in (node id prefix `n-cmph-`, decided from the id
+ * alone because the node is purged after its run); `upkeep` = background
+ * Pages maintenance.
+ */
+export type CompanionActorVia = 'conversation' | 'checkin' | 'upkeep';
+
+export const COMPANION_ACTOR_VIAS: readonly CompanionActorVia[] = Object.freeze(['conversation', 'checkin', 'upkeep']);
+
+/**
+ * The agent as the author of a page, a task or a change (DESIGN-v2 §2.7),
+ * shown as "<name>", upkeep as "<name> · Pages upkeep" (SpaceSummaryDto.createdBy,
+ * SpaceActivityDetail.by, TaskOrigin.by). It replaced the MVP's 'meta-agent'
+ * actor: an older backend that still sends that one is read as upkeep by the
+ * frontend's API layer (services/api/legacyActor.ts).
+ */
+export interface CompanionActor {
+  kind: 'companion';
+  via: CompanionActorVia;
+}
+
+/** Narrows an actor field that may hold a CompanionActor beside the older string forms. */
+export function isCompanionActor(value: unknown): value is CompanionActor {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  const actor = value as Partial<CompanionActor>;
+  return actor.kind === 'companion' && (COMPANION_ACTOR_VIAS as readonly unknown[]).includes(actor.via);
+}
 
 export interface PageSummaryDto {
   id: string;
@@ -47,6 +89,13 @@ export interface PageSummaryDto {
   updatedBy: 'user' | 'agent';
   pendingProposals: number;
   helperNodeId: string | null;
+}
+
+/** POST /pages/:pageId/helper and /pages/:pageId/helper/promote: the page's helper conversation. */
+export interface PageHelperDescriptor {
+  workspaceId: string;
+  treeId: string;
+  nodeId: string;
 }
 
 export interface PageDto extends PageSummaryDto {
@@ -62,10 +111,11 @@ export interface SpaceSummaryDto extends PageSummaryDto {
   databaseCount: number;
   contributorNodeIds: string[];
   /**
-   * Who made the Space: a person, the Meta agent's own chat, or an agent in
-   * one of the workspace's conversations. Absent from older backends.
+   * Who made the Space: a person, the user's own agent (a CompanionActor,
+   * DESIGN-v2 §2.7), or an agent in one of the workspace's conversations.
+   * Absent from older backends.
    */
-  createdBy?: 'user' | 'meta-agent' | 'agent';
+  createdBy?: 'user' | 'agent' | CompanionActor;
 }
 
 export interface BlockLocation {
@@ -146,7 +196,46 @@ export interface PageWriteResult {
   rejected: Array<{ index: number; reason: 'stale' | 'missing' | 'invalid'; message: string }>;
 }
 
-export const PAGE_LIMITS = { title: 200, pagesPerWorkspace: 2_000, manifestEntries: 20 } as const;
+/** How an interactive agent write ended: all applied, some, only proposals, none allowed, or nothing to do. */
+export type PageWriteCommitStatus = 'committed' | 'partial' | 'proposed' | 'rejected' | 'unchanged';
+
+/** What a write to a task database did to its tasks. */
+export interface PageWriteTaskCounts { added: number; updated: number; removed: number }
+
+/**
+ * The receipt a page tool's result leads with (agents/pageTools.ts), which the
+ * chat's page-write card and page invalidation read. Older tool outputs and
+ * output cut at 16 KB can lack any field; readers parse it tolerantly.
+ */
+export interface MichiPageWriteReceipt {
+  kind: 'michiPageWrite';
+  resourceKind: 'page' | 'database' | 'component';
+  resourceId: string;
+  /** The resource's workspace, when a writer outside it (the Meta agent) wrote it. */
+  workspaceId?: string;
+  originatingPageId?: string;
+  originatingPageIds?: string[];
+  title: string;
+  created?: true;
+  revision: number;
+  viewVersion?: number;
+  atomic?: boolean;
+  commitStatus?: PageWriteCommitStatus;
+  appliedCount: number;
+  proposedCount: number;
+  rejectedCount: number;
+  affectedTargetIds: string[];
+  batchId: string | null;
+  /** The write put a task board on the page. */
+  taskBoard?: true;
+  /** A row write: the column its rows go by. */
+  titleColumnId?: string;
+  tasks?: PageWriteTaskCounts;
+  /** A component write: the version it saved. */
+  version?: number;
+}
+
+export const PAGE_LIMITS = { title: 200, pagesPerWorkspace: 2_000, manifestEntries: 20, blocks: 40, opsPerEdit: 50 } as const;
 
 /** This state machine is shared by API parsing and database row validation. */
 export function isValidChangeState(proposalState: unknown, applicationState: unknown): boolean {
@@ -159,11 +248,10 @@ export function isValidChangeState(proposalState: unknown, applicationState: unk
 
 const id = (value: unknown): value is string => typeof value === 'string' && value.length > 0 && value.length <= 200;
 const safeInt = (value: unknown, min = 0): value is number => Number.isSafeInteger(value) && (value as number) >= min;
-const record = (value: unknown): value is Record<string, unknown> => value !== null && typeof value === 'object' && !Array.isArray(value);
 const exact = (value: Record<string, unknown>, keys: readonly string[]) => Object.keys(value).every((key) => keys.includes(key));
 
 export function parseChangeSource(value: unknown): ChangeSource | null {
-  if (!record(value) || typeof value.kind !== 'string') return null;
+  if (!isRecord(value) || typeof value.kind !== 'string') return null;
   if (value.kind === 'user') return exact(value, ['kind']) ? { kind: 'user' } : null;
   if (value.kind === 'chat' || value.kind === 'helper') {
     return exact(value, ['kind', 'nodeId', 'turnId', 'assistantId']) && [value.nodeId, value.turnId, value.assistantId].every(id)
@@ -173,9 +261,9 @@ export function parseChangeSource(value: unknown): ChangeSource | null {
     if (!exact(value, ['kind', 'nodeId', 'turnId', 'assistantId', 'jobId', 'runId', 'evidence', 'read']) ||
       ![value.nodeId, value.turnId, value.assistantId, value.jobId, value.runId].every(id) ||
       !Array.isArray(value.evidence) || value.evidence.length > 100) return null;
-    if (!value.evidence.every((entry) => record(entry) && exact(entry, ['nodeId', 'turnId', 'assistantId', 'messageId']) &&
+    if (!value.evidence.every((entry) => isRecord(entry) && exact(entry, ['nodeId', 'turnId', 'assistantId', 'messageId']) &&
       [entry.nodeId, entry.turnId, entry.assistantId].every(id) && (entry.messageId === undefined || id(entry.messageId)))) return null;
-    if (value.read !== undefined && !(record(value.read) && exact(value.read, ['kind', 'count']) &&
+    if (value.read !== undefined && !(isRecord(value.read) && exact(value.read, ['kind', 'count']) &&
       CHANGE_READ_SCOPE_KINDS.includes(value.read.kind as ChangeReadScope['kind']) && safeInt(value.read.count) && (value.read.count as number) <= 100_000)) return null;
     return value as ChangeSource;
   }
@@ -189,7 +277,7 @@ export function parseChangeSource(value: unknown): ChangeSource | null {
 }
 
 export function parseChangeTarget(value: unknown): ChangeTarget | null {
-  if (!record(value) || typeof value.kind !== 'string') return null;
+  if (!isRecord(value) || typeof value.kind !== 'string') return null;
   if (value.kind === 'block') return exact(value, ['kind', 'pageId', 'blockId']) && id(value.pageId) && id(value.blockId) ? value as ChangeTarget : null;
   if (value.kind === 'row') {
     return exact(value, ['kind', 'databaseId', 'rowId', 'columnIds', 'body']) && id(value.databaseId) && id(value.rowId) &&
@@ -201,7 +289,7 @@ export function parseChangeTarget(value: unknown): ChangeTarget | null {
 }
 
 export function isTargetSnapshot(value: unknown): value is TargetSnapshot {
-  if (!record(value) || typeof value.kind !== 'string' || typeof value.exists !== 'boolean') return false;
+  if (!isRecord(value) || typeof value.kind !== 'string' || typeof value.exists !== 'boolean') return false;
   if (value.kind === 'block') {
     if (!value.exists) return exact(value, ['kind', 'exists', 'id', 'location']) && id(value.id) && value.location === null;
     return exact(value, ['kind', 'exists', 'block', 'location']) && parsePageBlock(value.block) !== null && validBlockLocation(value.location);
@@ -218,7 +306,7 @@ export function isTargetSnapshot(value: unknown): value is TargetSnapshot {
 }
 
 export function isTargetMutation(value: unknown): value is TargetMutation {
-  if (!record(value) || typeof value.kind !== 'string' || typeof value.op !== 'string') return false;
+  if (!isRecord(value) || typeof value.kind !== 'string' || typeof value.op !== 'string') return false;
   if (value.kind === 'block') {
     if (value.op === 'upsert') return exact(value, ['kind', 'op', 'block', 'location']) && parsePageBlock(value.block) !== null && validBlockLocation(value.location);
     if (value.op === 'delete') return exact(value, ['kind', 'op', 'id', 'expectedLocation']) && id(value.id) && validBlockLocation(value.expectedLocation);
@@ -227,7 +315,7 @@ export function isTargetMutation(value: unknown): value is TargetMutation {
   if (value.kind === 'row') {
     if (value.op === 'upsert') return exact(value, ['kind', 'op', 'row', 'location']) && validRowSnapshot(value.row) && validRowLocation(value.location);
     if (value.op === 'patch') {
-      return exact(value, ['kind', 'op', 'id', 'values', 'body', 'edited', 'bodyEditedAt']) && id(value.id) && isCellValues(value.values) &&
+      return exact(value, ['kind', 'op', 'id', 'values', 'body', 'edited', 'bodyEditedAt']) && id(value.id) && isPageDatabaseCellValues(value.values) &&
         (value.body === undefined || typeof value.body === 'string') && (value.edited === undefined || validEdited(value.edited)) &&
         (value.bodyEditedAt === undefined || value.bodyEditedAt === null || safeInt(value.bodyEditedAt));
     }
@@ -246,7 +334,7 @@ export function parseTargetSnapshot(value: unknown): TargetSnapshot | null { ret
 export function parseTargetMutation(value: unknown): TargetMutation | null { return isTargetMutation(value) ? value : null; }
 
 export function parsePageChangeDto(value: unknown): PageChangeDto | null {
-  if (!record(value) || !exact(value, ['id', 'seq', 'batchId', 'target', 'op', 'before', 'after', 'forward', 'inverse', 'baseRev', 'appliedRev', 'previousHeadId', 'source', 'proposalState', 'applicationState', 'createdAt', 'resolvedAt'])) return null;
+  if (!isRecord(value) || !exact(value, ['id', 'seq', 'batchId', 'target', 'op', 'before', 'after', 'forward', 'inverse', 'baseRev', 'appliedRev', 'previousHeadId', 'source', 'proposalState', 'applicationState', 'createdAt', 'resolvedAt'])) return null;
   const target = parseChangeTarget(value.target);
   const source = parseChangeSource(value.source);
   if (!id(value.id) || !safeInt(value.seq, 1) || !id(value.batchId) || !target || !source ||
@@ -261,23 +349,23 @@ export function parsePageChangeDto(value: unknown): PageChangeDto | null {
 export function isPageChangeDto(value: unknown): value is PageChangeDto { return parsePageChangeDto(value) !== null; }
 
 function validBlockLocation(value: unknown): value is BlockLocation {
-  return record(value) && exact(value, ['parentId', 'slot', 'previousId', 'nextId']) &&
+  return isRecord(value) && exact(value, ['parentId', 'slot', 'previousId', 'nextId']) &&
     (value.parentId === null || id(value.parentId)) && (value.slot === null || id(value.slot)) &&
     (value.previousId === null || id(value.previousId)) && (value.nextId === null || id(value.nextId));
 }
 function validRowLocation(value: unknown): value is RowLocation {
-  return record(value) && exact(value, ['position', 'after']) && safeInt(value.position) && (value.after === null || id(value.after));
+  return isRecord(value) && exact(value, ['position', 'after']) && safeInt(value.position) && (value.after === null || id(value.after));
 }
 function validRowSnapshot(value: unknown): value is PageDatabaseRow {
-  return record(value) && exact(value, ['id', 'values', 'body', 'position', 'updatedAt', 'rev', 'edited', 'bodyEditedAt']) && id(value.id) && isCellValues(value.values) && safeInt(value.position) && safeInt(value.updatedAt) && safeInt(value.rev, 1) &&
+  return isRecord(value) && exact(value, ['id', 'values', 'body', 'position', 'updatedAt', 'rev', 'edited', 'bodyEditedAt']) && id(value.id) && isPageDatabaseCellValues(value.values) && safeInt(value.position) && safeInt(value.updatedAt) && safeInt(value.rev, 1) &&
     validEdited(value.edited) &&
     (value.body === undefined || typeof value.body === 'string') && (value.bodyEditedAt === null || safeInt(value.bodyEditedAt));
 }
 function validDatabaseSnapshot(value: unknown): value is DatabaseTargetSnapshot['database'] {
-  return record(value) && validDatabaseFields(value) && exact(value, ['id', 'workspaceId', 'title', 'columns', 'views', 'revision', 'updatedAt']) && safeInt(value['revision'], 1) && safeInt(value['updatedAt']);
+  return isRecord(value) && validDatabaseFields(value) && exact(value, ['id', 'workspaceId', 'title', 'columns', 'views', 'revision', 'updatedAt']) && safeInt(value['revision'], 1) && safeInt(value['updatedAt']);
 }
 function isDatabaseContent(value: unknown): value is Pick<PageDatabase, 'id' | 'workspaceId' | 'title' | 'columns' | 'views'> {
-  return record(value) && validDatabaseFields(value) && exact(value, ['id', 'workspaceId', 'title', 'columns', 'views']);
+  return isRecord(value) && validDatabaseFields(value) && exact(value, ['id', 'workspaceId', 'title', 'columns', 'views']);
 }
 function validDatabaseFields(value: Record<string, unknown>): boolean {
   return id(value.id) && id(value.workspaceId) && typeof value.title === 'string' && value.title.length <= 200 &&
@@ -286,42 +374,26 @@ function validDatabaseFields(value: Record<string, unknown>): boolean {
 }
 
 function validEdited(value: unknown): value is Record<string, number> {
-  return record(value) && Object.keys(value).length <= 100 && Object.entries(value).every(([key, at]) => id(key) && safeInt(at));
-}
-function isCellValues(value: unknown): value is Record<string, PageDatabaseRow['values'][string]> {
-  return record(value) && Object.keys(value).length <= 100 && Object.entries(value).every(([key, cell]) => id(key) && validCell(cell));
-}
-function validCell(value: unknown, depth = 0): boolean {
-  if (depth > 2) return false;
-  if (value === null || typeof value === 'boolean') return true;
-  if (typeof value === 'string') return value.length <= 2000;
-  if (typeof value === 'number') return Number.isFinite(value);
-  if (Array.isArray(value)) return value.length <= 50 && value.every((entry) => typeof entry === 'string' && entry.length <= 200);
-  return record(value) && exact(value, ['start', 'end']) && typeof value.start === 'string' && value.start.length <= 100 &&
-    (value.end === undefined || (typeof value.end === 'string' && value.end.length <= 100));
+  return isRecord(value) && Object.keys(value).length <= 100 && Object.entries(value).every(([key, at]) => id(key) && safeInt(at));
 }
 function validDatabaseColumn(value: unknown): value is PageDatabaseColumn {
-  return record(value) && exact(value, ['id', 'name', 'type', 'options', 'editable', 'width']) && id(value.id) && typeof value.name === 'string' && value.name.length <= 100 &&
+  return isRecord(value) && exact(value, ['id', 'name', 'type', 'options', 'editable', 'width']) && id(value.id) && typeof value.name === 'string' && value.name.length <= 100 &&
     (MICHI_DB_COLUMN_TYPES as readonly string[]).includes(String(value.type)) &&
-    (value.options === undefined || (Array.isArray(value.options) && value.options.length <= 100 && value.options.every((option) => record(option) && exact(option, ['value', 'label', 'color']) && typeof option.value === 'string' && option.value.length <= 200 &&
-      (option.label === undefined || (typeof option.label === 'string' && option.label.length <= 200)) && (option.color === undefined || ['gray', 'blue', 'green', 'amber', 'red', 'violet'].includes(String(option.color)))))) &&
+    (value.options === undefined || isPageDatabaseOptionList(value.options, 'stored')) &&
     (value.editable === undefined || typeof value.editable === 'boolean') && (value.width === undefined || (typeof value.width === 'number' && Number.isFinite(value.width) && value.width >= 40 && value.width <= 1000));
 }
 function validDatabaseView(value: unknown): value is PageDatabaseView {
-  if (!record(value) || !exact(value, ['id', 'name', 'type', 'config', 'position', 'edit']) || !id(value.id) || typeof value.name !== 'string' || value.name.length > 100 ||
-    !(MICHI_DB_VIEW_TYPES as readonly string[]).includes(String(value.type)) || !safeInt(value.position) || !record(value.config) ||
-    (value.edit !== undefined && (!record(value.edit) || !exact(value.edit, ['at']) || !safeInt(value.edit.at))) ||
+  if (!isRecord(value) || !exact(value, ['id', 'name', 'type', 'config', 'position', 'edit']) || !id(value.id) || typeof value.name !== 'string' || value.name.length > 100 ||
+    !(MICHI_DB_VIEW_TYPES as readonly string[]).includes(String(value.type)) || !safeInt(value.position) || !isRecord(value.config) ||
+    (value.edit !== undefined && (!isRecord(value.edit) || !exact(value.edit, ['at']) || !safeInt(value.edit.at))) ||
     !exact(value.config, value.type === 'custom'
       ? ['filters', 'match', 'sorts', 'group', 'visible', 'date', 'planDate', 'cover', 'componentId', 'pinnedVersion', 'props', 'height']
       : ['filters', 'match', 'sorts', 'group', 'visible', 'date', 'planDate', 'cover', 'component', 'code'])) return false;
   const config = value.config;
-  if (value.type === 'custom' && !parsePageComponentHostConfig({ componentId: config.componentId, ...(config.pinnedVersion === undefined ? {} : { pinnedVersion: config.pinnedVersion }), props: config.props, ...(config.height === undefined ? {} : { height: config.height }) })) return false;
-  const validFilter = (filter: unknown) => record(filter) && exact(filter, ['column', 'op', 'value']) && id(filter.column) &&
-    (MICHI_DB_FILTER_OPS as readonly string[]).includes(String(filter.op)) &&
-    (filter.value === undefined || validCell(filter.value));
-  const validSort = (sort: unknown) => record(sort) && exact(sort, ['column', 'dir']) && id(sort.column) && ['asc', 'desc'].includes(String(sort.dir));
+  if (value.type === 'custom' && !parsePageComponentHostConfig({ componentId: config.componentId, pinnedVersion: config.pinnedVersion, props: config.props, height: config.height })) return false;
+  // Older views may hold '' for these and the retired component/code keys; history keeps reading them.
   const validOptionalString = (key: string) => config[key] === undefined || (typeof config[key] === 'string' && (config[key] as string).length <= 200);
-  return Array.isArray(config.filters) && config.filters.length <= 100 && config.filters.every(validFilter) && Array.isArray(config.sorts) && config.sorts.length <= 100 && config.sorts.every(validSort) &&
+  return Array.isArray(config.filters) && config.filters.length <= 100 && config.filters.every(isPageDatabaseFilter) && Array.isArray(config.sorts) && config.sorts.length <= 100 && config.sorts.every(isPageDatabaseSort) &&
     ['all', 'any'].includes(String(config.match)) && (config.group === undefined || id(config.group)) &&
     (config.visible === undefined || (Array.isArray(config.visible) && config.visible.length <= 100 && config.visible.every(id))) &&
     (value.type === 'custom' ? true : ['date', 'planDate', 'cover', 'component', 'code'].every(validOptionalString));

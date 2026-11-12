@@ -1,6 +1,6 @@
 import React from 'react';
 import { useChatActions, useChatProjects, useStructuralSelector } from '../../state/chatStore';
-import { confirmDialog } from '../ui/ConfirmDialog';
+import { confirmMoveThreadsToTrash } from '../../lib/threadRowContextMenu';
 
 export default function TreeSelectionBar() {
   const {
@@ -32,8 +32,11 @@ export default function TreeSelectionBar() {
   );
   if (count === 0) return null;
 
-  const canMerge = count >= 2 && rootNodeIds.length >= 2;
-  const mergeDisabled = !canMerge || anyStreaming;
+  // Merge works within one workspace, the active one; a selected thread from
+  // another (Activity lists them all) would otherwise drop out of the merge.
+  const outsideWorkspace = rootNodeIds.length < count;
+  const showMerge = count >= 2;
+  const mergeDisabled = outsideWorkspace || anyStreaming;
 
   const onMerge = async () => {
     if (mergeDisabled) return;
@@ -63,11 +66,17 @@ export default function TreeSelectionBar() {
       <span onClick={selectAllTrees} style={{ cursor: 'pointer', color: 'var(--term-muted)', fontSize: 'var(--fs-xs)' }}>
         Select all
       </span>
-      {canMerge && (
+      {showMerge && (
         <span
           role="button"
           aria-disabled={mergeDisabled}
-          title={anyStreaming ? 'Wait for streaming to finish before merging.' : 'Merge selected threads into a new chat'}
+          title={
+            outsideWorkspace
+              ? 'Only threads of the current workspace can be merged.'
+              : anyStreaming
+                ? 'Wait for streaming to finish before merging.'
+                : 'Merge selected threads into a new chat'
+          }
           onClick={onMerge}
           style={{
             cursor: mergeDisabled ? 'not-allowed' : 'pointer',
@@ -84,11 +93,7 @@ export default function TreeSelectionBar() {
       </span>
       <span
         onClick={() => {
-          void confirmDialog({
-            title: 'Move to trash',
-            message: `Move ${count} thread${count === 1 ? '' : 's'} to trash?`,
-            confirmLabel: 'Move',
-          }).then((ok) => { if (ok) bulkDeleteTrees(); });
+          void confirmMoveThreadsToTrash(count).then((ok) => { if (ok) bulkDeleteTrees(); });
         }}
         style={{ cursor: 'pointer', color: 'var(--term-danger, #e55)', fontSize: 'var(--fs-xs)' }}
       >

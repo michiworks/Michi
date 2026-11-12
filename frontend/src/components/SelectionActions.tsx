@@ -6,6 +6,7 @@ import { useKeyboardInset } from '../hooks/useKeyboardInset';
 import { prefersReducedMotion } from '../hooks/useReducedMotion';
 import { DUR, EASE } from '../motion/tokens';
 import { DOCK_ROOM_VAR } from './selectionDockRoom';
+import { isImeComposing } from '../lib/ime';
 
 interface ViewRect {
   left: number;
@@ -172,6 +173,21 @@ const DOCK_SETTLE_MS = 350;
  * ignored and the popup keeps its current position. See `stickyPlacement`.
  */
 const POSITION_DEADZONE = 8;
+
+// Shared by the selection bar and the phone sheet's title.
+const BRANCH_GLYPH = (
+  <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+    <path d="M16 3h5v5" />
+    <path d="M8 3H3v5" />
+    <path d="M12 22v-8.3a4 4 0 0 0-1.172-2.872L3 3" />
+    <path d="m15 9 6-6" />
+  </svg>
+);
+const COMMENT_GLYPH = (
+  <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+    <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
+  </svg>
+);
 
 /**
  * Text-selection action bar + composer, rendered via portal so it can
@@ -342,7 +358,6 @@ export default function SelectionActions({
       document.removeEventListener('selectionchange', updateFromSelection);
       if (stableTimerRef.current) { clearTimeout(stableTimerRef.current); stableTimerRef.current = null; }
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [containerRef, anchor]);
 
   // Reposition on scroll / resize. Coalesce bursts through a single rAF: a
@@ -475,6 +490,7 @@ export default function SelectionActions({
     if (!anchor) return;
     const handler = (e: KeyboardEvent) => {
       if (e.key === 'Escape') {
+        if (isImeComposing(e)) return;
         e.preventDefault();
         close();
         return;
@@ -538,7 +554,7 @@ export default function SelectionActions({
       const room = parseFloat(scroller.style.getPropertyValue(DOCK_ROOM_VAR)) || 0;
       const shortfall = scroller.scrollTop + shift - (scroller.scrollHeight - scroller.clientHeight);
       if (shortfall > 0) scroller.style.setProperty(DOCK_ROOM_VAR, `${Math.ceil(room + shortfall)}px`);
-      const reduced = prefersReducedMotion(document.documentElement.dataset.reduceMotion === 'on');
+      const reduced = prefersReducedMotion();
       scroller.scrollBy?.({ top: shift, behavior: reduced ? 'auto' : 'smooth' });
     }, DOCK_SETTLE_MS);
     return () => clearTimeout(timer);
@@ -563,7 +579,6 @@ export default function SelectionActions({
   // the selection moves), so depending on it would re-run this layout effect
   // every scroll tick and force a synchronous reflow per frame, dropping the
   // chat pane off the compositor thread and tanking scroll smoothness.
-  // eslint-disable-next-line react-hooks/exhaustive-deps
   useLayoutEffect(() => {
     if (!anchor) return;
     const el = popupRef.current;
@@ -591,6 +606,16 @@ export default function SelectionActions({
     observer.observe(el);
     return () => observer.disconnect();
   }, [anchor?.text, anchor?.context, composerMode, prompt, renderSelectionContext]);
+
+  // The phone sheet's input starts as one line and grows with the draft up to
+  // its CSS max-height, then scrolls.
+  const sheetOpen = phone && composerMode !== 'closed';
+  useLayoutEffect(() => {
+    const el = composerInputRef.current;
+    if (!sheetOpen || !el) return;
+    el.style.height = 'auto';
+    if (el.scrollHeight > 0) el.style.height = `${el.scrollHeight}px`;
+  }, [sheetOpen, prompt, anchor?.text]);
 
   // One shape for every state, so the popup's presence (and its exit) lives
   // across the render that clears the selection.
@@ -663,7 +688,7 @@ export default function SelectionActions({
       ? 'ask something about this selection…'
       : 'your reply to this passage…';
 
-  const sheet = phone && composerOpen;
+  const sheet = sheetOpen;
   // Grows from the edge that faces the selection (a dock or sheet: the bottom).
   const originY = dock || sheet || placement.above ? 1 : 0;
 
@@ -684,6 +709,30 @@ export default function SelectionActions({
         />
       ))}
     </div>
+  );
+
+  const preview = (
+    <blockquote className="sel-actions-term-preview" aria-label="Selected passage">
+      <div className="sel-actions-term-preview-text">{anchor.text}</div>
+      {sourceLabel && <cite title={sourceLabel}>{sourceLabel}</cite>}
+    </blockquote>
+  );
+  const input = (
+    <textarea
+      ref={composerInputRef}
+      value={prompt}
+      onChange={(e) => setPrompt(e.target.value)}
+      placeholder={composerPlaceholder}
+      className={styles.textarea}
+      rows={sheet ? 1 : 3}
+      enterKeyHint="send"
+      onKeyDown={(e) => {
+        if (e.key === 'Enter' && !e.shiftKey && !e.altKey && !isImeComposing(e)) {
+          e.preventDefault();
+          submitComposer();
+        }
+      }}
+    />
   );
 
   return layer(null, highlight, (
@@ -709,7 +758,45 @@ export default function SelectionActions({
           WebkitAppRegion: 'no-drag',
         } as React.CSSProperties}
       >
-        {composerOpen ? (
+        {composerOpen ? sheet ? (
+          // Phone: a reply strip over a one-line composer, sent like a message.
+          <>
+            <div className={styles.composerHeader}>
+              {composerMode === 'branch' ? BRANCH_GLYPH : COMMENT_GLYPH}
+              <span>{composerHeaderLabel}</span>
+              <button
+                type="button"
+                onClick={close}
+                className={styles.closeBtn}
+                aria-label="Close selection composer"
+              >
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" aria-hidden="true">
+                  <path d="M18 6 6 18M6 6l12 12" />
+                </svg>
+              </button>
+            </div>
+            {preview}
+            <div className="sel-actions-sheet-input">
+              {input}
+              <button
+                type="button"
+                onMouseDown={(e) => e.preventDefault()}
+                onClick={submitComposer}
+                disabled={submitDisabled}
+                className="t-action-btn is-primary"
+                aria-label={composerMode === 'branch' ? 'Branch' : 'Save comment'}
+              >
+                <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                  <path d="M8 13V3" />
+                  <path d="M3.5 7.5L8 3l4.5 4.5" />
+                </svg>
+              </button>
+            </div>
+            {renderSelectionContext && (
+              <div className="sel-actions-context">{renderSelectionContext(anchor.context, replaceContext)}</div>
+            )}
+          </>
+        ) : (
           <>
             <div className={styles.composerHeader}>
               <span>{composerHeaderLabel}</span>
@@ -722,24 +809,8 @@ export default function SelectionActions({
                 ×
               </button>
             </div>
-            <blockquote className="sel-actions-term-preview" aria-label="Selected passage">
-              <div className="sel-actions-term-preview-text">{anchor.text}</div>
-              {sourceLabel && <cite title={sourceLabel}>{sourceLabel}</cite>}
-            </blockquote>
-            <textarea
-              ref={composerInputRef}
-              value={prompt}
-              onChange={(e) => setPrompt(e.target.value)}
-              placeholder={composerPlaceholder}
-              className={styles.textarea}
-              rows={3}
-              onKeyDown={(e) => {
-                if (e.key === 'Enter' && !e.shiftKey && !e.altKey && !e.nativeEvent.isComposing) {
-                  e.preventDefault();
-                  submitComposer();
-                }
-              }}
-            />
+            {preview}
+            {input}
             <div className={styles.composerFooter}>
               {renderSelectionContext ? (
                 <div className="sel-actions-context">{renderSelectionContext(anchor.context, replaceContext)}</div>
@@ -774,12 +845,7 @@ export default function SelectionActions({
                 className={styles.barBtn}
                 aria-label="Branch"
               >
-                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
-                  <path d="M16 3h5v5" />
-                  <path d="M8 3H3v5" />
-                  <path d="M12 22v-8.3a4 4 0 0 0-1.172-2.872L3 3" />
-                  <path d="m15 9 6-6" />
-                </svg>
+                {BRANCH_GLYPH}
                 Branch
               </button>
               <button
@@ -789,9 +855,7 @@ export default function SelectionActions({
                 className={styles.barBtn}
                 aria-label="Comment"
               >
-                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
-                  <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
-                </svg>
+                {COMMENT_GLYPH}
                 Comment
               </button>
               <button
@@ -1241,7 +1305,8 @@ const TERMINAL_CSS = `
   background: color-mix(in srgb, var(--term-accent) 30%, transparent);
 }
 /* Every selection surface uses the same raised palette, including chat,
-   files and the expanded composer. No per-caller color overrides. */
+   files and the expanded composer. No per-caller color overrides. The phone
+   sheet (.is-sheet, below) is the one exception: it takes the page palette. */
 .sel-actions-term-bar, .sel-actions-term-composer {
   background: var(--sel-bar-bg);
   color: var(--sel-bar-fg);
@@ -1261,7 +1326,10 @@ const TERMINAL_CSS = `
 .sel-actions-term-btn {
   position: relative;
   display: inline-flex; align-items: center; justify-content: center; gap: 6px;
-  flex: 1; min-width: 0;
+  /* Size each button to its label so every label sits the same distance from
+     its dividers; a wider bar (the file routing row) shares the extra evenly.
+     A 0 basis made equal cells and squeezed the longest label (Comment). */
+  flex: 1 1 auto; min-width: 0;
   padding: 5px 10px; background: transparent; border: 0;
   border-radius: var(--ui-radius-sm);
   color: inherit; font: inherit; cursor: pointer; white-space: nowrap;
@@ -1345,16 +1413,63 @@ const TERMINAL_CSS = `
 .sel-actions-term-bar button:focus-visible, .sel-actions-term-composer button:focus-visible, .file-selection-picker select:focus-visible {
   outline: 2px solid var(--sel-bar-fg); outline-offset: -2px;
 }
-/* Phone composer remains a keyboard-aware sheet; keep its footer reachable. */
+/* Phone composer: a keyboard-aware sheet. It stands in for the pane composer,
+   so it wears the page palette rather than the raised selection one: the
+   --sel-bar-* remap carries the file thread picker and focus rings with it.
+   A reply strip (title, two-line quote) sits over a one-line composer that
+   grows with the draft and sends with the composer's own Send button. */
 .sel-actions-term-composer.is-sheet {
+  --sel-bar-bg: var(--term-bg);
+  --sel-bar-fg: var(--term-fg);
+  --sel-bar-mid: var(--term-mid);
+  --sel-bar-muted: var(--term-muted);
+  --sel-bar-line: color-mix(in srgb, var(--term-line) 65%, transparent);
+  --sel-bar-hover: var(--term-hover-bg);
+  --sel-bar-color-scheme: var(--term-color-scheme);
+  --composer-chip-height: 40px;
+  --composer-send-inset: 4px;
   max-width: 100%; max-height: calc(100dvh - var(--keyboard-inset, 0px) - 16px);
-  border-left: 0; border-right: 0; border-bottom: 0;
-  border-radius: var(--ui-radius) var(--ui-radius) 0 0;
-  padding-bottom: env(safe-area-inset-bottom, 0px);
+  padding: 12px 10px calc(12px + env(safe-area-inset-bottom, 0px));
+  border-width: 1px 0 0;
+  border-radius: 0;
+  box-shadow: 0 -12px 28px -16px rgba(0, 0, 0, 0.3);
 }
-.sel-actions-term-composer.is-sheet .sel-actions-term-textarea { margin: 12px 16px; width: calc(100% - 32px); }
-.sel-actions-term-composer.is-sheet .sel-actions-term-footer-btn { min-height: 40px; padding: 0 12px; font-size: var(--fs-sm); }
-.sel-actions-term-composer.is-sheet .sel-actions-term-footer-kbd { display: none; }
+.sel-actions-term-composer.is-sheet .sel-actions-term-composer-hdr {
+  justify-content: flex-start; gap: 7px;
+  padding: 0 0 0 6px;
+  font-size: var(--fs-md); font-weight: 500;
+}
+.sel-actions-term-composer.is-sheet .sel-actions-term-composer-hdr > svg { width: 14px; height: 14px; flex-shrink: 0; color: var(--term-accent); }
+.sel-actions-term-composer.is-sheet .sel-actions-term-composer-hdr > span { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sel-actions-term-composer.is-sheet .sel-actions-term-close { margin: -8px 0; }
+.sel-actions-term-composer.is-sheet .sel-actions-term-preview {
+  margin: 8px 6px 12px; padding: 1px 0 1px 10px;
+  border-left-color: var(--term-accent); background: none;
+  font-size: var(--fs-lg); line-height: 1.5;
+}
+.sel-actions-term-composer.is-sheet .sel-actions-term-preview-text {
+  display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2;
+  max-height: none; overflow: hidden; white-space: normal;
+}
+.sel-actions-sheet-input {
+  display: flex; align-items: flex-end; gap: 6px;
+  padding: 4px 4px 4px 14px;
+  background: var(--term-composer-bg, var(--term-bg));
+  border: 1px solid color-mix(in srgb, var(--term-line) 65%, transparent);
+  border-radius: calc(var(--ui-radius) * 2);
+  transition: background var(--t-soft) ease-out, border-color var(--t-soft) ease-out, box-shadow var(--t-soft) ease-out;
+}
+.sel-actions-sheet-input:focus-within {
+  background: var(--term-composer-bg-focus, var(--term-surface));
+  border-color: color-mix(in srgb, var(--term-accent) 48%, var(--term-line));
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--term-accent) 7%, transparent);
+}
+.sel-actions-term-composer.is-sheet .sel-actions-term-textarea {
+  flex: 1; min-width: 0; width: auto; min-height: 0; max-height: 144px;
+  margin: 0 0 8px; overflow-y: auto;
+  font-size: var(--fs-2xl); line-height: 1.5;
+}
+.sel-actions-term-composer.is-sheet .sel-actions-context { margin: 8px 6px 0; }
 @media (hover: none) and (pointer: coarse) {
   .sel-actions-term-btn { min-height: 40px; padding: 0 12px; }
   .file-selection-picker select { min-height: 40px; }

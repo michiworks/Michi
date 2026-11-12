@@ -1,7 +1,5 @@
-import type { Response } from "express";
 import {
     CHAT_STREAM_EVENTS,
-    encodeChatStreamEvent,
     parseSubagentActivityPayload,
     parseSubagentPatches,
 } from "michi-shared";

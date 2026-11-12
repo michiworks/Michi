@@ -1,8 +1,9 @@
 import type { Prefs } from './prefs';
 import type { Tree, ChatNodeState, ProjectEdge, Project } from './chatTypes';
-import type { TreeNode } from './tree';
+import { buildBranchChildrenOf, type TreeNode } from './tree';
 import { isSystemWorkspace } from './assistant/systemWorkspace';
-import { isVisibleConversationNode } from './conversationVisibility';
+import { isListedThread, isVisibleConversationNode } from './conversationVisibility';
+import { hasUnseenCompletion } from './completionFacts';
 
 
 type ExpandedMaps = Prefs['sidebarExpanded'];
@@ -93,37 +94,14 @@ const RANK: Record<OpenState, number> = { none: 0, idle: 1, streaming: 2 };
 const RANK_TO_STATE: OpenState[] = ['none', 'idle', 'streaming'];
 
 /**
- * Build the branch-edge adjacency table once so callers that iterate
- * multiple trees over the **same** edges array can share the result
- * instead of rebuilding it on every call.
- *
- * Only follows 'branch' edges (kind === 'branch' or undefined) —
- * digest/merge/link edges are excluded, matching `subtreeOpenState` and
- * `treeHasUnread`.
- */
-export function buildBranchChildrenOf(
-  edges: readonly ProjectEdge[],
-): ReadonlyMap<string, readonly string[]> {
-  const map = new Map<string, string[]>();
-  for (const e of edges) {
-    if (e.kind !== undefined && e.kind !== 'branch') continue;
-    const arr = map.get(e.source);
-    if (arr) {
-      arr.push(e.target);
-    } else {
-      map.set(e.source, [e.target]);
-    }
-  }
-  return map;
-}
-
-/**
  * Per-node contribution to the sidebar indicator.
  *
- * - 'streaming' — status === 'streaming', regardless of open panes, focus,
- *   or which workspace/thread is currently active. A running turn stays
- *   visible in the sidebar even after you navigate to a different thread or
- *   workspace (where the node is no longer one of the active slot's panes).
+ * - 'streaming' — status === 'streaming', or `workRunning` (work the
+ *   conversation started runs on after its turn ended: an open workflow
+ *   run), regardless of open panes, focus, or which workspace/thread is
+ *   currently active. A running turn stays visible in the sidebar even after
+ *   you navigate to a different thread or workspace (where the node is no
+ *   longer one of the active slot's panes).
  * - 'idle' — open in the active slot's panes, unfocused, non-streaming
  *   (a background pane you have open in the current view).
  * - 'none' — not streaming, and either not an open pane or the focused pane
@@ -135,10 +113,11 @@ export function nodeOpenState(
   openPanes: readonly string[],
   focusedPane: string | null,
   status: ChatNodeState['status'],
+  workRunning = false,
 ): OpenState {
   // Streaming surfaces globally — independent of open panes, focus, and the
   // active workspace/thread slot. Navigating away must not hide a running turn.
-  if (status === 'streaming') return 'streaming';
+  if (status === 'streaming' || workRunning) return 'streaming';
   if (!openPanes.includes(nodeId)) return 'none';
   // Idle is suppressed on the focused row (its highlight already conveys it).
   if (nodeId === focusedPane) return 'none';
@@ -242,8 +221,10 @@ export function mergeReferences(
 }
 
 /**
- * A node is unread iff its last assistant `done` is newer than the user's last
- * view. Focused node is treated as read (the focused-pane highlight already
+ * A node is unread iff it has a completion the user has not seen: the
+ * server's completion facts when the backend sends them, else its last
+ * assistant `done` against the user's last view (see completionFacts.ts).
+ * Focused node is treated as read (the focused-pane highlight already
  * tells the user "you are looking at this"; flashing unread on it is noise).
  * Digest nodes have their own unread model (see digest.ts) and are excluded.
  */
@@ -253,27 +234,40 @@ export function isNodeUnread(
 ): boolean {
   if (node.kind === 'digest') return false;
   if (focusedNodeId !== null && node.nodeId === focusedNodeId) return false;
-  const last = node.lastAssistantAt ?? 0;
-  const seen = node.viewedAt ?? 0;
-  return last > seen;
+  return hasUnseenCompletion(node);
 }
 
 /**
- * Unread nodes across every workspace, except those in `hiddenProjectIds`:
- * workspaces no list shows the user (the assistant's), whose replies would
- * count where the Activity view has nothing to open.
+ * Unread nodes the sidebar can show: the threads the Activity view lists (a
+ * live workspace that is not the assistant's, an unarchived thread whose root
+ * is a live conversation) and the live branches below their roots. The store
+ * also holds nodes no list shows (archived threads, trash, a branch no edge
+ * reaches); counting one would put a number on the badge with nothing to open.
  */
 export function selectUnreadTotal(
+  projects: readonly Project[],
   nodes: Record<string, ChatNodeState>,
   focusedNodeId: string | null,
-  hiddenProjectIds?: ReadonlySet<string>,
 ): number {
   let count = 0;
-  for (const id in nodes) {
-    const node = nodes[id];
-    if (hiddenProjectIds?.has(node.projectId)) continue;
-    if (!isVisibleConversationNode(node)) continue;
-    if (isNodeUnread(node, focusedNodeId)) count++;
+  for (const project of projects) {
+    if (project.deletedAt || project.archivedAt || isSystemWorkspace(project)) continue;
+    const childrenOf = buildBranchChildrenOf(project.edges);
+    const seen = new Set<string>();
+    for (const tree of project.trees) {
+      if (!isListedThread(tree, nodes[tree.rootNodeId])) continue;
+      const stack = [tree.rootNodeId];
+      while (stack.length > 0) {
+        const id = stack.pop()!;
+        if (seen.has(id)) continue;
+        seen.add(id);
+        const node = nodes[id];
+        // A deleted node's subtree leaves the list with it (buildTree's isAlive).
+        if (node?.deletedAt) continue;
+        if (node && isVisibleConversationNode(node) && isNodeUnread(node, focusedNodeId)) count++;
+        for (const child of childrenOf.get(id) ?? []) stack.push(child);
+      }
+    }
   }
   return count;
 }
@@ -285,7 +279,7 @@ export function selectUnreadTotal(
  */
 export function selectProjectNodeStatuses(
   chatIds: readonly string[],
-  nodes: Readonly<Record<string, Pick<ChatNodeState, 'status' | 'pageId' | 'maintenanceJobId'> | undefined>>,
+  nodes: Readonly<Record<string, Pick<ChatNodeState, 'status' | 'pageId' | 'maintenanceJobId' | 'scheduledOnlyJobId'> | undefined>>,
 ): Record<string, ChatNodeState['status']> {
   const statuses: Record<string, ChatNodeState['status']> = {};
   for (const id of chatIds) {
@@ -322,6 +316,8 @@ export function treeHasUnread(
     if (seen.has(id)) continue;
     seen.add(id);
     const node = nodes[id];
+    // Deleted branches are in the trash, not under the thread (buildTree's isAlive).
+    if (node?.deletedAt) continue;
     if (node && isVisibleConversationNode(node) && isNodeUnread(node, focusedNodeId)) return true;
     for (const child of children.get(id) ?? []) stack.push(child);
   }
@@ -348,14 +344,19 @@ export function branchSubtreeHasUnread(
   return false;
 }
 
+/**
+ * True iff a listed thread of `project` has an unread node: the threads and
+ * branches selectUnreadTotal counts. A collapsed workspace's ring must lead to
+ * a row with a dot; an archived or trashed thread has none. Pass the
+ * workspace's `childrenOf` (from `buildBranchChildrenOf`) when it has one.
+ */
 export function workspaceHasUnread(
   project: Project,
   nodes: Record<string, ChatNodeState>,
   focusedNodeId: string | null,
+  childrenOf?: ReadonlyMap<string, readonly string[]>,
 ): boolean {
-  for (const id of project.chatIds ?? []) {
-    const node = nodes[id];
-    if (node && isVisibleConversationNode(node) && isNodeUnread(node, focusedNodeId)) return true;
-  }
-  return false;
+  const children = childrenOf ?? buildBranchChildrenOf(project.edges);
+  return project.trees.some((tree) => isListedThread(tree, nodes[tree.rootNodeId])
+    && treeHasUnread(tree, project.edges, nodes, focusedNodeId, children));
 }

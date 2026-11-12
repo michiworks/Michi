@@ -33,6 +33,26 @@ describe('useThreadStates', () => {
     expect(result.current.failed).toBe(false);
   });
 
+  it('reads nothing while the window is hidden, and once when it shows again', async () => {
+    vi.useFakeTimers();
+    let visibility: DocumentVisibilityState = 'visible';
+    Object.defineProperty(document, 'visibilityState', { configurable: true, get: () => visibility });
+    try {
+      vi.mocked(fetchThreadStates).mockResolvedValue([card('n1', 'waiting')]);
+      renderHook(() => useThreadStates('local', ['n1']));
+      await flush();
+      expect(fetchThreadStates).toHaveBeenCalledTimes(1);
+      visibility = 'hidden';
+      await act(async () => { vi.advanceTimersByTime(180_000); });
+      expect(fetchThreadStates).toHaveBeenCalledTimes(1);
+      visibility = 'visible';
+      act(() => { document.dispatchEvent(new Event('visibilitychange')); });
+      expect(fetchThreadStates).toHaveBeenCalledTimes(2);
+    } finally {
+      visibility = 'visible';
+    }
+  });
+
   it('keys the answers by the ids the cells hold, also for a remote backend', async () => {
     vi.mocked(fetchThreadStates).mockResolvedValue([{ ...card('remote:host:n1', 'running'), workspaceId: 'remote:host:ws' }]);
     const { result } = renderHook(() => useThreadStates('host', ['n1']));

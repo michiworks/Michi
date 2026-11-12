@@ -1,12 +1,17 @@
 import { createHash, randomUUID } from 'node:crypto';
-import type {
-  BlockSource, MaintenanceCatchupSuggestion, MaintenanceConfig, MaintenancePlan, MaintenanceReceipt, MaintenanceSourceMessageDescriptor, MaintenanceSourcePart,
-  MaintenanceResourceKind, MaintenanceResourceRef, MaintenanceSourcePlan,
+import {
+  ConversationUpdatesError, nodeLifecycleState,
+  type BlockSource, type MaintenanceCatchupSuggestion, type MaintenanceConfig, type MaintenancePlan, type MaintenanceReceipt,
+  type MaintenanceSourceMessageDescriptor, type MaintenanceSourcePart, type MaintenanceResourceKind, type MaintenanceResourceRef,
+  type MaintenanceSourcePlan,
 } from 'michi-shared';
 import { getDb, runInTransaction } from '../db';
+import { conversationCompletionCounter, readableCompletedTurns } from '../conversationFeed';
 import { PageWriteError, requirePagesWorkspace } from './core';
 import { livePageEditLease } from './editLeases';
 import { workspaceOwnerMatches } from '../agentOwner';
+import { savedChatHomePageId } from '../homeCards/chatHomePage';
+import { ownsUnattendedRun } from '../scheduledJobs/repository';
 import { backgroundMaintenanceResources } from '../metaAgent/homeWrites';
 
 const db = () => getDb();
@@ -35,20 +40,18 @@ function configDto(row: ConfigRow): MaintenanceConfig {
     runtimeId: row.runtime_id, providerId: row.provider_id, modelId: row.model_id, reasoning: row.reasoning, updatedAt: row.updated_at };
 }
 
+/** Pages routes answer only PageWriteError with a status. */
 function counter(workspaceId: string): number {
-  const row = db().prepare('SELECT value FROM meta WHERE key=?').get(`conversation_completion_seq:${workspaceId}`) as { value: string } | undefined;
-  const result = row ? Number(row.value) : 0;
-  if (!Number.isSafeInteger(result) || result < 0) throw new PageWriteError(409, 'invalid', 'Invalid conversation completion counter');
-  return result;
+  try { return conversationCompletionCounter(workspaceId); }
+  catch (error) {
+    if (error instanceof ConversationUpdatesError) throw new PageWriteError(409, 'invalid', 'Invalid conversation completion counter');
+    throw error;
+  }
 }
+// Sources are the conversation feed's turns: the scheduler requires every plan source to stay readable there.
 function countEligibleMaintenanceSources(workspaceId:string,ownerUserId:string,after:number,through:number):number {
-  const row=db().prepare(`SELECT COUNT(*) AS n FROM turns t JOIN nodes n ON n.id=t.node_id JOIN workspaces w ON w.id=n.workspace_id
-    JOIN messages m ON m.id=t.user_message_id LEFT JOIN trees tr ON tr.id=n.tree_id WHERE n.workspace_id=? AND n.kind='chat'
-    AND n.purged_at IS NULL AND n.deleted_at IS NULL AND n.status<>'archived' AND tr.archived_at IS NULL
-    AND w.deleted_at IS NULL AND w.purged_at IS NULL AND (w.owner_user_id=? OR (?='local-user' AND ?<>'1'))
-    AND t.status='completed' AND t.completion_seq>? AND t.completion_seq<=?
-    AND COALESCE(json_extract(m.metadata,'$.scheduledJobId'),'')=''`).get(workspaceId,ownerUserId,ownerUserId,process.env.MICHI_CLOUD??'',after,through) as {n:number};
-  return row.n;
+  const {from,args}=readableCompletedTurns({workspaceId,ownerUserId,after,through});
+  return (db().prepare(`SELECT COUNT(*) AS n ${from}`).get(...args) as {n:number}).n;
 }
 
 export interface CreateMaintenanceConfigInput {
@@ -192,8 +195,8 @@ export function listEligibleMaintenanceManifest(workspaceId: string, ownerUserId
         UNION ALL SELECT p.id FROM pages p JOIN hidden h ON p.parent_id=h.id WHERE p.deleted_at IS NULL` : ''}
     ) SELECT id,parent_id,title,revision,view_version FROM pages
       WHERE workspace_id=? AND owner_user_id=? AND deleted_at IS NULL AND id NOT IN (SELECT id FROM hidden)
-        AND NOT EXISTS (SELECT 1 FROM home_customization h WHERE h.owner_user_id=pages.owner_user_id AND json_extract(h.preferences,'$.pageId')=pages.id)
-      ORDER BY position,id LIMIT 2001`).all(...excluded,workspaceId,ownerUserId) as unknown as Array<{id:string;parent_id:string|null;title:string;revision:number;view_version:number}>;
+        AND id IS NOT ?
+      ORDER BY position,id LIMIT 2001`).all(...excluded,workspaceId,ownerUserId,savedChatHomePageId(ownerUserId)) as unknown as Array<{id:string;parent_id:string|null;title:string;revision:number;view_version:number}>;
   if (rows.length > 2000) throw new PageWriteError(409,'invalid','Maintenance manifest exceeds the native page limit');
   const pageIds=rows.map(r=>r.id);
   const dbRows=pageIds.length ? db().prepare(`SELECT d.id,d.title,d.revision,r.page_id FROM page_databases d
@@ -269,15 +272,9 @@ function createMaintenancePlanInTransaction(input:CreateMaintenancePlanInput,now
     if(input.reconsiderSourceTurnIds && (!reconsider||!input.reconsiderSourceTurnIds.length||input.reconsiderSourceTurnIds.length>100)) throw new PageWriteError(400,'invalid','Invalid reconsider source set');
     const sourceIds=input.reconsiderSourceTurnIds??[];
     const sourceFilter=sourceIds.length ? `AND t.turn_id IN (${sourceIds.map(()=>'?').join(',')})` : '';
-    const sourceRows=db().prepare(`SELECT t.turn_id,t.node_id,t.user_message_id,t.assistant_message_id,t.completion_seq FROM turns t
-      JOIN nodes n ON n.id=t.node_id JOIN workspaces w ON w.id=n.workspace_id LEFT JOIN trees tr ON tr.id=n.tree_id
-      WHERE n.workspace_id=? AND w.deleted_at IS NULL AND w.purged_at IS NULL
-        AND (w.owner_user_id=? OR (?='local-user' AND ?<>'1')) AND n.kind='chat'
-        AND n.purged_at IS NULL AND n.deleted_at IS NULL AND n.status<>'archived' AND tr.archived_at IS NULL
-        AND t.status='completed' AND t.user_message_id IS NOT NULL AND t.completion_seq>? AND t.completion_seq<=?
-        ${sourceFilter}
-        AND COALESCE(json_extract((SELECT metadata FROM messages WHERE id=t.user_message_id),'$.scheduledJobId'),'')=''
-      ORDER BY t.completion_seq`).all(input.workspaceId,input.ownerUserId,input.ownerUserId,process.env.MICHI_CLOUD??'',input.after,input.through,...sourceIds) as unknown as Array<{turn_id:string;node_id:string;user_message_id:string;assistant_message_id:string;completion_seq:number}>;
+    const readable=readableCompletedTurns({workspaceId:input.workspaceId,ownerUserId:input.ownerUserId,after:input.after,through:input.through});
+    const sourceRows=db().prepare(`SELECT t.turn_id,t.node_id,t.user_message_id,t.assistant_message_id,t.completion_seq ${readable.from}
+      ${sourceFilter} ORDER BY t.completion_seq`).all(...readable.args,...sourceIds) as unknown as Array<{turn_id:string;node_id:string;user_message_id:string;assistant_message_id:string;completion_seq:number}>;
     const id=`mpl-${randomUUID()}`;
     const generationRow=db().prepare('SELECT COALESCE(MAX(generation),0)+1 AS n FROM page_maintenance_plans WHERE job_id=?').get(input.jobId) as {n:number};
     const eligible=(input.scopeSpaceId?listEligibleMaintenanceManifestForSpace(input.workspaceId,input.ownerUserId,input.scopeSpaceId):listEligibleMaintenanceManifest(input.workspaceId,input.ownerUserId)).resources;
@@ -293,20 +290,22 @@ function createMaintenancePlanInTransaction(input:CreateMaintenancePlanInput,now
 }
 
 export interface AuthorityInput { workspaceId:string;ownerUserId:string;jobId:string;runId:string;claimedBy:string;configRevision:number }
+/** Just the authority fields of a larger run context, for inputs that carry them alongside their own. */
+export function maintenanceAuthority(context: AuthorityInput): AuthorityInput {
+  return { workspaceId: context.workspaceId, ownerUserId: context.ownerUserId, jobId: context.jobId,
+    runId: context.runId, claimedBy: context.claimedBy, configRevision: context.configRevision };
+}
 /** Call inside the caller's write transaction immediately before committing any maintenance mutation. */
 export function assertMaintenanceAuthority(input: AuthorityInput, now: number): void {
-  const row=db().prepare(`SELECT c.revision,c.enabled,c.paused,c.job_id,c.workspace_id,c.owner_user_id,
-      r.status,r.claimed_by,r.attention,r.node_id AS run_node_id,r.turn_id AS run_turn_id,
-      j.workspace_id AS job_workspace,j.owner_user_id AS job_owner,j.enabled AS job_enabled,j.auto_paused,
-      l.holder,l.expires_at,x.run_id AS execution_claim FROM page_maintenance_configs c JOIN scheduled_jobs j ON j.id=c.job_id
-      JOIN scheduled_job_runs r ON r.id=? AND r.job_id=j.id JOIN scheduler_lease l ON l.id=1
-      LEFT JOIN scheduler_execution_claims x ON x.run_id=r.id AND x.holder=l.holder AND x.generation=l.generation
+  const row=db().prepare(`SELECT c.revision,c.enabled,c.paused,
+      j.workspace_id AS job_workspace,j.owner_user_id AS job_owner,j.enabled AS job_enabled,j.auto_paused
+      FROM page_maintenance_configs c JOIN scheduled_jobs j ON j.id=c.job_id
+      JOIN scheduled_job_runs r ON r.id=? AND r.job_id=j.id
       WHERE c.workspace_id=? AND c.owner_user_id=? AND c.job_id=?`).get(input.runId,input.workspaceId,input.ownerUserId,input.jobId) as
-    {revision:number;enabled:number;paused:number;job_id:string;workspace_id:string;owner_user_id:string;status:string;claimed_by:string;attention:string|null;
-     run_node_id:string|null;run_turn_id:string|null;job_workspace:string;job_owner:string|null;job_enabled:number;auto_paused:number;holder:string;expires_at:number;execution_claim:string|null}|undefined;
+    {revision:number;enabled:number;paused:number;job_workspace:string;job_owner:string|null;job_enabled:number;auto_paused:number}|undefined;
   const ownerOk=row?.job_owner===input.ownerUserId||(row?.job_owner===null&&input.ownerUserId==='local-user'&&process.env.MICHI_CLOUD!=='1');
   if(!row||row.job_workspace!==input.workspaceId||!ownerOk) throw new PageWriteError(404,'not_found','Maintenance authority not found');
-  if(!row.execution_claim||row.revision!==input.configRevision||row.enabled!==1||row.paused===1||row.job_enabled!==1||row.auto_paused===1||row.status!=='running'||row.attention!==null||row.claimed_by!==input.claimedBy||row.holder!==input.claimedBy||row.expires_at<=now)
+  if(row.revision!==input.configRevision||row.enabled!==1||row.paused===1||row.job_enabled!==1||row.auto_paused===1||!ownsUnattendedRun(input.runId,input.claimedBy,now))
     throw new PageMaintenanceConflictError('Maintenance run authority expired or changed');
 }
 
@@ -538,21 +537,14 @@ export function listMaintenanceCatchupSuggestions(workspaceId:string,ownerUserId
     let after=period.after_seq;
     while(after<period.through_seq&&suggestions.length<maxSuggestions){
       const through=Math.min(period.through_seq,after+100);
-      const sources=db().prepare(`SELECT t.turn_id,t.completion_seq,t.completed_at,substr(m.content,1,240) AS preview FROM turns t JOIN nodes n ON n.id=t.node_id
-        JOIN workspaces w ON w.id=n.workspace_id JOIN messages m ON m.id=t.user_message_id
-        LEFT JOIN trees tr ON tr.id=n.tree_id WHERE n.workspace_id=? AND n.kind='chat' AND n.deleted_at IS NULL AND n.purged_at IS NULL
-        AND n.status<>'archived' AND tr.archived_at IS NULL AND w.deleted_at IS NULL AND w.purged_at IS NULL
-        AND (w.owner_user_id=? OR (?='local-user' AND ?<>'1')) AND t.status='completed'
-        AND t.completion_seq>? AND t.completion_seq<=? AND COALESCE(json_extract(m.metadata,'$.scheduledJobId'),'')=''
-        ORDER BY t.completion_seq DESC LIMIT 3`).all(workspaceId,ownerUserId,ownerUserId,process.env.MICHI_CLOUD??'',after,through) as unknown as Array<{turn_id:string;completion_seq:number;completed_at:number;preview:string}>;
-      const count=db().prepare(`SELECT COUNT(*) AS n FROM turns t JOIN nodes n ON n.id=t.node_id JOIN workspaces w ON w.id=n.workspace_id
-        JOIN messages m ON m.id=t.user_message_id LEFT JOIN trees tr ON tr.id=n.tree_id WHERE n.workspace_id=? AND n.kind='chat'
-        AND n.deleted_at IS NULL AND n.purged_at IS NULL AND n.status<>'archived' AND tr.archived_at IS NULL AND w.deleted_at IS NULL AND w.purged_at IS NULL
-        AND (w.owner_user_id=? OR (?='local-user' AND ?<>'1')) AND t.status='completed'
-        AND t.completion_seq>? AND t.completion_seq<=? AND COALESCE(json_extract(m.metadata,'$.scheduledJobId'),'')=''`).get(workspaceId,ownerUserId,ownerUserId,process.env.MICHI_CLOUD??'',after,through) as {n:number};
-      if(count.n===0){after=through;continue;}
+      const {from,args}=readableCompletedTurns({workspaceId,ownerUserId,after,through});
+      const sources=db().prepare(`SELECT t.turn_id,t.completion_seq,t.completed_at,
+        COALESCE((SELECT substr(m.content,1,240) FROM messages m WHERE m.id=t.user_message_id),'') AS preview ${from}
+        ORDER BY t.completion_seq DESC LIMIT 3`).all(...args) as unknown as Array<{turn_id:string;completion_seq:number;completed_at:number;preview:string}>;
+      const count=countEligibleMaintenanceSources(workspaceId,ownerUserId,after,through);
+      if(count===0){after=through;continue;}
       suggestions.push({periodId:period.id,spaceId:period.space_id,after,through,maxPositions:100,availablePositions:through-after,
-        excludedAt:period.excluded_at,reenabledAt:period.reenabled_at,sourceCount:count.n,
+        excludedAt:period.excluded_at,reenabledAt:period.reenabled_at,sourceCount:count,
         latestSources:sources.map(source=>({turnId:source.turn_id,completionSeq:source.completion_seq,completedAt:source.completed_at,preview:source.preview}))});
       after=through;
     }
@@ -623,42 +615,27 @@ export function markMaintenanceSourceAttention(input:{planId:string;ownerUserId:
   });
 }
 
-/** User-authorized skip outcome; the caller must authorize the owner and reason before calling. */
-export function skipMaintenanceSource(input:{planId:string;ownerUserId:string;sourceTurnId:string;reason:string;expectedConfigRevision:number;now:number}):MaintenancePlan {
-  const now=nowValue(input.now);
-  if(!input.reason?.trim()||input.reason.length>2000)throw new PageWriteError(400,'invalid','A skip reason is required');
-  return runInTransaction(()=>{
-    const plan=getMaintenancePlan(input.planId,input.ownerUserId);
-    if(!plan)throw new PageWriteError(404,'not_found','Maintenance plan not found');
-    const config=getMaintenanceConfig(plan.workspaceId,input.ownerUserId);
-    if(!config||config.revision!==input.expectedConfigRevision)throw new PageMaintenanceConflictError('Maintenance config changed');
-    const source=plan.sources.find(s=>s.sourceTurnId===input.sourceTurnId);
-    if(!source)throw new PageWriteError(404,'not_found','Source turn is not in this plan');
-    if(source.state==='terminal'||source.state==='skipped')throw new PageMaintenanceConflictError('Source is already terminal');
-    db().prepare(`UPDATE page_maintenance_resources SET state='skipped',terminal_reason=?,updated_at=? WHERE plan_id=? AND source_turn_id=? AND state IN ('pending','attention')`).run(input.reason.trim(),now,input.planId,input.sourceTurnId);
-    db().prepare(`UPDATE page_maintenance_sources SET state='skipped',terminal_reason=?,routing_complete=1,updated_at=? WHERE plan_id=? AND source_turn_id=?`).run(input.reason.trim(),now,input.planId,input.sourceTurnId);
-    updatePlanState(input.planId,now);
-    return getMaintenancePlan(input.planId,input.ownerUserId)!;
-  });
-}
-
 export const MAINTENANCE_SOURCE_DELETED='Skipped: the conversation was deleted';
 export const MAINTENANCE_SOURCE_ARCHIVED='Skipped: the conversation was archived';
+export const MAINTENANCE_SOURCE_SCHEDULED_ONLY='Skipped: the conversation shows only in Scheduled';
 
 /**
  * Why a source can no longer be read because the user removed its
  * conversation: put in Trash, purged, archived (status, archive group or
- * archived tree), or its turn or frozen messages gone. Null while it is still
+ * archived tree), or its turn or frozen messages gone. A source in a
+ * Scheduled-only run thread is skipped too: plans made before maintenance left
+ * those threads out would otherwise fail every run. Null while it is still
  * there, or when it moved to another workspace.
  */
 function removedSourceReason(plan:MaintenancePlan,source:MaintenanceSourcePlan):string|null {
-  const node=db().prepare(`SELECT n.workspace_id,n.deleted_at,n.purged_at,n.status,n.deletion_group_id,tr.archived_at AS tree_archived_at
+  const node=db().prepare(`SELECT n.workspace_id,n.deleted_at,n.purged_at,n.status,n.deletion_group_id,n.scheduled_only_job_id,tr.archived_at AS tree_archived_at
     FROM nodes n LEFT JOIN trees tr ON tr.id=n.tree_id WHERE n.id=?`).get(source.evidence.nodeId) as
-    {workspace_id:string;deleted_at:number|null;purged_at:number|null;status:string;deletion_group_id:string|null;tree_archived_at:number|null}|undefined;
+    {workspace_id:string;deleted_at:number|null;purged_at:number|null;status:string;deletion_group_id:string|null;scheduled_only_job_id:string|null;tree_archived_at:number|null}|undefined;
   if(!node||node.purged_at!==null)return MAINTENANCE_SOURCE_DELETED;
   if(node.workspace_id!==plan.workspaceId)return null;
-  if(node.deleted_at!==null)return node.deletion_group_id?.startsWith('arch-')?MAINTENANCE_SOURCE_ARCHIVED:MAINTENANCE_SOURCE_DELETED;
-  if(node.status==='archived'||node.tree_archived_at!==null)return MAINTENANCE_SOURCE_ARCHIVED;
+  const state=nodeLifecycleState({deletedAt:node.deleted_at,deletionGroupId:node.deletion_group_id,status:node.status,treeArchivedAt:node.tree_archived_at});
+  if(state!=='live')return state==='archived'?MAINTENANCE_SOURCE_ARCHIVED:MAINTENANCE_SOURCE_DELETED;
+  if(node.scheduled_only_job_id!==null)return MAINTENANCE_SOURCE_SCHEDULED_ONLY;
   if(!db().prepare('SELECT 1 FROM turns WHERE turn_id=? AND node_id=?').get(source.sourceTurnId,source.evidence.nodeId))return MAINTENANCE_SOURCE_DELETED;
   const missing=db().prepare(`SELECT 1 FROM page_maintenance_source_messages f WHERE f.plan_id=? AND f.source_turn_id=?
     AND NOT EXISTS(SELECT 1 FROM messages m WHERE m.id=f.message_id)`).get(plan.id,source.sourceTurnId);
@@ -953,11 +930,15 @@ export function assertMaintenanceResourceCurrent(input: {workspaceId:string;owne
   if(current.revision!==row.observed_revision)throw new PageMaintenanceConflictError('Maintenance target changed since you read it. Read it again from the start: the read refreshes its revision. Then retry with operations based on what you read.');
 }
 
+/** Stored as the resource's and receipt's payload_hash: raw JSON with payload first, so the formula must not change. */
+export function maintenancePayloadHash(payload: unknown, assignedIds: unknown): string {
+  return createHash('sha256').update(json({ payload, assignedIds })).digest('hex');
+}
+
 export function freezeMaintenanceResourcePayload(input: AuthorityInput & {planId:string;sourceTurnId:string;kind:MaintenanceResourceKind;resourceId:string;payload:unknown;assignedIds:unknown;now:number}): {payloadHash:string;payload:unknown;assignedIds:unknown} {
   const now=nowValue(input.now);
-  const canonical=json({payload:input.payload,assignedIds:input.assignedIds});
-  if(Buffer.byteLength(canonical)>1_048_576)throw new PageWriteError(400,'invalid','Maintenance resource payload exceeds 1 MB');
-  const payloadHash=createHash('sha256').update(canonical).digest('hex');
+  if(Buffer.byteLength(json({payload:input.payload,assignedIds:input.assignedIds}))>1_048_576)throw new PageWriteError(400,'invalid','Maintenance resource payload exceeds 1 MB');
+  const payloadHash=maintenancePayloadHash(input.payload,input.assignedIds);
   return runInTransaction(()=>{
     assertMaintenanceAuthority(input,now);
     const plan=db().prepare('SELECT generation,config_revision,state FROM page_maintenance_plans WHERE id=? AND job_id=? AND workspace_id=? AND owner_user_id=?')
@@ -981,9 +962,6 @@ export function freezeMaintenanceResourcePayload(input: AuthorityInput & {planId
 }
 
 export type CommitMaintenanceReceiptInput = AuthorityInput & {planId:string;sourceTurnId:string;resource:MaintenanceResourceRef;outcome:'written'|'proposed'|'no_change';payloadHash:string;payload:unknown;assignedIds:unknown;result:unknown;execution:BlockSource & {runId:string};evidence:BlockSource;now:number};
-export function commitMaintenanceReceipt(input: CommitMaintenanceReceiptInput): MaintenanceReceipt {
-  return runInTransaction(()=>persistMaintenanceReceiptInTransaction(input));
-}
 
 /** Persists the receipt inside the caller's page/content transaction. */
 export function persistMaintenanceReceiptInTransaction(input: CommitMaintenanceReceiptInput): MaintenanceReceipt {

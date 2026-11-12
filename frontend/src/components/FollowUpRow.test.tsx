@@ -1,5 +1,4 @@
 import { describe, it, expect, vi } from 'vitest';
-import React from 'react';
 import { render, screen, fireEvent } from '@testing-library/react';
 import { FollowUpRow } from './FollowUpRow';
 
@@ -16,6 +15,16 @@ describe('FollowUpRow', () => {
     );
     const textBtn = screen.getByRole('button', { name: /Continue follow-up/i });
     fireEvent.keyDown(textBtn, { key: 'B' });
+    expect(onBranch).toHaveBeenCalledWith('hello');
+  });
+
+  it('reads Branched once branched, and can still branch again', () => {
+    const onBranch = vi.fn();
+    render(<FollowUpRow index={0} question="hello" branched onContinue={vi.fn()} onBranch={onBranch} />);
+    const button = screen.getByRole('button', { name: /Branch follow-up/i });
+    expect(button.textContent).toBe('Branched');
+    expect(button.closest('.t-followup-row')?.getAttribute('data-branched')).toBe('true');
+    fireEvent.click(button);
     expect(onBranch).toHaveBeenCalledWith('hello');
   });
 

@@ -70,10 +70,13 @@ export function claudeSpawnPolicy(
 /**
  * The host's verdict on a tool call of a restricted session
  * (ClaudeAdapterOptions.restrictedToolApproval); deny when it gives none.
+ * `profile` is the calling session's own tool profile, passed on so the host
+ * allows only what that profile allows (DESIGN-v2 §2.5).
  */
 export function restrictedToolApproval(
   options: Pick<ClaudeAdapterOptions, 'restrictedToolApproval'>,
   hostToolName: string | null,
+  profile?: RuntimeToolProfile | null,
 ): 'allow' | 'deny' {
-  return options.restrictedToolApproval?.(hostToolName) ?? 'deny';
+  return options.restrictedToolApproval?.(hostToolName, profile ?? undefined) ?? 'deny';
 }

@@ -1,7 +1,6 @@
 import type { MichiPageBlock } from 'michi-shared';
 import type { MichiPageEditOp } from './editorTypes';
 import { isObj, objects, str } from './michiPageModel';
-import { segmentId, splitMarkdown, type MdSegmentKind } from './markdownSegments';
 
 // Build presentation edits consumed by the native Page adapter.
 
@@ -116,8 +115,6 @@ export function toggledChecklist(block: MichiPageBlock, index: number): MichiPag
 /** What the margin's + adds below a block. Michi adds Markdown only, so each kind is written as its Markdown. */
 export type InsertKind = 'text' | 'heading' | 'todo' | 'callout';
 
-export const INSERT_KINDS: readonly InsertKind[] = ['text', 'heading', 'todo', 'callout'];
-
 /** The Markdown an add-block editor's words become; null when nothing was written. */
 export function insertMarkdown(kind: InsertKind, draft: string): string | null {
   if (kind === 'heading') {
@@ -141,14 +138,6 @@ export function insertOp(after: string | null, markdown: string): MichiPageEditO
   return after == null ? { op: 'insert', after: null, parent: null, block } : { op: 'insert', after, block };
 }
 
-/**
- * A database shown on the page by reference, added after the block `after`:
- * Michi assigns the block an ID; the database keeps its own title and views.
- */
-export function databaseRefOp(after: string, databaseId: string): MichiPageEditOp {
-  return { op: 'insert', after, block: { type: 'database-ref', databaseId } };
-}
-
 export function deleteOps(ids: readonly string[]): MichiPageEditOp[] {
   return ids.map((id) => ({ op: 'delete', id }));
 }
@@ -156,108 +145,6 @@ export function deleteOps(ids: readonly string[]): MichiPageEditOp[] {
 export function releaseOp(id: string): MichiPageEditOp {
   return { op: 'release', id };
 }
-
-/**
- * Move the top-level block `id` into the gap before `order[before]` (`before`
- * = order.length is the end). Null when that leaves it where it is.
- */
-export function moveToOp(order: readonly string[], id: string, before: number): MichiPageEditOp | null {
-  const from = order.indexOf(id);
-  if (from < 0 || before < 0 || before > order.length || before === from || before === from + 1) return null;
-  const rest = order.filter((x) => x !== id);
-  const at = before > from ? before - 1 : before;
-  return { op: 'move', id, after: at === 0 ? null : rest[at - 1], parent: null };
-}
-
-/** One place up (-1) or down (1) among the page's top-level blocks. */
-export function moveStepOp(order: readonly string[], id: string, step: -1 | 1): MichiPageEditOp | null {
-  const from = order.indexOf(id);
-  if (from < 0) return null;
-  return moveToOp(order, id, step < 0 ? from - 1 : from + 2);
-}
-
-/** The page's blocks with `replacements` swapped in by id, at any depth inside containers. */
-export function replaceBlocks(
-  blocks: readonly MichiPageBlock[],
-  replacements: ReadonlyMap<string, MichiPageBlock>,
-): MichiPageBlock[] {
-  if (!replacements.size) return blocks as MichiPageBlock[];
-  function kids(list: unknown[]): unknown[] {
-    return list.map((c) => (isObj(c) && typeof c.type === 'string' ? swap(c as MichiPageBlock) : c));
-  }
-  function swap(b: MichiPageBlock): MichiPageBlock {
-    const id = blockIdOf(b);
-    const own = id ? replacements.get(id) : undefined;
-    if (own) return own;
-    if (b.type === 'toggle' && Array.isArray(b.blocks)) return { ...b, blocks: kids(b.blocks) };
-    if (b.type === 'columns' && Array.isArray(b.columns)) {
-      return { ...b, columns: b.columns.map((c) => (Array.isArray(c) ? kids(c) : c)) };
-    }
-    if (b.type === 'tabs' && Array.isArray(b.tabs)) {
-      return { ...b, tabs: b.tabs.map((t) => (isObj(t) && Array.isArray(t.blocks) ? { ...t, blocks: kids(t.blocks) } : t)) };
-    }
-    return b;
-  }
-  return blocks.map(swap);
-}
-
-// ── segments ─────────────────────────────────────────────────────
-
-const PIECES = new WeakMap<MichiPageBlock, MichiPageBlock[] | null>();
-
-/**
- * An agent's Markdown block cut into the pieces a person points at, one block
- * each with id `<block>~<n>`, the way Michi draws and counts it: a page edit
- * naming a piece makes Michi cut the block there, so only the touched piece is
- * marked "You edited". Each piece keeps the block's sources, and the first its
- * `staleFor`. Null when the block stays whole: not Markdown, no id, one piece,
- * or a person's own (edited as the one text it is). Cached per block object.
- */
-export function markdownPieces(block: MichiPageBlock): MichiPageBlock[] | null {
-  const cached = PIECES.get(block);
-  if (cached !== undefined) return cached;
-  const id = blockIdOf(block);
-  let pieces: MichiPageBlock[] | null = null;
-  if (block.type === 'markdown' && id && !isEditedBlock(block)) {
-    const segments = splitMarkdown(str(block.text));
-    if (segments.length >= 2) {
-      pieces = segments.map((s) => ({
-        id: segmentId(id, s.index),
-        type: 'markdown',
-        text: s.text,
-        ...(block.sources ? { sources: block.sources } : {}),
-        ...(s.index === 0 && block.staleFor !== undefined ? { staleFor: block.staleFor } : {}),
-      }));
-    }
-  }
-  PIECES.set(block, pieces);
-  return pieces;
-}
-
-/** One thing on the page a person points at: a block, or one piece of an agent's Markdown block. */
-export interface PageUnit {
-  block: MichiPageBlock;
-  /** The Markdown block this piece was cut from. */
-  segmentOf?: string;
-}
-
-const UNITS = new WeakMap<MichiPageBlock, PageUnit[]>();
-
-/** A list of blocks as the units drawn for it, each agent Markdown block as its pieces. */
-export function pageUnits(blocks: readonly MichiPageBlock[]): PageUnit[] {
-  return blocks.flatMap((b) => {
-    let units = UNITS.get(b);
-    if (!units) {
-      const pieces = markdownPieces(b);
-      const of = blockIdOf(b);
-      units = pieces && of ? pieces.map((piece) => ({ block: piece, segmentOf: of })) : [{ block: b }];
-      UNITS.set(b, units);
-    }
-    return units;
-  });
-}
-
-export type { MdSegmentKind };
 
 // ── drafts ───────────────────────────────────────────────────────
 
@@ -300,45 +187,6 @@ export function draftMarkdown(type: string, draft: EditorDraft): string | null {
   }
 }
 
-// ── keeping what did not change ──────────────────────────────────
-
-const JSON_OF = new WeakMap<object, string>();
-function jsonOf(value: object): string {
-  let json = JSON_OF.get(value);
-  if (json === undefined) {
-    json = JSON.stringify(value);
-    JSON_OF.set(value, json);
-  }
-  return json;
-}
-
-/** `next`, or `prev` when the two hold the same data, so what depends on it sees no change. */
-export function shareValue<T extends object>(prev: T, next: T): T {
-  return prev === next || jsonOf(prev) === jsonOf(next) ? prev : next;
-}
-
-/**
- * `next` with each block that did not change since `prev` kept as the same
- * object (matched by id, or by place when it has none), so memoized blocks
- * skip a reload that left them alone; `prev` itself when nothing changed.
- */
-export function shareBlocks(prev: readonly MichiPageBlock[], next: readonly MichiPageBlock[]): MichiPageBlock[] {
-  const byId = new Map<string, MichiPageBlock>();
-  for (const b of prev) {
-    const id = blockIdOf(b);
-    if (id) byId.set(id, b);
-  }
-  let same = prev.length === next.length;
-  const out = next.map((b, i) => {
-    const id = blockIdOf(b);
-    const old = id ? byId.get(id) : prev[i];
-    const kept = old && jsonOf(old) === jsonOf(b) ? old : b;
-    if (kept !== prev[i]) same = false;
-    return kept;
-  });
-  return same ? (prev as MichiPageBlock[]) : out;
-}
-
 // ── what an editor opened on ─────────────────────────────────────
 
 /**
@@ -357,38 +205,4 @@ export function blockFingerprint(block: MichiPageBlock, segmentOf?: string): str
     block.level ?? null,
     block.tone ?? null,
   ]);
-}
-
-/** The lists of blocks a container holds. */
-function childLists(block: MichiPageBlock): unknown[][] {
-  if (block.type === 'toggle' && Array.isArray(block.blocks)) return [block.blocks];
-  if (block.type === 'columns' && Array.isArray(block.columns)) return block.columns.filter(Array.isArray);
-  if (block.type === 'grid' && Array.isArray(block.regions)) {
-    return block.regions.flatMap((region) => (isObj(region) && Array.isArray(region.blocks) ? [region.blocks] : []));
-  }
-  if (block.type === 'tabs' && Array.isArray(block.tabs)) {
-    return block.tabs.flatMap((t) => (isObj(t) && Array.isArray(t.blocks) ? [t.blocks] : []));
-  }
-  return [];
-}
-
-/** The id of the block (or Markdown piece) anywhere on the page that says what `fingerprint` recorded; null when none does. */
-export function findByFingerprint(blocks: readonly unknown[], fingerprint: string): string | null {
-  for (const raw of blocks) {
-    if (!isObj(raw) || typeof raw.type !== 'string') continue;
-    const b = raw as MichiPageBlock;
-    const id = blockIdOf(b);
-    const pieces = markdownPieces(b);
-    if (pieces && id) {
-      const piece = pieces.find((p) => blockFingerprint(p, id) === fingerprint);
-      if (piece) return blockIdOf(piece);
-    } else if (id && blockFingerprint(b) === fingerprint) {
-      return id;
-    }
-    for (const list of childLists(b)) {
-      const found = findByFingerprint(list, fingerprint);
-      if (found) return found;
-    }
-  }
-  return null;
 }

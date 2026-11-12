@@ -16,6 +16,7 @@ vi.mock('../../services/api', async (importOriginal) => {
   };
 });
 
+const { listeners, downloadUpdate, installUpdate, getUpdateState, electron } = vi.hoisted(() => {
 const listeners: Array<(state: AppUpdateState) => void> = [];
 const downloadUpdate = vi.fn();
 const installUpdate = vi.fn();
@@ -36,6 +37,9 @@ const electron: ElectronBridge = {
     };
   },
 };
+
+return { listeners, downloadUpdate, installUpdate, getUpdateState, electron };
+});
 
 vi.mock('../../lib/electronBridge', () => ({
   getElectron: () => electron,
@@ -80,7 +84,7 @@ describe('TerminalTopbar GitHub update badge', () => {
   it('shows a versioned badge when the main process reports an available release', async () => {
     render(
       <Wrap>
-        <TerminalTopbar {...baseProps} />
+        <TerminalTopbar navigation={{ canBack: false, canForward: false, onBack: () => {}, onForward: () => {} }} {...baseProps} />
       </Wrap>,
     );
     emit({ status: 'available', currentVersion: '0.2.1', latestVersion: '0.3.0' });
@@ -102,7 +106,7 @@ describe('TerminalTopbar GitHub update badge', () => {
 
     render(
       <Wrap>
-        <TerminalTopbar {...baseProps} />
+        <TerminalTopbar navigation={{ canBack: false, canForward: false, onBack: () => {}, onForward: () => {} }} {...baseProps} />
       </Wrap>,
     );
     emit({ status: 'available', currentVersion: '0.2.1', latestVersion: '0.3.0' });
@@ -122,7 +126,7 @@ describe('TerminalTopbar GitHub update badge', () => {
 
     render(
       <Wrap>
-        <TerminalTopbar {...baseProps} />
+        <TerminalTopbar navigation={{ canBack: false, canForward: false, onBack: () => {}, onForward: () => {} }} {...baseProps} />
       </Wrap>,
     );
     emit({ status: 'available', currentVersion: '0.2.1', latestVersion: '0.3.0' });

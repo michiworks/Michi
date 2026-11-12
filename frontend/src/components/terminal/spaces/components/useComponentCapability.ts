@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import type { ComponentSandboxMethod } from 'michi-shared';
-import { callPageComponentCapability, mintPageComponentCapability, revokePageComponentCapability, type ComponentHost } from '../../../../services/api/pageComponents';
+import type { ComponentHost, ComponentSandboxMethod } from 'michi-shared';
+import { callPageComponentCapability, mintPageComponentCapability, revokePageComponentCapability } from '../../../../services/api/pageComponents';
 import { backendEntityId, serverEntityId } from '../../../../config/backendIdentity';
 import { notifyPageChanged } from '../../../../state/pages/pageEvents';
 

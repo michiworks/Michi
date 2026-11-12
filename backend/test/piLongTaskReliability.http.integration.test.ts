@@ -308,7 +308,7 @@ describe('Pi long tasks over the chat routes', () => {
     const before = listMessages(nodeId);
     const duplicate = await sendWhenFree(nodeId, 'busy-3', 'Third task');
     assert.equal(duplicate.response.status, 409, 'a turn ID that has a receipt is not run again');
-    assert.equal(((await duplicate.response.json()) as { code?: string }).code, 'turn_begin_failed');
+    assert.equal(((await duplicate.response.json()) as { code?: string }).code, 'turn_already_began');
     assert.equal(requests.filter((request) => request.label === 'busy/third').length, 1);
     assert.deepEqual(listMessages(nodeId), before, 'the saved turn is unchanged');
     assert.deepEqual(unexpected, [], 'no extra model request was made');

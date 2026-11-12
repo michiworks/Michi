@@ -99,9 +99,9 @@
 .michi-peek__caption {
   margin: 0;
   color: var(--term-muted);
-  font-size: 10px;
+  font-size: var(--fs-xs);
   font-weight: 500;
-  letter-spacing: 0.14em;
+  letter-spacing: var(--ls-caps-wide);
   text-transform: uppercase;
 }
 .michi-peek__caption-count {
@@ -289,6 +289,6 @@
 .michi-peek__ghost:focus-visible,
 .michi-peek__icon-btn:focus-visible,
 .michi-peek__text-btn:focus-visible {
-  outline: 2px solid var(--term-accent);
+  outline: var(--focus-ring);
   outline-offset: 1px;
 }

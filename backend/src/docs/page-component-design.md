@@ -1,10 +1,10 @@
 # Design generated components for Michi Pages
 
-Applies to: native Page composition and the current generated-component sandbox. Source checked: 2026-10-26. This guide records the design conventions and the APIs that actually exist. It does not add a component SDK, style validator or automatic preview tool. Read `pages-and-components` for the source/call contract.
+Applies to: native Page composition and the current generated-component sandbox. Source checked: 2026-11-08. This guide records the design conventions and the APIs that actually exist. It does not add a component SDK, style validator or automatic preview tool. Read `pages-and-components` for the source/call contract.
 
 ## Choose the smallest supported building block
 
-Use the native block catalog first: prose, metrics, charts, grids, tables and the other built-in types already receive Michi's renderer and interaction treatment. Use a native database view for editable structured rows. Generate a library component only when those choices cannot express the requested behavior, and check the existing library before creating another implementation.
+Use the native block catalog first: prose, metrics, charts, grids, tables and the other built-in types already receive Michi's renderer and interaction treatment. Use a native database view for editable structured rows. Generate a library component only when those choices cannot express the requested behavior, and check the existing library before creating another implementation. For task tracking, use the workspace task database: open it with `open_task_database` and insert a `task-view` block (see `pages-and-components`) rather than generating a task board or table component.
 
 Follow the target page's saved `layoutPreferences.text` and `layoutRules` when organizing content. They are page-local content guidance. Global visual conventions below govern how the UI looks; they do not allow overriding ownership, data access or program-applied section limits.
 
@@ -81,6 +81,8 @@ The host retains the last successful frame while a candidate source version load
 
 A fuller implementation would share radius/type/spacing tokens with native Pages; provide trusted sandbox styles or primitives for compact actions, rows, tooltips and empty states; add matching examples; and validate representative theme/width/interaction cases. Code/style checks can flag some violations but cannot prove visual quality.
 
-Those primitives, extra tokens and automated design checks have **not** been implemented by this documentation update. They should be introduced with explicit compatibility/version handling so existing saved components retain their behavior. The unified Tasks Overview/Table/Board/Milestones feature is also still a proposal; existing static blocks and native database views must not be described as that finished feature.
+Those primitives, extra tokens and automated design checks are **not** implemented. They should be introduced with explicit compatibility/version handling so existing saved components retain their behavior.
+
+Each workspace can have one native task database, shown with the `task-view` block (Board, Table and Needs you views; **All tasks** shows them across local workspaces; agents use `open_task_database`, `list_tasks` and `edit_database`; see `pages-and-components`). Overview and Milestones aggregation over the task database is not implemented. The static `metrics` and `milestones` blocks show supplied content, not live task aggregates, and must not be described as that feature.
 
 Related documents: `pages-and-components`, `pages-maintenance`, `permissions`, `privacy-and-data`, `troubleshooting`.

@@ -3,13 +3,16 @@ import { Check, X } from 'lucide-react';
 import { toast } from 'sonner';
 import {
   META_AGENT_DEFAULT_FIRST_RUN_DAYS,
+  plural,
   type FirstRunProgressDto, type MetaAgentCursorRow, type MetaAgentRecentRun, type MetaAgentStop, type WorkspaceHomeSummaryDto,
 } from 'michi-shared';
 import type { SpacesFirstRunStatus } from '../../../../services/api/spacesHome';
 import type { MetaAgentUpdateState } from '../../../../state/metaAgent/metaAgentUpdate';
 import { firstRunProgress } from '../../../../state/metaAgent/spacesFirstRun';
-import { META_AGENT_HEADLINE } from '../../../../state/metaAgent/metaAgentStatus';
-import { homeAge } from './homeFormat';
+import { UPKEEP_HEADLINE } from '../../../../state/metaAgent/metaAgentStatus';
+import { formatMichiAgo } from '../../content/michiFormat';
+import { navPageEvent } from '../../../../state/appEvents';
+import { useCompanionName } from '../../../../state/companion/companionName';
 import './metaAgentStatus.css';
 
 /** What the status line says about the Meta agent in its ordinary state. */
@@ -63,11 +66,7 @@ export interface MetaAgentStatusLineProps {
   onRetryWorkspace?(workspaceId: string): void;
 }
 
-const goToScheduled = () => window.dispatchEvent(new CustomEvent('michi:nav-page', { detail: { page: 'scheduled' } }));
-
-function plural(count: number, one: string, many = `${one}s`): string {
-  return `${count} ${count === 1 ? one : many}`;
-}
+const goToScheduled = () => navPageEvent.dispatch({ page: 'scheduled' });
 
 /** Where a workspace stands, in words: the cursor number itself is for Scheduled › Meta agent. */
 function cursorState(row: MetaAgentCursorRow): string {
@@ -93,7 +92,7 @@ export function workspaceDetailText(run: FirstRunProgressDto | null, cursor: Met
   if (cursor?.state === 'error' && (!run || run.state === 'done')) return cursorState(cursor);
   if (!run || (run.state === 'done' && cursor && cursor.cursor > run.startSeq)) {
     if (!cursor) return 'Not read yet';
-    return [cursorState(cursor), cursor.lastRunAt ? `read ${homeAge(cursor.lastRunAt, clock)}` : null, lastResult(last)]
+    return [cursorState(cursor), cursor.lastRunAt ? `read ${formatMichiAgo(cursor.lastRunAt, clock)}` : null, lastResult(last)]
       .filter(Boolean).join(' · ');
   }
   switch (run.state) {
@@ -144,7 +143,7 @@ function DetailList({ workspaces, firstRun, cursors, recentRuns, clock, days, sh
   const done = workspaces.filter((workspace) => workspace.firstRun?.state === 'done').length;
   const globalDone = firstRun?.summary.state === 'done';
   return (
-    <ul className="spaces-home-status__list" aria-label="Meta agent per workspace">
+    <ul className="spaces-home-status__list" aria-label="Pages upkeep per workspace">
       {workspaces.length === 0 && <li className="spaces-home-muted">No workspaces yet.</li>}
       {workspaces.map((workspace) => {
         const run = workspace.firstRun;
@@ -221,7 +220,7 @@ function RetryButton({ onRetry }: { onRetry(): Promise<void> | void }) {
     try {
       await onRetry();
     } catch (err) {
-      toast.error(err instanceof Error && err.message ? `Couldn’t retry: ${err.message}` : 'Couldn’t retry the Meta agent');
+      toast.error(err instanceof Error && err.message ? `Couldn’t retry: ${err.message}` : 'Couldn’t retry Pages upkeep');
     } finally {
       if (mounted.current) setRetrying(false);
     }
@@ -230,11 +229,12 @@ function RetryButton({ onRetry }: { onRetry(): Promise<void> | void }) {
 }
 const Spinner = () => <span className="agent-spinner spaces-home-status__spin" aria-hidden="true" />;
 
-/** One line on what the Meta agent does and did last, with its per-workspace detail on request. */
+/** One line on what Pages upkeep does and did last, with its per-workspace detail on request. */
 export function MetaAgentStatusLine({
   status, workspaces, clock, showLastWrite = true, mode = 'normal', reason, stop = null, firstRunDays, firstRun = null, cursors, recentRuns, update, homeUpdating = false,
   onOpenScheduled = goToScheduled, onOpenSettings, onResume, onRetry, onOpenWorkspace, onRetryWorkspace,
 }: MetaAgentStatusLineProps) {
+  const name = useCompanionName();
   const firstRunOpen = mode === 'first-run' || mode === 'just-read';
   const [open, setOpen] = React.useState(firstRunOpen);
   const opened = React.useRef(firstRunOpen);
@@ -254,21 +254,21 @@ export function MetaAgentStatusLine({
 
   if (mode === 'offline') {
     return <div className="spaces-home-status" data-mode="offline" role="status">
-      <Line mark={<Dot tone="off" />}>{META_AGENT_HEADLINE.offline} · showing the last saved Home</Line>
+      <Line mark={<Dot tone="off" />}>{UPKEEP_HEADLINE.offline} · showing the last saved Home</Line>
     </div>;
   }
   if (mode === 'unavailable' || mode === 'not-running') {
     return <div className="spaces-home-status" data-mode={mode} role="status">
       <Line mark={<Dot tone="warn" />}>
-        {META_AGENT_HEADLINE['not-running']}{reason ? ` · ${reason}` : ''}
-        {mode === 'unavailable' && onOpenSettings && <><Sep /><button type="button" className="spaces-home-link" onClick={onOpenSettings}>Settings › Meta agent</button></>}
+        {UPKEEP_HEADLINE['not-running']}{reason ? ` · ${reason}` : ''}
+        {mode === 'unavailable' && onOpenSettings && <><Sep /><button type="button" className="spaces-home-link" onClick={onOpenSettings}>Settings › {name} › Pages upkeep</button></>}
       </Line>
     </div>;
   }
   if (mode === 'stopped' && stop) {
     return <div className="spaces-home-status" data-mode="stopped" role="status">
       <Line mark={<Dot tone="danger" />}>
-        <span className="spaces-home-status__error">{META_AGENT_HEADLINE.stopped}: {stop.message}</span>
+        <span className="spaces-home-status__error">{UPKEEP_HEADLINE.stopped}: {stop.message}</span>
         {onRetry && <><Sep /><RetryButton onRetry={onRetry} /></>}
         {onOpenSettings && RUNTIME_REASONS.has(stop.reason) && <><Sep /><button type="button" className="spaces-home-link" onClick={onOpenSettings}>Change runtime</button></>}
         <Sep />{toggle}
@@ -280,7 +280,7 @@ export function MetaAgentStatusLine({
   if (mode === 'paused') {
     return <div className="spaces-home-status" data-mode="paused">
       <Line mark={<Dot tone="off" />}>
-        {META_AGENT_HEADLINE.paused}
+        {UPKEEP_HEADLINE.paused}
         {onResume && <><Sep /><button type="button" className="spaces-home-link" onClick={onResume}>Resume</button></>}
         <Sep />{scheduled}
       </Line>
@@ -294,7 +294,7 @@ export function MetaAgentStatusLine({
     const percent = progress.total > 0 ? Math.round((progress.read / progress.total) * 100) : 0;
     return <div className="spaces-home-status" data-mode="first-run">
       <Line mark={<Spinner />}>
-        First time opening Pages · Meta agent{status.runtimeLabel ? ` (${status.runtimeLabel})` : ''} is reading the last {firstRunDaysOf(recentRuns, firstRunDays)} days
+        First time opening Pages · {name}{status.runtimeLabel ? ` (${status.runtimeLabel})` : ''} is reading the last {firstRunDaysOf(recentRuns, firstRunDays)} days
         {' · '}<b>{progress.read}</b> / {progress.total}{' · '}{doing}
         <Sep />{toggle}
       </Line>
@@ -308,11 +308,11 @@ export function MetaAgentStatusLine({
   const parts: string[] = [];
   if (mode === 'just-read') {
     const homes = firstRunProgress(firstRun).done;
-    parts.push(`Meta agent just read the history; from now on it checks new conversations every ${status.intervalSeconds} s`);
+    parts.push(`Pages upkeep just read the history; from now on it checks new conversations every ${status.intervalSeconds} s`);
     parts.push(`wrote ${plural(homes, 'workspace home')} and this page`);
   } else {
-    parts.push(`Meta agent checks new conversations every ${status.intervalSeconds} s`);
-    if (showLastWrite && status.lastWrite) parts.push(`wrote ${status.lastWrite.workspaceName} ${homeAge(status.lastWrite.at, clock)}`);
+    parts.push(`Pages upkeep checks new conversations every ${status.intervalSeconds} s`);
+    if (showLastWrite && status.lastWrite) parts.push(`wrote ${status.lastWrite.workspaceName} ${formatMichiAgo(status.lastWrite.at, clock)}`);
   }
   const runtime = runtimePart(status);
   if (runtime) parts.push(runtime);

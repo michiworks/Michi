@@ -33,6 +33,7 @@ import {
 
 import {
   assertTurnIdentity,
+  completedWithAnswer,
   durableMessageMetadata,
   MESSAGE_SQL,
   NODE_SQL,
@@ -75,13 +76,8 @@ function clearPendingSpawnPromptOutbox(db: DbPrimitives, nodeId: string): void {
   const row = db.get<{ composer_draft?: string | null }>(NODE_SQL.getComposerDraft, nodeId);
   const raw = row?.composer_draft;
   if (!raw) return;
-  try {
-    const parsed = JSON.parse(raw) as Record<string, unknown>;
-    if (typeof parsed?.__michiPendingSpawnPrompt !== 'string') return;
-  } catch {
-    return;
-  }
-  db.run(NODE_SQL.clearComposerDraft, clearSpawnPromptFromComposerDraft(raw), nodeId, raw);
+  const cleared = clearSpawnPromptFromComposerDraft(raw);
+  if (cleared !== undefined) db.run(NODE_SQL.clearComposerDraft, cleared, nodeId, raw);
 }
 
 function saveMessageRow(
@@ -206,72 +202,88 @@ function writeTurnNodeProjection(
  * Idempotent: replaying the same turnId returns the existing row.
  */
 export function coreBeginTurn(db: DbPrimitives, snapshot: DurableTurnSnapshot): CoreTurnRow {
-  return db.runInTransaction(() => {
-    const existing = getTurnRow(db, snapshot.turnId);
-    if (existing) {
-      assertTurnIdentity(
-        existing as { node_id: unknown; assistant_message_id: unknown; user_message_id: unknown },
-        snapshot,
-      );
-      clearPendingSpawnPromptOutbox(db, snapshot.nodeId);
-      return existing;
-    }
+  return db.runInTransaction(() => beginTurnRows(db, snapshot, { consumesComposerOutbox: true }));
+}
 
-    const node = db.get<{ id: string; workspace_id: string; purged_at: number | null }>(
-      'SELECT id, workspace_id, purged_at FROM nodes WHERE id = ? AND purged_at IS NULL',
-      snapshot.nodeId,
+/**
+ * coreBeginTurn's writes, inside the caller's transaction. A turn that is
+ * the user's (or an agent's) prompt consumes the node's pending spawn-prompt
+ * outbox; a posted message (coreBeginAndFinalizeTurn) is nobody's prompt and
+ * leaves the composer draft alone.
+ */
+function beginTurnRows(
+  db: DbPrimitives,
+  snapshot: DurableTurnSnapshot,
+  opts: { consumesComposerOutbox: boolean },
+): CoreTurnRow {
+  const existing = getTurnRow(db, snapshot.turnId);
+  if (existing) {
+    assertTurnIdentity(
+      existing as { node_id: unknown; assistant_message_id: unknown; user_message_id: unknown },
+      snapshot,
     );
-    if (!node) throw new Error(`node ${snapshot.nodeId} does not exist`);
-    if (node.workspace_id !== snapshot.workspaceId) {
-      throw new Error(`node ${snapshot.nodeId} does not belong to workspace ${snapshot.workspaceId}`);
-    }
+    if (opts.consumesComposerOutbox) clearPendingSpawnPromptOutbox(db, snapshot.nodeId);
+    return existing;
+  }
 
-    clearPendingSpawnPromptOutbox(db, snapshot.nodeId);
+  const node = db.get<{ id: string; workspace_id: string; purged_at: number | null }>(
+    'SELECT id, workspace_id, purged_at FROM nodes WHERE id = ? AND purged_at IS NULL',
+    snapshot.nodeId,
+  );
+  if (!node) throw new Error(`node ${snapshot.nodeId} does not exist`);
+  if (node.workspace_id !== snapshot.workspaceId) {
+    throw new Error(`node ${snapshot.nodeId} does not belong to workspace ${snapshot.workspaceId}`);
+  }
 
-    const max = db.get<{ seq: number }>(MESSAGE_SQL.maxSeq, snapshot.nodeId);
-    let seq = (max?.seq ?? -1) + 1;
+  if (opts.consumesComposerOutbox) clearPendingSpawnPromptOutbox(db, snapshot.nodeId);
+  // The previous reply's follow-ups end with it. A turn that ends without
+  // its own (an error, a cancel) must not bring them back on hydration; a
+  // post's own chips are written by its finalize, in the same transaction.
+  db.run(NODE_SQL.setFollowUps, null, null, snapshot.nodeId);
 
-    if (snapshot.userMessage) {
-      saveMessageRow(db, {
-        id: snapshot.userMessage.id,
-        node_id: snapshot.nodeId,
-        role: 'user',
-        content: snapshot.userMessage.content,
-        blocks: null,
-        tool_calls: null,
-        metadata: durableMessageMetadata(snapshot.userMessage),
-        seq: seq++,
-        created_at: snapshot.userMessage.createdAt,
-      });
-    }
+  const max = db.get<{ seq: number }>(MESSAGE_SQL.maxSeq, snapshot.nodeId);
+  let seq = (max?.seq ?? -1) + 1;
 
+  if (snapshot.userMessage) {
     saveMessageRow(db, {
-      id: snapshot.assistantMessage.id,
+      id: snapshot.userMessage.id,
       node_id: snapshot.nodeId,
-      role: 'assistant',
-      content: snapshot.assistantMessage.content,
+      role: 'user',
+      content: snapshot.userMessage.content,
       blocks: null,
       tool_calls: null,
-      metadata: durableMessageMetadata(snapshot.assistantMessage),
-      seq,
-      created_at: snapshot.assistantMessage.createdAt,
+      metadata: durableMessageMetadata(snapshot.userMessage),
+      seq: seq++,
+      created_at: snapshot.userMessage.createdAt,
     });
+  }
 
-    const now = Date.now();
-    db.run(
-      TURN_SQL.insert,
-      snapshot.turnId,
-      snapshot.nodeId,
-      snapshot.userMessage?.id ?? null,
-      snapshot.assistantId,
-      snapshot.lastAppliedSeq,
-      snapshot.startedAt,
-      now,
-    );
-
-    writeTurnNodeProjection(db, snapshot, false);
-    return getTurnRow(db, snapshot.turnId)!;
+  saveMessageRow(db, {
+    id: snapshot.assistantMessage.id,
+    node_id: snapshot.nodeId,
+    role: 'assistant',
+    content: snapshot.assistantMessage.content,
+    blocks: null,
+    tool_calls: null,
+    metadata: durableMessageMetadata(snapshot.assistantMessage),
+    seq,
+    created_at: snapshot.assistantMessage.createdAt,
   });
+
+  const now = Date.now();
+  db.run(
+    TURN_SQL.insert,
+    snapshot.turnId,
+    snapshot.nodeId,
+    snapshot.userMessage?.id ?? null,
+    snapshot.assistantId,
+    snapshot.lastAppliedSeq,
+    snapshot.startedAt,
+    now,
+  );
+
+  writeTurnNodeProjection(db, snapshot, false);
+  return getTurnRow(db, snapshot.turnId)!;
 }
 
 /**
@@ -306,57 +318,129 @@ export function coreFinalizeTurn(db: DbPrimitives, snapshot: DurableTurnSnapshot
   if (snapshot.status === 'active') {
     throw new Error(`turn ${snapshot.turnId} cannot finalize while active`);
   }
-  return db.runInTransaction(() => {
-    const row = getTurnRow(db, snapshot.turnId);
-    if (!row) throw new Error(`turn ${snapshot.turnId} has not begun`);
-    assertTurnIdentity(
-      row as { node_id: unknown; assistant_message_id: unknown; user_message_id: unknown },
-      snapshot,
-    );
-    if (row.status !== 'active') {
-      if (row.status !== snapshot.status) {
-        throw new Error(`turn ${snapshot.turnId} is already finalized as ${row.status}`);
-      }
-      return row;
-    }
+  return db.runInTransaction(() => finalizeTurnRows(db, snapshot, { recordsCompletion: true }));
+}
 
-    writeSteeredMessages(db, snapshot);
-    writeAssistantSnapshot(db, snapshot);
-    writeTurnNodeProjection(db, snapshot, true);
-
-    const now = Date.now();
-    const completedAt = snapshot.completedAt ?? now;
-    let completionSeq: number | null = null;
-    const inputOrigin = row.user_message_id === null ? undefined : db.get<{ scheduled_job_id: unknown }>(
-      `SELECT json_extract(CASE WHEN json_valid(metadata) THEN metadata ELSE '{}' END, '$.scheduledJobId') AS scheduled_job_id
-       FROM messages WHERE id = ? AND node_id = ?`, row.user_message_id, snapshot.nodeId,
-    );
-    const scheduledInput = snapshot.userMessage?.metadata?.scheduledJobId || inputOrigin?.scheduled_job_id;
-    if (snapshot.status === 'completed' && row.user_message_id !== null && !scheduledInput) {
-      // Resolve the CURRENT workspace: a node may have moved since this turn began.
-      const node = db.get<{ workspace_id: string }>('SELECT workspace_id FROM nodes WHERE id = ?', snapshot.nodeId);
-      if (!node) throw new Error(`node ${snapshot.nodeId} does not exist`);
-      const key = `conversation_completion_seq:${node.workspace_id}`;
-      const counter = db.get<{ value: string }>('SELECT value FROM meta WHERE key = ?', key);
-      const previous = counter ? Number(counter.value) : 0;
-      if (!Number.isSafeInteger(previous) || previous < 0 || previous === Number.MAX_SAFE_INTEGER) {
-        throw new Error('Invalid conversation completion counter');
-      }
-      completionSeq = previous + 1;
-      db.run('INSERT INTO meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value', key, String(completionSeq));
+/**
+ * coreFinalizeTurn's writes, inside the caller's transaction. A turn that
+ * ran records the node's completion facts; a posted message
+ * (coreBeginAndFinalizeTurn) does not: the Companion's own unread badge and
+ * notice gate report a post (DESIGN-v2 §3.3, §3.8), so the attention
+ * service proposes nothing for it.
+ */
+function finalizeTurnRows(
+  db: DbPrimitives,
+  snapshot: DurableTurnSnapshot,
+  opts: { recordsCompletion: boolean },
+): CoreTurnRow {
+  const row = getTurnRow(db, snapshot.turnId);
+  if (!row) throw new Error(`turn ${snapshot.turnId} has not begun`);
+  assertTurnIdentity(
+    row as { node_id: unknown; assistant_message_id: unknown; user_message_id: unknown },
+    snapshot,
+  );
+  if (row.status !== 'active') {
+    if (row.status !== snapshot.status) {
+      throw new Error(`turn ${snapshot.turnId} is already finalized as ${row.status}`);
     }
-    db.run(
-      TURN_SQL.finalize,
-      snapshot.status,
-      snapshot.lastAppliedSeq,
-      snapshot.stopReason ?? null,
-      snapshot.error ?? null,
-      now,
-      completedAt,
-      now,
-      completionSeq,
-      snapshot.turnId,
+    return row;
+  }
+
+  writeSteeredMessages(db, snapshot);
+  writeAssistantSnapshot(db, snapshot);
+  writeTurnNodeProjection(db, snapshot, true);
+
+  const now = Date.now();
+  const completedAt = snapshot.completedAt ?? now;
+  // The node's completion facts (unread, attention) commit with the receipt,
+  // so a completion no window saw still counts after a reload.
+  if (opts.recordsCompletion && completedWithAnswer(snapshot)) {
+    db.run(NODE_SQL.recordCompletion, completedAt, snapshot.turnId, snapshot.nodeId);
+  }
+  let completionSeq: number | null = null;
+  const inputOrigin = row.user_message_id === null ? undefined : db.get<{ scheduled_job_id: unknown }>(
+    `SELECT json_extract(CASE WHEN json_valid(metadata) THEN metadata ELSE '{}' END, '$.scheduledJobId') AS scheduled_job_id
+     FROM messages WHERE id = ? AND node_id = ?`, row.user_message_id, snapshot.nodeId,
+  );
+  const scheduledInput = snapshot.userMessage?.metadata?.scheduledJobId || inputOrigin?.scheduled_job_id;
+  if (snapshot.status === 'completed' && row.user_message_id !== null && !scheduledInput) {
+    // Resolve the CURRENT workspace: a node may have moved since this turn began.
+    const node = db.get<{ workspace_id: string }>('SELECT workspace_id FROM nodes WHERE id = ?', snapshot.nodeId);
+    if (!node) throw new Error(`node ${snapshot.nodeId} does not exist`);
+    const key = `conversation_completion_seq:${node.workspace_id}`;
+    const counter = db.get<{ value: string }>('SELECT value FROM meta WHERE key = ?', key);
+    const previous = counter ? Number(counter.value) : 0;
+    if (!Number.isSafeInteger(previous) || previous < 0 || previous === Number.MAX_SAFE_INTEGER) {
+      throw new Error('Invalid conversation completion counter');
+    }
+    completionSeq = previous + 1;
+    db.run('INSERT INTO meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value', key, String(completionSeq));
+  }
+  db.run(
+    TURN_SQL.finalize,
+    snapshot.status,
+    snapshot.lastAppliedSeq,
+    snapshot.stopReason ?? null,
+    snapshot.error ?? null,
+    now,
+    completedAt,
+    now,
+    completionSeq,
+    snapshot.turnId,
+  );
+  return getTurnRow(db, snapshot.turnId)!;
+}
+
+/** What coreBeginAndFinalizeTurn did: `posted` wrote the turn; otherwise it was already there. */
+export type CoreBeginAndFinalizeResult =
+  | { posted: true; turn: CoreTurnRow }
+  /** `turn` is null when the message exists without a turn of its own (posted before posts had turns). */
+  | { posted: false; turn: CoreTurnRow | null };
+
+/**
+ * Begin and finalize a turn that is complete before anyone sees it, in ONE
+ * transaction: a message Michi posts into a conversation (chatHub
+ * .postSelfMessage, DESIGN-v2 §3.3). The rows a begin writes (the assistant
+ * message at MAX(seq)+1, the turn receipt, the node projection) and the
+ * terminal ones a finalize writes (content, follow_ups, the node's status
+ * and applied watermark) commit together or not at all, so a crash never
+ * leaves the conversation with an active turn that boot recovery would turn
+ * into an error with Retry/Resume. The composer draft is left alone: a post
+ * is nobody's prompt.
+ *
+ * Idempotent, writing nothing: a turn already finalized with the same
+ * identity and status, or a message of that id already in this node (one
+ * written directly, as first-run narration was before it moved onto posts).
+ * Throws for an active snapshot, for an id a turn or message of another
+ * identity or node holds, and for a turn of that id still active (which only
+ * a begin of its own could have left).
+ */
+export function coreBeginAndFinalizeTurn(db: DbPrimitives, snapshot: DurableTurnSnapshot): CoreBeginAndFinalizeResult {
+  if (snapshot.status === 'active') {
+    throw new Error(`turn ${snapshot.turnId} cannot be posted while active`);
+  }
+  return db.runInTransaction((): CoreBeginAndFinalizeResult => {
+    const existing = getTurnRow(db, snapshot.turnId);
+    if (existing) {
+      assertTurnIdentity(
+        existing as { node_id: unknown; assistant_message_id: unknown; user_message_id: unknown },
+        snapshot,
+      );
+      if (existing.status !== snapshot.status) {
+        throw new Error(`turn ${snapshot.turnId} already exists as ${existing.status}`);
+      }
+      return { posted: false, turn: existing };
+    }
+    const message = db.get<{ node_id: string; role: string }>(
+      'SELECT node_id, role FROM messages WHERE id = ?', snapshot.assistantId,
     );
-    return getTurnRow(db, snapshot.turnId)!;
+    if (message) {
+      if (message.node_id !== snapshot.nodeId || message.role !== 'assistant') {
+        throw new Error(`message ${snapshot.assistantId} belongs to another conversation`);
+      }
+      return { posted: false, turn: null };
+    }
+    beginTurnRows(db, snapshot, { consumesComposerOutbox: false });
+    return { posted: true, turn: finalizeTurnRows(db, snapshot, { recordsCompletion: false }) };
   });
 }

@@ -94,13 +94,6 @@ export class AcpConcurrencyError extends Error {
     }
 }
 
-export class KiroConcurrencyError extends AcpConcurrencyError {
-    constructor(message: string) {
-        super(message);
-        this.name = "KiroConcurrencyError";
-    }
-}
-
 /**
  * Shared ACP runtime: cwd-keyed process pool, MCP HTTP slot, warm sessions,
  * permission / ask-user forwarding. Kiro, Cursor, and Grok are thin configs

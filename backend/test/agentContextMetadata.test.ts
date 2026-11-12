@@ -5,7 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 
 import { closeDb, initDb } from '../src/services/db';
-import { listContexts, saveNode, saveWorkspace, upsertAgentContextMetadata } from '../src/services/dbRepository';
+import { listContexts, saveContext, saveNode, saveWorkspace, upsertAgentContextMetadata, type ContextRow } from '../src/services/dbRepository';
 
 describe('agent context metadata persistence', () => {
   let tmpDir: string;
@@ -56,5 +56,29 @@ describe('agent context metadata persistence', () => {
     assert.equal(contexts[0].size, 11);
     assert.equal(contexts[0].source, 'agent');
     assert.equal(contexts[0].origin_node_id, 'node-1');
+  });
+
+  test('takes a name differing only by case as the same artifact, as the window does', () => {
+    const savedId = upsertAgentContextMetadata({
+      workspaceId: 'ws-1', nodeId: 'node-1', name: 'Plan', filePath: '.contexts/Plan.md', size: 2,
+    });
+    const updatedId = upsertAgentContextMetadata({
+      workspaceId: 'ws-1', nodeId: 'node-1', name: 'plan', filePath: '.contexts/plan.md', size: 5,
+    });
+    const contexts = listContexts('ws-1');
+
+    assert.equal(updatedId, savedId);
+    assert.deepEqual(contexts.map((context) => [context.id, context.name, context.file_path, context.size]),
+      [[savedId, 'plan', '.contexts/plan.md', 5]]);
+  });
+
+  test('keeps updating its own row of a case-variant pair saved before names folded', () => {
+    for (const [id, name] of [['ctx-upper', 'Plan'], ['ctx-lower', 'plan']]) {
+      saveContext({ id, workspace_id: 'ws-1', name, file_path: `.contexts/${name}.md`, size: 1, auto_inject: 0,
+        source: 'agent', created_at: 1, updated_at: 1 } as ContextRow);
+    }
+    assert.equal(upsertAgentContextMetadata({
+      workspaceId: 'ws-1', nodeId: 'node-1', name: 'plan', filePath: '.contexts/plan.md', size: 5,
+    }), 'ctx-lower');
   });
 });

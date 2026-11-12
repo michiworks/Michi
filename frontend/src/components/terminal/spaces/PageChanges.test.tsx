@@ -1,4 +1,3 @@
-import React from 'react';
 import { fireEvent, render, screen } from '@testing-library/react';
 import { describe, expect, it, vi } from 'vitest';
 import type { PageChangeDto, PageDatabase } from 'michi-shared';
@@ -105,4 +104,62 @@ describe('native page change presentation', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Load older activity' }));
     expect(onLoadMore).toHaveBeenCalledOnce();
   });
+
+  it.each(['card', 'inline'] as const)('shows and edits the proposed row text of a %s row suggestion', (variant) => {
+    const onAccept = vi.fn();
+    const change = rowChange({ kind: 'row', op: 'patch', id: 'r1', values: { status: 'done' }, body: 'Agent notes' });
+    render(<ChangeCard change={change} variant={variant} onAccept={onAccept} onDismiss={vi.fn()} onReopen={vi.fn()} onRevert={vi.fn()} onRedo={vi.fn()} onOpenSource={vi.fn()} />);
+    // What Accept would write, before choosing.
+    expect(document.body.textContent).toContain('Agent notes');
+    fireEvent.click(screen.getByRole('button', { name: 'Edit & accept' }));
+    expect((screen.getByLabelText('Proposed row text') as HTMLTextAreaElement).value).toBe('Agent notes');
+    fireEvent.change(screen.getByLabelText('Proposed row text'), { target: { value: 'My notes' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Edit & accept' }));
+    expect(onAccept).toHaveBeenCalledWith(change, { kind: 'row', values: { status: 'done' }, body: 'My notes' });
+  });
+
+  it.each(['card', 'inline'] as const)('names a %s row removal as a removal', (variant) => {
+    const change = rowChange({ kind: 'row', op: 'delete', id: 'r1', expectedLocation: { position: 0, after: null } });
+    render(<ChangeCard change={change} variant={variant} onAccept={vi.fn()} onDismiss={vi.fn()} onReopen={vi.fn()} onRevert={vi.fn()} onRedo={vi.fn()} onOpenSource={vi.fn()} />);
+    expect(screen.getByText(variant === 'card' ? 'Suggested row deletion' : 'Suggested removal')).toBeTruthy();
+    expect(screen.getByText('Accepting removes the row.')).toBeTruthy();
+    expect(screen.queryByText('Suggested field update')).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Edit & accept' })).toBeNull();
+  });
+
+  it('says a row removal waits for you as a removal in a list', () => {
+    const change = rowChange({ kind: 'row', op: 'delete', id: 'r1', expectedLocation: { position: 0, after: null } });
+    render(<ChangeCard change={change} variant="inline" showTarget onAccept={vi.fn()} onDismiss={vi.fn()} onReopen={vi.fn()} onRevert={vi.fn()} onRedo={vi.fn()} onOpenSource={vi.fn()} />);
+    expect(screen.getByText('Waiting for you: remove this row')).toBeTruthy();
+  });
+
+  it('names a block as Home does, without its Markdown marks', () => {
+    const location = { parentId: null, slot: null, previousId: null, nextId: null };
+    const block = { id: 'block-1', rev: 2, type: 'markdown' as const, text: '## 本周重点\n- a' };
+    const change = blockChange({
+      before: { kind: 'block', exists: true, block: { id: 'block-1', rev: 1, type: 'markdown', text: 'Old' }, location },
+      after: { kind: 'block', exists: true, block, location }, forward: { kind: 'block', op: 'upsert', block, location },
+    });
+    const props = { onAccept: vi.fn(), onDismiss: vi.fn(), onReopen: vi.fn(), onRevert: vi.fn(), onRedo: vi.fn(), onOpenSource: vi.fn() };
+    const view = render(<ChangeCard change={change} {...props} />);
+    expect(screen.getByText('Suggested rewrite of “本周重点”')).toBeTruthy();
+    view.unmount();
+    render(<ChangeCard change={change} variant="inline" showTarget {...props} />);
+    expect(screen.getByText('Waiting for you: rewrite “本周重点”')).toBeTruthy();
+  });
 });
+
+/** A pending suggestion for row r1, recorded as the backend records every row change (op 'row'). */
+function rowChange(forward: PageChangeDto['forward']): PageChangeDto {
+  const row = { id: 'r1', values: { task: 'Write the spec', status: 'doing' }, body: 'My own notes', position: 0, updatedAt: 1, rev: 1, edited: { status: 1 }, bodyEditedAt: 1 };
+  const location = { position: 0, after: null };
+  const removal = forward.kind === 'row' && forward.op === 'delete';
+  return blockChange({
+    target: { kind: 'row', databaseId: 'db', rowId: 'r1', columnIds: ['status'], body: true }, op: 'row',
+    before: { kind: 'row', exists: true, row, location },
+    after: removal ? { kind: 'row', exists: false, id: 'r1', location: null }
+      : { kind: 'row', exists: true, row: { ...row, values: { ...row.values, status: 'done' }, body: 'Agent notes' }, location },
+    forward,
+    inverse: removal ? { kind: 'row', op: 'upsert', row, location } : { kind: 'row', op: 'patch', id: 'r1', values: { status: 'doing' }, body: 'My own notes' },
+  });
+}

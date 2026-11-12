@@ -12,9 +12,9 @@ const fakeConfig = {
   resolveModel: () => "", resolveReasoning: () => undefined,
 };
 
-function storeWith(nodes: Record<string, { parent: string | null; msgs: Array<{ role: string; content: string }> }>): HistoryStore {
+function storeWith(nodes: Record<string, { parent: string | null; fresh?: boolean; msgs: Array<{ role: string; content: string }> }>): HistoryStore {
   return {
-    getNode: (id) => (nodes[id] ? { parent_node_id: nodes[id].parent, workspace_id: null } : null),
+    getNode: (id) => (nodes[id] ? { parent_node_id: nodes[id].parent, workspace_id: null, fresh_context: nodes[id].fresh ? 1 : 0 } : null),
     listMessages: (id) => (nodes[id]?.msgs ?? []).map((m) => ({ role: m.role, content: m.content, created_at: 0 })),
     getWorkspace: () => null, getWorkspaceInstructions: () => null,
   };
@@ -49,6 +49,22 @@ describe("sessionRegistry.ensureAncestorChainLoaded", () => {
         ensureAncestorChainLoaded("child");
         assert.equal(getSession("root")?.getHistory()[0]?.content, "root-u");
         assert.equal(getSession("child")?.parentChatId, "root");
+    });
+
+    test("ends the chain at a fresh multi-model branch, which never had its parent's conversation", () => {
+        configureRuntimeDeps({
+            historyStore: storeWith({
+                grand: { parent: "fresh", msgs: [{ role: "user", content: "grand-u" }] },
+                fresh: { parent: "caller", fresh: true, msgs: [{ role: "assistant", content: "fresh-a" }] },
+                caller: { parent: null, msgs: [{ role: "user", content: "caller-u" }] },
+            }),
+            agentConfig: fakeConfig, dataDir: "/tmp/agent-runtime-test",
+        });
+        ensureAncestorChainLoaded("grand");
+        assert.equal(getSession("grand")?.parentChatId, "fresh");
+        assert.equal(getSession("fresh")?.getHistory()[0]?.content, "fresh-a");
+        assert.equal(getSession("fresh")?.parentChatId, undefined);
+        assert.equal(getSession("caller"), undefined, "the caller is not loaded into the chain");
     });
 
     test("uses least-recently-used order when the stub count exceeds its cap", () => {

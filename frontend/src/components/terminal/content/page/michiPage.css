@@ -30,9 +30,9 @@
 .michi-doc-caption {
   margin: 0;
   color: var(--term-muted);
-  font-size: 10px;
+  font-size: var(--fs-xs);
   font-weight: 500;
-  letter-spacing: 0.14em;
+  letter-spacing: var(--ls-caps-wide);
   text-transform: uppercase;
 }
 .michi-doc-caption--accent { color: var(--term-accent); }
@@ -519,6 +519,11 @@ a.michi-doc-link-card:hover { background: var(--term-alt); }
 .michi-doc-checklist li { display: flex; align-items: center; gap: 10px; padding: 5px 4px; border-radius: var(--ui-radius); }
 .michi-doc-checklist li[data-done='true'] { color: var(--term-muted); text-decoration: line-through; }
 .michi-doc-checklist__text { flex: 1; min-width: 0; }
+/* Done items fold under one row; the chevron turns when they are shown. */
+.michi-doc-checklist__done-toggle { display: inline-flex; align-items: center; gap: 6px; margin: 4px 0 0; padding: 4px; color: var(--term-muted); }
+.michi-doc-checklist__chevron { transition: transform 120ms ease-out; }
+.michi-doc-checklist__done-toggle[aria-expanded='true'] .michi-doc-checklist__chevron { transform: rotate(90deg); }
+@media (prefers-reduced-motion: reduce) { .michi-doc-checklist__chevron { transition: none; } }
 /* Ask about one item: shown on the row's hover or focus; touch screens have no hover, so it stays visible there, faint. */
 .michi-doc-checklist__ask {
   display: inline-flex;
@@ -663,7 +668,7 @@ a.michi-doc-link-card:hover { background: var(--term-alt); }
 .space-doc [data-michi-block='markdown'] .prose tbody tr:hover td { background: color-mix(in srgb, var(--term-hover-bg, var(--term-alt)) 50%, transparent); }
 /* Phones fit the table to the column: a long word (a branch or package name) breaks inside its cell
    rather than widening the table past the screen, which made the whole page pan sideways. */
-@media (max-width: 700px) {
+@media (max-width: 700px), (pointer: coarse) and (max-height: 500px) {
   .space-doc [data-michi-block='markdown'] .prose :is(th, td) { overflow-wrap: anywhere; }
   .space-doc [data-michi-block='markdown'] .prose th { white-space: normal; line-height: 1.3; }
 }
@@ -898,6 +903,14 @@ a.michi-doc-link-card:hover { background: var(--term-alt); }
   from { background: var(--term-accent-f); outline-color: var(--term-accent); }
   to { background: transparent; }
 }
+/* A block revealed from elsewhere (revealPageTarget) is often still arriving on
+   a smooth scroll, so its flash runs twice the page's own plus a beat, ≈1.4s,
+   and holds the tint for the first 30%. */
+@keyframes michi-doc-reveal-flash {
+  0%, 30% { background: var(--term-accent-f); }
+  100% { background: transparent; }
+}
+.michi-doc-block[data-reveal-flash] { animation: michi-doc-reveal-flash calc(var(--t-slow, 600ms) * 2 + var(--t-enter, 180ms)) ease-out; }
 .michi-doc-block[data-editing='true'] { outline-color: transparent; }
 /* Deleted, until the page reads itself again and drops it. */
 .michi-doc-block[data-removing='true'] { opacity: 0.4; outline-color: transparent; }
@@ -1087,7 +1100,7 @@ a.michi-doc-link-card:hover { background: var(--term-alt); }
 .michi-doc-insert__head button { font-size: inherit; }
 /* How much of Michi's limit the words use, once they come close. */
 .michi-doc-editor__count { color: var(--term-muted); font-size: var(--fs-xs); }
-.michi-doc-editor__count[data-over] { color: var(--term-danger); }
+.michi-doc-editor__count[data-over] { color: var(--term-danger-text); }
 /* The page was rearranged under an open editor. */
 .michi-doc-editor__changed {
   display: flex;
@@ -1135,7 +1148,7 @@ a.michi-doc-link-card:hover { background: var(--term-alt); }
 .michi-doc-menu__title { display: flex; align-items: baseline; gap: 6px; }
 .michi-doc-menu__count { margin-left: auto; color: var(--term-muted); font-size: var(--fs-sm); }
 .michi-doc-menu__sub { color: var(--term-muted); font-size: var(--fs-xs); }
-.michi-doc-menu__caption { letter-spacing: 0.14em; text-transform: uppercase; font-size: 10px; }
+.michi-doc-menu__caption { letter-spacing: var(--ls-caps-wide); text-transform: uppercase; font-size: var(--fs-xs); }
 .michi-doc-menu__keys {
   padding: 0 4px;
   border: 1px solid var(--term-line);
@@ -1359,7 +1372,7 @@ a.michi-doc-link-card:hover { background: var(--term-alt); }
 
 @media (prefers-reduced-motion: reduce) {
   .michi-doc-block, .michi-doc-toolbar, .michi-doc-thread, .michi-doc-ghost, .michi-doc-block__margin { transition: none; }
-  .michi-doc-block[data-flash] { animation: none; background: var(--term-accent-f); }
+  .michi-doc-block[data-flash], .michi-doc-block[data-reveal-flash] { animation: none; background: var(--term-accent-f); }
   .michi-doc-skeleton span { animation: none; }
 }
 

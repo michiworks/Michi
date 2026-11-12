@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { areaForPage, entryPageForArea } from './shellArea';
+import { SETTINGS_AREA_SECTIONS, areaForPage, entryPageForArea } from './shellArea';
 
 describe('shell areas', () => {
   it('maps every Spaces, Scheduled and Settings page to its area and the rest to Conversations', () => {
@@ -18,5 +18,10 @@ describe('shell areas', () => {
     expect(entryPageForArea('spaces', 'dashboard')).toBe('spaces');
     expect(entryPageForArea('scheduled', 'home')).toBe('scheduled');
     expect(entryPageForArea('settings', 'home')).toBe('settings');
+  });
+
+  it('keeps the old meta-agent section only as the Pages upkeep request, never under the old name', () => {
+    expect(SETTINGS_AREA_SECTIONS.find((section) => section.id === 'meta-agent')?.label).toBe('Pages upkeep');
+    expect(SETTINGS_AREA_SECTIONS.map((section) => section.label).join(' ')).not.toMatch(/meta agent/i);
   });
 });

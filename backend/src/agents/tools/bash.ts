@@ -17,7 +17,7 @@
 import { findOnPath } from "../executableLookup";
 import { spawnAgentProcess, killProcessTree } from "../processTree";
 import { resolveWithinCwd, PathSandboxError } from "./pathSandbox";
-import { getUserSandboxRoot } from "../../services/workspaceSandbox";
+import { agentSpawnEnv, cloudSubprocessEnv } from "../agentSpawnEnv";
 import { truncateTail, formatSize, type TruncationDetails } from "./truncate";
 import { errorResult, type ToolResult } from "./types";
 
@@ -92,19 +92,14 @@ export async function executeBash(
     // (MICHI_ENCRYPTION_KEY, BETTER_AUTH_SECRET, RAILWAY_API_TOKEN, etc.).
     // Without an owner there is no sandbox to scope it to, so refuse to run
     // (fail closed, like mcpSubprocessEnvironment for external MCP).
-    // Desktop mode (MICHI_CLOUD unset) keeps full process.env as today.
-    let spawnEnv: NodeJS.ProcessEnv = process.env;
+    // Desktop mode (MICHI_CLOUD unset) passes the user's environment, less the backend's own.
+    let spawnEnv: NodeJS.ProcessEnv = agentSpawnEnv();
     if (process.env.MICHI_CLOUD === "1") {
         const ownerUserId = ctx.ownerUserId;
         if (typeof ownerUserId !== "string" || ownerUserId.trim().length === 0) {
             return errorResult("bash requires a session owner in cloud mode; the command was not run");
         }
-        spawnEnv = {
-            PATH: process.env.PATH ?? "/usr/bin:/bin",
-            HOME: getUserSandboxRoot(ownerUserId),
-            LANG: process.env.LANG ?? "en_US.UTF-8",
-            NODE_NO_WARNINGS: "1",
-        };
+        spawnEnv = cloudSubprocessEnv(ownerUserId);
     }
 
     const shell = resolveBashShell();

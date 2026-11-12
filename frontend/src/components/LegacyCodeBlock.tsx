@@ -1,5 +1,7 @@
 import React, { Suspense, startTransition, useEffect, useMemo, useRef, useState } from 'react';
 import CodeBlockPlainLines from './CodeBlockPlainLines';
+import { useCopyFeedback } from '../hooks/useCopyFeedback';
+import { downloadText } from '../lib/download';
 
 const languageClassRe = /(?:^|\s)language-([^\s]+)/;
 const LegacyHighlightedCode = React.lazy(() => import('./LegacyHighlightedCode'));
@@ -8,7 +10,7 @@ export function languageFromClassName(className: string | undefined): string {
   return className?.match(languageClassRe)?.[1] ?? '';
 }
 
-export function trimCodeFenceNewline(value: string): string {
+function trimCodeFenceNewline(value: string): string {
   return value.endsWith('\n') ? value.slice(0, -1) : value;
 }
 
@@ -20,6 +22,8 @@ export interface LegacyCodeBlockProps {
   lineNumbers?: boolean;
   showDownload?: boolean;
   tail?: React.ReactNode;
+  /** Only https URLs in the code become links. */
+  httpsLinksOnly?: boolean;
   'data-michi-code-block'?: boolean;
 }
 
@@ -31,11 +35,10 @@ function LegacyCodeBlock({
   lineNumbers = false,
   showDownload = false,
   tail,
+  httpsLinksOnly = false,
 }: LegacyCodeBlockProps) {
-  const [copied, setCopied] = useState(false);
   const elementRef = useRef<HTMLDivElement>(null);
   const [nearViewport, setNearViewport] = useState(() => typeof IntersectionObserver === 'undefined');
-  const copyTimer = useRef<number | null>(null);
   const source = useMemo(() => trimCodeFenceNewline(text), [text]);
   const resolvedLanguage = language || languageFromClassName(className) || 'text';
   const highlightable = !deferHighlight && resolvedLanguage !== 'text' && source.trim().length > 0;
@@ -55,39 +58,18 @@ function LegacyCodeBlock({
     return () => observer.disconnect();
   }, [highlightable, nearViewport]);
 
-  useEffect(() => {
-    return () => {
-      if (copyTimer.current !== null) window.clearTimeout(copyTimer.current);
-    };
-  }, []);
-
-  const copyCode = async () => {
-    if (typeof navigator === 'undefined' || !navigator.clipboard?.writeText) return;
-    try {
-      await navigator.clipboard.writeText(source);
-    } catch {
-      return;
-    }
-    setCopied(true);
-    if (copyTimer.current !== null) window.clearTimeout(copyTimer.current);
-    copyTimer.current = window.setTimeout(() => setCopied(false), 1200);
-  };
+  const { result: copyResult, copy } = useCopyFeedback();
+  const copied = copyResult === 'copied';
 
   const downloadCode = () => {
-    if (typeof document === 'undefined' || typeof URL.createObjectURL !== 'function') return;
-    const url = URL.createObjectURL(new Blob([source], { type: 'text/plain;charset=utf-8' }));
-    const anchor = document.createElement('a');
-    anchor.href = url;
-    anchor.download = `code.${resolvedLanguage === 'text' ? 'txt' : resolvedLanguage}`;
-    anchor.click();
-    URL.revokeObjectURL(url);
+    downloadText(`code.${resolvedLanguage === 'text' ? 'txt' : resolvedLanguage}`, source, 'text/plain;charset=utf-8');
   };
 
   const copyButton = (
     <button
       aria-label="Copy code"
       className={copied ? 'michi-code-copy is-copied' : 'michi-code-copy'}
-      onClick={() => void copyCode()}
+      onClick={() => { void copy(source); }}
       title="copy code"
       type="button"
     >
@@ -133,11 +115,11 @@ function LegacyCodeBlock({
           <pre className="michi-code-pre">
             <code className={className}>
               {shouldHighlight ? (
-                <Suspense fallback={<CodeBlockPlainLines source={source} tail={tail} lineNumbers={lineNumbers} />}>
-                  <LegacyHighlightedCode language={resolvedLanguage} source={source} tail={tail} lineNumbers={lineNumbers} />
+                <Suspense fallback={<CodeBlockPlainLines source={source} tail={tail} lineNumbers={lineNumbers} httpsLinksOnly={httpsLinksOnly} />}>
+                  <LegacyHighlightedCode language={resolvedLanguage} source={source} tail={tail} lineNumbers={lineNumbers} httpsLinksOnly={httpsLinksOnly} />
                 </Suspense>
               ) : (
-                <CodeBlockPlainLines source={source} tail={tail} lineNumbers={lineNumbers} />
+                <CodeBlockPlainLines source={source} tail={tail} lineNumbers={lineNumbers} httpsLinksOnly={httpsLinksOnly} />
               )}
             </code>
           </pre>

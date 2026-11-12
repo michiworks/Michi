@@ -1,4 +1,3 @@
-import { createHash } from 'node:crypto';
 import {
   AgentPolicyCategory,
   AgentPolicyDecision,
@@ -26,6 +25,7 @@ import type {
   RuntimeSessionOwner,
 } from '../types';
 import type { NormalizedEvent } from '../../services/chatEvents';
+import { sha256Canonical } from '../../services/pages/canonicalJson';
 import { decodeMichiHostEvent, type MichiHostEvent } from '../hostEvents';
 import type {
   AgentRunExecutionEvent,
@@ -73,16 +73,6 @@ const RUN_DRIVER_MESSAGES: HeadlessDriverMessages = {
   cannotAnswerInteraction: (runtimeId, kind) => `runtime ${runtimeId} cannot answer a pending ${kind} interaction`,
   turnFailed: 'Runtime turn ended with an error',
 };
-
-function stableHash(value: unknown): string {
-  const normalize = (item: unknown): unknown => {
-    if (Array.isArray(item)) return item.map(normalize);
-    if (item && typeof item === 'object') return Object.fromEntries(Object.entries(item as Record<string, unknown>)
-      .sort(([a], [b]) => a.localeCompare(b)).map(([key, child]) => [key, normalize(child)]));
-    return item;
-  };
-  return createHash('sha256').update(JSON.stringify(normalize(value))).digest('hex');
-}
 
 function profileFor(spec: AgentRunSpec): RuntimeProfileV1 {
   return spec.effectiveDefinition.runtimeProfile;
@@ -220,7 +210,7 @@ export class RuntimeRunExecutor implements AgentRunExecutor {
     const collector = createRunResultCollector(owner);
     const toolProfile = collector.createToolProfile(allowedTools(spec), json(spec.effectiveDefinition.capabilitySnapshot));
     const permissionBroker = this.createPermissionBroker({ spec, owner, emit });
-    const profileHash = stableHash({ profile, cwd: spec.executionEnvironment.cwd,
+    const profileHash = sha256Canonical({ profile, cwd: spec.executionEnvironment.cwd,
       environment: spec.executionEnvironment, instructions, capabilitySnapshot: spec.effectiveDefinition.capabilitySnapshot });
     const common = {
       sessionId: spec.attemptId,
@@ -339,10 +329,14 @@ function permissionDecisionForTool(spec: AgentRunSpec, canonical: string): Runti
     if (['write', 'edit'].includes(canonical)) return AgentPolicyCategory.FilesystemWrite;
     if (['save_artifact', 'update_artifact', 'spawn_branches'].includes(canonical)) return AgentPolicyCategory.ArtifactWrite;
     if (canonical === 'web_search' || canonical === 'fetch_content') return AgentPolicyCategory.Browse;
-    if (['grep', 'find', 'search_messages'].includes(canonical)) return AgentPolicyCategory.Search;
-    if (['read', 'ls', 'read_node', 'read_node_overview', 'read_conversation_updates', 'list_threads', 'show_image', 'list_agents', 'check_agent', 'wait_agent'].includes(canonical)) {
+    if (['grep', 'find', 'search_messages', 'search_artifacts'].includes(canonical)) return AgentPolicyCategory.Search;
+    if (['read', 'ls', 'read_node', 'read_node_overview', 'read_conversation_updates', 'list_threads', 'list_artifacts', 'show_image', 'list_agents', 'check_agent', 'wait_agent',
+      // Read-only pane and docs tools; the pane layer itself authorizes a Run by its Read policy.
+      'inspect_pane', 'read_pane_output', 'list_panes', 'wait_pane', 'michi_docs', 'michi_skills'].includes(canonical)) {
       return AgentPolicyCategory.Read;
     }
+    // Everything else, delete_artifact included (chat-only today; it would
+    // not be ArtifactWrite, which Runs allow by default).
     return AgentPolicyCategory.ExternalAction;
   })();
   const decision = spec.effectiveDefinition.permissionPolicy.categories[category] ?? AgentPolicyDecision.Deny;

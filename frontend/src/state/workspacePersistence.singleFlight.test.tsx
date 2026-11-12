@@ -9,7 +9,6 @@ const apiMocks = vi.hoisted(() => ({
 
 vi.mock('../services/api', () => ({
   fetchPersistenceCapabilities: vi.fn().mockRejectedValue(new Error('backend still starting')),
-  fetchAllWorkspaces: vi.fn(() => new Promise(() => {})),
   fetchWorkspace: vi.fn(),
   fetchWorkspaces: vi.fn(),
   applyWorkspaceCommands: apiMocks.applyWorkspaceCommands,

@@ -43,4 +43,20 @@ describe('usePageDatabase refresh state', () => {
     await waitFor(() => expect(result.current.stale).toBe(true));
     await expect(result.current.edit([])).rejects.toThrow('Database is not ready for editing');
   });
+
+  it('reads the database again once when a write meets a newer revision, and still rejects', async () => {
+    const database = {
+      id: 'database-conflict', workspaceId: 'workspace-conflict', title: 'Plan',
+      columns: [], rows: [], views: [], revision: 1, updatedAt: 1,
+    };
+    api.fetchPageDatabase.mockResolvedValue(database);
+    const { result } = renderHook(() => usePageDatabase({
+      backendConnectionId: 'local', workspaceId: database.workspaceId, databaseId: database.id,
+    }));
+    await waitFor(() => expect(result.current.database?.revision).toBe(1));
+    api.fetchPageDatabase.mockClear();
+    api.editPageDatabase.mockRejectedValue(Object.assign(new Error('Database revision changed'), { status: 409 }));
+    await act(async () => { await expect(result.current.edit([])).rejects.toThrow('Database revision changed'); });
+    expect(api.fetchPageDatabase).toHaveBeenCalledTimes(1);
+  });
 });

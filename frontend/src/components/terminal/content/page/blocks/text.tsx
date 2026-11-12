@@ -1,14 +1,9 @@
 import React from 'react';
 import LegacyCodeBlock from '../../../../LegacyCodeBlock';
 import MarkdownContent, { type MarkdownFeatureProfile } from '../../../../MarkdownContent';
+import { INHERIT_PROSE_STYLE, MESSAGE_PROSE_STYLE, TERM_PROSE_CLASS, UNTRUSTED_MARKDOWN } from '../../../../markdownProse';
 import type { BlockProps } from '../blockTypes';
 import { httpsUrl, objects, str } from '../michiPageModel';
-
-const PROSE_CLASS =
-  'prose prose-sm max-w-none wrap-break-word [&>*:first-child]:mt-0 [&>*:last-child]:mb-0 ' +
-  '[&_p]:text-(--term-mid) [&_li]:text-(--term-mid) [&_strong]:text-(--term-fg) ' +
-  '[&_a]:text-(--term-accent) [&_code]:text-(--term-fg) ' +
-  '[&_h1]:text-(--term-fg) [&_h2]:text-(--term-fg) [&_h3]:text-(--term-fg) [&_h4]:text-(--term-fg)';
 
 const TONES = new Set(['info', 'warn', 'success', 'danger']);
 export const toneOf = (v: unknown): string | undefined => (typeof v === 'string' && TONES.has(v) ? v : undefined);
@@ -31,25 +26,14 @@ export function HeadingBlock({ block }: BlockProps) {
   return <Tag className="michi-doc-h2" data-level={level} data-michi-block="heading">{text}</Tag>;
 }
 
-/** One object for every render, so MarkdownContent's memo holds across Michi polls. */
-const PROSE_STYLE: React.CSSProperties = {
-  color: 'var(--term-mid)',
-  fontFamily: 'var(--message-latin-font), var(--message-cjk-font)',
-  fontSize: 'var(--fs-lg)',
-  lineHeight: 1.68,
-};
-
-/** Michi pages are written from other apps' conversations: opening one loads nothing, and only https links stay links. */
-export const MICHI_MARKDOWN_FEATURES: MarkdownFeatureProfile = { remoteMedia: false, httpsLinksOnly: true };
-
 /** Pages that load pictures (native pages) also show Markdown pictures at https addresses on the internet. */
-const PICTURE_MARKDOWN_FEATURES: MarkdownFeatureProfile = { ...MICHI_MARKDOWN_FEATURES, httpsImages: true };
+const PICTURE_MARKDOWN_FEATURES: MarkdownFeatureProfile = { ...UNTRUSTED_MARKDOWN, httpsImages: true };
 
 /** Agent prose. Images show as their alt text, except https pictures where the page loads pictures. */
 export function MarkdownBlock({ block, ctx }: BlockProps) {
   return (
     <div data-michi-block="markdown">
-      <MarkdownContent text={str(block.text)} size="sm" className={PROSE_CLASS} style={PROSE_STYLE} features={ctx.loadImages === true ? PICTURE_MARKDOWN_FEATURES : MICHI_MARKDOWN_FEATURES} />
+      <MarkdownContent text={str(block.text)} size="sm" className={TERM_PROSE_CLASS} style={MESSAGE_PROSE_STYLE} features={ctx.loadImages === true ? PICTURE_MARKDOWN_FEATURES : UNTRUSTED_MARKDOWN} />
     </div>
   );
 }
@@ -75,8 +59,6 @@ export function markdownLineAsText(line: string): string {
   return line.replace(ORDERED, '$1\\$2');
 }
 
-/** Size, colour and font come from the surrounding text; the prose wrapper only draws the inline marks. */
-const INLINE_STYLE: React.CSSProperties = { color: 'inherit', fontFamily: 'inherit', fontSize: 'inherit', lineHeight: 'inherit' };
 const INLINE_CLASS = 'wrap-break-word [&_strong]:text-(--term-fg) [&_a]:text-(--term-accent) [&_code]:text-(--term-fg)';
 
 /**
@@ -87,7 +69,7 @@ const INLINE_CLASS = 'wrap-break-word [&_strong]:text-(--term-fg) [&_a]:text-(--
 export function InlineMarkdownParagraphs({ text }: { text: string }) {
   const source = text.split(/\n+/).map((line) => line.trim()).filter(Boolean).map(markdownLineAsText).join('\n\n');
   if (!source) return null;
-  return <MarkdownContent text={source} size="sm" displayContents className={INLINE_CLASS} style={INLINE_STYLE} features={MICHI_MARKDOWN_FEATURES} />;
+  return <MarkdownContent text={source} size="sm" displayContents className={INLINE_CLASS} style={INHERIT_PROSE_STYLE} features={UNTRUSTED_MARKDOWN} />;
 }
 
 /**
@@ -167,7 +149,7 @@ export function StatusBlock({ block }: BlockProps) {
   );
 }
 
-/** Code is shown, never run. */
+/** Code is shown, never run. Only https addresses link, as in LinkBlock. */
 export function CodeBlock({ block }: BlockProps) {
   const title = str(block.title).trim();
   const lang = str(block.lang).trim();
@@ -179,7 +161,7 @@ export function CodeBlock({ block }: BlockProps) {
           {lang && <span className="michi-doc-code-lang">{lang}</span>}
         </div>
       )}
-      <LegacyCodeBlock text={str(block.code)} language={lang} />
+      <LegacyCodeBlock text={str(block.code)} language={lang} httpsLinksOnly />
     </div>
   );
 }

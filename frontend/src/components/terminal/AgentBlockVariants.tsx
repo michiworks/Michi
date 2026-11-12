@@ -2,7 +2,7 @@ import React, { useEffect, useRef, useState } from 'react';
 import type { ToolCallState, SubagentInfo } from '../../state/chatTypes';
 import { backendNow } from '../../services/backendClock';
 import {
-  toolBucketKey,
+  toolKind,
   toolDisplayTitle,
   isFailedStatus,
   isRunningStatus,
@@ -37,6 +37,7 @@ import {
   LabelSwap,
   Reveal,
   RevealList,
+  RollingNumber,
   ScrollingRevealList,
   type RevealRow,
 } from './agentBlockMotion';
@@ -97,7 +98,7 @@ export function CollapsedToolSummary({
     <>
       {lone ? subagentHeading(lone) : summarizeToolsBase(tools, subagentStatus)}
       {failed > 0 && (
-        <span style={{ color: 'var(--term-danger)' }}>
+        <span style={{ color: 'var(--term-danger-text)' }}>
           {' '}· {tools.length === 1 ? 'failed' : `${failed} failed`}
         </span>
       )}
@@ -181,8 +182,21 @@ function liveElapsedSeconds(startedAt: number | undefined, clockKey: string | un
   return Math.max(0, Math.floor((Date.now() - mountedAt) / 1000));
 }
 
+const VISUALLY_HIDDEN: React.CSSProperties = {
+  position: 'absolute',
+  width: 1,
+  height: 1,
+  margin: -1,
+  padding: 0,
+  overflow: 'hidden',
+  clip: 'rect(0 0 0 0)',
+  whiteSpace: 'nowrap',
+  border: 0,
+};
+
 /**
- * Live "8s" seconds counter for streaming headers (1b thinking card).
+ * Live "8s" seconds counter for streaming headers (1b thinking card). Its
+ * digits roll as it ticks (RollingNumber).
  * `startedAt` makes the count a function of durable data, so a remount
  * (switching away and back), a reload or another window resumes the same
  * count. Without it (legacy turns) the count starts when the label mounts.
@@ -204,8 +218,12 @@ export function LiveTimerLabel({ active, startedAt, clockKey }: {
   }, [active, startedAt, clockKey]);
   if (!active || sec < 1) return null;
   return (
-    <span style={{ marginLeft: 'auto', fontFamily: MONO, fontSize: 'var(--fs-xs)', color: 'var(--term-muted)', flexShrink: 0 }}>
-      {sec}s
+    <span style={{ marginLeft: 'auto', fontFamily: MONO, fontSize: 'var(--fs-xs)', color: 'var(--term-muted)', flexShrink: 0, position: 'relative' }}>
+      {/* Read as one value; the rolling digits (and any leaving one) are visual only. */}
+      <span style={VISUALLY_HIDDEN}>{sec}s</span>
+      <span aria-hidden style={{ display: 'inline-flex' }}>
+        <RollingNumber value={sec} />s
+      </span>
     </span>
   );
 }
@@ -214,7 +232,7 @@ export function LiveTimerLabel({ active, startedAt, clockKey }: {
 function SubagentStatus({ status }: { status: string | undefined }) {
   const failed = isFailedStatus(status);
   const running = isRunningStatus(status);
-  const color = failed ? 'var(--term-danger)' : running ? 'var(--term-accent)' : 'var(--term-muted)';
+  const color = failed ? 'var(--term-danger)' : running ? 'var(--term-run)' : 'var(--term-muted)';
   const label = subagentStatusLabel(status);
   return (
     <span style={{ display: 'inline-flex', alignItems: 'center', gap: 5, flexShrink: 0 }}>
@@ -227,7 +245,7 @@ function SubagentStatus({ status }: { status: string | undefined }) {
           <span aria-hidden className="term-dot-i" />
         )}
       </GlyphSwap>
-      <FadeOnChange k={label} style={{ fontSize: 'var(--fs-xs)', color }}>{label}</FadeOnChange>
+      <FadeOnChange k={label} style={{ fontSize: 'var(--fs-xs)', color: failed ? 'var(--term-danger-text)' : color }}>{label}</FadeOnChange>
     </span>
   );
 }
@@ -347,7 +365,7 @@ function FailedBadge({ label }: { label: string }) {
         fontSize: 'var(--fs-2xs)',
         letterSpacing: 'var(--ls-wide)',
         border: '1px solid var(--term-danger)',
-        color: 'var(--term-danger)',
+        color: 'var(--term-danger-text)',
         padding: '1px 5px',
         flexShrink: 0,
       }}
@@ -358,8 +376,8 @@ function FailedBadge({ label }: { label: string }) {
 }
 
 function cardToolName(t: ToolCallState): string {
-  const key = toolBucketKey(t);
-  if (key !== 'unknown') return key.charAt(0).toUpperCase() + key.slice(1);
+  const key = toolKind(t);
+  if (key !== 'unknown' && key !== 'subagent') return key.charAt(0).toUpperCase() + key.slice(1);
   return toolDisplayTitle(t) || t.kind || '(unnamed)';
 }
 
@@ -384,7 +402,7 @@ function CardPayload({ t }: { t: ToolCallState }) {
       {t.inputJson && (
         <>
           <div style={{ ...CAP_LABEL, padding: '5px 11px 2px' }}>input</div>
-          <pre style={preStyle}>{formatToolPayload(t.inputJson)}</pre>
+          <pre className="agent-verbatim" style={preStyle}>{formatToolPayload(t.inputJson)}</pre>
         </>
       )}
       {t.output && (
@@ -392,7 +410,7 @@ function CardPayload({ t }: { t: ToolCallState }) {
           <div style={{ ...CAP_LABEL, padding: '2px 11px 2px', borderTop: t.inputJson ? CARD_BORDER : undefined }}>
             output
           </div>
-          <pre style={{ ...preStyle, color: failed ? 'var(--term-danger)' : 'var(--term-mid)', padding: '0 11px 8px' }}>
+          <pre className="agent-verbatim" style={{ ...preStyle, color: failed ? 'var(--term-danger-text)' : 'var(--term-mid)', padding: '0 11px 8px' }}>
             {formatToolPayload(t.output)}
           </pre>
         </>
@@ -417,7 +435,7 @@ const CardToolRow = React.memo(function CardToolRow({ t, standalone = false }: {
   const durMs = toolDurationMs(t);
   const purpose = toolPurpose(t);
   const detail = toolRowDetail(t);
-  const iconColor = failed ? 'var(--term-danger)' : running ? 'var(--term-accent)' : 'var(--term-muted)';
+  const iconColor = failed ? 'var(--term-danger)' : running ? 'var(--term-run)' : 'var(--term-muted)';
   return (
     <div style={{ borderTop: CARD_BORDER, position: 'relative' }}>
       <FailFlash failed={failed} />
@@ -429,7 +447,7 @@ const CardToolRow = React.memo(function CardToolRow({ t, standalone = false }: {
           gap: 9,
           padding: '6px 11px',
           cursor: hasPayload ? 'pointer' : 'default',
-          background: running ? 'color-mix(in srgb, var(--term-accent) 5%, transparent)' : undefined,
+          background: running ? 'color-mix(in srgb, var(--term-run) 5%, transparent)' : undefined,
           transition: 'background-color var(--t-enter) ease-out',
         }}
       >
@@ -444,7 +462,7 @@ const CardToolRow = React.memo(function CardToolRow({ t, standalone = false }: {
             width: 13,
           }}
         >
-          <ToolTypeIcon kind={toolBucketKey(t)} color={iconColor} size={13} />
+          <ToolTypeIcon kind={toolKind(t)} color={iconColor} size={13} />
         </span>
         {purpose ? (
           <span style={{ flex: 1, minWidth: 0 }}>
@@ -454,7 +472,7 @@ const CardToolRow = React.memo(function CardToolRow({ t, standalone = false }: {
                 fontSize: titleSize,
                 ...(standalone ? { fontWeight: 500 } : null),
                 lineHeight: '16px',
-                color: failed ? 'var(--term-danger)' : 'var(--term-fg)',
+                color: failed ? 'var(--term-danger-text)' : 'var(--term-fg)',
                 overflowWrap: 'anywhere',
                 wordBreak: 'break-word',
               }}
@@ -462,6 +480,7 @@ const CardToolRow = React.memo(function CardToolRow({ t, standalone = false }: {
               {purpose}
             </span>
             <span
+              className="agent-verbatim"
               style={{
                 display: 'block',
                 fontFamily: MONO,
@@ -484,7 +503,7 @@ const CardToolRow = React.memo(function CardToolRow({ t, standalone = false }: {
               style={{
                 fontSize: titleSize,
                 fontWeight: 500,
-                color: failed ? 'var(--term-danger)' : 'var(--term-fg)',
+                color: failed ? 'var(--term-danger-text)' : 'var(--term-fg)',
                 flexShrink: 0,
                 maxWidth: '50%',
                 minWidth: 0,
@@ -496,6 +515,7 @@ const CardToolRow = React.memo(function CardToolRow({ t, standalone = false }: {
               {cardToolName(t)}
             </span>
             <span
+              className="agent-verbatim"
               style={{
                 fontFamily: MONO,
                 fontSize: 'var(--fs-xs)',
@@ -662,8 +682,8 @@ function CardGroupHeader({ tools, collapsed, onToggle, failed, running, doneCoun
 /* ══ 1d · Terminal variant ═══════════════════════════════════════════── */
 
 function termToolName(t: ToolCallState): string {
-  const key = toolBucketKey(t);
-  if (key !== 'unknown') return key;
+  const key = toolKind(t);
+  if (key !== 'unknown' && key !== 'subagent') return key;
   return toolDisplayTitle(t) || t.kind || '(unnamed)';
 }
 
@@ -694,13 +714,13 @@ function TermPayload({ t }: { t: ToolCallState }) {
       {t.inputJson && (
         <>
           <div style={{ ...CAP_LABEL, marginBottom: 2 }}>in</div>
-          <pre style={preStyle}>{formatToolPayload(t.inputJson)}</pre>
+          <pre className="agent-verbatim" style={preStyle}>{formatToolPayload(t.inputJson)}</pre>
         </>
       )}
       {t.output && (
         <>
           <div style={{ ...CAP_LABEL, margin: t.inputJson ? '6px 0 2px' : '0 0 2px' }}>out</div>
-          <pre style={{ ...preStyle, color: failed ? 'var(--term-danger)' : 'var(--term-mid)' }}>
+          <pre className="agent-verbatim" style={{ ...preStyle, color: failed ? 'var(--term-danger-text)' : 'var(--term-mid)' }}>
             {formatToolPayload(t.output)}
           </pre>
         </>
@@ -718,8 +738,8 @@ const TermToolRow = React.memo(function TermToolRow({ t }: { t: ToolCallState })
   const durMs = toolDurationMs(t);
   const purpose = toolPurpose(t);
   const detail = toolRowDetail(t);
-  const nameColor = failed ? 'var(--term-danger)' : running ? 'var(--term-fg)' : 'var(--term-muted)';
-  const detailColor = failed ? 'var(--term-danger)' : running ? 'var(--term-fg)' : 'var(--term-mid)';
+  const nameColor = failed ? 'var(--term-danger-text)' : running ? 'var(--term-fg)' : 'var(--term-muted)';
+  const detailColor = failed ? 'var(--term-danger-text)' : running ? 'var(--term-fg)' : 'var(--term-mid)';
   const glyphStyle: React.CSSProperties = { fontFamily: MONO, fontSize: 'var(--fs-xs)', textAlign: 'center' };
   return (
     <div style={{ position: 'relative' }}>
@@ -740,7 +760,7 @@ const TermToolRow = React.memo(function TermToolRow({ t }: { t: ToolCallState })
           {failed ? (
             <span aria-hidden style={{ ...glyphStyle, color: 'var(--term-danger)' }}>×</span>
           ) : running ? (
-            <span aria-hidden className="agent-glyph-run" style={{ ...glyphStyle, color: 'var(--term-accent)' }}>❯</span>
+            <span aria-hidden className="agent-glyph-run" style={{ ...glyphStyle, color: 'var(--term-run)' }}>❯</span>
           ) : (
             <span aria-hidden style={{ ...glyphStyle, color: 'var(--term-muted)' }}>✓</span>
           )}
@@ -751,11 +771,12 @@ const TermToolRow = React.memo(function TermToolRow({ t }: { t: ToolCallState })
               {purpose}
             </span>
             <span
+              className="agent-verbatim"
               style={{
                 display: 'block',
                 fontFamily: MONO,
                 fontSize: 'var(--fs-xs)',
-                color: failed ? 'var(--term-danger)' : 'var(--term-muted)',
+                color: failed ? 'var(--term-danger-text)' : 'var(--term-muted)',
                 marginTop: 1,
                 overflow: 'hidden',
                 textOverflow: 'ellipsis',
@@ -772,7 +793,7 @@ const TermToolRow = React.memo(function TermToolRow({ t }: { t: ToolCallState })
             {detail && (
               <>
                 {' '}
-                <span style={{ fontFamily: MONO, fontSize: 'var(--fs-sm)', color: detailColor }}>{detail}</span>
+                <span className="agent-verbatim" style={{ fontFamily: MONO, fontSize: 'var(--fs-sm)', color: detailColor }}>{detail}</span>
               </>
             )}
           </span>
@@ -780,7 +801,7 @@ const TermToolRow = React.memo(function TermToolRow({ t }: { t: ToolCallState })
         <span>
           <FadeOnChange k={failed ? 'failed' : running ? 'running' : durMs != null ? 'duration' : null}>
             {failed ? (
-              <span style={{ fontFamily: MONO, fontSize: 'var(--fs-xs)', color: 'var(--term-danger)' }}>failed</span>
+              <span style={{ fontFamily: MONO, fontSize: 'var(--fs-xs)', color: 'var(--term-danger-text)' }}>failed</span>
             ) : running ? (
               <span className="term-shimmer term-shimmer--accent" style={{ fontSize: 'var(--fs-xs)' }}>running</span>
             ) : durMs != null ? (
@@ -917,7 +938,7 @@ function TermGroupHeader({ tools, collapsed, onToggle, failed, running, doneCoun
             <span aria-hidden style={{ flex: 1, borderTop: '1px solid var(--term-line)', transform: 'translateY(1px)' }} />
             <span style={{ fontFamily: MONO, fontSize: 'var(--fs-xs)', color: 'var(--term-muted)', flexShrink: 0 }}>
               {rightMeta}
-              {failed > 0 && <span style={{ color: 'var(--term-danger)' }}> · {failed} failed</span>}
+              {failed > 0 && <span style={{ color: 'var(--term-danger-text)' }}> · {failed} failed</span>}
             </span>
           </>
         )}

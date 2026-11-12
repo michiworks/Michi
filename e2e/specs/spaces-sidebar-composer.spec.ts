@@ -9,7 +9,9 @@ import { controlledStreamState, installControlledChatStream, pushChatStream } fr
 const evidence = resolve('.artifacts/spaces-sidebar-composer');
 const titles = ['Review the desktop release', 'Plan the next milestone', 'Compare the open decisions', 'Check the launch notes', 'Review the weekly summary', 'Continue the earlier investigation', 'Collect the remaining risks'];
 
-for (const palette of ['bone', 'monokai']) test(`Spaces settings, assistant history and shared composer in ${palette}`, async ({ page }) => {
+// DESIGN-v2 §1.2–§1.4: the conversation's history moved from the Pages sidebar into the
+// panel's menu; the panel's composer is the conversation composer, in every area.
+for (const palette of ['bone', 'monokai']) test(`Pages settings, the panel's History and its shared composer in ${palette}`, async ({ page }) => {
   mkdirSync(evidence, { recursive: true });
   await page.setViewportSize({ width: 1520, height: 980 });
   const errors: string[] = [];
@@ -33,7 +35,6 @@ for (const palette of ['bone', 'monokai']) test(`Spaces settings, assistant hist
   await page.addInitScript(terminalPalette => {
     localStorage.setItem('michi:v1:prefs', JSON.stringify({ onboardingCompletedAt: 1, terminalPalette, uiFont: 'Geist' }));
     localStorage.setItem('michi:migrated', '1');
-    localStorage.setItem('michi:metaChat:window:v1', JSON.stringify({ form: 'dock', minimized: true, rect: null, dockRatio: 50 }));
   }, palette);
   await installControlledChatStream(page);
   await installMockApi(page, {
@@ -56,7 +57,11 @@ for (const palette of ['bone', 'monokai']) test(`Spaces settings, assistant hist
       const tree = path.match(/^\/api\/workspaces\/ws-assistant\/trees\/tree-(\d+)\/messages$/);
       if (tree) { await route.fulfill({ json: { messages: messages.filter(message => message.node_id === `assistant-${tree[1]}`) } }); return true; }
       if (path === '/api/agent/runtime-catalog') { await route.fulfill({ json: { runtimeId: 'mock', providers: [], models: [{ id: 'model-one', label: 'Model One' }, { id: 'model-two', label: 'Model Two' }], capabilities: { models: true, providerModels: false, reasoning: false } } }); return true; }
-      if (path === '/api/meta-agent/settings') { const patch = route.request().postDataJSON(); modelPatches.push(patch); Object.assign(model, patch); await route.fulfill({ json: metaInfo() }); return true; }
+      if (path === '/api/assistant/settings' && route.request().method() === 'PUT') {
+        const patch = route.request().postDataJSON(); modelPatches.push(patch);
+        Object.assign(model, { runtimeId: patch.runtimeId ?? model.runtimeId, modelId: patch.modelId ?? model.modelId });
+        await route.fulfill({ json: info() }); return true;
+      }
       if (path === '/api/meta-agent') { await route.fulfill({ json: metaInfo() }); return true; }
       if (path === '/api/spaces') { await route.fulfill({ json: { items: [] } }); return true; }
       return spaces.handle(route);
@@ -78,21 +83,23 @@ for (const palette of ['bone', 'monokai']) test(`Spaces settings, assistant hist
   await settingsPage.getByRole('button', { name: 'Back to settings' }).click();
   await page.screenshot({ path: resolve(evidence, `settings-${palette}.png`), animations: 'disabled' });
   await settingsPage.getByRole('button', { name: 'Back to Pages' }).click();
-  const history = sidebar.getByRole('navigation', { name: 'Assistant conversations' });
+  // No history in the sidebar any more: it is in the panel's menu.
+  await expect(sidebar.getByRole('navigation', { name: 'Assistant conversations' })).toHaveCount(0);
+  await page.keyboard.press('ControlOrMeta+j');
+  const panel = page.getByRole('complementary', { name: 'Michi', exact: true });
+  await expect(panel).toBeVisible();
+  const history = panel.getByRole('dialog', { name: 'History' }).getByRole('navigation', { name: 'Assistant conversations' });
+  const openHistory = async () => {
+    await panel.getByRole('button', { name: 'Michi menu', exact: true }).click();
+    await page.getByRole('menuitem', { name: 'History…', exact: true }).click();
+    await expect(history).toBeVisible();
+  };
+  await openHistory();
   await expect(history.locator('.spaces-assistant-history__row')).toHaveCount(5);
-  const rowType = await history.locator('.spaces-assistant-history__row').first().evaluate(element => {
-    const style = getComputedStyle(element);
-    const sidebar = element.closest('.terminal-sidebar')!;
-    const reference = getComputedStyle(sidebar.querySelector('.area-side__row.is-nav')!);
-    return { fontSize: style.fontSize, weight: style.fontWeight, lineHeight: style.lineHeight, referenceSize: reference.fontSize, referenceLineHeight: reference.lineHeight };
-  });
-  expect(rowType.fontSize).toBe(rowType.referenceSize);
-  expect(rowType.lineHeight).toBe(rowType.referenceLineHeight);
-  expect(rowType.weight).toBe('450');
   await history.getByRole('button', { name: 'Show more' }).click();
   await expect(history.locator('.spaces-assistant-history__row')).toHaveCount(7);
   await history.getByRole('button', { name: new RegExp(titles[5]) }).click();
-  const panel = page.getByRole('region', { name: 'Assistant', exact: true });
+  await expect(history).toHaveCount(0);
   await expect(panel.getByText('Saved answer for conversation 5.')).toBeVisible();
   const editor = panel.locator('.terminal-composer [contenteditable="true"]');
   await expect(panel.locator('.terminal-composer')).toHaveCount(1);
@@ -100,28 +107,34 @@ for (const palette of ['bone', 'monokai']) test(`Spaces settings, assistant hist
   await expect(panel.getByRole('button', { name: /^Permissions:/ })).toBeVisible();
   await expect(panel.getByTitle('Attach file', { exact: true })).toBeVisible();
   await expect(panel.getByTitle('Mention context or node', { exact: true })).toBeVisible();
+  // A model picked in the composer is this conversation's own, not the global settings (fad4308f).
   await panel.getByRole('button', { name: /^Model settings:/ }).click();
   const picker = page.getByRole('dialog', { name: 'Model settings', exact: true });
   await picker.getByRole('button', { name: /^Select model:/ }).click();
   await picker.getByRole('menuitemradio', { name: 'Model Two', exact: true }).click();
-  await expect.poll(() => modelPatches).toEqual([{ runtimeId: 'mock', modelId: 'model-two' }]);
+  await expect.poll(() => modelPatches.at(-1)).toMatchObject({ modelId: 'model-two', nodeId: 'assistant-5' });
   await expect(panel.getByRole('button', { name: /^Model settings:.*Model Two/ })).toBeVisible();
-  await page.keyboard.press('Escape');
+  // The picker's Esc is its own (an escape layer): the panel stays.
+  if (await picker.isVisible()) await page.keyboard.press('Escape');
+  await expect(picker).toHaveCount(0);
+  await expect(panel).toBeVisible();
+  // The panel is not Pages': it and its draft stay through another area.
   await editor.fill('Keep this draft in conversation 5');
   await page.getByRole('navigation', { name: 'Areas' }).locator('[data-area="conversations"]').click();
+  await expect(editor).toHaveText('Keep this draft in conversation 5');
   await page.getByRole('navigation', { name: 'Areas' }).locator('[data-area="spaces"]').click();
   await expect(editor).toHaveText('Keep this draft in conversation 5');
-  await history.getByRole('button', { name: 'Show more' }).click();
-  await expect(history.locator('.spaces-assistant-history__row')).toHaveCount(7);
   await expect(panel.getByRole('button', { name: /^Branch \(/ })).toHaveCount(0);
+  // Each conversation keeps its own draft.
+  await openHistory();
+  await history.getByRole('button', { name: 'Show more' }).click();
   await history.getByRole('button', { name: new RegExp(titles[0]) }).click();
   await expect(editor).toHaveText('');
   await editor.fill('Draft in conversation 0');
+  await openHistory();
+  await history.getByRole('button', { name: 'Show more' }).click();
   await history.getByRole('button', { name: new RegExp(titles[5]) }).click();
   await expect(editor).toHaveText('Keep this draft in conversation 5');
-  await panel.getByRole('button', { name: 'Full screen', exact: true }).click();
-  await expect(editor).toHaveText('Keep this draft in conversation 5');
-  await panel.getByRole('button', { name: 'Exit full screen' }).click();
   await editor.fill('Continue this investigation');
   await panel.getByRole('button', { name: 'Send (Enter)', exact: true }).click();
   await expect.poll(async () => (await controlledStreamState(page)).requests.length).toBe(1);

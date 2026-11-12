@@ -1,5 +1,6 @@
 import type { ChatNodeState, Project } from '../state/chatTypes';
 import { activeTreeRootNodeId, findTreeIdForNode } from '../state/tree';
+import { treeOfRoot } from '../state/displayTitle';
 import { digestSourceSnapshot } from './digestSource';
 import type { DigestGenerationPayload } from '../services/digestApi';
 
@@ -14,10 +15,10 @@ export function buildDigestPayload(
   const sourceRootId = project.trees.find((tree) => tree.id === sourceTreeId)?.rootNodeId;
   const rootId = sourceRootId ?? activeTreeRootNodeId(project);
   const rootNode = rootId ? nodes[rootId] : undefined;
-  const rootTitle =
-    rootNode?.title
-    ?? rootNode?.messages.find((m) => m.role === 'user')?.text.slice(0, 80)
-    ?? project.name;
+  const rootTitle = (rootId ? treeOfRoot(project, rootId)?.name?.trim() : undefined)
+    || (rootNode?.title
+      ?? rootNode?.messages.find((m) => m.role === 'user')?.text.slice(0, 80)
+      ?? project.name);
   const nodeList: DigestGenerationPayload['nodes'] = [];
   for (const id of sourceIds) {
     const n = nodes[id];

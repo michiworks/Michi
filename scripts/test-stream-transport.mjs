@@ -44,7 +44,7 @@ try {
   app.get('/', (_req, res) => res.type('html').send('<!doctype html><title>Michi transport regression</title><style>body{font:16px system-ui;margin:48px;color:#20242b;background:#fff}h1{font-size:26px}pre{font:15px monospace;line-height:1.8;white-space:pre-wrap}</style><h1>Michi transport regression</h1><pre id="result">Running isolated transport checks...</pre>'));
   app.get('/bundle.js', (_req, res) => res.type('js').send(frontend.outputFiles[0].text));
   app.all('/api/*route', async (req, res) => {
-    if (req.path.endsWith('/message') || req.path.endsWith('/background/subscribe') || req.path.endsWith('/stream') || req.path.endsWith('/agent-runs/subscribe') || req.path.endsWith('/panes/subscribe')) {
+    if (req.path.endsWith('/message') || req.path.endsWith('/background/subscribe') || req.path.endsWith('/stream') || req.path.endsWith('/agent-runs/subscribe')) {
       held.set(req.originalUrl, res);
       res.on('close', () => held.delete(req.originalUrl));
       res.setHeader('Content-Type', 'text/event-stream');
@@ -118,25 +118,24 @@ try {
       michi.fetchStream('/api/workspaces/test/watch/stream'),
       michi.fetchStream('/api/agent-runs/subscribe?workspaceId=test'),
       michi.fetchStream('/api/digests/stream', { method: 'POST', body: '{}' }),
-      michi.fetchStream('/api/panes/subscribe?paneIds=%5B%22node%3An-1%22%5D'),
     ]);
   });
-  await waitUntil(() => held.size === 30);
-  assert.equal(socketCount, 1, 'all 30 streams must use one WebSocket');
+  await waitUntil(() => held.size === 29);
+  assert.equal(socketCount, 1, 'all 29 streams must use one WebSocket');
   await startOrdinaryRequests();
   await page.waitForFunction(() => Object.keys(window.completed).length === 3, null, { timeout: 3_000 });
   const timings = await page.evaluate(() => window.completed);
   assert.ok(Object.values(timings).every((ms) => ms < 1_500));
-  assert.equal(held.size, 30, 'ordinary requests must complete while every stream remains active');
+  assert.equal(held.size, 29, 'ordinary requests must complete while every stream remains active');
   assert.deepEqual(await readFile(path.join(temp, 'upload.png')), Buffer.from([1, 2, 3]));
 
   await page.evaluate(() => window.cancels[0]());
-  await waitUntil(() => held.size === 29);
+  await waitUntil(() => held.size === 28);
 
   const bootSockets = socketCount;
   await page.evaluate(() => michi.fetchPersistenceCapabilities('local', { configureTransport: false }));
   assert.equal(socketCount, bootSockets, 'a workspace capability check must retain the authenticated socket');
-  assert.equal(held.size, 29, 'a workspace capability check must not detach existing feeds');
+  assert.equal(held.size, 28, 'a workspace capability check must not detach existing feeds');
 
   // A probe can fail while Electron hands the same origin to the service.
   // Failure is not evidence of an old gateway: native SSE fallback here
@@ -193,8 +192,8 @@ try {
   await page.waitForFunction(() => Object.keys(window.completed).length === 3, null, { timeout: 3_000 });
   const restartTimings = await page.evaluate(() => window.completed);
   const report = { status: 'PASS', legacyHttpStreams: 6, legacyQueuedRequests: 3,
-    multiplexedStreams: 30, webSockets: socketCount, concurrentRequestMs: timings,
-    cancellation: 'One channel detached; 29 remain active',
+    multiplexedStreams: 29, webSockets: socketCount, concurrentRequestMs: timings,
+    cancellation: 'One channel detached; 28 remain active',
     unavailableProbe: { rejectedFeeds: failedProbe.length, ordinaryRequestMs: outageTimings },
     recovery: { multiplexedStreams: 6, ordinaryRequestMs: recoveryTimings },
     sameOriginRestart: { multiplexedStreams: 6, ordinaryRequestMs: restartTimings },

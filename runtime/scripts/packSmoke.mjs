@@ -139,10 +139,10 @@ try {
   assert.equal(launch?.bin, process.execPath, 'Crew: no default launch');
   assert.equal(launch.args()[0], join(crewDir, 'crewAcp.js'));
   ok('Crew launches its bundled dist/adapters/crew/crewAcp.js by default');
-  for (const file of ['dist/adapters/crew/crewMcp.js', 'dist/adapters/crew/crewMcpHost.js', 'dist/adapters/codex/assets/codexStopHookRunner.cjs']) {
+  for (const file of ['dist/adapters/crew/crewMcp.js', 'dist/adapters/crew/crewMcpHost.js']) {
     assert.ok(existsSync(join(pkgDir, file)), `${file} is missing`);
   }
-  ok('the Crew relay bundles and the Codex Stop hook runner are in place');
+  ok('the Crew relay bundles are in place');
 
   const childEnv = {
     PATH: process.env.PATH, HOME: scratch, KIROCREW_HOME: join(scratch, 'crew'),

@@ -1,8 +1,9 @@
-import { createHash, randomUUID } from 'node:crypto';
+import { randomUUID } from 'node:crypto';
 import {
   AgentRunCompletionMode,
   AgentRunEventType,
   AgentRunStatus,
+  type AgentRunWaitingReason,
   parseAgentRunDtoV1,
   parseAgentRunEventV1,
   parseAgentRunWatchDtoV1,
@@ -27,8 +28,10 @@ import {
   type WatchConditionV1,
 } from 'michi-shared';
 import { getDb, runInTransaction } from './db';
+import { withCommandReceipt } from './commandReceipts';
 import { workspaceOwnerMatches } from './agentOwner';
 import { assertAgentOwnerWritable } from './agentOwnerDeletionGate';
+import { assertAgentRunTransition, assertWaitingProjection, isTerminalRunStatus } from '../agents/runs/agentRunStateMachine';
 
 export interface AgentRunsRepositoryDeps {
   now?: () => number;
@@ -56,6 +59,12 @@ export interface CreateAgentRunInput {
   executionEnvironment: ExecutionEnvironmentSnapshotV1;
   expiresAt: number | null;
   initialEvent: { type: AgentRunEventType; payload: JsonValue };
+  /**
+   * What the caller asked for, which the operation receipt compares. The
+   * fields above also hold values the server derives, such as creation times,
+   * so a repeated request would never match them. Defaults to the whole input.
+   */
+  spawnRequest?: unknown;
 }
 
 export interface CreateAttemptInput {
@@ -69,7 +78,7 @@ export interface CreateAttemptInput {
 
 export interface AgentRunProjectionPatch {
   status?: AgentRunStatus;
-  waitingReason?: string | null;
+  waitingReason?: AgentRunWaitingReason | null;
   activeAttemptId?: string | null;
   resultBundle?: ResultBundleV1 | null;
   startedAt?: number | null;
@@ -90,16 +99,24 @@ function requireOwner(ownerUserId: string): void {
   if (!ownerUserId?.trim()) throw new Error('ownerUserId is required');
 }
 
-function hash(payload: unknown): string {
-  return createHash('sha256').update(JSON.stringify(payload)).digest('hex');
-}
-
-function normalized(value: string): string {
+/** How Run search columns and queries store text, so a query matches however the text was spaced or cased. */
+export function normalizeAgentRunSearchText(value: string): string {
   return value.normalize('NFKC').trim().toLocaleLowerCase().replace(/\s+/g, ' ').slice(0, 8_000);
 }
 
-function terminal(status: AgentRunStatus): boolean {
-  return status === AgentRunStatus.Completed || status === AgentRunStatus.Failed || status === AgentRunStatus.Cancelled;
+/** The handoff text a Run is searched by, before normalizeAgentRunSearchText. */
+export function handoffSearchText(bundle: ResultBundleV1 | null): string {
+  const handoff = bundle?.handoff;
+  return handoff ? `${handoff.conclusion} ${handoff.artifactsOrChanges} ${handoff.unresolvedIssues}` : '';
+}
+
+
+interface CancellableRunRow {
+  status: AgentRunStatus;
+  active_attempt_id: string | null;
+  lease_token: string | null;
+  lease_expires_at: number | null;
+  latest_event_seq: number;
 }
 
 export class AgentRunsRepository {
@@ -118,18 +135,7 @@ export class AgentRunsRepository {
 
   private idempotent<T>(workspaceId: string, operationId: string, payload: unknown, fn: () => T): T {
     if (!operationId?.trim()) throw new Error('operationId is required');
-    const key = `agent-run:${operationId}`;
-    const payloadHash = hash(payload);
-    const prior = getDb().prepare('SELECT payload_hash, result_json FROM command_receipts WHERE workspace_id = ? AND operation_id = ?')
-      .get(workspaceId, key) as { payload_hash: string; result_json: string } | undefined;
-    if (prior) {
-      if (prior.payload_hash !== payloadHash) throw new Error(`operation ${operationId} was reused with a different payload`);
-      return JSON.parse(prior.result_json) as T;
-    }
-    const result = fn();
-    getDb().prepare('INSERT INTO command_receipts (workspace_id, operation_id, payload_hash, result_json, created_at) VALUES (?, ?, ?, ?, ?)')
-      .run(workspaceId, key, payloadHash, JSON.stringify(result), this.now());
-    return result;
+    return withCommandReceipt({ ledgerId: workspaceId, operationId: `agent-run:${operationId}`, request: payload, now: this.now() }, fn);
   }
 
   private rowToRun(row: RunRow): AgentRunDtoV1 {
@@ -157,7 +163,7 @@ export class AgentRunsRepository {
     return runInTransaction(() => {
       assertAgentOwnerWritable(input.ownerUserId, this.now());
       this.assertWorkspaceOwner(input.ownerUserId, input.workspaceId);
-      return this.idempotent(input.workspaceId, input.operationId, input, () => {
+      return this.idempotent(input.workspaceId, input.operationId, input.spawnRequest ?? input, () => {
       if ((input.definitionId === null) !== (input.definitionRevision === null)) {
         throw new Error('definitionId and definitionRevision must have matching nullability');
       }
@@ -201,7 +207,7 @@ export class AgentRunsRepository {
         runId, input.ownerUserId, input.workspaceId, input.definitionId, input.definitionRevision,
         JSON.stringify(input.effectiveDefinition), input.invocationMode, input.completionMode, input.parentRunId,
         input.parentAttemptId, input.parentNodeId, input.parentTurnId, input.parentMessageId, input.parentToolCallId,
-        input.task, normalized(input.task), normalized(input.effectiveDefinition.name),
+        input.task, normalizeAgentRunSearchText(input.task), normalizeAgentRunSearchText(input.effectiveDefinition.name),
         JSON.stringify(input.contextManifest), input.expectedResult ? JSON.stringify(input.expectedResult) : null,
         JSON.stringify(input.executionEnvironment), now, now, input.expiresAt,
       );
@@ -340,7 +346,7 @@ export class AgentRunsRepository {
     }
     if (!query.includeArchived) clauses.push('archived_at IS NULL');
     if (query.q?.trim()) {
-      const q = `%${normalized(query.q)}%`;
+      const q = `%${normalizeAgentRunSearchText(query.q)}%`;
       clauses.push('(task_search_text LIKE ? OR agent_name_snapshot LIKE ? OR handoff_search_text LIKE ?)');
       params.push(q, q, q);
     }
@@ -461,10 +467,17 @@ export class AgentRunsRepository {
 
   private appendEventAndProjectInternal(ownerUserId: string, runId: string, expectedLatestSeq: number,
     event: { type: AgentRunEventType; payload: JsonValue; attemptId?: string | null }, patch: AgentRunProjectionPatch): AgentRunEventV1 {
-    const row = getDb().prepare('SELECT latest_event_seq, status FROM agent_runs WHERE id = ? AND owner_user_id = ?')
-      .get(runId, ownerUserId) as { latest_event_seq: number; status: AgentRunStatus } | undefined;
+    const row = getDb().prepare('SELECT latest_event_seq, status, waiting_reason FROM agent_runs WHERE id = ? AND owner_user_id = ?')
+      .get(runId, ownerUserId) as { latest_event_seq: number; status: AgentRunStatus; waiting_reason: AgentRunWaitingReason | null } | undefined;
     if (!row) throw new Error('run not found');
     if (row.latest_event_seq !== expectedLatestSeq) throw new Error('event sequence conflict');
+    // Every status write passes here: a move the shared table forbids, or a
+    // waiting reason that disagrees with the status, never reaches the row.
+    if ('status' in patch && patch.status !== row.status) assertAgentRunTransition(row.status, patch.status!);
+    if ('status' in patch || 'waitingReason' in patch) {
+      assertWaitingProjection(patch.status ?? row.status,
+        'waitingReason' in patch ? patch.waitingReason ?? null : row.waiting_reason);
+    }
     const seq = expectedLatestSeq + 1;
     const createdAt = this.now();
     const persisted = parseAgentRunEventV1({
@@ -488,7 +501,7 @@ export class AgentRunsRepository {
       sets.push(`${column} = ?`);
       const value = patch[key];
       values.push(key === 'resultBundle' && value != null ? JSON.stringify(value)
-        : key === 'handoffSearchText' && typeof value === 'string' ? normalized(value) : value ?? null);
+        : key === 'handoffSearchText' && typeof value === 'string' ? normalizeAgentRunSearchText(value) : value ?? null);
     }
     values.push(runId, ownerUserId, expectedLatestSeq);
     const result = getDb().prepare(`UPDATE agent_runs SET ${sets.join(', ')} WHERE id = ? AND owner_user_id = ? AND latest_event_seq = ?`)
@@ -517,7 +530,7 @@ export class AgentRunsRepository {
         { ...event, attemptId }, {
           status: runStatus, waitingReason: null, resultBundle, completedAt: now,
           leaseToken: null, leaseOwner: null, leaseExpiresAt: null,
-          handoffSearchText: resultBundle ? `${resultBundle.handoff.conclusion} ${resultBundle.handoff.artifactsOrChanges} ${resultBundle.handoff.unresolvedIssues}` : '',
+          handoffSearchText: handoffSearchText(resultBundle),
         });
       return this.getRun(ownerUserId, runId)!;
     });
@@ -566,18 +579,9 @@ export class AgentRunsRepository {
     requireOwner(ownerUserId);
     const now = this.now();
     return runInTransaction(() => {
-      const run = getDb().prepare(`SELECT status, active_attempt_id, lease_token, lease_expires_at,
-        latest_event_seq FROM agent_runs WHERE id = ? AND owner_user_id = ?`).get(
-        runId, ownerUserId,
-      ) as {
-        status: AgentRunStatus;
-        active_attempt_id: string | null;
-        lease_token: string | null;
-        lease_expires_at: number | null;
-        latest_event_seq: number;
-      } | undefined;
+      const run = this.cancellableRun(ownerUserId, runId);
       if (!run) return null;
-      if (terminal(run.status)) {
+      if (isTerminalRunStatus(run.status)) {
         if (run.lease_token !== null) throw new Error('terminal Run still has a live lease');
         return null;
       }
@@ -586,42 +590,66 @@ export class AgentRunsRepository {
       } else if (run.lease_token !== null && (run.lease_expires_at ?? Number.POSITIVE_INFINITY) > now) {
         throw new Error('Run is leased by another live instance');
       }
+      return this.writeCancelled(ownerUserId, runId, run, now, {
+        version: 1, code: 'administrative_delete', category: 'terminal', message: reason, retryable: false,
+      }, reason, 'administrative_delete');
+    });
+  }
 
-      const error: StructuredRunErrorV1 = {
-        version: 1,
-        code: 'administrative_delete',
-        category: 'terminal',
-        message: reason,
-        retryable: false,
-      };
-      if (run.active_attempt_id) {
-        getDb().prepare(`UPDATE agent_run_attempts SET status = 'cancelled', completed_at = ?, error = ?
-          WHERE id = ? AND run_id = ? AND status NOT IN ('completed','failed','cancelled')`).run(
-          now, JSON.stringify(error), run.active_attempt_id, runId,
-        );
-      }
-      getDb().prepare(`UPDATE agent_run_interactions SET
-        status = 'cancelled', response_payload = ?, resolved_at = ?
-        WHERE run_id = ? AND status = 'pending'`).run(
-        JSON.stringify({ version: 1, value: { version: 1, reason } }), now, runId,
+  /**
+   * Cancel a Run that no live handle owns: one waiting after a restart or for
+   * an unsafe recovery, one between Attempts, or one whose owner's lease
+   * expired. Writes nothing and returns null when the Run is gone, already
+   * terminal, or leased by a live owner.
+   */
+  cancelRunWithoutHandle(ownerUserId: string, runId: string, reason: string | null): AgentRunEventV1 | null {
+    requireOwner(ownerUserId);
+    const now = this.now();
+    return runInTransaction(() => {
+      const run = this.cancellableRun(ownerUserId, runId);
+      if (!run || isTerminalRunStatus(run.status)) return null;
+      if (run.lease_token !== null && (run.lease_expires_at ?? Number.POSITIVE_INFINITY) > now) return null;
+      return this.writeCancelled(ownerUserId, runId, run, now, {
+        version: 1, code: 'cancelled', category: 'terminal', message: 'Run was cancelled', retryable: false,
+      }, reason);
+    });
+  }
+
+  private cancellableRun(ownerUserId: string, runId: string): CancellableRunRow | undefined {
+    return getDb().prepare(`SELECT status, active_attempt_id, lease_token, lease_expires_at,
+      latest_event_seq FROM agent_runs WHERE id = ? AND owner_user_id = ?`).get(runId, ownerUserId) as CancellableRunRow | undefined;
+  }
+
+  /** Ends the Run, its active Attempt and its open questions as cancelled. */
+  private writeCancelled(ownerUserId: string, runId: string, run: CancellableRunRow, now: number,
+    error: StructuredRunErrorV1, reason: string | null, eventReason?: string): AgentRunEventV1 {
+    if (run.active_attempt_id) {
+      getDb().prepare(`UPDATE agent_run_attempts SET status = 'cancelled', completed_at = ?, error = ?
+        WHERE id = ? AND run_id = ? AND status NOT IN ('completed','failed','cancelled')`).run(
+        now, JSON.stringify(error), run.active_attempt_id, runId,
       );
-      return this.appendEventAndProjectInternal(ownerUserId, runId, run.latest_event_seq, {
-        type: AgentRunEventType.RunStatusChanged,
-        attemptId: run.active_attempt_id,
-        payload: {
-          version: 1,
-          from: run.status,
-          to: AgentRunStatus.Cancelled,
-          reason: 'administrative_delete',
-        },
-      }, {
-        status: AgentRunStatus.Cancelled,
-        waitingReason: null,
-        completedAt: now,
-        leaseToken: null,
-        leaseOwner: null,
-        leaseExpiresAt: null,
-      });
+    }
+    getDb().prepare(`UPDATE agent_run_interactions SET
+      status = 'cancelled', response_payload = ?, resolved_at = ?
+      WHERE run_id = ? AND status = 'pending'`).run(
+      JSON.stringify({ version: 1, value: { version: 1, reason } }), now, runId,
+    );
+    return this.appendEventAndProjectInternal(ownerUserId, runId, run.latest_event_seq, {
+      type: AgentRunEventType.RunStatusChanged,
+      attemptId: run.active_attempt_id,
+      payload: {
+        version: 1,
+        from: run.status,
+        to: AgentRunStatus.Cancelled,
+        ...(eventReason ? { reason: eventReason } : {}),
+      },
+    }, {
+      status: AgentRunStatus.Cancelled,
+      waitingReason: null,
+      completedAt: now,
+      leaseToken: null,
+      leaseOwner: null,
+      leaseExpiresAt: null,
     });
   }
 
@@ -669,9 +697,9 @@ export class AgentRunsRepository {
     completionMode: 'notify' | 'wake', parent: { parentRunId: string | null; parentNodeId: string | null; parentTurnId: string | null },
     operationId: string): AgentRunWatchDtoV1 {
     requireOwner(ownerUserId);
-    return runInTransaction(() => this.idempotent(workspaceId, operationId,
-      { runIds, condition, completionMode, parent }, () => {
-        this.assertWorkspaceOwner(ownerUserId, workspaceId);
+    return runInTransaction(() => {
+      this.assertWorkspaceOwner(ownerUserId, workspaceId);
+      return this.idempotent(workspaceId, operationId, { runIds, condition, completionMode, parent }, () => {
         const uniqueRunIds = [...new Set(runIds)];
         if (!uniqueRunIds.length) throw new Error('watch requires at least one Run');
         const placeholders = uniqueRunIds.map(() => '?').join(',');
@@ -696,7 +724,8 @@ export class AgentRunsRepository {
         return parseAgentRunWatchDtoV1({ version: 1, id, ownerUserId, workspaceId,
           runIds: uniqueRunIds, condition, completionMode, status: 'active', deliveryId,
           requestedTurnId, ...parent, createdAt: now, firedAt: null });
-      }));
+      });
+    });
   }
 
   addWatchMembers(ownerUserId: string, watchId: string, runIds: readonly string[]): number {

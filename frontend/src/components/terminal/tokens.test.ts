@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { DARK_PALETTES, PALETTES, cssVarsFor, dangerTextFor } from './tokens';
+import { DARK_PALETTES, PALETTES, cssVarsFor, dangerTextFor, waitingTextFor } from './tokens';
 
 function relativeLuminance(hex: string): number {
   const channels = hex.match(/[0-9a-f]{2}/gi)?.map((channel) => parseInt(channel, 16) / 255);
@@ -22,6 +22,17 @@ function contrastRatio(foreground: string, background: string): number {
   );
 }
 
+describe('cssVarsFor — scrim', () => {
+  it('dims with the palette’s ink on light palettes and with black on dark ones', () => {
+    for (const palette of Object.keys(PALETTES) as Array<keyof typeof PALETTES>) {
+      const scrim = cssVarsFor(palette, PALETTES[palette].accent)['--term-scrim'];
+      expect(scrim).toBe(DARK_PALETTES.has(palette)
+        ? 'color-mix(in srgb, black 42%, transparent)'
+        : `color-mix(in srgb, ${PALETTES[palette].fg} 20%, transparent)`);
+    }
+  });
+});
+
 describe('cssVarsFor — accent resolution', () => {
   it('DARK_PALETTES contains exactly the dark palettes', () => {
     expect(DARK_PALETTES.has('monokai')).toBe(true);
@@ -37,7 +48,7 @@ function distance(a: string, b: string): number {
   return Math.hypot(x[0] - y[0], x[1] - y[1], x[2] - y[2]);
 }
 
-describe.each(Object.entries(PALETTES))('%s palette readability', (_name, p) => {
+describe.each(Object.entries(PALETTES))('%s palette readability', (name, p) => {
   const grounds = [p.bg, p.surface, p.alt];
 
   // muted carries information (timestamps, counts, hints) so it must clear AA;
@@ -59,7 +70,7 @@ describe.each(Object.entries(PALETTES))('%s palette readability', (_name, p) => 
   });
 
   it('keeps the accent visibly apart from the node hues it would otherwise impersonate', () => {
-    // select = streaming, digest = digests/success, mauve = tool calls.
+    // select = waiting on you, digest = digests/success, mauve = tool calls.
     for (const hue of [p.select, p.digest, p.mauve]) {
       expect(distance(p.accent, hue)).toBeGreaterThan(60);
     }
@@ -78,6 +89,23 @@ describe.each(Object.entries(PALETTES))('%s palette readability', (_name, p) => 
   it('reads accent text on its pale accent fill', () => {
     // Floor is 4.0, not AA's 4.5: Bone's rust on its chip fill sits at 4.1:1.
     expect(contrastRatio(p.accent, p.accentF)).toBeGreaterThanOrEqual(4.0);
+  });
+
+  it('keeps running apart from waiting, done, failed and tool calls, and readable as text', () => {
+    for (const hue of [p.select, p.digest, p.danger, p.mauve]) {
+      expect(distance(p.run, hue)).toBeGreaterThan(60);
+    }
+    // Running labels sit on the page and on cards; on alt it marks dots and bars.
+    expect(contrastRatio(p.run, p.bg)).toBeGreaterThanOrEqual(4.5);
+    expect(contrastRatio(p.run, p.surface)).toBeGreaterThanOrEqual(4.5);
+    expect(contrastRatio(p.run, p.alt)).toBeGreaterThanOrEqual(3);
+    expect(contrastRatio(p.run, p.runF)).toBeGreaterThanOrEqual(4.5);
+  });
+
+  it('emits running as its own variables, not the user-picked accent', () => {
+    const vars = cssVarsFor(name as keyof typeof PALETTES, '#ff2d95');
+    expect(vars['--term-run']).toBe(p.run);
+    expect(vars['--term-run-f']).toBe(p.runF);
   });
 });
 
@@ -102,6 +130,13 @@ describe('--term-danger-text', () => {
     }
   });
 
+  it('draws waiting on you in the select hue, whatever accent is picked', () => {
+    for (const palette of ['monokai', 'gruvbox', 'bone', 'slate'] as const) {
+      const vars = cssVarsFor(palette, '#ff2d95');
+      expect([vars['--term-waiting'], vars['--term-waiting-f']]).toEqual([vars['--term-select'], vars['--term-select-f']]);
+    }
+  });
+
   it.each(Object.entries(PALETTES))('reads as text on every %s ground', (name, p) => {
     const text = DARK_PALETTES.has(name as keyof typeof PALETTES) ? mixSrgb(p.danger, p.fg, 0.55) : p.danger;
     for (const g of [p.bg, p.surface, p.alt]) {
@@ -110,6 +145,23 @@ describe('--term-danger-text', () => {
   });
 });
 
+
+describe('--term-waiting-text', () => {
+  it('mixes amber toward fg on the light palettes, is plain amber on the dark ones, and is emitted', () => {
+    expect(waitingTextFor('bone')).toBe(`color-mix(in srgb, ${PALETTES.bone.select} 65%, ${PALETTES.bone.fg})`);
+    expect(waitingTextFor('monokai')).toBe(PALETTES.monokai.select);
+    for (const palette of ['monokai', 'gruvbox', 'bone', 'slate'] as const) {
+      expect(cssVarsFor(palette, PALETTES[palette].accent)['--term-waiting-text']).toBe(waitingTextFor(palette));
+    }
+  });
+
+  it.each(Object.entries(PALETTES))('reads as text on every %s ground, its waiting fill included', (name, p) => {
+    const text = DARK_PALETTES.has(name as keyof typeof PALETTES) ? p.select : mixSrgb(p.select, p.fg, 0.65);
+    for (const g of [p.bg, p.surface, p.alt, p.selectF]) {
+      expect(contrastRatio(text, g)).toBeGreaterThanOrEqual(4.5);
+    }
+  });
+});
 
 describe('raised selection surfaces', () => {
   function resolveColor(value: string): string {

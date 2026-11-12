@@ -5,17 +5,19 @@ import {
   moveTreeToWorkspace as apiMoveTreeToWorkspace,
 } from '../services/api';
 import { getElectron } from '../lib/electronBridge';
+import { FOLDER_OVERLAP_MESSAGE, folderConflict, MAX_WORKSPACE_FOLDERS } from '../lib/workspaceFolders';
 import { reduceProject } from './chatReducers';
+import { hasUnseenCompletion } from './completionFacts';
+import { pickLandingTreeId } from './conversationVisibility';
 import { descendants } from './tree';
+import { serializedEdgeId } from './edgeIds';
 import type { ChatAction, ChatNodeState, FolderEntry, Project } from './chatTypes';
 import type { Prefs } from './prefs';
-import { backendConnectionIdForWorkspace, LOCAL_BACKEND_CONNECTION_ID } from '../config/backendConnections';
+import { backendConnectionIdForWorkspace, LOCAL_BACKEND_CONNECTION_ID, sameBackendConnection } from '../config/backendConnections';
 import { backendEntityId } from '../config/backendIdentity';
-import { isSystemWorkspace } from './assistant/systemWorkspace';
+import { firstLiveUserWorkspaceId, isSystemWorkspace } from './assistant/systemWorkspace';
 import { userWorkspaceToReturnTo } from './assistant/userWorkspace';
-
-type PaneUpdater<T> = T | ((prev: T) => T);
-type PaneSetter<T> = (updater: PaneUpdater<T>) => void;
+import { treeMoveAdoptions, type StructureAdoption } from './structureAdoption';
 
 interface UseProjectActionsArgs {
   projects: Project[];
@@ -140,14 +142,10 @@ export function useProjectActions({
     setProjects((prev) => prev.map((p) => {
       if (p.id !== projectId) return p;
       const existing = p.folders ?? [];
-      if (existing.length >= 10) return p; // hard limit
-      // Nesting check
-      const hasNesting = existing.some(
-        (f) => resolved.startsWith(f.path + '/') || resolved === f.path || f.path.startsWith(resolved + '/'),
-      );
-      if (hasNesting) {
+      if (existing.length >= MAX_WORKSPACE_FOLDERS) return p;
+      if (folderConflict(resolved, existing)) {
         // Schedule toast outside reducer (safe: setState is batched)
-        setTimeout(() => toast.error('This folder overlaps with an existing folder (nested or parent)'), 0);
+        setTimeout(() => toast.error(FOLDER_OVERLAP_MESSAGE), 0);
         return p;
       }
       const entry: FolderEntry = {
@@ -205,12 +203,7 @@ export function useProjectActions({
         const next = prev.map((p) =>
           p.id === projectId ? { ...p, deletedAt: Date.now() } : p,
         );
-        if (activeProjectId === projectId) {
-          const live = next.find(
-            (p) => !p.deletedAt && !p.archivedAt && p.id !== projectId && !isSystemWorkspace(p),
-          );
-          setActiveProjectId(live?.id ?? null);
-        }
+        if (activeProjectId === projectId) setActiveProjectId(firstLiveUserWorkspaceId(next, projectId));
         return next;
       });
     },
@@ -233,12 +226,7 @@ export function useProjectActions({
         const next = prev.map((p) =>
           p.id === projectId ? { ...p, archivedAt: Date.now() } : p,
         );
-        if (activeProjectId === projectId) {
-          const live = next.find(
-            (p) => !p.deletedAt && !p.archivedAt && p.id !== projectId && !isSystemWorkspace(p),
-          );
-          setActiveProjectId(live?.id ?? null);
-        }
+        if (activeProjectId === projectId) setActiveProjectId(firstLiveUserWorkspaceId(next, projectId));
         return next;
       });
     },
@@ -300,46 +288,56 @@ interface UseTreeActionsArgs {
   projects: Project[];
   activeProjectId: string | null;
   nodesRef: MutableRefObject<Record<string, ChatNodeState>>;
-  cancelFns: MutableRefObject<Record<string, () => void>>;
   dispatch: (action: ChatAction) => void;
+  renameNode: (nodeId: string, title: string) => void;
   /** Allocates a node id in `projectId`'s backend scope (default: the active workspace). */
   newNodeId: (projectId?: string) => string;
   setProjects: Dispatch<SetStateAction<Project[]>>;
   setNodes: Dispatch<SetStateAction<Record<string, ChatNodeState>>>;
-  setOpenPanes: PaneSetter<string[]>;
-  setFocusedPane: PaneSetter<string | null>;
   setPaneSlot: (projectId: string, treeId: string, panes: string[], focused: string | null) => void;
   ensurePaneSlot: (projectId: string, treeId: string, rootNodeId: string) => void;
   setFocusedNodeId: Dispatch<SetStateAction<string | null>>;
   /** Switch the active workspace (createThread leaves the assistant's hidden one). */
   selectProject?: (projectId: string) => void;
-  setSelection: Dispatch<SetStateAction<ReadonlySet<string>>>;
+  /** useTrashActions' soft delete, shared so a thread and a branch delete alike. */
+  deleteSubtree: (
+    project: Project,
+    rootId: string,
+    updateProject?: (project: Project, nodes: Record<string, ChatNodeState>) => Project,
+  ) => string;
   treeSelection: ReadonlySet<string>;
   setTreeSelection: Dispatch<SetStateAction<ReadonlySet<string>>>;
   sidebarExpanded: Prefs['sidebarExpanded'];
   setSidebarExpanded: (value: Prefs['sidebarExpanded']) => void;
+  /** Persistence: hold queued writes around a backend-made structure change. Optional in tests. */
+  runWorkspaceMutation?: (projectId: string, mutation: () => Promise<void>) => Promise<void>;
+  /** Persistence: what the backend already holds, so it is not written back. Optional in tests. */
+  adoptBackendStructure?: (adoption: StructureAdoption) => void;
+  /** Bump the structure version so useStructuralSelector consumers re-compute. */
+  bumpStructureVersion?: () => void;
 }
 
 export function useTreeActions({
   projects,
   activeProjectId,
   nodesRef,
-  cancelFns,
   dispatch,
+  renameNode,
   newNodeId,
   setProjects,
   setNodes,
-  setOpenPanes,
-  setFocusedPane,
   setPaneSlot,
   ensurePaneSlot,
   setFocusedNodeId,
   selectProject,
-  setSelection,
+  deleteSubtree,
   treeSelection,
   setTreeSelection,
   sidebarExpanded,
   setSidebarExpanded,
+  runWorkspaceMutation,
+  adoptBackendStructure,
+  bumpStructureVersion,
 }: UseTreeActionsArgs) {
   const createThread = useCallback((modeId?: string) => {
     let projectId = activeProjectId;
@@ -415,11 +413,11 @@ export function useTreeActions({
       }
       setProjects((prev) =>
         prev.map((p) =>
-          p.id === project.id ? reduceProject(p, { type: 'archive-tree', treeId, now: Date.now() }) : p,
+          p.id === project.id ? reduceProject(p, { type: 'archive-tree', treeId, now: Date.now(), nodes: nodesRef.current }) : p,
         ),
       );
     },
-    [isTreeStreaming, projects, setProjects],
+    [isTreeStreaming, nodesRef, projects, setProjects],
   );
 
   const unarchiveTree = useCallback(
@@ -483,20 +481,14 @@ export function useTreeActions({
     [setProjects],
   );
 
+  // A thread's name is its root conversation's title.
   const renameTree = useCallback(
     (treeId: string, name: string, targetProjectId?: string) => {
       const projectId = targetProjectId ?? activeProjectId;
-      const trimmed = name.trim();
-      if (!projectId || !trimmed) return;
-      setProjects((prev) =>
-        prev.map((p) =>
-          p.id === projectId && p.trees.some((t) => t.id === treeId)
-            ? reduceProject(p, { type: 'rename-tree', treeId, name: trimmed })
-            : p,
-        ),
-      );
+      const tree = projects.find((p) => p.id === projectId)?.trees.find((t) => t.id === treeId);
+      if (tree) renameNode(tree.rootNodeId, name);
     },
-    [activeProjectId, setProjects],
+    [activeProjectId, projects, renameNode],
   );
 
   const activateTree = useCallback(
@@ -514,13 +506,14 @@ export function useTreeActions({
 
       // Mark all nodes in the activated tree as read so the thread-level
       // unread badge clears even when child branches completed while unfocused.
+      // Opening the thread is the user's own act, so its completions count as seen.
       const now = Date.now();
       const allIds = descendants(tree.rootNodeId, project.edges);
       allIds.add(tree.rootNodeId);
       for (const nid of allIds) {
         const node = nodesRef.current[nid];
-        if (node && (node.lastAssistantAt ?? 0) > (node.viewedAt ?? 0)) {
-          dispatch({ type: 'node-viewed', nodeId: nid, viewedAt: now });
+        if (node && hasUnseenCompletion(node)) {
+          dispatch({ type: 'node-viewed', nodeId: nid, viewedAt: now, seen: true });
         }
       }
     },
@@ -528,66 +521,22 @@ export function useTreeActions({
   );
 
   const deleteTree = useCallback(
-    (treeId: string) => {
+    (treeId: string): string | null => {
       const project = projects.find((p) => p.trees.some((t) => t.id === treeId));
-      if (!project) return;
+      if (!project) return null;
       if (isTreeStreaming(project, treeId)) {
         toast.warning('Stop streaming nodes in this thread before deleting.');
-        return;
+        return null;
       }
       const tree = project.trees.find((t) => t.id === treeId);
-      if (!tree) return;
-      const liveEdges = project.edges.filter(
-        (e) => !nodesRef.current[e.source]?.deletedAt && !nodesRef.current[e.target]?.deletedAt,
-      );
-      const doomed = descendants(tree.rootNodeId, liveEdges);
-      doomed.add(tree.rootNodeId);
-      doomed.forEach((id) => cancelFns.current[id]?.());
-
-      const gid = `del-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-      const at = Date.now();
-      const nextNodes = { ...nodesRef.current };
-      doomed.forEach((id) => {
-        const cur = nextNodes[id];
-        if (!cur) return;
-        nextNodes[id] = { ...cur, deletedAt: at, deletionGroupId: gid };
-      });
-      nodesRef.current = nextNodes;
-      setNodes(nextNodes);
-
-      setProjects((prev) =>
-        prev.map((p) => {
-          if (p.id !== project.id) return p;
-          if (p.activeTreeId !== treeId) return { ...p };
-          const fallback = p.trees
-            .filter((t) => t.id !== treeId && !t.archivedAt && !nextNodes[t.rootNodeId]?.deletedAt)
-            .sort((a, b) => b.lastActiveAt - a.lastActiveAt)[0];
-          return { ...p, activeTreeId: fallback ? fallback.id : null };
-        }),
-      );
-
-      setOpenPanes((prev) => prev.filter((id) => !doomed.has(id)));
-      setFocusedPane((cur) => (cur && doomed.has(cur) ? null : cur));
-      setFocusedNodeId((cur) => (cur && doomed.has(cur) ? null : cur));
-      setSelection((prev) => {
-        if (![...doomed].some((id) => prev.has(id))) return prev;
-        const next = new Set(prev);
-        doomed.forEach((id) => next.delete(id));
-        return next;
-      });
+      if (!tree) return null;
+      return deleteSubtree(project, tree.rootNodeId, (p, nodes) => (
+        p.activeTreeId !== treeId
+          ? { ...p }
+          : { ...p, activeTreeId: pickLandingTreeId(p.trees.filter((t) => t.id !== treeId), nodes) }
+      ));
     },
-    [
-      cancelFns,
-      isTreeStreaming,
-      nodesRef,
-      projects,
-      setFocusedNodeId,
-      setFocusedPane,
-      setNodes,
-      setOpenPanes,
-      setProjects,
-      setSelection,
-    ],
+    [deleteSubtree, isTreeStreaming, projects],
   );
 
   const moveTreeToWorkspace = useCallback(
@@ -600,7 +549,7 @@ export function useTreeActions({
         toast.error('Target workspace not found.');
         return;
       }
-      if ((source.backendConnectionId ?? LOCAL_BACKEND_CONNECTION_ID) !== (target.backendConnectionId ?? LOCAL_BACKEND_CONNECTION_ID)) {
+      if (!sameBackendConnection(source, target)) {
         toast.error('Threads cannot be moved between local and remote backends.');
         return;
       }
@@ -616,56 +565,65 @@ export function useTreeActions({
       );
       const moving = descendants(tree.rootNodeId, liveEdges);
       moving.add(tree.rootNodeId);
+      const removedEdges = source.edges.filter((e) => moving.has(e.source) || moving.has(e.target));
+      const movingEdges = source.edges.filter((e) => moving.has(e.source) && moving.has(e.target));
+
+      const move = async () => {
+        await apiMoveTreeToWorkspace(treeId, source.id, target.id);
+        const confirmedAt = Date.now();
+        const nextNodes = { ...nodesRef.current };
+        const movedNodes: ChatNodeState[] = [];
+        moving.forEach((id) => {
+          const cur = nextNodes[id];
+          if (!cur) return;
+          nextNodes[id] = cur.projectId === target.id ? cur : { ...cur, projectId: target.id };
+          movedNodes.push(nextNodes[id]);
+        });
+        // The backend has moved the tree, its threads and their edges: adopt
+        // that, as a re-read would, so neither workspace writes it again.
+        for (const adoption of treeMoveAdoptions({
+          from: source, to: target, tree, nodeIds: moving, removedEdges, addedEdges: movingEdges, movedNodes,
+        }, confirmedAt)) adoptBackendStructure?.(adoption);
+
+        setProjects((prev) =>
+          prev.map((p) => {
+            if (p.id === source.id) {
+              const trees = p.trees.filter((t) => t.id !== treeId);
+              const chatIds = p.chatIds.filter((id) => !moving.has(id));
+              const edges = p.edges.filter(
+                (e) => !moving.has(e.source) && !moving.has(e.target),
+              );
+              const activeTreeId = p.activeTreeId === treeId ? pickLandingTreeId(trees, nodesRef.current) : p.activeTreeId;
+              return { ...p, trees, chatIds, edges, activeTreeId };
+            }
+            if (p.id === target.id) {
+              // A re-read may already have brought some of it here.
+              const trees = p.trees.some((t) => t.id === treeId) ? p.trees : [...p.trees, tree];
+              const chatIds = [...p.chatIds, ...Array.from(moving).filter((id) => !p.chatIds.includes(id))];
+              const held = new Set(p.edges.map(serializedEdgeId));
+              const edges = [...p.edges, ...movingEdges.filter((e) => !held.has(serializedEdgeId(e)))];
+              return { ...p, trees, chatIds, edges };
+            }
+            return p;
+          }),
+        );
+        nodesRef.current = nextNodes;
+        setNodes(nextNodes);
+        bumpStructureVersion?.();
+      };
 
       try {
-        await apiMoveTreeToWorkspace(treeId, source.id, target.id);
+        // Writes queued for the source go out first, while the moving threads still belong to it.
+        if (runWorkspaceMutation) await runWorkspaceMutation(source.id, move);
+        else await move();
       } catch (err) {
         toast.error(`Move failed: ${(err as Error).message}`);
         return;
       }
 
-      setProjects((prev) =>
-        prev.map((p) => {
-          if (p.id === source.id) {
-            const trees = p.trees.filter((t) => t.id !== treeId);
-            const chatIds = p.chatIds.filter((id) => !moving.has(id));
-            const edges = p.edges.filter(
-              (e) => !moving.has(e.source) && !moving.has(e.target),
-            );
-            let activeTreeId = p.activeTreeId;
-            if (activeTreeId === treeId) {
-              const fallback = trees
-                .filter((t) => !t.archivedAt && !nodesRef.current[t.rootNodeId]?.deletedAt)
-                .sort((a, b) => b.lastActiveAt - a.lastActiveAt)[0];
-              activeTreeId = fallback ? fallback.id : null;
-            }
-            return { ...p, trees, chatIds, edges, activeTreeId };
-          }
-          if (p.id === target.id) {
-            const trees = [...p.trees, tree];
-            const chatIds = [...p.chatIds, ...Array.from(moving).filter((id) => !p.chatIds.includes(id))];
-            const movingEdges = source.edges.filter(
-              (e) => moving.has(e.source) && moving.has(e.target),
-            );
-            const edges = [...p.edges, ...movingEdges];
-            return { ...p, trees, chatIds, edges };
-          }
-          return p;
-        }),
-      );
-
-      const nextNodes = { ...nodesRef.current };
-      moving.forEach((id) => {
-        const cur = nextNodes[id];
-        if (!cur) return;
-        nextNodes[id] = { ...cur, projectId: target.id };
-      });
-      nodesRef.current = nextNodes;
-      setNodes(nextNodes);
-
       toast.success(`Moved thread to ${target.name || 'workspace'}.`);
     },
-    [isTreeStreaming, nodesRef, projects, setNodes, setProjects],
+    [adoptBackendStructure, bumpStructureVersion, isTreeStreaming, nodesRef, projects, runWorkspaceMutation, setNodes, setProjects],
   );
 
   const bulkArchiveTrees = useCallback(() => {

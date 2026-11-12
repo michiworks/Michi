@@ -1,6 +1,6 @@
-import React from 'react';
 import type { MichiThreadState } from 'michi-shared';
 import { michiStateLabel } from './michiFormat';
+import { THREAD_STATE_TONE as TONE } from './threadStateTone';
 import './michi.css';
 
 /**
@@ -68,21 +68,21 @@ export function ThreadStateDot({
       style={{ flexShrink: 0, display: 'inline-block', verticalAlign: 'middle' }}
     >
       {title && <title>{title}</title>}
-      {kind === 'waiting' && <circle cx="5" cy="5" r="3.5" fill="var(--term-accent)" />}
+      {kind === 'waiting' && <circle cx="5" cy="5" r="3.5" fill={TONE.waiting} />}
       {kind === 'doing' && (
-        <circle cx="5" cy="5" r="3.5" fill="none" stroke="var(--term-mid)" strokeWidth="1.4" />
+        <circle cx="5" cy="5" r="3.5" fill="none" stroke={TONE.doing} strokeWidth="1.4" />
       )}
       {kind === 'stalled' && (
         <>
-          <circle cx="5" cy="5" r="3.5" fill="none" stroke="var(--term-mauve)" strokeWidth="1.4" />
-          <path d="M5 1.5 A3.5 3.5 0 0 0 5 8.5 Z" fill="var(--term-mauve)" />
+          <circle cx="5" cy="5" r="3.5" fill="none" stroke={TONE.stalled} strokeWidth="1.4" />
+          <path d="M5 1.5 A3.5 3.5 0 0 0 5 8.5 Z" fill={TONE.stalled} />
         </>
       )}
       {kind === 'done' && (
         <path
           d="M2.4 5.3 L4.2 7.1 L7.6 3.3"
           fill="none"
-          stroke="var(--term-digest)"
+          stroke={TONE.done}
           strokeWidth="1.6"
           strokeLinecap="round"
           strokeLinejoin="round"
@@ -100,7 +100,7 @@ export function ThreadStateDot({
         />
       )}
       {/* Faint, yet a non-text glyph still reads at ≥3:1 on bg, surface and alt in every palette (--term-faint's contract). */}
-      {kind === 'idea' && <circle cx="5" cy="5" r="2.5" fill="var(--term-faint)" />}
+      {kind === 'idea' && <circle cx="5" cy="5" r="2.5" fill={TONE.idea} />}
       {kind === 'running' && (
         // Three quarters of a ring (circumference ≈ 22), turning.
         <circle
@@ -109,7 +109,7 @@ export function ThreadStateDot({
           cy="5"
           r="3.5"
           fill="none"
-          stroke="var(--term-select)"
+          stroke="var(--term-run)"
           strokeWidth="1.4"
           strokeLinecap="round"
           strokeDasharray="16.5 22"

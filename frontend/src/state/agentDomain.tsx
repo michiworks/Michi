@@ -3,16 +3,19 @@ import type {
   AgentDefinitionDtoV1, AgentRunDtoV1, AgentRunEventV1, AgentRunInputRequestV1, AgentRunInteractionDtoV1,
   AgentRunListQueryV1, AgentRunWatchDtoV1, CancelAgentRunRequestV1, SpawnAgentRunRequestV1,
 } from 'michi-shared';
-import { AgentRunEventType, AgentRunStatus } from 'michi-shared';
+import { AgentRunEventType, AgentRunStatus, isAgentRunTerminal } from 'michi-shared';
 import {
   cancelAgentRun, getAgentRun, getAgentRunEvents, listAgentDefinitions, listAgentRuns,
   sendAgentRunInput, spawnAgentRun, subscribeAgentRuns, type AgentRunRouteTarget,
 } from '../services/api';
+import { SseHttpError } from '../services/api/sseParser';
+import { HttpResponseError } from '../services/api/httpError';
 import { backendConnectionIdForWorkspace } from '../config/backendConnections';
 import {
   type AgentResourceIdentity, type LocatedAgentResource, agentResourceKey,
   identityOf, parentAgentIndexKey, parentTurnAgentIndexKey, workspaceAgentIndexKey,
 } from './agentIdentity';
+import { forgetKnownAgentRuns, noteKnownAgentRuns } from './agentRunNotifications';
 
 export interface AgentDomainState {
   definitions: Record<string, LocatedAgentResource<AgentDefinitionDtoV1>>;
@@ -48,8 +51,6 @@ export type AgentDomainAction =
   | { type: 'optimistic-cancel'; runKey: string; active: boolean }
   | { type: 'error'; message: string };
 
-const terminal = new Set<AgentRunStatus>([AgentRunStatus.Completed, AgentRunStatus.Failed, AgentRunStatus.Cancelled]);
-
 function withIndexes(state: AgentDomainState, runs: AgentDomainState['runs']): AgentDomainState {
   const workspaceRunKeys: Record<string, string[]> = {};
   const parentRunKeys: Record<string, string[]> = {};
@@ -72,7 +73,7 @@ function applyStatusEvent(run: AgentRunDtoV1, event: AgentRunEventV1): AgentRunD
   const to = event.payload.to;
   const from = event.payload.from;
   if (typeof to !== 'string' || !Object.values(AgentRunStatus).includes(to as AgentRunStatus)) return run;
-  if (terminal.has(run.status)) return run;
+  if (isAgentRunTerminal(run.status)) return run;
   if (from !== run.status) return run;
   const next = to as AgentRunStatus;
   return {
@@ -80,7 +81,7 @@ function applyStatusEvent(run: AgentRunDtoV1, event: AgentRunEventV1): AgentRunD
     status: next,
     waitingReason: next === AgentRunStatus.Waiting && typeof event.payload.waitingReason === 'string'
       ? event.payload.waitingReason as AgentRunDtoV1['waitingReason'] : null,
-    completedAt: terminal.has(next) ? event.createdAt : run.completedAt,
+    completedAt: isAgentRunTerminal(next) ? event.createdAt : run.completedAt,
     latestEventSeq: event.seq,
   };
 }
@@ -160,6 +161,11 @@ export interface AgentDomainContextValue {
 
 const AgentDomainContext = createContext<AgentDomainContextValue | null>(null);
 
+const RETRY_MIN_MS = 1_000;
+const RETRY_MAX_MS = 30_000;
+/** The workspace is not ours (403) or the request can never be valid (400): retrying cannot help. */
+const FATAL_STATUSES = new Set([400, 403]);
+
 export function AgentDomainProvider({ children, api = defaultApi }: { children: React.ReactNode; api?: AgentDomainApi }) {
   const [state, baseDispatch] = useReducer(agentDomainReducer, initialAgentDomainState);
   const stateRef = useRef(state); stateRef.current = state;
@@ -170,6 +176,11 @@ export function AgentDomainProvider({ children, api = defaultApi }: { children: 
   }, []);
 
   useEffect(() => () => { for (const unsubscribe of subscriptions.current.values()) unsubscribe(); subscriptions.current.clear(); }, []);
+  // Readers above this provider (the chat store opens a server notice's Run pane) look names up there.
+  useEffect(() => {
+    noteKnownAgentRuns(state.runs);
+    return () => forgetKnownAgentRuns(state.runs);
+  }, [state.runs]);
 
   const loadDefinitions = useCallback(async (workspaceId?: string | null) => {
     dispatch({ type: 'upsert-definitions', resources: await api.listDefinitions(workspaceId) });
@@ -196,29 +207,72 @@ export function AgentDomainProvider({ children, api = defaultApi }: { children: 
     const backendConnectionId = backendConnectionIdForWorkspace(workspaceId);
     const workspaceKey = workspaceAgentIndexKey(backendConnectionId, workspaceId);
     const existing = subscriptions.current.get(workspaceKey); if (existing) return existing;
-    const cursors: Record<string, number> = {};
-    for (const [key, cursor] of Object.entries(stateRef.current.cursors)) {
-      const resource = stateRef.current.runs[key];
-      if (resource?.backendConnectionId === backendConnectionId && resource.value.workspaceId === workspaceId) cursors[resource.value.id] = cursor;
-    }
-    const unsubscribeTransport = api.subscribe(workspaceId, {
-      cursors,
-      onEnvelope: async (envelope) => {
-        if (envelope.event === 'heartbeat') return;
-        if (envelope.event === 'agent_run_gap' && envelope.runId) {
-          await reconcileRun({ backendConnectionId, id: envelope.runId }); return;
-        }
-        const event = envelope.eventData; if (!event) return;
-        const runKey = agentResourceKey({ backendConnectionId, id: event.runId });
-        const cursor = stateRef.current.cursors[runKey] ?? -1;
-        if (event.seq > cursor + 1) { await reconcileRun({ backendConnectionId, id: event.runId }); return; }
-        dispatch({ type: 'apply-event', backendConnectionId, event });
-      },
-      onMalformed: (error) => dispatch({ type: 'error', message: error.message }),
-      onDisconnect: (error) => { if (error) dispatch({ type: 'error', message: error.message }); dispatch({ type: 'subscription', workspaceKey, active: false }); subscriptions.current.delete(workspaceKey); },
-    });
-    const unsubscribe = () => { unsubscribeTransport(); subscriptions.current.delete(workspaceKey); dispatch({ type: 'subscription', workspaceKey, active: false }); };
-    subscriptions.current.set(workspaceKey, unsubscribe); dispatch({ type: 'subscription', workspaceKey, active: true }); return unsubscribe;
+    let stopped = false;
+    let unsubscribeTransport: (() => void) | undefined;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let delay = RETRY_MIN_MS;
+    // Runs deleted on the server: resuming them would answer every reconnect with 404.
+    const gone = new Set<string>();
+    const dropDeletedRuns = async (runIds: string[]): Promise<boolean> => {
+      const missing = await Promise.all(runIds.map((id) => api.getRun({ backendConnectionId, id }).then(
+        () => false,
+        (error: unknown) => error instanceof HttpResponseError && error.status === 404,
+      )));
+      runIds.forEach((id, index) => { if (missing[index]) gone.add(id); });
+      return missing.some(Boolean);
+    };
+    const connect = () => {
+      // Each connection resumes from the cursors applied so far.
+      const cursors: Record<string, number> = {};
+      for (const [key, cursor] of Object.entries(stateRef.current.cursors)) {
+        const resource = stateRef.current.runs[key];
+        if (resource?.backendConnectionId === backendConnectionId && resource.value.workspaceId === workspaceId && !gone.has(resource.value.id)) cursors[resource.value.id] = cursor;
+      }
+      unsubscribeTransport = api.subscribe(workspaceId, {
+        cursors,
+        onOpen: () => { delay = RETRY_MIN_MS; },
+        onEnvelope: async (envelope) => {
+          if (envelope.event === 'heartbeat') return;
+          if (envelope.event === 'agent_run_gap' && envelope.runId) {
+            await reconcileRun({ backendConnectionId, id: envelope.runId }); return;
+          }
+          const event = envelope.eventData; if (!event) return;
+          const runKey = agentResourceKey({ backendConnectionId, id: event.runId });
+          const cursor = stateRef.current.cursors[runKey] ?? -1;
+          if (event.seq > cursor + 1) { await reconcileRun({ backendConnectionId, id: event.runId }); return; }
+          dispatch({ type: 'apply-event', backendConnectionId, event });
+        },
+        onMalformed: (error) => dispatch({ type: 'error', message: error.message }),
+        onDisconnect: (error) => {
+          if (stopped) return;
+          if (error) dispatch({ type: 'error', message: error.message });
+          dispatch({ type: 'subscription', workspaceKey, active: false });
+          const giveUp = () => { if (subscriptions.current.get(workspaceKey) === unsubscribe) subscriptions.current.delete(workspaceKey); };
+          if (error instanceof SseHttpError && FATAL_STATUSES.has(error.status)) { giveUp(); return; }
+          if (error instanceof SseHttpError && error.status === 404) {
+            // A resumed Run was deleted, or the workspace is gone: retry only without the deleted Runs.
+            void dropDeletedRuns(Object.keys(cursors)).then((dropped) => {
+              if (stopped) return;
+              if (!dropped) { giveUp(); return; }
+              delay = RETRY_MIN_MS;
+              timer = setTimeout(connect, delay);
+            });
+            return;
+          }
+          // A restarted or briefly unreachable backend, or one that cut a slow
+          // feed: the reconnect's replay brings the Runs back to their cursors.
+          timer = setTimeout(connect, delay);
+          delay = Math.min(delay * 2, RETRY_MAX_MS);
+        },
+      });
+      dispatch({ type: 'subscription', workspaceKey, active: true });
+    };
+    const unsubscribe = () => {
+      stopped = true; if (timer) clearTimeout(timer); unsubscribeTransport?.();
+      if (subscriptions.current.get(workspaceKey) === unsubscribe) subscriptions.current.delete(workspaceKey);
+      dispatch({ type: 'subscription', workspaceKey, active: false });
+    };
+    subscriptions.current.set(workspaceKey, unsubscribe); connect(); return unsubscribe;
   }, [api, reconcileRun]);
 
   const value = useMemo<AgentDomainContextValue>(() => ({ state, loadDefinitions, loadRuns, spawn, reconcileRun, subscribeWorkspace, sendInput, cancel, dispatch }), [state, loadDefinitions, loadRuns, spawn, reconcileRun, subscribeWorkspace, sendInput, cancel, dispatch]);

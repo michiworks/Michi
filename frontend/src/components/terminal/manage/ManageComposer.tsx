@@ -1,28 +1,25 @@
-import { serverEntityId } from '../../../config/backendIdentity';
 import { usePermissionPreferences } from '../../../hooks/usePermissionPreferences';
 import { ComposerPermissionControl } from '../ComposerPermissionControl';
 import { approveForMeRuntimeIds, chatPermissionChoiceForRuntime } from '../../../lib/chatPermissionModes';
 import { chatPermissionChoiceParts } from 'michi-shared';
 import React, { useCallback, useEffect, useImperativeHandle, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { useChatStore, useStructuralSelector, shallowArrayEqual } from '../../../state/chatStore';
+import { appendComposerLine } from '../../../state/composerDraft';
 import type { MentionEditorHandle } from '../../MentionEditor';
-const MentionEditor = React.lazy(() => import('../../MentionEditor'));
-import type { MentionRecord } from '../../mentions';
-import { expandMentions } from '../../mentions';
+import LazyMentionEditor from '../../LazyMentionEditor';
+import type { MentionRecord } from '../../../lib/mentions';
+import { expandMentions } from '../../../lib/mentions';
 import { draftToDoc } from '../../mentionDoc';
 import { collectCrossTreeGroups, EMPTY_CROSS_TREE_GROUPS } from '../../crossTreeMentions';
 import { getElectron } from '../../../lib/electronBridge';
 import {
-  getWebUploadCwd,
-  importWorkspaceFileUpload,
   copyWorkspaceFile,
   saveAgentOptions,
   bindPendingPrimaryAgent,
-  fetchAgentStatus,
+  fetchAgentStatusAfterFirstPaint,
   listPrimaryAgentDefinitions,
   type PrimaryAgentDefinitionOption,
   type AgentReasoning,
-  type UploadProgress,
 } from '../../../services/api';
 import { useRuntimeCatalog } from '../../../hooks/useRuntimeCatalog';
 import { resolveNodeBinding } from '../../../state/nodeBindingResolution';
@@ -48,17 +45,13 @@ import {
   writeComposerModeSelection,
   writeComposerPrimaryAgentSelection,
 } from './composerAgentSelection';
-import UploadProgressBar, { type UploadProgressViewState } from '../../UploadProgressBar';
+import UploadProgressBar from '../../UploadProgressBar';
+import { PendingAttachmentRow, type PanePendingAttachment } from '../PaneComposerPreBlocks';
+import { useComposerAttachments } from '../useComposerAttachments';
+import { isFileDrag, useFileDropZone } from '../useFileDropZone';
+import { focusIsTaken } from '../escapeLayers';
 
 type ComposerDraft = { value: string; mentions: MentionRecord[] };
-
-interface PendingAttachment {
-  id: string;
-  name: string;
-  absPath: string;
-  /** Workspace-relative path (e.g. ".attachments/img.png"). Present for uploaded files. */
-  relPath?: string;
-}
 
 // In-memory draft survives unmount within a session, but successful sends
 // reset it. Cleared on full reload.
@@ -72,10 +65,15 @@ const draftPermissionModes = new Map<string, import('michi-shared').ChatPermissi
 type StickyModePick = { backendConnectionId: string; runtimeId: string | undefined; modeId: string | undefined };
 let manageStickyModePick: StickyModePick | undefined;
 const manageStickyPrimaryAgent = new Map<string, PrimaryAgentDefinitionOption>();
+// The Home thread's Ultracode choice until it is sent; like the draft, it
+// survives unmount within a session and a send resets it.
+let homeDraftUltracode = false;
 
+/** @testonly */
 export function __resetManageComposerSessionStateForTests(options: { keepPersisted?: boolean } = {}) {
   composerDrafts.clear();
   draftPermissionModes.clear();
+  homeDraftUltracode = false;
   manageStickyModePick = undefined;
   manageStickyPrimaryAgent.clear();
   if (!options.keepPersisted) clearComposerAgentSelections();
@@ -185,24 +183,6 @@ function useToolbarLayout(
   return layout;
 }
 
-/** Build a thumbnail src for a pending image attachment in ManageComposer. */
-function pendingThumbSrc(p: PendingAttachment, workspaceId?: string): string | null {
-  if (workspaceId && p.relPath) {
-    const encoded = p.relPath.split('/').map(encodeURIComponent).join('/');
-    return `${workspaceBackendApiBase(workspaceId)}/files/${encodeURIComponent(serverEntityId(workspaceId))}/${encoded}`;
-  }
-  if (workspaceId && p.absPath) {
-    const marker = '/.attachments/';
-    const idx = p.absPath.indexOf(marker);
-    if (idx !== -1) {
-      const rel = '.attachments/' + p.absPath.slice(idx + marker.length);
-      const encoded = rel.split('/').map(encodeURIComponent).join('/');
-      return `${workspaceBackendApiBase(workspaceId)}/files/${encodeURIComponent(serverEntityId(workspaceId))}/${encoded}`;
-    }
-  }
-  return null;
-}
-
 const ManageComposer = React.forwardRef<ManageComposerHandle, Props>(function ManageComposer(props, ref) {
   const scope = props.parentNodeId ? `${props.workspaceId ?? ''}:${props.parentNodeId}` : '__manage__';
   return <ScopedManageComposer key={scope} {...props} handleRef={ref} />;
@@ -227,6 +207,7 @@ function ScopedManageComposer({
     createThread,
     createChildChat,
     sendMessage,
+    setChatUltracode,
     agentStatus,
     refreshAgentStatus,
     availableModes,
@@ -301,6 +282,16 @@ function ScopedManageComposer({
     }
     setPendingPrimaryAgentState(agent);
   }, [workspaceId]);
+  // Ultracode is the new chat's, which Home does not have yet: the switch
+  // holds the choice and submit() saves it to the chat before its first
+  // message. Only an ordinary Home thread runs it, not a custom agent; the
+  // picker offers it only where the runtime has it (capabilities.ultracode).
+  const [ultracodeDraft, setUltracodeDraftState] = useState(() => homeDraftUltracode);
+  const setUltracodeDraft = (enabled: boolean) => {
+    homeDraftUltracode = enabled;
+    setUltracodeDraftState(enabled);
+  };
+  const ultracode = !parentNodeId && !pendingPrimaryAgent ? { enabled: ultracodeDraft } : undefined;
 
   useEffect(() => {
     setPendingPrimaryAgentState(workspaceId ? manageStickyPrimaryAgent.get(workspaceId) : undefined);
@@ -315,7 +306,7 @@ function ScopedManageComposer({
     setPrimaryAgentsError(null);
     const load = async () => {
       if (!usesActiveBackend) {
-        const status = await fetchAgentStatus(backendConnectionIdForWorkspace(workspaceId), controller.signal);
+        const status = await fetchAgentStatusAfterFirstPaint(backendConnectionIdForWorkspace(workspaceId), controller.signal);
         if (!status.customAgentsEnabled) return [];
       }
       return listPrimaryAgentDefinitions(workspaceId, controller.signal);
@@ -379,173 +370,39 @@ function ScopedManageComposer({
   const effectivePermissionMode = chatPermissionChoiceForRuntime(permissionMode, permissionRuntime, approveRuntimeIds.includes(permissionRuntime));
   const composerEffort = resolveComposerReasoning(manageResolvedBinding, agentStatus, null, providerModels, agentStatus?.providers);
 
-  const [pendingAttachments, setPendingAttachments] = useState<PendingAttachment[]>([]);
-  const [uploadProgress, setUploadProgress] = useState<UploadProgressViewState | null>(null);
-  const [dragHover, setDragHover] = useState(false);
-  const dragDepthRef = useRef(0);
-  const webFileInputRef = useRef<HTMLInputElement | null>(null);
-
-  useEffect(() => () => {
-    webFileInputRef.current?.remove();
-    webFileInputRef.current = null;
-  }, [workspaceId]);
+  const {
+    pending: pendingAttachments,
+    setPending: setPendingAttachments,
+    removePending: removePendingAttachment,
+    uploadProgress,
+    attachFiles,
+    handlePaste,
+    pickFiles: onPickFile,
+    resolveCwd: resolveAttachCwd,
+  } = useComposerAttachments(project);
+  // Stops propagation so WorkspaceManage's own drop zone (artifact import)
+  // does not also take a file dropped on this composer.
+  const {
+    visible: dragHover,
+    onDragEnter: handleDragEnter,
+    onDragOver: handleDragOver,
+    onDragLeave: handleDragLeave,
+    endDrag,
+  } = useFileDropZone({ stopPropagation: true });
 
   useEffect(() => {
-    const active = document.activeElement as HTMLElement | null;
-    if (active && active !== document.body) {
-      const tag = active.tagName;
-      if (tag === 'INPUT' || tag === 'TEXTAREA' || active.isContentEditable) return;
-    }
+    if (focusIsTaken(toolbarRef.current)) return;
     requestAnimationFrame(() => inputRef.current?.focus());
   }, []);
 
-  const resolveAttachCwd = useCallback(async (): Promise<string | null> => {
-    if (project?.cwd) return project.cwd;
-    if (!project?.id) return null;
-    return getWebUploadCwd(project.id);
-  }, [project?.cwd, project?.id]);
-
-  const addPendingPaths = useCallback((items: ReadonlyArray<string | { abs: string; displayName?: string; relPath?: string }>) => {
-    if (items.length === 0) return;
-    setPendingAttachments((prev) => {
-      const have = new Set(prev.map((p) => p.absPath));
-      const next = [...prev];
-      for (const item of items) {
-        const abs = typeof item === 'string' ? item : item.abs;
-        const override = typeof item === 'string' ? undefined : item.displayName;
-        const relPath = typeof item === 'string' ? undefined : item.relPath;
-        if (have.has(abs)) continue;
-        const name = override || abs.split('/').pop() || abs;
-        next.push({
-          id: `att-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
-          name,
-          absPath: abs,
-          relPath,
-        });
-        have.add(abs);
-      }
-      return next;
-    });
-  }, []);
-
-  const removePendingAttachment = useCallback((id: string) => {
-    setPendingAttachments((prev) => prev.filter((x) => x.id !== id));
-  }, []);
-
-  const progressForFile = useCallback(
-    (fileName: string, fileIndex: number, fileCount: number) =>
-      (progress: UploadProgress) => {
-        setUploadProgress({
-          fileName,
-          fileIndex,
-          fileCount,
-          phase: progress.phase,
-          percent: progress.percent,
-        });
-      },
-    [],
-  );
-
-  const onPickFile = useCallback(async () => {
-    const electron = getElectron();
-    if (electron?.chooseFiles && !project?.backendConnectionId) {
-      const res = await electron.chooseFiles();
-      if (res.canceled || !res.paths?.length) return;
-      const cwd = await resolveAttachCwd();
-      if (!cwd || !project?.id) {
-        toast.error('No workspace folder for file attachment');
-        return;
-      }
-      const items: Array<{ abs: string; displayName: string; relPath: string }> = [];
-      const errors: string[] = [];
-      for (const sourcePath of res.paths) {
-        try {
-          const result = await copyWorkspaceFile(project.id, cwd, sourcePath, {
-            subdir: '.attachments',
-          });
-          const abs = result.filePath.startsWith('/')
-            ? result.filePath
-            : `${cwd.replace(/\/$/, '')}/${result.filePath}`;
-          items.push({
-            abs,
-            displayName: result.displayName || sourcePath.split('/').pop() || sourcePath,
-            relPath: result.filePath,
-          });
-        } catch (err) {
-          const name = sourcePath.split('/').pop() || sourcePath;
-          errors.push(`${name}: ${(err as Error).message}`);
-        }
-      }
-      if (items.length > 0) addPendingPaths(items);
-      if (errors.length > 0) {
-        toast.error(
-          `${errors.length} file${errors.length === 1 ? '' : 's'} failed`,
-          { description: errors.join('\n'), style: { whiteSpace: 'pre-line' } },
-        );
-      }
-      return;
-    }
-    if (!webFileInputRef.current) {
-      const input = document.createElement('input');
-      input.type = 'file';
-      input.multiple = true;
-      input.style.display = 'none';
-      input.addEventListener('change', async () => {
-        const files = Array.from(input.files ?? []);
-        input.value = '';
-        if (files.length === 0) return;
-        const items: Array<{ abs: string; displayName: string; relPath?: string }> = [];
-        const errors: string[] = [];
-        for (const [fileIndex, file] of files.entries()) {
-          try {
-            const cwd = await resolveAttachCwd();
-            if (!cwd || !project?.id) {
-              errors.push(`${file.name}: no workspace folder`);
-              continue;
-            }
-            const result = await importWorkspaceFileUpload(project.id, cwd, file, {
-              onProgress: progressForFile(file.name, fileIndex, files.length),
-              subdir: '.attachments',
-            });
-            const abs = result.filePath.startsWith('/')
-              ? result.filePath
-              : `${cwd.replace(/\/$/, '')}/${result.filePath}`;
-            items.push({ abs, displayName: result.displayName || file.name, relPath: result.filePath });
-          } catch (err) {
-            errors.push(`${file.name}: ${(err as Error).message}`);
-          }
-        }
-        setUploadProgress(null);
-        if (items.length > 0) addPendingPaths(items);
-        if (errors.length > 0) {
-          toast.error(
-            `${errors.length} file${errors.length === 1 ? '' : 's'} failed`,
-            { description: errors.join('\n'), style: { whiteSpace: 'pre-line' } },
-          );
-        }
-      });
-      document.body.appendChild(input);
-      webFileInputRef.current = input;
-    }
-    webFileInputRef.current.click();
-  }, [project?.id, project?.backendConnectionId, addPendingPaths, progressForFile, resolveAttachCwd]);
-
-  const insertMentionTrigger = useCallback(() => {
-    inputRef.current?.editor?.chain().focus().insertContent('@').run();
-  }, []);
+  const insertMentionTrigger = useCallback(() => inputRef.current?.startMention(), []);
 
   useImperativeHandle(handleRef, () => ({
     insert: (text) => {
       const editor = inputRef.current?.editor;
       const live = editor && !editor.isDestroyed ? editor : null;
-      const requested = text.trim();
-      if (requested) {
-        const current = draftRef.current;
-        const kept = current.value.trimEnd();
-        const next = {
-          value: kept ? `${kept}\n${requested}` : requested,
-          mentions: current.mentions.filter((mention) => mention.end <= kept.length),
-        };
+      if (text.trim()) {
+        const next = appendComposerLine(draftRef.current, text);
         // Through the editor, so its change path updates the draft and the
         // caret can be placed after the new text at once.
         if (live) live.commands.setContent(draftToDoc(next.value, next.mentions));
@@ -554,12 +411,7 @@ function ScopedManageComposer({
       if (live) live.commands.focus('end');
       else inputRef.current?.focus();
     },
-    startMention: () => {
-      const editor = inputRef.current?.editor;
-      if (!editor || editor.isDestroyed) return;
-      const value = draftRef.current.value;
-      editor.chain().focus('end').insertContent(value && !/\s$/.test(value) ? ' @' : '@').run();
-    },
+    startMention: () => inputRef.current?.startMention('end'),
   }), [setDraft]);
 
   const openModelMenu = useCallback(
@@ -578,135 +430,43 @@ function ScopedManageComposer({
     [],
   );
 
-  const handlePaste = useCallback(
-    async (e: React.ClipboardEvent<HTMLTextAreaElement>) => {
-      const dt = e.clipboardData;
-      if (!dt) return;
-      const items: File[] = [];
-      for (const item of Array.from(dt.items)) {
-        if (item.kind !== 'file') continue;
-        const f = item.getAsFile();
-        if (f) items.push(f);
-      }
-      if (items.length === 0) return;
-      e.preventDefault();
-
-      const pendingItems: Array<string | { abs: string; displayName?: string; relPath?: string }> = [];
-      const errors: string[] = [];
-      for (const [fileIndex, file] of items.entries()) {
-        try {
-          const cwd = await resolveAttachCwd();
-          if (!cwd || !project?.id) {
-            errors.push(`${file.name || 'pasted file'}: no workspace folder`);
-            continue;
-          }
-          const nameExtMatch = file.name && file.name.match(/\.[a-zA-Z0-9]{1,8}$/);
-          const ext = nameExtMatch
-            ? nameExtMatch[0]
-            : (file.type && file.type.startsWith('image/')
-                ? `.${file.type.slice('image/'.length).split(';')[0] || 'png'}`
-                : '');
-          const stem = (file.name && file.name.replace(/\.[a-zA-Z0-9]{1,8}$/, '')) || 'pasted';
-          const ts = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
-          const fileName = `${stem}-${ts}${ext}`;
-          const result = await importWorkspaceFileUpload(project.id, cwd, file, {
-            originalName: fileName,
-            onProgress: progressForFile(fileName, fileIndex, items.length),
-            subdir: '.attachments',
-          });
-          const abs = result.filePath.startsWith('/')
-            ? result.filePath
-            : `${cwd.replace(/\/$/, '')}/${result.filePath}`;
-          pendingItems.push({ abs, displayName: result.displayName || fileName, relPath: result.filePath });
-        } catch (err) {
-          errors.push(`${file.name || 'pasted file'}: ${(err as Error).message}`);
-        }
-      }
-      setUploadProgress(null);
-      if (pendingItems.length > 0) addPendingPaths(pendingItems);
-      if (errors.length > 0) {
-        toast.error(
-          `${errors.length} paste${errors.length === 1 ? '' : 's'} failed`,
-          { description: errors.join('\n'), style: { whiteSpace: 'pre-line' } },
-        );
-      }
-    },
-    [project?.id, project?.backendConnectionId, addPendingPaths, progressForFile, resolveAttachCwd],
-  );
-
-  const isFileDrag = (e: React.DragEvent) =>
-    Array.from(e.dataTransfer.types).includes('Files');
-
-  const handleDragEnter = useCallback((e: React.DragEvent) => {
-    if (!isFileDrag(e)) return;
-    e.preventDefault();
-    e.stopPropagation();
-    dragDepthRef.current += 1;
-    if (dragDepthRef.current === 1) setDragHover(true);
-  }, []);
-
-  const handleDragOver = useCallback((e: React.DragEvent) => {
-    if (!isFileDrag(e)) return;
-    e.preventDefault();
-    e.stopPropagation();
-    e.dataTransfer.dropEffect = 'copy';
-  }, []);
-
-  const handleDragLeave = useCallback((e: React.DragEvent) => {
-    if (!isFileDrag(e)) return;
-    e.preventDefault();
-    e.stopPropagation();
-    dragDepthRef.current = Math.max(0, dragDepthRef.current - 1);
-    if (dragDepthRef.current === 0) setDragHover(false);
-  }, []);
-
   const handleDrop = useCallback(
     async (e: React.DragEvent) => {
       if (!isFileDrag(e)) return;
       e.preventDefault();
       e.stopPropagation();
-      dragDepthRef.current = 0;
-      setDragHover(false);
-
-      const files = Array.from(e.dataTransfer.files);
-      if (files.length === 0) return;
-
-      const absPaths: Array<string | { abs: string; relPath?: string }> = [];
-      const errors: string[] = [];
-      for (const [fileIndex, file] of files.entries()) {
-        try {
-          const cwd = await resolveAttachCwd();
-          if (!cwd) {
-            errors.push(`${file.name}: no workspace folder`);
-            continue;
-          }
-          if (!project?.id) {
-            errors.push(`${file.name}: no workspace selected`);
-            continue;
-          }
-          const result = await importWorkspaceFileUpload(project.id, cwd, file, {
-            onProgress: progressForFile(file.name, fileIndex, files.length),
-            subdir: '.attachments',
-          });
-          const abs = result.filePath.startsWith('/')
-            ? result.filePath
-            : `${cwd.replace(/\/$/, '')}/${result.filePath}`;
-          absPaths.push({ abs, relPath: result.filePath });
-        } catch (err) {
-          errors.push(`${file.name}: ${(err as Error).message}`);
-        }
-      }
-      setUploadProgress(null);
-      if (absPaths.length > 0) addPendingPaths(absPaths);
-      if (errors.length > 0) {
-        toast.error(
-          `${errors.length} file${errors.length === 1 ? '' : 's'} failed`,
-          { description: errors.join('\n'), style: { whiteSpace: 'pre-line' } },
-        );
-      }
+      endDrag();
+      await attachFiles(Array.from(e.dataTransfer.files));
     },
-    [addPendingPaths, progressForFile, project?.id, project?.backendConnectionId, resolveAttachCwd],
+    [attachFiles, endDrag],
   );
+
+  // This composer outlives a workspace switch, so an attachment can still sit
+  // in the workspace it was added in. Copy it into the workspace the thread
+  // starts in: its agent reads it there, and its thumbnail is served from there.
+  const isFromOtherWorkspace = (p: PanePendingAttachment) => !!p.workspaceId && p.workspaceId !== workspaceId;
+  const copyAttachmentsHere = async (items: PanePendingAttachment[]): Promise<PanePendingAttachment[] | null> => {
+    try {
+      const cwd = await resolveAttachCwd();
+      if (!cwd) throw new Error('No workspace folder');
+      const copied = await Promise.all(items.map(async (p) => {
+        if (!isFromOtherWorkspace(p)) return p;
+        const result = await copyWorkspaceFile(workspaceId, cwd, p.absPath, { subdir: '.attachments' });
+        const absPath = result.filePath.startsWith('/')
+          ? result.filePath
+          : `${cwd.replace(/\/$/, '')}/${result.filePath}`;
+        return { ...p, absPath, relPath: result.filePath, workspaceId };
+      }));
+      // A failed send then retries with the copies.
+      setPendingAttachments((current) => current.map((p) => copied.find((c) => c.id === p.id) ?? p));
+      return copied;
+    } catch (error) {
+      toast.error(`Could not copy attachments into ${project?.name ?? 'this workspace'}`, {
+        description: `${(error as Error).message}. Remove them and attach them again.`,
+      });
+      return null;
+    }
+  };
 
   const submit = async () => {
     if (submittingRef.current || uploadProgress) return;
@@ -715,8 +475,19 @@ function ScopedManageComposer({
     if (!raw && pendingAttachments.length === 0) return;
     if (!workspaceId) return;
 
+    submittingRef.current = true;
+    setSubmitting(true);
+    const attachments = pendingAttachments.some(isFromOtherWorkspace)
+      ? await copyAttachmentsHere(pendingAttachments)
+      : pendingAttachments;
+    if (!attachments) {
+      submittingRef.current = false;
+      setSubmitting(false);
+      return;
+    }
+
     selectProject(workspaceId);
-    const attachmentsForSend = pendingAttachments.map((p) => ({
+    const attachmentsForSend = attachments.map((p) => ({
       name: p.name,
       absPath: p.absPath,
       relPath: p.relPath,
@@ -749,8 +520,6 @@ function ScopedManageComposer({
             mentions: mentionsForMeta,
           }
         : undefined;
-    submittingRef.current = true;
-    setSubmitting(true);
     try {
       const permissionParts = chatPermissionChoiceParts(effectivePermissionMode);
       const overrides = permissionPreferences.global || effectivePermissionMode === 'ask' ? {}
@@ -764,21 +533,27 @@ function ScopedManageComposer({
       if (parentNodeId) {
         await createChildChat(parentNodeId, finalText, permissionMeta, { modeId, primaryAgent });
       } else {
-        let nodeId: string | null;
-        try {
-          nodeId = await createThread(modeId);
-        } catch {
-          // The store already surfaced the allocation failure.
-          return;
-        }
+        const nodeId = await createThread(modeId);
         if (!nodeId) return;
         if (primaryAgent) {
           bindPendingPrimaryAgent(nodeId, { workspaceId, ...primaryAgent });
+        }
+        // Saved before the first message, whose spawn reads it. Not sent
+        // when the runtime changed since the switch was turned on.
+        if (ultracode?.enabled && agentStatus?.capabilities.ultracode === true) {
+          try {
+            await setChatUltracode(nodeId, true);
+          } catch (error) {
+            toast.error('Could not turn on Ultracode', {
+              description: `${(error as Error).message}. The chat starts without it; its model picker can turn it on.`,
+            });
+          }
         }
         sendMessage(nodeId, finalText, permissionMeta);
       }
       setDraft({ value: '', mentions: [] });
       setPermissionMode('ask');
+      setUltracodeDraft(false);
       setPendingAttachments([]);
       onSubmitted();
     } catch (error) {
@@ -855,53 +630,11 @@ function ScopedManageComposer({
         preBlocks={
           <>
             <UploadProgressBar progress={uploadProgress} />
-            {pendingAttachments.length > 0 ? (
-              <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, padding: '4px 8px' }}>
-                {pendingAttachments.map((p) => {
-                  const ext = p.name.split('.').pop()?.toLowerCase() ?? '';
-                  const isImage = ['png','jpg','jpeg','gif','webp'].includes(ext);
-                  const thumbSrc = isImage ? pendingThumbSrc(p, workspaceId) : null;
-
-                  if (isImage && thumbSrc) {
-                    return (
-                      <span key={p.id} title={p.name} className="t-att-pending-item" style={{ display: 'inline-block' }}>
-                        <img
-                          src={thumbSrc}
-                          alt={p.name}
-                          style={{ width: 64, height: 64, objectFit: 'cover', display: 'block' }}
-                        />
-                        <span
-                          className="t-att-pending-x"
-                          onClick={() => removePendingAttachment(p.id)}
-                        >
-                          ×
-                        </span>
-                      </span>
-                    );
-                  }
-
-                  return (
-                    <span key={p.id} className="t-att-pending-item t-att-pending-file" title={p.absPath}>
-                      <span style={{ fontSize: 'var(--fs-xs)', opacity: 0.7 }}>📄</span>
-                      <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', maxWidth: 120 }}>
-                        {p.name}
-                      </span>
-                      <span
-                        className="t-att-pending-x"
-                        onClick={() => removePendingAttachment(p.id)}
-                      >
-                        ×
-                      </span>
-                    </span>
-                  );
-                })}
-              </div>
-            ) : null}
+            <PendingAttachmentRow items={pendingAttachments} workspaceId={workspaceId} onRemove={removePendingAttachment} />
           </>
         }
         input={
-          <React.Suspense fallback={<div className="composer-loading-stub" />}>
-          <MentionEditor
+          <LazyMentionEditor
             ref={inputRef}
             value={draft.value}
             mentions={draft.mentions}
@@ -917,7 +650,6 @@ function ScopedManageComposer({
             onSubmit={() => submit()}
             onPaste={(e) => { void handlePaste(e as unknown as React.ClipboardEvent<HTMLTextAreaElement>); }}
           />
-          </React.Suspense>
         }
         toolbarLeft={<div className="manage-composer-toolbar-left">
           {!showTray && toolbarLeftPrefix}
@@ -948,6 +680,7 @@ function ScopedManageComposer({
             isStreaming={submitting}
             modelMenuOpen={!!modelMenu}
             onOpenModelMenu={openModelMenu}
+            ultracode={ultracode}
           />
           <PaneComposerActions
             draftHasText={false}
@@ -1026,6 +759,8 @@ function ScopedManageComposer({
         onSaveProvider={(provider) => saveHomeDefault({ provider })}
         onSaveModel={(model) => saveHomeDefault({ model })}
         onSaveReasoning={(reasoning) => saveHomeDefault({ reasoning: reasoning as AgentReasoning })}
+        ultracode={ultracode}
+        onSaveUltracode={ultracode ? setUltracodeDraft : undefined}
         onRetryModels={retryModels}
         onCloseAgentMenu={() => setAgentMenu(null)}
         onCloseModelMenu={() => setModelMenu(null)}

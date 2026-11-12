@@ -14,11 +14,9 @@ export function pageBackground(page: PageId): string {
     case 'home':
     case 'workspaces':
     case 'spaces':
-    case 'archived':
     case 'threads':
       return 'var(--term-bg)';
 
-    case 'trash':
     case 'scheduled':
       return 'color-mix(in srgb, var(--term-surface) 72%, var(--term-bg))';
 
@@ -32,7 +30,6 @@ export function pageBackground(page: PageId): string {
 
     // Graph/branch pages — a 60/40 mix of bg + surface.
     case 'map':
-    case 'branches':
     case 'space':
       return 'color-mix(in srgb, var(--term-bg) 60%, var(--term-surface))';
 

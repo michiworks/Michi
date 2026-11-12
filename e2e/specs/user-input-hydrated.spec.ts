@@ -56,8 +56,8 @@ test('a question saved before this window opened can be answered from a phone', 
     await page.addInitScript(() => localStorage.setItem('michi:v1:prefs', JSON.stringify({ onboardingCompletedAt: 1 })));
     await page.goto('/');
 
-    // The ASK bar announces it before the thread is open.
-    const alert = page.locator('.ask-alert-bar');
+    // The ASK notice announces it before the thread is open.
+    const alert = page.locator('.ask-notice');
     await expect(alert).toContainText('Ship the status email now?');
     await alert.getByRole('button', { name: /answer the agent's question/ }).tap();
 

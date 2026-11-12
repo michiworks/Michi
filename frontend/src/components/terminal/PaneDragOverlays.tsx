@@ -23,9 +23,11 @@ export function PaneDropIndicator({ side }: { side: 'left' | 'right' | null }) {
 export function FileDropOverlay({
   visible,
   fileCount,
+  label = 'attach to message',
 }: {
   visible: boolean;
   fileCount: number;
+  label?: string;
 }) {
   if (!visible) return null;
 
@@ -40,7 +42,7 @@ export function FileDropOverlay({
         alignItems: 'center',
         justifyContent: 'center',
         pointerEvents: 'none',
-        zIndex: 'var(--z-drag)',
+        zIndex: 'var(--z-pane-overlay)',
       }}
     >
       <div
@@ -55,7 +57,7 @@ export function FileDropOverlay({
           boxShadow: '0 4px 14px rgba(0,0,0,.08)',
         }}
       >
-        drop {fileCount} file{fileCount === 1 ? '' : 's'} · attach to message
+        drop {fileCount} file{fileCount === 1 ? '' : 's'} · {label}
       </div>
     </div>
   );

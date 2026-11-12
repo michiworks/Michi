@@ -2,6 +2,7 @@ import { ChildProcess } from "child_process";
 import { killProcessTree, spawnAgentProcess } from "../../core/processTree";
 import type { RuntimeObservability } from "../../contract/host";
 import { HEARTBEAT_INTERVAL_MS } from "../../core/constants";
+import { nextInteractionRequestId } from "../../core/pendingInteractions";
 import { ACPError, ACPProcessExitedError, ACPRequestNotSentError, ACPNotRunningError, ACPSessionRecoveryRequiredError } from "./errors";
 import type {
     AcpAgentCapabilities, AcpCancelOptions, AcpCancelSettlement, AcpConfigOption, AcpHandlerContext, AcpIncomingMessage, AcpIncomingNotification, AcpIncomingRequest,
@@ -174,7 +175,6 @@ export class AcpClient {
     protected exitListeners: Array<(err: Error) => void> = [];
     /** Tracks pending permission requests from the agent so we can respond later. */
     protected pendingPermissions = new Map<number, AcpPermissionRequest>();
-    protected nextPermissionId = -1;
     protected initialization: AcpInitializeResult | null = null;
     protected rawProbeState = new Map<string, { seq: number; prevAt: number; startedAt: number }>();
     /** Full prompt lifetimes, including the consumer's final queue cleanup. */
@@ -450,10 +450,13 @@ export class AcpClient {
      */
     protected dispatch(msg: AcpIncomingMessage): void {
         if (msg?.method === '_michi/permission_resolved') {
-            const { sessionId, requestId } = msg.params ?? {};
-            if (this.pendingPermissions.get(requestId)?.sessionId === sessionId) {
+            // The agent names its own request: the JSON-RPC id it asked with.
+            const { sessionId, requestId: rpcId } = msg.params ?? {};
+            for (const [requestId, entry] of this.pendingPermissions) {
+                if (entry.rpcId !== rpcId || entry.sessionId !== sessionId) continue;
                 this.pendingPermissions.delete(requestId);
                 this.sessionQueues.get(sessionId)?.push({ update: { sessionUpdate: 'permission_resolved', requestId } });
+                break;
             }
             return;
         }
@@ -982,13 +985,12 @@ export class AcpClient {
         }
     }
 
-    /** Keep the UI's numeric contract independent of provider JSON-RPC IDs. */
+    /**
+     * The UI gets a Michi request ID, never the provider's JSON-RPC ID: a new
+     * agent process numbers its requests from the start again.
+     */
     protected registerPendingPermission(rpcId: string | number, entry: { sessionId: string; options?: any[]; meta?: any }): number {
-        let requestId = rpcId;
-        if (typeof requestId !== 'number' || !Number.isFinite(requestId) || this.pendingPermissions.has(requestId)) {
-            while (this.pendingPermissions.has(this.nextPermissionId)) this.nextPermissionId--;
-            requestId = this.nextPermissionId--;
-        }
+        const requestId = nextInteractionRequestId();
         this.pendingPermissions.set(requestId, { ...entry, rpcId });
         return requestId;
     }
@@ -1030,6 +1032,14 @@ export class AcpClient {
             result: { outcome: { outcome: 'cancelled' } },
         });
         this.proc.stdin.write(payload + '\n');
+    }
+
+    /** The agent waits on an approval, a user question or a reply to a request for this session. */
+    protected hasPendingSessionWork(sessionId: string): boolean {
+        for (const entry of this.pendingPermissions.values()) if (entry.sessionId === sessionId) return true;
+        for (const entry of this.pendingUserInputs.values()) if (entry.sessionId === sessionId) return true;
+        for (const request of this.pending.values()) if (request.sessionId === sessionId) return true;
+        return false;
     }
 
     /** Cancel all pending permission requests (and user questions) for a given session. */

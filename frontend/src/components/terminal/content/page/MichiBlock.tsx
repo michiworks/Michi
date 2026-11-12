@@ -1,5 +1,5 @@
 import React, { Component, memo, useId, useRef, useState } from 'react';
-import type { MichiPageBlock } from 'michi-shared';
+import { PAGE_CONTAINER_LIMITS, type MichiPageBlock } from 'michi-shared';
 import { Plus } from 'lucide-react';
 import { MichiMenu, type MichiMenuEntry } from './MichiMenu';
 import type { BlockProps, BlockRenderer, MichiBlockCtx } from './blockTypes';
@@ -43,11 +43,9 @@ import { toggledChecklist } from './pageEdits';
 import { ResponsiveGrid } from './blocks/Grid';
 import { PageViewEntry } from './PageViewContext';
 
-/** Michi nests blocks at most two levels deep; anything deeper is not drawn. */
-const MAX_DEPTH = 2;
-
-/** A container's section holds at most this many blocks (the page model's limit). */
-const SLOT_MAX = 20;
+/** Anything nested deeper than the page model allows is not drawn. */
+const MAX_DEPTH = PAGE_CONTAINER_LIMITS.depth;
+const SLOT_MAX = PAGE_CONTAINER_LIMITS.slotBlocks;
 
 /** The "+" at the foot of a container's section: what the page offers to put there. */
 function SlotAdd({ entries, label }: { entries: MichiMenuEntry[]; label: string }) {

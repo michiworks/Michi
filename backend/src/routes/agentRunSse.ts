@@ -1,4 +1,4 @@
-import { createSseObserver } from '../services/httpSse';
+import { beginSse, SSE_REPLAY_BYTES } from '../services/httpSse';
 import type { Request, Response } from 'express';
 import type { AgentRunDtoV1, AgentRunEventV1, AgentRunSseEnvelopeV1 } from 'michi-shared';
 import { AgentRunEventBus } from '../agents/runs/agentRunEventBus';
@@ -55,16 +55,12 @@ export function createAgentRunSseHandler(deps: AgentRunSseDeps) {
       if (!run || run.workspaceId !== workspaceId) { res.status(404).json({ error: 'not_found' }); return; }
     }
 
-    res.status(200);
-    res.setHeader('Content-Type', 'text/event-stream');
-    res.setHeader('Cache-Control', 'no-cache, no-transform');
-    res.setHeader('Connection', 'keep-alive');
-    res.flushHeaders?.();
-    const observer = createSseObserver(res);
+    const observer = beginSse(res);
     const send = (envelope: AgentRunSseEnvelopeV1): void => {
       observer.write(frame(envelope));
     };
 
+    let replayBytes = 0;
     for (const [runId, afterSeq] of cursors) {
       const run = deps.source.getRun(ownerUserId, runId)!;
       if (afterSeq > run.latestEventSeq) {
@@ -72,13 +68,20 @@ export function createAgentRunSseHandler(deps: AgentRunSseDeps) {
         cursors.set(runId, run.latestEventSeq);
         continue;
       }
-      const events = deps.source.listEvents(ownerUserId, runId, afterSeq, MAX_REPLAY_EVENTS);
-      for (const event of events) {
-        send({ version: 1, event: 'agent_run_event', runId, seq: event.seq, eventData: event, gapAfterSeq: null, emittedAt: now() });
-        cursors.set(runId, event.seq);
+      let replayedSeq = afterSeq;
+      // Past the budget a Run gets a gap; the client reads the rest from its paginated events.
+      if (replayBytes <= SSE_REPLAY_BYTES) {
+        for (const event of deps.source.listEvents(ownerUserId, runId, afterSeq, MAX_REPLAY_EVENTS)) {
+          const text = frame({ version: 1, event: 'agent_run_event', runId, seq: event.seq, eventData: event, gapAfterSeq: null, emittedAt: now() });
+          replayBytes += Buffer.byteLength(text);
+          if (replayBytes > SSE_REPLAY_BYTES) break;
+          observer.write(text);
+          replayedSeq = event.seq;
+          cursors.set(runId, event.seq);
+        }
       }
-      if ((events.at(-1)?.seq ?? afterSeq) < run.latestEventSeq) {
-        send({ version: 1, event: 'agent_run_gap', runId, seq: null, eventData: null, gapAfterSeq: events.at(-1)?.seq ?? afterSeq, emittedAt: now() });
+      if (replayedSeq < run.latestEventSeq) {
+        send({ version: 1, event: 'agent_run_gap', runId, seq: null, eventData: null, gapAfterSeq: replayedSeq, emittedAt: now() });
         cursors.set(runId, run.latestEventSeq);
       }
     }

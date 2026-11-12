@@ -21,15 +21,13 @@ describe('BranchAnchorRow', () => {
     expect(container.firstElementChild?.tagName).toBe('BUTTON');
   });
 
-  it('a branch made just now grows into the list and keeps its separator', () => {
-    const { container } = render(<BranchAnchorRow {...baseProps} createdAt={Date.now()} enter last={false} />);
+  it('a branch made just now grows into the list', () => {
+    const { container } = render(<BranchAnchorRow {...baseProps} createdAt={Date.now()} enter />);
     const grow = container.firstElementChild as HTMLElement;
     expect(grow.tagName).toBe('DIV');
     expect(grow.style.display).toBe('flow-root');
     const row = screen.getByRole('button', { name: 'Open branch: Why TypeScript?' });
     expect(row.parentElement).toBe(grow);
-    // Wrapped, the row is its wrapper's last child; it draws its own separator.
-    expect(row.style.borderBottom).toContain('1px solid');
   });
 
   it('cross-fades the status word; the outgoing one is aria-hidden', async () => {

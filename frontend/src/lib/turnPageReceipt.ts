@@ -1,16 +1,17 @@
-import { blockShowsTaskBoard } from 'michi-shared';
+import {
+  blockShowsTaskBoard, pageBlockName, pageRowName, parsePageBlockInput, TASK_COLUMN,
+  type MichiPageWriteReceipt, type PageWriteCommitStatus, type PageWriteTaskCounts,
+} from 'michi-shared';
 import { backendEntityId } from '../config/backendIdentity';
 import { notifyPageChanged } from '../state/pages/pageEvents';
 
 const PAGE_TOOLS = ['edit_page', 'edit_database', 'create_page', 'create_database', 'configure_database', 'configure_database_view'] as const;
 export type PageWriteTool = typeof PAGE_TOOLS[number];
 
-export interface TurnPageInvalidation {
-  resourceKind: 'page' | 'database' | 'component';
-  resourceId: string;
-  workspaceId?: string;
+/** The receipt fields invalidation reads; any may be missing from an older or cut-off output. */
+export interface TurnPageInvalidation extends Pick<MichiPageWriteReceipt, 'resourceKind' | 'resourceId' | 'workspaceId' | 'viewVersion'> {
   revision?: number;
-  viewVersion?: number;
+  /** Kept as read: a backend newer than this window can name a status it does not know. */
   commitStatus?: string;
 }
 
@@ -49,7 +50,10 @@ export interface TurnPageChangeRef {
 }
 
 /** What a write to a task database did to its tasks (agents/pageTools.ts). */
-export interface TaskWriteCounts { added: number; updated: number; removed: number }
+export type TaskWriteCounts = PageWriteTaskCounts;
+
+/** Which write outcomes change what an open page shows; a status this window does not know does not count. */
+const INVALIDATES: Record<PageWriteCommitStatus, boolean> = { committed: true, partial: true, proposed: true, unchanged: true, rejected: false };
 
 const invalidatedReceipts = new Set<string>();
 const invalidatedVersions = new Map<string, number>();
@@ -61,7 +65,7 @@ export function invalidateTurnPageReceipt(
   toolCallId: string,
 ): void {
   const workspaceId = receipt.workspaceId ?? identity.workspaceId;
-  if (receipt.commitStatus && !['committed', 'partial', 'proposed', 'unchanged'].includes(receipt.commitStatus)) return;
+  if (receipt.commitStatus && INVALIDATES[receipt.commitStatus as PageWriteCommitStatus] !== true) return;
   const scope = JSON.stringify([identity.backendConnectionId, workspaceId, identity.nodeId, identity.turnId, receipt.resourceKind, receipt.resourceId]);
   const version = receipt.viewVersion ?? receipt.revision;
   if (version !== undefined) {
@@ -103,6 +107,32 @@ export function normalizeTurnToolName(title: string | undefined, names: readonly
 
 function parseJson(text: string): unknown {
   try { return JSON.parse(text); } catch { return undefined; }
+}
+
+const CREW_CALL_TOOL = ['michi_call_tool'] as const;
+
+/**
+ * A Michi tool call's own name and input, unwrapping Crew's michi_call_tool
+ * {tool, arguments}. ACP cuts inputJson at 16 KB, which leaves invalid JSON:
+ * the input is then null, and a Crew call is still named by its "tool" key.
+ */
+export function michiToolCall(tool: { title?: string; inputJson?: string }): { name: string; input: Record<string, unknown> | null } | null {
+  const title = tool.title?.trim();
+  if (!title) return null;
+  const parsed = tool.inputJson ? record(parseJson(tool.inputJson)) : null;
+  if (!toolMatch(title, CREW_CALL_TOOL)) return { name: title, input: parsed };
+  if (!parsed) return { name: tool.inputJson?.match(/"tool"\s*:\s*"([a-z_]+)"/)?.[1] ?? CREW_CALL_TOOL[0], input: null };
+  const args = typeof parsed.arguments === 'string' ? parseJson(parsed.arguments) : parsed.arguments;
+  return { name: stringField(parsed.tool) ?? CREW_CALL_TOOL[0], input: record(args) };
+}
+
+/**
+ * Which of `names` a Michi tool call is, seeing through Crew's wrapper. A
+ * wrapper whose input names no tool matches only where `names` lists the
+ * wrapper itself: a parser whose output marker alone identifies its tool.
+ */
+export function michiToolNamed<T extends string>(tool: { title?: string; inputJson?: string }, names: readonly T[]): T | null {
+  return toolMatch(michiToolCall(tool)?.name, names) as T | null;
 }
 
 /** Flatten JSON/MCP content envelopes and JSON text blocks without losing the raw output string. */
@@ -174,27 +204,23 @@ function record(value: unknown): Record<string, unknown> | null {
   return value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : null;
 }
 
-function firstLine(text: string): string {
-  const line = text.split('\n')
-    .map((l) => l.replace(/^\s*(?:#+|[-*>]|\d+\.)\s*/, '').replace(/\*\*|__|`/g, '').trim())
-    .find(Boolean) ?? '';
-  return line.length > 40 ? `${line.slice(0, 39)}…` : line;
-}
+const LABEL_MAX = 40;
 
-function changeLabel(change: Record<string, unknown>, taskRows: boolean): string | null {
+/** What a change is called, as Home and the change cards call it; a row goes by `titleColumnId`, whatever order its cells were written in. */
+function changeLabel(change: Record<string, unknown>, titleColumnId: string | null): string | null {
   for (const key of ['after', 'before']) {
     const snapshot = record(change[key]);
     const block = record(snapshot?.block);
     if (block) {
-      if (typeof block.title === 'string' && block.title.trim()) return firstLine(block.title);
-      if (typeof block.text === 'string' && block.text.trim()) return firstLine(block.text) || null;
+      const { id: _id, rev: _rev, sources: _sources, edit: _edit, ...content } = block;
+      const parsed = parsePageBlockInput(content);
+      const name = parsed ? pageBlockName(parsed, LABEL_MAX) : '';
+      if (name) return name;
       if (block.type === 'task-view') return 'Task board';
     }
     const values = record(record(snapshot?.row)?.values);
-    // A task goes by its Task cell, whatever order its cells were written in.
-    if (taskRows && typeof values?.task === 'string' && values.task.trim()) return firstLine(values.task);
-    const first = values ? Object.values(values).find((value) => typeof value === 'string' && value.trim()) : undefined;
-    if (typeof first === 'string') return firstLine(first);
+    const name = values ? pageRowName(values, titleColumnId, LABEL_MAX) : '';
+    if (name) return name;
   }
   return null;
 }
@@ -208,7 +234,7 @@ function addsTaskBoard(change: Record<string, unknown>): boolean {
   return change.op === 'update' && !!before && !blockShowsTaskBoard(before);
 }
 
-function writeChanges(values: unknown[], taskRows: boolean): TurnPageChangeRef[] {
+function writeChanges(values: unknown[], titleColumnId: string | null): TurnPageChangeRef[] {
   const parent = values.map(record).find((row) => record(row?.michiPageWrite)?.kind === 'michiPageWrite' && record(row?.result));
   const result = record(parent?.result);
   if (!result) return [];
@@ -216,7 +242,7 @@ function writeChanges(values: unknown[], taskRows: boolean): TurnPageChangeRef[]
     .map(record)
     .flatMap((change): TurnPageChangeRef[] => (change && typeof change.id === 'string' && change.id
       ? [{
-        id: change.id, seq: typeof change.seq === 'number' ? change.seq : 0, proposed: key === 'proposed', label: changeLabel(change, taskRows),
+        id: change.id, seq: typeof change.seq === 'number' ? change.seq : 0, proposed: key === 'proposed', label: changeLabel(change, titleColumnId),
         ...(addsTaskBoard(change) ? { taskBoard: true as const } : {}),
       }]
       : []));
@@ -286,11 +312,11 @@ function salvagePageWrite(output: string): Record<string, unknown> | null {
 
 /** Parse only completed tool calls. The original output remains in ToolCallState unchanged. */
 export function parseTurnPageReceipt(
-  tool: { title?: string; status?: string; output?: string },
+  tool: { title?: string; status?: string; output?: string; inputJson?: string },
   backendConnectionId: string,
 ): TurnPageReceipt | null {
   if (tool.status !== 'completed') return null;
-  const name = toolMatch(tool.title, PAGE_TOOLS) as PageWriteTool | null;
+  const name = michiToolNamed(tool, PAGE_TOOLS);
   if (!name || !tool.output) return null;
   const values = normalizeToolResultEnvelope(tool.output);
   const whole = values.map((value) => findPageWrite(value)).find(Boolean);
@@ -327,7 +353,8 @@ export function parseTurnPageReceipt(
     ...(batchId ? { batchId } : {}),
     ...(tasks ? { tasks } : {}),
     ...(raw.taskBoard === true ? { taskBoard: true as const } : {}),
-    changes: writeChanges(values, !!tasks),
+    // An older backend names no title column; a task still goes by its Task cell.
+    changes: writeChanges(values, stringField(raw.titleColumnId) ?? (tasks ? TASK_COLUMN.task : null)),
     ...(whole ? {} : { partial: true as const }),
   };
 }
@@ -355,13 +382,37 @@ export function taskBoardPageId(receipts: readonly TurnPageReceipt[], workspaceI
   return receipts.find((receipt) => receipt.resourceKind === 'page' && receipt.workspaceId === workspaceId && putsTaskBoard(receipt))?.resourceId ?? null;
 }
 
+/**
+ * The one page a receipt opens. A database shown on several pages still opens one:
+ * the page the write named, else `onScreen` when it shows the database, else the
+ * first that shows it, else the board this reply added.
+ */
+export function receiptPageId(receipt: TurnPageReceipt, boardPageId: string | null, onScreen?: string | null): string | null {
+  if (receipt.resourceKind === 'page') return receipt.resourceId;
+  if (receipt.originatingPageId) return receipt.originatingPageId;
+  if (onScreen && receipt.originatingPageIds.includes(onScreen)) return onScreen;
+  return receipt.originatingPageIds[0] ?? (receipt.tasks ? boardPageId : null);
+}
+
+/** A receipt worth showing: its write made, changed or suggested something. */
+export function receiptShows(receipt: TurnPageReceipt): boolean {
+  return receipt.created || receipt.appliedCount > 0 || receipt.proposedCount > 0;
+}
+
+/** Where on its page a receipt's View lands: the first block, or row of its database, that it changed. */
+export function receiptRevealTarget(receipt: TurnPageReceipt): { targetId: string; databaseId?: string } | null {
+  const targetId = receipt.affectedTargetIds[0];
+  if (!targetId) return null;
+  return receipt.resourceKind === 'database' ? { targetId, databaseId: receipt.resourceId } : { targetId };
+}
+
 /** Component saves refresh their hosts too, without masquerading as page cards; a new task database refreshes its workspace's boards. */
-export function parseTurnPageInvalidation(tool: { title?: string; status?: string; output?: string }, backendConnectionId: string): TurnPageInvalidation | null {
+export function parseTurnPageInvalidation(tool: { title?: string; status?: string; output?: string; inputJson?: string }, backendConnectionId: string): TurnPageInvalidation | null {
   const receipt = parseTurnPageReceipt(tool, backendConnectionId);
   if (receipt) return receipt;
   if (tool.status !== 'completed') return null;
-  if (toolMatch(tool.title, ['open_task_database'])) return openedTaskDatabase(tool.output, backendConnectionId);
-  if (!toolMatch(tool.title, ['save_page_component'])) return null;
+  if (michiToolNamed(tool, ['open_task_database'])) return openedTaskDatabase(tool.output, backendConnectionId);
+  if (!michiToolNamed(tool, ['save_page_component'])) return null;
   const raw = normalizeToolResultEnvelope(tool.output).map(value => findPageWrite(value)).find(Boolean);
   if (!raw || raw.resourceKind !== 'component' || !stringField(raw.resourceId)) return null;
   return {

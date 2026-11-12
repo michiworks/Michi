@@ -1,9 +1,11 @@
 import React from 'react';
 import { describe, it, expect, vi } from 'vitest';
-import { act, render, screen, fireEvent, waitFor } from '@testing-library/react';
+import { act, render, screen, fireEvent, waitFor, within } from '@testing-library/react';
 import TerminalSidebar from './Sidebar';
 import { ChatProvider } from '../../state/chatStore';
 import { PrefsProvider } from '../../state/prefs';
+import { clearRemoteRecoveryIssue, reportRemoteRecoveryFailure, REMOTE_RECOVERY_GRACE_MS } from '../../state/remoteRecovery';
+import { OPEN_SETTINGS_SECTION_EVENT } from './scheduled/metaAgent/metaAgentNav';
 
 function wrap(ui: React.ReactElement) {
   return (
@@ -13,26 +15,68 @@ function wrap(ui: React.ReactElement) {
   );
 }
 
-describe('TerminalSidebar BottomNav', () => {
-  it('renders Home / Workspaces as labelled rows and leaves Scheduled, Spaces and Settings to the rail', () => {
+describe('TerminalSidebar narrow drawer entry points', () => {
+  it('closes the drawer before its Search opens the palette', () => {
+    const calls: string[] = [];
     render(
       wrap(
         <TerminalSidebar
           activePage="dashboard"
-          customAgentsEnabled
+          workspaceReady
           onNav={() => {}}
-          onOpenPalette={() => {}}
-          onNewThread={() => {}}
+          narrowMode
+          narrowOverlayOpen
+          onCloseOverlay={() => calls.push('close')}
+          onOpenPalette={() => calls.push('palette')}
+          onNewThread={() => calls.push('new')}
         />,
       ),
     );
-    // getByText throws if missing — finding the element is the assertion.
-    expect(screen.getByText('Workspaces')).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: 'New chat' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Search' }));
+    expect(calls).toEqual(['new', 'close', 'palette']);
+  });
+});
+
+describe('TerminalSidebar BottomNav', () => {
+  it('leaves New chat and Search to the Topbar in a wide window, and carries them in the narrow drawer', () => {
+    const onNewThread = vi.fn();
+    const onOpenPalette = vi.fn();
+    const ui = (narrow: boolean) => wrap(
+      <TerminalSidebar
+        activePage="dashboard"
+        onNav={() => {}}
+        onOpenPalette={onOpenPalette}
+        onNewThread={onNewThread}
+        narrowMode={narrow}
+        narrowOverlayOpen={narrow}
+      />,
+    );
+    const { rerender } = render(ui(false));
+    expect(screen.queryByRole('button', { name: 'New chat' })).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Search' })).toBeNull();
+
+    // The drawer's scrim covers the Topbar: New chat (⌘T, which opens Home) and Search (⌘K).
+    rerender(ui(true));
+    const newChat = screen.getByRole('button', { name: 'New chat' });
+    expect(newChat.textContent).toContain('T');
+    fireEvent.click(newChat);
+    expect(onNewThread).toHaveBeenCalledTimes(1);
+    fireEvent.click(screen.getByRole('button', { name: 'Search' }));
+    expect(onOpenPalette).toHaveBeenCalledTimes(1);
+  });
+
+  it('leaves Home, Workspaces, Scheduled, Spaces, Settings and Skills to other entry points', () => {
+    render(wrap(<TerminalSidebar activePage="dashboard" customAgentsEnabled onNav={() => {}} />));
     expect(screen.getByText('Agents')).toBeTruthy();
-    expect(screen.getByText('Home')).toBeTruthy();
+    // Home is the logo, ⌘0 and New chat; Workspaces is "All N ›" on the Projects header.
+    expect(screen.queryByRole('button', { name: 'Home' })).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Workspaces' })).toBeNull();
     expect(screen.queryByText('Settings')).toBeNull();
     expect(screen.queryByText('Scheduled')).toBeNull();
     expect(screen.queryByText('Spaces')).toBeNull();
+    // Skills are managed in Settings.
+    expect(screen.queryByText('Skills')).toBeNull();
     // Branches / Map / Digest / Artifacts are thread-scoped views — their
     // entries moved to the Topbar right cluster (Artifacts removed 1a1348d0).
     expect(screen.queryByText('Branches')).toBeNull();
@@ -41,21 +85,65 @@ describe('TerminalSidebar BottomNav', () => {
     expect(screen.queryByText('Artifacts')).toBeNull();
   });
 
-  it('gives the narrow drawer an Activity switch that the wide sidebar leaves to the Topbar', () => {
-    const { rerender } = render(wrap(<TerminalSidebar activePage="dashboard" onNav={() => {}} />));
+  it.each([false, true])('switches between By project and Recent with the view tabs (narrow: %s)', (narrow) => {
+    render(wrap(<TerminalSidebar activePage="dashboard" onNav={() => {}} narrowMode={narrow} narrowOverlayOpen={narrow} />));
+    const tablist = screen.getByRole('tablist', { name: 'Sidebar view' });
+    const byProject = within(tablist).getByRole('tab', { name: 'By project' });
+    const recent = within(tablist).getByRole('tab', { name: 'Recent' });
+    const panel = screen.getByRole('tabpanel');
+    expect(byProject.getAttribute('aria-selected')).toBe('true');
+    expect(recent.getAttribute('aria-selected')).toBe('false');
+    expect(panel.getAttribute('aria-labelledby')).toBe(byProject.id);
+    // One tab stop for the pair; the arrows move between them.
+    expect(byProject.tabIndex).toBe(0);
+    expect(recent.tabIndex).toBe(-1);
+
+    fireEvent.click(recent);
+    expect(recent.getAttribute('aria-selected')).toBe('true');
+    expect(screen.getByRole('tabpanel').getAttribute('aria-labelledby')).toBe(recent.id);
+    // Recent is the Activity view.
+    expect(document.querySelector('.activity-view')).not.toBeNull();
+
+    fireEvent.keyDown(recent, { key: 'ArrowRight' });
+    expect(byProject.getAttribute('aria-selected')).toBe('true');
+    expect(document.activeElement).toBe(byProject);
+    expect(document.querySelector('.activity-view')).toBeNull();
+    // The topbar's old toggle has no copy in the sidebar.
     expect(screen.queryByRole('button', { name: 'Activity view' })).toBeNull();
+  });
 
-    rerender(wrap(<TerminalSidebar activePage="dashboard" onNav={() => {}} narrowMode narrowOverlayOpen />));
-    const toggle = screen.getByRole('button', { name: 'Activity view' });
-    expect(toggle.getAttribute('aria-pressed')).toBe('false');
-    expect(screen.getByText('Structure')).toBeTruthy();
+  it('shows a machine that went offline in the foot and opens Settings on Machines from it', () => {
+    vi.useFakeTimers({ now: Date.parse('2026-11-10T10:00:00Z') });
+    const opened = vi.fn();
+    const onSection = (event: Event) => opened((event as CustomEvent<{ section?: string }>).detail?.section);
+    window.addEventListener(OPEN_SETTINGS_SECTION_EVENT, onSection);
+    try {
+      render(wrap(<TerminalSidebar activePage="dashboard" onNav={() => {}} />));
+      expect(screen.queryByRole('button', { name: /offline/ })).toBeNull();
 
-    fireEvent.click(toggle);
-    expect(toggle.getAttribute('aria-pressed')).toBe('true');
-    expect(screen.getByText('Activity')).toBeTruthy();
+      act(() => {
+        reportRemoteRecoveryFailure(
+          { id: 'cplus', name: 'c+', transport: 'ssh', sshHost: 'c-plus.example', hasToken: false, createdAt: 0, updatedAt: 0 },
+          new Error('ssh: connect timed out'),
+        );
+      });
+      // A blip inside the recovery grace period stays quiet, as the topbar's does.
+      expect(screen.queryByRole('button', { name: /offline/ })).toBeNull();
 
-    fireEvent.click(toggle);
-    expect(toggle.getAttribute('aria-pressed')).toBe('false');
+      act(() => { vi.advanceTimersByTime(REMOTE_RECOVERY_GRACE_MS + 1); });
+      const chip = screen.getByRole('button', { name: 'c+ offline, open Machines settings' });
+      expect(chip.textContent).toBe('c+ offline');
+      expect(chip.querySelector('.sidebar-conn-chip__dot')).not.toBeNull();
+      fireEvent.click(chip);
+      expect(opened).toHaveBeenCalledWith('machines');
+
+      act(() => { clearRemoteRecoveryIssue('cplus'); });
+      expect(screen.queryByRole('button', { name: /offline/ })).toBeNull();
+    } finally {
+      window.removeEventListener(OPEN_SETTINGS_SECTION_EVENT, onSection);
+      clearRemoteRecoveryIssue('cplus');
+      vi.useRealTimers();
+    }
   });
 
   it('slides the narrow drawer out as a ghost that is no longer a layer', async () => {
@@ -97,20 +185,25 @@ describe('TerminalSidebar BottomNav', () => {
       return (
         <>
           <button type="button" onClick={() => setOpen((value) => !value)}>Toggle drawer</button>
-          <TerminalSidebar activePage="dashboard" onNav={() => setOpen(false)} narrowMode narrowOverlayOpen={open} onCloseOverlay={() => setOpen(false)} />
+          <TerminalSidebar activePage="dashboard" customAgentsEnabled onNav={() => setOpen(false)} narrowMode narrowOverlayOpen={open} onCloseOverlay={() => setOpen(false)} />
         </>
       );
     }
     const { container } = render(wrap(<Shell />));
     expect(container.querySelector('aside')).not.toBeNull();
 
+    // Switching views is not a destination: the drawer stays.
+    fireEvent.click(screen.getByRole('tab', { name: 'Recent' }));
+    expect(container.querySelector('aside')?.getAttribute('aria-hidden')).toBeNull();
+    fireEvent.click(screen.getByRole('tab', { name: 'By project' }));
+
     // A tap on a destination: no ghost, so the page it opens is the only copy.
-    fireEvent.click(screen.getByText('Workspaces'));
+    fireEvent.click(screen.getByText('Agents'));
     expect(container.querySelector('aside')).toBeNull();
 
     // Reopen, then choose with the keyboard.
     fireEvent.click(screen.getByRole('button', { name: 'Toggle drawer' }));
-    fireEvent.keyDown(screen.getByRole('button', { name: 'Home' }), { key: 'Enter' });
+    fireEvent.keyDown(screen.getByRole('button', { name: 'Agents' }), { key: 'Enter' });
     expect(container.querySelector('aside')).toBeNull();
 
     // A dismissal from outside the drawer still slides it out.

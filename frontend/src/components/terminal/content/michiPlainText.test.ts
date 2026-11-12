@@ -94,6 +94,11 @@ describe('michiOneLine', () => {
   it('keeps a fenced block inside a quote as code', () => {
     expect(michiOneLine('> ```py\n> __init__.py\n> ```\n> then **ship**')).toBe('__init__.py then ship');
   });
+
+  it('opens a fence where Markdown does, at any indent in a list item but not with a backtick in its info string', () => {
+    expect(michiOneLine('- step\n    ```sh\n    __x__\n    ```\n- **next**')).toBe('step __x__ next');
+    expect(michiOneLine('```a`b\n**x**')).toBe('ab x');
+  });
 });
 
 describe('michiSameText', () => {

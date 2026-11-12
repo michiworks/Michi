@@ -11,9 +11,11 @@ import {
   getMaintenanceReceipt, listEligibleMaintenanceManifest, listMaintenanceCatchupSuggestions, maintenanceOperationKey, maintenancePlanIsTerminal,
   listQueuedMaintenanceReconsiderations, persistMaintenanceReceiptInTransaction, queueMaintenanceCatchup, queueMaintenanceReconsider,
   readMaintenanceSourceMessages, recordMaintenanceRouting, refreshMaintenanceSourceManifest, setSpaceMaintenanceExcluded,
-  updateMaintenanceConfig,
+  updateMaintenanceConfig, assertMaintenanceAuthority, PageMaintenanceConflictError,
 } from '../src/services/pages/maintenanceRepository';
 import { runInTransaction } from '../src/services/db';
+import { readConversationUpdates } from '../src/services/conversationUpdates';
+import { forEachFenceBreak } from './helpers/unattendedRunFence';
 
 let dir: string;
 let oldData: string | undefined;
@@ -96,6 +98,16 @@ test('freezes source routing and transaction-composable immutable receipts; retr
   assert.equal(routed.sources[0]?.routingComplete,true);
 });
 
+test('maintenance writes need the run to still be this scheduler lease\'s',()=>{
+  seedRunAndSource();
+  const config=createMaintenanceConfig({workspaceId:'ws',ownerUserId:'alice',jobId:'job',now:20,enabled:true});
+  const auth={workspaceId:'ws',ownerUserId:'alice',jobId:'job',runId:'run',claimedBy:'worker',configRevision:config.revision};
+  assertMaintenanceAuthority(auth,30);
+  forEachFenceBreak('run',30,(name)=>assert.throws(()=>assertMaintenanceAuthority(auth,30),PageMaintenanceConflictError,name));
+  assert.throws(()=>assertMaintenanceAuthority({...auth,claimedBy:'another-scheduler'},30),PageMaintenanceConflictError);
+  assertMaintenanceAuthority(auth,30);
+});
+
 test('new source-plan generation can be explicitly bounded for historical reconsideration',()=>{
   seedRunAndSource();
   const config=createMaintenanceConfig({workspaceId:'ws',ownerUserId:'alice',jobId:'job',now:20,enabled:true});
@@ -160,6 +172,29 @@ test('Space catch-up suggestions are bounded to a closed exclusion interval and 
   assert.equal(plan.sources[0]?.sourceTurnId,'turn-source2');
   assert.ok(plan.sources[0]?.manifest.some(resource=>resource.id===space.id));
   assert.ok(!plan.sources[0]?.manifest.some(resource=>resource.id===other.id));
+});
+
+test('a reply into a Scheduled-only run thread is not a maintenance source, as in the conversation feed',()=>{
+  seedRunAndSource();
+  const space=createPage({workspaceId:'ws',ownerUserId:'alice',title:'Release',now:10});
+  const config=createMaintenanceConfig({workspaceId:'ws',ownerUserId:'alice',jobId:'job',now:20,enabled:true});
+  const excluded=setSpaceMaintenanceExcluded({workspaceId:'ws',ownerUserId:'alice',spaceId:space.id,excluded:true,expectedRevision:config.revision,now:21});
+  const db=getDb();
+  db.prepare("INSERT INTO nodes(id,workspace_id,kind,status,scheduled_only_job_id,created_at) VALUES('hidden-node','ws','chat','idle','job',30)").run();
+  db.prepare(`INSERT INTO messages(id,node_id,role,content,seq,created_at,metadata) VALUES('u-hidden','hidden-node','user','Reply from Notes',1,31,'{"threadMessage":{"kind":"reply"}}'),('a-hidden','hidden-node','assistant','Noted',2,32,'{}')`).run();
+  db.prepare(`INSERT INTO turns(turn_id,node_id,user_message_id,assistant_message_id,status,last_seq,started_at,completed_at,updated_at,completion_seq)
+    VALUES('turn-hidden','hidden-node','u-hidden','a-hidden','completed',2,30,32,32,2)`).run();
+  db.prepare("UPDATE meta SET value='2' WHERE key='conversation_completion_seq:ws'").run();
+  const reenabled=setSpaceMaintenanceExcluded({workspaceId:'ws',ownerUserId:'alice',spaceId:space.id,excluded:false,expectedRevision:excluded.revision,now:40});
+
+  const feed=readConversationUpdates({workspaceId:'ws',ownerUserId:'alice',backendConnectionId:'local'},{after:1});
+  assert.deepEqual(feed.turns,[]);
+  const plan=createMaintenancePlan({workspaceId:'ws',ownerUserId:'alice',jobId:'job',runId:'run',claimedBy:'worker',configRevision:reenabled.revision,after:1,through:2,now:41});
+  assert.equal(plan.state,'terminal');
+  assert.deepEqual(plan.sources,[]);
+  assert.deepEqual(listMaintenanceCatchupSuggestions('ws','alice',space.id),[]);
+  assert.throws(()=>queueMaintenanceCatchup({workspaceId:'ws',ownerUserId:'alice',spaceId:space.id,expectedConfigRevision:reenabled.revision,after:1,through:2,now:42}),
+    /no eligible completed sources/);
 });
 
 test('terminal plan recovery rebinds the same generation when new completions arrive before cursor commit',()=>{

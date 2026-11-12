@@ -1,10 +1,11 @@
 import express, { type NextFunction, type Request, type Response } from 'express';
-import { AgentRunContractError } from 'michi-shared';
+import { IDEMPOTENCY_KEY_HEADER } from 'michi-shared';
 import { AgentDefinitionService, AgentEnableBlockedError } from '../services/agentDefinitionService';
 import { LOCAL_AGENT_OWNER_ID } from '../services/agentOwner';
 import {
   requireAgentDefinitionOwner,
 } from './middleware/agentOwnership';
+import { agentRouteError } from './agentRouteErrors';
 
 export interface CustomAgentRouteDeps {
   service?: AgentDefinitionService;
@@ -21,21 +22,13 @@ function owner(req: Request): string {
 }
 
 function operationId(req: Request): string | undefined {
-  const header = req.header('x-idempotency-key');
+  const header = req.header(IDEMPOTENCY_KEY_HEADER);
   return header?.trim() || undefined;
 }
 
 function agentId(req: Request): string {
   const value = req.params.agentId;
   return Array.isArray(value) ? value[0] ?? '' : value;
-}
-
-function errorStatus(err: unknown): number {
-  const message = err instanceof Error ? err.message : '';
-  if (/authentication required|ownerUserId is required/.test(message)) return 401;
-  if (/revision conflict|reused with a different payload/.test(message)) return 409;
-  if (err instanceof AgentRunContractError) return 400;
-  return 400;
 }
 
 export function setupCustomAgentRoutes(deps: CustomAgentRouteDeps = {}): express.Router {
@@ -46,9 +39,10 @@ export function setupCustomAgentRoutes(deps: CustomAgentRouteDeps = {}): express
     async (req: Request, res: Response): Promise<void> => {
       try { await fn(req, res); }
       catch (err) {
-        const body: Record<string, unknown> = { error: err instanceof Error ? err.message : 'invalid request' };
+        const { status, message } = agentRouteError(err, `${req.method} ${req.path}`);
+        const body: Record<string, unknown> = { error: message };
         if (err instanceof AgentEnableBlockedError) body.blockers = err.blockers;
-        res.status(errorStatus(err)).json(body);
+        res.status(status).json(body);
       }
     };
 

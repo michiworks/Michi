@@ -1,4 +1,4 @@
-import { computeSourceFingerprint, staleSources, parseDigestStructure, DigestState } from './digest';
+import { computeSourceFingerprint, staleSources, parseDigestStructure, visibleDigestMarkdown, DigestState } from './digest';
 import { ChatNodeState } from './chatTypes';
 
 const mkChat = (id: string, messages: Array<{ role: 'user' | 'assistant'; text: string }>): ChatNodeState => ({
@@ -98,5 +98,13 @@ describe('digest source DTO freshness', () => {
     const node = { ...original, messages: [original.messages[0], { ...original.messages[1], blocks: [{ id: 'answer', kind: 'answer' as const, rawText: 'Answer' }, { id: 'thought', kind: 'thinking' as const, rawText: 'Transient analysis' }] }, { id: 'empty', role: 'user' as const, text: '', toolCalls: [] }] };
     expect(computeSourceFingerprint(node)).toBe(computeSourceFingerprint(original));
     expect(staleSources(digest, { source: node })).toEqual([]);
+  });
+});
+
+describe('visibleDigestMarkdown', () => {
+  it('drops the reply\'s metadata sentinels but keeps quoted ones', () => {
+    const saved = '[TITLE: Internal]\n# Result\n\nEnd with `[BRANCH-OVERVIEW: one line]`.\n\n[FOLLOW-UP 1/3: Next?]\n[BRANCH-OVERVIEW: Summarized]';
+    expect(visibleDigestMarkdown(saved)).toBe('# Result\n\nEnd with `[BRANCH-OVERVIEW: one line]`.');
+    expect(visibleDigestMarkdown('# Clean\n\nBody')).toBe('# Clean\n\nBody');
   });
 });

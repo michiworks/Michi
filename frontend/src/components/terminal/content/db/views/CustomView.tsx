@@ -1,5 +1,5 @@
-import React from 'react';
 import { Code } from 'lucide-react';
+import { navPageEvent } from '../../../../../state/appEvents';
 
 /** A custom view runs a widget in a sandbox, which Michi does not run yet: the view says it is off. */
 export function CustomView() {
@@ -10,7 +10,7 @@ export function CustomView() {
       <button
         type="button"
         className="michi-db-off__link"
-        onClick={() => window.dispatchEvent(new CustomEvent('michi:nav-page', { detail: { page: 'settings' } }))}
+        onClick={() => navPageEvent.dispatch({ page: 'settings' })}
       >
         Settings
       </button>

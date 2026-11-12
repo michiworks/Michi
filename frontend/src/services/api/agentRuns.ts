@@ -1,14 +1,13 @@
 import { backendFetch } from './backendRequest';
+import { jsonResponse } from './httpError';
 import type {
-  AgentRunAttemptDtoV1, AgentRunDtoV1, AgentRunEventV1, AgentRunInputRequestV1,
-  AgentRunInteractionDtoV1, AgentRunListQueryV1, AgentRunWatchDtoV1,
-  CancelAgentRunRequestV1, CreateAgentRunWatchRequestV1,
+  AgentRunDetailV1, AgentRunDtoV1, AgentRunEventV1, AgentRunInputRequestV1,
+  AgentRunListQueryV1, CancelAgentRunRequestV1,
   RespondAgentRunInteractionRequestV1, SpawnAgentRunRequestV1,
-  UpdateAgentRunWatchRequestV1,
 } from 'michi-shared';
 import {
   parseAgentRunAttemptDtoV1, parseAgentRunDtoV1, parseAgentRunEventV1,
-  parseAgentRunInteractionDtoV1, parseAgentRunSseEnvelopeV1, parseAgentRunWatchDtoV1,
+  parseAgentRunInteractionDtoV1, parseAgentRunSseEnvelopeV1,
 } from 'michi-shared';
 import {
   backendApiBase, nodeBackendApiBase, workspaceBackendApiBase,
@@ -20,27 +19,10 @@ import {
 import { readSseStream, SseHttpError } from './sseParser';
 import { fetchStream } from './streamTransport';
 
-export interface AgentRunDetailV1 {
-  run: AgentRunDtoV1;
-  attempts: AgentRunAttemptDtoV1[];
-  events: AgentRunEventV1[];
-  interactions: AgentRunInteractionDtoV1[];
-}
-
 export interface AgentRunRouteTarget {
   identity: AgentResourceIdentity;
   workspaceId: string;
   parentNodeId?: string | null;
-}
-
-async function jsonResponse(response: Response, operation: string): Promise<unknown> {
-  const body: unknown = await response.json().catch(() => null);
-  if (!response.ok) {
-    const message = body && typeof body === 'object' && 'error' in body && typeof body.error === 'string'
-      ? body.error : `${operation} failed: ${response.status}`;
-    throw new Error(message);
-  }
-  return body;
 }
 
 function field(value: unknown, name: string): unknown {
@@ -132,18 +114,6 @@ export async function cancelAgentRun(target: AgentRunRouteTarget, request: Cance
 export async function respondAgentRunInteraction(target: AgentRunRouteTarget, interactionId: string, request: RespondAgentRunInteractionRequestV1, signal?: AbortSignal): Promise<void> {
   const response = await backendFetch(`${actionBase(target)}/agent-runs/${encodeURIComponent(target.identity.id)}/interactions/${encodeURIComponent(interactionId)}/respond`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(request), signal });
   if (!response.ok) throw new Error(`respondAgentRunInteraction failed: ${response.status}`);
-}
-
-export async function createAgentRunWatch(request: CreateAgentRunWatchRequestV1, signal?: AbortSignal): Promise<LocatedAgentResource<AgentRunWatchDtoV1>> {
-  const base = workspaceBackendApiBase(request.workspaceId);
-  const connectionId = backendConnectionIdFromApiBase(base);
-  const payload = await jsonResponse(await backendFetch(`${base}/agent-run-watches`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(request), signal }), 'createAgentRunWatch');
-  return locatedAgentResource(connectionId, parseAgentRunWatchDtoV1(field(payload, 'watch')));
-}
-
-export async function updateAgentRunWatch(identity: AgentResourceIdentity, request: UpdateAgentRunWatchRequestV1, signal?: AbortSignal): Promise<LocatedAgentResource<AgentRunWatchDtoV1>> {
-  const payload = await jsonResponse(await backendFetch(`${backendApiBase(identity.backendConnectionId)}/agent-run-watches/${encodeURIComponent(identity.id)}`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(request), signal }), 'updateAgentRunWatch');
-  return locatedAgentResource(identity.backendConnectionId, parseAgentRunWatchDtoV1(field(payload, 'watch')));
 }
 
 export interface AgentRunSubscriptionOptions {

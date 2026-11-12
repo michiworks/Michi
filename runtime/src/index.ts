@@ -25,6 +25,7 @@ export { descriptorOf, UNKNOWN_HARNESS, UNKNOWN_RUNTIME_DESCRIPTOR } from './cor
 // Host ports: what adapters need from the embedding application.
 export * from './contract/host';
 export { createDefaultHost, assertHostPorts, type DefaultHostOptions, type DefaultHostPortOverrides } from './core/defaultHost';
+export { discardBackgroundTurn } from './core/backgroundTurns';
 
 // MCP slot provider and tool-name contracts: the host's MCP slots and the
 // tool names, bridge and result tool that adapters and host tools share.
@@ -36,3 +37,17 @@ export * from './contract/permissions';
 
 // Chat approvals: one-time, session and always-allow answers over the host permission port.
 export * from './core/approvals';
+
+// Skills: the block a host sends for a skill a runtime does not run itself, and SKILL.md folder scans.
+export {
+  expandSkillPrompt, renderSkillBlock, scanSkillRoots, substituteSkillArguments, SKILL_FILE_MAX_BYTES, type SkillScanRoot,
+} from './core/skills';
+
+// Types reachable through the session and workflow contracts.
+export { MULTI_MODEL_PHASES, MULTI_MODEL_STEP_STATUSES, MULTI_MODEL_SYNTHESIS_STATUSES } from 'michi-shared';
+export type {
+  MultiModelContext, MultiModelPermissionMode, MultiModelPhase, MultiModelRunView,
+  MultiModelStepKind, MultiModelStepStatus, MultiModelStepView, MultiModelSynthesisStatus,
+  MultiModelSynthesisView, MultiModelThreadView, SessionUltracodeState,
+  WorkflowLoopDto, WorkflowNodeRoundDto, WorkflowOmittedLeaves, WorkflowWatchDto,
+} from 'michi-shared';

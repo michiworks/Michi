@@ -1,13 +1,13 @@
 import React from 'react';
-import { changeRuntimeProfile, resolveProfileReasoning, supportedProfileReasoning } from '../../../lib/runtimeProfile';
-import { filterAvailableRuntimes } from '../../../lib/runtimeVisibility';
+import { changeRuntimeProfile, supportedProfileReasoning } from '../../../lib/runtimeProfile';
 import type {
   ChatPermissionMode,
   ScheduledJobDto,
   ScheduledJobInput,
   ScheduledJobSessionMode,
+  ScheduledJobVisibility,
 } from 'michi-shared';
-import { SCHEDULED_JOB_LIMITS } from 'michi-shared';
+import { SCHEDULED_JOB_DEFAULTS, SCHEDULED_JOB_LIMITS, SCHEDULED_ONLY_KEPT_DAYS, SCHEDULED_ONLY_RETENTION } from 'michi-shared';
 import { ModalShell } from '../../ui/ModalShell';
 import { Button, Switch } from '../../ui/controls';
 import { createScheduledJob, previewScheduledJobSchedule, updateScheduledJob } from '../../../services/api/scheduledJobs';
@@ -15,7 +15,7 @@ import { applyWorkspaceCommands } from '../../../services/api/persistence';
 import { serializeWorkspaceRow } from '../../../state/workspacePersistence';
 import type { Project } from '../../../state/chatTypes';
 import { PERMISSION_CHOICES } from '../ComposerPermissionControl';
-import { catalogKey } from '../agents/AgentRuntimeProfileFields';
+import { RuntimeOptionsError, SavedOption, useRuntimeProfileChoices } from '../agents/AgentRuntimeProfileFields';
 import { useRuntimeFieldCatalog } from '../agents/useRuntimeFieldCatalog';
 import {
   SCHEDULE_MODE_LABELS,
@@ -28,6 +28,7 @@ import {
   type ScheduleDraft,
   type ScheduleMode,
 } from './scheduleModel';
+import { LOCAL_BACKEND_CONNECTION_ID } from '../../../config/backendConnections';
 
 export interface JobFormValue {
   name: string;
@@ -40,9 +41,13 @@ export interface JobFormValue {
   reasoning: string;
   permissionMode: ChatPermissionMode;
   sessionMode: ScheduledJobSessionMode;
+  visibility: ScheduledJobVisibility;
   notify: boolean;
   timeoutMinutes: number;
 }
+
+const MIN_TIMEOUT_MINUTES = SCHEDULED_JOB_LIMITS.minTimeoutSeconds / 60;
+const MAX_TIMEOUT_MINUTES = SCHEDULED_JOB_LIMITS.maxTimeoutSeconds / 60;
 
 export function formValueFromJob(job: ScheduledJobDto | null, defaults: { workspaceId: string; sessionMode?: ScheduledJobSessionMode }): JobFormValue {
   if (!job) {
@@ -55,10 +60,11 @@ export function formValueFromJob(job: ScheduledJobDto | null, defaults: { worksp
       providerId: '',
       modelId: '',
       reasoning: '',
-      permissionMode: 'trust',
-      sessionMode: defaults.sessionMode ?? 'persistent',
-      notify: true,
-      timeoutMinutes: SCHEDULED_JOB_LIMITS.defaultTimeoutSeconds / 60,
+      permissionMode: SCHEDULED_JOB_DEFAULTS.permissionMode,
+      sessionMode: defaults.sessionMode ?? SCHEDULED_JOB_DEFAULTS.sessionMode,
+      visibility: SCHEDULED_JOB_DEFAULTS.visibility,
+      notify: SCHEDULED_JOB_DEFAULTS.notify,
+      timeoutMinutes: SCHEDULED_JOB_DEFAULTS.timeoutSeconds / 60,
     };
   }
   return {
@@ -72,6 +78,7 @@ export function formValueFromJob(job: ScheduledJobDto | null, defaults: { worksp
     reasoning: job.reasoning ?? '',
     permissionMode: job.permissionMode,
     sessionMode: job.sessionMode,
+    visibility: job.visibility ?? 'workspace',
     notify: job.notify,
     timeoutMinutes: Math.round(job.timeoutSeconds / 60),
   };
@@ -85,7 +92,9 @@ export function validateJobForm(value: JobFormValue): { input?: ScheduledJobInpu
   const compiled = draftToSchedule(value.schedule);
   if (compiled.error) errors.schedule = compiled.error;
   const timeout = Math.round(Number(value.timeoutMinutes));
-  if (!Number.isFinite(timeout) || timeout < 1 || timeout > 24 * 60) errors.timeout = 'Between 1 and 1440 minutes';
+  if (!Number.isFinite(timeout) || timeout < MIN_TIMEOUT_MINUTES || timeout > MAX_TIMEOUT_MINUTES) {
+    errors.timeout = `Between ${MIN_TIMEOUT_MINUTES} and ${MAX_TIMEOUT_MINUTES} minutes`;
+  }
   if (Object.keys(errors).length > 0 || !compiled.schedule) return { errors };
   return {
     errors,
@@ -100,6 +109,7 @@ export function validateJobForm(value: JobFormValue): { input?: ScheduledJobInpu
       reasoning: value.runtimeId ? value.reasoning || null : null,
       permissionMode: value.permissionMode,
       sessionMode: value.sessionMode,
+      visibility: value.visibility,
       notify: value.notify,
       timeoutSeconds: timeout * 60,
     },
@@ -173,6 +183,7 @@ function ScheduleFields({ draft, onChange, error }: { draft: ScheduleDraft; onCh
               value={draft.intervalValue} onChange={(event) => set('intervalValue', Number(event.target.value))} />
             <select className="ui-select sched-auto" aria-label="Interval unit" value={draft.intervalUnit}
               onChange={(event) => set('intervalUnit', event.target.value as ScheduleDraft['intervalUnit'])}>
+              {draft.intervalUnit === 'seconds' && <option value="seconds">seconds</option>}
               <option value="minutes">minutes</option>
               <option value="hours">hours</option>
               <option value="days">days</option>
@@ -223,18 +234,11 @@ function ScheduleFields({ draft, onChange, error }: { draft: ScheduleDraft; onCh
 }
 
 function AgentFields({ value, onChange }: { value: JobFormValue; onChange: (next: JobFormValue) => void }) {
-  const catalog = useRuntimeFieldCatalog('local');
-  const runtimes = filterAvailableRuntimes(catalog?.runtimes ?? []);
-  const providers = value.runtimeId ? catalog?.providersFor[value.runtimeId] : undefined;
-  const models = value.runtimeId ? catalog?.modelsFor[catalogKey(value.runtimeId, value.providerId)] : undefined;
-  React.useEffect(() => {
-    if (catalog && value.runtimeId) catalog.request(value.runtimeId, value.providerId);
-  }, [catalog, value.runtimeId, value.providerId]);
-  const { levels: reasoningLevels } = resolveProfileReasoning(catalog?.capabilitiesFor?.[value.runtimeId], models, value.modelId, providers?.find((provider) => provider.id === value.providerId));
+  const { runtimes, providers, models, reasoningLevels, retry } = useRuntimeProfileChoices(value, useRuntimeFieldCatalog(LOCAL_BACKEND_CONNECTION_ID));
   const disabled = !value.runtimeId;
   return (
     <div className="sched-grid">
-      {catalog?.errorsFor?.[catalogKey(value.runtimeId, value.providerId)] && <p role="alert">Unable to load runtime options. <button type="button" onClick={() => catalog.retry?.(value.runtimeId, value.providerId)}>Retry</button></p>}
+      {retry && <RuntimeOptionsError onRetry={retry} />}
       <Field label="Agent" htmlFor="sched-runtime">
         <select id="sched-runtime" className="ui-select" value={value.runtimeId}
           onChange={(event) => onChange(changeRuntimeProfile(value, 'runtimeId', event.target.value))}>
@@ -244,9 +248,7 @@ function AgentFields({ value, onChange }: { value: JobFormValue; onChange: (next
               {runtime.label}
             </option>
           ))}
-          {value.runtimeId && catalog && !runtimes.some((runtime) => runtime.id === value.runtimeId) && (
-            <option value={value.runtimeId} disabled hidden>{value.runtimeId}</option>
-          )}
+          <SavedOption id={value.runtimeId} options={runtimes} hidden />
         </select>
       </Field>
       {providers && providers.length > 0 && (
@@ -255,6 +257,7 @@ function AgentFields({ value, onChange }: { value: JobFormValue; onChange: (next
             onChange={(event) => onChange(changeRuntimeProfile(value, 'providerId', event.target.value))}>
             <option value="">Runtime default</option>
             {providers.map((provider) => <option key={provider.id} value={provider.id}>{provider.label}</option>)}
+            <SavedOption id={value.providerId} options={providers} />
           </select>
         </Field>
       )}
@@ -263,9 +266,7 @@ function AgentFields({ value, onChange }: { value: JobFormValue; onChange: (next
           onChange={(event) => onChange(changeRuntimeProfile(value, 'modelId', event.target.value))}>
           <option value="">{disabled ? 'Default from Settings' : 'Runtime default'}</option>
           {(models ?? []).map((model) => <option key={model.id} value={model.id}>{model.label ?? model.id}</option>)}
-          {value.modelId && !(models ?? []).some((model) => model.id === value.modelId) && (
-            <option value={value.modelId}>{value.modelId}</option>
-          )}
+          <SavedOption id={value.modelId} options={models ?? []} />
         </select>
       </Field>
       <Field label="Reasoning" htmlFor="sched-reasoning">
@@ -309,6 +310,16 @@ function ChoiceList<T extends string>({ label, value, options, onChange }: {
 const SESSION_OPTIONS: ReadonlyArray<{ value: ScheduledJobSessionMode; label: string; description: string }> = [
   { value: 'fresh', label: 'New thread each run', description: 'Every run starts clean in its own thread.' },
   { value: 'persistent', label: 'One ongoing thread', description: 'Runs add to the same conversation, so the agent remembers earlier results.' },
+];
+
+const VISIBILITY_OPTIONS: ReadonlyArray<{ value: ScheduledJobVisibility; label: string; description: string }> = [
+  { value: 'workspace', label: 'In the workspace', description: 'Each run’s thread appears among the workspace’s conversations.' },
+  {
+    value: 'scheduled',
+    label: 'Only in Scheduled',
+    description: `Open runs from this job, read-only. Michi keeps the latest ${SCHEDULED_ONLY_RETENTION.maxRuns} from the past `
+      + `${SCHEDULED_ONLY_KEPT_DAYS} days (always the latest ${SCHEDULED_ONLY_RETENTION.minRuns}); move one to the workspace to keep it or reply.`,
+  },
 ];
 
 export function ScheduledJobEditor({ job, initial, projects, defaultWorkspaceId, onClose, onSaved }: {
@@ -390,9 +401,11 @@ export function ScheduledJobEditor({ job, initial, projects, defaultWorkspaceId,
             onChange={(permissionMode) => setValue({ ...value, permissionMode })} />
           <ChoiceList label="Thread" value={value.sessionMode} options={SESSION_OPTIONS}
             onChange={(sessionMode) => setValue({ ...value, sessionMode })} />
+          <ChoiceList label="Runs show" value={value.visibility} options={VISIBILITY_OPTIONS}
+            onChange={(visibility) => setValue({ ...value, visibility })} />
           <div className="sched-grid">
             <Field label="Time limit (minutes)" htmlFor="sched-timeout" error={errors.timeout}>
-              <input id="sched-timeout" className="ui-input" type="number" min={1} max={1440} value={value.timeoutMinutes}
+              <input id="sched-timeout" className="ui-input" type="number" min={MIN_TIMEOUT_MINUTES} max={MAX_TIMEOUT_MINUTES} value={value.timeoutMinutes}
                 onChange={(event) => setValue({ ...value, timeoutMinutes: Number(event.target.value) })} />
             </Field>
             <div className="sched-field">

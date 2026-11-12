@@ -1,6 +1,7 @@
 export * from './blocks';
 export * from './blockCatalog';
 export * from './blockTree';
+export * from './changeNames';
 export * from './pageEdit';
 export * from './database';
 export * from './types';
@@ -12,3 +13,4 @@ export * from './home';
 export * from './markdownSegments';
 export * from './tasks';
 export * from './viewInteractions';
+export * from './containers';

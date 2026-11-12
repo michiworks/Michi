@@ -1,0 +1,244 @@
+/* ==========================================================================
+   62-away.css (owner: away). #away, ADDENDUM-AWAY.md: four tabs in a row
+   (>= 1280), 2 x 2 (768-1279) or a list (< 768) above one 1180 x 560
+   replica. One window (top row, area rail) never fades; its main area swaps
+   scenes; tab 4 dims it and raises a phone in front. Colours are tokens only
+   (.mk scope, page tokens, color-mix of tokens); Monokai comes from the
+   existing token layer. Also #note-memory's column (80-notes.html).
+   ========================================================================== */
+
+/* Heading in cols 1-8 at >= 1280. */
+@media (min-width: 1280px) {
+  .away-h { max-width: calc((100% - 11 * var(--gutter)) * 8 / 12 + 7 * var(--gutter)); }
+}
+
+/* Tabs: a row of four >= 1280, 2 x 2 at 768-1279, a list below. The active
+   tab's top hairline fills over its scene (P15), as #how's does. */
+.away-grid { display: grid; grid-template-columns: minmax(0, 1fr); row-gap: 32px; margin-top: var(--sp-body-fig); }
+.away-tabs { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); column-gap: var(--gutter); row-gap: 8px; }
+.away-tab { position: relative; padding: 18px 0 4px; border-top: 1px solid var(--rule); cursor: pointer; }
+.away-tab-t { font-size: 18px; line-height: 1.35; font-weight: 600; letter-spacing: -.01em; color: var(--ink-60);
+  text-wrap: balance; transition: color 150ms var(--ease); }
+.away-tab:hover .away-tab-t { color: var(--ink-2); transition-duration: 0ms; }
+.away-tab.is-on .away-tab-t { color: var(--ink); }
+.away-tab-l { max-width: 30em; margin-top: 6px; font-size: 15px; line-height: 1.55; color: var(--ink-3); text-wrap: pretty; }
+.away-prog { position: absolute; left: 0; right: 0; top: -1px; height: 1px; background: var(--violet);
+  transform: scaleX(0); transform-origin: 0 50%; opacity: 0; }
+.away-prog.is-fill, .away-prog.is-full { opacity: 1; }
+.away-prog.is-fill { animation: away-fill var(--fill, 6s) linear forwards; }
+.away-prog.is-full, .away-prog.is-past { transform: none; }
+.away-prog.is-past { transition: opacity var(--t-exit) var(--ease-out); }
+@keyframes away-fill { to { transform: none; } }
+@media (min-width: 768px) and (max-width: 1279px) {
+  .away-tabs { grid-template-columns: repeat(2, minmax(0, 1fr)); row-gap: 20px; }
+}
+@media (max-width: 767px) {
+  .away-tabs { grid-template-columns: minmax(0, 1fr); row-gap: 0; }
+  .away-tab { padding: 18px 0 20px; }
+  .away-tab:last-child { border-bottom: 1px solid var(--rule); }
+}
+
+/* Replica box. --k is the no-JS fallback, kept inside each band's narrowest
+   content width (1280: 1152, 1024: 922, 768: 691); JS writes the real one. */
+.away-panel { min-width: 0; }
+.away-fit { --h: 560; --k: 1; margin-inline: auto; }
+@media (min-width: 1280px) and (max-width: 1439px) { .away-fit { --k: .97; } }
+@media (min-width: 1024px) and (max-width: 1279px) { .away-fit { --k: .78; } }
+@media (min-width: 768px) and (max-width: 1023px) { .away-fit { --k: .58; } }
+
+.away-stage { position: absolute; inset: 0; }
+/* Tab 4 dims the desktop (no scale, no pan). */
+.away-win { transition: opacity var(--t-pane) var(--ease); }
+.away-win.is-dim { opacity: .4; }
+.away-main { position: relative; flex: 1; min-width: 0; overflow: hidden; }
+.away-scene { position: absolute; inset: 0; }
+.away-sep { margin: 0 6px; }
+.away-chev { color: var(--term-muted); }
+/* The Scheduled rail item's running dot (rail.css .area-rail__dot). */
+.away-rdot { position: absolute; top: 4px; right: 4px; width: 7px; height: 7px; border-radius: 50%;
+  background: var(--term-select); box-shadow: 0 0 0 2px var(--mk-chrome); }
+/* Small buttons shared by the scenes (.ui-btn). */
+.away-btn { display: inline-flex; align-items: center; gap: 6px; height: 26px; padding: 0 10px; border: 1px solid var(--term-line);
+  border-radius: var(--ui-radius); background: var(--term-surface); font-size: var(--fs-md); font-weight: 500; line-height: 1;
+  color: var(--term-fg); white-space: nowrap; }
+.away-btn.is-primary { border-color: var(--term-accent); background: var(--term-accent); color: var(--term-surface); }
+
+/* -- 1. Pages home (home.css, michiPage.css, nativeMarkdownSegments.css,
+   source.css). A doc column on bg; the new block rises in (6 px, 40 ms
+   stagger); the source popover opens beside its item. */
+.away-s1 { background: var(--term-bg); }
+.away-doc { position: absolute; left: 96px; top: 24px; width: 580px; }
+.away-st { display: flex; align-items: center; font-size: var(--fs-lg); line-height: 20px; color: var(--term-mid); white-space: nowrap; }
+.away-st b { font-weight: 600; color: var(--term-fg); }
+.away-st-ic { width: 10px; margin-right: 8px; place-items: center; }
+.away-st-dot { display: block; width: 7px; height: 7px; border-radius: 50%; background: var(--term-accent); }
+.away-head { margin-top: 20px; display: flex; flex-direction: column; gap: 8px; }
+.away-kick { font-size: 10.5px; font-weight: 500; line-height: 1.2; letter-spacing: var(--ls-caps-wide); text-transform: uppercase; color: var(--term-muted); }
+.away-h1 { font-size: 28px; font-weight: 650; line-height: 1.2; letter-spacing: var(--ls-tight); color: var(--term-fg); }
+.away-upd { font-size: var(--fs-md); line-height: 1.3; color: var(--term-muted); }
+.away-call { margin-top: 18px; padding: 12px 14px; border: 1px solid var(--term-line); border-left: 2px solid var(--term-line-s); background: var(--term-surface); }
+.away-cap { font-size: var(--fs-xs); line-height: 1.3; color: var(--term-muted); }
+.away-call > p + p { margin-top: 4px; font-size: var(--fs-xl); line-height: 1.5; color: var(--term-fg); }
+.away-from { display: flex; align-items: center; gap: 6px; margin-top: 8px; font-size: var(--fs-md); line-height: 1.3; color: var(--term-muted); }
+.away-blk { padding-top: 16px; }
+.away-blk-h { font-size: var(--fs-lg); font-weight: 600; line-height: 1.4; color: var(--term-fg); }
+.away-items { margin-top: 4px; }
+.away-item { position: relative; padding: 2px 28px 2px 22px; font-size: var(--fs-xl); line-height: 1.55; color: var(--term-fg);
+  transition: background-color var(--t-quick) var(--ease); }
+.away-item::before { content: ""; position: absolute; left: 9px; top: 11px; width: 4px; height: 4px; border-radius: 50%; background: var(--term-mid); }
+.away-item.is-hover { background: color-mix(in srgb, var(--term-alt) 50%, transparent); }
+.away-thr { margin-top: 4px; font-size: var(--fs-lg); line-height: 1.55; color: var(--term-mid); }
+.away-cause-w { position: relative; }
+.away-src { position: absolute; top: 1px; right: 2px; display: grid; place-items: center; width: 24px; height: 24px;
+  border-radius: var(--ui-radius); color: var(--term-mid); }
+.away-src.is-pressed { background: var(--term-alt); }
+.away-pop { position: absolute; left: 592px; top: 30px; z-index: 5; width: 384px; display: flex; flex-direction: column; gap: 8px;
+  padding: 10px 12px 12px; background: var(--term-surface); border: 1px solid var(--term-line); border-radius: var(--ui-radius);
+  box-shadow: var(--term-float-shadow); transform-origin: 0 0; }
+.away-pop-h { display: flex; align-items: center; gap: 6px; font-size: var(--fs-sm); line-height: 1.3; color: var(--term-muted); }
+.away-pop-t { max-width: 150px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: var(--fs-md); font-weight: 600; color: var(--term-fg); }
+.away-tag { padding: 0 4px; border: 1px solid var(--term-line); border-radius: var(--ui-radius-sm); background: var(--term-surface);
+  font-family: var(--mk-mono); font-size: var(--fs-xs); line-height: 15px; color: var(--term-mid); }
+.away-pop-x { margin-left: auto; }
+.away-pop-q { padding: 6px 10px; border-left: 2px solid var(--term-accent); background: var(--term-bg); font-size: var(--fs-xl); line-height: 1.6;
+  color: var(--term-fg); display: -webkit-box; -webkit-line-clamp: 5; -webkit-box-orient: vertical; overflow: hidden; }
+.away-pop-b { display: flex; gap: 8px; }
+.away-pop-hint { font-size: var(--fs-sm); line-height: 1.4; color: var(--term-muted); }
+
+/* -- 2. Memory: a full-width pane (TPane, 560 measure) and the sonner toast
+   docked to the window's right edge 6 px under the top row. */
+.away-pn { position: absolute; inset: 0; --pane-w: 100%; --col: 560px; }
+.away-pn .mk-composer { width: var(--col); margin: 0 auto 12px; }
+.away-draft.is-sent { visibility: hidden; }
+.away-top { justify-content: flex-start; }
+.away-toast { position: absolute; top: 6px; right: 0; z-index: 20; display: flex; align-items: center; gap: 6px; width: max-content;
+  max-width: 356px; padding: 16px; background: var(--term-surface); border: 1px solid var(--term-line); border-right: 0;
+  border-radius: var(--ui-radius) 0 0 var(--ui-radius); box-shadow: var(--term-float-shadow);
+  font-size: var(--fs-lg); line-height: 1.4; color: var(--term-fg); --e-in: var(--t-enter); }
+.away-toast-t { font-weight: 500; }
+.away-undo { flex: none; margin-left: auto; display: inline-flex; align-items: center; height: 24px; padding: 0 8px;
+  border-radius: var(--ui-radius); background: var(--term-fg); color: var(--term-surface); font-size: var(--fs-md); font-weight: 500; }
+
+/* -- 3. Scheduled (Scheduled.css, Trash.css): page bg = surface 72 % on bg,
+   1000 measure; a job row is 1fr 150 128. */
+.away-s3 { background: color-mix(in srgb, var(--term-surface) 72%, var(--term-bg)); }
+.away-sched { max-width: 1000px; margin: 0 auto; padding: 38px 36px 40px; }
+.away-sh { display: flex; align-items: center; }
+.away-sh-t { font-size: 22px; font-weight: 600; line-height: 1.2; color: var(--term-fg); }
+.away-sh-n { margin-left: 8px; font-size: var(--fs-sm); font-weight: 400; color: var(--term-muted); }
+.away-new { margin-left: auto; height: 34px; padding: 0 12px; }
+.away-sh-sub { display: flex; align-items: center; gap: 6px; margin-top: 9px; font-size: var(--fs-md); line-height: 1.3; color: var(--term-muted); }
+.away-search { display: flex; align-items: center; gap: 8px; width: 280px; height: 32px; margin-top: 22px; padding: 0 10px;
+  border: 1px solid var(--term-line); border-radius: var(--ui-radius); background: var(--term-surface); font-size: var(--fs-md); color: var(--term-faint); }
+.away-grp { display: flex; align-items: center; gap: 8px; min-height: 38px; margin-top: 14px; padding: 0 8px;
+  font-size: var(--fs-md); font-weight: 500; color: var(--term-mid); }
+.away-grp > .i { color: var(--c, var(--term-muted)); }
+.away-grp-n { font-size: var(--fs-sm); font-weight: 400; color: var(--term-muted); }
+.away-job { position: relative; display: grid; grid-template-columns: minmax(0, 1fr) 150px 128px; align-items: center; column-gap: 12px;
+  min-height: 68px; padding: 0 8px; }
+.away-job::after { content: ""; position: absolute; left: 43px; right: 12px; bottom: 0; height: 1px;
+  background: color-mix(in srgb, var(--term-line) 62%, transparent); }
+.away-j-l { display: flex; align-items: center; gap: 13px; min-width: 0; }
+.away-j-ic { flex: none; display: inline-grid; place-items: center; width: 22px; color: var(--term-muted); }
+.away-j-ic > .away-j-spin { color: var(--term-accent); }
+.away-j-txt { display: flex; flex-direction: column; min-width: 0; }
+.away-j-t { display: flex; align-items: center; gap: 8px; overflow: hidden; white-space: nowrap; text-overflow: ellipsis;
+  font-size: var(--fs-xl); font-weight: 500; line-height: 1.4; color: var(--term-fg); }
+.away-j-m { margin-top: 3px; font-size: var(--fs-sm); line-height: 1.4; color: var(--term-muted); white-space: nowrap; }
+.away-j-m .is-act { color: var(--term-accent); }
+.away-sys { padding: 0 5px; border: 1px solid var(--term-line); border-radius: 3px; background: var(--term-surface);
+  font-size: var(--fs-xs); font-weight: 400; line-height: 16px; color: var(--term-mid); }
+.away-j-c { display: flex; flex-direction: column; align-items: flex-end; gap: 3px; }
+.away-j-st { justify-items: end; font-size: var(--fs-md); line-height: 1.4; color: var(--term-mid); }
+.away-j-st > * { display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; }
+.away-sdot { width: 7px; height: 7px; }
+.away-sdot.is-ok { background: var(--term-digest); color: var(--term-digest); }
+.away-sdot.is-act { background: var(--term-accent); color: var(--term-accent); }
+.away-j-when { justify-items: end; font-size: var(--fs-sm); line-height: 1.4; font-variant-numeric: tabular-nums; color: var(--term-muted); white-space: nowrap; }
+.away-j-acts { display: flex; align-items: center; justify-content: flex-end; gap: 2px; color: var(--term-muted); }
+.away-ib { display: inline-grid; place-items: center; width: 34px; height: 34px; }
+.away-ib > * { grid-area: 1 / 1; }
+.away-ib.is-gap { visibility: hidden; }
+.away-sw-t { position: relative; flex: none; width: 28px; height: 16px; margin: 0 4px; border-radius: 8px; background: var(--term-accent); }
+.away-sw-t > i { position: absolute; top: 2px; right: 2px; width: 12px; height: 12px; border-radius: 50%; background: var(--term-surface); }
+/* A plain OS notification over the window, not Michi chrome; it floats as
+   the replica's floats do and slides in from the right edge. */
+.away-note { position: absolute; top: 12px; right: 12px; z-index: 20; width: 344px; display: flex; align-items: flex-start; gap: 12px;
+  padding: 12px 14px 13px 12px; border: 1px solid var(--term-line); border-radius: 16px; background: var(--term-surface);
+  box-shadow: var(--term-float-shadow); font-family: system-ui, -apple-system, var(--mk-font); font-size: var(--fs-lg); line-height: 1.35;
+  color: var(--term-fg); }
+.away-note-tile { width: 32px; height: 32px; margin-top: 2px; }
+.away-note-b { flex: 1; min-width: 0; }
+.away-note-h { display: flex; align-items: baseline; gap: 8px; }
+.away-note-h b { flex: 1; min-width: 0; font-weight: 600; }
+.away-note-h span { font-size: var(--fs-sm); color: var(--term-muted); }
+.away-note-p { color: var(--term-mid); }
+
+/* -- 4. The desktop (sidebar + pane) and the phone (mobile.css). */
+.away-s4 { display: flex; }
+.away-s4 .mk-strip { position: relative; }
+.away-remote { flex: none; padding: 0 4px; border: 1px solid color-mix(in srgb, var(--term-accent) 45%, var(--term-line));
+  font-size: var(--fs-2xs); font-weight: 500; line-height: 13px; letter-spacing: var(--ls-caps-wide); color: var(--term-accent); }
+.away-phone { position: absolute; left: 856px; top: 10px; z-index: 30; width: 300px; height: 540px; display: flex; flex-direction: column;
+  padding: 16px 0 12px; border: 1px solid var(--term-line); border-radius: 34px; background: var(--term-surface);
+  box-shadow: var(--mk-frame-shadow); overflow: hidden; }
+.away-rise { --e-in: var(--t-pane); --e-ease: var(--ease-pane); }
+.away-rise.is-off { translate: 0 16px; }
+.away-ph-top { position: relative; flex: none; height: 44px; display: flex; align-items: center; justify-content: center; }
+.away-ph-t { max-width: calc(100% - 112px); overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  font-size: var(--fs-md); font-weight: 500; line-height: 1.3; color: var(--term-fg); }
+.away-tap { transition: background-color var(--t-exit) var(--ease-out); }
+.away-tap.is-tap { background-color: var(--term-alt); transition-duration: var(--t-quick); }
+.away-tap1 { position: absolute; top: 0; right: 6px; display: grid; place-items: center; width: 44px; height: 44px; border-radius: var(--ui-radius-lg); color: var(--term-fg); }
+.away-ph-body { position: relative; flex: 1; min-height: 0; }
+.away-ph-pane { position: absolute; inset: 0; --pane-w: 100%; --col: auto; }
+.away-ph-pane .mk-col { margin: 0 14px; }
+.away-ph-pane .mk-composer { margin: 0 10px; }
+.away-sw { position: absolute; top: 64px; right: 12px; z-index: 6; width: 274px; padding: 7px; background: var(--term-surface);
+  border: 1px solid var(--term-line); border-radius: var(--ui-radius-lg); box-shadow: var(--term-float-shadow); transform-origin: 100% 0; }
+.away-sw-r { display: flex; align-items: center; gap: 8px; min-height: 44px; padding: 10px 12px 10px calc(12px + var(--d, 0) * 16px);
+  border-radius: var(--ui-radius); font-size: var(--fs-md); line-height: 1.3; color: var(--term-fg); }
+.away-sw-r.is-cur { background: var(--term-accent-f); color: var(--term-accent); font-weight: 550; }
+.away-sw-n { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.away-wdot { flex: none; width: 6px; height: 6px; border-radius: 50%; background: var(--term-accent); }
+.away-sw-x { margin: -10px -6px -10px 0; color: var(--term-muted); }
+
+/* Below 768: fluid, single column in a fixed box. The window drops its top
+   row and rail (the app's phone layout has neither), and tab 4 shows only
+   the phone. */
+@media (max-width: 767px) {
+  .away-fit { width: 100%; max-width: 640px; height: 600px; aspect-ratio: auto; }
+  .away-fit > .mk-canvas { width: auto; height: auto; right: 0; bottom: 0; transform: none; }
+  .away-win > .mk-top, .away-win .mk-rail { display: none; }
+  .away-stage.is-a4 .away-win { visibility: hidden; }
+  .away-doc { position: static; width: auto; padding: 20px 16px; }
+  .away-st { display: block; white-space: normal; }
+  .away-st-ic { vertical-align: 1px; }
+  .away-st .away-sep { margin: 0 4px; }
+  .away-head { margin-top: 14px; gap: 6px; }
+  .away-h1 { font-size: 24px; }
+  .away-call { margin-top: 14px; }
+  .away-from { display: none; }
+  .away-pop-q { -webkit-line-clamp: 3; }
+  .away-cause-w { position: static; }
+  .away-pop { left: 16px; right: 16px; top: auto; bottom: 16px; width: auto; }
+  .away-pn { --col: auto; }
+  .away-pn .mk-col { margin: 0 16px; }
+  .away-pn .mk-composer { width: auto; margin: 0 12px 12px; }
+  .away-toast { max-width: calc(100% - 24px); }
+  .away-sched { padding: 22px 16px; }
+  .away-sh-t { font-size: 20px; }
+  .away-search { display: none; }
+  .away-job { grid-template-columns: minmax(0, 1fr) 92px; }
+  .away-j-acts { display: none; }
+  .away-j-dsep { display: none; }
+  .away-j-next { display: grid; }
+  .away-note { width: auto; left: 12px; }
+  .away-s4 { display: none; }
+  .away-phone { left: 0; right: 0; top: 16px; bottom: 16px; width: min(300px, calc(100% - 24px)); height: auto; margin: 0 auto; }
+}
+
+/* #note-memory sits last in the notes' right column (80-notes.html). */
+@media (min-width: 768px) {
+  #note-memory { grid-column: 2; }
+}

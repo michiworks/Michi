@@ -3,7 +3,6 @@ export type MetricAttrs = Record<string, unknown>;
 const SOURCE = 'renderer';
 
 let cachedMetricsEnabled: boolean | null = null;
-let cachedPerfEnabled: boolean | null = null;
 let cachedStartupEnabled: boolean | null = null;
 let cachedRunId: string | null = null;
 const emittedStartupOnce = new Set<string>();
@@ -45,15 +44,6 @@ export function enabled(): boolean {
   return cachedMetricsEnabled;
 }
 
-export function perfEnabled(): boolean {
-  if (cachedPerfEnabled !== null) return cachedPerfEnabled;
-  const env = readEnv();
-  cachedPerfEnabled =
-    readLocalStorage('michi:perf') === '1' ||
-    env?.VITE_MICHI_PERF === '1';
-  return cachedPerfEnabled;
-}
-
 export function startupEnabled(): boolean {
   if (cachedStartupEnabled !== null) return cachedStartupEnabled;
   const params = readSearchParams();
@@ -81,11 +71,10 @@ export function runId(): string {
 }
 
 export function now(): number {
-  return enabled() || perfEnabled() ? performance.now() : 0;
+  return enabled() ? performance.now() : 0;
 }
 
 function writeJson(row: Record<string, unknown>): void {
-  // eslint-disable-next-line no-console
   console.info(JSON.stringify(row));
 }
 

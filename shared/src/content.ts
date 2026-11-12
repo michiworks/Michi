@@ -16,7 +16,14 @@ export interface MichiPageBlock {
 
 /** Quoted interface material handed to the Michi assistant. */
 export interface MichiContextItem {
-  kind: 'thread' | 'block' | 'row' | 'node';
+  /**
+   * `companion_item` (DESIGN-v2 §1.2, §1.3): a Today item the user asks the
+   * agent about (Today's Ask): `id` is the item's id, `title` its title. The
+   * message also carries `{kind: 'companion_item', itemId}` in
+   * metaAgentContext.refs, so its turn starts with collector material and
+   * runs in Ask (§2.8 T4). W2-F1a attaches and shows it.
+   */
+  kind: 'thread' | 'block' | 'row' | 'node' | 'companion_item';
   id: string;
   title: string;
   text?: string;

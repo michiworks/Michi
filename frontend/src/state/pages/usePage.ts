@@ -7,12 +7,13 @@ import {
   fetchPage,
   fetchPageActivitySeen,
   listPageChanges,
+  pageEditFailure,
   patchPage,
-  revertPageBatch,
   type PageApiIdentity,
   type PageChangeAction,
 } from '../../services/api/pages';
 import { notifyPageChanged, subscribePageChanges } from './pageEvents';
+import { batchOutcomeNotice, revertPageBatches, UNDO_FAILED } from './pageUndo';
 import {
   commitResourceRead,
   failResourceRead,
@@ -23,6 +24,10 @@ import {
   useResource,
   writeResource,
 } from './resourceCache';
+import { useVisiblePoll } from '../visiblePoll';
+
+/** How a page edit ended: saved, refused because the page changed meanwhile, the page is gone, or it failed. */
+export type PageApplyResult = 'ok' | 'stale' | 'gone' | 'failed';
 
 export interface UsePageOptions extends PageApiIdentity {
   pageId: string;
@@ -41,6 +46,8 @@ export interface UsePageResult {
   refresh: () => void;
   loadMoreChanges: () => Promise<void>;
   edit: (ops: PageEditOp[]) => Promise<void>;
+  /** Saves edits made against `revision`, and says how it ended rather than throwing. */
+  apply: (ops: PageEditOp[], revision: number) => Promise<PageApplyResult>;
   patch: (body: { title?: string; color?: string | null; parentId?: string | null; position?: number }) => Promise<void>;
   revert: (changeId: string) => Promise<void>;
   redo: (changeId: string) => Promise<void>;
@@ -171,18 +178,7 @@ export function usePage({ backendConnectionId, workspaceId, pageId, enabled = tr
     });
   }, [backendConnectionId, enabled, pageId, refresh, workspaceId]);
 
-  useEffect(() => {
-    if (!enabled) return undefined;
-    const onFocus = () => refresh();
-    const timer = window.setInterval(() => {
-      if (document.visibilityState === 'visible') refresh();
-    }, PAGE_POLL_MS);
-    window.addEventListener('focus', onFocus);
-    return () => {
-      window.clearInterval(timer);
-      window.removeEventListener('focus', onFocus);
-    };
-  }, [enabled, refresh]);
+  useVisiblePoll(refresh, { intervalMs: PAGE_POLL_MS, enabled });
 
   const loadMoreChanges = useCallback(async () => {
     if (!enabled || !pageId || !hasMoreChanges || changesCursor === null) return;
@@ -225,10 +221,23 @@ export function usePage({ backendConnectionId, workspaceId, pageId, enabled = tr
       notifyPageChanged({ backendConnectionId, workspaceId, pageId });
       await refreshChanges();
     } catch (error) {
-      if ((error as { status?: number })?.status === 409) refresh();
+      if (pageEditFailure(error) === 'stale') refresh();
       throw error;
     }
   }, [assertWritable, backendConnectionId, key, pageId, refresh, refreshChanges, workspaceId]);
+
+  const apply = useCallback(async (ops: PageEditOp[], revision: number): Promise<PageApplyResult> => {
+    const current = readResource<PageDto>(key);
+    if (!enabled || !pageId || !current.data || current.stale || current.status !== 'ready') return 'failed';
+    if (current.data.revision !== revision) { refresh(); return 'stale'; }
+    try {
+      await edit(ops);
+      return 'ok';
+    } catch (error) {
+      // edit has already read the page again after a 409.
+      return pageEditFailure(error);
+    }
+  }, [edit, enabled, key, pageId, refresh]);
 
   const patch = useCallback(async (body: { title?: string; color?: string | null; parentId?: string | null; position?: number }) => {
     const page = assertWritable();
@@ -237,7 +246,7 @@ export function usePage({ backendConnectionId, workspaceId, pageId, enabled = tr
       notifyPageChanged({ backendConnectionId, workspaceId, pageId });
       refresh();
     } catch (error) {
-      if ((error as { status?: number })?.status === 409) refresh();
+      if (pageEditFailure(error) === 'stale') refresh();
       throw error;
     }
   }, [assertWritable, backendConnectionId, key, pageId, refresh, workspaceId]);
@@ -261,7 +270,7 @@ export function usePage({ backendConnectionId, workspaceId, pageId, enabled = tr
       void refresh();
     } catch (error) {
       if (!stillCurrent()) return;
-      if ((error as { status?: number })?.status === 409) refresh();
+      if (pageEditFailure(error) === 'stale') refresh();
       setActionError(error instanceof Error ? error.message : 'Could not update page activity');
     }
   }, [assertWritable, backendConnectionId, key, pageId, refresh, workspaceId]);
@@ -276,19 +285,24 @@ export function usePage({ backendConnectionId, workspaceId, pageId, enabled = tr
     const requestKey = key;
     const requestGeneration = identityGenerationRef.current;
     const stillCurrent = () => mountedRef.current && activeIdentityRef.current === requestKey && identityGenerationRef.current === requestGeneration;
+    // The page's activity includes the databases it references: their views must read the undo too.
+    const databaseIds = new Set(changes.flatMap((change) =>
+      change.batchId === batchId && change.target.kind !== 'block' ? [change.target.databaseId] : []));
+    const changed = databaseIds.size > 0
+      ? [...databaseIds].map((databaseId) => ({ backendConnectionId, workspaceId, pageId, databaseId }))
+      : [{ backendConnectionId, workspaceId, pageId }];
     try {
       assertWritable();
-      await revertPageBatch(batchId, identity);
+      const outcome = await revertPageBatches(backendConnectionId, [{ batchId, workspaceId, changed }]);
       if (!stillCurrent()) return;
-      setActionError(null);
-      notifyPageChanged({ backendConnectionId, workspaceId, pageId });
+      setActionError(batchOutcomeNotice(outcome, 'undone'));
       void refresh();
     } catch (error) {
       if (!stillCurrent()) return;
-      if ((error as { status?: number })?.status === 409) refresh();
-      setActionError(error instanceof Error ? error.message : 'Could not undo page activity');
+      if (pageEditFailure(error) === 'stale') refresh();
+      setActionError(error instanceof Error ? error.message : UNDO_FAILED);
     }
-  }, [assertWritable, backendConnectionId, key, pageId, refresh, workspaceId]);
+  }, [assertWritable, backendConnectionId, changes, key, pageId, refresh, workspaceId]);
 
   const acknowledgeThrough = useCallback(async (seq: number) => {
     if (!Number.isSafeInteger(seq) || seq < 0) throw new Error('Invalid activity sequence');
@@ -322,6 +336,7 @@ export function usePage({ backendConnectionId, workspaceId, pageId, enabled = tr
     refresh,
     loadMoreChanges,
     edit,
+    apply,
     patch,
     revert,
     redo,

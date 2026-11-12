@@ -2,18 +2,13 @@ import { maintenanceCoordinatorState } from '../metaAgent/maintenanceCoordinator
 import type { MaintenanceWorkspaceResponse } from 'michi-shared';
 import { conversationCompletionCounter } from '../conversationUpdates';
 import type { ScheduledJobScheduler } from '../scheduledJobs/scheduler';
-import { getMaintenanceConfig, listEligibleMaintenanceManifest, listMaintenanceBacklog, listMaintenanceCatchupSuggestions,
-  listMaintenanceExcludedSpaces, type MaintenanceManifest } from './maintenanceRepository';
+import { getMaintenanceConfig, listMaintenanceBacklog, listMaintenanceCatchupSuggestions,
+  listMaintenanceExcludedSpaces } from './maintenanceRepository';
 import { maintenanceRuntimeAvailability } from '../../agents/maintenancePolicy';
 import { resolveMetaAgentRuntime } from '../metaAgent/settings';
 import { getWorkspaceInstructions, listWatches } from '../metaAgent/watches';
 
 export type MaintenanceWorkspaceView = MaintenanceWorkspaceResponse;
-
-export function maintenanceManifest(workspaceId: string, ownerUserId: string): MaintenanceManifest {
-  // Repository manifests are complete and versioned; do not cap at the conversation-feed page size.
-  return listEligibleMaintenanceManifest(workspaceId, ownerUserId);
-}
 
 export function getMaintenanceWorkspaceView(input: {
   workspaceId: string; ownerUserId: string; scheduler: ScheduledJobScheduler; now?: number;

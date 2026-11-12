@@ -1,5 +1,4 @@
-import { normalizeWorkspaceCwd } from '../agents/tools/pathSandbox';
-import { deriveSandboxCwd } from './workspaceSandbox';
+import { workspaceSessionCwd } from './workspaceSandbox';
 import type { AgentSession, NewAgentSessionOptions } from '../agents/types';
 import { getRuntime } from '../agents/registry';
 import { descriptorOf } from 'michi-runtime/internal/core/descriptors';
@@ -19,7 +18,7 @@ export async function resetKiroContext(original: AgentSession, ownerUserId: stri
     const unlock = await acquireSessionRestoreLock(original.id);
     try {
         if (getSessionForUser(original.id, ownerUserId) !== original
-            || chatHub.isActive(original.id) || chatHub.isOwnerTurnActive(original.id)) {
+            || chatHub.holdsSession(original.id)) {
             throw new Error('The session changed or is still running. Retry /clear when it is idle.');
         }
         const node = getNode(original.id);
@@ -46,7 +45,7 @@ export async function resetKiroContext(original: AgentSession, ownerUserId: stri
         dropSession(original.id);
         let replacement: AgentSession | undefined;
         try {
-            replacement = await runtime.newSession({ sessionId: original.id, cwd: process.env.MICHI_CLOUD === '1' && ownerUserId ? deriveSandboxCwd(ownerUserId, workspace.id) : normalizeWorkspaceCwd(workspace.cwd ?? process.cwd()),
+            replacement = await runtime.newSession({ sessionId: original.id, cwd: workspaceSessionCwd(workspace, ownerUserId, process.cwd()),
                 workspaceId: workspace.id, ownerUserId, model, reasoning,
                 owner: chatOwner(original.id),
                 ...bootstrap,

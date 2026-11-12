@@ -5,7 +5,7 @@ import type { TiptapEditorHTMLElement } from '@tiptap/react';
 import { TextSelection } from '@tiptap/pm/state';
 import ManageComposer, { __resetManageComposerSessionStateForTests, type ManageComposerHandle } from './ManageComposer';
 import { docToDraft, draftToDoc } from '../../mentionDoc';
-import type { MentionRecord } from '../../mentions';
+import type { MentionRecord } from '../../../lib/mentions';
 
 vi.mock('../../../state/prefs', async () => {
   const actual = await vi.importActual<typeof import('../../../state/prefs')>('../../../state/prefs');
@@ -116,6 +116,14 @@ describe('ManageComposer insert', () => {
     act(() => { ref.current!.startMention(); });
     expect(draft().value).toBe('Look at @');
     expect(caretAtEnd()).toBe(true);
+  });
+
+  it('spaces the toolbar\'s @ from the word before it, Chinese text included', async () => {
+    await mount();
+    type('帮我看看');
+    act(() => { editorOf().commands.focus('end'); });
+    fireEvent.click(screen.getByTitle('Mention context or node'));
+    expect(draft().value).toBe('帮我看看 @');
   });
 
   it('works the same in a digest follow-up composer', async () => {

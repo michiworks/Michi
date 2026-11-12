@@ -1,9 +1,10 @@
 import { getDb } from '../db';
 import {
-  isValidChangeState, parseChangeSource, parseChangeTarget, parsePageChangeDto,
+  changeTargetKey, checkinNodeId, companionCheckinTurnId, isValidChangeState, parseChangeSource, parseChangeTarget, parsePageChangeDto,
   parseTargetMutation, parseTargetSnapshot,
   type ApplicationState, type ChangeTarget, type PageChangeDto, type ProposalState,
 } from 'michi-shared';
+import { presentChanges } from './checkinSources';
 import { PageWriteError, requirePagesWorkspace, sourceNodeId } from './core';
 
 type ChangeRow = {
@@ -55,9 +56,7 @@ function activeTarget(workspaceId: string, ownerUserId: string, target: ChangeTa
 export function targetKey(target: ChangeTarget): string {
   const parsed = parseChangeTarget(target);
   if (!parsed) return invalid('Invalid change target');
-  if (parsed.kind === 'block') return `block:${parsed.pageId}:${parsed.blockId}`;
-  if (parsed.kind === 'row') return `row:${parsed.databaseId}:${parsed.rowId}`;
-  return `database:${parsed.databaseId}`;
+  return changeTargetKey(parsed);
 }
 
 export function insertChange(ownerUserId: string, workspaceId: string, change: Omit<PageChangeDto, 'seq'>): PageChangeDto {
@@ -148,6 +147,11 @@ export function updateChange(id: string, ownerUserId: string, patch: ChangeLifec
 export interface RelevantChangeOptions {
   afterSeq?: number; beforeSeq?: number; direction?: 'forward' | 'backward'; limit?: number; proposalState?: ProposalState; applicationState?: ApplicationState;
 }
+/**
+ * A page's history as its owner is shown it: a check-in's changes open the
+ * post it made (checkinSources.ts presentChange), so these records are for
+ * the response only, never to write back.
+ */
 export function listRelevantChanges(pageId: string, ownerUserId: string, options: RelevantChangeOptions = {}): { changes: PageChangeDto[]; nextAfter: number; nextBefore: number | null; hasMore: boolean } {
   const page = getDb().prepare('SELECT id,workspace_id FROM pages WHERE id=? AND owner_user_id=? AND deleted_at IS NULL').get(pageId, ownerUserId) as { id: string; workspace_id: string } | undefined;
   if (!page) return fail404();
@@ -168,7 +172,7 @@ export function listRelevantChanges(pageId: string, ownerUserId: string, options
   if (options.applicationState !== undefined) { clauses.push('application_state IS ?'); params.push(options.applicationState); }
   const rows = db.prepare(`SELECT * FROM page_changes WHERE ${clauses.join(' AND ')} ORDER BY seq ${direction === 'backward' ? 'DESC' : 'ASC'} LIMIT ?`).all(...params, limit + 1) as unknown as ChangeRow[];
   const hasMore = rows.length > limit;
-  const changes = rows.slice(0, limit).map(decode);
+  const changes = presentChanges(rows.slice(0, limit).map(decode), ownerUserId);
   return { changes, nextAfter: direction === 'forward' ? changes.at(-1)?.seq ?? after : after,
     nextBefore: direction === 'backward' ? changes.at(-1)?.seq ?? null : null, hasMore };
 }
@@ -178,6 +182,33 @@ export function listChangeBatch(batchId: string, ownerUserId: string, workspaceI
   const rows = getDb().prepare('SELECT * FROM page_changes WHERE batch_id=? AND owner_user_id=? AND workspace_id=? ORDER BY seq')
     .all(batchId, ownerUserId, workspaceId) as unknown as ChangeRow[];
   return rows.map(decode);
+}
+
+/**
+ * Every page and database change check-in run `runId` recorded for this
+ * owner, oldest first: those whose source is its node and its own turn
+ * (DESIGN-v2 §2.7). Stored form, for revertRunPageChanges.
+ */
+export function listCheckinRunChanges(runId: string, ownerUserId: string): PageChangeDto[] {
+  if (!runId || runId.length > 200 || !ownerUserId?.trim()) return invalid('Invalid check-in run');
+  const nodeId = checkinNodeId(runId);
+  const turnId = companionCheckinTurnId(runId);
+  const rows = getDb().prepare(`SELECT * FROM page_changes WHERE owner_user_id=? AND source_node_id=?
+    AND json_extract(source,'$.turnId')=? ORDER BY seq`).all(ownerUserId, nodeId, turnId) as unknown as ChangeRow[];
+  return rows.map(decode).filter((change) => (change.source.kind === 'chat' || change.source.kind === 'helper')
+    && change.source.nodeId === nodeId && change.source.turnId === turnId);
+}
+
+/** Whether a change to this page or database still stands, from anyone: applied, or a suggestion waiting for review. */
+export function hasStandingChanges(target: { pageId: string } | { databaseId: string }, ownerUserId: string): boolean {
+  const [column, id] = 'pageId' in target ? ['page_id', target.pageId] : ['database_id', target.databaseId];
+  return !!getDb().prepare(`SELECT 1 FROM page_changes WHERE owner_user_id=? AND ${column}=?
+    AND (application_state='applied' OR proposal_state='pending') LIMIT 1`).get(ownerUserId, id);
+}
+
+/** Whether anything changed this database before this change (seq). */
+export function hasEarlierChanges(databaseId: string, seq: number): boolean {
+  return !!getDb().prepare('SELECT 1 FROM page_changes WHERE database_id=? AND seq<? LIMIT 1').get(databaseId, seq);
 }
 
 export function getPageActivitySeen(pageId: string, ownerUserId: string): number {
@@ -232,6 +263,6 @@ export function upkeepRowChanges(databaseId: string, ownerUserId: string, since:
 
 /** The first change Michi recorded for a row, if any. */
 export function firstRowChange(databaseId: string, rowId: string, ownerUserId: string, workspaceId: string): PageChangeDto | null {
-  const row = getDb().prepare(TASK_ACTIVITY_SQL.first).get(ownerUserId, workspaceId, databaseId, `row:${databaseId}:${rowId}`) as ChangeRow | undefined;
+  const row = getDb().prepare(TASK_ACTIVITY_SQL.first).get(ownerUserId, workspaceId, databaseId, changeTargetKey({ kind: 'row', databaseId, rowId })) as ChangeRow | undefined;
   return row ? decode(row) : null;
 }

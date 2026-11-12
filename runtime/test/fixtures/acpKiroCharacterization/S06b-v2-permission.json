@@ -238,7 +238,7 @@
     "p1": [
       {
         "sessionUpdate": "permission_request",
-        "requestId": 3,
+        "requestId": "michi:3",
         "toolCall": {
           "toolCallId": "perm-3",
           "title": "Edit file"

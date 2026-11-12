@@ -64,6 +64,20 @@ describe('CustomBlock live database data', () => {
     expect(screen.getByTestId('sandbox').getAttribute('data-mounts')).toBe('1');
   });
 
+  it('refreshes for a database edit named by its remote renderer id', async () => {
+    let revision = 1;
+    mockCapability.call.mockImplementation(async (method: string, args: unknown[]) => {
+      if (method === 'read.host') return { page: { id: 'page-1', revision }, block };
+      return { id: args[0], revision, rows: [{ id: 'row-1', title: `revision ${revision}` }] };
+    });
+    render(<CustomBlock block={block} pageId="page-1" workspaceId="workspace-1" connectionId="backend-1" />);
+    expect(await screen.findByText(/revision 1/)).toBeTruthy();
+
+    revision = 2;
+    act(() => notifyPageChanged({ backendConnectionId: 'backend-1', workspaceId: 'workspace-1', databaseId: 'remote:backend-1:database-2' }));
+    await waitFor(() => expect(screen.getByTestId('sandbox').textContent).toContain('revision 2'));
+  });
+
   it('shows generated component provenance and opens the saved source message', async () => {
     vi.mocked(readPageComponent).mockResolvedValue({
       component: { id: 'component-1', enabled: true, name: 'Table widget' } as never,

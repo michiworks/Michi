@@ -34,7 +34,7 @@ interface StoredCheck {
 
 export function metaAgentGuardOwnerKey(ownerUserId?: string | null): string {
   if (process.env.MICHI_CLOUD === '1') {
-    if (!ownerUserId) throw new Error('Meta agent restriction checks require an authenticated owner');
+    if (!ownerUserId) throw new Error('Pages upkeep restriction checks require an authenticated owner');
     return `user:${ownerUserId}`;
   }
   return 'desktop';
@@ -46,8 +46,8 @@ const rowKey = (toolset: MetaAgentToolset, ownerUserId?: string | null) =>
 const fingerprint = (profile: MetaAgentRunProfile) =>
   JSON.stringify([profile.runtimeId, profile.providerId ?? null, profile.modelId ?? null, profile.reasoning ?? null]);
 
-/** Mirrors MetaAgentGuardError's message, which is all a runtime_error event or a stored turn error keeps. */
-const GUARD_MESSAGE = /^Meta agent restriction check failed on ([^\s:()]+)(?:: ([\s\S]+?))?(?: \(([\s\S]*)\))?$/;
+/** Mirrors MetaAgentGuardError's message (and its older wording), which is all a runtime_error event or a stored turn error keeps. */
+const GUARD_MESSAGE = /^(?:Michi|Meta agent) restriction check failed on ([^\s:()]+)(?:: ([\s\S]+?))?(?: \(([\s\S]*)\))?$/;
 
 /**
  * The failure a Meta agent run stopped on, from the MetaAgentGuardError

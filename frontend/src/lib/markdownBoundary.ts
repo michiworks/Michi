@@ -145,15 +145,3 @@ function findBoundary(text: string, offset: number): number | null {
 export function findNextSafeBoundaryOrNull(text: string, offset: number): number | null {
   return findBoundary(text, offset);
 }
-
-export function isSafeMarkdownBoundary(text: string, offset: number): boolean {
-  return findBoundary(text, offset) === Math.max(0, Math.min(offset, text.length));
-}
-
-/**
- * Legacy offset snapper used by weaveToolCalls. It preserves the historical
- * behavior of falling back to text.length when no safe boundary exists yet.
- */
-export function findNextSafeBoundary(text: string, offset: number): number {
-  return findNextSafeBoundaryOrNull(text, offset) ?? text.length;
-}

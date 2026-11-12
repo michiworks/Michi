@@ -10,11 +10,22 @@ import type { ChatAction } from './chatTypes';
 import { cancelChatAndObserve, settleCancellationObservation } from '../services/api/stream';
 import { fetchStream } from '../services/api/streamTransport';
 
+import { indexBackendProjects, setKnownBackendConnections } from '../config/backendConnections';
+import { closeRemoteAuthentication, completeRemoteAuthentication, getRemoteAuthentication, reportRemoteCredentialError } from './remoteAuthentication';
+import { resetTurnPageReceiptInvalidationForTests } from '../lib/turnPageReceipt';
+import { subscribePageChanges } from './pages/pageEvents';
+
 vi.mock('../services/api/streamTransport', () => ({ fetchStream: vi.fn() }));
-vi.mock('../config/backendConnections', () => ({
+vi.mock('../config/backendConnections', async (importOriginal) => ({
+  ...await importOriginal<typeof import('../config/backendConnections')>(),
   backendApiBase: () => 'http://localhost:3000/api',
   nodeBackendApiBase: () => 'http://localhost:3000/api',
 }));
+vi.mock('../../../shared/src/remoteCredentials', () => ({ REMOTE_CREDENTIALS: {
+  name: 'Example SSO', localAction: 'Refresh Example SSO on this computer', localCommand: ['example-login'],
+  remoteCommand: ['example-login', '--remote'], remoteCookie: null,
+  remoteCredentialError: /example-login|example sso.*expired/i, localCredentialError: null,
+} }));
 
 function envelope(seq: number) {
   return {
@@ -32,6 +43,7 @@ describe('createBackgroundTurnBinding', () => {
     const onSpawnBranches = vi.fn();
     const onArtifactSaved = vi.fn();
     const onArtifactUpdated = vi.fn();
+    const onArtifactDeleted = vi.fn();
     const lastTurnRef = { current: '' };
     const lastSeqRef = { current: -1 };
     const handlers = createBackgroundTurnBinding({
@@ -40,7 +52,7 @@ describe('createBackgroundTurnBinding', () => {
       dispatch,
       lastTurnRef,
       lastSeqRef,
-      extraHandlers: { onSpawnBranches, onArtifactSaved, onArtifactUpdated },
+      extraHandlers: { onSpawnBranches, onArtifactSaved, onArtifactUpdated, onArtifactDeleted },
     }).createHandlers();
 
     dispatchChatStreamEvent({
@@ -64,12 +76,19 @@ describe('createBackgroundTurnBinding', () => {
       event: CHAT_STREAM_EVENTS.artifactUpdated,
       data: { ...envelope(3), name: 'notes', filePath: '/tmp/notes.md', size: 18 },
     }, handlers);
+    const deleted: ChatStreamEvent = {
+      event: CHAT_STREAM_EVENTS.artifactDeleted,
+      data: { ...envelope(4), contextId: 'ctx-1', name: 'notes' },
+    };
+    dispatchChatStreamEvent(deleted, handlers);
+    dispatchChatStreamEvent(deleted, handlers);
 
     expect(onSpawnBranches).toHaveBeenCalledTimes(1);
     expect(onArtifactSaved).toHaveBeenCalledWith('notes', '/tmp/notes.md', 12, undefined);
     expect(onArtifactUpdated).toHaveBeenCalledWith('notes', '/tmp/notes.md', 18, undefined);
+    expect(onArtifactDeleted.mock.calls).toEqual([['notes', 'ctx-1']]);
     expect(lastTurnRef.current).toBe('self-turn-1');
-    expect(lastSeqRef.current).toBe(3);
+    expect(lastSeqRef.current).toBe(4);
   });
 
   it('shares durable terminal semantics and completion callbacks with foreground turns', () => {
@@ -92,12 +111,28 @@ describe('createBackgroundTurnBinding', () => {
     }, handlers);
     dispatchChatStreamEvent({
       event: CHAT_STREAM_EVENTS.done,
-      data: { ...envelope(1), stopReason: 'end_turn', persisted: true },
+      data: { ...envelope(1), stopReason: 'end_turn', persisted: true, nodeCompletionSeq: 3, nodeSeenCompletionSeq: 2 },
     }, handlers);
 
-    expect(dispatch).toHaveBeenCalledWith({ type: 'done', nodeId: 'node-1', assistantId: 'self-a-1' });
+    // The turn and the server's completion counts travel with it (completionFacts.ts).
+    expect(dispatch).toHaveBeenCalledWith({
+      type: 'done', nodeId: 'node-1', assistantId: 'self-a-1', turnId: 'self-turn-1',
+      completion: { completionSeq: 3, seenCompletionSeq: 2 },
+    });
     expect(onTurnEnd).toHaveBeenCalledWith('done', 'node-1');
     expect(onStreamComplete).toHaveBeenCalledTimes(1);
+  });
+
+  it.each(['cancel', 'cancelled'])('does not announce a turn cancelled elsewhere as finished (stopReason %s)', (stopReason) => {
+    const dispatch = vi.fn<(action: ChatAction) => void>();
+    const onStreamComplete = vi.fn();
+    const handlers = createBackgroundTurnBinding({
+      chatId: 'chat-1', nodeId: 'node-1', dispatch, lastTurnRef: { current: '' }, lastSeqRef: { current: -1 }, onStreamComplete,
+    }).createHandlers();
+    dispatchChatStreamEvent({ event: CHAT_STREAM_EVENTS.turnStart, data: { ...envelope(0), userText: '', selfInitiated: true } }, handlers);
+    dispatchChatStreamEvent({ event: CHAT_STREAM_EVENTS.done, data: { ...envelope(1), stopReason, persisted: true } }, handlers);
+    expect(dispatch).toHaveBeenCalledWith(expect.objectContaining({ type: 'done', aborted: true }));
+    expect(onStreamComplete).not.toHaveBeenCalled();
   });
 
   it('turns an unpersisted terminal frame into the same visible error path', () => {
@@ -125,6 +160,122 @@ describe('createBackgroundTurnBinding', () => {
       type: 'error', nodeId: 'node-1', assistantId: 'self-a-1',
     }));
     expect(onTurnEnd).toHaveBeenCalledWith('error', 'node-1');
+  });
+});
+
+describe('the side effects of a background turn', () => {
+  const CREDENTIAL_ERROR = 'Run example-login --remote';
+  const bind = (cursor?: 'foreground' | 'background') => createBackgroundTurnBinding({
+    chatId: 'chat-1', nodeId: 'node-1', dispatch: vi.fn(), lastTurnRef: { current: '' }, lastSeqRef: { current: -1 },
+    workspaceId: () => 'p1', ...(cursor ? { cursor } : {}),
+  }).createHandlers();
+  const turn = (handlers: ReturnType<typeof bind>, id: string, options: { selfInitiated?: boolean; start?: boolean } = {}) => {
+    const at = (seq: number) => ({ ...envelope(seq), turnId: id, assistantId: `a-${id}` });
+    if (options.start !== false) {
+      dispatchChatStreamEvent({ event: CHAT_STREAM_EVENTS.turnStart, data: { ...at(0), userText: '', ...(options.selfInitiated ? { selfInitiated: true } : {}) } }, handlers);
+    }
+    return {
+      fail: (message: string) => dispatchChatStreamEvent({ event: CHAT_STREAM_EVENTS.error, data: { ...at(1), message } }, handlers),
+      warn: (message: string) => dispatchChatStreamEvent({ event: CHAT_STREAM_EVENTS.warning, data: { ...at(1), source: 'claude-cli', category: 'runtime', message } }, handlers),
+      done: (stopReason = 'end_turn') => dispatchChatStreamEvent({ event: CHAT_STREAM_EVENTS.done, data: { ...at(2), stopReason, persisted: true } }, handlers),
+    };
+  };
+  const signInShown = () => getRemoteAuthentication()?.key === 'runtime:sso-remote';
+  /** Whether a sign-in the connection still owes would open again: a clean turn forgets it. */
+  const signInOwed = () => {
+    closeRemoteAuthentication();
+    reportRemoteCredentialError('node-1', CREDENTIAL_ERROR);
+    const owed = getRemoteAuthentication() === null;
+    closeRemoteAuthentication();
+    return owed;
+  };
+
+  beforeEach(() => {
+    setKnownBackendConnections([{ id: 'sso-remote', name: 'Remote', transport: 'ssh', sshHost: 'box', hasToken: true, createdAt: 1, updatedAt: 1 }]);
+    indexBackendProjects([{ id: 'p1', backendConnectionId: 'sso-remote', chatIds: ['node-1'] }]);
+  });
+  afterEach(() => {
+    closeRemoteAuthentication(); completeRemoteAuthentication('runtime:sso-remote');
+    setKnownBackendConnections([]); indexBackendProjects([]);
+  });
+
+  it("asks for remote sign-in on a self-initiated turn's credential error, until a later turn completes cleanly", () => {
+    const handlers = bind();
+    turn(handlers, 't1', { selfInitiated: true }).fail(CREDENTIAL_ERROR);
+    expect(signInShown()).toBe(true);
+    expect(signInOwed()).toBe(true);
+    const failed = turn(handlers, 't2', { selfInitiated: true });
+    failed.warn(CREDENTIAL_ERROR);
+    failed.done();
+    expect(signInOwed()).toBe(true);
+    turn(handlers, 't3', { selfInitiated: true }).done('cancelled');
+    expect(signInOwed()).toBe(true);
+    turn(handlers, 't4', { selfInitiated: true }).done();
+    expect(signInOwed()).toBe(false);
+  });
+
+  // foreground: reattached on load; background: the feed resumed past the turn's start.
+  it.each(['foreground', 'background'] as const)('asks for sign-in on the credential error of a turn joined mid-way (%s cursor)', cursor => {
+    turn(bind(cursor), 't1', { start: false }).fail(CREDENTIAL_ERROR);
+    expect(signInShown()).toBe(true);
+  });
+
+  it('asks for sign-in on the credential error of a turn another window sent, and clears it when one completes', () => {
+    const handlers = bind();
+    turn(handlers, 't1').fail(CREDENTIAL_ERROR);
+    expect(signInShown()).toBe(true);
+    expect(signInOwed()).toBe(true);
+    turn(handlers, 't2').done();
+    expect(signInOwed()).toBe(false);
+  });
+
+  it('refreshes the boards of the workspace a background turn made a task database for', () => {
+    resetTurnPageReceiptInvalidationForTests();
+    const changed = vi.fn();
+    const stop = subscribePageChanges({ backendConnectionId: 'sso-remote' }, changed);
+    try {
+      const handlers = bind();
+      turn(handlers, 't1');
+      const output = JSON.stringify({ kind: 'taskDatabase', created: true, databaseId: 'db-t', workspaceId: 'ws-real' });
+      dispatchChatStreamEvent({ event: CHAT_STREAM_EVENTS.toolCall, data: { ...envelope(1), turnId: 't1', assistantId: 'a-t1', toolCallId: 'open-1', title: 'mcp__michi__open_task_database', status: 'in_progress' } }, handlers);
+      dispatchChatStreamEvent({ event: CHAT_STREAM_EVENTS.toolCallUpdate, data: { ...envelope(2), turnId: 't1', assistantId: 'a-t1', toolCallId: 'open-1', title: '', status: 'completed', output } }, handlers);
+      expect(changed).toHaveBeenCalledWith({ backendConnectionId: 'sso-remote', workspaceId: 'remote:sso-remote:ws-real', databaseId: 'remote:sso-remote:db-t' });
+    } finally { stop(); }
+  });
+});
+
+describe('a background cursor a replay-gap install moved past the gap', () => {
+  it('drops the output its body holds, and still raises and clears an unsequenced permission prompt', () => {
+    let nodes: Record<string, ChatNodeState> = {
+      'node-1': {
+        nodeId: 'node-1', projectId: 'ws', kind: 'chat', chatId: 'chat-1', followUps: [], status: 'streaming',
+        activeTurnId: 'self-turn-1', lastAppliedBackgroundTurnId: 'self-turn-1', lastAppliedBackgroundSeq: 20,
+        messages: [{ id: 'self-a-1', role: 'assistant', text: '', toolCalls: [], blocks: [], streaming: true }],
+      },
+    };
+    const dispatch = vi.fn((action: ChatAction) => { nodes = reduceNodes(nodes, action); });
+    const handlers = createBackgroundTurnBinding({
+      chatId: 'chat-1', nodeId: 'node-1', dispatch,
+      lastTurnRef: { get current() { return nodes['node-1'].lastAppliedBackgroundTurnId ?? ''; }, set current(_value: string) {} },
+      lastSeqRef: { get current() { return nodes['node-1'].lastAppliedBackgroundSeq ?? -1; }, set current(_value: number) {} },
+    }).createHandlers();
+    const permission = { requestId: 7, title: 'Run tests', options: [] };
+
+    dispatchChatStreamEvent({ event: CHAT_STREAM_EVENTS.chunk, data: { ...envelope(13), text: 'in the body' } }, handlers);
+    dispatchChatStreamEvent({ event: CHAT_STREAM_EVENTS.permissionRequest, data: { ...envelope(14), seq: undefined, ...permission } }, handlers);
+    expect(nodes['node-1'].pendingPermission?.requestId).toBe(7);
+    expect(nodes['node-1'].lastAppliedBackgroundSeq).toBe(20);
+    dispatchChatStreamEvent({ event: CHAT_STREAM_EVENTS.permissionResolved, data: { ...envelope(15), seq: undefined, requestId: 7 } }, handlers);
+    expect(nodes['node-1'].pendingPermission).toBeNull();
+    // Replaying the prompt and its answer again ends in the same state.
+    dispatchChatStreamEvent({ event: CHAT_STREAM_EVENTS.permissionRequest, data: { ...envelope(14), seq: undefined, ...permission } }, handlers);
+    dispatchChatStreamEvent({ event: CHAT_STREAM_EVENTS.permissionResolved, data: { ...envelope(15), seq: undefined, requestId: 7 } }, handlers);
+    expect(nodes['node-1'].pendingPermission).toBeNull();
+    dispatchChatStreamEvent({ event: CHAT_STREAM_EVENTS.chunk, data: { ...envelope(21), text: 'new output' } }, handlers);
+
+    expect(dispatch.mock.calls.filter(([action]) => action.type === 'chunk').map(([action]) => (action as { text: string }).text))
+      .toEqual(['new output']);
+    expect(nodes['node-1'].lastAppliedBackgroundSeq).toBe(21);
   });
 });
 

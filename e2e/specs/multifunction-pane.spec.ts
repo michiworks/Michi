@@ -18,8 +18,8 @@ test('new pane opens an in-pane chooser and transforms the same slot', async ({ 
   // The browser opens only from the topbar Browser button, not the chooser.
   await expect(firstLauncher.getByRole('button', { name: 'Browser' })).toHaveCount(0);
   await firstLauncher.getByRole('button', { name: 'Terminal' }).click();
-  await expect(page.locator(`[data-pane-id="${firstPaneId}"][data-pane-kind="terminal"]`)).toBeVisible();
-  await expect(page.getByText(/Native terminal is available/)).toBeVisible();
+  // A browser has no Electron PTY: the pane uses a terminal the backend runs.
+  await expect(page.locator(`[data-pane-id="${firstPaneId}"][data-pane-kind="terminal"][data-terminal-status]`)).toBeVisible();
 
   await page.getByRole('button', { name: 'New pane', exact: true }).click();
   const secondLauncher = page.locator('[data-pane-kind="launcher"]');

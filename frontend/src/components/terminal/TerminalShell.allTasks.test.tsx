@@ -1,4 +1,3 @@
-import React from 'react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import TerminalShell from './TerminalShell';
@@ -47,7 +46,8 @@ vi.mock('../../state/chatStore', async () => {
     }),
     useStructuralSelector: (s: (n: Record<string, unknown>) => unknown) => s({}),
     useChatNodesSnapshot: () => ({}),
-    useNodesSelector: () => ({}),
+    useNodesSelector: (s: (n: Record<string, unknown>) => unknown) => s({}),
+    useChatNodeReader: () => () => undefined,
     useChatNode: () => null,
     chatLabel: () => '',
   };

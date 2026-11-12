@@ -1,22 +1,28 @@
 import { describe, expect, it, vi } from 'vitest';
-import React from 'react';
-import { act, fireEvent, render, within } from '@testing-library/react';
-import type { WorkflowRunDtoV1 } from 'michi-shared';
+import { act, fireEvent, render, waitFor, within } from '@testing-library/react';
+import type { MultiModelRunView, WorkflowRunDtoV1 } from 'michi-shared';
+import { MessageWorkflowRuns } from './MessageWorkflowRuns';
 import { WorkflowRunCard } from './WorkflowRunCard';
 import { WorkflowRunDetail, WorkflowRunPane } from './WorkflowRunPane';
-import { workflowNodeRows, workflowNowLine } from './workflowPresentation';
+import { RUN_NOUN, runNounTitle, workflowNodeRows, workflowNow } from './workflowPresentation';
 import {
   WorkflowDomainProvider,
   initialWorkflowDomainState,
   selectLiveBackgroundSubagents,
   useBackgroundSubagentLiveness,
+  useActiveWorkflowCounts,
+  useOpenWorkflowNodeIds,
   useOptionalWorkflowDomain,
+  useRefetchPartialWorkflowRun,
   useRunningClaudeWorkflow,
+  useWaitingWorkflowNodeIds,
+  useWorkflowRun,
   useWorkflowPlacementsForNode,
   useWorkflowRunDetail,
   useWorkflowRunsForNodes,
   workflowDomainReducer,
   workflowFeedKey,
+  workflowRunKey,
   type NodeBackgroundSubagentLiveness,
   type WorkflowDomainAction,
   type WorkflowDomainApi,
@@ -54,34 +60,126 @@ describe('workflow presentation', () => {
     expect(workflowNodeRows(run().nodes).map(({ node, depth }) => [node.id, depth])).toEqual([
       ['read-both', 0], ['read-alpha', 1], ['read-beta', 1], ['combine', 0],
     ]);
-    expect(workflowNowLine(run())).toBe('read-alpha ❯ Read File');
-    expect(workflowNowLine(run({ status: 'paused', statusDetail: 'Waiting for approval' }))).toBe('Waiting for approval');
-    expect(workflowNowLine(run({ status: 'completed' }))).toBeUndefined();
+    expect(workflowNow(run())).toEqual({ step: 'read-alpha', detail: 'Read File' });
+    expect(workflowNow(run({ status: 'paused', statusDetail: 'Waiting for approval' }))).toEqual({ detail: 'Waiting for approval' });
+    expect(workflowNow(run({ status: 'completed' }))).toBeUndefined();
   });
 });
 
 describe('WorkflowRunCard', () => {
-  it('shows status, progress, the now line and runs controls', () => {
-    const onAction = vi.fn();
+  it('shows status, progress and what runs now, without run controls', () => {
     const onOpen = vi.fn();
-    const { getByTestId, getByRole } = render(<WorkflowRunCard run={run()} onAction={onAction} onOpen={onOpen} />);
+    const { getByTestId, getByRole, queryByRole } = render(<WorkflowRunCard run={run()} onOpen={onOpen} />);
     const card = getByTestId('workflow-run-card');
     expect(card.textContent).toContain('readonly-observability-probe');
-    expect(card.textContent).toContain('running');
+    expect(card.textContent).toContain('Running');
     expect(card.textContent).toContain('Kiro CLI');
     expect(card.textContent).toContain('1/3 steps');
-    expect(getByTestId('workflow-now').textContent).toBe('now ❯ read-alpha ❯ Read File');
-    fireEvent.click(getByRole('button', { name: 'Stop workflow readonly-observability-probe' }));
-    expect(onAction).toHaveBeenCalledWith('stop');
+    expect(getByTestId('workflow-now').textContent).toBe('❯read-alphaRead File');
+    expect(queryByRole('button', { name: /^(Stop|Pause) workflow/ })).toBeNull();
     fireEvent.click(getByRole('button', { name: 'Open workflow readonly-observability-probe' }));
-    expect(onOpen).toHaveBeenCalled();
+    expect(onOpen).toHaveBeenCalledTimes(1);
   });
 
+  it('opens the run from anywhere on the card except its controls and approvals', () => {
+    const onOpen = vi.fn();
+    const onAnswer = vi.fn();
+    const pending = run({
+      approvals: [{
+        id: 'kiro-s-1', nodeId: 'read-alpha', title: 'Approve Write File?', detail: '{"path":"out.txt"}', requestedAt: 1,
+        options: [{ optionId: 'allow', name: 'Allow once', kind: 'allow_once' }],
+      }],
+    });
+    const { getByTestId, getByRole } = render(<WorkflowRunCard run={pending} onOpen={onOpen} onAnswer={onAnswer} />);
+    expect(getByTestId('workflow-run-card').getAttribute('aria-label')).toBe('Workflow readonly-observability-probe, needs approval');
+    expect(getByTestId('workflow-run-card').textContent).toContain('Needs you');
+    fireEvent.click(getByRole('button', { name: 'Allow once' }));
+    fireEvent.click(getByRole('group', { name: 'Approval needed: Approve Write File?' }));
+    expect(onAnswer).toHaveBeenCalledWith('kiro-s-1', 'allow');
+    expect(onOpen).not.toHaveBeenCalled();
+    fireEvent.click(getByTestId('workflow-now'));
+    expect(onOpen).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not open the run when a click ends a text selection inside the card', () => {
+    const onOpen = vi.fn();
+    const { getByTestId } = render(<WorkflowRunCard run={run()} onOpen={onOpen} />);
+    const now = getByTestId('workflow-now');
+    window.getSelection()!.selectAllChildren(now);
+    try {
+      fireEvent.click(now);
+      expect(onOpen).not.toHaveBeenCalled();
+    } finally {
+      window.getSelection()!.removeAllRanges();
+    }
+    fireEvent.click(now);
+    expect(onOpen).toHaveBeenCalledTimes(1);
+  });
+
+});
+
+describe('MessageWorkflowRuns', () => {
+  function renderMessage() {
+    const onOpen = vi.fn();
+    let domain: ReturnType<typeof useOptionalWorkflowDomain> = null;
+    const handlers: Array<Parameters<WorkflowDomainApi['subscribe']>[1]> = [];
+    const api: WorkflowDomainApi = {
+      get: vi.fn(), act: vi.fn(), answer: vi.fn(),
+      subscribe: vi.fn((_workspaceId, options) => { handlers.push(options); return () => {}; }),
+    };
+    function Message() {
+      domain = useOptionalWorkflowDomain();
+      const placements = useWorkflowPlacementsForNode('node-1');
+      return placements.length > 0 ? <MessageWorkflowRuns runs={placements} onOpen={onOpen} /> : null;
+    }
+    const view = render(<WorkflowDomainProvider api={api}><Message /></WorkflowDomainProvider>);
+    act(() => { domain!.subscribeWorkspace('ws'); });
+    const feed = (patch: Partial<WorkflowRunDtoV1>) => act(() => handlers[0].onRun(run(patch)));
+    return { ...view, feed, onOpen };
+  }
+  const ended = (status: 'completed' | 'failed' | 'cancelled') => ({ status, actions: [], endedAt: 61_000, revision: 9 });
+
+  it('folds finished runs into one line of counts once two have finished, above the live cards', async () => {
+    const { feed, getByRole, getAllByTestId, queryAllByTestId } = renderMessage();
+    feed({ id: 'wfr_a', name: 'alpha', startedAt: 1_000, ...ended('completed') });
+    feed({ id: 'wfr_b', name: 'beta', startedAt: 2_000 });
+    feed({ id: 'wfr_c', name: 'gamma', startedAt: 3_000 });
+    // One finished run keeps its card.
+    expect(getAllByTestId('workflow-run-card')).toHaveLength(3);
+
+    feed({ id: 'wfr_b', name: 'beta', startedAt: 2_000, ...ended('completed') });
+    await waitFor(() => expect(getAllByTestId('workflow-run-card')).toHaveLength(1));
+    expect(getAllByTestId('workflow-run-card')[0].textContent).toContain('gamma');
+    const fold = getByRole('button', { name: 'Workflows: 2 done' });
+    expect(fold.getAttribute('aria-expanded')).toBe('false');
+    expect(fold.compareDocumentPosition(getAllByTestId('workflow-run-card')[0]) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+
+    feed({ id: 'wfr_c', name: 'gamma', startedAt: 3_000, ...ended('failed'), statusDetail: 'Agent crashed' });
+    await waitFor(() => expect(queryAllByTestId('workflow-run-card')).toHaveLength(0));
+    expect(getByRole('button', { name: 'Workflows: 2 done, 1 failed' })).toBeTruthy();
+  });
+
+  it('lists the folded runs one line each, and a line opens its run', () => {
+    const { feed, getByRole, onOpen } = renderMessage();
+    feed({ id: 'wfr_a', name: 'alpha', startedAt: 1_000, ...ended('completed') });
+    feed({ id: 'wfr_b', name: 'beta', startedAt: 2_000, ...ended('cancelled') });
+    const fold = getByRole('button', { name: 'Workflows: 1 done, 1 stopped' });
+    fireEvent.click(fold);
+    expect(fold.getAttribute('aria-expanded')).toBe('true');
+    const lines = within(getByRole('list')).getAllByRole('button');
+    expect(lines.map((line) => line.getAttribute('aria-label'))).toEqual(['Open workflow alpha, completed', 'Open workflow beta, stopped']);
+    expect(lines[0].textContent).toBe('alphaDone1m›');
+    fireEvent.click(lines[1]);
+    expect(onOpen).toHaveBeenCalledWith(expect.objectContaining({ id: 'wfr_b' }), 'beta');
+  });
+});
+
+describe('WorkflowActions', () => {
   it('marks the action in flight and hides controls the run no longer accepts', () => {
-    const { getByRole, rerender, queryByRole } = render(<WorkflowRunCard run={run()} pending="pause" onAction={() => {}} />);
+    const { getByRole, rerender, queryByRole } = render(<WorkflowRunDetail run={run()} now={5_000} controls pending="pause" onAction={() => {}} />);
     expect((getByRole('button', { name: /Pause workflow/ }) as HTMLButtonElement).disabled).toBe(true);
     expect(getByRole('button', { name: /Pause workflow/ }).textContent).toBe('Pause…');
-    rerender(<WorkflowRunCard run={run({ status: 'completed', actions: [] })} onAction={() => {}} />);
+    rerender(<WorkflowRunDetail run={run({ status: 'completed', actions: [] })} now={5_000} controls onAction={() => {}} />);
     expect(queryByRole('button', { name: /Stop workflow/ })).toBeNull();
   });
 });
@@ -106,9 +204,36 @@ describe('workflow approvals', () => {
     rerender(<WorkflowRunCard run={run()} onAnswer={onAnswer} />);
     expect(queryByTestId('workflow-approvals')).toBeNull();
   });
+
+  it('shows a request it cannot answer without its buttons, as Background work does', () => {
+    const pending = run({
+      approvals: [{
+        id: 'kiro-s-1', title: 'Approve Write File?', detail: '{"path":"out.txt"}', requestedAt: 1, scope: 'session',
+        options: [{ optionId: 'allow', name: 'Allow once', kind: 'allow_once' }],
+      }],
+    });
+    const { getByRole, queryByRole } = render(<WorkflowRunCard run={pending} />);
+    const group = getByRole('group', { name: 'Approval needed: Approve Write File?' });
+    expect(group.textContent).toContain('out.txt');
+    expect(within(group).getByText('from this chat').getAttribute('title')).toMatch(/^The runtime does not say which agent asked/);
+    expect(queryByRole('button', { name: 'Allow once' })).toBeNull();
+  });
 });
 
 describe('WorkflowRunPane', () => {
+  it('writes its start and log times as chat does', () => {
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(new Date(2026, 10, 9, 18, 0));
+      const at = new Date(2026, 10, 9, 15, 4, 7).getTime();
+      const { getByRole, getByText } = render(<WorkflowRunPane run={run({ startedAt: new Date(2026, 10, 7, 15, 4).getTime(), log: [{ at, text: 'Read beta.txt.' }] })} onClose={() => {}} />);
+      expect(getByRole('list', { name: 'Workflow messages' }).textContent).toBe('15:04:07Read beta.txt.');
+      expect(getByText(/^started /).textContent).toBe('started 11/7 15:04');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('renders the node tree with task, now and result, the step log and the report', () => {
     const { getAllByTestId, getByText, getByTestId } = render(
       <WorkflowRunPane run={run({ result: 'ALPHA | BETA', definition: '{"alpha_path":"a"}' })} onClose={() => {}} onAction={() => {}} />,
@@ -128,6 +253,13 @@ describe('WorkflowRunPane', () => {
     expect(getByTestId('workflow-definition').textContent).toContain('alpha_path');
   });
 
+  it('names a node\'s model as the composer does', () => {
+    const claude = run({ runtime: 'claude', nodes: [{ id: 'a', kind: 'agent', title: 'review', status: 'running', model: 'global.anthropic.claude-opus-5-5' }] });
+    const { getByTestId } = render(<WorkflowRunPane run={claude} onClose={() => {}} onAction={() => {}} />);
+    expect(getByTestId('workflow-node').textContent).toContain('Opus 5.5');
+    expect(getByTestId('workflow-node').textContent).not.toContain('anthropic');
+  });
+
   it('opens a failed node\'s error by default', () => {
     const failed = run({ status: 'failed', actions: ['retry'], statusDetail: 'Step combine failed', nodes: [{ id: 'combine', kind: 'step', title: 'combine', status: 'failed', error: 'boom' }] });
     const { getByTestId, getByText } = render(<WorkflowRunPane run={failed} onClose={() => {}} onAction={() => {}} />);
@@ -142,7 +274,7 @@ describe('WorkflowRunDetail', () => {
     const onAction = vi.fn();
     const { getByTestId, getByRole, queryByRole, rerender } = render(<WorkflowRunDetail run={run()} now={5_000} controls onAction={onAction} />);
     const detail = getByTestId('workflow-run-detail');
-    expect(detail.textContent).toContain('running · 4.0s');
+    expect(detail.textContent).toContain('running · 4s');
     expect(detail.textContent).toContain('Kiro CLI');
     fireEvent.click(getByRole('button', { name: 'Pause workflow readonly-observability-probe' }));
     expect(onAction).toHaveBeenCalledWith('pause');
@@ -179,7 +311,6 @@ describe('workflow domain', () => {
       const handlers: Array<Parameters<WorkflowDomainApi['subscribe']>[1]> = [];
       const unsubscribe = vi.fn();
       const api: WorkflowDomainApi = {
-        list: vi.fn(),
         get: vi.fn(),
         act: vi.fn(),
         answer: vi.fn(),
@@ -192,10 +323,11 @@ describe('workflow domain', () => {
       let releaseB!: () => void;
       act(() => { releaseA = domain!.subscribeWorkspace('ws'); releaseB = domain!.subscribeWorkspace('ws'); });
       expect(api.subscribe).toHaveBeenCalledTimes(1);
-      act(() => handlers[0].onRun(run()));
+      // Finished: an open run would hold the feed itself (see below).
+      act(() => handlers[0].onRun(run({ status: 'completed', actions: [] })));
       expect(Object.keys(domain!.store.getState().runs)).toHaveLength(1);
       act(() => handlers[0].onDisconnect?.(new Error('gone')));
-      await act(async () => { vi.advanceTimersByTime(1_000); });
+      await act(async () => { vi.advanceTimersByTime(1_250); });
       expect(api.subscribe).toHaveBeenCalledTimes(2);
       act(() => releaseA());
       expect(unsubscribe).not.toHaveBeenCalled();
@@ -206,9 +338,69 @@ describe('workflow domain', () => {
     }
   });
 
+  it('keeps a workspace feed live while one of its runs is open, after the last view of it leaves', async () => {
+    const handlers: Array<Parameters<WorkflowDomainApi['subscribe']>[1]> = [];
+    const unsubscribe = vi.fn();
+    const api: WorkflowDomainApi = {
+      act: vi.fn(), answer: vi.fn(),
+      get: vi.fn(async () => run({ id: 'wfr_2', workspaceId: 'ws-2', nodeId: 'node-2', revision: 1 })),
+      subscribe: vi.fn((_workspaceId, options) => { handlers.push(options); return unsubscribe; }),
+    };
+    let domain: ReturnType<typeof useOptionalWorkflowDomain> = null;
+    function Probe() { domain = useOptionalWorkflowDomain(); return null; }
+    const { unmount } = render(<WorkflowDomainProvider api={api}><Probe /></WorkflowDomainProvider>);
+    let release!: () => void;
+    act(() => { release = domain!.subscribeWorkspace('ws'); });
+    await act(async () => { handlers[0].onRun(run()); });
+    // Another workspace becomes active: the open run keeps this feed.
+    act(() => release());
+    expect(unsubscribe).not.toHaveBeenCalled();
+    // It ends on that feed, and nothing holds the feed any more.
+    await act(async () => { handlers[0].onRun(run({ revision: 5, status: 'completed', actions: [] })); });
+    expect(unsubscribe).toHaveBeenCalledTimes(1);
+    expect(api.subscribe).toHaveBeenCalledTimes(1);
+
+    // An open run known only from a fetch (a workflow pane) is kept live too.
+    await act(async () => { await domain!.load({ backendConnectionId: 'local', id: 'wfr_2' }); });
+    expect(api.subscribe).toHaveBeenCalledTimes(2);
+    expect(vi.mocked(api.subscribe).mock.calls[1][0]).toBe('ws-2');
+    unmount();
+    expect(unsubscribe).toHaveBeenCalledTimes(2);
+  });
+
+  it('lists the chat nodes with an open run, as a new set only when one starts or ends', () => {
+    const handlers: Array<Parameters<WorkflowDomainApi['subscribe']>[1]> = [];
+    const api: WorkflowDomainApi = {
+      get: vi.fn(), act: vi.fn(), answer: vi.fn(),
+      subscribe: vi.fn((_workspaceId, options) => { handlers.push(options); return () => {}; }),
+    };
+    let domain: ReturnType<typeof useOptionalWorkflowDomain> = null;
+    let renders = 0;
+    function Probe() {
+      renders += 1;
+      domain = useOptionalWorkflowDomain();
+      const ids = useOpenWorkflowNodeIds();
+      return <span data-testid="open">{[...ids].sort().join(',') || 'none'}</span>;
+    }
+    const { getByTestId } = render(<WorkflowDomainProvider api={api}><Probe /></WorkflowDomainProvider>);
+    act(() => { domain!.subscribeWorkspace('ws'); });
+    expect(getByTestId('open').textContent).toBe('none');
+    act(() => handlers[0].onRun(run()));
+    act(() => handlers[0].onRun(run({ id: 'wfr_2', nodeId: 'node-2', status: 'paused' })));
+    act(() => handlers[0].onRun(run({ id: 'wfr_3', nodeId: 'node-3', status: 'completed', actions: [] })));
+    act(() => handlers[0].onRun(run({ id: 'wfr_4', nodeId: null })));
+    expect(getByTestId('open').textContent).toBe('node-1,node-2');
+    // Progress on an open run does not re-render the reader.
+    const before = renders;
+    act(() => handlers[0].onRun(run({ revision: 5, updatedAt: 3_000 })));
+    expect(renders).toBe(before);
+    act(() => handlers[0].onRun(run({ revision: 6, status: 'failed', actions: [] })));
+    expect(getByTestId('open').textContent).toBe('node-2');
+  });
+
   it('records a refused action as an error on the run', async () => {
     const api: WorkflowDomainApi = {
-      list: vi.fn(), get: vi.fn(), subscribe: vi.fn(() => () => {}), answer: vi.fn(),
+      get: vi.fn(), subscribe: vi.fn(() => () => {}), answer: vi.fn(),
       act: vi.fn(async () => { throw new Error('Cannot stop this workflow now'); }),
     };
     let domain: ReturnType<typeof useOptionalWorkflowDomain> = null;
@@ -225,7 +417,7 @@ describe('workflow domain', () => {
       const { SseHttpError } = await import('../../../services/api/sseParser');
       const handlers: Array<Parameters<WorkflowDomainApi['subscribe']>[1]> = [];
       const api: WorkflowDomainApi = {
-        list: vi.fn(), get: vi.fn(), act: vi.fn(), answer: vi.fn(),
+        get: vi.fn(), act: vi.fn(), answer: vi.fn(),
         subscribe: vi.fn((_workspaceId, options) => { handlers.push(options); return () => {}; }),
       };
       let domain: ReturnType<typeof useOptionalWorkflowDomain> = null;
@@ -240,13 +432,70 @@ describe('workflow domain', () => {
     }
   });
 
+  it('reconnects at once when its remote backend is ready again, not for another one', async () => {
+    vi.useFakeTimers();
+    try {
+      const { BACKEND_CONNECTION_READY } = await import('../../../config/backendConnectionState');
+      const ready = (connectionId: string) => window.dispatchEvent(new CustomEvent(BACKEND_CONNECTION_READY, { detail: { connectionId } }));
+      const handlers: Array<Parameters<WorkflowDomainApi['subscribe']>[1]> = [];
+      const api: WorkflowDomainApi = {
+        get: vi.fn(), act: vi.fn(), answer: vi.fn(),
+        subscribe: vi.fn((_workspaceId, options) => { handlers.push(options); return () => {}; }),
+      };
+      let domain: ReturnType<typeof useOptionalWorkflowDomain> = null;
+      function Probe() { domain = useOptionalWorkflowDomain(); return null; }
+      render(<WorkflowDomainProvider api={api}><Probe /></WorkflowDomainProvider>);
+      let release!: () => void;
+      act(() => { release = domain!.subscribeWorkspace('remote:mac:ws'); });
+      act(() => handlers[0].onDisconnect?.(new Error('gone')));
+      act(() => ready('other'));
+      expect(api.subscribe).toHaveBeenCalledTimes(1);
+      act(() => ready('mac'));
+      expect(api.subscribe).toHaveBeenCalledTimes(2);
+      act(() => release());
+      act(() => ready('mac'));
+      expect(api.subscribe).toHaveBeenCalledTimes(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('keeps backing off when the feed fails right after it opens', async () => {
+    vi.useFakeTimers();
+    const random = vi.spyOn(Math, 'random').mockReturnValue(0.5);
+    try {
+      const handlers: Array<Parameters<WorkflowDomainApi['subscribe']>[1]> = [];
+      const api: WorkflowDomainApi = {
+        get: vi.fn(), act: vi.fn(), answer: vi.fn(),
+        subscribe: vi.fn((_workspaceId, options) => { handlers.push(options); return () => {}; }),
+      };
+      let domain: ReturnType<typeof useOptionalWorkflowDomain> = null;
+      function Probe() { domain = useOptionalWorkflowDomain(); return null; }
+      render(<WorkflowDomainProvider api={api}><Probe /></WorkflowDomainProvider>);
+      act(() => { domain!.subscribeWorkspace('ws'); });
+      for (const delay of [1_000, 2_000, 4_000]) {
+        const last = handlers[handlers.length - 1];
+        act(() => last.onOpen?.());
+        act(() => last.onDisconnect?.(new Error('dropped after headers')));
+        const before = handlers.length;
+        await act(async () => { vi.advanceTimersByTime(delay - 1); });
+        expect(handlers).toHaveLength(before);
+        await act(async () => { vi.advanceTimersByTime(1); });
+        expect(handlers).toHaveLength(before + 1);
+      }
+    } finally {
+      random.mockRestore();
+      vi.useRealTimers();
+    }
+  });
+
   it('keeps retrying a workspace the backend has not saved yet', async () => {
     vi.useFakeTimers();
     try {
       const { SseHttpError } = await import('../../../services/api/sseParser');
       const handlers: Array<Parameters<WorkflowDomainApi['subscribe']>[1]> = [];
       const api: WorkflowDomainApi = {
-        list: vi.fn(), get: vi.fn(), act: vi.fn(), answer: vi.fn(),
+        get: vi.fn(), act: vi.fn(), answer: vi.fn(),
         subscribe: vi.fn((_workspaceId, options) => { handlers.push(options); return () => {}; }),
       };
       let domain: ReturnType<typeof useOptionalWorkflowDomain> = null;
@@ -255,7 +504,7 @@ describe('workflow domain', () => {
       act(() => { domain!.subscribeWorkspace('ws-new'); });
       // A new workspace answers 404 until its first structural flush.
       act(() => handlers[0].onDisconnect?.(new SseHttpError(404)));
-      await act(async () => { vi.advanceTimersByTime(1_000); });
+      await act(async () => { vi.advanceTimersByTime(1_250); });
       expect(api.subscribe).toHaveBeenCalledTimes(2);
       act(() => handlers[1].onOpen?.());
       act(() => handlers[1].onRun(run({ workspaceId: 'ws-new' })));
@@ -270,7 +519,7 @@ describe('workflow domain', () => {
     let domain: ReturnType<typeof useOptionalWorkflowDomain> = null;
     const handlers: Array<Parameters<WorkflowDomainApi['subscribe']>[1]> = [];
     const api: WorkflowDomainApi = {
-      list: vi.fn(), get: vi.fn(), act: vi.fn(), answer: vi.fn(),
+      get: vi.fn(), act: vi.fn(), answer: vi.fn(),
       subscribe: vi.fn((_workspaceId, options) => { handlers.push(options); return () => {}; }),
     };
     function List() {
@@ -297,7 +546,7 @@ describe('workflow domain', () => {
     let domain: ReturnType<typeof useOptionalWorkflowDomain> = null;
     const handlers: Array<Parameters<WorkflowDomainApi['subscribe']>[1]> = [];
     const api: WorkflowDomainApi = {
-      list: vi.fn(), get: vi.fn(), act: vi.fn(), answer: vi.fn(),
+      get: vi.fn(), act: vi.fn(), answer: vi.fn(),
       subscribe: vi.fn((_workspaceId, options) => { handlers.push(options); return () => {}; }),
     };
     const nodeIds = ['node-1', 'node-2'];
@@ -324,7 +573,7 @@ describe('workflow domain', () => {
     let domain: ReturnType<typeof useOptionalWorkflowDomain> = null;
     const handlers: Array<Parameters<WorkflowDomainApi['subscribe']>[1]> = [];
     const api: WorkflowDomainApi = {
-      list: vi.fn(), act: vi.fn(), answer: vi.fn(),
+      act: vi.fn(), answer: vi.fn(),
       get: vi.fn(async () => run({ revision: 4 })),
       subscribe: vi.fn((_workspaceId, options) => { handlers.push(options); return () => {}; }),
     };
@@ -349,7 +598,7 @@ describe('workflow domain', () => {
     let domain: ReturnType<typeof useOptionalWorkflowDomain> = null;
     const handlers: Array<Parameters<WorkflowDomainApi['subscribe']>[1]> = [];
     const api: WorkflowDomainApi = {
-      list: vi.fn(), get: vi.fn(), act: vi.fn(), answer: vi.fn(),
+      get: vi.fn(), act: vi.fn(), answer: vi.fn(),
       subscribe: vi.fn((_workspaceId, options) => { handlers.push(options); return () => {}; }),
     };
     function Probe() {
@@ -368,6 +617,140 @@ describe('workflow domain', () => {
     expect(getByTestId('running').textContent).toBe('false');
   });
 
+});
+
+function multiModelView(phase: MultiModelRunView['phase']): MultiModelRunView {
+  return {
+    version: 1, phase, title: 'Caches', askPreview: 'Ask Codex too', callerNodeId: 'node-1', callerMessageId: 'm-1',
+    callerRuntimeId: 'claude', callerRuntimeLabel: 'Claude Code', callerModelLabel: 'Opus', permissionMode: 'ask', reviewRounds: 0,
+    threads: [], synthesis: { status: 'pending' },
+  };
+}
+
+function michiRun(phase: MultiModelRunView['phase'], patch: Partial<WorkflowRunDtoV1> = {}): WorkflowRunDtoV1 {
+  return run({
+    id: 'wfr_mm', runtime: 'michi', nativeId: 'mm_1', parentToolCallId: null, nodes: [], log: [], actions: [],
+    status: phase === 'proposed' ? 'paused' : phase === 'running' ? 'running' : 'completed',
+    multiModel: multiModelView(phase), ...patch,
+  });
+}
+
+describe('workflow domain: multi-model runs', () => {
+  function feed() {
+    const handlers: Array<Parameters<WorkflowDomainApi['subscribe']>[1]> = [];
+    const api: WorkflowDomainApi = {
+      get: vi.fn(), act: vi.fn(), answer: vi.fn(),
+      subscribe: vi.fn((_workspaceId, options) => { handlers.push(options); return () => {}; }),
+    };
+    return { api, handlers };
+  }
+
+  it('names a michi run\'s members branches', () => {
+    expect(RUN_NOUN).toEqual({ claude: 'agents', kiro: 'steps', michi: 'branches' });
+    expect(['claude', 'kiro', 'michi'].map((runtime) => runNounTitle(runtime as WorkflowRunDtoV1['runtime']))).toEqual(['Agents', 'Steps', 'Branches']);
+  });
+
+  it('does not count a proposed plan as running work until it starts', () => {
+    const { api, handlers } = feed();
+    let domain: ReturnType<typeof useOptionalWorkflowDomain> = null;
+    const nodeIds = ['node-1'];
+    function Probe() {
+      domain = useOptionalWorkflowDomain();
+      const counts = useActiveWorkflowCounts(nodeIds);
+      const open = useOpenWorkflowNodeIds();
+      return <span data-testid="state">{`${counts.join(',')}|${[...open].join(',') || 'none'}`}</span>;
+    }
+    const { getByTestId } = render(<WorkflowDomainProvider api={api}><Probe /></WorkflowDomainProvider>);
+    act(() => { domain!.subscribeWorkspace('ws'); });
+    act(() => handlers[0].onRun(michiRun('proposed', { revision: 1 })));
+    expect(getByTestId('state').textContent).toBe('0|none');
+    act(() => handlers[0].onRun(michiRun('running', { revision: 2 })));
+    expect(getByTestId('state').textContent).toBe('1|node-1');
+  });
+
+  it('leaves michi runs to their receipt instead of placing them under the message', () => {
+    const { api, handlers } = feed();
+    let domain: ReturnType<typeof useOptionalWorkflowDomain> = null;
+    function List() {
+      domain = useOptionalWorkflowDomain();
+      return <span data-testid="ids">{useWorkflowPlacementsForNode('node-1').map((p) => p.identity.id).join(',')}</span>;
+    }
+    const { getByTestId } = render(<WorkflowDomainProvider api={api}><List /></WorkflowDomainProvider>);
+    act(() => { domain!.subscribeWorkspace('ws'); });
+    act(() => handlers[0].onRun(michiRun('running')));
+    act(() => handlers[0].onRun(run({ id: 'wfr_kiro' })));
+    expect(getByTestId('ids').textContent).toBe('wfr_kiro');
+  });
+
+  it('lists the chats whose active run waits on an approval, as a stable set', () => {
+    const { api, handlers } = feed();
+    let domain: ReturnType<typeof useOptionalWorkflowDomain> = null;
+    const seen: Array<ReadonlySet<string>> = [];
+    function Probe() {
+      domain = useOptionalWorkflowDomain();
+      const ids = useWaitingWorkflowNodeIds();
+      seen.push(ids);
+      return <span data-testid="waiting">{[...ids].sort().join(',') || 'none'}</span>;
+    }
+    const approval = { id: 't1:turn:1', nodeId: 't1@0', title: 'Approve Bash?', options: [{ optionId: 'allow', name: 'Allow once' }], requestedAt: 1 };
+    const { getByTestId } = render(<WorkflowDomainProvider api={api}><Probe /></WorkflowDomainProvider>);
+    act(() => { domain!.subscribeWorkspace('ws'); });
+    act(() => handlers[0].onRun(michiRun('running', { revision: 1 })));
+    act(() => handlers[0].onRun(run({ id: 'wfr_done', nodeId: 'node-3', status: 'completed', actions: [], approvals: [approval] })));
+    expect(getByTestId('waiting').textContent).toBe('none');
+    act(() => handlers[0].onRun(michiRun('running', { revision: 2, approvals: [approval] })));
+    act(() => handlers[0].onRun(run({ id: 'wfr_kiro', nodeId: 'node-2', status: 'paused', approvals: [approval] })));
+    expect(getByTestId('waiting').textContent).toBe('node-1,node-2');
+    const before = seen[seen.length - 1];
+    act(() => handlers[0].onRun(michiRun('running', { revision: 3, approvals: [approval], updatedAt: 9_000 })));
+    expect(seen[seen.length - 1]).toBe(before);
+    act(() => handlers[0].onRun(michiRun('running', { revision: 4 })));
+    expect(getByTestId('waiting').textContent).toBe('node-2');
+  });
+
+  it('performs a command with its own pending kind and stores the run it answers with', async () => {
+    const { api } = feed();
+    let domain: ReturnType<typeof useOptionalWorkflowDomain> = null;
+    function Probe() { domain = useOptionalWorkflowDomain(); return null; }
+    render(<WorkflowDomainProvider api={api}><Probe /></WorkflowDomainProvider>);
+    const identity = { backendConnectionId: 'local', id: 'wfr_mm' };
+    let finish!: (value: WorkflowRunDtoV1) => void;
+    let done!: Promise<void>;
+    act(() => { done = domain!.perform(identity, 'start', () => new Promise((resolve) => { finish = resolve; })); });
+    expect(Object.values(domain!.store.getState().pending)).toEqual(['start']);
+    await act(async () => { finish(michiRun('running', { revision: 3 })); await done; });
+    expect(Object.values(domain!.store.getState().pending)).toEqual([undefined]);
+    expect(Object.values(domain!.store.getState().runs).map((r) => r.value.multiModel?.phase)).toEqual(['running']);
+    await act(async () => { await domain!.perform(identity, 'thread', async () => { throw new Error('Still stopping the branches.'); }); });
+    expect(Object.values(domain!.store.getState().errors)).toEqual(['Still stopping the branches.']);
+  });
+
+  it('refetches a trimmed run once per revision, without a fetch on mount', async () => {
+    const { handlers } = feed();
+    const api: WorkflowDomainApi = {
+      act: vi.fn(), answer: vi.fn(),
+      get: vi.fn(async () => michiRun('running', { revision: 6 })),
+      subscribe: vi.fn((_workspaceId, options) => { handlers.push(options); return () => {}; }),
+    };
+    let domain: ReturnType<typeof useOptionalWorkflowDomain> = null;
+    const identity = { backendConnectionId: 'local', id: 'wfr_mm' };
+    function Card() {
+      domain = useOptionalWorkflowDomain();
+      const { resource } = useWorkflowRun(workflowRunKey(identity));
+      useRefetchPartialWorkflowRun(identity, resource);
+      return null;
+    }
+    render(<WorkflowDomainProvider api={api}><Card /></WorkflowDomainProvider>);
+    await act(async () => {});
+    expect(api.get).not.toHaveBeenCalled();
+    act(() => { domain!.subscribeWorkspace('ws'); });
+    await act(async () => { handlers[0].onRun(michiRun('running', { revision: 5 })); });
+    expect(api.get).not.toHaveBeenCalled();
+    await act(async () => { handlers[0].onRun(michiRun('running', { revision: 6, partial: true })); });
+    expect(api.get).toHaveBeenCalledTimes(1);
+    await act(async () => { handlers[0].onRun(michiRun('running', { revision: 6, partial: true })); });
+    expect(api.get).toHaveBeenCalledTimes(1);
+  });
 });
 
 describe('workflow domain: live background subagents', () => {
@@ -491,7 +874,7 @@ describe('workflow domain: live background subagents', () => {
     try {
       const handlers: Array<Parameters<WorkflowDomainApi['subscribe']>[1]> = [];
       const api: WorkflowDomainApi = {
-        list: vi.fn(), get: vi.fn(), act: vi.fn(), answer: vi.fn(),
+        get: vi.fn(), act: vi.fn(), answer: vi.fn(),
         subscribe: vi.fn((_workspaceId, options) => { handlers.push(options); return () => {}; }),
       };
       let clock = 5_000;
@@ -519,14 +902,14 @@ describe('workflow domain: live background subagents', () => {
       act(() => handlers[0].onDisconnect?.(new Error('gone')));
       expect(live()).toEqual({ stale: 5_000, ids: ['a'] });
       expect(notified).toHaveBeenCalledTimes(2);
-      await act(async () => { vi.advanceTimersByTime(1_000); });
+      await act(async () => { vi.advanceTimersByTime(1_250); });
       expect(handlers).toHaveLength(2);
       // The reconnect fails too: still stale since the first disconnect, and nobody is woken.
       clock = 6_000;
       act(() => handlers[1].onDisconnect?.(new Error('still gone')));
       expect(live()).toEqual({ stale: 5_000, ids: ['a'] });
       expect(notified).toHaveBeenCalledTimes(2);
-      await act(async () => { vi.advanceTimersByTime(2_000); });
+      await act(async () => { vi.advanceTimersByTime(2_500); });
       expect(handlers).toHaveLength(3);
       act(() => handlers[2].onOpen?.());
       expect(live()).toEqual({ stale: 5_000, ids: ['a'] });
@@ -563,7 +946,7 @@ describe('workflow domain: live background subagents', () => {
       const { SseHttpError } = await import('../../../services/api/sseParser');
       const handlers: Array<Parameters<WorkflowDomainApi['subscribe']>[1]> = [];
       const api: WorkflowDomainApi = {
-        list: vi.fn(), get: vi.fn(), act: vi.fn(), answer: vi.fn(),
+        get: vi.fn(), act: vi.fn(), answer: vi.fn(),
         subscribe: vi.fn((_workspaceId, options) => { handlers.push(options); return () => {}; }),
       };
       let domain: ReturnType<typeof useOptionalWorkflowDomain> = null;
@@ -584,7 +967,7 @@ describe('workflow domain: live background subagents', () => {
     let domain: ReturnType<typeof useOptionalWorkflowDomain> = null;
     const handlers: Array<Parameters<WorkflowDomainApi['subscribe']>[1]> = [];
     const api: WorkflowDomainApi = {
-      list: vi.fn(), get: vi.fn(), act: vi.fn(), answer: vi.fn(),
+      get: vi.fn(), act: vi.fn(), answer: vi.fn(),
       subscribe: vi.fn((_workspaceId, options) => { handlers.push(options); return () => {}; }),
     };
     let renders = 0;
@@ -621,7 +1004,7 @@ describe('workflow domain: live background subagents', () => {
     let domain: ReturnType<typeof useOptionalWorkflowDomain> = null;
     const handlers: Array<Parameters<WorkflowDomainApi['subscribe']>[1]> = [];
     const api: WorkflowDomainApi = {
-      list: vi.fn(), get: vi.fn(), act: vi.fn(), answer: vi.fn(),
+      get: vi.fn(), act: vi.fn(), answer: vi.fn(),
       subscribe: vi.fn((_workspaceId, options) => { handlers.push(options); return () => {}; }),
     };
     function Probe() { domain = useOptionalWorkflowDomain(); return null; }

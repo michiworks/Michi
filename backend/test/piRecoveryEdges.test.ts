@@ -1,11 +1,13 @@
 import { test, type TestContext } from 'node:test';
 import assert from 'node:assert/strict';
-import { PiSession, streamSimpleWithFallback } from '../src/agents/pi/PiSession';
+import { PiSession } from '../src/agents/pi/PiSession';
+import { streamSimpleWithFallback } from '../src/agents/pi/piStreamFallback';
 import { PiSdkSession } from '../src/agents/pi/PiSdkSession';
 import { McpClientManager } from '../src/services/mcpClientManager';
 import { configureRuntimeDeps, __resetRuntimeDeps } from '../src/agents/runtimeDeps';
 import type { NormalizedEvent } from '../src/services/chatEvents';
-import { chatOwner } from './helpers/owners';
+import { chatOwner, runOwner } from './helpers/owners';
+import { HEARTBEAT_INTERVAL_MS } from '../src/config/constants';
 
 const tick = () => new Promise<void>((resolve) => setImmediate(resolve));
 function deferred<T = void>() {
@@ -185,6 +187,31 @@ test('Pi cooperative cancellation preserves live history without an unavailable 
   assert.equal(session.describeNativeState().recoveryRequired, false);
 });
 
+test('a silent Pi turn reports a heartbeat each interval, and none after Stop', async (t) => {
+  t.mock.timers.enable({ apis: ['setInterval', 'Date'] });
+  const gate = deferred();
+  const { session } = sessionFixture(t, async (_agent, text) => { if (text === 'A') await gate.promise; });
+  const events: NormalizedEvent[] = [];
+  const turn = (async () => { for await (const event of session.send('A')) events.push(event); })();
+  for (let i = 0; i < 5; i++) await tick();
+  assert.ok(events.some((event) => event.kind === 'chunk'), 'the reply has started');
+  const heartbeats = () => events.filter((event) => event.kind === 'heartbeat');
+
+  t.mock.timers.tick(HEARTBEAT_INTERVAL_MS - 1);
+  await tick();
+  assert.equal(heartbeats().length, 0);
+  t.mock.timers.tick(1);
+  await tick();
+  assert.deepEqual(heartbeats(), [{ kind: 'heartbeat', idleMs: HEARTBEAT_INTERVAL_MS }]);
+
+  session.cancel();
+  t.mock.timers.tick(HEARTBEAT_INTERVAL_MS * 3);
+  gate.resolve();
+  await turn;
+  assert.equal(heartbeats().length, 1, 'nothing is queued after Stop');
+  assert.deepEqual(events.at(-1), { kind: 'turn_end', stopReason: 'cancelled' });
+});
+
 test('Pi cancellation releases a pending permission broker without allowing a late ask to create a banner', async (t) => {
   const { session, agents } = sessionFixture(t);
   const decision = deferred<'ask'>();
@@ -201,6 +228,57 @@ test('Pi cancellation releases a pending permission broker without allowing a la
   await tick();
   assert.deepEqual(banners, []);
   assert.equal((session as any).pendingPermissions.size, 0);
+});
+
+/** Opens a chat approval for bash on the session's Agent; the id is the banner's. */
+async function askBash(session: PiSession, agent: any) {
+  const banners: NormalizedEvent[] = [];
+  (session as any).activePush = (event: NormalizedEvent) => banners.push(event);
+  const answer = agent.options.beforeToolCall({ toolCall: { name: 'bash' }, args: { command: 'ls' } }, new AbortController().signal);
+  await tick();
+  const banner = banners.find((event) => event.kind === 'permission_request');
+  assert.ok(banner?.kind === 'permission_request');
+  return { id: banner.requestId, answer, banners };
+}
+
+test('replacing the same Pi node ignores an old approval reply', async (t) => {
+  const original = sessionFixture(t);
+  await drain(original.session.send('init'));
+  const old = await askBash(original.session, original.agents[0]);
+  assert.ok(Number.isSafeInteger(old.id));
+  await original.session.dispose();
+  assert.deepEqual(await old.answer, { block: true, reason: 'user denied' });
+
+  const replacement = sessionFixture(t);
+  await drain(replacement.session.send('init'));
+  const current = await askBash(replacement.session, replacement.agents[0]);
+  assert.ok(Number.isSafeInteger(current.id));
+  assert.ok(current.id > old.id);
+  replacement.session.respondToPermission(old.id, 'allow_once');
+  await tick();
+  assert.equal((replacement.session as any).pendingPermissions.has(current.id), true);
+  replacement.session.respondToPermission(current.id, 'reject_once');
+  assert.deepEqual(await current.answer, { block: true, reason: 'user denied' });
+});
+
+test('an unanswered Pi approval times out after MICHI_APPROVE_TIMEOUT_MS as a denial with permission_resolved', async (t) => {
+  const previous = process.env.MICHI_APPROVE_TIMEOUT_MS;
+  process.env.MICHI_APPROVE_TIMEOUT_MS = '20';
+  t.after(() => { if (previous === undefined) delete process.env.MICHI_APPROVE_TIMEOUT_MS; else process.env.MICHI_APPROVE_TIMEOUT_MS = previous; });
+  const { session, agents } = sessionFixture(t);
+  await drain(session.send('init'));
+  const pending = await askBash(session, agents[0]);
+  assert.deepEqual(await pending.answer, { block: true, reason: 'user denied' });
+  assert.deepEqual(pending.banners.at(-1), { kind: 'permission_resolved', requestId: pending.id });
+  assert.equal((session as any).pendingPermissions.size, 0);
+});
+
+test('Pi rejects an unknown approval option, and allow_session from a run', () => {
+  assert.throws(() => new PiSession('pi-node', sessionDeps).respondToPermission(1, 'forged'), /Invalid permission option/);
+  const run = new PiSession('pi-node', { ...sessionDeps, owner: runOwner('run', 'attempt') });
+  assert.throws(() => run.respondToPermission(1, 'allow_session'), /Invalid permission option/);
+  run.respondToPermission(1, 'allow_always');
+  new PiSession('pi-node', sessionDeps).respondToPermission(1, 'allow_session');
 });
 
 test('Pi SDK class retains the recovery contract and reports its engine', () => {

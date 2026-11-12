@@ -1,4 +1,3 @@
-import React from 'react';
 import type { HomeGreeting as Greeting } from 'michi-shared';
 import { michiHomeEyebrow } from '../content/home/michiHomeFormat';
 import '../content/home/michiHome.css';

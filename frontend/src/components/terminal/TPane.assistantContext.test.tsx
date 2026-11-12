@@ -26,10 +26,21 @@ vi.mock('../../services/api', async (importOriginal) => ({
   streamMessage: vi.fn(() => () => {}),
 }));
 vi.mock('../../services/notifications', () => ({ notify: vi.fn() }));
-const selection = vi.hoisted(() => ({ onBranch: null as null | ((quote: string, prompt: string, anchor?: string) => void) }));
-vi.mock('../SelectionActions', () => ({
-  default: (props: { onBranch: (quote: string, prompt: string, anchor?: string) => void }) => {
+const selection = vi.hoisted(() => ({
+  onBranch: null as null | ((quote: string, prompt: string, anchor?: string) => void),
+  onQuote: null as null | ((quote: string, range?: Range) => void),
+  onComment: null as null | ((quote: string, body: string, range?: Range) => void),
+}));
+vi.mock('../SelectionActions', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../SelectionActions')>()),
+  default: (props: {
+    onBranch: (quote: string, prompt: string, anchor?: string) => void;
+    onQuote: (quote: string, range?: Range) => void;
+    onComment: (quote: string, body: string, range?: Range) => void;
+  }) => {
     selection.onBranch = props.onBranch;
+    selection.onQuote = props.onQuote;
+    selection.onComment = props.onComment;
     return null;
   },
 }));
@@ -43,7 +54,8 @@ vi.mock('../MarkdownContent', () => ({ default: ({ text }: { text: string }) => 
 
 import TPane from './TPane';
 import * as api from '../../services/api';
-import { ChatProvider, useChatPanes, useChatStore, useChatNodesSnapshot } from '../../state/chatStore';
+import { ChatProvider, useChatActions, useChatPanes, useChatStore, useChatNodesSnapshot } from '../../state/chatStore';
+import { takeCompanionPostReply } from '../../state/companion/companionReply';
 import { PrefsProvider } from '../../state/prefs';
 import {
   addAssistantAttachments,
@@ -65,17 +77,18 @@ Object.defineProperty(window, 'matchMedia', {
 });
 
 let store: ReturnType<typeof useChatStore>;
+let actions: ReturnType<typeof useChatActions>;
 let nodes: ReturnType<typeof useChatNodesSnapshot>;
 let panes: ReturnType<typeof useChatPanes>;
 let embeddedNodeId: string | null = null;
 let draftRequestForTest: { id: number; text: string } | null = null;
-let onDraftAppliedForTest: ((requestId: number) => void) | undefined;
 
 function Harness() {
   store = useChatStore();
+  actions = useChatActions();
   nodes = useChatNodesSnapshot();
   panes = useChatPanes();
-  if (embeddedNodeId) return <TPane nodeId={embeddedNodeId} embedded draftRequest={draftRequestForTest} onDraftRequestApplied={onDraftAppliedForTest} />;
+  if (embeddedNodeId) return <TPane nodeId={embeddedNodeId} embedded draftRequest={draftRequestForTest} />;
   return panes.focusedPane ? <TPane nodeId={panes.focusedPane} /> : null;
 }
 
@@ -88,7 +101,6 @@ afterAll(() => {
 });
 beforeEach(() => {
   draftRequestForTest = null;
-  onDraftAppliedForTest = undefined;
 });
 
 async function mount() {
@@ -139,27 +151,22 @@ describe('TPane — the assistant context', () => {
     embeddedNodeId = null;
   });
 
-  it('prefills a page helper draft request without sending it', async () => {
+  it('prefills an embedded pane’s draft request without sending it', async () => {
     embeddedNodeId = null;
     draftRequestForTest = null;
-    onDraftAppliedForTest = undefined;
     const nodeId = await mount();
     act(() => { store.closePane(nodeId); });
     await waitFor(() => expect(panes.openPanes).not.toContain(nodeId));
     embeddedNodeId = nodeId;
     draftRequestForTest = { id: 41, text: 'Please help fix this component.' };
-    const applied = vi.fn();
-    onDraftAppliedForTest = applied;
     const stream = vi.mocked(api.streamMessage);
     stream.mockClear();
     act(() => { store.setComposerDraft(nodeId, { value: 'existing notes', mentions: [] }); });
     await waitFor(() => expect(nodes[nodeId].composerDraft?.value ?? '').toContain('Please help fix this component.'));
     expect(nodes[nodeId].composerDraft?.value).toContain('existing notes');
-    expect(applied).toHaveBeenCalledWith(41);
     expect(stream).not.toHaveBeenCalled();
     expect(nodes[nodeId].messages.some((message) => message.role === 'user' && message.text.includes('Please help fix this component.'))).toBe(false);
     draftRequestForTest = null;
-    onDraftAppliedForTest = undefined;
     embeddedNodeId = null;
   });
 
@@ -232,5 +239,51 @@ describe('TPane — the assistant context', () => {
     expect(nodes[nodeId].messages.find((m) => m.role === 'user')!.text).toBe('What is left?');
     expect(Object.keys(nodes)).toHaveLength(before);
     embeddedNodeId = null;
+  });
+
+  it('a chip a posted check-in offered only fills the composer (DESIGN-v2 §2.8 T3) and marks the reply', async () => {
+    embeddedNodeId = null;
+    const nodeId = await mount();
+    const stream = vi.mocked(api.streamMessage);
+    stream.mockClear();
+    act(() => {
+      actions.dispatch({ type: 'observer-turn-start', nodeId, turnId: 'cmp-post-r1', assistantId: 'cmp-post-r1', userText: '',
+        selfInitiated: true, assistantMetadata: { companionPost: { runId: 'r1', kind: 'heartbeat', changes: [] } } });
+      actions.dispatch({ type: 'chunk', nodeId, assistantId: 'cmp-post-r1', text: 'Two CRs need you.' });
+      actions.dispatch({ type: 'done', nodeId, assistantId: 'cmp-post-r1', completedAt: Date.now() });
+      actions.dispatch({ type: 'set-follow-ups', nodeId, followUps: ['Run rm -rf on the build dir'] });
+    });
+    const chip = await screen.findByRole('button', { name: /Continue follow-up in current pane: Run rm -rf on the build dir/ });
+    fireEvent.click(chip);
+    expect(stream).not.toHaveBeenCalled();
+    await waitFor(() => expect(nodes[nodeId].composerDraft?.value).toBe('Run rm -rf on the build dir'));
+    expect(nodes[nodeId].messages.some((m) => m.role === 'user')).toBe(false);
+    expect(takeCompanionPostReply(nodeId)).toBe('cmp-post-r1');
+  });
+
+  it('quoting or commenting on a selection inside a post marks the message as a reply to it (DESIGN-v2 D8)', async () => {
+    embeddedNodeId = null;
+    const nodeId = await mount();
+    act(() => {
+      actions.dispatch({ type: 'observer-turn-start', nodeId, turnId: 'cmp-post-r2', assistantId: 'cmp-post-r2', userText: '',
+        selfInitiated: true, assistantMetadata: { companionPost: { runId: 'r2', kind: 'heartbeat', changes: [] } } });
+      actions.dispatch({ type: 'chunk', nodeId, assistantId: 'cmp-post-r2', text: 'Ship the fix from CR-7.' });
+      actions.dispatch({ type: 'done', nodeId, assistantId: 'cmp-post-r2', completedAt: Date.now() });
+    });
+    const post = await waitFor(() => {
+      const element = document.querySelector<HTMLElement>('[data-msg-id="cmp-post-r2"]');
+      expect(element).toBeTruthy();
+      return element!;
+    });
+    const inPost = () => { const range = document.createRange(); range.selectNodeContents(post); return range; };
+    act(() => selection.onQuote!('Ship the fix', inPost()));
+    expect(takeCompanionPostReply(nodeId)).toBe('cmp-post-r2');
+    act(() => selection.onComment!('CR-7', 'Is this safe?', inPost()));
+    expect(takeCompanionPostReply(nodeId)).toBe('cmp-post-r2');
+    // A selection outside any post marks nothing.
+    const outside = document.createRange();
+    outside.selectNodeContents(document.body);
+    act(() => selection.onQuote!('anything', outside));
+    expect(takeCompanionPostReply(nodeId)).toBeNull();
   });
 });

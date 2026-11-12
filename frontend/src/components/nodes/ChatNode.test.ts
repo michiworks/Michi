@@ -27,23 +27,11 @@ describe('parseFanoutCommand', () => {
     expect(parseFanoutCommand('/fanout')).toEqual({ topics: [] });
     expect(parseFanoutCommand('/fanout   ')).toEqual({ topics: [] });
   });
-});
 
-import { isNodeInArchivedTree } from './chatNodeUtils';
-
-describe('isNodeInArchivedTree', () => {
-  const project = {
-    trees: [
-      { id: 't1', rootNodeId: 'r1', archivedAt: undefined },
-      { id: 't2', rootNodeId: 'r2', archivedAt: 100 },
-    ],
-    edges: [
-      { source: 'r1', target: 'c1' },
-      { source: 'r2', target: 'c2' },
-    ],
-  };
-
-  it('returns true for a node in an archived tree', () => {
-    expect(isNodeInArchivedTree('c2', project as any)).toBe(true);
+  it('leaves a longer name that starts with the command to the skill it names', () => {
+    for (const text of ['/explore-codebase how auth works', '/explore-codebase', '/fanout-plan release', '/fan-out-review the diff', '/explore:deep x']) {
+      expect(parseFanoutCommand(text)).toBeNull();
+    }
+    expect(parseFanoutCommand('/explore\ta; b')).toEqual({ topics: ['a', 'b'] });
   });
 });

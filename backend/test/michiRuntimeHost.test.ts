@@ -29,9 +29,9 @@ import { CLAUDE_RESTRICTED_DISALLOWED_TOOLS, claudeSpawnPolicy } from 'michi-run
 import {
   CODEX_RESTRICTED_FEATURES_OFF, CODEX_RESTRICTED_TURN_POLICY, codexRestrictedMcpCheck, codexRestrictedThreadConfig, codexThreadSandbox,
 } from 'michi-runtime/internal/adapters/codex/codexRestrictedProfile';
-import * as nodeSummaryExperiment from '../src/agents/nodeSummaryExperiment';
 import * as permissionPolicy from '../src/agents/permissionPolicy';
 import * as preamble from '../src/agents/preamble';
+import { ARTIFACT_TOOL_NAMES } from '../src/agents/artifactToolNames';
 import * as runtimeDeps from '../src/agents/runtimeDeps';
 import * as sessionRegistry from '../src/agents/sessionRegistry';
 import { TurnMetadataState } from '../src/agents/turnMetadataState';
@@ -102,10 +102,12 @@ describe('config', () => {
     expectDelegation(t, titleGeneration, 'titleModelConfig', () => config.titleModel('kiro'), ['kiro']);
     t.mock.restoreAll();
     expectDelegation(t, titleGeneration, 'titleModelConfig', () => config.titleModel('codex'), ['codex']);
+    t.mock.restoreAll();
+    expectDelegation(t, titleGeneration, 'titleModelConfig', () => config.titleModel('claude'), ['claude']);
   });
 
   it('titleModel disables sidecar titles for runtimes titleModelConfig does not know', () => {
-    for (const runtimeId of ['claude', 'crew', 'pi']) {
+    for (const runtimeId of ['crew', 'pi']) {
       assert.deepEqual(config.titleModel(runtimeId), { model: null, timeoutMs: titleGeneration.DEFAULT_TITLE_TIMEOUT_MS });
     }
     assert.equal(titleGeneration.DEFAULT_TITLE_TIMEOUT_MS, 15_000);
@@ -128,6 +130,13 @@ describe('config', () => {
     expectDelegation(t, agentConfig, 'isWorkflowsEnabled', () => config.features.workflows('kiro', 'u1'), ['kiro', 'u1']);
   });
 
+  it('features.nativeMemory is off for every runtime and user: Michi Memory is the one store', () => {
+    for (const runtimeId of ['claude', 'codex', 'kiro', 'crew']) {
+      assert.equal(config.features.nativeMemory?.(runtimeId, 'u1'), false);
+      assert.equal(config.features.nativeMemory?.(runtimeId, null), false);
+    }
+  });
+
   it('dataDir → dataDir.getMichiDataDir', (t) => {
     expectDelegation(t, dataDir, 'getMichiDataDir', () => config.dataDir(), []);
   });
@@ -139,32 +148,92 @@ describe('prompt', () => {
 
   it('firstTurnPrefix → preamble.buildFirstTurnPrefix', (t) => {
     const input = { cwd: '/w', workspaceInstructions: 'be brief' };
-    expectDelegation(t, preamble, 'buildFirstTurnPrefix', () => prompt.firstTurnPrefix(input), [input]);
+    expectDelegation(t, preamble, 'buildFirstTurnPrefix', () => prompt.firstTurnPrefix(input),
+      [{ ...input, artifactTools: [...ARTIFACT_TOOL_NAMES] }]);
+  });
+
+  it('firstTurnPrefix passes the artifact tools of the profile, not the profile', (t) => {
+    const input = { cwd: '/w', artifactCount: 3 };
+    expectDelegation(t, preamble, 'buildFirstTurnPrefix',
+      () => prompt.firstTurnPrefix({ ...input, toolProfile: { allowedToolNames: ['read'] } }),
+      [{ ...input, artifactTools: [] }]);
+    t.mock.restoreAll();
+    expectDelegation(t, preamble, 'buildFirstTurnPrefix',
+      () => prompt.firstTurnPrefix({ ...input, toolProfile: { assistant: true } }),
+      [{ ...input, artifactTools: [] }]);
+  });
+
+  it('a first-turn manifest names no lookup tool a primary Agent lacks', () => {
+    const manifest = { cwd: '/w', contextManifest: [{ name: 'spec', filePath: '.contexts/spec.md' }], artifactCount: 4 };
+    assert.match(prompt.firstTurnPrefix(manifest), /`list_artifacts` to browse them and `search_artifacts`/);
+    const primary = prompt.firstTurnPrefix({ ...manifest, toolProfile: { allowedToolNames: ['read'] } });
+    assert.match(primary, /- spec — \.contexts\/spec\.md/);
+    assert.doesNotMatch(primary, /list_artifacts|search_artifacts/);
   });
 
   it('preamble → preamble.buildPreamble', (t) => {
     const input = { cwd: '/w', enableFollowUps: true };
-    expectDelegation(t, preamble, 'buildPreamble', () => prompt.preamble(input), [input]);
+    expectDelegation(t, preamble, 'buildPreamble', () => prompt.preamble(input), [{ ...input, artifactTools: [...ARTIFACT_TOOL_NAMES] }]);
+  });
+
+  it('preamble names no artifact tools for an allow-list without them (an Agent Run)', (t) => {
+    const input = { cwd: '/w', enableFollowUps: true };
+    expectDelegation(t, preamble, 'buildPreamble', () => prompt.preamble({ ...input, toolProfile: { allowedToolNames: ['save_artifact'] } }),
+      [{ ...input, artifactTools: [] }]);
+  });
+
+  it('a native fork parent is named by its stored title in both first-turn prompts', (t) => {
+    t.mock.method(dbRepository, 'getNode', (id: string) => (id === 'p' ? { id: 'p', title: 'Parent chat' } : undefined));
+    const input = { cwd: '/w', nativeForkParentNodeId: 'p' };
+    expectDelegation(t, preamble, 'buildFirstTurnPrefix', () => prompt.firstTurnPrefix(input),
+      [{ ...input, nativeForkParentTitle: 'Parent chat', artifactTools: [...ARTIFACT_TOOL_NAMES] }]);
+    expectDelegation(t, preamble, 'buildPreamble', () => prompt.preamble({ ...input, enableFollowUps: true }),
+      [{ ...input, enableFollowUps: true, nativeForkParentTitle: 'Parent chat', artifactTools: [...ARTIFACT_TOOL_NAMES] }]);
   });
 
   it('stableSystemPrompt → preamble.buildStableSystemPrompt, with the assistant tool note when restricted', (t) => {
-    expectDelegation(t, preamble, 'buildStableSystemPrompt', () => prompt.stableSystemPrompt('structured-tool', true, true),
-      ['structured-tool', true, true, undefined]);
+    expectDelegation(t, preamble, 'buildStableSystemPrompt', () => prompt.stableSystemPrompt('sentinel-followups-tool-overview', true, true),
+      ['sentinel-followups-tool-overview', true, true, undefined, [...ARTIFACT_TOOL_NAMES]]);
     t.mock.restoreAll();
     expectDelegation(t, preamble, 'buildStableSystemPrompt',
       () => prompt.stableSystemPrompt('sentinel', false, false, false),
-      ['sentinel', false, false, undefined]);
+      ['sentinel', false, false, undefined, [...ARTIFACT_TOOL_NAMES]]);
     t.mock.restoreAll();
     expectDelegation(t, preamble, 'buildStableSystemPrompt',
       () => prompt.stableSystemPrompt('sentinel', true, false, true),
-      ['sentinel', true, false, 'assistant']);
+      ['sentinel', true, false, 'assistant', [...ARTIFACT_TOOL_NAMES]]);
+  });
+
+  it('a check-in\'s closed profile gets the check-in head, never V\'s; V\'s open profile and a closed profile without nothing_to_do keep the assistant\'s', (t) => {
+    const checkin = assistantPolicy.assistantToolProfile('checkin');
+    assert.equal(assistantPolicy.isCompanionProfile(checkin), true);
+    for (const profile of [assistantPolicy.assistantToolProfile('main'),
+      { ...assistantPolicy.assistantToolProfile(), restricted: true, allowedToolNames: assistantPolicy.MAIN_TOOL_NAMES }, undefined]) {
+      assert.equal(assistantPolicy.isCompanionProfile(profile), false, JSON.stringify(profile));
+    }
+    // Claude and Codex: the stable system prompt; Kiro: the first message's preamble.
+    expectDelegation(t, preamble, 'buildStableSystemPrompt',
+      () => prompt.stableSystemPrompt('sentinel', false, false, true, checkin),
+      ['sentinel', false, false, 'companion', []]);
+    t.mock.restoreAll();
+    expectDelegation(t, preamble, 'buildStableSystemPrompt',
+      () => prompt.stableSystemPrompt('sentinel', false, false, true, assistantPolicy.assistantToolProfile('main')),
+      ['sentinel', false, false, 'assistant', []]);
+    t.mock.restoreAll();
+    expectDelegation(t, preamble, 'buildPreamble',
+      () => prompt.preamble({ cwd: '/w', enableFollowUps: false, toolProfile: checkin }),
+      [{ cwd: '/w', enableFollowUps: false, artifactTools: [], toolCapabilities: 'companion' }]);
+    t.mock.restoreAll();
+    expectDelegation(t, preamble, 'buildPreamble',
+      () => prompt.preamble({ cwd: '/w', enableFollowUps: false, toolProfile: assistantPolicy.assistantToolProfile('main') }),
+      [{ cwd: '/w', enableFollowUps: false, artifactTools: [], toolCapabilities: 'assistant' }]);
   });
 
   it('stableSystemPrompt matches the direct calls byte for byte', () => {
     // ClaudeSessionManager.ts:232-233 and CodexRuntime.ts:662.
     assert.equal(prompt.stableSystemPrompt('sentinel', true, false, true), preamble.buildStableSystemPrompt('sentinel', true, false, 'assistant'));
     assert.equal(prompt.stableSystemPrompt('sentinel', true, true), preamble.buildStableSystemPrompt('sentinel', true, true));
-    assert.equal(prompt.stableSystemPrompt('structured-tool', false, false, false), preamble.buildStableSystemPrompt('structured-tool', false, false, 'michi'));
+    assert.equal(prompt.stableSystemPrompt('sentinel-followups-tool-overview', false, false, false), preamble.buildStableSystemPrompt('sentinel-followups-tool-overview', false, false, 'michi'));
     assert.equal(prompt.stableSystemPrompt(), preamble.buildStableSystemPrompt());
   });
 
@@ -174,35 +243,23 @@ describe('prompt', () => {
       const reminder = crew ? '' : preamble.followUpReminder(userTurnCount, enableFollowUps);
       const overviewReminder = crew
         ? (owner && hostOwner(owner).kind === 'agent_run' ? '' : kiroHostText.crewTurnFormat(enableFollowUps))
-        : (nodeSummaryExperiment.fullNodeSummaryExperimentEnabled()
-          ? kiroHostText.FULL_BRANCH_OVERVIEW_TOOL_REMINDER
-          : kiroHostText.BRANCH_OVERVIEW_TOOL_REMINDER);
+        : kiroHostText.BRANCH_OVERVIEW_TOOL_REMINDER;
       return (reminder || '') + overviewReminder;
     };
-    const original = process.env.MICHI_NODE_SUMMARY_EXPERIMENT_MODE;
     let cases = 0;
-    try {
-      for (const summaryMode of [undefined, 'full']) {
-        if (summaryMode === undefined) delete process.env.MICHI_NODE_SUMMARY_EXPERIMENT_MODE;
-        else process.env.MICHI_NODE_SUMMARY_EXPERIMENT_MODE = summaryMode;
-        for (const crew of [false, true]) {
-          for (const userTurnCount of [1, 2, 6, 7, 8, 12, 17]) {
-            for (const enableFollowUps of [true, false]) {
-              for (const owner of [chat, run, undefined]) {
-                const metadataChannel = crew ? 'inline' : 'tools';
-                assert.equal(prompt.turnSuffix({ metadataChannel, userTurnCount, enableFollowUps, owner }),
-                  today(crew, userTurnCount, enableFollowUps, owner), JSON.stringify({ summaryMode, crew, userTurnCount, enableFollowUps, owner }));
-                cases += 1;
-              }
-            }
+    for (const crew of [false, true]) {
+      for (const userTurnCount of [1, 2, 6, 7, 8, 12, 17]) {
+        for (const enableFollowUps of [true, false]) {
+          for (const owner of [chat, run, undefined]) {
+            const metadataChannel = crew ? 'inline' : 'tools';
+            assert.equal(prompt.turnSuffix({ metadataChannel, userTurnCount, enableFollowUps, owner }),
+              today(crew, userTurnCount, enableFollowUps, owner), JSON.stringify({ crew, userTurnCount, enableFollowUps, owner }));
+            cases += 1;
           }
         }
       }
-    } finally {
-      if (original === undefined) delete process.env.MICHI_NODE_SUMMARY_EXPERIMENT_MODE;
-      else process.env.MICHI_NODE_SUMMARY_EXPERIMENT_MODE = original;
     }
-    assert.equal(cases, 168);
+    assert.equal(cases, 84);
   });
 
   it('turnSuffix carries the Kiro and Crew protocol text', () => {
@@ -212,21 +269,30 @@ describe('prompt', () => {
     assert.equal(prompt.turnSuffix({ metadataChannel: 'inline', userTurnCount: 1, enableFollowUps: true, owner: run }), '');
   });
 
-  it('followUpsExperimentMode → followUpsExperiment.resolveFollowUpsExperimentMode', (t) => {
-    expectDelegation(t, followUpsExperiment, 'resolveFollowUpsExperimentMode', () => prompt.followUpsExperimentMode(), []);
+  it('mcpSessionReminder names the metadata tools, except on a skill turn', () => {
+    const reminder = prompt.mcpSessionReminder!('sid-1');
+    assert.equal(reminder, kiroHostText.kiroMcpSessionReminder('sid-1'));
+    assert.ok(reminder.includes('set_branch_overview and set_follow_ups'));
+    const skill = prompt.mcpSessionReminder!('sid-1', { skill: true });
+    assert.ok(skill.includes('"sid-1"') && skill.includes('session_id'));
+    assert.equal(/set_branch_overview|set_follow_ups/.test(skill), false);
+  });
+
+  it('followUpsExperimentMode is sentinel, the only protocol', () => {
+    assert.equal(prompt.followUpsExperimentMode(), 'sentinel');
   });
 
   it('followUpsMetadataOutputMode → followUpsExperiment.followUpsMetadataOutputMode', (t) => {
     expectDelegation(t, followUpsExperiment, 'followUpsMetadataOutputMode',
-      () => prompt.followUpsMetadataOutputMode(true, 'hook-tool'), [true, 'hook-tool']);
+      () => prompt.followUpsMetadataOutputMode(true, 'sentinel'), [true]);
   });
 
   it('followUpsTurnReminder → followUpsExperiment.followUpsTurnReminder', (t) => {
     expectDelegation(t, followUpsExperiment, 'followUpsTurnReminder',
-      () => prompt.followUpsTurnReminder(3, false, 'sentinel', false), [3, false, 'sentinel', false]);
+      () => prompt.followUpsTurnReminder(3, false, 'sentinel', false), [3, false, false]);
     t.mock.restoreAll();
     expectDelegation(t, followUpsExperiment, 'followUpsTurnReminder',
-      () => prompt.followUpsTurnReminder(3, true, 'sentinel'), [3, true, 'sentinel']);
+      () => prompt.followUpsTurnReminder(3, true, 'sentinel'), [3, true, undefined]);
   });
 
   it('renderBranchContext → branchBoundary.renderBranchContext', (t) => {
@@ -239,13 +305,9 @@ describe('prompt', () => {
     expectDelegation(t, dbRepository, 'getWorkspaceInstructions', () => prompt.workspaceInstructions('w1'), ['w1']);
   });
 
-  it('turnMetadata → new TurnMetadataState(mode)', () => {
-    const tool = prompt.turnMetadata('hook-tool');
-    assert.ok(tool instanceof TurnMetadataState);
-    assert.equal(tool.acceptsFollowUps(true), true);
+  it('turnMetadata → a new TurnMetadataState', () => {
     const sentinel = prompt.turnMetadata('sentinel');
     assert.ok(sentinel instanceof TurnMetadataState);
-    assert.equal(sentinel.acceptsFollowUps(true), false);
     assert.notEqual(prompt.turnMetadata('sentinel'), sentinel);
   });
 });
@@ -429,11 +491,16 @@ describe('permissions', () => {
   it('decide → permissionPolicy.resolveChatPolicy', (t) => {
     expectDelegation(t, permissionPolicy, 'resolveChatPolicy',
       () => permissions.decide({ owner: chat, ownerUserId: 'u1', toolName: 'bash', nativeRequest: true, mode: 'trust' }),
-      [chat, 'u1', 'bash', true, 'trust']);
+      [chat, 'u1', 'bash', true, 'trust', undefined]);
     t.mock.restoreAll();
     expectDelegation(t, permissionPolicy, 'resolveChatPolicy',
       () => permissions.decide({ owner: chat, ownerUserId: null, toolName: 'Read' }),
-      [chat, null, 'Read', undefined, undefined]);
+      [chat, null, 'Read', undefined, undefined, undefined]);
+    t.mock.restoreAll();
+    // Claude's mark that a bare name is a tool of Michi's own server.
+    expectDelegation(t, permissionPolicy, 'resolveChatPolicy',
+      () => permissions.decide({ owner: chat, ownerUserId: null, toolName: 'delete_artifact', nativeRequest: true, hostTool: true }),
+      [chat, null, 'delete_artifact', true, undefined, true]);
   });
 
   it('grant → permissionPolicy.grantChatPermission', (t) => {

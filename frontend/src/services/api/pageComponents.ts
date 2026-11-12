@@ -1,18 +1,16 @@
-import type { PageComponent, PageComponentInput, PageComponentReference, PageComponentVersion } from 'michi-shared';
+import type { ComponentHost, PageComponent, PageComponentInput, PageComponentReference, PageComponentVersion } from 'michi-shared';
 import { backendApiBase } from '../../config/backendConnections';
 import { backendEntityId, serverEntityId } from '../../config/backendIdentity';
-import { backendConnectionGeneration, backendConnectionUnavailable, markBackendConnectionUnavailable } from '../../config/backendConnectionState';
+import { backendFetch } from './backendRequest';
+import { PageApiError, pageApiError } from './pages';
 
 export interface PageComponentLibrary { revision: number; items: PageComponent[] }
 export interface PageComponentVersionDto extends PageComponentVersion { propsSchema: PageComponentVersion['propsSchema'] }
 export interface PageComponentDetail { component?: PageComponent; version: PageComponentVersionDto; references?: PageComponentReference[] }
-export type ComponentHost =
-  | { kind: 'page_block'; pageId: string; blockId: string }
-  | { kind: 'database_view'; databaseId: string; viewId: string };
 export interface ComponentCapability { capability: string; expiresAt: number; host: ComponentHost; version: number; props: Record<string, unknown>; capabilityId?: string }
 
-export class PageComponentApiError extends Error {
-  constructor(readonly status: number, readonly code: string, message: string) { super(message); this.name = 'PageComponentApiError'; }
+export class PageComponentApiError extends PageApiError {
+  constructor(status: number, code: string, message: string) { super(status, code, message); this.name = 'PageComponentApiError'; }
 }
 
 const base = (connectionId: string) => backendApiBase(connectionId);
@@ -28,21 +26,14 @@ const mapVersionSource = (version: PageComponentVersionDto, connectionId: string
     ? version.source
     : { ...version.source, nodeId: backendEntityId(connectionId, version.source.nodeId) },
 });
+// Component props are opaque: like pages.ts, map only the DTOs' own references.
 async function request<T>(connectionId: string, path: string, init: RequestInit = {}): Promise<T> {
-  const generation = backendConnectionGeneration(connectionId);
-  if (backendConnectionUnavailable(connectionId) && init.method && init.method !== 'GET') throw new Error('Remote connection is unavailable');
-  let response: Response;
-  try { response = await globalThis.fetch(`${base(connectionId)}${path}`, init); }
-  catch (error) { if (error instanceof TypeError) markBackendConnectionUnavailable(connectionId); throw error; }
-  if ([502, 503, 504].includes(response.status)) markBackendConnectionUnavailable(connectionId);
-  const payload: unknown = await response.json().catch(() => null);
-  if (generation !== backendConnectionGeneration(connectionId)) throw new DOMException('Remote connection changed while reading components', 'AbortError');
+  const response = await backendFetch(`${base(connectionId)}${path}`, init, { mapPayload: false });
   if (!response.ok) {
-    const error = payload && typeof payload === 'object' ? (payload as { error?: unknown }).error : null;
-    const detail = error && typeof error === 'object' ? error as { code?: unknown; message?: unknown } : {};
-    throw new PageComponentApiError(response.status, typeof detail.code === 'string' ? detail.code : 'component_request_failed', typeof detail.message === 'string' ? detail.message : `Component request failed (${response.status})`);
+    const { status, code, message } = await pageApiError(response, 'component_request_failed', 'Component');
+    throw new PageComponentApiError(status, code, message);
   }
-  return payload as T;
+  return (response.status === 204 ? null : await response.json()) as T;
 }
 const body = (value: unknown): RequestInit => ({ method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(value) });
 

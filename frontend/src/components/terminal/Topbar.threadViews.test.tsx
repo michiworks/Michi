@@ -7,7 +7,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, fireEvent, act } from '@testing-library/react';
 import TerminalTopbar from './Topbar';
 import { ChatProvider, useChatProjects } from '../../state/chatStore';
-import { PrefsProvider } from '../../state/prefs';
+import { PREFS_KEY, PrefsProvider } from '../../state/prefs';
 import type { ChatNodeState, Project, Tree } from '../../state/chatTypes';
 
 vi.mock('../../services/api', async (importOriginal) => {
@@ -17,7 +17,6 @@ vi.mock('../../services/api', async (importOriginal) => {
     checkVersion: vi.fn().mockResolvedValue({ updateAvailable: false }),
     triggerUpdate: vi.fn(),
     listAgentModes: vi.fn().mockResolvedValue({ availableModes: [], defaultModeId: null }),
-    fetchAllWorkspaces: vi.fn().mockResolvedValue([]),
     fetchAllWorkspacesMeta: vi.fn().mockResolvedValue([]),
     fetchTreeMessages: vi.fn().mockResolvedValue([]),
     fetchWorkspaces: vi.fn().mockResolvedValue([]),
@@ -109,11 +108,29 @@ const baseProps = {
   page: 'dashboard' as const,
   sidebarCollapsed: false,
   onToggleSidebar: vi.fn(),
+  navigation: { canBack: false, canForward: false, onBack: () => {}, onForward: () => {} },
 };
 
 describe('Topbar thread-view toggles', () => {
 
+  it('has no Digest toggle while Settings › Digest is off', async () => {
+    seed(
+      { n1: makeChatNode('n1'), d1: makeUnreadDigestNode('d1') },
+      [{ id: 't1', rootNodeId: 'n1', createdAt: BEFORE, lastActiveAt: BEFORE }],
+      't1',
+    );
+    openPanes(['n1']);
+    render(
+      <Wrap>
+        <TerminalTopbar {...baseProps} onNav={vi.fn()} />
+      </Wrap>,
+    );
+    await screen.findByLabelText('Map');
+    expect(screen.queryByLabelText('Digest')).toBeNull();
+  });
+
   it('shows the unread dot on the Digest toggle when a digest is unread', async () => {
+    localStorage.setItem(PREFS_KEY, JSON.stringify({ digestEnabled: true }));
     seed(
       { n1: makeChatNode('n1'), d1: makeUnreadDigestNode('d1') },
       [{ id: 't1', rootNodeId: 'n1', createdAt: BEFORE, lastActiveAt: BEFORE }],

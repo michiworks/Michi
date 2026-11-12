@@ -1,8 +1,9 @@
-import { artifactTypeForPath } from 'michi-shared';
 import React from 'react';
 import type { ArtifactEntry } from '../../../state/chatTypes';
+import { artifactType } from '../artifacts/artifactOpen';
 import { manageFileType, MANAGE_COLORS } from './tokens';
 import { Button } from '../../ui/controls';
+import { formatBytes } from '../../../lib/formatBytes';
 
 interface Props {
   artifacts: ArtifactEntry[];
@@ -11,7 +12,7 @@ interface Props {
   onSelect: (id: string) => void;
   onPin: (id: string) => void;
   onDelete: (id: string) => void;
-  onPreview: (filePath: string) => void;
+  onOpen: (artifact: ArtifactEntry) => void;
   onAdd: () => void;
 }
 
@@ -23,18 +24,6 @@ const TYPE_GROUPS: Array<{ key: 'doc' | 'file' | 'image' | 'link'; title: string
   { key: 'link', title: 'Links' },
 ];
 
-function artifactType(c: ArtifactEntry): 'doc' | 'file' | 'image' | 'link' {
-  if (c.type) return c.type;
-  return c.url ? 'link' : artifactTypeForPath(c.filePath);
-}
-
-function fmtBytes(n: number | undefined): string {
-  if (!n) return '—';
-  if (n < 1024) return `${n} B`;
-  if (n < 1024 * 1024) return `${(n / 1024).toFixed(n < 10_240 ? 1 : 0)} KB`;
-  return `${(n / 1024 / 1024).toFixed(n < 10_485_760 ? 1 : 0)} MB`;
-}
-
 export default function ContextList({
   artifacts,
   filter,
@@ -42,7 +31,7 @@ export default function ContextList({
   onSelect,
   onPin,
   onDelete,
-  onPreview,
+  onOpen,
   onAdd,
 }: Props) {
   const norm = filter.trim().toLowerCase();
@@ -86,7 +75,7 @@ export default function ContextList({
           onSelect={onSelect}
           onPin={onPin}
           onDelete={onDelete}
-          onPreview={onPreview}
+          onOpen={onOpen}
         />
       ))}
     </div>
@@ -121,7 +110,7 @@ function Strip({
       </Button>
       <span style={{ flex: 1 }} />
       <span style={{ color: 'var(--term-muted)', fontSize: 'var(--fs-md)' }}>
-        {favoriteCount} favorite{favoriteCount === 1 ? '' : 's'} · {fmtBytes(totalBytes)} total
+        {favoriteCount} favorite{favoriteCount === 1 ? '' : 's'} · {formatBytes(totalBytes, { empty: '—' })} total
       </span>
     </div>
   );
@@ -135,7 +124,7 @@ function Section({
   onSelect,
   onPin,
   onDelete,
-  onPreview,
+  onOpen,
 }: {
   title: string;
   count: number;
@@ -144,7 +133,7 @@ function Section({
   onSelect: (id: string) => void;
   onPin: (id: string) => void;
   onDelete: (id: string) => void;
-  onPreview: (filePath: string) => void;
+  onOpen: (artifact: ArtifactEntry) => void;
 }) {
   const [hoverId, setHoverId] = React.useState<string | null>(null);
   if (rows.length === 0) return null;
@@ -276,7 +265,7 @@ function Section({
             {hovered ? (
               <RowActions
                 favorite={!!c.pinnedAt}
-                onPreview={() => onPreview(c.filePath)}
+                onPreview={() => onOpen(c)}
                 onPin={() => onPin(c.id)}
                 onDelete={() => onDelete(c.id)}
                 contextName={c.name}
@@ -304,7 +293,7 @@ function RowMeta({ size }: { size: number | undefined }) {
         fontVariantNumeric: 'tabular-nums',
       }}
     >
-      <span style={{ width: 60, textAlign: 'right' }}>{fmtBytes(size)}</span>
+      <span style={{ width: 60, textAlign: 'right' }}>{formatBytes(size, { empty: '—' })}</span>
     </span>
   );
 }

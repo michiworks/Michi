@@ -1,0 +1,105 @@
+/* What a reply changed, under it: one bordered list, a row per thing.
+   The rows share the list's columns (subgrid), so verbs and Views line up. */
+.receipt-ledger {
+  max-width: min(100%, 640px);
+  margin: 8px 0 4px;
+  container-type: inline-size;
+}
+.receipt-ledger__list {
+  display: grid;
+  grid-template-columns: 14px max-content minmax(0, 1fr) auto auto;
+  column-gap: 10px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  border: 1px solid var(--term-line);
+  border-radius: var(--ui-radius);
+  font-family: var(--ui-font);
+  font-size: 12px;
+  color: var(--term-fg);
+}
+.receipt-row {
+  grid-column: 1 / -1;
+  display: grid;
+  grid-template-columns: subgrid;
+  align-items: center;
+  min-height: 30px;
+  padding: 5px 8px 5px 10px;
+}
+.receipt-row + .receipt-row { border-top: 1px solid var(--term-line); }
+.receipt-row__glyph { grid-column: 1; color: var(--term-digest); }
+.receipt-row__verb { grid-column: 2; color: var(--term-muted); }
+.receipt-row__object {
+  grid-column: 3;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.receipt-row__meta {
+  grid-column: 4;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  text-align: right;
+  color: var(--term-muted);
+}
+.receipt-row__actions {
+  grid-column: 5;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 2px;
+}
+.receipt-row__link {
+  padding: 0 4px;
+  border: 0;
+  background: transparent;
+  color: var(--term-mid);
+  font: inherit;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  cursor: pointer;
+}
+.receipt-row__link:hover,
+.receipt-row__link:focus-visible { color: var(--term-fg); }
+.receipt-row__toggle {
+  display: grid;
+  place-items: center;
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  border: 0;
+  border-radius: var(--ui-radius);
+  background: transparent;
+  color: var(--term-faint);
+  cursor: pointer;
+}
+.receipt-row__toggle:hover,
+.receipt-row__toggle:focus-visible { color: var(--term-fg); background: var(--term-hover-bg); }
+.receipt-row__toggle svg { transition: transform var(--t-soft) var(--t-ease); }
+.receipt-row__toggle[aria-expanded='true'] svg { transform: rotate(90deg); }
+.receipt-row__details { grid-column: 2 / -1; min-width: 0; }
+
+/* A row's details: label and value columns. */
+.receipt-row__facts {
+  display: grid;
+  grid-template-columns: max-content minmax(0, 1fr);
+  gap: 3px 14px;
+  margin: 0;
+  padding: 4px 0 4px;
+}
+.receipt-row__facts dt { color: var(--term-muted); }
+.receipt-row__facts dd { margin: 0; min-width: 0; color: var(--term-mid); overflow-wrap: anywhere; }
+
+/* A narrow pane: the note drops under the name, details stack. */
+@container (max-width: 480px) {
+  .receipt-ledger__list { grid-template-columns: 14px max-content minmax(0, 1fr) auto; }
+  .receipt-row { row-gap: 1px; }
+  .receipt-row__meta { grid-column: 3; grid-row: 2; text-align: left; }
+  .receipt-row__actions { grid-column: 4; grid-row: 1 / span 2; }
+  .receipt-row__details { grid-row: 3; }
+  .receipt-row__facts { grid-template-columns: minmax(0, 1fr); gap: 0; }
+  .receipt-row__facts dt { margin-top: 5px; font-size: 11px; }
+}

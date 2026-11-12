@@ -1,13 +1,14 @@
 import React, { useEffect, useId, useState } from 'react';
 import type { BlockProps } from '../blockTypes';
 import { isPlanSchedule, list, num, objects, pct, planActualModel, planScheduleModel, str, timelineWhen } from '../michiPageModel';
-import { MessageSquare } from 'lucide-react';
+import { ChevronRight, MessageSquare } from 'lucide-react';
 import { CheckIcon } from '../../../icons';
 import { Button } from '../../../../ui/controls';
 import { useBlockSend } from '../vendor-blocks/src/desk/blocks/catalog/interactive/useBlockSend';
 import type { PageBlockWithSources } from '../vendor-blocks/shared/desk-blocks';
 import { BlockTitle } from './text';
 import { PageViewEntry } from '../PageViewContext';
+import { useCompanionName } from '../../../../../state/companion/companionName';
 
 /** A row of labelled figures; tone `warn` flags one, `accent` highlights it. A note is a native page's hint. */
 export function MetricsBlock({ block }: BlockProps) {
@@ -365,60 +366,81 @@ export function ProsConsBlock({ block }: BlockProps) {
 }
 
 /**
- * Items with their marks; done ones are struck through. On a page the person
- * may edit, a mark ticks the item there and then. Where the assistant window
- * is open, each item offers Ask at its end (on hover or focus; always on touch).
+ * Items with their marks: the open ones, then the done ones folded under one
+ * "Show N done" row that opens them, struck through. Each group keeps its saved
+ * order. On a page the person may edit, a mark ticks the item there and then.
+ * Where the page offers Ask, each item offers "Ask <name>" at its end (on hover
+ * or focus; always on touch).
  */
 export function ChecklistBlock({ block, ctx }: BlockProps) {
   const all = objects(block.items);
-  const items = all.map((it, index) => ({ it, index })).filter(({ it }) => str(it.text).trim());
-  const done = items.filter(({ it }) => it.done === true).length;
+  const shown = all.map((it, index) => ({ it, index })).filter(({ it }) => str(it.text).trim());
+  // `index` stays the saved position, which ticking and Ask address.
+  const open = shown.filter(({ it }) => it.done !== true);
+  const finished = shown.filter(({ it }) => it.done === true);
+  const [showDone, setShowDone] = useState(false);
+  const doneListId = useId();
   const hasId = typeof block.id === 'string' && !!block.id;
   const toggle = ctx.toggleItem && hasId ? ctx.toggleItem : undefined;
   const ask = ctx.askItem && hasId ? ctx.askItem : undefined;
+  const name = useCompanionName();
+  const row = ({ it, index }: (typeof shown)[number]) => {
+    const checked = it.done === true;
+    return (
+      <li key={index} data-done={checked || undefined}>
+        {toggle ? (
+          <button
+            type="button"
+            className="michi-doc-check michi-doc-check--live"
+            role="checkbox"
+            aria-checked={checked}
+            aria-label={str(it.text)}
+            onClick={() => toggle(block, index)}
+          >
+            {checked && <CheckIcon size={10} />}
+          </button>
+        ) : (
+          <span className="michi-doc-check" role="checkbox" aria-checked={checked} aria-readonly="true" aria-label={str(it.text)}>
+            {checked && <CheckIcon size={10} />}
+          </span>
+        )}
+        <span className="michi-doc-checklist__text">{str(it.text)}</span>
+        {ask && (
+          <button
+            type="button"
+            className="michi-doc-checklist__ask"
+            aria-label={`Ask ${name} about “${str(it.text)}”`}
+            title={`Ask ${name} about this item`}
+            onClick={() => ask(block, index)}
+          >
+            <MessageSquare size={13} strokeWidth={1.7} aria-hidden="true" />
+          </button>
+        )}
+      </li>
+    );
+  };
   return (
     <div data-michi-block="checklist">
       <div className="michi-doc-block-head">
         <h3 className="michi-doc-block-title">{str(block.title).trim() || 'Checklist'}</h3>
-        <span className="michi-doc-mono michi-doc-muted" style={{ fontSize: 'var(--fs-sm)' }}>{done}/{items.length}</span>
+        <span className="michi-doc-mono michi-doc-muted" style={{ fontSize: 'var(--fs-sm)' }}>{finished.length}/{shown.length}</span>
       </div>
-      <ul className="michi-doc-checklist">
-        {items.map(({ it, index }) => {
-          const checked = it.done === true;
-          return (
-            <li key={index} data-done={checked || undefined}>
-              {toggle ? (
-                <button
-                  type="button"
-                  className="michi-doc-check michi-doc-check--live"
-                  role="checkbox"
-                  aria-checked={checked}
-                  aria-label={str(it.text)}
-                  onClick={() => toggle(block, index)}
-                >
-                  {checked && <CheckIcon size={10} />}
-                </button>
-              ) : (
-                <span className="michi-doc-check" role="checkbox" aria-checked={checked} aria-readonly="true" aria-label={str(it.text)}>
-                  {checked && <CheckIcon size={10} />}
-                </span>
-              )}
-              <span className="michi-doc-checklist__text">{str(it.text)}</span>
-              {ask && (
-                <button
-                  type="button"
-                  className="michi-doc-checklist__ask"
-                  aria-label={`Ask assistant about “${str(it.text)}”`}
-                  title="Ask assistant about this item"
-                  onClick={() => ask(block, index)}
-                >
-                  <MessageSquare size={13} strokeWidth={1.7} aria-hidden="true" />
-                </button>
-              )}
-            </li>
-          );
-        })}
-      </ul>
+      {open.length > 0 && <ul className="michi-doc-checklist">{open.map(row)}</ul>}
+      {finished.length > 0 && (
+        <>
+          <button
+            type="button"
+            className="michi-doc-link-btn michi-doc-checklist__done-toggle"
+            aria-expanded={showDone}
+            aria-controls={doneListId}
+            onClick={() => setShowDone(!showDone)}
+          >
+            <ChevronRight size={13} strokeWidth={1.8} aria-hidden="true" className="michi-doc-checklist__chevron" />
+            {showDone ? 'Hide done' : `Show ${finished.length} done`}
+          </button>
+          {showDone && <ul id={doneListId} className="michi-doc-checklist">{finished.map(row)}</ul>}
+        </>
+      )}
     </div>
   );
 }

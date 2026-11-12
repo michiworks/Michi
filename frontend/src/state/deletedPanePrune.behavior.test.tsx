@@ -34,7 +34,6 @@ vi.mock('../services/api', () => ({
   ),
   streamMessage: vi.fn(() => () => {}),
   syncWorkspace: () => Promise.resolve({ ok: true }),
-  fetchAllWorkspaces: () => Promise.resolve([]),
 }));
 
 vi.mock('../services/notifications', () => ({ notify: vi.fn() }));

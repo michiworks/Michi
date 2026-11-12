@@ -3,6 +3,7 @@ import type { MichiContextItem } from 'michi-shared';
 import {
   assistantPageCaption,
   assistantPageKey,
+  attachedQuoteHasSelection,
   attachmentChipLabel,
   CONTEXT_TEXT_LIMIT,
   formatAssistantContext,
@@ -89,6 +90,12 @@ describe('quoteSourceOf', () => {
     expect(quoteSourceOf(formatAssistantContext(null, [block]))).toEqual({ type: 'attached' });
     expect(quoteSourceOf('Some passage from a reply')).toBeUndefined();
     expect(quoteSourceOf(null)).toBeUndefined();
+  });
+
+  it('knows a Today item handed over (Today’s Ask) as attached context too, after a reload (F1a-review #17)', () => {
+    const item = { kind: 'companion_item' as const, id: 'i1', title: 'CR 1 needs a reviewer' };
+    expect(quoteSourceOf(formatAssistantContext(null, [item]))).toEqual({ type: 'attached' });
+    expect(attachedQuoteHasSelection(formatAssistantContext(null, [item])!)).toBe(false);
   });
 
   it('names the attached source on the wire, still as source context', () => {

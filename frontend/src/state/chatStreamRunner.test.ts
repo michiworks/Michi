@@ -8,6 +8,7 @@ vi.mock('../services/api', () => ({
 import * as api from '../services/api';
 import { CHAT_STREAM_EVENTS, dispatchChatStreamEvent, parseChatStreamEvent } from '../services/chatStreamEvents';
 import { runChatStream } from './chatStreamRunner';
+import { createBackgroundTurnBinding } from './observeChatStream';
 import { reduceNodes } from './chatReducers';
 import { assistantAnswerRawText } from './assistantBlocks';
 import { mapMessageRow } from './chatHydration';
@@ -159,6 +160,27 @@ describe('chatStreamRunner — chunk/tool-call ordering', () => {
       backendConnectionId: 'local', workspaceId: 'p1', databaseId: 'db-1',
     });
     unsubscribe();
+  });
+
+  it("refreshes the page Crew's michi_call_tool wrote, named by the call's earlier input", () => {
+    mockStream.mockClear();
+    resetTurnPageReceiptInvalidationForTests();
+    const changed = vi.fn();
+    const unsubscribe = subscribePageChanges({ backendConnectionId: 'local', workspaceId: 'p1' }, changed);
+    runChatStream({ prompt: 'edit', nodeId: 'n1', assistantId: 'a1', workspaceId: 'p1',
+      dispatch: vi.fn(), assistantTextBufs: { current: {} }, cancelFns: { current: {} },
+    });
+    const handlers = mockStream.mock.calls[0][2];
+    const output = JSON.stringify({ michiPageWrite: {
+      kind: 'michiPageWrite', resourceKind: 'page', resourceId: 'page-crew', appliedCount: 1, proposedCount: 0,
+    } });
+    try {
+      handlers.onToolCall({ toolCallId: 'crew-1', title: 'michi_call_tool', status: 'in_progress',
+        inputJson: JSON.stringify({ tool: 'edit_page', arguments: { pageId: 'page-crew' } }) });
+      handlers.onToolCallUpdate({ toolCallId: 'crew-1', title: '', status: 'completed', output });
+      expect(changed).toHaveBeenCalledTimes(1);
+      expect(changed.mock.calls[0][0]).toMatchObject({ backendConnectionId: 'local', workspaceId: 'p1', pageId: 'page-crew' });
+    } finally { unsubscribe(); }
   });
 
   it('adds accepted steering as one user message while keeping the current reply streaming', () => {
@@ -516,6 +538,61 @@ describe('chatStreamRunner — incremental follow-up sentinels', () => {
     );
   });
 
+  it('reads a follow-up to the last ] of its line, so brackets inside the question stay in it', () => {
+    const dispatched: ChatAction[] = [];
+    runChatStream({
+      prompt: 'hi', nodeId: 'n1', assistantId: 'a1', dispatch: (a) => dispatched.push(a),
+      assistantTextBufs: { current: {} }, cancelFns: { current: {} },
+    });
+    const handlers = mockStream.mock.calls[0][2];
+    handlers.onChunk('Answer.\n\n[FOLLOW-UP 1/3: 会不会误杀 app/[slug]');
+    handlers.onChunk('/page.tsx？]\n[FOLLOW-UP 2/3: b?] [FOLLOW-UP 3/3: 用 [TITLE:] 吗？]');
+    expect(dispatched.filter((a) => a.type === 'set-follow-ups').at(-1)).toEqual({
+      type: 'set-follow-ups', nodeId: 'n1', followUps: ['会不会误杀 app/[slug]/page.tsx？', 'b?', '用 [TITLE:] 吗？'],
+    });
+    expect(dispatched.filter((a) => a.type === 'visible-response-complete')).toHaveLength(1);
+    expect(dispatched.filter((a) => a.type === 'set-title')).toEqual([]);
+  });
+
+  it.each(['[TITLE:', '[BRANCH-OVERVIEW:', '[FOLLOW-UP'])('holds %s so a follow-up quoted inside it is not dispatched', (prefix) => {
+    const dispatched: ChatAction[] = [];
+    runChatStream({
+      prompt: 'hi', nodeId: 'n1', assistantId: 'a1', dispatch: (a) => dispatched.push(a),
+      assistantTextBufs: { current: {} }, cancelFns: { current: {} },
+    });
+    const handlers = mockStream.mock.calls[0][2];
+    handlers.onChunk(`Answer.\n${prefix.slice(0, 4)}`);
+    handlers.onChunk(`${prefix.slice(4)} quotes [FOLLOW-UP 1/3: q?] inline]`);
+    expect(dispatched.filter((a) => a.type === 'set-follow-ups')).toEqual([]);
+  });
+
+  it('abandons a quoted prefix at the newline instead of reading later text as a title', () => {
+    const dispatched: ChatAction[] = [];
+    runChatStream({
+      prompt: 'hi', nodeId: 'n1', assistantId: 'a1', dispatch: (a) => dispatched.push(a),
+      assistantTextBufs: { current: {} }, cancelFns: { current: {} },
+    });
+    const handlers = mockStream.mock.calls[0][2];
+    handlers.onChunk('Use [TITLE: for\n');
+    handlers.onChunk('titles [see docs].\n\n[FOLLOW-UP 1/3: q?]');
+    expect(dispatched.filter((a) => a.type === 'set-title')).toEqual([]);
+    expect(dispatched).toContainEqual({ type: 'set-follow-ups', nodeId: 'n1', followUps: ['q?'] });
+  });
+
+  it('ignores sentinels quoted in inline code, as the visible text does', () => {
+    const dispatched: ChatAction[] = [];
+    runChatStream({
+      prompt: 'hi', nodeId: 'n1', assistantId: 'a1', dispatch: (a) => dispatched.push(a),
+      assistantTextBufs: { current: {} }, cancelFns: { current: {} },
+    });
+    const handlers = mockStream.mock.calls[0][2];
+    handlers.onChunk('quote `[TITLE:` and `');
+    handlers.onChunk(']`, or `');
+    handlers.onChunk('`[FOLLOW-UP 1/3: q?]`` here\n[TITLE: real]\n');
+    expect(dispatched.filter((a) => a.type === 'set-title')).toEqual([{ type: 'set-title', nodeId: 'n1', title: 'real' }]);
+    expect(dispatched.filter((a) => a.type === 'set-follow-ups')).toEqual([]);
+  });
+
   it('still dispatches legacy compact follow-ups when the bracket closes', () => {
     const dispatched: ChatAction[] = [];
     const bufs = { current: {} as Record<string, string> };
@@ -543,6 +620,29 @@ describe('chatStreamRunner — incremental follow-up sentinels', () => {
       nodeId: 'n1',
       assistantId: 'a1',
     });
+  });
+
+  it.each([
+    ['the counts on the done frame', { nodeCompletionSeq: 5, nodeSeenCompletionSeq: 4 }],
+    ['its own count, once per turn', {}],
+  ])('counts the completion of a reply the follow-ups completed, from %s', (_label, facts) => {
+    const dispatched: ChatAction[] = [];
+    runChatStream({
+      prompt: 'hi', nodeId: 'n1', assistantId: 'a1', dispatch: (a) => dispatched.push(a),
+      assistantTextBufs: { current: {} }, cancelFns: { current: {} },
+    });
+    const handlers = mockStream.mock.calls[0][2];
+    const envelope = { chatId: 'n1', nodeId: 'n1', turnId: 'turn-5', assistantId: 'a1' };
+    const frame = (event: string, seq: number, data: Record<string, unknown>) =>
+      dispatchChatStreamEvent(parseChatStreamEvent(event, JSON.stringify({ ...envelope, seq, ...data }))!, handlers);
+    frame(CHAT_STREAM_EVENTS.chunk, 1, { text: 'Answer. [FOLLOW-UP 1/3: a] [FOLLOW-UP 2/3: b] [FOLLOW-UP 3/3: c]' });
+    frame(CHAT_STREAM_EVENTS.done, 2, { stopReason: 'end_turn', persisted: true, completedAt: 500, ...facts });
+
+    let nodes: Record<string, ChatNodeState> = { n1: { ...makeNode(), completionSeq: 4, seenCompletionSeq: 4 } };
+    for (const action of dispatched) nodes = reduceNodes(nodes, action);
+    expect(dispatched.map((action) => action.type)).toContain('visible-response-complete');
+    expect(dispatched.find((action) => action.type === 'done')).toMatchObject({ turnId: 'turn-5' });
+    expect([nodes.n1.completionSeq, nodes.n1.seenCompletionSeq, nodes.n1.lastCompletedTurnId]).toEqual([5, 4, 'turn-5']);
   });
 });
 
@@ -808,10 +908,18 @@ describe('chatStreamRunner — saved turn after the live replay is gone', () => 
   });
 
   it('finishes a saved cancelled turn as cancelled', () => {
-    const { handlers, actions, onTurnEnd } = start();
+    const { handlers, actions, onTurnEnd, onStreamComplete } = start();
     expect(handlers.onSavedTurn?.(saved({ status: 'cancelled', stopReason: null }))).toBe(true);
     expect(actions.find((action) => action.type === 'done')).toMatchObject({ aborted: true, completedAt: 20 });
     expect(onTurnEnd).toHaveBeenCalledExactlyOnceWith('done', 'n1');
+    expect(onStreamComplete).not.toHaveBeenCalled();
+  });
+
+  it.each(['cancel', 'cancelled'])('does not announce a turn cancelled elsewhere as finished (stopReason %s)', (stopReason) => {
+    const { handlers, actions, onStreamComplete } = start();
+    handlers.onDone?.(stopReason, 'a1', 'turn-1', true);
+    expect(actions.find((action) => action.type === 'done')).toMatchObject({ aborted: true });
+    expect(onStreamComplete).not.toHaveBeenCalled();
   });
 
   it('refuses an unfinished saved turn so the replay error stands', () => {
@@ -819,5 +927,36 @@ describe('chatStreamRunner — saved turn after the live replay is gone', () => 
     expect(handlers.onSavedTurn?.(saved({ status: 'active', completedAt: null }))).toBe(false);
     expect(actions).toEqual([]);
     expect(onTurnEnd).not.toHaveBeenCalled();
+  });
+});
+
+describe('a done frame ends a turn alike in the runner and the background binding', () => {
+  it.each([
+    ['unpersisted', 'end_turn', false],
+    ['an error stop', 'error', true],
+    ['cancel', 'cancel', true],
+    ['cancelled', 'cancelled', true],
+    ['a completed turn', 'end_turn', true],
+  ] as const)('%s', (_name, stopReason, persisted) => {
+    const terminal = (action: ChatAction) => action.type === 'error' || action.type === 'done';
+    const foreground: ChatAction[] = [];
+    const foregroundEnd = vi.fn();
+    mockStream.mockClear();
+    runChatStream({ prompt: 'hi', nodeId: 'n1', assistantId: 'a1', dispatch: (action) => foreground.push(action),
+      assistantTextBufs: { current: {} }, cancelFns: { current: {} }, onTurnEnd: foregroundEnd });
+    const runner = mockStream.mock.calls[0][2];
+    runner.onTurnStart({ turnId: 'turn-1', assistantId: 'a1' });
+    runner.onDone(stopReason, 'a1', 'turn-1', persisted, 10);
+
+    const background: ChatAction[] = [];
+    const backgroundEnd = vi.fn();
+    const binding = createBackgroundTurnBinding({ chatId: 'n1', nodeId: 'n1', dispatch: (action) => background.push(action),
+      lastTurnRef: { current: '' }, lastSeqRef: { current: -1 }, onTurnEnd: backgroundEnd }).createHandlers();
+    binding.onTurnStart?.({ turnId: 'turn-1', assistantId: 'a1', nodeId: 'n1', userText: '' });
+    binding.onDone?.(stopReason, 'a1', 'turn-1', persisted, 10);
+
+    expect(background.filter(terminal)).toEqual(foreground.filter(terminal));
+    expect(background.filter(terminal)).toHaveLength(1);
+    expect(backgroundEnd.mock.calls).toEqual(foregroundEnd.mock.calls);
   });
 });

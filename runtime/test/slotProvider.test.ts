@@ -143,8 +143,7 @@ test('Michi topology: basePath /mcp under a server mounted at /api gives /api/mc
   assert.deepEqual(endpoint, { type: 'http', url: `${base}/mcp/${slot.slotId}`, headers: [] });
   assert.deepEqual(mcpSlotProviderInternals(provider).hostSlot(slot.slotId)!.endpoint(), endpoint);
   assert.deepEqual(provider.sessionEndpoint(groupId), { type: 'http', url: `${base}/mcp-session/${groupId}`, headers: [] });
-  assert.equal(provider.hookEndpoint(slot.slotId, 'stop'), mcpHost.hookUrl(slot.slotId, 'stop'));
-  assert.equal(provider.hookEndpoint(slot.slotId, 'stop'), `${base}/mcp-hooks/${slot.slotId}/stop`);
+  assert.equal(mcpHost.hookUrl(slot.slotId, 'stop'), `${base}/mcp-hooks/${slot.slotId}/stop`);
   for (const engine of ['v2', 'v3'] as const) assert.equal(michiMcpServer(engine, endpoint).url, endpoint.url);
   assert.equal(michiSessionMcpServer(provider.sessionEndpoint(groupId)).url, `${base}/mcp-session/${groupId}`);
   assert.equal((buildCodexMcpConfig(endpoint).mcp_servers as Record<string, { url: string }>).__michi_internal__.url, endpoint.url);
@@ -166,35 +165,17 @@ test('standalone topology: basePath /api/mcp on listen() gives /api/mcp/<id>, wh
   assert.equal(michiMcpServer('v2', endpoint).url, endpoint.url);
   assert.equal(provider.sessionEndpoint(groupId).url, `${listener.baseUrl}/api/mcp-session/${groupId}`);
   assert.throws(() => validateMichiEndpoint(provider.sessionEndpoint(groupId).url), /Invalid Michi MCP endpoint/);
-  assert.equal(provider.hookEndpoint(slot.slotId, 'stop'), `${listener.baseUrl}/api/mcp-hooks/${slot.slotId}/stop`);
   assert.equal(probed(await call(await connect(t, endpoint.url), 'probe')).slotId, slot.slotId);
 
-  // Built from the id alone: a disposed slot keeps its URLs, which answer 404.
-  const hook = provider.hookEndpoint(slot.slotId, 'stop');
+  // Built from the id alone: a disposed slot keeps its URL, which answers 404.
   await provider.dispose(slot.slotId);
   assert.deepEqual(provider.endpoint(slot.slotId), endpoint);
-  assert.equal(provider.hookEndpoint(slot.slotId, 'stop'), hook);
   assert.equal(await post(endpoint.url), 404);
-});
-
-test('hookEndpoint: the host hook route by default, the option\'s URL when given', async (t) => {
-  const seen: Array<[string, string]> = [];
-  const { listener, provider } = await start(t, {}, {
-    hookEndpoint: (slotId, hook) => { seen.push([slotId, hook]); return `http://127.0.0.1:1/api/own-hooks/${slotId}/${hook}`; },
-  });
-  const slot = create(provider, 'chat-a');
-  assert.equal(provider.hookEndpoint(slot.slotId, 'stop'), `http://127.0.0.1:1/api/own-hooks/${slot.slotId}/stop`);
-  assert.deepEqual(seen, [[slot.slotId, 'stop']]);
-  const plainHost = createMcpHost<McpSlot>({ publicBaseUrl: listener.baseUrl });
-  t.after(() => plainHost.close());
-  const plain = createMcpSlotProvider(plainHost);
-  assert.equal(plain.hookEndpoint('a'.repeat(32), 'stop'), `${listener.baseUrl}/mcp-hooks/${'a'.repeat(32)}/stop`);
 });
 
 test('invalid options are refused when the provider is built', () => {
   const mcpHost = createMcpHost<McpSlot>();
   assert.throws(() => createMcpSlotProvider(mcpHost, { sessionAnchorDescription: ' ' }), /sessionAnchorDescription/);
-  assert.throws(() => createMcpSlotProvider(mcpHost, { hookEndpoint: 'url' as never }), /hookEndpoint must be a function/);
   void mcpHost.close();
 });
 
@@ -224,6 +205,16 @@ test('create: the binding has the given fields and callbacks; the sink reaches t
     slotId: slot.slotId, sessionKey: 'chat-a', cwd: '/work/a', parentChatId: 'chat-a', nodeId: 'node-a', bindingHasSink: false,
   });
   assert.deepEqual(events, [{ type: 'probed', payload: 'chat-a' }]);
+});
+
+test('create: the client\'s up-front key reaches the slot\'s tools/list on the tools marked loadUpFront, never the binding', async (t) => {
+  const { mcpHost, provider } = await start(t);
+  mcpHost.registerTool({ ...probe, name: 'upfront', loadUpFront: true });
+  const slot = create(provider, 'chat-a', { upFrontToolMeta: { 'anthropic/alwaysLoad': true } });
+  assert.equal('upFrontToolMeta' in slot, false);
+  const tools = (await (await connect(t, provider.endpoint(slot.slotId).url)).listTools()).tools;
+  assert.deepEqual(tools.find((tool) => tool.name === 'upfront')?._meta, { 'anthropic/alwaysLoad': true });
+  assert.equal(tools.find((tool) => tool.name === 'probe')?._meta, undefined);
 });
 
 test('a slot without a sink drops its tools\' reports: the call succeeds and no other session gets them', async (t) => {

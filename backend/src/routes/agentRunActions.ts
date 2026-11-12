@@ -1,6 +1,7 @@
 import type express from 'express';
-import { AgentRunActionError, AgentRunActionsService, type ContinueAgentRunRequestV1,
+import { AgentRunActionsService, type ContinueAgentRunRequestV1,
   type SaveAgentRunAsDefinitionRequestV1 } from '../services/agentRunActions';
+import { agentRouteError } from './agentRouteErrors';
 
 export interface AgentRunActionRouteDeps {
   actions: AgentRunActionsService;
@@ -41,14 +42,9 @@ function object(value: unknown): Record<string, any> {
   return value as Record<string, any>;
 }
 
-function sendError(res: express.Response, error: unknown): void {
-  if (error instanceof AgentRunActionError) {
-    res.status(error.code === 'not_found' ? 404 : 400).json({ error: error.code, message: error.message });
-    return;
-  }
-  const message = error instanceof Error ? error.message : 'invalid request';
-  res.status(/reused with a different payload/.test(message) ? 409 : /authentication required/.test(message) ? 401 : 400)
-    .json({ error: message });
+function sendError(req: express.Request, res: express.Response, error: unknown): void {
+  const { status, code, message } = agentRouteError(error, `${req.method} ${req.path}`);
+  res.status(status).json({ error: code, message });
 }
 
 export function mountAgentRunActionRoutes(router: express.Router, deps: AgentRunActionRouteDeps): void {
@@ -56,12 +52,12 @@ export function mountAgentRunActionRoutes(router: express.Router, deps: AgentRun
     try {
       const result = deps.actions.continueAsBranch(owner(req), routeId(req, 'runId'), continueRequest(req.body), deps.operationId(req));
       res.status(201).json(result);
-    } catch (error) { sendError(res, error); }
+    } catch (error) { sendError(req, res, error); }
   });
   router.post('/agent-runs/:runId/save-as-agent', async (req, res) => {
     try {
       const result = await deps.actions.saveAsAgent(owner(req), routeId(req, 'runId'), saveRequest(req.body), deps.operationId(req));
       res.status(201).json(result);
-    } catch (error) { sendError(res, error); }
+    } catch (error) { sendError(req, res, error); }
   });
 }

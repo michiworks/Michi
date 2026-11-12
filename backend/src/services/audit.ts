@@ -1,4 +1,5 @@
-import { getAuditDb } from './db';
+import type { DatabaseSync } from 'node:sqlite';
+import { auditDbUnavailable, getAuditDb } from './db';
 
 export type AuditAction =
   | 'auth.sign_in.success'
@@ -20,9 +21,21 @@ export interface AuditRecord {
   metadata?: Record<string, unknown> | null;
 }
 
+/** For /api/health: present only while audit.db is unavailable and records are dropped. */
+export function auditLogHealth(): { auditLog?: 'unavailable' } {
+  return auditDbUnavailable() ? { auditLog: 'unavailable' } : {};
+}
+
 export function recordAudit(r: AuditRecord): void {
+  let db: DatabaseSync;
   try {
-    const db = getAuditDb();
+    db = getAuditDb();
+  } catch {
+    // getAuditDb logged why, once; until a restart the record is dropped
+    // without another attempt to open (and snapshot) the database.
+    return;
+  }
+  try {
     db.prepare(`
       INSERT INTO audit_log
         (ts, actor_user_id, actor_email, action, target_type, target_id, ip, ua, metadata_json)
@@ -40,7 +53,6 @@ export function recordAudit(r: AuditRecord): void {
     );
   } catch (e) {
     // Audit failures should never break the request — log to console only.
-    // eslint-disable-next-line no-console
     console.error('[audit] failed:', e);
   }
 }

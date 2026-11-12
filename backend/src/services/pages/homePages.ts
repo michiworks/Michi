@@ -6,9 +6,10 @@ import {
 } from 'michi-shared';
 import { ensureAssistant } from '../../assistant/store';
 import { getDb } from '../db';
-import { workspaceOwnerMatches } from '../agentOwner';
+import { ownerMatchParams, ownerMatchSql, workspaceOwnerMatches } from '../agentOwner';
 import { PageWriteError, invalidatePages, pagesTransaction, requirePagesWorkspace } from './core';
 import { getPage, insertHomePage, pageRecord, pendingProposalCount } from './repository';
+import { presentPage } from './checkinSources';
 import { parseLayoutRules } from './layoutRules';
 import { getFirstRun, listFirstRuns } from './firstRun';
 import { firstRunWindowDays } from '../metaAgent/firstRunHistory';
@@ -96,6 +97,10 @@ export function ensureSpacesHomePageId(ownerUserId: string, now = Date.now()): s
   }
 }
 
+/**
+ * The home DTOs below are what the routes send, so their page is presented:
+ * a check-in's source opens the post its run made (checkinSources.ts presentPage).
+ */
 export function getSpacesHome(ownerUserId: string, now = Date.now()): SpacesHomeDto {
   const pageId = ensureSpacesHomePageId(ownerUserId, now);
   pagesTransaction(() => {
@@ -111,7 +116,7 @@ export function getSpacesHome(ownerUserId: string, now = Date.now()): SpacesHome
     }
     db().prepare('INSERT INTO meta(key,value) VALUES(?,?)').run(marker, '1');
   });
-  return { role: 'spaces-home', page: getPage(pageId, ownerUserId), layoutRules: parseLayoutRules(pageRecord(pageId, ownerUserId).layout_rules) };
+  return { role: 'spaces-home', page: presentPage(getPage(pageId, ownerUserId), ownerUserId), layoutRules: parseLayoutRules(pageRecord(pageId, ownerUserId).layout_rules) };
 }
 
 function requireUserWorkspace(workspaceId: string, ownerUserId: string, write = false) {
@@ -158,7 +163,7 @@ export function getWorkspaceHome(workspaceId: string, ownerUserId: string, now =
   const record = pageRecord(pageId, ownerUserId);
   const firstRun = getFirstRun(workspaceId, ownerUserId);
   return {
-    role: 'workspace-home', workspaceId, page: getPage(pageId, ownerUserId), layoutRules: parseLayoutRules(record.layout_rules),
+    role: 'workspace-home', workspaceId, page: presentPage(getPage(pageId, ownerUserId), ownerUserId), layoutRules: parseLayoutRules(record.layout_rules),
     hiddenAt: record.hidden_at, firstRun, firstRunDays: firstRun ? firstRunWindowDays(workspaceId, ownerUserId) : null,
     incremental: incrementalReading(workspaceId, pageId, ownerUserId),
   };
@@ -207,8 +212,8 @@ export function listWorkspaceHomes(ownerUserId: string): WorkspaceHomeSummaryDto
   requireOwner(ownerUserId);
   const rows = db().prepare(`SELECT w.id,w.name,w.owner_user_id,w.settings,p.id AS home_id,p.blocks AS home_blocks,p.hidden_at,p.deleted_at AS home_deleted_at
     FROM workspaces w LEFT JOIN pages p ON p.workspace_id=w.id AND p.role='workspace-home' AND p.owner_user_id=?
-    WHERE w.deleted_at IS NULL AND w.purged_at IS NULL AND w.archived_at IS NULL AND (w.owner_user_id=? OR (?='local-user' AND ?<>'1'))
-    ORDER BY w.created_at,w.id`).all(ownerUserId, ownerUserId, ownerUserId, process.env.MICHI_CLOUD ?? '') as unknown as Array<{
+    WHERE w.deleted_at IS NULL AND w.purged_at IS NULL AND w.archived_at IS NULL AND ${ownerMatchSql()}
+    ORDER BY w.created_at,w.id`).all(ownerUserId, ...ownerMatchParams(ownerUserId)) as unknown as Array<{
       id: string; name: string; owner_user_id: string | null; settings: string | null;
       home_id: string | null; home_blocks: string | null; hidden_at: number | null; home_deleted_at: number | null;
     }>;
@@ -220,19 +225,4 @@ export function listWorkspaceHomes(ownerUserId: string): WorkspaceHomeSummaryDto
       return { workspaceId: row.id, workspaceName: row.name, homePageId: home ? row.home_id : null,
         hasContent: home && homeHasContent(row.home_blocks), hiddenAt: home ? row.hidden_at : null, firstRun: runs.get(row.id) ?? null, pendingProposals: home ? pendingProposalCount([row.home_id!]) : 0 };
     });
-}
-
-/**
- * Whether a page may appear in the owner's Home lists: a live page in a live,
- * unarchived user workspace, or the owner's own Spaces Home.
- */
-export function pageShownOnHome(
-  page: { role: string | null; deleted_at: number | null; owner_user_id: string },
-  workspace: Pick<WorkspaceRow, 'owner_user_id' | 'settings' | 'deleted_at' | 'archived_at' | 'purged_at'>,
-  ownerUserId: string,
-): boolean {
-  if (page.deleted_at !== null || page.owner_user_id !== ownerUserId) return false;
-  if (workspace.deleted_at !== null || workspace.purged_at !== null || workspace.archived_at !== null) return false;
-  if (!workspaceOwnerMatches(workspace.owner_user_id, ownerUserId)) return false;
-  return !isSystemWorkspaceSettings(workspace.settings) || page.role === 'spaces-home';
 }

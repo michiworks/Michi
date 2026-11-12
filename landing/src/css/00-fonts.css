@@ -1,0 +1,103 @@
+/* ==========================================================================
+   1. Fonts (owner: shell)
+   Geist 400/500/600/700 and Geist Mono 400/500/700, OFL, from @fontsource
+   (geist 5.2.9, geist-mono 5.2.8), latin subset, self-hosted (brief §8.2).
+   The head preloads geist-latin-400 and geist-latin-700 only. No
+   unicode-range: the page is Latin only, and a glyph the subset lacks (↗ ↵ ✓)
+   falls back per character to the next family either way.
+   ========================================================================== */
+
+@font-face {
+  font-family: "Geist";
+  font-weight: 400;
+  font-display: swap;
+  src: url("assets/fonts/geist-latin-400-normal.woff2") format("woff2");
+}
+@font-face {
+  font-family: "Geist";
+  font-weight: 500;
+  font-display: swap;
+  src: url("assets/fonts/geist-latin-500-normal.woff2") format("woff2");
+}
+@font-face {
+  font-family: "Geist";
+  font-weight: 600;
+  font-display: swap;
+  src: url("assets/fonts/geist-latin-600-normal.woff2") format("woff2");
+}
+@font-face {
+  font-family: "Geist";
+  font-weight: 700;
+  font-display: swap;
+  src: url("assets/fonts/geist-latin-700-normal.woff2") format("woff2");
+}
+@font-face {
+  font-family: "Geist Mono";
+  font-weight: 400;
+  font-display: swap;
+  src: url("assets/fonts/geist-mono-latin-400-normal.woff2") format("woff2");
+}
+@font-face {
+  font-family: "Geist Mono";
+  font-weight: 500;
+  font-display: swap;
+  src: url("assets/fonts/geist-mono-latin-500-normal.woff2") format("woff2");
+}
+@font-face {
+  font-family: "Geist Mono";
+  font-weight: 700;
+  font-display: swap;
+  src: url("assets/fonts/geist-mono-latin-700-normal.woff2") format("woff2");
+}
+
+/* Metric-matched fallback faces (brief §7.3: Geist upem 1000, ascent 1005,
+   descent 295), one per weight the page uses. size-adjust is each Geist
+   weight's width over its Arial face, measured in Chromium on this page's own
+   text (2026-11-04), so lines break the same before and after the woff2 files
+   swap in (CLS 0). 600 maps to Arial Bold, as it reads closer than a wider
+   Arial Regular. The ascent and descent overrides undo the size-adjust. */
+@font-face {
+  font-family: "Geist Fallback";
+  src: local("Arial");
+  font-weight: 400;
+  size-adjust: 102.27%;
+  ascent-override: 98.27%;
+  descent-override: 28.85%;
+  line-gap-override: 0%;
+}
+@font-face {
+  font-family: "Geist Fallback";
+  src: local("Arial");
+  font-weight: 500;
+  size-adjust: 104.66%;
+  ascent-override: 96.03%;
+  descent-override: 28.19%;
+  line-gap-override: 0%;
+}
+@font-face {
+  font-family: "Geist Fallback";
+  src: local("Arial Bold");
+  font-weight: 600;
+  size-adjust: 99.36%;
+  ascent-override: 101.15%;
+  descent-override: 29.69%;
+  line-gap-override: 0%;
+}
+@font-face {
+  font-family: "Geist Fallback";
+  src: local("Arial Bold");
+  font-weight: 700;
+  size-adjust: 101.55%;
+  ascent-override: 98.97%;
+  descent-override: 29.05%;
+  line-gap-override: 0%;
+}
+@font-face {
+  font-family: "Geist Mono Fallback";
+  src: local("Courier New");
+  font-weight: 400 700;
+  size-adjust: 99.98%;
+  ascent-override: 100.52%;
+  descent-override: 29.50%;
+  line-gap-override: 0%;
+}

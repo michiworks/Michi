@@ -1,3 +1,5 @@
+import { randomUuid } from 'michi-shared';
+
 export type PaneItemKind = 'launcher' | 'files' | 'review' | 'file' | 'diff' | 'terminal' | 'browser' | 'agent-run' | 'page' | 'workflow-run';
 export type PaneLauncherChoice = 'review' | 'terminal' | 'browser' | 'files' | 'side-chat';
 
@@ -53,6 +55,10 @@ export interface TerminalPaneItem extends PaneItemBase {
   kind: 'terminal';
   surfaceId: string;
   cwd: string;
+  /** A terminal a Michi backend runs (state/terminalTarget.ts); absent: Electron's local PTY when present. */
+  transport?: 'backend';
+  /** The backend that runs it; absent means this window's own. */
+  backendConnectionId?: string;
 }
 
 export interface BrowserPaneItem extends PaneItemBase {
@@ -134,7 +140,11 @@ export function isPaneItem(value: unknown): value is PaneItem {
     return true;
   }
   if (item.kind === 'diff') return typeof item.filePath === 'string';
-  if (item.kind === 'terminal') return typeof item.surfaceId === 'string' && typeof item.cwd === 'string';
+  if (item.kind === 'terminal') {
+    return typeof item.surfaceId === 'string' && typeof item.cwd === 'string'
+      && (item.transport === undefined || item.transport === 'backend')
+      && (item.backendConnectionId === undefined || typeof item.backendConnectionId === 'string');
+  }
   if (item.kind === 'browser') return typeof item.surfaceId === 'string' && typeof item.url === 'string';
   if (item.kind === 'page') {
     return typeof item.backendConnectionId === 'string'
@@ -174,10 +184,7 @@ export function workflowRunPaneId(backendConnectionId: string, runId: string): s
 }
 
 export function uniquePaneId(kind: 'launcher' | 'terminal' | 'browser'): string {
-  const token = typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
-    ? crypto.randomUUID()
-    : `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
-  return `pane:${kind}:${token}`;
+  return `pane:${kind}:${randomUuid()}`;
 }
 
 export function paneItemTitle(item: PaneItem): string {
@@ -193,6 +200,8 @@ export function paneItemTitle(item: PaneItem): string {
   if (item.kind === 'workflow-run') return 'Workflow';
   return item.kind === 'terminal' ? 'Terminal' : 'Browser';
 }
+
+export const DEFAULT_BROWSER_URL = 'https://www.google.com/';
 
 export function normalizeBrowserUrl(value: string): string | null {
   const trimmed = value.trim();

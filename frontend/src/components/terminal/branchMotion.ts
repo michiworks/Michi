@@ -1,6 +1,7 @@
 import { prefersReducedMotion } from '../../hooks/useReducedMotion';
 import type { ProjectEdge } from '../../state/chatTypes';
 import { PANE_EASE } from './paneMotion';
+import { isBranchEdge } from '../../state/tree';
 
 /**
  * How a new branch arrives on a phone, which shows one pane at a time.
@@ -25,7 +26,7 @@ const FRESH_MS = 1000;
 export interface BranchFlightOrigin { x: number; y: number }
 
 export function isFreshBranch(edges: readonly ProjectEdge[] | undefined, nodeId: string, now = Date.now()): boolean {
-  return !!edges?.some(edge => edge.target === nodeId && (edge.kind ?? 'branch') === 'branch'
+  return !!edges?.some(edge => edge.target === nodeId && isBranchEdge(edge)
     && edge.createdAt !== undefined && now - edge.createdAt < FRESH_MS);
 }
 
@@ -34,7 +35,7 @@ export function branchMotionAllowed(): boolean {
 }
 
 export function branchMotionReduced(): boolean {
-  return prefersReducedMotion(document.documentElement.dataset.reduceMotion === 'on');
+  return prefersReducedMotion();
 }
 
 /**

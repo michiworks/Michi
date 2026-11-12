@@ -1,4 +1,4 @@
-import React, { useEffect, useId, useState } from 'react';
+import { useEffect, useId, useState } from 'react';
 import { isCrewMemoryMode, type CrewMemoryMode } from 'michi-shared';
 import { toast } from 'sonner';
 import { backendFetch } from '../../services/api/backendRequest';
@@ -86,6 +86,6 @@ export function CrewMemorySettings({ apiBase }: { apiBase: string }) {
       {!memory.mode && <option value="" disabled>{memory.error ? 'Unavailable' : 'Loading…'}</option>}
       {CREW_MEMORY_CHOICES.map((item) => <option key={item.mode} value={item.mode}>{item.label}</option>)}
     </select>
-    {memory.error && <div role="alert" style={{ fontSize: 'var(--fs-sm)', color: 'var(--term-danger)', marginTop: 6 }}>{memory.error}</div>}
+    {memory.error && <div role="alert" style={{ fontSize: 'var(--fs-sm)', color: 'var(--term-danger-text)', marginTop: 6 }}>{memory.error}</div>}
   </div>;
 }

@@ -5,24 +5,32 @@ import {
 } from '../chatStreamEvents';
 import type { CancelRecoveryStatus, StreamHandlers } from '../chatStreamEvents';
 import { startupMark } from '../startupTrace';
-import { backendApiBase, nodeBackendApiBase } from '../../config/backendConnections';
+import { backendApiBase, LOCAL_BACKEND_CONNECTION_ID, nodeBackendApiBase } from '../../config/backendConnections';
+import { isServerAttentionEvent, receiveServerAttentionFrame } from '../serverAttentionStore';
 import { backendFetch } from './backendRequest';
 import { SseHttpError, readSseStream } from './sseParser';
+import { shouldRetryRequest } from './httpError';
 import { fetchStream } from './streamTransport';
+import { abortableDelay } from '../../utils/sleep';
 import { metaAgentTurnContextFor } from './assistant';
 import type {
   ChatStreamEnvelope,
   ChatStreamEvent,
   ChatStreamPayloads,
+  MetaAgentChatTurnContext,
   ScheduledJobRunEvent,
   ScheduledJobsChangedEvent,
   SteerMessageOptions,
+  WorkspaceStructureChangedEvent,
 } from 'michi-shared';
 import {
   isScheduledJobRunEvent,
   isScheduledJobsChangedEvent,
+  isWorkspaceStructureChangedEvent,
+  randomUuid,
   SCHEDULED_JOB_RUN_EVENT,
   SCHEDULED_JOBS_CHANGED_EVENT,
+  WORKSPACE_STRUCTURE_CHANGED_EVENT,
 } from 'michi-shared';
 
 let cachedStreamProbeEnabled: boolean | null = null;
@@ -69,15 +77,6 @@ export interface ExportRequestPayload {
   }>;
   cwd?: string;
   nodeIds?: string[];
-}
-
-function createClientTurnId(): string {
-  if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
-    return crypto.randomUUID();
-  }
-  // Web Crypto is available in every supported renderer, but retaining a
-  // fallback keeps the transport usable in stripped-down test/webview hosts.
-  return `turn-${Date.now()}-${Math.random().toString(36).slice(2, 12)}`;
 }
 
 /** GET /chats/:chatId/turns/:turnId: one turn's saved receipt, read once its
@@ -144,6 +143,8 @@ export function streamMessage(
       attachments?: Array<{ name: string; absPath: string }>;
       comments?: Array<Record<string, unknown>>;
     };
+    /** Run this skill with the message (`text` is what the user wrote after the command, and may be empty). */
+    skill?: import('michi-shared').SkillInvocationRequest;
   },
 ): () => void {
   stopCancellationObservation(nodeId);
@@ -164,13 +165,11 @@ export function streamMessage(
   // after the server began the turn but before any SSE bytes reach us.
   // The server requires nodeId for a durable foreground turn. Preserve the
   // legacy no-node helper behavior used by a few lightweight callers/tests.
-  const clientTurnId = nodeId ? (durable?.turnId ?? createClientTurnId()) : '';
+  const clientTurnId = nodeId ? (durable?.turnId ?? randomUuid()) : '';
   if (clientTurnId) locallyOwnedTurns.add(ownedTurnKey(nodeId, clientTurnId));
   let resumeTurnId = clientTurnId;
   let resumeSeq = -1;
-  let resumeCancel: (() => void) | null = null;
-  let resumeTimer: ReturnType<typeof setTimeout> | null = null;
-  let resumeAttempt = 0;
+  let resumeReplay: (() => void) | null = null;
   let cancelledByUser = false;
   let waitingForTurn = false;
   let sawFirstByte = false;
@@ -211,31 +210,22 @@ export function streamMessage(
   };
 
   const resumeForeground = (): boolean => {
-    if (!resumeTurnId || cancelledByUser || resumeCancel || resumeTimer) return false;
-    resumeCancel = subscribeChat(nodeId, {
-      ...handlers,
-      onEnvelope: acceptEnvelope,
-      onDone: (...args) => { terminalSeen = true; handlers.onDone?.(...args); },
-      onErrorPayload: handlers.onErrorPayload ? (data) => { terminalSeen = true; handlers.onErrorPayload?.(data); } : undefined,
-      onError: (...args) => { terminalSeen = true; handlers.onError?.(...args); },
-    }, { turnId: resumeTurnId, seq: resumeSeq + 1 }, {
-      onOpen: () => { resumeAttempt = 0; },
-      onDisconnect: (result) => {
-        resumeCancel = null;
-        if (terminalSeen || cancelledByUser || settled) return;
-        if (!result.retryable) {
-          const message = result.error?.message ?? 'turn replay unavailable';
-          const code = result.error instanceof SseHttpError && result.error.code ? result.error.code : 'turn_outcome_unknown';
-          if (code === 'turn_replay_unavailable' || code === 'backend_restarted') finishFromSavedTurn(message, code);
-          else settleError(message, code);
-          return;
-        }
-        const delay = Math.min(5_000, 250 * (2 ** resumeAttempt++));
-        resumeTimer = setTimeout(() => {
-          resumeTimer = null;
-          if (!resumeForeground()) settleError('turn replay ended before completion');
-        }, delay);
+    if (!resumeTurnId || cancelledByUser || resumeReplay) return false;
+    resumeReplay = reattachTurnReplay(nodeId, {
+      turnId: resumeTurnId,
+      nextSeq: () => resumeSeq + 1,
+      handlers: {
+        ...handlers,
+        onEnvelope: acceptEnvelope,
+        onDone: (...args) => { terminalSeen = true; handlers.onDone?.(...args); },
+        onErrorPayload: handlers.onErrorPayload ? (data) => { terminalSeen = true; handlers.onErrorPayload?.(data); } : undefined,
+        onError: (...args) => { terminalSeen = true; handlers.onError?.(...args); },
       },
+      isCurrent: () => !terminalSeen && !cancelledByUser && !settled,
+      // A message turn is never the backend's own; its outcome is unknown, never a reason to send it again.
+      onBackgroundOwned: (message) => settleError(message, 'turn_outcome_unknown'),
+      onReplayGone: finishFromSavedTurn,
+      onUnavailable: settleError,
     });
     return true;
   };
@@ -279,6 +269,7 @@ export function streamMessage(
         payload.enableKiroSidecarTitle = durable.enableKiroSidecarTitle;
       }
       if (durable?.userMetadata) payload.userMetadata = durable.userMetadata;
+      if (durable?.skill) payload.skill = durable.skill;
       const metaAgentContext = nodeId ? metaAgentTurnContextFor(nodeId) : undefined;
       if (metaAgentContext) payload.metaAgentContext = metaAgentContext;
       const requestBody = JSON.stringify(payload);
@@ -304,21 +295,13 @@ export function streamMessage(
         // Never retry ambiguous network failures or other kinds of conflict.
         if (res.status === 409 && body?.code === 'turn_active') {
           waitingForTurn = true;
-          await new Promise<void>((resolve, reject) => {
-            const onAbort = () => {
-              clearTimeout(timer);
-              reject(controller.signal.reason);
-            };
-            const timer = setTimeout(() => {
-              controller.signal.removeEventListener('abort', onAbort);
-              resolve();
-            }, Math.min(2_000, 250 * (2 ** Math.min(busyAttempt++, 3))));
-            controller.signal.addEventListener('abort', onAbort, { once: true });
-            if (controller.signal.aborted) onAbort();
-          });
+          await abortableDelay(Math.min(2_000, 250 * (2 ** Math.min(busyAttempt++, 3))), controller.signal);
           continue;
         }
         const message = body && typeof body.error === 'string' ? body.error : `stream failed: ${res.status}`;
+        // A gateway's 502/504 (the desktop proxy's included) may follow a write
+        // that reached the backend, so it does not prove the turn never began.
+        if (res.status === 502 || res.status === 504) throw new Error(message);
         throw Object.assign(new Error(message), { code: typeof body?.code === 'string' ? body.code : undefined, rejected: true });
       }
       sawFirstByte = true;
@@ -399,10 +382,8 @@ export function streamMessage(
     cancelledByUser = true;
     settleAborted();
     clearWatchdog();
-    if (resumeTimer) clearTimeout(resumeTimer);
-    resumeTimer = null;
     controller.abort();
-    resumeCancel?.();
+    resumeReplay?.();
     savedTurnRead?.abort();
     // Withdrawing a message that was explicitly rejected as busy must leave
     // the previous response running. There is no backend turn to cancel yet.
@@ -415,10 +396,17 @@ export function streamMessage(
   };
 }
 
+/**
+ * Steers `text` into the chat's running turn. `metaAgentContext`: for the
+ * agent's conversation V only (the backend refuses it elsewhere), what the
+ * steered message carried when the user queued it, so its check-in or
+ * collector references taint the running turn (§2.8 T4) as a send would.
+ */
 export async function steerChat(
   chatId: string,
   text: string,
   options?: SteerMessageOptions,
+  metaAgentContext?: MetaAgentChatTurnContext | null,
 ): Promise<{ accepted: boolean; pending?: boolean; reason?: string; message?: ChatStreamPayloads['steer_accepted'] & ChatStreamEnvelope }> {
   const res = await backendFetch(`${nodeBackendApiBase(chatId)}/chats/${chatId}/steer`, {
     method: 'POST',
@@ -426,6 +414,7 @@ export async function steerChat(
     body: JSON.stringify({
       text,
       ...options,
+      ...(metaAgentContext ? { metaAgentContext } : {}),
     }),
   });
   const body = await res.json().catch(() => ({ accepted: false }));
@@ -630,13 +619,7 @@ export function subscribeChat(
     } catch (err) {
       const original = err instanceof Error ? err : new Error(String(err));
       const error = watchdogTimedOut ? new Error('turn replay stalled — no data received') : original;
-      disconnect = {
-        retryable: !(original instanceof SseHttpError)
-          || original.status >= 500
-          || original.status === 408
-          || original.status === 429,
-        error,
-      };
+      disconnect = { retryable: shouldRetryRequest(original), error };
       if (!stopped) opts.onError?.(error);
     } finally {
       clearWatchdog();
@@ -648,6 +631,68 @@ export function subscribeChat(
     clearWatchdog();
     controller.abort();
   };
+}
+
+/** Reattaching one turn to its replay: what the caller does when it ends other than by the turn's own terminal frame. */
+export interface TurnReplayReattach {
+  turnId: string;
+  /** The first seq this window has not applied. */
+  nextSeq: () => number;
+  handlers: StreamHandlers;
+  /** False once the turn no longer owns what this window shows: the replay then stops, and onStale runs. */
+  isCurrent: () => boolean;
+  onStale?: () => void;
+  /** A runtime self-turn: the shared background feed delivers it. */
+  onBackgroundOwned: (message: string) => void;
+  /** The live replay is gone: the saved turn decides. */
+  onReplayGone: (message: string, code: 'turn_replay_unavailable' | 'backend_restarted') => void;
+  /** Any other refusal. The outcome is unknown: Retry inspects the turn, never sends its prompt again. */
+  onUnavailable: (message: string, code: 'turn_outcome_unknown') => void;
+}
+
+/**
+ * Reattach one current turn to its replay (fromSeq is inclusive),
+ * reconnecting a dropped replay after 250 ms, doubling to 5 s, from 250 ms
+ * again once a reconnect opens. Returns stop.
+ */
+export function reattachTurnReplay(chatId: string, options: TurnReplayReattach): () => void {
+  let stopped = false;
+  let detach: (() => void) | null = null;
+  let retry: ReturnType<typeof setTimeout> | undefined;
+  let attempt = 0;
+  const stop = () => {
+    stopped = true;
+    clearTimeout(retry);
+    detach?.();
+  };
+  const current = (): boolean => {
+    if (options.isCurrent()) return true;
+    stop();
+    options.onStale?.();
+    return false;
+  };
+  const connect = () => {
+    detach = subscribeChat(chatId, options.handlers, { turnId: options.turnId, seq: options.nextSeq() }, {
+      onOpen: () => { attempt = 0; },
+      onDisconnect: ({ retryable, error }) => {
+        detach = null;
+        if (stopped || !current()) return;
+        if (retryable) {
+          retry = setTimeout(() => { if (current()) connect(); }, Math.min(5_000, 250 * (2 ** attempt++)));
+          return;
+        }
+        stop();
+        const refused = error instanceof SseHttpError ? error : undefined;
+        const message = error?.message ?? 'turn replay unavailable';
+        if (refused?.code === 'turn_background_owned') options.onBackgroundOwned(message);
+        else if (refused && (refused.code === 'turn_replay_unavailable' || refused.code === 'backend_restarted' || (refused.status === 410 && !refused.code))) {
+          options.onReplayGone(message, refused.code === 'backend_restarted' ? 'backend_restarted' : 'turn_replay_unavailable');
+        } else options.onUnavailable(message, 'turn_outcome_unknown');
+      },
+    });
+  };
+  connect();
+  return stop;
 }
 
 export interface BackgroundDisconnect {
@@ -664,11 +709,13 @@ export interface SubscribeBackgroundOptions {
    * Reconcile an evicted replay cursor before any later frame is delivered.
    * The parser awaits this callback, turning the control frame into a real
    * ordering barrier instead of racing a stale snapshot against live data.
+   * It resolves the background cursor the snapshot installed, if it
+   * installed one; the silence watchdog waits while it runs.
    */
   onReplayGap?: (
     gap: { chatId: string; nodeId?: string; turnId: string; seq: number },
     signal: AbortSignal,
-  ) => void | Promise<void>;
+  ) => void | ReplayGapInstall | undefined | Promise<void | ReplayGapInstall | undefined>;
   /**
    * A scheduled run started, finished or needs attention. Not awaited: the
    * thread it created is installed asynchronously and must not stall the feed.
@@ -676,15 +723,87 @@ export interface SubscribeBackgroundOptions {
   onScheduledJobRun?: (event: ScheduledJobRunEvent) => void;
   /** A job was created, edited or deleted (another window or an agent tool). */
   onScheduledJobsChanged?: (event: ScheduledJobsChangedEvent) => void;
+  /**
+   * Workspaces, trees or threads changed (any window, a tool, a scheduled
+   * run). The first frame of each subscription carries only the cursor. Not
+   * awaited: the re-read it asks for must not stall chat events.
+   */
+  onWorkspaceStructureChanged?: (event: WorkspaceStructureChangedEvent) => void;
+}
+
+/** The background cursor a replay-gap reconcile installed for the gap's chat. */
+export interface ReplayGapInstall {
+  turnId: string;
+  seq: number;
 }
 
 const OBSERVER_SILENCE_TIMEOUT_MS = 30_000;
 
-function observerDisconnectFor(error: Error): BackgroundDisconnect {
-  return {
-    retryable: !(error instanceof SseHttpError) || error.status >= 500,
-    error,
-  };
+/**
+ * What the rest of one subscription delivers for a chat whose replay gap
+ * installed a snapshot. The server replays that chat from the gap's durable
+ * cursor, and the snapshot, read later, can be past it:
+ * - when the node's turn changed during the read, the gap's turn had ended
+ *   and its body holds all of that turn: its replayed frames are dropped
+ *   (the sequence gate would apply them, being another turn than the cursor);
+ * - the sequence gate drops the installed turn's frames the body holds. A
+ *   permission prompt is not part of a body, so those frames are delivered
+ *   unsequenced instead, as the server's own recovery frames are: they leave
+ *   the cursor alone, and their reducers set or clear the prompt by request id.
+ */
+function afterInstalledGap(
+  event: ChatStreamEvent,
+  installed: { gapTurnId: string; turnId: string; seq: number } | undefined,
+): ChatStreamEvent | null {
+  const { turnId, seq } = event.data;
+  if (!installed || !turnId) return event;
+  if (turnId === installed.gapTurnId && turnId !== installed.turnId) return null;
+  if (turnId === installed.turnId && typeof seq === 'number' && seq <= installed.seq
+    && (event.event === CHAT_STREAM_EVENTS.permissionRequest || event.event === CHAT_STREAM_EVENTS.permissionResolved)) {
+    return { ...event, data: { ...event.data, seq: undefined } } as ChatStreamEvent;
+  }
+  return event;
+}
+
+/** The latest turn SQLite applied for a chat (POST /chats/background/cursors). */
+export interface DurableChatCursor {
+  turnId: string;
+  seq: number;
+  nodeId: string;
+}
+
+/**
+ * What the backend applied for these chats, read without the background feed.
+ * Chats it holds no turn for are absent; null when the read fails.
+ */
+export async function fetchBackgroundCursors(
+  chatIds: string[],
+  connectionId?: string,
+  signal?: AbortSignal,
+): Promise<Record<string, DurableChatCursor> | null> {
+  try {
+    const res = await backendFetch(`${backendApiBase(connectionId)}/chats/background/cursors`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ chatIds }),
+      signal,
+    });
+    if (!res.ok) return null;
+    const body = await res.json() as { cursors?: unknown } | null;
+    const raw = body?.cursors;
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
+    const out: Record<string, DurableChatCursor> = {};
+    for (const [chatId, value] of Object.entries(raw as Record<string, unknown>)) {
+      const cursor = value as Partial<DurableChatCursor> | null;
+      if (cursor && typeof cursor.turnId === 'string' && cursor.turnId && typeof cursor.seq === 'number'
+        && typeof cursor.nodeId === 'string' && cursor.nodeId) {
+        out[chatId] = { turnId: cursor.turnId, seq: cursor.seq, nodeId: cursor.nodeId };
+      }
+    }
+    return out;
+  } catch {
+    return null;
+  }
 }
 
 /**
@@ -708,6 +827,14 @@ export function subscribeBackground(
     clearWatchdog();
     watchdog = setTimeout(() => controller.abort(), OBSERVER_SILENCE_TIMEOUT_MS);
   };
+  // Chats whose replay gap installed a snapshot on this subscription.
+  const installedGaps = new Map<string, { gapTurnId: string; turnId: string; seq: number }>();
+  const deliver = (parsed: ChatStreamEvent) => {
+    const chatId = parsed.data.chatId;
+    if (!chatId) return;
+    const event = afterInstalledGap(parsed, installedGaps.get(chatId));
+    if (event) dispatchChatStreamEvent(event, handlersForChat(chatId, event.data.nodeId));
+  };
 
   (async () => {
     let disconnect: BackgroundDisconnect = { retryable: true };
@@ -724,6 +851,11 @@ export function subscribeBackground(
       const reader = res.body.getReader();
       armWatchdog();
       await readSseStream(reader, (evt, data) => {
+        // Server-decided notifications (serverAttentionStore.ts); never awaited.
+        if (isServerAttentionEvent(evt)) {
+          receiveServerAttentionFrame(connectionId ?? LOCAL_BACKEND_CONNECTION_ID, evt, data);
+          return;
+        }
         if (evt === SCHEDULED_JOB_RUN_EVENT) {
           try {
             const event: unknown = JSON.parse(data);
@@ -742,6 +874,15 @@ export function subscribeBackground(
           }
           return;
         }
+        if (evt === WORKSPACE_STRUCTURE_CHANGED_EVENT) {
+          try {
+            const event: unknown = JSON.parse(data);
+            if (isWorkspaceStructureChangedEvent(event)) opts.onWorkspaceStructureChanged?.(event);
+          } catch {
+            // Malformed control frames are ignored like malformed events.
+          }
+          return;
+        }
         if (evt === 'background_sync_required') {
           let gap: Record<string, unknown> | null = null;
           try {
@@ -754,16 +895,40 @@ export function subscribeBackground(
             && typeof gap.chatId === 'string'
             && typeof gap.turnId === 'string'
             && typeof gap.seq === 'number'
+            && opts.onReplayGap
           ) {
+            const chatId = gap.chatId;
+            const gapTurnId = gap.turnId;
+            const settle = (installed: void | ReplayGapInstall | undefined) => {
+              if (installed) installedGaps.set(chatId, { gapTurnId, turnId: installed.turnId, seq: installed.seq });
+            };
+            // No frame is read while the reconcile reads the backend: the
+            // silence watchdog must not abort the feed, and with it the
+            // reconcile's own signal, under it. Those reads carry their own
+            // timeouts; the watchdog restarts once the barrier lifts.
+            clearWatchdog();
+            const rearm = () => { if (!stopped) armWatchdog(); };
+            let result: ReturnType<NonNullable<SubscribeBackgroundOptions['onReplayGap']>>;
+            try {
+              result = opts.onReplayGap({
+                chatId,
+                nodeId: typeof gap.nodeId === 'string' ? gap.nodeId : undefined,
+                turnId: gapTurnId,
+                seq: gap.seq,
+              }, controller.signal);
+            } catch (error) {
+              rearm();
+              throw error;
+            }
+            if (!(result instanceof Promise)) {
+              settle(result);
+              rearm();
+              return;
+            }
             // Deliberately returned (awaited by readSseStream): reconciliation
             // failures must close this feed so the transport reconnects and
             // retries the same durable gap instead of silently moving on.
-            return opts.onReplayGap?.({
-              chatId: gap.chatId,
-              nodeId: typeof gap.nodeId === 'string' ? gap.nodeId : undefined,
-              turnId: gap.turnId,
-              seq: gap.seq,
-            }, controller.signal);
+            return result.then(settle).finally(rearm);
           }
           return;
         }
@@ -776,17 +941,15 @@ export function subscribeBackground(
           const nodeId = parsed.data.nodeId ?? parsed.data.chatId;
           if (parsed.data.turnId && locallyOwnedTurns.has(ownedTurnKey(nodeId, parsed.data.turnId))) return;
           // Use the same identifier scoping and sequence gate as self-turns.
-          dispatchChatStreamEvent(parsed, handlersForChat(parsed.data.chatId, parsed.data.nodeId));
+          deliver(parsed);
           return;
         }
         const parsed = parseChatStreamEvent(evt, data);
-        const chatId = parsed?.data.chatId;
-        if (!parsed || !chatId) return;
-        dispatchChatStreamEvent(parsed, handlersForChat(chatId, parsed.data.nodeId));
+        if (parsed) deliver(parsed);
       }, { onRead: () => armWatchdog(), shouldStop: () => stopped });
     } catch (err) {
       const error = err instanceof Error ? err : new Error(String(err));
-      disconnect = observerDisconnectFor(error);
+      disconnect = { retryable: shouldRetryRequest(error), error };
       if (!stopped) {
         controller.abort();
         opts.onError?.(error);

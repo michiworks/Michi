@@ -1,4 +1,4 @@
-import React, { Suspense } from 'react';
+import React from 'react';
 import { ChevronDown, Folder, GitBranch, MessageSquare, X } from 'lucide-react';
 import { useChatProjects } from '../../../../state/chatStore';
 import { isSystemWorkspace } from '../../../../state/assistant/systemWorkspace';
@@ -13,11 +13,13 @@ import {
 import { ActionMenu } from '../../../ui/ActionMenu';
 import { Button } from '../../../ui/controls';
 import { ComposerShell } from '../../ComposerShell';
+import { escapeTakenBefore } from '../../../composerEscape';
+import { isImeComposing } from '../../../../lib/ime';
 import type { MentionEditorHandle } from '../../../MentionEditor';
-import type { MentionRecord } from '../../../mentions';
+import LazyMentionEditor from '../../../LazyMentionEditor';
+import type { MentionRecord } from '../../../../lib/mentions';
 import './conversation.css';
 
-const MentionEditor = React.lazy(() => import('../../../MentionEditor'));
 const NONE: never[] = [];
 
 /**
@@ -77,7 +79,9 @@ export function NewChatSheet({ sheet, scope }: { sheet: NewChatSheetState; scope
       className="space-new-chat"
       aria-label="Start a task"
       onKeyDown={(event) => {
-        if (event.key === 'Escape' && !event.defaultPrevented && !menuAnchor) { event.preventDefault(); closeNewChatSheet(); }
+        if (event.key !== 'Escape' || isImeComposing(event) || menuAnchor || escapeTakenBefore(event.nativeEvent)) return;
+        event.preventDefault();
+        closeNewChatSheet();
       }}
     >
       <ComposerShell
@@ -107,21 +111,19 @@ export function NewChatSheet({ sheet, scope }: { sheet: NewChatSheetState; scope
           </div>
         )}
         input={(
-          <Suspense fallback={<div className="composer-loading-stub" />}>
-            <MentionEditor
-              ref={editorRef}
-              value={draft.value}
-              mentions={draft.mentions}
-              onChange={setDraft}
-              className="hide-sb space-new-chat__input"
-              data-testid="space-new-chat-input"
-              artifacts={NONE}
-              sameTreeNodes={NONE}
-              currentNodeId="__space_new_chat__"
-              enableSlash={false}
-              onSubmit={start}
-            />
-          </Suspense>
+          <LazyMentionEditor
+            ref={editorRef}
+            value={draft.value}
+            mentions={draft.mentions}
+            onChange={setDraft}
+            className="hide-sb space-new-chat__input"
+            data-testid="space-new-chat-input"
+            artifacts={NONE}
+            sameTreeNodes={NONE}
+            currentNodeId="__space_new_chat__"
+            enableSlash={false}
+            onSubmit={start}
+          />
         )}
         toolbarLeft={(
           <span className="space-new-chat__runtime">

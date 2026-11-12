@@ -19,8 +19,8 @@ data owner. Local auth therefore continues to use shared local credentials,
 the desktop Agent identity, and ownerless workspace history. Do not manually
 inject a login identity as a desktop data owner in new request adapters.
 Local CLI subprocesses may access only the existing loopback MCP slot/group
-and Codex stop-hook capability routes without a browser cookie; those routes
-still validate their own slot and active-session binding. This exception does
+routes without a browser cookie; those routes still validate their own slot
+and active-session binding. This exception does
 not include ordinary API paths and does not apply in cloud mode.
 
 Request-facing persistence routes apply `requireRequestAccess` and obtain

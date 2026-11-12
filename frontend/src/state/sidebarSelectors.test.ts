@@ -2,8 +2,6 @@ import { describe, it, expect } from 'vitest';
 import { sortLiveProjects, mergeReferences, selectProjectNodeStatuses } from './sidebarSelectors';
 import type { Project, ChatNodeState } from './chatTypes';
 
-const empty = { workspaces: {}, threads: {}, branches: {} };
-
 describe('selectProjectNodeStatuses', () => {
   it('collects only non-idle statuses from the requested workspace', () => {
     const nodes = {

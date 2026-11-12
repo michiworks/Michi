@@ -1,17 +1,15 @@
-import { artifactTypeForPath, artifactHasImagePreview } from 'michi-shared';
+import { artifactTypeForPath } from 'michi-shared';
 import React from 'react';
 import { Lightbox } from '../Lightbox';
-import { artifactImageUrl, downloadArtifactFile } from '../../../services/api/artifacts';
 import { toast } from 'sonner';
 import type { PageId } from '../../../state/commands';
 import { useChatStore, useChatNodesSnapshot } from '../../../state/chatStore';
 import { getElectron } from '../../../lib/electronBridge';
+import { openArtifact, showArtifactInDrawer } from '../artifacts/artifactOpen';
 import { importWorkspaceFileUpload, type UploadProgress } from '../../../services/api';
 import { sanitizeContextName } from '../../../lib/sanitizeContextName';
-import { navigateToNode } from '../../../state/navigateToNode';
-import { findTreeIdForNode } from '../../../state/tree';
 import UploadProgressBar, { type UploadProgressViewState } from '../../UploadProgressBar';
-import { deriveDigests, deriveHeaderCounts } from '../manage/derive';
+import { deriveDigests, deriveHeaderCounts, deriveTreeRows } from '../manage/derive';
 import ManageHeader from '../manage/ManageHeader';
 import ManageComposer from '../manage/ManageComposer';
 import ManageTabs from '../manage/ManageTabs';
@@ -20,6 +18,11 @@ import ContextList from '../manage/ContextList';
 import DigestList from '../manage/DigestList';
 import ManageSidebar from '../manage/ManageSidebar';
 import { usePhoneLayout } from '../../../hooks/usePhoneLayout';
+import { exportPanelEvent } from '../../../state/appEvents';
+import { isFileDrag, useFileDropZone } from '../useFileDropZone';
+import { FileDropOverlay } from '../PaneDragOverlays';
+import { isLocalProject } from '../../../config/backendConnections';
+import { useDigestEnabled } from '../../../state/prefs';
 
 interface Props {
   workspaceId: string | null;
@@ -36,16 +39,24 @@ export default function WorkspaceManage({ workspaceId, onNav }: Props) {
     ? store.projects.find((p) => p.id === workspaceId && !p.deletedAt) ?? null
     : null;
 
-  const [lightbox, setLightbox] = React.useState<string | null>(null);
-  const [tab, setTab] = React.useState<Tab>('chats');
+  const [lightbox, setLightbox] = React.useState<{ src: string; name: string } | null>(null);
+  const [selectedTab, setTab] = React.useState<Tab>('chats');
+  // Settings › Digest off hides the Digests tab; one left open falls back to Chats.
+  const digestEnabled = useDigestEnabled();
+  const tab: Tab = selectedTab === 'digests' && !digestEnabled ? 'chats' : selectedTab;
   const [filter, setFilter] = React.useState('');
   const [selectedContextId, setSelectedContextId] = React.useState<string | null>(null);
   const [importing, setImporting] = React.useState(false);
   const [uploadProgress, setUploadProgress] = React.useState<UploadProgressViewState | null>(null);
   const fileInputRef = React.useRef<HTMLInputElement>(null);
-  const dragDepthRef = React.useRef(0);
-  const [dropzoneVisible, setDropzoneVisible] = React.useState(false);
-  const [droppedFileCount, setDroppedFileCount] = React.useState(0);
+  const {
+    visible: dropzoneVisible,
+    fileCount: droppedFileCount,
+    onDragEnter: handleDragEnter,
+    onDragOver: handleDragOver,
+    onDragLeave: handleDragLeave,
+    endDrag,
+  } = useFileDropZone();
   const [manageMode, setManageMode] = React.useState(false);
   const managedProjectId = project?.id ?? null;
   // A phone has no room for the 360px side column: the page becomes one
@@ -65,7 +76,7 @@ export default function WorkspaceManage({ workspaceId, onNav }: Props) {
   const handleAddContext = React.useCallback(async () => {
     if (importing || !project) return;
     const electron = getElectron();
-    if (electron?.chooseFiles && !project.backendConnectionId) {
+    if (electron?.chooseFiles && isLocalProject(project)) {
       setImporting(true);
       try {
         const r = await electron.chooseFiles();
@@ -110,7 +121,7 @@ export default function WorkspaceManage({ workspaceId, onNav }: Props) {
       const existing = (project.artifacts ?? []).map((c) => c.name);
       for (const [fileIndex, file] of files.entries()) {
         const electronPath = electron?.getPathForFile?.(file) ?? null;
-        if (electronPath && !project.backendConnectionId) {
+        if (electronPath && isLocalProject(project)) {
           const base = electronPath.split('/').pop() ?? electronPath;
           const name = sanitizeContextName(base, existing);
           existing.push(name);
@@ -143,42 +154,16 @@ export default function WorkspaceManage({ workspaceId, onNav }: Props) {
     }
   }, [handleImportFiles]);
 
-  const isFileDrag = (e: React.DragEvent) =>
-    Array.from(e.dataTransfer.types).includes('Files');
-
-  const handleDragEnter = React.useCallback((e: React.DragEvent) => {
-    if (!isFileDrag(e)) return;
-    e.preventDefault();
-    dragDepthRef.current += 1;
-    if (dragDepthRef.current === 1) {
-      setDropzoneVisible(true);
-      setDroppedFileCount(e.dataTransfer.items.length);
-    }
-  }, []);
-
-  const handleDragOver = React.useCallback((e: React.DragEvent) => {
-    if (!isFileDrag(e)) return;
-    e.preventDefault();
-    e.dataTransfer.dropEffect = 'copy';
-  }, []);
-
-  const handleDragLeave = React.useCallback((e: React.DragEvent) => {
-    if (!isFileDrag(e)) return;
-    dragDepthRef.current = Math.max(0, dragDepthRef.current - 1);
-    if (dragDepthRef.current === 0) setDropzoneVisible(false);
-  }, []);
-
   const handleDrop = React.useCallback(async (e: React.DragEvent) => {
     if (!isFileDrag(e)) return;
     e.preventDefault();
-    dragDepthRef.current = 0;
-    setDropzoneVisible(false);
+    endDrag();
     const files = Array.from(e.dataTransfer.files);
     if (files.length === 0) return;
     // Auto-switch to artifacts tab so the user sees the new entries.
     setTab('artifacts');
     await handleImportFiles(files);
-  }, [handleImportFiles]);
+  }, [endDrag, handleImportFiles]);
 
   if (!project) {
     return (
@@ -218,6 +203,10 @@ export default function WorkspaceManage({ workspaceId, onNav }: Props) {
 
   const counts = deriveHeaderCounts(project, nodes);
   const digests = deriveDigests(project, nodes);
+  // Select all takes the threads the chat list shows, under its filter.
+  const selectListedTrees = () => store.selectTrees(
+    deriveTreeRows(project, nodes, tab === 'chats' ? filter : '').flatMap((row) => (row.kind === 'root' ? [row.treeId] : [])),
+  );
   const tabCounts = {
     chats: counts.chats,
     artifacts: counts.artifacts,
@@ -225,36 +214,7 @@ export default function WorkspaceManage({ workspaceId, onNav }: Props) {
   };
 
   const handleOpenNode = (nodeId: string) => {
-    const node = nodes[nodeId];
-    if (node?.kind === 'digest') {
-      // Digest nodes deliberately sit outside the branch tree. Anchor their
-      // dashboard pane to the source thread so opening one from the workspace
-      // manager never writes it into whichever thread happened to be active.
-      const sourceId = node.digest?.sources.find((id) => project.chatIds.includes(id));
-      const treeId = sourceId ? findTreeIdForNode(sourceId, project) : project.activeTreeId;
-      if (treeId) {
-        if (store.activeProjectId !== project.id) store.selectProject(project.id);
-        store.openPaneInTree(project.id, treeId, nodeId);
-        store.activateTree(treeId, project.id);
-        store.setFocusedNodeId(nodeId);
-      } else {
-        store.openPane(nodeId);
-      }
-    } else {
-      navigateToNode(
-        {
-          projects: store.projects,
-          activeProjectId: store.activeProjectId,
-          selectProject: store.selectProject,
-          openPane: store.openPane,
-          openPaneInTree: store.openPaneInTree,
-          activateTree: store.activateTree,
-          setFocusedNodeId: store.setFocusedNodeId,
-        },
-        nodeId,
-        project.id,
-      );
-    }
+    store.revealNode(nodeId, { workspaceId: project.id });
     onNav('dashboard');
   };
 
@@ -313,6 +273,7 @@ export default function WorkspaceManage({ workspaceId, onNav }: Props) {
           filter={filter}
           onFilterChange={setFilter}
           compact={phone}
+          showDigests={digestEnabled}
         />
         {tab === 'chats' && (
           <ChatTreeList
@@ -330,17 +291,13 @@ export default function WorkspaceManage({ workspaceId, onNav }: Props) {
               renameTree: store.renameTree,
               deleteTree: store.deleteTree,
               exportTree: (treeId) =>
-                window.dispatchEvent(
-                  new CustomEvent('michi:toggle-export-panel', {
-                    detail: { projectId: project.id, treeId },
-                  }),
-                ),
+                exportPanelEvent.dispatch({ projectId: project.id, treeId }),
             }}
             bulkActions={{
               treeSelection: store.treeSelection,
               toggleTreeSelection: store.toggleTreeSelection,
               clearTreeSelection: store.clearTreeSelection,
-              selectAllTrees: store.selectAllTrees,
+              selectAllTrees: selectListedTrees,
               bulkArchiveTrees: store.bulkArchiveTrees,
               bulkDeleteTrees: store.bulkDeleteTrees,
               bulkUnarchiveTrees: store.bulkUnarchiveTrees,
@@ -349,7 +306,7 @@ export default function WorkspaceManage({ workspaceId, onNav }: Props) {
         )}
         {tab === 'artifacts' && (
           <>
-            {lightbox && <Lightbox src={artifactImageUrl(project.id, lightbox)} filename={lightbox.split('/').pop() ?? lightbox} onClose={() => setLightbox(null)} />}
+            {lightbox && <Lightbox src={lightbox.src} filename={lightbox.name} onClose={() => setLightbox(null)} />}
             <UploadProgressBar progress={uploadProgress} compact />
             <ContextList
               artifacts={project.artifacts ?? []}
@@ -359,28 +316,13 @@ export default function WorkspaceManage({ workspaceId, onNav }: Props) {
               onAdd={handleAddContext}
               onPin={(id) => store.pinContext?.(id)}
               onDelete={(id) => store.deleteContext?.(id)}
-              onPreview={(filePath) => {
-                const entry = project.artifacts?.find((item) => item.filePath === filePath);
-                const type = artifactTypeForPath(filePath);
-                const localReference = entry?.kind === 'reference' || entry?.kind === 'symlink';
-                if (!localReference && artifactHasImagePreview(filePath)) {
-                  setLightbox(filePath);
-                  return;
-                }
-                const resolvedPath = localReference && !filePath.startsWith('/') && project.cwd
-                  ? `${project.cwd.replace(/\/$/, '')}/${filePath}` : filePath;
-                const action = type === 'doc'
-                  ? store.openArtifactPane(resolvedPath)
-                  : localReference
-                    ? getElectron()?.openPath?.(resolvedPath) ?? Promise.reject(new Error('Open this reference on its desktop host'))
-                    : downloadArtifactFile(project.id, filePath);
-                void action.catch((err: unknown) => {
-                  console.warn(`openArtifactPane(${filePath}) failed:`, err);
-                  toast.error(
-                    `Could not open ${filePath}: ${err instanceof Error ? err.message : String(err)}`,
-                  );
-                });
-              }}
+              onOpen={(artifact) => void openArtifact(artifact, {
+                project,
+                openArtifactPane: store.openArtifactPane,
+                onLightbox: (src) => setLightbox({ src, name: artifact.name }),
+                onPreview: () => showArtifactInDrawer(artifact.id),
+                onError: (message) => toast.error(`Could not open ${artifact.name}: ${message}`),
+              })}
             />
           </>
         )}
@@ -391,11 +333,7 @@ export default function WorkspaceManage({ workspaceId, onNav }: Props) {
             onOpen={handleOpenNode}
             onRebuild={(id) => { void store.refreshDigest(id); }}
             onExport={(id) =>
-              window.dispatchEvent(
-                new CustomEvent('michi:toggle-export-panel', {
-                  detail: { projectId: project.id, digestNodeId: id },
-                }),
-              )
+              exportPanelEvent.dispatch({ projectId: project.id, digestNodeId: id })
             }
           />
         )}
@@ -406,35 +344,7 @@ export default function WorkspaceManage({ workspaceId, onNav }: Props) {
           onChange={(e) => handleWebFiles(e.target.files)}
           style={{ display: 'none' }}
         />
-        {dropzoneVisible && (
-          <div
-            style={{
-              position: 'absolute',
-              inset: 0,
-              border: '2px dashed var(--term-accent)',
-              background: 'color-mix(in srgb, var(--term-accent) 12%, transparent)',
-              display: 'flex',
-              alignItems: 'center',
-              justifyContent: 'center',
-              pointerEvents: 'none',
-              zIndex: 'var(--z-pane-overlay)',
-            }}
-          >
-            <div
-              style={{
-                background: 'var(--term-bg)',
-                border: '1px solid var(--term-accent)',
-                color: 'var(--term-accent)',
-                padding: '8px 18px',
-                fontFamily: 'var(--ui-font)',
-                fontSize: 'var(--fs-md)',
-                borderRadius: 'var(--ui-radius-sm)',
-              }}
-            >
-              drop {droppedFileCount} file{droppedFileCount === 1 ? '' : 's'} · add as context
-            </div>
-          </div>
-        )}
+        <FileDropOverlay visible={dropzoneVisible} fileCount={droppedFileCount} label="add as context" />
       </main>
       <ManageSidebar
         workspace={project}
@@ -454,7 +364,7 @@ export default function WorkspaceManage({ workspaceId, onNav }: Props) {
           treeSelection: store.treeSelection,
           toggleTreeSelection: store.toggleTreeSelection,
           clearTreeSelection: store.clearTreeSelection,
-          selectAllTrees: store.selectAllTrees,
+          selectAllTrees: selectListedTrees,
           bulkArchiveTrees: store.bulkArchiveTrees,
           bulkDeleteTrees: store.bulkDeleteTrees,
           bulkUnarchiveTrees: store.bulkUnarchiveTrees,

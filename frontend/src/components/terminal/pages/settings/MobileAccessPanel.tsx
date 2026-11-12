@@ -1,11 +1,13 @@
 import { useEffect, useId, useMemo, useRef, useState } from 'react';
 import qrcode from 'qrcode-generator';
-import type { MobileAccessLink, MobileAccessStatus } from 'michi-shared';
-import { Button } from '../../../ui/controls';
+import type { MobileAccessLink, MobileAccessProvider, MobileAccessStatus } from 'michi-shared';
+import { Button, Switch } from '../../../ui/controls';
 import { confirmDialog } from '../../../ui/ConfirmDialog';
-import { createMobileAccessLink, mobileAccessRequest, type MobileAccessAction } from '../../../../services/api/mobileAccess';
+import { createMobileAccessLink, mobileAccessRequest, setPhoneTerminal, type MobileAccessAction } from '../../../../services/api/mobileAccess';
 import { openExternalUrl } from '../../../../services/openUrl';
+import { copyText } from '../../../../lib/clipboard';
 import { LOCAL_BACKEND_CONNECTION_ID, type BackendConnectionSummary } from '../../../../config/backendConnections';
+import { useNow } from '../../../../hooks/useNow';
 import { SettingsRow, SettingsSection } from './SettingsSection';
 import './mobileAccess.css';
 
@@ -17,13 +19,13 @@ function servedThrough(url: string | undefined): boolean {
 
 export function MobileAccessPanel({ connections }: { connections: BackendConnectionSummary[] }) {
   const machineId = useId();
-  const [machine, setMachine] = useState('local');
+  const providerId = useId();
+  const [machine, setMachine] = useState(LOCAL_BACKEND_CONNECTION_ID);
   const [status, setStatus] = useState<MobileAccessStatus | null>(null);
   const [link, setLink] = useState<MobileAccessLink | null>(null);
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
   const [copied, setCopied] = useState(false);
-  const [now, setNow] = useState(Date.now());
   const generation = useRef(0);
   const mutation = useRef(0);
   const acting = useRef(false);
@@ -48,23 +50,19 @@ export function MobileAccessPanel({ connections }: { connections: BackendConnect
     return () => { ++generation.current; controller.abort(); clearTimeout(timer); };
   }, [machine]);
   useEffect(() => {
-    if (machine !== 'local' && !connections.some(c => c.id === machine)) setMachine('local');
+    if (machine !== LOCAL_BACKEND_CONNECTION_ID && !connections.some(c => c.id === machine)) setMachine(LOCAL_BACKEND_CONNECTION_ID);
   }, [connections, machine]);
-  useEffect(() => {
-    if (!link || link.reusable) return;
-    const timer = setInterval(() => setNow(Date.now()), 1000);
-    return () => clearInterval(timer);
-  }, [link]);
   useEffect(() => {
     if (status?.provider !== 'tailscale' || status.state !== 'connected') return;
     let cancelled = false;
     const revision = generation.current;
     const version = mutation.current;
     void createMobileAccessLink(machine).then(next => {
-      if (!cancelled && revision === generation.current && version === mutation.current) { setLink(next); setNow(Date.now()); }
+      if (!cancelled && revision === generation.current && version === mutation.current) setLink(next);
     }, err => { if (!cancelled && revision === generation.current && version === mutation.current) setError((err as Error).message); });
     return () => { cancelled = true; };
   }, [machine, status?.provider, status?.state, status?.url]);
+  const now = useNow(1_000, !!link && !link.reusable);
   const activeLink = link && (link.reusable || link.expiresAt > now) ? link : null;
   const qr = useMemo(() => {
     if (!activeLink) return null;
@@ -86,7 +84,7 @@ export function MobileAccessPanel({ connections }: { connections: BackendConnect
     try {
       if (action === 'link') {
         const next = await createMobileAccessLink(machine);
-        if (generation.current === revision) { setLink(next); setNow(Date.now()); }
+        if (generation.current === revision) setLink(next);
       } else {
         const next = await mobileAccessRequest(machine, action);
         if (generation.current === revision) { setStatus(next); setLink(null); }
@@ -94,18 +92,40 @@ export function MobileAccessPanel({ connections }: { connections: BackendConnect
     } catch (err) { if (generation.current === revision) setError((err as Error).message); }
     finally { if (generation.current === revision) { acting.current = false; setBusy(false); } }
   };
+  const toggleTerminal = async (enabled: boolean) => {
+    if (acting.current) return;
+    if (enabled && !(await confirmDialog({
+      title: 'Allow terminals from your phone?',
+      message: 'Your phone link will be able to open a shell on this machine and run any command as you, the same as typing at this computer. Only your sign-in can open the link, and you can turn this off here at any time.',
+      confirmLabel: 'Allow',
+    }))) return;
+    if (acting.current) return;
+    const revision = generation.current;
+    ++mutation.current; acting.current = true;
+    setBusy(true); setError('');
+    try {
+      const next = await setPhoneTerminal(machine, enabled);
+      if (generation.current === revision) setStatus(next);
+    } catch (err) { if (generation.current === revision) setError((err as Error).message); }
+    finally { if (generation.current === revision) { acting.current = false; setBusy(false); } }
+  };
   const running = status && ['starting', 'connected', 'reconnecting'].includes(status.state);
   const tailscale = status?.provider === 'tailscale';
   const setup = status?.tailscale;
   const ready = !tailscale || setup?.state === 'ready';
+  // One row: what phone access does, then which machine and the switch for it.
   return <SettingsSection className="mobile-access" title="Phone access"
-    aside={status && <span role="status">{{ stopped: 'Off', starting: 'Connecting…', connected: 'Connected', reconnecting: 'Reconnecting…', error: 'Unavailable' }[status.state]}</span>}
-    intro="Open this machine’s Michi on your phone through your private Tailscale network.">
-    <SettingsRow label="Machine" labelFor={machineId} control={
-      <select id={machineId} className="ui-select settings-row__select" value={machine} onChange={event => setMachine(event.target.value)}>
-        <option value="local">This machine</option>{connections.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
-      </select>} />
-    {(error || status?.error) && <p role="alert">{error || status?.error}</p>}
+    aside={status && <span role="status">{{ stopped: 'Off', starting: 'Connecting…', connected: 'Connected', reconnecting: 'Reconnecting…', error: 'Unavailable' }[status.state]}</span>}>
+    <SettingsRow label="Open on your phone"
+      description={tailscale ? 'Open this machine’s Michi on your phone through your private Tailscale network.' : 'Open this machine’s Michi on your phone.'}
+      control={<>
+        <select id={machineId} className="ui-select settings-row__select" aria-label="Machine" value={machine} onChange={event => setMachine(event.target.value)}>
+          <option value="local">This machine</option>{connections.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
+        </select>
+        <Button disabled={busy || !status || (!running && (!status.available || !ready))} variant={running ? 'secondary' : 'primary'} onClick={() => void act(running ? 'stop' : 'start')}>{running ? 'Turn off' : 'Enable phone access'}</Button>
+      </>}>
+      {(error || status?.error) && <p role="alert" className="settings-row__note">{error || status?.error}</p>}
+    </SettingsRow>
     {tailscale && <div className="mobile-access__setup">
       <ol>
         <li><strong>Connect this machine.</strong> {setup?.account ? <>Signed in as {setup.account}.</> : setup?.message || 'Checking Tailscale…'}</li>
@@ -119,17 +139,21 @@ export function MobileAccessPanel({ connections }: { connections: BackendConnect
       {setup?.actionUrl && <Button onClick={() => openExternalUrl(setup.actionUrl!)}>{setup.state === 'needs-login' ? 'Continue Tailscale sign-in' : 'Allow Tailscale HTTPS'}</Button>}
       {setup?.state === 'not-running' && !setup.canOpenApp && <p>Start the Tailscale app or service on this computer, then connect it to your account.</p>}
     </div>}
-    <div className="mobile-access__actions">
-      <Button disabled={busy || !status || (!running && (!status.available || !ready))} variant={running ? 'secondary' : 'primary'} onClick={() => void act(running ? 'stop' : 'start')}>{running ? 'Turn off' : 'Enable phone access'}</Button>
-      {status?.state === 'connected' && !activeLink?.reusable && <Button disabled={busy} onClick={() => void act('link')}>{activeLink ? 'New sign-in link' : 'Connect phone'}</Button>}
-    </div>
+    {status?.state === 'connected' && !activeLink?.reusable && <div className="mobile-access__actions">
+      <Button disabled={busy} onClick={() => void act('link')}>{activeLink ? 'New sign-in link' : 'Connect phone'}</Button>
+    </div>}
+    {status && typeof status.terminal === 'boolean' && <SettingsRow label="Terminal"
+      description={status.terminal
+        ? 'On. Your phone can open terminals on this machine and use the ones open here. Turning this off disconnects the phone; the terminals keep running here.'
+        : 'Open terminals from your phone. They run on this machine, with your account.'}
+      control={<Switch on={status.terminal} disabled={busy} aria-label="Terminal on phone" onChange={next => void toggleTerminal(next)} />} />}
     {activeLink && qr && <div className="mobile-access__link">
       <svg role="img" aria-label="Scan to connect to Michi" viewBox={`-4 -4 ${qr.getModuleCount() + 8} ${qr.getModuleCount() + 8}`} width="192" height="192" shapeRendering="crispEdges">
         <rect x="-4" y="-4" width={qr.getModuleCount() + 8} height={qr.getModuleCount() + 8} fill="white" />
         <path fill="black" d={Array.from({ length: qr.getModuleCount() }, (_, r) => Array.from({ length: qr.getModuleCount() }, (_, c) => qr.isDark(r, c) ? `M${c} ${r}h1v1h-1z` : '').join('')).join('')} />
       </svg>
-      <div><p>Keep Tailscale connected on your phone, then scan inside Michi or with your phone’s Camera app.</p><p>{activeLink.reusable ? 'Reuse or bookmark this link while phone access is enabled.' : <>One use · expires in {Math.max(1, Math.ceil((activeLink.expiresAt - now) / 60_000))} min</>}</p>
-        <Button onClick={() => { const revision = generation.current; void Promise.resolve().then(() => navigator.clipboard.writeText(activeLink.url)).then(() => { if (revision === generation.current) setCopied(true); }, () => { if (revision === generation.current) setError('Could not copy. Scan the code to connect.'); }); }}>{copied ? 'Copied' : activeLink.reusable ? 'Copy phone link' : 'Copy sign-in link'}</Button>
+      <div><p>{'Keep Tailscale connected on your phone, then scan inside Michi or with your camera.'}</p><p>{activeLink.reusable ? 'Reuse or bookmark this link while phone access is enabled.' : <>One use · expires in {Math.max(1, Math.ceil((activeLink.expiresAt - now) / 60_000))} min</>}</p>
+        <Button onClick={() => { const revision = generation.current; void copyText(activeLink.url).then((ok) => { if (revision !== generation.current) return; if (ok) setCopied(true); else setError('Could not copy. Scan the code to connect.'); }); }}>{copied ? 'Copied' : activeLink.reusable ? 'Copy phone link' : 'Copy sign-in link'}</Button>
       </div>
     </div>}
     {link && !activeLink && <p>The sign-in link expired. Create a new one to connect.</p>}

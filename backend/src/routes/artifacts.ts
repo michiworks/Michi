@@ -1,8 +1,10 @@
-import { createSseObserver } from "../services/httpSse";
+import { SSE_HEARTBEAT_MS } from "michi-shared";
+import { beginSse } from "../services/httpSse";
 import express, { Request, Response } from "express";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { NotFoundError } from "../services/workspaceSandbox";
+import { imageMimeType } from "michi-runtime/internal/core/attachments";
 import {
   findWorkspaceFileBySuffix,
   resolveWorkspaceFileRoot as resolveRoot,
@@ -114,7 +116,7 @@ export function setupArtifactRoutes(deps: ArtifactRouteDeps = {}): express.Route
 
     res.setHeader('Cache-Control', 'private, no-store');
     res.setHeader('X-Content-Type-Options', 'nosniff');
-    const imageMime = preview ? ({ '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.gif': 'image/gif', '.webp': 'image/webp' } as Record<string, string>)[path.extname(real).toLowerCase()] : undefined;
+    const imageMime = preview ? imageMimeType(real) : undefined;
     if (imageMime) {
       try {
         return res.json({ content: `data:${imageMime};base64,${fs.readFileSync(real).toString('base64')}`, imageMime,
@@ -201,12 +203,7 @@ export function setupArtifactRoutes(deps: ArtifactRouteDeps = {}): express.Route
       return res.status(500).end();
     }
 
-    res.setHeader("Content-Type", "text/event-stream");
-    res.setHeader("Cache-Control", "no-cache, no-transform");
-    res.setHeader("Connection", "keep-alive");
-    res.setHeader("X-Accel-Buffering", "no"); // defeat proxy buffering (nginx)
-    res.flushHeaders?.();
-    const observer = createSseObserver(res);
+    const observer = beginSse(res);
     // Prime the stream before subscribing; failure must not retain a watcher.
     if (!observer.write(": connected\n\n")) return;
     observer.addCleanup(subscribe(root, (evt) => {
@@ -216,7 +213,7 @@ export function setupArtifactRoutes(deps: ArtifactRouteDeps = {}): express.Route
         : { filePath: evt.filePath, mtimeMs: evt.mtimeMs, size: evt.size };
       observer.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
     }));
-    observer.heartbeat(": ping\n\n", deps.heartbeatMs ?? 25_000);
+    observer.heartbeat(": ping\n\n", deps.heartbeatMs ?? SSE_HEARTBEAT_MS.artifactWatch);
     // Only the observer is detached on response close/error; producers continue.
   });
 

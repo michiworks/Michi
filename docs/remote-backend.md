@@ -29,7 +29,7 @@ The final output includes a copyable line:
 MICHI_REMOTE_TOKEN=...
 ```
 
-Paste that value into **Settings → Connections** in the local Michi app.
+Paste that value into **Settings → Machines → Manual setup…** in the local Michi app.
 
 To register Michi as a systemd user service instead of using a detached
 process:
@@ -80,7 +80,8 @@ and `--data-dir` another installation.
 
 On a phone opened through [phone access](mobile-access.md), **Settings →
 Update** runs the same `michi update` on the machine serving the phone; see
-[Update from the phone](mobile-access.md#update-from-the-phone).
+[Update from the phone](mobile-access.md#update-from-the-phone) in
+`mobile-access`.
 
 Useful launch options:
 
@@ -118,7 +119,9 @@ Michi reaches it through an SSH tunnel. To listen on a network interface, set
 HTTPS reverse proxy: the remote token is then the only thing guarding the API.
 Earlier builds listened on every interface when only `MICHI_REMOTE_ACCESS=1` was
 set; a setup that connects to such a server directly, without a tunnel, now has
-to set `MICHI_BIND_HOST`.
+to set `MICHI_BIND_HOST`. Outside remote mode, a Backend without
+`MICHI_REQUIRE_AUTH=true` has nothing that checks callers, so it refuses to
+start on any address but loopback and names these options.
 
 ### Manual foreground startup
 
@@ -166,9 +169,8 @@ WantedBy=multi-user.target
 
 In **New workspace → machine → Connect remote SSH…**, enter an SSH alias
 such as `build+`, a hostname, or `user@hostname`, then choose **Connect**. Pasting
-`ssh build+` works too. The same flow is available in **Settings → Connections →
-Connect remote SSH**. Existing manual SSH and Direct URL settings remain
-available under the advanced connection form.
+`ssh build+` works too. The same flow is available in **Settings → Machines → Connect
+remote**. Manual SSH and Direct URL settings are under **Manual setup…**.
 
 If Michi is already healthy, the local gateway retrieves its connection token
 over SSH, verifies the forwarded API and saves the connection. A stopped existing
@@ -182,7 +184,7 @@ Repeated connections reuse the installation; connecting does not upgrade it.
 
 ### Update a connected machine
 
-The Connect flow and **Settings → Connections** compare the remote service with
+The Connect flow and **Settings → Machines** compare the remote service with
 the local app's build. When the remote commit is an ancestor of the local build,
 Michi shows **Remote Michi is older than this app**, both revision IDs, and an
 **Update remote Michi** button for SSH connections. Equal versions and unrelated
@@ -210,7 +212,7 @@ and concurrent setup/recovery cannot switch the same installation. After startup
 the local gateway checks the running service's revision before reporting success.
 
 Once accepted, updating continues if its progress dialog closes while the local
-gateway stays running. Reopening Settings, switching back to Connections, or
+gateway stays running. Reopening Settings, switching back to Machines, or
 choosing the machine in the Connect flow shows that update's latest progress
 instead of another update button, followed by its outcome. The local gateway
 keeps the latest outcome until it restarts or the connection is edited or
@@ -264,7 +266,7 @@ create the workspace. Paths are resolved on the remote machine, including
 symlinks and `~`. Existing remote workspaces are imported without reloading the
 app; late imports preserve newly created workspaces and current focus.
 
-**Settings → Connections** reads each machine's current workspace list from its
+**Settings → Machines** reads each machine's current workspace list from its
 remote backend whenever the pane opens. **Refresh workspaces** reads it again;
 the list and count are not inferred from locally hydrated workspaces or saved as
 a local inventory. While reading, the pane shows progress. A failed or timed-out
@@ -363,17 +365,15 @@ remain available. Without a ready local runtime, viewing and copying diagnostics
 still work.
 
 For development, the local gateway can override its trusted source with
-`MICHI_REMOTE_SOURCE_URL` and `MICHI_REMOTE_SOURCE_REF`. To test an unpushed
-worktree, `MICHI_REMOTE_EXPERIMENT_BUNDLE` names a Git bundle already placed on
-the remote host: after cloning `main`, setup fetches its
-`codex/remote-devdesktop-connect` ref and checks out that commit before building.
-These settings are gateway environment variables, not renderer inputs.
+`MICHI_REMOTE_SOURCE_URL` and `MICHI_REMOTE_SOURCE_REF`. These settings are
+gateway environment variables, not renderer inputs.
 
 ### Built-in SSH tunnel (recommended)
 
 1. In Terminal on the desktop machine, run `ssh HOST` once. Complete any
    first-login authentication and accept the server host key.
-2. Open **Settings → Connections** and choose **SSH tunnel**.
+2. Open **Settings → Machines**, choose **Manual setup…**, and set
+   **Connection type** to **SSH tunnel**.
 3. Enter the SSH host or `~/.ssh/config` alias. The SSH user and SSH port are
    optional; blank values use your SSH config/defaults.
 4. Enter the remote Michi port (`3000` by default) and the same remote token.
@@ -475,3 +475,9 @@ of these:
 Rotate `MICHI_REMOTE_TOKEN` if it is disclosed. Updating the token requires
 editing the saved connection in Settings. The remote SQLite database and agent
 processes remain entirely on the server.
+
+## Phone access
+
+For an owner-authenticated HTTPS tunnel, QR pairing and the mobile pane switcher,
+see [Phone access](mobile-access.md) (`mobile-access`). The remote Web UI
+is included by `remote:setup`; the backend remains bound to loopback.

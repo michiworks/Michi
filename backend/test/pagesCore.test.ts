@@ -5,6 +5,8 @@ import os from 'node:os';
 import path from 'node:path';
 import { closeDb, getDb, initDb } from '../src/services/db';
 import { PageWriteError, pagesTransaction, requirePagesWorkspace, requireChatChangeSource } from '../src/services/pages/core';
+import { companionActorOf } from '../src/services/pages/checkinSources';
+import { checkinNodeId } from 'michi-shared';
 
 let dir: string;
 let oldData: string | undefined;
@@ -103,4 +105,24 @@ test('a chat source from another workspace is refused, but for the owner\'s Meta
   missing(() => requireChatChangeSource('ws','alice',source('n-bob')));
   process.env.MICHI_CLOUD = '1';
   missing(() => requireChatChangeSource('ws','alice',source('n-meta')));
+});
+
+test('companionActorOf names the agent for every change it made, and nothing else', () => {
+  const assistant = JSON.stringify({ system: 'assistant' });
+  const spaces = JSON.stringify({ system: 'spaces' });
+  const chat = { kind: 'chat' as const, nodeId: 'n', turnId: 't', assistantId: 'a' };
+  const settings = (value: string | null | undefined) => () => value;
+  const conversation = { kind: 'companion', via: 'conversation' };
+  assert.equal(companionActorOf(null), null);
+  assert.equal(companionActorOf({ kind: 'user' }, settings(assistant)), null);
+  assert.deepEqual(companionActorOf(chat, settings(assistant)), conversation);
+  assert.deepEqual(companionActorOf({ ...chat, kind: 'helper' }, settings(assistant)), conversation);
+  assert.equal(companionActorOf(chat, settings(null)), null);
+  assert.equal(companionActorOf(chat, settings(undefined)), null);
+  assert.equal(companionActorOf({ ...chat, kind: 'helper' }, settings('{}')), null);
+  // Only the assistant's workspace holds the agent's conversations; the Spaces workspace holds none.
+  assert.equal(companionActorOf(chat, settings(spaces)), null);
+  assert.deepEqual(companionActorOf({ kind: 'maintenance' }, settings('{}')), { kind: 'companion', via: 'upkeep' });
+  assert.deepEqual(companionActorOf({ ...chat, nodeId: checkinNodeId('r1') }, settings(null)), { kind: 'companion', via: 'checkin' });
+  assert.equal(companionActorOf({ kind: 'component' }, settings(assistant)), null);
 });

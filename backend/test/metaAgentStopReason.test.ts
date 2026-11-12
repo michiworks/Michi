@@ -1,7 +1,8 @@
 import { KiroSignedOutError } from '../src/agents/kiro/kiroAuth';
+import { KIRO_QUOTA_MARKERS } from 'michi-runtime/internal/adapters/kiro/kiroErrorMarkers';
 import assert from 'node:assert/strict';
 import { describe, test } from 'node:test';
-import { classifyMetaAgentRunError, errorFirstLine } from '../src/services/metaAgent/stopReason';
+import { classifyMetaAgentRunError, errorFirstLine, isSignInFailure } from '../src/services/metaAgent/stopReason';
 
 const classify = (error: string, runtimeId = 'claude') => {
   const { reason, message } = classifyMetaAgentRunError(error, { runtimeId, workspaceName: 'rabbitholes' });
@@ -31,6 +32,19 @@ describe('Meta agent stop reasons', () => {
     assert.deepEqual(classify('Anthropic API key not configured', 'pi'), { reason: 'signed-out', message: 'Pi has no API key set up' });
   });
 
+  test('credentials the provider rejected count as a sign-in failure', () => {
+    assert.deepEqual(classify('Claude authentication failed. Refresh the CLI credentials and retry; the original session is retained.. Paused after 5 failed runs in a row.'),
+      { reason: 'signed-out', message: 'Claude\'s credentials were rejected' });
+    assert.deepEqual(classify('The model call failed: Claude authentication failed. Refresh the CLI credentials and retry.'),
+      { reason: 'signed-out', message: 'Claude\'s credentials were rejected' });
+    assert.equal(classify('403 The security token included in the request is expired').reason, 'signed-out');
+    assert.equal(isSignInFailure('Claude authentication failed. Refresh the CLI credentials and retry. Paused after 6 failed runs in a row.'), true);
+    assert.equal(isSignInFailure('No claude auth found. Set ANTHROPIC_API_KEY, or run `claude /login`.'), true);
+    assert.equal(isSignInFailure('The model call failed: Claude\'s structured answer timed out after 180000 ms'), false);
+    assert.equal(isSignInFailure('Claude AI usage limit reached|1761234567'), false);
+    assert.equal(isSignInFailure(null), false);
+  });
+
   test('Kiro startup and Crew readiness failures surface as signed out', () => {
     assert.equal(classify(new KiroSignedOutError().message, 'kiro').reason, 'signed-out');
     assert.equal(classify('Kiro CLI setup or sign-in is required', 'crew').reason, 'signed-out');
@@ -40,6 +54,7 @@ describe('Meta agent stop reasons', () => {
     assert.deepEqual(classify('Claude AI usage limit reached|1761234567'), { reason: 'quota', message: 'Claude reached its usage or rate limit' });
     assert.equal(classify('You\'ve hit your usage limit. Upgrade to Pro or try again later.', 'codex').message, 'Codex reached its usage or rate limit');
     assert.equal(classify('MonthlyRequestCount limit reached', 'kiro').reason, 'quota');
+    for (const marker of KIRO_QUOTA_MARKERS) assert.equal(classify(`Internal error: ${marker}Exceeded`, 'kiro').reason, 'quota', marker);
     assert.equal(classify('429 Too Many Requests', 'pi').reason, 'quota');
   });
 

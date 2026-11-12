@@ -41,12 +41,17 @@ export interface ServerContext<B> extends CatalogContext<B> {
 /** `_meta` keys that carry the agent's own tool-use id. */
 const TOOL_CALL_ID_META_KEYS = ['claudecode/toolUseId'];
 
-function toWireTool<B>(entry: CatalogEntry<B>, inputSchema: JsonSchemaObject = entry.inputSchema): Tool {
+/**
+ * A catalog entry as tools/list sends it. A tool to load up front carries the
+ * slot's own key for that (`upFrontToolMeta`, from its adapter) as `_meta`.
+ */
+function toWireTool<B>(entry: CatalogEntry<B>, record: SlotRecord<B>, inputSchema: JsonSchemaObject = entry.inputSchema): Tool {
   return {
     name: entry.name,
     description: entry.description,
     inputSchema: inputSchema as Tool['inputSchema'],
     ...(entry.annotations ? { annotations: entry.annotations } : {}),
+    ...(entry.loadUpFront && record.upFrontToolMeta ? { _meta: { ...record.upFrontToolMeta } } : {}),
   };
 }
 
@@ -88,7 +93,7 @@ export function buildServer<B>(ctx: ServerContext<B>, target: ServerTarget): Ser
 export function slotTarget<B>(ctx: ServerContext<B>, record: SlotRecord<B>): ServerTarget {
   const logData = { slot: redactId(record.slotId) };
   return {
-    listTools: () => slotCatalog(ctx, record).map((entry) => toWireTool(entry)),
+    listTools: () => slotCatalog(ctx, record).map((entry) => toWireTool(entry, record)),
     async callTool(name, args, call) {
       const catalog = catalogForCall(ctx, record);
       if (!Array.isArray(catalog)) return catalog;
@@ -114,7 +119,7 @@ export function groupTarget<B>(ctx: ServerContext<B>, group: GroupRecord): Serve
       if (!catalog) return [];
       return slotCatalog(ctx, catalog)
         .filter((entry) => !declaresAnchor(entry, anchorArg))
-        .map((entry) => toWireTool(entry, withAnchor(entry.inputSchema, anchorArg, anchorDescription)));
+        .map((entry) => toWireTool(entry, catalog, withAnchor(entry.inputSchema, anchorArg, anchorDescription)));
     },
     async callTool(name, args, call) {
       const anchor = args[anchorArg];

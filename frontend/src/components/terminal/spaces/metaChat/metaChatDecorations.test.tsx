@@ -22,7 +22,7 @@ const reply: ChatMessage = {
 function renderReply(decorations: MetaChatDecorations | null) {
   return render(
     <MetaChatDecorationsContext.Provider value={decorations}>
-      <MessageBlock m={reply} index={0} isDark={false} onEdit={() => {}} onCopy={() => {}} showThoughts={false}
+      <MessageBlock m={reply} index={0} isDark={false} onEdit={() => {}} copyText={() => ''} showThoughts={false}
         fontFamily="inherit" density="comfortable" workspaceId="ws-assistant" backendConnectionId="local" />
     </MetaChatDecorationsContext.Provider>,
   );
@@ -31,7 +31,9 @@ function renderReply(decorations: MetaChatDecorations | null) {
 describe('the Meta agent window decorations on the shared message list', () => {
   it('keeps the plain reply without a provider', () => {
     renderReply(null);
-    expect(screen.getByText('> michi')).toBeTruthy();
+    // A pane's reply has no speaker line; its meta line sits under it.
+    expect(screen.queryByText('> michi')).toBeNull();
+    expect(document.querySelector('.t-answer-meta')).not.toBeNull();
     expect(document.querySelector('[data-tool-lines]')).toBeNull();
   });
 
@@ -48,6 +50,16 @@ describe('the Meta agent window decorations on the shared message list', () => {
     expect(lines).toEqual(['▸Read Home · 6 blocks', '▸List pages · rabbitholes']);
     expect(screen.getByTestId('cards').textContent).toBe('2 tools');
     expect(screen.getByRole('separator').textContent).toBe('From here on: Kiro after a-1');
+  });
+
+  it('keeps the window\'s corner actions on hover, even under its latest reply', () => {
+    render(
+      <MetaChatDecorationsContext.Provider value={{ assistantLabel: <span>Meta agent</span> }}>
+        <MessageBlock m={reply} index={0} isDark={false} copyText={() => ''} showThoughts={false}
+          fontFamily="inherit" density="comfortable" pinned />
+      </MetaChatDecorationsContext.Provider>,
+    );
+    expect((document.querySelector('.t-msg-actions') as HTMLElement).style.opacity).toBe('0');
   });
 });
 

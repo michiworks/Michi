@@ -14,6 +14,7 @@ import {
 import type { AgentRunContextEntryV1, AgentRunContextManifestV1 } from 'michi-shared';
 import type { RunContextSnapshotStore } from './ports';
 import { normalizeContextManifest } from './contextManifest';
+import { isWithinRoot } from '../tools/pathSandbox';
 
 export interface FileRunContextSnapshotStoreOptions {
   dataDir: string;
@@ -26,11 +27,6 @@ function safeId(value: string, label: string): string {
     throw new Error(`${label} is not path-safe`);
   }
   return value;
-}
-
-function inside(root: string, candidate: string): boolean {
-  const relative = path.relative(root, candidate);
-  return relative === '' || (!relative.startsWith(`..${path.sep}`) && relative !== '..' && !path.isAbsolute(relative));
 }
 
 async function sha256(filePath: string): Promise<string> {
@@ -99,7 +95,7 @@ export class FileRunContextSnapshotStore implements RunContextSnapshotStore {
         const roots = await Promise.all(this.allowedSourceRoots.map(async (root) => {
           try { return await realpath(root); } catch { return path.resolve(root); }
         }));
-        if (!roots.some((root) => inside(root, source))) throw new Error(`context entry ${index} escapes allowed snapshot roots`);
+        if (!roots.some((root) => isWithinRoot(source, root))) throw new Error(`context entry ${index} escapes allowed snapshot roots`);
         const sourceStat = await stat(source);
         if (sourceStat.size !== entry.size) throw new Error(`context entry ${index} size does not match its manifest`);
         const digest = await sha256(source);

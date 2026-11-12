@@ -1,6 +1,8 @@
 import { act, renderHook, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import type { ScheduledJobRunEvent } from 'michi-shared';
 import type { ScheduledRunTarget } from '../../../lib/electronBridge';
+import { SCHEDULED_JOB_RUN_WINDOW_EVENT } from '../../../state/scheduledRunNotice';
 import { useScheduledRunOpening } from './useScheduledRunOpening';
 
 type Notice = { title: string; subtitle: string; body: string; target: ScheduledRunTarget };
@@ -17,7 +19,10 @@ const state = vi.hoisted(() => ({
   notify: vi.fn(),
   toastError: vi.fn(),
   requestDetail: vi.fn(),
+  requestRun: vi.fn(),
+  getRun: vi.fn(),
   closeMetaAgent: vi.fn(),
+  notifications: 'all' as 'all' | 'approval-only' | 'off',
 }));
 
 vi.mock('../../../lib/electronBridge', () => ({ getElectron: () => state.bridge }));
@@ -25,8 +30,13 @@ vi.mock('../../../state/chatStore', () => ({
   useChatActions: () => ({ revealBackendNode: (...args: unknown[]) => state.reveal(...args) }),
 }));
 vi.mock('../../../services/notifications', () => ({ notify: (...args: unknown[]) => state.notify(...args) }));
+vi.mock('../../../state/prefs', () => ({ usePrefs: () => ({ prefs: { notifications: state.notifications } }) }));
 vi.mock('sonner', () => ({ toast: { error: (...args: unknown[]) => state.toastError(...args) } }));
-vi.mock('./scheduledNav', () => ({ requestScheduledJobDetail: (...args: unknown[]) => state.requestDetail(...args) }));
+vi.mock('./scheduledNav', () => ({
+  requestScheduledJobDetail: (...args: unknown[]) => state.requestDetail(...args),
+  requestScheduledRun: (...args: unknown[]) => state.requestRun(...args),
+}));
+vi.mock('../../../services/api/scheduledJobs', () => ({ getScheduledJobRun: (...args: unknown[]) => state.getRun(...args) }));
 // A notification opens its job even over the Meta agent page.
 vi.mock('./metaAgent/metaAgentNav', () => ({ closeMetaAgentDetail: () => state.closeMetaAgent() }));
 
@@ -46,6 +56,8 @@ beforeEach(() => {
   state.openHandler = null;
   state.noticeHandler = null;
   state.reveal.mockResolvedValue(true);
+  state.getRun.mockResolvedValue({ id: 'run-1', scheduledOnly: false });
+  state.notifications = 'all';
 });
 
 afterEach(() => {
@@ -110,10 +122,22 @@ describe('useScheduledRunOpening', () => {
     renderHook(() => useScheduledRunOpening({ hydrated: true, onNav: vi.fn() }));
 
     act(() => { state.noticeHandler?.({ title: 'Ping check', subtitle: 'Succeeded', body: 'PONG', target }); });
-    expect(state.notify).toHaveBeenCalledWith(expect.objectContaining({ title: 'Ping check · Succeeded', body: 'PONG' }));
+    expect(state.notify).toHaveBeenCalledWith(expect.objectContaining({ title: 'Ping check · Succeeded', body: 'PONG', key: 'scheduled:run-1' }));
     const { onClick } = state.notify.mock.calls[0][0] as { onClick: () => void };
     await act(async () => { onClick(); });
     expect(state.reveal).toHaveBeenCalledWith('ws-1', 'n-1');
+  });
+
+  it('opens a Scheduled-only run on the Scheduled page', async () => {
+    installBridge();
+    state.getRun.mockResolvedValue({ id: 'run-1', scheduledOnly: true });
+    const onNav = vi.fn();
+    renderHook(() => useScheduledRunOpening({ hydrated: true, onNav }));
+
+    await act(async () => { state.openHandler?.(target); });
+    await waitFor(() => expect(state.requestRun).toHaveBeenCalledWith('job-1', 'run-1'));
+    expect(onNav).toHaveBeenCalledWith('scheduled');
+    expect(state.reveal).not.toHaveBeenCalled();
   });
 
   it('detaches its bridge listeners on unmount', () => {
@@ -125,10 +149,76 @@ describe('useScheduledRunOpening', () => {
     expect(state.noticeHandler).toBeNull();
   });
 
-  it('does nothing in a browser without the Electron bridge', () => {
-    const onNav = vi.fn();
-    renderHook(() => useScheduledRunOpening({ hydrated: true, onNav }));
-    expect(state.reveal).not.toHaveBeenCalled();
-    expect(onNav).not.toHaveBeenCalled();
+  describe('in a browser, where this window is the notifier', () => {
+    const finished = (overrides: Partial<ScheduledJobRunEvent> = {}): ScheduledJobRunEvent => ({
+      phase: 'finished', runId: 'run-1', jobId: 'job-1', jobName: 'Job', workspaceId: 'ws-1', nodeId: 'n-1', treeId: 't-1',
+      status: 'succeeded', summary: 'Done', error: null, notify: true, at: 1, ...overrides,
+    });
+    const deliver = (event: ScheduledJobRunEvent) => act(() => {
+      window.dispatchEvent(new CustomEvent(SCHEDULED_JOB_RUN_WINDOW_EVENT, { detail: event }));
+    });
+    const clickNotice = async () => {
+      const { onClick } = state.notify.mock.calls.at(-1)![0] as { onClick: () => void };
+      await act(async () => { onClick(); });
+    };
+
+    it('tells about a run that failed before it made a thread, and opens its job', async () => {
+      const onNav = vi.fn();
+      renderHook(() => useScheduledRunOpening({ hydrated: true, onNav }));
+      deliver(finished({ nodeId: null, treeId: null, status: 'failed', summary: null, error: 'Claude is not signed in' }));
+      expect(state.notify).toHaveBeenCalledWith(expect.objectContaining({ title: 'Job · Scheduled job failed', body: 'Claude is not signed in', key: 'scheduled:run-1' }));
+
+      await clickNotice();
+      await waitFor(() => expect(onNav).toHaveBeenCalledWith('scheduled'));
+      expect(state.requestDetail).toHaveBeenCalledWith('job-1');
+      expect(state.reveal).not.toHaveBeenCalled();
+      expect(state.toastError).not.toHaveBeenCalled();
+    });
+
+    it('says the thread is gone and opens the job when a click cannot reveal it', async () => {
+      state.reveal.mockResolvedValue(false);
+      const onNav = vi.fn();
+      renderHook(() => useScheduledRunOpening({ hydrated: true, onNav }));
+      deliver(finished());
+      await clickNotice();
+      await waitFor(() => expect(state.toastError).toHaveBeenCalledWith('That thread is no longer available'));
+      expect(state.reveal).toHaveBeenCalledWith('ws-1', 'n-1');
+      expect(state.requestDetail).toHaveBeenCalledWith('job-1');
+      expect(onNav).toHaveBeenCalledWith('scheduled');
+    });
+
+    it('opens a Scheduled-only run on the Scheduled page', async () => {
+      state.getRun.mockResolvedValue({ id: 'run-1', scheduledOnly: true });
+      const onNav = vi.fn();
+      renderHook(() => useScheduledRunOpening({ hydrated: true, onNav }));
+      deliver(finished({ scheduledOnly: true }));
+      await clickNotice();
+      await waitFor(() => expect(state.requestRun).toHaveBeenCalledWith('job-1', 'run-1'));
+      expect(state.reveal).not.toHaveBeenCalled();
+    });
+
+    it('stays quiet when notifications are off, for a start, and without the notify flag', () => {
+      const { rerender } = renderHook(() => useScheduledRunOpening({ hydrated: true, onNav: vi.fn() }));
+      deliver(finished({ phase: 'started', status: 'running' }));
+      deliver(finished({ notify: false }));
+      state.notifications = 'off';
+      rerender();
+      deliver(finished());
+      expect(state.notify).not.toHaveBeenCalled();
+    });
+
+    it('leaves the notice to Electron main in the desktop app', () => {
+      installBridge();
+      renderHook(() => useScheduledRunOpening({ hydrated: true, onNav: vi.fn() }));
+      deliver(finished({ nodeId: null, status: 'failed' }));
+      expect(state.notify).not.toHaveBeenCalled();
+    });
+
+    it('opens nothing until a notice is clicked', () => {
+      const onNav = vi.fn();
+      renderHook(() => useScheduledRunOpening({ hydrated: true, onNav }));
+      expect(state.reveal).not.toHaveBeenCalled();
+      expect(onNav).not.toHaveBeenCalled();
+    });
   });
 });

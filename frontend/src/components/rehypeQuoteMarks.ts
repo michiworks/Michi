@@ -16,13 +16,7 @@
  * Runs after sanitize, so Markdown and raw HTML cannot forge a mark.
  */
 
-type HastNode = {
-  type?: string;
-  tagName?: string;
-  value?: string;
-  properties?: Record<string, unknown>;
-  children?: HastNode[];
-};
+import { hastClassNames, hastText, mathKind, type HastNode } from './rehypeHast';
 
 export interface MarkdownQuote {
   /** Names the quote in the keys of the marks it produces. */
@@ -53,8 +47,6 @@ const BLOCK_TAGS = new Set([
 ]);
 /** Inline elements that only style their text, so a mark may cut them in two. */
 const SPLIT_TAGS = new Set(['b', 'del', 'em', 'i', 'ins', 'mark', 's', 'small', 'span', 'strong', 'sub', 'sup', 'u']);
-const MATH_CLASSES = ['katex', 'math', 'math-inline'];
-const DISPLAY_MATH_CLASSES = ['katex-display', 'math-display'];
 const WHITESPACE = /\s/;
 
 /**
@@ -68,12 +60,6 @@ type Kind = 'text' | 'block' | 'skip' | 'atom' | 'split';
 interface Walk {
   lengths: WeakMap<HastNode, number>;
   blocks: WeakMap<HastNode, boolean>;
-}
-
-function classes(node: HastNode): string[] {
-  const value = node.properties?.className;
-  if (Array.isArray(value)) return value.map(String);
-  return typeof value === 'string' ? value.split(/\s+/) : [];
 }
 
 function textLength(node: HastNode, walk: Walk): number {
@@ -99,17 +85,12 @@ function kindOf(node: HastNode, walk: Walk): Kind {
   if (node.type === 'text') return 'text';
   if (node.type !== 'element') return 'atom';
   const tag = node.tagName ?? '';
-  const names = classes(node);
-  if (tag === 'pre' || names.some((name) => DISPLAY_MATH_CLASSES.includes(name))) return 'skip';
+  const math = mathKind(node);
+  if (tag === 'pre' || math === 'display') return 'skip';
   if (BLOCK_TAGS.has(tag)) return 'block';
-  if (names.some((name) => MATH_CLASSES.includes(name)) || names.includes('mention-chip') || quoteMarkKeys(node)) return 'atom';
+  if (math === 'inline' || hastClassNames(node).includes('mention-chip') || quoteMarkKeys(node)) return 'atom';
   if (containsBlock(node, walk)) return SPLIT_TAGS.has(tag) ? 'block' : 'skip';
   return SPLIT_TAGS.has(tag) ? 'split' : 'atom';
-}
-
-function allText(node: HastNode): string {
-  if (node.type === 'text') return node.value ?? '';
-  return (node.children ?? []).map(allText).join('');
 }
 
 interface MarkRange {
@@ -243,7 +224,7 @@ export function rehypeQuoteMarks(options: QuoteMarksOptions) {
   return function transform(tree: HastNode) {
     const quotes = options?.quotes ?? [];
     if (quotes.length === 0 || !Array.isArray(tree.children)) return;
-    const ranges = findRanges(allText(tree), quotes);
+    const ranges = findRanges(hastText(tree), quotes);
     const walk: Walk = { lengths: new WeakMap(), blocks: new WeakMap() };
     for (const range of ranges) {
       tree.children = markChildren(tree, range.start, range.end, range.keys, walk);

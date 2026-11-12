@@ -1,9 +1,12 @@
 import React from 'react';
-import { fireEvent, render, screen, waitFor } from '@testing-library/react';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import type { BackgroundServiceStatus } from 'michi-shared';
+import { resetCompanionStoreForTests } from '../../../../state/companion/companionStore';
+import { companionSnapshot } from '../../../../test/companionFixtures';
 import { BackgroundPane } from './BackgroundPane';
-import { shouldShowLifetimeRows } from './desktopLifetime';
-import { SettingsLayoutContext } from './settingsPhone';
+import { KEEP_RUNNING_LABEL } from './residencyCopy';
+import { SettingsLayoutContext, SettingsOpenContext } from './settingsPhone';
 const api = vi.hoisted(() => ({ save: vi.fn() }));
 const lifetime = vi.hoisted(() => ({
   available: false,
@@ -21,120 +24,92 @@ const lifetime = vi.hoisted(() => ({
   setOpenAtLogin: vi.fn(),
 }));
 vi.mock('../../../../services/api/scheduledJobs', () => ({
-  getScheduledJobSettings: async () => ({ sessionMode: 'persistent' }),
+  getScheduledJobSettings: async () => ({ sessionMode: 'persistent', requireCreateApproval: false }),
   updateScheduledJobSettings: (...args: unknown[]) => api.save(...args),
 }));
-vi.mock('../../scheduled/useBackgroundService', () => ({ useBackgroundService: () => ({ available: false }) }));
-vi.mock('../../scheduled/useDesktopLifetime', () => ({ useDesktopLifetime: () => lifetime }));
-beforeEach(() => {
-  lifetime.available = false;
-  lifetime.status = null;
-  lifetime.busy = false;
-  lifetime.error = null;
-  lifetime.setKeepInBackground.mockReset();
-  lifetime.setOpenAtLogin.mockReset();
-});
+
+/** A desktop bridge with the background service, answering `status`. */
+function desktopService(status: BackgroundServiceStatus) {
+  const bridge = {
+    chooseFolder: vi.fn(), saveMarkdown: vi.fn(),
+    getBackgroundServiceStatus: vi.fn(async () => status),
+    setBackgroundServiceEnabled: vi.fn(async () => status),
+  };
+  (window as unknown as { electron?: unknown }).electron = bridge;
+  return bridge;
+}
+afterEach(() => { delete (window as unknown as { electron?: unknown }).electron; });
 describe('scheduled job defaults', () => {
   it('loads and saves the default, retaining the saved value on failure', async () => {
     render(<BackgroundPane />);
     const ongoing = await screen.findByRole('radio', { name: 'One ongoing thread' });
     expect((ongoing as HTMLInputElement).checked).toBe(true);
-    api.save.mockResolvedValueOnce({ sessionMode: 'fresh' });
+    api.save.mockResolvedValueOnce({ sessionMode: 'fresh', requireCreateApproval: false });
     fireEvent.click(screen.getByRole('radio', { name: 'New thread each run' }));
     await waitFor(() => expect((screen.getByRole('radio', { name: 'New thread each run' }) as HTMLInputElement).checked).toBe(true));
-    expect(api.save).toHaveBeenCalledWith('fresh');
+    expect(api.save).toHaveBeenCalledWith({ sessionMode: 'fresh' });
     api.save.mockRejectedValueOnce(new Error('Save failed'));
     fireEvent.click(ongoing);
     expect((await screen.findByRole('alert')).textContent).toContain('Save failed');
     expect((screen.getByRole('radio', { name: 'New thread each run' }) as HTMLInputElement).checked).toBe(true);
   });
+
+  it('asks before agents create jobs only once turned on', async () => {
+    render(<BackgroundPane />);
+    const toggle = await screen.findByRole('switch', { name: 'Ask before agents create scheduled jobs' });
+    expect(toggle.getAttribute('aria-checked')).toBe('false');
+    expect(screen.getByText(/saves a new job right away/)).toBeTruthy();
+    api.save.mockResolvedValueOnce({ sessionMode: 'persistent', requireCreateApproval: true });
+    fireEvent.click(toggle);
+    expect(api.save).toHaveBeenLastCalledWith({ requireCreateApproval: true });
+    await waitFor(() => expect(toggle.getAttribute('aria-checked')).toBe('true'));
+    expect(screen.getByText(/saves it only after you approve/)).toBeTruthy();
+  });
 });
 
-describe('background service on a phone', () => {
-  it('links to the scheduled jobs instead of describing the desktop app’s service', async () => {
+describe('the background service, moved to Settings › Notifications', () => {
+  it('on a phone, links to the scheduled jobs and leaves the desktop app’s service out', async () => {
     const onOpenScheduled = vi.fn();
     render(<SettingsLayoutContext.Provider value="phone"><BackgroundPane onOpenScheduled={onOpenScheduled} /></SettingsLayoutContext.Provider>);
     await screen.findByRole('radio', { name: 'One ongoing thread' });
-    expect(screen.queryByText('Keep Michi running in the background')).toBeNull();
+    expect(screen.queryByText(KEEP_RUNNING_LABEL)).toBeNull();
     expect(screen.queryByText(/Your Mac still pauses Michi/)).toBeNull();
     fireEvent.click(screen.getByRole('button', { name: 'Open' }));
     expect(onOpenScheduled).toHaveBeenCalledOnce();
   });
 
-  it('keeps the service row on desktop', async () => {
+  it('on a desktop, keeps a link row that opens the switch where it is now, and names the agent', async () => {
+    desktopService({ supported: true, enabled: false, running: false, port: null });
+    const snapshot = companionSnapshot();
+    resetCompanionStoreForTests({ snapshot: { ...snapshot, settings: { ...snapshot.settings, displayName: 'Robin' } } });
+    const open = vi.fn();
+    try {
+      render(<SettingsOpenContext.Provider value={open}><BackgroundPane onOpenScheduled={vi.fn()} /></SettingsOpenContext.Provider>);
+      await screen.findByRole('radio', { name: 'One ongoing thread' });
+      const row = (await screen.findByText(KEEP_RUNNING_LABEL)).closest('.settings-row') as HTMLElement;
+      expect(row.textContent).toContain('Robin can still notify you');
+      expect(row.textContent).toContain('Settings › Notifications › When Michi’s windows are closed');
+      // The service's switch itself is not here any more; the job-creation approval switch is.
+      expect(screen.queryByRole('switch', { name: KEEP_RUNNING_LABEL })).toBeNull();
+      expect(screen.getByRole('switch', { name: 'Ask before agents create scheduled jobs' })).toBeTruthy();
+      fireEvent.click(within(row).getByRole('button', { name: 'Open' }));
+      expect(open).toHaveBeenCalledWith('notifications', KEEP_RUNNING_LABEL);
+    } finally {
+      resetCompanionStoreForTests();
+    }
+  });
+
+  it('leaves the link out where Settings › Notifications doesn’t show the switch: a browser, or a desktop that isn’t a Mac and has no service', async () => {
+    const view = render(<BackgroundPane onOpenScheduled={vi.fn()} />);
+    await screen.findByRole('radio', { name: 'One ongoing thread' });
+    expect(screen.queryByText(KEEP_RUNNING_LABEL)).toBeNull();
+    view.unmount();
+    // jsdom is not a Mac: an install that says the service isn't supported has nothing to point at.
+    const bridge = desktopService({ supported: false, enabled: false, running: false, port: null, reason: 'macOS only' });
     render(<BackgroundPane onOpenScheduled={vi.fn()} />);
     await screen.findByRole('radio', { name: 'One ongoing thread' });
-    expect(screen.getByText('Keep Michi running in the background')).toBeTruthy();
-    expect(screen.getByText('Available in the Michi desktop app.')).toBeTruthy();
-    expect(screen.queryByText('Keep Michi in the system tray')).toBeNull();
-    expect(screen.queryByText('Open Michi when I sign in')).toBeNull();
-  });
-});
-
-describe('Windows lifetime rows', () => {
-  const supported = {
-    supported: true,
-    keepInBackground: false,
-    openAtLogin: false,
-    trayActive: false,
-    canStartHidden: false,
-  };
-
-  it('shows native tray and login switches when Windows lifetime is supported', async () => {
-    lifetime.available = true;
-    lifetime.status = supported;
-    vi.spyOn(window, 'confirm').mockReturnValue(true);
-    render(<BackgroundPane />);
-    await screen.findByRole('radio', { name: 'One ongoing thread' });
-    expect(screen.getByRole('switch', { name: 'Keep Michi in the system tray' })).toBeTruthy();
-    expect(screen.getByRole('switch', { name: 'Open Michi when I sign in' })).toBeTruthy();
-    fireEvent.click(screen.getByRole('switch', { name: 'Keep Michi in the system tray' }));
-    await waitFor(() => expect(lifetime.setKeepInBackground).toHaveBeenCalledWith(true));
-    fireEvent.click(screen.getByRole('switch', { name: 'Open Michi when I sign in' }));
-    await waitFor(() => expect(lifetime.setOpenAtLogin).toHaveBeenCalledWith(true));
-  });
-
-  it('clears unsupported Windows states without offering switches', async () => {
-    lifetime.available = true;
-    lifetime.status = {
-      supported: false,
-      reason: 'Tray background mode is available in the installed Windows app.',
-      keepInBackground: false,
-      openAtLogin: false,
-      trayActive: false,
-      canStartHidden: false,
-    };
-    render(<BackgroundPane />);
-    await screen.findByRole('radio', { name: 'One ongoing thread' });
-    expect(screen.getByText('Keep Michi in the system tray')).toBeTruthy();
-    expect(screen.getAllByText('Tray background mode is available in the installed Windows app.').length).toBeGreaterThan(0);
-    expect(screen.queryByRole('switch', { name: 'Keep Michi in the system tray' })).toBeNull();
-    expect(screen.queryByRole('switch', { name: 'Open Michi when I sign in' })).toBeNull();
-  });
-
-  it('explains a failed tray so the user is not left with a hidden-looking On state', async () => {
-    lifetime.available = true;
-    lifetime.status = {
-      supported: true,
-      keepInBackground: true,
-      openAtLogin: true,
-      trayActive: false,
-      canStartHidden: false,
-    };
-    render(<BackgroundPane />);
-    await screen.findByRole('radio', { name: 'One ongoing thread' });
-    expect(screen.getByText(/tray is unavailable/)).toBeTruthy();
-    expect(screen.getByText(/stays visible unless the tray is working/)).toBeTruthy();
-    expect((screen.getByRole('switch', { name: 'Keep Michi in the system tray' }) as HTMLButtonElement).getAttribute('aria-checked')).toBe('true');
-  });
-});
-
-describe('lifetime row visibility', () => {
-  it('hides browser, phone, and non-Windows unsupported states', () => {
-    expect(shouldShowLifetimeRows(false, false, null)).toBe(false);
-    expect(shouldShowLifetimeRows(true, true, { supported: true, keepInBackground: true, openAtLogin: false, trayActive: true, canStartHidden: true })).toBe(false);
-    expect(shouldShowLifetimeRows(true, false, { supported: false, reason: 'Tray background mode is available on Windows.', keepInBackground: false, openAtLogin: false, trayActive: false, canStartHidden: false })).toBe(false);
-    expect(shouldShowLifetimeRows(true, false, { supported: false, reason: 'Tray background mode is available in the installed Windows app.', keepInBackground: false, openAtLogin: false, trayActive: false, canStartHidden: false })).toBe(true);
-    expect(shouldShowLifetimeRows(true, false, { supported: true, keepInBackground: false, openAtLogin: false, trayActive: false, canStartHidden: false })).toBe(true);
+    await waitFor(() => expect(bridge.getBackgroundServiceStatus).toHaveBeenCalled());
+    await act(async () => { await Promise.resolve(); });
+    expect(screen.queryByText(KEEP_RUNNING_LABEL)).toBeNull();
   });
 });

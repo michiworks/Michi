@@ -140,7 +140,7 @@ try {
   evidence.backendMode = useBundle ? 'fresh backend bundle' : 'ts-node source';
   const backend = start(process.execPath, backendCommand, {
     cwd: path.join(root, 'backend'),
-    env: { ...process.env, HOST: '127.0.0.1', PORT: String(backendPort), MICHI_RENDERER_URL: `http://127.0.0.1:${frontendPort}`, MICHI_DATA_DIR: data, MICHI_CONFIG_DIR: config, MICHI_LOG_DIR: logs, MICHI_DEFAULT_CWD: workspaceCwd },
+    env: { ...process.env, HOST: '127.0.0.1', PORT: String(backendPort), MICHI_RENDERER_URL: `http://127.0.0.1:${frontendPort}`, MICHI_DATA_DIR: data, MICHI_CONFIG_DIR: config, MICHI_LOG_DIR: logs, MICHI_DEFAULT_CWD: workspaceCwd, MICHI_DISABLE_COMPANION: '1' },
   });
   const vite = start(process.execPath, [path.join(root, 'node_modules/vite/bin/vite.js'), '--host', '127.0.0.1', '--port', String(frontendPort), '--strictPort'], {
     cwd: path.join(root, 'frontend'),

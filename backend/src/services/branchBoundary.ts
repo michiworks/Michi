@@ -1,6 +1,8 @@
 import { getDb } from './db';
 import { getNode, listEdges, listMessages, type EdgeRow, type MessageRow } from './dbRepository';
 import { buildCompatibleResumeContext, type TranscriptMessage } from './resumeStrategy';
+import { sessionReplayHistory } from '../agents/sessionReplayView';
+import { getCompanionSettings } from './companion/settings';
 
 export type BranchBoundaryKind = 'exact' | 'approx' | 'legacy';
 
@@ -82,6 +84,11 @@ export function resolveBranchBoundary(input: ResolveBranchBoundaryInput): Branch
       `branch parent "${edge.source_node_id}" is unavailable`,
     );
   }
+  // A fresh multi-model branch (nodes.fresh_context) inherits nothing: no
+  // rows, no cut and no note, so nothing renders and native fork declines.
+  if (getNode(input.childNodeId)?.fresh_context === 1) {
+    return { childNodeId: input.childNodeId, parentNodeId: parent.id, edgeId: edge.id, kind: 'exact', atTail: false, messages: [] };
+  }
   const rows = listMessages(parent.id, input.userId);
   const boundaryId = edge.fork_boundary_message_id ?? edge.anchor_message_id ?? undefined;
   let kind: BranchBoundaryKind;
@@ -135,14 +142,14 @@ export function resolveBranchBoundary(input: ResolveBranchBoundaryInput): Branch
   };
 }
 
-/** Model-visible transcript rows only, with empty placeholders removed. */
+/**
+ * Model-visible transcript rows only, with empty placeholders removed, as a
+ * rebuilt session replays them (DESIGN-v2 §2.8 T2): a branch of the user's
+ * conversation with the agent gets each posted check-in as Michi's one-line
+ * fact, never its text (agents/sessionReplayView).
+ */
 export function branchBoundaryTranscript(boundary: BranchBoundary): TranscriptMessage[] {
-  return boundary.messages
-    .filter((message) => message.role === 'user' || message.role === 'assistant')
-    .map((message) => ({
-      role: message.role as 'user' | 'assistant',
-      content: message.content,
-    }))
+  return sessionReplayHistory(boundary.messages, { name: () => getCompanionSettings().displayName })
     .filter((message) => message.content.trim().length > 0);
 }
 

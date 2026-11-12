@@ -9,8 +9,23 @@ import { LOCAL_AGENT_OWNER_ID, workspaceOwnerMatches } from '../agentOwner';
 import { isSystemWorkspaceSettings } from 'michi-shared';
 import { isMemoryExtractionJob } from '../memory/extractionRepository';
 import { memoryExtractionHasWork } from '../memory/extractionRun';
+import { isSignInFailure } from './stopReason';
 
 export const MAINTENANCE_CHECK_INTERVAL_MS = 60_000;
+
+/** How long an execution stopped by a sign-in failure waits before it is tried again. */
+const SIGN_IN_RETRY_MS = 60 * 60_000;
+
+/**
+ * Stopped after repeated failures (the scheduler's auto-pause). A sign-in or
+ * credential failure clears up outside Michi, so that stop holds only for
+ * SIGN_IN_RETRY_MS after its last failure; the scheduler lifts it for the
+ * run, and one more failure stops it again (scheduler.ts).
+ */
+function heldByAutoPause(record: ScheduledJobRecord, now: number): boolean {
+  if (!record.autoPaused) return false;
+  return !isSignInFailure(record.lastError) || now < record.updatedAt + SIGN_IN_RETRY_MS;
+}
 
 export function maintenanceCoordinatorState(ownerUserId: string): { paused: boolean; lastCheckedAt: number | null } {
   const row = getDb().prepare('SELECT paused,last_checked_at FROM meta_agent_maintenance_state WHERE owner_user_id=?')
@@ -45,10 +60,15 @@ export function maintenanceHasWork(workspaceId: string, ownerUserId: string, now
  * Discovery for one execution identity. A workspace has up to two: its Pages
  * maintenance, and its automatic memory extraction (memory/extractionRun.ts),
  * which shares this coordinator's lease, capacity, backoff and pauses.
+ * `automatic`: the coordinator's own check, for which extraction reads a
+ * conversation only once it is due (quiet, or enough turns waiting); a
+ * manual start never waits.
  */
-export function maintenanceExecutionHasWork(record: Pick<ScheduledJobRecord, 'id' | 'workspaceId' | 'ownerUserId'>, now: number): boolean {
+export function maintenanceExecutionHasWork(record: Pick<ScheduledJobRecord, 'id' | 'workspaceId' | 'ownerUserId'>, now: number, automatic = false): boolean {
   const ownerUserId = record.ownerUserId ?? LOCAL_AGENT_OWNER_ID;
-  if (isMemoryExtractionJob(record.id)) return memoryExtractionHasWork({ jobId: record.id, workspaceId: record.workspaceId, ownerUserId }, now);
+  if (isMemoryExtractionJob(record.id)) {
+    return memoryExtractionHasWork({ jobId: record.id, workspaceId: record.workspaceId, ownerUserId }, now, automatic);
+  }
   return maintenanceHasWork(record.workspaceId, ownerUserId, now);
 }
 
@@ -77,11 +97,11 @@ export class MaintenanceCoordinator {
     // Least recently served first; a busy workspace yields after every batch.
     records.sort((a, b) => (a.lastRunAt ?? -1) - (b.lastRunAt ?? -1) || a.createdAt - b.createdAt || a.id.localeCompare(b.id));
     for (const record of records) {
-      if (!record.enabled || record.autoPaused) continue;
+      if (!record.enabled || heldByAutoPause(record, now)) continue;
       const retryMs = Math.min(60 * 60_000, MAINTENANCE_CHECK_INTERVAL_MS * 2 ** Math.min(6, Math.max(0, record.consecutiveFailures - 1)));
       if (record.consecutiveFailures > 0 && record.lastRunAt !== null && now < record.updatedAt + retryMs) continue;
       try {
-        if (!maintenanceExecutionHasWork(record, now)) continue;
+        if (!maintenanceExecutionHasWork(record, now, true)) continue;
         if (start(record)) break;
       } catch (error) {
         log.warn('scheduler', 'maintenance discovery failed', { workspaceId: record.workspaceId, error: String(error) });

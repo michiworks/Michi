@@ -3,6 +3,7 @@ import {
   boundWorkflowRun,
   isWorkflowRunOpen,
   isWorkflowRunTerminal,
+  settleWorkflowNodes,
   WORKFLOW_LIMITS,
   type WorkflowAction,
   type WorkflowApprovalDto,
@@ -10,6 +11,7 @@ import {
   type WorkflowRunStatus,
   type WorkflowRuntime,
 } from 'michi-shared';
+import type { WorkflowApprovalResolver, WorkflowControls } from 'michi-runtime';
 import { log } from './logger';
 import { SqliteWorkflowRunStore, type WorkflowRunStore } from './workflowRunsRepository';
 
@@ -32,14 +34,7 @@ export interface WorkflowRunContext {
   nodeId: string | null;
 }
 
-export type WorkflowControl = () => Promise<void>;
-export type WorkflowControls = Partial<Record<WorkflowAction, WorkflowControl>>;
 export type WorkflowRunListener = (ownerUserId: string, run: WorkflowRunDtoV1) => void;
-/**
- * Called once per approval: the chosen option, or null when it lapsed.
- * `endedAs` is the run's terminal status when the run ending lapsed it.
- */
-export type WorkflowApprovalResolver = (optionId: string | null, endedAs?: WorkflowRunStatus) => void;
 
 const ALLOWED: Record<WorkflowRunStatus, readonly WorkflowAction[]> = {
   running: ['pause', 'stop'],
@@ -192,10 +187,11 @@ export class WorkflowRunHub {
     const entry = this.live.get(workflowRunId(ownerUserId, runtime, nativeId));
     if (!entry) return;
     entry.controls = {};
+    const at = this.now();
     const run = isWorkflowRunTerminal(entry.run.status) || !reason
       ? entry.run
-      : { ...entry.run, status: 'cancelled' as const, statusDetail: reason, endedAt: entry.run.endedAt ?? this.now(),
-          nodes: entry.run.nodes.map((node) => node.status === 'running' ? { ...node, status: 'cancelled' as const, currentTool: undefined } : node) };
+      : { ...entry.run, status: 'cancelled' as const, statusDetail: reason, interrupted: true as const, endedAt: entry.run.endedAt ?? at,
+          nodes: settleWorkflowNodes(entry.run.nodes, 'cancelled', at) };
     this.commit(entry, run);
   }
 
@@ -275,10 +271,11 @@ export class WorkflowRunHub {
             statusDetail: run.runtime === 'kiro'
               ? 'Interrupted: Michi restarted while this workflow was running. Kiro may resume it in a new session.'
               : 'Interrupted: Michi restarted while this workflow was running',
+            interrupted: true,
             endedAt: run.endedAt ?? at,
             actions: [],
             approvals: undefined,
-            nodes: run.nodes.map((node) => node.status === 'running' ? { ...node, status: 'cancelled', currentTool: undefined } : node),
+            nodes: settleWorkflowNodes(run.nodes, 'cancelled', at),
             updatedAt: at,
             revision: this.nextRevision(run.revision, at),
           };

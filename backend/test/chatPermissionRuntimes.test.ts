@@ -30,6 +30,24 @@ test('Ask gates writes, execution, unknown MCP and native requests; Trust and YO
   assert.equal(resolveChatPolicy(chatOwner('b'), null, 'write'), 'ask');
 });
 
+test("Ask runs Michi's read-only pane and docs tools without a prompt, as send_to_thread's follow-ups need", () => {
+  configure({ a: 'ask' });
+  for (const tool of ['wait_pane', 'read_pane_output', 'inspect_pane', 'list_panes', 'michi_docs', 'michi_skills']) {
+    assert.equal(resolveChatPolicy(chatOwner('a'), null, tool), 'allow', tool);
+    // Michi's self-scoped tools run unasked as a runtime's own request too (CHAT_SELF_SCOPED_TOOLS).
+    assert.equal(resolveChatPolicy(chatOwner('a'), null, tool, true), 'allow', `${tool}: native request`);
+  }
+});
+
+test('Ask runs show_image and Pi\'s web_search and fetch_content without a prompt: they only read', () => {
+  configure({ a: 'ask' });
+  for (const tool of ['show_image', 'web_search', 'fetch_content']) {
+    assert.equal(resolveChatPolicy(chatOwner('a'), null, tool), 'allow', tool);
+    assert.equal(resolveChatPolicy(chatOwner('a'), null, tool, true), 'ask', `${tool}: a native request still asks`);
+  }
+  assert.equal(resolveChatPolicy(chatOwner('a'), null, 'open_url'), 'ask', 'opening a link for the user still asks');
+});
+
 test('Codex maps all three modes to native turn approval and sandbox policies', () => {
   assert.deepEqual(codexChatTurnPolicy('ask', '/workspace'), { approvalPolicy: 'untrusted', sandboxPolicy: { type: 'readOnly', networkAccess: false } });
   assert.equal(codexChatTurnPolicy('trust', '/workspace').approvalPolicy, 'never');

@@ -1,15 +1,14 @@
-import { serverEntityId } from '../../config/backendIdentity';
-import React, { useState, useRef, useEffect, useCallback, useLayoutEffect } from 'react';
+import { useState, useRef, useEffect } from 'react';
 import { AnimatePresence, motion, useIsPresent, type TargetAndTransition } from 'motion/react';
 import type { ChatNodeState, PendingQueuedMessage } from '../../state/chatTypes';
-import { useChatProjects } from '../../state/chatStore';
-import { parseChatCommand } from '../../state/chatCommands';
-import { workspaceBackendApiBase } from '../../config/backendConnections';
+import { buildSlashEntries, resolveSlashRun, type SlashEntry } from '../../state/slashEntries';
+import { artifactHasImagePreview } from 'michi-shared';
+import { attachmentImageUrl } from '../../services/api/artifacts';
 import { EASE } from '../../motion/tokens';
 import { AssistantAttachmentsPreBlock } from './assistant/AssistantAttachments';
-import { launchFlight, markRestored, registerQueuedSource, wasRestored } from './messageFlight';
+import { isImeComposing } from '../../lib/ime';
 
-/** A queued block leaving folds away (its text flies on as the bubble). */
+/** A queued block leaving folds away; its bubble fades in in the transcript. */
 const QUEUED_EXIT: TargetAndTransition = {
   opacity: 0,
   height: 0,
@@ -21,6 +20,7 @@ const QUEUED_EXIT: TargetAndTransition = {
 };
 
 const NO_QUEUE: readonly PendingQueuedMessage[] = [];
+const LOCAL_SLASH_ENTRIES = buildSlashEntries({});
 
 export interface PanePendingAttachment {
   id: string;
@@ -28,6 +28,10 @@ export interface PanePendingAttachment {
   absPath: string;
   /** Workspace-relative path (e.g. ".attachments/img.png"). Present for uploaded files. */
   relPath?: string;
+  /** Workspace whose folder holds the file; absent means the composer's own.
+   *  The Home composer keeps its attachments across a workspace switch, so
+   *  this can differ from the workspace the message goes to. */
+  workspaceId?: string;
 }
 
 interface PaneComposerPreBlocksProps {
@@ -35,7 +39,11 @@ interface PaneComposerPreBlocksProps {
   quoteMaxLines: number;
   quotedText: string | null;
   pendingAttachments: readonly PanePendingAttachment[];
+  /** The workspace the pending attachments were uploaded to: the pane's own, not the shell's. */
+  workspaceId?: string;
   canSteerQueued: boolean;
+  /** The chat's / entries: a queued message that runs a skill is a turn of its own, never steered. */
+  slashEntries?: readonly SlashEntry[];
   steeringQueueId: string | null;
   onSteerQueued: (queueId: string) => void;
   onRestoreQueued: (queueId: string) => void;
@@ -45,33 +53,14 @@ interface PaneComposerPreBlocksProps {
   onRemovePendingAttachment: (attachmentId: string) => void;
 }
 
-/** Build a thumbnail src for a pending image attachment. Always uses the
- *  backend /api/files route — file:// URLs are blocked when the renderer
- *  loads from http:// (Electron dev and prod both use localhost). */
-function pendingThumbSrc(p: PanePendingAttachment, workspaceId?: string): string | null {
-  if (workspaceId && p.relPath) {
-    const encoded = p.relPath.split('/').map(encodeURIComponent).join('/');
-    return `${workspaceBackendApiBase(workspaceId)}/files/${encodeURIComponent(serverEntityId(workspaceId))}/${encoded}`;
-  }
-  // Fallback: derive relPath from absPath if it contains .attachments/
-  if (workspaceId && p.absPath) {
-    const marker = '/.attachments/';
-    const idx = p.absPath.indexOf(marker);
-    if (idx !== -1) {
-      const rel = '.attachments/' + p.absPath.slice(idx + marker.length);
-      const encoded = rel.split('/').map(encodeURIComponent).join('/');
-      return `${workspaceBackendApiBase(workspaceId)}/files/${encodeURIComponent(serverEntityId(workspaceId))}/${encoded}`;
-    }
-  }
-  return null;
-}
-
 export function PaneComposerPreBlocks({
   node,
   quoteMaxLines,
   quotedText,
   pendingAttachments,
+  workspaceId,
   canSteerQueued,
+  slashEntries,
   steeringQueueId,
   onSteerQueued,
   onRestoreQueued,
@@ -80,47 +69,8 @@ export function PaneComposerPreBlocks({
   onDismissQuote,
   onRemovePendingAttachment,
 }: PaneComposerPreBlocksProps) {
-  const { activeProject } = useChatProjects();
-  const workspaceId = activeProject?.id;
   const queued = node.pendingQueued ?? NO_QUEUE;
-  const nodeId = node.nodeId;
-
-  // This pane's queued blocks: the launch reads them; steered messages find
-  // them through the registry.
-  const blocksRef = useRef(new Map<string, HTMLElement>());
-  const registerBlock = useCallback((queueId: string, el: HTMLElement) => {
-    blocksRef.current.set(queueId, el);
-    const unregister = registerQueuedSource(nodeId, queueId, el);
-    return () => {
-      unregister();
-      if (blocksRef.current.get(queueId) === el) blocksRef.current.delete(queueId);
-    };
-  }, [nodeId]);
-
-  // An entry that leaves the queue is sent (the turn's end drains it, or
-  // "Send now"), unless the user took it back into the composer (×, in any
-  // surface showing it), it is being steered (that message links to its
-  // block itself) or it is a command (no bubble). A drain launches once:
-  // a batch merges into one bubble, which flies from its first block, still
-  // on screen here, leaving.
-  const runtimeId = node.runtimeId;
-  const engine = node.sessionState?.nativeEngine;
-  const previousRef = useRef<{ nodeId: string; entries: readonly PendingQueuedMessage[] }>({ nodeId, entries: queued });
-  useLayoutEffect(() => {
-    const previous = previousRef.current;
-    previousRef.current = { nodeId, entries: queued };
-    if (previous.nodeId !== nodeId) return;
-    const sent = previous.entries.find((entry) =>
-      !queued.some((q) => q.id === entry.id)
-      && !entry.steering
-      && !wasRestored(nodeId, entry.id)
-      && !parseChatCommand(entry.value, runtimeId, engine));
-    if (sent) launchFlight(nodeId, blocksRef.current.get(sent.id));
-  }, [nodeId, queued, runtimeId, engine]);
-  const restore = useCallback((queueId: string) => {
-    markRestored(nodeId, queueId);
-    onRestoreQueued(queueId);
-  }, [nodeId, onRestoreQueued]);
+  const runOf = (entry: PendingQueuedMessage) => resolveSlashRun(entry.value, slashEntries ?? LOCAL_SLASH_ENTRIES, entry.slash?.entry)?.kind;
 
   return (
     <>
@@ -132,15 +82,14 @@ export function PaneComposerPreBlocks({
           return (
             <QueuedBlock
               key={q.id}
-              register={registerBlock}
               entry={q}
               index={i}
               errored={isErrored}
-              steerable={canSteerQueued && !isErrored}
+              steerable={canSteerQueued && !isErrored && runOf(q) !== 'skill'}
               steerDisabled={steeringQueueId !== null || queued.some((entry) => entry.steering)}
               steering={steeringQueueId === q.id || !!q.steering}
               onSteer={onSteerQueued}
-              onRestore={restore}
+              onRestore={onRestoreQueued}
             />
           );
         })}
@@ -185,55 +134,68 @@ export function PaneComposerPreBlocks({
         </div>
       )}
 
-      {pendingAttachments.length > 0 && (
-        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, padding: '4px 8px' }}>
-          {pendingAttachments.map((p) => {
-            const ext = p.name.split('.').pop()?.toLowerCase() ?? '';
-            const isImage = ['png','jpg','jpeg','gif','webp'].includes(ext);
-            const thumbSrc = isImage ? pendingThumbSrc(p, workspaceId) : null;
-
-            if (isImage && thumbSrc) {
-              return (
-                <span key={p.id} title={p.name} className="t-att-pending-item" style={{ display: 'inline-block' }}>
-                  <img
-                    src={thumbSrc}
-                    alt={p.name}
-                    style={{ width: 64, height: 64, objectFit: 'cover', display: 'block' }}
-                  />
-                  <span
-                    className="t-att-pending-x"
-                    onClick={() => onRemovePendingAttachment(p.id)}
-                  >
-                    ×
-                  </span>
-                </span>
-              );
-            }
-
-            return (
-              <span key={p.id} className="t-att-pending-item t-att-pending-file" title={p.absPath}>
-                <span style={{ fontSize: 'var(--fs-xs)', opacity: 0.7 }}>📄</span>
-                <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', maxWidth: 120 }}>
-                  {p.name}
-                </span>
-                <span
-                  className="t-att-pending-x"
-                  onClick={() => onRemovePendingAttachment(p.id)}
-                >
-                  ×
-                </span>
-              </span>
-            );
-          })}
-        </div>
-      )}
+      <PendingAttachmentRow items={pendingAttachments} workspaceId={workspaceId} onRemove={onRemovePendingAttachment} />
     </>
   );
 }
 
+/** The composer's pending attachments: image thumbnails, other files as chips. */
+export function PendingAttachmentRow({ items, workspaceId, onRemove }: {
+  items: readonly PanePendingAttachment[];
+  workspaceId?: string;
+  onRemove: (attachmentId: string) => void;
+}) {
+  const [broken, setBroken] = useState<ReadonlySet<string>>(() => new Set());
+  if (items.length === 0) return null;
+  return (
+    <div className="t-att-pending-row">
+      {items.map((p) => {
+        const thumbSrc = artifactHasImagePreview(p.name) ? attachmentImageUrl(p.workspaceId ?? workspaceId, p) : null;
+
+        if (thumbSrc && !broken.has(thumbSrc)) {
+          return (
+            <span key={p.id} title={p.name} className="t-att-pending-item t-reveal-host" style={{ display: 'inline-block' }}>
+              <img
+                src={thumbSrc}
+                alt={p.name}
+                onError={() => setBroken((prev) => new Set(prev).add(thumbSrc))}
+                style={{ width: 64, height: 64, objectFit: 'cover', display: 'block' }}
+              />
+              <button
+                type="button"
+                className="t-att-pending-x t-reveal"
+                aria-label={`Remove ${p.name}`}
+                onClick={() => onRemove(p.id)}
+              >
+                ×
+              </button>
+            </span>
+          );
+        }
+
+        return (
+          <span key={p.id} className="t-att-pending-item t-att-pending-file t-reveal-host" title={p.absPath}>
+            <span style={{ fontSize: 'var(--fs-xs)', opacity: 0.7 }}>📄</span>
+            <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', maxWidth: 120 }}>
+              {p.name}
+            </span>
+            <button
+              type="button"
+              className="t-att-pending-x t-reveal"
+              aria-label={`Remove ${p.name}`}
+              onClick={() => onRemove(p.id)}
+            >
+              ×
+            </button>
+          </span>
+        );
+      })}
+    </div>
+  );
+}
+
 /** One queued message. While it leaves it is out of the a11y tree and inert. */
-function QueuedBlock({ register: registerBlock, entry, index, errored, steerable, steerDisabled, steering, onSteer, onRestore }: {
-  register: (queueId: string, el: HTMLElement) => () => void;
+function QueuedBlock({ entry, index, errored, steerable, steerDisabled, steering, onSteer, onRestore }: {
   entry: PendingQueuedMessage;
   index: number;
   errored: boolean;
@@ -245,14 +207,11 @@ function QueuedBlock({ register: registerBlock, entry, index, errored, steerable
 }) {
   const present = useIsPresent();
   const queueId = entry.id;
-  // Stays registered while it leaves: a steered message finds it then.
-  const register = useCallback((el: HTMLDivElement | null) => (el ? registerBlock(queueId, el) : undefined), [registerBlock, queueId]);
   const captionSuffix = index === 0
     ? (errored ? ' · paused, review and send manually' : ' · sends when stream ends')
     : '';
   return (
     <motion.div
-      ref={register}
       exit={QUEUED_EXIT}
       className={`t-pre-block ${errored ? 'tone-danger' : 'tone-select'}`}
       aria-hidden={present ? undefined : true}
@@ -348,7 +307,7 @@ function EditableCommentChip({
             value={draft}
             onChange={(e) => setDraft(e.target.value)}
             onKeyDown={(e) => {
-              if (e.key === 'Enter' && (e.metaKey || e.ctrlKey) && !e.nativeEvent.isComposing) {
+              if (e.key === 'Enter' && (e.metaKey || e.ctrlKey) && !isImeComposing(e)) {
                 e.preventDefault();
                 commit();
               } else if (e.key === 'Escape') {

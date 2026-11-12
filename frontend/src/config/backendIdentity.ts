@@ -2,18 +2,30 @@
 // their original IDs; losing UI metadata can never turn a remote ID into Local.
 const PREFIX = 'remote:';
 
+export const LOCAL_BACKEND_CONNECTION_ID = 'local';
+
+/** A missing connection id means this machine's backend, as backendApiBase reads it. */
+export function isLocalConnectionId(connectionId?: string | null): boolean {
+  return !connectionId || connectionId === LOCAL_BACKEND_CONNECTION_ID;
+}
+
 export function remoteEntityIdentity(id: string): { connectionId: string; id: string } | null {
   if (!id.startsWith(PREFIX)) return null;
   const separator = id.indexOf(':', PREFIX.length);
   if (separator < 0) throw new Error('Malformed remote entity identity');
   const connectionId = decodeURIComponent(id.slice(PREFIX.length, separator));
   const serverId = decodeURIComponent(id.slice(separator + 1));
-  if (!connectionId || connectionId === 'local' || !serverId) throw new Error('Malformed remote entity identity');
+  if (isLocalConnectionId(connectionId) || !serverId) throw new Error('Malformed remote entity identity');
   return { connectionId, id: serverId };
 }
 
+/** Fail-closed: any `remote:` id, a malformed one included, is not this machine's. */
+export function namesRemoteEntity(id: string): boolean {
+  return id.startsWith(PREFIX);
+}
+
 export function backendEntityId(connectionId: string, id: string): string {
-  if (!id || connectionId === 'local') return id;
+  if (!id || connectionId === LOCAL_BACKEND_CONNECTION_ID) return id;
   const existing = remoteEntityIdentity(id);
   if (existing) {
     if (existing.connectionId !== connectionId) throw new Error('Entity belongs to a different backend connection');
@@ -33,7 +45,7 @@ export function serverEntityId(id: string, connectionId?: string): string {
 
 export function connectionIdFromApiUrl(url: string): string {
   const match = /\/backend-connections\/([^/]+)\/proxy(?:\/|\?|$)/.exec(url);
-  return match ? decodeURIComponent(match[1]) : 'local';
+  return match ? decodeURIComponent(match[1]) : LOCAL_BACKEND_CONNECTION_ID;
 }
 
 const entityFields = new Set([
@@ -43,8 +55,10 @@ const entityFields = new Set([
   'forkedFromNodeId', 'forked_from_node_id',
   'fromWorkspaceId', 'toWorkspaceId', 'sourceWorkspaceId',
   'treeId', 'tree_id', 'activeTreeId', 'active_tree_id', 'sourceTreeId', 'targetTreeId', 'fromNodeId',
+  // A multi-model run's caller chat and branches (WorkflowRunDtoV1.multiModel).
+  'callerNodeId', 'childNodeId',
 ]);
-const entityArrays = new Set(['nodeIds', 'chatIds', 'treeIds', 'childrenIds', 'mergeSources', 'digestSources']);
+const entityArrays = new Set(['nodeIds', 'chatIds', 'treeIds', 'childrenIds', 'mergeSources', 'digestSources', 'previousChildNodeIds']);
 const encodedFields = new Set(['blocks', 'digest', 'composer_draft', 'metadata', 'trim_snapshot']);
 const entityRoutes = new Set(['workspaces', 'trees', 'nodes', 'chats', 'files', 'artifacts']);
 /** Objects keyed by entity ID, e.g. the liveness feed's `backgroundSubagents.nodes` (node id → agent ids). */

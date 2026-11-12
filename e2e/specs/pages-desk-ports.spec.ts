@@ -29,7 +29,6 @@ async function setup(page: Page, blocks: PageBlock[]) {
   await page.addInitScript(() => {
     localStorage.setItem('michi:prefs', JSON.stringify({ onboardingCompletedAt: 1, terminalPalette: 'bone' }));
     localStorage.setItem('michi:migrated', '1');
-    localStorage.setItem('michi:metaChat:window:v1', JSON.stringify({ form: 'float', minimized: true, rect: null, dockRatio: 50 }));
   });
   await installMockApi(page, { workspaces: [{
     workspace: { id: WORKSPACE_ID, name: 'Ports review', created_at: 1, active_tree_id: 'source-tree' },

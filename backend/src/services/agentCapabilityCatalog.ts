@@ -9,6 +9,7 @@ import { CHAT_ONLY_BUILTIN_TOOLS, listEnabledBuiltinTools, type ParamField, type
 import { getRuntime } from '../agents/registry';
 import { AGENT_RUN_TOOL_NAMES, type AgentRunToolName } from '../agents/runToolBridge';
 import type { RuntimeRunAdapterRegistry } from '../agents/runs/runtimeRunAdapterRegistry';
+import { canonicalString } from './pages/canonicalJson';
 
 export interface AgentCapabilityCatalogQuery {
   ownerUserId: string;
@@ -30,19 +31,8 @@ function requireOwner(ownerUserId: string): void {
   if (!ownerUserId?.trim()) throw new Error('ownerUserId is required');
 }
 
-function canonical(value: unknown): string {
-  if (Array.isArray(value)) return `[${value.map(canonical).join(',')}]`;
-  if (value && typeof value === 'object') {
-    return `{${Object.entries(value as Record<string, unknown>)
-      .sort(([a], [b]) => a.localeCompare(b))
-      .map(([key, child]) => `${JSON.stringify(key)}:${canonical(child)}`)
-      .join(',')}}`;
-  }
-  return JSON.stringify(value);
-}
-
 function sha256(value: unknown): string {
-  return createHash('sha256').update(canonical(value)).digest('hex');
+  return createHash('sha256').update(canonicalString(value)).digest('hex');
 }
 
 function paramSchema(spec: ParamSpec): JsonValue {

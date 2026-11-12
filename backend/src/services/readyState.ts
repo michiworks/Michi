@@ -26,7 +26,10 @@ export function markFailed(err: Error): void {
   error = err.message;
 }
 
-/** Test-only — reset between unit tests. Do NOT call from production code. */
+/**
+ * Test-only — reset between unit tests. Do NOT call from production code.
+ * @testonly
+ */
 export function __resetWarmStatusForTest(): void {
   status = 'pending';
   error = null;

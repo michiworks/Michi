@@ -1,36 +1,15 @@
 import { Router } from 'express';
-import type { NextFunction, Request, Response } from 'express';
+import type { Request } from 'express';
 import { LOCAL_AGENT_OWNER_ID } from '../services/agentOwner';
-import { PageWriteError, assertPageRequestSize } from '../services/pages/core';
+import { PageWriteError } from '../services/pages/core';
 import { pageComponents } from '../services/pages/components';
 import { callPageComponentCapability, mintPageComponentCapability, revokePageComponentCapability } from '../services/pages/componentCapabilities';
 import { COMPONENT_SANDBOX_CSP, COMPONENT_SANDBOX_HTML, componentSandboxWrapper } from '../services/pages/sandboxDocument';
 import { COMPONENT_SANDBOX_METHODS, isComponentRecord } from 'michi-shared';
+import { pageBody as body, pageErrors, pageId as id, pageQuery, route } from './pageRouteKit';
 
-type Obj = Record<string, unknown>;
 const owner = (req: Request): string => (req as Request & { user?: { id?: string } }).user?.id ?? LOCAL_AGENT_OWNER_ID;
-const isObject = (value: unknown): value is Obj => value !== null && typeof value === 'object' && !Array.isArray(value);
 function fail(message: string): never { throw new PageWriteError(400, 'invalid', message); }
-function body(req: Request, keys: readonly string[]): Obj {
-  const data = req.body;
-  if (!isObject(data) || Object.keys(data).some((key) => !keys.includes(key))) return fail('Invalid component request body');
-  assertPageRequestSize(data);
-  return data;
-}
-function route(fn: (req: Request, res: Response) => unknown) {
-  return (req: Request, res: Response, next: NextFunction) => { try { fn(req, res); } catch (error) { next(error); } };
-}
-function errors(error: unknown, _req: Request, res: Response, _next: NextFunction): void {
-  if (error instanceof PageWriteError) {
-    res.status(error.status).json({ error: { code: error.code, message: error.message } });
-    return;
-  }
-  res.status(500).json({ error: { code: 'internal_error', message: 'Unable to complete component request' } });
-}
-function id(value: unknown, label: string): string {
-  if (typeof value !== 'string' || !value || value.length > 200) return fail(`Invalid ${label}`);
-  return value;
-}
 function libraryRevision(value: unknown): number {
   if (!Number.isSafeInteger(value) || (value as number) < 0) return fail('Invalid expectedLibraryRevision');
   return value as number;
@@ -65,14 +44,14 @@ export function setupPageComponentRoutes(): Router {
     res.json(pageComponents.list(id(req.params.workspaceId, 'workspaceId'), owner(req)));
   }));
   router.get('/components/:componentId', route((req, res) => {
-    if (Object.keys(req.query).some((key) => !['workspaceId', 'version'].includes(key))) fail('Unknown component query parameter');
+    pageQuery(req, ['workspaceId', 'version']);
     const workspaceId = id(req.query.workspaceId, 'workspaceId');
     const version = req.query.version === undefined ? undefined : Number(req.query.version);
     if (version !== undefined && !Number.isSafeInteger(version)) fail('Invalid version');
     res.json(pageComponents.read(workspaceId, owner(req), id(req.params.componentId, 'componentId'), version));
   }));
   router.get('/components/:componentId/references', route((req, res) => {
-    if (Object.keys(req.query).some((key) => key !== 'workspaceId')) fail('Unknown component query parameter');
+    pageQuery(req, ['workspaceId']);
     res.json({ items: pageComponents.references(id(req.query.workspaceId, 'workspaceId'), owner(req), id(req.params.componentId, 'componentId')) });
   }));
   // This native UI endpoint creates user attribution server-side; agent tools use the separate validated save path.
@@ -134,6 +113,6 @@ export function setupPageComponentRoutes(): Router {
     revokePageComponentCapability(id(req.params.capability, 'capability'), owner(req));
     res.status(204).end();
   }));
-  router.use(errors);
+  router.use(pageErrors('Unable to complete component request'));
   return router;
 }

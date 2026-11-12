@@ -1,6 +1,5 @@
-import React from 'react';
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { BottomSheet } from './BottomSheet';
 
 describe('BottomSheet presence', () => {
@@ -30,5 +29,37 @@ describe('BottomSheet presence', () => {
     fireEvent.pointerDown(scrim);
     fireEvent.click(scrim);
     expect(close).toHaveBeenCalledOnce();
+  });
+});
+
+class FakeViewport extends EventTarget {
+  constructor(public height: number, public offsetTop: number, public scale: number) { super(); }
+}
+
+describe('BottomSheet over the on-screen keyboard', () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  function placement(viewport: FakeViewport) {
+    vi.stubGlobal('innerHeight', 800);
+    vi.stubGlobal('visualViewport', viewport);
+    render(<BottomSheet open onClose={() => {}} aria-label="Actions">Content</BottomSheet>);
+    const sheet = document.querySelector('.ui-sheet') as HTMLElement;
+    return { bottom: sheet.style.bottom, maxHeight: sheet.style.maxHeight };
+  }
+
+  it('sits on the keyboard at scale 1', () => {
+    expect(placement(new FakeViewport(500, 0, 1))).toEqual({ bottom: '300px', maxHeight: '488px' });
+  });
+
+  it('stays at the bottom of the visible region under a pinch zoom without a keyboard', () => {
+    expect(placement(new FakeViewport(400, 0, 2))).toEqual({ bottom: '400px', maxHeight: '388px' });
+  });
+
+  it('still lifts above the keyboard while zoomed', () => {
+    expect(placement(new FakeViewport(250, 100, 2))).toEqual({ bottom: '450px', maxHeight: '238px' });
+  });
+
+  it('keeps its stylesheet place when nothing covers the bottom edge', () => {
+    expect(placement(new FakeViewport(800, 0, 1))).toEqual({ bottom: '', maxHeight: '' });
   });
 });

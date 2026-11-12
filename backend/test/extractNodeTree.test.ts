@@ -8,7 +8,7 @@ import { once } from 'node:events';
 import type { AddressInfo } from 'node:net';
 import { closeDb, getDb, initDb } from '../src/services/db';
 import { extractNodeTree } from '../src/services/extractNodeTree';
-import { getNode, listEdges, listMessages, listTrees, loadTreeMessages, saveEdge, saveMessage, saveNode, saveTree, saveWorkspace } from '../src/services/dbRepository';
+import { getNode, listEdges, listMessages, listTrees, loadTreeMessageSnapshot, saveEdge, saveMessage, saveNode, saveTree, saveWorkspace } from '../src/services/dbRepository';
 import { setupPersistenceRoutes } from '../src/routes/persistence';
 import { chatHub } from '../src/agents/chatHub';
 import { clearAllSessions, getSession, registerSession } from '../src/agents/sessionRegistry';
@@ -83,19 +83,70 @@ describe('extract a branch as an independent tree', () => {
     // The committed operation is retrievable after restart, without duplicating history.
     closeDb(); initDb();
     assert.deepEqual(extractNodeTree('ws', 'child', 'new'), result);
-    assert.equal(loadTreeMessages('ws', 'new').length, 8);
+    assert.equal(loadTreeMessageSnapshot('ws', 'new').messages.length, 8);
     // Old-tree history can disappear without taking the snapshot with it.
     getDb().prepare('DELETE FROM messages WHERE node_id IN (?, ?)').run('root', 'middle');
     assert.equal(listMessages('child').length, 6);
   });
 
+  test('copies parent history from a database that still has a dropped feature column', () => {
+    // A reverted feature left `thinking_headline` on some local databases.
+    // SELECT * returns it; the copy must not bind it as a named parameter.
+    getDb().exec('ALTER TABLE messages ADD COLUMN thinking_headline TEXT');
+    getDb().prepare('UPDATE messages SET thinking_headline = ? WHERE id = ?').run('Thinking about roots', 'root-a');
+    const result = extractNodeTree('ws', 'child', 'new');
+    assert.deepEqual(result.messages.map(m => m.content), ['root user', 'root assistant', 'middle user', 'middle assistant', 'child user', 'child assistant']);
+    assert.equal(result.inheritedMessageCount, 4);
+  });
+
   test('uses branch time for older unanchored branches and rejects missing explicit anchors', () => {
-    getDb().prepare('UPDATE edges SET anchor_message_id = NULL, created_at = 1 WHERE id = ?').run('root-middle');
+    getDb().prepare('UPDATE edges SET anchor_message_id = NULL, fork_boundary_message_id = NULL, created_at = 1 WHERE id = ?').run('root-middle');
     assert.deepEqual(extractNodeTree('ws', 'child', 'new').messages.map(m => m.content),
       ['root user', 'middle user', 'middle assistant', 'child user', 'child assistant']);
-    getDb().prepare('UPDATE edges SET anchor_message_id = ? WHERE id = ?').run('missing', 'root-sibling');
+    getDb().prepare('UPDATE edges SET anchor_message_id = NULL, fork_boundary_message_id = ? WHERE id = ?').run('missing', 'root-sibling');
     assert.throws(() => extractNodeTree('ws', 'sibling', 'another'), /anchor is missing/);
     assert.equal(getNode('sibling')?.parent_node_id, 'root');
+  });
+
+  test('cuts at the fork boundary a parent retry or edit left after clearing the anchor', () => {
+    getDb().prepare('UPDATE edges SET anchor_message_id = NULL, created_at = 1 WHERE id = ?').run('root-middle');
+    assert.deepEqual(extractNodeTree('ws', 'child', 'new').messages.map(m => m.content),
+      ['root user', 'root assistant', 'middle user', 'middle assistant', 'child user', 'child assistant']);
+  });
+
+  describe('multi-model branches', () => {
+    // The caller's ask and the reply that proposed the plan share the turn's start time;
+    // the branch edge is written when the user runs the plan, later, with only the ask as its cut.
+    beforeEach(() => {
+      saveMessage({ id: 'root-ask', node_id: 'root', role: 'user', content: 'Ask other models', seq: 2, created_at: 5 });
+      saveMessage({ id: 'root-plan', node_id: 'root', role: 'assistant', content: 'Parent later answer', seq: 3, created_at: 5 });
+      getDb().prepare("UPDATE edges SET anchor_message_id = NULL, fork_boundary_message_id = 'root-ask', created_at = 10 WHERE id = 'root-middle'").run();
+    });
+
+    test('a fork branch copies the caller only through the ask', () => {
+      const result = extractNodeTree('ws', 'middle', 'new');
+      assert.deepEqual(result.messages.map(m => m.content),
+        ['root user', 'root assistant', 'Ask other models', 'middle user', 'middle assistant']);
+      assert.equal(result.inheritedMessageCount, 3);
+    });
+
+    test('a fresh branch copies nothing it never saw', () => {
+      getDb().prepare("UPDATE edges SET fork_boundary_message_id = NULL WHERE id = 'root-middle'").run();
+      getDb().prepare("UPDATE nodes SET fresh_context = 1 WHERE id = 'middle'").run();
+      const result = extractNodeTree('ws', 'middle', 'new');
+      assert.deepEqual(result.messages.map(m => m.content), ['middle user', 'middle assistant']);
+      assert.equal(result.inheritedMessageCount, 0);
+      assert.equal(result.forkBoundaryMessageId, null);
+      assert.equal(result.forkedFromNodeId, 'root');
+    });
+
+    test('a branch below a fresh branch inherits only from the fresh branch down', () => {
+      getDb().prepare("UPDATE edges SET fork_boundary_message_id = NULL WHERE id = 'root-middle'").run();
+      getDb().prepare("UPDATE nodes SET fresh_context = 1 WHERE id = 'middle'").run();
+      const result = extractNodeTree('ws', 'child', 'new');
+      assert.deepEqual(result.messages.map(m => m.content), ['middle user', 'middle assistant', 'child user', 'child assistant']);
+      assert.equal(result.inheritedMessageCount, 2);
+    });
   });
 
   test('rejects roots, archived trees/workspaces, foreign nodes, busy descendants and broken lineage without writes', () => {

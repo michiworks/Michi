@@ -1,3 +1,4 @@
+import { extractKiroSteering, stripTurnMetadataSentinels } from 'michi-shared';
 import type { ChatNodeState, DigestState, Project } from './chatTypes';
 import { digestSourceSnapshot } from '../lib/digestSource';
 import { descendants, findTreeIdForNode } from './tree';
@@ -72,6 +73,15 @@ export function liveDigestSources(
     return !!n && n.kind === 'chat' && !n.deletedAt;
   });
   return ids.length > 0 ? ids : digest.sources;
+}
+
+/**
+ * A digest as the reader sees it. Generation replies can carry the chat
+ * preamble's metadata sentinels, and digests saved before the backend
+ * stripped them still hold them.
+ */
+export function visibleDigestMarkdown(content: string): string {
+  return stripTurnMetadataSentinels(extractKiroSteering(content).text).trim();
 }
 
 export interface ParsedDigest {

@@ -11,13 +11,15 @@ async function startStreaming(page: Page, mode: CaptureMode) {
   await installMockApi(page);
   await page.addInitScript(() => {
     const original = window.fetch.bind(window);
-    let controller: ReadableStreamDefaultController<Uint8Array>;
-    const probe = { captures: 0, push: (body: string) => controller.enqueue(new TextEncoder().encode(body)) };
+    let connect!: (controller: ReadableStreamDefaultController<Uint8Array>) => void;
+    // Send reaches fetch only after the stream transport's own checks, so a push may come first.
+    const connected = new Promise<ReadableStreamDefaultController<Uint8Array>>(resolve => { connect = resolve; });
+    const probe = { captures: 0, push: async (body: string) => (await connected).enqueue(new TextEncoder().encode(body)) };
     Object.assign(window, { overlayProbe: probe });
     window.fetch = async (input, init) => {
       const url = new URL(typeof input === 'string' || input instanceof URL ? String(input) : input.url, location.href);
       if (init?.method === 'POST' && /\/api\/chats\/[^/]+\/message$/.test(url.pathname)) {
-        return new Response(new ReadableStream<Uint8Array>({ start(value) { controller = value; } }), {
+        return new Response(new ReadableStream<Uint8Array>({ start(value) { connect(value); } }), {
           headers: { 'content-type': 'text/event-stream' },
         });
       }
@@ -57,7 +59,7 @@ async function startStreaming(page: Page, mode: CaptureMode) {
 }
 
 async function push(page: Page, body: string) {
-  await page.evaluate(value => (window as unknown as { overlayProbe: { push: (body: string) => void } }).overlayProbe.push(value), body);
+  await page.evaluate(value => (window as unknown as { overlayProbe: { push: (body: string) => Promise<void> } }).overlayProbe.push(value), body);
 }
 
 async function resize(page: Page, width: number, height: number) {

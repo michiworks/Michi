@@ -1,7 +1,8 @@
 import type React from 'react';
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { useChatActions, useChatNodesSnapshot, useChatPanes, useChatProjects } from '../../../state/chatStore';
+import { useChatActions, useChatNodeReader, useChatNodesSnapshot, useChatPanes, useChatProjects } from '../../../state/chatStore';
 import { usePrefs, type Prefs } from '../../../state/prefs';
+import { isListedThread, isVisibleConversationNode } from '../../../state/conversationVisibility';
 import {
   isBranchExpanded,
   isThreadExpanded,
@@ -9,11 +10,13 @@ import {
   orderPinnedFirst,
   type NodePinnedAt,
 } from '../../../state/sidebarSelectors';
-import { buildTree, findTreeIdForNode, type TreeNode } from '../../../state/tree';
+import { branchParentOf, buildTree, findTreeIdForNode, type TreeNode } from '../../../state/tree';
+import { navigateToNode } from '../../../state/navigateToNode';
 import { buildTreeContextMenu } from '../../../lib/treeContextMenu';
 import { prefersReducedMotion } from '../../../hooks/useReducedMotion';
 import type { MenuSection } from '../../ContextMenu';
-import type { Project, ProjectEdge, Tree } from '../../../state/chatTypes';
+import type { ChatNodeState, Project, ProjectEdge, Tree } from '../../../state/chatTypes';
+import { exportPanelEvent } from '../../../state/appEvents';
 
 type Expanded = Prefs['sidebarExpanded'];
 
@@ -44,6 +47,30 @@ export function flattenBranchIds(
     visit(orderPinnedFirst(buildTree(tree.rootNodeId, edges, isAlive), pinnedAt), true);
   }
   return ids;
+}
+
+/** What a thread row knows about itself when it is clicked. */
+export interface ThreadRowClick {
+  hasBranches: boolean;
+  expanded: boolean;
+  isActive: boolean;
+  /** The thread rows the view shows, in order: ⇧+click selects a range of these. */
+  shownTreeIds: readonly string[];
+}
+
+/** Whether the sidebar still lists `nodeId`: it is not in Trash, and neither
+ *  its thread nor its workspace is archived or deleted. */
+function listedInSidebar(
+  nodeId: string,
+  projects: readonly Project[],
+  readNode: (id: string) => ChatNodeState | undefined,
+): boolean {
+  const node = readNode(nodeId);
+  if (!node || node.deletedAt || !isVisibleConversationNode(node)) return false;
+  const project = projects.find((p) => !p.deletedAt && !p.archivedAt && p.chatIds.includes(nodeId));
+  const treeId = project ? findTreeIdForNode(nodeId, project) : null;
+  const tree = project?.trees.find((t) => t.id === treeId);
+  return !!tree && isListedThread(tree, readNode(tree.rootNodeId));
 }
 
 /** Pin both ends of a thread/workspace switch into the explicit maps so every
@@ -84,8 +111,9 @@ function pinBeforeSwitch(
 /**
  * Tree controller shared by the sidebar's structure view (WorkspaceTree) and
  * activity view (ActivityView): expand/collapse state, thread and branch
- * navigation, branch selection, revealing the focused pane, and the branch
- * context menu. The views keep only their own data derivation and layout.
+ * navigation, thread and branch selection, revealing the focused pane, and
+ * the branch context menu. The views keep only their own data derivation and
+ * layout.
  *
  * `branchIdsForProject` returns a project's branch ids in the view's on-screen
  * order (see `flattenBranchIds`) for ⇧+click range selection.
@@ -97,7 +125,7 @@ export function useSidebarTreeController({
   onActivate?: () => void;
   branchIdsForProject: (project: Project) => string[];
 }) {
-  const { projects, activeProjectId, activeProject, selection } = useChatProjects();
+  const { projects, activeProjectId, activeProject, selection, treeSelection } = useChatProjects();
   const { focusedPane } = useChatPanes();
   const {
     selectProject,
@@ -107,6 +135,8 @@ export function useSidebarTreeController({
     setFocusedNodeId,
     toggleSelection,
     clearSelection,
+    toggleTreeSelection,
+    clearTreeSelection,
     createBlankChild,
     deleteNode,
     trimNode,
@@ -195,29 +225,21 @@ export function useSidebarTreeController({
   const anchorRef = useRef<string | null>(null);
   const treeAnchorRef = useRef<string | null>(null);
 
-  /** Open `nodeId` in `treeId` of `project`, switching thread/workspace when
-   *  needed. Order matters:
-   *    - snapshot first, so the switch changes no row's expand state;
-   *    - openPaneInTree before activateTree, so ensurePaneSlot (inside
-   *      activateTree) sees a populated slot and skips its [root] default —
-   *      plain openPane would write into the OUTGOING paneKey, which only
-   *      re-derives after a re-render;
-   *    - setFocusedNodeId after activateTree, which would otherwise reset
-   *      focus to the tree's root. */
+  /** Open `nodeId` in `treeId` of `project` wherever it lives (navigateToNode).
+   *  Any thread it switches to is activated, so its replies count as read: also
+   *  another workspace's shown thread. The snapshot comes first, so the switch
+   *  changes no row's expand state. */
   const openInTree = useCallback(
     (project: Project, treeId: string, nodeId: string) => {
-      const crossesThread = project.id !== activeProjectId || treeId !== project.activeTreeId;
-      if (crossesThread) {
-        snapshotBeforeSwitch(treeId, project.id);
-        openPaneInTree(project.id, treeId, nodeId);
-        if (project.id !== activeProjectId) selectProject(project.id);
-        if (treeId !== project.activeTreeId) activateTree(treeId, project.id);
-      } else {
-        openPane(nodeId);
-      }
-      setFocusedNodeId(nodeId);
+      if (project.id !== activeProjectId || treeId !== project.activeTreeId) snapshotBeforeSwitch(treeId, project.id);
+      navigateToNode(
+        { projects, activeProjectId, selectProject, openPane, openPaneInTree, activateTree, setFocusedNodeId },
+        nodeId,
+        project.id,
+        treeId,
+      );
     },
-    [activeProjectId, snapshotBeforeSwitch, openPaneInTree, selectProject, activateTree, openPane, setFocusedNodeId],
+    [projects, activeProjectId, snapshotBeforeSwitch, openPaneInTree, selectProject, activateTree, openPane, setFocusedNodeId],
   );
 
   /** Click on a thread row body: open + focus the tree's root, even when the
@@ -231,6 +253,49 @@ export function useSidebarTreeController({
       onActivate?.();
     },
     [selection, clearSelection, openInTree, onActivate],
+  );
+
+  /** ⌘/Ctrl-click toggles the thread in the thread selection; ⇧-click adds
+   *  the shown rows from the anchor through it. */
+  const selectThread = useCallback(
+    (treeId: string, shownTreeIds: readonly string[], event: React.MouseEvent) => {
+      if (event.metaKey || event.ctrlKey) {
+        event.preventDefault();
+        toggleTreeSelection(treeId);
+        treeAnchorRef.current = treeId;
+        return;
+      }
+      if (event.shiftKey && treeAnchorRef.current) {
+        event.preventDefault();
+        const a = shownTreeIds.indexOf(treeAnchorRef.current);
+        const b = shownTreeIds.indexOf(treeId);
+        if (a === -1 || b === -1) return;
+        const [lo, hi] = a < b ? [a, b] : [b, a];
+        for (const id of shownTreeIds.slice(lo, hi + 1)) {
+          if (!treeSelection.has(id)) toggleTreeSelection(id);
+        }
+        return;
+      }
+      if (treeSelection.size > 0) clearTreeSelection();
+      treeAnchorRef.current = treeId;
+    },
+    [treeSelection, toggleTreeSelection, clearTreeSelection],
+  );
+
+  /** Click on a thread row. ⌘/⇧ only select (see selectThread). A plain
+   *  click always opens and focuses the root, even on the active thread (a
+   *  branch may hold the focus), then: a collapsed thread expands, the open
+   *  active one collapses, an open inactive one stays open. */
+  const clickThreadRow = useCallback(
+    (tree: Tree, project: Project, event: React.MouseEvent | undefined, row: ThreadRowClick) => {
+      if (event && (event.metaKey || event.ctrlKey || event.shiftKey)) {
+        selectThread(tree.id, row.shownTreeIds, event);
+        return;
+      }
+      openThreadRoot(tree, project);
+      if (row.hasBranches && (!row.expanded || row.isActive)) toggleThread(tree.id);
+    },
+    [selectThread, openThreadRoot, toggleThread],
   );
 
   const selectBranch = useCallback(
@@ -291,9 +356,17 @@ export function useSidebarTreeController({
   // the user isn't undone by unrelated updates (e.g. background streams).
   const revealRef = useRef({ projects, activeProject, activeProjectId, reduceMotion: prefs.reduceMotion });
   revealRef.current = { projects, activeProject, activeProjectId, reduceMotion: prefs.reduceMotion };
+  const readNode = useChatNodeReader();
+  const lastFocusedRef = useRef<string | null>(null);
   useEffect(() => {
     if (!focusedPane) return;
+    const previous = lastFocusedRef.current;
+    lastFocusedRef.current = focusedPane;
     const { projects: all, activeProject: active, activeProjectId: pid } = revealRef.current;
+    // The open conversation was archived or deleted and the store opened
+    // another in its place. The user did not go there, so the list stays
+    // where they were reading it.
+    if (previous && previous !== focusedPane && !listedInSidebar(previous, all, readNode)) return;
     const candidates = active
       ? [active, ...all.filter((p) => p.id !== active.id && !p.deletedAt && !p.archivedAt)]
       : all.filter((p) => !p.deletedAt && !p.archivedAt);
@@ -306,11 +379,7 @@ export function useSidebarTreeController({
     const owningTree = project?.trees.find((t) => t.id === owningTreeId);
     if (!project || !owningTreeId || !owningTree) return;
 
-    const parentOf = new Map<string, string>();
-    for (const e of project.edges) {
-      if (e.kind !== undefined && e.kind !== 'branch') continue;
-      parentOf.set(e.target, e.source);
-    }
+    const parentOf = branchParentOf(project.edges);
     const treeRoots = new Set(project.trees.map((t) => t.rootNodeId));
     const ancestors: string[] = [];
     const seen = new Set<string>();
@@ -360,7 +429,7 @@ export function useSidebarTreeController({
       cancelAnimationFrame(raf1);
       if (raf2) cancelAnimationFrame(raf2);
     };
-  }, [focusedPane, updateExpanded]);
+  }, [focusedPane, updateExpanded, readNode]);
 
   // ── Branch context menu ──
   const [menu, setMenu] = useState<BranchMenu | null>(null);
@@ -371,7 +440,9 @@ export function useSidebarTreeController({
       event.preventDefault();
       const project = projects.find((p) => !p.deletedAt && p.chatIds.includes(nodeId));
       if (!project) return;
-      setMenu({ x: event.clientX, y: event.clientY, targetId: nodeId, project });
+      const { clientX: x, clientY: y } = event;
+      // A row's ⋯ toggles; a right-click's press has already closed the menu.
+      setMenu((open) => (open?.targetId === nodeId ? null : { x, y, targetId: nodeId, project }));
     },
     [projects],
   );
@@ -385,6 +456,7 @@ export function useSidebarTreeController({
         project: menu.project,
         nodes,
         selection,
+        digestEnabled: prefs.digestEnabled,
         actions: {
           openPane: focusNode,
           createBlankChild,
@@ -399,7 +471,7 @@ export function useSidebarTreeController({
           createMergedChat,
           createDigest,
           openExportPanel: () =>
-            window.dispatchEvent(new CustomEvent('michi:toggle-export-panel')),
+            exportPanelEvent.dispatch({}),
           archiveTree,
           focusOrOpen: focusNode,
           beginInlineRename: (id) => {
@@ -423,10 +495,10 @@ export function useSidebarTreeController({
     updateExpanded,
     // navigation and selection
     openThreadRoot,
+    clickThreadRow,
     selectBranch,
     focusNode,
     isBranchSelected,
-    treeAnchorRef,
     // branch context menu
     menu,
     menuSections,

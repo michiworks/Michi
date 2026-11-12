@@ -3,8 +3,6 @@ import type { PageId } from './commands';
 /** The four places the left rail switches between. Each has its own sidebar and main area. */
 export type ShellArea = 'conversations' | 'spaces' | 'scheduled' | 'settings';
 
-export const SHELL_AREAS: readonly ShellArea[] = ['conversations', 'spaces', 'scheduled', 'settings'];
-
 export function areaForPage(page: PageId): ShellArea {
   if (page === 'spaces' || page === 'space') return 'spaces';
   if (page === 'scheduled') return 'scheduled';
@@ -21,12 +19,17 @@ export type SpacesHomeTarget =
 export const SPACES_HOME: SpacesHomeTarget = { kind: 'home' };
 export const ALL_TASKS: SpacesHomeTarget = { kind: 'all-tasks' };
 
+/**
+ * The older Settings sections that requests may still name. `meta-agent` is
+ * kept as a request id only: Settings › Meta agent became the Pages upkeep
+ * part of Settings › <name> (DESIGN-v2 §1.5), where a request for it opens.
+ */
 export type SettingsAreaSection = 'general' | 'runtime' | 'meta-agent' | 'appearance' | 'data';
 
 export const SETTINGS_AREA_SECTIONS: ReadonlyArray<{ id: SettingsAreaSection; label: string }> = [
   { id: 'general', label: 'General' },
   { id: 'runtime', label: 'Runtime (global)' },
-  { id: 'meta-agent', label: 'Meta agent' },
+  { id: 'meta-agent', label: 'Pages upkeep' },
   { id: 'appearance', label: 'Appearance' },
   { id: 'data', label: 'Data & backup' },
 ];

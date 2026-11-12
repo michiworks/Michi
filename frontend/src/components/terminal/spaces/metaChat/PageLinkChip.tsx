@@ -1,7 +1,7 @@
 import React, { useState } from 'react';
 import { FileText } from 'lucide-react';
 import { openSpacesPage } from '../../../../state/metaChat/spacesPages';
-import { useMetaChatRevealPage } from './MetaChatArea';
+import { useMetaChatRevealPage } from './metaChatRevealPage';
 
 function textOf(children: React.ReactNode): string {
   if (typeof children === 'string' || typeof children === 'number') return String(children);

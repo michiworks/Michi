@@ -4,6 +4,8 @@ import { AgentDefinitionStatus, AgentRunCompletionMode, AgentRunInvocationMode, 
 import {
   backendApiBase, indexBackendProjects, setActiveBackendConnectionId,
 } from '../config/backendConnections';
+import { HttpResponseError } from './api/httpError';
+import { AgentEnableBlockedError, enableAgentDefinition } from './api/agents';
 import {
   createAgentDefinition, getAgentDefinition, listAgentDefinitions, listAgentRuns, getAgentRun, getAgentRunDetail, getAgentRunEvents,
   sendAgentRunInput, cancelAgentRun, spawnAgentRun, subscribeAgentRuns,
@@ -43,6 +45,11 @@ describe('Agent REST/SSE multi-Backend routing', () => {
     expect(listed[0].backendConnectionId).toBe('remote-a');
     expect(spawned.backendConnectionId).toBe('remote-a');
     expect(calls.every((call) => call.url.startsWith(backendApiBase('remote-a')))).toBe(true);
+  });
+
+  it('surfaces a failed request\'s message and status', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => Response.json({ error: 'not_found' }, { status: 404 })));
+    await expect(getAgentRun({ backendConnectionId: 'remote-a', id: 'same-run' })).rejects.toMatchObject({ message: 'not_found', status: 404 });
   });
 
   it('routes spawn by the Workspace Backend and rejects a Parent from another Backend', async () => {
@@ -120,6 +127,19 @@ describe('Agent REST/SSE multi-Backend routing', () => {
     expect(malformed).toHaveLength(1);
     expect(calls[0].url.startsWith(backendApiBase('remote-a'))).toBe(true);
     expect(calls.some((call) => call.method === 'POST' && call.url.endsWith('/cancel'))).toBe(false);
+  });
+
+  it('keeps the status and code of a refused Definition request, and its enable blockers', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({ error: 'custom_agents_disabled' }), { status: 404 })));
+    const disabled = await listAgentDefinitions('remote-ws').catch((error: unknown) => error);
+    expect(disabled).toBeInstanceOf(HttpResponseError);
+    expect(disabled).toMatchObject({ status: 404, message: 'custom_agents_disabled' });
+
+    const blockers = [{ code: 'runtime', ref: 'pi', message: 'runtime pi requires a model' }];
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({ error: 'runtime pi requires a model', blockers }), { status: 400 })));
+    const blocked = await enableAgentDefinition({ backendConnectionId: 'remote-a', id: 'agent-1' }).catch((error: unknown) => error);
+    expect(blocked).toBeInstanceOf(AgentEnableBlockedError);
+    expect(blocked).toMatchObject({ message: 'runtime pi requires a model', blockers });
   });
 
   it('paginates authoritative event replay until the Run feed is complete', async () => {

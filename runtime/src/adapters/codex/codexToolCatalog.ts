@@ -1,8 +1,14 @@
 const CODEX_MICHI_MCP_SERVER = '__michi_internal__';
 function isPlainObject(value: unknown): value is Record<string, unknown> { return typeof value === 'object' && value !== null && !Array.isArray(value); }
-export const CODEX_META_AGENT_UNREMOVABLE_TOOLS: readonly string[] = Object.freeze([
-  'image_generation', 'view_image', 'goals', 'request_user_input',
-]);
+/**
+ * Codex built-ins a restricted thread's launch check admits besides the
+ * profile's allow-list: none. The restricted thread config turns off image
+ * generation, view_image, goals and request_user_input, which earlier
+ * releases were thought to keep (codexRestrictedProfile.ts). The check sees
+ * only the MCP status list (codexMetaAgentCatalog), never Codex's built-ins,
+ * so it is that config that removes them.
+ */
+export const CODEX_META_AGENT_UNREMOVABLE_TOOLS: readonly string[] = Object.freeze([]);
 
 export function codexMetaAgentCatalog(
   statuses: ReadonlyArray<{ name?: unknown; runtimeStatus?: unknown; tools?: unknown }>,

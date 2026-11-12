@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from 'react';
 import type { HomeCard, HomeCardsDto } from 'michi-shared';
 import { useBackendScope } from '../../hooks/useBackendScope';
 import { BACKEND_CONNECTION_UNAVAILABLE } from '../../config/backendConnectionState';
+import { remoteFirstPainted, whenRemoteFirstPaint } from '../remoteFirstPaint';
 import { EMPTY_HOME_CARDS, fetchHomeCards, markHomeCardUsed } from '../../services/api/homeCards';
 
 export interface HomeCardsState {
@@ -46,6 +47,7 @@ function withoutCard(cards: HomeCardsDto, cardId: string): HomeCardsDto {
   return { ...cards, sets };
 }
 
+/** @testonly */
 export function __resetHomeCardsCacheForTests(): void {
   lastAnswers.clear();
 }
@@ -61,7 +63,12 @@ export function useHomeCards(): HomeCardsState {
 
   useEffect(() => {
     const controller = new AbortController();
-    fetchHomeCards(base, controller.signal)
+    // Home's cards are not the visible conversation: a remote's read waits for its first paint.
+    const held = remoteFirstPainted(connectionId) ? undefined : whenRemoteFirstPaint(connectionId);
+    (held ? held.then(() => {
+      if (controller.signal.aborted) throw new DOMException('Aborted', 'AbortError');
+      return fetchHomeCards(base, controller.signal);
+    }) : fetchHomeCards(base, controller.signal))
       .then((cards) => {
         if (controller.signal.aborted) return;
         remember(connectionId, { key, cards });

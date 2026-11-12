@@ -135,7 +135,7 @@ export function useMapCamera({
 
   const animateTo = useCallback((target: Camera) => {
     // The OS setting or the in-app Reduce motion preference: either jumps the camera.
-    if (prefersReducedMotion(document.documentElement.dataset.reduceMotion === 'on')) {
+    if (prefersReducedMotion()) {
       tweenRef.current = null;
       camRef.current = target;
     } else {

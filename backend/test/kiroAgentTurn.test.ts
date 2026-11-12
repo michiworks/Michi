@@ -9,7 +9,7 @@
  * (Kiro cancels the wake and runs the prompt), and a wake stopped with
  * session/cancel (Kiro ends it with stopReason "cancelled").
  */
-import { afterEach, describe, it } from 'node:test';
+import { after, afterEach, before, describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
@@ -94,6 +94,12 @@ const turnStartIndex = (frames: Array<Record<string, any>>) => frames.findIndex(
 afterEach(() => sessionRegistry.clearAllSessions());
 
 describe('Kiro agent-initiated turns (AcpClient)', () => {
+  // The cancel deadlines these tests await unref their timers, so nothing
+  // else would keep the event loop alive and node:test would cancel the file.
+  let keepAlive: ReturnType<typeof setInterval>;
+  before(() => { keepAlive = setInterval(() => {}, 2 ** 30); });
+  after(() => clearInterval(keepAlive));
+
   it('gives a workflow-complete wake its own stream, ended by Kiro, and keeps it out of the chat queue', async () => {
     const { client, parent, dispatch } = harness();
     const wake = collector();

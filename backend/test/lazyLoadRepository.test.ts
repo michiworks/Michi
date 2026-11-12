@@ -8,7 +8,7 @@ import { once } from 'node:events';
 import type { AddressInfo } from 'node:net';
 import { setupPersistenceRoutes } from '../src/routes/persistence';
 
-import { closeDb, initDb } from '../src/services/db';
+import { closeDb, getDb, initDb } from '../src/services/db';
 import {
   saveWorkspace,
   saveTree,
@@ -16,8 +16,8 @@ import {
   saveMessage,
   loadAllWorkspacesMeta,
   loadWorkspaceMeta,
-  loadTreeMessages,
   loadTreeMessagePage,
+  loadTreeMessageSnapshot,
 } from '../src/services/dbRepository';
 
 function seedNode(id: string, workspaceId: string, treeId: string): void {
@@ -95,8 +95,8 @@ describe('lazy-load repository', () => {
     assert.equal(empty.message_count, 0);
   });
 
-  test('loadTreeMessages for an unknown tree is empty, not an error', () => {
-    assert.deepEqual(loadTreeMessages('ws-1', 'tree-nope'), []);
+  test('loadTreeMessageSnapshot for an unknown tree is empty, not an error', () => {
+    assert.deepEqual(loadTreeMessageSnapshot('ws-1', 'tree-nope'), { messages: [], turns: [] });
   });
 
   test('pages each node from its newest messages and continues without duplicates after new output', () => {
@@ -119,12 +119,28 @@ describe('lazy-load repository', () => {
   });
 
   test('isolates page cursors by workspace and tree, including empty nodes', () => {
-    assert.deepEqual(loadTreeMessagePage('ws-1', 'tree-A', { limit: 50, nodeId: 'n-b1' }), { messages: [], pages: [] });
-    assert.deepEqual(loadTreeMessagePage('other', 'tree-A', { limit: 50 }), { messages: [], pages: [] });
+    assert.deepEqual(loadTreeMessagePage('ws-1', 'tree-A', { limit: 50, nodeId: 'n-b1' }), { messages: [], pages: [], turns: [] });
+    assert.deepEqual(loadTreeMessagePage('other', 'tree-A', { limit: 50 }), { messages: [], pages: [], turns: [] });
     seedNode('empty', 'ws-1', 'tree-A');
     assert.deepEqual(loadTreeMessagePage('ws-1', 'tree-A', { limit: 50, nodeId: 'empty' }), {
-      messages: [], pages: [{ nodeId: 'empty', total: 0, before: null }],
+      messages: [], turns: [], pages: [{ nodeId: 'empty', total: 0, before: null, node: {
+        branch_overview: null, follow_ups: null, follow_ups_source_message_id: null, composer_draft: null,
+      } }],
     });
+  });
+
+  test('reads each node’s latest turn in the same snapshot as its messages', () => {
+    const insert = getDb().prepare(`INSERT INTO turns(turn_id,node_id,assistant_message_id,status,last_seq,started_at,updated_at)
+      VALUES (?,?,?,?,?,?,?)`);
+    insert.run('older', 'n-a1', 'a-older', 'completed', 12, 1, 1);
+    insert.run('latest', 'n-a1', 'a-latest', 'active', 40, 2, 2);
+    insert.run('other-tree', 'n-b1', 'a-other', 'active', 7, 2, 2);
+    const snapshot = loadTreeMessageSnapshot('ws-1', 'tree-A');
+    assert.equal(snapshot.messages.length, 3);
+    assert.deepEqual(snapshot.turns.map(row => ({ ...row })), [
+      { node_id: 'n-a1', turn_id: 'latest', status: 'active', last_seq: 40, error: null, completed_at: null },
+    ]);
+    assert.deepEqual(loadTreeMessagePage('ws-1', 'tree-A', { limit: 50 }).turns, snapshot.turns);
   });
 
   test('enforces cloud ownership for page reads', () => {
@@ -135,7 +151,7 @@ describe('lazy-load repository', () => {
       saveTree({ id: 'tree', workspace_id: 'owned', root_node_id: 'secret', name: null, archived_at: null, pinned_at: null, last_active_at: 1, created_at: 1 });
       seedNode('secret', 'owned', 'tree'); seedMessage('secret-row', 'secret', 0, 'private');
       assert.equal(loadTreeMessagePage('owned', 'tree', { limit: 50 }, 'alice').messages.length, 1);
-      assert.deepEqual(loadTreeMessagePage('owned', 'tree', { limit: 50 }, 'bob'), { messages: [], pages: [] });
+      assert.deepEqual(loadTreeMessagePage('owned', 'tree', { limit: 50 }, 'bob'), { messages: [], pages: [], turns: [] });
     } finally { if (old === undefined) delete process.env.MICHI_CLOUD; else process.env.MICHI_CLOUD = old; }
   });
 
@@ -157,7 +173,9 @@ describe('lazy-load repository', () => {
       const older = await fetch(`${url}?limit=1&nodeId=n-a1&beforeSeq=1&beforeId=m-a1-1`);
       assert.equal((await older.json() as ReturnType<typeof loadTreeMessagePage>).messages[0].id, 'm-a1-0');
       const all = await fetch(url);
-      assert.equal((await all.json() as { messages: unknown[] }).messages.length, 3);
+      const snapshot = await all.json() as ReturnType<typeof loadTreeMessageSnapshot>;
+      assert.equal(snapshot.messages.length, 3);
+      assert.deepEqual(snapshot.turns, []);
       for (const query of ['limit=0', 'limit=201', 'limit=1.5', 'limit=1&limit=2',
         'limit=1&beforeSeq=1&beforeId=m-a1-1', 'limit=1&nodeId=n-a1&beforeSeq=1',
         'limit=1&nodeId=n-a1&beforeId=m-a1-1', 'limit=1&nodeId=n-a1&beforeSeq=-1&beforeId=m-a1-1']) {

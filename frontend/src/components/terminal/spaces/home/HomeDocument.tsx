@@ -1,7 +1,7 @@
 import React from 'react';
 import type { PageBlock, PageChangeDto, PageDto, PageEditOp, SpaceSummaryDto, SpacesHomeSectionsDto, WorkspaceHomeSummaryDto } from 'michi-shared';
 import { useChatNodesSnapshot } from '../../../../state/chatStore';
-import { usePage, type UsePageResult } from '../../../../state/pages/usePage';
+import { usePage, type PageApplyResult, type UsePageResult } from '../../../../state/pages/usePage';
 import { useSpaces } from '../../../../state/pages/useSpaces';
 import { fetchPageActivitySeen } from '../../../../services/api/pages';
 import type { ExactPageSource } from '../../../../state/pages/revealSource';
@@ -9,12 +9,12 @@ import NativeDatabase from '../NativeDatabase';
 import { NativeTaskView } from '../NativeTaskView';
 import { LiveThreadCards } from '../NativeThreadCards';
 import { PageChangeTargets } from '../PageChangeTargets';
-import { openNativePageRoute } from '../SpacesPage';
-import { requestWorkspaceHome } from '../../../../state/pages/workspaceHomeNav';
-import { blockFullText, blockLabel } from '../../content/page/michiPageModel';
-import { toMichiBlock } from '../nativeBlockAdapter';
-import { useMetaChatDocked } from '../metaChat/MetaChatArea';
-import { blockItemTarget, NativePageDocument, openNewChatSheet, useMetaChatTargeting, useSpacesSourceNav, type MetaChatBlockTarget } from './homeLinks';
+import { pageChangeHandlers } from '../nativePageHost';
+import { openSpacesPage } from '../../../../state/metaChat/spacesPages';
+import { pageBlockTarget } from '../metaChat/blockTarget';
+import { NativePageDocument, openNewChatSheet, useSpacesSourceNav } from './homeLinks';
+import { useCompanionTargeting } from '../NativePageDocument';
+import { useCompanionName } from '../../../../state/companion/companionName';
 import { homeChangesShown } from './homeFormat';
 import { homeWorkspaceCounts, useSpacesHomeSections } from './homeCounts';
 import { prefersReducedMotion } from '../../../../hooks/useReducedMotion';
@@ -24,13 +24,9 @@ import { FRESH_MS } from '../../../../motion/useFresh';
 import '../spaces.css';
 
 const startConversation = (text: string, workspaceId: string) => { openNewChatSheet({ text, workspaceId }); };
-const NO_BLOCK_IDS: readonly string[] = [];
 
-/** How the chat window names a home block it targets, and the text it sends along. */
-export function homeBlockTarget(block: PageBlock): { title: string; content: string } {
-  const content = toMichiBlock(block);
-  return { title: blockLabel(content), content: blockFullText(content) };
-}
+/** How the panel's "Targeting" chip names a home block: as on a Space page (pageBlockTarget). */
+const homeBlockTitle = (block: PageBlock): string => pageBlockTarget(block).title;
 
 export type WorkspaceDotTone = 'pending' | 'waiting' | 'stalled' | 'calm';
 
@@ -131,7 +127,7 @@ export type BlockReveal = {
 function riseIn(el: HTMLElement, order: number) {
   if (typeof el.animate !== 'function') return;
   // Reduced motion keeps the fade and drops the rise, as motion's own components do.
-  const still = prefersReducedMotion(document.documentElement.dataset.reduceMotion === 'on');
+  const still = prefersReducedMotion();
   el.animate(
     still ? [{ opacity: 0 }, { opacity: 1 }] : [{ opacity: 0, transform: 'translateY(6px)' }, { opacity: 1, transform: 'none' }],
     { duration: REVEAL_MS, delay: Math.min(order, REVEAL_STAGGER_CAP) * REVEAL_STAGGER_MS, easing: `cubic-bezier(${EASE.out.join(',')})`, fill: 'backwards' },
@@ -182,7 +178,7 @@ export interface HomeDocument {
 export function useHomeDocument({ backendConnectionId, initial, allowEmptyEditor = true, workspaceHomes = null }: {
   backendConnectionId: string;
   initial: PageDto | null;
-  /** Workspace homes by page id: a link to one opens that workspace's home in Spaces. */
+  /** The workspace homes, whose rows a table on this home marks. */
   workspaceHomes?: readonly WorkspaceHomeSummaryDto[] | null;
   /** The empty-page editor appears in the last segment only. */
   allowEmptyEditor?: boolean;
@@ -229,32 +225,13 @@ export function useHomeDocument({ backendConnectionId, initial, allowEmptyEditor
   const sourceLabel = React.useCallback((source: PageChangeDto['source']) => (
     source.kind === 'chat' || source.kind === 'helper' ? nodes[source.nodeId]?.title?.trim() || undefined : undefined
   ), [nodes]);
-  const homesRef = React.useRef(workspaceHomes);
-  homesRef.current = workspaceHomes;
   const openPage = React.useCallback((target: string) => {
-    const home = homesRef.current?.find((candidate) => candidate.homePageId === target);
-    if (home) requestWorkspaceHome({ workspaceId: home.workspaceId, backendConnectionId });
-    else openNativePageRoute({ pageId: target, workspaceId, backendConnectionId });
-  }, [backendConnectionId, workspaceId]);
+    void openSpacesPage({ pageId: target, backendConnectionId, currentPageId: pageId, ...(workspaceId ? { workspaceId } : {}) });
+  }, [backendConnectionId, pageId, workspaceId]);
 
-  // Clicking a block targets it in the chat window, as on a Space page; the selection is the window's.
-  const targeting = useMetaChatTargeting();
-  const blocksRef = React.useRef<readonly PageBlock[]>([]);
-  blocksRef.current = page?.blocks ?? [];
-  const targetFor = React.useCallback((block: PageBlock): MetaChatBlockTarget => (
-    { backendConnectionId, workspaceId, pageId, blockId: block.id, ...homeBlockTarget(block) }
-  ), [backendConnectionId, pageId, workspaceId]);
-  const selectBlock = React.useCallback((selection: { blockId: string } | null) => {
-    const block = selection ? blocksRef.current.find((candidate) => candidate.id === selection.blockId) : undefined;
-    targeting?.setTarget(block ? targetFor(block) : null);
-  }, [targetFor, targeting]);
-  const askAssistant = React.useCallback((block: PageBlock, item?: { index: number; text: string }) => (
-    targeting?.askAbout(item ? blockItemTarget(targetFor(block), item) : targetFor(block))
-  ), [targetFor, targeting]);
-  const targetBlockId = targeting?.target?.pageId === pageId ? targeting.target.blockId : null;
-  const selectedBlockIds = React.useMemo(() => (targetBlockId ? [targetBlockId] : NO_BLOCK_IDS), [targetBlockId]);
-  const canTarget = Boolean(targeting) && !readOnly;
-  const narrow = useMetaChatDocked();
+  // Blocks are the panel's targets, as on a Space page: Ask <name>, and a
+  // click while the panel is open names the block (DESIGN-v2 §1.3).
+  const targeting = useCompanionTargeting(page ?? null, homeBlockTitle, readOnly);
 
   // Blocks the Meta agent writes while the home is on screen rise in; see blockRevealTracker.
   const [tracker] = React.useState(() => blockRevealTracker());
@@ -281,20 +258,12 @@ export function useHomeDocument({ backendConnectionId, initial, allowEmptyEditor
   // An empty home draws no segment; it still has to learn the page it opened with.
   React.useLayoutEffect(() => { reveal.claim([]); });
 
-  const applyEdits = React.useCallback(async (ops: PageEditOp[], revision: number): Promise<'ok' | 'stale' | 'gone' | 'failed'> => {
-    const current = pageState.page;
-    if (!current || readOnly) return 'failed';
-    if (current.revision !== revision) { pageState.refresh(); return 'stale'; }
+  const applyEdits = React.useCallback(async (ops: PageEditOp[], revision: number): Promise<PageApplyResult> => {
+    if (readOnly) return 'failed';
     // The page draws the edit before it is saved: what appears meanwhile is the person's own.
     const ended = tracker.ownEdit();
     try {
-      await pageState.edit(ops);
-      return 'ok';
-    } catch (error) {
-      const status = (error as { status?: number })?.status;
-      if (status === 409) { pageState.refresh(); return 'stale'; }
-      if (status === 404 || status === 410) return 'gone';
-      return 'failed';
+      return await pageState.apply(ops, revision);
     } finally {
       ended();
     }
@@ -303,7 +272,6 @@ export function useHomeDocument({ backendConnectionId, initial, allowEmptyEditor
   const renderBlocks = React.useCallback((blocks: readonly PageBlock[], key: string) => {
     if (!page) return null;
     if (!blocks.length && !(allowEmptyEditor && key === 'rest' && !page.blocks.length)) return null;
-    const onChange = (action: (changeId: string) => Promise<unknown>) => (change: PageChangeDto) => { void action(change.id); };
     const decorations = (block: PageBlock) => <>
       <PageChangeTargets
         quiet
@@ -311,11 +279,7 @@ export function useHomeDocument({ backendConnectionId, initial, allowEmptyEditor
         history={changes}
         target={{ kind: 'block', pageId: page.id, blockId: block.id }}
         sourceLabel={sourceLabel}
-        onAccept={(change, edited) => { void pageState.accept(change.id, edited); }}
-        onDismiss={onChange(pageState.dismiss)}
-        onReopen={onChange(pageState.reopen)}
-        onRevert={onChange(pageState.revert)}
-        onRedo={onChange(pageState.redo)}
+        {...pageChangeHandlers(pageState)}
         onOpenSource={openSource}
         loading={readOnly}
         error={pageState.error}
@@ -340,29 +304,31 @@ export function useHomeDocument({ backendConnectionId, initial, allowEmptyEditor
         workspaceId={workspaceId}
         connectionId={backendConnectionId}
         viewId={block.viewId}
-        compact={compact || narrow}
+        compact={compact}
         readOnly={blockReadOnly || readOnly}
         onNavigatePage={openPage}
         onOpenSource={openSource}
       />}
       renderTaskView={(block, compact, blockReadOnly) => <NativeTaskView workspaceId={workspaceId} connectionId={backendConnectionId}
-        viewId={block.viewId} title={block.title} compact={compact || narrow} readOnly={blockReadOnly || readOnly}
+        viewId={block.viewId} title={block.title} compact={compact} readOnly={blockReadOnly || readOnly}
         onNavigatePage={openPage} onOpenSource={openSource}
         onOpenThread={(card) => { void sourceNav.openConversationFromSpaces({ backendConnectionId, workspaceId: card.workspaceId, nodeId: card.nodeId, messageId: card.messageId, focus: false }); }} />}
       renderDecorations={decorations}
-      onAskAssistant={canTarget ? askAssistant : undefined}
-      onSelectionChange={canTarget ? selectBlock : undefined}
-      selectedBlockIds={selectedBlockIds}
-      selectOnClick={canTarget}
+      onAskAssistant={targeting.onAskAssistant}
+      onSelectionChange={targeting.onSelectionChange}
+      selectedBlockIds={targeting.selectedBlockIds}
+      selectOnClick={targeting.selectOnClick}
       readOnly={readOnly}
     /></HomeSegment>;
-  }, [allowEmptyEditor, applyEdits, askAssistant, backendConnectionId, canTarget, changes, narrow, openPage, openSource, page, pageState, readOnly, reveal, selectBlock, selectedBlockIds, shownChanges, sourceLabel, sourceNav, workspaceHomes, workspaceId]);
+  }, [allowEmptyEditor, applyEdits, backendConnectionId, changes, openPage, openSource, page, pageState, readOnly, reveal, targeting, shownChanges, sourceLabel, sourceNav, workspaceHomes, workspaceId]);
 
   return { page, pageState, readOnly, renderBlocks };
 }
 
-/** A dashed stand-in for blocks the Meta agent has not written yet. */
-export function HomePlaceholder({ title, text = 'The Meta agent writes this after it has written each workspace home.' }: { title?: string; text?: string }) {
+/** A dashed stand-in for blocks the agent's Pages upkeep has not written yet. */
+export function HomePlaceholder({ title, text }: { title?: string; text?: string }) {
+  const name = useCompanionName();
+  text ??= `${name} writes this after it has written each workspace home.`;
   return (
     <section className="spaces-home-placeholder" aria-label={title ?? 'Not written yet'}>
       {title && <h2 className="spaces-home-h2">{title}</h2>}
@@ -371,26 +337,4 @@ export function HomePlaceholder({ title, text = 'The Meta agent writes this afte
       <p className="spaces-home-muted">{text}</p>
     </section>
   );
-}
-
-/** Scrolls to a block once its page has rendered it, and flashes it once. */
-export function revealPageBlock(blockId: string, timeoutMs = 8000): () => void {
-  const started = Date.now();
-  let timer: number | undefined;
-  let clear: number | undefined;
-  const attempt = () => {
-    const element = document.getElementById(`page-block-${blockId}`);
-    if (element) {
-      element.scrollIntoView?.({ behavior: 'smooth', block: 'center' });
-      element.setAttribute('data-home-flash', '');
-      clear = window.setTimeout(() => element.removeAttribute('data-home-flash'), 1600);
-      return;
-    }
-    if (Date.now() - started < timeoutMs) timer = window.setTimeout(attempt, 100);
-  };
-  attempt();
-  return () => {
-    if (timer !== undefined) window.clearTimeout(timer);
-    if (clear !== undefined) window.clearTimeout(clear);
-  };
 }

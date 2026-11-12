@@ -306,7 +306,7 @@
     "p1": [
       {
         "sessionUpdate": "permission_request",
-        "requestId": 30,
+        "requestId": "michi:30",
         "toolCall": {
           "toolCallId": "perm-30",
           "title": "Edit file"

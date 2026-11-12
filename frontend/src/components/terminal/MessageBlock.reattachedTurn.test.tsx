@@ -1,5 +1,4 @@
 import { describe, expect, it } from 'vitest';
-import React from 'react';
 import { render } from '@testing-library/react';
 import { MessageBlock } from './MessageBlock';
 import { AgentBlockStyleOverride } from '../../state/prefs';
@@ -36,7 +35,7 @@ describe('a running tool call in a turn this renderer reattached to', () => {
     });
     const { getByText } = render(
       <AgentBlockStyleOverride.Provider value="card">
-        <MessageBlock m={next.n1.messages[1]} index={1} isDark={false} onCopy={() => {}} showThoughts fontFamily="inherit" density="comfortable" />
+        <MessageBlock m={next.n1.messages[1]} index={1} isDark={false} copyText={() => ''} showThoughts fontFamily="inherit" density="comfortable" />
       </AgentBlockStyleOverride.Provider>,
     );
     expect(getByText('Working…')).not.toBeNull();

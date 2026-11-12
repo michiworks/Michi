@@ -19,6 +19,9 @@ For an installed Michi application, including the public installer at `~/Michi`,
    - **Read & learn**：读取已有记忆，也允许保存可复用偏好。
    - **Read only**：读取记忆，不新增或修改记忆。
    - **Off**：不读取、不写入长期记忆。
+
+   没选过时默认 **Read only**（`MICHI_CREW_MEMORY_MODE` 可改默认值）：Michi Memory
+   负责从 Michi 的对话里学习，Crew 只读它已有的记忆，不再另记一份。之前建的对话保持原模式。
 3. 已创建对话的模式固定，fork 继承原模式；想换模式请调整 Settings 后新建对话。
 4. 普通聊天、文件工具、模型与模板选择、恢复和历史分叉可以直接用。
    审批模式在 **Michi Settings → Model → Permissions** 选择。
@@ -132,6 +135,12 @@ pending native tool requests to the normal Michi permission workflow:
 - **Trust**: automatically answer requests using the existing Michi policy.
 - Crew has no Michi **YOLO** control; a global Michi YOLO preference behaves as Trust.
 
+A `michi_call_tool` request is named for the Michi tool its input names
+(`@michi/<tool>`, crewRelayTools.ts), so Michi's reads (`michi_list_tools` too), turn
+metadata, questions, thread messages and Memory are answered without a card in every mode, as on Kiro,
+and **Trust this tool** applies to that one Michi tool. A request whose input
+cannot be read keeps the Gateway's `michi_call_tool` name and asks.
+
 Crew's existing tool allowlists, governance and operator-enabled global YOLO still
 apply. Michi cannot revoke global Crew YOLO, so Ask cannot promise to intercept tools
 that Crew auto-approves before a request exists. Settings and composer report the
@@ -167,6 +176,7 @@ guarantee. Daily approval decisions are made in Michi.
 | Compact | Automatic Crew compaction, and Michi `/compact` on an idle session (sent to the App's own slot; result from the Gateway's tagged notice). `/compact` takes no instructions |
 | Subagents | Roster from the Gateway's `subagent_spawn/tool/chunk/done` events. Crew asks for each spawn on a Crew **dashboard** tab: Michi cannot answer it, and with no dashboard tab open the spawn is refused. No Michi control of running subagents |
 | Images/audio | Not advertised by the adapter; unsupported blocks are marked omitted |
+| Skills | Michi lists Crew's `skills/` under `KIROCREW_HOME` and `~/.kiro/skills`, not trusted project skills or `skills.extra_paths`. A skill run from the / menu, from there or from Michi's library, is sent as its instructions ahead of the message, not as Crew's `$name` |
 
 Send a correction after the current turn, or stop it first. A queued follow-up is
 never presented as same-turn steer. Fork replays transcript context; it is not a

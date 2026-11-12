@@ -1,8 +1,9 @@
-import type { ScheduledJobRunStatus, ScheduledJobSchedule } from 'michi-shared';
+import { plural, SCHEDULED_JOB_LIMITS, type ScheduledJobRunStatus, type ScheduledJobSchedule } from 'michi-shared';
 
 /** Editor-friendly representation of a schedule. Presets compile to cron. */
 export type ScheduleMode = 'interval' | 'daily' | 'weekdays' | 'weekly' | 'once' | 'cron';
-export type IntervalUnit = 'minutes' | 'hours' | 'days';
+/** The editor offers minutes and up; seconds appear only for an interval an agent set that is not whole minutes. */
+export type IntervalUnit = 'seconds' | 'minutes' | 'hours' | 'days';
 
 export interface ScheduleDraft {
   mode: ScheduleMode;
@@ -29,7 +30,7 @@ export const SCHEDULE_MODE_LABELS: Record<ScheduleMode, string> = {
   cron: 'Cron',
 };
 
-const UNIT_SECONDS: Record<IntervalUnit, number> = { minutes: 60, hours: 3600, days: 86_400 };
+const UNIT_SECONDS: Record<IntervalUnit, number> = { seconds: 1, minutes: 60, hours: 3600, days: 86_400 };
 
 export function localTimeZone(): string {
   try {
@@ -83,7 +84,8 @@ export function draftToSchedule(draft: ScheduleDraft): DraftResult {
       const value = Math.floor(Number(draft.intervalValue));
       if (!Number.isFinite(value) || value < 1) return { error: 'Enter how often to run' };
       const seconds = value * UNIT_SECONDS[draft.intervalUnit];
-      if (seconds < 60) return { error: 'Run at most once a minute' };
+      if (seconds < SCHEDULED_JOB_LIMITS.minEverySeconds) return { error: 'Run at most once a minute' };
+      if (seconds > SCHEDULED_JOB_LIMITS.maxEverySeconds) return { error: `Run at least once every ${SCHEDULED_JOB_LIMITS.maxEverySeconds / UNIT_SECONDS.days} days` };
       return { schedule: { kind: 'every', everySeconds: seconds } };
     }
     case 'daily':
@@ -121,7 +123,8 @@ export function scheduleToDraft(schedule: ScheduledJobSchedule, now: number = Da
   if (schedule.kind === 'every') {
     const unit: IntervalUnit = schedule.everySeconds % 86_400 === 0 ? 'days'
       : schedule.everySeconds % 3600 === 0 ? 'hours'
-        : 'minutes';
+        : schedule.everySeconds % 60 === 0 ? 'minutes'
+          : 'seconds';
     return { ...draft, mode: 'interval', intervalUnit: unit, intervalValue: Math.max(1, Math.round(schedule.everySeconds / UNIT_SECONDS[unit])) };
   }
   if (schedule.kind === 'at') return { ...draft, mode: 'once', onceAt: toDateTimeLocal(schedule.at) };
@@ -136,10 +139,6 @@ export function scheduleToDraft(schedule: ScheduledJobSchedule, now: number = Da
   return { ...draft, mode: 'cron', cron: schedule.expression, timezone };
 }
 
-function plural(count: number, unit: string): string {
-  return `${count} ${unit}${count === 1 ? '' : 's'}`;
-}
-
 function formatClock(hour: number, minute: number): string {
   return `${pad(hour)}:${pad(minute)}`;
 }
@@ -150,8 +149,8 @@ export function describeSchedule(schedule: ScheduledJobSchedule, viewerTimeZone:
     const seconds = schedule.everySeconds;
     if (seconds % 86_400 === 0) return seconds === 86_400 ? 'Every day' : `Every ${plural(seconds / 86_400, 'day')}`;
     if (seconds % 3600 === 0) return seconds === 3600 ? 'Every hour' : `Every ${plural(seconds / 3600, 'hour')}`;
-    const minutes = Math.round(seconds / 60);
-    return minutes === 1 ? 'Every minute' : `Every ${plural(minutes, 'minute')}`;
+    if (seconds % 60 !== 0) return `Every ${plural(seconds, 'second')}`;
+    return seconds === 60 ? 'Every minute' : `Every ${plural(seconds / 60, 'minute')}`;
   }
   if (schedule.kind === 'at') return `Once · ${formatDateTime(schedule.at)}`;
   const zone = schedule.timezone && schedule.timezone !== viewerTimeZone ? ` (${schedule.timezone})` : '';

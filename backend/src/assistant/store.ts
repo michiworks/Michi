@@ -1,24 +1,29 @@
 /**
  * The Michi assistant's home: one hidden system workspace (`settings.system
- * = 'assistant'`) whose current conversation is a single chat node.
+ * = 'assistant'`) whose current conversation is V, the user's one visible
+ * conversation with the agent (DESIGN-v2 §0.2). Check-ins run in their own
+ * throwaway nodes S there (W2-G1a createCheckinNode), never in V.
  *
  * Provisioning is synchronous end to end (SQLite and mkdir), so concurrent
  * requests in this process cannot interleave and create a second workspace
- * or node. The workspace row holds the current node id of each purpose (the
- * Spaces window, and the Scheduled window's "Create with agent"):
+ * or node. The workspace row holds V's node id:
  *
- *   { "system": "assistant", "assistant": { "nodeId": "n-…", "scheduleNodeId": "n-…" } }
+ *   { "system": "assistant", "assistant": { "nodeId": "n-…" } }
  *
- * A Scheduled conversation is recorded as one in `meta` when it is created
- * (assistantPurposeOf); history, activation and Pages Home only know Spaces
- * conversations.
+ * Before v2 it also held the Scheduled window's and the MVP Companion's
+ * (`scheduleNodeId`, `companionNodeId`); migrateAssistantV2 archives those
+ * conversations and drops the pointers, once (§7). History and activation
+ * know every 'main' conversation, the old Scheduled ones included.
  *
  * The runtime is the global runtime settings, read whenever a session is
  * bound, until the user picks a runtime, model or reasoning in a
  * conversation's composer: from then on that conversation keeps its pick
- * (`meta`, one key per conversation). Workspaces from before the Meta agent
- * record may still carry runtimeId/modelId/reasoning here; that record's
- * first read folds them in once.
+ * (`meta`, one key per conversation). Without a pick its reasoning is the
+ * agent's (Settings › <name> › Reasoning), by default the lower of the
+ * global level and COMPANION_DEFAULT_REASONING_MAX (§6). A check-in runs on
+ * V's runtime and model, its pick included, at the agent's reasoning, never
+ * the chip's. Workspaces from before the Meta agent record may still carry
+ * runtimeId/modelId/reasoning here; that record's first read folds them in once.
  *
  * Only this module writes these keys, with its own UPDATE: every other
  * workspace write keeps the stored ones (mergeServerOwnedSettings), so no
@@ -31,8 +36,11 @@ import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import {
   ASSISTANT_WORKSPACE_SYSTEM,
+  CHECKIN_NODE_PREFIX,
+  REASONING_LEVELS,
   isAssistantWorkspaceSettings,
   isReasoningLevel,
+  parseWorkspaceSettings,
   type MetaAgentResolvedRuntime,
   type MichiAssistantInfo,
   type MichiAssistantSettings,
@@ -42,15 +50,17 @@ import {
   type RuntimeReasoning,
 } from 'michi-shared';
 import { getRuntime, listRuntimes } from '../agents/registry';
-import { getProviderInfo } from '../agents/pi/piProviders';
-import { getAgentConfig, resolveModel, resolveProvider, resolveReasoning } from '../services/agentConfig';
+import { getProviderInfo, selectDefaultModelId } from '../agents/pi/piProviders';
+import { getAgentConfig, resolveModel, resolveProvider, resolveRuntimeProfile } from '../services/agentConfig';
 import { getMichiDataDir } from '../services/dataDir';
 import { getDb, runInTransaction } from '../services/db';
-import { getNode, getWorkspace, listWorkspaces, saveWorkspace, type NodeRow, type WorkspaceRow } from '../services/dbRepository';
+import { getNode, getWorkspace, isTreeArchived, listWorkspaces, saveWorkspace, type NodeRow, type WorkspaceRow } from '../services/dbRepository';
 import { ensureDurableGraphNode } from '../services/graphCommands';
 import { getMetaAgentSettings } from '../services/metaAgent/settings';
-import { ASSISTANT_RUNTIMES, isAssistantRuntime, type AssistantPurpose } from './policy';
-import { assistantPurposeKey, assistantPurposeOf } from './identity';
+import { getCompanionSettings, migrateCompanionSettingsV2 } from '../services/companion/settings';
+import { setCompanionNotesOrigin } from '../services/companion/repository';
+import { ASSISTANT_RUNTIMES, isAssistantRuntime } from './policy';
+import { assistantJobCreated, assistantPurposeKey, assistantPurposeOf } from './identity';
 
 export type { AssistantPurpose } from './policy';
 
@@ -66,27 +76,19 @@ export class AssistantSettingsError extends Error {}
 const MODEL_ID = /^[A-Za-z0-9][A-Za-z0-9._:/@[\]+-]{0,199}$/;
 
 interface StoredAssistant {
-  /** The Spaces window's current conversation. */
+  /** V: the current conversation. */
   nodeId?: unknown;
-  /** The Scheduled window's current conversation. */
+  /** Before v2: the Scheduled window's conversation (migrateAssistantV2 archives it and drops this). */
   scheduleNodeId?: unknown;
+  /** Before v2: the MVP Companion's conversation (migrateAssistantV2 archives it and drops this). */
+  companionNodeId?: unknown;
 }
 
-/** Where each purpose keeps its current conversation in the workspace's `assistant` settings. */
-const POINTER: Record<AssistantPurpose, keyof StoredAssistant> = { spaces: 'nodeId', schedule: 'scheduleNodeId' };
-
-function parseObject(raw: string | null | undefined): Record<string, unknown> {
-  if (!raw) return {};
-  try {
-    const parsed: unknown = JSON.parse(raw);
-    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed as Record<string, unknown> : {};
-  } catch {
-    return {};
-  }
-}
+/** The pointers before v2, kept until migrateAssistantV2 has read them. */
+const LEGACY_POINTERS = ['scheduleNodeId', 'companionNodeId'] as const;
 
 function storedOf(workspace: WorkspaceRow): StoredAssistant {
-  const value = parseObject(workspace.settings).assistant;
+  const value = parseWorkspaceSettings(workspace.settings)?.assistant;
   return value && typeof value === 'object' && !Array.isArray(value) ? value as StoredAssistant : {};
 }
 
@@ -116,19 +118,53 @@ function globalAssistantRuntimeId(): string {
 /** The global settings for `runtimeId`, each field as a new conversation there would use it. */
 function globalSettingsFor(runtimeId: string): Required<MichiAssistantSettings> {
   const usesProviders = getRuntime(runtimeId)?.capabilities.providerModels === true;
-  return {
-    runtimeId,
-    providerId: usesProviders ? resolveProvider(runtimeId) || null : null,
-    modelId: resolveModel(runtimeId) || null,
-    reasoning: (resolveReasoning(runtimeId) as RuntimeReasoning | undefined) ?? null,
-  };
+  return { runtimeId, ...resolveRuntimeProfile(runtimeId, usesProviders) };
+}
+
+/**
+ * The most reasoning the agent runs at by default (DESIGN-v2 §6, user
+ * decision 8): a user turn at the global xhigh took 69 s, and check-ins stop
+ * after 3 minutes. Settings › <name> › Reasoning (CompanionSettings.reasoning)
+ * replaces the default; the composer chip still changes one conversation.
+ */
+export const COMPANION_DEFAULT_REASONING_MAX: RuntimeReasoning = 'high';
+
+/** The lower of `level` and COMPANION_DEFAULT_REASONING_MAX; none stays none (the runtime's own default). */
+function companionDefaultReasoning(level: RuntimeReasoning | null): RuntimeReasoning | null {
+  if (!level) return level;
+  return REASONING_LEVELS.indexOf(level) > REASONING_LEVELS.indexOf(COMPANION_DEFAULT_REASONING_MAX) ? COMPANION_DEFAULT_REASONING_MAX : level;
+}
+
+/** Settings › <name> › Reasoning; null (the default, or unreadable settings) is min(global, high). */
+function agentReasoningSetting(): RuntimeReasoning | null {
+  try {
+    const level = getCompanionSettings().reasoning;
+    return isReasoningLevel(level) ? level : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * The agent's reasoning on `runtimeId` (§6): Settings › <name> › Reasoning,
+ * else the lower of that runtime's global level and high. A level the model
+ * cannot use is dropped when the session is bound (binding.ts).
+ */
+export function agentReasoningFor(runtimeId: string): RuntimeReasoning | null {
+  return agentReasoningSetting() ?? companionDefaultReasoning(globalSettingsFor(runtimeId).reasoning);
+}
+
+/** The global settings for `runtimeId` as a conversation with the agent starts on them: its reasoning, not the global one. */
+function globalSettingsForAgent(runtimeId: string): Required<MichiAssistantSettings> {
+  return { ...globalSettingsFor(runtimeId), reasoning: agentReasoningFor(runtimeId) };
 }
 
 /** A provider's model: the global one for the global provider, else that provider's own default. */
 function providerModel(runtimeId: string, providerId: string | null): string | null {
   if (!providerId) return null;
   if (providerId === (resolveProvider(runtimeId) || null)) return resolveModel(runtimeId) || null;
-  return getProviderInfo(providerId)?.defaultModel || null;
+  const info = getProviderInfo(providerId);
+  return info ? selectDefaultModelId(info) : null;
 }
 
 const choiceKey = (nodeId: string) => `assistant_conversation_runtime:${nodeId}`;
@@ -147,17 +183,18 @@ function readConversationChoice(nodeId: string): Required<MichiAssistantSettings
 }
 
 /**
- * The workspace's settings with one purpose's pointer moved. The other
- * purpose's pointer is kept; nothing else is (older keys such as the
- * runtime fields the Meta agent record took over are dropped).
+ * The workspace's settings with V's pointer moved. The pointers from before
+ * v2 are kept until migrateAssistantV2 has read them (`dropLegacy`); nothing
+ * else is (older keys such as the runtime fields the Meta agent record took
+ * over are dropped).
  */
-function settingsJson(workspace: WorkspaceRow | null, pointer: Partial<Record<keyof StoredAssistant, string>>): Record<string, unknown> {
-  const current = workspace ? parseObject(workspace.settings) : {};
+function settingsJson(workspace: WorkspaceRow | null, nodeId: string, dropLegacy = false): Record<string, unknown> {
+  const current = parseWorkspaceSettings(workspace?.settings) ?? {};
   const stored = workspace ? storedOf(workspace) : {};
-  const kept = Object.fromEntries(Object.values(POINTER)
+  const kept = dropLegacy ? {} : Object.fromEntries(LEGACY_POINTERS
     .filter((key) => typeof stored[key] === 'string')
     .map((key) => [key, stored[key]]));
-  return { ...current, system: ASSISTANT_WORKSPACE_SYSTEM, assistant: { ...kept, ...pointer } };
+  return { ...current, system: ASSISTANT_WORKSPACE_SYSTEM, assistant: { ...kept, nodeId } };
 }
 
 function writeSettings(workspaceId: string, settings: Record<string, unknown>): void {
@@ -173,16 +210,41 @@ export function assistantCwdFor(dataDir: string): string {
   return dir.split(path.sep).includes('.michi') ? dir : path.join(dir, '.michi');
 }
 
-/** The assistant's working directory: empty, private, per Michi data directory, never a project. */
-export function assistantCwd(): string {
-  const dataDir = getMichiDataDir();
-  const dir = assistantCwdFor(dataDir);
+/** Makes `dir` and every directory from `top` down to it, private (0700); the data directory keeps its own mode. */
+function privateDir(top: string, dir: string): string {
   fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
-  // `<data>/assistant` and the leaf inside it; the data directory keeps its own mode.
-  for (const each of new Set([path.join(path.resolve(dataDir), 'assistant'), dir])) {
-    try { fs.chmodSync(each, 0o700); } catch { /* best effort on filesystems without modes */ }
+  let each = dir;
+  const chain: string[] = [];
+  while (each.startsWith(top) && each !== path.dirname(top)) {
+    chain.push(each);
+    if (each === top) break;
+    each = path.dirname(each);
+  }
+  for (const entry of chain) {
+    try { fs.chmodSync(entry, 0o700); } catch { /* best effort on filesystems without modes */ }
   }
   return dir;
+}
+
+/** V's working directory: empty, private, per Michi data directory, never a project. */
+export function assistantCwd(): string {
+  const dataDir = getMichiDataDir();
+  return privateDir(path.join(path.resolve(dataDir), 'assistant'), assistantCwdFor(dataDir));
+}
+
+/**
+ * A check-in's working directory (DESIGN-v2 §2.2): `<data>/companion/checkin/.michi`,
+ * empty and private, apart from V's, so a runtime's per-directory records
+ * (Claude's `projects/<slug>`) never mix and discarding a check-in's native
+ * record can never reach V's.
+ */
+export function checkinCwdFor(dataDir: string): string {
+  return path.join(path.resolve(dataDir), 'companion', 'checkin', '.michi');
+}
+
+export function checkinCwd(): string {
+  const dataDir = getMichiDataDir();
+  return privateDir(path.join(path.resolve(dataDir), 'companion'), checkinCwdFor(dataDir));
 }
 
 /** The newest live assistant workspace. */
@@ -193,30 +255,23 @@ export function findAssistantWorkspace(): WorkspaceRow | null {
   return candidates[0] ?? null;
 }
 
-function treeArchived(treeId: string | null | undefined): boolean {
-  if (!treeId) return true;
-  const row = getDb().prepare('SELECT archived_at FROM trees WHERE id = ?').get(treeId) as { archived_at: number | null } | undefined;
-  return !row || row.archived_at != null;
-}
-
+/** A conversation outside a thread cannot be the assistant's. */
 function usableConversation(node: NodeRow | null, workspaceId: string): node is NodeRow {
   return !!node
     && node.workspace_id === workspaceId
     && node.kind === 'chat'
     && node.deleted_at == null
     && node.status !== 'archived'
-    && !treeArchived(node.tree_id);
+    && !!node.tree_id && !isTreeArchived(node.tree_id);
 }
 
-function newConversation(workspace: WorkspaceRow | null, cwd: string, purpose: AssistantPurpose = 'spaces'): { workspace: WorkspaceRow; node: NodeRow } {
+/** A new V: a fresh conversation, which becomes the workspace's active tree and its pointer. */
+function newConversation(workspace: WorkspaceRow | null, cwd: string): { workspace: WorkspaceRow; node: NodeRow } {
   const now = Date.now();
   const workspaceId = workspace?.id ?? `p-assistant-${randomUUID()}`;
   const treeId = `t-${randomUUID()}`;
   const nodeId = `n-${randomUUID()}`;
-  // Recorded before the node exists, so the node never binds without it.
-  if (purpose !== 'spaces') {
-    getDb().prepare('INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)').run(assistantPurposeKey(nodeId), purpose);
-  }
+  const title = ASSISTANT_CONVERSATION_TITLE;
   if (!workspace) {
     // Workspace writes never carry the server-owned marker (saveWorkspace),
     // so it goes on here, before the conversation exists: an interrupted
@@ -234,31 +289,41 @@ function newConversation(workspace: WorkspaceRow | null, cwd: string, purpose: A
       name: workspace?.name ?? ASSISTANT_WORKSPACE_NAME,
       cwd: workspace?.cwd ?? cwd,
       createdAt: workspace?.created_at ?? now,
-      // The workspace's active tree stays the Spaces conversation's.
-      activeTreeId: purpose === 'spaces' ? treeId : getWorkspace(workspaceId)?.active_tree_id ?? null,
+      activeTreeId: treeId,
     },
-    tree: { id: treeId, rootNodeId: nodeId, name: ASSISTANT_CONVERSATION_TITLE, lastActiveAt: now, createdAt: now },
-    node: { id: nodeId, treeId, kind: 'chat', title: ASSISTANT_CONVERSATION_TITLE, createdAt: now },
+    tree: { id: treeId, rootNodeId: nodeId, name: title, lastActiveAt: now, createdAt: now },
+    node: { id: nodeId, treeId, kind: 'chat', title, createdAt: now },
     edges: [],
     ownerUserId: null,
   });
-  writeSettings(workspaceId, settingsJson(getWorkspace(workspaceId), { [POINTER[purpose]]: nodeId }));
+  writeSettings(workspaceId, settingsJson(getWorkspace(workspaceId), nodeId));
   return { workspace: getWorkspace(workspaceId) ?? result.workspace, node: result.node };
 }
 
 /**
  * What an assistant conversation's next message runs on: what the user picked
- * in it, else the global settings resolved now (`followsGlobal`). A
- * conversation is not pinned to the runtime it ran on; when this names
- * another runtime than its bound session, the session paths open a new native
- * session there and pass the visible history as prior context
- * (assistant_runtime_switches records where that happened).
+ * in it, else the global settings resolved now (`followsGlobal`) with the
+ * agent's reasoning (§6). Without `nodeId`, the global settings as they are.
+ * A check-in node runs on V's runtime, provider and model, V's pick
+ * included, always at the agent's reasoning: a one-off chip level never
+ * drags a check-in past its 3 minutes. A pick stored under a check-in node's
+ * own key is never read (no route writes one; E-review #14). A conversation is not pinned to the
+ * runtime it ran on; when this names another runtime than its bound session,
+ * the session paths open a new native session there and pass the visible
+ * history as prior context (assistant_runtime_switches records where that
+ * happened).
  */
 export function assistantConversationRuntime(nodeId?: string | null): MetaAgentResolvedRuntime {
+  if (nodeId && assistantPurposeOf(nodeId) === 'checkin') {
+    // currentAssistantNodeId is a 'main' conversation, so this never comes back here.
+    const v = currentAssistantNodeId();
+    const runs = v ? assistantConversationRuntime(v) : { ...globalSettingsForAgent(globalAssistantRuntimeId()), followsGlobal: true };
+    return { ...runs, reasoning: agentReasoningFor(runs.runtimeId) };
+  }
   const choice = nodeId ? readConversationChoice(nodeId) : null;
-  return choice
-    ? { ...choice, followsGlobal: false }
-    : { ...globalSettingsFor(globalAssistantRuntimeId()), followsGlobal: true };
+  if (choice) return { ...choice, followsGlobal: false };
+  const runtimeId = globalAssistantRuntimeId();
+  return { ...(nodeId ? globalSettingsForAgent(runtimeId) : globalSettingsFor(runtimeId)), followsGlobal: true };
 }
 
 /** Where the conversation moved to another runtime; a switch undone before the next message is not shown. */
@@ -283,7 +348,15 @@ function runtimeSwitchesOf(nodeId: string): MichiAssistantRuntimeSwitch[] {
   return [...byAnchor.values()].filter((change) => change.runtimeId !== change.previousRuntimeId);
 }
 
-function info(workspace: WorkspaceRow, node: NodeRow, supported: string[]): MichiAssistantInfo {
+/**
+ * What GET /api/assistant (and every answer naming V) sends: MichiAssistantInfo
+ * plus `hadMessagesBeforeMerge` (W2 fix decision D7): the user wrote in V
+ * before the v2 merge, so the panel shows its one-time upgrade note. Always
+ * set here; optional in the shared type for older backends.
+ */
+export type AssistantInfo = MichiAssistantInfo & { hadMessagesBeforeMerge: boolean };
+
+function info(workspace: WorkspaceRow, node: NodeRow, supported: string[]): AssistantInfo {
   const { followsGlobal: _global, ...global } = assistantConversationRuntime();
   const { followsGlobal, ...runs } = assistantConversationRuntime(node.id);
   return {
@@ -295,45 +368,165 @@ function info(workspace: WorkspaceRow, node: NodeRow, supported: string[]): Mich
     conversationFollowsGlobal: followsGlobal,
     supportedRuntimes: supported,
     runtimeSwitches: runtimeSwitchesOf(node.id),
+    jobCreated: assistantJobCreated(node.id),
+    hadMessagesBeforeMerge: hadMessagesBeforeMerge(node.id),
   };
 }
 
-/** The current conversation's node id, without creating anything; null before the assistant first exists. */
+/** V's node id, without creating anything; null before the assistant first exists. */
 export function currentAssistantNodeId(): string | null {
   const workspace = findAssistantWorkspace();
   const stored = workspace ? storedOf(workspace) : {};
   const node = workspace && typeof stored.nodeId === 'string' ? getNode(stored.nodeId) : null;
-  return workspace && usableConversation(node, workspace.id) ? node.id : null;
+  return workspace && usableConversation(node, workspace.id) && assistantPurposeOf(node.id) === 'main' ? node.id : null;
 }
 
-/** One purpose's current conversation, creating the workspace and conversation on first use. Idempotent. */
-function ensureConversation(purpose: AssistantPurpose): MichiAssistantInfo {
+/** V, creating the workspace and conversation when there is none. Idempotent. */
+function ensureV(): AssistantInfo {
   // Its native sessions are recorded as they are bound (db/migrations/0032_assistant_sessions.sql).
   // The settings are read before this rewrites the workspace's stored keys: the first read folds them in.
   getMetaAgentSettings();
   const supported = assistantSupportedRuntimes();
   const cwd = assistantCwd();
   const workspace = findAssistantWorkspace();
-  const stored = workspace ? storedOf(workspace)[POINTER[purpose]] : undefined;
+  const stored = workspace ? storedOf(workspace).nodeId : undefined;
   const current = workspace && typeof stored === 'string' ? getNode(stored) : null;
-  if (workspace && usableConversation(current, workspace.id) && assistantPurposeOf(current.id) === purpose) {
+  if (workspace && usableConversation(current, workspace.id) && assistantPurposeOf(current.id) === 'main') {
     return info(workspace, current, supported);
   }
-  const created = newConversation(workspace, cwd, purpose);
+  const created = newConversation(workspace, cwd);
   return info(created.workspace, created.node, supported);
 }
 
-/** Returns the assistant (the Spaces window's conversation), creating its workspace and conversation on first use. Idempotent. */
-export function ensureAssistant(): MichiAssistantInfo {
-  return ensureConversation('spaces');
+/**
+ * V, the user's one conversation with the agent, creating its workspace and
+ * conversation on first use. Idempotent.
+ *
+ * Departure from DESIGN-v2 §7 (E-review #14): §7 has ensure only assert
+ * that the v2 merge ran. Boot does run migrateAssistantV2 before any route
+ * opens (server.ts, W2-G1a), but a caller that comes before boot (a test, a
+ * tool or script outside it) would then fail; so instead of asserting, this
+ * runs the merge itself when `assistant:v2_merged_at` is not written yet.
+ * It is the same function: one transaction, guarded by that key, a no-op
+ * once it ran, so no second V and no second archive can come of it.
+ */
+export function ensureAssistant(): AssistantInfo {
+  if (assistantV2MergedAt() === null) migrateAssistantV2();
+  return ensureV();
+}
+
+// ── The v2 merge (DESIGN-v2 §7, §8.1(c)) ────────────────────────────────────
+
+/** Meta key: when migrateAssistantV2 ran. noticeUserMet and welcome.wanted count user messages after it. */
+export const ASSISTANT_V2_MERGED_AT_KEY = 'assistant:v2_merged_at';
+
+/** When the v2 merge ran; null before it has. */
+export function assistantV2MergedAt(): number | null {
+  const row = getDb().prepare('SELECT value FROM meta WHERE key = ?').get(ASSISTANT_V2_MERGED_AT_KEY) as { value: string } | undefined;
+  const value = row ? Number(row.value) : NaN;
+  return Number.isSafeInteger(value) && value > 0 ? value : null;
+}
+
+/** Meta key ('1' or '0'): whether V, as the v2 merge found it, held messages the user wrote (D7). */
+const ASSISTANT_V2_HAD_MESSAGES_KEY = 'assistant:v2_had_messages';
+
+/** The user's own messages only: narration and posted check-ins are the assistant's (as welcome.wanted counts them). */
+function userWroteBefore(nodeId: string, before: number): boolean {
+  return !!getDb().prepare("SELECT 1 FROM messages WHERE node_id = ? AND role = 'user' AND created_at < ? LIMIT 1").get(nodeId, before);
 }
 
 /**
- * One purpose's current conversation. The Scheduled window's lives in the
- * same hidden workspace as the Spaces one and is never shown there. Idempotent.
+ * AssistantInfo.hadMessagesBeforeMerge (D7): the user talked to ⌘J
+ * before v2, so the panel shows its one-time upgrade note. Decided once, in
+ * the merge's transaction, from the V the merge kept, so a New conversation
+ * or a History switch afterwards does not change it; false before the merge.
+ * A merge an earlier build ran recorded nothing: `nodeId` (V now) decides
+ * then, by the user's messages from before the merge.
  */
-export function ensureAssistantFor(purpose: AssistantPurpose): MichiAssistantInfo {
-  return ensureConversation(purpose);
+function hadMessagesBeforeMerge(nodeId: string): boolean {
+  const mergedAt = assistantV2MergedAt();
+  if (mergedAt === null) return false;
+  const recorded = getDb().prepare('SELECT value FROM meta WHERE key = ?').get(ASSISTANT_V2_HAD_MESSAGES_KEY) as { value: string } | undefined;
+  return recorded ? recorded.value === '1' : userWroteBefore(nodeId, mergedAt);
+}
+
+/** What the merge calls in the agent's modules (§8.1(c), (e)); tests pass fakes. */
+export interface AssistantV2MigrationHooks {
+  /** §8.1(c): settings.ts migrateCompanionSettingsV2, in the merge's transaction. */
+  migrateCompanionSettings(now: number): void;
+  /** §7 step 5: the MVP's notes may be a hidden turn's, so they are not inlined into V until the user writes or keeps them. */
+  setNotesOrigin(origin: 'checkin'): void;
+}
+
+const DEFAULT_MIGRATION_HOOKS: AssistantV2MigrationHooks = {
+  migrateCompanionSettings: () => migrateCompanionSettingsV2(),
+  setNotesOrigin: (origin) => setCompanionNotesOrigin(origin),
+};
+
+function hasMessages(nodeId: string): boolean {
+  return !!getDb().prepare('SELECT 1 FROM messages WHERE node_id = ? LIMIT 1').get(nodeId);
+}
+
+/** Archives the tree a conversation of the assistant's workspace roots (it stays readable; History lists the 'main' ones). */
+function archiveConversationTree(workspaceId: string, nodeId: string, now: number): void {
+  const node = getNode(nodeId);
+  if (!node || node.workspace_id !== workspaceId || !node.tree_id) return;
+  getDb().prepare('UPDATE trees SET archived_at = ?, last_active_at = ? WHERE id = ? AND workspace_id = ? AND archived_at IS NULL')
+    .run(now, now, node.tree_id, workspaceId);
+}
+
+/**
+ * The one-time v2 merge (DESIGN-v2 §7), at boot before any route opens:
+ * 1. V is the Spaces window's current conversation, kept as it is (made only
+ *    when there is none);
+ * 2. the Scheduled window's conversation, when it has messages, is archived
+ *    (History lists it; it can be activated again);
+ * 3. the MVP Companion's conversation is archived; it reads as 'checkin'
+ *    (its meta says 'companion'), so History never lists it and it cannot be
+ *    activated; boot cleanup discards the native sessions it recorded (§3.7);
+ * 4. both pointers go;
+ * 5. the agent's settings migrate (reasoning, and the MVP's default name
+ *    becomes 'Michi', §8.1(c)), and its notes count as a check-in's until the
+ *    user writes or keeps them;
+ * 6. `assistant:v2_merged_at` is written, and `assistant:v2_had_messages`:
+ *    whether the user had written in V (the upgrade note, D7).
+ * Steps 2-6 are one transaction, guarded by that key: a second run changes
+ * nothing. Step 1 runs first (making V takes its own transaction) and keeps
+ * the old pointers, so a crash between them leaves the next run all it needs.
+ */
+export function migrateAssistantV2(hooks: AssistantV2MigrationHooks = DEFAULT_MIGRATION_HOOKS, now: number = Date.now()): { vNodeId: string; mergedAt: number } {
+  const done = assistantV2MergedAt();
+  if (done !== null) return { vNodeId: ensureV().nodeId, mergedAt: done };
+  const v = ensureV();
+  const mergedAt = Math.max(1, Math.trunc(now));
+  const result = runInTransaction(() => {
+    const already = assistantV2MergedAt();
+    if (already !== null) return already;
+    const workspace = getWorkspace(v.workspaceId);
+    if (workspace) {
+      const stored = storedOf(workspace);
+      const legacy = (key: typeof LEGACY_POINTERS[number]) => {
+        const id = stored[key];
+        return typeof id === 'string' && id !== v.nodeId ? id : null;
+      };
+      const schedule = legacy('scheduleNodeId');
+      if (schedule && hasMessages(schedule)) archiveConversationTree(workspace.id, schedule, mergedAt);
+      const companion = legacy('companionNodeId');
+      if (companion) {
+        // Closed whatever its row says: it was the MVP's hidden-turn conversation.
+        getDb().prepare('INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)').run(assistantPurposeKey(companion), 'companion');
+        archiveConversationTree(workspace.id, companion, mergedAt);
+      }
+      writeSettings(workspace.id, settingsJson(getWorkspace(workspace.id), v.nodeId, true));
+    }
+    hooks.migrateCompanionSettings(mergedAt);
+    hooks.setNotesOrigin('checkin');
+    getDb().prepare('INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)')
+      .run(ASSISTANT_V2_HAD_MESSAGES_KEY, userWroteBefore(v.nodeId, mergedAt) ? '1' : '0');
+    getDb().prepare('INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)').run(ASSISTANT_V2_MERGED_AT_KEY, String(mergedAt));
+    return mergedAt;
+  });
+  return { vNodeId: v.nodeId, mergedAt: result };
 }
 
 function patchId(value: unknown, field: string): string | null {
@@ -355,7 +548,7 @@ function patchId(value: unknown, field: string): string | null {
  * runtime's own default. Another provider without a model named starts on
  * its own model.
  */
-export function updateAssistantSettings(patch: MichiAssistantSettingsPatch): MichiAssistantInfo {
+export function updateAssistantSettings(patch: MichiAssistantSettingsPatch): AssistantInfo {
   if (patch.runtimeId !== undefined && (typeof patch.runtimeId !== 'string' || !getRuntime(patch.runtimeId))) {
     const registered = listRuntimes().map((runtime) => runtime.id);
     throw new AssistantSettingsError(`runtimeId must be one of: ${registered.join(', ') || '(none available)'}`);
@@ -365,12 +558,11 @@ export function updateAssistantSettings(patch: MichiAssistantSettingsPatch): Mic
   if (patch.reasoning !== undefined && patch.reasoning !== null && !isReasoningLevel(patch.reasoning)) {
     throw new AssistantSettingsError('reasoning must be minimal, low, medium, high, xhigh, max or null');
   }
-  // The answer is the conversation's own window: the Spaces assistant, or the Scheduled one.
-  const purpose = assistantPurposeOf(patch.nodeId);
-  const current = ensureConversation(purpose);
+  const current = ensureAssistant();
   const nodeId = patch.nodeId ?? current.nodeId;
   const node = getNode(nodeId);
-  if (!node || node.workspace_id !== current.workspaceId || node.kind !== 'chat' || node.deleted_at != null) {
+  // Only a conversation the user talks in: a check-in runs on V's settings (routes answer 409 first).
+  if (!node || node.workspace_id !== current.workspaceId || node.kind !== 'chat' || node.deleted_at != null || assistantPurposeOf(nodeId) !== 'main') {
     throw new AssistantSettingsError('Assistant conversation not found');
   }
   if (patch.runtimeId === undefined && providerId === undefined && modelId === undefined && patch.reasoning === undefined) return current;
@@ -378,7 +570,8 @@ export function updateAssistantSettings(patch: MichiAssistantSettingsPatch): Mic
   // never depends on what the conversation resolves to now.
   const runtimePicked = patch.runtimeId !== undefined;
   const { followsGlobal: _global, ...now } = assistantConversationRuntime(nodeId);
-  const base = runtimePicked ? globalSettingsFor(patch.runtimeId as string) : now;
+  // A runtime pick is no reasoning pick: the agent's reasoning holds there too.
+  const base = runtimePicked ? globalSettingsForAgent(patch.runtimeId as string) : now;
   const next: Required<MichiAssistantSettings> = {
     runtimeId: base.runtimeId,
     providerId: base.providerId,
@@ -391,20 +584,21 @@ export function updateAssistantSettings(patch: MichiAssistantSettingsPatch): Mic
   if (next.providerId !== base.providerId && !modelId) next.modelId = providerModel(next.runtimeId, next.providerId);
   if (patch.reasoning !== undefined && (!runtimePicked || patch.reasoning !== null)) next.reasoning = patch.reasoning;
   getDb().prepare('INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)').run(choiceKey(nodeId), JSON.stringify(next));
-  return ensureConversation(purpose);
+  return ensureAssistant();
 }
 
 /**
- * Archives one purpose's current conversation and starts a fresh one with the
- * current settings; the other purpose's conversation is untouched.
+ * New conversation: archives V (History keeps it) and starts a fresh V with
+ * the current settings. Callers check first that V is idle (no turn, no
+ * runtime cleanup, no pending self-turn or post).
  */
-export function resetAssistant(purpose: AssistantPurpose = 'spaces'): { info: MichiAssistantInfo; previousNodeId: string } {
-  const current = ensureConversation(purpose);
+export function resetAssistant(): { info: AssistantInfo; previousNodeId: string } {
+  const current = ensureAssistant();
   const now = Date.now();
   getDb().prepare('UPDATE trees SET archived_at = ?, last_active_at = ? WHERE id = ? AND archived_at IS NULL')
     .run(now, now, current.treeId);
   const workspace = getWorkspace(current.workspaceId);
-  const created = newConversation(workspace, assistantCwd(), purpose);
+  const created = newConversation(workspace, assistantCwd());
   return {
     info: info(created.workspace, created.node, current.supportedRuntimes),
     previousNodeId: current.nodeId,
@@ -412,9 +606,10 @@ export function resetAssistant(purpose: AssistantPurpose = 'spaces'): { info: Mi
 }
 
 /**
- * The Spaces window's history. Includes conversations archived by New
- * conversation, but never deleted nodes, another workspace or the Scheduled
- * window's conversations.
+ * History (DESIGN-v2 §7): every 'main' conversation of the assistant's
+ * workspace, archived by New conversation or by the v2 merge (the old
+ * Scheduled ones too), but never deleted nodes, another workspace, a
+ * check-in node or the MVP Companion's conversation (any purpose 'checkin').
  */
 export function listAssistantConversations(limit = 5, cursor?: string): MichiAssistantConversations {
   const workspace = findAssistantWorkspace();
@@ -437,22 +632,23 @@ export function listAssistantConversations(limit = 5, cursor?: string): MichiAss
       FROM nodes n JOIN trees t ON t.id = n.tree_id AND t.workspace_id = n.workspace_id AND t.root_node_id = n.id
       WHERE n.workspace_id = ? AND n.kind = 'chat' AND n.deleted_at IS NULL AND n.purged_at IS NULL
         AND EXISTS (SELECT 1 FROM messages m WHERE m.node_id = n.id)
-        AND NOT EXISTS (SELECT 1 FROM meta p WHERE p.key = 'assistant:purpose:' || n.id AND p.value <> 'spaces')
+        AND substr(n.id, 1, length(?)) <> ?
+        AND NOT EXISTS (SELECT 1 FROM meta p WHERE p.key = 'assistant:purpose:' || n.id AND p.value IN ('checkin', 'companion'))
     )
     SELECT * FROM history WHERE (? IS NULL OR updatedAt < ? OR (updatedAt = ? AND nodeId < ?))
     ORDER BY updatedAt DESC, nodeId DESC LIMIT ?
-  `).all(workspace.id, before?.updatedAt ?? null, before?.updatedAt ?? null, before?.updatedAt ?? null, before?.nodeId ?? null, limit + 1) as Array<{ nodeId: string; title: string; updatedAt: number }>;
+  `).all(workspace.id, CHECKIN_NODE_PREFIX, CHECKIN_NODE_PREFIX, before?.updatedAt ?? null, before?.updatedAt ?? null, before?.updatedAt ?? null, before?.nodeId ?? null, limit + 1) as Array<{ nodeId: string; title: string; updatedAt: number }>;
   const items = rows.slice(0, limit).map(row => ({ ...row, title: row.title.replace(/\s+/g, ' ').trim().slice(0, 100) || 'Assistant' }));
   const last = items.at(-1);
   return { items, nextCursor: rows.length > limit && last ? Buffer.from(JSON.stringify({ updatedAt: last.updatedAt, nodeId: last.nodeId })).toString('base64url') : null };
 }
 
-/** Resume a saved assistant conversation without cloning or losing its transcript. */
-export function activateAssistantConversation(nodeId: string): MichiAssistantInfo {
+/** Resume a saved 'main' conversation as V without cloning or losing its transcript; a check-in is never one. */
+export function activateAssistantConversation(nodeId: string): AssistantInfo {
   const workspace = findAssistantWorkspace();
   const node = getNode(nodeId);
   if (!workspace || !node || node.workspace_id !== workspace.id || node.kind !== 'chat' || node.deleted_at != null || node.purged_at != null || !node.tree_id
-    || assistantPurposeOf(node.id) !== 'spaces') {
+    || assistantPurposeOf(node.id) !== 'main') {
     throw new AssistantSettingsError('Assistant conversation not found');
   }
   const tree = getDb().prepare('SELECT root_node_id FROM trees WHERE id = ? AND workspace_id = ?').get(node.tree_id, workspace.id) as { root_node_id: string } | undefined;
@@ -467,7 +663,7 @@ export function activateAssistantConversation(nodeId: string): MichiAssistantInf
     getDb().prepare('UPDATE trees SET archived_at = NULL, last_active_at = ? WHERE id = ?').run(now, treeId);
     getDb().prepare("UPDATE nodes SET status = 'idle' WHERE id = ? AND status = 'archived'").run(node.id);
     getDb().prepare('UPDATE workspaces SET active_tree_id = ? WHERE id = ?').run(treeId, workspace.id);
-    writeSettings(workspace.id, settingsJson(workspace, { nodeId }));
+    writeSettings(workspace.id, settingsJson(workspace, nodeId));
   });
   return ensureAssistant();
 }

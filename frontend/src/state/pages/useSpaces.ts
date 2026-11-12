@@ -1,7 +1,7 @@
 import { useCallback, useEffect } from 'react';
 import type { SpaceSummaryDto } from 'michi-shared';
 import { fetchSpaces } from '../../services/api/pages';
-import { commitResourceRead, failResourceRead, resourceKey, startResourceRead, useResource } from './resourceCache';
+import { commitResourceRead, failResourceRead, pollResource, resourceKey, startResourceRead, useResource } from './resourceCache';
 import { subscribePageChanges } from './pageEvents';
 
 export interface UseSpacesResult {
@@ -31,17 +31,7 @@ export function useSpaces(connectionId: string): UseSpacesResult {
 
   useEffect(() => { refresh(); }, [refresh]);
   useEffect(() => subscribePageChanges({ backendConnectionId: connectionId }, refresh), [connectionId, refresh]);
-  useEffect(() => {
-    const onFocus = () => refresh();
-    const timer = window.setInterval(() => {
-      if (document.visibilityState === 'visible') refresh();
-    }, SPACES_POLL_MS);
-    window.addEventListener('focus', onFocus);
-    return () => {
-      window.clearInterval(timer);
-      window.removeEventListener('focus', onFocus);
-    };
-  }, [refresh]);
+  useEffect(() => pollResource(key, SPACES_POLL_MS, refresh), [key, refresh]);
 
   return {
     spaces: snapshot.data,

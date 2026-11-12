@@ -1,0 +1,209 @@
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { AcpClient } from '../src/adapters/kiro/acpClient';
+import type { KiroEngine } from '../src/adapters/kiro/kiroProtocol';
+
+function fixture(engine: KiroEngine) {
+    const c = new AcpClient('/bin/false', '/tmp', undefined, engine);
+    const internal = c as any;
+    const calls: any[] = [];
+    internal.initialization = { agentCapabilities: { _meta: { kiro: { extensionMethods: ['_kiro/session/compact'] } } } };
+    internal.send = async (method: string, params: any) => {
+        calls.push({ method, params });
+        if (method === 'initialize') return { protocolVersion: 1, agentCapabilities: { _meta: { kiro: { extensionMethods: ['_kiro/session/compact'] } }, loadSession: true, sessionCapabilities: { fork: {}, list: {} } } };
+        if (method === 'session/list') return { sessions: [{ sessionId: 'parent', cwd: '/tmp' }] };
+        if (method === 'session/new' || method === 'session/load') return { sessionId: 'parent',
+            ...(engine === 'v3' ? { configOptions: [{ id: 'model', type: 'select', currentValue: 'old', options: [{ value: 'old' }, { value: 'new' }] }] }
+                : { models: { currentModelId: 'old' } }),
+        };
+        if (method === 'session/set_config_option') return { configOptions: [{ id: 'model', type: 'select', currentValue: params.value }] };
+        if (method === '_kiro.dev/commands/execute') return params.command.args?.value === undefined
+            ? { success: true, data: { turns: [{ logIndex: 19 }, { logIndex: 3 }] } }
+            : { success: true, data: { sessionId: 'child', switchSession: true } };
+        if (method === 'session/fork') return { sessionId: 'child' };
+        if (method === '_session/steer') return { queued: true, ...(engine === 'v3' ? { messageId: 'steer-id' } : {}) };
+        if (method === '_session/steer/clear') return { cleared: true, ...(engine === 'v3' ? { messageIds: ['steer-id'] } : {}) };
+        return {};
+    };
+    return { c, internal, calls };
+}
+
+async function nextTurnUpdate(stream: AsyncIterableIterator<any>) {
+    let result = await stream.next();
+    while (!result.done && result.value.sessionUpdate === 'session_state') result = await stream.next();
+    return result;
+}
+
+test('Crew v2 override forks with standard RPC and stable message id without changing Kiro v2 rewind', async () => {
+    const c = new AcpClient('/bin/false', '/tmp', undefined, 'v2', { bin: '/bin/false', args: () => [], standardFork: true });
+    const internal = c as any;
+    const calls: any[] = [];
+    internal.initialization = { agentCapabilities: { sessionCapabilities: { fork: {} } } };
+    internal.send = async (method: string, params: any) => { calls.push({ method, params }); return { sessionId: 'child' }; };
+    assert.equal(await c.forkSession('parent', { messageId: 'stable-id' }), 'child');
+    assert.deepEqual(calls, [{ method: 'session/fork', params: { sessionId: 'parent', cwd: '/tmp', _meta: { kiro: { messageId: 'stable-id' } } } }]);
+    internal.initialization = {};
+    await assert.rejects(c.forkSession('parent'), /did not advertise/);
+});
+
+for (const engine of ['v2', 'v3'] as const) {
+    test(`${engine}: numeric handshake, session config, and model switch use the correct wire API`, async () => {
+        const { c, calls } = fixture(engine);
+        await c.initialize();
+        assert.equal(calls[0].params.protocolVersion, 1);
+        assert.ok(c.capabilities?.sessionCapabilities?.fork);
+        const result = await c.newSession([{ name: 'michi', type: 'http', url: 'http://localhost', headers: [] }]);
+        assert.equal(result.models.currentModelId, 'old');
+        await c.setModel('parent', 'new');
+        assert.equal(calls[2].method, engine === 'v3' ? 'session/set_config_option' : 'session/set_model');
+        assert.equal(c.getSessionInfo('parent')?.models.currentModelId, 'new');
+    });
+
+    test(`${engine}: fork creates an independent child and uses only native anchors`, async () => {
+        const { c, calls } = fixture(engine);
+        await c.initialize();
+        await c.newSession();
+        assert.equal(await c.forkSession('parent', engine === 'v3' ? { messageId: 'native-user-id' } : undefined), 'child');
+        if (engine === 'v2') {
+            assert.deepEqual(calls[2].params.command, { command: 'rewind', args: {} });
+            assert.deepEqual(calls[3].params.command, { command: 'rewind', args: { value: '19' } });
+        } else assert.deepEqual(calls[2].params._meta, { kiro: { messageId: 'native-user-id', createdReason: 'rewind' } });
+        assert.ok(c.hasSession('parent'));
+    });
+
+    test(`${engine}: rejects fork during a prompt and steers only a live turn`, async () => {
+        const { c, internal, calls } = fixture(engine);
+        assert.deepEqual(await c.steer('parent', 'late'), { queued: false });
+        assert.equal(calls.length, 0);
+        internal.sessionInFlight.set('parent', Promise.resolve());
+        await assert.rejects(c.forkSession('parent'), /active/);
+        assert.deepEqual(await c.steer('parent', 'locked but not prompting'), { queued: false });
+        internal.activePrompts.add('parent');
+        assert.equal((await c.steer('parent', 'change direction')).queued, true);
+        assert.deepEqual(calls[0], { method: '_session/steer', params: { sessionId: 'parent', message: 'change direction' } });
+        const cleared = await c.clearSteer('parent');
+        assert.equal(cleared.cleared, true);
+        assert.deepEqual(cleared.messageIds, engine === 'v3' ? ['steer-id'] : undefined);
+    });
+}
+
+test('v3 emits one usage summary and waits for prompt response despite early turn_end', async () => {
+    const { c, internal } = fixture('v3');
+    await c.newSession();
+    let complete!: () => void;
+    internal.send = async () => new Promise((resolve) => { complete = () => resolve({ stopReason: 'end_turn' }); });
+    const stream = c.prompt('parent', 'hello');
+    await stream.next(); // initial session snapshot
+    const first = stream.next();
+    internal.dispatch({ method: 'session/update', params: { sessionId: 'parent', update: {
+        sessionUpdate: 'session_info_update', _meta: { kiro: { kind: 'turn_completion', elapsedTime: 5, promptTurnSummaries: [{ unit: 'credit', usage: 0.4 }] } },
+    } } });
+    internal.dispatch({ method: 'session/update', params: { sessionId: 'parent', update: {
+        sessionUpdate: 'session_info_update', _meta: { kiro: { kind: 'turn_end' } },
+    } } });
+    let resolved = false; void first.then(() => { resolved = true; });
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.equal(resolved, false);
+    complete();
+    assert.equal((await first).value?.totalCredits, 0.4);
+    assert.equal((await nextTurnUpdate(stream)).value?.sessionUpdate, 'turn_end');
+    await stream.return?.();
+});
+
+test('v3 persistent permission uses kind and exact triggering resource; unknown callbacks fail closed', async () => {
+    const { c, internal } = fixture('v3');
+    await c.newSession();
+    const writes: any[] = [];
+    internal.proc = { stdin: { destroyed: false, write: (text: string) => writes.push(JSON.parse(text)) } };
+    internal.dispatch({ id: 10, method: 'session/request_permission', params: { sessionId: 'parent',
+        options: [{ optionId: 'always-accept', kind: 'allow_always' }],
+        _meta: { kiro: { consent: { capability: 'shell', resource: 'echo a', triggeringResource: 'echo a && echo b', workspaceRoot: '/tmp' } } },
+    } });
+    const [requestId] = internal.pendingPermissions.keys();
+    assert.throws(() => c.respondToPermission(requestId, 'allow'), /Unknown/);
+    c.respondToPermission(requestId, 'always-accept');
+    assert.equal(writes[0].result._meta.kiro.consent.resource, 'echo a && echo b');
+    assert.equal(writes[0].result._meta.kiro.consent.scope, 'session');
+    internal.dispatch({ id: 11, method: 'terminal/create', params: {} });
+    assert.equal(writes[1].error.code, -32601);
+});
+
+test('v2 compact waits for its own completion notification, locks the session, and cleans up', async () => {
+    const { c, internal } = fixture('v2');
+    await c.newSession();
+    internal.send = async () => ({ success: true, message: 'Compacting conversation...' });
+    let done = false;
+    const compact = c.compact('parent').then((result) => { done = true; return result; });
+    const status = (sessionId: string, type: string) => internal.dispatch({
+        method: '_kiro.dev/compaction/status', params: { sessionId, status: { type } },
+    });
+    status('parent', 'started');
+    status('peer', 'completed');
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.equal(done, false, 'command acknowledgement is not completion');
+    assert.equal((await c.compact('parent')).success, false, 'cannot start overlapping compaction');
+    await assert.rejects(c.forkSession('parent'), /active/);
+    status('parent', 'completed');
+    assert.equal((await compact).success, true);
+    assert.equal(internal.sessionInFlight.size, 0);
+    assert.equal(internal.compactions.size, 0);
+    assert.equal(c.needsSessionRecovery('parent'), false);
+});
+
+test('v2 compact timeout quarantines the session and blocks subsequent prompts', async () => {
+    const { c, internal } = fixture('v2');
+    await c.newSession();
+    internal.send = async () => ({ success: true });
+    await assert.rejects(c.compact('parent', undefined, 10), /completion timed out/);
+    assert.equal(c.needsSessionRecovery('parent'), true);
+    await assert.rejects(c.prompt('parent', 'must not start').next(), /needs recovery/);
+    assert.equal(internal.compactions.size, 0);
+    assert.equal(internal.sessionInFlight.size, 0);
+});
+
+for (const failure of ['refused', 'failed', 'released', 'shutdown']) {
+    test(`v2 compact ${failure} settles without leaking its session lock`, async () => {
+        const { c, internal } = fixture('v2');
+        internal.send = async () => ({ success: failure !== 'refused' });
+        const compact = c.compact('parent');
+        await new Promise<void>((resolve) => setImmediate(resolve));
+        if (failure === 'refused') assert.equal((await compact).success, false);
+        else {
+            const rejected = assert.rejects(compact);
+            if (failure === 'failed') internal.dispatch({ method: '_kiro.dev/compaction/status', params: {
+                sessionId: 'parent', status: { type: 'failed', message: 'native failure' },
+            } });
+            if (failure === 'released') c.destroySession('parent');
+            if (failure === 'shutdown') await c.shutdown();
+            await rejected;
+        }
+        assert.equal(internal.compactions.size, 0);
+        assert.equal(internal.sessionInFlight.size, 0);
+    });
+}
+
+test('v3 compact immediately after done waits for native steer cleanup', async () => {
+    const { c, internal } = fixture('v3');
+    await c.newSession();
+    let clear!: () => void;
+    let compactionCalls = 0;
+    internal.steeredSessions.add('parent');
+    internal.send = async (method: string) => {
+        if (method === 'session/prompt') return { stopReason: 'end_turn' };
+        if (method === '_session/steer/clear') return new Promise((resolve) => { clear = () => resolve({ cleared: true }); });
+        if (method === '_kiro/session/compact') compactionCalls++;
+        return {};
+    };
+    const stream = c.prompt('parent', 'first');
+    assert.equal((await nextTurnUpdate(stream)).value?.sessionUpdate, 'turn_end');
+    const cleanup = stream.return?.();
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    const compact = c.compact('parent');
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.equal(compactionCalls, 0);
+    clear();
+    await cleanup;
+    assert.equal((await compact).success, true);
+    assert.equal(compactionCalls, 1);
+    assert.equal(internal.sessionInFlight.size, 0);
+});

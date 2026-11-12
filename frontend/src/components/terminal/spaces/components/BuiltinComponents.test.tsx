@@ -1,4 +1,3 @@
-import React from 'react';
 import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { describe, expect, it, vi } from 'vitest';
 import { PAGE_BLOCK_CATALOG, PAGE_BLOCK_TYPES, parsePageBlockInput } from 'michi-shared';
@@ -35,10 +34,13 @@ describe('Built-in components', () => {
     const onInsert = vi.fn().mockResolvedValue(undefined);
     render(<BuiltinComponents onInsert={onInsert} now={NOW} />);
     const card = cardOf('Checklist');
-    const checkbox = within(card).getAllByRole('checkbox')[1];
+    const checkbox = within(card).getByRole('checkbox', { name: 'Verify the installer' });
     expect(checkbox.getAttribute('aria-checked')).toBe('false');
     fireEvent.click(checkbox);
-    expect(checkbox.getAttribute('aria-checked')).toBe('true');
+    // A ticked item folds under the done row; opening it shows the item ticked.
+    expect(within(card).queryByRole('checkbox', { name: 'Verify the installer' })).toBeNull();
+    fireEvent.click(within(card).getByRole('button', { name: 'Show 2 done' }));
+    expect(within(card).getByRole('checkbox', { name: 'Verify the installer' }).getAttribute('aria-checked')).toBe('true');
     expect(onInsert).not.toHaveBeenCalled();
     fireEvent.click(within(card).getByRole('button', { name: 'Add Checklist to the page' }));
     await waitFor(() => expect(onInsert).toHaveBeenCalledWith(PAGE_BLOCK_CATALOG.checklist.example));
@@ -63,7 +65,9 @@ describe('Built-in components', () => {
     fireEvent.change(screen.getByRole('searchbox'), { target: { value: 'Responsive grid' } });
     const card = cardOf('Responsive grid');
     fireEvent.click(within(card).getByRole('checkbox', { name: 'Review the next step' }));
-    expect(within(card).getByRole('checkbox').getAttribute('aria-checked')).toBe('true');
+    expect(within(card).queryByRole('checkbox')).toBeNull();
+    fireEvent.click(within(card).getByRole('button', { name: 'Show 1 done' }));
+    expect(within(card).getByRole('checkbox', { name: 'Review the next step' }).getAttribute('aria-checked')).toBe('true');
     fireEvent.click(within(card).getByRole('button', { name: 'Arrange layout' }));
     fireEvent.change(within(card).getByRole('combobox', { name: 'Current work width' }), { target: { value: '7' } });
     expect(within(card).getByRole('combobox', { name: 'Current work width' })).toHaveProperty('value', '7');

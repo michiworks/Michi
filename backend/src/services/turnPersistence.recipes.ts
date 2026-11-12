@@ -16,19 +16,13 @@
  * @module turnPersistence.recipes
  */
 
-import { knownSubagentEnd, type DurableMessage, type DurableTurnSnapshot, type SubagentEnd } from 'michi-shared';
+import { knownSubagentEnd, turnLeftAnswer, type DurableMessage, type DurableTurnSnapshot, type SubagentEnd } from 'michi-shared';
 
 // ── Restart interruption ───────────────────────────────────────────────────
 // A turn the process died under ends with this durable marker, whether the
 // shutdown path finalized it or the next boot recovered it. The replay route
 // and the hydration payload read the marker; the message is what a reader sees.
-
-/** `turns.error` and the stream error `code` of a turn a restart cut short. */
-export const BACKEND_RESTARTED_ERROR = 'backend_restarted';
-
-/** The one sentence shown for such a turn, live or after a reload. */
-export const BACKEND_RESTARTED_MESSAGE =
-  'Michi restarted while this task was running. Review the partial output above, then resume.';
+export { BACKEND_RESTARTED_ERROR, BACKEND_RESTARTED_MESSAGE } from 'michi-shared';
 
 // ── SQL Templates ──────────────────────────────────────────────────────────
 // Named so grep turns them up: search `TURN_SQL.` or `MESSAGE_SQL.`.
@@ -124,7 +118,22 @@ export const NODE_SQL = {
   clearComposerDraft:
     'UPDATE nodes SET composer_draft = ? WHERE id = ? AND composer_draft = ?',
 
+  /** Count a turn that completed with an answer (migration 0064). */
+  recordCompletion: `
+    UPDATE nodes
+    SET completion_seq = completion_seq + 1, last_completed_at = ?, last_completed_turn_id = ?
+    WHERE id = ?`,
+
 } as const;
+
+/**
+ * A completed turn counts toward the node's completion facts (and so its
+ * unread mark) when it left something to read (turnLeftAnswer).
+ */
+export function completedWithAnswer(snapshot: DurableTurnSnapshot): boolean {
+  return snapshot.status === 'completed'
+    && turnLeftAnswer(snapshot.assistantMessage.content, snapshot.assistantMessage.blocks);
+}
 
 // ── Pure Functions ─────────────────────────────────────────────────────────
 

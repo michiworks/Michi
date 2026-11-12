@@ -1,4 +1,4 @@
-import type { MentionRecord } from './mentions';
+import type { MentionRecord } from '../lib/mentions';
 
 /**
  * Bridge between the composer's controlled `{ value, mentions }` contract and a

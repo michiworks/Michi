@@ -30,9 +30,9 @@ vi.mock('../../state/chatStore', async () => {
   const noop = () => {};
   return {
     ...actual,
-    useChatProjects: () => ({ activeProject: project, projects: [project], focusedNodeId: 'n1', canNavBack: false, canNavForward: false }),
+    useChatProjects: () => ({ activeProject: project, projects: [project], focusedNodeId: 'n1' }),
     useChatPanes: () => ({ openPanes: panes.openPanes, focusedPane: 'n1', paneItems: panes.paneItems }),
-    useChatActions: () => ({ focusPane: noop, closePane: noop, reorderPane: noop, setPaneWidth: noop, navBack: noop, navForward: noop }),
+    useChatActions: () => ({ focusPane: noop, closePane: noop, reorderPane: noop, setPaneWidth: noop }),
   };
 });
 
@@ -43,6 +43,7 @@ vi.mock('../../services/api', async (importOriginal) => {
 
 vi.mock('../../lib/electronBridge', () => ({ getElectron: () => null }));
 
+const navigation = { canBack: false, canForward: false, onBack: () => {}, onForward: () => {} };
 function subagent(patch: Partial<SubagentInfo> & { sessionId: string }): SubagentInfo {
   return { sessionName: '', agentName: '', initialQuery: '', status: 'working', group: '', dependsOn: [], ...patch };
 }
@@ -100,7 +101,7 @@ describe('Topbar background work badges', () => {
     });
     const handlers: Array<Parameters<WorkflowDomainApi['subscribe']>[1]> = [];
     const api: WorkflowDomainApi = {
-      list: vi.fn(), get: vi.fn(), act: vi.fn(), answer: vi.fn(),
+      get: vi.fn(), act: vi.fn(), answer: vi.fn(),
       subscribe: vi.fn((_workspaceId, options) => { handlers.push(options); return () => {}; }),
     };
     const { container } = render(
@@ -108,7 +109,7 @@ describe('Topbar background work badges', () => {
         <ChatNodeStoreContext.Provider value={store.value}>
           <WorkflowDomainProvider api={api}>
             <Subscribe />
-            <TerminalTopbar page="dashboard" onNav={() => {}} sidebarCollapsed={false} onToggleSidebar={() => {}} />
+            <TerminalTopbar page="dashboard" onNav={() => {}} sidebarCollapsed={false} onToggleSidebar={() => {}} navigation={navigation} />
           </WorkflowDomainProvider>
         </ChatNodeStoreContext.Provider>
       </PrefsProvider>,
@@ -144,7 +145,7 @@ describe('Topbar background work button', () => {
     const store = nodeStore(nodes);
     const handlers: Array<Parameters<WorkflowDomainApi['subscribe']>[1]> = [];
     const api: WorkflowDomainApi = {
-      list: vi.fn(), get: vi.fn(), act: vi.fn(), answer: vi.fn(),
+      get: vi.fn(), act: vi.fn(), answer: vi.fn(),
       subscribe: vi.fn((_workspaceId, options) => { handlers.push(options); return () => {}; }),
     };
     const view = render(
@@ -152,7 +153,7 @@ describe('Topbar background work button', () => {
         <ChatNodeStoreContext.Provider value={store.value}>
           <WorkflowDomainProvider api={api}>
             <Subscribe />
-            <TerminalTopbar page="dashboard" onNav={() => {}} sidebarCollapsed={false} onToggleSidebar={() => {}} />
+            <TerminalTopbar page="dashboard" onNav={() => {}} sidebarCollapsed={false} onToggleSidebar={() => {}} navigation={navigation} />
           </WorkflowDomainProvider>
         </ChatNodeStoreContext.Provider>
       </PrefsProvider>,

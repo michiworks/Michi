@@ -48,6 +48,18 @@ export interface MichiAssistantInfo {
    * backends.
    */
   runtimeSwitches?: MichiAssistantRuntimeSwitch[];
+  /**
+   * A turn the user sent from the Scheduled area created a scheduled job, so
+   * "Create with agent" starts a new conversation (W2 fix decision D6).
+   * Absent from older backends.
+   */
+  jobCreated?: boolean;
+  /**
+   * The conversation held the user's own messages before the v2 merge
+   * (`v2_merged_at`): the panel shows its one-time upgrade note (W2 fix
+   * decision D7). The backend decides; absent from older backends (= false).
+   */
+  hadMessagesBeforeMerge?: boolean;
 }
 
 /** One point where an assistant conversation continued on another runtime. */
@@ -87,7 +99,8 @@ export interface MichiAssistantSettingsPatch {
 /** Workspace `settings` keys only the backend's assistant store writes. */
 export const SERVER_OWNED_WORKSPACE_SETTINGS = ['system', 'assistant'] as const;
 
-function parseSettings(raw: string | null | undefined): Record<string, unknown> | null {
+/** A workspace's `settings` JSON as an object; null when unset, malformed or not an object. */
+export function parseWorkspaceSettings(raw: string | null | undefined): Record<string, unknown> | null {
   if (!raw) return null;
   try {
     const parsed: unknown = JSON.parse(raw);
@@ -99,17 +112,28 @@ function parseSettings(raw: string | null | undefined): Record<string, unknown> 
 
 /** True for the settings JSON of the assistant's hidden workspace. */
 export function isAssistantWorkspaceSettings(raw: string | null | undefined): boolean {
-  return parseSettings(raw)?.system === ASSISTANT_WORKSPACE_SYSTEM;
+  return parseWorkspaceSettings(raw)?.system === ASSISTANT_WORKSPACE_SYSTEM;
 }
 
 /**
- * True for any system workspace (`settings.system` set; today only the
- * assistant's). Its conversations are not search or navigation material for
- * anything outside it.
+ * The system flag of parsed workspace settings; undefined for a user
+ * workspace. Any non-null `settings.system` marks a system workspace, as the
+ * SQL predicates read it; a value other than a non-blank string comes back
+ * as its JSON so it still reads as set.
+ */
+export function workspaceSystemOf(settings: Record<string, unknown> | null | undefined): string | undefined {
+  const system = settings?.system;
+  if (system === undefined || system === null) return undefined;
+  return typeof system === 'string' && system.trim() ? system : JSON.stringify(system);
+}
+
+/**
+ * True for any system workspace (`settings.system` set: the assistant's, or
+ * the one holding a cloud Spaces Home). Its conversations are not search or
+ * navigation material for anything outside it.
  */
 export function isSystemWorkspaceSettings(raw: string | null | undefined): boolean {
-  const system = parseSettings(raw)?.system;
-  return system !== undefined && system !== null;
+  return workspaceSystemOf(parseWorkspaceSettings(raw)) !== undefined;
 }
 
 /**
@@ -120,8 +144,8 @@ export function isSystemWorkspaceSettings(raw: string | null | undefined): boole
  * writer's. The assistant store sets these keys with its own UPDATE.
  */
 export function mergeServerOwnedSettings(existing: string | null | undefined, incoming: string | null | undefined): string | null {
-  const before = parseSettings(existing);
-  const next = parseSettings(incoming);
+  const before = parseWorkspaceSettings(existing);
+  const next = parseWorkspaceSettings(incoming);
   const ownedBefore = before ? SERVER_OWNED_WORKSPACE_SETTINGS.filter(key => key in before) : [];
   const ownedIncoming = next ? SERVER_OWNED_WORKSPACE_SETTINGS.filter(key => key in next) : [];
   if (ownedBefore.length === 0 && ownedIncoming.length === 0) return incoming ?? null;

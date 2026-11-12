@@ -1,4 +1,4 @@
-import React, { useCallback, useRef, useState } from 'react';
+import React, { useCallback, useRef } from 'react';
 import { useNodesSelector } from '../../../state/chatStore';
 import type { ChatNodeState } from '../../../state/chatTypes';
 import {
@@ -8,7 +8,8 @@ import {
   type BackgroundWorkIndicator,
 } from '../../../state/backgroundWork';
 import { useBackgroundSubagentLiveness, useWorkflowRunsForNodes } from '../../../state/workflowDomain';
-import { HeaderTooltip } from '../WorkspaceMenuButton';
+import { HoverTip } from '../../ui/Popover';
+import { TOPBAR_TIP_DELAY_MS } from '../TopbarIconButton';
 import { openBackgroundWork } from './backgroundWorkEvents';
 
 /**
@@ -64,8 +65,6 @@ export default function BackgroundWorkButton({
   focusedId: string | null | undefined;
 }) {
   const indicator = useBackgroundWorkIndicator(paneIds, paneItems, focusedId);
-  const [hover, setHover] = useState(false);
-  const ref = useRef<HTMLButtonElement>(null);
   if (!indicator) return null;
   const runningCount = indicator.running.subagents + indicator.running.workflows;
   const state = indicator.waiting ? 'waiting' : runningCount > 0 ? 'running' : 'done';
@@ -73,9 +72,8 @@ export default function BackgroundWorkButton({
   const color = state === 'waiting' ? 'var(--term-select)'
     : state === 'running' ? 'var(--term-mauve)' : 'var(--term-faint)';
   return (
-    <>
+    <HoverTip label={label} delayMs={TOPBAR_TIP_DELAY_MS}>
       <button
-        ref={ref}
         type="button"
         className="t-icon-btn"
         data-testid="topbar-background-work"
@@ -83,25 +81,25 @@ export default function BackgroundWorkButton({
         aria-label={`${label}. Show background work`}
         aria-haspopup="dialog"
         onClick={() => openBackgroundWork({ nodeId: indicator.nodeId })}
-        onMouseEnter={() => setHover(true)}
-        onMouseLeave={() => setHover(false)}
         style={{
           display: 'inline-flex',
           alignItems: 'center',
           gap: 4,
-          height: 26,
+          // The phone top bar raises these to a 40×44 target (mobile.css).
+          height: 'var(--bgw-height, 26px)',
+          minWidth: 'var(--bgw-min-width, 0px)',
+          justifyContent: 'center',
           padding: '0 7px',
           flexShrink: 0,
           fontFamily: 'var(--font-mono)',
-          fontSize: 'var(--fs-xs)',
+          fontSize: 'var(--bgw-count-size, var(--fs-xs))',
           color: state === 'done' ? 'var(--term-faint)' : 'var(--term-fg)',
           WebkitAppRegion: 'no-drag',
         } as React.CSSProperties}
       >
-        <span aria-hidden className={state === 'running' ? 'agent-glyph-run' : undefined} style={{ color, fontSize: 'var(--fs-2xs)' }}>◆</span>
+        <span aria-hidden className={state === 'running' ? 'agent-glyph-run' : undefined} style={{ color, fontSize: 'var(--bgw-glyph-size, var(--fs-2xs))' }}>◆</span>
         <span>{runningCount > 0 ? runningCount : indicator.total}</span>
       </button>
-      {hover && <HeaderTooltip anchorRef={ref} label={label} />}
-    </>
+    </HoverTip>
   );
 }

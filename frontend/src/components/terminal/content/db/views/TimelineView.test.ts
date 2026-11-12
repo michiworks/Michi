@@ -1,5 +1,6 @@
-import { describe, expect, it } from 'vitest';
-import { axisLabels, timelineAxis } from './TimelineView';
+import { describe, expect, it, vi } from 'vitest';
+import { axisLabels, placeSpan, spanOf, timelineAxis } from './TimelineView';
+import { localDay } from '../dbModel';
 
 // This year, so the month labels read without a year (`Sep 22`).
 const YEAR = new Date().getFullYear();
@@ -43,5 +44,39 @@ describe('axisLabels', () => {
       expect(i).toBeGreaterThanOrEqual(free);
       free = i + label.span;
     });
+  });
+});
+
+describe('timelineAxis in every time zone', () => {
+  const zone = (tz: string, run: () => void) => {
+    vi.stubEnv('TZ', tz);
+    try { run(); } finally { vi.unstubAllEnvs(); }
+  };
+  const ZONES = ['Pacific/Auckland', 'Pacific/Tongatapu', 'Pacific/Kiritimati', 'UTC', 'Asia/Shanghai', 'America/Los_Angeles', 'Etc/GMT+12'];
+
+  it.each(ZONES)('labels the column a day is drawn in with that day (%s)', (tz) => zone(tz, () => {
+    const now = new Date(2026, 10, 9, 12).getTime();
+    const axis = timelineAxis([{ start: '2026-11-10', end: '2026-11-10' }], now);
+    const at = Math.round((placeSpan(axis, { start: '2026-11-10', end: '2026-11-10' })!.left / 100) * axis.days);
+    expect(axis.labels[at].day).toBe('2026-11-10');
+    expect(axis.labels[axis.today - axis.first].day).toBe(localDay(new Date(now)));
+    expect(axis.labels[axis.today - axis.first].day).toBe('2026-11-09');
+  }));
+
+  it.each(ZONES)('gives each day of a daylight-saving change its own column (%s)', (tz) => zone(tz, () => {
+    const now = new Date(2026, 8, 27, 12).getTime();
+    const axis = timelineAxis([{ start: '2026-09-27', end: '2026-09-28' }], now);
+    const place = placeSpan(axis, { start: '2026-09-27', end: '2026-09-28' })!;
+    expect(Math.round((place.width / 100) * axis.days)).toBe(2);
+    expect(new Set(axis.labels.map((l) => l.day)).size).toBe(axis.days);
+  }));
+});
+
+describe('spanOf', () => {
+  it('places no bar for a day that does not exist', () => {
+    expect(spanOf('2026-04-31')).toBeNull();
+    expect(spanOf({ start: '2026-04-31' })).toBeNull();
+    expect(spanOf({ start: '2026-04-29', end: '2026-04-31' })).toBeNull();
+    expect(spanOf({ start: '2026-04-29', end: '2026-04-30' })).toEqual({ start: '2026-04-29', end: '2026-04-30' });
   });
 });

@@ -13,7 +13,7 @@ import zlib from 'node:zlib';
 import { isBlockedAddress } from '../src/services/webFetch/addressPolicy';
 import { ContentCache } from '../src/services/webFetch/contentCache';
 import { htmlToText } from '../src/services/webFetch/htmlToText';
-import { checkFetchUrl, WebFetchError, type ResolvedAddress } from '../src/services/webFetch/safeRequest';
+import { checkFetchUrl, safeGet, WebFetchError, type ResolvedAddress } from '../src/services/webFetch/safeRequest';
 import { createWebFetcher, formatFetchContentForAgent, type WebFetcherOptions } from '../src/services/webFetch';
 import { closeDb, initDb } from '../src/services/db';
 import { updateAgentConfig } from '../src/services/agentConfig';
@@ -525,6 +525,22 @@ describe('limits', () => {
       await assert.rejects(localFetcher().fetch({ url: `http://public.test:${server.port}/`, signal: controller.signal }), /user cancelled/);
     } finally {
       await server.close();
+    }
+  });
+
+  test('a call cancelled before it starts leaves no lookup failure unhandled', async () => {
+    const unhandled: unknown[] = [];
+    const onUnhandled = (reason: unknown) => { unhandled.push(reason); };
+    process.on('unhandledRejection', onUnhandled);
+    try {
+      const controller = new AbortController();
+      controller.abort(new Error('user cancelled'));
+      const resolveHost = () => new Promise<never>((_, reject) => setTimeout(() => reject(new Error('ENOTFOUND')), 5));
+      await assert.rejects(safeGet('http://public.test/', { maxRedirects: 0, maxBytes: 1024, timeoutMs: 5_000, signal: controller.signal, resolveHost }), /user cancelled/);
+      await new Promise((resolve) => setTimeout(resolve, 30));
+      assert.deepEqual(unhandled, []);
+    } finally {
+      process.off('unhandledRejection', onUnhandled);
     }
   });
 

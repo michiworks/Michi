@@ -1,10 +1,12 @@
 import React from 'react';
+import { Ellipsis } from 'lucide-react';
 import { HoverTip } from '../ui/Popover';
 
-/** Small filled circle; animates with the pulse keyframe when `pulse` is set. */
+/** Small filled circle; breathes as the running dot (index.css .term-dot-i--run) when `pulse` is set. */
 export function Dot({ color, size = 6, pulse = false, extraStyle }: { color: string; size?: number; pulse?: boolean; extraStyle?: React.CSSProperties }) {
   return (
     <span
+      className={pulse ? 'term-dot-i term-dot-i--run' : undefined}
       style={{
         display: 'inline-block',
         width: size,
@@ -14,29 +16,9 @@ export function Dot({ color, size = 6, pulse = false, extraStyle }: { color: str
         color,
         flexShrink: 0,
         boxShadow: pulse ? '0 0 6px 0 currentColor' : undefined,
-        animation: pulse ? 'tpulse var(--t-loop) ease-in-out infinite' : 'none',
         ...extraStyle,
       }}
     />
-  );
-}
-
-/** Thin keyboard tag like `⌘K`. */
-export function KBD({ children }: { children: React.ReactNode }) {
-  return (
-    <span
-      style={{
-        fontFamily: 'var(--ui-font)',
-        fontSize: 'var(--fs-xs)',
-        padding: '1px 5px',
-        border: '1px solid var(--term-line)',
-        color: 'var(--term-mid)',
-        background: 'var(--term-surface)',
-        lineHeight: 1.3,
-      }}
-    >
-      {children}
-    </span>
   );
 }
 
@@ -50,18 +32,6 @@ export function Row({
   ...rest
 }: { active?: boolean } & React.HTMLAttributes<HTMLDivElement>) {
   const cls = ['t-row-hover', active && 'is-active', className].filter(Boolean).join(' ');
-  return <div className={cls} {...rest}>{children}</div>;
-}
-
-/** Tab — focused state suppresses hover, hover hints the bottom border too.
- *  Use for topbar pane tabs and settings section tabs. */
-export function Tab({
-  focused = false,
-  className,
-  children,
-  ...rest
-}: { focused?: boolean } & React.HTMLAttributes<HTMLDivElement>) {
-  const cls = ['t-tab-hover', focused && 'is-focused', className].filter(Boolean).join(' ');
   return <div className={cls} {...rest}>{children}</div>;
 }
 
@@ -96,17 +66,20 @@ export function IconBtn({
  *  gradient (transparent → --term-alt) that masks whatever sits behind it,
  *  matching the Claude Code thread-list hover pattern. The parent row must
  *  show `--term-alt` while hovered or pinned (`open`) so the gradient blends
- *  seamlessly; consumers force that bg when the menu is open. */
+ *  seamlessly; consumers force that bg when the menu is open. A row with a
+ *  hover of its own (`.t-reveal-host`, not `.t-row-hover`) takes it without
+ *  the gradient (`fader={false}`). A touch screen hides it and opens the menu
+ *  on a long press instead (index.css). */
 export function RowKebab({
   open = false,
   onOpen,
   ariaLabel = 'More actions',
-  title = 'More actions',
+  fader = true,
 }: {
   open?: boolean;
-  onOpen: (anchor: { x: number; y: number }) => void;
+  onOpen: (anchor: { x: number; y: number }, button: HTMLButtonElement) => void;
   ariaLabel?: string;
-  title?: string;
+  fader?: boolean;
 }) {
   const cls = ['row-kebab', open && 'is-open'].filter(Boolean).join(' ');
   return (
@@ -119,15 +92,16 @@ export function RowKebab({
         bottom: 0,
         display: 'flex',
         alignItems: 'center',
-        paddingLeft: 28,
-        paddingRight: 10,
+        paddingLeft: fader ? 28 : 4,
+        paddingRight: fader ? 10 : 6,
         // 28px transparent-to-alt fade, then a solid alt strip the kebab
         // sits on. Bleeds into the row's hover/active background.
-        background:
-          'linear-gradient(to right, transparent 0%, var(--term-alt) 28px)',
+        background: fader
+          ? 'linear-gradient(to right, transparent 0%, var(--term-alt) 28px)'
+          : undefined,
       }}
     >
-      <HoverTip label={title}>
+      <HoverTip label="More actions">
       <button
         type="button"
         aria-label={ariaLabel}
@@ -143,29 +117,15 @@ export function RowKebab({
           const r = e.currentTarget.getBoundingClientRect();
           // Anchor menu just below the button's left edge so it reads as
           // attached to the kebab. ContextMenu flips on viewport overflow.
-          onOpen({ x: r.left, y: r.bottom + 2 });
+          onOpen({ x: r.left, y: r.bottom + 2 }, e.currentTarget);
         }}
         onContextMenu={(e) => e.preventDefault()}
-        style={{
-          background: 'transparent',
-          border: 'none',
-          cursor: 'pointer',
-          padding: 0,
-          width: 16,
-          height: 16,
-          display: 'inline-flex',
-          alignItems: 'center',
-          justifyContent: 'center',
-          color: 'var(--term-faint)',
-          flexShrink: 0,
-          lineHeight: 0,
-        }}
+        // Drawn like the workspace row's ⋯ (22px); the -3px margin keeps the
+        // 16px footprint that sidebarRowStyle's KEBAB_FOOTPRINT assumes.
+        className="ws-action-btn"
+        style={{ margin: -3 }}
       >
-        <svg width="14" height="14" viewBox="0 0 16 16" aria-hidden>
-          <circle cx="8" cy="3.5" r="1.25" fill="currentColor" />
-          <circle cx="8" cy="8" r="1.25" fill="currentColor" />
-          <circle cx="8" cy="12.5" r="1.25" fill="currentColor" />
-        </svg>
+        <Ellipsis size={16} aria-hidden="true" />
       </button>
       </HoverTip>
     </span>

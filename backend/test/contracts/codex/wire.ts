@@ -24,7 +24,12 @@ export function turnNotification(status: string) {
   } };
 }
 
-export async function wireClient(t: TestContext, cleanup = true) {
+/**
+ * `results` answers those methods instead of the stubs below. `start: false`
+ * leaves the first start to the caller, so a runtime built on the client
+ * sees it (CodexAppServerClient.onStarted).
+ */
+export async function wireClient(t: TestContext, cleanup = true, options: { start?: boolean; results?: Record<string, unknown> } = {}) {
   const child = Object.assign(new EventEmitter(), {
     stdin: new PassThrough(), stdout: new PassThrough(), stderr: new PassThrough(),
     kill() { child.emit('exit', 0); return true; },
@@ -41,7 +46,8 @@ export async function wireClient(t: TestContext, cleanup = true) {
       if (!message.method || message.id === undefined) continue;
       // Infrastructure replies only; tests validate server-initiated fixtures below.
       const title = message.params?.threadId === `${threadId}-title`;
-      const result = message.method === 'initialize' ? { userAgent: 'contract-fake' }
+      const result = options.results && message.method in options.results ? options.results[message.method]
+        : message.method === 'initialize' ? { userAgent: 'contract-fake' }
         : message.method === 'thread/start' ? { thread: { id: message.params?.ephemeral ? `${threadId}-title` : threadId } }
         : message.method === 'turn/start' ? { turn: { id: title ? 'title-turn' : turnId } }
         : message.method === 'model/list' ? { data: [] } : {};
@@ -55,7 +61,7 @@ export async function wireClient(t: TestContext, cleanup = true) {
   });
   const client = new CodexAppServerClient({ spawnFn: () => child as unknown as ChildProcessWithoutNullStreams, initTimeoutMs: 1_000 });
   if (cleanup) t.after(() => client.shutdown());
-  await client.ensureStarted();
+  if (options.start !== false) await client.ensureStarted();
   const send = (message: object, type?: 'ServerRequest' | 'ServerNotification') => {
     if (type) assertSchema(type, message);
     const jsonl = JSON.stringify(message) + '\n';
@@ -82,7 +88,7 @@ export async function activeWire(t: TestContext, chat = false) {
   const broker = { decision: 'ask' as RuntimePermissionDecision, async requestPermission() { return this.decision; } };
   const runtime = new CodexRuntime({ ...codexTestOptions(), bridge: { spawnBranches: async () => [], saveContext: () => null, updateContext: () => null }, mcpSlots: fakeMcpRegistry({
     create: () => ({ slotId: 'contract-slot' }) as McpSlot, get: () => undefined,
-  }, { mcpPort: 0 }) }, { client: wire.client, followUpsHookPocEnabled: false, followUpsExperimentMode: 'sentinel' });
+  }, { mcpPort: 0 }) }, { client: wire.client });
   const session = await runtime.newSession({
     sessionId: 'contract-attempt', cwd: process.env.MICHI_DATA_DIR!, model: 'fixture-model',
     owner: chat ? chatOwner('contract-attempt') : runOwner('contract-run', 'contract-attempt'),

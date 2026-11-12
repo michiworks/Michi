@@ -16,7 +16,7 @@
 import { log } from "./logger";
 import { JSON_BODY_LIMIT_BYTES } from "./requestBodyLimit";
 import { abortable, withDeadline } from '../agents/runtimeLifecycle';
-import { getUserSandboxRoot } from './workspaceSandbox';
+import { agentSpawnEnv, cloudSubprocessEnv } from '../agents/agentSpawnEnv';
 import type { CallToolResult, Tool } from '@modelcontextprotocol/sdk/types.js';
 import { AjvJsonSchemaValidator } from '@modelcontextprotocol/sdk/validation/ajv-provider.js';
 import type { JsonSchemaValidator } from '@modelcontextprotocol/sdk/validation/types.js';
@@ -54,7 +54,7 @@ export interface McpServerConfig {
     command: string;
     /** Command-line arguments. */
     args?: string[];
-    /** Extra environment variables merged with process.env. */
+    /** Extra environment variables merged over agentSpawnEnv() (desktop; refused in cloud mode). */
     env?: Record<string, string>;
     /** Working directory for the child process. */
     cwd?: string;
@@ -96,12 +96,10 @@ export function mcpSubprocessEnvironment(config: McpServerConfig, options: McpCl
         // overrides prevent host USER/LOGNAME/SHELL (and Windows profile paths)
         // from being reintroduced behind the explicit cloud allowlist.
         const suppressedDefaults = Object.fromEntries(DEFAULT_INHERITED_ENV_VARS.map(key => [key, '']));
-        return { ...suppressedDefaults, PATH: process.env.PATH ?? '/usr/bin:/bin', LANG: process.env.LANG ?? 'en_US.UTF-8',
-            NODE_NO_WARNINGS: '1', ...policy.env, HOME: getUserSandboxRoot(options.ownerUserId) };
+        return { ...suppressedDefaults, ...cloudSubprocessEnv(options.ownerUserId, policy.env) };
     }
-    const env: Record<string, string> = {};
-    for (const [key, value] of Object.entries(process.env)) if (value !== undefined) env[key] = value;
-    return { ...env, ...config.env };
+    // The server's own entries win: one that needs a backend variable names it there.
+    return { ...agentSpawnEnv(), ...config.env };
 }
 
 interface ManagedConnection {
@@ -174,6 +172,10 @@ export class McpClientManager {
             // closing the server's connection, is one Michi carries elsewhere.
             maxBufferSize: JSON_BODY_LIMIT_BYTES,
         });
+        // Nothing reads the child's stderr, and a pipe nobody reads fills up
+        // until a long-lived server blocks writing to it: drain and discard
+        // it (never logged; it can carry anything the server prints).
+        transport.stderr?.on("data", () => {});
 
         const client = new Client(
             { name: "michi", version: "1.0.0" },

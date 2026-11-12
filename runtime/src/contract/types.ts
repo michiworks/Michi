@@ -1,4 +1,4 @@
-import type { AgentSessionState } from 'michi-shared';
+import type { AgentCommand, AgentSessionState } from 'michi-shared';
 import type {
   EventConfidence,
   EventSource,
@@ -54,6 +54,84 @@ export interface AgentTurnInput {
     name: string;
     absPath: string;
   }>;
+  /**
+   * The person ran a skill with this turn (`/name args` in the composer).
+   * The host resolved it; the text passed to send() is what the user wrote
+   * after the command, with the host's usual context around it, and may be
+   * empty. Adapters run the skill the runtime's own way when they can (a
+   * native command or skill input) and otherwise send expandSkillPrompt().
+   */
+  skill?: SkillTurnInvocation;
+  /**
+   * What the host titles this chat from, as GenerateTitleOptions: the
+   * user's message as shown in the UI and the text it quotes. For a runtime
+   * that titles the chat itself; the text passed to send() also carries the
+   * host's framing around them.
+   */
+  titleSource?: { text: string; context?: string };
+}
+
+/** A skill to run in one turn (AgentTurnInput.skill). */
+export interface SkillTurnInvocation {
+  /** The host's catalog id; opaque to runtimes. */
+  id: string;
+  /** The Agent Skills name. */
+  name: string;
+  /**
+   * library: the host's own skill library, which it mounts into sessions.
+   * builtin: a skill the host ships, never mounted: the runtime always sends
+   * its body (expandSkillPrompt), even when a native command shares its name.
+   * runtime: a skill this runtime reported.
+   */
+  origin: 'library' | 'builtin' | 'runtime';
+  /** The name this runtime's own command table runs it by, when the host knows it. */
+  nativeName?: string;
+  /** Absolute path of the SKILL.md, when the host has the file. */
+  path?: string;
+  /** The SKILL.md body without frontmatter, read by the host at turn start, when it has the file. */
+  body?: string;
+  /** What the user wrote after the command, trimmed. */
+  args: string;
+}
+
+/** One skill as a runtime itself would load it for a folder (AgentRuntime.listSkills). */
+export interface RuntimeSkill {
+  /** The Agent Skills name (frontmatter name, else the folder name). */
+  name: string;
+  description: string;
+  /** The name the runtime runs it by, when it differs from `name` (Claude plugin skills: 'plugin:skill'). */
+  nativeName?: string;
+  /** Absolute SKILL.md path, when the runtime or its files say. */
+  path?: string;
+  /** The runtime's own scope label: user, project, plugin, system, admin, ... */
+  scope?: string;
+  pluginId?: string;
+  argumentHint?: string;
+  /** Default true. */
+  userInvocable?: boolean;
+  /** Default true. */
+  modelInvocable?: boolean;
+  /** Who owns the files when the host must treat them as read-only ('Claude plugin', ...). */
+  managedBy?: string;
+  /** The runtime's own enabled flag. Default true. */
+  enabled?: boolean;
+}
+
+export interface RuntimeSkillListing {
+  skills: RuntimeSkill[];
+  /** Problems worth showing (an unreadable SKILL.md, a failed probe); the listing may still be partial. */
+  errors?: string[];
+}
+
+export interface ListRuntimeSkillsOptions {
+  /** The workspace folder: project skills depend on it. */
+  cwd: string;
+  /** See NewAgentSessionOptions.ownerUserId. */
+  ownerUserId?: string | null;
+  /** The person asked to look again: bypass what the runtime keeps (Codex: forceReload). */
+  refresh?: boolean;
+  /** Aborts when the host gives the listing up. */
+  signal?: AbortSignal;
 }
 
 export interface MaintenanceTurnContext {
@@ -204,6 +282,12 @@ export interface NewAgentSessionOptions extends RuntimeSessionBootstrapOptions {
   mergeContexts?: string[];
   extraContexts?: ExtraContext[];
   contextManifest?: ExtraContext[];
+  /**
+   * How many reusable items (Michi: artifacts) the host's workspace has in
+   * all, when contextManifest lists only some of them. The runtime passes it
+   * to the host's first-turn prompt (FirstTurnPrefixInput) unchanged.
+   */
+  artifactCount?: number;
   /** Default true. When false, the runtime omits set_follow_ups instructions and tool. */
   enableFollowUps?: boolean;
   /** Optional model id forwarded to runtime (e.g. Kiro --model arg, or Pi provider model) */
@@ -233,6 +317,19 @@ export interface NewAgentSessionOptions extends RuntimeSessionBootstrapOptions {
    * is undefined and Pi falls back to the shared keys).
    */
   ownerUserId?: string | null;
+  /**
+   * The host opens this session for one job, releases it and never resumes it
+   * (Michi: a Companion check-in, DESIGN-v2 §3.2). Keep no native transcript
+   * the runtime can avoid keeping; never native-resume or fork it, and when
+   * its process dies, fail the turn rather than restore it. The runtime says
+   * how it honors this in RuntimeTopology.ephemeralSessions; a host opens an
+   * ephemeral session only on a runtime that declares one there, and calls
+   * discardNativeSession after releasing it. W1-A implements it per adapter
+   * (Claude persistSession:false, Codex an ephemeral thread on a scratch
+   * home, Pi an in-memory session manager); W1-B's
+   * chatManager.openEphemeralSession sets it.
+   */
+  ephemeral?: true;
 }
 
 export interface LoadAgentSessionOptions extends RuntimeSessionBootstrapOptions {
@@ -256,6 +353,40 @@ export interface LoadAgentSessionOptions extends RuntimeSessionBootstrapOptions 
   /** See NewAgentSessionOptions.ownerUserId. */
   ownerUserId?: string | null;
 }
+
+/** What a host passes to AgentRuntime.discardNativeSession: the released session, as its binding recorded it. */
+export interface NativeSessionDiscardInput {
+  /** The host's public id of the released session (Michi: the check-in node id). */
+  sessionId: string;
+  owner: RuntimeSessionOwner;
+  /** The native id the binding recorded (resumeTokenFromBinding), or null when the runtime keeps none. */
+  nativeSessionId: string | null;
+  /** The cwd the session ran in: runtimes find, and check, its native files by it. */
+  cwd: string;
+  /** The session's profile hash, for runtimes that keep restricted sessions apart by profile. */
+  profileHash?: string | null;
+  /**
+   * See NewAgentSessionOptions.ownerUserId: the per-user profile the native
+   * files live under (Claude's projects directory depends on it). Not in the
+   * DESIGN-v2 §3.2 sketch; added because Claude's discard cannot find the
+   * files without it outside the desktop's single user.
+   */
+  ownerUserId?: string | null;
+}
+
+/**
+ * What discardNativeSession did:
+ * - `discarded`: the runtime's native record of the session is gone;
+ * - `absent`: there was none (never written, or already removed);
+ * - `deferred`: it cannot be removed yet (Kiro: the shared worker still
+ *   holds its lock, or the session is still loaded); the host keeps it
+ *   pending and retries at its next cleanup, and must not record it as discarded;
+ * - `unsupported`: the runtime will not remove it: it keeps no discard for
+ *   this kind of session, or the id or the path it would delete is one it
+ *   cannot vouch for (Claude: a native id that is not a UUID, a path outside
+ *   that cwd's projects directory). Retrying does not help.
+ */
+export type NativeSessionDiscardResult = 'discarded' | 'absent' | 'deferred' | 'unsupported';
 
 export interface ForkAgentSessionOptions extends NewAgentSessionOptions {
   /** Backend-validated parent token. The new session must have a different native identity. */
@@ -309,6 +440,12 @@ export interface AgentSession {
   describeNativeState?(): Record<string, unknown>;
   setMode?(modeId: string): Promise<void>;
   setModel?(modelId: string): Promise<void>;
+  /**
+   * Apply the chat's changed Ultracode choice (RuntimeConfigPort.features.ultracode)
+   * to the live agent now, instead of at its next turn. The host saves the
+   * choice first: the session reads it from there at every spawn and turn.
+   */
+  setUltracode?(enabled: boolean): Promise<void>;
   respondToPermission?(requestId: number, optionId: string): void;
   cancelPermission?(requestId: number): void;
   respondToUserInput?(requestId: number, answers: Array<{ question: string; answer: string }>): void;
@@ -358,6 +495,16 @@ export interface CompactResult {
   detail?: string;
 }
 
+/**
+ * AgentRuntime.idleRelease: `release` frees the live session (the next
+ * message resumes it natively); `keep` leaves it, with why; `stop_background`
+ * means background work has held it past its cap and should be stopped first.
+ */
+export type IdleReleaseVerdict =
+  | { action: 'release' }
+  | { action: 'keep'; reason: string }
+  | { action: 'stop_background'; reason: string };
+
 /** The native session id fields of a host's stored chat binding. */
 export type RuntimeResumeBinding = Pick<HostNodeRecord, 'acp_session_id' | 'external_session_id'> & { id?: string };
 
@@ -406,7 +553,57 @@ export interface AgentRuntime {
    * sessionRegistry in sync.
    */
   releaseSession(sessionId: string, expectedOwner?: RuntimeSessionOwner): Promise<void> | void;
+  /**
+   * Whether an idle live chat session may be released now, as far as the
+   * runtime can tell (its native turns, background work, idle time). The
+   * host checks its own turns and whether the next message can resume the
+   * session natively, then calls releaseSession. Runtimes that release idle
+   * sessions themselves (Codex) leave this undefined.
+   */
+  idleRelease?(sessionId: string, now: number): IdleReleaseVerdict;
+  /**
+   * Stop the background work that keeps an idle session past its cap
+   * (idleRelease said `stop_background`); a later idleRelease releases it.
+   */
+  stopIdleBackgroundWork?(sessionId: string): Promise<void>;
+  /**
+   * Removes what this runtime stored on disk for a session the host released
+   * (its native transcript, session directories and index entries), for the
+   * sessions a host opened `ephemeral` and for the leftovers of ones it could
+   * not discard before (DESIGN-v2 §3.2, §3.7). Idempotent. Never touches a
+   * session the runtime still holds: that answers `deferred`. Declared with
+   * RuntimeTopology.ephemeralSessions; absent means the host has nothing to
+   * call. W1-A implements it (Claude: the cwd's `projects/<slug>/<id>.jsonl`,
+   * `<id>/` and `session-env/<id>/` only; Codex: the scratch home, or
+   * `thread/delete`; Pi: the scope directory; Kiro: `session/delete`, or its
+   * files after checking their cwd). W1-B's chatManager.discardEphemeralSession
+   * and W2-G1a's boot cleanup call it.
+   */
+  discardNativeSession?(input: NativeSessionDiscardInput): Promise<NativeSessionDiscardResult>;
   listModes?(sessionId: string): Promise<SessionMode[]>;
+  /**
+   * The skills this runtime would load for a folder, without starting a
+   * chat turn. The host's own skill library is not included unless the
+   * runtime reports it like any other skill. The host keeps the listings
+   * it gets and asks again when it wants a newer one, so an implementation
+   * caches only what its runtime itself tells it when to forget (Codex's
+   * skills/changed). A listing may need a short-lived process (Codex
+   * app-server, a Claude initialize probe) but never a model call; it
+   * rejects when the runtime cannot list.
+   */
+  listSkills?(opts: ListRuntimeSkillsOptions): Promise<RuntimeSkillListing>;
+  /**
+   * The commands a chat on this runtime runs before a live session lists
+   * its own (AgentSessionState.commands): what its sessions' executeCommand
+   * answers without a model turn, each with what it does, so a host can
+   * offer them, and keep skills from taking their names, in a chat that has
+   * no session yet. It includes the ones only some versions of the runtime,
+   * or some sessions, support; a live session's state, where every command
+   * executeCommand runs has kind 'command', names the ones that session
+   * runs, so a host prefers that list once a session has reported it. The
+   * host's own commands are not included. Absent: none.
+   */
+  hostCommands?(): AgentCommand[];
   listModels?(opts?: { provider?: string }): Promise<ModelInfo[]>;
   /** Refresh a dynamic model catalog from the underlying runtime. */
   refreshModels?(): Promise<ModelInfo[]>;
@@ -434,7 +631,54 @@ export interface AgentRuntime {
    * generate titles inside the session (Claude, Codex) leave this undefined.
    */
   generateTitle?(opts: GenerateTitleOptions): Promise<string | null>;
+  /**
+   * One direct structured answer on a cheap model, for a host's background
+   * work such as memory extraction: a system prompt and a prompt in, a JSON
+   * value meant to match `schema` out. No tools, no session, no user or
+   * project settings and nothing persisted. The runtime enforces the schema
+   * where its model API can; the host validates the value either way.
+   * Runtimes without such a call leave it undefined, and hosts open a
+   * session instead.
+   */
+  completeStructured?(opts: StructuredCompletionOptions): Promise<StructuredCompletion>;
   shutdown(): Promise<void>;
+}
+
+export interface StructuredCompletionOptions {
+  system: string;
+  prompt: string;
+  /** JSON Schema of the answer: an object whose properties are all listed. */
+  schema: Record<string, unknown>;
+  /** The model; absent or null: the runtime's cheap model when it has one (its title model, a small model the account lists), else its default. */
+  model?: string | null;
+  /** The provider of `model`, for a runtime with providers; others ignore it. */
+  provider?: string | null;
+  /** Default: low. */
+  reasoning?: AgentReasoning | null;
+  /** The user whose credentials the call uses, where the runtime keeps them per user. */
+  ownerUserId?: string | null;
+  /** Default: 120 s. */
+  timeoutMs?: number;
+  signal?: AbortSignal;
+}
+
+export interface StructuredCompletionUsage {
+  inputTokens: number;
+  outputTokens: number;
+  /** Prompt tokens read from, or written to, the provider's cache, when it reports them. */
+  cacheReadTokens?: number;
+  cacheWriteTokens?: number;
+}
+
+export interface StructuredCompletion {
+  /** The parsed answer, or null when the model gave none. */
+  value: unknown;
+  /** The answer as the model wrote it, for a repair prompt or a log. */
+  text: string;
+  /** The model that answered, when known. */
+  model: string | null;
+  /** What the call used, when the runtime reports it. */
+  usage: StructuredCompletionUsage | null;
 }
 
 export interface GenerateTitleOptions {

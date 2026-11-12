@@ -184,6 +184,22 @@ describe('turn persistence repository', () => {
     assert.equal(node.composer_draft, null);
   });
 
+  test('a turn that fails leaves no earlier follow-ups on the node', () => {
+    getDb().prepare('UPDATE nodes SET follow_ups = ?, follow_ups_source_message_id = ? WHERE id = ?')
+      .run(JSON.stringify(['Earlier question?']), 'a-earlier', 'node-1');
+    let failed = createDurableTurn({
+      turnId: 'turn-auth', assistantId: 'a-auth', nodeId: 'node-1', workspaceId: 'ws-1',
+      displayUserText: 'Review the CR', startedAt: 260,
+    });
+    beginTurn(failed);
+    failed = applyTurnEvent(failed, event('error', { message: 'Claude authentication failed.', completedAt: 270, seq: 1 }));
+    finalizeTurn(failed);
+
+    const node = getDb().prepare('SELECT follow_ups, follow_ups_source_message_id FROM nodes WHERE id = ?')
+      .get('node-1') as { follow_ups: string | null; follow_ups_source_message_id: string | null };
+    assert.deepEqual({ ...node }, { follow_ups: null, follow_ups_source_message_id: null });
+  });
+
   test('finalizes cancelled and errored partial turns without losing content', () => {
     let cancelled = createDurableTurn({
       turnId: 'turn-cancel', assistantId: 'a-cancel', nodeId: 'node-1', workspaceId: 'ws-1',

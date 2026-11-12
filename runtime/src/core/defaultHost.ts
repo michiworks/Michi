@@ -1,7 +1,7 @@
 import os from 'node:os';
 import path from 'node:path';
 import { isCrewMemoryMode, type ChatPermissionMode } from 'michi-shared';
-import { ownerMode, type AgentReasoning, type AgentSession, type RuntimeSessionOwner, type RuntimeToolProfile } from '../contract/types';
+import { ownerMode, type AgentReasoning, type AgentSession, type RuntimeSessionOwner } from '../contract/types';
 import {
   RuntimeHostConfigError,
   SessionProfileUnsupportedError,
@@ -33,6 +33,7 @@ import {
 } from '../contract/host';
 import { createSessionDirectory } from './sessionDirectory';
 import { withSessionDirectory } from './sessionPortDirectory';
+import { discardBackgroundTurn } from './backgroundTurns';
 
 type PortOverride<T> = T extends (...args: never[]) => unknown ? T : Partial<T>;
 
@@ -84,6 +85,8 @@ export interface DefaultHostOptions {
   titleModels?: Readonly<Record<string, TitleModelConfig>>;
   /** Workflow feature flag; default off. */
   workflows?: boolean | ((runtimeId: string, userId?: string | null) => boolean);
+  /** A chat's Ultracode choice (RuntimeConfigPort.features.ultracode); default off. */
+  ultracode?: boolean | ((owner: RuntimeSessionOwner | undefined, ownerUserId?: string | null) => boolean);
   /** Chat permission mode; default 'ask'. */
   permissionMode?: ChatPermissionMode | ((owner: RuntimeSessionOwner | undefined, ownerUserId?: string | null) => ChatPermissionMode);
   /** Approve for me on top of Ask (PermissionPolicyPort.approveForMe); default off. */
@@ -172,6 +175,7 @@ export function assertHostPorts(
 function defaultConfig(options: DefaultHostOptions): RuntimeConfigPort {
   const listeners = new Set<(event: DefaultModelChangedEvent) => void>();
   const workflows = options.workflows;
+  const ultracode = options.ultracode;
   return {
     defaultModel: (runtimeId) => options.defaultModels?.[runtimeId] ?? '',
     defaultReasoning: (runtimeId) => options.defaultReasoning?.[runtimeId],
@@ -183,6 +187,7 @@ function defaultConfig(options: DefaultHostOptions): RuntimeConfigPort {
     },
     features: {
       workflows: (runtimeId, userId) => typeof workflows === 'function' ? workflows(runtimeId, userId) : workflows === true,
+      ultracode: (owner, ownerUserId) => typeof ultracode === 'function' ? ultracode(owner, ownerUserId) : ultracode === true,
     },
     dataDir: () => options.dataDir ?? path.join(os.homedir(), '.agent-runtime'),
   };
@@ -453,13 +458,9 @@ function defaultTitle(): TitlePolicy {
 function defaultBackgroundTurns(host: RuntimeHost): BackgroundTurnConsumer {
   return {
     consume: (turn) => {
-      void (async () => {
-        try { await turn.cancel?.(); } catch { /* draining still ends it */ }
-        try {
-          for await (const discarded of turn.events) void discarded;
-        } catch { /* the turn is discarded either way */ }
+      void discardBackgroundTurn(turn).then(() => {
         host.observability.log('debug', 'runtime', 'background turn discarded: the host has no turn consumer', { chatId: turn.chatId });
-      })();
+      });
     },
     isActive: () => false,
     isOwnerTurnActive: () => false,

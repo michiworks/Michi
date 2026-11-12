@@ -6,14 +6,20 @@ import { useChatNode, useChatProjects, useStructuralSelector } from '../../state
 import type { ProjectEdge } from '../../state/chatTypes';
 import { usePrefs } from '../../state/prefs';
 import { Row, RowKebab } from './primitives';
-import { Chevron, CARD_FILL, CARD_FILL_SELECT, PinMark } from './ThreadRow';
-import { rowGeom, rowPadding, caretKebabClearance } from './sidebarRowStyle';
+import { CardCaret, Chevron, CARD_FILL, CARD_FILL_SELECT, PinMark } from './ThreadRow';
+import { rowGeom, rowPadding, pinMarkEndMargin } from './sidebarRowStyle';
 import type { TreeNode } from '../../state/tree';
 import { branchSubtreeHasUnread, isNodeUnread, type OpenState } from '../../state/sidebarSelectors';
+import { BRANCH_TITLE_CHARS } from '../../state/branchAnchors';
 import { UnreadDot, UNREAD_DOT_LEAD, UNREAD_TITLE_WEIGHT, type UnreadMark } from './UnreadDot';
+import { SidebarOpenRail } from './RailAfterglow';
 import { relativeTime } from '../../lib/relativeTime';
 import { useNewPanePulse } from './useNewPanePulse';
 import { useTreePrefetchIntent } from '../../state/treePrefetch';
+import { InlineRenameInput } from '../ui/InlineRenameInput';
+import { isBranchEdge } from '../../state/tree';
+import { PROVISIONAL_LABEL_STYLE, rowLabel } from './sidebar/rowLabel';
+import { rowKeyDown } from './sidebar/rowKeyboard';
 
 interface Props {
   /** This branch node and its descendants. */
@@ -68,7 +74,7 @@ function branchBornAt(edges: readonly ProjectEdge[] | undefined, nodeId: string)
   if (!births) {
     births = new Map();
     for (const edge of edges) {
-      if ((edge.kind ?? 'branch') !== 'branch' || edge.createdAt === undefined) continue;
+      if (!isBranchEdge(edge) || edge.createdAt === undefined) continue;
       births.set(edge.target, Math.max(births.get(edge.target) ?? 0, edge.createdAt));
     }
     branchBirths.set(edges, births);
@@ -124,10 +130,9 @@ export default function BranchRow({
   const { prefs } = usePrefs();
   const newPanePulse = useNewPanePulse(node.nodeId);
   const hasChildren = node.children.length > 0;
-  const title =
-    n?.title ||
-    n?.messages.find((m) => m.role === 'user')?.text.slice(0, 40) ||
-    'Untitled';
+  // With no title yet, an excerpt of the first message, styled as provisional,
+  // cut at a branch row's 40 characters.
+  const { text: title, provisional } = rowLabel(undefined, n, BRANCH_TITLE_CHARS);
   const nodeUpdatedAt = n?.lastAssistantAt ?? n?.messages[n.messages.length - 1]?.createdAt ?? 0;
   const focused = isFocused(node.nodeId);
   const selected = isSelected(node.nodeId);
@@ -155,39 +160,20 @@ export default function BranchRow({
   const [washed, setWashed] = useState(false);
   const geom = rowGeom(prefs.sidebarRowStyle, prefs.sidebarInset);
   const cardPaddingLeft = rowPadding(geom, baseIndent + depth * geom.indentStep).paddingLeft;
+  // The star ends the row and takes the caret's place, so it clears the ⋯.
+  const pinTakesEnd = !!n?.pinnedAt && geom.isCard && !hasChildren && !prefs.showSidebarTimestamps && !selected;
 
   const renaming = renamingNodeId === node.nodeId;
-  const [draftName, setDraftName] = useState('');
   const renameRef = useRef<HTMLInputElement>(null);
-  const suppressBlurRef = useRef(false);
 
   useEffect(() => {
     if (!renaming) return;
-    setDraftName(title);
     // Small delay so the input is mounted before focus
     requestAnimationFrame(() => {
       renameRef.current?.focus();
       renameRef.current?.select();
     });
-  }, [renaming]); // eslint-disable-line react-hooks/exhaustive-deps
-
-  const commitRename = () => {
-    if (suppressBlurRef.current) {
-      suppressBlurRef.current = false;
-      return;
-    }
-    const trimmed = draftName.trim();
-    if (trimmed && trimmed !== title) {
-      onRenameNode?.(node.nodeId, trimmed);
-    }
-    onRenameEnd?.();
-  };
-
-  const cancelRename = () => {
-    suppressBlurRef.current = true;
-    setDraftName(title);
-    onRenameEnd?.();
-  };
+  }, [renaming]);
 
   const openMenuAt = (clientX: number, clientY: number) => {
     // Reuse the upstream branch context menu handler. It only reads
@@ -198,30 +184,54 @@ export default function BranchRow({
     );
   };
 
+  // A click, or Enter/Space on the focused row (whose key event carries the
+  // same modifier flags the selection reads).
+  const activate = (e: React.MouseEvent | React.KeyboardEvent) => {
+    // Capture focus state BEFORE selecting so the toggle decision
+    // reflects the highlight state at click time, not after.
+    const wasFocused = focused;
+    onSelect(node.nodeId, e as React.MouseEvent);
+    // ⌘/⇧+click are pure selection ops — don't toggle the branch open.
+    if (e.metaKey || e.ctrlKey || e.shiftKey) return;
+    if (!hasChildren) return;
+    // Unified expand rule (see WorkspaceRow):
+    //   collapsed → expand; expanded + already highlighted → collapse;
+    //   expanded + not highlighted → keep open (just highlight).
+    if (!expanded) {
+      onToggle(node.nodeId);
+    } else if (wasFocused) {
+      onToggle(node.nodeId);
+    }
+  };
+
   return (
     <>
       <GrowIn active={!!entrance} grown={grown} onGrown={() => setGrown(true)}>
       <Row
         {...prefetchIntent}
+        data-context-target=""
         data-sidebar-row={node.nodeId}
+        // A button to the keyboard: Tab reaches it, Enter/Space opens it (sidebar/rowKeyboard).
+        role="button"
+        tabIndex={0}
+        className="t-row-focus"
+        // Its title, not the ⋯ inside it.
+        aria-label={title}
+        aria-current={focused ? 'true' : undefined}
+        aria-expanded={hasChildren ? expanded : undefined}
         active={focused || selected}
         onClick={(e) => {
           if (renaming) return;
-          // Capture focus state BEFORE selecting so the toggle decision
-          // reflects the highlight state at click time, not after.
-          const wasFocused = focused;
-          onSelect(node.nodeId, e);
-          // ⌘/⇧+click are pure selection ops — don't toggle the branch open.
-          if (e.metaKey || e.ctrlKey || e.shiftKey) return;
-          if (!hasChildren) return;
-          // Unified expand rule (see WorkspaceRow):
-          //   collapsed → expand; expanded + already highlighted → collapse;
-          //   expanded + not highlighted → keep open (just highlight).
-          if (!expanded) {
-            onToggle(node.nodeId);
-          } else if (wasFocused) {
-            onToggle(node.nodeId);
-          }
+          activate(e);
+        }}
+        onKeyDown={(e) => {
+          if (renaming) return;
+          rowKeyDown(e, {
+            activate: () => activate(e),
+            expanded: hasChildren ? expanded : undefined,
+            toggle: hasChildren ? () => onToggle(node.nodeId) : undefined,
+            openMenu: (anchor) => openMenuAt(anchor.x, anchor.y),
+          });
         }}
         onContextMenu={(e) => onContextMenu(node.nodeId, e)}
         style={{
@@ -298,7 +308,7 @@ export default function BranchRow({
           />
         )}
         {/* In the gutter just left of where the row's content starts: before the
-            pin/title in card modes, before the chevron in classic. Kept mid-row
+            title in card modes, before the chevron in classic. Kept mid-row
             so the entrance wash stays the first child and the rail the last. */}
         <UnreadDot
           mark={unreadMark}
@@ -306,17 +316,12 @@ export default function BranchRow({
             ? `calc(${cardPaddingLeft} - ${UNREAD_DOT_LEAD}px)`
             : `calc(${1 + depth * 10}px + var(--sb-inset, 0px))`}
         />
-        {!!n?.pinnedAt && <PinMark />}
         {renaming ? (
-          <input
+          <InlineRenameInput
             ref={renameRef}
-            value={draftName}
-            onChange={(e) => setDraftName(e.target.value)}
-            onBlur={commitRename}
-            onKeyDown={(e) => {
-              if (e.key === 'Enter') { e.preventDefault(); commitRename(); }
-              if (e.key === 'Escape') { e.preventDefault(); cancelRename(); }
-            }}
+            value={title}
+            onCommit={(name) => onRenameNode?.(node.nodeId, name)}
+            onEnd={() => onRenameEnd?.()}
             style={{
               flex: 1,
               minWidth: 0,
@@ -344,31 +349,19 @@ export default function BranchRow({
               whiteSpace: 'nowrap',
               maskImage: `linear-gradient(to right, black calc(100% - ${geom.isCard ? 26 : 14}px), transparent)`,
               WebkitMaskImage: `linear-gradient(to right, black calc(100% - ${geom.isCard ? 26 : 14}px), transparent)`,
+              ...(provisional ? PROVISIONAL_LABEL_STYLE : {}),
             }}
+            data-provisional={provisional || undefined}
           >
             {title}
           </span>
         )}
+        {/* After the title, so it can't push the title off its indent; see PinMark. */}
+        {!!n?.pinnedAt && (
+          <PinMark endMargin={pinTakesEnd ? pinMarkEndMargin(geom, 6) : undefined} />
+        )}
         {geom.isCard && hasChildren && (
-          <span
-            aria-hidden
-            onClick={(e) => {
-              e.stopPropagation();
-              onToggle(node.nodeId);
-            }}
-            style={{
-              flexShrink: 0,
-              width: 9,
-              // Keeps clear of the hover-revealed ⋯ — see caretKebabClearance.
-              marginRight: `calc(${caretKebabClearance(geom)}px + var(--row-kebab-extra, 0px))`,
-              textAlign: 'center',
-              fontSize: 'var(--fs-xs)',
-              color: 'var(--term-muted)',
-              cursor: 'pointer',
-            }}
-          >
-            {expanded ? '⌄' : '›'}
-          </span>
+          <CardCaret expanded={expanded} geom={geom} onToggle={() => onToggle(node.nodeId)} />
         )}
         {prefs.showSidebarTimestamps && nodeUpdatedAt > 0 && (
           <span style={{ color: 'var(--term-muted)', fontSize: 'var(--sb-ts-fs, var(--fs-sm))', flexShrink: 0 }}>
@@ -385,44 +378,13 @@ export default function BranchRow({
           onOpen={(p) => openMenuAt(p.x, p.y)}
           ariaLabel={`Actions for ${title}`}
         />
-        {openState !== 'none' && (
-          // A new row's rail draws down from the top once it has room to.
-          <motion.span
-            aria-hidden
-            initial={entrance?.rail && !washed ? { scaleY: 0 } : false}
-            animate={{ scaleY: 1 }}
-            transition={{ duration: 0.22, delay: 0.04, ease: EASE.out }}
-            style={{
-              originY: 0,
-              position: 'absolute',
-              // Right edge in every mode — see ThreadRow.
-              right: geom.isCard ? 3 : 2,
-              top: 5,
-              bottom: 5,
-              width: 2,
-              borderRadius: 'var(--ui-radius-pill)',
-              // Classic paints both states accent and leans on pulse + glow to
-              // tell them apart; card modes give idle a neutral rail so accent
-              // always means something is actually running.
-              color: 'var(--term-accent)',
-              background:
-                openState === 'streaming'
-                  ? 'var(--term-accent)'
-                  : (geom.isCard ? 'var(--term-line-s)' : 'var(--term-accent)'),
-              boxShadow:
-                openState === 'streaming'
-                  ? '0 0 6px 0 currentColor'
-                  : undefined,
-              animation:
-                openState === 'streaming'
-                  ? 'tpulse var(--t-loop) ease-in-out infinite'
-                  : newPanePulse
-                    ? 'bar-pulse-once var(--t-slow) ease-in-out 2'
-                    : undefined,
-              pointerEvents: 'none',
-            }}
-          />
-        )}
+        {/* A new row's rail draws down from the top once it has room to. */}
+        <SidebarOpenRail
+          state={openState}
+          isCard={geom.isCard}
+          pulseOnce={newPanePulse}
+          drawIn={!!entrance?.rail && !washed}
+        />
       </Row>
       </GrowIn>
       {hasChildren && expanded &&

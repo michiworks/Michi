@@ -6,6 +6,24 @@ export interface MichiBuildInfo {
   dirty?: boolean;
 }
 
+/** The body of a Michi backend's GET /api/health. */
+export interface MichiBackendHealth {
+  status: 'healthy';
+  service: 'michi-backend';
+  connectionProtocol: 1;
+  build: MichiBuildInfo;
+  serverId: string;
+  serviceMode: boolean;
+  serviceBuild: string | null;
+  auditLog?: 'unavailable';
+}
+
+/** Older backends answer without the later fields; only status and service are certain. */
+export function isMichiBackendHealth(body: unknown): body is Pick<MichiBackendHealth, 'status' | 'service'> & Partial<MichiBackendHealth> {
+  const health = body as Partial<MichiBackendHealth> | null | undefined;
+  return health?.service === 'michi-backend' && health.status === 'healthy';
+}
+
 export interface RemoteUpdateStatus {
   local: MichiBuildInfo;
   remote: MichiBuildInfo | null;

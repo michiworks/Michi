@@ -1,6 +1,8 @@
 import cors from 'cors';
 import type { Express, RequestHandler } from 'express';
 import { isIP } from 'node:net';
+import { MICHI_REQUEST_HEADERS } from 'michi-shared';
+import { isLoopbackHostname } from 'michi-runtime/internal/core/loopback';
 import { log } from './logger';
 
 /**
@@ -31,27 +33,43 @@ import { log } from './logger';
  * stream-transport ticket route apply them too.
  */
 
-const LOOPBACK_HOSTNAMES = new Set(['localhost', '127.0.0.1', '[::1]', '::1']);
 const DEV_RENDERER_PORT = '3001';
+/** Auth mode's CORS origins when MICHI_CORS_ORIGINS is unset: `npm run dev`'s renderer and backend. */
+const AUTH_DEV_ORIGINS = ['http://localhost:3001', 'http://localhost:3000'];
+const CORS_METHODS = ['GET', 'POST', 'PUT', 'PATCH', 'DELETE'];
+const CORS_ALLOWED_HEADERS = ['Content-Type', 'Authorization', ...MICHI_REQUEST_HEADERS];
 /** Distinct refused origins and hosts logged per process. */
 const REFUSAL_LOG_LIMIT = 50;
-
-function isLoopbackHostname(hostname: string): boolean {
-  return LOOPBACK_HOSTNAMES.has(hostname.toLowerCase());
-}
 
 function listFromEnv(...names: string[]): string[] {
   return names.flatMap((name) => (process.env[name] ?? '').split(',')).map((value) => value.trim()).filter(Boolean);
 }
 
+/** A configured origin as browsers send it: `https://X.example.com:443/app/` is https://x.example.com. */
+export function normalizeOrigin(value: string): string {
+  try {
+    const url = new URL(value);
+    // Not url.origin: that is "null" for schemes such as chrome-extension:,
+    // and "null" is what any sandboxed iframe or file:// page sends.
+    return `${url.protocol}//${url.host}`;
+  } catch {
+    return value.replace(/\/+$/, '');
+  }
+}
+
+/** A comma-separated origin list (MICHI_CORS_ORIGINS and the like) as distinct origins. */
+export function parseOriginList(raw: string | undefined): string[] {
+  return [...new Set((raw ?? '').split(',').map((value) => value.trim()).filter(Boolean).map(normalizeOrigin))];
+}
+
 /** MICHI_CORS_ORIGINS, MICHI_LOCAL_CONTROL_ORIGINS and MICHI_RENDERER_URL, as origins. */
 export function configuredOrigins(): string[] {
-  const out = new Set<string>();
-  for (const value of [...listFromEnv('MICHI_CORS_ORIGINS', 'MICHI_LOCAL_CONTROL_ORIGINS'), process.env.MICHI_RENDERER_URL?.trim() ?? '']) {
-    if (!value) continue;
-    try { out.add(new URL(value).origin); } catch { out.add(value); }
-  }
-  return [...out];
+  const renderer = process.env.MICHI_RENDERER_URL?.trim();
+  return [...new Set([
+    ...parseOriginList(process.env.MICHI_CORS_ORIGINS),
+    ...parseOriginList(process.env.MICHI_LOCAL_CONTROL_ORIGINS),
+    ...(renderer ? [normalizeOrigin(renderer)] : []),
+  ])];
 }
 
 /** Host header → URL, or null when it is not a host[:port]. */
@@ -184,8 +202,35 @@ export function installLocalAccessGuards(app: Express, options: LocalAccessGuard
   if (!options.remoteAccess) app.use(createLoopbackHostGuard(options.allowedHosts));
   app.use(cors((req, callback) => callback(null, {
     origin: isAllowedLocalOrigin(req.headers.origin, req.headers.host, options),
-    methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE'],
-    allowedHeaders: ['Content-Type', 'Authorization'],
+    methods: CORS_METHODS,
+    allowedHeaders: CORS_ALLOWED_HEADERS,
   })));
   app.use(createOriginGuard(options));
+}
+
+/**
+ * Auth mode's CORS origins: MICHI_CORS_ORIGINS alone. The no-auth rules
+ * (same host, loopback, MICHI_LOCAL_CONTROL_ORIGINS, MICHI_RENDERER_URL)
+ * do not apply when a session decides access.
+ */
+export function authModeOrigins(raw: string | undefined = process.env.MICHI_CORS_ORIGINS): string[] {
+  return raw ? parseOriginList(raw) : [...AUTH_DEV_ORIGINS];
+}
+
+/**
+ * Auth mode's CORS. credentials:true lets the browser send the session
+ * cookie cross-origin (`npm run dev`'s renderer on :3001, backend on :3000),
+ * which needs the request origin echoed rather than '*'. Another Origin
+ * fails the request.
+ */
+export function createAuthCors(origins: readonly string[]): RequestHandler {
+  return cors({
+    origin: (origin, cb) => {
+      if (!origin || origins.includes(origin)) return cb(null, true);
+      return cb(new Error(`CORS: origin ${origin} not allowed`));
+    },
+    credentials: true,
+    methods: CORS_METHODS,
+    allowedHeaders: CORS_ALLOWED_HEADERS,
+  });
 }

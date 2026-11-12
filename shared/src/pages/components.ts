@@ -18,7 +18,6 @@ export interface PageComponent {
   enabled: boolean; activeVersion: number; libraryRevision: number; revocationEpoch: number;
   deletedAt: number | null; versions: number; createdAt: number; updatedAt: number;
 }
-export interface PageComponentRecord extends PageComponent { current: PageComponentVersion }
 export interface PageComponentInput { name: string; description: string; code: string; propsSchema?: unknown }
 export interface PageComponentReference {
   componentId: string; workspaceId: string; kind: 'page_block' | 'database_view';
@@ -26,6 +25,10 @@ export interface PageComponentReference {
   pinnedVersion: number | null; protected: boolean; hostRevision: number;
 }
 export interface PageComponentHostConfig { componentId: string; pinnedVersion?: number; props: Record<string, unknown>; height?: number }
+/** Where a component is shown: what a component capability is minted for. */
+export type ComponentHost =
+  | { kind: 'page_block'; pageId: string; blockId: string }
+  | { kind: 'database_view'; databaseId: string; viewId: string };
 export type JsonSchema = {
   type?: 'object' | 'array' | 'string' | 'number' | 'integer' | 'boolean' | 'null';
   properties?: Record<string, JsonSchema>; required?: string[]; additionalProperties?: boolean;

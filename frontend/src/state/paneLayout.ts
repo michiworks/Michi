@@ -12,14 +12,24 @@ export interface PaneLayoutInput {
   customWidths?: readonly (number | undefined)[];
   gap?: number;
   padding?: number;
+  /** A zoomed pane fills the strip alone; the others get no track. */
+  zoomedIndex?: number;
 }
 
 /** Shared by the body and caption strips; viewportWidth never includes the sidebar. */
 export function resolvePaneLayout({
   viewportWidth, paneCount, defaultPaneWidth, mode = 'adaptive',
-  customWidths = [], gap = 0, padding = 0,
+  customWidths = [], gap = 0, padding = 0, zoomedIndex = -1,
 }: PaneLayoutInput) {
   const available = Math.max(0, viewportWidth - padding * 2);
+  if (paneCount > 1 && zoomedIndex >= 0 && zoomedIndex < paneCount) {
+    return {
+      widths: Array.from({ length: paneCount }, (_, i) => (i === zoomedIndex ? available : 0)),
+      overflow: false,
+      paddingRight: padding,
+      gridTemplateColumns: `${available}px`,
+    };
+  }
   const half = Math.max(0, (available - gap) / 2);
   const fixed = Math.min(available, defaultPaneWidth);
   const defaultWidth = paneCount === 1

@@ -1,4 +1,4 @@
-import type { MentionRecord } from '../components/mentions';
+import type { MentionRecord } from '../lib/mentions';
 import type { AttachmentRef } from '../lib/composerAttachments';
 import type { PendingQueuedMessage } from './chatTypes';
 

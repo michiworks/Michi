@@ -1,15 +1,18 @@
-import { createHash, randomUUID } from 'node:crypto';
+import { randomUUID } from 'node:crypto';
 import {
   AgentDefinitionStatus,
+  edgeRowId,
   type AgentDefinitionDtoV1,
   type AgentRunDtoV1,
   type AgentRunEventV1,
   type CreateAgentDefinitionRequestV1,
 } from 'michi-shared';
 import { runInTransaction, getDb } from './db';
+import { withCommandReceipt } from './commandReceipts';
 import { AgentRunsRepository } from './agentRunsRepository';
 import { AgentDefinitionService } from './agentDefinitionService';
 import { workspaceOwnerMatches } from './agentOwner';
+import { saveEdge, saveNode, saveTree } from './dbRepository';
 
 export type AgentRunContinueFallback = 'error' | 'new_thread';
 
@@ -65,14 +68,14 @@ export interface AgentRunActionsDeps {
   runs?: RunSource;
   definitions?: DefinitionCreator;
   now?: () => number;
-  nextId?: (kind: 'node' | 'tree' | 'edge') => string;
+  nextId?: (kind: 'node' | 'tree') => string;
 }
 
 export class AgentRunActionsService {
   private readonly runs: RunSource;
   private readonly definitions: DefinitionCreator;
   private readonly now: () => number;
-  private readonly nextId: (kind: 'node' | 'tree' | 'edge') => string;
+  private readonly nextId: (kind: 'node' | 'tree') => string;
 
   constructor(deps: AgentRunActionsDeps = {}) {
     this.runs = deps.runs ?? new AgentRunsRepository();
@@ -94,46 +97,40 @@ export class AgentRunActionsService {
     }
     const events = request.includeTranscript ? this.runs.listEvents(ownerUserId, runId, -1, 1_000) : [];
     const prompt = buildContinuationPrompt(run, events, request);
-    const receiptOperationId = `agent-run-action:continue:${operationId}`;
-    const receiptPayload = { runId, request };
     return runInTransaction(() => {
-      const replay = readReceipt<ContinueAgentRunResultV1>(request.workspaceId, receiptOperationId, receiptPayload);
-      if (replay) return replay;
       const workspace = ownedWorkspace(ownerUserId, request.workspaceId);
       const now = this.now();
-      const nodeId = this.nextId('node');
-      const treeId = parent?.treeId ?? this.nextId('tree');
-      const edgeId = parent ? this.nextId('edge') : null;
-      if (!parent) {
-        getDb().prepare(`INSERT INTO trees (id, workspace_id, root_node_id, name, last_active_at, created_at)
-          VALUES (?, ?, ?, ?, ?, ?)`).run(treeId, workspace.id, nodeId, `Run · ${run.effectiveDefinition.name}`, now, now);
-      }
-      getDb().prepare(`INSERT INTO nodes (
-        id, workspace_id, tree_id, parent_node_id, kind, title, status, minimized,
-        spawned_by_agent, composer_draft, created_at
-      ) VALUES (?, ?, ?, ?, 'chat', ?, 'idle', 0, 0, ?, ?)`).run(
-        nodeId, workspace.id, treeId, parent?.nodeId ?? null,
-        `Continue · ${run.effectiveDefinition.name}`,
-        JSON.stringify({ value: prompt, mentions: [] }), now,
-      );
-      if (parent && edgeId) {
-        getDb().prepare(`INSERT INTO edges (
-          id, workspace_id, source_node_id, target_node_id, kind, anchor_message_id, created_at
-        ) VALUES (?, ?, ?, ?, 'branch', ?, ?)`).run(
-          edgeId, workspace.id, parent.nodeId, nodeId, run.parentMessageId, now,
-        );
-      }
-      getDb().prepare('UPDATE trees SET last_active_at = ? WHERE id = ? AND workspace_id = ?')
-        .run(now, treeId, workspace.id);
-      getDb().prepare('UPDATE workspaces SET active_tree_id = ?, persistence_version = 2 WHERE id = ?')
-        .run(treeId, workspace.id);
-      const result: ContinueAgentRunResultV1 = {
-        version: 1, runId, workspaceId: workspace.id, nodeId, treeId,
-        parentNodeId: parent?.nodeId ?? null, mode: parent ? 'branch' : 'new_thread',
-        imported: { task: request.includeTask, result: request.includeResult, transcript: request.includeTranscript },
-      };
-      writeReceipt(workspace.id, receiptOperationId, receiptPayload, result, now);
-      return result;
+      return withCommandReceipt({
+        ledgerId: workspace.id, operationId: `agent-run-action:continue:${operationId}`, request: { runId, request }, now,
+      }, (): ContinueAgentRunResultV1 => {
+        const nodeId = this.nextId('node');
+        const treeId = parent?.treeId ?? this.nextId('tree');
+        const edgeId = parent ? edgeRowId('branch', parent.nodeId, nodeId) : null;
+        if (!parent) saveTree({ id: treeId, workspace_id: workspace.id, root_node_id: nodeId, last_active_at: now, created_at: now });
+        // saveNode and saveEdge give the branch what every branch inherits: its parent's
+        // Scheduled-only and maintenance markers and the fork boundary.
+        saveNode({
+          id: nodeId, workspace_id: workspace.id, tree_id: treeId, parent_node_id: parent?.nodeId ?? null, kind: 'chat',
+          // A new thread's name is its root's title.
+          title: `${parent ? 'Continue' : 'Run'} · ${run.effectiveDefinition.name}`,
+          status: 'idle', minimized: 0, spawned_by_agent: 0,
+          composer_draft: JSON.stringify({ value: prompt, mentions: [] }), created_at: now,
+        });
+        if (parent && edgeId) {
+          saveEdge({ id: edgeId, workspace_id: workspace.id, source_node_id: parent.nodeId, target_node_id: nodeId,
+            kind: 'branch', anchor_message_id: run.parentMessageId, created_at: now });
+        }
+        getDb().prepare('UPDATE trees SET last_active_at = ? WHERE id = ? AND workspace_id = ?')
+          .run(now, treeId, workspace.id);
+        getDb().prepare('UPDATE workspaces SET active_tree_id = ?, persistence_version = 2 WHERE id = ?')
+          .run(treeId, workspace.id);
+        const result: ContinueAgentRunResultV1 = {
+          version: 1, runId, workspaceId: workspace.id, nodeId, treeId,
+          parentNodeId: parent?.nodeId ?? null, mode: parent ? 'branch' : 'new_thread',
+          imported: { task: request.includeTask, result: request.includeResult, transcript: request.includeTranscript },
+        };
+        return result;
+      });
     });
   }
 
@@ -228,28 +225,4 @@ function buildContinuationPrompt(run: AgentRunDtoV1, events: AgentRunEventV1[], 
     sections.push(`## Selected Run transcript\n${transcript || 'No transcript events were recorded.'}`);
   }
   return sections.join('\n\n');
-}
-
-function canonical(value: unknown): string {
-  if (Array.isArray(value)) return `[${value.map(canonical).join(',')}]`;
-  if (value && typeof value === 'object') return `{${Object.entries(value as Record<string, unknown>)
-    .sort(([a], [b]) => a.localeCompare(b)).map(([key, child]) => `${JSON.stringify(key)}:${canonical(child)}`).join(',')}}`;
-  return JSON.stringify(value);
-}
-
-function receiptHash(payload: unknown): string {
-  return createHash('sha256').update(canonical(payload)).digest('hex');
-}
-
-function readReceipt<T>(workspaceId: string, operationId: string, payload: unknown): T | null {
-  const row = getDb().prepare('SELECT payload_hash, result_json FROM command_receipts WHERE workspace_id = ? AND operation_id = ?')
-    .get(workspaceId, operationId) as { payload_hash: string; result_json: string } | undefined;
-  if (!row) return null;
-  if (row.payload_hash !== receiptHash(payload)) throw new Error(`operation ${operationId} was reused with a different payload`);
-  return JSON.parse(row.result_json) as T;
-}
-
-function writeReceipt(workspaceId: string, operationId: string, payload: unknown, result: unknown, now: number): void {
-  getDb().prepare(`INSERT INTO command_receipts (workspace_id, operation_id, payload_hash, result_json, created_at)
-    VALUES (?, ?, ?, ?, ?)`).run(workspaceId, operationId, receiptHash(payload), JSON.stringify(result), now);
 }

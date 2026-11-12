@@ -1,14 +1,16 @@
-import React, { useEffect, useState } from 'react';
+import { useEffect, useState } from 'react';
 import type { PageBlockOf, ThreadCardItem } from 'michi-shared';
 import { fetchThreadCards } from '../../../services/api/spacesHome';
+import { openThreadCard } from '../../../state/sourceNav/sourceNav';
 import { ThreadStateDot } from '../content/ThreadStateDot';
 import { threadCardKind, threadNowLine } from '../content/db/liveThreads';
 import { formatMichiAge } from '../content/michiFormat';
+import { startVisiblePoll } from '../../../state/visiblePoll';
 
 /** What the cards read of a threads block: its title and the conversations it names. */
 type ThreadsBlock = Pick<PageBlockOf<'threads'>, 'title' | 'nodeIds'>;
 
-/** How often a page re-reads its cards while it stays open; focusing the window reads them too. */
+/** How often a page re-reads its cards while it stays open and visible; focusing the window reads them too. */
 const REFRESH_MS = 60_000;
 
 interface CardsState { key: string; items: readonly ThreadCardItem[] | null; failed: boolean }
@@ -20,21 +22,21 @@ export function useThreadCardItems(connectionId: string, workspaceId: string, no
   const [state, setState] = useState<CardsState>({ key, items: null, failed: false });
   useEffect(() => {
     let live = true;
+    let latest = 0;
     const controller = new AbortController();
     const load = () => {
+      const request = ++latest;
       void fetchThreadCards(connectionId, { workspaceId, nodeIds: ids ? ids.split(',') : [], signal: controller.signal }).then(
-        (items) => { if (live) setState({ key, items, failed: false }); },
-        () => { if (live) setState((current) => ({ key, items: current.key === key ? current.items : null, failed: true })); },
+        (items) => { if (live && request === latest) setState({ key, items, failed: false }); },
+        () => { if (live && request === latest) setState((current) => ({ key, items: current.key === key ? current.items : null, failed: true })); },
       );
     };
     load();
-    const timer = window.setInterval(load, REFRESH_MS);
-    window.addEventListener('focus', load);
+    const stopPolling = startVisiblePoll(load, { intervalMs: REFRESH_MS });
     return () => {
       live = false;
       controller.abort();
-      window.clearInterval(timer);
-      window.removeEventListener('focus', load);
+      stopPolling();
     };
   }, [connectionId, workspaceId, ids, key]);
   return state.key === key ? state : { key, items: null, failed: false };
@@ -105,5 +107,5 @@ export function LiveThreadCards({ block, connectionId, workspaceId, onOpen }: {
   onOpen(item: ThreadCardItem): void;
 }) {
   const state = useThreadCardItems(connectionId, workspaceId, block.nodeIds);
-  return <NativeThreadCards block={block} items={state.items} failed={state.failed} onOpen={onOpen} />;
+  return <NativeThreadCards block={block} items={state.items} failed={state.failed} onOpen={(item) => openThreadCard(connectionId, item, onOpen)} />;
 }

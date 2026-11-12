@@ -16,7 +16,7 @@ vi.mock('../../services/api', async (importOriginal) => {
 });
 vi.mock('../../lib/electronBridge', () => ({ getElectron: () => null }));
 
-const base = { onNav: () => {}, sidebarCollapsed: false, onToggleSidebar: () => {} };
+const base = { onNav: () => {}, sidebarCollapsed: false, onToggleSidebar: () => {}, navigation: { canBack: false, canForward: false, onBack: () => {}, onForward: () => {} } };
 
 function renderTopbar(props: Partial<React.ComponentProps<typeof TerminalTopbar>> & { page: React.ComponentProps<typeof TerminalTopbar>['page'] }) {
   return render(<PrefsProvider><ChatProvider><TerminalTopbar {...base} {...props} /></ChatProvider></PrefsProvider>);

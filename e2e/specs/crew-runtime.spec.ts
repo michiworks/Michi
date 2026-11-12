@@ -1,5 +1,5 @@
 import { test, expect } from '@playwright/test';
-import { CREW_DESCRIPTOR } from '../../backend/src/agents/capabilityDescriptors';
+import { CREW_HARNESS } from '../../runtime/src/adapters/crew/crewDescriptor';
 import { installMockApi, bootWithWorkspace } from '../fixtures/mockApi';
 import { COMPOSER_EDITOR, openSettings } from '../fixtures/shell';
 
@@ -23,7 +23,7 @@ test('Crew renders native tool/title metadata and offers fork with common approv
         capabilities: { modes: true, permissions: true, models: true, providerModels: false,
           reasoning: true, apiKeys: false, warmSessions: false, saveContext: true,
           spawnBranches: true, nativeResume: true },
-        capabilityDescriptor: CREW_DESCRIPTOR,
+        capabilityDescriptor: CREW_HARNESS,
         availableRuntimes: [{ id: 'crew', label: 'Kiro Crew', available: true }],
       } });
       return true;

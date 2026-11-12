@@ -1,5 +1,5 @@
 import type { MichiPageBlock } from 'michi-shared';
-import { parsePageBlockInput, withoutStalePageSegmentSources } from 'michi-shared';
+import { mapPageChildBlocks, parsePageBlockInput, withoutStalePageSegmentSources, type NestedPageBlock, type PageBlockContent } from 'michi-shared';
 import type { PageDto, PageEditOp, PageBlock } from 'michi-shared';
 import type { MichiPageEditOp } from '../content/page/editorTypes';
 
@@ -27,12 +27,7 @@ function withChildIds(block: MichiPageBlock): MichiPageBlock {
 /** Renderer identities inside atomic containers are view state, never server metadata. */
 export function contentOnly(block: MichiPageBlock | PageBlock): Record<string, unknown> {
   const { id: _id, rev: _rev, sources: _sources, edit: _edit, ...content } = block;
-  const slot = (blocks: unknown) => (blocks as MichiPageBlock[]).map(contentOnly);
-  if (block.type === 'toggle') return { ...content, blocks: slot(block.blocks) };
-  if (block.type === 'columns') return { ...content, columns: (block.columns as unknown[]).map(slot) };
-  if (block.type === 'tabs') return { ...content, tabs: (block.tabs as Array<{ label: string; blocks: unknown }>).map((tab) => ({ ...tab, blocks: slot(tab.blocks) })) };
-  if (block.type === 'grid') return { ...content, regions: (block.regions as Array<{ id: string; blocks: unknown }>).map((region) => ({ ...region, blocks: slot(region.blocks) })) };
-  return content;
+  return { ...mapPageChildBlocks(content as PageBlockContent, (child) => contentOnly(child as MichiPageBlock) as NestedPageBlock) };
 }
 
 /**

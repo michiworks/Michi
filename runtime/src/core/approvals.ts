@@ -82,22 +82,35 @@ export class ApprovalCoordinator {
     catch { return undefined; }
   }
 
-  /** Session trust while it holds for this owner and user, otherwise the host's policy. */
+  /**
+   * Session trust while it holds for this owner and user, otherwise the
+   * host's policy. `hostTool`: see PermissionDecisionRequest.
+   */
   policy(owner: RuntimeSessionOwner, ownerUserId: string | null, toolName: string, nativeRequest: boolean,
-    mode?: ChatPermissionMode): HostPermissionDecision {
+    mode?: ChatPermissionMode, hostTool?: boolean): HostPermissionDecision {
     if (this.sessionTrust && (ownerMode(owner) !== 'interactive' || this.sessionTrust.ownerKey !== trustKey(owner)
       || this.sessionTrust.ownerUserId !== (this.permissions.resolveOwnerUserId(owner, ownerUserId) ?? null)
       || this.sessionTrust.resetToken !== this.resetToken(owner, ownerUserId))) this.sessionTrust = undefined;
     if (ownerMode(owner) === 'interactive' && this.sessionTrust) return 'allow';
-    return this.permissions.decide({ owner, ownerUserId, toolName, nativeRequest, mode });
+    return this.permissions.decide({ owner, ownerUserId, toolName, nativeRequest, mode, ...(hostTool ? { hostTool } : {}) });
   }
 
   /**
    * Records an answer and returns whether it approves the request. Always
    * allow writes a host grant for `toolName`; trust for the session lasts
-   * until the session or its reset token changes.
+   * until the session or its reset token changes. An approval of a named
+   * tool is told to the host (PermissionPolicyPort.approved).
    */
   accept(optionId: string | null, owner: RuntimeSessionOwner, toolName: string | undefined, ownerUserId?: string | null): boolean {
+    const approved = this.record(optionId, owner, toolName, ownerUserId);
+    if (approved && toolName) {
+      try { this.permissions.approved?.({ owner, ownerUserId, toolName }); }
+      catch { /* The answer stands; the host only misses the note. */ }
+    }
+    return approved;
+  }
+
+  private record(optionId: string | null, owner: RuntimeSessionOwner, toolName: string | undefined, ownerUserId?: string | null): boolean {
     if (optionId === 'allow_once') return true;
     if (ownerMode(owner) !== 'interactive') return false;
     if (optionId === 'allow_always' && toolName) {

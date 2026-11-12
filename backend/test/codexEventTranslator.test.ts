@@ -68,6 +68,27 @@ describe('codexEventTranslator', () => {
     assert.equal(text, 'I’ll look it up.\n\n- Project: michi-app');
   });
 
+  test("another MCP server's call names its server in the title; Michi's own stays bare", () => {
+    const { emitted, feed } = makeTranslator();
+    feed('item/started', { item: { id: 'host', type: 'mcpToolCall', server: '__michi_internal__', tool: 'read_node' } });
+    feed('item/started', { item: { id: 'notion', type: 'mcpToolCall', server: 'notion', tool: 'set_title' } });
+    feed('item/completed', { item: { id: 'notion', type: 'mcpToolCall', server: 'notion', tool: 'set_title', status: 'completed' } });
+    assert.deepEqual(emitted.filter((ev) => ev.kind === 'tool_call' || ev.kind === 'tool_call_update').map((ev) => (ev as AnyEv).title),
+      ['read_node', 'mcp__notion__set_title', 'mcp__notion__set_title']);
+  });
+
+  test('an MCP result image reaches the chip as a placeholder; the item is untouched', () => {
+    const { emitted, feed } = makeTranslator();
+    const data = Buffer.concat([Buffer.from([255, 216, 255, 224]), Buffer.alloc(20_000, 3)]).toString('base64');
+    const item = { id: 'tool-img', type: 'mcpToolCall', server: 'shots', tool: 'capture', status: 'completed',
+      result: { content: [{ type: 'image', data, mimeType: 'image/jpeg' }] } };
+    const before = structuredClone(item);
+    feed('item/completed', { item });
+    assert.deepEqual(item, before);
+    const update = emitted.find((ev) => ev.kind === 'tool_call_update') as AnyEv;
+    assert.deepEqual(JSON.parse(update.output as string), { content: [{ type: 'image', data: '[image image/jpeg 20 KB omitted]', mimeType: 'image/jpeg' }] });
+  });
+
   test('a new turn does not start with a paragraph break', () => {
     const { emitted, feed, startTurn } = makeTranslator();
 

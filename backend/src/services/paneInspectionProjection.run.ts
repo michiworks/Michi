@@ -4,6 +4,7 @@ import {
   AgentRunEventType,
   AgentRunStatus,
   AgentRunWaitingReason,
+  isAgentRunTerminal,
   type AgentRunAttemptDtoV1,
   type AgentRunDtoV1,
   type AgentRunEventV1,
@@ -63,12 +64,6 @@ const RUN_STATUS_TO_EXECUTION_STATUS: Record<AgentRunStatus, ExecutionStatus> = 
   [AgentRunStatus.Cancelled]: 'cancelled',
 };
 
-const TERMINAL_RUN_STATUSES: ReadonlySet<AgentRunStatus> = new Set([
-  AgentRunStatus.Completed,
-  AgentRunStatus.Failed,
-  AgentRunStatus.Cancelled,
-]);
-
 const WAITING_REASON_TEXT: Record<AgentRunWaitingReason, string> = {
   [AgentRunWaitingReason.Permission]: 'permission',
   [AgentRunWaitingReason.Context]: 'context',
@@ -84,7 +79,7 @@ function deriveCancelling(input: {
   observedAt: number;
 }): { cancelling: boolean; requestedAt: number | null; timedOut: boolean } {
   if (input.cancellationRequested.length === 0) return { cancelling: false, requestedAt: null, timedOut: false };
-  if (TERMINAL_RUN_STATUSES.has(input.run.status)) {
+  if (isAgentRunTerminal(input.run.status)) {
     // Authoritative terminal status has arrived — no longer cancelling, whatever the outcome.
     return { cancelling: false, requestedAt: null, timedOut: false };
   }
@@ -101,11 +96,11 @@ function deriveCancelling(input: {
 
 function activityForRun(run: AgentRunDtoV1, cancelling: boolean): PaneActivity {
   if (cancelling) return 'cancelling';
-  if (TERMINAL_RUN_STATUSES.has(run.status)) return 'idle'; // idle never means success — see execution.status
+  if (isAgentRunTerminal(run.status)) return 'idle'; // idle never means success — see execution.status
   return RUN_STATUS_TO_ACTIVITY[run.status] ?? 'unknown';
 }
 
-function selectedAttempt(run: AgentRunDtoV1, attempts: readonly AgentRunAttemptDtoV1[]): AgentRunAttemptDtoV1 | null {
+export function selectedAttempt(run: AgentRunDtoV1, attempts: readonly AgentRunAttemptDtoV1[]): AgentRunAttemptDtoV1 | null {
   if (run.activeAttemptId) {
     const active = attempts.find((attempt) => attempt.id === run.activeAttemptId);
     if (active) return active;
@@ -121,7 +116,7 @@ function truncateUtf8(text: string, maxBytes: number): { text: string; truncated
   return truncateTailToCodePointUtf8(text, maxBytes);
 }
 
-function assistantTextForAttempt(events: readonly AgentRunEventV1[], attemptId: string | null): string {
+export function assistantTextForAttempt(events: readonly AgentRunEventV1[], attemptId: string | null): string {
   // §6.4: aggregate assistant text WITHIN ONE ATTEMPT ONLY — never concatenate across attempts.
   // Input is already filtered to the selected attempt by the caller (P1-6); re-filter defensively
   // so a caller that passes unfiltered events cannot leak cross-attempt text into the preview.
@@ -143,7 +138,7 @@ function buildLatestOutput(input: {
   assistantEvents: readonly AgentRunEventV1[];
 }): PaneDescriptorV1['latestOutput'] {
   const { run, attempt } = input;
-  if (TERMINAL_RUN_STATUSES.has(run.status) && run.resultBundle) {
+  if (isAgentRunTerminal(run.status) && run.resultBundle) {
     const text = compactResultHandoff(run.resultBundle);
     const { text: bounded, truncated } = truncateUtf8(text, PANE_INSPECTION_LIMITS.outputPreviewBytes);
     const preview: OutputPreview = {
@@ -175,7 +170,7 @@ function buildLatestOutput(input: {
     text: bounded,
     outputRevision: `${attempt.id}:${run.latestEventSeq}`,
     updatedAt: attempt.checkpointAt ?? attempt.startedAt,
-    partial: !TERMINAL_RUN_STATUSES.has(run.status),
+    partial: !isAgentRunTerminal(run.status),
     truncated,
   };
   return { status: 'ready', value: preview };
@@ -199,7 +194,7 @@ function buildExecution(input: {
     status: cancelling ? 'cancelling' : RUN_STATUS_TO_EXECUTION_STATUS[run.status],
     startedAt: run.startedAt,
     endedAt: run.completedAt,
-    commitState: TERMINAL_RUN_STATUSES.has(run.status) ? 'committed' : 'pending',
+    commitState: isAgentRunTerminal(run.status) ? 'committed' : 'pending',
     waitingReason: run.waitingReason ? WAITING_REASON_TEXT[run.waitingReason] : null,
     error: timedOut
       ? { code: 'CANCEL_TIMEOUT', message: 'Cancellation was requested but no terminal status arrived within the timeout.' }

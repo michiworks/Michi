@@ -1,4 +1,4 @@
-import React, { useRef, useState } from 'react';
+import { useRef, useState } from 'react';
 import type { AgentRunEventV1 } from 'michi-shared';
 import type { LocatedAgentRun } from './agentRunSelectors';
 import { runIdentity } from './agentRunSelectors';
@@ -18,6 +18,8 @@ export function AgentRunActions({ run: resource, events = [] }: {
   const [busy, setBusy] = useState<'continue' | 'save' | null>(null);
   const [message, setMessage] = useState<string | null>(null);
   const [offerFallback, setOfferFallback] = useState(false);
+  // One key per operation: a retry after a failure may replay what the
+  // backend already did; a click after a success is a new operation.
   const continueOperationId = useRef(createAgentRunActionOperationId());
   const saveOperationId = useRef(createAgentRunActionOperationId());
 
@@ -27,6 +29,7 @@ export function AgentRunActions({ run: resource, events = [] }: {
       const result = await continueAgentRunAsBranch(identity, {
         version: 1, workspaceId: run.workspaceId, includeTask, includeResult, includeTranscript, fallback,
       }, continueOperationId.current);
+      continueOperationId.current = createAgentRunActionOperationId();
       setOfferFallback(false);
       const displayNodeId = serverEntityId(result.nodeId, identity.backendConnectionId);
       setMessage(result.mode === 'branch' ? `Branch created: ${displayNodeId}` : `New thread created: ${displayNodeId}`);
@@ -40,6 +43,7 @@ export function AgentRunActions({ run: resource, events = [] }: {
     setBusy('save'); setMessage(null);
     try {
       const saved = await saveAgentRunAsCustomAgent(identity, { version: 1, workspaceId: run.workspaceId }, saveOperationId.current);
+      saveOperationId.current = createAgentRunActionOperationId();
       setMessage(`Draft saved: ${saved.value.name}`);
     } catch (error) { setMessage(error instanceof Error ? error.message : String(error)); }
     finally { setBusy(null); }

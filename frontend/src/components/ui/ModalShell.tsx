@@ -5,6 +5,8 @@ import { DUR, TRANSITION } from '../../motion/tokens';
 import { useOverlayFocus } from './useOverlayFocus';
 import { useFrozenGlass } from './useFrozenGlass';
 import { getElectron } from '../../lib/electronBridge';
+import { useBackLayer } from '../../lib/backStack';
+import { isImeComposing } from '../../lib/ime';
 import './OverlaySurface.css';
 import './ModalShell.css';
 
@@ -24,6 +26,9 @@ import './ModalShell.css';
 export interface ModalShellProps {
   open: boolean;
   onClose: () => void;
+  /** Set while the modal shows a level inside it: Back (the phone's back
+   *  swipe, the system Back) steps back one level instead of closing it. */
+  onBack?: () => void;
   /** Header tag text, uppercased via CSS. Omit for a chrome-less modal. */
   title?: React.ReactNode;
   /** Optional glyph before the title (e.g. ⎇ for move, ⊕ for digest). */
@@ -106,6 +111,7 @@ function handOver(from: ModalOnScreen, to: ModalOnScreen) {
 export function ModalShell({
   open,
   onClose,
+  onBack,
   title,
   titleGlyph,
   accent = 'var(--term-accent)',
@@ -157,7 +163,7 @@ export function ModalShell({
   React.useEffect(() => {
     if (!shown) return;
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape' && dismissibleRef.current) {
+      if (e.key === 'Escape' && dismissibleRef.current && !isImeComposing(e)) {
         e.preventDefault();
         // stopImmediatePropagation, not stopPropagation: the shell's listener
         // is registered on the same window target.
@@ -169,6 +175,9 @@ export function ModalShell({
     window.addEventListener('keydown', onKey, { capture: captureEscape });
     return () => window.removeEventListener('keydown', onKey, { capture: captureEscape });
   }, [shown, captureEscape]);
+  // Back closes it as Escape does; one that cannot be dismissed keeps Back
+  // from the page under it (backStack.ts modalOpen).
+  useBackLayer(shown && dismissible, { back: () => (onBack ?? onCloseRef.current)() });
 
   const layers = shown ? (
     <ModalLayers

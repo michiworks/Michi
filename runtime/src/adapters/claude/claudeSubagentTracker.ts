@@ -1,12 +1,15 @@
 import {
   clampSubagentText,
   extractToolUsePurpose,
+  oneLine,
   SUBAGENT_LIMITS,
+  subagentInitialQuery,
   type SubagentInfo,
   type SubagentOutcome,
   type SubagentUsage,
 } from 'michi-shared';
 import type { NormalizedEvent } from '../../contract/events';
+import { claudeTaskUsage } from '../../core/workflows/claudeWorkflowFold';
 import type { ClaudeEnvelope } from './claudeEnvelopeParser';
 
 /**
@@ -33,6 +36,12 @@ import type { ClaudeEnvelope } from './claudeEnvelopeParser';
 
 export const CLAUDE_SUBAGENT_TOOLS = new Set(['Task', 'Agent']);
 
+/** Parent tools whose forwarded frames belong to an agent: the spawners, and SendMessage, which resumes one. */
+const AGENT_PARENT_TOOLS = new Set([...CLAUDE_SUBAGENT_TOOLS, 'SendMessage']);
+
+/** Parent tool names remembered, so frames under a plain tool are told apart. */
+const TOOL_NAME_LIMIT = 512;
+
 interface Entry extends SubagentInfo {
   messageSeq: number;
   /** Carried over from an earlier turn; not yet published in this one. */
@@ -51,11 +60,6 @@ function num(value: unknown): number | undefined {
 
 function record(value: unknown): Record<string, unknown> | undefined {
   return value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : undefined;
-}
-
-function oneLine(text: string, max: number): string {
-  const flat = text.replace(/\s+/g, ' ').trim();
-  return flat.length > max ? `${flat.slice(0, max - 1)}…` : flat;
 }
 
 /** Text of a tool_result / message content (string or block array). */
@@ -93,18 +97,6 @@ export function toolActivityDetail(input: Record<string, unknown>): string | und
     if (typeof value === 'string' && value.trim()) return oneLine(value, SUBAGENT_LIMITS.detail);
   }
   return undefined;
-}
-
-function usageFrom(raw: Record<string, unknown> | undefined): SubagentUsage | undefined {
-  if (!raw) return undefined;
-  const usage: SubagentUsage = {};
-  const tokens = num(raw['total_tokens']) ?? num(raw['totalTokens']);
-  const tools = num(raw['tool_uses']) ?? num(raw['totalToolUseCount']);
-  const duration = num(raw['duration_ms']) ?? num(raw['totalDurationMs']);
-  if (tokens !== undefined) usage.totalTokens = tokens;
-  if (tools !== undefined) usage.toolUses = tools;
-  if (duration !== undefined) usage.durationMs = duration;
-  return Object.keys(usage).length > 0 ? usage : undefined;
 }
 
 export interface ClaudeSubagentTracker {
@@ -154,6 +146,8 @@ export function createClaudeSubagentTracker(
   const entries = new Map<string, Entry>();
   const taskToTool = new Map<string, string>();
   const ignoredTasks = new Set<string>();
+  /** Parent tool_use id → tool name, oldest first, bounded by TOOL_NAME_LIMIT. */
+  const toolNames = new Map<string, string>();
   // A new translator is inside its first turn; only a `result` closes it.
   let inTurn = true;
   let reportedBackground: string[] = [];
@@ -319,6 +313,11 @@ export function createClaudeSubagentTracker(
 
   const tracker: ClaudeSubagentTracker = {
     onParentToolUse(id, name, input) {
+      if (id && name) {
+        toolNames.delete(id);
+        toolNames.set(id, name);
+        if (toolNames.size > TOOL_NAME_LIMIT) toolNames.delete(toolNames.keys().next().value as string);
+      }
       if (!id || !CLAUDE_SUBAGENT_TOOLS.has(name)) return false;
       const subagentType = str(input['subagent_type']);
       const description = str(input['description']);
@@ -326,7 +325,7 @@ export function createClaudeSubagentTracker(
       ensure(id, {
         agentName: subagentType ?? 'general-purpose',
         sessionName: description ?? subagentType,
-        initialQuery: description ?? (prompt ? oneLine(prompt.split('\n')[0], 200) : undefined),
+        initialQuery: description ?? (prompt ? subagentInitialQuery(prompt) : undefined),
         description,
         prompt: clampSubagentText(prompt, SUBAGENT_LIMITS.prompt),
         model: str(input['model']),
@@ -353,7 +352,7 @@ export function createClaudeSubagentTracker(
       // it is still the best record when nothing else arrived.
       if (entry.status === 'terminated' && !structuredText && !structured) return;
       const text = structuredText || contentText(block['content']);
-      const usage = usageFrom(structured);
+      const usage = claudeTaskUsage(structured);
       const model = str(structured?.['resolvedModel']);
       const authoritative = !!structuredText;
       if (isError || status === 'failed') finish(entry, 'failed', { error: text, usage, model, authoritative });
@@ -361,6 +360,11 @@ export function createClaudeSubagentTracker(
     },
 
     onChildEnvelope(env, parentToolUseId) {
+      // Frames under a plain tool (a long-running Bash, an MCP call) are that
+      // tool's own progress, not an agent's: they made nameless "subagent"
+      // entries, and the tool's chip then read as a delegation.
+      const parentTool = toolNames.get(parentToolUseId);
+      if (!entries.has(parentToolUseId) && parentTool !== undefined && !AGENT_PARENT_TOOLS.has(parentTool)) return;
       const entry = ensure(parentToolUseId);
       if (entry.status === 'terminated') return; // late frames after the hand-back
       const type = str(env['type']);
@@ -448,7 +452,7 @@ export function createClaudeSubagentTracker(
         const summary = str(env['summary']) ?? str(env['description']);
         seed(entry, {
           ...(summary ? { statusMessage: clampSubagentText(oneLine(summary, SUBAGENT_LIMITS.statusMessage), SUBAGENT_LIMITS.statusMessage) } : {}),
-          ...(usageFrom(record(env['usage'])) ? { usage: usageFrom(record(env['usage'])) } : {}),
+          ...(claudeTaskUsage(record(env['usage'])) ? { usage: claudeTaskUsage(record(env['usage'])) } : {}),
         });
         return true;
       }
@@ -465,7 +469,7 @@ export function createClaudeSubagentTracker(
       // task_notification: the final edge.
       const status = str(env['status']);
       const summary = str(env['summary']);
-      const usage = usageFrom(record(env['usage']));
+      const usage = claudeTaskUsage(record(env['usage']));
       if (status === 'completed') finish(entry, 'completed', { result: summary, usage });
       else if (status === 'failed') finish(entry, 'failed', { error: summary, usage });
       else if (status === 'stopped') {

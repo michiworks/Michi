@@ -3,10 +3,10 @@ import { describe, expect, it, vi } from 'vitest';
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import type { MichiDbColumn, ThreadCardItem } from 'michi-shared';
 import { CellEditor } from './CellEditor';
-import { CellView } from './CellView';
+import { CellView, OptionPill } from './CellView';
 import { LiveThreadsContext, type ConversationChoice, type LiveThreads } from './liveThreads';
 import { batchColumns } from './RowsBatchBar';
-import { taskDatabase } from './dbTestData';
+import { taskDatabase, threadsDatabase } from './dbTestData';
 
 const db = taskDatabase();
 const column = db.columns.find((c) => c.id === 'threads') as MichiDbColumn;
@@ -97,5 +97,16 @@ describe('a Conversations cell', () => {
 
   it('is linked one conversation at a time, never set for many rows at once', () => {
     expect(batchColumns(db).map((c) => c.id)).not.toContain('threads');
+  });
+});
+
+describe('a thread’s state pill', () => {
+  it.each(['waiting', 'doing', 'stalled', 'done', 'idea'] as const)('is tinted with the colour of its state dot (%s)', (state) => {
+    const threads = threadsDatabase([]);
+    const stateColumn = threads.columns.find((c) => c.id === 'state') as MichiDbColumn;
+    const { container } = render(<OptionPill db={threads} column={stateColumn} value={state} />);
+    const pill = container.querySelector<HTMLElement>('.michi-db-pill')!;
+    const mark = container.querySelector('svg circle, svg path')!;
+    expect(pill.style.getPropertyValue('--pill-tone')).toBe(mark.getAttribute('fill') === 'none' ? mark.getAttribute('stroke') : mark.getAttribute('fill'));
   });
 });

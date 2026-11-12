@@ -1,9 +1,10 @@
-import { toast } from 'sonner';
-import { useEffect, useSyncExternalStore } from 'react';
+import { useEffect, useRef, useSyncExternalStore } from 'react';
 import type { MetaAgentGuardStatus, MetaAgentSettingsPatch } from 'michi-shared';
 import {
   decideMetaAgentToolApproval, fetchMetaAgent, isMetaAgentUnavailable, retryMetaAgentGuard as retryGuard, updateMetaAgentSettings, type MetaAgentInfo,
 } from '../../services/api/metaAgent';
+import { companionNameNow } from '../companion/companionName';
+import { showPendingReviewNotice, withdrawPendingReviewNotice } from '../../services/attention/pendingReviewNotice';
 
 /** `unavailable`: this backend has no Meta agent routes yet. */
 export type MetaAgentStatus = 'loading' | 'ready' | 'unavailable' | 'error';
@@ -17,7 +18,12 @@ export interface MetaAgentSnapshot {
 const INITIAL: MetaAgentSnapshot = { status: 'loading', info: null, error: null };
 const GUARD_POLL_MS = 60_000;
 
+const APPROVALS_NOTICE_ID = 'meta-agent:approvals';
 const notifiedApprovals = new Set<string>();
+// The first read of the status only records what already waits: the Settings badge shows it, and a reload must not announce it again.
+let approvalsRead = false;
+let approvalsNoticeShown = false;
+let reviewApprovals: (() => void) | null = null;
 let snapshot = INITIAL;
 const listeners = new Set<() => void>();
 let inflight: Promise<void> | null = null;
@@ -25,15 +31,34 @@ let readGeneration = 0;
 let pollers = 0;
 let pollTimer: number | null = null;
 
-function publish(next: MetaAgentSnapshot): void {
-  for (const request of next.info?.toolApprovals ?? []) {
-    if (request.state === 'pending' && !notifiedApprovals.has(request.id)) {
-      notifiedApprovals.add(request.id);
-      toast(`Background maintenance needs approval for ${request.server} / ${request.tool}`, {
-        description: 'Review Settings → Meta agent → Tool approvals. Other permitted tools can still be used.', duration: 12000,
-      });
-    }
+/** One notice for the tool requests waiting for approval, when a new one arrives; withdrawn once none waits. */
+function noticeApprovals(info: MetaAgentInfo | null): void {
+  if (!info) return;
+  const pending = (info.toolApprovals ?? []).filter((request) => request.state === 'pending');
+  const fresh = pending.filter((request) => !notifiedApprovals.has(request.id));
+  for (const request of fresh) notifiedApprovals.add(request.id);
+  const firstRead = !approvalsRead;
+  approvalsRead = true;
+  if (pending.length === 0) {
+    if (approvalsNoticeShown) withdrawPendingReviewNotice(APPROVALS_NOTICE_ID);
+    approvalsNoticeShown = false;
+    return;
   }
+  if (firstRead || fresh.length === 0) return;
+  const shown = showPendingReviewNotice({
+    id: APPROVALS_NOTICE_ID,
+    title: pending.length === 1
+      ? `Pages upkeep needs approval for ${pending[0].server} / ${pending[0].tool}`
+      : `Pages upkeep needs approval for ${pending.length} tools`,
+    description: `Review them in Settings › ${companionNameNow()} › Pages upkeep › Tool approvals. Other permitted tools can still be used.`,
+    onReview: reviewApprovals ? () => reviewApprovals?.() : null,
+    onClose: () => { approvalsNoticeShown = false; },
+  });
+  approvalsNoticeShown ||= shown;
+}
+
+function publish(next: MetaAgentSnapshot): void {
+  noticeApprovals(next.info);
   snapshot = next;
   for (const listener of listeners) listener();
 }
@@ -56,7 +81,7 @@ export function refreshMetaAgent(): Promise<void> {
     (err: unknown) => {
       if (generation !== readGeneration) return;
       if (isMetaAgentUnavailable(err)) { publish({ status: 'unavailable', info: null, error: null }); return; }
-      const message = err instanceof Error ? err.message : "Couldn't load the Meta agent";
+      const message = err instanceof Error ? err.message : 'Couldn’t load Pages upkeep';
       publish({ status: snapshot.info ? 'ready' : 'error', info: snapshot.info, error: message });
     },
   ).finally(() => { inflight = null; });
@@ -131,8 +156,25 @@ export function useMetaAgentGuardFailed(): boolean {
   return metaAgentGuardFailures(current.info).length > 0;
 }
 
+/**
+ * Lets the tool approval notice's Review open Settings › Meta agent: the
+ * opener lives with the shell's components, which state code cannot import.
+ */
+export function useMetaAgentApprovalReview(onReview: () => void): void {
+  const reviewRef = useRef(onReview);
+  reviewRef.current = onReview;
+  useEffect(() => {
+    const handler = () => reviewRef.current();
+    reviewApprovals = handler;
+    return () => { if (reviewApprovals === handler) reviewApprovals = null; };
+  }, []);
+}
+
+/** @testonly */
 export function resetMetaAgentStore(): void {
   notifiedApprovals.clear();
+  approvalsRead = false;
+  approvalsNoticeShown = false;
   snapshot = INITIAL;
   inflight = null;
   readGeneration = 0;

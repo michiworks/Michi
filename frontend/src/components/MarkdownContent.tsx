@@ -9,10 +9,10 @@ import remarkMath from 'remark-math';
 import { remarkCurrencyGuard } from './remarkCurrencyGuard';
 import { rehypeFileLinks, fileLinkPath } from './rehypeFileLinks';
 import { rehypeAutolinkBareUrls } from './rehypeAutolinkBareUrls';
+import { remarkCjkAutolinkBoundary } from './remarkCjkAutolinkBoundary';
 import { rehypeLocalOnly } from './rehypeLocalOnly';
-import LegacyCodeBlock, { languageFromClassName, trimCodeFenceNewline } from './LegacyCodeBlock';
+import LegacyCodeBlock, { languageFromClassName } from './LegacyCodeBlock';
 import MarkdownFeatureTable from './MarkdownFeatureTable';
-import MarkdownMermaidBlock from './MarkdownMermaidBlock';
 import { MarkdownPicture } from './MarkdownPicture';
 import { MarkdownStreamingTail } from './MarkdownStreamingTail';
 import { loadableImageUrl } from '../lib/pictureAddress';
@@ -21,6 +21,7 @@ import { countRender } from '../services/renderCounters';
 import { MarkdownLinkRendererContext, type MarkdownLinkRenderer } from './markdownLinkRenderer';
 import { MarkdownQuoteMarksContext } from './markdownQuoteMarks';
 import { quoteMarkKeys, rehypeQuoteMarks } from './rehypeQuoteMarks';
+import { domMathKind, hastText, mathKind, type HastNode } from './rehypeHast';
 import type { MarkdownBlockKind } from '../lib/streamingMarkdownBlocks';
 
 const isLoadableImage = (src: string) => loadableImageUrl(src) !== null;
@@ -30,8 +31,6 @@ export interface MarkdownFeatureProfile {
   cjk?: boolean;
   codeDownload?: boolean;
   codeLineNumbers?: boolean;
-  linkSafety?: boolean;
-  mermaid?: boolean;
   normalizeHtmlIndentation?: boolean;
   strikethrough?: boolean;
   tableControls?: boolean;
@@ -124,14 +123,6 @@ function sanitizeSchemaFor(linkRenderer: MarkdownLinkRenderer | null): typeof sa
   };
 }
 
-type HastNode = {
-  type?: string;
-  tagName?: string;
-  value?: string;
-  properties?: Record<string, unknown>;
-  children?: HastNode[];
-};
-
 interface StreamingRevealState {
   previousText: string;
 }
@@ -141,28 +132,13 @@ const WHITESPACE_RE = /^\s+$/;
 
 /** KaTeX renders `<span class="katex">…</span>`; the tail-reveal plugin must not
  *  split its visual text into per-char spans, so detect math containers by class. */
-function classList(value: unknown): string[] {
-  if (Array.isArray(value)) return value.filter((c): c is string => typeof c === 'string');
-  if (typeof value === 'string') return value.split(/\s+/);
-  return [];
-}
-
 function isMathNode(node: HastNode): boolean {
-  if (node.type !== 'element') return false;
-  return classList(node.properties?.className).some(
-    (c) => c === 'katex' || c === 'katex-display' || c === 'math' || c === 'math-display' || c === 'math-inline',
-  );
-}
-
-function allText(node: HastNode): string {
-  if (node.type === 'text') return typeof node.value === 'string' ? node.value : '';
-  if (!Array.isArray(node.children)) return '';
-  return node.children.map(allText).join('');
+  return mathKind(node) !== null;
 }
 
 function dropEmptyCodeBlocks(children: HastNode[]): HastNode[] {
   return children.flatMap((child) => {
-    if (child.type === 'element' && child.tagName === 'pre' && !allText(child).trim()) {
+    if (child.type === 'element' && child.tagName === 'pre' && !hastText(child).trim()) {
       return [];
     }
     if (Array.isArray(child.children)) {
@@ -187,12 +163,7 @@ function domRevealText(node: Node, skip = false): string {
   if (node.nodeType !== 1) return '';
 
   const element = node as Element;
-  const shouldSkip =
-    STREAM_REVEAL_SKIP_TAGS.has(element.localName) ||
-    element.classList.contains('katex') ||
-    element.classList.contains('katex-display') ||
-    element.classList.contains('math-display') ||
-    element.classList.contains('math-inline');
+  const shouldSkip = STREAM_REVEAL_SKIP_TAGS.has(element.localName) || domMathKind(element) !== null;
   return Array.from(element.childNodes).map((child) => domRevealText(child, shouldSkip)).join('');
 }
 
@@ -463,7 +434,7 @@ function MarkdownContentInner({
       : [];
     // katex runs after sanitize (when present) so its generated markup
     // (spans/MathML) is not stripped. Autolink and reveal follow it and both
-    // skip katex output via isMathNode.
+    // skip katex output via mathKind.
     if (rehypeKatex) plugins.push(rehypeKatex);
     plugins.push(rehypeFileLinks);
     plugins.push(rehypeAutolinkBareUrls);
@@ -472,9 +443,10 @@ function MarkdownContentInner({
     if (revealPlugin) plugins.push(revealPlugin);
     if (appendStreamingTail) plugins.push(createStreamingTailPlugin());
     // Last, so it sees every element sanitize and the autolinkers left.
-    const remoteMedia = features?.remoteMedia !== false;
+    // A link renderer that says no remote media wins over the caller's features.
+    const remoteMedia = features?.remoteMedia !== false && linkRenderer?.remoteMedia !== false;
     const httpsLinksOnly = features?.httpsLinksOnly === true;
-    const keepImage = features?.httpsImages === true ? isLoadableImage : undefined;
+    const keepImage = features?.httpsImages === true && linkRenderer?.remoteMedia !== false ? isLoadableImage : undefined;
     if (!remoteMedia || httpsLinksOnly) plugins.push([rehypeLocalOnly, { remoteMedia, httpsLinksOnly, keepImage }]);
     return plugins;
   }, [appendStreamingTail, features?.httpsImages, features?.httpsLinksOnly, features?.remoteMedia, linkRenderer, mayContainRawHtml, quotes, rehypeKatex, revealPlugin]);
@@ -493,26 +465,22 @@ function MarkdownContentInner({
       // Non-external, non-mailto links (relative paths, hash anchors, bare
       // filenames like "readme.md") would navigate the SPA to an invalid
       // route, causing a white screen. Intercept and delegate to the host.
-      const handleClick = external && features?.linkSafety
+      const handleClick = !external && !mailto
         ? (e: React.MouseEvent<HTMLAnchorElement>) => {
-            if (!window.confirm(`Open external link?\n${url}`)) e.preventDefault();
+          // Hash-only links (#section) are harmless scroll targets.
+          if (url.startsWith('#')) return;
+          e.preventDefault();
+          if (onLinkClick) {
+            onLinkClick(filePath ?? url, e);
+          } else {
+            // Dispatch a bubbling custom event so ancestor components can
+            // handle it without prop drilling (e.g. TPane → openArtifactPane).
+            e.currentTarget.dispatchEvent(
+              new CustomEvent('michi:internal-link', { bubbles: true, detail: { href: filePath ?? url } }),
+            );
           }
-        : !external && !mailto
-          ? (e: React.MouseEvent<HTMLAnchorElement>) => {
-            // Hash-only links (#section) are harmless scroll targets.
-            if (url.startsWith('#')) return;
-            e.preventDefault();
-            if (onLinkClick) {
-              onLinkClick(filePath ?? url, e);
-            } else {
-              // Dispatch a bubbling custom event so ancestor components can
-              // handle it without prop drilling (e.g. TPane → openArtifactPane).
-              e.currentTarget.dispatchEvent(
-                new CustomEvent('michi:internal-link', { bubbles: true, detail: { href: filePath ?? url } }),
-              );
-            }
-          }
-          : undefined;
+        }
+        : undefined;
 
       return (
         <a
@@ -523,11 +491,11 @@ function MarkdownContentInner({
           onClick={handleClick}
           {...(external ? { target: '_blank', rel: 'noopener noreferrer' } : {})}
         >
-          {filePath ? <span aria-hidden="true" style={{ marginRight: 4 }}>▧</span> : null}{content}
+          {content}
         </a>
       );
     };
-  }, [features?.linkSafety, ht, linkRenderer, onLinkClick]);
+  }, [ht, linkRenderer, onLinkClick]);
   const hlComponents = useMemo(() => {
     if (!ht) return {};
     const wrap = (Tag: string) =>
@@ -585,7 +553,7 @@ function MarkdownContentInner({
       style={style}
     >
       <ReactMarkdown
-        remarkPlugins={[remarkGfm, ...cjkRemarkPlugins, ...remarkPlugins]}
+        remarkPlugins={[remarkGfm, ...cjkRemarkPlugins, remarkCjkAutolinkBoundary, ...remarkPlugins]}
         rehypePlugins={rehypePlugins}
         urlTransform={urlTransform}
         components={{
@@ -606,13 +574,11 @@ function MarkdownContentInner({
             const language = languageFromClassName(codeClass);
             const isBlock = !!language || codeText.includes('\n');
             if (isBlock) {
-              if (features?.mermaid && language === 'mermaid' && !appendStreamingTail) {
-                return <MarkdownMermaidBlock chart={trimCodeFenceNewline(codeText)} />;
-              }
               return (
                 <LegacyCodeBlock
                   className={codeClass}
                   deferHighlight={revealEnabled}
+                  httpsLinksOnly={features?.httpsLinksOnly}
                   language={language}
                   lineNumbers={features?.codeLineNumbers}
                   showDownload={features?.codeDownload}
@@ -631,7 +597,7 @@ function MarkdownContentInner({
             );
           },
           ...(features?.tableControls ? { table: MarkdownFeatureTable, td: tableCellComponent } : {}),
-          ...(features?.httpsImages && features.remoteMedia === false ? { img: MarkdownPicture } : {}),
+          ...(features?.httpsImages && features.remoteMedia === false && linkRenderer?.remoteMedia !== false ? { img: MarkdownPicture } : {}),
           del({ children, ...props }: any) {
             return features?.strikethrough
               ? <del {...props}>{children}</del>

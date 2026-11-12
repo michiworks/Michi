@@ -66,19 +66,15 @@ test('sidebar polish: focus reveal, HoverTip, scrollbar linger', async ({ page }
   await bootSidebar(page);
 
   const sidebar = page.locator('.terminal-sidebar');
-  const tree = sidebar.locator('.term-scrollbar').first();
+  const thumb = sidebar.locator('.sb-scroller__thumb').first();
 
   // ── scrollbars start quiet, appear on entry, linger 2s after leaving ──
   await expect(sidebar).toHaveAttribute('data-scrollbars', 'quiet');
-  await expect.poll(() => tree.evaluate(el => (
-    getComputedStyle(el).getPropertyValue('--term-scrollbar-thumb').trim()
-  ))).toBe('transparent');
+  await expect.poll(() => thumb.evaluate(el => getComputedStyle(el).opacity)).toBe('0');
 
   await sidebar.hover();
   await expect(sidebar).toHaveAttribute('data-scrollbars', 'visible');
-  await expect.poll(() => tree.evaluate(el => (
-    getComputedStyle(el).getPropertyValue('--term-scrollbar-thumb').trim()
-  ))).not.toBe('transparent');
+  await expect.poll(() => thumb.evaluate(el => getComputedStyle(el).opacity)).toBe('1');
 
   await page.mouse.move(4, 4);
   await expect(sidebar).toHaveAttribute('data-scrollbars', 'visible');
@@ -105,11 +101,11 @@ test('sidebar polish: focus reveal, HoverTip, scrollbar linger', async ({ page }
   // ── workspace action uses the delayed styled tooltip ───────────────────
   const workspaceRow = sidebar.locator('.t-row-hover').filter({ hasText: 'Polish workspace' }).first();
   await workspaceRow.hover();
-  const options = workspaceRow.getByRole('button', { name: 'Workspace options' });
+  const options = workspaceRow.getByRole('button', { name: 'Actions for Polish workspace' });
   await options.hover();
   const tooltip = page.getByRole('tooltip');
   await expect(tooltip).toBeVisible({ timeout: 2000 });
-  await expect(tooltip).toContainText('Workspace options');
+  await expect(tooltip).toContainText('More actions');
   // Tooltip must be the styled surface, not a native title.
   await expect(tooltip).toHaveCSS('pointer-events', 'none');
   await page.screenshot({ path: info.outputPath('sidebar-tooltip.png'), fullPage: true });
@@ -122,6 +118,31 @@ test('sidebar polish: focus reveal, HoverTip, scrollbar linger', async ({ page }
 });
 
 
+
+test("the sidebar list's own thumb takes the outer 2px, beside the rows' rails, and follows the scroll", async ({ page }) => {
+  // Short enough that the first page of threads overflows the list.
+  await page.setViewportSize({ width: 1280, height: 380 });
+  await bootSidebar(page);
+  const sidebar = page.locator('.terminal-sidebar');
+  const frame = sidebar.locator('.sb-scroller').first();
+  const view = frame.locator('.sb-scroller__view');
+  const thumb = frame.locator('.sb-scroller__thumb');
+  await expect(frame).toHaveAttribute('data-overflow', '');
+  // The native bar is hidden, so it reserves no gutter and draws over nothing.
+  expect(await view.evaluate(el => el.offsetWidth - el.clientWidth)).toBe(0);
+
+  await sidebar.hover({ position: { x: 40, y: 200 } });
+  await expect.poll(() => thumb.evaluate(el => getComputedStyle(el).opacity)).toBe('1');
+  const viewBox = (await view.boundingBox())!;
+  const before = (await thumb.boundingBox())!;
+  // Rows draw their running rail from 2px in (ThreadRow, BranchRow, WorkspaceRow).
+  expect(before.width).toBe(2);
+  expect(before.x).toBeCloseTo(viewBox.x + viewBox.width - 2, 0);
+
+  await page.mouse.wheel(0, 120);
+  await expect.poll(() => view.evaluate(el => el.scrollTop)).toBeGreaterThan(0);
+  await expect.poll(async () => (await thumb.boundingBox())!.y).toBeGreaterThan(before.y);
+});
 
 test('collapsed sidebar leaves the 48px area rail with every area', async ({ page }, info) => {
   await bootSidebar(page);

@@ -1,4 +1,4 @@
-import { MONTHS, formatMichiAge } from '../michiFormat';
+import { MONTHS, formatMichiAgo } from '../michiFormat';
 
 const WEEKDAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
 
@@ -11,6 +11,5 @@ export function michiHomeEyebrow(now: number, homeSince: number | null): string 
   const d = new Date(now);
   const date = `${WEEKDAYS[d.getDay()]}, ${MONTHS[d.getMonth()]} ${d.getDate()}`;
   if (homeSince == null) return date;
-  const age = formatMichiAge(homeSince, now);
-  return `${date} · last looked ${age === 'now' ? 'just now' : `${age} ago`}`;
+  return `${date} · last looked ${formatMichiAgo(homeSince, now)}`;
 }

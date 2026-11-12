@@ -1,5 +1,4 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import React from 'react';
 import { act, render, screen } from '@testing-library/react';
 import type { WorkflowRunDtoV1 } from 'michi-shared';
 import { ChatNodeStoreContext } from '../../../state/chatStore';
@@ -53,7 +52,7 @@ describe('usePaneBackgroundWorkCounts', () => {
     const store = nodeStore({ n1: chat('n1', [tail('', [working])]), n2: chat('n2', []) });
     const handlers: Array<Parameters<WorkflowDomainApi['subscribe']>[1]> = [];
     const api: WorkflowDomainApi = {
-      list: vi.fn(), get: vi.fn(), act: vi.fn(), answer: vi.fn(),
+      get: vi.fn(), act: vi.fn(), answer: vi.fn(),
       subscribe: vi.fn((_workspaceId, options) => { handlers.push(options); return () => {}; }),
     };
     const paneIds = ['n1', 'n2', 'launcher'];
@@ -93,6 +92,35 @@ describe('usePaneBackgroundWorkCounts', () => {
     expect(screen.getByTestId('counts').textContent).toBe('0/0 0/0 0/0');
   });
 
+  it('flags a pane whose run waits for an approval', () => {
+    const store = nodeStore({ n1: chat('n1', []), n2: chat('n2', []) });
+    const handlers: Array<Parameters<WorkflowDomainApi['subscribe']>[1]> = [];
+    const api: WorkflowDomainApi = {
+      get: vi.fn(), act: vi.fn(), answer: vi.fn(),
+      subscribe: vi.fn((_workspaceId, options) => { handlers.push(options); return () => {}; }),
+    };
+    const paneIds = ['n1', 'n2'];
+    const paneItems = {};
+    let domain: ReturnType<typeof useOptionalWorkflowDomain> = null;
+    function Probe() {
+      domain = useOptionalWorkflowDomain();
+      const countsFor = usePaneBackgroundWorkCounts(paneIds, paneItems);
+      return <span data-testid="counts">{paneIds.map((_, index) => `${countsFor(index).workflows}${countsFor(index).waiting ? '!' : ''}`).join(' ')}</span>;
+    }
+    render(
+      <ChatNodeStoreContext.Provider value={store.value}>
+        <WorkflowDomainProvider api={api}><Probe /></WorkflowDomainProvider>
+      </ChatNodeStoreContext.Provider>,
+    );
+    act(() => { domain!.subscribeWorkspace('ws'); });
+    const approval = { id: 'a', nodeId: 't1@0', title: 'Approve Bash?', options: [], requestedAt: 1 };
+    act(() => handlers[0].onRun(run({ approvals: [approval] })));
+    act(() => handlers[0].onRun(run({ id: 'wfr_2', nodeId: 'n2' })));
+    expect(screen.getByTestId('counts').textContent).toBe('1! 1');
+    act(() => handlers[0].onRun(run({ revision: 2, approvals: [] })));
+    expect(screen.getByTestId('counts').textContent).toBe('1 1');
+  });
+
   describe('with background-subagent liveness', () => {
     // One clock for when agents were first seen pending and when the feed
     // disconnected: the renderer's (fake) Date.now.
@@ -116,7 +144,7 @@ describe('usePaneBackgroundWorkCounts', () => {
       const store = nodeStore({ n1: launched('n1'), n2: launched('n2') });
       const handlers: Array<Parameters<WorkflowDomainApi['subscribe']>[1]> = [];
       const api: WorkflowDomainApi = {
-        list: vi.fn(), get: vi.fn(), act: vi.fn(), answer: vi.fn(),
+        get: vi.fn(), act: vi.fn(), answer: vi.fn(),
         subscribe: vi.fn((_workspaceId, options) => { handlers.push(options); return () => {}; }),
       };
       const paneIds = ['n1', 'n2'];
@@ -160,7 +188,7 @@ describe('usePaneBackgroundWorkCounts', () => {
       const store = nodeStore({ n1: launched('n1', 'old', 1_000), n2: chat('n2', []), n3: chat('n3', []) });
       const handlers: Array<Parameters<WorkflowDomainApi['subscribe']>[1]> = [];
       const api: WorkflowDomainApi = {
-        list: vi.fn(), get: vi.fn(), act: vi.fn(), answer: vi.fn(),
+        get: vi.fn(), act: vi.fn(), answer: vi.fn(),
         subscribe: vi.fn((_workspaceId, options) => { handlers.push(options); return () => {}; }),
       };
       const paneIds = ['n1', 'n2', 'n3'];
@@ -191,7 +219,7 @@ describe('usePaneBackgroundWorkCounts', () => {
       expect(screen.getByTestId('counts').textContent).toBe('0 1 1');
 
       // The reconnect's snapshot is current again: it lists n2's agent, not n3's.
-      await act(async () => { vi.advanceTimersByTime(1_000); });
+      await act(async () => { vi.advanceTimersByTime(1_250); });
       expect(handlers).toHaveLength(2);
       act(() => handlers[1].onBackgroundSubagents?.({ snapshot: true, nodes: { n2: ['kept'] } }));
       expect(screen.getByTestId('counts').textContent).toBe('0 1 0');

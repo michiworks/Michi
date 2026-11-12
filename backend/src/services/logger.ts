@@ -1,6 +1,7 @@
 import fs from "fs";
 import os from "os";
 import path from "path";
+import { formatLogLine } from "michi-shared";
 
 /**
  * Lifecycle logger for the backend. Writes structured single-line records
@@ -32,7 +33,8 @@ type Stage =
     | "bridge"
     | "auth"
     | "tree"
-    | "scheduler";
+    | "scheduler"
+    | "tunnel";
 
 const MAX_BYTES = 5 * 1024 * 1024; // 5MB per file before rotation
 
@@ -95,37 +97,19 @@ function appendSafe(file: string, line: string): void {
     }
 }
 
-function formatMeta(meta?: Record<string, unknown>): string {
-    if (!meta) return "";
-    const parts: string[] = [];
-    for (const [k, v] of Object.entries(meta)) {
-        if (v === undefined) continue;
-        let s: string;
-        if (typeof v === "string") {
-            // Avoid line breaks in serialized values.
-            s = v.includes(" ") || v.includes("=") ? JSON.stringify(v) : v;
-        } else if (v instanceof Error) {
-            s = JSON.stringify(`${v.message}`);
-        } else {
-            try { s = JSON.stringify(v); } catch { s = String(v); }
-        }
-        parts.push(`${k}=${s}`);
-    }
-    return parts.length > 0 ? " " + parts.join(" ") : "";
-}
-
 /** DEBUG lines always land in backend.log but only reach stdout when
  *  MICHI_LOG_DEBUG=1 — keeps the dev console quiet without losing the
  *  diagnostic trail. */
 const DEBUG_TO_STDOUT = process.env.MICHI_LOG_DEBUG === "1";
+/** launchd appends a background service's stdout to a file nothing rotates;
+ *  backend.log already holds these lines. Errors still reach its stderr file. */
+const MIRROR_TO_STDOUT = process.env.MICHI_SERVICE_MODE !== "1";
 
 function emit(level: Level, stage: Stage, msg: string, meta?: Record<string, unknown>): void {
-    const ts = new Date().toISOString();
-    const stagePad = stage.padEnd(10, " ");
-    const line = `${ts} ${level.padEnd(5, " ")} ${stagePad} ${msg}${formatMeta(meta)}\n`;
+    const line = formatLogLine(new Date().toISOString(), level, stage, msg, meta);
     appendSafe(BACKEND_LOG, line);
     if (level === "ERROR") process.stderr.write(line);
-    else if (level !== "DEBUG" || DEBUG_TO_STDOUT) process.stdout.write(line);
+    else if (MIRROR_TO_STDOUT && (level !== "DEBUG" || DEBUG_TO_STDOUT)) process.stdout.write(line);
 }
 
 export const log = {

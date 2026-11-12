@@ -21,7 +21,9 @@ describe('turn error action policy', () => {
     expect(turnErrorAction('turn_persistence_failed')).toBe('inspect-existing-turn');
     expect(turnErrorAction('turn_outcome_unknown')).toBe('inspect-existing-turn');
     expect(turnErrorAction('turn_replay_unavailable')).toBe('inspect-existing-turn');
-    for (const kind of [undefined, 'connection', 'auth', 'turn_active', 'invalid_request', 'something_new']) {
+    // The backend refused a resent turn ID because that turn already began.
+    expect(turnErrorAction('turn_already_began')).toBe('inspect-existing-turn');
+    for (const kind of [undefined, 'connection', 'turn_active', 'turn_begin_failed', 'invalid_request', 'something_new', 'constructor']) {
       expect(turnErrorAction(kind)).toBe('rerun-prompt');
     }
   });
@@ -30,6 +32,11 @@ describe('turn error action policy', () => {
     // The backend wrote the receipt itself and the partial output is checkpointed,
     // so the known outcome is carried on, never re-executed from the original prompt.
     expect(turnErrorAction('backend_restarted')).toBe('resume-turn');
+  });
+
+  it('resumes a turn expired credentials stopped, once the user signs in again', () => {
+    expect(turnErrorAction('auth')).toBe('resume-turn');
+    expect(turnErrorAction('credentials_expired')).toBe('resume-turn');
   });
 
   it('maps only a completed or cancelled saved turn with a completion time, as hydration maps the row', () => {

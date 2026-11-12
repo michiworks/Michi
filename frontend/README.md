@@ -1,8 +1,9 @@
 # Michi Frontend
 
 The frontend workspace contains Michi's React and Vite renderer. Shared protocol
-code lives in `../shared`, while backend APIs and runtime integrations live in
-`../backend`.
+code lives in `../shared`, backend APIs in `../backend`, and the runtime
+integrations in `../runtime` (`michi-runtime`; Pi stays in
+`../backend/src/agents/pi`).
 
 Run frontend commands from the repository root:
 

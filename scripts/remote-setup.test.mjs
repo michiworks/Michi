@@ -22,10 +22,14 @@ test('backend links the runtime workspace by path, not by registry version', () 
   assert.equal(backendPackage.dependencies?.['michi-runtime'], 'file:../runtime');
 });
 
-test('Electron-only node-pty is not a backend dependency', () => {
-  assert.equal(rootPackage.dependencies?.['node-pty'], '^1.1.0');
-  assert.equal(backendPackage.dependencies?.['node-pty'], undefined);
-  assert.equal(backendPackage.devDependencies?.['node-pty'], undefined);
+test('node-pty is optional, so remote setup never fails on building it', () => {
+  // Backend terminals use it where it builds; elsewhere they report unavailable.
+  assert.equal(rootPackage.optionalDependencies?.['node-pty'], '^1.1.0');
+  assert.equal(backendPackage.optionalDependencies?.['node-pty'], '^1.1.0');
+  for (const pkg of [rootPackage, backendPackage]) {
+    assert.equal(pkg.dependencies?.['node-pty'], undefined);
+    assert.equal(pkg.devDependencies?.['node-pty'], undefined);
+  }
 });
 
 test('one-command remote launch is exposed without adding a remote-only dependency', () => {

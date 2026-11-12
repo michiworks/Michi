@@ -6,7 +6,7 @@ import { prefersReducedMotion } from '../../hooks/useReducedMotion';
 const LEAVE_FALLBACK_MS = 160;
 
 function reducedMotion() {
-  return prefersReducedMotion(document.documentElement.dataset.reduceMotion === 'on');
+  return prefersReducedMotion();
 }
 
 /** The same controls stay mounted across widths; launchers retain their own

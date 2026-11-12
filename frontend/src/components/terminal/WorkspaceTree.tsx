@@ -1,16 +1,21 @@
-import React, { useCallback, useMemo, useState } from 'react';
+import React, { useCallback, useId, useMemo, useState } from 'react';
 import { AnimatePresence } from 'motion/react';
-import { shallowArrayEqual, useChatActions, useChatNodesSnapshot, useChatProjects, useStructuralSelector } from '../../state/chatStore';
+import { shallowArrayEqual, useChatActions, useChatNodesSnapshot, useChatPanes, useChatProjects, useStructuralSelector } from '../../state/chatStore';
 import { usePrefs } from '../../state/prefs';
 import { isWorkspaceExpanded, sortTrees, sortLiveProjects, workspaceHasUnread, type NodePinnedAt } from '../../state/sidebarSelectors';
-import { isVisibleConversationNode } from '../../state/conversationVisibility';
+import { isListedThread, isVisibleConversationNode } from '../../state/conversationVisibility';
+import { useRunningWorkNodeIds } from '../../state/runningWork';
 import WorkspaceRow from './WorkspaceRow';
-import ContextMenu from '../ContextMenu';
+import ContextMenu, { menuOpenKey } from '../ContextMenu';
 import { descendants } from '../../state/tree';
 import { flattenBranchIds, useSidebarTreeController } from './sidebar/useSidebarTreeController';
+import { EARLIER_GROUP_KEY, splitEarlierWorkspaces } from './sidebar/earlierWorkspaces';
+import { PROVISIONAL_LABEL_STYLE, rowLabel } from './sidebar/rowLabel';
 import { Row } from './primitives';
 import { Chevron } from './ThreadRow';
+import { rowGeom, spinePadding, WORKSPACE_ICON_GAP, WORKSPACE_ICON_SIZE, type RowGeom } from './sidebarRowStyle';
 import type { Project, ChatNodeState } from '../../state/chatTypes';
+import { SidebarScroller } from './SidebarScroller';
 
 const MERGED_PREVIEW_LIMIT = 5;
 const MERGED_PAGE_SIZE = 10;
@@ -24,6 +29,8 @@ interface MergeGroup {
 export default function WorkspaceTree({
   onActivate,
   chatViewActive = true,
+  onOpenWorkspaces,
+  workspacesPageOpen = false,
 }: {
   /** Called after a thread/branch click so the parent can switch to dashboard. */
   onActivate?: () => void;
@@ -31,12 +38,15 @@ export default function WorkspaceTree({
    *  active highlights so the sidebar doesn't claim something is open when
    *  the user has navigated away. The workspace row still gets a marker. */
   chatViewActive?: boolean;
+  /** The Projects header's "All N ›": opens the Workspaces page. Omit to hide it. */
+  onOpenWorkspaces?: () => void;
+  /** The Workspaces page is on screen: "All N ›" reads as current. */
+  workspacesPageOpen?: boolean;
 }) {
   const {
     projects,
     activeProjectId,
     focusedNodeId,
-    treeSelection,
     unreadFilterOn,
   } = useChatProjects();
   const {
@@ -56,13 +66,16 @@ export default function WorkspaceTree({
     unpinProject,
     deleteProject,
     createThread,
-    toggleTreeSelection,
-    clearTreeSelection,
     markAllRead,
     renameNode,
   } = useChatActions();
   const { prefs, setPref } = usePrefs();
   const nodesSnapshot = useChatNodesSnapshot();
+  const { openPanes } = useChatPanes();
+  // Conversations whose workflow or background agents still run after their turn ended.
+  const workRunning = useRunningWorkNodeIds();
+  const geom = rowGeom(prefs.sidebarRowStyle, prefs.sidebarInset);
+  const earlierGroupId = `sidebar-earlier-${useId().replace(/[^\w-]/g, '')}`;
 
   const liveProjects = useMemo(
     () => sortLiveProjects(projects, prefs.workspaceOrder),
@@ -158,11 +171,10 @@ export default function WorkspaceTree({
     toggleBranch,
     snapshotBeforeSwitch,
     updateExpanded,
-    openThreadRoot,
+    clickThreadRow,
     selectBranch,
     focusNode,
     isBranchSelected,
-    treeAnchorRef,
     menu,
     menuSections,
     openBranchMenu,
@@ -179,36 +191,6 @@ export default function WorkspaceTree({
         workspaces: { ...cur.workspaces, [projectId]: !isWorkspaceExpanded(cur, projectId, activeProjectId) },
       })),
     [activeProjectId, updateExpanded],
-  );
-
-  const selectThread = useCallback(
-    (treeId: string, project: Project, event: React.MouseEvent) => {
-      if (event.metaKey || event.ctrlKey) {
-        event.preventDefault();
-        toggleTreeSelection(treeId);
-        treeAnchorRef.current = treeId;
-        return;
-      }
-      if (event.shiftKey && treeAnchorRef.current) {
-        event.preventDefault();
-        const normalTrees = project.trees.filter((t) => t.kind !== 'merge');
-        const sorted = sortTrees(normalTrees, project.activeTreeId);
-        const visible = sorted.filter((t) => !t.archivedAt && isAlive(t.rootNodeId));
-        const ids = visible.map((t) => t.id);
-        const a = ids.indexOf(treeAnchorRef.current);
-        const b = ids.indexOf(treeId);
-        if (a === -1 || b === -1) return;
-        const [lo, hi] = a < b ? [a, b] : [b, a];
-        const range = ids.slice(lo, hi + 1);
-        for (const rid of range) {
-          if (!treeSelection.has(rid)) toggleTreeSelection(rid);
-        }
-        return;
-      }
-      if (treeSelection.size > 0) clearTreeSelection();
-      treeAnchorRef.current = treeId;
-    },
-    [isAlive, treeSelection, toggleTreeSelection, clearTreeSelection, treeAnchorRef],
   );
 
   const activateTreeStable = useCallback(
@@ -265,7 +247,7 @@ export default function WorkspaceTree({
       activeProjectId,
     );
     const normalTrees = project.trees.filter((t) => t.kind !== 'merge');
-    const mergeTrees = project.trees.filter((t) => t.kind === 'merge');
+    const mergeTrees = project.trees.filter((t) => t.kind === 'merge' && isListedThread(t, nodesSnapshot[t.rootNodeId]));
     const sortedTreesArr = sortTrees(normalTrees, project.activeTreeId);
     const isActive = project.id === activeProjectId;
     const mergeGroups = isActive
@@ -324,8 +306,7 @@ export default function WorkspaceTree({
             deleteProject,
             selectBranch,
             branchContextMenu: openBranchMenu,
-            selectThreadRoot: openThreadRoot,
-            selectThread,
+            clickThreadRow,
           }}
           renamingNodeId={renamingNodeId}
           onRenameNode={renameNode}
@@ -360,13 +341,11 @@ export default function WorkspaceTree({
   );
 
   return (
-    <div
-      className="term-scrollbar"
+    <SidebarScroller
+      scrollKey="structure"
       style={{
-        flex: 1,
-        overflowY: 'auto',
         // Horizontal gutter between tree content and the sidebar edges. The
-        // scrollbar still sits at the element's true right edge; only the rows
+        // scroll thumb still sits at the list's true right edge; only the rows
         // inset. 0 = original flush look. See Sidebar.tsx `--sb-inset`.
         paddingLeft: 'var(--sb-inset, 0px)',
         paddingRight: 'var(--sb-inset, 0px)',
@@ -413,11 +392,24 @@ export default function WorkspaceTree({
         const pinned = projectsToRender.filter((p) => !!p.pinnedAt);
         const unpinned = projectsToRender.filter((p) => !p.pinnedAt);
         const showPinnedSection = pinned.length > 0;
+        // Workspaces left alone for a month fold into Earlier at the end of
+        // Projects; each part keeps the manual order. The unread filter
+        // already shows only workspaces with something new.
+        const { recent, earlier } = unreadFilterOn
+          ? { recent: unpinned, earlier: [] }
+          : splitEarlierWorkspaces(unpinned, {
+              activeProjectId, now: Date.now(), nodes: nodesSnapshot, openPaneIds: openPanes, workRunning,
+            });
+        const earlierOpen = prefs.sidebarExpanded.groups?.[EARLIER_GROUP_KEY] === true;
+        // "All N ›" rides the Projects header, or Pinned's when every workspace is pinned.
+        const allLink = onOpenWorkspaces && liveProjects.length > 0 ? (
+          <AllWorkspacesLink count={liveProjects.length} current={workspacesPageOpen} onOpen={onOpenWorkspaces} />
+        ) : null;
         return (
           <>
             {showPinnedSection && (
               <>
-                <SectionLabel label="Pinned" />
+                <SectionLabel label="Pinned" action={unpinned.length === 0 ? allLink : null} />
                 <div className="sb-section-items">
                   {pinned.map((p) => renderProject(p, { dnd: dndForProject(p.id) }))}
                 </div>
@@ -425,9 +417,23 @@ export default function WorkspaceTree({
             )}
             {unpinned.length > 0 && (
               <>
-                <SectionLabel label="Projects" />
+                <SectionLabel label="Projects" action={allLink} />
                 <div className="sb-section-items">
-                  {unpinned.map((p) => renderProject(p, { dnd: dndForProject(p.id) }))}
+                  {recent.map((p) => renderProject(p, { dnd: dndForProject(p.id) }))}
+                  {earlier.length > 0 && (
+                    <EarlierGroup
+                      id={earlierGroupId}
+                      count={earlier.length}
+                      open={earlierOpen}
+                      geom={geom}
+                      onToggle={() => updateExpanded((cur) => ({
+                        ...cur,
+                        groups: { ...cur.groups, [EARLIER_GROUP_KEY]: !(cur.groups?.[EARLIER_GROUP_KEY] === true) },
+                      }))}
+                    >
+                      {earlier.map((p) => renderProject(p, { dnd: dndForProject(p.id) }))}
+                    </EarlierGroup>
+                  )}
                 </div>
               </>
             )}
@@ -463,7 +469,7 @@ export default function WorkspaceTree({
       <AnimatePresence>
         {menu && (
           <ContextMenu
-            key={`${menu.x}:${menu.y}`}
+            key={menuOpenKey(menu)}
             x={menu.x}
             y={menu.y}
             sections={menuSections}
@@ -471,20 +477,93 @@ export default function WorkspaceTree({
           />
         )}
       </AnimatePresence>
-    </div>
+    </SidebarScroller>
   );
 }
 
 /** Section header for the Structure sidebar (Pinned / Projects / Chats).
- *  Style matches ActivityView's time-label: uppercase, 11px, faint color,
- *  aligned to WorkspaceRow folder-icon left edge (6 + inset from sidebar). */
-function SectionLabel({ label }: { label: string }) {
+ *  Style matches ActivityView's time-label: sentence case, small, muted,
+ *  aligned to WorkspaceRow folder-icon left edge (6 + inset from sidebar).
+ *  `action` sits at the header's right end. */
+function SectionLabel({ label, action }: { label: string; action?: React.ReactNode }) {
   return (
     <div
       data-testid={`section-label-${label.toLowerCase()}`}
       className="sidebar-section-label"
     >
       {label}
+      {action}
+    </div>
+  );
+}
+
+/** The quiet way to the Workspaces page, at the right end of a section header. */
+function AllWorkspacesLink({ count, current, onOpen }: { count: number; current: boolean; onOpen: () => void }) {
+  return (
+    <button
+      type="button"
+      className="sidebar-section-label__action"
+      aria-label={`All ${count} workspaces`}
+      aria-current={current ? 'page' : undefined}
+      onClick={onOpen}
+    >
+      All {count}<span aria-hidden="true"> ›</span>
+    </button>
+  );
+}
+
+/**
+ * Earlier · N: workspaces nobody touched for a month, folded at the end of
+ * Projects. Closed by default; its open state is remembered with the rest of
+ * the sidebar's (`sidebarExpanded.groups`). Shaped like a workspace header,
+ * with a chevron where a workspace has its folder, but quieter.
+ */
+function EarlierGroup({ id, count, open, geom, onToggle, children }: {
+  id: string;
+  count: number;
+  open: boolean;
+  geom: RowGeom;
+  onToggle: () => void;
+  children: React.ReactNode;
+}) {
+  return (
+    <div className="sidebar-earlier" style={{ marginTop: geom.workspaceAsHeader ? 14 : 'var(--sb-ws-gap, 6px)' }}>
+      <Row
+        role="button"
+        tabIndex={0}
+        aria-label={`Earlier, ${count} ${count === 1 ? 'workspace' : 'workspaces'}`}
+        aria-expanded={open}
+        aria-controls={id}
+        className="t-row-focus sidebar-earlier__toggle"
+        onClick={onToggle}
+        onKeyDown={(event) => {
+          if (event.target !== event.currentTarget || event.metaKey || event.ctrlKey || event.altKey) return;
+          if (event.key !== 'Enter' && event.key !== ' ') return;
+          event.preventDefault();
+          onToggle();
+        }}
+        style={{
+          display: 'flex',
+          alignItems: 'center',
+          gap: geom.workspaceAsHeader ? WORKSPACE_ICON_GAP : 6,
+          padding: geom.workspaceAsHeader
+            ? `3px ${spinePadding(geom, geom.rightGap)} 3px ${spinePadding(geom, geom.titleX)}`
+            : 'var(--sb-row-py, 5px) calc(10px + var(--sb-inset, 0px)) var(--sb-row-py, 4px) calc(4px + var(--sb-inset, 0px))',
+          ...(geom.workspaceAsHeader ? {} : { borderLeft: '2px solid transparent' }),
+          fontSize: 'var(--sb-fs, var(--fs-xl))',
+          fontFamily: 'var(--ui-font)',
+          color: 'var(--term-muted)',
+        }}
+      >
+        <span aria-hidden="true" className="sidebar-earlier__chevron" data-open={open || undefined} style={{ width: WORKSPACE_ICON_SIZE }}>›</span>
+        <span>Earlier</span>
+        <span className="sidebar-earlier__count">· {count}</span>
+      </Row>
+      {open && (
+        <div id={id} role="group" aria-label="Earlier workspaces">
+          {children}
+        </div>
+      )}
     </div>
   );
 }
@@ -520,13 +599,12 @@ function MergedGroupsSection({
     <div data-testid="merged-section" style={{ marginTop: 12 }}>
       <div style={{
         padding: '4px 10px', fontSize: 'var(--fs-xs)', color: 'var(--term-muted)',
-        textTransform: 'uppercase', letterSpacing: 'var(--ls-caps)',
       }}>
         ── Merged ──
       </div>
       {displayedGroups.map((g) => {
         const merged = nodesSnapshot[g.mergeNodeId];
-        const mergedTitle = merged.title ?? 'Untitled';
+        const mergedLabel = rowLabel(undefined, merged);
         const isFocused = focusedNodeId === g.mergeNodeId;
         const expanded = !collapsedMergeGroups.has(g.mergeNodeId);
         const branchChildIds = Array.from(descendants(g.mergeNodeId, project.edges, isAlive));
@@ -537,6 +615,7 @@ function MergedGroupsSection({
               active={isFocused}
               onClick={() => onSelectMergeNode(g.mergeNodeId)}
               onContextMenu={(e: React.MouseEvent) => onContextMenu(g.mergeNodeId, e)}
+              data-context-target=""
               style={{
                 display: 'flex',
                 alignItems: 'center',
@@ -570,15 +649,17 @@ function MergedGroupsSection({
                   whiteSpace: 'nowrap',
                   maskImage: 'linear-gradient(to right, black calc(100% - 14px), transparent)',
                   WebkitMaskImage: 'linear-gradient(to right, black calc(100% - 14px), transparent)',
+                  ...(mergedLabel.provisional ? PROVISIONAL_LABEL_STYLE : {}),
                 }}
               >
-                {mergedTitle}
+                {mergedLabel.text}
               </span>
             </Row>
             {expanded && g.sources.map((sid) => {
               const src = nodesSnapshot[sid];
               const deleted = !src || !!src.deletedAt;
-              const title = deleted ? '(deleted)' : (src?.title ?? 'Untitled');
+              // Source rows are already italic and muted, so an excerpt needs no extra mark.
+              const title = deleted ? '(deleted)' : rowLabel(undefined, src).text;
               const focused = focusedNodeId === sid;
               return (
                 <Row
@@ -586,6 +667,7 @@ function MergedGroupsSection({
                   active={focused}
                   onClick={() => { if (!deleted) onSelectMergeSource(sid); }}
                   onContextMenu={(e: React.MouseEvent) => { if (!deleted) onContextMenu(sid, e); }}
+                  data-context-target={deleted ? undefined : ''}
                   style={{
                     display: 'flex',
                     alignItems: 'center',
@@ -620,7 +702,7 @@ function MergedGroupsSection({
             {expanded && branchChildIds.map((cid) => {
               const child = nodesSnapshot[cid];
               if (!child) return null;
-              const childTitle = child.title ?? 'Untitled';
+              const childLabel = rowLabel(undefined, child);
               const focused = focusedNodeId === cid;
               return (
                 <Row
@@ -628,6 +710,7 @@ function MergedGroupsSection({
                   active={focused}
                   onClick={() => onSelectMergeSource(cid)}
                   onContextMenu={(e: React.MouseEvent) => onContextMenu(cid, e)}
+                  data-context-target=""
                   style={{
                     display: 'flex',
                     alignItems: 'center',
@@ -651,9 +734,10 @@ function MergedGroupsSection({
                       whiteSpace: 'nowrap',
                       maskImage: 'linear-gradient(to right, black calc(100% - 14px), transparent)',
                       WebkitMaskImage: 'linear-gradient(to right, black calc(100% - 14px), transparent)',
+                      ...(childLabel.provisional ? PROVISIONAL_LABEL_STYLE : {}),
                     }}
                   >
-                    {childTitle}
+                    {childLabel.text}
                   </span>
                 </Row>
               );

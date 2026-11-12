@@ -17,3 +17,6 @@ export function setPanePresenceDashboardVisible(visible: boolean): void {
 export function usePanePresenceDashboardVisible(): boolean {
   return useSyncExternalStore(subscribe, getSnapshot, getSnapshot);
 }
+
+/** The same flag read outside React: this window shows the Dashboard page. */
+export const isPanePresenceDashboardVisible = getSnapshot;

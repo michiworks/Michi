@@ -33,6 +33,9 @@ export default defineConfig({
     alias: {
       'michi-shared': fileURLToPath(new URL('../shared/src/index.ts', import.meta.url)),
     },
+    // shared/src and zod-to-json-schema would otherwise bundle their own zod
+    // installs next to frontend's; resolve every zod import from frontend.
+    dedupe: ['zod'],
   },
   optimizeDeps: {
     exclude: ['michi-shared'],

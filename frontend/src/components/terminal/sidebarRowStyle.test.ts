@@ -1,7 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { rowGeom, caretKebabClearance, SIDEBAR_ROW_STYLES, type SidebarRowStyle } from './sidebarRowStyle';
-
-const B_MODES: SidebarRowStyle[] = ['rounded-inset', 'square-inset', 'square-full'];
+import { rowGeom, caretKebabClearance, SIDEBAR_ROW_STYLES } from './sidebarRowStyle';
 
 describe('caretKebabClearance', () => {
   it('never goes negative', () => {

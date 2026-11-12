@@ -1,252 +1,65 @@
-import { extractToolUsePurpose } from 'michi-shared';
+// Public entry for the tool-call copy. The code lives in ./toolCallGrouping/, one module per
+// concern; their helpers stay internal, and this file re-exports only the public surface.
 import type { ToolCallState, SubagentInfo } from '../../state/chatTypes';
+import { failedToolCount } from './toolCallGrouping/toolStatus';
+import { subagentTitleMatches, subagentToolInfo } from './toolCallGrouping/subagentTools';
+import { summarizeToolsBase } from './toolCallGrouping/toolSummary';
 
-const RUNNING_STATUSES = new Set(['running', 'in_progress', 'pending']);
-const FAILED_STATUSES = new Set(['error', 'failed']);
-const SUBAGENT_TOOL_TITLES = new Set(['agent', 'task', 'subagent']);
+export {
+  failedToolCount,
+  isDenied,
+  isFailedStatus,
+  isHiddenInternalTool,
+  isRunningStatus,
+  isStoppedStatus,
+  isTerminalStatus,
+  toolErrorLine,
+  toolExitCode,
+} from './toolCallGrouping/toolStatus';
+export { bareToolName, prettifyToolTitle, toolDisplayTitle } from './toolCallGrouping/toolTitle';
+export { toolCommand, toolPurpose, toolRowDetail } from './toolCallGrouping/toolInput';
+export type { SubagentToolInfo } from './toolCallGrouping/subagentTools';
+export {
+  delegationToolInfo,
+  filterSubagentRelayedTools,
+  subagentHeading,
+  subagentStatusLabel,
+  subagentTitleMatches,
+  subagentToolInfo,
+} from './toolCallGrouping/subagentTools';
+export type { BucketKey, PhraseKind } from './toolCallGrouping/toolKind';
+export { toolKind } from './toolCallGrouping/toolKind';
+export { summarizeToolsBase, summarizeWork } from './toolCallGrouping/toolSummary';
+export {
+  formatDurationMs,
+  formatElapsedMs,
+  spokenDurationMs,
+  toolDurationMs,
+  toolSpanMs,
+} from './toolCallGrouping/toolDuration';
+export type { PayloadSubject } from './toolCallGrouping/toolPayload';
+export { formatToolPayload, payloadSubject } from './toolCallGrouping/toolPayload';
+export type { PhraseVerb } from './toolCallGrouping/phraseText';
+export type { CommandPhrase } from './toolCallGrouping/commandPhrase';
+export { commandPhrase, isSimpleCommand, readablePattern, stripHeredocs } from './toolCallGrouping/commandPhrase';
+export type { ToolPhrase } from './toolCallGrouping/toolPhrase';
+export { mergeToolPhrases, toolIntent, toolPhrase, toolRecord } from './toolCallGrouping/toolPhrase';
+export type { OutcomeIcon } from './toolCallGrouping/toolEffect';
+export { changesState, findRecoveries, toolOutcomeIcon } from './toolCallGrouping/toolEffect';
+export type { StepView } from './toolCallGrouping/toolStep';
+export { stepDetail, stepName, stepView } from './toolCallGrouping/toolStep';
+export type { OutcomePhrase, ToolOutcome } from './toolCallGrouping/toolOutcome';
+export {
+  SUMMARY_MAX_PHRASES,
+  capPhrases,
+  joinSentence,
+  sentenceOf,
+  summarizeOutcome,
+} from './toolCallGrouping/toolOutcome';
+export { thoughtConclusion, thoughtPreview } from './toolCallGrouping/thoughtSentence';
 
-/**
- * Internal metadata tools that Michi injects for structured data extraction
- * (title, follow-ups, branch overview). These are invisible plumbing — the
- * user sees their *effects* (a title appears, follow-up buttons render) but
- * should never see a "Running set_branch_overview" banner or a chip in the
- * tool group. Matches both raw MCP names and the prefixed variants from
- * different runtimes (mcp__michi-tools__*, mcp____michi_internal____*).
- */
-const HIDDEN_INTERNAL_TOOLS = new Set([
-  'set_branch_overview',
-  'set_title',
-  'set_follow_ups',
-  'validate_follow_ups',
-  'validate_turn_metadata',
-]);
-
-export function isHiddenInternalTool(title: string): boolean {
-  const normalized = title.trim().toLowerCase();
-  // Direct match (Kiro ACP reports the bare tool name)
-  if (HIDDEN_INTERNAL_TOOLS.has(normalized)) return true;
-  // Claude prefixed: mcp____michi_internal____<tool>
-  // Kiro MCP prefixed: mcp__michi-tools__<tool> or @michi/<tool>
-  const stripped = prettifyToolTitle(normalized);
-  if (HIDDEN_INTERNAL_TOOLS.has(stripped)) return true;
-  // Codex App Server can report the MCP server and tool as one title without
-  // the leading `mcp__`, e.g. `michi_internal____set_branch_overview`.
-  // Accept only a real namespace separator so similarly-named user tools do
-  // not get hidden accidentally.
-  for (const tool of HIDDEN_INTERNAL_TOOLS) {
-    if (!normalized.endsWith(tool)) continue;
-    const prefix = normalized.slice(0, -tool.length);
-    if (/(?:[/.:]|_{2,})$/.test(prefix)) return true;
-  }
-  // @server/tool format (some runtimes)
-  const slashIdx = normalized.lastIndexOf('/');
-  if (slashIdx >= 0 && HIDDEN_INTERNAL_TOOLS.has(normalized.slice(slashIdx + 1))) return true;
-  return false;
-}
-
-export function isRunningStatus(status: string | undefined): boolean {
-  if (!status) return true;
-  return RUNNING_STATUSES.has(status);
-}
-
-export function isTerminalStatus(status: string | undefined): boolean {
-  return !isRunningStatus(status);
-}
-
-export function isFailedStatus(status: string | undefined): boolean {
-  if (!status) return false;
-  return FAILED_STATUSES.has(status);
-}
-
-export type BucketKey = 'read' | 'edit' | 'write' | 'bash' | 'grep' | 'glob' | 'unknown';
-
-interface BucketDef {
-  verb: string;          // "Read", "Edited", "Ran"
-  noun: string;          // "file", "command"
-}
-
-export interface SubagentToolInfo {
-  agentType?: string;
-  description?: string;
-  prompt?: string;
-  model?: string;
-}
-
-const BUCKETS: Record<BucketKey, BucketDef> = {
-  read:    { verb: 'read',     noun: 'file' },
-  edit:    { verb: 'edited',   noun: 'file' },
-  write:   { verb: 'created',  noun: 'file' },
-  bash:    { verb: 'ran',      noun: 'command' },
-  grep:    { verb: 'searched', noun: 'pattern' },
-  glob:    { verb: 'listed',   noun: 'path' },
-  unknown: { verb: 'used',     noun: 'tool' },
-};
-
-export function toolBucketKey(tool: ToolCallState): BucketKey {
-  // Try kind first, but fall through to the title when the kind is a value
-  // outside our bucket set — Claude runtime reports kind 'tool' for
-  // everything, kiro ACP uses kinds like 'execute'. Without the fallback a
-  // Bash/Read title lands in 'unknown' and loses its icon + verb.
-  const kind = (tool.kind || '').toLowerCase();
-  if (kind in BUCKETS) return kind as BucketKey;
-  const first = (tool.title.split(/\s+/)[0] || '').toLowerCase();
-  if (first in BUCKETS) return first as BucketKey;
-  if (kind === 'execute') return 'bash';
-  return 'unknown';
-}
-
-function pluralize(noun: string, count: number): string {
-  if (count === 1) return noun;
-  return `${noun}s`;
-}
-
-function compactWhitespace(value: string | undefined): string | undefined {
-  const compact = value?.replace(/\s+/g, ' ').trim();
-  return compact || undefined;
-}
-
-function humanizeIdentifier(value: string | undefined): string | undefined {
-  const compact = compactWhitespace(value?.replace(/[_-]+/g, ' '));
-  if (!compact) return undefined;
-  return compact.charAt(0).toUpperCase() + compact.slice(1);
-}
-
-function objectStringField(
-  obj: Record<string, unknown> | null,
-  keys: string[],
-): string | undefined {
-  if (!obj) return undefined;
-  for (const key of keys) {
-    const value = obj[key];
-    if (typeof value === 'string') return compactWhitespace(value);
-  }
-  return undefined;
-}
-
-function decodeJsonStringFragment(fragment: string): string {
-  try {
-    return JSON.parse(`"${fragment}"`);
-  } catch {
-    return fragment
-      .replace(/\\n/g, '\n')
-      .replace(/\\"/g, '"')
-      .replace(/\\\\/g, '\\');
-  }
-}
-
-function regexStringField(detail: string | undefined, keys: string[]): string | undefined {
-  if (!detail) return undefined;
-  for (const key of keys) {
-    const escapedKey = key.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-    const match = detail.match(new RegExp(`"${escapedKey}"\\s*:\\s*"((?:\\\\.|[^"\\\\])*)"`));
-    if (match) return compactWhitespace(decodeJsonStringFragment(match[1]));
-  }
-  return undefined;
-}
-
-function parseDetailObject(detail: string | undefined): Record<string, unknown> | null {
-  if (!detail?.trim().startsWith('{')) return null;
-  try {
-    const parsed = JSON.parse(detail);
-    return parsed && typeof parsed === 'object' && !Array.isArray(parsed)
-      ? parsed as Record<string, unknown>
-      : null;
-  } catch {
-    return null;
-  }
-}
-
-function detailField(
-  detail: string | undefined,
-  obj: Record<string, unknown> | null,
-  keys: string[],
-): string | undefined {
-  return objectStringField(obj, keys) ?? regexStringField(detail, keys);
-}
-
-export function subagentToolInfo(tool: ToolCallState): SubagentToolInfo | null {
-  const title = tool.title.trim().toLowerCase();
-  const kind = tool.kind?.trim().toLowerCase();
-  const detail = tool.detail;
-  const detailObject = parseDetailObject(detail);
-  // Only explicit subagent-type keys count. A bare `type` key must NOT be
-  // treated as a subagent signal: a completed tool's `detail` is overwritten
-  // with its result content (e.g. `[{"type":"text",...}]` for MCP tools), and
-  // matching that `"type":"text"` would mislabel every MCP tool as
-  // "SubAgent · Text".
-  const agentTypeKeys = ['subagent_type', 'subagentType', 'agent_type', 'agentType'];
-  const rawAgentType = detailField(detail, detailObject, agentTypeKeys);
-  const hasSignal =
-    SUBAGENT_TOOL_TITLES.has(title) ||
-    kind === 'subagent' ||
-    !!rawAgentType ||
-    /"subagent_type"\s*:/.test(detail ?? '');
-
-  if (!hasSignal) return null;
-
-  // Runtimes that keep `detail` for purpose text carry the delegation input in
-  // `inputJson` (Kiro V3, Codex). Explicit subagent tools may name the agent
-  // with a plain `name` key there; other tools never reach this point.
-  const input = tool.inputJson;
-  const inputObject = parseDetailObject(input);
-  const fromEither = (keys: string[]) => detailField(detail, detailObject, keys) ?? detailField(input, inputObject, keys);
-  const agentType = rawAgentType
-    ?? detailField(input, inputObject, agentTypeKeys)
-    ?? (kind === 'subagent' ? detailField(input, inputObject, ['name']) : undefined);
-  return {
-    agentType: humanizeIdentifier(agentType),
-    description: fromEither(['description', 'summary', 'goal', 'task', 'explanation']),
-    prompt: fromEither(['prompt', 'query', 'instructions']),
-    model: fromEither(['model']),
-  };
-}
-
-/**
- * A tool that delegates: a recognised subagent tool, or any tool a roster
- * entry names as its parent (Kiro V2 crews report under "Spawning agent crew").
- */
-export function delegationToolInfo(
-  tool: ToolCallState,
-  roster: readonly SubagentInfo[] | undefined,
-): SubagentToolInfo | null {
-  const info = subagentToolInfo(tool);
-  if (info) return info;
-  return roster?.some((entry) => entry.parentToolCallId === tool.id) ? {} : null;
-}
-
-export function subagentHeading(info: SubagentToolInfo): string {
-  return info.agentType ? `SubAgent · ${info.agentType}` : 'SubAgent';
-}
-
-export function subagentStatusLabel(status: string | undefined): string {
-  if (isFailedStatus(status)) return 'failed';
-  if (isRunningStatus(status)) return 'working';
-  return 'completed';
-}
-
-/**
- * Returns true if `tool` is a SubAgent tool-call (parent-session) that
- * plausibly corresponds to `subagent`. Match is best-effort: agentType
- * equality OR text overlap between the tool's description/prompt and the
- * subagent's `initialQuery`. False for non-subagent tools.
- */
-export function subagentTitleMatches(tool: ToolCallState, subagent: SubagentInfo): boolean {
-  const info = subagentToolInfo(tool);
-  if (!info) return false;
-
-  const agentTypeNorm = info.agentType?.toLowerCase().trim();
-  const subAgentName = subagent.agentName?.toLowerCase().trim();
-  if (agentTypeNorm && subAgentName && agentTypeNorm === subAgentName) return true;
-
-  const initial = subagent.initialQuery?.trim();
-  if (!initial) return false;
-
-  const description = info.description?.trim();
-  const prompt = info.prompt?.trim();
-
-  return description === initial || prompt === initial;
-}
-
+// Only tests call these two (they are in the knip baseline under this path). They stay here
+// until they are deleted, so the split does not move their file-keyed baseline entries.
 export function findOwningSubagent(
   tool: ToolCallState,
   subagents: readonly SubagentInfo[] | undefined,
@@ -254,233 +67,6 @@ export function findOwningSubagent(
   if (!subagents || subagents.length === 0) return undefined;
   if (!subagentToolInfo(tool)) return undefined;
   return subagents.find((s) => subagentTitleMatches(tool, s));
-}
-
-/**
- * Drops parent-stream tool-calls that a subagent reported as its own
- * activity (same tool-call id), so a relayed child tool renders once — in
- * the subagent's trail — not again as a parent row. Delegation tool-calls
- * themselves are always kept; they ARE the card.
- *
- * Matching is exact. Runtimes route child tools to subagent activity, so the
- * parent's own tools — including ones running in parallel with a subagent or
- * after a backgrounded one — always stay visible. (An earlier heuristic hid
- * every running peer while any subagent worked; with rosters on every
- * runtime that hid the parent's real work.)
- *
- * If `subagents` is empty/undefined the input is returned as-is, so this
- * is safe to call unconditionally on every tool group.
- */
-export function filterSubagentRelayedTools(
-  tools: readonly ToolCallState[],
-  subagents: readonly SubagentInfo[] | undefined,
-): ToolCallState[] {
-  if (!subagents || subagents.length === 0) return [...tools];
-  const relayed = new Set<string>();
-  for (const subagent of subagents) {
-    for (const item of subagent.activity ?? []) {
-      if (item.kind === 'tool') relayed.add(item.id);
-    }
-  }
-  if (relayed.size === 0) return [...tools];
-  return tools.filter((tool) => !relayed.has(tool.id) || !!delegationToolInfo(tool, subagents));
-}
-
-/** Priority order for the one-line argument shown beside a tool name.
- *  Matches what each bucket's primary argument is (command for bash,
- *  file_path for read/edit, pattern for grep, …). */
-const ROW_DETAIL_KEYS = [
-  'command',
-  'pattern',
-  'file_path',
-  'filePath',
-  'path',
-  'query',
-  'url',
-];
-
-const ROW_DETAIL_MAX = 200;
-
-function clampLine(value: string | undefined, max: number): string | undefined {
-  if (!value) return undefined;
-  return value.length > max ? `${value.slice(0, max - 1)}…` : value;
-}
-
-/** Paths and "Read: /foo" labels are command detail, not the agent's why. */
-function looksLikeToolArg(value: string): boolean {
-  if (/^(\/|\.\/|\.\.\/|[A-Za-z]:[\\/])/.test(value)) return true;
-  if (/^(Read|Write|Edit|Bash|Grep|Glob|List|Search)\b[:\s]/i.test(value)) return true;
-  return false;
-}
-
-/**
- * Agent's stated why-string for a tool row. Only `__tool_use_purpose` counts —
- * `detail` is overloaded (path, command dump, stdout, result JSON) and must
- * not be treated as purpose. Returns undefined when the field is absent so
- * renderers fall back to name + command detail.
- */
-export function toolPurpose(tool: ToolCallState): string | undefined {
-  return clampLine(
-    extractToolUsePurpose(tool.inputJson) ?? extractToolUsePurpose(tool.detail),
-    ROW_DETAIL_MAX,
-  );
-}
-
-/**
- * One-line technical argument for a tool row ("npm test", a file path,
- * a grep pattern) — the machine-level command/operation detail. Sources:
- *   1. the structured input (`inputJson`) — the primary argument key;
- *   2. `detail` parsed as JSON — Claude runtime backfills detail with a raw
- *      input dump, and completed MCP tools overwrite it with result content,
- *      so a raw `detail` is only trusted after extraction, never verbatim.
- *
- * This is the secondary line shown below purpose. When purpose is absent,
- * renderers show this as the only line (preserving current behavior).
- */
-export function toolRowDetail(tool: ToolCallState): string | undefined {
-  const input = tool.inputJson;
-  if (input?.trim().startsWith('{')) {
-    const fromInput = detailField(input, parseDetailObject(input), ROW_DETAIL_KEYS);
-    if (fromInput) return clampLine(fromInput, ROW_DETAIL_MAX);
-  }
-  const detail = compactWhitespace(tool.detail);
-  if (detail && !/^[[{]/.test(detail)) {
-    // Human purpose lives on the primary line; a path/title is the row argument.
-    return looksLikeToolArg(detail) ? clampLine(detail, ROW_DETAIL_MAX) : undefined;
-  }
-  if (detail?.startsWith('{')) {
-    const fromDetail = detailField(tool.detail, parseDetailObject(tool.detail), ROW_DETAIL_KEYS);
-    if (fromDetail) return clampLine(fromDetail, ROW_DETAIL_MAX);
-  }
-  return undefined;
-}
-
-/**
- * Short MCP tool names for chips.
- * Claude: `mcp__michi-tools__list_threads` → `list_threads`
- * Cursor: `michi-list_threads: list_threads` → `list_threads`
- * Grok / bare: `michi__list_threads` or `michi-list_threads` → `list_threads`
- * Non-MCP titles pass through.
- */
-export function prettifyToolTitle(title: string): string {
-  const trimmed = title.trim();
-  if (!trimmed) return title;
-
-  const cursorPrefixed = trimmed.match(/^michi[-_][\w.-]+:\s*([\w.-]+)$/i);
-  if (cursorPrefixed) return cursorPrefixed[1];
-
-  if (trimmed.startsWith('mcp__')) {
-    const parts = trimmed.split('__');
-    if (parts.length >= 3) return parts.slice(2).join('__');
-  }
-
-  const michiPrefixed = trimmed.match(/^michi(?:__|-)(.+)$/i);
-  if (michiPrefixed) return michiPrefixed[1];
-
-  return trimmed;
-}
-
-/** Kiro ACP keeps this generated start label after ask_user finishes. Derive
- * its display state without rewriting raw provider titles or stored history. */
-export function toolDisplayTitle(tool: ToolCallState): string {
-  if (tool.title === 'Running: @michi/ask_user') {
-    switch (tool.status) {
-      case 'completed': return 'Completed: @michi/ask_user';
-      case 'error':
-      case 'failed': return 'Failed: @michi/ask_user';
-      case 'interrupted':
-      case 'cancelled':
-      case 'canceled': return 'Interrupted: @michi/ask_user';
-    }
-  }
-  return prettifyToolTitle(tool.title);
-}
-
-export function failedToolCount(tools: readonly ToolCallState[]): number {
-  return tools.reduce((n, t) => n + (isFailedStatus(t.status) ? 1 : 0), 0);
-}
-
-/**
- * Duration of a single tool call, from projection-stamped timestamps.
- * Undefined for turns persisted before timestamps existed.
- */
-export function toolDurationMs(tool: ToolCallState): number | undefined {
-  if (tool.startedAt == null || tool.endedAt == null) return undefined;
-  const d = tool.endedAt - tool.startedAt;
-  return d >= 0 ? d : undefined;
-}
-
-/**
- * Wall-clock span of a group: earliest startedAt → latest endedAt across
- * tools that carry timestamps. Undefined when none do.
- */
-export function toolSpanMs(tools: readonly ToolCallState[]): number | undefined {
-  let min: number | undefined;
-  let max: number | undefined;
-  for (const t of tools) {
-    if (t.startedAt != null) min = min == null ? t.startedAt : Math.min(min, t.startedAt);
-    if (t.endedAt != null) max = max == null ? t.endedAt : Math.max(max, t.endedAt);
-  }
-  if (min == null || max == null || max < min) return undefined;
-  return max - min;
-}
-
-/** "0.3s" below 10s, "12s" below 1m, "1m 12s" beyond. */
-export function formatDurationMs(ms: number): string {
-  if (ms < 10_000) return `${Math.max(0.1, Math.round(ms / 100) / 10).toFixed(1)}s`;
-  if (ms < 60_000) return `${Math.round(ms / 1000)}s`;
-  const m = Math.floor(ms / 60_000);
-  const s = Math.round((ms % 60_000) / 1000);
-  return s > 0 ? `${m}m ${s}s` : `${m}m`;
-}
-
-/**
- * Base summary without the failed-count suffix, so renderers can color the
- * failure fragment independently (color marks state, never whole rows).
- *
- * `subagentStatus` replaces a lone SubAgent's status word ("in background",
- * "stopped"), which the tool status alone cannot say; see
- * useDelegationStatusLabel. Other summaries ignore it.
- */
-export function summarizeToolsBase(tools: ToolCallState[], subagentStatus?: string): string {
-  if (tools.length === 0) return '';
-
-  const subagentInfos = tools.map(subagentToolInfo);
-  if (tools.length === 1 && subagentInfos[0]) {
-    return `${subagentHeading(subagentInfos[0])} · ${subagentStatus ?? subagentStatusLabel(tools[0].status)}`;
-  }
-  if (tools.length > 1 && subagentInfos.every(Boolean)) {
-    const running = tools.filter((t) => isRunningStatus(t.status)).length;
-    const failed = failedToolCount(tools);
-    if (running > 0) return `${tools.length} SubAgents · ${running} working`;
-    if (failed > 0) return `${tools.length} SubAgents`;
-    return `${tools.length} SubAgents · completed`;
-  }
-
-  if (tools.length === 1) {
-    return toolDisplayTitle(tools[0]) || BUCKETS[toolBucketKey(tools[0])].verb;
-  }
-
-  const counts = new Map<BucketKey, number>();
-  for (const tool of tools) {
-    const key = toolBucketKey(tool);
-    counts.set(key, (counts.get(key) ?? 0) + 1);
-  }
-
-  // Single bucket → "read 3 files"
-  if (counts.size === 1) {
-    const [key, count] = counts.entries().next().value as [BucketKey, number];
-    const def = BUCKETS[key];
-    return `${def.verb} ${count} ${pluralize(def.noun, count)}`;
-  }
-
-  // Multi-bucket → "read 2 files, ran 1 command"
-  const phrases: string[] = [];
-  for (const [key, count] of counts.entries()) {
-    const def = BUCKETS[key];
-    phrases.push(`${def.verb} ${count} ${pluralize(def.noun, count)}`);
-  }
-  return phrases.join(', ');
 }
 
 export function summarizeTools(tools: ToolCallState[]): string {
@@ -493,99 +79,4 @@ export function summarizeTools(tools: ToolCallState[]): string {
     return subagentToolInfo(tools[0]) ? base : `${base} · failed`;
   }
   return `${base} · ${failed} failed`;
-}
-
-/** Phrase order for the agent block header: changes first, then commands
- *  and delegation, then lookups, so a long run's edits survive truncation. */
-const WORK_PHRASE_ORDER: ReadonlyArray<BucketKey | 'subagent'> = [
-  'edit', 'write', 'bash', 'subagent', 'grep', 'read', 'glob', 'unknown',
-];
-const WORK_SUMMARY_MAX_PHRASES = 3;
-
-/**
- * What an agent block did, for its collapsed header: "Edited 3 files, ran 5
- * commands, read 12 files". Hidden metadata tools and tools relayed from a
- * SubAgent's own session are excluded, matching what ToolCallGroup shows.
- * `failed` counts the same visible tools so the caller can color it apart.
- */
-export function summarizeWork(
-  tools: readonly ToolCallState[],
-  subagents?: readonly SubagentInfo[],
-): { text: string; failed: number } {
-  const visible = filterSubagentRelayedTools(tools, subagents)
-    .filter((tool) => !isHiddenInternalTool(tool.title));
-  const failed = failedToolCount(visible);
-  if (visible.length === 0) return { text: '', failed };
-
-  const counts = new Map<BucketKey | 'subagent', number>();
-  for (const tool of visible) {
-    const key = subagentToolInfo(tool) ? 'subagent' : toolBucketKey(tool);
-    counts.set(key, (counts.get(key) ?? 0) + 1);
-  }
-
-  // A lone tool we can't classify reads better by name than as "used 1 tool".
-  if (visible.length === 1 && counts.has('unknown')) {
-    return { text: toolDisplayTitle(visible[0]), failed };
-  }
-
-  const phrases: string[] = [];
-  let rest = 0;
-  for (const key of WORK_PHRASE_ORDER) {
-    const count = counts.get(key);
-    if (!count) continue;
-    if (phrases.length === WORK_SUMMARY_MAX_PHRASES) {
-      rest += count;
-      continue;
-    }
-    phrases.push(
-      key === 'subagent'
-        ? `ran ${count} ${pluralize('SubAgent', count)}`
-        : `${BUCKETS[key].verb} ${count} ${pluralize(BUCKETS[key].noun, count)}`,
-    );
-  }
-  if (rest > 0) phrases.push(`+${rest} more`);
-  const text = phrases.join(', ');
-  return { text: text.charAt(0).toUpperCase() + text.slice(1), failed };
-}
-
-function stripHtml(html: string): string {
-  return html
-    .replace(/<br\s*\/?>/gi, '\n')
-    .replace(/<\/(?:p|div|li|tr|h[1-6])>/gi, '\n')
-    .replace(/<[^>]*>/g, '')
-    .replace(/&nbsp;/gi, ' ')
-    .replace(/&amp;/gi, '&')
-    .replace(/&lt;/gi, '<')
-    .replace(/&gt;/gi, '>')
-    .replace(/&quot;/gi, '"')
-    .replace(/&#39;/gi, "'")
-    .replace(/\n{3,}/g, '\n\n')
-    .trim();
-}
-
-function cleanJsonValues(obj: unknown): unknown {
-  if (typeof obj === 'string' && /<[a-z][\s\S]*>/i.test(obj)) {
-    return stripHtml(obj);
-  }
-  if (Array.isArray(obj)) return obj.map(cleanJsonValues);
-  if (obj && typeof obj === 'object') {
-    const out: Record<string, unknown> = {};
-    for (const [k, v] of Object.entries(obj)) {
-      out[k] = cleanJsonValues(v);
-    }
-    return out;
-  }
-  return obj;
-}
-
-/** Pretty-print a tool payload: JSON re-indented with HTML-bearing string
- *  values stripped to text; non-JSON passes through verbatim. */
-export function formatToolPayload(raw: string): string {
-  try {
-    const parsed = JSON.parse(raw);
-    const cleaned = cleanJsonValues(parsed);
-    return JSON.stringify(cleaned, null, 2);
-  } catch {
-    return raw;
-  }
 }

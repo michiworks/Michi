@@ -3,7 +3,6 @@
  * The palette must keep the row the user moved to: before, every update put
  * the highlight (and the list's scroll) back on the first row.
  */
-import React from 'react';
 import { act, fireEvent, render, screen } from '@testing-library/react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import CommandPalette from './CommandPalette';
@@ -55,7 +54,6 @@ vi.mock('../../state/chatStore', async () => {
 vi.mock('../../state/prefs', () => ({
   usePrefs: () => ({ prefs: { bypassPermissions: false }, setPref: vi.fn() }),
 }));
-vi.mock('../../state/navigateToNode', () => ({ navigateToNode: vi.fn() }));
 vi.mock('../../lib/digestPrompt', () => ({ requestDigest: vi.fn() }));
 
 const scrollIntoView = vi.fn();
@@ -83,7 +81,7 @@ describe('CommandPalette while a reply streams', () => {
     expect(scrollIntoView).not.toHaveBeenCalled();
   });
 
-  it('still moves the highlight to the top when the query changes', () => {
+  it('still puts the highlight back on its opening row when the query changes', () => {
     render(<CommandPalette activePage="dashboard" setPage={vi.fn()} onClose={vi.fn()} />);
     const input = screen.getByPlaceholderText('Search chats, commands, messages…');
     const first = activeRow();

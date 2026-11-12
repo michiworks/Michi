@@ -10,24 +10,9 @@ import {
 import { getDb, runInTransaction } from './db';
 import { getWorkspace } from './dbRepository';
 import { assertPaneInspectionCaller, type PaneInspectionCaller } from './paneInspection';
+import { conversationCompletionCounter, readableCompletedTurns, readableTurnsFrom } from './conversationFeed';
 
-export function conversationCompletionCounter(workspaceId: string): number {
-  const row = getDb().prepare('SELECT value FROM meta WHERE key = ?')
-    .get(`conversation_completion_seq:${workspaceId}`) as { value: string } | undefined;
-  const value = row ? Number(row.value) : 0;
-  if (!Number.isSafeInteger(value) || value < 0) throw new ConversationUpdatesError('cursor_invalid', 'Invalid workspace counter');
-  return value;
-}
-
-// Archive has two representations: a status, or the trim engine's arch-* deletion group.
-// Both, Trash, purged nodes and archived trees are excluded. Keep stats/list on this predicate.
-const READABLE = `FROM turns t JOIN nodes n ON n.id = t.node_id
-  JOIN workspaces w ON w.id = n.workspace_id LEFT JOIN trees tr ON tr.id = n.tree_id
-  WHERE n.workspace_id = ? AND w.deleted_at IS NULL AND w.purged_at IS NULL
-    AND (? = 0 OR w.owner_user_id = ?) AND n.kind = 'chat' AND n.purged_at IS NULL
-    AND n.deleted_at IS NULL AND n.status <> 'archived' AND tr.archived_at IS NULL
-    AND t.status = 'completed' AND t.user_message_id IS NOT NULL
-    AND t.completion_seq > ? AND t.completion_seq <= ?`;
+export { conversationCompletionCounter, readableTurnsFrom };
 
 interface UpdateRow {
   completion_seq: number; turn_id: string; node_id: string; tree_id: string | null;
@@ -36,12 +21,37 @@ interface UpdateRow {
 
 interface TextRow { id: string; role: string; content: string; metadata: string | null; seq: number }
 
+type TurnBoundary = { nodeId: string; userMessageId: string; assistantMessageId: string };
+
+/** The seq range from a turn's user message to its reply on a live node; null when they no longer bound one turn. */
+export function turnMessageBounds(turn: TurnBoundary): { first: number; last: number } | null {
+  const bounds = getDb().prepare(`SELECT u.seq AS first, a.seq AS last FROM messages u JOIN messages a ON a.node_id = u.node_id
+    JOIN nodes n ON n.id = u.node_id
+    WHERE u.id = ? AND a.id = ? AND u.node_id = ? AND u.role = 'user' AND a.role = 'assistant'
+      AND n.deleted_at IS NULL AND n.purged_at IS NULL`)
+    .get(turn.userMessageId, turn.assistantMessageId, turn.nodeId) as { first: number; last: number } | undefined;
+  return bounds && bounds.first < bounds.last ? bounds : null;
+}
+
+/**
+ * A user or assistant row inside turnMessageBounds, with its metadata ({} when
+ * unreadable). Only the boundaries and input the user steered in mid-turn
+ * belong to the turn; null for anything else, which means the boundaries no
+ * longer identify one turn.
+ */
+export function parseTurnMessage(row: { id: string; role: string; metadata: string | null }, turn: TurnBoundary):
+  { metadata: Record<string, unknown> } | null {
+  let metadata: Record<string, unknown> = {};
+  try { metadata = row.metadata ? JSON.parse(row.metadata) : {}; } catch { /* legacy metadata */ }
+  if (!metadata || typeof metadata !== 'object' || Array.isArray(metadata)) metadata = {};
+  const boundary = row.id === turn.userMessageId || row.id === turn.assistantMessageId;
+  return boundary || (row.role === 'user' && metadata.steered === true) ? { metadata } : null;
+}
+
 function turnMessages(turn: ConversationUpdate): ConversationUpdateMessage[] | 'large' | 'missing' {
   const db = getDb();
-  const bounds = db.prepare(`SELECT u.seq AS first, a.seq AS last FROM messages u JOIN messages a ON a.node_id = u.node_id
-    WHERE u.id = ? AND a.id = ? AND u.node_id = ? AND u.role = 'user' AND a.role = 'assistant'`)
-    .get(turn.userMessageId, turn.assistantMessageId, turn.nodeId) as { first: number; last: number } | undefined;
-  if (!bounds || bounds.first >= bounds.last) return 'missing';
+  const bounds = turnMessageBounds(turn);
+  if (!bounds) return 'missing';
   // Check size before loading text, so a giant single input cannot allocate an unbounded body.
   const size = db.prepare(`SELECT SUM(length(CAST(content AS BLOB)) + COALESCE(length(CAST(metadata AS BLOB)), 0)) AS bytes
     FROM messages WHERE node_id = ? AND seq BETWEEN ? AND ? AND role IN ('user', 'assistant')`)
@@ -52,13 +62,9 @@ function turnMessages(turn: ConversationUpdate): ConversationUpdateMessage[] | '
     .all(turn.nodeId, bounds.first, bounds.last) as unknown as TextRow[];
   const messages: ConversationUpdateMessage[] = [];
   for (const row of rows) {
-    let metadata: Record<string, unknown> = {};
-    try { metadata = row.metadata ? JSON.parse(row.metadata) : {}; } catch { /* legacy metadata */ }
-    if (!metadata || typeof metadata !== 'object' || Array.isArray(metadata)) metadata = {};
-    const initial = row.id === turn.userMessageId;
-    const assistant = row.id === turn.assistantMessageId;
-    // Unexpected intervening input/reply means these boundaries cannot safely identify a turn.
-    if (!initial && !assistant && (row.role !== 'user' || metadata.steered !== true)) return 'missing';
+    const member = parseTurnMessage(row, turn);
+    if (!member) return 'missing';
+    const { metadata } = member;
     const safeMetadata: Record<string, unknown> = {};
     if (row.role === 'user') {
       for (const key of ['steered', 'quotedText', 'quoteSource', 'comments', 'attachments']) {
@@ -92,15 +98,15 @@ export function readConversationUpdates(caller: PaneInspectionCaller, raw: unkno
     if (input.after > through || through > current) {
       throw new ConversationUpdatesError('cursor_invalid', 'Expected after <= through <= current workspace counter');
     }
-    const args = [caller.workspaceId, cloud ? 1 : 0, caller.ownerUserId, input.after, through];
+    const { from, args } = readableCompletedTurns({ workspaceId: caller.workspaceId, ownerUserId: caller.ownerUserId, after: input.after, through });
     const db = getDb();
-    const byNode = db.prepare(`SELECT n.id AS nodeId, n.tree_id AS treeId, COUNT(*) AS newTurnCount ${READABLE} GROUP BY n.id ORDER BY n.id`)
+    const byNode = db.prepare(`SELECT n.id AS nodeId, n.tree_id AS treeId, COUNT(*) AS newTurnCount ${from} GROUP BY n.id ORDER BY n.id`)
       .all(...args) as unknown as ConversationUpdates['byNode'];
     const totalTurns = byNode.reduce((sum, node) => sum + node.newTurnCount, 0);
     const rows = db.prepare(`SELECT t.completion_seq, t.turn_id, t.node_id, n.tree_id, t.user_message_id,
       t.assistant_message_id, t.completed_at,
       COALESCE((SELECT substr(m.content, 1, 280) FROM messages m WHERE m.id = t.assistant_message_id AND m.node_id = n.id), '') AS preview
-      ${READABLE} ORDER BY t.completion_seq LIMIT ?`).all(...args, input.limit) as unknown as UpdateRow[];
+      ${from} ORDER BY t.completion_seq LIMIT ?`).all(...args, input.limit) as unknown as UpdateRow[];
     const turns: ConversationUpdate[] = [];
     let bytes = 0;
     let delivered = 0;

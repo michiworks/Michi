@@ -153,11 +153,6 @@ export function fakeMcpRegistry(
       return httpEndpoint(`${baseUrl()}/mcp-session/${groupId}`);
     },
 
-    hookEndpoint(slotId: string, hook: 'stop'): string {
-      if (hook !== 'stop') throw new Error(`Unknown MCP slot hook: ${String(hook)}`);
-      return `${baseUrl()}/codex-hooks/${slotId}/stop`;
-    },
-
     rebind(slotId: string, patch: McpSlotRebindPatch): void {
       const slot = slots.get(slotId);
       if (!slot) return;

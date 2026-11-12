@@ -12,6 +12,20 @@ describe('ensureSession', () => {
     expect(JSON.parse(String(fetchMock.mock.calls[0][1].body))).toMatchObject({ reasoning: null });
   });
 
+  it('sends the pinned manifest with the artifact count, and no count for a workspace without artifacts', async () => {
+    const fetchMock = vi.fn().mockImplementation(async () => new Response(JSON.stringify({
+      chatId: 'n1', currentModeId: null, resumeStrategy: 'fresh',
+    }), { status: 200 }));
+    vi.stubGlobal('fetch', fetchMock);
+    const contextManifest = [{ name: 'spec', filePath: '.contexts/spec.md' }];
+    await ensureSession({ nodeId: 'n1', contextManifest, artifactCount: 120 });
+    await ensureSession({ nodeId: 'n1', artifactCount: 0 });
+    const [withArtifacts, without] = fetchMock.mock.calls.map((call) => JSON.parse(String(call[1].body)));
+    expect(withArtifacts).toMatchObject({ contextManifest, artifactCount: 120 });
+    expect('artifactCount' in without).toBe(false);
+    expect('contextManifest' in without).toBe(false);
+  });
+
   afterEach(() => {
     vi.unstubAllGlobals();
   });
@@ -215,6 +229,31 @@ it('keeps a lost POST response outcome unknown with its original turn identity a
   } finally { vi.unstubAllGlobals(); }
 });
 
+it.each([502, 504])('keeps a POST answered %i by a gateway outcome unknown and never resends', async (status) => {
+  // The desktop proxy answers 502 when the remote's reply is lost; the write may have reached it.
+  const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({ error: 'Remote backend unavailable: socket hang up', code: 'remote_starting' }), { status }));
+  vi.stubGlobal('fetch', fetchMock);
+  const onErrorPayload = vi.fn();
+  streamMessage('gateway-chat', 'perform side effect', { onErrorPayload }, { turnId: 'gateway-original' });
+  try {
+    await vi.waitFor(() => expect(onErrorPayload).toHaveBeenCalledOnce());
+    expect(onErrorPayload).toHaveBeenCalledWith(expect.objectContaining({
+      message: 'Remote backend unavailable: socket hang up', code: 'turn_outcome_unknown', turnId: 'gateway-original',
+    }));
+    expect(fetchMock).toHaveBeenCalledOnce();
+  } finally { vi.unstubAllGlobals(); }
+});
+
+it('keeps the code of a send the backend refused before the turn began', async () => {
+  vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(JSON.stringify({ error: 'Session changed', code: 'turn_begin_failed' }), { status: 409 })));
+  const onErrorPayload = vi.fn();
+  streamMessage('refused-chat', 'hi', { onErrorPayload }, { turnId: 'refused-original' });
+  try {
+    await vi.waitFor(() => expect(onErrorPayload).toHaveBeenCalledOnce());
+    expect(onErrorPayload).toHaveBeenCalledWith(expect.objectContaining({ code: 'turn_begin_failed', turnId: 'refused-original' }));
+  } finally { vi.unstubAllGlobals(); }
+});
+
 it('keeps an externally aborted POST outcome unknown while an explicit user cancel stays aborted', async () => {
   const externalError = vi.fn();
   const externalAborted = vi.fn();
@@ -299,6 +338,18 @@ describe('foreground resume after the live replay is gone', () => {
       expect(onErrorPayload).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ code: 'turn_replay_unavailable' }));
       expect(onSavedTurn).not.toHaveBeenCalled();
     } finally { stop(); vi.useRealTimers(); }
+  });
+
+  it('ends a reattach refused because the background feed owns it as an unknown outcome, which Retry inspects', async () => {
+    const fetchMock = vi.fn().mockResolvedValueOnce(partial()).mockResolvedValueOnce(gone('turn_background_owned'));
+    vi.stubGlobal('fetch', fetchMock);
+    const onErrorPayload = vi.fn();
+    const stop = streamMessage('gone-node', 'hi', { onSavedTurn: vi.fn(() => true), onErrorPayload }, { turnId: 'gone-turn' });
+    try {
+      await vi.waitFor(() => expect(onErrorPayload).toHaveBeenCalledOnce());
+      expect(onErrorPayload).toHaveBeenCalledWith(expect.objectContaining({ code: 'turn_outcome_unknown', turnId: 'gone-turn' }));
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+    } finally { stop(); }
   });
 
   it('does not read the saved turn for other replay failures', async () => {

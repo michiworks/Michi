@@ -50,8 +50,8 @@ test('Scheduled detail participates in back/forward history and has a direct rou
   await boot(page);
   await openArea(page, 'scheduled');
   const list = page.getByRole('heading', { level: 1, name: 'Scheduled', exact: true });
-  const detail = page.getByRole('heading', { level: 1, name: 'Meta agent · Maintain Pages', exact: true });
-  const systemRow = page.locator('.scheduled-side').getByRole('button', { name: 'Meta agent · maintain Pages System', exact: true });
+  const detail = page.getByRole('heading', { level: 1, name: 'Michi · Pages upkeep', exact: true });
+  const systemRow = page.locator('.scheduled-side').getByRole('button', { name: 'Michi · Pages upkeep System', exact: true });
   const back = page.getByRole('button', { name: 'Navigate back', exact: true });
   const forward = page.getByRole('button', { name: 'Navigate forward', exact: true });
   await expect(list).toBeVisible();

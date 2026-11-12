@@ -1,11 +1,13 @@
 import React from 'react';
-import type { MetaAgentResolvedRuntime, ScheduledJobDto } from 'michi-shared';
+import type { ScheduledJobDto } from 'michi-shared';
 import { LOCAL_BACKEND_CONNECTION_ID } from '../../../config/backendConnections';
 import { usePageMaintenance } from '../../../state/pages/usePageMaintenance';
 import type { PageMaintenanceIdentity, PageMaintenanceWorkspace } from '../../../services/api/pageMaintenance';
 import { requestMetaAgentSettings } from '../scheduled/metaAgent/metaAgentNav';
-import { metaAgentRuntimeLabel } from '../settings/metaAgent/runtimeCopy';
+import { metaAgentResolvedText } from '../settings/metaAgent/runtimeCopy';
+import { formatMichiClock } from '../content/michiFormat';
 import { MaintenanceWatches } from './MaintenanceWatches';
+import { useCompanionName } from '../../../state/companion/companionName';
 
 export function MaintenanceEnrollmentCheckbox({ checked, onChange, disabled = false }: {
   checked: boolean;
@@ -38,17 +40,18 @@ function lastRunLabel(value: PageMaintenanceWorkspace | null): string | null {
   const run = value?.status?.lastRun;
   if (run) {
     const status = run.status.replaceAll('_', ' ');
-    return `Last run ${status}${run.finishedAt ? ` · ${new Date(run.finishedAt).toLocaleString()}` : ` · started ${new Date(run.startedAt).toLocaleString()}`}`;
+    return `Last run ${status}${run.finishedAt ? ` · ${formatMichiClock(run.finishedAt)}` : ` · started ${formatMichiClock(run.startedAt)}`}`;
   }
   if (typeof job?.lastRunAt === 'number') {
     const status = job.lastStatus ? job.lastStatus.replaceAll('_', ' ') : 'started';
-    return `Last run ${status} · ${new Date(job.lastRunAt).toLocaleString()}`;
+    return `Last run ${status} · ${formatMichiClock(job.lastRunAt)}`;
   }
   return null;
 }
 
 export function MaintenanceStatus({ backendConnectionId, workspaceId, pendingProposals = 0, spaceId, spaceTitle, onOpenJob }: MaintenanceStatusProps) {
   const maintenance = usePageMaintenance({ backendConnectionId, workspaceId });
+  const name = useCompanionName();
   const { value, loading, busy } = maintenance;
   const config = value?.config ?? null;
   const job = jobInfo(value);
@@ -76,8 +79,8 @@ export function MaintenanceStatus({ backendConnectionId, workspaceId, pendingPro
       ? (typeof job?.lastError === 'string' && job.lastError ? job.lastError : 'The last scheduled check did not finish successfully.')
       : updating
         ? checkingWatch
-          ? `The Meta agent is running the watch “${checkingWatch.title}”.`
-          : 'The Meta agent is reading completed conversations and updating the workspace’s pages.'
+          ? `${name} is running the watch “${checkingWatch.title}”.`
+          : `${name} is reading completed conversations and updating the workspace’s pages.`
         : notConfigured
           ? 'Enable updates to use new conversations in this workspace. Older conversations are not read automatically.'
           : paused
@@ -126,10 +129,10 @@ export function MaintenanceStatus({ backendConnectionId, workspaceId, pendingPro
       </div>
 
       <p style={{ margin: '12px 0 0', color: 'var(--term-muted)', fontSize: 'var(--fs-xs)' }}>
-        Runs on the Meta agent{value?.runtime ? `: ${runtimeLine(value.runtime)}` : ''}.{' '}
+        Runs on Pages upkeep’s runtime{value?.runtime ? `: ${metaAgentResolvedText(value.runtime)}` : ''}.{' '}
         {backendConnectionId === LOCAL_BACKEND_CONNECTION_ID
-          ? <button type="button" onClick={requestMetaAgentSettings}>Change in Settings › Meta agent</button>
-          : 'It is set in Settings › Meta agent on that machine.'}
+          ? <button type="button" onClick={requestMetaAgentSettings}>Change in Settings › {name} › Pages upkeep</button>
+          : 'It is set in Pages upkeep’s settings on that machine.'}
       </p>
 
       {spaceId && <div style={{ borderTop: '1px solid var(--term-line)', marginTop: 12, paddingTop: 10 }}>
@@ -153,10 +156,10 @@ export function MaintenanceStatus({ backendConnectionId, workspaceId, pendingPro
           </p>
           {(value?.catchUpSuggestions ?? []).filter((suggestion) => suggestion.spaceId === spaceId && suggestion.availablePositions > 0).map((suggestion) => <div key={suggestion.periodId} style={{ paddingTop: 8, marginTop: 8, borderTop: '1px solid var(--term-line)' }}>
             <p style={{ margin: '0 0 6px', color: 'var(--term-muted)', fontSize: 'var(--fs-xs)' }}>
-              Excluded {new Date(suggestion.excludedAt).toLocaleString()} · re-enabled {new Date(suggestion.reenabledAt).toLocaleString()}. Queue completion positions {suggestion.after + 1}–{suggestion.through} ({suggestion.availablePositions} available, up to {suggestion.maxPositions} per request).
+              Excluded {formatMichiClock(suggestion.excludedAt)} · re-enabled {formatMichiClock(suggestion.reenabledAt)}. Queue completion positions {suggestion.after + 1}–{suggestion.through} ({suggestion.availablePositions} available, up to {suggestion.maxPositions} per request).
             </p>
             {suggestion.latestSources.length > 0 && <ul style={{ margin: '0 0 7px', paddingLeft: 18, color: 'var(--term-muted)', fontSize: 'var(--fs-xs)' }}>
-              {suggestion.latestSources.map((source) => <li key={source.turnId}>{new Date(source.completedAt).toLocaleString()} · {source.preview || `Completion position ${source.completionSeq}`}</li>)}
+              {suggestion.latestSources.map((source) => <li key={source.turnId}>{formatMichiClock(source.completedAt)} · {source.preview || `Completion position ${source.completionSeq}`}</li>)}
               {suggestion.sourceCount > suggestion.latestSources.length && <li>and {suggestion.sourceCount - suggestion.latestSources.length} more conversation {suggestion.sourceCount - suggestion.latestSources.length === 1 ? 'turn' : 'turns'}</li>}
             </ul>}
             <button type="button" disabled={busy || updating} onClick={(event) => {
@@ -170,7 +173,7 @@ export function MaintenanceStatus({ backendConnectionId, workspaceId, pendingPro
         </div>}
       </div>}
       <MaintenanceWatches maintenance={maintenance} />
-      {maintenance.error && <p role="alert" style={{ marginBottom: 0, color: 'var(--term-danger)' }}>{maintenance.error}<button type="button" onClick={maintenance.refresh}>Retry</button></p>}
+      {maintenance.error && <p role="alert" style={{ marginBottom: 0, color: 'var(--term-danger-text)' }}>{maintenance.error}<button type="button" onClick={maintenance.refresh}>Retry</button></p>}
       {value?.backlog.plans.filter((plan) => plan.state === 'attention').map((plan) => {
         const sources = plan.sources.filter((source) => source.state === 'attention');
         return <div key={plan.id} style={{ marginTop: 10, paddingTop: 9, borderTop: '1px solid var(--term-line)' }}>
@@ -184,11 +187,3 @@ export function MaintenanceStatus({ backendConnectionId, workspaceId, pendingPro
     </section>
   );
 }
-
-/** "Claude · claude-opus-5.5 (follows global)". */
-function runtimeLine(runtime: MetaAgentResolvedRuntime): string {
-  const parts = [metaAgentRuntimeLabel(runtime.runtimeId), runtime.modelId].filter(Boolean).join(' · ');
-  return `${parts} (${runtime.followsGlobal ? 'follows global' : 'custom'})`;
-}
-
-export default MaintenanceStatus;

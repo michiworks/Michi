@@ -1,7 +1,7 @@
 import { resolveAtMentions, resolveAtNodeMentions, buildNodeTranscriptBlock, stripNodeMentionTokens, rewriteNodeMentionsForDisplay } from './contextBudget';
 import type { ChatNodeState, ArtifactEntry } from './chatTypes';
 import { backendEntityId } from '../config/backendIdentity';
-import { expandMentions, type MentionRecord } from '../components/mentions';
+import { expandMentions, type MentionRecord } from '../lib/mentions';
 
 const mkCtx = (id: string, name: string, filePath: string, size?: number): ArtifactEntry => ({
     id, name, filePath, size, source: 'user', createdAt: 1000, updatedAt: 1000,

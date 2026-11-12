@@ -3,6 +3,29 @@ import { permissionSourceLabel } from 'michi-shared';
 import type { PermissionRequest } from '../../state/chatTypes';
 import { Button } from '../ui/controls';
 
+/** How a choice reads by its kind: the runtime's own names vary, so its prompts read the same everywhere. */
+const KIND_LABEL: Record<string, string> = {
+  reject_once: 'Deny',
+  reject_always: 'Never allow',
+  allow_once: 'Allow Once',
+  allow_always: 'Trust this tool',
+  allow_session: 'Trust all tools for this session',
+};
+
+/**
+ * The button's words. Michi's own prompts (source michi_policy: Pi's tool
+ * approvals and the single-use questions it asks, like a follow-up's "Don't
+ * send / Send / Send, and stop asking for this conversation") name each
+ * answer, so their name shows; a name that is only the kind's label in
+ * other case keeps the label. A runtime's prompts read by kind.
+ */
+function optionLabel(permission: PermissionRequest, option: PermissionRequest['options'][number]): string {
+  const label = KIND_LABEL[option.kind] ?? option.name;
+  if (permission.source !== 'michi_policy') return label;
+  const name = typeof option.name === 'string' ? option.name.trim() : '';
+  return name && name.toLowerCase() !== label.toLowerCase() ? name : label;
+}
+
 interface PermissionBannerProps {
   permission: PermissionRequest;
   onRespond: (optionId: string) => void;
@@ -96,14 +119,12 @@ export default function PermissionBanner({ permission, onRespond, readOnly = fal
               disabled={o.disabled}
               onClick={() => onRespond(o.optionId)}
             >
-              {o.kind === 'reject_once' ? 'Deny' : 'Never allow'}
+              {optionLabel(permission, o)}
             </Button>
           ))}
         </div>
         <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
           {allowOptions.map((o) => {
-            const isAlways = o.kind === 'allow_always';
-            const isOnce = o.kind === 'allow_once';
             return (
               <Button
                 key={o.optionId}
@@ -113,7 +134,7 @@ export default function PermissionBanner({ permission, onRespond, readOnly = fal
                 title={o.disabled ? 'The runtime did not provide a stable tool name. Allow this request once or trust this session.' : undefined}
                 onClick={() => onRespond(o.optionId)}
               >
-                {isAlways ? 'Trust this tool' : isOnce ? 'Allow Once' : 'Trust all tools for this session'}
+                {optionLabel(permission, o)}
               </Button>
             );
           })}

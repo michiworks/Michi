@@ -1,4 +1,4 @@
-import { app, BrowserWindow, ipcMain, Notification as ElectronNotification } from 'electron';
+import { app, BrowserWindow, Notification as ElectronNotification } from 'electron';
 import { spawn, execFile } from 'child_process';
 import { promisify } from 'util';
 import * as fs from 'fs';
@@ -398,20 +398,6 @@ export function initAutoUpdate(opts: {
 }): void {
   sendToWindows = opts.sendToWindows;
   state.currentVersion = currentVersionInfo().version;
-
-  ipcMain.handle('app:getUpdateState', () => getUpdateState());
-  ipcMain.handle('app:checkForUpdate', async () => {
-    await checkForUpdate();
-    return getUpdateState();
-  });
-  ipcMain.handle('app:downloadUpdate', async () => {
-    await downloadUpdate();
-    return getUpdateState();
-  });
-  ipcMain.handle('app:installUpdate', async () => {
-    await installUpdate();
-    return getUpdateState();
-  });
 
   if (opts.isDev || !opts.isPackaged) {
     elog('INFO', 'disabled in unpackaged/dev session');

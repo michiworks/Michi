@@ -1,6 +1,6 @@
 import { useEffect, useId, useRef, useState } from 'react';
 import { useIsPresent } from 'motion/react';
-import { redactRemoteLog, type RemoteConnectionDiagnostic } from 'michi-shared';
+import { randomUuid, redactRemoteLog, type RemoteConnectionDiagnostic } from 'michi-shared';
 import { connectRemoteDesktop } from '../services/api/backendConnections';
 import type { BackendConnectionSummary } from '../config/backendConnections';
 import { RemoteDiagnostics } from './RemoteDiagnostics';
@@ -8,6 +8,7 @@ import { RemoteRuntimeSummary } from './RemoteRuntimeSummary';
 import { Button } from './ui/controls';
 import './RemoteConnection.css';
 import { authenticationTargetForHost, requestRemoteAuthentication } from '../state/remoteAuthentication';
+import { isImeComposing } from '../lib/ime';
 
 export function RemoteDesktopConnect({ onConnected }: {
   onConnected: (connection: BackendConnectionSummary, home: string, warnings: string[], runtimes: string[], diagnostic?: RemoteConnectionDiagnostic) => void;
@@ -58,7 +59,7 @@ export function RemoteDesktopConnect({ onConnected }: {
         setWarnings(result.runtimeWarnings ?? []);
         const warnings = result.runtimeWarnings ?? [];
         const report = warnings.length ? result.diagnostic ?? {
-          id: 'client-' + crypto.randomUUID(), host, startedAt: new Date().toISOString(), stage: 'runtime',
+          id: 'client-' + randomUuid(), host, startedAt: new Date().toISOString(), stage: 'runtime',
           severity: 'warning' as const, code: 'runtime_warning', message: redactRemoteLog(warnings.join(' ')),
           log: redactRemoteLog('Machine connected. Runtime warnings:\n' + warnings.join('\n')), truncated: false,
         } : undefined;
@@ -72,7 +73,7 @@ export function RemoteDesktopConnect({ onConnected }: {
         setError(message); setMessage('');
         const report = (failure as { diagnostic?: RemoteConnectionDiagnostic })?.diagnostic;
         if (report?.code === 'ssh_auth') requestRemoteAuthentication({ key: `connect:${host}:local`, target: report.authentication ?? authenticationTargetForHost(host), onComplete: () => { void connect(install); } });
-        setDiagnostic(report ?? { id: 'client-' + crypto.randomUUID(), host, startedAt: new Date().toISOString(), stage: stage.current, code: 'connection_failed', message, log: message, truncated: false });
+        setDiagnostic(report ?? { id: 'client-' + randomUuid(), host, startedAt: new Date().toISOString(), stage: stage.current, code: 'connection_failed', message, log: message, truncated: false });
       }
     } finally { if (!controller.signal.aborted) setBusy(false); }
   };
@@ -84,7 +85,7 @@ export function RemoteDesktopConnect({ onConnected }: {
         spellCheck={false} autoCapitalize="none" autoCorrect="off" aria-describedby={`${hostHintId}${error ? ` ${errorId}` : ''}`}
         aria-invalid={error ? true : undefined}
         onChange={event => { setHost(event.target.value); setDiagnostic(null); setInstallHost(null); setMessage(''); setError(''); setWarnings([]); setRuntimes(null); }}
-        onKeyDown={event => { if (event.key === 'Enter' && !event.nativeEvent.isComposing) { event.preventDefault(); void connect(false); } }} />
+        onKeyDown={event => { if (event.key === 'Enter' && !isImeComposing(event)) { event.preventDefault(); void connect(false); } }} />
       <Button variant="primary" disabled={busy || sendingDiagnostic || !host.trim()} onClick={() => { void connect(false); }}>{busy ? 'Connecting…' : 'Connect'}</Button>
     </div>
     <p id={hostHintId} className="remote-connect__hint">Use the same host you connect to in Terminal.</p>

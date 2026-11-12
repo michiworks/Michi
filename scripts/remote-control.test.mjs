@@ -6,6 +6,7 @@ import test from 'node:test';
 import {
   compareVersions,
   healthHostForBind,
+  nodeGypEnvironment,
   parseArgs,
   parseEnvironmentFile,
   renderEnvironmentFile,
@@ -104,4 +105,14 @@ test('package exposes the one-command remote lifecycle scripts', () => {
   assert.equal(rootPackage.scripts['remote:stop'], 'node scripts/remote-control.mjs stop');
   assert.equal(rootPackage.scripts['remote:restart'], 'node scripts/remote-control.mjs restart');
   assert.equal(rootPackage.scripts['remote:service:remove'], 'node scripts/remote-control.mjs remove-service');
+});
+
+test('remote setup points node-gyp at a Python it accepts', () => {
+  const env = { PATH: '/usr/bin:/opt/py/bin' };
+  const found = (name) => (name === 'python3.12' ? '/opt/py/bin/python3.12' : null);
+  assert.equal(nodeGypEnvironment(env, () => false, found).npm_config_python, '/opt/py/bin/python3.12');
+  // A usable default, an explicit choice, or no newer Python leaves npm alone.
+  assert.equal(nodeGypEnvironment(env, () => true, found), env);
+  assert.equal(nodeGypEnvironment({ ...env, npm_config_python: '/x' }, () => false, found).npm_config_python, '/x');
+  assert.equal(nodeGypEnvironment(env, () => false, () => null), env);
 });

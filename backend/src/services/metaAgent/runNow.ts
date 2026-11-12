@@ -22,7 +22,7 @@ export function runMetaAgentRoundNow(input: { scheduler: ScheduledJobScheduler; 
   const workspaces = listMaintenanceConfigs(ownerUserId).map((config): MetaAgentRunNowWorkspace => {
     const base = { workspaceId: config.workspace_id, workspaceName: config.workspace_name, cursor: config.completion_cursor, unread: unread(config) };
     const skipped = (skip: MetaAgentRunNowSkip, reason: string): MetaAgentRunNowWorkspace => ({ ...base, outcome: 'skipped', skip, reason });
-    if (!availability.available) return skipped('unsupported_runtime', availability.reason ?? `The Meta agent cannot run on ${runtime.runtimeId}`);
+    if (!availability.available) return skipped('unsupported_runtime', availability.reason ?? `Pages upkeep cannot run on ${runtime.runtimeId}`);
     if (guard?.state === 'failed') return skipped('guard_hold', metaAgentGuardStatusMessage(guard));
     if (maintenanceCoordinatorState(ownerUserId).paused || config.paused === 1) return skipped('paused', 'Maintenance is paused in this workspace');
     if (config.auto_paused === 1) return skipped('stopped', config.last_error ? `Stopped after repeated failures: ${config.last_error}` : 'Stopped after repeated failures');

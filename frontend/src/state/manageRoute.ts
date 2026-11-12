@@ -49,15 +49,14 @@ export function setManageAgentRoute(route: ManageAgentRoute | null): void {
   emit();
 }
 
-export function getManageAgentRoute(): ManageAgentRoute | null {
-  return manageAgentRoute;
-}
-
 export function useManageAgentRoute(): ManageAgentRoute | null {
   return useSyncExternalStore(subscribe, () => manageAgentRoute, () => manageAgentRoute);
 }
 
-/** Test-only reset; do not call from app code. */
+/**
+ * Test-only reset; do not call from app code.
+ * @testonly
+ */
 export function _resetForTest(): void {
   manageWorkspaceId = null;
   manageAgentRoute = null;

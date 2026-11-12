@@ -12,6 +12,7 @@ export const MIN_TESTED_ANTIGRAVITY_VERSION = "1.1.1";
 
 let cachedBinary: string | null = null;
 
+/** @testonly */
 export function resetAntigravityBinaryCacheForTest(): void {
   cachedBinary = null;
 }

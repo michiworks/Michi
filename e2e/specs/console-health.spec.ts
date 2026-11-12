@@ -1,6 +1,6 @@
 import { expect, test } from '@playwright/test';
 import { bootWithWorkspace, installMockApi } from '../fixtures/mockApi';
-import { leaveSettings, openSettings } from '../fixtures/shell';
+import { composerEditor, leaveSettings, openSettings } from '../fixtures/shell';
 
 test('local boot, fonts, drawers and optional pages do not produce console errors', async ({ page }, info) => {
   const issues: string[] = [];
@@ -30,7 +30,7 @@ test('local boot, fonts, drawers and optional pages do not produce console error
 
   const settings = await openSettings(page);
   await expect(settings).toBeVisible();
-  for (const name of ['Appearance', 'Runtime & model', 'Machines', 'Meta agent', 'Notifications', 'Backup & restore', 'Keyboard shortcuts'] as const) {
+  for (const name of ['Appearance', 'Runtime & model', 'Machines', 'Michi', 'Notifications', 'Backup & restore', 'Keyboard shortcuts'] as const) {
     await openSettings(page, name);
     await expect(settings.getByRole('heading', { level: 1, name, exact: true })).toBeVisible();
   }
@@ -38,6 +38,10 @@ test('local boot, fonts, drawers and optional pages do not produce console error
   await leaveSettings(page);
   await expect(settings).toHaveCount(0);
 
+  // The topbar offers Artifacts once a conversation is on screen, not on Home.
+  await composerEditor(page).fill('Start a conversation');
+  await page.getByRole('button', { name: 'Send (Enter)', exact: true }).click();
+  await expect(page.getByText('Hello from mock kiro.').first()).toBeVisible();
   const trigger = page.getByRole('button', { name: 'Artifacts', exact: true });
   const artifacts = page.getByRole('dialog', { name: 'Artifacts', exact: true });
   await trigger.click();
@@ -62,7 +66,7 @@ test('local boot, fonts, drawers and optional pages do not produce console error
   expect(requests.filter(path => /^\/api\/(?:auth\/|agents(?:\/|$)|agent-runs(?:\/|$))/.test(path))).toEqual([]);
 
   await page.setViewportSize({ width: 390, height: 844 });
-  // Home focuses its composer again, and shortcuts typed into it are text.
+  // The pane focuses its composer again, and shortcuts typed into it are text.
   await page.evaluate(() => (document.activeElement as HTMLElement | null)?.blur());
   await page.keyboard.press('ControlOrMeta+,');
   await expect(settings).toBeVisible();

@@ -1,9 +1,9 @@
-import React from 'react';
 import { fireEvent, render, screen } from '@testing-library/react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { MaintenanceWatch } from 'michi-shared';
 import type { PageMaintenanceState } from '../../../state/pages/usePageMaintenance';
 import { MaintenanceWatches } from './MaintenanceWatches';
+import { useZhCnDefaultLocale } from '../../../test/zhCnLocale';
 
 const CONFIG = { workspaceId: 'w1', ownerUserId: 'u1', jobId: 'j1', enabled: true, paused: false, revision: 2, completionCursor: 0,
   runtimeId: null, providerId: null, modelId: null, reasoning: null, updatedAt: 1 };
@@ -30,6 +30,14 @@ function state(watches: MaintenanceWatch[] | undefined, instructions: string | n
 
 describe('MaintenanceWatches', () => {
   beforeEach(() => { vi.restoreAllMocks(); });
+
+  it('writes check times in English whatever the browser locale', () => {
+    useZhCnDefaultLocale();
+    const at = new Date(2099, 0, 1, 10, 5).getTime();
+    render(<MaintenanceWatches maintenance={state([watch({ nextCheckAt: at, lastRun: { state: 'succeeded', startedAt: at - 60_000, finishedAt: new Date(2026, 9, 31, 14, 30).getTime(), summary: null, error: null } })])} />);
+    expect(screen.getByText('Last check Oct 31, 14:30')).toBeTruthy();
+    expect(screen.getByText('Next check Jan 1, 10:05')).toBeTruthy();
+  });
 
   it('shows nothing for a backend that sends no watches', () => {
     const { container } = render(<MaintenanceWatches maintenance={state(undefined)} />);

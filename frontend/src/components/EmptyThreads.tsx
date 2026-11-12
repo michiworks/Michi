@@ -1,4 +1,3 @@
-import React from 'react';
 import { kbd } from '../lib/platform';
 
 export default function EmptyThreads() {

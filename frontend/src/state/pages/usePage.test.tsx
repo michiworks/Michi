@@ -10,6 +10,7 @@ const api = vi.hoisted(() => ({
   fetchPage: vi.fn(),
   fetchPageActivitySeen: vi.fn(),
   listPageChanges: vi.fn(),
+  revertPageBatch: vi.fn(),
 }));
 
 vi.mock('../../services/api/pages', async (importOriginal) => ({
@@ -35,6 +36,29 @@ describe('usePage activity acknowledgement', () => {
       await act(async () => result.current.accept('schema-change'));
       expect(refreshed).toHaveBeenCalledWith({ ...identity, databaseId: 'db-target' });
       expect(unrelated).not.toHaveBeenCalled();
+    } finally { stop(); stopOther(); }
+  });
+
+  it('says when Undo all left some of a batch, and refreshes the databases the batch changed', async () => {
+    const identity = { backendConnectionId: 'local', workspaceId: 'undo-all', pageId: 'undo-all-page' };
+    api.fetchPage.mockReset().mockResolvedValue({ id: identity.pageId, workspaceId: identity.workspaceId, revision: 1, viewVersion: 1, blocks: [] });
+    api.listPageChanges.mockResolvedValue({ changes: [
+      { id: 'c1', seq: 1, batchId: 'b1', target: { kind: 'block', pageId: identity.pageId, blockId: 'x' } },
+      { id: 'c2', seq: 2, batchId: 'b1', target: { kind: 'row', databaseId: 'db-ref', rowId: 'r' } },
+      { id: 'c3', seq: 3, batchId: 'b2', target: { kind: 'row', databaseId: 'db-other', rowId: 'r' } },
+    ], nextAfter: 3, nextBefore: null, hasMore: false });
+    api.fetchPageActivitySeen.mockResolvedValue({ lastSeenChangeSeq: 0 });
+    api.revertPageBatch.mockResolvedValue({ reverted: ['c1'], conflicts: [{ changeId: 'c2', message: 'stale' }] });
+    const { result } = renderHook(() => usePage(identity));
+    await waitFor(() => expect(result.current.changes).toHaveLength(3));
+    const refreshed = vi.fn(), unrelated = vi.fn();
+    const stop = subscribePageChanges({ backendConnectionId: 'local', workspaceId: identity.workspaceId, databaseId: 'db-ref' }, refreshed);
+    const stopOther = subscribePageChanges({ backendConnectionId: 'local', workspaceId: identity.workspaceId, databaseId: 'db-other' }, unrelated);
+    try {
+      await act(async () => result.current.revertBatch('b1'));
+      expect(refreshed).toHaveBeenCalledWith({ ...identity, databaseId: 'db-ref' });
+      expect(unrelated).not.toHaveBeenCalled();
+      expect(result.current.error).toBe('Not all of it was undone: some of it changed again since.');
     } finally { stop(); stopOther(); }
   });
 
@@ -255,5 +279,62 @@ describe('usePage activity acknowledgement', () => {
     act(() => result.current.refresh());
     await waitFor(() => expect(result.current.stale).toBe(true));
     await expect(result.current.edit([])).rejects.toThrow('Page is not ready for editing');
+  });
+});
+
+describe('usePage apply', () => {
+  const ready = async (pageId: string) => {
+    const page = { id: pageId, workspaceId: `ws-${pageId}`, revision: 3, viewVersion: 3, blocks: [] };
+    api.fetchPage.mockReset().mockResolvedValue(page);
+    api.listPageChanges.mockResolvedValue({ changes: [], nextAfter: 0, nextBefore: null, hasMore: false });
+    api.fetchPageActivitySeen.mockResolvedValue({ lastSeenChangeSeq: 0 });
+    const hook = renderHook(() => usePage({ backendConnectionId: 'local', workspaceId: page.workspaceId, pageId }));
+    await waitFor(() => expect(hook.result.current.status).toBe('ready'));
+    api.fetchPage.mockClear();
+    return hook;
+  };
+
+  it('saves at the current revision', async () => {
+    const { result } = await ready('apply-ok');
+    api.editPage.mockResolvedValue({ page: { id: 'apply-ok', workspaceId: 'ws-apply-ok', revision: 4, viewVersion: 4, blocks: [] } });
+    let answer: unknown;
+    await act(async () => { answer = await result.current.apply([], 3); });
+    expect(answer).toBe('ok');
+    expect(api.editPage).toHaveBeenCalledWith('apply-ok', { revision: 3, ops: [] }, { backendConnectionId: 'local', workspaceId: 'ws-apply-ok' });
+  });
+
+  it('reads the page once on a 409 and calls it stale', async () => {
+    const { result } = await ready('apply-409');
+    api.editPage.mockRejectedValue(Object.assign(new Error('Page revision changed'), { status: 409 }));
+    let answer: unknown;
+    await act(async () => { answer = await result.current.apply([], 3); });
+    expect(answer).toBe('stale');
+    expect(api.fetchPage).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([404, 410])('calls a %i gone without reading the page again', async (status) => {
+    const { result } = await ready(`apply-${status}`);
+    api.editPage.mockRejectedValue(Object.assign(new Error('Page not found'), { status }));
+    let answer: unknown;
+    await act(async () => { answer = await result.current.apply([], 3); });
+    expect(answer).toBe('gone');
+    expect(api.fetchPage).not.toHaveBeenCalled();
+  });
+
+  it('calls any other refusal failed', async () => {
+    const { result } = await ready('apply-500');
+    api.editPage.mockRejectedValue(Object.assign(new Error('boom'), { status: 500 }));
+    let answer: unknown;
+    await act(async () => { answer = await result.current.apply([], 3); });
+    expect(answer).toBe('failed');
+  });
+
+  it('calls an edit made against an older revision stale without sending it', async () => {
+    const { result } = await ready('apply-old');
+    let answer: unknown;
+    await act(async () => { answer = await result.current.apply([], 2); });
+    expect(answer).toBe('stale');
+    expect(api.editPage).not.toHaveBeenCalled();
+    expect(api.fetchPage).toHaveBeenCalledTimes(1);
   });
 });

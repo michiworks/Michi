@@ -14,7 +14,7 @@ function bindingPath(directory: string, session: string): string {
 export function validateMichiEndpoint(value: unknown): string {
     if (typeof value !== 'string') throw new Error('Missing Michi MCP endpoint');
     const url = new URL(value);
-    if (url.protocol !== 'http:' || url.hostname !== '127.0.0.1' || !url.port
+    if (url.protocol !== 'http:' || !['127.0.0.1', '[::1]'].includes(url.hostname) || !url.port
         || url.username || url.password || url.search || url.hash
         || !/^\/api\/mcp\/[a-zA-Z0-9_-]+$/.test(url.pathname)) {
         throw new Error('Invalid Michi MCP endpoint');

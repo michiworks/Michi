@@ -136,7 +136,8 @@ for (const runtimeId of ["kiro", "crew"] as const) {
             const r = rig(t, runtimeId);
             await r.open();
             r.feed({ jsonrpc: "2.0", id: 5, method: "session/request_permission", params: { sessionId: "S1", options: [{ optionId: "allow", kind: "allow_once" }] } });
-            assert.throws(() => r.client.respondToPermission(5, "maybe"), { message: "Unknown permission option" });
+            const [requestId] = (r.client as any).pendingPermissions.keys();
+            assert.throws(() => r.client.respondToPermission(requestId, "maybe"), { message: "Unknown permission option" });
             r.feed({ jsonrpc: "2.0", id: 6, method: "fs/read_text_file", params: {} });
             assert.deepEqual(r.writes.at(-1), { jsonrpc: "2.0", id: 6, error: { code: -32601, message: "Unsupported client method: fs/read_text_file" } });
         });

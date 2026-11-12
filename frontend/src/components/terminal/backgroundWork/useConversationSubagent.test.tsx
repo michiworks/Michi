@@ -1,5 +1,4 @@
 import { describe, expect, it, vi } from 'vitest';
-import React from 'react';
 import { act, render, screen } from '@testing-library/react';
 import { SUBAGENT_UNTRACKED_ERROR } from 'michi-shared';
 import { ChatNodeStoreContext } from '../../../state/chatStore';
@@ -75,7 +74,7 @@ describe('useConversationSubagent', () => {
     const store = nodeStore({ n1: chat(launched) });
     const handlers: Array<Parameters<WorkflowDomainApi['subscribe']>[1]> = [];
     const api: WorkflowDomainApi = {
-      list: vi.fn(), get: vi.fn(), act: vi.fn(), answer: vi.fn(),
+      get: vi.fn(), act: vi.fn(), answer: vi.fn(),
       subscribe: vi.fn((_workspaceId, options) => { handlers.push(options); return () => {}; }),
     };
     let domain: ReturnType<typeof useOptionalWorkflowDomain> = null;

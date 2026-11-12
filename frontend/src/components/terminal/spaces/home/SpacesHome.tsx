@@ -1,13 +1,15 @@
 import React from 'react';
 import { RefreshCw } from 'lucide-react';
+import { toast } from 'sonner';
 import type { PageLayoutRule, WorkspaceHomeSummaryDto } from 'michi-shared';
 import { useProgressCards, useSpaceActivity, useSpacesHome, useSpacesHomeWorkspaces } from '../../../../state/pages/useSpacesHome';
 import { retryMetaAgentGuard, useMetaAgent } from '../../../../state/metaAgent/useMetaAgent';
 import { metaAgentStatus, type MetaAgentStatusKind } from '../../../../state/metaAgent/metaAgentStatus';
 import { firstRunActive, firstRunProgress, retrySpacesFirstRunNow, spacesHomeUpdating, useSpacesFirstRun } from '../../../../state/metaAgent/spacesFirstRun';
-import { resumeMetaAgent, useMetaAgentOverview } from '../../../../state/metaAgent/useMetaAgentOverview';
+import { pauseMetaAgentMaintenance, refreshMetaAgentOverview, useMetaAgentOverview } from '../../../../state/metaAgent/useMetaAgentOverview';
 import { retryStoppedMetaAgent, runMetaAgentUpdate, useMetaAgentUpdate } from '../../../../state/metaAgent/metaAgentUpdate';
 import { requestWorkspaceHome } from '../../../../state/pages/workspaceHomeNav';
+import { endsTextSelectionIn } from '../../../../lib/cardClick';
 import { Button } from '../../../ui/controls';
 import { useMinuteClock } from '../../content/home/useMinuteClock';
 import { openMetaAgentDetail, requestMetaAgentSettings } from '../../scheduled/metaAgent/metaAgentNav';
@@ -18,13 +20,16 @@ import { HomeSectionBlock } from './HomeSections';
 import { SpaceActivityList } from './HomeActivity';
 import { NewChatSheetSlot, SpaceProgressCardList, type SpaceConversationScope } from './homeLinks';
 import { DEFAULT_META_STATUS, MetaAgentStatusLine, type MetaAgentHomeStatus, type MetaAgentLineMode } from './MetaAgentStatusLine';
-import { homeAge, homeDateLabel, latestAgentWrite, splitHomeBlocks } from './homeFormat';
+import { homeDateLabel, latestAgentWrite, splitHomeBlocks } from './homeFormat';
+import { formatMichiAgo } from '../../content/michiFormat';
 import { useHomeNavigation } from './useHomeNavigation';
 import { useSpacesHomeSections } from './homeCounts';
 import { useMarkSpacesHomeLookedOnLeave } from './useMarkSpacesHomeLooked';
 import { LayoutRulesMenuButton } from '../layoutRules/LayoutRulesMenu';
 import { LayoutRuleSectionMarks } from '../layoutRules/LayoutRuleSectionMarks';
+import { navPageEvent } from '../../../../state/appEvents';
 import './home.css';
+import { LOCAL_BACKEND_CONNECTION_ID } from '../../../../config/backendConnections';
 
 export interface SpacesHomeViewProps {
   /** The backend connection whose Spaces Home this is. */
@@ -38,7 +43,7 @@ export interface SpacesHomeViewProps {
 
 const openScheduledMetaAgent = () => {
   openMetaAgentDetail();
-  window.dispatchEvent(new CustomEvent('michi:nav-page', { detail: { page: 'scheduled' } }));
+  navPageEvent.dispatch({ page: 'scheduled' });
 };
 
 /** The status line's mode for each state; a failed restriction check shows its own alert instead. */
@@ -66,7 +71,7 @@ function useWorkspaceRowLinks(ref: React.RefObject<HTMLElement | null>, workspac
     if (target.closest('a, button, input, textarea, [contenteditable="true"]')) return;
     const row = target.closest<HTMLElement>('tr[data-home-workspace]');
     const workspaceId = row?.getAttribute('data-home-workspace');
-    if (workspaceId) requestWorkspaceHome({ workspaceId, backendConnectionId: connectionId });
+    if (row && workspaceId && !endsTextSelectionIn(row)) requestWorkspaceHome({ workspaceId, backendConnectionId: connectionId });
   }, [connectionId]);
 }
 
@@ -78,7 +83,7 @@ function useWorkspaceRowLinks(ref: React.RefObject<HTMLElement | null>, workspac
  */
 const NO_RULES: readonly PageLayoutRule[] = [];
 
-export function SpacesHomeView({ backendConnectionId = 'local', now, meta, onUpdate }: SpacesHomeViewProps) {
+function SpacesHomeView({ backendConnectionId = LOCAL_BACKEND_CONNECTION_ID, now, meta, onUpdate }: SpacesHomeViewProps) {
   const clock = useMinuteClock(true);
   const home = useSpacesHome(backendConnectionId);
   const workspaces = useSpacesHomeWorkspaces(backendConnectionId);
@@ -89,7 +94,8 @@ export function SpacesHomeView({ backendConnectionId = 'local', now, meta, onUpd
   const cards = useProgressCards(backendConnectionId);
   const agent = useMetaAgent();
   const firstRun = useSpacesFirstRun(backendConnectionId);
-  const overview = useMetaAgentOverview();
+  const overviewLoad = useMetaAgentOverview();
+  const overview = overviewLoad.kind === 'ready' ? overviewLoad.overview : null;
   const update = useMetaAgentUpdate();
   const running = firstRunActive(firstRun.data);
   const doc = useHomeDocument({
@@ -107,7 +113,7 @@ export function SpacesHomeView({ backendConnectionId = 'local', now, meta, onUpd
 
   const info = agent.info;
   const agentState = metaAgentStatus({
-    info, infoStatus: agent.status, firstRun, overview: overview.overview, offline: home.stale, runtimeLabel: metaAgentRuntimeLabel,
+    info, infoStatus: agent.status, firstRun, overview, offline: home.stale, runtimeLabel: metaAgentRuntimeLabel,
   });
   const offline = agentState.kind === 'offline';
   const failures = agentState.kind === 'guard-failed' ? agentState.guardFailures : [];
@@ -121,7 +127,7 @@ export function SpacesHomeView({ backendConnectionId = 'local', now, meta, onUpd
   };
   const mode = LINE_MODE[agentState.kind];
   const showAgentStatus = mode !== 'normal' || update.phase === 'failed'
-    || overview.overview?.cursors?.some(cursor => cursor.problem);
+    || overview?.cursors?.some(cursor => cursor.problem);
 
   const update_ = () => {
     home.refresh();
@@ -159,7 +165,7 @@ export function SpacesHomeView({ backendConnectionId = 'local', now, meta, onUpd
             <LayoutRulesMenuButton pageId={page?.id ?? null} backendConnectionId={backendConnectionId} readOnly={offline} />
           </div>
           {page && blocks.length > 0 && <p className="spaces-home__updated">
-            <time dateTime={new Date(page.updatedAt).toISOString()} title={new Date(page.updatedAt).toLocaleString()}>Updated {homeAge(page.updatedAt, clock)}</time>
+            <time dateTime={new Date(page.updatedAt).toISOString()} title={new Date(page.updatedAt).toLocaleString()}>Updated {formatMichiAgo(page.updatedAt, clock)}</time>
           </p>}
         </header>
         {failures.length > 0 && !offline
@@ -174,13 +180,18 @@ export function SpacesHomeView({ backendConnectionId = 'local', now, meta, onUpd
             stop={agentState.stop}
             firstRunDays={info?.settings.firstRunDays}
             firstRun={firstRun.data}
-            cursors={overview.overview?.cursors}
-            recentRuns={overview.overview?.recentRuns}
+            cursors={overview?.cursors}
+            recentRuns={overview?.recentRuns}
             update={update}
             homeUpdating={spacesHomeUpdating(firstRun.data)}
             onOpenScheduled={openScheduledMetaAgent}
             onOpenSettings={requestMetaAgentSettings}
-            onResume={() => { void resumeMetaAgent(); }}
+            onResume={() => {
+              pauseMetaAgentMaintenance(false).catch((reason: unknown) => {
+                toast.error(reason instanceof Error && reason.message ? reason.message : 'Couldn’t resume Pages upkeep');
+                void refreshMetaAgentOverview();
+              });
+            }}
             onRetry={() => retryStoppedMetaAgent(backendConnectionId)}
             onOpenWorkspace={openWorkspace}
             onRetryWorkspace={(workspaceId) => { void retrySpacesFirstRunNow(backendConnectionId, workspaceId); }}

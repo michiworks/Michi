@@ -1,4 +1,3 @@
-import React from 'react';
 import type { AgentRunInteractionDtoV1, JsonValue } from 'michi-shared';
 
 export function AgentRunInteractions({ interactions, onRespond }: {
@@ -22,7 +21,7 @@ export function AgentRunInteractions({ interactions, onRespond }: {
             {pending && onRespond && (
               <div data-testid="pending-interaction-actions" style={{ display: 'flex', gap: 6, justifyContent: 'flex-end', marginTop: 8 }}>
                 <button type="button" onClick={() => onRespond(interaction, { decision: 'deny' })}
-                  style={{ border: '1px solid var(--term-danger)', background: 'transparent', color: 'var(--term-danger)', padding: '4px 8px', fontSize: 'var(--fs-xs)', cursor: 'pointer' }}>Deny</button>
+                  style={{ border: '1px solid var(--term-danger)', background: 'transparent', color: 'var(--term-danger-text)', padding: '4px 8px', fontSize: 'var(--fs-xs)', cursor: 'pointer' }}>Deny</button>
                 <button type="button" onClick={() => onRespond(interaction, { decision: 'allow' })}
                   style={{ border: '1px solid var(--term-accent)', background: 'var(--term-accent)', color: 'var(--term-bg)', padding: '4px 8px', fontSize: 'var(--fs-xs)', cursor: 'pointer' }}>Allow</button>
               </div>

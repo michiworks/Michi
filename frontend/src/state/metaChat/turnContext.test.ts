@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { PageSummaryDto, SpaceSummaryDto } from 'michi-shared';
+import { parseMetaAgentChatTurnContext } from 'michi-shared';
 import { streamMessage } from '../../services/api/stream';
 import { metaAgentTurnContextFor, provideMetaAgentTurnContext } from '../../services/api/assistant';
 import { writeResource } from '../pages/resourceCache';
@@ -48,6 +49,33 @@ describe('buildMetaAgentTurnContext', () => {
     expect(item).toMatchObject({ pageId: 'pg-home', blockId: 'focus', blockItem: { index: 5, text: 'x'.repeat(300) } });
     expect(buildMetaAgentTurnContext({ view: { kind: 'home' }, target: { pageId: 'pg-home', blockId: 'focus' }, workspaces })).not.toHaveProperty('blockItem');
     expect(buildMetaAgentTurnContext({ view: { kind: 'home' }, target: { pageId: 'pg-home', blockId: 'focus', item: { index: -1, text: 'bad' } }, workspaces })).not.toHaveProperty('blockItem');
+  });
+
+  it('names the database row a target is narrowed to, clipped to the title bound, and never with an item', () => {
+    resetSpacesPagesForTests({ home: { id: 'pg-home', title: 'Home' }, workspaces: {} });
+    const row = { databaseId: 'db-1', rowId: 'row-7', text: 'y'.repeat(400) };
+    expect(buildMetaAgentTurnContext({ view: { kind: 'home' }, target: { pageId: 'pg-home', blockId: 'crs', row }, workspaces }))
+      .toMatchObject({ pageId: 'pg-home', blockId: 'crs', blockRow: { databaseId: 'db-1', rowId: 'row-7', text: 'y'.repeat(300) } });
+    expect(buildMetaAgentTurnContext({ view: { kind: 'home' }, target: { pageId: 'pg-home', blockId: 'crs' }, workspaces })).not.toHaveProperty('blockRow');
+    expect(buildMetaAgentTurnContext({ view: { kind: 'home' }, target: { pageId: 'pg-home', blockId: 'crs', row: { ...row, rowId: '' } }, workspaces })).not.toHaveProperty('blockRow');
+    const both = buildMetaAgentTurnContext({ view: { kind: 'home' }, target: { pageId: 'pg-home', blockId: 'crs', row, item: { index: 0, text: 'x' } }, workspaces });
+    expect(both).toHaveProperty('blockItem');
+    expect(both).not.toHaveProperty('blockRow');
+  });
+
+  it('sends only what the backend accepts: no ids with control characters, item and row text within the bound', () => {
+    resetSpacesPagesForTests({ home: { id: 'pg-home', title: 'Home' }, workspaces: {} });
+    const controlled = buildMetaAgentTurnContext({ view: { kind: 'page', backendConnectionId: 'local', workspaceId: 'ws-r', pageId: 'pg\u0001x' }, target: { pageId: 'pg\u0001x', blockId: 'b\u0007' }, workspaces });
+    expect(controlled).toMatchObject({ pageId: null, blockId: null });
+    expect(() => parseMetaAgentChatTurnContext(controlled)).not.toThrow();
+    const wide = '😀'.repeat(400);
+    const item = buildMetaAgentTurnContext({ view: { kind: 'home' }, target: { pageId: 'pg-home', blockId: 'focus', item: { index: 0, text: wide } }, workspaces });
+    expect(() => parseMetaAgentChatTurnContext(item)).not.toThrow();
+    expect(item.blockItem?.text).toBe('😀'.repeat(150));
+    const row = buildMetaAgentTurnContext({ view: { kind: 'home' }, target: { pageId: 'pg-home', blockId: 'crs', row: { databaseId: 'db-1', rowId: 'row-7', text: `x${wide}` } }, workspaces });
+    expect(() => parseMetaAgentChatTurnContext(row)).not.toThrow();
+    // A pair is never split: the cut falls before it.
+    expect(row.blockRow?.text).toBe(`x${'😀'.repeat(149)}`);
   });
 
   it('names the remote workspaces, and the one on screen, so the Meta agent can say Spaces doesn’t support them', () => {

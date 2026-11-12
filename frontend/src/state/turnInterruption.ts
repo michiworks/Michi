@@ -1,12 +1,30 @@
+import { BACKEND_RESTARTED_ERROR, turnInterruptionCause, type TurnInterruptionCause } from 'michi-shared';
 import { assistantAnswerVisibleText } from './assistantBlocks';
 import type { ChatMessage } from './chatTypes';
 
 /** The stream error code and `turns.error` marker of a turn a Michi restart cut short. */
-export const BACKEND_RESTARTED_KIND = 'backend_restarted';
+export const BACKEND_RESTARTED_KIND = BACKEND_RESTARTED_ERROR;
 
-/** What the node's error reads after a reload classified it from the turn receipt. */
-export const BACKEND_RESTARTED_MESSAGE =
-  'Michi restarted while this task was running. Review the partial output above, then resume.';
+/**
+ * The error kind of a turn the agent's credentials expiring cut short (an
+ * expired Auth session, say), classified from its message: the stored
+ * receipt keeps only the text, and runtimes word it their own way.
+ */
+export const CREDENTIALS_EXPIRED_KIND = 'credentials_expired';
+
+/** A turn's error kind, with a credentials failure the stream sent no code for named as one. */
+export function classifiedErrorKind(code: string | undefined, message: string): string | undefined {
+  if (code) return code;
+  return turnInterruptionCause(message) === 'credentials' ? CREDENTIALS_EXPIRED_KIND : undefined;
+}
+
+/** Why the node's last turn was interrupted, from its error kind; null when it was not. */
+export function interruptionCauseOfKind(errorKind: string | undefined): TurnInterruptionCause | null {
+  if (errorKind === BACKEND_RESTARTED_KIND) return 'restart';
+  return errorKind === CREDENTIALS_EXPIRED_KIND || errorKind === 'auth' ? 'credentials' : null;
+}
+
+export { BACKEND_RESTARTED_MESSAGE } from 'michi-shared';
 
 /** The user row a Resume lands as; the wire text is the continuation prompt. */
 const RESUME_DISPLAY_TEXT = 'Resume the interrupted turn';
@@ -20,8 +38,13 @@ function clip(text: string, cap: number): string {
   return text.length > cap ? `${text.slice(0, cap)}… [truncated]` : text;
 }
 
+const INTERRUPTION_LINE: Record<TurnInterruptionCause, string> = {
+  restart: 'The turn below was cut off when Michi restarted, so the agent session may not contain it. ',
+  credentials: 'The turn below was cut off when the agent\'s credentials expired, so the agent session may not contain all of it. ',
+};
+
 /**
- * The prompt a Resume sends after a restart cut the last turn short.
+ * The prompt a Resume sends after a restart (or expired credentials) cut the last turn short.
  *
  * kiro-cli records a prompt in its session log only once the model has
  * answered it, so the interrupted request and whatever streamed back are
@@ -31,7 +54,10 @@ function clip(text: string, cap: number): string {
  * Mid-turn steering rows are carried in order as part of the partial output.
  * Returns null when the transcript holds no request to carry on with.
  */
-export function buildResumePrompt(messages: ChatMessage[]): { text: string; displayText: string } | null {
+export function buildResumePrompt(
+  messages: ChatMessage[],
+  cause: TurnInterruptionCause = 'restart',
+): { text: string; displayText: string } | null {
   const openerIdx = messages.findLastIndex((m) => m.role === 'user' && !m.steered);
   if (openerIdx < 0) return null;
   const request = clip(messages[openerIdx].text.trim(), RESUME_REQUEST_CAP);
@@ -53,7 +79,7 @@ export function buildResumePrompt(messages: ChatMessage[]): { text: string; disp
   }
   const lines = [
     '[INTERRUPTED TURN — context restore]',
-    'The turn below was cut off when Michi restarted, so the agent session may not contain it. '
+    INTERRUPTION_LINE[cause]
       + 'It is the user\'s most recent request, the one you are being asked to carry on with. '
       + 'Tool calls it made may already have taken effect.',
     '',

@@ -137,6 +137,7 @@ export function dropPending(id: number): void {
   if (state.pending.some((entry) => entry.id === id)) set({ ...state, pending: state.pending.filter((entry) => entry.id !== id) });
 }
 
+/** @testonly */
 export function resetSpaceConversationsForTests(): void {
   state = { scopes: [], sheet: null, pending: [] };
   nextId = 1;

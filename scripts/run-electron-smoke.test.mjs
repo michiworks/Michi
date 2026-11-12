@@ -20,7 +20,7 @@ test('smoke names resolve to their scripts; anything else is refused', () => {
 });
 
 test('every Electron smoke runs from an npm script', () => {
-  assert.deepEqual(smokeNames, ['browser-theme', 'native-shortcut']);
+  assert.deepEqual(smokeNames, ['browser-theme', 'native-shortcut', 'tray']);
   const scripts = Object.values(JSON.parse(readFileSync(path.join(scriptsDir, '..', 'package.json'), 'utf8')).scripts);
   const launched = new Set(
     scripts.flatMap((command) => [...command.matchAll(/scripts\/run-electron-smoke\.mjs((?: [a-z-]+)+)/g)]

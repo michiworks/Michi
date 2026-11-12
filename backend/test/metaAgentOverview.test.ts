@@ -17,6 +17,7 @@ import { ScheduledJobsRepository } from '../src/services/scheduledJobs/repositor
 import { ScheduledJobScheduler, type ScheduledJobExecutor } from '../src/services/scheduledJobs/scheduler';
 import { metaAgentOverview, setMetaAgentPaused, startOfLocalDay } from '../src/services/metaAgent/overview';
 import { metaAgentUsageToday } from '../src/services/metaAgent/todayUsage';
+import { usageSummaryTotalTokens } from 'michi-shared';
 import { setFirstRunWindowDays } from '../src/services/metaAgent/firstRunHistory';
 import { setupMetaAgentOverviewRoutes } from '../src/routes/metaAgentOverview';
 import { recordMetaAgentGuardCheck } from '../src/services/metaAgent/guardStatus';
@@ -180,6 +181,25 @@ describe('Meta agent overview', () => {
     assert.deepEqual(metaAgentUsageToday(LOCAL, now), { checks: 3, modelCalls: 2, tokens: 42_000 },
       'yesterday and ordinary conversations are not counted');
     assert.equal(metaAgentOverview({ ownerUserId: LOCAL, now, dayStart: DAY }).today.modelCalls, 2);
+  });
+
+  test('counts a reply\'s tokens as usageSummaryTotalTokens does', () => {
+    const jobs = scheduler();
+    const desk = maintained(jobs, 'ws-d', 'agent-desk', 4);
+    getDb().prepare(`INSERT INTO nodes (id,workspace_id,kind,status,minimized,spawned_by_agent,created_at,maintenance_job_id)
+      VALUES ('n-m','ws-d','chat','idle',0,0,1,?)`).run(desk);
+    const cases: unknown[] = [
+      { totalTokens: 1200 }, { inputTokens: 900, outputTokens: 100 }, { totalTokens: 50, inputTokens: 900, outputTokens: 100 },
+      { contextUsagePercentage: 12 }, { inputTokens: 900 }, { totalTokens: '1200', inputTokens: 10, outputTokens: 5 },
+      { inputTokens: '900', outputTokens: 100 }, { totalTokens: 10.6 },
+    ];
+    for (const usage of cases) {
+      getDb().prepare("DELETE FROM messages WHERE node_id = 'n-m'").run();
+      getDb().prepare(`INSERT INTO messages (id,node_id,role,content,seq,created_at,metadata) VALUES ('m-m','n-m','assistant','ok',0,?,?)`)
+        .run(at(9), JSON.stringify({ usageSummary: usage }));
+      const expected = usageSummaryTotalTokens(usage);
+      assert.equal(metaAgentUsageToday(LOCAL, now).tokens, expected === undefined ? null : Math.round(expected), JSON.stringify(usage));
+    }
   });
 
   test('a run that failed before its model session opened is no model call, whatever it had to read', () => {
@@ -475,7 +495,7 @@ describe('Meta agent overview', () => {
       recordMetaAgentGuardCheck({ toolset: 'maintenance', profile: resolveMetaAgentRuntime(LOCAL),
         failure: { runtimeId: 'kiro', unexpectedTools: ['fs_write', 'execute_bash'] }, ownerUserId: LOCAL, now });
       assert.deepEqual(overview().stopped, {
-        reason: 'restriction-check', message: 'Kiro started with tools outside the Meta agent\'s list: fs_write, execute_bash', workspaceIds: [],
+        reason: 'restriction-check', message: 'Kiro started with tools outside Pages upkeep\'s list: fs_write, execute_bash', workspaceIds: [],
       });
     });
 

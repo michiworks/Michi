@@ -276,6 +276,113 @@ describe('scheduled execution admission and ownership', () => {
     });
   }
 
+  /** What a backend replaced mid-run leaves: a running run and its claim under an older lease, with no exit proof. */
+  function orphan(jobId: string, workspaceId: string, acquiredAt: number): string {
+    const runId = `orphan-${jobId}`;
+    getDb().prepare(`INSERT INTO scheduled_job_runs (id, job_id, workspace_id, trigger, status, started_at, claimed_by)
+      VALUES (?, ?, ?, 'scheduled', 'running', ?, 'old-backend')`).run(runId, jobId, workspaceId, acquiredAt);
+    getDb().prepare(`INSERT INTO scheduler_execution_claims (run_id, job_id, holder, generation, process_id, acquired_at, workspace_id, process_exit_safe)
+      VALUES (?, ?, 'old-backend', 1, NULL, ?, ?, 0)`).run(runId, jobId, acquiredAt, workspaceId);
+    return runId;
+  }
+  let probeSeq = 0;
+  /** Admission as the scheduler asks for it, for maintenance executions that have no work to start themselves. */
+  function probe(jobId: string) {
+    return repo.claimRun({ jobId, runId: `probe-${++probeSeq}`, trigger: 'scheduled', now, lease: lease(), maxConcurrentRuns: 2,
+      processExitStopsExecution: false, nextRunAt: null, requireDue: false });
+  }
+  const autoReleased = /Auto-released after the time limit plus 10 minutes; the old process may still have been running$/;
+
+  test('an unconfirmed maintenance claim holds every maintenance job until its time limit plus grace, then releases', async () => {
+    for (const id of ['w2', 'w3']) getDb().prepare('INSERT INTO workspaces (id, name, created_at, updated_at) VALUES (?, ?, 1, 1)').run(id, id);
+    const a = scheduler('a', 2);
+    const [stuck, other, third] = ['w', 'w2', 'w3'].map(workspaceId => a.createMaintenanceExecution({ workspaceId,
+      name: 'Space maintenance', prompt: 'Maintain', schedule: { kind: 'every', everySeconds: 60 }, timeoutSeconds: 3600 }, 'local-user'));
+    const startedAt = now;
+    const runId = orphan(stuck.id, 'w', startedAt);
+    const releasesAt = startedAt + 3_600_000 + 10 * 60_000;
+    a.start(); await a.tick();
+    assert.equal(a.getRun(runId).status, 'interrupted');
+    assert.deepEqual(a.status().blockedExecutions?.map(e => [e.runId, e.releasesAt]), [[runId, releasesAt]]);
+
+    now = releasesAt - 1; await a.tick();
+    assert.equal(probe(other.id).reason, 'unresolved_execution');
+    assert.equal(claims(), 1);
+
+    now = releasesAt; await a.tick();
+    assert.deepEqual(a.status().blockedExecutions, []);
+    assert.equal(claims(), 0);
+    assert.match(a.getRun(runId).error ?? '', /^Scheduler ownership changed while this run was in progress\. Auto-released/);
+    assert.match(a.getRun(runId).error ?? '', autoReleased);
+    assert.ok(probe(other.id).run, 'another workspace’s maintenance is admitted');
+    assert.equal(probe(third.id).reason, 'capacity', 'a live maintenance run still holds the maintenance mutex');
+  });
+
+  test('a prompt job’s unconfirmed claim releases on the same bound and stops taking a slot', async () => {
+    const a = scheduler('a', 1);
+    const stuck = a.createJob({ ...fields, enabled: false });
+    const removed = a.createJob({ ...fields, enabled: false, timeoutSeconds: 7200 });
+    const next = a.createJob({ ...fields, enabled: false });
+    const startedAt = now;
+    const runId = orphan(stuck.id, 'w', startedAt);
+    orphan(removed.id, 'w', startedAt);
+    a.deleteJob(removed.id); // its claim stays, on the default time limit
+    const releasesAt = startedAt + 30 * 60_000 + 10 * 60_000;
+    a.start(); await a.tick();
+    assert.deepEqual(a.status().blockedExecutions?.map(e => e.releasesAt), [releasesAt, releasesAt]);
+
+    now = releasesAt - 1;
+    await assert.rejects(a.runNow(next.id), /not confirmed it stopped/);
+    now = releasesAt; await a.tick();
+    assert.equal(claims(), 0); assert.deepEqual(a.status().blockedExecutions, []);
+    assert.equal(a.getRun(runId).status, 'interrupted');
+    assert.match(a.getRun(runId).error ?? '', autoReleased);
+    await a.runNow(next.id); await flush();
+    assert.equal(executor.openHandles, 1, 'admitted into the only slot although two old claims were never confirmed');
+  });
+
+  test('a lease handover claim stays fenced inside its bound; a live claim of this lease is never released by time', () => {
+    const a = scheduler('a');
+    const job = a.createJob({ ...fields, enabled: false }); const other = a.createJob({ ...fields, enabled: false });
+    const startedAt = now;
+    // The previous holder's claim before the new owner quarantines it.
+    getDb().prepare(`INSERT INTO scheduler_execution_claims (run_id, job_id, holder, generation, process_id, acquired_at, workspace_id)
+      VALUES ('handover', ?, 'previous', 1, NULL, ?, 'w')`).run(job.id, startedAt);
+    now = startedAt + 40 * 60_000 - 1;
+    let fence = repo.acquireLease('a', now, 48 * 3_600_000)!;
+    assert.deepEqual(repo.releaseExpiredExecutions(fence, now), []);
+    assert.equal(probe(other.id).reason, 'unresolved_execution');
+    now += 1;
+    assert.deepEqual(repo.releaseExpiredExecutions(fence, now).map(released => released.runId), ['handover']);
+    const live = probe(other.id).run!;
+    now += 24 * 3_600_000; fence = repo.acquireLease('a', now, 90_000)!;
+    assert.deepEqual(repo.releaseExpiredExecutions(fence, now), []);
+    assert.equal(a.getRun(live.id).status, 'running'); assert.equal(claims(), 1);
+  });
+
+  test('a run whose cancellation never settles stops holding the slot after its bound', async () => {
+    const a = scheduler('a', 1);
+    const first = a.createJob({ ...fields, enabled: false }); const second = a.createJob(fields);
+    a.start(); await a.tick();
+    const run = await a.runNow(first.id); await flush();
+    assert.equal(a.cancelActiveRun(first.id), true);
+    const releasesAt = run.startedAt + 30 * 60_000 + 10 * 60_000;
+    // Tick every minute, renewing the lease, while the due second job waits for the slot.
+    while (now + 60_000 < releasesAt) { now += 60_000; await a.tick(); }
+    await flush();
+    assert.equal(executor.started.length, 1); assert.equal(a.getRun(run.id).status, 'running');
+    assert.equal(a.status().blockedExecutions?.[0].releasesAt, releasesAt);
+
+    now = releasesAt; await a.tick(); await flush();
+    assert.equal(a.getRun(run.id).status, 'interrupted');
+    assert.match(a.getRun(run.id).error ?? '', /^Auto-released/);
+    assert.equal(executor.started.length, 2, 'the due job takes the released slot');
+    assert.equal(executor.started[1].run.jobId, second.id);
+    executor.started[0].finish(); await flush();
+    assert.equal(a.getRun(run.id).status, 'interrupted', 'a late end does not rewrite the released run');
+    assert.equal(claims(), 1);
+  });
+
   test('PID reuse or unknown legacy identity stays quarantined and visible', async () => {
     const a = scheduler('a'); const job = a.createJob(fields);
     getDb().prepare(`INSERT INTO scheduler_execution_claims

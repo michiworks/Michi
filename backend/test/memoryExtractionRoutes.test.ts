@@ -81,6 +81,14 @@ describe('memory extraction routes (local)', () => {
     t.mock.method(require('../src/agents/maintenancePolicy'), 'maintenanceRuntimeAvailability', () => ({ available: true }));
     seedWorkspace('ws', null);
     await start(fakeScheduler);
+    // Memory is on by default: nothing to read yet.
+    const byDefault = await call('GET', '/memory-extraction/status', null);
+    assert.equal(byDefault.status, 200);
+    assert.equal(byDefault.json.enabled, true);
+    assert.equal(byDefault.json.state, 'idle');
+    assert.equal(byDefault.json.pendingCount, 0);
+
+    setMemorySettings('local-user', { mode: 'off' });
     const off = await call('GET', '/memory-extraction/status', null);
     assert.equal(off.status, 200);
     const status = off.json as MemoryExtractionStatus;
@@ -91,7 +99,7 @@ describe('memory extraction routes (local)', () => {
     assert.equal(status.state, 'off');
     assert.equal(status.supported, true);
     assert.deepEqual(status.exclusions, [...EXTRACTION_EXCLUSIONS]);
-    assert.equal(status.dailyTokenLimit, 1_000_000);
+    assert.equal(status.dailyTokenLimit, 3_000_000);
 
     setMemorySettings('local-user', { mode: 'auto' });
     insertExtractionCursor({ workspaceId: 'ws', ownerUserId: 'local-user', cursor: 0, now: 1 });

@@ -2,29 +2,36 @@ import React, { useCallback, useEffect, useRef, useState, useMemo } from 'react'
 import { useChatNode, useChatActions, useChatProjects, useStructuralSelector } from '../../state/chatStore';
 import { usePrefs } from '../../state/prefs';
 import { Row, RowKebab } from './primitives';
-import ContextMenu, { MenuPresence } from '../ContextMenu';
+import ContextMenu, { MenuPresence, menuOpenKey } from '../ContextMenu';
 import MoveThreadDialog from '../MoveThreadDialog';
 import { buildThreadRowContextMenu } from '../../lib/threadRowContextMenu';
-import type { MenuSection } from '../ContextMenu';
-import type { ContextMenuSection } from '../../lib/threadRowContextMenu';
 import type { ProjectEdge, Tree } from '../../state/chatTypes';
+import type { MoveTargetWorkspace } from '../../state/moveTargets';
 import type { OpenState } from '../../state/sidebarSelectors';
-import { treeHasUnread, buildBranchChildrenOf, isNodeUnread } from '../../state/sidebarSelectors';
+import { treeHasUnread, isNodeUnread } from '../../state/sidebarSelectors';
+import { buildBranchChildrenOf } from '../../state/tree';
 import { isVisibleConversationNode } from '../../state/conversationVisibility';
-import { rowGeom, rowPadding, caretKebabClearance, CARD_FILL, CARD_FILL_SELECT } from './sidebarRowStyle';
+import { rowGeom, rowPadding, caretKebabClearance, pinMarkEndMargin, CARD_FILL, CARD_FILL_SELECT, type RowGeom } from './sidebarRowStyle';
 import { UnreadDot, UNREAD_DOT_LEAD, UNREAD_TITLE_WEIGHT, type UnreadMark } from './UnreadDot';
+import { SidebarOpenRail } from './RailAfterglow';
 import { useNewPanePulse } from './useNewPanePulse';
 import { useTreePrefetchIntent } from '../../state/treePrefetch';
-import { deriveTitleFromUserText } from '../../state/assistantParsing';
+import { exportPanelEvent } from '../../state/appEvents';
+import { InlineRenameInput } from '../ui/InlineRenameInput';
+import { formatMichiAge } from './content/michiFormat';
+import { PROVISIONAL_LABEL_STYLE, rowLabel } from './sidebar/rowLabel';
+import { rowKeyDown } from './sidebar/rowKeyboard';
 
 const EMPTY_EDGES: readonly ProjectEdge[] = [];
 
 // Card-mode row fills live with the row geometry (sidebarRowStyle); re-exported for the rows that take them from here.
 export { CARD_FILL, CARD_FILL_SELECT } from './sidebarRowStyle';
 
-/** Small star glyph marking a pinned row. Shared by ThreadRow (tree pin) and
- *  BranchRow (node pin) so both levels read identically. */
-export function PinMark() {
+/** Small star glyph marking a pinned row. Shared by ThreadRow (tree pin),
+ *  BranchRow (node pin) and WorkspaceRow so every level reads identically. It goes AFTER the
+ *  title: in front of it, its 15px pushed a pinned thread's title past its own
+ *  branches' 12px indent, so a pinned thread read as a level deeper. */
+export function PinMark({ endMargin }: { endMargin?: string }) {
   return (
     <svg
       aria-label="pinned"
@@ -35,25 +42,11 @@ export function PinMark() {
       stroke="currentColor"
       strokeWidth="1.4"
       strokeLinejoin="round"
-      style={{ color: 'var(--term-select)', flexShrink: 0 }}
+      style={{ color: 'var(--term-select)', flexShrink: 0, marginRight: endMargin }}
     >
       <path d="M8 1.5l1.9 4 4.4.5-3.3 3 .9 4.3L8 11.3 4.1 13.3 5 9 1.7 6l4.4-.5L8 1.5z" />
     </svg>
   );
-}
-
-function toMenuSections(sections: ContextMenuSection[]): MenuSection[] {
-  return sections.map((s, si) => ({
-    label: s.label,
-    items: s.items.map((item, ii) => ({
-      id: `${si}-${ii}`,
-      label: item.label,
-      danger: item.danger,
-      disabled: item.disabled,
-      keys: item.keys,
-      run: item.onSelect,
-    })),
-  }));
 }
 
 interface Actions {
@@ -66,11 +59,6 @@ interface Actions {
   deleteTree: (treeId: string) => void;
   /** Optional — wire only when there are other live workspaces to move to. */
   moveTreeToWorkspace?: (treeId: string, targetProjectId: string) => void;
-}
-
-export interface MoveTargetWorkspace {
-  id: string;
-  name: string;
 }
 
 interface Props {
@@ -142,16 +130,14 @@ export default function ThreadRow({
   const [menu, setMenu] = useState<{ x: number; y: number } | null>(null);
   const [moveOpen, setMoveOpen] = useState(false);
   const [renaming, setRenaming] = useState(false);
-  const [draftName, setDraftName] = useState('');
-  const renameBaseRef = useRef('');
   const renameRef = useRef<HTMLInputElement>(null);
-  const suppressNextBlurCommitRef = useRef(false);
-  // This display fallback never fills n.title, so the main response can still
-  // provide the first durable title while the user sees a useful sidebar label.
-  const label = tree.name || n?.title
-    || deriveTitleFromUserText(n?.messages.find((m) => m.role === 'user')?.text)
-    || 'Untitled';
+  // With no title yet, an excerpt of the first message, styled as provisional.
+  // It never fills n.title, so the main response can still provide the first
+  // durable title while the user sees a useful sidebar label.
+  const { text: label, provisional } = rowLabel(tree.name, n);
   const geom = rowGeom(prefs.sidebarRowStyle, prefs.sidebarInset);
+  // The star ends the row and takes the caret's place, so it clears the ⋯.
+  const pinTakesEnd = !!tree.pinnedAt && geom.isCard && !hasBranches && !prefs.showSidebarTimestamps && !selected;
   const newPanePulse = useNewPanePulse(tree.rootNodeId);
   // Same rule in every mode: the rail is a SUMMARY for a collapsed subtree, so
   // it's suppressed once the row is expanded and each branch speaks for itself.
@@ -163,64 +149,37 @@ export default function ThreadRow({
     renameRef.current?.select();
   }, [renaming]);
 
-  const beginRename = () => {
-    suppressNextBlurCommitRef.current = false;
-    renameBaseRef.current = label;
-    setDraftName(label);
-    setRenaming(true);
-  };
-
-  const commitRename = () => {
-    if (suppressNextBlurCommitRef.current) {
-      suppressNextBlurCommitRef.current = false;
-      return;
-    }
-    const trimmed = draftName.trim();
-    if (trimmed && trimmed !== renameBaseRef.current) {
-      actions.renameTree(tree.id, trimmed);
-    }
-    setRenaming(false);
-  };
-
-  const cancelRename = () => {
-    suppressNextBlurCommitRef.current = true;
-    setDraftName(renameBaseRef.current);
-    setRenaming(false);
-  };
+  const beginRename = () => setRenaming(true);
 
   const exportTree = () =>
-    window.dispatchEvent(
-      new CustomEvent('michi:toggle-export-panel', { detail: { projectId, treeId: tree.id } }),
-    );
+    exportPanelEvent.dispatch({ projectId, treeId: tree.id });
 
   const sections = menu
-    ? toMenuSections(
-        buildThreadRowContextMenu({
-          treeId: tree.id,
-          tree,
-          moveTargets,
-          treeSelection,
-          clearTreeSelection,
-          actions: {
-            activateTree: actions.activateTree,
-            archiveTree: actions.archiveTree,
-            unarchiveTree: actions.unarchiveTree,
-            pinTree: actions.pinTree,
-            unpinTree: actions.unpinTree,
-            renameTree: actions.renameTree,
-            deleteTree: actions.deleteTree,
-            exportTree,
-            beginInlineRename: beginRename,
-            moveToWorkspace: actions.moveTreeToWorkspace
-              ? (targetProjectId: string) =>
-                  actions.moveTreeToWorkspace!(tree.id, targetProjectId)
-              : undefined,
-            openMoveDialog: actions.moveTreeToWorkspace
-              ? () => setMoveOpen(true)
-              : undefined,
-          },
-        }),
-      )
+    ? buildThreadRowContextMenu({
+        treeId: tree.id,
+        tree,
+        moveTargets,
+        treeSelection,
+        clearTreeSelection,
+        actions: {
+          activateTree: actions.activateTree,
+          archiveTree: actions.archiveTree,
+          unarchiveTree: actions.unarchiveTree,
+          pinTree: actions.pinTree,
+          unpinTree: actions.unpinTree,
+          renameTree: actions.renameTree,
+          deleteTree: actions.deleteTree,
+          exportTree,
+          beginInlineRename: beginRename,
+          moveToWorkspace: actions.moveTreeToWorkspace
+            ? (targetProjectId: string) =>
+                actions.moveTreeToWorkspace!(tree.id, targetProjectId)
+            : undefined,
+          openMoveDialog: actions.moveTreeToWorkspace
+            ? () => setMoveOpen(true)
+            : undefined,
+        },
+      })
     : [];
 
   return (
@@ -228,10 +187,28 @@ export default function ThreadRow({
       <Row
         {...prefetchIntent}
         data-sidebar-row={tree.rootNodeId}
+        data-context-target=""
+        // A button to the keyboard: Tab reaches it, Enter/Space opens it (sidebar/rowKeyboard).
+        role="button"
+        tabIndex={0}
+        className="t-row-focus"
+        // Its title (and workspace), not the ⋯ inside it.
+        aria-label={subtitle ? `${label}, ${subtitle}` : label}
+        aria-current={isActive ? 'true' : undefined}
+        aria-expanded={hasBranches ? expanded : undefined}
         active={isActive || selected}
         onClick={(e) => {
           if (renaming) return;
           onActivate(e);
+        }}
+        onKeyDown={(e) => {
+          if (renaming) return;
+          rowKeyDown(e, {
+            activate: () => onActivate(),
+            expanded: hasBranches ? expanded : undefined,
+            toggle: hasBranches ? onToggleExpand : undefined,
+            openMenu: (anchor) => setMenu(anchor),
+          });
         }}
         onContextMenu={(e) => {
           e.preventDefault();
@@ -256,7 +233,12 @@ export default function ThreadRow({
                 paddingTop: 'var(--sb-row-py, 4px)',
                 paddingBottom: 'calc(var(--sb-row-py, 4px) + 1px)',
                 paddingLeft: rowPadding(geom, indent).paddingLeft,
-                paddingRight: rowPadding(geom, indent).paddingRight,
+                // The current row keeps its ⋯ showing; keep its title and
+                // workspace lines from running under it. (A caret, when there
+                // is one, already keeps that room.)
+                paddingRight: isActive && subtitle && !hasBranches
+                  ? `calc(${rowPadding(geom, indent).paddingRight} + ${caretKebabClearance(geom)}px + var(--row-kebab-extra, 0px))`
+                  : rowPadding(geom, indent).paddingRight,
               }
             : {
                 padding: 'var(--sb-row-py, 4px) calc(10px + var(--sb-inset, 0px)) var(--sb-row-py, 4px) calc(8px + var(--sb-inset, 0px))',
@@ -299,9 +281,9 @@ export default function ThreadRow({
               : { display: 'contents' }
           }
         >
-        {/* Card modes: anchored to this first line, so the dot centres on the
-            title line of a two-line card and sits in the gutter just left of
-            the title (or pin). Classic: the line is display:contents, so the
+        {/* Card modes: anchored to this title line, so the dot centres on it
+            and sits in the gutter just left of the title. Classic: the line is
+            display:contents, so the
             dot anchors to the Row and lands in its left padding, before the
             chevron. */}
         <UnreadDot
@@ -318,26 +300,15 @@ export default function ThreadRow({
             }}
           />
         )}
-        {tree.pinnedAt && <PinMark />}
         {renaming ? (
-          <input
+          <InlineRenameInput
             ref={renameRef}
             aria-label="Thread name"
-            value={draftName}
-            onChange={(e) => setDraftName(e.target.value)}
+            value={label}
+            onCommit={(name) => actions.renameTree(tree.id, name)}
+            onEnd={() => setRenaming(false)}
             onMouseDown={(e) => e.stopPropagation()}
             onClick={(e) => e.stopPropagation()}
-            onKeyDown={(e) => {
-              if (e.nativeEvent.isComposing) return;
-              if (e.key === 'Enter') {
-                e.preventDefault();
-                commitRename();
-              } else if (e.key === 'Escape') {
-                e.preventDefault();
-                cancelRename();
-              }
-            }}
-            onBlur={commitRename}
             style={{
               flex: 1,
               minWidth: 0,
@@ -354,6 +325,7 @@ export default function ThreadRow({
           />
         ) : (
           <span
+            data-provisional={provisional || undefined}
             style={{
               flex: 1,
               // Card modes only — see BranchRow. Classic keeps its original box.
@@ -362,14 +334,18 @@ export default function ThreadRow({
               whiteSpace: 'nowrap',
               maskImage: `linear-gradient(to right, black calc(100% - ${geom.isCard ? 28 : 14}px), transparent)`,
               WebkitMaskImage: `linear-gradient(to right, black calc(100% - ${geom.isCard ? 28 : 14}px), transparent)`,
+              ...(provisional ? PROVISIONAL_LABEL_STYLE : {}),
             }}
           >
             {label}
           </span>
         )}
+        {tree.pinnedAt && (
+          <PinMark endMargin={pinTakesEnd ? pinMarkEndMargin(geom, 5) : undefined} />
+        )}
         {prefs.showSidebarTimestamps && (
           <span style={{ color: 'var(--term-muted)', fontSize: 'var(--sb-ts-fs, var(--fs-sm))', marginRight: 2 }}>
-            {formatRelative(tree.lastActiveAt)}
+            {formatMichiAge(tree.lastActiveAt)}
           </span>
         )}
         {selected && (
@@ -380,6 +356,7 @@ export default function ThreadRow({
         </div>
         {geom.isCard && geom.subtitleInRow && subtitle && (
           <div
+            data-row-workspace=""
             style={{
               display: 'flex',
               alignItems: 'center',
@@ -418,71 +395,23 @@ export default function ThreadRow({
             The right margin clears the kebab — see caretKebabClearance, which
             derives it per mode from that mode's own right padding. */}
         {geom.isCard && hasBranches && (
-          <span
-            aria-hidden
-            onClick={(e) => {
-              e.stopPropagation();
-              onToggleExpand();
-            }}
-            style={{
-              flexShrink: 0,
-              width: 9,
-              marginRight: `calc(${caretKebabClearance(geom)}px + var(--row-kebab-extra, 0px))`,
-              textAlign: 'center',
-              fontSize: 'var(--fs-xs)',
-              color: 'var(--term-muted)',
-              cursor: 'pointer',
-            }}
-          >
-            {expanded ? '⌄' : '›'}
-          </span>
+          <CardCaret expanded={expanded} geom={geom} onToggle={onToggleExpand} />
         )}
         <RowKebab
           open={!!menu}
-          onOpen={(p) => setMenu({ x: p.x, y: p.y })}
+          onOpen={(p) => setMenu((open) => (open ? null : { x: p.x, y: p.y }))}
           ariaLabel={`Actions for ${label}`}
         />
-        {(openState === 'streaming' || showIdleMark) && (
-          <span
-            aria-hidden
-            style={{
-              position: 'absolute',
-              // Right edge in every mode. Card modes briefly had this on the
-              // left as an inset strip; it read as a stray marker rather than
-              // the familiar open-pane rail.
-              right: geom.isCard ? 3 : 2,
-              top: 5,
-              bottom: 5,
-              width: 2,
-              borderRadius: 'var(--ui-radius-pill)',
-              // Classic paints both states in the brand accent and leans on the
-              // pulse + glow to tell "live" from "merely open". Card modes give
-              // idle a neutral rail so accent in the sidebar always means
-              // something is actually running.
-              color: 'var(--term-accent)',
-              background:
-                openState === 'streaming'
-                  ? 'var(--term-accent)'
-                  : (geom.isCard ? 'var(--term-line-s)' : 'var(--term-accent)'),
-              boxShadow:
-                openState === 'streaming'
-                  ? '0 0 6px 0 currentColor'
-                  : undefined,
-              animation:
-                openState === 'streaming'
-                  ? 'tpulse var(--t-loop) ease-in-out infinite'
-                  : newPanePulse
-                    ? 'bar-pulse-once var(--t-slow) ease-in-out 2'
-                    : undefined,
-              pointerEvents: 'none',
-            }}
-          />
-        )}
+        <SidebarOpenRail
+          state={openState === 'streaming' || showIdleMark ? openState : 'none'}
+          isCard={geom.isCard}
+          pulseOnce={newPanePulse}
+        />
       </Row>
       <MenuPresence>
         {menu && (
           <ContextMenu
-            key={`${menu.x}:${menu.y}`}
+            key={menuOpenKey(menu)}
             x={menu.x}
             y={menu.y}
             sections={sections}
@@ -522,6 +451,39 @@ export function SubtitleFolder() {
   );
 }
 
+/** A card-mode row's expand caret at the row end, in thread and branch rows. */
+export function CardCaret({ expanded, geom, onToggle }: { expanded: boolean; geom: RowGeom; onToggle: () => void }) {
+  return (
+    <span
+      aria-hidden
+      onClick={(e) => {
+        e.stopPropagation();
+        onToggle();
+      }}
+      style={{
+        flexShrink: 0,
+        display: 'inline-flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        // The phone drawer draws a larger, brighter caret (mobile.css).
+        width: 'var(--sb-caret-w, 9px)',
+        // Keeps clear of the hover-revealed ⋯ — see caretKebabClearance.
+        marginRight: caretKebabClearance(geom),
+        fontSize: 'var(--sb-caret-fs, var(--fs-xs))',
+        color: 'var(--sb-caret-color, var(--term-muted))',
+        cursor: 'pointer',
+        // Expanded turns the same › a quarter turn, as the classic leading
+        // Chevron does, rather than drawing ⌄, whose glyph sits below the
+        // line's centre and so below the ⋯.
+        transform: expanded ? 'rotate(90deg)' : undefined,
+        transition: 'transform var(--t-soft) var(--t-ease, ease-out)',
+      }}
+    >
+      ›
+    </span>
+  );
+}
+
 /** Single-style chevron used across sidebar tree rows. Always gray, rotates
  *  90° when expanded. `visible=false` keeps the box but hides the glyph so
  *  rows align. */
@@ -556,16 +518,4 @@ export function Chevron({
       ›
     </span>
   );
-}
-
-function formatRelative(ts: number): string {
-  const diff = Date.now() - ts;
-  const m = Math.floor(diff / 60000);
-  if (m < 1) return 'now';
-  if (m < 60) return `${m}m`;
-  const h = Math.floor(m / 60);
-  if (h < 24) return `${h}h`;
-  const d = Math.floor(h / 24);
-  if (d < 7) return `${d}d`;
-  return `${Math.floor(d / 7)}w`;
 }

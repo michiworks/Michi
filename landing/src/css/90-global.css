@@ -1,0 +1,48 @@
+/* ==========================================================================
+   8. Global: no-JS and reduced motion (owner: shell). Brief §9.
+
+   .js-only   hidden without JS (CTA 2 "Branch a sentence", "Copy link for
+              your Mac", anything that only works with the engine running).
+   ========================================================================== */
+
+/* No JS: the page is the settled frame (tB) and reads completely. Controls,
+   keys and keycap hints are hidden; footnotes stay plain links to the notes;
+   Download and every link still work. */
+html:not(.js) .take-ctls,
+html:not(.js) .take-hint,
+html:not(.js) .kbd,
+html:not(.js) .foot-keys,
+html:not(.js) .js-only {
+  display: none !important;
+}
+
+/* The head script sets .js before main.js loads. Until the engine boots
+   (it sets data-motion) the JS-only affordances keep their box but stay
+   invisible, so a main.js that never runs leaves no dead buttons or keys,
+   and booting shows them without moving anything. */
+html.js:not([data-motion]) :is(.take-hint, .kbd, .foot-keys, .js-only) {
+  visibility: hidden;
+}
+
+/* A take bar left with nothing to say (verbs, recall) takes no room. */
+html:not(.js) .take-bar:not(:has(.take-caption)) {
+  display: none;
+}
+
+/* With JS the bar keeps one control row of height even before the engine
+   sets a state, so showing Pause or Replay never moves anything. */
+html.js .take-bar {
+  min-height: 32px;
+}
+
+/* Reduced motion: the tokens are already 0 ms (01-tokens.css). Here: no
+   smooth scrolling and no keycap or hairline tweens. */
+@media (prefers-reduced-motion: reduce) {
+  html {
+    scroll-behavior: auto;
+  }
+  .kbd,
+  .nav {
+    transition: none;
+  }
+}

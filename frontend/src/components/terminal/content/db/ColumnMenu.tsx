@@ -1,4 +1,4 @@
-import React, { useRef, useState } from 'react';
+import { useRef, useState } from 'react';
 import {
   AppWindow, ArrowDownUp, CalendarDays, Check, ChevronRight, CircleChevronDown, Clock, EyeOff, Folder, Gauge, Hash, Image, Link,
   ListFilter, MessagesSquare, Plus, SquareCheck, Tags, Trash2, Type, type LucideIcon,
@@ -17,6 +17,7 @@ import {
   sortByColumnOp,
 } from './dbOps';
 import type { DbEdit } from './views/viewTypes';
+import { isImeComposing } from '../../../../lib/ime';
 
 export const TYPE_ICON: Record<MichiDbColumnType, LucideIcon> = {
   text: Type,
@@ -99,7 +100,7 @@ export function ColumnMenu({
             maxLength={100}
             onChange={(event) => setDraft(event.currentTarget.value)}
             onKeyDown={(event) => {
-              if (event.key === 'Enter' && !event.nativeEvent.isComposing) {
+              if (event.key === 'Enter' && !isImeComposing(event)) {
                 event.preventDefault();
                 run(() => {});
               }

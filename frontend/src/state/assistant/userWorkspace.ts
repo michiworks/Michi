@@ -1,6 +1,6 @@
 import { useEffect } from 'react';
 import type { Project } from '../chatTypes';
-import { isSystemWorkspace } from './systemWorkspace';
+import { isLiveUserWorkspace, isSystemWorkspace } from './systemWorkspace';
 
 /**
  * The user's workspace to come back to while the assistant's hidden one is
@@ -9,11 +9,6 @@ import { isSystemWorkspace } from './systemWorkspace';
  * showing, the assistant's workspace.
  */
 let remembered: string | null = null;
-
-const isLiveUserWorkspace = (project: Project | null | undefined): project is Project => !!project
-  && !project.deletedAt
-  && !project.archivedAt
-  && !isSystemWorkspace(project);
 
 /** Note the active workspace; only the user's own ones count. */
 export function rememberUserWorkspace(project: Project | null | undefined): void {
@@ -43,7 +38,10 @@ export function useReturnFromSystemWorkspace(
   }, [target, selectProject]);
 }
 
-/** Test seam. */
+/**
+ * Test seam.
+ * @testonly
+ */
 export function resetUserWorkspaceForTests(): void {
   remembered = null;
 }

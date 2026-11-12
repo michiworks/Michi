@@ -8,8 +8,8 @@
     ],
     "expected": {
       "candidates": [
-        { "kind": "preference", "scopeHint": "maybe_global", "bodyIncludes": ["中文"] },
-        { "kind": "convention", "scopeHint": "workspace", "bodyIncludes": ["注释", "英文"] }
+        { "kind": "preference", "about": "user", "bodyIncludes": ["中文"], "quote": "以后回复我都用中文" },
+        { "kind": "convention", "about": "project", "bodyIncludes": ["注释", "英文"], "quote": "代码注释保持英文" }
       ]
     }
   },
@@ -23,7 +23,7 @@
     ],
     "expected": {
       "candidates": [
-        { "kind": "convention", "scopeHint": "workspace", "bodyIncludes": ["pnpm"] }
+        { "kind": "convention", "about": "project", "bodyIncludes": ["pnpm"], "quote": "这个仓库统一用 pnpm 装依赖" }
       ]
     }
   },
@@ -36,7 +36,7 @@
     ],
     "expected": {
       "candidates": [
-        { "kind": "convention", "scopeHint": "workspace", "bodyIncludes": ["Conventional Commits"] }
+        { "kind": "convention", "about": "project", "bodyIncludes": ["Conventional Commits"], "quote": "use Conventional Commits with a scope" }
       ]
     }
   },
@@ -50,7 +50,7 @@
     ],
     "expected": {
       "candidates": [
-        { "kind": "decision", "scopeHint": "workspace", "bodyIncludes": ["SQLite"] }
+        { "kind": "decision", "about": "project", "bodyIncludes": ["SQLite"], "quote": "行，就用 SQLite" }
       ]
     }
   },
@@ -63,7 +63,7 @@
     ],
     "expected": {
       "candidates": [
-        { "kind": "decision", "scopeHint": "workspace", "bodyIncludes": ["LRU"] }
+        { "kind": "decision", "about": "project", "bodyIncludes": ["LRU"], "quote": "Let's go with the in-process LRU" }
       ]
     }
   },
@@ -76,7 +76,7 @@
     ],
     "expected": {
       "candidates": [
-        { "kind": "fact", "scopeHint": "workspace", "bodyIncludes": ["5433"] }
+        { "kind": "fact", "about": "project", "bodyIncludes": ["5433"], "quote": "本地测试数据库跑在 5433 端口" }
       ]
     }
   },
@@ -89,7 +89,7 @@
     ],
     "expected": {
       "candidates": [
-        { "kind": "fact", "scopeHint": "workspace", "bodyIncludes": ["release"] }
+        { "kind": "fact", "about": "project", "bodyIncludes": ["release"], "quote": "we deploy to production from the release branch" }
       ]
     }
   },
@@ -102,7 +102,7 @@
     ],
     "expected": {
       "candidates": [
-        { "kind": "preference", "scopeHint": "maybe_global", "bodyIncludes": ["emoji"] }
+        { "kind": "preference", "about": "user", "bodyIncludes": ["emoji"], "quote": "回复里不要加 emoji" }
       ]
     }
   },
@@ -115,7 +115,7 @@
     ],
     "expected": {
       "candidates": [
-        { "kind": "preference", "scopeHint": "maybe_global", "bodyIncludes": ["command"] }
+        { "kind": "preference", "about": "user", "bodyIncludes": ["command"], "quote": "I prefer short answers: give me the command first" }
       ]
     }
   },
@@ -128,7 +128,7 @@
     ],
     "expected": {
       "candidates": [
-        { "kind": "convention", "scopeHint": "workspace", "bodyIncludes": ["PascalCase"] }
+        { "kind": "convention", "about": "project", "bodyIncludes": ["PascalCase"], "quote": "组件文件统一用 PascalCase 命名" }
       ]
     }
   },
@@ -141,7 +141,7 @@
     ],
     "expected": {
       "candidates": [
-        { "kind": "convention", "scopeHint": "workspace", "bodyIncludes": ["node:test"] }
+        { "kind": "convention", "about": "project", "bodyIncludes": ["node:test"], "quote": "Every new backend module needs a node:test file" }
       ]
     }
   },
@@ -154,7 +154,7 @@
     ],
     "expected": {
       "candidates": [
-        { "kind": "convention", "scopeHint": "workspace", "bodyIncludes": ["code", "message"] }
+        { "kind": "convention", "about": "project", "bodyIncludes": ["code", "message"], "quote": "可以，就按这个来，以后新接口都这样返回" }
       ]
     }
   },
@@ -167,7 +167,7 @@
     ],
     "expected": {
       "candidates": [
-        { "kind": "preference", "scopeHint": "maybe_global", "bodyIncludes": ["计划"] }
+        { "kind": "preference", "about": "user", "bodyIncludes": ["计划"], "quote": "动代码之前先跟我说一下你的计划" }
       ]
     }
   },
@@ -180,7 +180,7 @@
     ],
     "expected": {
       "candidates": [
-        { "kind": "fact", "scopeHint": "workspace", "bodyIncludes": ["Node 22"] }
+        { "kind": "fact", "about": "project", "bodyIncludes": ["Node 22"], "quote": "the CI runners are pinned to Node 22" }
       ]
     }
   },
@@ -193,7 +193,7 @@
     ],
     "expected": {
       "candidates": [
-        { "kind": "decision", "scopeHint": "workspace", "bodyIncludes": ["Zustand"] }
+        { "kind": "decision", "about": "project", "bodyIncludes": ["Zustand"], "quote": "选 Zustand" }
       ]
     }
   },
@@ -206,7 +206,7 @@
     ],
     "expected": {
       "candidates": [
-        { "kind": "preference", "scopeHint": "maybe_global", "bodyIncludes": ["British English"] }
+        { "kind": "preference", "about": "user", "bodyIncludes": ["British English"], "quote": "always write documentation in British English" }
       ]
     }
   },
@@ -221,7 +221,7 @@
     ],
     "expected": {
       "candidates": [
-        { "kind": "convention", "scopeHint": "workspace", "bodyIncludes": ["22"] }
+        { "kind": "convention", "about": "project", "bodyIncludes": ["22"], "quote": "我们这边规定 Node 版本锁在 22.x" }
       ]
     }
   },
@@ -234,7 +234,111 @@
     ],
     "expected": {
       "candidates": [
-        { "kind": "convention", "scopeHint": "workspace", "bodyIncludes": ["dist"] }
+        { "kind": "convention", "about": "project", "bodyIncludes": ["dist"], "quote": "dist/. And keep it out of git." }
+      ]
+    }
+  },
+  {
+    "id": "zh-moved-to-nakano-with-date",
+    "description": "User reports a move, a fact about their own life, with a relative date the extractor resolves (sent on Tuesday 2026-11-03).",
+    "turns": [
+      { "role": "user", "text": "我上周六搬到中野了，离车站走路五分钟。" },
+      { "role": "assistant", "text": "恭喜搬家！中野交通很方便。" }
+    ],
+    "expected": {
+      "candidates": [
+        { "kind": "fact", "about": "user", "bodyIncludes": ["中野"], "quote": "我上周六搬到中野了", "eventDate": "2026-10-31" }
+      ]
+    }
+  },
+  {
+    "id": "en-daughter-starts-kindergarten",
+    "description": "User mentions a family member and a planned event in passing (sent on Tuesday 2026-11-03).",
+    "turns": [
+      { "role": "user", "text": "My daughter Mia starts kindergarten next Monday, so I'll be offline that morning." },
+      { "role": "assistant", "text": "Good luck to Mia! I'll plan around that morning." }
+    ],
+    "expected": {
+      "candidates": [
+        { "kind": "fact", "about": "user", "bodyIncludes": ["Mia"], "quote": "My daughter Mia starts kindergarten next Monday", "eventDate": "2026-11-09" }
+      ]
+    }
+  },
+  {
+    "id": "mixed-pet-name-beside-a-task",
+    "description": "User names their pet while asking for an unrelated edit; only the durable fact is kept.",
+    "turns": [
+      { "role": "user", "text": "顺便说一下，我家的猫叫 Mochi，今年三岁。帮我把这段 README 的语法改一改。" },
+      { "role": "assistant", "text": "Mochi 这个名字很可爱。README 的语法已经改好了。" }
+    ],
+    "expected": {
+      "candidates": [
+        { "kind": "fact", "about": "user", "bodyIncludes": ["Mochi"], "quote": "我家的猫叫 Mochi" }
+      ]
+    }
+  },
+  {
+    "id": "zh-taste-in-passing",
+    "description": "User mentions a food they love while asking about something else; a taste is a preference about the user.",
+    "turns": [
+      { "role": "user", "text": "对了，我超爱吃榴莲。帮我看看这条 SQL 为什么这么慢。" },
+      { "role": "assistant", "text": "榴莲是好东西！这条 SQL 慢是因为 orders.user_id 上没有索引。" }
+    ],
+    "expected": {
+      "candidates": [
+        { "kind": "preference", "about": "user", "bodyIncludes": ["榴莲"], "quote": "我超爱吃榴莲" }
+      ]
+    }
+  },
+  {
+    "id": "en-dislike-in-passing",
+    "description": "User names a food they dislike while asking for a recipe; a dislike is a preference about the user.",
+    "turns": [
+      { "role": "user", "text": "I can't stand anchovies, by the way. Can you suggest a quick pasta for tonight?" },
+      { "role": "assistant", "text": "Try a lemon and garlic spaghetti, no anchovies needed." }
+    ],
+    "expected": {
+      "candidates": [
+        { "kind": "preference", "about": "user", "bodyIncludes": ["anchovies"], "quote": "I can't stand anchovies" }
+      ]
+    }
+  },
+  {
+    "id": "en-habit-in-passing",
+    "description": "User mentions a habit while asking for recommendations; a habit is a preference about the user.",
+    "turns": [
+      { "role": "user", "text": "I listen to audiobooks every night before bed. Any good science fiction picks?" },
+      { "role": "assistant", "text": "Project Hail Mary and The Left Hand of Darkness both work well as audiobooks." }
+    ],
+    "expected": {
+      "candidates": [
+        { "kind": "preference", "about": "user", "bodyIncludes": ["audiobooks"], "quote": "I listen to audiobooks every night before bed" }
+      ]
+    }
+  },
+  {
+    "id": "zh-company-party-with-colleagues",
+    "description": "A dated event in the user's life that involves colleagues (sent on Tuesday 2026-11-03: 下周五 is 2026-11-13).",
+    "turns": [
+      { "role": "user", "text": "下周五公司年会，我和同事要一起表演节目，帮我想几个点子。" },
+      { "role": "assistant", "text": "可以考虑小品、合唱或者情景短剧，下面是几个具体方案。" }
+    ],
+    "expected": {
+      "candidates": [
+        { "kind": "fact", "about": "user", "bodyIncludes": ["年会"], "quote": "下周五公司年会，我和同事要一起表演节目", "eventDate": "2026-11-13" }
+      ]
+    }
+  },
+  {
+    "id": "en-child-event-tomorrow",
+    "description": "A family member's event the user mentions in passing, dated from the sent time (Tuesday 2026-11-03: tomorrow is 2026-11-04).",
+    "turns": [
+      { "role": "user", "text": "My son is in the school spelling bee tomorrow, so I only have a few minutes tonight. Summarize this article?" },
+      { "role": "assistant", "text": "Good luck to him! Here is a three-line summary of the article." }
+    ],
+    "expected": {
+      "candidates": [
+        { "kind": "fact", "about": "user", "bodyIncludes": ["spelling bee"], "quote": "My son is in the school spelling bee tomorrow", "eventDate": "2026-11-04" }
       ]
     }
   }

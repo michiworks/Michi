@@ -1,26 +1,28 @@
-import React, { useCallback } from 'react';
+import React, { useCallback, useMemo } from 'react';
 import type { BlockSource, PageBlock, PageChangeDto, PageEditOp, PageSummaryDto } from 'michi-shared';
 import type { PagePaneItem } from '../../../state/paneItems';
 import { useChatActions, useChatProjects, useChatNodesSnapshot } from '../../../state/chatStore';
-import { usePage } from '../../../state/pages/usePage';
+import { usePage, type PageApplyResult } from '../../../state/pages/usePage';
 import { revealPageSource } from '../../../state/pages/revealSource';
 import { useSpaceTree } from '../../../state/pages/useSpaceTree';
 import { backendConnectionIdForWorkspace } from '../../../config/backendConnections';
-import NativePageDocument from './NativePageDocument';
+import NativePageDocument, { spaceBlockTitle, useCompanionTargeting } from './NativePageDocument';
+import { dispatchPageHelperDraft } from '../../../state/pages/pageHelperDraft';
 import NativeDatabase from './NativeDatabase';
 import { NativeTaskView } from './NativeTaskView';
 import { PageChangeTargets } from './PageChangeTargets';
+import { pageChangeHandlers } from './nativePageHost';
+import { pageBlockTarget } from './metaChat/blockTarget';
 import { DocumentHeader, DocumentShell } from '../content/page/DocumentShell';
 import { pageBackground } from '../../../lib/pageBackground';
 import { Maximize2 } from 'lucide-react';
 import { toast } from 'sonner';
 import { CustomBlock } from './components/CustomBlock';
 import { openNativePageRoute } from './SpacesPage';
-import { dispatchPageHelperDraft } from '../../../state/pages/pageHelperDraft';
 import { LiveThreadCards } from './NativeThreadCards';
 import './spaces.css';
 
-export function PagePane({ item }: { item: PagePaneItem }) {
+function PagePane({ item }: { item: PagePaneItem }) {
   const { projects } = useChatProjects();
   const { revealBackendNode } = useChatActions();
   const nodes = useChatNodesSnapshot();
@@ -50,53 +52,30 @@ export function PagePane({ item }: { item: PagePaneItem }) {
   }), [item.backendConnectionId, item.pageId, item.workspaceId]);
   const onOpenSource = useCallback((source: BlockSource) => {
     if (!page) return false;
-    const sourceNode = nodes[source.nodeId];
-    const sourcePageId = sourceNode
-      ? sourceNode.projectId === item.workspaceId ? sourceNode.pageId ?? null : null
-      : (pages ?? []).find((candidate) => candidate.helperNodeId === source.nodeId)?.id ?? null;
-    const kind = sourcePageId ? 'helper' : 'chat';
-    return revealPageSource(
-      { backendConnectionId: item.backendConnectionId, workspaceId: item.workspaceId },
-      { ...source, kind },
-      revealBackendNode,
-      sourcePageId ? {
-        pageId: sourcePageId,
-        open: () => openNativePageRoute({
-          pageId: sourcePageId,
-          workspaceId: item.workspaceId,
-          backendConnectionId: item.backendConnectionId,
-        }),
-      } : undefined,
-    );
-  }, [item.backendConnectionId, item.workspaceId, nodes, openStandalone, page, pages, revealBackendNode]);
-  const onEdit = useCallback(async (ops: PageEditOp[], revision: number): Promise<'ok' | 'stale' | 'gone' | 'failed'> => {
-    if (!page || readOnly) return 'failed';
-    if (page.revision !== revision) { pageState.refresh(); return 'stale'; }
-    try {
-      await pageState.edit(ops);
-      return 'ok';
-    } catch (error) {
-      const status = (error as { status?: number })?.status;
-      if (status === 409) { pageState.refresh(); return 'stale'; }
-      if (status === 404 || status === 410) return 'gone';
-      return 'failed';
-    }
-  }, [page, pageState.edit, pageState.refresh, readOnly]);
+    return revealPageSource({ backendConnectionId: item.backendConnectionId, workspaceId: item.workspaceId }, source, revealBackendNode);
+  }, [item.backendConnectionId, item.workspaceId, page, revealBackendNode]);
+  const { apply, accept, dismiss, reopen, revert, redo } = pageState;
+  const onEdit = useCallback(async (ops: PageEditOp[], revision: number): Promise<PageApplyResult> => (
+    readOnly ? 'failed' : apply(ops, revision)
+  ), [apply, readOnly]);
+  const changeHandlers = useMemo(() => pageChangeHandlers({ accept, dismiss, reopen, revert, redo }), [accept, dismiss, redo, reopen, revert]);
   const onOpenPage = useCallback((pageId: string) => openNativePageRoute({
     pageId,
     workspaceId: item.workspaceId,
     backendConnectionId: item.backendConnectionId,
   }), [item.backendConnectionId, item.workspaceId]);
-  const handoffDraft = useCallback((text: string, blockContext?: { blockId: string; title: string; content: string }) => {
+  // A database's or component's Ask is a page helper's draft: the panel opens
+  // with it right here, the block as its target, with no detour to the page
+  // in Pages first (DESIGN-v2 §1.2, §1.3).
+  const handoffDraft = useCallback((text: string, blockContext: { blockId: string; title: string; content: string }) => {
     dispatchPageHelperDraft({
       backendConnectionId: item.backendConnectionId,
       workspaceId: item.workspaceId,
       pageId: item.pageId,
       text,
-      ...(blockContext ? { blockContext } : {}),
+      blockContext,
     });
-    openStandalone();
-  }, [item.backendConnectionId, item.pageId, item.workspaceId, openStandalone]);
+  }, [item.backendConnectionId, item.pageId, item.workspaceId]);
   const renderDatabaseRef = useCallback((block: Extract<PageBlock, { type: 'database-ref' }>) => (
     <>
       <NativeDatabase
@@ -108,19 +87,12 @@ export function PagePane({ item }: { item: PagePaneItem }) {
         readOnly={readOnly}
         onNavigatePage={onOpenPage}
         onOpenSource={onOpenSource}
-        onAskDraft={(text) => handoffDraft(text, {
-          blockId: block.id,
-          title: `Database ${block.databaseId}`,
-          content: 'Native database view',
-        })}
+        onAskDraft={(text) => handoffDraft(text, { blockId: block.id, title: pageBlockTarget(block).title, content: 'Native database view' })}
       />
-      <PageChangeTargets changes={changes} target={{ kind: 'database', databaseId: block.databaseId }}
-        onAccept={(change, edited) => { void pageState.accept(change.id, edited); }}
-        onDismiss={(change) => { void pageState.dismiss(change.id); }} onReopen={(change) => { void pageState.reopen(change.id); }}
-        onRevert={(change) => { void pageState.revert(change.id); }} onRedo={(change) => { void pageState.redo(change.id); }}
+      <PageChangeTargets changes={changes} target={{ kind: 'database', databaseId: block.databaseId }} {...changeHandlers}
         onOpenSource={onOpenSource} loading={readOnly} error={pageState.error} />
     </>
-  ), [changes, handoffDraft, item.backendConnectionId, item.workspaceId, onOpenPage, onOpenSource, pageState.accept, pageState.dismiss, pageState.error, pageState.redo, pageState.reopen, pageState.revert, readOnly]);
+  ), [changeHandlers, changes, handoffDraft, item.backendConnectionId, item.workspaceId, onOpenPage, onOpenSource, pageState.error, readOnly]);
   const renderComponent = useCallback((block: PageBlock) => block.type === 'component' ? (
     <CustomBlock
       block={block}
@@ -130,13 +102,11 @@ export function PagePane({ item }: { item: PagePaneItem }) {
       readOnly={readOnly}
       onNavigatePage={onOpenPage}
       onOpenSource={onOpenSource}
-      onAskDraft={(text) => handoffDraft(text, {
-        blockId: block.id,
-        title: `Component ${block.componentId}`,
-        content: 'Custom page component',
-      })}
+      onAskDraft={(text) => handoffDraft(text, { blockId: block.id, title: pageBlockTarget(block).title, content: 'Custom page component' })}
     />
   ) : null, [handoffDraft, item.backendConnectionId, item.pageId, item.workspaceId, onOpenPage, onOpenSource, readOnly]);
+  // Blocks and checklist items are the panel's targets here too: Ask <name>, and a click while the panel is open (DESIGN-v2 §1.3).
+  const targeting = useCompanionTargeting(page, spaceBlockTitle, readOnly, item.backendConnectionId);
 
   const paneIdentity = {
     'data-native-page-pane': '',
@@ -189,10 +159,7 @@ export function PagePane({ item }: { item: PagePaneItem }) {
           onOpenSource={onOpenSource}
           renderDatabaseRef={renderDatabaseRef}
           renderDecorations={(block) => <PageChangeTargets changes={changes} target={{ kind: 'block', pageId: page.id, blockId: block.id }} sourceLabel={sourceLabel}
-            onAccept={(change, edited) => { void pageState.accept(change.id, edited); }}
-            onDismiss={(change) => { void pageState.dismiss(change.id); }} onReopen={(change) => { void pageState.reopen(change.id); }}
-            onRevert={(change) => { void pageState.revert(change.id); }} onRedo={(change) => { void pageState.redo(change.id); }}
-            onOpenSource={onOpenSource} loading={readOnly} error={pageState.error} />}
+            {...changeHandlers} onOpenSource={onOpenSource} loading={readOnly} error={pageState.error} />}
           renderComponent={renderComponent}
           renderThreads={(block) => <LiveThreadCards block={block} connectionId={item.backendConnectionId} workspaceId={item.workspaceId}
             onOpen={(card) => { void revealBackendNode(card.workspaceId, card.nodeId); }} />}
@@ -200,6 +167,10 @@ export function PagePane({ item }: { item: PagePaneItem }) {
             viewId={block.viewId} title={block.title} compact readOnly={blockReadOnly || readOnly}
             onOpenThread={(card) => { void revealBackendNode(card.workspaceId, card.nodeId); }} onNavigatePage={onOpenPage} onOpenSource={onOpenSource} />}
           onOpenConversation={(nodeId) => { void revealBackendNode(item.workspaceId, nodeId).then((opened) => { if (!opened) toast.error('This conversation is no longer in this workspace.'); }); }}
+          onAskAssistant={targeting.onAskAssistant}
+          onSelectionChange={targeting.onSelectionChange}
+          selectedBlockIds={targeting.selectedBlockIds}
+          selectOnClick={targeting.selectOnClick}
           compact
           readOnly={readOnly}
         />

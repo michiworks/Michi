@@ -1,6 +1,7 @@
 import { useCallback, useLayoutEffect, useRef, useState } from 'react';
 import { AnimatePresence, motion } from 'motion/react';
-import { chatLabel, shallowArrayEqual, useStructuralSelector } from '../../state/chatStore';
+import { shallowArrayEqual, useStructuralSelector } from '../../state/chatStore';
+import { paneTitle } from '../../state/paneLabels';
 import type { ProjectEdge } from '../../state/chatTypes';
 import { DUR, EASE, TRANSITION } from '../../motion/tokens';
 import { isFreshBranch } from './branchMotion';
@@ -64,7 +65,7 @@ export function PaneArrivalTabs({ ids, onOpen }: { ids: readonly string[]; onOpe
   const list = ids.length ? ids : lastIds.current;
   const shown = list.slice(0, MAX_TABS);
   const hidden = list.slice(MAX_TABS);
-  const titles = useStructuralSelector(nodes => shown.map(id => nodes[id]?.title || chatLabel(nodes[id]) || 'Untitled'), shallowArrayEqual);
+  const titles = useStructuralSelector(nodes => shown.map(id => paneTitle(nodes[id], undefined) || 'Untitled'), shallowArrayEqual);
   const statuses = useStructuralSelector(nodes => shown.map(id => nodes[id]?.status === 'error' ? 'error'
     : nodes[id]?.status === 'streaming' && !nodes[id]?.visibleResponseComplete ? 'streaming' : 'idle'), shallowArrayEqual);
   return (
@@ -86,7 +87,7 @@ export function PaneArrivalTabs({ ids, onOpen }: { ids: readonly string[]; onOpe
             {shown.map((id, index) => (
               <button key={id} type="button" className="pane-arrival" title={titles[index]} onClick={() => onOpen(id)}>
                 <Dot
-                  color={statuses[index] === 'error' ? 'var(--term-danger)' : statuses[index] === 'streaming' ? 'var(--term-accent)' : 'var(--term-muted)'}
+                  color={statuses[index] === 'error' ? 'var(--term-danger)' : statuses[index] === 'streaming' ? 'var(--term-run)' : 'var(--term-muted)'}
                   pulse={statuses[index] === 'streaming'}
                 />
                 <span className="pane-arrival__title">{titles[index]}</span>

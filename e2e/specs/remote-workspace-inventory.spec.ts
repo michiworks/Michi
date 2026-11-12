@@ -21,9 +21,10 @@ test('Connections reads live remote membership, clears it on failure, and reread
     const path = new URL(route.request().url()).pathname;
     if (path === '/api/backend-connections') { await route.fulfill({ json: { connections } }); return true; }
     if (path === '/api/backend-connections/desktop/proxy/workspaces/all') {
-      // Hydration deliberately stays stale throughout this test.
+      // Hydration deliberately stays stale throughout this test. Created today:
+      // a workspace idle for a month would fold into the sidebar's Earlier group.
       await route.fulfill({ json: { workspaces: [{
-        workspace: { id: 'stale-local', name: 'Old hydrated workspace', cwd: '/srv/old', created_at: 1 },
+        workspace: { id: 'stale-local', name: 'Old hydrated workspace', cwd: '/srv/old', created_at: Date.now() },
         nodes: [], trees: [], edges: [], messages: [], artifacts: [],
       }] } }); return true;
     }
@@ -54,16 +55,24 @@ test('Connections reads live remote membership, clears it on failure, and reread
   await expect(desktop.getByText('Created from another device', { exact: true })).toBeVisible();
   await expect(desktop.getByText('Old hydrated workspace', { exact: true })).toHaveCount(0);
 
+  // A machine's actions are in its ⋯ menu.
+  const refresh = async () => {
+    await desktop.getByRole('button', { name: 'More actions for Build box', exact: true }).click();
+    await page.getByRole('menuitem', { name: 'Refresh workspaces', exact: true }).click();
+  };
   inventory = [{ id: 'replacement', name: 'Updated remote workspace', cwd: '/srv/current' }];
-  await desktop.getByRole('button', { name: 'Refresh workspaces', exact: true }).click();
+  await refresh();
   await expect(desktop.getByText('Updated remote workspace', { exact: true })).toBeVisible();
   await expect(desktop.getByText('Created from another device', { exact: true })).toHaveCount(0);
   await page.screenshot({ path: testInfo.outputPath('remote-workspaces-current.png') });
 
   offline = true;
-  await desktop.getByRole('button', { name: 'Refresh workspaces', exact: true }).click();
-  await expect(desktop.getByText('Workspaces unavailable', { exact: true })).toBeVisible();
-  await expect(desktop.getByRole('alert')).toContainText('SSH authentication expired');
+  await refresh();
+  // A one-sentence conclusion and its cause; the raw message is in the log.
+  await expect(desktop.getByRole('alert')).toContainText('Can’t sign in to Build box');
+  await expect(desktop.getByRole('alert')).toContainText('SSH sign-in needs attention.');
+  await desktop.getByText('Show log', { exact: true }).click();
+  await expect(desktop.locator('.remote-problem__log pre')).toContainText('SSH authentication expired');
   await expect(desktop.getByText('Updated remote workspace', { exact: true })).toHaveCount(0);
   await expect(desktop.getByText('0 workspaces', { exact: true })).toHaveCount(0);
   await expect(build.getByText('0 workspaces', { exact: true })).toBeVisible();
@@ -71,7 +80,7 @@ test('Connections reads live remote membership, clears it on failure, and reread
 
   offline = false;
   inventory = [];
-  await desktop.getByRole('button', { name: 'Retry workspaces', exact: true }).click();
+  await desktop.getByRole('button', { name: 'Retry', exact: true }).click();
   await expect(desktop.getByText('No workspaces on this machine.', { exact: true })).toBeVisible();
   await expect(desktop.getByText('0 workspaces', { exact: true })).toBeVisible();
 

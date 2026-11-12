@@ -1,0 +1,125 @@
+/* ==========================================================================
+   Map (#map), owner: map. Brief §3.7, §5.8, §6.2 M1-M9. Kit pieces (.mk-mcard,
+   .mk-medge, .mk-mapbar, .mk-mslot) keep the app's values (map/MapCard.tsx,
+   pages/Map.tsx); this file places them and adds the band, the world
+   geometry, the after-hold buttons and the top-down composition below 1024.
+   ========================================================================== */
+
+.map-body { margin-top: var(--sp-head-body); }
+.map-fig { margin-top: var(--sp-body-fig); }
+
+/* Band: full bleed, the page's only dot grid (pages/Map.tsx: line 55 % on bg
+   = #e0e3e7, 20 px). Only the ground is masked; the cards never fade. No
+   bottom padding in the wide world: its last 77 px are the Map bar's room,
+   which balances the 48 px fade above the first card.
+   Map tokens (the band is outside .mk, the world inside it): ground and dots;
+   the opaque stand-ins for the app's translucent strokes on that ground
+   (fg 25 %, its 30 % dim; mauve .65 and .65 x .3), so joins never darken. */
+.map-band { --map-ground: #f3f4f6; --map-dot: #e0e3e7; --map-e: #babdc2; --map-e-dim: #e2e4e6;
+  --map-m: #9c86c3; --map-m-dim: #d9d3e7;
+  position: relative; isolation: isolate; padding-top: 48px; }
+.map-band::before {
+  content: ""; position: absolute; inset: 0; z-index: -1; pointer-events: none;
+  background: var(--map-ground) radial-gradient(var(--map-dot) 1px, transparent 1px) 50% 0 / 20px 20px;
+  -webkit-mask-image: linear-gradient(transparent, #000 48px, #000 calc(100% - 48px), transparent);
+  mask-image: linear-gradient(transparent, #000 48px, #000 calc(100% - 48px), transparent);
+}
+/* The world centres in the band, overflowing the margins equally when k is
+   floored at .8 (1024-1048 px). */
+.map-stage { display: flex; justify-content: center; }
+@media (min-width: 1024px) and (max-width: 1279px) {
+  .map-fit { --k: .82; }   /* no-JS fallback, brief §7.4; JS writes the continuous value */
+}
+
+/* World, 1180 x 740 design px. Each card centres on its brief mid-height, as
+   the app centres a card on its layout point, so edges meet card middles
+   whatever the content height. */
+.map-s { position: absolute; transform: translateY(-50%); }
+.map-s0 { left: 40px; top: 342px; }
+.map-s1 { left: 440px; top: 122px; }
+.map-s2 { left: 440px; top: 342px; }
+.map-s3 { left: 440px; top: 562px; }
+.map-s4 { left: 840px; top: 452px; }
+.map-box.mk-mslot { position: relative; }
+/* The card's button (after the hold): covers the card, so the focus ring
+   hugs it at the selection outline's offset. */
+.map-hit { position: absolute; inset: 0; z-index: 2; cursor: pointer; }
+.map-s4 .mk-msum { --e-in: var(--t-soft); }   /* summary crossfade, 100 */
+.map-bar-btns { flex: none; display: flex; gap: 8px; margin-left: auto; }
+
+/* Branch edges: the app's fg 25 % stroke as its opaque value on the ground,
+   so the trunk the three edges share never darkens; dim = the app's 30 % of
+   it. Map edge draws ease with the CSS keyword (brief §6.1). */
+.map-e { stroke: var(--map-e);
+  transition: stroke-dashoffset 600ms ease-out, stroke 150ms var(--ease), stroke-width 150ms var(--ease); }
+.map-e.is-dim { stroke: var(--map-e-dim); opacity: 1; }
+.map-e:is(.is-lit, .is-dim) { transition-duration: 600ms, 100ms, 100ms; }
+.map-e.is-off { transition: none; }
+/* Merge edges reveal through these solid strokes (brief M7). They live in a
+   <mask>: #fff is mask luminance (fully shown), not a colour, so it never themes. */
+.map-k { --d-ease: ease-out; fill: none; stroke: #fff; stroke-width: 6; stroke-linecap: round; }
+
+/* Under the band, on the page grid (wide) or the column (top-down). The
+   breadcrumb keeps the box of its longest variant (the sizer), so a pin never
+   moves anything. */
+.map-under { margin-inline: auto; }
+.map-crumb { display: grid; }
+.map-crumb > * { grid-area: 1 / 1; }
+.map-crumb-s { visibility: hidden; }
+.map-digest { margin-top: var(--sp-bar-rows); }
+
+.map-cx { display: none; }
+
+/* Top-down (< 1024, brief §5.8): fluid, max 520, centred. Root full width;
+   children and the merged card inset 24, so the left gutter carries the
+   branch elbows and the right gutter the dashed merge elbows. The Map bar
+   overlays the merged card's reserved slot, under the last child. */
+@media (max-width: 1023px) {
+  .map-band { padding-bottom: 48px; }
+  .map-fit { width: 100%; max-width: 520px; aspect-ratio: auto; }
+  .map-fit > .mk-canvas { position: relative; width: auto; height: auto; transform: none;
+    display: flex; flex-direction: column; }
+  .map-world > svg { display: none; }
+  .map-s { position: relative; left: auto; top: auto; transform: none; }
+  .map-s1, .map-s2, .map-s3, .map-s4 { margin: 24px 24px 0; }
+  .map-s4 { margin-top: 0; }
+  .map-sec .mk-mcard { width: 100%; }
+  .map-barslot { position: relative; z-index: 5; height: 0; margin-top: 24px; }
+  .map-sec .mk-mapbar { position: relative; left: 0; right: 0; bottom: auto; flex-wrap: wrap; row-gap: 8px; }
+  /* Names at their own width, so the buttons wrap below them rather than the
+     names ellipsizing on one line (the kit's flex: 1 has a 0 basis). */
+  .map-sec .mk-mapbar-names { flex: 1 1 auto; }
+  .map-under { max-width: 520px; }
+
+  /* Elbows: CSS borders, revealed with clip-path, one pen per gutter. Opaque
+     equivalents of the app's strokes on the ground, so joins never darken. */
+  .map-cx { --cxw: 1.4px; --cxc: var(--map-e); display: block; position: absolute; width: 12px;
+    border: 0 solid var(--cxc); clip-path: inset(0);   /* not none: inset() only tweens to inset() */
+    transition: clip-path var(--cx-ms, 189ms) linear var(--cx-d, 0ms), border-color 150ms var(--ease); }
+  .map-cx:is(.is-lit, .is-pass, .is-dim) { transition-duration: var(--cx-ms, 189ms), 100ms; }
+  .map-cx.is-dim { --cxc: var(--map-e-dim); }
+  .map-cx:is(.is-lit, .is-pass) { --cxc: var(--term-accent); --cxw: 1.8px; }
+  .map-cx-up, .map-cx-dn { left: -12px; border-left-width: var(--cxw); }
+  .map-cx-up { top: -24px; bottom: 50%; border-bottom-width: var(--cxw); }
+  .map-cx-up.is-pass { border-bottom: 1.4px solid var(--map-e-dim); }   /* the chain passes this tick */
+  .map-cx-dn { top: 50%; bottom: 0; }
+  .map-cx.is-m { --cxc: var(--map-m); right: -12px; border-style: dashed; }   /* mauve .65 */
+  .map-cx.is-m:is(.is-lit, .is-flow) { --cxc: var(--map-m); --cxw: 1.8px; border-style: solid; }
+  .map-cx.is-m.is-dim { --cxc: var(--map-m-dim); }   /* .65 x .3 */
+  .map-cx-out { top: 50%; bottom: -24px; border-top-width: var(--cxw); border-right-width: var(--cxw); }
+  .map-cx-thru { top: 0; bottom: -24px; border-right-width: var(--cxw); }
+  .map-cx-tick { top: 50%; height: 0; border-top-width: var(--cxw); }
+  .map-cx-in { top: 0; bottom: 50%; border-right-width: var(--cxw); border-bottom-width: var(--cxw); }
+  .map-cx.is-off { clip-path: inset(0 0 100% 0); transition: none; }
+  .map-cx-tick.is-off { clip-path: inset(0 100% 0 0); }
+  /* Pen timing (left ≈ .66 px/ms from 200, right ≈ .74 px/ms from 3900),
+     relative to the draw step that reveals each piece. */
+  .map-s1 .map-cx-dn { --cx-d: 69ms; --cx-ms: 153ms; }
+  .map-s2 .map-cx-up { --cx-d: 222ms; --cx-ms: 174ms; }
+  .map-s2 .map-cx-dn { --cx-d: 276ms; --cx-ms: 138ms; }
+  .map-s3 .map-cx-up { --cx-d: 414ms; }
+  .map-cx-out { --cx-ms: 155ms; }
+  .map-cx-thru { --cx-d: 155ms; --cx-ms: 305ms; }
+  .map-cx-tick { --cx-d: 131ms; --cx-ms: 80ms; }
+  .map-cx-in { --cx-d: 460ms; --cx-ms: 136ms; }
+}

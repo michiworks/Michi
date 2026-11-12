@@ -1,8 +1,10 @@
 import React from 'react';
+import { estimateTokens } from 'michi-shared';
 import type { Project } from '../../../state/chatTypes';
 import type { BulkActions } from './ChatTreeList';
-import { confirmDialog } from '../../ui/ConfirmDialog';
+import { confirmMoveThreadsToTrash } from '../../../lib/threadRowContextMenu';
 import FolderList from './FolderList';
+import { isLocalProject } from '../../../config/backendConnections';
 
 interface Props {
   workspace: Project;
@@ -134,7 +136,7 @@ export default function ManageSidebar({
           }}
         >
           <span>
-            {instr.length} chars · ~{Math.round(instr.length / 4)} tokens
+            {instr.length} chars · ~{estimateTokens(instr)} tokens
             {dirty && (
               <span style={{ color: 'var(--term-accent)', marginLeft: 6 }}>· unsaved</span>
             )}
@@ -169,7 +171,7 @@ export default function ManageSidebar({
         <FolderList
           folders={workspace.folders ?? []}
           projectId={workspace.id}
-          remote={!!workspace.backendConnectionId}
+          remote={!isLocalProject(workspace)}
           onAddFolder={onAddFolder}
           onRemoveFolder={onRemoveFolder}
           onUpdateLabel={onUpdateFolderLabel}
@@ -219,11 +221,7 @@ export default function ManageSidebar({
                       danger
                       onClick={() => {
                         const count = bulkActions?.treeSelection.size ?? 0;
-                        void confirmDialog({
-                          title: 'Move to trash',
-                          message: `Move ${count} thread${count === 1 ? '' : 's'} to trash?`,
-                          confirmLabel: 'Move',
-                        }).then((ok) => {
+                        void confirmMoveThreadsToTrash(count).then((ok) => {
                           if (ok) bulkActions?.bulkDeleteTrees();
                         });
                       }}
@@ -272,24 +270,6 @@ function SidebarManageBtn({ label, onClick, danger }: { label: string; onClick: 
     >
       {label}
     </span>
-  );
-}
-
-function EyeGlyph() {
-  return (
-    <svg
-      width="10"
-      height="10"
-      viewBox="0 0 16 16"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth="1.4"
-      strokeLinejoin="round"
-      aria-hidden
-    >
-      <path d="M1.5 8s2.5-4.5 6.5-4.5S14.5 8 14.5 8 12 12.5 8 12.5 1.5 8 1.5 8z" />
-      <circle cx="8" cy="8" r="1.8" />
-    </svg>
   );
 }
 

@@ -58,6 +58,16 @@ describe('collectCrossTreeGroups', () => {
     expect(groups.map((g) => [g.treeTitle, g.nodes.map((n) => n.nodeId)])).toEqual([['A root', ['a1']]]);
   });
 
+  it('lists a thread not opened yet this session, whose bodies are not loaded', () => {
+    const { nodes, project } = fixture();
+    const placeholder = { ...nodes, b1: { ...nodes.b1, messages: [], messagesLoaded: false, messageCount: 3 } };
+    const groups = collectCrossTreeGroups(placeholder, project, 'tA');
+    expect(groups.map((g) => [g.treeTitle, g.nodes.map((n) => n.nodeId)])).toEqual([['B root', ['b1']]]);
+    // A blank new chat still has nothing to mention.
+    const blank = { ...nodes, b1: { ...nodes.b1, messages: [], messagesLoaded: true, messageCount: 0 } };
+    expect(collectCrossTreeGroups(blank, project, 'tA')).toEqual([]);
+  });
+
   it('caps total candidates at CROSS_TREE_MENTION_CAP', () => {
     const nodes: Record<string, ChatNodeState> = {};
     const chatIds: string[] = [];

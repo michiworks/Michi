@@ -85,10 +85,9 @@ async function assertSurface(menu: Locator, width: number, viewportWidth: number
     await expect(menu).not.toHaveClass(/\bterm-glass\b/);
     await expect(menu).toHaveCSS('backdrop-filter', 'none');
   } else {
-    // Same glass recipe as the palette (tint, highlight, cast shadow), at the
-    // denser menu setting: blur floored at 26px, surface at 78%.
+    // The palette's overlay frost (blur, highlight, cast shadow).
     await expect(menu).toHaveClass(/\bterm-glass\b/);
-    await expect(menu).toHaveCSS('backdrop-filter', /blur\(26px\)/);
+    await expect(menu).toHaveCSS('backdrop-filter', 'blur(48px) saturate(1.1)');
     if (paletteMaterial) expect((await materialOf(menu)).boxShadow).toEqual(paletteMaterial.boxShadow);
   }
   await expect(menu).toHaveCSS('padding', '6px');
@@ -105,183 +104,6 @@ async function materialOf(surface: Locator) {
   return surface.evaluate((element) => {
     const css = getComputedStyle(element);
     return { background: css.background, backdropFilter: css.backdropFilter, boxShadow: css.boxShadow };
-  });
-}
-
-async function expectQuietSearch(input: Locator) {
-  await input.focus();
-  await expect(input).toBeFocused();
-  await expect(input).toHaveCSS('outline-style', 'none');
-  await expect(input).toHaveCSS('box-shadow', 'none');
-}
-
-for (const palette of ['bone', 'monokai'] as const) {
-  test(`${palette}: workspace, agents, autocomplete and context menus use the tuned tokens`, async ({ page }, info) => {
-    const errors: string[] = [];
-    page.on('pageerror', (error) => errors.push(error.message));
-    await page.setViewportSize({ width: 1280, height: 900 });
-    await bootMenus(page, palette);
-    await expect(page.locator('html')).toHaveAttribute('data-terminal-palette', palette);
-
-    await page.getByRole('button', { name: 'Search', exact: true }).click();
-    const paletteDialog = page.getByRole('dialog', { name: /Command palette/i });
-    await expect(paletteDialog).toBeVisible();
-    await expect(paletteDialog).toHaveCSS('border-radius', '4px');
-    await expectQuietSearch(paletteDialog.getByRole('textbox'));
-    const paletteMaterial = await materialOf(paletteDialog);
-    const paletteFont = await paletteDialog.evaluate((element) => getComputedStyle(element).fontFamily);
-    // The palette's list is built from the same menu rows as every dropdown.
-    const paletteRow = paletteDialog.locator('.michi-menu-scope .ui-menu-item').first();
-    await expect(paletteRow).toHaveCSS('border-radius', '2px');
-    await expect(paletteRow).toHaveCSS('font-size', '13px');
-    await expect(paletteRow).toHaveCSS('border-left-width', '0px');
-    await paletteDialog.screenshot({ path: info.outputPath('command-palette.png') });
-    await page.keyboard.press('Escape');
-
-    await page.getByTitle('Switch workspace', { exact: true }).click();
-    const workspace = page.getByRole('menu', { name: 'Workspaces', exact: true });
-    await assertSurface(workspace, 252, 1280, paletteMaterial);
-    expect(await workspace.evaluate((element) => getComputedStyle(element).fontFamily)).toBe(paletteFont);
-    await expect(workspace.locator('.ui-menu-item').first()).toHaveCSS('min-height', '35px');
-    await expect(workspace.locator('.ui-menu-item').first()).toHaveCSS('padding', '9px 10px');
-    const workspaceList = workspace.locator('.michi-menu-list:not(.michi-menu-pinned)');
-    const workspaceRows = workspaceList.getByRole('menuitem');
-    const workspaceSearch = workspace.getByRole('textbox');
-    const newWorkspace = workspace.getByRole('menuitem', { name: /new workspace/ });
-    await expect(workspaceRows).toHaveCount(10);
-    await expect(workspaceList).toHaveCSS('max-height', '175px');
-    expect((await workspaceList.boundingBox())!.height).toBe(175);
-    for (const row of (await workspaceRows.all()).slice(0, 5)) await expect(row).toBeInViewport({ ratio: 1 });
-    await expect(workspaceRows.nth(5)).not.toBeInViewport();
-    await expect(newWorkspace).toBeInViewport({ ratio: 1 });
-    await expectQuietSearch(workspaceSearch);
-    await workspace.screenshot({ path: info.outputPath('workspace.png') });
-    await page.screenshot({ path: info.outputPath('workspace-page.png'), fullPage: true });
-    for (let index = 0; index < 10; index++) await workspaceSearch.press('ArrowDown');
-    await expect(workspaceRows.last()).toBeInViewport({ ratio: 1 });
-    expect(await workspaceList.evaluate((element) => element.scrollTop)).toBeGreaterThan(0);
-    await expect(workspaceSearch).toBeInViewport({ ratio: 1 });
-    await expect(newWorkspace).toBeInViewport({ ratio: 1 });
-    await workspaceSearch.fill('Workspace 9');
-    await expect(workspaceRows).toHaveCount(1);
-    await expect(workspaceRows.first()).toBeInViewport({ ratio: 1 });
-    await workspaceSearch.fill('no workspace matches');
-    await expect(workspaceRows).toHaveCount(0);
-    await expect(newWorkspace).toBeInViewport({ ratio: 1 });
-    await page.keyboard.press('Escape');
-
-    await page.locator('[title^="Switch agent"]').click();
-    const agents = page.getByRole('menu', { name: 'Agents', exact: true });
-    await assertSurface(agents, 480, 1280, paletteMaterial);
-    await expectQuietSearch(agents.getByRole('textbox'));
-    await expect(agents.getByRole('menuitem', { name: /Default Agent/ })).toBeVisible();
-    await agents.screenshot({ path: info.outputPath('agents.png') });
-    await page.keyboard.press('Escape');
-
-    const sidebar = page.locator('.terminal-sidebar');
-    await sidebar.getByText('root conversation', { exact: true }).first().click();
-    const editor = page.locator(COMPOSER_EDITOR).first();
-    await editor.fill('@');
-    const mentions = page.getByRole('listbox', { name: 'Mentions', exact: true });
-    await assertSurface(mentions, 420, 1280, paletteMaterial);
-    await expect(mentions.locator('input')).toHaveCount(0);
-    await mentions.screenshot({ path: info.outputPath('mentions.png') });
-    await editor.press('ArrowUp');
-    await expect(mentions.getByRole('option').last()).toBeInViewport();
-    await editor.fill('@Design');
-    await expect(mentions.getByRole('option')).toHaveCount(1);
-    await editor.press('Enter');
-    await expect(editor.locator('.mention-chip')).toHaveText('@Design notes');
-    await expect(editor).toBeFocused();
-    await expect(mentions).toHaveCount(0);
-
-    await editor.fill('/');
-    const slash = page.getByRole('listbox', { name: 'Slash commands', exact: true });
-    await assertSurface(slash, 480, 1280, paletteMaterial);
-    await expect(slash.locator('input')).toHaveCount(0);
-    const branch = slash.getByRole('option', { name: /^\/branch / });
-    await expect(branch).toContainText('Open this message as a new child thread.');
-    const command = (await branch.locator('.michi-menu-command').boundingBox())!;
-    const description = (await branch.locator('.michi-menu-caption').boundingBox())!;
-    expect(Math.abs(command.y + command.height / 2 - description.y - description.height / 2)).toBeLessThan(1);
-    await slash.screenshot({ path: info.outputPath('slash.png') });
-    await page.screenshot({ path: info.outputPath('slash-page.png'), fullPage: true });
-    await branch.click();
-    await expect(editor).toHaveText('/branch');
-    await expect(slash).toHaveCount(0);
-
-    await page.getByLabel('root conversation pane, focused', { exact: true }).click({ button: 'right' });
-    const context = page.getByRole('menu', { name: 'Actions', exact: true });
-    await assertSurface(context, 252, 1280);
-    await expect(context.locator('.ui-menu-item').first()).toHaveCSS('min-height', '32px');
-    await expect(context.locator('.ui-menu-item').first()).toHaveCSS('border-radius', '2px');
-    await context.screenshot({ path: info.outputPath('pane-context.png') });
-    await page.screenshot({ path: info.outputPath('pane-context-page.png'), fullPage: true });
-    await page.keyboard.press('Escape');
-
-    for (const [label, screenshot] of [['Menu implementation', 'workspace-context'], ['root conversation', 'thread-context'], ['branch conversation', 'node-context']]) {
-      await sidebar.getByText(label, { exact: true }).first().click({ button: 'right' });
-      await assertSurface(context, 252, 1280);
-      await context.screenshot({ path: info.outputPath(`${screenshot}.png`) });
-      await page.keyboard.press('Escape');
-    }
-    await sidebar.getByText('branch conversation', { exact: true }).click({ modifiers: ['ControlOrMeta'] });
-    await sidebar.getByText('branch2 conversation', { exact: true }).click({ modifiers: ['ControlOrMeta'] });
-    await sidebar.getByText('branch conversation', { exact: true }).click({ button: 'right' });
-    await assertSurface(context, 252, 1280);
-    await expect(context).toContainText('Weave 2 chats');
-    await context.screenshot({ path: info.outputPath('multi-context.png') });
-    await page.keyboard.press('Escape');
-
-    await page.getByRole('button', { name: 'Artifacts', exact: true }).click();
-    const drawer = page.getByRole('dialog', { name: 'Artifacts', exact: true });
-    const artifactSearch = drawer.getByRole('searchbox');
-    const unfocusedBorder = await artifactSearch.evaluate((element) => getComputedStyle(element).borderColor);
-    await expectQuietSearch(artifactSearch);
-    await expect(artifactSearch).toHaveCSS('border-color', unfocusedBorder);
-    await artifactSearch.fill('Design');
-    await expect(drawer.getByText('Reference notes 1', { exact: true })).toHaveCount(0);
-    await drawer.screenshot({ path: info.outputPath('artifact-search.png') });
-    await drawer.getByText('Design notes', { exact: true }).click({ button: 'right' });
-    await assertSurface(context, 252, 1280);
-    await context.screenshot({ path: info.outputPath('artifact-context.png') });
-    await page.keyboard.press('Escape');
-    await expect(context).toHaveCount(0);
-    await expect(drawer).toBeVisible();
-    await drawer.getByRole('button', { name: 'Close', exact: true }).click();
-
-    await editor.fill('Inspect context usage');
-    await page.getByRole('button', { name: 'Send (Enter)', exact: true }).click();
-    await page.getByRole('meter').hover();
-    const usage = page.locator('[data-menu="usage"]');
-    await assertSurface(usage, 288, 1280, paletteMaterial);
-    await expect(usage).toContainText('79.5K tokens');
-    // The usage hover hugs its widest line instead of taking the menu column width.
-    const slack = await usage.evaluate((element) => {
-      const px = (value: string) => parseFloat(value) || 0;
-      const content = Math.max(...Array.from(element.children, (row) => {
-        const range = document.createRange();
-        range.selectNodeContents(row);
-        const css = getComputedStyle(row);
-        return range.getBoundingClientRect().width + px(css.paddingLeft) + px(css.paddingRight);
-      }));
-      const css = getComputedStyle(element);
-      const chrome = px(css.paddingLeft) + px(css.paddingRight) + px(css.borderLeftWidth) + px(css.borderRightWidth);
-      return element.getBoundingClientRect().width - chrome - content;
-    });
-    expect(slack).toBeLessThanOrEqual(2);
-    const meterBox = (await page.getByRole('meter').boundingBox())!;
-    const usageBox = (await usage.boundingBox())!;
-    expect(usageBox.y + usageBox.height).toBeLessThanOrEqual(meterBox.y);
-    await usage.screenshot({ path: info.outputPath('usage.png') });
-
-    await page.getByRole('button', { name: 'Search', exact: true }).hover();
-    const tooltip = page.getByRole('tooltip');
-    await expect(tooltip).toBeVisible();
-    await expect(tooltip).toHaveCSS('border-radius', '2px');
-    await expect(tooltip).toHaveCSS('font-size', '11px');
-    await expect(tooltip).toHaveCSS('backdrop-filter', 'none');
-    expect(errors).toEqual([]);
   });
 }
 
@@ -310,25 +132,24 @@ test('autocomplete stays within a narrow viewport and reduced motion skips the b
   }
 });
 
-test('glass menus follow glass preferences and reduced transparency; right-click stays solid', async ({ page }, info) => {
+test('glass menus keep the overlay frost whatever the sidebar glass, honour reduced transparency; right-click stays solid', async ({ page }, info) => {
   await bootMenus(page, 'monokai');
   await page.evaluate(() => {
+    // The sidebar's glass knobs. Overlays must not follow them.
     const style = document.documentElement.style;
     style.setProperty('--term-glass-blur', '36px');
     style.setProperty('--term-glass-saturate', '120%');
-    style.setProperty('--term-glass-solid-alpha', '.65');
-    style.setProperty('--term-glass-wash-strength', '0.5');
-    style.setProperty('--term-glass-depth', '1.3');
+    style.setProperty('--term-sidebar-solid-alpha', '.2');
   });
   await page.getByRole('button', { name: 'Search', exact: true }).click();
   const paletteMaterial = await materialOf(page.getByRole('dialog', { name: /Command palette/i }));
   await page.keyboard.press('Escape');
   await page.getByTitle('Switch workspace', { exact: true }).click();
   const workspace = page.getByRole('menu', { name: 'Workspaces', exact: true });
-  await expect(workspace).toHaveCSS('backdrop-filter', 'blur(36px) saturate(1.2)');
+  await expect(workspace).toHaveCSS('backdrop-filter', 'blur(48px) saturate(1.1)');
   await expect.poll(() => workspace.evaluate((element) => element.getAnimations().filter((animation) => animation.playState === 'running').length)).toBe(0);
-  // A blur above the menu floor follows the pref; the shared cast/highlight too.
-  expect((await materialOf(workspace)).boxShadow).toEqual(paletteMaterial.boxShadow);
+  // One overlay material: same surface, blur and edge cues as the palette.
+  expect(await materialOf(workspace)).toEqual(paletteMaterial);
   await workspace.screenshot({ path: info.outputPath('custom-glass.png') });
   await page.keyboard.press('Escape');
 

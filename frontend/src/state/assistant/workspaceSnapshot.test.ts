@@ -57,6 +57,19 @@ describe('mergeWorkspaceSnapshot', () => {
     expect(merged.nodes.helper.deletedAt).toBe(123);
   });
 
+  it('shows a Scheduled-only run moved to its workspace: the cleared mark replaces the held one', () => {
+    const hidden = raw(['run'], null);
+    (hidden.nodes[0] as Record<string, unknown>).scheduled_only_job_id = 'job-hidden';
+    const first = mergeWorkspaceSnapshot([user], {}, hidden)!;
+    expect(first.nodes.run.scheduledOnlyJobId).toBe('job-hidden');
+    const held = { ...first.nodes.run, status: 'streaming' as const };
+    const moved = raw(['run'], null);
+    (moved.nodes[0] as Record<string, unknown>).scheduled_only_job_id = null;
+    const merged = mergeWorkspaceSnapshot(first.projects, { run: held }, moved)!;
+    expect(merged.nodes.run.scheduledOnlyJobId).toBeNull();
+    expect(merged.nodes.run.status).toBe('streaming');
+  });
+
   it('keeps the render keys of a realigned turn: held nodes keep their own messages', () => {
     const first = mergeWorkspaceSnapshot([user], {}, raw(['n1']))!;
     const realigned = {
@@ -97,6 +110,16 @@ describe('mergeWorkspaceSnapshot', () => {
     // A live local choice stands.
     const kept = mergeWorkspaceSnapshot(local, first.nodes, { ...raw(['n1', 'n2']), workspace: { ...reset.workspace } })!;
     expect(kept.projects.find((p) => p.id === 'sys')!.activeTreeId).toBe('t0');
+  });
+
+  it('lands a new workspace whose active tree moved elsewhere on its newest listed thread', () => {
+    // n-moved now belongs to workspace a; t2 is a newer Scheduled-only run.
+    const snapshot = raw(['n-moved', 'n-plain', 'n-run'], null);
+    snapshot.workspace = { ...snapshot.workspace, active_tree_id: 't0' } as typeof snapshot.workspace;
+    (snapshot.nodes[2] as Record<string, unknown>).scheduled_only_job_id = 'job-hidden';
+    const held = { 'n-moved': { nodeId: 'n-moved', projectId: 'a', kind: 'chat', chatId: null, messages: [], followUps: [], status: 'idle' } as ChatNodeState };
+    const merged = mergeWorkspaceSnapshot([user], held, snapshot)!;
+    expect(merged.projects.find((p) => p.id === 'sys')!.activeTreeId).toBe('t1');
   });
 
   it('notices a newly archived tree even when nothing was added', () => {

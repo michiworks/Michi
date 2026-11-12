@@ -14,6 +14,7 @@ vi.mock('./home/WorkspaceHome', () => ({ default: ({ workspaceId, backendConnect
 ) }));
 vi.mock('./allTasks/AllTasksPage', () => ({ default: () => <h1>All tasks</h1> }));
 vi.mock('../../../config/backendConnections', () => ({
+  LOCAL_BACKEND_CONNECTION_ID: 'local',
   backendConnectionIdForWorkspace: (id: string) => id === 'remote-ws' ? 'remote-1' : 'local',
   getKnownBackendConnections: () => [{ id: 'local', name: 'Local' }, { id: 'remote-1', name: 'Research server' }],
 }));
@@ -21,7 +22,7 @@ vi.mock('../../../services/api/pages', () => ({ createPage: mocks.createPage }))
 vi.mock('../../../state/metaAgent/spacesFirstRun', () => ({ useSpacesFirstRun: mocks.firstRun }));
 vi.mock('../../../services/api/pageMaintenance', () => ({ getPageMaintenance: mocks.getMaintenance, setPageMaintenanceSpaceExcluded: mocks.excludeSpace }));
 
-import { CreateSpaceDialog, SpacesPage } from './SpacesPage';
+import SpacesPage, { CreateSpaceDialog } from './SpacesPage';
 import { act } from '@testing-library/react';
 import { requestWorkspaceHome } from '../../../state/pages/workspaceHomeNav';
 
@@ -81,5 +82,39 @@ describe('Spaces main area', () => {
     ));
     await waitFor(() => expect(mocks.excludeSpace).toHaveBeenCalledWith('remote-page', true, 0, { backendConnectionId: 'remote-1', workspaceId: 'remote-ws' }));
     await waitFor(() => expect(onCreated).toHaveBeenCalledWith({ pageId: 'remote-page', workspaceId: 'remote-ws', backendConnectionId: 'remote-1' }));
+  });
+
+  function Opener() {
+    const [open, setOpen] = React.useState(false);
+    return <>
+      <button type="button" onClick={() => setOpen(true)}>New page</button>
+      {open && <CreateSpaceDialog activeWorkspaceId="ws-local" onClose={() => setOpen(false)} onCreated={vi.fn()} />}
+    </>;
+  }
+
+  it.each([
+    ['Esc', () => fireEvent.keyDown(window, { key: 'Escape' })],
+    ['Cancel', () => fireEvent.click(screen.getByRole('button', { name: 'Cancel' }))],
+  ])('gives focus back to what opened it when %s closes it', async (_how, close) => {
+    render(<Opener />);
+    const opener = screen.getByRole('button', { name: 'New page' });
+    opener.focus();
+    fireEvent.click(opener);
+    await waitFor(() => expect(screen.getByRole('dialog', { name: 'Create a page' }).contains(document.activeElement)).toBe(true));
+    close();
+    await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
+    await waitFor(() => expect(document.activeElement).toBe(opener));
+  });
+
+  it('cannot be closed while the page is being created', async () => {
+    mocks.createPage.mockReturnValue(new Promise(() => {}));
+    const onClose = vi.fn();
+    render(<CreateSpaceDialog activeWorkspaceId="ws-local" onClose={onClose} onCreated={vi.fn()} />);
+    fireEvent.change(screen.getByLabelText('Name'), { target: { value: 'Field notes' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Create page' }));
+    await screen.findByRole('button', { name: 'Creating…' });
+    expect(screen.queryByRole('button', { name: 'Close' })).toBeNull();
+    fireEvent.keyDown(window, { key: 'Escape' });
+    expect(onClose).not.toHaveBeenCalled();
   });
 });

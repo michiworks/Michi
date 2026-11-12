@@ -1,12 +1,13 @@
-import React, { useState } from 'react';
+import { useState } from 'react';
 import { useChatProjects } from '../../../../state/chatStore';
 import { ComponentLibrary } from './ComponentLibrary';
 import { BuiltinComponents } from './BuiltinComponents';
+import { isLocalProject } from '../../../../config/backendConnections';
 
 /** Each library belongs to a workspace; never silently mix local and remote components. */
 export function ComponentsSettings() {
   const { projects, activeProject } = useChatProjects();
-  const workspaces = projects.filter(project => !project.deletedAt && !project.archivedAt && (!project.backendConnectionId || project.backendConnectionId === 'local'));
+  const workspaces = projects.filter(project => !project.deletedAt && !project.archivedAt && isLocalProject(project));
   const [selected, setSelected] = useState(activeProject?.id ?? '');
   const workspace = workspaces.find(project => project.id === selected) ?? workspaces[0];
   return <div className="components-settings">

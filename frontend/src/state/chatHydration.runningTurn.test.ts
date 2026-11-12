@@ -48,4 +48,22 @@ describe('a running turn opened by a renderer that did not start it', () => {
     const nodes = applyTreeMessages({ n1: placeholder }, { n1: [mapMessageRow(assistantRow)] });
     expect(nodes.n1.messages[0].streaming).toBe(true);
   });
+
+  it('resumes a lazily loaded running turn from the cursor its rows were stored at', () => {
+    const placeholder = { nodeId: 'n1', projectId: 'ws1', kind: 'chat', chatId: 'n1', status: 'streaming', lastAppliedTurnId: 'turn-1', lastAppliedSeq: 9, messages: [], messagesLoaded: false, followUps: [] } as unknown as ChatNodeState;
+    const nodes = applyTreeMessages({ n1: placeholder }, { n1: [mapMessageRow(assistantRow)] }, undefined,
+      [{ node_id: 'n1', turn_id: 'turn-1', status: 'active', last_seq: 40, error: null, completed_at: null }]);
+    expect(nodes.n1).toMatchObject({
+      status: 'streaming', activeTurnId: 'turn-1', lastAppliedTurnId: 'turn-1', lastAppliedSeq: 40, lastAppliedBackgroundSeq: 40,
+    });
+    expect(nodes.n1.messages[0].streaming).toBe(true);
+  });
+
+  it('shows the error of a turn that failed before its rows loaded', () => {
+    const placeholder = { nodeId: 'n1', projectId: 'ws1', kind: 'chat', chatId: 'n1', status: 'streaming', messages: [], messagesLoaded: false, followUps: [] } as unknown as ChatNodeState;
+    const nodes = applyTreeMessages({ n1: placeholder }, { n1: [mapMessageRow(assistantRow)] }, undefined,
+      [{ node_id: 'n1', turn_id: 'turn-1', status: 'error', last_seq: 40, error: 'Agent exited', completed_at: 5 }]);
+    expect(nodes.n1).toMatchObject({ status: 'error', error: 'Agent exited', errorTurnId: 'turn-1', errorCompletedAt: 5 });
+    expect(nodes.n1.messages[0].streaming).toBe(false);
+  });
 });

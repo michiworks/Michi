@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import type { ChatMessage, ChatNodeState, Project } from './chatTypes';
 import { applyTreeMessages, carryClientKeys } from './chatHydration';
 import { reconcileBackgroundWorkspaceSnapshot } from './backgroundGapReconcile';
+import { quietStructureRead } from '../test/structureGuardsStub';
 
 // A realigned turn: its rows carry the ids they were first rendered under.
 const realigned: ChatMessage[] = [
@@ -55,6 +56,7 @@ describe('clientKey across server replacements', () => {
       artifacts: [],
     };
     const result = reconcileBackgroundWorkspaceSnapshot({
+      ...quietStructureRead,
       currentProjects: [project],
       currentNodes: { parent: node(realigned) },
       rawWorkspace,
@@ -64,5 +66,19 @@ describe('clientKey across server replacements', () => {
       ['u-a-server', 'u-a-local'],
       ['a-server', 'a-local'],
     ]);
+    // The same rows as one node page over a structure read.
+    const paged = reconcileBackgroundWorkspaceSnapshot({
+      ...quietStructureRead,
+      currentProjects: [project],
+      currentNodes: { parent: node(realigned) },
+      rawWorkspace: { ...rawWorkspace, nodes: rawWorkspace.nodes.map((row) => ({ ...row, message_count: 3 })), messages: [] },
+      page: { messages: rawWorkspace.messages, pages: [{ nodeId: 'parent', total: 3, before: { seq: 0, id: 'u-a-server' } }] },
+      gap: { chatId: 'chat-parent', nodeId: 'parent', turnId: 'turn-1', seq: 4 },
+    });
+    expect(paged!.nodes.parent.messages.map((m) => [m.id, m.clientKey])).toEqual([
+      ['u-a-server', 'u-a-local'],
+      ['a-server', 'a-local'],
+    ]);
+    expect(paged!.nodes.parent).toMatchObject({ messagesLoaded: false, messageCount: 3 });
   });
 });

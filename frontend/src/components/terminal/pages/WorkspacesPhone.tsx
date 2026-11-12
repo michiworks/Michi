@@ -1,41 +1,38 @@
 import React from 'react';
 import { flushSync } from 'react-dom';
 import { toast } from 'sonner';
+import { plural } from 'michi-shared';
 import {
   Archive,
-  ArchiveRestore,
-  ArrowUpRight,
   ChevronDown,
   ChevronRight,
   Ellipsis,
-  FolderOpen,
-  Pencil,
   Pin,
-  PinOff,
   Plus,
   Search,
   Server,
   Trash2,
   X,
-  type LucideIcon,
 } from 'lucide-react';
 import type { BackendConnectionSummary } from '../../../config/backendConnections';
 import type { PageId } from '../../../state/commands';
 import type { ChatNodeState, Project } from '../../../state/chatTypes';
 import { useChatNode, useNodesSelector } from '../../../state/chatStore';
 import { isVisibleConversationNode } from '../../../state/conversationVisibility';
+import { useWaitingWorkflowNodeIds } from '../../../state/workflowDomain';
 import { nodeAwaiting, nodeWaitingFor, progressStatusLine, threadTitle } from '../../../state/spaceConversations/liveStatus';
 import {
   buildWorkspaceRowContextMenu,
-  type ContextMenuItem,
   type WorkspaceRowActionId,
   type WorkspaceRowActions,
 } from '../../../lib/workspaceRowContextMenu';
+import ContextMenu, { MenuPresence, menuOpenKey, type MenuSection } from '../../ContextMenu';
 import { remoteMachineName } from '../../WorkspaceLocation';
 import { BottomSheet } from '../../ui/BottomSheet';
 import { Button } from '../../ui/controls';
 import { Dot } from '../primitives';
 import { initialOf, workspaceAccent } from '../workspaceAccent';
+import { isImeComposing } from '../../../lib/ime';
 import {
   EmptyState,
   formatRelative,
@@ -48,8 +45,9 @@ import {
 import './WorkspacesPhone.css';
 
 // The Workspaces page on a phone: one row per workspace that says what it is
-// doing now (waiting on you, running, failed, or its latest thread), and an
-// action sheet for everything the desktop row menu offers.
+// doing now (waiting on you, running, failed, or its latest thread). A long
+// press or the row's … opens everything the desktop row menu offers beside the
+// row; renaming and deleting continue in a sheet.
 
 /** A workspace's conversations that wait on the user or run right now, by node id. */
 export interface WorkspaceLive { waiting: string | null; running: string | null }
@@ -63,12 +61,14 @@ function newerTurn(nodes: Record<string, ChatNodeState>, current: string | null,
 
 /** Per workspace, its newest conversation waiting on the user and its newest
  *  one running, from the conversations a person sees (no page helpers or
- *  maintenance runs). */
-export function selectWorkspaceLive(nodes: Record<string, ChatNodeState>): Map<string, WorkspaceLive> {
+ *  maintenance runs). `runApprovals`: conversations with a workflow run
+ *  waiting on a tool approval (useWaitingWorkflowNodeIds), which wait on the
+ *  user with no turn running. */
+export function selectWorkspaceLive(nodes: Record<string, ChatNodeState>, runApprovals?: ReadonlySet<string>): Map<string, WorkspaceLive> {
   const live = new Map<string, WorkspaceLive>();
   for (const node of Object.values(nodes)) {
     if (node.deletedAt || !isVisibleConversationNode(node)) continue;
-    const waiting = nodeAwaiting(node) !== null;
+    const waiting = nodeAwaiting(node) !== null || !!runApprovals?.has(node.nodeId);
     // A visibly finished answer whose runtime is still cleaning up is not "running".
     const running = !waiting && node.status === 'streaming' && !node.visibleResponseComplete;
     if (!waiting && !running) continue;
@@ -98,62 +98,6 @@ function rowState(card: WorkspaceCardData, live: WorkspaceLive): RowState {
   return card.failed ? 'failed' : 'idle';
 }
 
-const plural = (n: number, one: string, many = `${one}s`) => `${n} ${n === 1 ? one : many}`;
-
-// ── Long press ────────────────────────────────────────────────────────────
-
-const LONG_PRESS_MS = 500;
-/** How far a finger may drift before the press counts as a scroll. */
-const LONG_PRESS_SLOP = 10;
-/** The click that ends a long press arrives within this window, if at all. */
-const LONG_PRESS_CLICK_MS = 800;
-
-/** Touch and pen hold to open; the mouse asks with its right button instead. */
-function useLongPress(onLongPress: () => void) {
-  const timer = React.useRef<number | null>(null);
-  const origin = React.useRef<{ x: number; y: number } | null>(null);
-  const firedAt = React.useRef(0);
-  const callback = React.useRef(onLongPress);
-  callback.current = onLongPress;
-
-  const cancel = React.useCallback(() => {
-    if (timer.current !== null) window.clearTimeout(timer.current);
-    timer.current = null;
-    origin.current = null;
-  }, []);
-  React.useEffect(() => cancel, [cancel]);
-
-  const handlers = React.useMemo(() => ({
-    onPointerDown: (event: React.PointerEvent) => {
-      firedAt.current = 0;
-      if (event.pointerType === 'mouse' || event.isPrimary === false) return;
-      cancel();
-      origin.current = { x: event.clientX, y: event.clientY };
-      timer.current = window.setTimeout(() => {
-        timer.current = null;
-        origin.current = null;
-        firedAt.current = Date.now();
-        callback.current();
-      }, LONG_PRESS_MS);
-    },
-    onPointerMove: (event: React.PointerEvent) => {
-      const start = origin.current;
-      if (start && Math.hypot(event.clientX - start.x, event.clientY - start.y) > LONG_PRESS_SLOP) cancel();
-    },
-    onPointerUp: cancel,
-    onPointerCancel: cancel,
-  }), [cancel]);
-
-  /** True for the click that ends a long press, which must not also open the row. */
-  const consumeClick = React.useCallback(() => {
-    const fired = firedAt.current !== 0 && Date.now() - firedAt.current < LONG_PRESS_CLICK_MS;
-    firedAt.current = 0;
-    return fired;
-  }, []);
-
-  return { handlers, consumeClick };
-}
-
 // ── Rows ──────────────────────────────────────────────────────────────────
 
 function WaitingLine({ nodeId }: { nodeId: string }) {
@@ -178,7 +122,7 @@ function RunningLine({ nodeId }: { nodeId: string }) {
   if (!node) return null;
   return (
     <>
-      <Dot color="var(--term-select, var(--term-accent))" size={7} pulse />
+      <Dot color="var(--term-run)" size={7} pulse />
       <span className="ws-phone__label" data-tone="running">{progressStatusLine(node)}</span>
       <span className="ws-phone__sep" aria-hidden="true">·</span>
       <span className="ws-phone__detail">{threadTitle(node)}</span>
@@ -244,9 +188,9 @@ function MetaLine({ card, query, machine }: { card: WorkspaceCardData; query: st
   );
 }
 
-function WorkspaceBadge({ card, size }: { card: WorkspaceCardData; size?: 'lg' }) {
+function WorkspaceBadge({ card }: { card: WorkspaceCardData }) {
   return (
-    <span className="ws-phone__badge" data-size={size} aria-hidden="true" style={{ background: workspaceAccent(card.id) }}>
+    <span className="ws-phone__badge" aria-hidden="true" style={{ background: workspaceAccent(card.id) }}>
       {initialOf(card.name)}
     </span>
   );
@@ -266,24 +210,26 @@ function WorkspaceRow({
   query: string;
   machine: string | null;
   archived?: boolean;
-  onOpen: () => void;
-  onMenu: () => void;
+  onOpen: (event: React.MouseEvent) => void;
+  onMenu: (row: HTMLElement, point: { x: number; y: number }) => void;
 }) {
-  const press = useLongPress(onMenu);
   return (
     <li
       className="ws-phone__row"
       data-testid={`workspace-row-${card.id}`}
       data-current={card.active || undefined}
       data-archived={archived || undefined}
+      data-context-target=""
+      onContextMenu={(event) => {
+        event.preventDefault();
+        onMenu(event.currentTarget, { x: event.clientX, y: event.clientY });
+      }}
     >
       <button
         type="button"
         className="ws-phone__open"
         aria-current={card.active ? 'true' : undefined}
-        onClick={() => { if (!press.consumeClick()) onOpen(); }}
-        onContextMenu={(event) => { event.preventDefault(); onMenu(); }}
-        {...press.handlers}
+        onClick={onOpen}
       >
         <WorkspaceBadge card={card} />
         <span className="ws-phone__text">
@@ -298,33 +244,30 @@ function WorkspaceRow({
           <MetaLine card={card} query={query} machine={machine} />
         </span>
       </button>
-      <button type="button" className="ws-phone__more" aria-label="More actions" onClick={onMenu}>
+      <button
+        type="button"
+        className="ws-phone__more"
+        aria-label="More actions"
+        onClick={(event) => {
+          const rect = event.currentTarget.getBoundingClientRect();
+          const row = event.currentTarget.closest('li');
+          if (row) onMenu(row, { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 });
+        }}
+      >
         <Ellipsis size={20} aria-hidden="true" />
       </button>
     </li>
   );
 }
 
-// ── Action sheet ──────────────────────────────────────────────────────────
+// ── Menu and sheet ──
 
-type SheetView = 'actions' | 'rename' | 'delete';
+/** Renaming and deleting continue in the sheet; every other action is done in the menu. */
+type SheetView = 'rename' | 'delete';
 
-const ACTION_GLYPHS: Record<WorkspaceRowActionId, LucideIcon> = {
-  manage: ArrowUpRight,
-  folder: FolderOpen,
-  rename: Pencil,
-  pin: Pin,
-  unpin: PinOff,
-  archive: Archive,
-  unarchive: ArchiveRestore,
-  delete: Trash2,
-};
-
-/** Rename and delete keep the sheet open on their own step; every other action ends it. */
-const STAYS_OPEN = new Set<WorkspaceRowActionId | undefined>(['rename', 'delete']);
 /** An archived workspace is not opened (Settings › Connections doesn't offer it
  *  either) or pinned; it can be renamed, unarchived or deleted. */
-const ARCHIVED_HIDES = new Set<WorkspaceRowActionId | undefined>(['manage', 'folder', 'pin', 'unpin']);
+const ARCHIVED_HIDES: ReadonlySet<string> = new Set<WorkspaceRowActionId>(['manage', 'folder', 'pin', 'unpin']);
 
 const SHEET_TITLE_ID = 'workspace-sheet-title';
 
@@ -368,10 +311,13 @@ export default function PhoneWorkspaces({
   actions,
   onRename,
 }: Props) {
-  const live = useNodesSelector(selectWorkspaceLive, sameLive);
+  const runApprovals = useWaitingWorkflowNodeIds();
+  const selectLive = React.useCallback((nodes: Record<string, ChatNodeState>) => selectWorkspaceLive(nodes, runApprovals), [runApprovals]);
+  const live = useNodesSelector(selectLive, sameLive);
   const liveOf = (id: string) => live.get(id) ?? NO_LIVE;
   const [filter, setFilter] = React.useState<'running' | 'waiting' | null>(null);
   const [showArchived, setShowArchived] = React.useState(false);
+  const [menu, setMenu] = React.useState<{ id: string; row: HTMLElement; x: number; y: number } | null>(null);
   const [sheet, setSheet] = React.useState<{ id: string; view: SheetView } | null>(null);
   const [draft, setDraft] = React.useState('');
   const searchRef = React.useRef<HTMLInputElement>(null);
@@ -407,7 +353,12 @@ export default function PhoneWorkspaces({
   }, [sheet, sheetCard, sheetProject]);
 
   const machineOf = (card: WorkspaceCardData) => remoteMachineName(card.backendConnectionId, connections);
-  const openSheet = (id: string) => setSheet({ id, view: 'actions' });
+  const openMenu = (id: string, row: HTMLElement, point: { x: number; y: number }) => setMenu({ id, row, ...point });
+  const menuProject = menu ? projects.find((project) => project.id === menu.id && !project.deletedAt) : undefined;
+  // The workspace went away underneath the menu (deleted elsewhere).
+  React.useEffect(() => {
+    if (menu && !menuProject) setMenu(null);
+  }, [menu, menuProject]);
 
   const rowActions: WorkspaceRowActions = {
     ...actions,
@@ -429,12 +380,6 @@ export default function PhoneWorkspaces({
       flushSync(() => setSheet({ id, view: 'delete' }));
       keepRef.current?.focus();
     },
-  };
-
-  const runAction = (item: ContextMenuItem) => {
-    if (item.disabled) return;
-    if (!STAYS_OPEN.has(item.id)) closeSheet();
-    item.onSelect();
   };
 
   const commitRename = () => {
@@ -461,8 +406,13 @@ export default function PhoneWorkspaces({
       machine={machineOf(card)}
       archived={isArchived}
       // An archived workspace opens to what can be done with it.
-      onOpen={isArchived ? () => openSheet(card.id) : () => onOpen(card.id)}
-      onMenu={() => openSheet(card.id)}
+      onOpen={isArchived
+        ? (event) => {
+            const row = (event.currentTarget as HTMLElement).closest('li');
+            if (row) openMenu(card.id, row, { x: event.clientX, y: event.clientY });
+          }
+        : () => onOpen(card.id)}
+      onMenu={(row, point) => openMenu(card.id, row, point)}
     />
   );
 
@@ -494,7 +444,7 @@ export default function PhoneWorkspaces({
               aria-pressed={filter === 'running'}
               onClick={() => setFilter((current) => (current === 'running' ? null : 'running'))}
             >
-              <Dot color="var(--term-select, var(--term-accent))" size={7} pulse={counts.running > 0} />
+              <Dot color="var(--term-run)" size={7} pulse={counts.running > 0} />
               <b>{counts.running}</b> running
             </button>
           )}
@@ -526,7 +476,7 @@ export default function PhoneWorkspaces({
           value={query}
           onChange={(event) => onQueryChange(event.target.value)}
           // The results are already on screen; Search just puts the keyboard away.
-          onKeyDown={(event) => { if (event.key === 'Enter') event.currentTarget.blur(); }}
+          onKeyDown={(event) => { if (event.key === 'Enter' && !isImeComposing(event)) event.currentTarget.blur(); }}
           placeholder="Search workspaces, paths, threads"
         />
         {query && (
@@ -599,46 +549,23 @@ export default function PhoneWorkspaces({
         </>
       )}
 
+      <MenuPresence>{menu && menuProject && (
+        <ContextMenu
+          key={menuOpenKey(menu)}
+          x={menu.x}
+          y={menu.y}
+          anchor={menu.row}
+          onClose={() => setMenu(null)}
+          sections={buildWorkspaceRowContextMenu({ project: menuProject, actions: rowActions })
+            .map((section): MenuSection => ({
+              ...section,
+              items: section.items.filter((item) => !menuProject.archivedAt || !ARCHIVED_HIDES.has(item.id)),
+            }))
+            .filter((section) => section.items.length > 0)}
+        />
+      )}</MenuPresence>
+
       <BottomSheet open={!!(sheet && sheetCard && sheetProject)} onClose={closeSheet} labelledBy={SHEET_TITLE_ID}>
-        {sheet && sheetCard && sheetProject && sheet.view === 'actions' && (
-          <>
-            <div className="ws-phone__sheet-head">
-              <WorkspaceBadge card={sheetCard} size="lg" />
-              <span className="ws-phone__text">
-                <h2 className="ws-phone__sheet-name" id={SHEET_TITLE_ID}>{sheetCard.name}</h2>
-                <MetaLine card={sheetCard} query="" machine={machineOf(sheetCard)} />
-              </span>
-            </div>
-            {buildWorkspaceRowContextMenu({ project: sheetProject, actions: rowActions })
-              .map((section) => ({
-                items: sheetProject.archivedAt ? section.items.filter((item) => !ARCHIVED_HIDES.has(item.id)) : section.items,
-              }))
-              .filter((section) => section.items.length > 0)
-              .map((section, index) => (
-              <div className="ui-sheet__group" key={index}>
-                {section.items.map((item) => {
-                  const Glyph = item.id ? ACTION_GLYPHS[item.id] : null;
-                  return (
-                    <button
-                      key={item.id ?? item.label}
-                      type="button"
-                      className="ui-sheet__action"
-                      data-danger={item.danger || undefined}
-                      disabled={item.disabled}
-                      onClick={() => runAction(item)}
-                    >
-                      {Glyph && <Glyph size={20} aria-hidden="true" />}
-                      {item.label}
-                    </button>
-                  );
-                })}
-              </div>
-            ))}
-            <div className="ui-sheet__buttons" data-stacked="">
-              <Button onClick={closeSheet}>Cancel</Button>
-            </div>
-          </>
-        )}
         {sheet && sheetCard && sheet.view === 'rename' && (
           <form onSubmit={(event) => { event.preventDefault(); commitRename(); }}>
             <div className="ui-sheet__section">

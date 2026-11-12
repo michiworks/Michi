@@ -1,7 +1,7 @@
 import { Readable } from 'node:stream';
 import { randomUUID } from 'node:crypto';
 import express from 'express';
-import { isRemoteCredentialWarning, type RemoteUpdateJob } from 'michi-shared';
+import { isRemoteCredentialWarning, MICHI_REQUEST_HEADERS, type RemoteUpdateJob } from 'michi-shared';
 import {
   type BackendConnectionInput,
   deleteBackendConnection,
@@ -16,8 +16,10 @@ import { requireLocalControlRequest } from './middleware/localControl';
 import { RemoteDesktopError, RemoteDesktopSetup, parseRemoteHost } from '../services/remoteDesktopSetup';
 import { RemoteDiagnosticLog, readRemoteDiagnostic } from '../services/remoteDiagnostics';
 import { RemoteServiceRecovery } from '../services/remoteServiceRecovery';
+import { isPhoneRequest, VIA_HEADER } from '../services/accessLog';
 
-const FORWARDED_REQUEST_HEADERS = ['accept', 'content-type', 'range', 'last-event-id'] as const;
+// The window header lets a remote's structure frames name this window as their origin.
+const FORWARDED_REQUEST_HEADERS = ['accept', 'content-type', 'range', 'last-event-id', ...MICHI_REQUEST_HEADERS] as const;
 const SKIPPED_RESPONSE_HEADERS = new Set([
   'connection',
   'content-encoding',
@@ -267,6 +269,9 @@ export function setupBackendConnectionRoutes(options: { tunnelManager?: SshTunne
       const value = req.headers[name];
       if (typeof value === 'string') headers.set(name, value);
     }
+    // Labels the hop for the remote's access log. A phone stays a phone, so
+    // the remote's deny-only phone rules (isPhoneRequest) still apply to it.
+    headers.set(VIA_HEADER, isPhoneRequest(req.headers) ? 'phone' : 'desktop-proxy');
     if (connection.token) headers.set('authorization', `Bearer ${connection.token}`);
 
     let body: string | undefined;

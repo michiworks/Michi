@@ -2,6 +2,12 @@ import React, { useCallback, useEffect, useLayoutEffect, useRef, useState } from
 import { AnimatePresence, useIsPresent } from 'motion/react';
 import { PopoverSurface, MenuItem as MenuRow } from './ui/Popover';
 import { useMenuConfirm } from './ui/useMenuConfirm';
+import { useMenuEscape } from './ui/useMenuEscape';
+import { pickMenuSide } from './ui/useAnchoredPosition';
+import { PhoneContextMenu } from './ui/PhoneContextMenu';
+import { usePhoneLayout } from '../hooks/usePhoneLayout';
+import { contextMenuAnchor } from '../lib/touchContextMenu';
+import { isImeComposing } from '../lib/ime';
 
 export interface MenuItem {
   id: string;
@@ -70,6 +76,9 @@ export interface ContextMenuProps {
   trigger?: HTMLElement | null;
   /** Extra class on the menu surface, for a caller's own row details. */
   className?: string;
+  /** The element this menu belongs to, for the phone's lifted menu. Without
+   *  one it is the `[data-context-target]` the opening press went down on. */
+  anchor?: HTMLElement | null;
 }
 
 /**
@@ -150,14 +159,48 @@ export function MenuPresence({ children }: { children: React.ReactNode }) {
 }
 
 /**
- * Shell-neutral right-click menu. Positions itself at the cursor, flips
+ * Shell-neutral right-click menu. On a phone, a menu that belongs to a
+ * `[data-context-target]` element (opened by a long press or the row's ⋯)
+ * lifts that element and opens beside it (PhoneContextMenu). Anywhere else
+ * it is the desktop menu below.
+ */
+export default function ContextMenu(props: ContextMenuProps) {
+  const phone = usePhoneLayout();
+  // Decided once per opening: a menu does not change kind while it is up.
+  const [anchor] = useState<HTMLElement | null>(() => {
+    const kind = props.menuKind ?? 'context';
+    if (!phone || kind !== 'context' || props.anchorBottom !== undefined || props.searchable) return null;
+    return props.anchor ?? contextMenuAnchor(props.x, props.y);
+  });
+  if (anchor) {
+    return <PhoneContextMenu anchor={anchor} x={props.x} y={props.y} sections={props.sections} onClose={props.onClose} />;
+  }
+  return <DesktopContextMenu {...props} />;
+}
+
+/**
+ * A menu's height without a cap: its chrome (filter, padding) plus its list
+ * up to the list's own max height. A filterable list counts at that height,
+ * as the model picker's does, so typing cannot move the menu.
+ */
+function wantedHeight(surface: HTMLElement, box: DOMRect, filterable: boolean): number {
+  const list = surface.querySelector<HTMLElement>('.michi-menu-list');
+  if (!list) return box.height;
+  const chrome = box.height - list.getBoundingClientRect().height;
+  const listCap = parseFloat(getComputedStyle(list).maxHeight);
+  if (!Number.isFinite(listCap)) return chrome + list.scrollHeight;
+  return chrome + (filterable ? listCap : Math.min(listCap, list.scrollHeight));
+}
+
+/**
+ * The desktop right-click menu. Positions itself at the cursor, flips
  * when it would overflow the viewport, closes on any outside click or
  * Escape. Visual shell (bg/border/radius/shadow) comes from
  * PopoverSurface; rows render through the shared MenuRow so hover and
  * danger/disabled states stay consistent with every other popover in
  * the app.
  */
-export default function ContextMenu({
+function DesktopContextMenu({
   x,
   y,
   sections,
@@ -242,15 +285,12 @@ export default function ContextMenu({
       let ny = y;
       let cap: number | undefined;
       if (anchorBottom !== undefined) {
-        // Toolbar trigger: prefer above it, flip below (to `y`) when there is
-        // clearly more room there — same rule as ComposerModelPicker. The cap
-        // makes a long list scroll instead of sliding over the trigger.
+        // Toolbar trigger: the model picker's side rule, for the height the
+        // menu wants rather than its capped box, so the cap cannot flip it.
+        // The cap makes a long list scroll instead of sliding over the trigger.
         const aboveSpace = Math.min(anchorBottom, vh) - 8;
         const belowSpace = vh - 8 - y;
-        const enough = Math.min(240, vh / 2);
-        const above = preferBelow
-          ? belowSpace < enough && aboveSpace > belowSpace
-          : aboveSpace >= enough || aboveSpace >= belowSpace;
+        const above = pickMenuSide({ aboveSpace, belowSpace, wanted: wantedHeight(el, rect, showSearch), preferBelow }) === 'above';
         cap = Math.max(80, Math.min(above ? aboveSpace : belowSpace, vh - 16));
         const height = Math.min(rect.height, cap);
         ny = above ? anchorBottom - height : y;
@@ -272,7 +312,7 @@ export default function ContextMenu({
     ro.observe(el);
     window.addEventListener('resize', reposition);
     return () => { ro.disconnect(); window.removeEventListener('resize', reposition); };
-  }, [x, y, anchorBottom, preferBelow]);
+  }, [x, y, anchorBottom, preferBelow, showSearch]);
 
   // A blink still running when the menu closes another way never fires.
   useEffect(() => {
@@ -288,11 +328,6 @@ export default function ContextMenu({
       dismiss();
     };
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') {
-        e.preventDefault();
-        dismiss();
-        return;
-      }
       // Single-letter accelerators (e.g. R/E/D/A). Skip while the filter input
       // owns the keystroke, and ignore when modifier keys are held so we don't
       // intercept browser shortcuts like ⌘R.
@@ -325,6 +360,7 @@ export default function ContextMenu({
       window.removeEventListener('keydown', onKey);
     };
   }, [present, showSearch, fireWithBlink, dismiss]);
+  useMenuEscape(present, dismiss);
 
   const run = (item: MenuItem) => fireWithBlink(item);
 
@@ -390,12 +426,7 @@ export default function ContextMenu({
   // Handle arrow/enter in the search input for keyboard navigation.
   const onSearchKeyDown = useCallback(
     (e: React.KeyboardEvent) => {
-      if (e.key === 'Escape') {
-        e.preventDefault();
-        e.stopPropagation();
-        dismiss();
-        return;
-      }
+      if (isImeComposing(e)) return;
       if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
         e.preventDefault();
         cancel();
@@ -420,7 +451,7 @@ export default function ContextMenu({
         return;
       }
     },
-    [flatItems, activeIdx, fireWithBlink, dismiss, cancel, showDetailFor, hideDetail],
+    [flatItems, activeIdx, fireWithBlink, cancel, showDetailFor, hideDetail],
   );
 
   const detailItem = detail

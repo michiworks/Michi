@@ -1,6 +1,8 @@
 import { useCallback, useEffect, type Dispatch, type MutableRefObject, type SetStateAction } from 'react';
-import { descendants } from './tree';
+import { ARCHIVE_GROUP_PREFIX, isArchiveGroupId } from 'michi-shared';
+import { descendants, isBranchEdge } from './tree';
 import type { ChatNodeState, Project, TrimSnapshot } from './chatTypes';
+import { pickLandingTreeId } from './conversationVisibility';
 import {
   emptyWorkspaceTrash as apiEmptyWorkspaceTrash,
   purgeWorkspaceNodes as apiPurgeWorkspaceNodes,
@@ -9,19 +11,7 @@ import {
 type PaneUpdater<T> = T | ((prev: T) => T);
 type PaneSetter<T> = (updater: PaneUpdater<T>) => void;
 
-/**
- * Prefix on a node's `deletionGroupId` marking it as *archived* rather than
- * trashed. Archive reuses the entire single-node trim engine (soft-remove +
- * reparent children up + `trimSnapshot`-driven restore); the only difference
- * is this prefix, which routes the node to the Archived surface instead of
- * Trash and exempts it from trash-only flows (TTL sweep, empty-trash, ⌘Z).
- */
-export const ARCHIVE_GID_PREFIX = 'arch-';
-
-/** True iff a deletion group id belongs to the archived lane (vs trash). */
-export function isArchiveGroupId(gid: string | null | undefined): boolean {
-  return !!gid && gid.startsWith(ARCHIVE_GID_PREFIX);
-}
+export { isArchiveGroupId };
 
 interface UseTrashActionsArgs {
   projects: Project[];
@@ -56,18 +46,18 @@ export function useTrashActions({
   syncPausedRef,
   bumpStructureVersion,
 }: UseTrashActionsArgs) {
-  const deleteNode = useCallback((nodeId: string) => {
-    const project = projects.find((p) => p.chatIds.includes(nodeId));
-    if (!project) return;
-    const rootOfActive = activeTreeRootNodeId(project);
-    if (rootOfActive === nodeId) return;
-    if (project.trees.some((t) => t.rootNodeId === nodeId)) return;
-
+  /** Soft-delete `rootId` and its live descendants as one deletion group;
+   *  `updateProject` gets the stamped nodes. Returns the group id. */
+  const deleteSubtree = useCallback((
+    project: Project,
+    rootId: string,
+    updateProject: (project: Project, nodes: Record<string, ChatNodeState>) => Project = (p) => ({ ...p }),
+  ): string => {
     const live = project.edges.filter(
       (e) => !nodesRef.current[e.source]?.deletedAt && !nodesRef.current[e.target]?.deletedAt,
     );
-    const dead = descendants(nodeId, live);
-    dead.add(nodeId);
+    const dead = descendants(rootId, live);
+    dead.add(rootId);
 
     dead.forEach((id) => {
       cancelFns.current[id]?.();
@@ -86,7 +76,7 @@ export function useTrashActions({
     bumpStructureVersion?.();
 
     setProjects((prev) =>
-      prev.map((p) => (p.id === project.id ? { ...p } : p)),
+      prev.map((p) => (p.id === project.id ? updateProject(p, next) : p)),
     );
     setOpenPanes((prev) => prev.filter((id) => !dead.has(id)));
     setFocusedPane((cur) => (cur && dead.has(cur) ? null : cur));
@@ -97,12 +87,11 @@ export function useTrashActions({
       dead.forEach((id) => nextSelection.delete(id));
       return nextSelection;
     });
+    return gid;
   }, [
-    activeTreeRootNodeId,
     bumpStructureVersion,
     cancelFns,
     nodesRef,
-    projects,
     setFocusedNodeId,
     setFocusedPane,
     setNodes,
@@ -111,22 +100,34 @@ export function useTrashActions({
     setSelection,
   ]);
 
+  const deleteNode = useCallback((nodeId: string) => {
+    const project = projects.find((p) => p.chatIds.includes(nodeId));
+    if (!project) return;
+    const rootOfActive = activeTreeRootNodeId(project);
+    if (rootOfActive === nodeId) return;
+    if (project.trees.some((t) => t.rootNodeId === nodeId)) return;
+    deleteSubtree(project, nodeId);
+  }, [activeTreeRootNodeId, deleteSubtree, projects]);
+
   /**
    * Single-node trim: send `nodeId` to trash while keeping its descendants
-   * live by reparenting them up. Mirrors the SQL algorithm in
-   * `dbRepository.trimNode` so the next persistence sync upserts a state the
-   * backend would have computed itself. The 2-second sync interval is
-   * sufficient — trim is non-destructive (only flips `deletedAt`); a stale
-   * snapshot revival window can't lose data.
+   * live by reparenting them up. This is the trim the app runs: the next
+   * persistence sync saves it as node.patch commands (parent_node_id,
+   * deleted_at, deletion_group_id, trim_snapshot; backend domainCommands).
+   * The backend's own dbRepository.trimNode has no caller in the app. The
+   * 2-second sync interval is sufficient — trim is non-destructive (only
+   * flips `deletedAt`); a stale snapshot revival window can't lose data.
    *
-   * Tree-root case (Option A): the oldest live child is promoted to new root
-   * and the rest of the children become siblings under it. The tree's
+   * Tree-root case (Option A): the first live child in chatIds order (the
+   * stand-in for the oldest; nodes carry no creation time, and a thread
+   * moved here this session lists its nodes out of that order) is promoted
+   * to new root and the rest of the children become siblings under it. The tree's
    * `rootNodeId` is updated in the same setProjects call.
    *
    * No-op when the node is unknown or already trashed (idempotent).
    *
    * `gidPrefix` decides the lane: `'trim'` → Trash, `'arch'` → Archived. Both
-   * lanes share this exact algorithm; see `ARCHIVE_GID_PREFIX`.
+   * lanes share this exact algorithm; see `ARCHIVE_GROUP_PREFIX`.
    */
   const pruneNode = useCallback((nodeId: string, gidPrefix: 'trim' | 'arch') => {
     const project = projects.find((p) => p.chatIds.includes(nodeId));
@@ -213,14 +214,13 @@ export function useTrashActions({
         // Drop branch edges touching the trimmed node, keep cross-tree edges
         // (merge / link / digest-source) untouched — those are user-managed.
         const survivingEdges = p.edges.filter(
-          (e) => !(e.kind === undefined || e.kind === 'branch') ||
+          (e) => !isBranchEdge(e) ||
                  (e.source !== nodeId && e.target !== nodeId),
         );
 
         const ensureEdge = (source: string, target: string) => {
           if (survivingEdges.some(
-            (e) => e.source === source && e.target === target &&
-              (e.kind === undefined || e.kind === 'branch'),
+            (e) => e.source === source && e.target === target && isBranchEdge(e),
           )) return;
           survivingEdges.push({ source, target, kind: 'branch' });
         };
@@ -241,12 +241,7 @@ export function useTrashActions({
           } else {
             // No live child to promote — drop the tree row.
             nextTrees = p.trees.filter((t) => t.id !== treeOfRoot.id);
-            if (p.activeTreeId === treeOfRoot.id) {
-              const fallback = nextTrees
-                .filter((t) => !t.archivedAt)
-                .sort((a, b) => b.lastActiveAt - a.lastActiveAt)[0];
-              nextActive = fallback ? fallback.id : null;
-            }
+            if (p.activeTreeId === treeOfRoot.id) nextActive = pickLandingTreeId(nextTrees, nextNodes);
           }
         }
 
@@ -292,8 +287,8 @@ export function useTrashActions({
    * Walk up the snapshot's parent chain until hitting a live ancestor (or
    * null = becomes a tree root). Re-steal any snapshot child that's still
    * live AND still parented to the resolved target parent. Re-seat the
-   * tree root pointer if the trimmed node was a tree root. Mirrors
-   * dbRepository.restoreTrimmedNode().
+   * tree root pointer if the trimmed node was a tree root. Saved the same
+   * way as the trim, through node.patch.
    *
    * Returns the restored nodeId on success.
    */
@@ -349,14 +344,13 @@ export function useTrashActions({
         // Drop the bypass edge target→stolen and re-add target→nodeId,
         // nodeId→stolen.
         const filtered = p.edges.filter((e) => {
-          if (e.kind && e.kind !== 'branch') return true;
+          if (!isBranchEdge(e)) return true;
           if (target && e.source === target && stolen.includes(e.target)) return false;
           return true;
         });
         const ensureEdge = (source: string, t: string) => {
           if (filtered.some(
-            (e) => e.source === source && e.target === t &&
-              (e.kind === undefined || e.kind === 'branch'),
+            (e) => e.source === source && e.target === t && isBranchEdge(e),
           )) return;
           filtered.push({ source, target: t, kind: 'branch' });
         };
@@ -426,6 +420,26 @@ export function useTrashActions({
     return root;
   }, [bumpStructureVersion, nodesRef, restoreFromTrimSnapshot, setNodes, setProjects]);
 
+  /**
+   * Move a single-node trim group between Archived and Trash. Archive and
+   * trim share the same mechanics and differ only by the group id's prefix,
+   * so relabelling keeps the node's trimSnapshot and either lane restores it
+   * the same way. `at` restarts the deletion clock: Trash's retention counts
+   * from the move. Returns the group's new id, or null when nothing moved.
+   */
+  const moveDeletionGroupLane = useCallback((groupId: string, lane: 'trash' | 'archive', at = Date.now()): string | null => {
+    const ids = Object.entries(nodesRef.current).filter(([, n]) => n.deletionGroupId === groupId).map(([id]) => id);
+    if (ids.length !== 1 || !nodesRef.current[ids[0]]?.trimSnapshot) return null;
+    if (isArchiveGroupId(groupId) === (lane === 'archive')) return null;
+    const nextId = `${lane === 'archive' ? ARCHIVE_GROUP_PREFIX : 'trim-'}${groupId.replace(/^[a-z]+-/, '')}`;
+    const next = { ...nodesRef.current, [ids[0]]: { ...nodesRef.current[ids[0]], deletionGroupId: nextId, deletedAt: at } };
+    nodesRef.current = next;
+    setNodes(next);
+    bumpStructureVersion?.();
+    setProjects((prev) => prev.map((p) => (p.chatIds.includes(ids[0]) ? { ...p } : p)));
+    return nextId;
+  }, [bumpStructureVersion, nodesRef, setNodes, setProjects]);
+
   const purgeDeletion = useCallback((groupId: string) => {
     const ids = new Set<string>();
     for (const [id, n] of Object.entries(nodesRef.current)) {
@@ -433,17 +447,14 @@ export function useTrashActions({
     }
     if (ids.size === 0) return;
 
+    const held = nodesRef.current;
     setProjects((prev) =>
       prev.map((p) => {
         if (!p.chatIds.some((id) => ids.has(id))) return p;
         const survivingTrees = p.trees.filter((t) => !ids.has(t.rootNodeId));
-        let nextActive = p.activeTreeId;
-        if (p.activeTreeId != null && !survivingTrees.some((t) => t.id === p.activeTreeId)) {
-          const fallback = [...survivingTrees]
-            .filter((t) => !t.archivedAt)
-            .sort((a, b) => b.lastActiveAt - a.lastActiveAt)[0];
-          nextActive = fallback ? fallback.id : null;
-        }
+        const nextActive = p.activeTreeId != null && !survivingTrees.some((t) => t.id === p.activeTreeId)
+          ? pickLandingTreeId(survivingTrees, held)
+          : p.activeTreeId;
         return {
           ...p,
           chatIds: p.chatIds.filter((id) => !ids.has(id)),
@@ -574,10 +585,12 @@ export function useTrashActions({
   }, [nodesRef, purgeDeletion, trashTTLDays]);
 
   return {
+    deleteSubtree,
     deleteNode,
     trimNode,
     archiveNode,
     restoreDeletion,
+    moveDeletionGroupLane,
     purgeDeletion,
     purgeDeletionAsync,
     restoreLastDeletion,

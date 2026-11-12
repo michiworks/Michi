@@ -12,11 +12,13 @@ import {
   Type,
 } from 'lucide-react';
 import type { MichiPageBlock } from 'michi-shared';
+import type { PageApplyResult } from '../../../../state/pages/usePage';
 import type { MichiPageEditOp } from './editorTypes';
 import type { MichiNoticeTone } from './editorTypes';
 import { BranchIcon, CopyIcon, DocIcon, EditIcon, PlusIcon, TrashIcon } from '../../icons';
 import { HoverTip } from '../../../ui/Popover';
 import { AskPopover, BLOCK_SUGGESTIONS } from './AskPopover';
+import { useCompanionName } from '../../../../state/companion/companionName';
 import { BlockRewrittenNote, ChecklistEditor, PageChangedNote, TextBlockEditor } from './BlockEditor';
 import { MichiBlock } from './MichiBlock';
 import { MichiMenu, type MichiMenuEntry, type MichiMenuItem } from './MichiMenu';
@@ -47,7 +49,7 @@ import {
 import './michiPage.css';
 
 /** How Michi answered a page edit: done, refused because the page was rearranged, or the block is no longer there. */
-export type ApplyResult = 'ok' | 'stale' | 'gone' | 'failed';
+export type ApplyResult = PageApplyResult;
 
 /** What an editor whose block left the page leaves behind: its words as Markdown, so they can go back on the page. */
 export interface OrphanDraft {
@@ -71,7 +73,7 @@ export interface PageChrome {
   generatedAt: number;
   /** A question about the block, sent to the Michi assistant with the block attached. */
   ask(block: MichiPageBlock, question: string): void;
-  /** Set: Ask hands the block to an assistant window instead of opening the question popover. */
+  /** Set: Ask hands the block to the agent's panel ("Ask <name>") instead of opening the question popover. */
   askAssistant?(block: MichiPageBlock): void;
   /** A new Michi thread with the block quoted in its composer. */
   branch(block: MichiPageBlock): void;
@@ -297,7 +299,9 @@ export const BlockFrame = memo(function BlockFrame({
     if (chrome?.askAssistant) chrome.askAssistant(block);
     else setPopup('ask');
   }, [block, chrome]);
-  const askLabel = chrome?.askAssistant ? 'Ask assistant' : 'Ask';
+  // Ask hands the block to the agent's panel: named after it, as everywhere (DESIGN-v2 §1.5).
+  const companionName = useCompanionName();
+  const askLabel = chrome?.askAssistant ? `Ask ${companionName}` : 'Ask';
 
   const openEditor = (next: Mode, draft: EditorDraft) => {
     draftRef.current = draft;

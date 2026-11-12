@@ -153,16 +153,39 @@ describe('pane state', () => {
 
   it('destroys a runtime surface only when its pane is explicitly closed', async () => {
     const terminalDestroy = vi.fn();
-    window.electron = { terminalDestroy } as unknown as NonNullable<typeof window.electron>;
+    window.electron = { terminalCreate: vi.fn(), terminalWrite: vi.fn(), terminalResize: vi.fn(), terminalDestroy } as unknown as NonNullable<typeof window.electron>;
     const harness = renderHook(() => useChatStore());
     await act(async () => { await harness.result.current.createProject('WS'); });
     await act(async () => { await harness.result.current.createThread(); });
     let paneId = '';
-    act(() => { paneId = harness.result.current.openTerminalPane('/tmp'); });
+    act(() => { paneId = harness.result.current.openLauncherPane(); });
+    await act(async () => { await harness.result.current.activateLauncherPane(paneId, 'terminal'); });
+    expect(harness.result.current.paneItems[paneId]?.kind).toBe('terminal');
     expect(terminalDestroy).not.toHaveBeenCalled();
     act(() => harness.result.current.closePane(paneId));
     expect(terminalDestroy).toHaveBeenCalledTimes(1);
     expect(harness.result.current.paneItems[paneId]).toBeUndefined();
+    harness.unmount();
+  });
+
+  it('closing a backend terminal pane tells the backend, which ends the shell unless another window shows it', async () => {
+    window.electron = undefined;
+    const fetchMock = vi.fn(async (_url: RequestInfo | URL, _init?: RequestInit) => new Response(JSON.stringify({ closed: true }), { status: 200 }));
+    vi.stubGlobal('fetch', fetchMock);
+    const harness = renderHook(() => useChatStore());
+    await act(async () => { await harness.result.current.createProject('WS'); });
+    await act(async () => { await harness.result.current.createThread(); });
+    let paneId = '';
+    act(() => { paneId = harness.result.current.openLauncherPane(); });
+    await act(async () => { await harness.result.current.activateLauncherPane(paneId, 'terminal'); });
+    const item = harness.result.current.paneItems[paneId];
+    expect(item).toMatchObject({ kind: 'terminal', transport: 'backend', backendConnectionId: 'local' });
+    fetchMock.mockClear();
+    act(() => harness.result.current.closePane(paneId));
+    const surfaceId = item?.kind === 'terminal' ? item.surfaceId : '';
+    expect(fetchMock.mock.calls.some(([url, init]) => String(url).includes(`/terminals/${surfaceId}?clientId=`)
+      && (init as RequestInit | undefined)?.method === 'DELETE')).toBe(true);
+    vi.unstubAllGlobals();
     harness.unmount();
   });
 
@@ -189,6 +212,32 @@ describe('pane state', () => {
 
     expect(harness.result.current.openPanes).toEqual(['parent', 'child']);
     expect(harness.result.current.focusedPane).toBe('parent');
+    harness.unmount();
+  });
+
+  it('zooms a pane that follows focus, survives background panes and ends when closed', () => {
+    const project = {
+      id: 'p1', name: 'WS', chatIds: ['a', 'b', 'c'], edges: [], artifacts: [],
+      trees: [{ id: 't1', rootNodeId: 'a', createdAt: 1, lastActiveAt: 1 }],
+      activeTreeId: 't1', createdAt: 1,
+    };
+    const harness = renderHook(() => usePaneState({ projects: [project], activeProjectId: 'p1' }));
+    act(() => { harness.result.current.openPane('a'); harness.result.current.openPane('b'); });
+    act(() => harness.result.current.zoomPane('a'));
+    expect(harness.result.current.focusedPane).toBe('a');
+    expect(harness.result.current.zoomedPane).toBe('a');
+
+    act(() => harness.result.current.focusPane('b'));
+    expect(harness.result.current.zoomedPane).toBe('b');
+    act(() => harness.result.current.appendPaneInTree('p1', 't1', 'c'));
+    expect(harness.result.current.zoomedPane).toBe('b');
+
+    act(() => harness.result.current.closePane('b'));
+    expect(harness.result.current.openPanes).toEqual(['a', 'c']);
+    expect(harness.result.current.zoomedPane).toBeNull();
+    // The zoom ended rather than moving on with focus.
+    act(() => harness.result.current.focusPane('c'));
+    expect(harness.result.current.zoomedPane).toBeNull();
     harness.unmount();
   });
 

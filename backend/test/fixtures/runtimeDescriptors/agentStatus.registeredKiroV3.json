@@ -449,7 +449,8 @@
       "nativeResumeSettings": [
         "model",
         "reasoning"
-      ]
+      ],
+      "ultracode": true
     },
     "capabilityDescriptor": {
       "steer": {

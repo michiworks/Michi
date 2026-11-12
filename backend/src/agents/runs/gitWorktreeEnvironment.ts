@@ -12,6 +12,7 @@ import {
   type GitWorktreeEnvironmentPort,
   type PrepareExecutionEnvironmentInput,
 } from './executionEnvironment';
+import { isWithinRoot } from '../tools/pathSandbox';
 
 const DEFAULT_TIMEOUT_MS = 20_000;
 const DEFAULT_MAX_OUTPUT_BYTES = 32 * 1024 * 1024;
@@ -31,11 +32,6 @@ export interface GitWorktreeEnvironmentDeps {
 
 interface CapturedFile { relativePath: string; bytes: Buffer; sha256: string; size: number; mode: number }
 interface LeaseMarker { version: 1; leaseId: string; ownerRunId: string; sourceRepositoryRoot: string; worktreePath: string }
-
-function isWithin(candidate: string, root: string): boolean {
-  const relative = path.relative(root, candidate);
-  return relative === '' || (!path.isAbsolute(relative) && relative !== '..' && !relative.startsWith(`..${path.sep}`));
-}
 
 function hash(data: Buffer | string): string { return createHash('sha256').update(data).digest('hex'); }
 function splitNull(data: Buffer): string[] { return data.toString('utf8').split('\0').filter(Boolean); }
@@ -71,7 +67,7 @@ export class GitWorktreeEnvironment implements GitWorktreeEnvironmentPort {
   private readonly dataRoot: string;
   private readonly maxSnapshotBytes: number;
 
-  constructor(private readonly deps: GitWorktreeEnvironmentDeps) {
+  constructor(deps: GitWorktreeEnvironmentDeps) {
     this.now = deps.now ?? Date.now;
     this.nextId = deps.nextId ?? (() => createHash('sha256').update(`${Date.now()}:${Math.random()}`).digest('hex').slice(0, 20));
     this.git = deps.git ?? defaultGitRunner(deps.timeoutMs ?? DEFAULT_TIMEOUT_MS, deps.maxOutputBytes ?? DEFAULT_MAX_OUTPUT_BYTES);
@@ -99,11 +95,11 @@ export class GitWorktreeEnvironment implements GitWorktreeEnvironmentPort {
     const tracked = splitNull(await this.git(repositoryRoot, ['ls-files', '-z']));
     for (const relativePath of tracked) {
       const absolute = path.resolve(repositoryRoot, relativePath);
-      if (!isWithin(absolute, repositoryRoot)) throw new ExecutionEnvironmentError('path_escape', `tracked path escapes repository: ${relativePath}`);
+      if (!isWithinRoot(absolute, repositoryRoot)) throw new ExecutionEnvironmentError('path_escape', `tracked path escapes repository: ${relativePath}`);
       const metadata = await lstat(absolute).catch(() => null);
       if (!metadata?.isSymbolicLink()) continue;
       const target = await realpath(absolute).catch(() => null);
-      if (!target || !isWithin(target, repositoryRoot)) {
+      if (!target || !isWithinRoot(target, repositoryRoot)) {
         throw new ExecutionEnvironmentError('symlink_escape', `tracked symlink escapes repository: ${relativePath}`);
       }
     }
@@ -120,12 +116,12 @@ export class GitWorktreeEnvironment implements GitWorktreeEnvironmentPort {
         throw new ExecutionEnvironmentError('path_escape', `untracked path escapes repository: ${relativePath}`);
       }
       const absolute = path.resolve(repositoryRoot, relativePath);
-      if (!isWithin(absolute, repositoryRoot)) throw new ExecutionEnvironmentError('path_escape', `untracked path escapes repository: ${relativePath}`);
+      if (!isWithinRoot(absolute, repositoryRoot)) throw new ExecutionEnvironmentError('path_escape', `untracked path escapes repository: ${relativePath}`);
       const metadata = await lstat(absolute);
       if (metadata.isSymbolicLink()) throw new ExecutionEnvironmentError('symlink_escape', `untracked symlinks are not snapshotted: ${relativePath}`);
       if (!metadata.isFile()) continue;
       const canonical = await realpath(absolute);
-      if (!isWithin(canonical, repositoryRoot)) throw new ExecutionEnvironmentError('symlink_escape', `untracked file resolves outside repository: ${relativePath}`);
+      if (!isWithinRoot(canonical, repositoryRoot)) throw new ExecutionEnvironmentError('symlink_escape', `untracked file resolves outside repository: ${relativePath}`);
       const bytes = await readFile(canonical);
       totalBytes += bytes.byteLength;
       if (totalBytes > this.maxSnapshotBytes) throw new ExecutionEnvironmentError('snapshot_failed', 'untracked snapshot exceeds the configured byte limit');
@@ -136,7 +132,7 @@ export class GitWorktreeEnvironment implements GitWorktreeEnvironmentPort {
 
   private async assertSafeDestination(worktreeRoot: string, relativePath: string): Promise<string> {
     const destination = path.resolve(worktreeRoot, relativePath);
-    if (!isWithin(destination, worktreeRoot)) throw new ExecutionEnvironmentError('path_escape', `destination escapes worktree: ${relativePath}`);
+    if (!isWithinRoot(destination, worktreeRoot)) throw new ExecutionEnvironmentError('path_escape', `destination escapes worktree: ${relativePath}`);
     let cursor = path.dirname(destination);
     while (cursor !== worktreeRoot) {
       if (await exists(cursor)) {
@@ -144,26 +140,26 @@ export class GitWorktreeEnvironment implements GitWorktreeEnvironmentPort {
         if (metadata.isSymbolicLink()) throw new ExecutionEnvironmentError('symlink_escape', `destination parent is a symlink: ${relativePath}`);
       }
       const parent = path.dirname(cursor);
-      if (parent === cursor || !isWithin(parent, worktreeRoot)) throw new ExecutionEnvironmentError('path_escape', `destination parent escapes worktree: ${relativePath}`);
+      if (parent === cursor || !isWithinRoot(parent, worktreeRoot)) throw new ExecutionEnvironmentError('path_escape', `destination parent escapes worktree: ${relativePath}`);
       cursor = parent;
     }
     await mkdir(path.dirname(destination), { recursive: true });
     const canonicalParent = await realpath(path.dirname(destination));
-    if (!isWithin(canonicalParent, worktreeRoot)) throw new ExecutionEnvironmentError('symlink_escape', `destination parent resolves outside worktree: ${relativePath}`);
+    if (!isWithinRoot(canonicalParent, worktreeRoot)) throw new ExecutionEnvironmentError('symlink_escape', `destination parent resolves outside worktree: ${relativePath}`);
     return destination;
   }
 
   async prepareWorktree(input: PrepareExecutionEnvironmentInput): Promise<ExecutionEnvironmentLease> {
     const repositoryRoot = await this.repositoryRoot(input.workspaceCwd);
-    if (isWithin(this.dataRoot, repositoryRoot)) throw new ExecutionEnvironmentError('path_escape', 'Michi data root must be outside the source repository');
+    if (isWithinRoot(this.dataRoot, repositoryRoot)) throw new ExecutionEnvironmentError('path_escape', 'Michi data root must be outside the source repository');
     await mkdir(this.dataRoot, { recursive: true });
     const realDataRoot = await realpath(this.dataRoot);
-    if (isWithin(realDataRoot, repositoryRoot)) throw new ExecutionEnvironmentError('path_escape', 'Michi data root resolves inside the source repository');
+    if (isWithinRoot(realDataRoot, repositoryRoot)) throw new ExecutionEnvironmentError('path_escape', 'Michi data root resolves inside the source repository');
     await mkdir(this.worktreesRoot, { recursive: true });
     await mkdir(this.leasesRoot, { recursive: true });
     const realWorktreesRoot = await realpath(this.worktreesRoot);
     const realLeasesRoot = await realpath(this.leasesRoot);
-    if (isWithin(realWorktreesRoot, repositoryRoot) || isWithin(realLeasesRoot, repositoryRoot)) {
+    if (isWithinRoot(realWorktreesRoot, repositoryRoot) || isWithinRoot(realLeasesRoot, repositoryRoot)) {
       throw new ExecutionEnvironmentError('path_escape', 'Michi data root must be outside the source repository');
     }
 
@@ -183,7 +179,7 @@ export class GitWorktreeEnvironment implements GitWorktreeEnvironmentPort {
     if (!SAFE_ID.test(leaseId) || !SAFE_ID.test(input.runId)) throw new ExecutionEnvironmentError('path_escape', 'Run and lease IDs must be path-safe');
     const worktreePath = path.join(realWorktreesRoot, `${input.runId}-${leaseId}`);
     const metadataPath = path.join(realLeasesRoot, leaseId);
-    if (!isWithin(worktreePath, realWorktreesRoot) || !isWithin(metadataPath, realLeasesRoot)) throw new ExecutionEnvironmentError('path_escape', 'generated worktree path escaped its root');
+    if (!isWithinRoot(worktreePath, realWorktreesRoot) || !isWithinRoot(metadataPath, realLeasesRoot)) throw new ExecutionEnvironmentError('path_escape', 'generated worktree path escaped its root');
     if (await exists(worktreePath) || await exists(metadataPath)) throw new ExecutionEnvironmentError('snapshot_failed', 'generated worktree lease already exists');
     await mkdir(metadataPath, { recursive: false });
 
@@ -196,7 +192,7 @@ export class GitWorktreeEnvironment implements GitWorktreeEnvironmentPort {
       await this.git(repositoryRoot, ['worktree', 'add', '--detach', worktreePath, baseCommit]);
       worktreeAdded = true;
       const canonicalWorktree = await realpath(worktreePath);
-      if (!isWithin(canonicalWorktree, realWorktreesRoot) || isWithin(canonicalWorktree, repositoryRoot)) {
+      if (!isWithinRoot(canonicalWorktree, realWorktreesRoot) || isWithinRoot(canonicalWorktree, repositoryRoot)) {
         throw new ExecutionEnvironmentError('path_escape', 'created worktree is not under the configured data root');
       }
       try {
@@ -281,18 +277,18 @@ class GitWorktreeLease implements ExecutionEnvironmentLease {
   private async safeExistingFile(relativePath: string): Promise<string> {
     if (path.isAbsolute(relativePath) || relativePath.split(/[\\/]/).includes('..')) throw new ExecutionEnvironmentError('path_escape', `change path escapes worktree: ${relativePath}`);
     const absolute = path.resolve(this.snapshot.cwd, relativePath);
-    if (!isWithin(absolute, this.snapshot.cwd)) throw new ExecutionEnvironmentError('path_escape', `change path escapes worktree: ${relativePath}`);
+    if (!isWithinRoot(absolute, this.snapshot.cwd)) throw new ExecutionEnvironmentError('path_escape', `change path escapes worktree: ${relativePath}`);
     const metadata = await lstat(absolute);
     if (metadata.isSymbolicLink()) throw new ExecutionEnvironmentError('symlink_escape', `changed file is a symlink: ${relativePath}`);
     const canonical = await realpath(absolute);
-    if (!isWithin(canonical, this.snapshot.cwd)) throw new ExecutionEnvironmentError('symlink_escape', `changed file resolves outside worktree: ${relativePath}`);
+    if (!isWithinRoot(canonical, this.snapshot.cwd)) throw new ExecutionEnvironmentError('symlink_escape', `changed file resolves outside worktree: ${relativePath}`);
     return canonical;
   }
 
   async cleanup(requestingRunId: string): Promise<{ removed: boolean }> {
     if (requestingRunId !== this.ownerRunId) throw new ExecutionEnvironmentError('lease_owner_mismatch', 'worktree lease belongs to another Run');
     const metadataCanonicalParent = await realpath(path.dirname(this.metadataPath));
-    if (!isWithin(metadataCanonicalParent, this.leasesRoot) || !isWithin(this.marker.worktreePath, this.worktreesRoot)) throw new ExecutionEnvironmentError('path_escape', 'lease cleanup path escaped its configured root');
+    if (!isWithinRoot(metadataCanonicalParent, this.leasesRoot) || !isWithinRoot(this.marker.worktreePath, this.worktreesRoot)) throw new ExecutionEnvironmentError('path_escape', 'lease cleanup path escaped its configured root');
     const markerPath = path.join(this.metadataPath, 'lease.json');
     if (!await exists(markerPath)) {
       if (!await exists(this.marker.worktreePath)) return { removed: false };

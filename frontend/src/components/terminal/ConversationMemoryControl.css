@@ -1,0 +1,8 @@
+/* A chat's memory menu (ConversationMemoryControl.tsx): the composer pickers'
+   rows (ComposerModelPicker.css), with a note under them while it learns. */
+.composer-memory-menu .composer-memory-menu__note {
+  margin: 4px 0 0;
+  line-height: var(--m-lineHeight);
+  text-wrap: pretty;
+}
+.composer-memory-chip:disabled { opacity: .45; cursor: not-allowed; }

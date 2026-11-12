@@ -2,16 +2,20 @@ import {
   MICHI_DB_COLUMN_TYPES,
   MICHI_DB_FILTER_OPS,
   MICHI_DB_LIMITS,
+  MICHI_DB_OPTION_COLORS,
   MICHI_DB_VIEW_TYPES,
   type MichiDbCellValue,
   type MichiDbColumn,
   type MichiDbColumnOption,
+  type MichiDbFilter,
   type MichiDbNewColumn,
   type MichiDbRow,
+  type MichiDbSort,
   type MichiDbView,
   type MichiDbViewType,
 } from '../databaseModel';
-import { validatePageComponentProps } from './components';
+import { isRecord } from '../guards';
+import { parsePageComponentHostConfig } from './components';
 
 export type PageDatabaseColumn = Omit<MichiDbColumn, 'builtin'>;
 export type PageDatabaseView = Omit<MichiDbView, 'type' | 'config'> & {
@@ -64,40 +68,56 @@ export type PageDatabaseParseResult =
   | { ok: true; ops: PageDatabaseEditOp[] }
   | { ok: false; error: string };
 
-const isRecord = (value: unknown): value is Record<string, unknown> =>
-  typeof value === 'object' && value !== null && !Array.isArray(value);
 const ownKeys = (value: Record<string, unknown>, allowed: readonly string[]) =>
   Object.keys(value).every((key) => allowed.includes(key));
 const text = (value: unknown, max = 2000) => typeof value === 'string' && value.length <= max;
 const COLUMN_TYPES: readonly string[] = MICHI_DB_COLUMN_TYPES;
 const FILTER_OPS: readonly string[] = MICHI_DB_FILTER_OPS;
+const OPTION_COLORS: readonly string[] = MICHI_DB_OPTION_COLORS;
 const validId = (value: unknown) => typeof value === 'string' && value.length > 0 && value.length <= 200;
 
-function validCell(value: unknown, depth = 0): value is MichiDbCellValue {
-  if (depth > 2) return false;
-  if (value === null || typeof value === 'string') return value === null || value.length <= 2000;
-  if (typeof value === 'boolean') return true;
+// Leaf rules shared by edits (here) and page history (types.ts), so the two
+// cannot drift apart; each side keeps its own entry point for its shape.
+
+/** One cell: text, a yes/no, a finite number, a list of option values or ids, or a date range. */
+export function isPageDatabaseCell(value: unknown): value is MichiDbCellValue {
+  if (value === null || typeof value === 'boolean') return true;
+  if (typeof value === 'string') return value.length <= 2000;
   if (typeof value === 'number') return Number.isFinite(value);
   if (Array.isArray(value)) return value.length <= 50 && value.every((item) => typeof item === 'string' && item.length <= 200);
-  if (isRecord(value)) return ownKeys(value, ['start', 'end']) && text(value.start, 100)
+  return isRecord(value) && ownKeys(value, ['start', 'end']) && text(value.start, 100)
     && (value.end === undefined || text(value.end, 100));
-  return false;
 }
-function validValues(value: unknown): value is Record<string, MichiDbCellValue> {
+/** A row's cells by column id. */
+export function isPageDatabaseCellValues(value: unknown): value is Record<string, MichiDbCellValue> {
   return isRecord(value) && Object.keys(value).length <= MICHI_DB_LIMITS.columns
-    && Object.entries(value).every(([key, cell]) => validId(key) && validCell(cell));
+    && Object.entries(value).every(([key, cell]) => validId(key) && isPageDatabaseCell(cell));
 }
+export function isPageDatabaseOption(value: unknown): value is MichiDbColumnOption {
+  return isRecord(value) && ownKeys(value, ['value', 'label', 'color']) && text(value.value, 200)
+    && (value.label === undefined || text(value.label, 200))
+    && (value.color === undefined || OPTION_COLORS.includes(String(value.color)));
+}
+/** A column's options. An edit needs distinct values; history (`stored`) still reads older ones that repeat a value. */
+export function isPageDatabaseOptionList(value: unknown, mode: 'input' | 'stored'): value is MichiDbColumnOption[] {
+  return Array.isArray(value) && value.length <= MICHI_DB_LIMITS.options && value.every(isPageDatabaseOption)
+    && (mode === 'stored' || new Set(value.map((option) => option.value)).size === value.length);
+}
+export function isPageDatabaseFilter(value: unknown): value is MichiDbFilter {
+  return isRecord(value) && ownKeys(value, ['column', 'op', 'value']) && validId(value.column) && FILTER_OPS.includes(String(value.op))
+    && (value.value === undefined || isPageDatabaseCell(value.value));
+}
+export function isPageDatabaseSort(value: unknown): value is MichiDbSort {
+  return isRecord(value) && ownKeys(value, ['column', 'dir']) && validId(value.column) && ['asc', 'desc'].includes(String(value.dir));
+}
+
 function validColumn(value: unknown): value is MichiDbNewColumn {
   if (!isRecord(value) || !ownKeys(value, ['id', 'name', 'type', 'options', 'editable', 'width'])) return false;
   if (value.id !== undefined && !validId(value.id)) return false;
   if (!text(value.name, 100) || !COLUMN_TYPES.includes(String(value.type))) return false;
   if (value.editable !== undefined && typeof value.editable !== 'boolean') return false;
   if (value.width !== undefined && (typeof value.width !== 'number' || !Number.isFinite(value.width) || value.width < 40 || value.width > 1000)) return false;
-  return value.options === undefined || (Array.isArray(value.options) && value.options.length <= 100
-    && value.options.every((option) => isRecord(option) && ownKeys(option, ['value','label','color']) && text(option.value, 200)
-      && (option.label === undefined || text(option.label, 200))
-      && (option.color === undefined || ['gray','blue','green','amber','red','violet'].includes(String(option.color)))
-      ) && new Set(value.options.map((option) => option.value)).size === value.options.length);
+  return value.options === undefined || isPageDatabaseOptionList(value.options, 'input');
 }
 function validView(value: unknown): value is PageDatabaseNewView {
   if (!isRecord(value) || !ownKeys(value, ['id','name','type','config'])) return false;
@@ -107,12 +127,10 @@ function validView(value: unknown): value is PageDatabaseNewView {
   const custom = value.type === 'custom';
   if (!ownKeys(c, custom ? ['filters','match','sorts','group','visible','date','planDate','cover','componentId','pinnedVersion','props','height'] : ['filters','match','sorts','group','visible','date','planDate','cover'])) return false;
   if (!Array.isArray(c.filters) || c.filters.length > 100 || !Array.isArray(c.sorts) || c.sorts.length > 100 || !['all','any'].includes(String(c.match))) return false;
-  if (c.filters.some((f) => !isRecord(f) || !ownKeys(f, ['column','op','value']) || !validId(f.column) || !FILTER_OPS.includes(String(f.op)) || (f.value !== undefined && !validCell(f.value)))) return false;
-  if (c.sorts.some((x) => !isRecord(x) || !ownKeys(x, ['column','dir']) || !validId(x.column) || !['asc','desc'].includes(String(x.dir)))) return false;
+  if (!c.filters.every(isPageDatabaseFilter) || !c.sorts.every(isPageDatabaseSort)) return false;
   if (c.visible !== undefined && (!Array.isArray(c.visible) || c.visible.length > 100 || !c.visible.every(validId))) return false;
   for (const key of ['group','date','planDate','cover']) if (c[key] !== undefined && !validId(c[key])) return false;
-  if (custom && (!validId(c.componentId) || (c.pinnedVersion !== undefined && (!Number.isSafeInteger(c.pinnedVersion) || (c.pinnedVersion as number) < 1)) ||
-    (c.height !== undefined && (!Number.isSafeInteger(c.height) || (c.height as number) < 80 || (c.height as number) > 1600)) || validatePageComponentProps(null, c.props) === null)) return false;
+  if (custom && !parsePageComponentHostConfig({ componentId: c.componentId, pinnedVersion: c.pinnedVersion, props: c.props, height: c.height })) return false;
   return true;
 }
 
@@ -138,14 +156,14 @@ export function parsePageDatabaseOps(input: unknown, actor: 'user' | 'agent'): P
     if (raw.op === 'column.update' && (!validId(raw.id) || !isRecord(raw.patch) || !ownKeys(raw.patch, ['name','type','options','editable','width']) || (raw.patch.name !== undefined && !text(raw.patch.name,100)) || (raw.patch.type !== undefined && !COLUMN_TYPES.includes(String(raw.patch.type))) || (raw.patch.editable !== undefined && typeof raw.patch.editable !== 'boolean') || (raw.patch.width !== undefined && (typeof raw.patch.width !== 'number' || !Number.isFinite(raw.patch.width) || raw.patch.width < 40 || raw.patch.width > 1000)) || (raw.patch.options !== undefined && !validColumn({name:'x',type:'text',options:raw.patch.options})))) return { ok: false, error: 'invalid column update' };
     if (raw.op === 'column.delete' && !validId(raw.id)) return { ok: false, error: 'invalid column id' };
     if (raw.op === 'column.move' && (!validId(raw.id) || (raw.after !== null && !validId(raw.after)))) return { ok: false, error: 'invalid column move' };
-    if (raw.op === 'option.add' && (!validId(raw.id) || !isRecord(raw.option) || !ownKeys(raw.option, ['value','label','color']) || !text(raw.option.value,200) || (raw.option.label !== undefined && !text(raw.option.label,200)) || (raw.option.color !== undefined && !['gray','blue','green','amber','red','violet'].includes(String(raw.option.color))))) return { ok: false, error: 'invalid option' };
+    if (raw.op === 'option.add' && (!validId(raw.id) || !isPageDatabaseOption(raw.option))) return { ok: false, error: 'invalid option' };
     if (raw.op === 'view.save' && !validView(raw.view)) return { ok: false, error: 'invalid view' };
     if (raw.op === 'view.delete' && !validId(raw.id)) return { ok: false, error: 'invalid view id' };
     if (raw.op.startsWith('row.')) {
       if (raw.op === 'row.add') {
-        if ((raw.id !== undefined && !validId(raw.id)) || !validValues(raw.values) || (raw.body !== undefined && !text(raw.body, 100_000)) || (raw.after !== undefined && raw.after !== null && !validId(raw.after))) return { ok: false, error: 'invalid row' };
+        if ((raw.id !== undefined && !validId(raw.id)) || !isPageDatabaseCellValues(raw.values) || (raw.body !== undefined && !text(raw.body, 100_000)) || (raw.after !== undefined && raw.after !== null && !validId(raw.after))) return { ok: false, error: 'invalid row' };
       } else if (!validId(raw.id)) return { ok: false, error: 'invalid row id' };
-      if (raw.op === 'row.update' && ((raw.values !== undefined && !validValues(raw.values)) || (raw.body !== undefined && !text(raw.body,100_000)) || (raw.values === undefined && raw.body === undefined))) return { ok: false, error: 'invalid row update' };
+      if (raw.op === 'row.update' && ((raw.values !== undefined && !isPageDatabaseCellValues(raw.values)) || (raw.body !== undefined && !text(raw.body,100_000)) || (raw.values === undefined && raw.body === undefined))) return { ok: false, error: 'invalid row update' };
       if ((raw.op === 'row.move' && raw.after !== null && !validId(raw.after)) || (raw.op === 'row.add' && raw.after !== undefined && raw.after !== null && !validId(raw.after))) return { ok: false, error: 'invalid row position' };
       if ((raw.op === 'row.update' || raw.op === 'row.delete') && raw.expectRev !== undefined && (!Number.isSafeInteger(raw.expectRev) || (raw.expectRev as number) < 1)) return { ok: false, error: 'invalid expected revision' };
       if (actor === 'agent' && (raw.op === 'row.update' || raw.op === 'row.delete') && raw.expectRev === undefined) return { ok: false, error: 'expectRev is required for agent row edits' };
@@ -233,6 +251,7 @@ export function applyPageDatabaseOps(database: PageDatabase, ops: readonly PageD
       if(!columns.some((c)=>c.id===op.id)){failOrReject(opIndex,'target_missing');continue;}
       const column=columns.find((c)=>c.id===op.id)!;
       if((column.options??[]).some((o)=>o.value===op.option.value)) throw new Error(`duplicate option value: ${op.option.value}`);
+      if((column.options??[]).length>=MICHI_DB_LIMITS.options) throw new Error(`A column holds at most ${MICHI_DB_LIMITS.options} options`);
       columns=columns.map((c)=>c.id===op.id?({...c,options:[...(c.options??[]),op.option]}):c);applied=true;
     }
     else if (op.op==='view.save') {

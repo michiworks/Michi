@@ -1,4 +1,3 @@
-import React from 'react';
 import { fireEvent, render, renderHook, screen } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { AgentRunStatus, type AgentRunDtoV1 } from 'michi-shared';
@@ -32,7 +31,7 @@ const noop = () => {};
 
 function list() {
   return <PaneMessageList
-    node={node} prefs={DEFAULT_PREFS} contentStyle={{}} streaming={false} viewportHeight={800}
+    node={node} prefs={DEFAULT_PREFS} contentStyle={{}} streaming={false}
     onRetryTurn={noop} onEditUserMessage={noop} onContinueFollowUp={noop} onBranchFollowUp={noop}
   />;
 }

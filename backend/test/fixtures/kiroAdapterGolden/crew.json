@@ -32,7 +32,7 @@
       "node": {
         "acp_session_id": "native-1",
         "external_session_id": null,
-        "crew_memory_mode": "persistent"
+        "crew_memory_mode": "incognito"
       },
       "wire": [
         {
@@ -51,7 +51,7 @@
           "options": {
             "metadata": {
               "crew": {
-                "memoryMode": "persistent",
+                "memoryMode": "incognito",
                 "workspaceName": "Golden"
               }
             }
@@ -107,7 +107,7 @@
       "node": {
         "acp_session_id": null,
         "external_session_id": null,
-        "crew_memory_mode": "persistent"
+        "crew_memory_mode": "incognito"
       },
       "wire": [
         {
@@ -126,7 +126,7 @@
           "options": {
             "metadata": {
               "crew": {
-                "memoryMode": "persistent",
+                "memoryMode": "incognito",
                 "workspaceName": "Golden"
               }
             }
@@ -166,7 +166,7 @@
       "node": {
         "acp_session_id": null,
         "external_session_id": null,
-        "crew_memory_mode": "persistent"
+        "crew_memory_mode": "incognito"
       },
       "wire": [
         {
@@ -185,7 +185,7 @@
           "options": {
             "metadata": {
               "crew": {
-                "memoryMode": "persistent",
+                "memoryMode": "incognito",
                 "workspaceName": "Golden"
               }
             }
@@ -307,14 +307,14 @@
           "op": "session/prompt",
           "sessionId": "native-4",
           "images": 0,
-          "text": "Workspace instructions (these apply to every reply in this conversation — treat as if part of the system prompt):\n\nWorkspace rule: answer in one paragraph.\n\n\nContext from previous explorations this user wants to synthesize:\n\nFork merge context.\n\nThe user is now opening a new branch to synthesize across these threads.\nForked question?\n\n[Michi final-answer format: first line [TITLE: short summary]. Then three separate [FOLLOW-UP 1/3: question], [FOLLOW-UP 2/3: question], [FOLLOW-UP 3/3: question] lines: questions the user would ask you next, in their language. Last line [BRANCH-OVERVIEW: 1-3 sentences about this turn]. Keep metadata out of commentary. No tools are needed for this metadata.]"
+          "text": "Workspace instructions (these apply to every reply in this conversation — treat as if part of the system prompt):\n\nWorkspace rule: answer in one paragraph.\n\n\nContext from previous explorations this user wants to synthesize:\n\nFork merge context.\n\nThe user is now opening a new branch to synthesize across these threads.\n\nThis conversation is a branch of the thread \"Untitled thread\" (node node-a) in the same conversation tree: the history above is that thread's, copied when the user branched, and the parent thread has continued on its own since.\nForked question?\n\n[Michi final-answer format: first line [TITLE: short summary]. Then three separate [FOLLOW-UP 1/3: question], [FOLLOW-UP 2/3: question], [FOLLOW-UP 3/3: question] lines: questions the user would ask you next, in their language. Last line [BRANCH-OVERVIEW: 1-3 sentences about this turn]. Keep metadata out of commentary. No tools are needed for this metadata.]"
         }
       ]
     },
     {
-      "name": "chat: node summary experiment",
+      "name": "agent run: new with bootstrap",
       "session": {
-        "id": "node-f",
+        "id": "attempt-1",
         "nativeSessionId": "native-5",
         "nativeEngine": "v2",
         "resumeToken": {
@@ -328,11 +328,6 @@
           "turn_end"
         ]
       ],
-      "node": {
-        "acp_session_id": null,
-        "external_session_id": null,
-        "crew_memory_mode": "persistent"
-      },
       "wire": [
         {
           "op": "session/new",
@@ -350,7 +345,7 @@
           "options": {
             "metadata": {
               "crew": {
-                "memoryMode": "persistent",
+                "memoryMode": "incognito",
                 "workspaceName": "Golden"
               }
             }
@@ -359,54 +354,6 @@
         {
           "op": "session/prompt",
           "sessionId": "native-5",
-          "images": 0,
-          "text": "Workspace instructions (these apply to every reply in this conversation — treat as if part of the system prompt):\n\nWorkspace rule: answer in one paragraph.\nSummarized question?\n\n[Michi final-answer format: first line [TITLE: short summary]. Then three separate [FOLLOW-UP 1/3: question], [FOLLOW-UP 2/3: question], [FOLLOW-UP 3/3: question] lines: questions the user would ask you next, in their language. Last line [BRANCH-OVERVIEW: 1-3 sentences about this turn]. Keep metadata out of commentary. No tools are needed for this metadata.]"
-        }
-      ]
-    },
-    {
-      "name": "agent run: new with bootstrap",
-      "session": {
-        "id": "attempt-1",
-        "nativeSessionId": "native-6",
-        "nativeEngine": "v2",
-        "resumeToken": {
-          "engine": "v2",
-          "sessionId": "native-6"
-        }
-      },
-      "turns": [
-        [
-          "chunk",
-          "turn_end"
-        ]
-      ],
-      "wire": [
-        {
-          "op": "session/new",
-          "engine": "v2",
-          "runtimeId": "crew",
-          "sessionId": "native-6",
-          "mcpServers": [
-            {
-              "name": "michi",
-              "type": "http",
-              "url": "http://127.0.0.1:43117/api/mcp/<slot-7>",
-              "headers": []
-            }
-          ],
-          "options": {
-            "metadata": {
-              "crew": {
-                "memoryMode": "persistent",
-                "workspaceName": "Golden"
-              }
-            }
-          }
-        },
-        {
-          "op": "session/prompt",
-          "sessionId": "native-6",
           "images": 0,
           "text": "Run bootstrap: do the task, then submit the result.\nRun task text."
         }
@@ -439,7 +386,7 @@
             {
               "name": "michi",
               "type": "http",
-              "url": "http://127.0.0.1:43117/api/mcp/<slot-8>",
+              "url": "http://127.0.0.1:43117/api/mcp/<slot-7>",
               "headers": []
             }
           ],
@@ -458,15 +405,15 @@
       "name": "restricted profile",
       "newSession": {
         "name": "AssistantRuntimeUnsupportedError",
-        "message": "The Meta agent does not run on Kiro Crew yet. Choose another runtime for it in Settings › Meta agent."
+        "message": "Pages upkeep does not run on Kiro Crew yet. Choose another runtime for it under Pages upkeep in Settings."
       },
       "loadSession": {
         "name": "AssistantRuntimeUnsupportedError",
-        "message": "The Meta agent does not run on Kiro Crew yet. Choose another runtime for it in Settings › Meta agent."
+        "message": "Pages upkeep does not run on Kiro Crew yet. Choose another runtime for it under Pages upkeep in Settings."
       },
       "forkSession": {
         "name": "AssistantRuntimeUnsupportedError",
-        "message": "The Meta agent does not run on Kiro Crew yet. Choose another runtime for it in Settings › Meta agent."
+        "message": "Pages upkeep does not run on Kiro Crew yet. Choose another runtime for it under Pages upkeep in Settings."
       },
       "wire": []
     },

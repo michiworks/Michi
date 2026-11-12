@@ -37,4 +37,9 @@ export function lastInputWasTouch(): boolean {
   return modality === 'touch';
 }
 
+/** True when the most recent input was a key, not a pointer. */
+export function lastInputWasKeyboard(): boolean {
+  return modality === 'keyboard';
+}
+
 installInputModality();

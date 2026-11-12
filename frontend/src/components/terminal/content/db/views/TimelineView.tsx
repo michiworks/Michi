@@ -1,14 +1,14 @@
 import React, { useLayoutEffect, useMemo, useRef, useState } from 'react';
-import type { MichiDatabase, MichiDbColumn, MichiDbRow, DatabaseRowStatus } from 'michi-shared';
+import { dayAt, dayIndex, localDayIndex, type MichiDatabase, type MichiDbColumn, type MichiDbRow, type DatabaseRowStatus } from 'michi-shared';
 import { ThreadStateDot } from '../../ThreadStateDot';
 import { threadItemProps, type ThreadItemHandlers } from '../../threads/threadItem';
-import { cellOf, dateColumn, dateColumns, dayOf, isDateValue, isThreadsDb, localDay, planColumn } from '../dbModel';
-import { columnName, formatDay, viewName } from '../dbLabels';
+import { cellOf, dateColumn, dateColumns, dayOf, isDateValue, isThreadsDb, planColumn } from '../dbModel';
+import { columnName, viewName } from '../dbLabels';
+import { formatDay } from '../../michiFormat';
 import { viewSave } from '../dbOps';
 import { GroupHeading, rowTitle, } from './RowBits';
 import type { DbViewProps } from './viewTypes';
 
-const DAY_MS = 86_400_000;
 const MIN_DAYS = 14;
 const MAX_DAYS = 92;
 
@@ -28,10 +28,8 @@ export function spanOf(value: unknown): Span | null {
   return null;
 }
 
-const dayNum = (day: string) => {
-  const [y, m, d] = day.split('-').map(Number);
-  return Math.round(new Date(y, m - 1, d).getTime() / DAY_MS);
-};
+// spanOf keeps only real days, so every span day has an index.
+const dayNum = (day: string) => dayIndex(day)!;
 
 export interface Axis { first: number; days: number; today: number; labels: Array<{ day: string; n: number }> }
 
@@ -40,7 +38,7 @@ export interface Axis { first: number; days: number; today: number; labels: Arra
  * side, at least two weeks; past three months only the latest three.
  */
 export function timelineAxis(spans: readonly Span[], now: number): Axis {
-  const today = dayNum(localDay(new Date(now)));
+  const today = localDayIndex(now);
   let lo = today;
   let hi = today;
   for (const s of spans) {
@@ -53,10 +51,8 @@ export function timelineAxis(spans: readonly Span[], now: number): Axis {
   if (hi - lo + 1 > MAX_DAYS) lo = hi - MAX_DAYS + 1;
   const days = hi - lo + 1;
   const labels = Array.from({ length: days }, (_, i) => {
-    const d = new Date((lo + i) * DAY_MS);
-    // dayNum went through local midnight; step back to the local calendar day.
-    const local = new Date(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate());
-    return { day: localDay(local), n: local.getDate() };
+    const day = dayAt(lo + i);
+    return { day, n: Number(day.slice(8)) };
   });
   return { first: lo, days, today, labels };
 }

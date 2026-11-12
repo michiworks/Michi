@@ -49,11 +49,11 @@ export function candidateNames(base: string, platform: NodeJS.Platform = process
   return [`${base}.exe`, `${base}.cmd`, `${base}.bat`, base];
 }
 
+/** An existing regular file (symlinks followed), and executable off Windows. A searchable folder passes X_OK but cannot be spawned. */
 export function isRunnableFile(filePath: string, platform: NodeJS.Platform = process.platform): boolean {
-  if (!fs.existsSync(filePath)) return false;
-  if (platform === "win32") return true;
   try {
-    fs.accessSync(filePath, fs.constants.X_OK);
+    if (!fs.statSync(filePath).isFile()) return false;
+    if (platform !== "win32") fs.accessSync(filePath, fs.constants.X_OK);
     return true;
   } catch {
     return false;
@@ -83,12 +83,18 @@ export function findInDir(dir: string, name: string, ctx: LookupContext = {}): s
 }
 
 export function findOnPath(name: string, ctx: LookupContext = {}): string | null {
+  return findAllOnPath(name, ctx)[0] ?? null;
+}
+
+/** Every runnable `name` on PATH, in PATH order. */
+export function findAllOnPath(name: string, ctx: LookupContext = {}): string[] {
   const env = lookupEnv(ctx);
+  const found: string[] = [];
   for (const dir of pathDirs(env.PATH, lookupPlatform(ctx))) {
-    const found = findInDir(dir, name, ctx);
-    if (found) return found;
+    const file = findInDir(dir, name, ctx);
+    if (file && !found.includes(file)) found.push(file);
   }
-  return null;
+  return found;
 }
 
 /** User-level install prefixes shared by every runtime. */
@@ -108,7 +114,8 @@ export function standardInstallDirs(ctx: LookupContext = {}): string[] {
     dirs.push(path.join(appData, "npm"));
     return dirs;
   }
-  dirs.push("/usr/local/bin", "/opt/homebrew/bin");
+  // AgentSpaces installs its Claude Code CLI here and leaves it off PATH.
+  dirs.push("/usr/local/bin", "/opt/homebrew/bin", "/agentspaces/cecelia/bin");
   return dirs;
 }
 
@@ -121,6 +128,12 @@ export interface ResolveNamedBinaryOptions extends LookupContext {
   extraDirs?: string[];
   /** Skip the shared standard-install directory list (caller supplies a complete extraDirs). */
   skipStandardDirs?: boolean;
+  /**
+   * Why a found candidate cannot run, or null when it can. With it, a
+   * candidate that exists but fails, such as a stale shim earlier on PATH, is
+   * skipped and its reason recorded in `tried`. The env override is not checked.
+   */
+  unusableReason?: (filePath: string) => string | null;
 }
 
 export interface ResolveNamedBinaryResult {
@@ -134,10 +147,21 @@ export interface ResolveNamedBinaryResult {
  *   2. PATH
  *   3. extraFiles
  *   4. extraDirs + standard install dirs
+ * With `unusableReason`, steps 2-4 skip candidates that cannot run.
  */
 export function resolveNamedBinary(name: string, opts: ResolveNamedBinaryOptions = {}): ResolveNamedBinaryResult {
   const tried: string[] = [];
   const io = fsFor(opts);
+  const reasons = new Map<string, string | null>();
+  const usable = (file: string): boolean => {
+    if (!opts.unusableReason) return true;
+    if (!reasons.has(file)) {
+      const reason = opts.unusableReason(file);
+      reasons.set(file, reason);
+      if (reason) tried.push(`${file} (${reason})`);
+    }
+    return reasons.get(file) === null;
+  };
 
   if (opts.envValue) {
     tried.push(opts.envValue);
@@ -145,14 +169,14 @@ export function resolveNamedBinary(name: string, opts: ResolveNamedBinaryOptions
   }
 
   tried.push(`<PATH lookup for ${name}>`);
-  const onPath = findOnPath(name, opts);
+  const onPath = findAllOnPath(name, opts).find(usable);
   if (onPath) return { found: onPath, tried };
 
   for (const file of opts.extraFiles ?? []) {
     tried.push(file);
     // Extra files keep the historical existsSync-only check so tests can stub
     // existence for macOS app-bundle paths that are not actually on disk.
-    if (io.exists(file)) return { found: file, tried };
+    if (io.exists(file) && usable(file)) return { found: file, tried };
   }
 
   const dirs = [
@@ -168,7 +192,7 @@ export function resolveNamedBinary(name: string, opts: ResolveNamedBinaryOptions
       tried.push(path.join(dir, fileName));
     }
     const found = findInDir(dir, name, opts);
-    if (found) return { found, tried };
+    if (found && usable(found)) return { found, tried };
   }
 
   return { found: null, tried };

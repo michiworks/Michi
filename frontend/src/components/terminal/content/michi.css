@@ -69,9 +69,9 @@
 }
 .michi-section-label__text {
   color: var(--term-muted);
-  font-size: 10px;
+  font-size: var(--fs-xs);
   font-weight: 500;
-  letter-spacing: 0.14em;
+  letter-spacing: var(--ls-caps-wide);
   text-transform: uppercase;
   white-space: nowrap;
 }
@@ -151,9 +151,9 @@
 }
 .michi-continue-menu__caption {
   color: var(--term-muted);
-  font-size: 10px;
+  font-size: var(--fs-xs);
   font-weight: 500;
-  letter-spacing: 0.14em;
+  letter-spacing: var(--ls-caps-wide);
   text-transform: uppercase;
 }
 .michi-continue-menu__line {
@@ -281,7 +281,7 @@ body:has(.michi-batch, .michi-doc-batch) .michi-toast-region {
 }
 .michi-toast__btn:focus-visible,
 .michi-toast__close:focus-visible {
-  outline: 2px solid color-mix(in srgb, var(--term-accent) 60%, transparent);
+  outline: var(--focus-ring);
   outline-offset: 1px;
 }
 

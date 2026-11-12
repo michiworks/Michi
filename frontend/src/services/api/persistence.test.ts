@@ -1,5 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { fetchAllWorkspacesMeta, fetchNodeWorkspace, fetchPersistenceCapabilities, fetchTreeMessages, fetchTreeMessagePage, supportsPaneInspection } from './persistence';
+import {
+  applyWorkspaceCommands, fetchAllWorkspacesMeta, fetchNodeWorkspace, fetchPersistenceCapabilities, fetchTreeMessages, fetchTreeMessagePage,
+  supportsArtifactWriteAnswers, supportsPaneInspection, workspacesFromMetaBody,
+} from './persistence';
 import { RemoteServiceRecoveryError } from './remoteRecovery';
 import { fetchStream } from './streamTransport';
 import { backendEntityId } from '../../config/backendIdentity';
@@ -62,6 +65,15 @@ describe('fetchPersistenceCapabilities — paneInspection field', () => {
 
   afterEach(() => {
     vi.unstubAllGlobals();
+  });
+
+  it('skipped artifact writes are answered only by a backend that says v1; an older one says nothing', async () => {
+    fetchMock.mockResolvedValueOnce(new Response(JSON.stringify({ protocolVersion: 2, artifactWriteAnswers: 'v1' })));
+    expect(supportsArtifactWriteAnswers(await fetchPersistenceCapabilities('local', { configureTransport: false }))).toBe(true);
+    // The default response here is an older backend's: no field.
+    expect(supportsArtifactWriteAnswers(await fetchPersistenceCapabilities('local', { configureTransport: false }))).toBe(false);
+    for (const value of [true, 'v2', 1, null, {}]) expect(supportsArtifactWriteAnswers({ artifactWriteAnswers: value })).toBe(false);
+    expect(supportsArtifactWriteAnswers(null)).toBe(false);
   });
 
   it('an old-gateway response with no paneInspection field is reported as unsupported', async () => {
@@ -135,4 +147,94 @@ it('retains gateway recovery state for workspace retries and ignores a different
     const unrelated = await fetchAllWorkspacesMeta('other-machine').catch(error => error);
     expect(unrelated).not.toBeInstanceOf(RemoteServiceRecoveryError);
   } finally { vi.unstubAllGlobals(); }
+});
+
+describe('a committed command batch names the artifacts whose upserts it skipped', () => {
+  afterEach(() => vi.unstubAllGlobals());
+  const answer = (body: unknown) => new Response(typeof body === 'string' ? body : JSON.stringify(body), { status: 200 });
+  const commands = [
+    { type: 'context.upsert' as const, payload: { id: 'ctx-1', workspace_id: 'ws' } },
+    { type: 'context.upsert' as const, payload: { id: 'ctx-2', workspace_id: 'ws' } },
+  ];
+  const none = { goneContextIds: [], nameTakenContextIds: [] };
+
+  it('takes goneContextIds and nameTakenContextIds, unscoped for a remote workspace like its artifact ids', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockImplementation(async () => answer({
+      ok: true, operationId: 'op', applied: [], goneContextIds: ['ctx-1'], nameTakenContextIds: ['ctx-2'],
+    })));
+    const expected = { goneContextIds: ['ctx-1'], nameTakenContextIds: ['ctx-2'] };
+    expect(await applyWorkspaceCommands('ws', 'op', commands)).toEqual(expected);
+    expect(await applyWorkspaceCommands(backendEntityId('r', 'ws'), 'op', commands)).toEqual(expected);
+  });
+
+  it('an older backend, an unreadable body or ids that are not ids answer nothing skipped', async () => {
+    const fetch = vi.fn()
+      .mockResolvedValueOnce(answer({ ok: true, operationId: 'op', applied: [{ type: 'context.upsert', id: 'ctx-1' }] }))
+      .mockResolvedValueOnce(answer('not json'))
+      .mockResolvedValueOnce(answer({ ok: true, goneContextIds: 'ctx-1', nameTakenContextIds: 'ctx-2' }))
+      .mockResolvedValueOnce(answer({
+        ok: true, goneContextIds: [7, '', 'x'.repeat(161), null, 'ctx-2'], nameTakenContextIds: [{ id: 'ctx-1' }, 'ctx-1'],
+      }));
+    vi.stubGlobal('fetch', fetch);
+    for (let i = 0; i < 3; i += 1) expect(await applyWorkspaceCommands('ws', 'op', commands)).toEqual(none);
+    expect(await applyWorkspaceCommands('ws', 'op', commands)).toEqual({ goneContextIds: ['ctx-2'], nameTakenContextIds: ['ctx-1'] });
+    // An empty batch is not sent.
+    expect(await applyWorkspaceCommands('ws', 'op', [])).toEqual(none);
+    expect(fetch).toHaveBeenCalledTimes(4);
+  });
+
+  it('says this window matches artifacts by id only, to a remote workspace too (an older backend ignores the field)', async () => {
+    const fetch = vi.fn().mockImplementation(async () => answer({ ok: true, operationId: 'op', applied: [] }));
+    vi.stubGlobal('fetch', fetch);
+    await applyWorkspaceCommands('ws', 'op', commands);
+    await applyWorkspaceCommands(backendEntityId('r', 'ws'), 'op-remote', commands);
+    expect(fetch.mock.calls.map(([, init]) => JSON.parse(String((init as RequestInit).body)))).toEqual([
+      { operationId: 'op', commands, artifactIdentity: 'id' },
+      { operationId: 'op-remote', commands, artifactIdentity: 'id' },
+    ]);
+  });
+});
+
+describe('lean remote metadata', () => {
+  afterEach(() => vi.unstubAllGlobals());
+  const leanBody = {
+    structureCursor: null,
+    leanNodeFields: ['branch_overview', 'follow_ups', 'composer_draft', 'not_a_field'],
+    workspaces: [{ workspace: { id: 'ws', name: 'W' }, nodes: [{ id: 'n1', tree_id: 'tree', message_count: 2 }], trees: [], edges: [] }],
+  };
+
+  it('asks a remote connection for lean rows and stamps each workspace with the fields they left out', async () => {
+    const fetch = vi.fn().mockImplementation(async () => new Response(JSON.stringify(leanBody)));
+    vi.stubGlobal('fetch', fetch);
+    const [remote] = await fetchAllWorkspacesMeta('r') as Array<{ leanNodeFields: string[]; nodes: Array<{ id: string }> }>;
+    const url = new URL(fetch.mock.calls[0][0], 'http://localhost');
+    expect(url.pathname).toMatch(/\/backend-connections\/r\/proxy\/workspaces\/all$/);
+    expect(url.searchParams.get('meta')).toBe('1');
+    expect(url.searchParams.get('lean')).toBe('1');
+    expect(remote.leanNodeFields).toEqual(['branch_overview', 'follow_ups', 'composer_draft']);
+    expect(remote.nodes[0].id).toBe(backendEntityId('r', 'n1'));
+    for (const local of [undefined, 'local']) {
+      await fetchAllWorkspacesMeta(local);
+      expect(new URL(fetch.mock.calls.at(-1)![0], 'http://localhost').searchParams.has('lean')).toBe(false);
+    }
+  });
+
+  it('leaves an older backend\'s workspaces as they are (no marker, nothing deferred)', () => {
+    const { leanNodeFields: _marker, ...older } = leanBody;
+    expect(workspacesFromMetaBody(older)).toBe(older.workspaces);
+    expect(workspacesFromMetaBody({ ...older, leanNodeFields: [] })).toBe(older.workspaces);
+    expect(workspacesFromMetaBody(null)).toEqual([]);
+  });
+
+  it('keeps a page\'s lean node fields, scoped like the rows they came from', async () => {
+    const draft = JSON.stringify({ value: 'see @x', mentions: [{ start: 4, end: 6, kind: 'node', refId: 'n2', label: 'x' }] });
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      messages: [], pages: [{ nodeId: 'n1', total: 0, before: null, node: { branch_overview: null, follow_ups: '["Next?"]', follow_ups_source_message_id: 'a-1', composer_draft: draft } }],
+    }))));
+    const page = await fetchTreeMessagePage(backendEntityId('r', 'ws'), backendEntityId('r', 'tree'), 'r');
+    const node = page.pages![0].node!;
+    expect(node.follow_ups).toBe('["Next?"]');
+    expect(node.follow_ups_source_message_id).toBe('a-1');
+    expect(JSON.parse(node.composer_draft as string).mentions[0].refId).toBe(backendEntityId('r', 'n2'));
+  });
 });

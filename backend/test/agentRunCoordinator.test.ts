@@ -57,10 +57,10 @@ class MemoryRepo {
     } : null;
   }
   listEvents(_owner: string, id: string, after = -1, limit = 500) { return (this.events.get(id) ?? []).filter((event) => event.seq > after).slice(0, limit); }
-  claimRun(owner: string, id: string, _leaseOwner: string, leaseToken: string, _expires: number, expected: number) {
+  claimRun(owner: string, id: string, _leaseOwner: string, leaseToken: string, expires: number, expected: number) {
     const run = this.getRun(owner, id); if (!run || run.latestEventSeq !== expected
       || ![AgentRunStatus.Queued, AgentRunStatus.Recovering].includes(run.status)) return null;
-    this.claims += 1; (run as any).leaseToken = leaseToken;
+    this.claims += 1; (run as any).leaseToken = leaseToken; (run as any).leaseExpiresAt = expires;
     return this.append(owner, run, AgentRunEventType.RunStatusChanged,
       { version: 1, from: run.status, to: AgentRunStatus.Preparing }, { status: AgentRunStatus.Preparing });
   }
@@ -105,6 +105,22 @@ class MemoryRepo {
       { version: 1, from: run.status, to: AgentRunStatus.Cancelled, reason: 'administrative_delete' },
       { status: AgentRunStatus.Cancelled, waitingReason: null, completedAt: 2_000 });
   }
+  /** The fixture's clock, for lease expiry. */
+  now = () => 1_000;
+  cancelRunWithoutHandle(owner: string, id: string, reason: string | null) {
+    const run = this.getRun(owner, id);
+    if (!run || [AgentRunStatus.Completed, AgentRunStatus.Failed, AgentRunStatus.Cancelled].includes(run.status)) return null;
+    if ((run as any).leaseToken && (run as any).leaseExpiresAt > this.now()) return null;
+    const attempt = this.attempts.get(id)?.find((item) => item.id === run.activeAttemptId);
+    if (attempt && !['completed', 'failed', 'cancelled'].includes(attempt.status)) attempt.status = 'cancelled';
+    for (const item of this.interactions.values()) {
+      if (item.runId === id && item.status === 'pending') Object.assign(item, { status: 'cancelled', response: { version: 1, reason }, resolvedAt: 2 });
+    }
+    (run as any).leaseToken = null;
+    return this.append(owner, run, AgentRunEventType.RunStatusChanged,
+      { version: 1, from: run.status, to: AgentRunStatus.Cancelled },
+      { status: AgentRunStatus.Cancelled, waitingReason: null, completedAt: 2_000 }, run.activeAttemptId);
+  }
   createInteraction(_owner: string, runId: string, attemptId: string | null, kind: any, request: any) {
     const interaction = { version: 1 as const, id: `interaction-${this.nextInteraction++}`, runId, attemptId,
       kind, status: 'pending' as const, request, response: null, createdAt: 1, resolvedAt: null };
@@ -112,8 +128,8 @@ class MemoryRepo {
   }
   getInteraction(_owner: string, id: string) { return this.interactions.get(id) ?? null; }
   listInteractions(_owner: string, runId: string) { return [...this.interactions.values()].filter((item) => item.runId === runId); }
-  resolveInteraction(_owner: string, id: string, _status: any, response: any) { const item = this.interactions.get(id); if (!item) return null;
-    Object.assign(item, { status: 'resolved', response, resolvedAt: 2 }); return item; }
+  resolveInteraction(_owner: string, id: string, status: any, response: any) { const item = this.interactions.get(id); if (!item) return null;
+    Object.assign(item, { status, response, resolvedAt: 2 }); return item; }
 }
 
 class FakeClock {
@@ -128,6 +144,7 @@ function deferred<T>() { let resolve!: (value: T) => void; const promise = new P
 
 function setup(outcome: any = { status: 'completed', resultBundle: result() }, continuedOutcome?: any) {
   const repository = new MemoryRepo(); const clock = new FakeClock(); let starts = 0; let resumes = 0; let bindingError = false;
+  repository.now = clock.now;
   let inputError: Error | null = null; let startError: Error | null = null; let resumedToken: any = null;
   const inputs: Array<{ text: string; mode?: 'queued' | 'immediate' }> = []; const cancels: Array<string | null> = [];
   const completion = outcome === 'deferred' ? deferred<any>() : null;
@@ -189,6 +206,17 @@ describe('AgentRunCoordinator', () => {
     assert.equal(fixture.starts, 1);
     fixture.completion!.resolve({ status: 'completed', resultBundle: result() });
     assert.equal((await pending)?.status, AgentRunStatus.Completed);
+  });
+
+  test('a throwing event listener neither stops the Run from settling nor starves the listeners after it', async () => {
+    const fixture = setup(); const coordinator = new AgentRunCoordinator(fixture.ports);
+    const queued = await coordinator.spawn(spawnInput());
+    const seen: number[] = [];
+    coordinator.events.subscribe(queued.id, () => { throw new Error('pane watcher failed'); });
+    coordinator.events.subscribeAll(() => { throw new Error('first listener failed'); });
+    coordinator.events.subscribeAll((event) => { seen.push(event.seq); });
+    assert.equal((await coordinator.start('owner', queued.id))?.status, AgentRunStatus.Completed);
+    assert.ok(seen.length >= 2, 'the claim and the running events reach the second listener');
   });
 
   test('waiting interaction remains durable across coordinator recreation', async () => {
@@ -274,6 +302,86 @@ describe('AgentRunCoordinator', () => {
     assert.deepEqual(fixture.cancels, ['stop']);
     fixture.completion!.resolve({ status: 'cancelled' });
     assert.equal((await pending)?.status, AgentRunStatus.Cancelled);
+  });
+
+  test('cancelling a Run that waits for an answer ends it, its Attempt and the question', async () => {
+    const fixture = setup({ status: 'waiting', kind: 'permission', request: { version: 1, tool: 'bash' } });
+    const coordinator = new AgentRunCoordinator(fixture.ports);
+    const queued = await coordinator.spawn(spawnInput());
+    assert.equal((await coordinator.start('owner', queued.id))?.status, AgentRunStatus.Waiting);
+    const interaction = [...fixture.repository.interactions.values()][0];
+    assert.equal(await coordinator.cancel('owner', queued.id, 'stop', null, 'cancel-waiting'), true);
+    assert.deepEqual(fixture.cancels, ['stop']);
+    const run = coordinator.check('owner', queued.id);
+    assert.equal(run?.status, AgentRunStatus.Cancelled);
+    assert.equal(run?.waitingReason, null);
+    assert.equal(fixture.repository.attempts.get(queued.id)?.at(-1)?.status, 'cancelled');
+    assert.equal(fixture.repository.interactions.get(interaction.id)?.status, 'cancelled');
+    assert.deepEqual(await coordinator.wait('owner', queued.id, 50), { run, resultBundle: null, stillRunning: false });
+  });
+
+  test('cancelling a Run that waits after a restart ends it and its question', async () => {
+    const fixture = setup({ status: 'waiting', kind: 'permission', request: { version: 1, tool: 'bash' } });
+    const first = new AgentRunCoordinator(fixture.ports); const queued = await first.spawn(spawnInput());
+    assert.equal((await first.start('owner', queued.id))?.status, AgentRunStatus.Waiting);
+    // A restart: the new coordinator holds no handle, and heartbeats skip waiting Runs, so the old lease ran out.
+    const recreated = new AgentRunCoordinator({ ...fixture.ports, instanceId: 'coordinator-2' });
+    fixture.clock.value += 60_000;
+    const interaction = [...fixture.repository.interactions.values()][0];
+    assert.equal(await recreated.cancel('owner', queued.id, 'stop', null, 'cancel-after-restart'), true);
+    assert.equal(recreated.check('owner', queued.id)?.status, AgentRunStatus.Cancelled);
+    assert.equal(fixture.repository.interactions.get(interaction.id)?.status, 'cancelled');
+    assert.equal(fixture.repository.attempts.get(queued.id)?.at(-1)?.status, 'cancelled');
+    assert.deepEqual(fixture.cancels, []);
+  });
+
+  test('cancelling a Run between Attempts ends it, and the next start does not run it', async () => {
+    const fixture = setup();
+    const coordinator = new AgentRunCoordinator(fixture.ports);
+    const queued = await coordinator.spawn(spawnInput());
+    const run = fixture.repository.runs.get(queued.id)!;
+    run.status = AgentRunStatus.Recovering;
+    fixture.repository.attempts.set(run.id, [{ id: 'attempt-old', attemptIndex: 0, profileIndex: 0, status: 'failed' }]);
+    assert.equal(await coordinator.cancel('owner', run.id, 'stop', null, 'cancel-recovering'), true);
+    assert.equal(coordinator.check('owner', run.id)?.status, AgentRunStatus.Cancelled);
+    assert.equal((await coordinator.start('owner', run.id))?.status, AgentRunStatus.Cancelled);
+    assert.equal(fixture.starts + fixture.resumes, 0);
+  });
+
+  test('a cancel while the runtime starts stops it once it has started', async () => {
+    const fixture = setup('deferred');
+    let started!: () => void;
+    const gate = new Promise<void>((resolve) => { started = resolve; });
+    const start = fixture.ports.executor.start;
+    fixture.ports.executor.start = async (...args: any[]) => { await gate; return start(...args); };
+    const coordinator = new AgentRunCoordinator(fixture.ports);
+    const queued = await coordinator.spawn(spawnInput());
+    const running = coordinator.start('owner', queued.id);
+    assert.equal(coordinator.check('owner', queued.id)?.status, AgentRunStatus.Preparing);
+    assert.equal(await coordinator.cancel('owner', queued.id, 'stop', null, 'cancel-starting'), true);
+    assert.equal(coordinator.check('owner', queued.id)?.status, AgentRunStatus.Preparing, 'its live lease keeps it for the starting owner');
+    started();
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.deepEqual(fixture.cancels, ['stop']);
+    fixture.completion!.resolve({ status: 'cancelled' });
+    assert.equal((await running)?.status, AgentRunStatus.Cancelled);
+  });
+
+  test('a Run cancelled after its lease ran out during a slow start stops what started', async () => {
+    const fixture = setup('deferred');
+    let started!: () => void;
+    const gate = new Promise<void>((resolve) => { started = resolve; });
+    const start = fixture.ports.executor.start;
+    fixture.ports.executor.start = async (...args: any[]) => { await gate; return start(...args); };
+    const coordinator = new AgentRunCoordinator(fixture.ports);
+    const queued = await coordinator.spawn(spawnInput());
+    const running = coordinator.start('owner', queued.id);
+    fixture.clock.value += 60_000;
+    assert.equal(await coordinator.cancel('owner', queued.id, 'stop', null, 'cancel-slow-start'), true);
+    assert.equal(coordinator.check('owner', queued.id)?.status, AgentRunStatus.Cancelled);
+    started();
+    assert.equal((await running)?.status, AgentRunStatus.Cancelled);
+    assert.deepEqual(fixture.cancels, ['Run ended before its runtime started']);
   });
 
   test('queued cancellation is durable and idempotent before an executor starts', async () => {

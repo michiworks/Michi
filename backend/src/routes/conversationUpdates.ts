@@ -1,6 +1,6 @@
 import { Router } from 'express';
 import { ConversationUpdatesError } from 'michi-shared';
-import { LOCAL_AGENT_OWNER_ID } from '../services/agentOwner';
+import { requestAgentOwner } from '../services/agentOwner';
 import { readConversationUpdates } from '../services/conversationUpdates';
 
 export function setupConversationUpdatesRoutes(): Router {
@@ -16,7 +16,7 @@ export function setupConversationUpdatesRoutes(): Router {
       const include = req.query.includeMessages;
       if (include !== undefined && include !== 'true' && include !== 'false') throw new ConversationUpdatesError('invalid_argument', 'includeMessages must be true or false');
       const result = readConversationUpdates({
-        ownerUserId: process.env.MICHI_CLOUD === '1' ? req.user?.id ?? '' : LOCAL_AGENT_OWNER_ID,
+        ownerUserId: requestAgentOwner(req.user?.id),
         workspaceId: req.params.workspaceId as string, backendConnectionId: 'local',
       }, { after: number('after'), through: number('through'), limit: number('limit'), includeMessages: include === 'true' });
       res.json(result);

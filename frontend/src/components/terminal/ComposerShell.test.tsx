@@ -1,6 +1,7 @@
 import React from 'react';
 import { act, fireEvent, render, screen } from '@testing-library/react';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { openFilePicker } from '../../hooks/useKeyboardDismiss';
 import { ComposerShell, type ComposerShellHandle } from './ComposerShell';
 
 describe('ComposerShell', () => {
@@ -172,6 +173,35 @@ describe('ComposerShell on a phone', () => {
       expect(collapsed()).toBe(false);
       rerender(<Shell hasContent />);
       expect(collapsed()).toBe(true);
+    });
+
+    it('stays open with the field focused while a file picker takes the keyboard down', () => {
+      setWidth(390);
+      render(<Shell />);
+      const field = screen.getByRole('textbox');
+      act(() => field.focus());
+      keyboard(300);
+      const input = document.createElement('input');
+      input.type = 'file';
+      openFilePicker(input);
+      // iOS lowers the keyboard while the photo picker covers the page.
+      keyboard(0);
+      expect(collapsed()).toBe(false);
+      expect(document.activeElement).toBe(field);
+      // A photo is chosen and the keyboard comes back for the same field.
+      fireEvent.change(input);
+      keyboard(300);
+      expect(collapsed()).toBe(false);
+      // Once the picker has settled, lowering the keyboard rests it again.
+      const later = performance.now() + 1000;
+      const now = vi.spyOn(performance, 'now').mockReturnValue(later);
+      try {
+        keyboard(0);
+      } finally {
+        now.mockRestore();
+      }
+      expect(collapsed()).toBe(true);
+      expect(document.activeElement).not.toBe(field);
     });
 
     it('ignores a keyboard raised for another input', () => {
@@ -354,5 +384,51 @@ describe('ComposerShell height after a desktop send', () => {
     });
     expect(observers[0].disconnected).toBe(true);
     expect(root.hasAttribute('data-morphing')).toBe(false);
+  });
+});
+
+describe('ComposerShell rest after a phone send', () => {
+  interface Played { keyframes: Keyframe[]; options: KeyframeAnimationOptions }
+  let played: Played[] = [];
+  const viewport = Object.assign(new EventTarget(), { height: window.innerHeight, offsetTop: 0, scale: 1 });
+  beforeEach(() => {
+    setWidth(390);
+    played = [];
+    viewport.height = window.innerHeight;
+    Object.defineProperty(window, 'visualViewport', { configurable: true, value: viewport });
+    Element.prototype.animate = function animate(keyframes: Keyframe[], options: KeyframeAnimationOptions) {
+      played.push({ keyframes, options });
+      return { addEventListener: () => {}, cancel: () => {}, effect: null } as unknown as Animation;
+    } as unknown as Element['animate'];
+  });
+  afterEach(() => {
+    delete (window as { visualViewport?: unknown }).visualViewport;
+    delete (Element.prototype as { animate?: unknown }).animate;
+  });
+
+  /** Type with the keyboard `inset` px tall, send, then let the emptied field land. */
+  function send(inset: number) {
+    const handle = React.createRef<ComposerShellHandle>();
+    const view = render(<Shell ref={handle} hasContent />);
+    act(() => screen.getByRole('textbox').focus());
+    viewport.height = window.innerHeight - inset;
+    let lowered: boolean | undefined;
+    act(() => { lowered = handle.current!.settle(); });
+    view.rerender(<Shell ref={handle} />);
+    expect(collapsed()).toBe(true);
+    // The frame's move is the morph's first animation.
+    return { lowered, frame: played[0]?.options };
+  }
+
+  it('reports a lowered keyboard and rests on the keyboard\'s curve', () => {
+    const { lowered, frame } = send(300);
+    expect(lowered).toBe(true);
+    expect(frame).toMatchObject({ duration: 350, easing: 'cubic-bezier(0.38, 0.7, 0.125, 1)' });
+  });
+
+  it('keeps the theme\'s timing when the keyboard was already down', () => {
+    const { lowered, frame } = send(0);
+    expect(lowered).toBe(false);
+    expect(frame?.duration).toBe(180);
   });
 });

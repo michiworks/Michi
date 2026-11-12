@@ -1,4 +1,4 @@
-import { progressCardStatusLine, progressReplyConclusion, progressReplyText, progressTurnSummary, type ProgressCardAwaiting, type ProgressCardDto, type ProgressCardStatus } from 'michi-shared';
+import { oneLine, progressCardStatusLine, progressReplyConclusion, progressReplyText, progressTurnSummary, type ProgressCardAwaiting, type ProgressCardDto, type ProgressCardStatus } from 'michi-shared';
 import type { ChatMessage, ChatNodeState } from '../chatTypes';
 
 /** What a progress card shows, read from the thread each time. */
@@ -35,17 +35,15 @@ export function nodeAwaiting(node: ChatNodeState): ProgressCardAwaiting | null {
   return node.pendingUserInput && !node.pendingUserInput.resolved ? 'question' : null;
 }
 
-function oneLine(text: string | null | undefined): string | null {
-  const line = text?.replace(/\s+/g, ' ').trim();
-  if (!line) return null;
-  return line.length > DETAIL_MAX ? `${line.slice(0, DETAIL_MAX - 1)}…` : line;
+function detailLine(text: string | null | undefined): string | null {
+  return text ? oneLine(text, DETAIL_MAX) || null : null;
 }
 
 /** The request a conversation in this window waits on: the approval's title, or the question it asks. */
 export function nodeWaitingFor(node: ChatNodeState): string | null {
-  if (node.pendingPermission) return oneLine(node.pendingPermission.title);
+  if (node.pendingPermission) return detailLine(node.pendingPermission.title);
   const question = node.pendingUserInput && !node.pendingUserInput.resolved ? node.pendingUserInput.questions?.[0] : undefined;
-  return oneLine(question ? question.question || question.header : null);
+  return detailLine(question ? question.question || question.header : null);
 }
 
 /** What the newest turn concluded, cut like the backend's card summary: its overview entry, else its reply's conclusion. */

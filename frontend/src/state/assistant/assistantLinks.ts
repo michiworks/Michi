@@ -49,7 +49,3 @@ function withBlock<K extends 'page'>(kind: K, match: RegExpExecArray): { kind: K
   const blockId = decodeId(match[2]);
   return blockId ? { kind, id, blockId } : null;
 }
-
-export function isAssistantLink(href: string | null | undefined): boolean {
-  return parseAssistantLink(href) !== null;
-}

@@ -2,8 +2,8 @@ import { PAGE_COMPONENT_LIMITS } from 'michi-shared';
 
 export const PAGE_HELPER_DRAFT_EVENT = 'michi:page-helper-draft';
 
+/** A page block's Ask (a database's or component's helper): a draft for the panel, about that block. */
 export interface PageHelperDraftRequest {
-  requestId?: number;
   backendConnectionId: string;
   workspaceId: string;
   pageId: string;
@@ -11,25 +11,13 @@ export interface PageHelperDraftRequest {
   blockContext?: { blockId: string; title: string; content: string };
 }
 
-let requestSequence = 0;
-const pendingRequests: PageHelperDraftRequest[] = [];
-
+/**
+ * Hands the draft to the one panel: its host (CompanionPanel.tsx, mounted
+ * with the shell) opens on it with the block as its target, without sending.
+ * Empty and oversized drafts are dropped.
+ */
 export function dispatchPageHelperDraft(request: PageHelperDraftRequest): void {
   const text = request.text.trim();
   if (!text || text.length > PAGE_COMPONENT_LIMITS.draftChars) return;
-  const queued = { ...request, requestId: ++requestSequence, text };
-  pendingRequests.push(queued);
-  window.dispatchEvent(new CustomEvent<PageHelperDraftRequest>(PAGE_HELPER_DRAFT_EVENT, {
-    detail: queued,
-  }));
-}
-
-export function pendingPageHelperDrafts(identity: Pick<PageHelperDraftRequest, 'backendConnectionId' | 'workspaceId' | 'pageId'>): PageHelperDraftRequest[] {
-  return pendingRequests.filter((request) => request.backendConnectionId === identity.backendConnectionId
-    && request.workspaceId === identity.workspaceId && request.pageId === identity.pageId);
-}
-
-export function consumePageHelperDraft(requestId: number): void {
-  const index = pendingRequests.findIndex((request) => request.requestId === requestId);
-  if (index >= 0) pendingRequests.splice(index, 1);
+  window.dispatchEvent(new CustomEvent<PageHelperDraftRequest>(PAGE_HELPER_DRAFT_EVENT, { detail: { ...request, text } }));
 }

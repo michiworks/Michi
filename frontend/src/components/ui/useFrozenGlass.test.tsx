@@ -46,7 +46,7 @@ describe('frozen glass', () => {
 
     await waitFor(() => expect(panel().getAttribute('data-glass')).toBe('frozen'));
     expect(scrim().hasAttribute('data-glass')).toBe(false);
-    expect(blurSnapshot).toHaveBeenCalledWith('data:image/png;base64,AAAA', expect.objectContaining({ blurPx: 26, viewportWidth: window.innerWidth }));
+    expect(blurSnapshot).toHaveBeenCalledWith('data:image/png;base64,AAAA', expect.objectContaining({ blurPx: 48, saturate: "110%", viewportWidth: window.innerWidth }));
     const layer = panel().querySelector('.ui-frozen-glass');
     expect(layer?.getAttribute('aria-hidden')).toBe('true');
     expect(layer?.querySelector('canvas')).toBeTruthy();

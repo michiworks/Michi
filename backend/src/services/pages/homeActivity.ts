@@ -1,11 +1,12 @@
 import {
-  SPACE_ACTIVITY_LIMITS, isSystemWorkspaceSettings, pageBlockTitle, parseChangeSource,
-  type ChangeSource, type PageBlock, type SpaceActivityDetail, type SpaceActivityItem, type TargetSnapshot,
+  SPACE_ACTIVITY_LIMITS, clipPageName, isCheckinNodeId, isSystemWorkspaceSettings, pageBlockName, pageRowName, parseChangeSource, titleColumn,
+  type ChangeSource, type MichiDbColumn, type PageBlock, type SpaceActivityDetail, type SpaceActivityItem, type TargetSnapshot,
 } from 'michi-shared';
 import { getDb } from '../db';
-import { pageShownOnHome } from './homePages';
-import { FIRST_LOOK_WINDOW_MS, blockLine, getSpacesHomeLook, snapshotLine } from './homeSections';
+import { homeHiddenJoin, pageShownOnHome } from './homeVisibility';
+import { FIRST_LOOK_WINDOW_MS, blockLine, getSpacesHomeLook, parseJson, snapshotLine } from './homeSections';
 import { startedConversations } from './progressCards';
+import { checkinSourceResolver, companionActorOf, type CheckinSourceResolver } from './checkinSources';
 import { sourceNodeId } from './core';
 
 type ChangeRow = {
@@ -13,8 +14,9 @@ type ChangeRow = {
   source: string; source_node_id: string | null; proposal_state: string | null; application_state: string | null;
   target_key: string; created_at: number;
   workspace_name: string; workspace_owner: string | null; workspace_settings: string | null;
-  workspace_deleted_at: number | null; workspace_archived_at: number | null; workspace_purged_at: number | null;
+  workspace_deleted_at: number | null; workspace_archived_at: number | null; workspace_purged_at: number | null; home_hidden_at: number | null;
   page_id: string | null; page_title: string | null; page_role: string | null; page_deleted_at: number | null; page_owner: string | null;
+  database_id: string | null; database_columns: string | null;
 };
 
 /** Recent change rows read per request; groups are made from these. */
@@ -24,29 +26,26 @@ const GROUP_GAP_MS = 30 * 60_000;
 const NAME_MAX = 24;
 const NAMES_SHOWN = 3;
 
-function parseJson(raw: string | null): unknown {
-  if (raw === null) return null;
-  try { return JSON.parse(raw); } catch { return null; }
-}
-
 function recentChanges(ownerUserId: string): ChangeRow[] {
   return getDb().prepare(`SELECT c.seq,c.batch_id,c.workspace_id,c.op,c.after_json,c.before_json,c.source,c.source_node_id,c.proposal_state,
       c.application_state,c.target_key,c.created_at,
       w.name AS workspace_name,w.owner_user_id AS workspace_owner,w.settings AS workspace_settings,
-      w.deleted_at AS workspace_deleted_at,w.archived_at AS workspace_archived_at,w.purged_at AS workspace_purged_at,
-      p.id AS page_id,p.title AS page_title,p.role AS page_role,p.deleted_at AS page_deleted_at,p.owner_user_id AS page_owner
-    FROM page_changes c JOIN workspaces w ON w.id=c.workspace_id
+      w.deleted_at AS workspace_deleted_at,w.archived_at AS workspace_archived_at,w.purged_at AS workspace_purged_at,hp.hidden_at AS home_hidden_at,
+      p.id AS page_id,p.title AS page_title,p.role AS page_role,p.deleted_at AS page_deleted_at,p.owner_user_id AS page_owner,
+      c.database_id,d.columns_json AS database_columns
+    FROM page_changes c JOIN workspaces w ON w.id=c.workspace_id ${homeHiddenJoin('w')}
+    LEFT JOIN page_databases d ON d.id=c.database_id AND d.owner_user_id=c.owner_user_id
     LEFT JOIN pages p ON p.id=COALESCE(c.page_id,(SELECT r.page_id FROM page_database_refs r JOIN pages rp ON rp.id=r.page_id
         WHERE r.database_id=c.database_id AND rp.deleted_at IS NULL ORDER BY rp.position,rp.id LIMIT 1))
-    WHERE c.owner_user_id=? AND w.deleted_at IS NULL AND w.purged_at IS NULL AND w.archived_at IS NULL
-    ORDER BY c.seq DESC LIMIT ?`).all(ownerUserId, CHANGE_WINDOW) as unknown as ChangeRow[];
+    WHERE c.owner_user_id=? AND w.deleted_at IS NULL AND w.purged_at IS NULL AND w.archived_at IS NULL AND hp.hidden_at IS NULL
+    ORDER BY c.seq DESC LIMIT ?`).all(ownerUserId, ownerUserId, CHANGE_WINDOW) as unknown as ChangeRow[];
 }
 
 function shown(row: ChangeRow, ownerUserId: string): boolean {
   return row.page_id !== null && row.page_owner !== null && pageShownOnHome(
     { role: row.page_role, deleted_at: row.page_deleted_at, owner_user_id: row.page_owner },
     { owner_user_id: row.workspace_owner, settings: row.workspace_settings, deleted_at: row.workspace_deleted_at,
-      archived_at: row.workspace_archived_at, purged_at: row.workspace_purged_at },
+      archived_at: row.workspace_archived_at, purged_at: row.workspace_purged_at, home_hidden_at: row.home_hidden_at },
     ownerUserId);
 }
 
@@ -96,34 +95,18 @@ function groupChanges(ownerUserId: string, limit: number): Group[] {
   return groups;
 }
 
-function clip(text: string): string {
-  const line = text.replace(/\*\*|__|`|~~/g, '').replace(/\s+/g, ' ').trim();
-  return line.length > NAME_MAX ? `${line.slice(0, NAME_MAX)}…` : line;
+/** The column a row change is named by: the one the database's views title its rows by. */
+function titleColumnId(row: ChangeRow): string | null {
+  if (!row.database_id || !row.database_columns) return null;
+  const columns = parseJson(row.database_columns);
+  return Array.isArray(columns) ? titleColumn({ id: row.database_id, kind: 'user', columns: columns as MichiDbColumn[] })?.id ?? null : null;
 }
 
-/** A block's name: its title or heading, else its first words. */
-function blockName(block: PageBlock): string {
-  switch (block.type) {
-    case 'heading': return clip(block.text);
-    case 'markdown': {
-      const first = block.text.split('\n').map((line) => line.trim()).find(Boolean) ?? '';
-      return clip(first.replace(/^#{1,6}\s+/, '').replace(/^(?:[-*+>]|\d+[.)])\s+/, ''));
-    }
-    case 'callout': return clip(block.title?.trim() || block.text);
-    case 'checklist': case 'next-steps': case 'timeline': return clip(block.title ?? '');
-    case 'metrics': case 'database-ref': case 'page-link': case 'component': return '';
-    default: return clip(pageBlockTitle(block));
-  }
-}
-
-function snapshotName(snapshot: TargetSnapshot | null): string {
+function snapshotName(snapshot: TargetSnapshot | null, row: ChangeRow): string {
   if (!snapshot || !snapshot.exists) return '';
-  if (snapshot.kind === 'block') return blockName(snapshot.block);
-  if (snapshot.kind === 'row') {
-    const first = Object.values(snapshot.row.values).find((value): value is string => typeof value === 'string' && value.trim().length > 0);
-    return first ? clip(first) : '';
-  }
-  return clip(snapshot.database.title);
+  if (snapshot.kind === 'block') return pageBlockName(snapshot.block, NAME_MAX);
+  if (snapshot.kind === 'row') return pageRowName(snapshot.row.values, titleColumnId(row), NAME_MAX);
+  return clipPageName(snapshot.database.title, NAME_MAX);
 }
 
 const snapshotOf = (raw: string | null) => parseJson(raw) as TargetSnapshot | null;
@@ -170,14 +153,23 @@ function namingNode(source: ChangeSource | null): string | null {
   return null;
 }
 
+/**
+ * Who wrote a group. The user's own agent is a CompanionActor: a check-in
+ * (by its node id: the node is purged after the run), a conversation in its
+ * workspace, or upkeep. Upkeep that read one titled conversation of the
+ * person's is named by that conversation, as before.
+ */
 function writer(source: ChangeSource | null, nodes: ReadonlyMap<string, NodeInfo>): SpaceActivityDetail['by'] {
   if (!source || source.kind === 'user') return { kind: 'user' };
   const nodeId = namingNode(source);
   const node = nodeId ? nodes.get(nodeId) : undefined;
-  // The Meta agent's own conversations (its chat window and its runs) live in the system workspace.
-  if (node && isSystemWorkspaceSettings(node.settings)) return { kind: 'meta-agent' };
+  const settingsOf = (id: string) => nodes.get(id)?.settings;
+  if (source.kind !== 'maintenance' || (node && isSystemWorkspaceSettings(node.settings))) {
+    const actor = companionActorOf(source, settingsOf);
+    if (actor) return actor;
+  }
   if (node?.title?.trim()) return { kind: 'conversation', title: node.title.trim() };
-  return source.kind === 'maintenance' ? { kind: 'meta-agent' } : { kind: 'agent' };
+  return companionActorOf(source, settingsOf) ?? { kind: 'agent' };
 }
 
 const applies = (row: ChangeRow) => row.proposal_state === null || row.proposal_state === 'accepted';
@@ -191,7 +183,7 @@ function describe(group: Group, nodes: ReadonlyMap<string, NodeInfo>): SpaceActi
     else targets.set(row.target_key, { first: row, last: row });
   }
   const names = [...new Set([...targets.values()]
-    .map(({ first, last }) => snapshotName(snapshotOf(last.after_json)) || snapshotName(snapshotOf(first.before_json)))
+    .map(({ first, last }) => snapshotName(snapshotOf(last.after_json), last) || snapshotName(snapshotOf(first.before_json), first))
     .filter(Boolean))].slice(0, NAMES_SHOWN);
   const states = group.rows.map((row) => row.proposal_state);
   const applied = group.rows.filter(applies);
@@ -217,15 +209,22 @@ function describe(group: Group, nodes: ReadonlyMap<string, NodeInfo>): SpaceActi
       if (entries) detail.entries = entries;
     } else if (VALUE_TYPES.has(after.type)) {
       const value = oneValueChange(blockLine(before), blockLine(after));
-      if (value) detail.value = { name: blockName(after), ...value };
+      if (value) detail.value = { name: pageBlockName(after, NAME_MAX), ...value };
     }
   }
   return detail;
 }
 
+/** The conversation a group's source opens: a check-in's is the one it posted in (checkinSources.ts). */
+function openedNode(nodeId: string | null, resolver: CheckinSourceResolver): string | null {
+  if (!nodeId || !isCheckinNodeId(nodeId)) return nodeId;
+  return resolver.target(nodeId)?.nodeId ?? null;
+}
+
 function pageChangeItems(ownerUserId: string, limit: number): SpaceActivityItem[] {
   const groups = groupChanges(ownerUserId, limit);
   const nodes = nodesById([...new Set(groups.map((group) => namingNode(group.source)).filter((id): id is string => id !== null))]);
+  const resolver = checkinSourceResolver(ownerUserId);
   return groups.map((group) => {
     const newest = group.rows[0]!;
     const oldest = group.rows.at(-1)!;
@@ -242,7 +241,7 @@ function pageChangeItems(ownerUserId: string, limit: number): SpaceActivityItem[
       at: newest.created_at, count: totals.count, pending: totals.pending ?? 0,
       ops: [...new Set(group.rows.map((row) => row.op))], summary: snapshotLine(snapshotOf(oldest.after_json) ?? snapshotOf(oldest.before_json)),
       actor: sourceKind === 'user' ? 'user' : 'agent', sourceKind,
-      sourceNodeId: group.source ? sourceNodeId(group.source) : newest.source_node_id,
+      sourceNodeId: openedNode(group.source ? sourceNodeId(group.source) : newest.source_node_id, resolver),
       detail: describe(group, nodes),
     };
   });

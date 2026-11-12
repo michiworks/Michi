@@ -36,6 +36,14 @@ describe('scanInline', () => {
     expect(markers(result.state)).toEqual(['**']);
   });
 
+  it('closes a fence only on a bare run of its own character at least as long', () => {
+    expect(scanInline('```\nx\n```js\ny\n').state.inFence).toBe(true);
+    expect(scanInline('````\nx\n```\ny\n').state.inFence).toBe(true);
+    const nested = scanInline('````\n```js\nx\n```\n````\nafter **x');
+    expect(nested.state.inFence).toBe(false);
+    expect(markers(nested.state)).toEqual(['**']);
+  });
+
   it('treats escaped markers as literal and carries a trailing backslash', () => {
     expect(markers(scanInline('\\**not bold').state)).toEqual(['*']);
     expect(scanInline('abc\\').carry).toBe('\\');
@@ -168,6 +176,21 @@ describe('computeTailRemend', () => {
     expect(result.displayText).toBe(source);
     expect(result.closers).toBe('');
     expect(result.endState.inFence).toBe(true);
+  });
+
+  it('keeps an inner fence inside an outer, longer one', () => {
+    const source = '````md\n# T\n\n```js\nconst x = a*b';
+    const result = computeTailRemend(source);
+
+    expect(result.displayText).toBe(source);
+    expect(result.closers).toBe('');
+    expect(result.endState.inFence).toBe(true);
+  });
+
+  it('leaves brackets and angle brackets alone on a code line', () => {
+    expect(computeTailRemend('```ts\nconst xs: Array<str').displayText).toBe('```ts\nconst xs: Array<str');
+    expect(computeTailRemend('```py\nx = arr[i').displayText).toBe('```py\nx = arr[i');
+    expect(computeTailRemend('see `arr[i').displayText).toBe('see `arr[i`');
   });
 
   it('renders only the label of an incomplete link or image', () => {

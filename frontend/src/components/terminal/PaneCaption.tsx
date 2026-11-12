@@ -1,15 +1,22 @@
 import React, { useState } from 'react';
 import { AnimatePresence } from 'motion/react';
+import { Maximize2, Minimize2 } from 'lucide-react';
 import { Dot } from './primitives';
-import ContextMenu from '../ContextMenu';
+import ContextMenu, { menuOpenKey } from '../ContextMenu';
 import { kbd } from '../../lib/platform';
 import { describeRunningWork, type RunningWorkCounts } from '../../state/backgroundWork';
 import { openBackgroundWork } from './backgroundWork/backgroundWorkEvents';
+import { HoverTip } from '../ui/Popover';
+import type { PaneItemKind } from '../../state/paneItems';
 
 const PANE_DRAG_MIME = 'application/x-michi-pane-id';
+const PANE_ZOOM_KEYS = kbd('shift', 'mod', 'enter');
+// The caption's controls share one height (the icon buttons are square), so
+// boxes shown side by side line up: the exit control beside a hovered × or ◆.
+const CONTROL_SIZE = 22;
 
 function dotColorFor(streaming: boolean, error: boolean, focused: boolean): string {
-  if (streaming) return 'var(--term-select)';
+  if (streaming) return 'var(--term-run)';
   if (error) return 'var(--term-danger)';
   if (focused) return 'var(--term-accent)';
   return 'var(--term-faint)';
@@ -24,12 +31,20 @@ interface Props {
   isNew?: boolean;
   /** Running subagents and workflows of this conversation (chat panes). */
   backgroundWork?: RunningWorkCounts;
-  kind?: 'chat' | 'digest' | 'artifact' | 'launcher' | 'files' | 'review' | 'file' | 'diff' | 'terminal' | 'browser';
+  kind?: PaneItemKind | 'chat' | 'digest';
   onFocus: (id: string) => void;
   onClose: (id: string) => void;
   onCloseOthers: (keepId: string) => void;
   canCloseOthers: boolean;
   onReorder: (fromId: string, toId: string) => void;
+  /** This pane fills the strip alone. */
+  zoomed?: boolean;
+  /** There is more than one pane, so zooming would hide something. */
+  canZoom?: boolean;
+  /** Panes the zoom hides, shown on the exit control. */
+  hiddenPaneCount?: number;
+  /** Zoom this pane, or end the zoom with null. Absent where panes cannot zoom. */
+  onZoom?: (id: string | null) => void;
 }
 
 export default function PaneCaption({
@@ -49,13 +64,17 @@ export default function PaneCaption({
   // TPane's existing pane-level drop zone (paneDropSide). Keeping it in
   // the API lets TPane pass reorderPane unconditionally.
   onReorder: _onReorder,
+  zoomed = false,
+  canZoom = false,
+  hiddenPaneCount = 0,
+  onZoom,
 }: Props) {
   const [menu, setMenu] = useState<{ x: number; y: number } | null>(null);
   const [hovered, setHovered] = useState(false);
-  const [closeHover, setCloseHover] = useState(false);
+  const zoomable = !!onZoom && (zoomed || canZoom);
+  const toggleZoom = () => { if (zoomable) onZoom?.(zoomed ? null : nodeId); };
 
   const isDigest = kind === 'digest';
-  const isArtifact = kind === 'artifact';
   const kindGlyph = kind === 'launcher' ? '+'
     : kind === 'files' ? '▱'
     : kind === 'review' ? '±'
@@ -66,7 +85,7 @@ export default function PaneCaption({
     : null;
   const dotColor = isDigest
     ? 'var(--term-digest)'
-    : isArtifact || kind === 'file' || kind === 'files' || kind === 'browser' || kind === 'launcher'
+    : kind === 'file' || kind === 'files' || kind === 'browser' || kind === 'launcher'
       ? 'var(--term-accent)'
       : kind === 'diff' || kind === 'review' || kind === 'terminal'
         ? 'var(--term-digest)'
@@ -74,7 +93,7 @@ export default function PaneCaption({
 
   // Entrance animation for the Dot when the pane is newly opened in background.
   // isNew overrides to accent color with a one-shot spring scale animation.
-  const dotStyle: React.CSSProperties = isNew && !isDigest && !isArtifact
+  const dotStyle: React.CSSProperties = isNew && !isDigest
     && kind !== 'file' && kind !== 'files' && kind !== 'browser' && kind !== 'launcher'
     && kind !== 'diff' && kind !== 'review' && kind !== 'terminal'
     ? { animation: 'pane-entrance-dot var(--t-slow) cubic-bezier(.34, 1.56, .64, 1) forwards' }
@@ -94,12 +113,19 @@ export default function PaneCaption({
           e.dataTransfer.setData('text/plain', nodeId);
         }}
         onClick={() => onFocus(nodeId)}
+        // Double-clicking a title bar maximizes, as on a desktop window.
+        onDoubleClick={(e) => {
+          if ((e.target as HTMLElement).closest('button')) return;
+          toggleZoom();
+        }}
+        data-context-target=""
+        data-pane-zoomed={zoomed || undefined}
         onContextMenu={(e) => {
           e.preventDefault();
           setMenu({ x: e.clientX, y: e.clientY });
         }}
         onMouseEnter={() => setHovered(true)}
-        onMouseLeave={() => { setHovered(false); setCloseHover(false); }}
+        onMouseLeave={() => setHovered(false)}
         style={{
           display: 'inline-flex',
           alignItems: 'center',
@@ -180,6 +206,64 @@ export default function PaneCaption({
             ⚠
           </span>
         )}
+        {zoomed && onZoom ? (
+          <HoverTip label="Exit zoom" kbd={PANE_ZOOM_KEYS}>
+            <button
+              type="button"
+              data-testid="pane-zoom-exit"
+              aria-label={`Exit zoom, ${hiddenPaneCount} more ${hiddenPaneCount === 1 ? 'pane' : 'panes'}`}
+              onClick={(e) => { e.stopPropagation(); onZoom(null); }}
+              onMouseDown={(e) => e.stopPropagation()}
+              className="pane-caption-zoom-exit"
+              style={{
+                display: 'inline-flex',
+                alignItems: 'center',
+                gap: 4,
+                height: CONTROL_SIZE,
+                padding: '0 7px 0 5px',
+                flexShrink: 0,
+                borderRadius: 'var(--ui-radius-sm)',
+                fontFamily: 'var(--font-mono)',
+                fontSize: 'var(--fs-xs)',
+                lineHeight: 1,
+                cursor: 'pointer',
+                WebkitAppRegion: 'no-drag',
+              } as React.CSSProperties}
+            >
+              <Minimize2 size={11} aria-hidden />
+              {hiddenPaneCount > 0 && <span>+{hiddenPaneCount}</span>}
+            </button>
+          </HoverTip>
+        ) : zoomable && (
+          <HoverTip label="Zoom pane" kbd={PANE_ZOOM_KEYS} disabled={!hovered}>
+            <button
+              type="button"
+              data-testid="pane-zoom"
+              aria-label={`Zoom ${title}`}
+              tabIndex={hovered ? 0 : -1}
+              aria-hidden={!hovered}
+              onClick={(e) => { e.stopPropagation(); onZoom?.(nodeId); }}
+              onMouseDown={(e) => e.stopPropagation()}
+              className="pane-caption-icon"
+              style={{
+                width: CONTROL_SIZE,
+                height: CONTROL_SIZE,
+                marginRight: -4,
+                flexShrink: 0,
+                display: 'inline-flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                padding: 0,
+                borderRadius: 'var(--ui-radius-sm)',
+                cursor: 'pointer',
+                opacity: hovered ? 1 : 0,
+                pointerEvents: hovered ? 'auto' : 'none',
+              }}
+            >
+              <Maximize2 size={12} aria-hidden />
+            </button>
+          </HoverTip>
+        )}
         <button
           type="button"
           aria-label={`Close ${title}`}
@@ -190,28 +274,23 @@ export default function PaneCaption({
             onClose(nodeId);
           }}
           onMouseDown={(e) => e.stopPropagation()}
-          onMouseEnter={() => setCloseHover(true)}
-          onMouseLeave={() => setCloseHover(false)}
+          className="pane-caption-icon"
           style={{
-            width: 22,
-            height: 22,
+            width: CONTROL_SIZE,
+            height: CONTROL_SIZE,
             marginRight: -6,
             flexShrink: 0,
             display: 'inline-flex',
             alignItems: 'center',
             justifyContent: 'center',
             padding: 0,
-            border: closeHover ? '1px solid var(--term-line)' : '1px solid transparent',
             borderRadius: 'var(--ui-radius-sm)',
-            background: closeHover ? 'var(--term-alt2, var(--term-alt))' : 'transparent',
-            color: closeHover ? 'var(--term-fg)' : 'var(--term-faint)',
             fontFamily: 'inherit',
             fontSize: 'var(--fs-xl)',
             lineHeight: 1,
             cursor: 'pointer',
             opacity: hovered ? 1 : 0,
             pointerEvents: hovered ? 'auto' : 'none',
-            transition: 'opacity var(--t-quick) var(--t-ease), background var(--t-quick) var(--t-ease), color var(--t-quick) var(--t-ease), border-color var(--t-quick) var(--t-ease)',
           }}
         >
           ×
@@ -219,13 +298,20 @@ export default function PaneCaption({
       </div>
       <AnimatePresence>{menu && (
         <ContextMenu
-          key={`${menu.x}:${menu.y}`}
+          key={menuOpenKey(menu)}
           x={menu.x}
           y={menu.y}
           onClose={() => setMenu(null)}
           sections={[
             {
               items: [
+                ...(onZoom ? [{
+                  id: 'zoom',
+                  label: zoomed ? 'Exit Zoom' : 'Zoom Pane',
+                  keys: PANE_ZOOM_KEYS,
+                  disabled: !zoomable,
+                  run: toggleZoom,
+                }] : []),
                 { id: 'close', label: 'Close', keys: kbd('mod', 'W'), run: () => onClose(nodeId) },
                 {
                   id: 'close-others',
@@ -244,20 +330,23 @@ export default function PaneCaption({
 }
 
 /**
- * "◆ 3" after the title while the conversation has background work running.
- * Opens the Background work drawer on this conversation; the click never
- * reaches the caption (no pane focus) and never starts a pane drag.
+ * "◆ 3" after the title while the conversation has background work running,
+ * amber "◆ 3 · needs you" while a run waits for an approval. Opens the
+ * Background work drawer on this conversation; the click never reaches the
+ * caption (no pane focus) and never starts a pane drag.
  */
 function BackgroundWorkBadge({ nodeId, counts }: { nodeId: string; counts: RunningWorkCounts }) {
   const label = describeRunningWork(counts);
   const [hover, setHover] = useState(false);
   if (!label) return null;
   const total = counts.subagents + counts.workflows;
+  const waiting = !!counts.waiting;
   return (
     <button
       type="button"
       data-testid="pane-background-work-badge"
-      aria-label={`${label}. Show background work`}
+      data-state={waiting ? 'waiting' : 'running'}
+      aria-label={`${waiting ? 'Needs your approval. ' : ''}${label}. Show background work`}
       aria-haspopup="dialog"
       title={label}
       draggable={false}
@@ -277,13 +366,13 @@ function BackgroundWorkBadge({ nodeId, counts }: { nodeId: string; counts: Runni
         display: 'inline-flex',
         alignItems: 'center',
         gap: 4,
-        height: 18,
+        height: CONTROL_SIZE,
         padding: '0 5px',
         flexShrink: 0,
         border: hover ? '1px solid var(--term-line)' : '1px solid transparent',
         borderRadius: 'var(--ui-radius-sm)',
-        background: hover ? 'var(--term-alt2, var(--term-alt))' : 'transparent',
-        color: hover ? 'var(--term-fg)' : 'var(--term-mid)',
+        background: waiting ? 'var(--term-select-f)' : hover ? 'var(--term-alt2, var(--term-alt))' : 'transparent',
+        color: waiting ? 'var(--term-select)' : hover ? 'var(--term-fg)' : 'var(--term-mid)',
         fontFamily: 'var(--font-mono)',
         fontSize: 'var(--fs-xs)',
         lineHeight: 1,
@@ -292,8 +381,8 @@ function BackgroundWorkBadge({ nodeId, counts }: { nodeId: string; counts: Runni
         transition: 'background var(--t-quick) var(--t-ease), color var(--t-quick) var(--t-ease), border-color var(--t-quick) var(--t-ease)',
       } as React.CSSProperties}
     >
-      <span aria-hidden className="agent-glyph-run" style={{ color: 'var(--term-mauve)', fontSize: 'var(--fs-2xs)' }}>◆</span>
-      <span>{total}</span>
+      <span aria-hidden className={waiting ? undefined : 'agent-glyph-run'} style={{ color: waiting ? 'inherit' : 'var(--term-mauve)', fontSize: 'var(--fs-2xs)' }}>◆</span>
+      <span>{waiting ? `${total} · needs you` : total}</span>
     </button>
   );
 }

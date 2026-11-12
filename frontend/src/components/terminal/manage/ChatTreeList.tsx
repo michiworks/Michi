@@ -3,14 +3,8 @@ import { AnimatePresence } from 'motion/react';
 import type { ChatNodeState, Project, Tree } from '../../../state/chatTypes';
 import { deriveTreeRows, deriveArchivedTreeRows, firstUserSnippet, type TreeRow } from './derive';
 import { relativeTime } from '../../../lib/relativeTime';
-import ContextMenu from '../../ContextMenu';
+import ContextMenu, { menuOpenKey } from '../../ContextMenu';
 import { buildThreadRowContextMenu } from '../../../lib/threadRowContextMenu';
-import type {
-  MenuSection as UiMenuSection,
-} from '../../ContextMenu';
-import type {
-  ContextMenuSection as ThreadCtxSection,
-} from '../../../lib/threadRowContextMenu';
 
 export interface ChatTreeListMenuActions {
   activateTree: (id: string) => void;
@@ -52,20 +46,6 @@ function subscribeNoHover(notify: () => void) {
   return () => query?.removeEventListener?.('change', notify);
 }
 const cannotHover = () => window.matchMedia?.(NO_HOVER).matches ?? false;
-
-function toMenuSections(sections: ThreadCtxSection[]): UiMenuSection[] {
-  return sections.map((s, si) => ({
-    label: s.label,
-    items: s.items.map((item, ii) => ({
-      id: `${si}-${ii}`,
-      label: item.label,
-      danger: item.danger,
-      disabled: item.disabled,
-      keys: item.keys,
-      run: item.onSelect,
-    })),
-  }));
-}
 
 interface TreeGroup {
   treeId: string;
@@ -186,24 +166,22 @@ export default function ChatTreeList({
   const closeMenu = () => setMenu(null);
 
   const menuSections = menu && menuActions
-    ? toMenuSections(
-        buildThreadRowContextMenu({
-          treeId: menu.tree.id,
-          tree: menu.tree,
-          treeSelection: bulkActions?.treeSelection,
-          clearTreeSelection: bulkActions?.clearTreeSelection,
-          actions: {
-            activateTree: menuActions.activateTree,
-            archiveTree: menuActions.archiveTree,
-            unarchiveTree: menuActions.unarchiveTree,
-            pinTree: menuActions.pinTree,
-            unpinTree: menuActions.unpinTree,
-            renameTree: menuActions.renameTree,
-            deleteTree: menuActions.deleteTree,
-            exportTree: menuActions.exportTree,
-          },
-        }),
-      )
+    ? buildThreadRowContextMenu({
+        treeId: menu.tree.id,
+        tree: menu.tree,
+        treeSelection: bulkActions?.treeSelection,
+        clearTreeSelection: bulkActions?.clearTreeSelection,
+        actions: {
+          activateTree: menuActions.activateTree,
+          archiveTree: menuActions.archiveTree,
+          unarchiveTree: menuActions.unarchiveTree,
+          pinTree: menuActions.pinTree,
+          unpinTree: menuActions.unpinTree,
+          renameTree: menuActions.renameTree,
+          deleteTree: menuActions.deleteTree,
+          exportTree: menuActions.exportTree,
+        },
+      })
     : [];
 
   if (groups.length === 0 && archivedGroups.length === 0) {
@@ -316,7 +294,7 @@ export default function ChatTreeList({
       <AnimatePresence>
         {menu && (
           <ContextMenu
-            key={`${menu.x}:${menu.y}`}
+            key={menuOpenKey(menu)}
             x={menu.x}
             y={menu.y}
             sections={menuSections}
@@ -444,6 +422,7 @@ function TreeBlock({
         <div style={{ flex: 1, minWidth: 0 }}>
           <ChatRow
             row={group.root}
+            title={group.title}
             isBranch={false}
             hovered={hoveredId === group.root.nodeId}
             selected={selectedId === group.root.nodeId}
@@ -489,6 +468,8 @@ function TreeBlock({
 
 interface ChatRowProps {
   row: Extract<TreeRow, { kind: 'root' | 'branch' }>;
+  /** The thread's name, for a root row; a branch shows its own title. */
+  title?: string;
   isBranch: boolean;
   hovered: boolean;
   selected: boolean;
@@ -504,6 +485,7 @@ interface ChatRowProps {
 
 function ChatRow({
   row,
+  title,
   isBranch,
   hovered,
   selected,
@@ -526,6 +508,7 @@ function ChatRow({
       data-hovered={hovered}
       data-selected={selected}
       data-pinned={isRoot && row.kind === 'root' ? row.pinned : false}
+      data-context-target={menuEnabled && !isBranch ? '' : undefined}
       onMouseEnter={() => onHover(node.nodeId)}
       onMouseLeave={() => onHover(null)}
       onClick={() => onSelect(node.nodeId)}
@@ -583,7 +566,7 @@ function ChatRow({
             textOverflow: 'ellipsis',
           }}
         >
-          {node.title || 'Untitled'}
+          {title || node.title || 'Untitled'}
           {isArchived && (
             <span
               style={{

@@ -8,6 +8,7 @@ import { describe, it, expect, vi } from 'vitest';
 import React from 'react';
 import { act, render, screen, waitFor } from '@testing-library/react';
 import TPane from './TPane';
+import { glideToTail } from './sendScroll';
 import type { ChatNodeState, PermissionRequest } from '../../state/chatTypes';
 
 if (typeof CSS === 'undefined') {
@@ -144,6 +145,10 @@ vi.mock('../MentionEditor', () => ({
   }),
 }));
 vi.mock('./PaneFind', () => ({ default: () => null }));
+vi.mock('./sendScroll', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('./sendScroll')>();
+  return { ...actual, glideToTail: vi.fn(actual.glideToTail) };
+});
 vi.mock('../ContextMenu', () => ({ default: () => null }));
 vi.mock('../MarkdownContent', () => ({ default: ({ text }: { text: string }) => <span>{text}</span> }));
 
@@ -253,34 +258,113 @@ describe('TPane bottom slot: permission banner ↔ composer', () => {
   });
 });
 
+describe('TPane focus when a turn ends', () => {
+  const nextFrames = () => act(() => new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))));
+
+  async function endTurnWithFocusOn(control: HTMLElement, host: HTMLElement = document.body) {
+    store.set(baseNode);
+    const view = render(<TPane nodeId="n1" />);
+    await screen.findByTestId('composer');
+    host.appendChild(control);
+    control.focus();
+    act(() => store.set({ ...baseNode, status: 'idle' }));
+    await nextFrames();
+    return view;
+  }
+
+  it('leaves the focus on a button in an open dialog', async () => {
+    const dialog = document.createElement('div');
+    dialog.setAttribute('role', 'dialog');
+    document.body.appendChild(dialog);
+    const button = document.createElement('button');
+    const view = await endTurnWithFocusOn(button, dialog);
+    expect(document.activeElement).toBe(button);
+    view.unmount();
+    dialog.remove();
+  });
+
+  it('leaves the focus on a select', async () => {
+    const select = document.createElement('select');
+    const view = await endTurnWithFocusOn(select);
+    expect(document.activeElement).toBe(select);
+    view.unmount();
+    select.remove();
+  });
+
+  it('still takes the focus from a button on the page', async () => {
+    store.set(baseNode);
+    render(<TPane nodeId="n1" />);
+    const field = await screen.findByTestId('composer');
+    const button = document.createElement('button');
+    document.body.appendChild(button);
+    button.focus();
+    act(() => store.set({ ...baseNode, status: 'idle' }));
+    await waitFor(() => expect(document.activeElement).toBe(field));
+    button.remove();
+  });
+});
+
+describe('TPane composer toolbar width', () => {
+  it('compacts a narrow pane\'s toolbar at mount, before any resize is observed', async () => {
+    const width = Object.getOwnPropertyDescriptor(Element.prototype, 'clientWidth')!;
+    Object.defineProperty(HTMLElement.prototype, 'clientWidth', {
+      configurable: true,
+      get(this: HTMLElement) { return this.classList.contains('terminal-composer__toolbar') ? 300 : width.get!.call(this); },
+    });
+    // An observer that never reports: only the mount's own measurement counts.
+    const Observer = globalThis.ResizeObserver;
+    globalThis.ResizeObserver = class { observe() {} unobserve() {} disconnect() {} } as unknown as typeof ResizeObserver;
+    try {
+      store.set({ ...baseNode, status: 'idle' });
+      render(<TPane nodeId="n1" />);
+      await screen.findByTestId('composer');
+      expect(document.querySelector('.composer-model-trigger')?.getAttribute('data-compact')).toBe('true');
+    } finally {
+      delete (HTMLElement.prototype as { clientWidth?: number }).clientWidth;
+      globalThis.ResizeObserver = Observer;
+    }
+  });
+});
+
+describe('TPane read-only (a Scheduled-only run)', () => {
+  it('has no composer, yet a pending approval can still be answered', async () => {
+    store.set(baseNode);
+    const view = render(<TPane nodeId="n1" embedded readOnly />);
+    expect(composerCard()).toBeNull();
+    expect(screen.queryByTestId('composer')).toBeNull();
+    expect(transcript().style.paddingBottom).toMatch(/^calc\(12px \+ var\(/);
+    act(() => store.set({ ...baseNode, pendingPermission: permission }));
+    await waitFor(() => expect(banner()).toBeTruthy());
+    expect(screen.getByRole('button', { name: 'Allow Once' })).toBeTruthy();
+    act(() => store.set({ ...baseNode, pendingPermission: null }));
+    await waitFor(() => expect(document.querySelector('[aria-label="Permission request"]')).toBeNull());
+    expect(composerCard()).toBeNull();
+    view.unmount();
+  });
+});
+
 describe('TPane send scroll', () => {
   const msg = (id: string, role: 'user' | 'assistant', clientKey?: string) => ({
     id, role, text: id, toolCalls: [], blocks: [], createdAt: 1, ...(clientKey ? { clientKey } : {}),
   });
 
-  it('scrolls a new send into place once, not again when realign-assistant-id renames it', async () => {
-    const scrollTo = vi.fn();
-    const original = (HTMLElement.prototype as any).scrollTo;
-    (HTMLElement.prototype as any).scrollTo = scrollTo;
-    try {
-      const history = [msg('u1', 'user'), msg('a1', 'assistant')];
-      store.set({ ...baseNode, messages: history });
-      render(<TPane nodeId="n1" />);
-      await screen.findByTestId('composer');
-      const smooth = () => scrollTo.mock.calls.filter(([arg]) => arg?.behavior === 'smooth').length;
-      expect(smooth()).toBe(0);
+  it('glides a new send into place once, not again when realign-assistant-id renames it', async () => {
+    const glide = vi.mocked(glideToTail);
+    glide.mockClear();
+    const history = [msg('u1', 'user'), msg('a1', 'assistant')];
+    store.set({ ...baseNode, messages: history });
+    render(<TPane nodeId="n1" />);
+    await screen.findByTestId('composer');
+    expect(glide).not.toHaveBeenCalled();
 
-      act(() => store.set({ ...baseNode, messages: [...history, msg('u2-local', 'user'), msg('a2-local', 'assistant')] }));
-      await waitFor(() => expect(smooth()).toBe(1));
+    act(() => store.set({ ...baseNode, messages: [...history, msg('u2-local', 'user'), msg('a2-local', 'assistant')] }));
+    await waitFor(() => expect(glide).toHaveBeenCalledTimes(1));
 
-      act(() => store.set({
-        ...baseNode,
-        messages: [...history, msg('u2', 'user', 'u2-local'), msg('a2', 'assistant', 'a2-local')],
-      }));
-      await new Promise((resolve) => setTimeout(resolve, 60));
-      expect(smooth()).toBe(1);
-    } finally {
-      (HTMLElement.prototype as any).scrollTo = original;
-    }
+    act(() => store.set({
+      ...baseNode,
+      messages: [...history, msg('u2', 'user', 'u2-local'), msg('a2', 'assistant', 'a2-local')],
+    }));
+    await new Promise((resolve) => setTimeout(resolve, 60));
+    expect(glide).toHaveBeenCalledTimes(1);
   });
 });

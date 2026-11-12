@@ -7,7 +7,7 @@
  */
 import { describe, test, beforeEach } from "node:test";
 import assert from "node:assert/strict";
-import { McpClientManager, type McpServerConfig, type McpToolInfo } from "../src/services/mcpClientManager";
+import { McpClientManager, mcpSubprocessEnvironment, type McpServerConfig, type McpToolInfo } from "../src/services/mcpClientManager";
 
 /**
  * Since McpClientManager dynamically imports @modelcontextprotocol/sdk,
@@ -171,4 +171,19 @@ describe("McpClientManager", () => {
         await manager.dispose();
         await manager.dispose(); // should not throw
     });
+});
+
+test("desktop MCP servers start without the backend's own environment; their own entries win", (t) => {
+    const names = ["MICHI_CLOUD", "MICHI_REMOTE_TOKEN", "MICHI_DATA_DIR", "NODE_ENV", "MCP_HOST_CREDENTIAL"] as const;
+    const saved = Object.fromEntries(names.map((name) => [name, process.env[name]]));
+    t.after(() => {
+        for (const name of names) {
+            if (saved[name] === undefined) delete process.env[name]; else process.env[name] = saved[name];
+        }
+    });
+    delete process.env.MICHI_CLOUD;
+    Object.assign(process.env, { MICHI_REMOTE_TOKEN: "fixture-token", MICHI_DATA_DIR: "/fixture/data", NODE_ENV: "production", MCP_HOST_CREDENTIAL: "fixture-key" });
+    const env = mcpSubprocessEnvironment({ serverName: "s", command: "s", env: { MICHI_DATA_DIR: "/server/data" } }, {});
+    assert.deepEqual(names.filter((name) => name in env), ["MICHI_DATA_DIR", "MCP_HOST_CREDENTIAL"]);
+    assert.equal(env.MICHI_DATA_DIR, "/server/data", "named by the server's configuration");
 });

@@ -32,10 +32,10 @@ describe('steered user messages', () => {
     expect(state.n.pendingQueued).toBeUndefined();
     const turn = applyTurnEvent(createDurableTurn({ turnId: 't', assistantId: 'a', nodeId: 'n', workspaceId: 'w', displayUserText: 'Pick a color', startedAt: 1 }), event);
     const message = turn.steeredMessages![0];
-    // The live row also links to the queued block it replaced, in memory only
-    // (its bubble flies in from that block); the rest is the durable message.
-    const { queueId, ...live } = state.n.messages[1];
-    expect(queueId).toBe('q');
+    // The live row also records when it arrived, in memory only (its entrance
+    // reads that, not the server's clock); the rest is the durable message.
+    const { arrivedAt, ...live } = state.n.messages[1];
+    expect(arrivedAt).toEqual(expect.any(Number));
     expect(mapMessageRow({ id: message.id, role: message.role, content: message.content, metadata: message.metadata, created_at: message.createdAt })).toEqual(live);
     const persisted = serializeMessageRowsForNode(state, 'n').find((row) => row.id === 'steer-1')!;
     expect(mapMessageRow(persisted)).toEqual(live);

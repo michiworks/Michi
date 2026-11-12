@@ -22,3 +22,13 @@ export function isComposerEditorEvent(event: Event): boolean {
   const target = event.target;
   return target instanceof Element && !!target.closest('.ProseMirror');
 }
+
+/**
+ * Something inside already used this Esc: inside a composer's editor, the
+ * composer kept it (its popup, an IME composition); anywhere else, its
+ * default was prevented. Only for bubble-phase listeners on a surface around
+ * a composer: before the editor's own handlers run, nothing is marked yet.
+ */
+export function escapeTakenBefore(event: Event): boolean {
+  return isComposerEditorEvent(event) ? composerKeptEscape(event) : event.defaultPrevented;
+}

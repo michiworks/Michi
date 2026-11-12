@@ -38,15 +38,13 @@ function activeRun(context: MaintenanceExecutionContext, args: Record<string, un
   const run = watchRunFor(context);
   if (!run) throw invalid('This tool is only bound to a watch check');
   if (args.sourceTurnId !== run.id) throw invalid(`Use sourceTurnId "${run.id}" for this watch check`);
-  assertMaintenanceAuthority({ workspaceId: context.workspaceId, ownerUserId: context.ownerUserId, jobId: context.jobId,
-    runId: context.runId, claimedBy: context.claimedBy, configRevision: context.configRevision }, now);
+  assertMaintenanceAuthority(context, now);
   if (run.state !== 'active') throw stale(`This watch check already finished (${run.state}); make no further write or no-change call`);
   return run;
 }
 
 function authorize(context: MaintenanceExecutionContext, now: number): () => void {
-  return () => assertMaintenanceAuthority({ workspaceId: context.workspaceId, ownerUserId: context.ownerUserId, jobId: context.jobId,
-    runId: context.runId, claimedBy: context.claimedBy, configRevision: context.configRevision }, now);
+  return () => assertMaintenanceAuthority(context, now);
 }
 
 function resourceId(value: unknown, name: string): string {

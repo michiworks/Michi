@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
-import { PendingSessionAcquisitions } from '../../core/sessionAcquisition';
-import { assertOwner, interactiveOwner, sameOwner } from '../../contract/types';
+import { PendingSessionAcquisitions, assertSessionReusable, sessionIdentity } from '../../core/sessionAcquisition';
+import { interactiveOwner, sameOwner } from '../../contract/types';
 import { assertReleaseOwnership } from '../../core/release';
 import type {
   AgentReasoning,
@@ -56,6 +56,8 @@ export interface CreateClaudeSessionOptions {
   permissionBroker?: RuntimePermissionBroker;
   profileHash?: string | null;
   reasoning?: AgentReasoning | null;
+  /** NewAgentSessionOptions.ephemeral: never a warm process, never persisted (ClaudeSessionDeps.ephemeral). */
+  ephemeral?: boolean;
 }
 
 export interface LoadClaudeSessionOptions {
@@ -96,10 +98,7 @@ export class ClaudeSessionManager {
 
   constructor(private readonly deps: ClaudeSessionManagerDeps) {
     this.host = deps.options.host;
-    this.metadataOutputMode = this.host.prompt.followUpsMetadataOutputMode(
-      deps.options.followUpsHookPoc(),
-      this.host.prompt.followUpsExperimentMode(),
-    );
+    this.metadataOutputMode = this.host.prompt.followUpsMetadataOutputMode(false, this.host.prompt.followUpsExperimentMode());
     this.pool = new ClaudeWarmPool({
       spawner: (cwd, model) => this.spawnWarmSession(cwd, model),
       perf: deps.options.host.observability.perf,
@@ -115,22 +114,19 @@ export class ClaudeSessionManager {
     return this.active.get(id);
   }
 
+  /** A session under this id is live, opening or still being released: its native files are not to be touched. */
+  holds(id: string): boolean {
+    return this.active.has(id) || this.acquisitions.has(id);
+  }
+
   getCompatible(
     id: string,
     owner: RuntimeSessionOwner,
     profileHash: string | null,
-    ownerUserId?: string | null,
+    ownerUserId: string | null,
   ): ClaudeSession | undefined {
     const existing = this.active.get(id);
-    if (!existing) return undefined;
-    if (!existing.matchesOwner(owner)) {
-      throw new Error(`session ${id} is already bound to a different owner`);
-    }
-    if (ownerUserId !== undefined && existing.getOwnerUserId() !== ownerUserId) throw new Error('session user owner mismatch');
-    if ((existing.runtimeProfileHash ?? null) !== profileHash) {
-      throw new Error(`session ${id} runtime profile hash mismatch`);
-    }
-    return existing;
+    return existing && assertSessionReusable(existing, { owner, ownerUserId, profileHash }, (session) => session.getOwnerUserId());
   }
 
   stats(): ClaudeSessionManagerStats {
@@ -165,15 +161,9 @@ export class ClaudeSessionManager {
 
   private acquireSession(opts: CreateClaudeSessionOptions | LoadClaudeSessionOptions,
     create: () => Promise<ClaudeSession>): Promise<ClaudeSession> {
-    const owner = opts.owner ?? interactiveOwner(opts.id);
-    return this.acquisitions.acquire(opts.id, create, (session) => {
-      assertOwner(session.owner, owner);
-      if ((session.runtimeProfileHash ?? null) !== (opts.profileHash ?? null)) {
-        throw new Error(`session ${opts.id} runtime profile hash mismatch`);
-      }
-      if (session.getOwnerUserId() !== (opts.ownerUserId ?? null)) throw new Error('session user owner mismatch');
-      return session;
-    });
+    const { owner } = sessionIdentity(opts.owner, opts.id);
+    return this.acquisitions.acquire(opts.id, create, (session) => assertSessionReusable(session,
+      { owner, ownerUserId: opts.ownerUserId, profileHash: opts.profileHash }, (s) => s.getOwnerUserId()));
   }
 
   private async createFreshSession(opts: CreateClaudeSessionOptions): Promise<ClaudeSession> {
@@ -191,7 +181,7 @@ export class ClaudeSessionManager {
     // state and must cold-spawn unless a future pool explicitly keys those
     // dimensions.
     const poolable = ownerMode(owner) === 'interactive' && !opts.profileHash && !opts.forkFromNativeSessionId
-      && !opts.toolProfile && !opts.permissionBroker;
+      && !opts.toolProfile && !opts.permissionBroker && !opts.ephemeral;
     let session = poolable ? this.pool.take(opts.cwd, model) : undefined;
     let releaseReservation: (() => void) | undefined;
     let releasePending: (() => void) | undefined;
@@ -221,11 +211,7 @@ export class ClaudeSessionManager {
           workspaceId: opts.workspaceId ?? null,
           parentChatId: opts.parentChatId,
           model: opts.model ?? undefined,
-          // The assistant has no AskUserQuestion, nor the ordinary chat tools
-          // the stable prompt advertises; it gets its own short tool note.
-          systemPromptAppend: (this.host.profile.isRestricted(opts.toolProfile) || opts.toolProfile?.assistant === true)
-            ? this.host.prompt.stableSystemPrompt(this.metadataOutputMode, false, false, true, opts.toolProfile)
-            : this.host.prompt.stableSystemPrompt(this.metadataOutputMode, true, true),
+          systemPromptAppend: this.systemPromptFor(opts.toolProfile),
           mcpRegistry: this.deps.mcpRegistry,
           bridge: this.deps.bridge,
           options: this.deps.options,
@@ -235,6 +221,7 @@ export class ClaudeSessionManager {
           toolProfile: opts.toolProfile,
           permissionBroker: opts.permissionBroker,
           reasoning: opts.reasoning ?? null,
+          ...(opts.ephemeral ? { ephemeral: true } : {}),
         });
         releasePending = this.trackPendingSession(session);
         await session.spawnFresh(opts.forkFromNativeSessionId);
@@ -279,7 +266,7 @@ export class ClaudeSessionManager {
       workspaceId: opts.workspaceId ?? null,
       parentChatId: opts.parentChatId,
       model: opts.model ?? undefined,
-      systemPromptAppend: this.host.prompt.stableSystemPrompt(this.metadataOutputMode, !this.host.profile.isRestricted(opts.toolProfile), !this.host.profile.isRestricted(opts.toolProfile), this.host.profile.isRestricted(opts.toolProfile), opts.toolProfile),
+      systemPromptAppend: this.systemPromptFor(opts.toolProfile),
       mcpRegistry: this.deps.mcpRegistry,
       bridge: this.deps.bridge,
       options: this.deps.options,
@@ -335,6 +322,19 @@ export class ClaudeSessionManager {
     this.active.clear();
   }
 
+  /**
+   * The same text for a fresh, restored or warm session of one profile: a
+   * warm session must equal a cold ordinary spawn byte for byte. A restricted
+   * profile has no AskUserQuestion; the assistant does, through its native tools.
+   * Every profile (an Agent Run's, a primary Agent's) goes along, so the
+   * prompt names only the tools that profile has.
+   */
+  private systemPromptFor(toolProfile: RuntimeToolProfile | undefined): string {
+    const restricted = this.host.profile.isRestricted(toolProfile);
+    return this.host.prompt.stableSystemPrompt(this.metadataOutputMode,
+      !restricted && toolProfile?.assistant !== true, !restricted, restricted, toolProfile);
+  }
+
   private async spawnWarmSession(cwd: string, model: string): Promise<ClaudeSession> {
     if (this.shuttingDown) {
       throw new ClaudeConcurrencyError('ClaudeRuntime is shutting down');
@@ -348,7 +348,7 @@ export class ClaudeSessionManager {
       cwd,
       workspaceId: null,
       model,
-      systemPromptAppend: this.host.prompt.stableSystemPrompt(this.metadataOutputMode, true, true),
+      systemPromptAppend: this.systemPromptFor(undefined),
       mcpRegistry: this.deps.mcpRegistry,
       bridge: this.deps.bridge,
       options: this.deps.options,

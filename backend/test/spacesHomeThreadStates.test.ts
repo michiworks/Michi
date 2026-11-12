@@ -30,7 +30,8 @@ beforeEach(() => {
   workspace.run('other', 'Elsewhere', null);
   seedConversation({ nodeId: 'asked', workspaceId: 'ws', title: 'Schema naming', turns: [{ status: 'completed', startedAt: NOW - DAY, reply: 'camelCase or snake_case?' }] });
   seedConversation({ nodeId: 'running', workspaceId: 'ws', title: 'Tests', turns: [{ status: 'active', startedAt: NOW - 60_000, reply: 'Running the suites' }] });
-  seedConversation({ nodeId: 'gone', workspaceId: 'ws', title: 'Deleted', deletedAt: NOW, turns: [{ status: 'completed', startedAt: NOW - DAY }] });
+  seedConversation({ nodeId: 'gone', workspaceId: 'ws', title: 'Deleted', deletedAt: NOW, deletionGroupId: 'del-1', turns: [{ status: 'completed', startedAt: NOW - DAY }] });
+  seedConversation({ nodeId: 'branch', workspaceId: 'ws', title: 'Side idea', deletedAt: NOW, deletionGroupId: 'arch-1', turns: [{ status: 'completed', startedAt: NOW - DAY, reply: 'Done.' }] });
   seedConversation({ nodeId: 'moved', workspaceId: 'other', title: 'Moved away', turns: [{ status: 'completed', startedAt: NOW - DAY, reply: 'Done.' }] });
 });
 
@@ -41,10 +42,12 @@ afterEach(() => {
   fs.rmSync(dir, { recursive: true, force: true });
 });
 
-test('thread states read each named conversation wherever it is, and leave out deleted ones', () => {
-  const states = Object.fromEntries(threadStates({ ownerUserId: OWNER, nodeIds: ['asked', 'running', 'moved', 'gone', 'nope'], now: NOW })
-    .map((card) => [card.nodeId, [card.state, card.workspaceId]]));
-  assert.deepEqual(states, { asked: ['waiting', 'ws'], running: ['running', 'ws'], moved: ['done', 'other'] });
+test('thread states read each named conversation wherever it is, and leave out ones in the Trash', () => {
+  const states = Object.fromEntries(threadStates({ ownerUserId: OWNER, nodeIds: ['asked', 'running', 'moved', 'gone', 'branch', 'nope'], now: NOW })
+    .map((card) => [card.nodeId, [card.state, card.workspaceId, card.archived]]));
+  assert.deepEqual(states, {
+    asked: ['waiting', 'ws', undefined], running: ['running', 'ws', undefined], moved: ['done', 'other', undefined], branch: ['done', 'ws', true],
+  });
   assert.deepEqual(threadStates({ ownerUserId: OWNER, nodeIds: [], now: NOW }), []);
 });
 

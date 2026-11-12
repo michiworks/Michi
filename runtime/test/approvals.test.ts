@@ -39,6 +39,30 @@ describe('ApprovalCoordinator', () => {
     assert.equal(root.chatApprovalOptions, chatApprovalOptions);
   });
 
+  it('tells the host each approval of a named tool, and nothing for a refusal, a headless grant or a host that does not listen', () => {
+    const told: Array<{ owner: RuntimeSessionOwner; ownerUserId?: string | null; toolName: string }> = [];
+    const host = port();
+    const approvals = new ApprovalCoordinator({ permissions: { ...host.permissions, approved: (request) => { told.push(request); } } });
+    assert.equal(approvals.accept('allow_once', chat, 'mcp__michi__send_to_thread', 'u1'), true);
+    assert.equal(approvals.accept('allow_always', chat, 'Bash'), true);
+    assert.equal(approvals.accept('allow_session', chat, 'edit'), true);
+    assert.equal(approvals.accept('allow_once', run, 'read'), true, 'a headless owner\'s single-use approval');
+    assert.equal(approvals.accept('allow_once', chat, undefined), true, 'no tool name: nothing to tell');
+    assert.equal(approvals.accept('reject_once', chat, 'Bash'), false);
+    assert.equal(approvals.accept('allow_always', run, 'Bash'), false);
+    assert.equal(approvals.accept(null, chat, 'Bash'), false);
+    assert.deepEqual(told, [
+      { owner: chat, ownerUserId: 'u1', toolName: 'mcp__michi__send_to_thread' },
+      { owner: chat, ownerUserId: undefined, toolName: 'Bash' },
+      { owner: chat, ownerUserId: undefined, toolName: 'edit' },
+      { owner: run, ownerUserId: undefined, toolName: 'read' },
+    ]);
+    // A host whose note throws keeps the answer.
+    const throwing = new ApprovalCoordinator({ permissions: { ...host.permissions, approved: () => { throw new Error('no'); } } });
+    assert.equal(throwing.accept('allow_once', chat, 'Bash'), true);
+    assert.equal(new ApprovalCoordinator({ permissions: host.permissions }).accept('allow_once', chat, 'Bash'), true);
+  });
+
   it('without session trust, policy is the host decision for the exact request', () => {
     const host = port({ decision: 'deny' });
     const approvals = new ApprovalCoordinator({ permissions: host.permissions });

@@ -3,7 +3,7 @@ import type { ChatPermissionMode } from './chatPermissions';
 /**
  * Scheduled Jobs: a prompt that the backend runs on a schedule without any
  * renderer attached. Each run is an ordinary durable chat turn, so the result
- * is opened like any other thread.
+ * is opened like any other thread (a Scheduled-only job's, on the Scheduled page).
  */
 
 export type ScheduledJobSchedule =
@@ -14,10 +14,40 @@ export type ScheduledJobSchedule =
   /** One-shot run at an epoch-ms instant. */
   | { kind: 'at'; at: number };
 
-export type ScheduledJobScheduleKind = ScheduledJobSchedule['kind'];
-
 /** fresh: every run opens a new thread. persistent: runs append to one thread. */
 export type ScheduledJobSessionMode = 'fresh' | 'persistent';
+
+/**
+ * Where a run's thread shows. workspace: among the workspace's conversations.
+ * scheduled: only on the Scheduled page, read-only, until the user moves it
+ * to the workspace; Michi deletes runs past SCHEDULED_ONLY_RETENTION.
+ */
+export type ScheduledJobVisibility = 'workspace' | 'scheduled';
+
+/**
+ * What Michi keeps of a Scheduled-only job: a run's thread stays while it is
+ * one of the job's latest `minRuns` runs, or one of its latest `maxRuns` runs
+ * that started within `maxAgeMs`. A thread several runs share (One ongoing
+ * thread) stays until none of them is kept; that thread is replaced by a new
+ * one after `rotateAfterRuns` runs.
+ */
+export const SCHEDULED_ONLY_RETENTION = {
+  maxRuns: 20,
+  maxAgeMs: 7 * 24 * 3_600_000,
+  minRuns: 5,
+  rotateAfterRuns: 20,
+} as const;
+
+/** SCHEDULED_ONLY_RETENTION.maxAgeMs in whole days, as the retention text states it. */
+export const SCHEDULED_ONLY_KEPT_DAYS = Math.round(SCHEDULED_ONLY_RETENTION.maxAgeMs / 86_400_000);
+
+/** Settings › Background defaults (GET and PATCH /api/scheduled-jobs/settings). */
+export interface ScheduledJobSettings {
+  /** Thread mode for a new job that does not name one. */
+  sessionMode: ScheduledJobSessionMode;
+  /** An agent asks the user before it creates a job. Off by default; other changes always ask. */
+  requireCreateApproval: boolean;
+}
 
 export type ScheduledJobRunStatus =
   | 'running'
@@ -42,6 +72,8 @@ export interface ScheduledJobDto {
   reasoning: string | null;
   permissionMode: ChatPermissionMode;
   sessionMode: ScheduledJobSessionMode;
+  /** Absent from older backends: workspace. */
+  visibility?: ScheduledJobVisibility;
   notify: boolean;
   enabled: boolean;
   /** Set after repeated failures; cleared by resuming the job. */
@@ -73,6 +105,8 @@ export interface ScheduledJobRunDto {
   finishedAt: number | null;
   summary: string | null;
   error: string | null;
+  /** The run's thread shows only in Scheduled (not moved to its workspace). Absent: false. */
+  scheduledOnly?: boolean;
 }
 
 export interface ScheduledJobInput {
@@ -86,6 +120,7 @@ export interface ScheduledJobInput {
   reasoning?: string | null;
   permissionMode?: ChatPermissionMode;
   sessionMode?: ScheduledJobSessionMode;
+  visibility?: ScheduledJobVisibility;
   notify?: boolean;
   enabled?: boolean;
   timeoutSeconds?: number;
@@ -101,10 +136,12 @@ export interface ScheduledJobBlockedExecution {
   workspaceId: string;
   reason: string;
   since: number;
+  /** When it stops blocking without confirmation: its start plus the job's time limit plus a grace. Absent from older backends. */
+  releasesAt?: number;
 }
 
 export interface ScheduledJobsSchedulerStatus {
-  /** Unconfirmed execution lifetimes block data-directory-wide admission. */
+  /** Unconfirmed execution lifetimes block data-directory-wide admission until confirmed stopped or releasesAt. */
   blockedExecutions?: ScheduledJobBlockedExecution[];
   /** False when another Michi process on the same data directory owns scheduling. */
   active: boolean;
@@ -145,6 +182,8 @@ export interface ScheduledJobRunEvent {
   notify: boolean;
   /** What a blocked run is waiting for (phase=attention only). */
   attention?: 'approval' | 'input';
+  /** The run's thread shows only in Scheduled: open it there, not in the workspace. */
+  scheduledOnly?: boolean;
   at: number;
 }
 
@@ -184,6 +223,18 @@ export const SCHEDULED_JOB_LIMITS = {
   autoPauseThreshold: 5,
   runHistoryPerJob: 50,
 } as const;
+
+/**
+ * What a new job gets for a field it does not name. sessionMode applies only
+ * while the user has not chosen a default in Settings › Background.
+ */
+export const SCHEDULED_JOB_DEFAULTS = {
+  permissionMode: 'trust' as ChatPermissionMode,
+  sessionMode: 'persistent' as ScheduledJobSessionMode,
+  visibility: 'workspace' as ScheduledJobVisibility,
+  notify: true,
+  timeoutSeconds: SCHEDULED_JOB_LIMITS.defaultTimeoutSeconds,
+};
 
 export function isScheduledJobRunStatus(value: unknown): value is ScheduledJobRunStatus {
   return value === 'running' || value === 'succeeded' || value === 'failed'

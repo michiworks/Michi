@@ -1,0 +1,44 @@
+/* The back swipe's edge arrow (backSwipeTracks.ts arrowTrack). Placed and
+   moved inline while the finger is down; it fades as it goes. */
+.back-swipe-arrow {
+  position: fixed;
+  left: 0;
+  z-index: var(--z-toast);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 40px;
+  height: 40px;
+  border-radius: 50%;
+  border: 1px solid var(--term-line);
+  background: var(--term-surface);
+  color: var(--term-muted);
+  box-shadow: var(--term-float-shadow);
+  opacity: 0;
+  transform: translateX(-40px);
+  pointer-events: none;
+  transition: background var(--t-soft) var(--t-ease), color var(--t-soft) var(--t-ease), border-color var(--t-soft) var(--t-ease);
+}
+
+.back-swipe-arrow[data-armed='true'] {
+  border-color: var(--term-accent);
+  background: var(--term-accent);
+  color: var(--term-surface);
+}
+
+.back-swipe-arrow[data-state='done'] {
+  transition: opacity var(--t-exit) ease-out, transform var(--t-exit) ease-out;
+  opacity: 0 !important;
+}
+
+.back-swipe-arrow[data-state='cancelled'] {
+  transition: opacity var(--t-exit) ease-out, transform var(--t-enter) cubic-bezier(0.23, 1, 0.32, 1);
+  opacity: 0 !important;
+  transform: translateX(-40px) !important;
+}
+
+/* A layer dragged by the back swipe (panelTrack): its leading edge lifts it
+   off what it uncovers. */
+[data-back-swipe] {
+  box-shadow: -14px 0 28px -18px rgb(0 0 0 / 0.4);
+}

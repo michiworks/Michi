@@ -413,6 +413,7 @@ class CrewAcpServerImpl {
         const session = this.sessions.get(sessionId);
         const mode = asString(params.modeId);
         if (!session || !mode) throw new RpcError(ERR_INVALID_PARAMS, 'Unknown session or missing agent template');
+        await this.afterOrphanedSetup(sessionId, session);
         if (session.turn || session.settingsBusy || session.setup) throw new RpcError(ERR_BUSY, 'Crew session is busy');
         if (mode === 'current' && !session.template) return {};
         session.settingsBusy = true;
@@ -495,6 +496,22 @@ class CrewAcpServerImpl {
 
     private effectiveModel(session: CrewSession): string {
         return session.model ?? this.defaultModel ?? DEFAULT_MODEL_ID;
+    }
+
+    /**
+     * Wait out a slot setup that no turn owns any more (its first prompt was
+     * cancelled while the slot was being created), so a settings change
+     * applies to the new slot instead of finding the idle session busy. A
+     * turn that starts meanwhile joins that setup and keeps the session busy.
+     */
+    private async afterOrphanedSetup(sessionId: string, session: CrewSession): Promise<void> {
+        let waited = false;
+        // Read again after each wait: a failed setup can be retried by the next prompt.
+        for (let setup = session.setup; setup && !session.turn; setup = session.setup) {
+            waited = true;
+            await setup.catch(() => undefined);
+        }
+        if (waited && this.sessions.get(sessionId) !== session) throw new RpcError(ERR_BUSY, 'Crew session is busy');
     }
 
     private async ensureSlot(sessionId: string, session: CrewSession): Promise<void> {
@@ -724,6 +741,7 @@ class CrewAcpServerImpl {
         if (!sessionId || !session || !modelId) {
             throw new RpcError(ERR_INVALID_PARAMS, 'Unknown session or missing model');
         }
+        await this.afterOrphanedSetup(sessionId, session);
         if (session.turn || session.settingsBusy || session.setup) throw new RpcError(ERR_BUSY, 'Crew session is busy');
         session.settingsBusy = true;
         try {
@@ -746,8 +764,9 @@ class CrewAcpServerImpl {
         if (!sessionId || !session) return { success: false, message: 'Unknown Kiro Crew session' };
         if (asString(args.instructions)?.trim()) return { success: false, message: 'Kiro Crew /compact takes no instructions' };
         if (!this.gateway.getSlot) return { success: false, message: 'compact is not supported by Kiro Crew' };
-        if (session.turn || session.settingsBusy || session.setup) throw new RpcError(ERR_BUSY, 'Crew session is busy');
+        // A slot still being created has nothing to compact either.
         if (!session.slotReady) return { success: false, message: 'Nothing to compact yet' };
+        if (session.turn || session.settingsBusy || session.setup) throw new RpcError(ERR_BUSY, 'Crew session is busy');
         session.settingsBusy = true;
         try {
             const before = await this.gateway.getSlot(sessionId, 1);
@@ -802,6 +821,7 @@ class CrewAcpServerImpl {
         const value = asString(((command.args ?? {}) as Params).value);
         if (!sessionId || !session) return { success: false, message: 'Unknown Kiro Crew session' };
         if (!value) return { success: false, message: 'effort needs a value' };
+        await this.afterOrphanedSetup(sessionId, session);
         if (session.turn || session.settingsBusy || session.setup) throw new RpcError(ERR_BUSY, 'Crew session is busy');
         session.settingsBusy = true;
         try {

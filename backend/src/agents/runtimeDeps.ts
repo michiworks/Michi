@@ -58,7 +58,10 @@ export function getRuntimeDeps(): RuntimeDeps {
   return deps;
 }
 
-/** Test helper — reset the singleton between tests. */
+/**
+ * Test helper — reset the singleton between tests.
+ * @testonly
+ */
 export function __resetRuntimeDeps(): void {
   deps = undefined;
 }

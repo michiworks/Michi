@@ -1,18 +1,7 @@
+import type { MenuItem, MenuSection } from '../components/ContextMenu';
+import { confirmDialog } from '../components/ui/ConfirmDialog';
 import type { Tree } from '../state/chatStore';
-
-export interface ContextMenuItem {
-  label: string;
-  onSelect: () => void;
-  danger?: boolean;
-  disabled?: boolean;
-  /** Single-letter keyboard accelerator (e.g. 'R'); displayed in the chip. */
-  keys?: string;
-}
-export interface ContextMenuSection {
-  items: ContextMenuItem[];
-  /** Optional section header (small uppercase label rendered above items). */
-  label?: string;
-}
+import type { MoveTargetWorkspace } from '../state/moveTargets';
 
 export interface ThreadRowActions {
   activateTree: (id: string) => void;
@@ -23,7 +12,8 @@ export interface ThreadRowActions {
   renameTree: (id: string, name: string) => void;
   deleteTree: (id: string) => void;
   exportTree: (id: string) => void;
-  /** Flip the thread row into inline-rename mode. Implemented by the UI. */
+  /** Flip the thread row into inline-rename mode. Implemented by the UI;
+   *  without it the menu offers no Rename. */
   beginInlineRename?: (id: string) => void;
   /** Move this thread to another workspace. Omit when no other workspace is
    *  available (the menu item is dropped). The picker UI lives elsewhere —
@@ -34,11 +24,13 @@ export interface ThreadRowActions {
   openMoveDialog?: () => void;
 }
 
-/** Workspace eligible as a move destination — anything live (not the current
- *  one, not archived, not deleted). The UI is responsible for filtering. */
-export interface MoveTargetWorkspace {
-  id: string;
-  name: string;
+/** The one way to ask before moving threads to trash, from a row menu or a selection bar. */
+export function confirmMoveThreadsToTrash(count: number): Promise<boolean> {
+  return confirmDialog({
+    title: 'Move to trash',
+    message: count === 1 ? 'Move this thread to trash?' : `Move ${count} threads to trash?`,
+    confirmLabel: 'Move',
+  });
 }
 
 export interface BuildThreadRowArgs {
@@ -56,7 +48,7 @@ export interface BuildThreadRowArgs {
   clearTreeSelection?: () => void;
 }
 
-export function buildThreadRowContextMenu(args: BuildThreadRowArgs): ContextMenuSection[] {
+export function buildThreadRowContextMenu(args: BuildThreadRowArgs): MenuSection[] {
   const { treeId, tree, actions, moveTargets, treeSelection, clearTreeSelection } = args;
 
   // Multi-select path: if the right-clicked tree is in the selection and there
@@ -67,21 +59,23 @@ export function buildThreadRowContextMenu(args: BuildThreadRowArgs): ContextMenu
   if (isMulti) {
     const scope = Array.from(treeSelection!);
     const count = scope.length;
-    const sections: ContextMenuSection[] = [
+    const sections: MenuSection[] = [
       {
         items: [
           {
+            id: 'archive',
             label: `Archive ${count} threads`,
             keys: 'A',
-            onSelect: () => {
+            run: () => {
               for (const id of scope) actions.archiveTree(id);
               clearTreeSelection?.();
             },
           },
           {
+            id: 'export',
             label: `Export ${count} threads…`,
             keys: 'E',
-            onSelect: () => {
+            run: () => {
               for (const id of scope) actions.exportTree(id);
               clearTreeSelection?.();
             },
@@ -91,19 +85,22 @@ export function buildThreadRowContextMenu(args: BuildThreadRowArgs): ContextMenu
       {
         items: [
           {
+            id: 'clear',
             label: 'Clear selection',
             keys: 'esc',
-            onSelect: () => clearTreeSelection?.(),
+            run: () => clearTreeSelection?.(),
           },
           {
+            id: 'delete',
             label: `Delete ${count} threads…`,
             danger: true,
             keys: 'D',
-            onSelect: () => {
-              if (window.confirm(`Move ${count} threads to trash?`)) {
+            run: () => {
+              void confirmMoveThreadsToTrash(count).then((ok) => {
+                if (!ok) return;
                 for (const id of scope) actions.deleteTree(id);
                 clearTreeSelection?.();
-              }
+              });
             },
           },
         ],
@@ -115,48 +112,42 @@ export function buildThreadRowContextMenu(args: BuildThreadRowArgs): ContextMenu
   // Single-target path (original behavior).
   const archived = !!tree.archivedAt;
   const pinned = !!tree.pinnedAt;
-  const items: ContextMenuItem[] = [
-    {
-      label: 'Rename…',
-      keys: 'R',
-      onSelect: () => {
-        if (actions.beginInlineRename) actions.beginInlineRename(treeId);
-      },
-    },
-  ];
+  const items: MenuItem[] = actions.beginInlineRename
+    ? [{ id: 'rename', label: 'Rename…', keys: 'R', run: () => actions.beginInlineRename!(treeId) }]
+    : [];
   if (actions.pinTree && actions.unpinTree) {
     items.push(
       pinned
-        ? { label: 'Unpin', keys: 'P', onSelect: () => actions.unpinTree!(treeId) }
-        : { label: 'Pin', keys: 'P', onSelect: () => actions.pinTree!(treeId) },
+        ? { id: 'unpin', label: 'Unpin', keys: 'P', run: () => actions.unpinTree!(treeId) }
+        : { id: 'pin', label: 'Pin', keys: 'P', run: () => actions.pinTree!(treeId) },
     );
   }
   items.push(
     archived
-      ? { label: 'Unarchive', keys: 'A', onSelect: () => actions.unarchiveTree(treeId) }
-      : { label: 'Archive', keys: 'A', onSelect: () => actions.archiveTree(treeId) },
-    { label: 'Export this thread…', keys: 'E', onSelect: () => actions.exportTree(treeId) },
+      ? { id: 'unarchive', label: 'Unarchive', keys: 'A', run: () => actions.unarchiveTree(treeId) }
+      : { id: 'archive', label: 'Archive', keys: 'A', run: () => actions.archiveTree(treeId) },
+    { id: 'export', label: 'Export this thread…', keys: 'E', run: () => actions.exportTree(treeId) },
   );
-  const sections: ContextMenuSection[] = [{ items }];
+  const sections: MenuSection[] = [{ items }];
 
   if (moveTargets && moveTargets.length > 0 && actions.openMoveDialog) {
     sections[0].items.push({
+      id: 'move',
       label: 'Move to workspace…',
       keys: 'M',
-      onSelect: () => actions.openMoveDialog!(),
+      run: () => actions.openMoveDialog!(),
     });
   }
 
   sections.push({
     items: [
       {
+        id: 'delete',
         label: 'Delete thread…',
         danger: true,
         keys: 'D',
-        onSelect: () => {
-          if (window.confirm('Move this thread to trash?')) {
-            actions.deleteTree(treeId);
-          }
+        run: () => {
+          void confirmMoveThreadsToTrash(1).then((ok) => { if (ok) actions.deleteTree(treeId); });
         },
       },
     ],

@@ -10,12 +10,12 @@ import { BUILTIN_TOOLS } from '../src/agents/builtinTools';
 import { PAGE_TOOL_NAMES } from '../src/agents/pageToolNames';
 import { runPageTool, type PageToolCaller } from '../src/agents/pageTools';
 import { closeDb, getDb, initDb } from '../src/services/db';
-import { createDatabase, createPage, getDatabase, getPage, listPages } from '../src/services/pages/repository';
+import { createDatabase, createPage, getDatabase, getPage, listPages, savePageContent } from '../src/services/pages/repository';
 import { pageComponents } from '../src/services/pages/components';
 import { applyUserDatabaseEdits } from '../src/services/pages/databaseWrites';
 import { ensureWorkspaceHomePageId } from '../src/services/pages/homePages';
 import { addLayoutRule, saveLayoutPreferences } from '../src/services/pages/layoutRules';
-import type { PageDatabase, PageWriteResult } from 'michi-shared';
+import type { ChangeSource, PageDatabase, PageWriteResult } from 'michi-shared';
 import { acceptProposal, revertChange, redoChange } from '../src/services/pages/pageChanges';
 
 const ownerUserId = 'alice';
@@ -59,7 +59,7 @@ afterEach(() => {
 });
 
 test('the Page tools are in the built-in catalog and page executor enforces owner and workspace scope', () => {
-  assert.deepEqual(PAGE_TOOL_NAMES, ['read_home', 'edit_home', 'list_pages', 'read_page', 'edit_page', 'create_page', 'create_database', 'configure_database', 'read_database', 'edit_database', 'list_page_components', 'read_page_component', 'save_page_component', 'configure_database_view', 'open_task_database', 'list_tasks']);
+  assert.deepEqual(PAGE_TOOL_NAMES, ['read_home', 'edit_home', 'list_pages', 'read_page', 'preview_page', 'edit_page', 'create_page', 'create_database', 'configure_database', 'read_database', 'edit_database', 'list_page_components', 'read_page_component', 'save_page_component', 'configure_database_view', 'open_task_database', 'list_tasks']);
   assert.deepEqual(BUILTIN_TOOLS.filter((tool) => PAGE_TOOL_NAMES.includes(tool.name as (typeof PAGE_TOOL_NAMES)[number])).map((tool) => tool.name).sort(), [...PAGE_TOOL_NAMES].sort());
 
   const page = createPage({ workspaceId, ownerUserId, title: 'Release' });
@@ -302,6 +302,14 @@ test('a task database write counts the tasks it added, updated and removed; a st
   assert.equal('tasks' in other.michiPageWrite, false, 'other databases keep their receipt');
 });
 
+test('a database write tells its receipt which column names a row', () => {
+  const board = createDatabase({ workspaceId, ownerUserId, title: 'Trip', views: [],
+    columns: [{ id: 'pri', name: 'Priority', type: 'select', options: [{ value: 'High' }] }, { id: 'name', name: 'Name', type: 'text' }] });
+  const written = runPageTool('edit_database', caller(), { databaseId: board.id, ops: [{ op: 'row.add', values: { pri: 'High', name: 'Book the hotel' } }] });
+  assert.equal(written.isError, undefined, JSON.stringify(written.details));
+  assert.equal((written.details as { michiPageWrite: Record<string, unknown> }).michiPageWrite.titleColumnId, 'name');
+});
+
 test("chat tools leave the task database's Board, Table and Needs you views alone, and can still add a custom view", () => {
   const opened = runPageTool('open_task_database', caller(), {}).details as { databaseId: string };
   const component = runPageTool('save_page_component', caller(), {
@@ -387,10 +395,20 @@ test('Chat Home embeds a native page and narrowly grants cross-workspace editing
   assert.equal((getPage(home.id, ownerUserId).blocks[0] as { text: string }).text, 'Human wording');
   const change = getDb().prepare("SELECT source FROM page_changes WHERE page_id=? AND proposal_state IS NULL ORDER BY seq LIMIT 1").get(home.id) as { source: string };
   assert.equal(JSON.parse(change.source).nodeId, nodeId);
+  // The saved page stays out of automatic maintenance while it is hidden or the cards are back.
+  const outOfMaintenance = () => {
+    assert.equal(listEligibleMaintenanceManifest('ws-home', ownerUserId).pages.some(page => page.id === home.id), false);
+    const current = getPage(home.id, ownerUserId);
+    assert.throws(() => savePageContent(home.id, ownerUserId, { ...current, revision: current.revision + 1 },
+      { source: { kind: 'maintenance' } as ChangeSource, now: Date.now(), expectedRevision: current.revision }), /Chat Home layout is customized/);
+  };
+  outOfMaintenance();
   editHomeCustomization(ownerUserId, { expectedRevision: 1, contentMode: 'hidden' });
   assert.equal(readHomeCards(ownerUserId).contentMode, 'hidden');
+  outOfMaintenance();
   editHomeCustomization(ownerUserId, { expectedRevision: 2, contentMode: 'default' });
   assert.equal(getPage(home.id, ownerUserId).blocks.length, after.blocks.length);
+  outOfMaintenance();
   editHomeCustomization(ownerUserId, { expectedRevision: 3, contentMode: 'page' });
   assert.equal(readHomeCards(ownerUserId).contentPage?.id, home.id);
   assert.throws(() => editHomeCustomization('bob', { expectedRevision: 0, contentMode: 'page', pageId: home.id }));

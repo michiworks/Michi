@@ -58,6 +58,8 @@ export interface ChatNodeToDescriptorInput {
   };
   /** P2-1 supplies this; accepted as given, never computed here. */
   presence: PaneDescriptorV1['presence'];
+  /** paneInspection's isArchivedPaneNode, which also reads the node's thread. */
+  archived: boolean;
   backendConnectionId: string;
   /** Injected clock reading. Never read Date.now() inside this module. */
   observedAt: number;
@@ -74,7 +76,7 @@ export interface ChatNodeToDescriptorInput {
 // ---------------------------------------------------------------------------
 
 export function chatNodeToDescriptor(input: ChatNodeToDescriptorInput): PaneDescriptorV1 {
-  const { node, observation, durableTurn, counts, turns, lineage, runtime, presence, backendConnectionId, observedAt } = input;
+  const { node, observation, durableTurn, counts, turns, lineage, runtime, presence, archived, backendConnectionId, observedAt } = input;
 
   const { activity, execution, commitState: _commitState } = deriveActivityAndExecution(input);
 
@@ -86,7 +88,7 @@ export function chatNodeToDescriptor(input: ChatNodeToDescriptorInput): PaneDesc
     title: node.title ?? '',
     workspaceId: node.workspace_id,
     treeId: node.tree_id ?? null,
-    archived: isArchivedPaneNode(node),
+    archived,
     truncatedFields: [],
     observation: {
       observedAt,
@@ -466,10 +468,6 @@ export function buildOutputPreview(
   };
 }
 
-export function isArchivedPaneNode(node: NodeRow): boolean {
-  return node.status === 'archived' || (node.deleted_at !== null && (node.deletion_group_id ?? '').startsWith('arch-'));
-}
-
 function outputIdFor(ref: ExecutionRef | null): string {
   if (!ref) return 'no-execution';
   return ref.kind === 'chat_turn' ? `chat_turn:${ref.turnId}` : `agent_run:${ref.runId}`;
@@ -477,7 +475,7 @@ function outputIdFor(ref: ExecutionRef | null): string {
 
 /** Opaque revision token distinct from the observation cursor — changes whenever the preview
  *  text or its updatedAt changes. Not decoded by any caller; only compared for equality. */
-function outputRevisionFor(text: string, updatedAt: number | null): string {
+export function outputRevisionFor(text: string, updatedAt: number | null): string {
   return `${updatedAt ?? 'null'}:${text.length}:${simpleHash(text)}`;
 }
 

@@ -1,5 +1,5 @@
 import { useEffect, useState, useSyncExternalStore } from 'react';
-import { redactRemoteLog, type RemoteConnectionDiagnostic } from 'michi-shared';
+import { randomUuid, redactRemoteLog, type RemoteConnectionDiagnostic } from 'michi-shared';
 import { getKnownBackendConnections, type BackendConnectionSummary } from '../config/backendConnections';
 import { recoverRemoteService, RemoteServiceRecoveryError } from '../services/api/remoteRecovery';
 
@@ -54,7 +54,7 @@ export function reportRemoteRecoveryFailure(connection: BackendConnectionSummary
     detectedAt: previous?.detectedAt ?? Date.now(),
     serviceDiagnosticId: serviceReport?.id, history: history?.slice(-32_000),
     diagnostic: {
-      id: serviceReport?.id ?? previous?.diagnostic.id ?? 'recovery-' + crypto.randomUUID(),
+      id: serviceReport?.id ?? previous?.diagnostic.id ?? 'recovery-' + randomUuid(),
       host: redactRemoteLog(connection.sshHost ?? connection.apiUrl ?? connection.name),
       startedAt, stage: 'workspace', code: 'remote_workspace_unavailable', message,
       severity: 'error',
@@ -79,7 +79,7 @@ export function reportRemoteRecoveryProgress(connection: BackendConnectionSummar
     history: history.slice(-32_000),
     diagnostic: {
       ...(serviceReport ?? {}),
-      id: serviceReport?.id ?? previous?.diagnostic.id ?? 'recovery-' + crypto.randomUUID(),
+      id: serviceReport?.id ?? previous?.diagnostic.id ?? 'recovery-' + randomUuid(),
       host: redactRemoteLog(connection.sshHost ?? connection.apiUrl ?? connection.name),
       startedAt: serviceReport?.startedAt ?? previous?.diagnostic.startedAt ?? new Date().toISOString(),
       stage: serviceReport?.stage ?? 'ssh', severity: 'info', code: undefined, message: redactRemoteLog(message),

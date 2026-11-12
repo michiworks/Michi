@@ -91,6 +91,16 @@ it('keeps a selectable command and clipboard fallback in the browser', async () 
   expect(copy).toHaveBeenCalledWith("ssh -tt -p 2222 u@test-host 'example-login --remote'");
 });
 
+it('points to the command when the browser has no clipboard here', async () => {
+  state.bridge = null;
+  vi.stubGlobal('navigator', {});
+  requestRemoteAuthentication({ key: 'web-fallback', target: { scope: 'remote', host: 'test-host' } }, true);
+  render(<RemoteAuthenticationDialog />);
+  fireEvent.click(await screen.findByRole('button', { name: 'Copy command' }));
+  await screen.findByText('Select the command above to copy it.');
+  expect(screen.queryByRole('button', { name: 'Copied' })).toBeNull();
+});
+
 it('does not run the reconnect callback when the browser dialog closes during recovery', async () => {
   state.bridge = null;
   let resolve!: () => void;

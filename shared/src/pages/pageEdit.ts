@@ -1,9 +1,11 @@
-import { isRecord, parsePageBlockInput, parseBlockSource } from './blocks';
+import { isRecord } from '../guards';
+import { parsePageBlockInput, parseBlockSource } from './blocks';
 import type { BlockEdit, BlockSource, PageBlock, PageBlockInput } from './blocks';
-import { blockLocation, insertionIndex, missingBlockSnapshot, snapshotBlock } from './blockTree';
+import { insertionIndex, missingBlockSnapshot, snapshotBlock } from './blockTree';
 import { pageBlockProblem } from './blockCatalog';
 import type { BlockSnapshot } from './blockTree';
 import { retainUserPageSegmentSources } from './markdownSegments';
+import { PAGE_LIMITS } from './types';
 
 export type PageEditOp =
   | { op: 'insert'; block: PageBlockInput; after: string | null }
@@ -69,7 +71,7 @@ export function agentPageOpProblem(value: unknown): string {
 }
 
 function parseOps(value: unknown, agent: boolean): PageEditOp[] | null {
-  if (!Array.isArray(value) || value.length > 50) return null;
+  if (!Array.isArray(value) || value.length > PAGE_LIMITS.opsPerEdit) return null;
   const ops: PageEditOp[] = [];
   for (const candidate of value) {
     if (!isRecord(candidate) || typeof candidate.op !== 'string') return null;

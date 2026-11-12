@@ -2,6 +2,7 @@ import type { StreamHandlers } from '../services/chatStreamEvents';
 import { settleCancellationObservation } from '../services/api/stream';
 import type { ChatAction } from './chatTypes';
 import { subagentActivityAction, subagentListAction } from './subagentStreamActions';
+import { createTurnStreamEffects, doneOutcome } from './turnStreamEffects';
 
 type Ref<T> = { current: T };
 
@@ -16,6 +17,8 @@ interface ObserveOptions {
   onTurnEnd?: (reason: 'done' | 'error', nodeId: string) => void;
   onStreamComplete?: () => void;
   cursor?: 'foreground' | 'background';
+  /** The node's workspace, whose pages the turn's writes refresh. */
+  workspaceId?: () => string | undefined;
 }
 
 export interface BackgroundTurnBinding {
@@ -47,10 +50,14 @@ export function createBackgroundTurnBinding({
   onTurnEnd,
   onStreamComplete,
   cursor = 'background',
+  workspaceId = () => undefined,
 }: ObserveOptions): BackgroundTurnBinding {
   const makeHandlers = (): StreamHandlers => {
     let assistantId = '';
     let turnId = '';
+    // Every window that shows a turn asks for sign-in on its credential error
+    // and clears the notice when it completes, whichever window sent it.
+    const effects = createTurnStreamEffects({ nodeId, workspaceId });
 
     const rememberEnvelope = (incomingAssistantId?: string, incomingTurnId?: string) => {
       if (incomingAssistantId) assistantId = incomingAssistantId;
@@ -82,6 +89,7 @@ export function createBackgroundTurnBinding({
           userText: data.userText,
           ...(data.selfInitiated ? { selfInitiated: true } : {}),
           ...(data.userMetadata ? { userMetadata: data.userMetadata } : {}),
+          ...(data.assistantMetadata ? { assistantMetadata: data.assistantMetadata } : {}),
           cursor,
         });
       },
@@ -111,6 +119,7 @@ export function createBackgroundTurnBinding({
       onToolCall: (tool) => {
         const env = tool as typeof tool & { assistantId?: string; turnId?: string; seq?: number };
         rememberEnvelope(env.assistantId, env.turnId);
+        effects.tool(tool, turnId || assistantId);
         if (assistantId) {
           dispatch({ type: 'tool-call', nodeId, assistantId, tool: toolState(tool), observedAt: tool.observedAt });
         }
@@ -121,6 +130,7 @@ export function createBackgroundTurnBinding({
         if (assistantId) {
           dispatch({ type: 'tool-call-update', nodeId, assistantId, tool: toolState(tool), observedAt: tool.observedAt });
         }
+        effects.tool(tool, turnId || assistantId);
       },
       onImage: (data) => {
         if (assistantId) {
@@ -179,39 +189,35 @@ export function createBackgroundTurnBinding({
       onCompactionEnd: () => dispatch({ type: 'compaction', nodeId, active: false }),
       onRetryStart: (data) => dispatch({ type: 'runtime-activity', nodeId, assistantId, detail: data.detail ?? 'Reconnecting' }),
       onRetryEnd: () => dispatch({ type: 'runtime-activity', nodeId, assistantId }),
-      onWarning: (warning) => dispatch({ type: 'warning', nodeId, assistantId, warning }),
-      onMcpServerError: (data) =>
-        dispatch({ type: 'mcp-server-error', nodeId, serverName: data.serverName, error: data.error }),
-      onDone: (stopReason, incomingAssistantId, incomingTurnId, persisted, completedAt) => {
+      onWarning: (warning) => {
+        dispatch({ type: 'warning', nodeId, assistantId, warning });
+        effects.runtimeMessage(warning.message);
+      },
+      onMcpServerError: (data) => {
+        dispatch({ type: 'mcp-server-error', nodeId, serverName: data.serverName, error: data.error });
+        effects.runtimeMessage(data.error);
+      },
+      onDone: (stopReason, incomingAssistantId, incomingTurnId, persisted, completedAt, completion) => {
         rememberEnvelope(incomingAssistantId, incomingTurnId);
-        settleCancellationObservation(chatId, turnId, persisted === false || stopReason === 'error'
+        const { error, aborted } = doneOutcome(stopReason, persisted);
+        settleCancellationObservation(chatId, turnId, error
           ? { state: 'error', detail: 'Cancellation cleanup failed. Retry to check the original session.' }
           : { state: 'settled' });
+        effects.end(!error && !aborted);
         if (!assistantId) return;
-        if (persisted === false) {
-          dispatch({
-            type: 'error', nodeId, assistantId,
-            message: 'The turn finished but the backend did not confirm durable persistence.',
-            errorKind: 'turn_persistence_failed', turnId,
-          });
+        if (error) {
+          dispatch({ type: 'error', nodeId, assistantId, ...error, turnId });
           onTurnEnd?.('error', nodeId);
           onTerminal?.();
           return;
         }
-        if (stopReason === 'error') {
-          dispatch({
-            type: 'error', nodeId, assistantId,
-            message: 'Agent process exited before completing the turn.',
-            errorKind: 'turn_outcome_unknown', turnId,
-          });
-          onTurnEnd?.('error', nodeId);
-          onTerminal?.();
-          return;
-        }
-        const aborted = stopReason === 'cancel' || stopReason === 'cancelled' || undefined;
-        dispatch({ type: 'done', nodeId, assistantId, completedAt, aborted });
+        dispatch({
+          type: 'done', nodeId, assistantId, completedAt, aborted,
+          ...(turnId ? { turnId } : {}),
+          ...(completion ? { completion } : {}),
+        });
         onTurnEnd?.('done', nodeId);
-        onStreamComplete?.();
+        if (!aborted) onStreamComplete?.();
         onTerminal?.();
       },
       onErrorPayload: (data) => handleError(data.message, data.assistantId, data.turnId, data.code, data.recoverable, data.completedAt),
@@ -220,6 +226,8 @@ export function createBackgroundTurnBinding({
     function handleError(message: string, incomingAssistantId?: string, incomingTurnId?: string, code?: string, recoverable?: boolean, completedAt?: number) {
         rememberEnvelope(incomingAssistantId, incomingTurnId);
         settleCancellationObservation(chatId, turnId, { state: 'error', detail: message });
+        effects.runtimeMessage(message);
+        effects.end(false);
         if (assistantId) dispatch({ type: 'error', nodeId, assistantId, message, errorKind: code, recoverable, completedAt, turnId });
         onTurnEnd?.('error', nodeId);
         onTerminal?.();

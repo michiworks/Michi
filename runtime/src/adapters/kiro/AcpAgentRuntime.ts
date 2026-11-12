@@ -1,8 +1,11 @@
 import { assertToolCatalog, catalogUnavailable, guardError } from '../../core/restrictedCatalog';
 import { assertReleaseOwnership } from '../../core/release';
+import { hostSkillsPrefix, scanSkillRoots, type SkillScanRoot } from '../../core/skills';
+import { kiroSkillRoots } from './kiroSkills';
+import { kiroHostCommands } from './v3Commands';
 import { RuntimeModelCatalog } from '../../core/modelCatalog';
-import { PendingSessionAcquisitions } from '../../core/sessionAcquisition';
-import { isCrewMemoryMode } from 'michi-shared';
+import { PendingSessionAcquisitions, assertSessionReusable, sessionIdentity } from '../../core/sessionAcquisition';
+import { isCrewMemoryMode, type AgentCommand } from 'michi-shared';
 import { AcpClient } from "./acpClient";
 import type { McpSlotProvider, McpSlotCallbacks, McpSlotEventSink } from "../../contract/mcp";
 import type {
@@ -12,15 +15,20 @@ import type {
     AgentTurnInput,
     LoadAgentSessionOptions,
     ModelInfo,
+    NativeSessionDiscardInput,
+    NativeSessionDiscardResult,
     NewAgentSessionOptions,
     ForkAgentSessionOptions,
+    IdleReleaseVerdict,
+    ListRuntimeSkillsOptions,
     RuntimeAvailability,
+    RuntimeSkillListing,
     RuntimeSessionOwner,
     RuntimeToolProfile,
     RuntimePermissionBroker,
     SessionMode,
 } from "../../contract/types";
-import { assertOwner, interactiveOwner } from "../../contract/types";
+import { interactiveOwner } from "../../contract/types";
 import { isHeadlessOwner, isInteractiveOwner } from './kiroOwner';
 import { AcpAgentSession } from "./AcpAgentSession";
 import { acpPermissionToolName } from "./kiroToolNames";
@@ -35,16 +43,18 @@ import { NativeResumeFailedError, NativeResumeUnavailableError } from '../../con
 import { classifyAcpError, isNativeSessionUnavailable, KiroCancelRecoveryBusyError } from './acpErrors';
 import { ACPNotRunningError, ACPProcessExitedError, probeKiroCli } from './acpClient';
 import { KiroTitleGenerator } from './kiroTitleGenerator';
+import { kiroModelInfos, markKiroV2EffortSupport, reasoningConfigOption, withThoughtLevels, type KiroModelSource } from './kiroModels';
 import type { GenerateTitleOptions } from '../../contract/types';
-import { configValues, KIRO_APPROVE_FOR_ME_PRESET, KIRO_METADATA_DONE_SENTINEL, michiMcpServer, michiSessionMcpServer, rewindPoints, type AcpConfigOption, type AcpMcpServer, type KiroEngine } from './kiroProtocol';
+import { configValues, KIRO_APPROVE_FOR_ME_PRESET, KIRO_METADATA_DONE_SENTINEL, michiMcpServer, michiSessionMcpServer, restrictedSessionName, rewindPoints, type AcpConfigOption, type AcpMcpServer, type AcpSessionOptions, type KiroEngine, type KiroPageTurnAttribution } from './kiroProtocol';
 import { kiroDescriptor, type KiroDescriptorOverride } from './kiroDescriptor';
 import { KIRO_FLAVOR, joinSessionMetadata, type AcpAgentFlavor } from './acpAgentFlavor';
+import { discardKiroSessionFiles, KIRO_V3_SESSION_ID, kiroSessionStored, kiroSessionTrace, runningKiroStoreProcesses } from './kiroSessionFiles';
 import type { RuntimeDescriptor } from '../../contract/descriptor';
 import type { PreambleInput, RuntimeHost, RuntimePortName, WorkflowRunContext } from '../../contract/host';
 import { assertHostPorts } from '../../core/defaultHost';
-import { sanitizeReasoningLevels, isReasoningLevel } from 'michi-shared';
 import type { AcpLaunch, AcpClientOptions, AcpProcessOptions } from './acpClient';
-import { createKiroWorkflowBridge } from '../../core/workflows/kiroWorkflowBridge';
+import { createKiroWorkflowBridge, type KiroWorkflowBridge } from '../../core/workflows/kiroWorkflowBridge';
+import { sessionOwnerContext } from '../../core/ownerContext';
 
 // ---------------------------------------------------------------------------
 // Process lifecycle constants
@@ -56,21 +66,18 @@ const DEFAULT_IDLE_TTL_MS = 300_000;
 const DEFAULT_WARM_POOL_SIZE = 3;
 const DEFAULT_CONCURRENCY_CAP = 100;
 const DEFAULT_APPROVE_TIMEOUT_MS = 300_000;
-
+const DEFAULT_SESSION_IDLE_TTL_MS = 15 * 60_000;
 /**
- * kiro-cli v2 publishes no per-model effort metadata, but its `auto` router
- * rejects `/effort` ("Effort configuration is currently not available on
- * auto"). Mark it explicitly so the composer disables the control and session
- * setup skips applying effort instead of failing the turn. v3 reports this
- * through `_meta.kiro.hasEffort`, so it never needs the override.
+ * A session whose workflow is running or paused stays live: Kiro wakes it
+ * when the workflow finishes. Past this much quiet from its runs, or past
+ * the cap since the session's own last use, the runs are stopped first
+ * (the same numbers as Codex's background children and Claude's reclaim
+ * protection).
  */
-const KIRO_V2_MODELS_WITHOUT_EFFORT = new Set(["auto"]);
-
-export function markKiroV2EffortSupport(models: ModelInfo[]): ModelInfo[] {
-    return models.map((model) => KIRO_V2_MODELS_WITHOUT_EFFORT.has(model.id) && model.supportsReasoning === undefined
-        ? { ...model, supportsReasoning: false, supportedReasoningLevels: [] }
-        : model);
-}
+export const KIRO_BACKGROUND_IDLE_TTL_MS = 2 * 60 * 60_000;
+export const KIRO_BACKGROUND_IDLE_CAP_MS = 6 * 60 * 60_000;
+/** session/close or terminate on release; the host may hold its restore lock meanwhile. */
+const NATIVE_CLOSE_TIMEOUT_MS = 5_000;
 
 export interface OpenSessionResult {
     crewMemoryMode?: import("michi-shared").CrewMemoryMode;
@@ -175,12 +182,31 @@ export interface KiroAdapterOptions extends AcpProcessOptions {
     /** Host-owned restricted agent config and tool catalog policy. Absent: restricted sessions are refused. */
     restrictedAgent?: {
         ensure(dataDir: string, toolset: string, names: readonly string[]): { dir: string; agentName: string };
-        clientOptions(engine: KiroEngine, agentName: string): AcpClientOptions;
+        /** `kiroHome`: the worker of ephemeral sessions runs with this KIRO_HOME (ephemeral below). */
+        clientOptions(engine: KiroEngine, agentName: string, opts?: { kiroHome?: string }): AcpClientOptions;
         catalog(tags: readonly unknown[]): string[];
         /** Catalog entries outside the profile's tools that the host still accepts, in `catalog` terms. */
         extraAllowed?: readonly string[];
         isRestrictedMode?(modeId: string): boolean;
         verify(input: { client: AcpClient; sessionId: string; engine: KiroEngine; runtimeId: string; profile: RuntimeToolProfile; sinceSeq?: number }): Promise<string[]>;
+        /**
+         * Ephemeral restricted sessions (NewAgentSessionOptions.ephemeral, a
+         * Companion check-in; DESIGN-v2 §3.2, probe P1). Present: kiro-cli on
+         * v3 hosts them, and its descriptor says `ephemeralSessions:
+         * 'discard-after-release'`. They run on a worker of their own whose
+         * kiro-cli gets KIRO_HOME = `homeDir`, a directory the host owns, so
+         * none of the user's `~/.kiro` config (global mcp.json, hook files,
+         * agents, steering, memories) is read and their sessions are stored
+         * there; each session opens straight in the restricted agent.
+         */
+        ephemeral?: {
+            /** The KIRO_HOME of the ephemeral worker; nothing is created. */
+            homeDir(dataDir: string): string;
+            /** Creates (or keeps) that KIRO_HOME with the host's settings in it; returns it. */
+            prepareHome(dataDir: string): string;
+            /** Whether a session's workspace directory is one of the host's restricted agent directories. */
+            ownsWorkspace(dataDir: string, dir: string): boolean;
+        };
     };
     /**
      * Runtime host ports. Required; see KIRO_HOST_PORTS. A v3 session worker
@@ -204,6 +230,13 @@ export interface KiroAdapterOptions extends AcpProcessOptions {
      * cwd. 0 disables it. Default 5 minutes.
      */
     idleTtlMs?: number;
+    /**
+     * How long a chat session stays live after its last use before
+     * idleRelease lets the host release it (Michi:
+     * MICHI_KIRO_SESSION_IDLE_TTL_MS); the next message resumes it natively.
+     * 0 keeps every session. Default 15 minutes.
+     */
+    sessionIdleTtlMs?: number;
     /**
      * Number of pre-warmed ACP sessions to keep per cwd (Michi:
      * MICHI_KIRO_WARM_POOL_SIZE), at least 1. When a warmed session is
@@ -248,7 +281,31 @@ export interface KiroAdapterOptions extends AcpProcessOptions {
      * Set only on the dedicated worker that hosts one Meta agent session: its
      * kiro-cli runs in the toolset's agent directory with that agent selected.
      */
-    metaAgent?: { toolset: string; agentName: string };
+    metaAgent?: { toolset: string; agentName: string; kiroHome?: string };
+    /**
+     * The host's skill library as a folder Kiro reads like a workspace, its
+     * skills in `<folder>/.kiro/skills/<name>` (Michi: the kiro-workspace
+     * skill mount, whose path never changes). V3 chat sessions open it as an
+     * additional directory, each at its own session/new and session/load,
+     * never at initialize: one kiro-cli serves every chat of a cwd. Agent
+     * Runs and the Meta agent keep their own folders. Default: none.
+     */
+    skillLibraryWorkspace?: string;
+    /**
+     * Called before each V3 chat session opens skillLibraryWorkspace, so the
+     * host can bring the folder up to date first (Michi also removes anything
+     * it did not put there: every Kiro chat loads that folder's AGENTS.md,
+     * steering and skills). Default: none.
+     */
+    prepareSkillLibraryWorkspace?: () => void;
+    /**
+     * The folders the agent loads skills from for a cwd, the one that wins a
+     * name clash first (listSkills). Default: Kiro's, the workspace's
+     * `.kiro/skills` and then `~/.kiro/skills`.
+     */
+    skillRoots?: (cwd: string) => readonly SkillScanRoot[];
+    /** See AcpClientOptions.advertiseSkills. */
+    advertiseSkills?: () => boolean;
 }
 
 /** What AcpAgentRuntime is built from: the adapter's options plus the host's tool effects and MCP slots. */
@@ -319,7 +376,7 @@ export class AcpAgentRuntime implements AgentRuntime {
             ? [KIRO_APPROVE_FOR_ME_PRESET] : [];
     }
     get descriptor(): RuntimeDescriptor {
-        return kiroDescriptor({
+        const descriptor = kiroDescriptor({
             engine: this.engine,
             clients: [...this.pool.values(), ...[...this.isolatedWorkers()].flatMap((worker) => [...worker.pool.values()])],
             mcpSlots: !this.mcpRegistry ? 'none' : this.sessionAnchorsEnabled ? 'chat-groups' : 'per-session',
@@ -327,6 +384,21 @@ export class AcpAgentRuntime implements AgentRuntime {
             flavor: this.flavor,
             override: this.runtimeOptions.descriptorOverride,
         });
+        // Declared here, by kiro-cli itself, not in kiroDescriptor's shared
+        // topology: Crew and Antigravity build theirs from it and run none.
+        return this.hostsEphemeralSessions()
+            ? { ...descriptor, topology: { ...descriptor.topology, ephemeralSessions: 'discard-after-release' } }
+            : descriptor;
+    }
+
+    /**
+     * kiro-cli (not Crew, Antigravity or another ACP agent) on v3, with the
+     * host's ephemeral port: probes P1 and P1b (signed in, through the
+     * toolbox shim, kiro-cli 3.0.0) passed for v3 only (v2 was not probed).
+     */
+    private hostsEphemeralSessions(): boolean {
+        return this.flavor === KIRO_FLAVOR && this.engine === 'v3' && !this.runtimeOptions.launch
+            && !this.runtimeOptions.metaAgent && !!this.runtimeOptions.restrictedAgent?.ephemeral;
     }
     public readonly capabilities: AgentCapabilities;
     /** Native fork/rewind is attempted only while the descriptor advertises it. */
@@ -454,6 +526,10 @@ export class AcpAgentRuntime implements AgentRuntime {
      * duration the process is shut down. 0 disables idle cleanup.
      */
     private readonly idleTtlMs: number;
+    /** See KiroAdapterOptions.sessionIdleTtlMs. */
+    private readonly sessionIdleTtlMs: number;
+    /** Each process's workflow bridge (v3), for the runs a session launched. */
+    private readonly workflowBridges = new WeakMap<AcpClient, KiroWorkflowBridge>();
     /** Pre-warmed ACP sessions kept per cwd; see KiroAdapterOptions.warmPoolSize. */
     private readonly warmPoolSize: number;
     /**
@@ -485,6 +561,13 @@ export class AcpAgentRuntime implements AgentRuntime {
     private readonly metaAgentWorkers = new Map<string, SharedMetaAgentWorker>();
     /** Public session id → the shared Meta agent worker it is on (a subset of sessionWorkers). */
     private readonly metaAgentWorkerBySession = new Map<string, SharedMetaAgentWorker>();
+    /**
+     * The kiro-cli clients of check-in workers being stopped (in neither map
+     * above, their pool already emptied), until their process is gone:
+     * discardNativeSession must not remove a check-in session's files while
+     * one may still run.
+     */
+    private readonly stoppingCheckinClients = new Set<AcpClient>();
     private readonly sessionAnchorsEnabled: boolean;
     private readonly mcpSessionGroups = new Map<string, string>();
     /** ACP session id → its Meta agent gate (Meta agent workers only). */
@@ -529,6 +612,7 @@ export class AcpAgentRuntime implements AgentRuntime {
         this.concurrencyCap = options.concurrencyCap ?? DEFAULT_CONCURRENCY_CAP;
         this.processCap = options.processCap ?? DEFAULT_PROCESS_CAP;
         this.idleTtlMs = options.idleTtlMs ?? DEFAULT_IDLE_TTL_MS;
+        this.sessionIdleTtlMs = options.sessionIdleTtlMs ?? DEFAULT_SESSION_IDLE_TTL_MS;
         this.warmPoolSize = Math.max(1, options.warmPoolSize ?? DEFAULT_WARM_POOL_SIZE);
         // The sidecar title model is Kiro's; Crew turns sidecar titles off.
         const titleConfig = this.host.config.titleModel('kiro');
@@ -548,11 +632,40 @@ export class AcpAgentRuntime implements AgentRuntime {
 
     /** How this runtime's ACP clients find and run kiro-cli, and report. */
     private acpClientOptions(): AcpClientOptions {
-        const { kiroCli, acpIdleTimeoutMs, spawnEnv, preloadTools, onSignedOut } = this.runtimeOptions;
+        const { kiroCli, acpIdleTimeoutMs, spawnEnv, preloadTools, onSignedOut, skillLibraryWorkspace, advertiseSkills } = this.runtimeOptions;
         return { kiroCli, acpIdleTimeoutMs, spawnEnv, preloadTools, onSignedOut,
             ...(this.flavor.signIn ? { signIn: this.flavor.signIn } : {}),
             ...(this.standardAcp ? { displayName: this.label } : {}),
+            ...(skillLibraryWorkspace ? { skillLibraryWorkspace } : {}),
+            ...(advertiseSkills ? { advertiseSkills } : {}),
+            ...(this.flavor.unmarkedSkills ? { skillCommandNames: (cwd: string) => this.skillCommandNames(cwd) } : {}),
+            ...(this.engine !== 'v3' ? { commandInterface: this.hostCommands() } : {}),
             ...this.clientOptions(), observability: this.host.observability };
+    }
+
+    /** The names the agent advertises a cwd's skills by (AcpClientOptions.skillCommandNames). */
+    private async skillCommandNames(cwd: string): Promise<ReadonlySet<string>> {
+        return new Set((await this.listSkills({ cwd })).skills.map((skill) => skill.nativeName ?? skill.name));
+    }
+
+    /** What a V3 chat session opens besides its cwd: the host's skill library (KiroAdapterOptions.skillLibraryWorkspace). */
+    private chatSessionDirectories(): Pick<AcpSessionOptions, 'additionalDirectories'> {
+        const library = this.runtimeOptions.skillLibraryWorkspace;
+        if (!library || this.engine !== 'v3') return {};
+        try { this.runtimeOptions.prepareSkillLibraryWorkspace?.(); }
+        catch (error) {
+            this.host.observability.log('warn', 'acp', 'kiro skill library folder could not be prepared', { error: (error as Error).message });
+        }
+        return { additionalDirectories: [library] };
+    }
+
+    /** The skills the agent loads for a cwd, read from its skill folders (KiroAdapterOptions.skillRoots). */
+    async listSkills(opts: ListRuntimeSkillsOptions): Promise<RuntimeSkillListing> {
+        return scanSkillRoots(this.runtimeOptions.skillRoots?.(opts.cwd) ?? kiroSkillRoots(opts.cwd));
+    }
+
+    hostCommands(): AgentCommand[] {
+        return (this.flavor.hostCommands ?? kiroHostCommands(this.engine)).map((command) => ({ ...command }));
     }
 
     private get usesSessionWorkers(): boolean { return this.engine === 'v3' && !this.isolatedSession && !this.sessionAnchorsEnabled; }
@@ -578,14 +691,14 @@ export class AcpAgentRuntime implements AgentRuntime {
     }
 
     /** The host's session-id reminder, on a shared v3 MCP catalog only. */
-    getMcpSessionReminder(sid: string): string {
+    getMcpSessionReminder(sid: string, turn?: { skill?: boolean }): string {
         if (!this.sessionAnchorsEnabled) return '';
-        return this.host.prompt.mcpSessionReminder?.(sid) ?? '';
+        return this.host.prompt.mcpSessionReminder?.(sid, turn) ?? '';
     }
 
     beginMcpSessionTurn(
         sid: string,
-        getActivePageTurnAttribution: () => { turnId: string; assistantId: string } | null,
+        getActivePageTurnAttribution: () => KiroPageTurnAttribution | null,
     ): () => void {
         const binding = this.getBindingByNativeSid(sid);
         const group = binding && this.mcpSessionGroups.get(binding.cwd);
@@ -654,7 +767,7 @@ export class AcpAgentRuntime implements AgentRuntime {
      * changed config starts a new worker and the family's old one drains.
      */
     private async openSharedMetaAgentSession(
-        id: string, family: string, key: string, dir: string, metaAgent: { toolset: string; agentName: string },
+        id: string, family: string, key: string, dir: string, metaAgent: { toolset: string; agentName: string; kiroHome?: string },
         open: (worker: AcpAgentRuntime) => Promise<AgentSession>,
     ): Promise<AgentSession> {
         if (this.closing) throw new Error('Kiro runtime is shutting down');
@@ -703,7 +816,15 @@ export class AcpAgentRuntime implements AgentRuntime {
         this.cancelMetaAgentIdle(entry);
         if (this.metaAgentWorkers.get(entry.key) === entry) this.metaAgentWorkers.delete(entry.key);
         this.host.observability.perf.mark("metaAgentWorker:stop", { cwd: entry.worker.defaultCwd });
-        await entry.worker.shutdown().catch(() => {});
+        // A check-in worker's clients stay counted (shutdown empties its pool)
+        // until their process is gone, also when its exit could not be confirmed.
+        const clients = entry.worker.runtimeOptions.metaAgent?.kiroHome ? [...entry.worker.pool.values()] : [];
+        for (const client of clients) this.stoppingCheckinClients.add(client);
+        try {
+            await entry.worker.shutdown().catch(() => {});
+        } finally {
+            for (const client of clients) if (!client.processRunning()) this.stoppingCheckinClients.delete(client);
+        }
     }
 
     /** Take no new sessions; stop now if none are left, else when the last is released. */
@@ -809,6 +930,12 @@ export class AcpAgentRuntime implements AgentRuntime {
             if (this.liveSessionCountForCwd(cwd) > 0) return;
             const client = this.pool.get(cwd);
             if (!client) return;
+            // A workflow (or a request) still runs in this process with no
+            // chat bound to it: stopping now would end it. Look again later.
+            if (client.hasHealthyWork?.()) {
+                this.scheduleIdleCleanup(cwd);
+                return;
+            }
             this.host.observability.perf.mark("idleCleanup:kill", { cwd });
             this.pool.delete(cwd);
             this.cwdLastActivity.delete(cwd);
@@ -844,7 +971,7 @@ export class AcpAgentRuntime implements AgentRuntime {
         let oldestCwd: string | null = null;
         let oldestTs = Infinity;
         for (const [cwd, ts] of this.cwdLastActivity) {
-            if (ts < oldestTs && this.liveSessionCountForCwd(cwd) === 0 && this.pool.has(cwd)) {
+            if (ts < oldestTs && this.liveSessionCountForCwd(cwd) === 0 && this.pool.has(cwd) && !this.pool.get(cwd)!.hasHealthyWork?.()) {
                 oldestCwd = cwd;
                 oldestTs = ts;
             }
@@ -893,6 +1020,31 @@ export class AcpAgentRuntime implements AgentRuntime {
             if (!group) throw new Error('Missing MCP session group');
             this.mcpRegistry!.bindSession(group, binding.nativeSessionId, binding.slotId);
         }
+    }
+
+    /**
+     * Bind a session this runtime opened or loaded, and build its
+     * AcpAgentSession from the same record: the session's per-turn checks
+     * (tool profile, permission broker, owner) read what the binding holds.
+     * A chat slot's parentChatId and nodeId must be rebound before this, as
+     * storeBinding binds a v3 chat group.
+     */
+    private bindSession(binding: KiroSessionBinding, session: { enableFollowUps: boolean; parentChatId?: string }): AcpAgentSession {
+        if (binding.slotId) this.slotByChatId.set(binding.nativeSessionId, binding.slotId);
+        this.sessionCwd.set(binding.nativeSessionId, binding.cwd);
+        this.bindNodeSession(binding.publicSessionId, binding.nativeSessionId);
+        this.storeBinding(binding);
+        return new AcpAgentSession(binding.publicSessionId, binding.nativeSessionId, this, binding.cwd, {
+            runtimeId: this.id,
+            flavor: this.flavor,
+            owner: binding.owner,
+            runtimeProfileHash: binding.runtimeProfileHash,
+            toolProfile: binding.toolProfile,
+            permissionBroker: binding.permissionBroker,
+            ownerUserId: binding.ownerUserId,
+            workspaceId: binding.workspaceId,
+            ...session,
+        });
     }
 
     /** Look up a binding by public session id (node id or Attempt id). */
@@ -1162,7 +1314,12 @@ export class AcpAgentRuntime implements AgentRuntime {
 
     private clientOptions(): AcpClientOptions | undefined {
         const meta = this.runtimeOptions.metaAgent;
-        return meta ? this.runtimeOptions.restrictedAgent!.clientOptions(this.engine, meta.agentName) : undefined;
+        if (!meta) return undefined;
+        // The check-in worker exports no agent telemetry, whatever the host's
+        // options say: Kiro reports even ids of a hidden turn otherwise (P1b).
+        return meta.kiroHome
+            ? { ...this.runtimeOptions.restrictedAgent!.clientOptions(this.engine, meta.agentName, { kiroHome: meta.kiroHome }), telemetryOff: true }
+            : this.runtimeOptions.restrictedAgent!.clientOptions(this.engine, meta.agentName);
     }
 
     ensureClient(cwd: string, model?: string): Promise<AcpClient> {
@@ -1249,7 +1406,7 @@ export class AcpAgentRuntime implements AgentRuntime {
         if (!old?.needsSessionRecovery(sid)) return this.ensureClient(cwd);
         // Reloading here would rebuild an ordinary chat slot; reopen through the runtime instead.
         if (this.runtimeOptions.metaAgent) {
-            return Promise.reject(new NativeResumeFailedError(new Error('The Meta agent session must be reopened after a stuck cancellation')));
+            return Promise.reject(new NativeResumeFailedError(new Error(`The ${restrictedSessionName(this.runtimeOptions.metaAgent.toolset)} session must be reopened after a stuck cancellation`)));
         }
         if (old.hasHealthyWork()) return Promise.reject(new KiroCancelRecoveryBusyError({ workflowRunning: old.hasOpenWorkflowRuns() }));
         const binding = this.getBindingByNativeSid(sid);
@@ -1562,43 +1719,19 @@ export class AcpAgentRuntime implements AgentRuntime {
     private absorbModels(sid: string, models: any, configOptions?: AcpConfigOption[]): void {
         if (!models) return;
         if (Array.isArray(models.availableModels)) {
-            this.storeAvailableModels(this.withThoughtLevels(models.availableModels, configOptions));
+            this.storeAvailableModels(withThoughtLevels(models.availableModels, this.modelSource, configOptions));
         }
         if (typeof models.currentModelId === "string" && models.currentModelId) {
             this.sessionCurrentModel.set(sid, models.currentModelId);
         }
     }
 
-    /**
-     * A standard ACP agent's reasoning is one session config option
-     * (category thought_level) for every model: its levels go with each
-     * catalog entry for normalizeModels. Kiro's catalog is kept as it is.
-     */
-    private withThoughtLevels(list: any[], configOptions?: AcpConfigOption[]): any[] {
-        if (!this.standardAcp) return list;
-        const option = configOptions?.find((c) => c.category === 'thought_level' || c.id === 'thought_level');
-        const levels = sanitizeReasoningLevels(configValues(option).map((value) => value.value)) ?? [];
-        return levels.length ? list.map((model) => ({ ...model, thoughtLevels: levels })) : list;
+    private normalizeModels(list: any[]): ModelInfo[] {
+        return kiroModelInfos(list, this.modelSource);
     }
 
-    private normalizeModels(list: any[]): ModelInfo[] {
-        const models = list
-            .map((m: any): ModelInfo => ({
-                id: String(m?.modelId ?? ""),
-                label: typeof m?.name === "string" ? m.name : undefined,
-                description: typeof m?.description === "string" ? m.description : undefined,
-                ...(this.engine === 'v3' ? {
-                    supportsReasoning: m?._meta?.kiro?.hasEffort === true,
-                    supportedReasoningLevels: sanitizeReasoningLevels(m?._meta?.kiro?.effortLevels),
-                    ...(isReasoningLevel(m?._meta?.kiro?.defaultEffortLevel)
-                        ? { defaultReasoning: m._meta.kiro.defaultEffortLevel } : {}),
-                } : this.standardAcp && sanitizeReasoningLevels(m?.thoughtLevels)?.length ? {
-                    supportsReasoning: true,
-                    supportedReasoningLevels: sanitizeReasoningLevels(m.thoughtLevels),
-                } : {}),
-            }))
-            .filter((m) => m.id);
-        return this.engine === 'v2' ? markKiroV2EffortSupport(models) : models;
+    private get modelSource(): KiroModelSource {
+        return { engine: this.engine, standardAcp: this.standardAcp };
     }
 
     private storeAvailableModels(list: any[]): void {
@@ -1642,7 +1775,7 @@ export class AcpAgentRuntime implements AgentRuntime {
         let result: { sessionId: string; modes?: any; models?: any; configOptions?: any; _meta?: Record<string, unknown> };
         try {
             result = await c.newSession(mcpServers, { metadata, ...(workflows ? { workflowsEnabled: true } : {}),
-                ...(policyPresets.length ? { policyPresets } : {}) });
+                ...(policyPresets.length ? { policyPresets } : {}), ...this.chatSessionDirectories() });
         } catch (err) {
             if (slotId) await this.mcpRegistry?.dispose(slotId).catch(() => {});
             throw err;
@@ -1712,7 +1845,7 @@ export class AcpAgentRuntime implements AgentRuntime {
         let result: { modes?: any; models?: any; configOptions?: AcpConfigOption[]; _meta?: Record<string, unknown> };
         try {
             result = await c.loadSession(sessionId, cwd, mcpServers, remaining(), { modelId: model, ...(opts.workflows ? { workflowsEnabled: true } : {}),
-                ...(opts.policyPresets?.length ? { policyPresets: opts.policyPresets } : {}) });
+                ...(opts.policyPresets?.length ? { policyPresets: opts.policyPresets } : {}), ...this.chatSessionDirectories() });
             if (model && result.models?.currentModelId !== model) {
                 await c.setModel(sessionId, model, remaining());
                 result.models = { ...result.models, currentModelId: model };
@@ -1884,7 +2017,7 @@ export class AcpAgentRuntime implements AgentRuntime {
             c.destroySession(sid);
             this.absorbFreshModes(this.defaultCwd, modes);
             const list = Array.isArray(modes?.availableModes) ? modes.availableModes : [];
-            if (Array.isArray(models?.availableModels)) this.storeAvailableModels(this.withThoughtLevels(models.availableModels, configOptions));
+            if (Array.isArray(models?.availableModels)) this.storeAvailableModels(withThoughtLevels(models.availableModels, this.modelSource, configOptions));
             this.host.observability.perf.measure("getAvailableModes:fallback_session_new", t0);
             return list;
         })().finally(() => {
@@ -1898,7 +2031,7 @@ export class AcpAgentRuntime implements AgentRuntime {
         const worker = this.workerForNativeId(sid);
         if (worker) return worker.setMode(sid, modeId);
         const meta = this.runtimeOptions.metaAgent;
-        if (meta && modeId !== meta.agentName) throw new Error('The Meta agent cannot switch to another Kiro agent');
+        if (meta && modeId !== meta.agentName) throw new Error(`The ${restrictedSessionName(meta.toolset)} session cannot switch to another Kiro agent`);
         const cwd = this.getCwdForSession(sid);
         if (!cwd) throw new Error("unknown chat");
         const c = this.pool.get(cwd);
@@ -1963,7 +2096,7 @@ export class AcpAgentRuntime implements AgentRuntime {
     ): Promise<{ success: boolean; message?: string; data?: unknown }> {
         const worker = this.workerForNativeId(sid);
         if (worker) return worker.executeCommand(sid, command, args);
-        if (this.runtimeOptions.metaAgent) return { success: false, message: 'Kiro commands are off for the Meta agent.' };
+        if (this.runtimeOptions.metaAgent) return { success: false, message: `Kiro commands are off in the ${restrictedSessionName(this.runtimeOptions.metaAgent.toolset)} session.` };
         const cwd = this.getCwdForSession(sid);
         if (!cwd) throw new Error("unknown session");
         const c = this.pool.get(cwd);
@@ -2027,6 +2160,7 @@ export class AcpAgentRuntime implements AgentRuntime {
             },
             approves: (parentSessionId, request) => this.chatApprovesWorkflowRequest(parentSessionId, request.toolCall, request.meta),
         });
+        this.workflowBridges.set(client, bridge);
         client.setWorkflowRouter({
             onEvent: (method, params) => bridge.handle(method, params),
             isStepSession: (sessionId) => bridge.isStepSession(sessionId),
@@ -2086,12 +2220,7 @@ export class AcpAgentRuntime implements AgentRuntime {
         const publicId = this.publicIdByNativeSid.get(nativeSessionId);
         const binding = publicId ? this.bindings.get(publicId) : undefined;
         if (!binding) return null;
-        if (!binding.ownerUserId && this.host.principal.enforceUserOwnership()) return null;
-        return {
-            ownerUserId: this.host.principal.resolve(binding.ownerUserId),
-            workspaceId: binding.workspaceId,
-            owner: binding.owner,
-        };
+        return sessionOwnerContext(this.host.principal, binding.ownerUserId, binding.workspaceId, binding.owner);
     }
 
     /**
@@ -2110,26 +2239,24 @@ export class AcpAgentRuntime implements AgentRuntime {
      */
     async newSession(opts: NewAgentSessionOptions): Promise<AgentSession> {
         if (this.host.profile.isRestricted(opts.toolProfile)) return this.acquireSession(opts, () => this.openMetaAgentSession(opts, 'new'));
+        // Only a restricted session runs on the check-in worker; an ordinary
+        // chat process would keep its native record where discard never looks.
+        if (opts.ephemeral) throw new Error(`${this.label} opens ephemeral sessions only for restricted profiles`);
         return this.acquireSession(opts, () => this.createSession(opts));
     }
 
     private async acquireSession(opts: NewAgentSessionOptions | LoadAgentSessionOptions,
         create: () => Promise<AgentSession>): Promise<AgentSession> {
-        const id = isHeadlessOwner(opts.owner) ? opts.owner.key
-            : ('nodeId' in opts ? opts.nodeId : undefined) ?? opts.sessionId;
+        const requestedId = ('nodeId' in opts ? opts.nodeId : undefined) ?? opts.sessionId;
         // Legacy callers let ACP allocate the public id; no id can be joined yet.
-        if (!id) return create();
-        const owner = opts.owner ?? interactiveOwner(id);
-        const compatible = (session: AgentSession) => {
-            assertOwner(session.owner ?? interactiveOwner(session.id), owner);
-            const binding = this.getBinding(id);
-            if (binding?.ownerUserId !== (opts.ownerUserId ?? null)) throw new Error('session user owner mismatch');
-            if ((session.runtimeProfileHash ?? null) !== (opts.profileHash ?? null)) throw new Error(`session ${id} runtime profile hash mismatch`);
-            return session;
-        };
+        if (!requestedId && !isHeadlessOwner(opts.owner)) return create();
+        const { owner, id } = sessionIdentity(opts.owner, requestedId);
+        // AcpAgentSession keeps no user; its binding does, and none never matches.
+        const compatible = (session: AgentSession) => assertSessionReusable(session,
+            { owner, ownerUserId: opts.ownerUserId, profileHash: opts.profileHash }, () => this.getBinding(id)?.ownerUserId);
         return this.acquisitions.acquire(id, async () => {
             const existing = this.acquiredSessions.get(id);
-            if (existing && this.getBinding(id)) return compatible(existing);
+            if (existing && this.getBinding(id)) return existing;
             const session = await create();
             this.acquiredSessions.set(id, session);
             return session;
@@ -2300,11 +2427,7 @@ export class AcpAgentRuntime implements AgentRuntime {
         }
 
         if (memory && isInteractiveOwner(owner)) memory.keep(owner.key);
-        this.sessionCwd.set(sid, opts.cwd);
-        this.bindNodeSession(publicId, sid);
-
-        // Store the binding record for owner-aware lookups and release guards.
-        this.storeBinding({
+        const session = this.bindSession({
             publicSessionId: publicId,
             nativeSessionId: sid,
             owner,
@@ -2316,21 +2439,7 @@ export class AcpAgentRuntime implements AgentRuntime {
             permissionBroker: opts.permissionBroker,
             slotId,
             modelId: opts.model ?? null,
-        });
-
-        const enableFollowUps = isAgentRun ? false : (opts.enableFollowUps !== false);
-        const session = new AcpAgentSession(publicId, sid, this, opts.cwd, {
-            runtimeId: this.id,
-            flavor: this.flavor,
-            parentChatId: opts.parentChatId,
-            enableFollowUps,
-            owner,
-            runtimeProfileHash: opts.profileHash ?? null,
-            toolProfile: opts.toolProfile,
-            permissionBroker: opts.permissionBroker,
-            ownerUserId: opts.ownerUserId ?? null,
-            workspaceId: opts.workspaceId ?? null,
-        });
+        }, { parentChatId: opts.parentChatId, enableFollowUps: !isAgentRun && opts.enableFollowUps !== false });
 
         if (!isAgentRun) {
             // Walk the parent's chain (parent's own ancestors + parent itself).
@@ -2353,9 +2462,12 @@ export class AcpAgentRuntime implements AgentRuntime {
                 ? this.host.prompt.renderBranchContext(opts.branchContext)
                 : null;
             const preamble = this.firstMessagePrefix({
-                enableFollowUps,
+                enableFollowUps: session.getEnableFollowUps(),
+                // A primary Agent's allow-list: the host names only the tools it has.
+                toolProfile: opts.toolProfile,
                 cwd: opts.cwd,
                 contextManifest: opts.contextManifest,
+                ...(opts.artifactCount !== undefined ? { artifactCount: opts.artifactCount } : {}),
                 extraContexts: opts.extraContexts,
                 ancestors: ancestorChain,
                 mergeContexts: [
@@ -2363,8 +2475,9 @@ export class AcpAgentRuntime implements AgentRuntime {
                     ...(opts.mergeContexts ?? []),
                 ],
                 workspaceInstructions,
+                ...this.hostSkills(opts.toolProfile),
             });
-            session.primeFirstMessage([preamble, opts.bootstrapInstructions].filter(Boolean).join("\n\n"));
+            session.primeFirstMessage(this.host.profile.composeFirstTurnPrefix(preamble, opts.bootstrapInstructions, opts.toolProfile));
         } else if (opts.bootstrapInstructions) {
             // Agent Run sessions use bootstrap instructions as the first-message preamble.
             session.primeFirstMessage(opts.bootstrapInstructions);
@@ -2395,18 +2508,25 @@ export class AcpAgentRuntime implements AgentRuntime {
         const toolset = this.assertMetaAgentRuntime(opts.toolProfile);
         const meta = this.runtimeOptions.metaAgent;
         if (meta) {
-            if (meta.toolset !== toolset) throw new Error('This Kiro worker hosts the other Meta agent toolset');
+            if (meta.toolset !== toolset) throw new Error(`This Kiro worker hosts the ${restrictedSessionName(meta.toolset)} session, not the ${restrictedSessionName(toolset)} one`);
             return mode === 'new'
                 ? this.createMetaAgentSession(opts as NewAgentSessionOptions)
                 : this.restoreMetaAgentSession(opts as LoadAgentSessionOptions);
         }
         const id = ('nodeId' in opts ? opts.nodeId : undefined) ?? opts.sessionId;
-        if (!id || (opts.owner && opts.owner.mode !== 'interactive')) throw new Error('The Meta agent runs only as a chat session');
+        if (!id || (opts.owner && opts.owner.mode !== 'interactive')) throw new Error(`The ${restrictedSessionName(toolset)} session runs only as a chat session`);
+        const ephemeral = mode === 'new' && (opts as NewAgentSessionOptions).ephemeral === true;
+        if (ephemeral && !this.hostsEphemeralSessions()) {
+            throw new Error(`${this.label} keeps no ephemeral sessions here (kiro-cli on v3 with the host's ephemeral support only)`);
+        }
         const names = opts.toolProfile?.allowedToolNames ?? [];
         const { dir, agentName } = this.runtimeOptions.restrictedAgent!.ensure(this.host.config.dataDir(), toolset, names);
-        const family = [toolset, this.host.principal.enforceUserOwnership() ? opts.ownerUserId ?? '' : ''].join('\u0000');
-        const key = [family, agentName, dir, ...[...new Set(names)].sort()].join('\u0000');
-        return this.openSharedMetaAgentSession(id, family, key, dir, { toolset, agentName }, (worker) => mode === 'new'
+        const kiroHome = ephemeral ? this.runtimeOptions.restrictedAgent!.ephemeral!.prepareHome(this.host.config.dataDir()) : undefined;
+        // Ephemeral sessions get workers of their own (another KIRO_HOME): a
+        // family apart, so neither kind retires the other's worker.
+        const family = [toolset, this.host.principal.enforceUserOwnership() ? opts.ownerUserId ?? '' : '', ...(kiroHome ? ['ephemeral'] : [])].join('\u0000');
+        const key = [family, agentName, dir, kiroHome ?? '', ...[...new Set(names)].sort()].join('\u0000');
+        return this.openSharedMetaAgentSession(id, family, key, dir, { toolset, agentName, ...(kiroHome ? { kiroHome } : {}) }, (worker) => mode === 'new'
             ? worker.newSession({ ...opts, cwd: dir } as NewAgentSessionOptions)
             : worker.loadSession({ ...opts, cwd: dir } as LoadAgentSessionOptions));
     }
@@ -2419,8 +2539,8 @@ export class AcpAgentRuntime implements AgentRuntime {
         gate: MetaAgentGate,
         getSession: () => AcpAgentSession | undefined,
     ): { slotId: string; mcpServers: AcpMcpServer[] } {
-        if (!this.mcpRegistry) throw new Error('The Meta agent needs Michi\'s MCP server');
         const toolset = this.runtimeOptions.metaAgent!.toolset;
+        if (!this.mcpRegistry) throw new Error(`The ${restrictedSessionName(toolset)} session needs Michi's MCP server`);
         let slotId: string | undefined;
         const slot = this.mcpRegistry.create(parentChatId, this.defaultCwd, opts.ownerUserId ?? null, {
             ...this.makeSlotCallbacks(() => slotId),
@@ -2436,18 +2556,45 @@ export class AcpAgentRuntime implements AgentRuntime {
         return { slotId, mcpServers: [michiMcpServer(this.engine, this.mcpRegistry.endpoint(slotId))] };
     }
 
-    /** Select the toolset's agent (v3 ignores `--agent`), apply model settings, then check the catalog. */
+    /**
+     * A check-in worker's session must live in the worker's own KIRO_HOME,
+     * Michi's directory, where discard looks: kiro-cli 3.0 writes its
+     * `session.json` there before it answers session/new (P1b). If a launcher
+     * (a CLI wrapper, a kiro-cli that ignores KIRO_HOME)
+     * stored it anywhere else, such as `~/.kiro`, the check-in does not run:
+     * the user's hooks and history tools would see it and discard could not
+     * remove it. Fails closed with a guard error; the caller removes the session.
+     */
+    private async assertStoredUnderKiroHome(sid: string, kiroHome: string, toolset: string): Promise<void> {
+        for (let attempt = 0; attempt < 10; attempt++) {
+            if (kiroSessionStored(kiroHome, sid)) return;
+            await new Promise((resolve) => setTimeout(resolve, 50));
+        }
+        throw guardError(this.host, {
+            runtimeId: this.id, toolset, unexpectedTools: [],
+            detail: `Kiro did not store check-in session ${sid} under Michi's KIRO_HOME (${kiroHome}); the check-in is not run`,
+        });
+    }
+
+    /**
+     * Select the toolset's agent (v3 ignores `--agent`), apply model settings,
+     * then check the catalog. A v3 session opened in the agent
+     * (`openedInAgent`: session/new carried its modeId and Kiro answered in
+     * it) needs no switch, and its catalog is the one Kiro published while
+     * opening it: a `set_mode` to the current agent publishes none (P1).
+     */
     private async selectVerifiedMetaAgent(
         c: AcpClient, sid: string, currentModeId: string | undefined, profile: RuntimeToolProfile,
-        model: string | null | undefined, reasoning: string | null | undefined,
+        model: string | null | undefined, reasoning: string | null | undefined, openedInAgent = false,
     ): Promise<void> {
         const meta = this.runtimeOptions.metaAgent!;
-        const since = c.toolCatalog(sid)?.seq ?? 0;
-        if (this.engine === 'v3' || currentModeId !== meta.agentName) {
+        const inAgent = openedInAgent && this.engine === 'v3' && currentModeId === meta.agentName;
+        const since = inAgent ? 0 : c.toolCatalog(sid)?.seq ?? 0;
+        if (!inAgent && (this.engine === 'v3' || currentModeId !== meta.agentName)) {
             try { await c.setMode(sid, meta.agentName); }
             catch (error) {
                 throw catalogUnavailable(this.host, this.id, meta.toolset,
-                    `Kiro did not select the Meta agent: ${error instanceof Error ? error.message : String(error)}`);
+                    `Kiro did not select the ${restrictedSessionName(meta.toolset)} agent: ${error instanceof Error ? error.message : String(error)}`);
             }
         }
         this.sessionCurrentMode.set(sid, meta.agentName);
@@ -2502,10 +2649,10 @@ export class AcpAgentRuntime implements AgentRuntime {
         const worker = this.workerForNativeId(sid);
         if (worker) return worker.assertMetaAgentReady(sid);
         const meta = this.runtimeOptions.metaAgent;
-        if (!meta) throw new Error('Not a Meta agent session');
+        if (!meta) throw new Error('Not a restricted session');
         const gate = this.metaAgentGates.get(sid);
         const binding = this.getBindingByNativeSid(sid);
-        if (!gate || !binding?.toolProfile) throw new Error('This Kiro Meta agent session has ended; open it again.');
+        if (!gate || !binding?.toolProfile) throw new Error(`This Kiro ${restrictedSessionName(meta.toolset)} session has ended; open it again.`);
         if (!gate.verified) throw catalogUnavailable(this.host, this.id, meta.toolset, 'this Kiro session has not passed its restriction check');
         if (this.engine === 'v3') {
             const error = this.metaAgentCatalogError(sid, binding.toolProfile, this.pool.get(binding.cwd)?.toolCatalog(sid)?.tags);
@@ -2518,15 +2665,11 @@ export class AcpAgentRuntime implements AgentRuntime {
         opts: NewAgentSessionOptions | LoadAgentSessionOptions, profile: RuntimeToolProfile,
         nodeId: string, sid: string, slotId: string, gate: MetaAgentGate,
     ): AcpAgentSession {
-        const owner: RuntimeSessionOwner = interactiveOwner(nodeId);
-        this.slotByChatId.set(sid, slotId);
-        this.sessionCwd.set(sid, this.defaultCwd);
-        this.bindNodeSession(nodeId, sid);
         this.metaAgentGates.set(sid, gate);
-        this.storeBinding({
+        return this.bindSession({
             publicSessionId: nodeId,
             nativeSessionId: sid,
-            owner,
+            owner: interactiveOwner(nodeId),
             cwd: this.defaultCwd,
             workspaceId: opts.workspaceId ?? null,
             ownerUserId: opts.ownerUserId ?? null,
@@ -2534,38 +2677,38 @@ export class AcpAgentRuntime implements AgentRuntime {
             toolProfile: profile,
             slotId,
             modelId: opts.model ?? null,
-        });
-        return new AcpAgentSession(nodeId, sid, this, this.defaultCwd, {
-            runtimeId: this.id,
-            parentChatId: 'parentChatId' in opts ? opts.parentChatId : undefined,
-            enableFollowUps: false,
-            owner,
-            runtimeProfileHash: opts.profileHash ?? null,
-            toolProfile: profile,
-            workspaceId: opts.workspaceId ?? null,
-            ownerUserId: opts.ownerUserId ?? null,
-        });
+        }, { parentChatId: 'parentChatId' in opts ? opts.parentChatId : undefined, enableFollowUps: false });
     }
 
     private async createMetaAgentSession(opts: NewAgentSessionOptions): Promise<AgentSession> {
         const profile = opts.toolProfile!;
         const nodeId = opts.sessionId;
-        if (!nodeId) throw new Error('The Meta agent needs a public session id');
         const toolset = this.runtimeOptions.metaAgent!.toolset;
+        if (!nodeId) throw new Error(`The ${restrictedSessionName(toolset)} session needs a public session id`);
         const c = await this.ensureClient(this.defaultCwd, opts.model ?? undefined);
         const gate: MetaAgentGate = { verified: false, failed: false };
         let session: AcpAgentSession | undefined;
         const { slotId, mcpServers } = this.metaAgentSlot(opts, profile, nodeId, '__pending__', gate, () => session);
         let sid: string | undefined;
+        // An ephemeral session opens in the restricted agent itself, so no
+        // MCP server of Kiro's default agent starts first (P1).
+        const kiroHome = this.runtimeOptions.metaAgent!.kiroHome;
+        const openInAgent = this.engine === 'v3' && !!kiroHome;
         try {
-            const result = await c.newSession(mcpServers);
+            const result = await c.newSession(mcpServers, openInAgent ? { modeId: this.runtimeOptions.metaAgent!.agentName } : {});
             sid = result.sessionId;
             const slot = this.mcpRegistry!.get(slotId);
             if (slot) slot.parentChatId = sid;
+            if (kiroHome) await this.assertStoredUnderKiroHome(sid, kiroHome, toolset);
             this.absorbModels(sid, result.models);
-            await this.selectVerifiedMetaAgent(c, sid, result.modes?.currentModeId, profile, opts.model, opts.reasoning);
+            await this.selectVerifiedMetaAgent(c, sid, result.modes?.currentModeId, profile, opts.model, opts.reasoning, openInAgent);
         } catch (error) {
-            if (sid) { c.destroySession(sid); this.sessionCurrentMode.delete(sid); this.sessionCurrentModel.delete(sid); }
+            if (sid) {
+                // A check-in session Kiro has recorded goes from its store now,
+                // wherever that is: no prompt has reached it yet.
+                if (kiroHome && c.isAlive() && c.supportsSessionDelete()) await c.deleteSession(sid).catch(() => {});
+                c.destroySession(sid); this.sessionCurrentMode.delete(sid); this.sessionCurrentModel.delete(sid);
+            }
             await this.mcpRegistry?.dispose(slotId).catch(() => {});
             throw error;
         }
@@ -2578,6 +2721,7 @@ export class AcpAgentRuntime implements AgentRuntime {
             toolProfile: profile,
             cwd: this.defaultCwd,
             contextManifest: opts.contextManifest,
+            ...(opts.artifactCount !== undefined ? { artifactCount: opts.artifactCount } : {}),
             extraContexts: opts.extraContexts,
             ancestors: [],
             mergeContexts: [
@@ -2624,6 +2768,13 @@ export class AcpAgentRuntime implements AgentRuntime {
         return session;
     }
 
+    /** Which skills the host names before a chat's first message: a V3 session lists the library itself (chatSessionDirectories). */
+    private hostSkills(toolProfile: RuntimeToolProfile | null | undefined): Pick<PreambleInput, 'hostSkills'> {
+        return hostSkillsPrefix(this.host.profile, {
+            interactive: true, toolProfile, librarySkillsLoaded: this.engine === 'v3' && !!this.runtimeOptions.skillLibraryWorkspace,
+        });
+    }
+
     /** The host's text before a new chat's first message, as the flavor places it. */
     private firstMessagePrefix(input: PreambleInput): string {
         return this.flavor.prompt.firstMessage(this.host, input);
@@ -2631,9 +2782,11 @@ export class AcpAgentRuntime implements AgentRuntime {
 
     /**
      * Kiro v2's `/effort` command; v3 and a standard ACP agent set a session
-     * config option. A standard ACP session without that option, or without
-     * the chosen level among its values, keeps its own reasoning rather than
-     * fail to open.
+     * config option. A session without that option, or without the chosen
+     * level among its values, keeps its own reasoning rather than fail to
+     * open: Kiro v3 can answer the first session/new after a start before it
+     * has listed its models, so the host may pick a level without knowing
+     * that Kiro's default model (auto) has none.
      */
     private async applyReasoning(client: AcpClient, sid: string, reasoning?: string | null): Promise<void> {
         if (!reasoning) return;
@@ -2642,15 +2795,12 @@ export class AcpAgentRuntime implements AgentRuntime {
             if (!result.success) throw new Error(result.message ?? 'Kiro rejected reasoning effort');
             return;
         }
-        const option = client.getSessionInfo(sid)?.configOptions?.find((c) => c.id === 'effortLevel' || c.category === 'thought_level');
-        if (this.standardAcp) {
-            const values = configValues(option).map((value) => value.value);
-            if (!option || (values.length > 0 && !values.includes(reasoning))) {
-                this.host.observability.log('warn', 'acp', `${this.label} session does not offer this reasoning level; keeping its own`, { sid, reasoning, offered: values });
-                return;
-            }
+        const option = reasoningConfigOption(client.getSessionInfo(sid)?.configOptions);
+        const values = configValues(option).map((value) => value.value);
+        if (!option || (values.length > 0 && !values.includes(reasoning))) {
+            this.host.observability.log('warn', 'acp', `${this.label} session does not offer this reasoning level; keeping its own`, { sid, reasoning, offered: values });
+            return;
         }
-        if (!option) throw new Error('The selected Kiro model does not expose reasoning effort');
         await client.setConfigOption(sid, option.id, reasoning);
     }
 
@@ -2661,8 +2811,8 @@ export class AcpAgentRuntime implements AgentRuntime {
 
     async forkSession(opts: ForkAgentSessionOptions): Promise<AgentSession> {
         if (this.host.profile.isRestricted(opts.toolProfile)) {
-            this.assertMetaAgentRuntime(opts.toolProfile);
-            throw new NativeResumeUnavailableError('The Meta agent does not fork native Kiro history');
+            const toolset = this.assertMetaAgentRuntime(opts.toolProfile);
+            throw new NativeResumeUnavailableError(`The ${restrictedSessionName(toolset)} session does not fork native Kiro history`);
         }
         if (this.usesSessionWorkers) {
             if (!opts.sessionId) throw new Error('Kiro v3 fork requires a child node id');
@@ -2690,7 +2840,11 @@ export class AcpAgentRuntime implements AgentRuntime {
             if (this.flavor.nativeSessions.replaceable && this.nativeSessionGone(error, opts.sourceNativeSessionId)) throw new NativeResumeUnavailableError('Kiro parent session is unavailable');
             throw error;
         } finally {
-            if (!alreadyLoaded) c.destroySession(opts.sourceNativeSessionId);
+            // Loaded only to fork: let Kiro drop it again, not just Michi.
+            if (!alreadyLoaded) {
+                if (c.hasSession(opts.sourceNativeSessionId)) await this.closeNativeSession(c, opts.sourceNativeSessionId);
+                c.destroySession(opts.sourceNativeSessionId);
+            }
         }
         // Rebind the copied native history to the child's own MCP slot. The
         // anchor experiment keeps the URL stable and routes by the new SID.
@@ -2698,9 +2852,13 @@ export class AcpAgentRuntime implements AgentRuntime {
         loaded.parentChatId = opts.parentChatId;
         (loaded as AcpAgentSession).primeFirstMessage(this.firstMessagePrefix({
             enableFollowUps: opts.enableFollowUps !== false, cwd: opts.cwd,
+            ...(opts.toolProfile ? { toolProfile: opts.toolProfile } : {}),
             contextManifest: opts.contextManifest, extraContexts: opts.extraContexts,
+            ...(opts.artifactCount !== undefined ? { artifactCount: opts.artifactCount } : {}),
             ancestors: [], mergeContexts: opts.mergeContexts,
             workspaceInstructions: opts.workspaceId ? this.host.prompt.workspaceInstructions(opts.workspaceId) : null,
+            ...(opts.parentChatId ? { nativeForkParentNodeId: opts.parentChatId } : {}),
+            ...this.hostSkills(opts.toolProfile),
         }));
         return loaded;
     }
@@ -2822,11 +2980,7 @@ export class AcpAgentRuntime implements AgentRuntime {
                 throw err;
             }
 
-            if (resumeSlotId) this.slotByChatId.set(nativeSessionId, resumeSlotId);
-            this.sessionCwd.set(nativeSessionId, opts.cwd);
-            this.bindNodeSession(publicId, nativeSessionId);
-
-            this.storeBinding({
+            return this.bindSession({
                 publicSessionId: publicId,
                 nativeSessionId,
                 owner,
@@ -2838,19 +2992,7 @@ export class AcpAgentRuntime implements AgentRuntime {
                 permissionBroker: opts.permissionBroker,
                 slotId: resumeSlotId,
                 modelId: opts.model ?? null,
-            });
-
-            return new AcpAgentSession(publicId, nativeSessionId, this, opts.cwd, {
-                runtimeId: this.id,
-                flavor: this.flavor,
-                enableFollowUps: false,
-                owner,
-                runtimeProfileHash: opts.profileHash ?? null,
-                toolProfile: opts.toolProfile,
-                permissionBroker: opts.permissionBroker,
-                ownerUserId: opts.ownerUserId ?? null,
-                workspaceId: opts.workspaceId ?? null,
-            });
+            }, { enableFollowUps: false });
         }
 
         // Chat path (unchanged).
@@ -2891,11 +3033,7 @@ export class AcpAgentRuntime implements AgentRuntime {
                 }) ?? undefined,
             });
         }
-        if (result.slotId) this.slotByChatId.set(result.sid, result.slotId);
-        this.sessionCwd.set(result.sid, opts.cwd);
-        this.bindNodeSession(nodeId, result.sid);
-
-        this.storeBinding({
+        return this.bindSession({
             publicSessionId: nodeId,
             nativeSessionId: result.sid,
             owner,
@@ -2907,15 +3045,7 @@ export class AcpAgentRuntime implements AgentRuntime {
             permissionBroker: opts.permissionBroker,
             slotId: result.slotId,
             modelId: opts.model ?? null,
-        });
-
-        return new AcpAgentSession(nodeId, result.sid, this, opts.cwd, {
-            runtimeId: this.id,
-            flavor: this.flavor,
-            enableFollowUps: opts.enableFollowUps !== false,
-            owner,
-            runtimeProfileHash: opts.profileHash ?? null,
-        });
+        }, { enableFollowUps: opts.enableFollowUps !== false });
     }
 
     /**
@@ -2928,6 +3058,154 @@ export class AcpAgentRuntime implements AgentRuntime {
      */
     async releaseSession(sessionId: string, expectedOwner?: RuntimeSessionOwner): Promise<void> {
         return this.acquisitions.release(sessionId, () => this.disposeSession(sessionId, expectedOwner));
+    }
+
+    /**
+     * AgentRuntime contract: whether an idle chat session may be released,
+     * as Kiro sees it. Kept while anything still runs on it natively, and
+     * while a workflow it launched is running or paused: Kiro wakes the
+     * session that launched a workflow when it finishes, and a session Michi
+     * released would turn nobody sees. Otherwise released once its last use,
+     * and its runs' last report, are sessionIdleTtlMs old (that covers the
+     * gap between a run's end and its wake). The host checks its own turns,
+     * holds its restore lock and asks again right before releasing.
+     */
+    idleRelease(sessionId: string, now: number): IdleReleaseVerdict {
+        const keep = (reason: string): IdleReleaseVerdict => ({ action: 'keep', reason });
+        const worker = this.sessionWorkers.get(sessionId);
+        if (worker) return this.metaAgentWorkerBySession.has(sessionId) ? keep('meta_agent') : worker.idleRelease(sessionId, now);
+        // Crew and other launch adapters keep their own session lifecycle.
+        if (this.runtimeOptions.launch) return keep('launch_adapter');
+        if (this.sessionIdleTtlMs <= 0) return keep('disabled');
+        if (this.closing || this.acquisitions.has(sessionId)) return keep('acquiring');
+        const binding = this.bindings.get(sessionId);
+        if (!binding || !isInteractiveOwner(binding.owner)) return keep('not_chat');
+        const session = this.acquiredSessions.get(sessionId);
+        if (!(session instanceof AcpAgentSession)) return keep('unknown_session');
+        const sid = binding.nativeSessionId;
+        const client = this.pool.get(binding.cwd);
+        if (!client || this.sessionCwd.get(sid) !== binding.cwd) return keep('no_process');
+        if (client.needsSessionRecovery(sid)) return keep('needs_recovery');
+        if (session.hasActiveTurn() || client.isSessionBusy(sid)) return keep('busy');
+        const bridge = this.workflowBridges.get(client);
+        const lastUse = session.getLastUsedAt();
+        const lastRunEvent = bridge?.lastEventAt(sid) ?? 0;
+        if (bridge && bridge.openRunsFor(sid).length > 0) {
+            if (now - lastRunEvent >= KIRO_BACKGROUND_IDLE_TTL_MS) return { action: 'stop_background', reason: 'workflow_quiet' };
+            if (now - lastUse >= KIRO_BACKGROUND_IDLE_CAP_MS) return { action: 'stop_background', reason: 'workflow_cap' };
+            return keep('workflow');
+        }
+        if (now - Math.max(lastUse, lastRunEvent) < this.sessionIdleTtlMs) return keep('recent');
+        return { action: 'release' };
+    }
+
+    /** AgentRuntime contract: stop the workflows that hold an idle session past its cap. */
+    async stopIdleBackgroundWork(sessionId: string): Promise<void> {
+        const worker = this.sessionWorkers.get(sessionId);
+        if (worker) { await worker.stopIdleBackgroundWork(sessionId); return; }
+        const binding = this.bindings.get(sessionId);
+        const client = binding ? this.pool.get(binding.cwd) : undefined;
+        const bridge = client ? this.workflowBridges.get(client) : undefined;
+        if (!binding || !bridge) return;
+        this.host.observability.log('info', 'acp', 'stopping the workflows of an idle Kiro chat', {
+            sessionId, nativeSessionId: binding.nativeSessionId, workflows: bridge.openRunsFor(binding.nativeSessionId),
+        });
+        await bridge.stopRunsFor(binding.nativeSessionId);
+    }
+
+    /**
+     * Let kiro-cli drop a released session (V3 session/close, V2 terminate):
+     * forgetting it here alone leaves its transcript, context and MCP
+     * children in the shared process for the process's life. Kept native
+     * while a workflow it launched is open, since closing could end that
+     * workflow. Best effort: Michi's own cleanup follows either way.
+     */
+    private async closeNativeSession(client: AcpClient, sid: string): Promise<void> {
+        if (this.runtimeOptions.launch) return;
+        const bridge = this.workflowBridges.get(client);
+        if (bridge && bridge.openRunsFor(sid).length > 0) return;
+        try {
+            const closed = await client.closeNativeSession?.(sid, NATIVE_CLOSE_TIMEOUT_MS);
+            this.host.observability.perf.mark(closed ? 'kiroSession:nativeClose' : 'kiroSession:nativeCloseUnsupported', { engine: this.engine });
+        } catch (error) {
+            this.host.observability.log('warn', 'acp', 'Kiro did not close a released session; it stays in its process', {
+                nativeSessionId: sid, engine: this.engine, error: error instanceof Error ? error.message : String(error),
+            });
+        } finally {
+            bridge?.releaseParent(sid);
+        }
+    }
+
+    /**
+     * Removes a released ephemeral session's native record (DESIGN-v2 §3.2).
+     * Kiro keeps one whatever the host asks (`discard-after-release`), under
+     * the ephemeral worker's KIRO_HOME; only that store is looked at, never
+     * `~/.kiro`. Fails closed:
+     * - `unsupported`: the check-in KIRO_HOME has no trace of the session
+     *   (an MVP Companion session in `~/.kiro`, or one Kiro stored anywhere
+     *   else): Michi will not vouch that it is gone, so never `absent`;
+     * - `absent`: the check-in KIRO_HOME had it and holds nothing of it now
+     *   (its index log records it, no directory or cached entry is left);
+     * - `deferred`: a Michi session is still opening on or bound to it; or a
+     *   check-in kiro-cli process is still running (live, or stopping) and
+     *   cannot delete it (no `session/delete`, the call failed, or something
+     *   of the session is left after it): files are never removed under a
+     *   running kiro-cli, whose `.lock` stays whether it runs or not (P1b);
+     * - `discarded`: Kiro's `session/delete` removed it (P1, P1b), or, with
+     *   no check-in kiro-cli running, its files went after their
+     *   `workspacePaths` named one of the host's restricted agent
+     *   directories (kiroSessionFiles.ts).
+     */
+    async discardNativeSession(input: NativeSessionDiscardInput): Promise<NativeSessionDiscardResult> {
+        const ephemeral = this.runtimeOptions.restrictedAgent?.ephemeral;
+        if (!ephemeral || !this.hostsEphemeralSessions()) return 'unsupported';
+        const sid = input.nativeSessionId;
+        if (!sid) return 'absent';
+        if (!KIRO_V3_SESSION_ID.test(sid)) return 'unsupported';
+        if (this.acquisitions.has(input.sessionId) || this.sessionWorkers.has(input.sessionId) || this.acquiredSessions.has(input.sessionId)) return 'deferred';
+        const workers = this.checkinWorkers();
+        if (workers.some((worker) => worker.getBindingByNativeSid(sid))) return 'deferred';
+        const dataDir = this.host.config.dataDir();
+        const home = ephemeral.homeDir(dataDir);
+        const trace = kiroSessionTrace(home, sid);
+        if (!trace.dirs.length && !trace.cached.length) return trace.logged.length ? 'absent' : 'unsupported';
+        // Any kiro-cli started on that KIRO_HOME counts, whichever worker it was
+        // (or is no longer) in: a respawn or a stop can take it out of a pool first.
+        const running = [...new Set([...this.checkinProcesses(workers), ...runningKiroStoreProcesses<AcpClient>(home)])];
+        if (running.length > 0) {
+            const deleter = running.find((client) => client.isAlive() && client.supportsSessionDelete());
+            if (!deleter) return 'deferred';
+            try {
+                await deleter.deleteSession(sid);
+            } catch (error) {
+                this.host.observability.log('warn', 'acp', 'kiro session/delete failed; the discard is deferred', {
+                    sid, error: error instanceof Error ? error.message : String(error),
+                });
+                return 'deferred';
+            }
+            const left = kiroSessionTrace(home, sid);
+            return left.dirs.length || left.cached.length ? 'deferred' : 'discarded';
+        }
+        return discardKiroSessionFiles({
+            configDir: home,
+            sessionId: sid,
+            ownsWorkspace: (dir) => ephemeral.ownsWorkspace(dataDir, dir),
+        });
+    }
+
+    /** The shared workers with a check-in KIRO_HOME: open, idle or draining. */
+    private checkinWorkers(): AcpAgentRuntime[] {
+        const workers = new Set<AcpAgentRuntime>();
+        for (const entry of [...this.metaAgentWorkers.values(), ...this.metaAgentWorkerBySession.values()]) workers.add(entry.worker);
+        return [...workers].filter((worker) => !!worker.runtimeOptions.metaAgent?.kiroHome);
+    }
+
+    /** Every check-in kiro-cli whose process may still run: those of `workers` and those being stopped. */
+    private checkinProcesses(workers: readonly AcpAgentRuntime[]): AcpClient[] {
+        for (const client of [...this.stoppingCheckinClients]) if (!client.processRunning()) this.stoppingCheckinClients.delete(client);
+        const clients = new Set<AcpClient>(this.stoppingCheckinClients);
+        for (const worker of workers) for (const client of worker.pool.values()) clients.add(client);
+        return [...clients].filter((client) => client.processRunning());
     }
 
     private async disposeSession(sessionId: string, expectedOwner?: RuntimeSessionOwner): Promise<void> {
@@ -2968,6 +3246,7 @@ export class AcpAgentRuntime implements AgentRuntime {
         const client = cwd ? this.pool.get(cwd) : undefined;
         if (client) {
             await client.cancel(sid).catch(() => {});
+            await this.closeNativeSession(client, sid);
             client.destroySession(sid);
         }
         const slotId = this.slotByChatId.get(sid);

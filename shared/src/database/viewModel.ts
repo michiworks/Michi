@@ -14,6 +14,8 @@ import {
   type MichiDbView,
   type MichiDbViewConfig,
 } from '../databaseModel';
+import { isCalendarDay } from '../calendarDay';
+import { randomUuid } from '../randomId';
 
 // Browser-safe database filtering, sorting and grouping shared by Michi
 // views and native assistant reads. This module has no UI or service dependency.
@@ -59,7 +61,7 @@ export const timeOf = (s: string) => (DAY.test(s) ? dayTime(s) : Date.parse(s));
 
 /** The local day a date string falls on, `YYYY-MM-DD`; null when it is no date. */
 export function dayOf(s: string): string | null {
-  if (DAY.test(s)) return s;
+  if (DAY.test(s)) return isCalendarDay(s) ? s : null;
   const t = Date.parse(s);
   return Number.isNaN(t) ? null : localDay(new Date(t));
 }
@@ -180,6 +182,15 @@ export function convertValue(value: CellValue, to: MichiDbColumnType, options?: 
       return done(ids.length ? ids : null);
     }
   }
+}
+
+/** What typed number text means: empty clears the cell; anything that is not a number is refused. Progress is typed in percent. */
+export function parseNumberText(text: string, pct: boolean): { ok: true; value: number | null } | { ok: false } {
+  const t = text.trim();
+  if (t === '') return { ok: true, value: null };
+  const n = Number(t.replace(/[,%\s]/g, ''));
+  if (!Number.isFinite(n)) return { ok: false };
+  return { ok: true, value: pct ? Math.min(1, Math.max(0, n / 100)) : n };
 }
 
 // ── Filters ──────────────────────────────────────────────────────────
@@ -534,11 +545,9 @@ export function startValues(db: Pick<MichiDatabase, 'columns'>, config: MichiDbV
 
 export const sameValue = (a: CellValue | undefined, b: CellValue | undefined) => JSON.stringify(a ?? null) === JSON.stringify(b ?? null);
 
-let seq = 0;
 /** Ids made here go with the op, so the screen and Michi agree on them before Michi has answered. */
 export function newDbId(prefix: string): string {
-  const random = globalThis.crypto?.randomUUID?.().replace(/-/g, '').slice(0, 10) ?? `${Date.now().toString(36)}${(++seq).toString(36)}`;
-  return `${prefix}-${random}`;
+  return `${prefix}-${randomUuid().replace(/-/g, '').slice(0, 10)}`;
 }
 
 /** The rows of a set of groups in reading order, each once (a multi-select row can sit in several groups). */

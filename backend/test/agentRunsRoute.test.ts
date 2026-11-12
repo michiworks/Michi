@@ -8,6 +8,7 @@ import {
   type AgentRunDtoV1, type EffectiveAgentDefinitionV1, type SpawnAgentRunRequestV1,
 } from 'michi-shared';
 import { AgentRunEventBus } from '../src/agents/runs/agentRunEventBus';
+import { ExecutionEnvironmentError } from '../src/agents/runs/executionEnvironment';
 import { setupAgentRunRoutes, type AgentRunRouteService } from '../src/routes/agentRuns';
 
 const HASH = 'a'.repeat(64);
@@ -84,6 +85,39 @@ describe('Agent Run REST routes', () => {
     assert.equal((await request('GET', '/agent-runs?workspaceId=ws-a&includeArchived=maybe')).response.status, 400);
     assert.equal((await request('GET', '/agent-runs/run-1')).body.run.id, 'run-1');
     assert.deepEqual((await request('GET', '/agent-runs/run-1/events?afterSeq=-1')).body.events, []);
+  });
+
+  test('answers a refused request with its reason and an internal failure without it', async () => {
+    const reject = (message: string, code?: string) => () => { throw Object.assign(new Error(message), code ? { code } : {}); };
+    await start({
+      list: reject('ownerUserId is required'),
+      spawn: async () => reject('no such table: agent_runs', 'ERR_SQLITE_ERROR')(),
+      input: async () => reject('expected Attempt does not match the active Attempt')(),
+      cancel: async () => reject('operation op was reused with a different payload')(),
+      respond: async () => reject('interaction is already resolved')(),
+      updateWatch: () => { throw new TypeError("Cannot read properties of undefined (reading 'kind')"); },
+    });
+
+    const listed = await request('GET', '/agent-runs?workspaceId=ws-a');
+    assert.deepEqual([listed.response.status, listed.body], [401, { error: 'ownerUserId is required' }]);
+    const spawned = await request('POST', '/agent-runs', spawn);
+    assert.equal(spawned.response.status, 500);
+    assert.deepEqual(spawned.body, { error: 'Internal server error' });
+    const input = await request('POST', '/agent-runs/run-1/input', { version: 1, text: 'more', mode: 'queued', expectedAttemptId: null });
+    assert.equal(input.response.status, 409);
+    assert.deepEqual(input.body, { error: 'expected Attempt does not match the active Attempt' });
+    assert.equal((await request('POST', '/agent-runs/run-1/cancel', { version: 1, expectedAttemptId: null, reason: 'stop' })).response.status, 409);
+    const respond = await request('POST', '/agent-runs/run-1/interactions/i-1/respond', { version: 1, response: { kind: 'text', text: 'ok' } });
+    assert.deepEqual([respond.response.status, respond.body], [400, { error: 'interaction is already resolved' }]);
+    const watch = await request('PATCH', '/agent-run-watches/w-1', { version: 1, addRunIds: ['run-2'] });
+    assert.deepEqual([watch.response.status, watch.body], [500, { error: 'Internal server error' }]);
+  });
+
+  test('answers a refused execution environment with its reason', async () => {
+    await start({ spawn: async () => { throw new ExecutionEnvironmentError('git_required', 'workspace is not a Git repository'); } });
+
+    const spawned = await request('POST', '/agent-runs', spawn);
+    assert.deepEqual([spawned.response.status, spawned.body], [400, { error: 'workspace is not a Git repository' }]);
   });
 
   test('wrong-owner detail and event reads are hidden with 404 semantics', async () => {

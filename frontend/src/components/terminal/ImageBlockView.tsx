@@ -1,7 +1,6 @@
-import { serverEntityId } from '../../config/backendIdentity';
-import React, { useState } from 'react';
+import { useState } from 'react';
 import type { AssistantBlock } from '../../state/chatTypes';
-import { workspaceBackendApiBase } from '../../config/backendConnections';
+import { artifactImageUrl } from '../../services/api/artifacts';
 import { Lightbox } from './Lightbox';
 
 type ImageBlock = Extract<AssistantBlock, { kind: 'image' }>;
@@ -15,10 +14,7 @@ export function ImageBlockView({ blocks }: { blocks: readonly AssistantBlock[] }
   return (
     <div className="t-image-block" style={{ margin: '8px 0' }}>
       {images.map((b) => {
-        // Build off API_BASE_URL (absolute http://host:3000/api in dev, '/api'
-        // in the packaged app) — NOT a hardcoded relative '/api/...', which in
-        // dev resolves to the vite origin (:3001) instead of the backend.
-        const src = `${workspaceBackendApiBase(b.workspaceId)}/files/${encodeURIComponent(serverEntityId(b.workspaceId))}/${b.path.split('/').map(encodeURIComponent).join('/')}`;
+        const src = artifactImageUrl(b.workspaceId, b.path);
         if (broken.has(src)) {
           return (
             <figure key={b.id} style={{ margin: 0 }}>

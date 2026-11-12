@@ -1,10 +1,11 @@
 import React from 'react';
 import { ChevronRight, FileText, MessageSquare, Plus, Sparkles } from 'lucide-react';
-import { META_AGENT_DEFAULT_FIRST_RUN_DAYS, type FirstRunProgressDto, type HomeSectionKey, type SpacesHomeSectionsDto, type WorkspaceHomeDto } from 'michi-shared';
+import { HOME_SECTION_KEYS, META_AGENT_DEFAULT_FIRST_RUN_DAYS, type FirstRunProgressDto, type HomeSectionKey, type SpacesHomeSectionsDto, type WorkspaceHomeDto } from 'michi-shared';
 import { useChatActions, useChatNodesSnapshot, useChatProjects } from '../../../../state/chatStore';
 import type { ChatNodeState, Project } from '../../../../state/chatTypes';
 import { findTreeIdForNode } from '../../../../state/tree';
-import { isVisibleConversationNode } from '../../../../state/conversationVisibility';
+import { threadDisplayTitle } from '../../../../state/displayTitle';
+import { isListedThread } from '../../../../state/conversationVisibility';
 import { useWorkspaceHome } from '../../../../state/pages/useSpacesHome';
 import { useSpaces } from '../../../../state/pages/useSpaces';
 import { markWorkspaceHomeOpened, newerFirstRun, retrySpacesFirstRunNow, useSpacesFirstRun } from '../../../../state/metaAgent/spacesFirstRun';
@@ -14,10 +15,11 @@ import { Button } from '../../../ui/controls';
 import { useMinuteClock } from '../../content/home/useMinuteClock';
 import { CreateSpaceDialog, type OpenNativePageRoute } from '../SpacesPage';
 import { HomePlaceholder, useHomeDocument } from './HomeDocument';
-import { homeAge } from './homeFormat';
+import { formatMichiAgo } from '../../content/michiFormat';
 import { useHomeNavigation } from './useHomeNavigation';
 import { NewChatSheetSlot, PageProgressCards, type SpaceConversationScope } from './homeLinks';
 import { useSpacesHomeSections } from './homeCounts';
+import { useCompanionName } from '../../../../state/companion/companionName';
 import '../../content/home/michiHome.css';
 import './home.css';
 import { LayoutRulesMenuButton } from '../layoutRules/LayoutRulesMenu';
@@ -48,7 +50,7 @@ const SECTION_STATE: Record<HomeSectionKey, RelatedConversationState> = { waitin
 
 /**
  * The workspace's conversations (its unarchived trees, without background
- * maintenance runs or page helpers), newest first. A
+ * maintenance runs, page helpers or what is in Trash), newest first. A
  * conversation's state is the strongest of what its nodes are doing now and
  * where the Home sections place them.
  */
@@ -69,18 +71,18 @@ export function workspaceConversations(
     if (status === 'streaming') mark(nodeId, 'running');
     else if (status === 'error') mark(nodeId, 'failed');
   }
-  for (const key of ['waiting', 'stalled', 'done'] as const) {
+  for (const key of HOME_SECTION_KEYS) {
     for (const item of sections?.[key].items ?? []) {
       if (item.target.kind === 'conversation' && item.target.workspaceId === project.id) mark(item.target.nodeId, SECTION_STATE[key]);
     }
   }
   return project.trees
-    .filter((tree) => !tree.archivedAt && nodes[tree.rootNodeId]?.kind === 'chat' && isVisibleConversationNode(nodes[tree.rootNodeId]))
+    .filter((tree) => isListedThread(tree, nodes[tree.rootNodeId]) && nodes[tree.rootNodeId]?.kind === 'chat')
     .map((tree) => {
       const root = nodes[tree.rootNodeId]!;
       return {
         nodeId: tree.rootNodeId,
-        title: tree.name?.trim() || root.title?.trim() || 'Untitled conversation',
+        title: threadDisplayTitle(tree, root, 'Untitled conversation'),
         at: tree.lastActiveAt,
         state: states.get(tree.id) ?? null,
         runtimeId: root.runtimeId ?? null,
@@ -110,12 +112,13 @@ function sourceLine(home: WorkspaceHomeDto | null, run: FirstRunProgressDto | nu
 }
 
 function FirstRunPending({ run, name, onRetry }: { run: FirstRunProgressDto | null; name: string; onRetry(): void }) {
+  const agentName = useCompanionName();
   if (!run || run.state === 'done') return null;
   const message = run.state === 'failed'
     ? `Not written${run.error ? `: ${run.error}` : ''}.`
     : run.state === 'queued'
       ? `Queued: ${name} has ${run.total} past ${run.total === 1 ? 'conversation' : 'conversations'} to read.`
-      : `The Meta agent is reading ${name}’s ${run.total} past ${run.total === 1 ? 'conversation' : 'conversations'} and writes them here when it is done.`;
+      : `${agentName} is reading ${name}’s ${run.total} past ${run.total === 1 ? 'conversation' : 'conversations'} and writes them here when it is done.`;
   return (
     <div className="spaces-home-pending" role="status" data-state={run.state}>
       <p className="spaces-home-pending__msg">
@@ -147,7 +150,7 @@ function RemoteWorkspaceHome({ workspaceId, backendConnectionId }: WorkspaceHome
         <div className="spaces-home-empty-ws" role="status">
           <p className="spaces-home-lead">{REMOTE_SPACES_NOTE}.</p>
           <p className="spaces-home-muted">
-            {name} is on {connection ? `the remote connection ${connection}` : 'a remote connection'}. The Meta agent reads only the workspaces on this
+            {name} is on {connection ? `the remote connection ${connection}` : 'a remote connection'}. Pages upkeep reads only the workspaces on this
             computer, so it doesn’t write a home for this one. Its conversations are still in Conversations.
           </p>
         </div>
@@ -156,8 +159,8 @@ function RemoteWorkspaceHome({ workspaceId, backendConnectionId }: WorkspaceHome
   );
 }
 
-/** A workspace's default home in Spaces: the Meta agent's page, the workspace's Spaces and its conversations. */
-export function WorkspaceHomeView(props: WorkspaceHomeViewProps) {
+/** A workspace's default home in Spaces: the page Pages upkeep writes, the workspace's Spaces and its conversations. */
+function WorkspaceHomeView(props: WorkspaceHomeViewProps) {
   return spacesSupportsConnection(props.backendConnectionId) ? <LocalWorkspaceHome {...props} /> : <RemoteWorkspaceHome {...props} />;
 }
 
@@ -175,11 +178,12 @@ function LocalWorkspaceHome({ workspaceId, backendConnectionId, onOpenPage }: Wo
   const firstRunActive = Boolean(run && run.state !== 'done');
   // Until its first read is written the page is only its placeholder, like the rest of the home.
   const reading = firstRunActive && run?.state !== 'failed' && (home.data?.page.blocks.length ?? 0) === 0;
-  // While the Meta agent is writing the page, the empty-page editor would only race it.
+  // While Pages upkeep is writing the page, the empty-page editor would only race it.
   const doc = useHomeDocument({ backendConnectionId, initial: home.data?.page ?? null, allowEmptyEditor: !firstRunActive });
   const nav = useHomeNavigation(backendConnectionId, doc.page?.id ?? null);
   const [creating, setCreating] = React.useState(false);
   const [allConversations, setAllConversations] = React.useState(false);
+  const agentName = useCompanionName();
 
   const name = project?.name ?? home.data?.page.title ?? 'Workspace';
   const page = doc.page;
@@ -223,7 +227,7 @@ function LocalWorkspaceHome({ workspaceId, backendConnectionId, onOpenPage }: Wo
             <span className="spaces-home-spacer" /><LayoutRulesMenuButton pageId={page?.id ?? null} backendConnectionId={backendConnectionId} readOnly={home.stale} />
           </div>
           {page && blocks.length > 0 && <p className="spaces-home__updated">
-            <time dateTime={new Date(page.updatedAt).toISOString()} title={new Date(page.updatedAt).toLocaleString()}>Updated {homeAge(page.updatedAt, clock)}</time>
+            <time dateTime={new Date(page.updatedAt).toISOString()} title={new Date(page.updatedAt).toLocaleString()}>Updated {formatMichiAgo(page.updatedAt, clock)}</time>
           </p>}
         </header>
         {home.status === 'error' && !page && <p className="spaces-home-muted" role="alert">
@@ -244,9 +248,9 @@ function LocalWorkspaceHome({ workspaceId, backendConnectionId, onOpenPage }: Wo
           {home.data && blocks.length === 0 && !firstRunActive && (nothingRecent
             ? <p className="spaces-home-muted" role="status">
               The first read found no conversations in its {firstRunDays}-day range. Your older conversations are still listed below.
-              When background updates are enabled, the Meta agent can write this page after a new conversation finishes.
+              When background updates are enabled, {agentName} can write this page after a new conversation finishes.
             </p>
-            : <HomePlaceholder text="The Meta agent writes this page from the workspace’s conversations." />)}
+            : <HomePlaceholder text={`${agentName} writes this page from the workspace’s conversations.`} />)}
           {doc.renderBlocks(blocks.slice(1), 'rest')}
 
           {!reading && <>
@@ -285,7 +289,7 @@ function LocalWorkspaceHome({ workspaceId, backendConnectionId, onOpenPage }: Wo
                   {thread.runtimeId && <span className="michi-tag spaces-home-threads__runtime">{runtimeName(thread.runtimeId)}</span>}
                   <span className="spaces-home-spacer" />
                   <span className="spaces-home-muted" data-state={thread.state ?? undefined}>
-                    {[thread.state && RELATED_CONVERSATION_STATE[thread.state], homeAge(thread.at, clock)].filter(Boolean).join(' · ')}
+                    {[thread.state && RELATED_CONVERSATION_STATE[thread.state], formatMichiAgo(thread.at, clock)].filter(Boolean).join(' · ')}
                   </span>
                   <ChevronRight size={13} strokeWidth={1.7} aria-hidden="true" />
                 </button>

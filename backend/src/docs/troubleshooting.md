@@ -1,28 +1,26 @@
 # Troubleshoot Michi
 
-Applies to: desktop/web and local/remote backends. Source checked: 2026-10-16. The entries are diagnostic paths, not proof of the cause on your machine. Use actual runtime, backend, timestamp and first failing error.
-
-Pages-related sections checked against source on 2026-10-26; other topics retain the review scope above.
+Applies to: desktop/web and local/remote backends. Source checked: 2026-11-08. The entries are diagnostic paths, not proof of the cause on your machine. Use actual runtime, backend, timestamp and first failing error.
 
 ## Find your symptom
 
 | Symptom / search phrase | Section below | Related reference |
 | --- | --- | --- |
-| App exits, cannot start, exit 143, port busy | Startup | `configuration` |
-| Runtime unavailable, executable missing, ENOENT | CLI / authentication | `runtimes` |
-| Logged in but unauthorized, expired token, 401/403 | CLI / authentication | `configuration` |
-| Empty models, model not found, 429, 5xx | Models / provider errors | `runtimes` |
-| Stuck, slow, always thinking, no output | Slow / waiting | `performance-and-usage` |
-| Disconnected, stream 410, 409 turn_active | Stream / busy turn | `sessions-and-recovery` |
-| No approval card, Trust still refused | Approvals | `permissions` |
-| Missing Michi tools, docs tool missing | Tool discovery | `crew`, `custom-agents` |
-| Wrong folder, file missing, broken attachment | Files / context | `files-and-artifacts` |
-| Forgot a detail, @ did not read everything | Files / context | `concepts-and-context` |
-| Chats disappeared, empty workspace | History / recovery | `data-and-backups` |
-| Crew setup required, Sync, command changed | Crew | `crew` |
-| Remote unreachable, SSH / token error | Remote connection | `remote-backend` |
-| Agents page absent, Run waiting/failed | Custom Agents | `custom-agents` |
-| Page not updating, preference conflict, component mismatch, remote Pages unavailable | Pages | `pages-and-components`, `pages-maintenance`, `page-component-design` |
+| App exits, cannot start, exit 143, port busy | Startup: app/backend will not start or exits | `configuration` |
+| Runtime unavailable, executable missing, ENOENT | CLI or authentication fails | `runtimes` |
+| Logged in but unauthorized, expired token, 401/403 | CLI or authentication fails | `configuration` |
+| Empty models, model not found, 429, 5xx | Empty models or provider errors | `runtimes` |
+| Stuck, slow, always thinking, no output | Slow, stuck or always thinking | `performance-and-usage` |
+| Disconnected, stream 410, 409 turn_active | Stream 410, disconnected chat or busy 409 | `sessions-and-recovery` |
+| No approval card, Trust still refused | Ask does not show a card, or Trust is still refused | `permissions` |
+| Missing Michi tools, docs tool missing | Missing Michi tools or michi_docs | `crew`, `custom-agents` |
+| Wrong folder, file missing, broken attachment | Wrong files, broken attachment or forgotten context | `files-and-artifacts` |
+| Forgot a detail, @ did not read everything | Wrong files, broken attachment or forgotten context | `concepts-and-context` |
+| Chats disappeared, empty workspace | Missing history or unexpected restore behavior | `data-and-backups` |
+| Crew setup required, Sync, command changed | Crew setup, Sync or missing caller identity | `crew` |
+| Remote unreachable, SSH / token error | Remote backend or SSH cannot connect | `remote-backend` |
+| Agents page absent, Run waiting/failed | Agents missing or Run waiting/failed | `custom-agents` |
+| Page not updating, preference conflict, component mismatch, remote Pages unavailable | Pages, maintenance and generated components | `pages-and-components`, `pages-maintenance`, `page-component-design` |
 
 ## Startup: app/backend will not start or exits
 
@@ -38,7 +36,7 @@ Success check: the intended backend remains healthy at its printed URL and the a
 
 ## CLI or authentication fails
 
-Confirm which machine/user runs the backend. Desktop PATH can differ from your interactive shell. Check the installed executable/version and configure `KIRO_CLI_BIN`, `CLAUDE_CLI_BIN` or `CODEX_CLI_BIN` when necessary.
+Confirm which machine/user runs the backend. Desktop PATH can differ from your interactive shell. Check the installed executable/version and configure `KIRO_CLI_BIN`, `CLAUDE_CLI_BIN` or `CODEX_CLI_BIN` when necessary. Crew normally uses its bundled ACP adapter (see `crew`); `MICHI_CREW_ACP_BIN` overrides it. Antigravity is registered only when `MICHI_ENABLE_ANTIGRAVITY=1` or `MICHI_ENABLED_RUNTIMES` lists `antigravity`; it runs `agy acp` from `MICHI_ANTIGRAVITY_BIN` when set, else `agy` on PATH or in `~/.local/bin`. Pi needs no CLI.
 
 Use the runtime's supported login/configuration mechanism under that backend user. For Pi, check the selected provider, credential source and region. AWS environment credentials take precedence over saved Bedrock choices. Never paste secret values to prove a key exists.
 
@@ -88,7 +86,7 @@ Crew uses `michi_list_tools` to discover current schemas and `michi_call_tool` t
 
 Agent Runs expose only selected capabilities: include `michi_docs` in the definition when needed. An unavailable experimental feature or a denied allowlist is not repaired by guessing hidden tool names.
 
-If the docs tool itself is missing, use the human-readable guide in the installation/source or public repository. Do not depend exclusively on the failed tool for repair.
+If the docs tool itself is missing, open the installation's `docs/user-guide.md` (normally `~/.michi/docs/user-guide.md`). The canonical Markdown is under `backend/src/docs/` (built backends: `backend/dist/docs/`), and the guide links Crew's and remote setup's own source files. Do not depend exclusively on the failed tool for repair.
 
 ## Wrong files, broken attachment or forgotten context
 
@@ -114,9 +112,9 @@ Check Gateway running, App enabled, required sessionApproval, approved Stub / Ro
 
 ## Remote backend or SSH cannot connect
 
-Check the connection's test result, remote service status, host/port and token without exposing the token. The path belongs to the server. For SSH, complete a normal `ssh HOST` connection once so authentication/known-host setup works.
+Check the connection's **Test connection** result in Settings → Machines, remote service status, host/port and token without exposing the token. The path belongs to the server. For SSH, complete a normal `ssh HOST` connection once so authentication/known-host setup works.
 
-A tunnel and the remote service have different lifetimes. Reopening Michi can recreate its tunnel, but cannot start a stopped remote backend automatically. Follow `remote-backend` for lifecycle and secure network setup. Avoid switching to a public bind as a generic workaround.
+A tunnel and the remote service have different lifetimes. For a saved SSH connection, a failed request makes Michi check the existing tunnel first. If the service is down, Michi starts the existing remote build over SSH, reusing its saved data directory, port and token. It does not install, upgrade or accept changed credentials. A missing installation needs **Connect remote**, then **Install and connect**. Direct-URL connections cannot be started this way. Follow `remote-backend` for lifecycle and secure network setup. Avoid switching to a public bind as a generic workaround.
 
 ## Agents missing or Run waiting/failed
 
@@ -126,8 +124,8 @@ For a Run, inspect its capability snapshot, effective permissions, environment, 
 
 ## Pages, maintenance and generated components
 
-- **Remote page unavailable:** the current Pages/Meta agent interface supports the local backend only. The unavailable message is a product limitation, not a reason to reset the connection or database.
-- **Page not updated:** check workspace maintenance enablement, page-tree exclusion, backend/scheduler availability, Settings → Meta agent, and whether the input was an eligible new completion. Inspect Needs attention, pending suggestions and Open job; Up to date can include explicit no-change decisions or unaccepted proposals. See `pages-maintenance`.
+- **Remote page unavailable:** the current Pages and Pages upkeep interface supports the local backend only. The unavailable message is a product limitation, not a reason to reset the connection or database.
+- **Page not updated:** check workspace maintenance enablement, page-tree exclusion, backend/scheduler availability, Settings → Michi → Pages upkeep (the Settings page named after your agent), and whether the input was an eligible new completion. Inspect Needs attention, the suggestions waiting for review and View automatic maintenance; Up to date can include explicit no-change decisions or unaccepted proposals. See `pages-maintenance`.
 - **Preferences did not rearrange content:** they apply on the next relevant update. They are per-page and do not override section limits. On a revision conflict, Use latest discards the draft; Keep my draft retains it against the new base and still requires Save preferences.
 - **Per-item Sources missing:** old or uncited content has no inferred mapping, and complex Markdown may use whole-block Sources. Text edits remove stale mappings. Never manufacture message IDs to make the control appear.
 - **Component saved but absent:** a new library component needs attachment to a Page block/custom database view. Check enabled state, pinned/active version, host access and error UI. Already attached unpinned hosts can update on save; saving is not draft-only.
@@ -136,7 +134,9 @@ For a Run, inspect its capability snapshot, effective permissions, environment, 
 
 ## Logs and a useful problem report
 
-Production logs default under `~/.michi/logs/`; Linux launcher output can also be in `<installation>/michi.log`. Native CLIs have their own diagnostics. Development data/config/log overrides can differ; remote runtime logs are on the remote backend.
+Production logs default under `~/.michi/logs/` (`MICHI_LOG_DIR` overrides); Linux launcher output can also be in `<installation>/michi.log`. Native CLIs have their own diagnostics. Development data/config/log overrides can differ.
+
+Remote runtime logs are on the remote backend. Service output is in `<data dir>/remote.log` (default `~/.michi/remote.log`), or in the journal for a systemd `michi-remote` service; `michi logs` on the remote shows whichever applies. Recovery attempts append to `<data dir>/remote-recovery.log`. The remote backend's own logs are in its `MICHI_LOG_DIR`, else `~/.michi/logs`; a detached launch started from the desktop sets `<data dir>/logs`. Local connection diagnostics are saved under `<MICHI_LOG_DIR or ~/.michi/logs>/remote-connections/`.
 
 Share this small redacted report:
 

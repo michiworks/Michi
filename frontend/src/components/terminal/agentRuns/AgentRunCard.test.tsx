@@ -1,5 +1,4 @@
-import React from 'react';
-import { fireEvent, render, screen } from '@testing-library/react';
+import { act, fireEvent, render, screen } from '@testing-library/react';
 import { describe, expect, it, vi } from 'vitest';
 import {
   AgentRunCompletionMode, AgentRunInvocationMode, AgentRunStatus, AgentRunWaitingReason,
@@ -37,6 +36,19 @@ describe('AgentRunCard', () => {
     render(<AgentRunCard run={run(status)} now={3000} onOpen={() => {}} />);
     expect(screen.getByText(status)).not.toBeNull();
     expect(screen.getByText('Snapshot Implementer')).not.toBeNull();
+  });
+
+  it('counts a live run up each second when no clock is passed in', () => {
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(13_000);
+      render(<AgentRunCard run={run(AgentRunStatus.Running)} onOpen={() => {}} />);
+      expect(screen.getByText('12s')).not.toBeNull();
+      act(() => { vi.advanceTimersByTime(2_000); });
+      expect(screen.getByText('14s')).not.toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('reveals the handoff when a live run settles, reading its new status once', () => {

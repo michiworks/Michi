@@ -1,9 +1,11 @@
 import { serverEntityId } from '../../config/backendIdentity';
 import { backendFetch } from './backendRequest';
-import { redactRemoteLog } from 'michi-shared';
+import { isWorkspaceStructureCursor, parseLeanNodeFields, redactRemoteLog, type WorkspaceStructureCursor } from 'michi-shared';
 import {
   activeBackendApiBase,
   backendApiBase,
+  isLocalConnectionId,
+  LOCAL_BACKEND_CONNECTION_ID,
   nodeBackendApiBase,
   workspaceBackendApiBase,
 } from '../../config/backendConnections';
@@ -82,21 +84,54 @@ export async function fetchWorkspaces(connectionId?: string): Promise<unknown[]>
   return body.workspaces ?? body;
 }
 
-export async function fetchAllWorkspaces(connectionId?: string): Promise<unknown[]> {
-  const res = await backendFetch(`${backendApiBase(connectionId)}/workspaces/all`);
-  if (!res.ok) throw new Error(`fetchAllWorkspaces failed: ${res.status}`);
-  const body = await res.json();
-  return body.workspaces ?? [];
+// The structure-feed cursor each hydration read was taken at, per connection:
+// the background feed's opening cursor tells whether that read missed a change.
+const hydrationStructureCursors = new Map<string, WorkspaceStructureCursor>();
+
+/** The cursor the last hydration read of `connectionId` was taken at; read once. */
+export function takeHydrationStructureCursor(connectionId: string): WorkspaceStructureCursor | undefined {
+  const cursor = hydrationStructureCursors.get(connectionId);
+  hydrationStructureCursors.delete(connectionId);
+  return cursor;
+}
+
+/**
+ * One workspace's structure (no message bodies), for a re-read after a
+ * workspace_structure_changed frame. Null when the backend no longer has it;
+ * throws when the backend cannot answer (unreachable is not deleted).
+ */
+export async function fetchWorkspaceStructure(id: string, signal?: AbortSignal): Promise<unknown | null> {
+  const res = await backendFetch(`${workspaceBackendApiBase(id)}/workspaces/${encodeURIComponent(id)}?meta=1`, { signal });
+  if (res.status === 404) return null;
+  if (!res.ok) throw new Error(`fetchWorkspaceStructure failed: ${res.status}`);
+  return res.json();
+}
+
+/**
+ * The workspaces of a `/workspaces/all` body, each stamped with the lean node
+ * fields the response names (shared/leanNodeFields), so a workspace payload
+ * held on its own still says which fields its rows deferred. A body without
+ * the marker (an older backend, a local read) comes back as it is.
+ */
+export function workspacesFromMetaBody(body: unknown): unknown[] {
+  const { workspaces, leanNodeFields } = (body ?? {}) as { workspaces?: unknown; leanNodeFields?: unknown };
+  if (!Array.isArray(workspaces)) return [];
+  const lean = parseLeanNodeFields(leanNodeFields);
+  if (lean.length === 0) return workspaces;
+  return workspaces.map((workspace) => (workspace && typeof workspace === 'object'
+    ? { ...workspace, leanNodeFields: lean } : workspace));
 }
 
 /**
  * Lazy-load hydration payload: every workspace's structure + per-node
  * message_count, with NO message bodies. Bodies are fetched per-tree on demand
- * via {@link fetchTreeMessages}. Throws on unreachability (same as
- * fetchAllWorkspaces) so the hydration barrier can retry.
+ * via {@link fetchTreeMessages}. Throws on unreachability so the hydration
+ * barrier can retry. A remote connection asks for lean rows: the heavy node
+ * fields come with each tree's page.
  */
 export async function fetchAllWorkspacesMeta(connectionId?: string, signal?: AbortSignal): Promise<unknown[]> {
-  const res = await backendFetch(`${backendApiBase(connectionId)}/workspaces/all?meta=1`, { signal });
+  const lean = !isLocalConnectionId(connectionId) ? '&lean=1' : '';
+  const res = await backendFetch(`${backendApiBase(connectionId)}/workspaces/all?meta=1${lean}`, { signal });
   if (!res.ok) {
     const body = await res.json().catch(() => null);
     const detail = typeof body?.error === 'string' ? ': ' + redactRemoteLog(body.error).slice(0, 2000) : '';
@@ -108,35 +143,63 @@ export async function fetchAllWorkspacesMeta(connectionId?: string, signal?: Abo
     throw new Error(message);
   }
   const body = await res.json();
-  return body.workspaces ?? [];
+  if (isWorkspaceStructureCursor(body?.structureCursor)) {
+    hydrationStructureCursors.set(connectionId ?? LOCAL_BACKEND_CONNECTION_ID, body.structureCursor);
+  }
+  return workspacesFromMetaBody(body);
 }
 
 /** Lazy-load: all message-body rows for one tree. Backend orders by (node, seq). */
 export async function fetchTreeMessages(workspaceId: string, treeId: string, connectionId?: string, signal?: AbortSignal): Promise<unknown[]> {
+  return (await fetchTreeMessageSnapshot(workspaceId, treeId, connectionId, signal)).messages;
+}
+
+/** All message-body rows for one tree, with each node's latest turn read alongside. */
+export async function fetchTreeMessageSnapshot(workspaceId: string, treeId: string, connectionId?: string,
+  signal?: AbortSignal,
+): Promise<TreeMessagePage> {
   const res = await backendFetch(
     `${connectionId ? backendApiBase(connectionId) : workspaceBackendApiBase(workspaceId)}/workspaces/${encodeURIComponent(serverEntityId(workspaceId, connectionId))}/trees/${encodeURIComponent(treeId)}/messages`,
     { signal: AbortSignal.any([...(signal ? [signal] : []), AbortSignal.timeout(30_000)]) },
   );
   if (!res.ok) throw new Error(`fetchTreeMessages failed: ${res.status}`);
   const body = await res.json();
-  return body.messages ?? [];
+  return { messages: body.messages ?? [], ...(Array.isArray(body.turns) ? { turns: body.turns } : {}) };
 }
 
 export interface MessagePageCursor { seq: number; id: string }
+/** One node's place in a page. */
+export interface TreeMessagePageEntry {
+  nodeId: string;
+  total: number;
+  before: MessagePageCursor | null;
+  /**
+   * On a node's latest page from a current gateway: its lean node fields as
+   * stored (shared/leanNodeFields), which lean metadata may have left out.
+   */
+  node?: Record<string, unknown>;
+}
 export interface TreeMessagePage {
   messages: unknown[];
   // Missing on older gateways, which answer this endpoint with full history.
-  pages?: Array<{ nodeId: string; total: number; before: MessagePageCursor | null }>;
+  pages?: TreeMessagePageEntry[];
+  // Each node's latest turn row, read in the same transaction as `messages`.
+  // Missing on older gateways.
+  turns?: unknown[];
 }
 
 export async function fetchTreeMessagePage(workspaceId: string, treeId: string, connectionId?: string,
-  signal?: AbortSignal, page?: { nodeId: string; before: MessagePageCursor },
+  signal?: AbortSignal, page?: { nodeId?: string; before?: MessagePageCursor; limit?: number },
 ): Promise<TreeMessagePage> {
-  const query = new URLSearchParams({ limit: '50' });
-  if (page) {
+  // One node's latest page when `before` is absent; the server caps limit at 200.
+  // Without a node, every node's latest `limit` messages.
+  const query = new URLSearchParams({ limit: String(Math.min(200, Math.max(1, page?.limit ?? 50))) });
+  if (page?.nodeId) {
     query.set('nodeId', serverEntityId(page.nodeId, connectionId));
-    query.set('beforeSeq', String(page.before.seq));
-    query.set('beforeId', page.before.id);
+    if (page.before) {
+      query.set('beforeSeq', String(page.before.seq));
+      query.set('beforeId', page.before.id);
+    }
   }
   const res = await backendFetch(
     `${connectionId ? backendApiBase(connectionId) : workspaceBackendApiBase(workspaceId)}/workspaces/${encodeURIComponent(serverEntityId(workspaceId, connectionId))}/trees/${encodeURIComponent(treeId)}/messages?${query}`,
@@ -147,7 +210,8 @@ export async function fetchTreeMessagePage(workspaceId: string, treeId: string, 
   if (!Array.isArray(body.messages) || (body.pages !== undefined && (!Array.isArray(body.pages)
     || body.pages.some(item => !item || typeof item.nodeId !== 'string' || !Number.isSafeInteger(item.total) || item.total < 0
       || (item.before !== null && (!item.before || !Number.isSafeInteger(item.before.seq) || item.before.seq < 0
-        || typeof item.before.id !== 'string' || !item.before.id)))))) {
+        || typeof item.before.id !== 'string' || !item.before.id)))))
+    || (body.turns !== undefined && !Array.isArray(body.turns))) {
     throw new Error('Invalid message page');
   }
   return body;
@@ -193,6 +257,33 @@ export interface PersistenceCapabilities {
    * treated as "supported with an empty pane list".
    */
   paneInspection?: unknown;
+  /** Server attention ('v1'): see supportsServerAttention in services/serverAttention.ts. */
+  attention?: unknown;
+  /** Agent artifact tools ('v1'): see {@link supportsArtifactTools}. */
+  artifactTools?: unknown;
+  /** Skipped artifact writes answered, not a failed batch ('v1'): see {@link supportsArtifactWriteAnswers}. */
+  artifactWriteAnswers?: unknown;
+}
+
+/**
+ * The backend skips an artifact upsert of a deleted artifact or under a name
+ * another one holds, names it in the batch's answer (goneContextIds,
+ * nameTakenContextIds) and commits the rest. True ONLY for `'v1'`: an older
+ * backend omits the field, and fails such a batch with a 500 that its sender
+ * retries, holding up every later write of the workspace.
+ */
+export function supportsArtifactWriteAnswers(capabilities: Pick<PersistenceCapabilities, 'artifactWriteAnswers'> | null | undefined): boolean {
+  return capabilities?.artifactWriteAnswers === 'v1';
+}
+
+/**
+ * The backend's chat agents have list_artifacts / search_artifacts and its
+ * ensure-session reads artifactCount, so a first message may name only the
+ * pinned artifacts. True ONLY for `'v1'`: an older backend omits the field,
+ * and it must get the full artifact list.
+ */
+export function supportsArtifactTools(capabilities: Pick<PersistenceCapabilities, 'artifactTools'> | null | undefined): boolean {
+  return capabilities?.artifactTools === 'v1';
 }
 
 /**
@@ -214,7 +305,7 @@ export function fetchPersistenceCapabilities(connectionId?: string, options: { c
     return res.json() as Promise<PersistenceCapabilities>;
   });
   const result = probe();
-  if (options.configureTransport !== false && (!connectionId || connectionId === 'local')) {
+  if (options.configureTransport !== false && isLocalConnectionId(connectionId)) {
     const available = (capabilities: PersistenceCapabilities) => capabilities.streamTransport === STREAM_TRANSPORT_PROTOCOL;
     configureStreamTransport(base, result.then(available), () => probe().then(available));
   }
@@ -227,21 +318,91 @@ export interface WorkspaceCommand {
   payload: Record<string, unknown>;
 }
 
+/**
+ * A command batch the backend answered with an error status. Older backends
+ * send only `error`; newer ones add the DomainError `code` and, when known,
+ * the batch limit and the command that failed.
+ */
+export class WorkspaceCommandsError extends Error {
+  readonly name = 'WorkspaceCommandsError';
+  constructor(
+    message: string,
+    readonly status: number,
+    readonly code?: string,
+    readonly detail: {
+      maxCommands?: number;
+      commandIndex?: number;
+      commandType?: string;
+      entityId?: string;
+    } = {},
+  ) {
+    super(message);
+  }
+}
+
+/**
+ * What a committed batch says of the artifacts it upserted and skipped:
+ * - goneContextIds: deleted (the id is tombstoned), so the sender drops them;
+ * - nameTakenContextIds: written under a name another artifact holds, a
+ *   stale write; they are alive, so only that write is dropped.
+ * Only lists of ids are taken; an older backend sends neither (and failed a
+ * batch with a taken name instead, a 500).
+ */
+interface WorkspaceCommandsAnswer {
+  goneContextIds: string[];
+  nameTakenContextIds: string[];
+}
+
+function contextIdsOf(body: unknown, field: keyof WorkspaceCommandsAnswer): string[] {
+  const ids = body && typeof body === 'object' ? (body as Record<string, unknown>)[field] : undefined;
+  if (!Array.isArray(ids)) return [];
+  return ids.filter((id): id is string => typeof id === 'string' && id.length > 0 && id.length <= 160);
+}
+
+/**
+ * The body of POST /workspaces/:id/commands. `artifactIdentity: 'id'` tells
+ * the backend this window matches artifacts by id only (state/chatReducers.ts
+ * never gives one another's id by name), so it never mistakes one of its
+ * deletes for an older window's id takeover and skips it (backend
+ * domainCommands.ts). A backend without that check reads only operationId
+ * and commands and ignores the field.
+ */
+export function workspaceCommandsBody(operationId: string, commands: readonly WorkspaceCommand[]): string {
+  return JSON.stringify({ operationId, commands, artifactIdentity: 'id' });
+}
+
+/** Commits `commands`; answers which of the artifacts they upserted the backend skipped (WorkspaceCommandsAnswer). */
 export async function applyWorkspaceCommands(
   workspaceId: string,
   operationId: string,
   commands: readonly WorkspaceCommand[],
-): Promise<void> {
-  if (commands.length === 0) return;
+): Promise<WorkspaceCommandsAnswer> {
+  if (commands.length === 0) return { goneContextIds: [], nameTakenContextIds: [] };
   const res = await backendFetch(`${workspaceBackendApiBase(workspaceId)}/workspaces/${encodeURIComponent(serverEntityId(workspaceId))}/commands`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ operationId, commands }),
+    body: workspaceCommandsBody(operationId, commands),
   });
   if (!res.ok) {
-    const body = await res.json().catch(() => ({ error: `status ${res.status}` }));
-    throw new Error(body.error || `applyWorkspaceCommands failed: ${res.status}`);
+    const body: Record<string, unknown> = await res.json().catch(() => ({}));
+    const count = (value: unknown) => (Number.isSafeInteger(value) && (value as number) >= 0 ? value as number : undefined);
+    const text = (value: unknown) => (typeof value === 'string' && value ? value : undefined);
+    throw new WorkspaceCommandsError(
+      text(body.error) ?? `applyWorkspaceCommands failed: ${res.status}`,
+      res.status,
+      text(body.code),
+      {
+        maxCommands: count(body.maxCommands),
+        commandIndex: count(body.commandIndex),
+        commandType: text(body.commandType),
+        entityId: text(body.entityId),
+      },
+    );
   }
+  // The batch committed whatever its body says: an unreadable one answers nothing skipped.
+  let body: unknown = null;
+  try { body = await res.json(); } catch { /* As above. */ }
+  return { goneContextIds: contextIdsOf(body, 'goneContextIds'), nameTakenContextIds: contextIdsOf(body, 'nameTakenContextIds') };
 }
 
 export async function deleteWorkspace(id: string): Promise<void> {

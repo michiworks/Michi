@@ -49,9 +49,11 @@ export interface SwitchProps {
 }
 
 /**
- * The 28×16 sliding toggle switch. Its markup was written verbatim three times
- * in Settings alone; this is the single source. Purely presentational — wrap it
- * in a ClickableRow / label for the tappable text.
+ * The sliding toggle switch, 28×16 by default. Its markup was written verbatim
+ * three times in Settings alone; this is the single source. Purely
+ * presentational — wrap it in a ClickableRow / label for the tappable text.
+ * Its look is CSS (.ui-switch in index.css), so a surface can restyle it:
+ * Settings draws it larger (Settings.css).
  */
 export function Switch({ on, onChange, disabled, ...rest }: SwitchProps) {
   const ariaLabel = rest['aria-label'];
@@ -67,31 +69,8 @@ export function Switch({ on, onChange, disabled, ...rest }: SwitchProps) {
         e.stopPropagation();
         onChange(!on);
       }}
-      style={{
-        width: 28,
-        height: 16,
-        padding: 0,
-        border: '1px solid var(--term-line-s)',
-        background: on ? 'var(--term-accent)' : 'var(--term-surface)',
-        position: 'relative',
-        display: 'inline-block',
-        flexShrink: 0,
-        cursor: disabled ? 'not-allowed' : 'pointer',
-        opacity: disabled ? 0.5 : 1,
-        transition: 'background var(--t-soft) var(--t-ease)',
-      }}
     >
-      <span
-        style={{
-          position: 'absolute',
-          top: 1,
-          left: on ? 13 : 1,
-          width: 12,
-          height: 12,
-          background: on ? 'var(--term-surface)' : 'var(--term-line-s)',
-          transition: 'left var(--t-soft) var(--t-ease)',
-        }}
-      />
+      <span className="ui-switch__knob" aria-hidden="true" />
     </button>
   );
 }

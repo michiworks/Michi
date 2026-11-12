@@ -11,6 +11,11 @@ export default tseslint.config(
   {
     ignores: ['dist/**', 'node_modules/**', 'coverage/**'],
   },
+  {
+    // A disable comment whose rule no longer fires is an error, so dead ones
+    // cannot pile up again.
+    linterOptions: { reportUnusedDisableDirectives: 'error' },
+  },
   ...tseslint.configs.recommended,
   {
     files: ['src/**/*.{ts,tsx}'],
@@ -82,6 +87,19 @@ export default tseslint.config(
           selector: "Property > Literal[value=/^#[0-9a-fA-F]{3,8}$/]",
           message: "Use a palette token, e.g. 'var(--term-fg)', not a hex colour.",
         },
+      ],
+    },
+  },
+  {
+    // One test for "an input method owns this key": isImeComposing (lib/ime.ts)
+    // also catches Safari's keyCode 229, which isComposing alone misses.
+    files: ['src/**/*.{ts,tsx}'],
+    ignores: ['src/**/*.test.{ts,tsx}', 'src/lib/ime.ts'],
+    rules: {
+      'no-restricted-properties': [
+        'error',
+        { property: 'isComposing', message: 'Use isImeComposing(event) from lib/ime.' },
+        { property: 'keyCode', message: 'Read event.key; for keyCode 229 use isImeComposing(event) from lib/ime.' },
       ],
     },
   },

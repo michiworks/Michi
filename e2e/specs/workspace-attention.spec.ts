@@ -103,7 +103,7 @@ test('expanded live activity stays bounded, preserves reading position, and foll
   const reasoning = (from: number, count: number) => Array.from({ length: count }, (_, i) => `Reasoning step ${from + i}: inspect the isolated fixture and preserve user attention.`).join('\n\n');
   await emit(page, [{ event: 'thought', data: { text: reasoning(0, 75) } }]);
   await taskPane.getByText('Thinking…', { exact: true }).click();
-  const activity = taskPane.getByRole('region', { name: 'Activity details' });
+  const activity = taskPane.getByRole('region', { name: 'Thought' });
   await expect(activity).toBeVisible();
   const measure = () => activity.evaluate(el => ({ top: el.scrollTop, height: el.clientHeight, max: el.scrollHeight - el.clientHeight }));
   await expect.poll(async () => (await measure()).max).toBeGreaterThan(500);

@@ -63,6 +63,34 @@ test('preload forwards typed service and terminal responses without wrapping or 
   ]);
 });
 
+test('residency reads and changes cross only the desktop: channels and come back unchanged', async () => {
+  const { bridge, calls, responses } = loadPreload();
+  // DesktopResidency as main answers it on macOS: the icon on, the Dock kept, no login item.
+  const residency = {
+    tray: { supported: true, enabled: true },
+    hideDock: { supported: true, enabled: false },
+    openAtLogin: { supported: false, enabled: false },
+  };
+  const changed = { ...residency, hideDock: { supported: true, enabled: true } };
+  responses.set('desktop:getResidency', residency);
+  responses.set('desktop:setResidency', changed);
+  assert.equal(await bridge.getResidency(), residency);
+  const patch = { hideDock: true };
+  assert.equal(await bridge.setResidency(patch), changed);
+  assert.deepEqual(calls, [['desktop:getResidency'], ['desktop:setResidency', patch]]);
+  assert.equal(calls[1][1], patch, 'the patch is passed as given; main validates it');
+});
+
+test('main answers every channel the preload invokes', () => {
+  const preloadSource = fs.readFileSync(new URL('../electron/preload.ts', import.meta.url), 'utf8');
+  const mainSource = fs.readFileSync(new URL('../electron/main.ts', import.meta.url), 'utf8');
+  const channels = (text, pattern) => new Set([...text.matchAll(pattern)].map((m) => m[1]));
+  const invoked = channels(preloadSource, /[^\w]invoke\('([\w:-]+)'/g);
+  const handled = channels(mainSource, /handleDesktopInvoke\('([\w:-]+)'/g);
+  assert.ok(invoked.has('desktop:getResidency') && invoked.has('desktop:setResidency'), 'the scan finds the preload\'s invokes');
+  for (const channel of invoked) assert.ok(handled.has(channel), `${channel} is invoked by the preload but main has no handler`);
+});
+
 test('backdrop capture forwards the rect and returns the image unchanged', async () => {
   const { bridge, calls, responses } = loadPreload();
   responses.set('app:captureBackdrop', 'data:image/png;base64,AAAA');
@@ -89,6 +117,165 @@ test('preload event subscriptions preserve payloads and release their exact list
   assert.equal(received, notice);
   stop();
   assert.equal(handlers.has('scheduled:notice'), false);
+});
+
+test('notifications keep the two-argument call and route a targeted click back', () => {
+  const { bridge, calls, handlers } = loadPreload();
+  bridge.showNotification('Done', 'Result');
+  bridge.showNotification('Needs input', 'Which database?', { key: 'node:n1', silent: true });
+  assert.deepEqual(calls, [
+    ['app:showNotification', 'Done', 'Result'],
+    ['app:showNotification', 'Needs input', 'Which database?', { key: 'node:n1', silent: true }],
+  ]);
+  const clicked = [];
+  const stop = bridge.onAttentionNotificationClick((key) => clicked.push(key));
+  handlers.get('app:attentionNotificationClicked')({}, 'node:n1');
+  assert.deepEqual(clicked, ['node:n1']);
+  stop();
+  assert.equal(handlers.has('app:attentionNotificationClicked'), false);
+});
+
+async function loadRendererNotifications() {
+  const builtUrl = new URL('../electron/dist/rendererNotifications.js', import.meta.url);
+  assert.ok(fs.existsSync(builtUrl), 'electron/dist/rendererNotifications.js is missing; run `npm run electron:build-main` first');
+  return import(builtUrl.href);
+}
+
+test('main accepts a renderer notification only with a string title and a sane target', async () => {
+  const { parseNotificationRequest } = await loadRendererNotifications();
+  assert.deepEqual(parseNotificationRequest('Done', 'Result', undefined), { title: 'Done', body: 'Result', key: null, silent: false });
+  assert.deepEqual(parseNotificationRequest('Done', undefined, { key: 'node:n1', silent: true }), { title: 'Done', body: '', key: 'node:n1', silent: true });
+  assert.equal(parseNotificationRequest(undefined, 'Result', { key: 'node:n1' }), null);
+  assert.equal(parseNotificationRequest('Done', '', { key: 'x'.repeat(2000) }).key, null);
+  assert.equal(parseNotificationRequest('Done', '', { key: 42, silent: 'yes' }).silent, false);
+});
+
+test('main holds one notification per window and key, bounded', async () => {
+  const { createNotificationHolder } = await loadRendererNotifications();
+  const holder = createNotificationHolder(2);
+  const notification = () => { const n = { closed: 0, close() { n.closed += 1; } }; return n; };
+  const first = notification();
+  const releaseFirst = holder.hold(1, 'node:n1', first);
+  const other = notification();
+  holder.hold(2, 'node:n1', other);
+  const newer = notification();
+  holder.hold(1, 'node:n1', newer);
+  // Only the same window's older notification for the target is replaced.
+  assert.equal(first.closed, 1);
+  assert.equal(other.closed, 0);
+  releaseFirst();
+  for (const n of [notification(), notification()]) holder.hold(1, null, n);
+  // Over the limit the oldest are let go, not closed: a later one for their key replaces nothing.
+  holder.hold(2, 'node:n1', notification());
+  holder.hold(1, 'node:n1', notification());
+  assert.equal(other.closed, 0);
+  assert.equal(newer.closed, 0);
+});
+
+test('Companion subscriptions pass notices and targets through and release their exact listener', () => {
+  const { bridge, handlers } = loadPreload();
+  // A notice about one Michi conversation, as the backend sends it.
+  const notice = {
+    id: 'cmn-1', title: 'Companion', body: 'Chat X has been waiting 30 min', target: { kind: 'node', workspaceId: 'w', nodeId: 'n' },
+    itemIds: ['cmi-1'], createdAt: 1, expiresAt: 2,
+  };
+  // A banner's click for a notice about one item: Today, at that item.
+  const target = { kind: 'companion', tab: 'today', itemId: 'cmi-2' };
+  let receivedNotice;
+  let receivedTarget;
+  const stopNotice = bridge.onCompanionNotice((value) => { receivedNotice = value; });
+  const stopOpen = bridge.onCompanionOpen((value) => { receivedTarget = value; });
+  handlers.get('companion:notice')({}, notice);
+  handlers.get('companion:open')({}, target);
+  assert.equal(receivedNotice, notice);
+  assert.equal(receivedTarget, target);
+  stopNotice();
+  stopOpen();
+  assert.equal(handlers.has('companion:notice'), false);
+  assert.equal(handlers.has('companion:open'), false);
+});
+
+test('Companion subscriptions tell main when this document starts and stops listening, on the channel main reads', () => {
+  // The name main.ts listens on (electron/companionNotifications.ts); preload.ts cannot import it.
+  const { COMPANION_READY_CHANNEL } = require('../electron/dist/companionNotifications.js');
+  const { bridge, calls } = loadPreload();
+  const stopFirst = bridge.onCompanionNotice(() => {});
+  const stopSecond = bridge.onCompanionNotice(() => {});
+  const stopOpen = bridge.onCompanionOpen(() => {});
+  assert.deepEqual(calls, [[COMPANION_READY_CHANNEL, 'notice', true], [COMPANION_READY_CHANNEL, 'open', true]]);
+  stopFirst();
+  stopFirst();
+  assert.equal(calls.length, 2, 'one notice listener is left, and a second stop does nothing');
+  stopSecond();
+  stopOpen();
+  assert.deepEqual(calls.slice(2), [[COMPANION_READY_CHANNEL, 'notice', false], [COMPANION_READY_CHANNEL, 'open', false]]);
+  // Subscribing again (React StrictMode runs an effect twice) is reported again.
+  bridge.onCompanionNotice(() => {});
+  assert.deepEqual(calls.slice(4), [[COMPANION_READY_CHANNEL, 'notice', true]]);
+  // Other subscriptions say nothing.
+  bridge.onScheduledNotice(() => {});
+  bridge.onOpenUrl(() => {});
+  assert.equal(calls.length, 5);
+});
+
+test('a window a Companion notification opened reads its target from the parameter main.ts sets', () => {
+  // The name main.ts writes (electron/companionNotifications.ts); preload.ts cannot import it.
+  const { COMPANION_TARGET_PARAM } = require('../electron/dist/companionNotifications.js');
+  const withTarget = (raw) => `?${new URLSearchParams({ michiWindowId: 'window', [COMPANION_TARGET_PARAM]: raw })}`;
+  for (const target of [
+    { kind: 'node', workspaceId: 'w', nodeId: 'n' },
+    { kind: 'url', url: 'https://reviews.example.com/reviews/CR-1' },
+    { kind: 'companion', tab: 'today' },
+    // A notice about one item: Today, at that item.
+    { kind: 'companion', tab: 'today', itemId: 'cmi-1' },
+    { kind: 'settings' },
+  ]) {
+    const { bridge, calls } = loadPreload(withTarget(JSON.stringify(target)));
+    assert.equal(JSON.stringify(bridge.initialCompanionTarget), JSON.stringify(target));
+    assert.deepEqual(calls, []);
+  }
+  // Rebuilt from known fields only; an item only on Today, and only a well-formed one.
+  for (const [raw, target] of [
+    ['{"kind":"companion","tab":"chat","extra":1}', { kind: 'companion', tab: 'chat' }],
+    ['{"kind":"companion","tab":"chat","itemId":"cmi-1"}', { kind: 'companion', tab: 'chat' }],
+    ['{"kind":"companion","tab":"today","itemId":""}', { kind: 'companion', tab: 'today' }],
+    ['{"kind":"companion","tab":"today","itemId":7}', { kind: 'companion', tab: 'today' }],
+    [JSON.stringify({ kind: 'companion', tab: 'today', itemId: 'x'.repeat(161) }), { kind: 'companion', tab: 'today' }],
+  ]) {
+    assert.equal(JSON.stringify(loadPreload(withTarget(raw)).bridge.initialCompanionTarget), JSON.stringify(target), raw.slice(0, 80));
+  }
+  assert.equal(loadPreload('?michiWindowId=window').bridge.initialCompanionTarget, null);
+  for (const raw of [
+    '', 'not json', 'null', '[]', '"chat"', '{"kind":"spaces"}', '{"kind":"companion","tab":"inbox"}',
+    '{"kind":"url","url":"javascript:alert(1)"}', '{"kind":"node","workspaceId":"","nodeId":"n"}', '{"kind":"node","workspaceId":"w"}',
+  ]) {
+    assert.equal(loadPreload(withTarget(raw)).bridge.initialCompanionTarget, null, raw);
+  }
+});
+
+test('every target main.ts accepts survives the preload unchanged', () => {
+  const { COMPANION_TARGET_PARAM, parseCompanionTarget } = require('../electron/dist/companionNotifications.js');
+  const long = (n) => 'x'.repeat(n);
+  const candidates = [
+    { kind: 'node', workspaceId: 'w', nodeId: 'n' }, { kind: 'node', workspaceId: long(160), nodeId: long(160) },
+    { kind: 'node', workspaceId: long(161), nodeId: 'n' },
+    { kind: 'url', url: 'https://reviews.example.com/reviews/CR-1' }, { kind: 'url', url: 'HTTP://builds.example.com/pipelines/A' },
+    { kind: 'url', url: 'https://outlook.office.com/mail/a b' }, { kind: 'url', url: ' https://reviews.example.com' },
+    { kind: 'url', url: `https://x.test/${long(2048 - 'https://x.test/'.length)}` }, { kind: 'url', url: `https://x.test/${long(2048)}` },
+    { kind: 'url', url: 'ftp://x.test' }, { kind: 'url', url: 'https://' },
+    { kind: 'companion', tab: 'chat' }, { kind: 'companion', tab: 'today' }, { kind: 'settings' },
+    { kind: 'companion', tab: 'today', itemId: 'cmi-1' }, { kind: 'companion', tab: 'today', itemId: long(160) },
+    { kind: 'companion', tab: 'today', itemId: long(161) }, { kind: 'companion', tab: 'chat', itemId: 'cmi-1' },
+  ];
+  let accepted = 0;
+  for (const candidate of candidates) {
+    const target = parseCompanionTarget(candidate);
+    if (!target) continue;
+    accepted += 1;
+    const query = `?${new URLSearchParams({ [COMPANION_TARGET_PARAM]: JSON.stringify(target) })}`;
+    assert.equal(JSON.stringify(loadPreload(query).bridge.initialCompanionTarget), JSON.stringify(target), JSON.stringify(candidate).slice(0, 80));
+  }
+  assert.ok(accepted >= 8, 'the sample covers each target kind');
 });
 
 test('bootstrap values and native File conversion retain legacy renderer behavior', () => {

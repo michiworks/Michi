@@ -1,7 +1,23 @@
 import { randomUUID } from 'node:crypto';
+import { BranchBoundaryError, resolveBranchBoundary } from './branchBoundary';
 import { getDb, runInTransaction } from './db';
 import { getWorkspace, listNodes, listEdges, listTrees, listMessages, saveMessage, saveTree, setNodeForkProvenance } from './dbRepository';
 import type { MessageRow } from './dbRepository';
+import { recordStructureChange } from './structureEvents';
+
+/** The parent rows a branch inherited: the same cut its session uses (resolveBranchBoundary). */
+function inheritedRows(childNodeId: string, parentNodeId: string, userId?: string): MessageRow[] {
+  try {
+    const boundary = resolveBranchBoundary({ childNodeId, parentNodeId, userId });
+    if (!boundary) throw new Error('Parent branch is unavailable');
+    return boundary.messages;
+  } catch (error) {
+    if (!(error instanceof BranchBoundaryError)) throw error;
+    throw new Error(error.code === 'BRANCH_ANCHOR_UNAVAILABLE'
+      ? 'Branch anchor is missing; parent history cannot be extracted safely'
+      : 'Parent history is unavailable or inconsistent');
+  }
+}
 
 /** Validate and snapshot before changing either the graph or the transcript. */
 export function planNodeExtraction(workspaceId: string, nodeId: string, userId?: string) {
@@ -44,6 +60,8 @@ export function planNodeExtraction(workspaceId: string, nodeId: string, userId?:
   const ancestors: string[] = [];
   const segments: MessageRow[][] = [];
   const visited = new Set([nodeId]);
+  // A fresh multi-model branch never had its parent's conversation, so nothing above it is inherited.
+  let inherits = true;
   let child = node;
   while (child.parent_node_id) {
     const parent = byId.get(child.parent_node_id);
@@ -52,17 +70,11 @@ export function planNodeExtraction(workspaceId: string, nodeId: string, userId?:
     }
     visited.add(parent.id);
     ancestors.push(parent.id);
-    const edge = edges.find(e => e.kind === 'branch' && e.source_node_id === parent.id && e.target_node_id === child.id);
-    if (!edge) throw new Error('Parent branch is unavailable');
-    let messages = listMessages(parent.id);
-    if (edge.anchor_message_id) {
-      const anchor = messages.findIndex(message => message.id === edge.anchor_message_id);
-      if (anchor < 0) throw new Error('Branch anchor is missing; parent history cannot be extracted safely');
-      messages = messages.slice(0, anchor + 1);
-    } else if (edge.created_at != null) {
-      messages = messages.filter(message => message.created_at <= edge.created_at!);
+    if (!edges.some(e => e.kind === 'branch' && e.source_node_id === parent.id && e.target_node_id === child.id)) {
+      throw new Error('Parent branch is unavailable');
     }
-    segments.unshift(messages);
+    if (child.fresh_context === 1) inherits = false;
+    if (inherits) segments.unshift(inheritedRows(child.id, parent.id, userId));
     child = parent;
   }
   if (child.id !== sourceTree.root_node_id) throw new Error('Parent chain does not reach the thread root');
@@ -101,8 +113,9 @@ export function extractNodeTree(workspaceId: string, nodeId: string, treeId: str
     const forkedFromNodeId = plan.node.parent_node_id ?? null;
     const db = getDb();
     const now = Date.now();
+    // The new thread's name is its root's title (the extracted node's).
     const tree = { id: treeId, workspace_id: workspaceId, root_node_id: nodeId,
-      name: plan.node.title ?? null, created_at: now, last_active_at: now };
+      created_at: now, last_active_at: now };
     saveTree(tree);
     // Shift from the end to also support databases with a unique (node, seq) index.
     for (const message of listMessages(nodeId).reverse()) {
@@ -112,9 +125,14 @@ export function extractNodeTree(workspaceId: string, nodeId: string, treeId: str
     plan.history.forEach((message, seq) => {
       const id = `m-${randomUUID()}`;
       if (seq === plan.history.length - 1) forkBoundaryMessageId = id;
-      saveMessage({ ...message, id, node_id: nodeId, seq, rev: null });
+      // Copy named fields: SELECT * also returns columns left by old builds,
+      // which the upsert would reject as unknown named parameters.
+      const { role, content, blocks, tool_calls, metadata, created_at } = message;
+      saveMessage({ id, node_id: nodeId, role, content, blocks, tool_calls, metadata, seq, created_at, rev: null });
     });
     for (const id of plan.moving) db.prepare('UPDATE nodes SET tree_id = ? WHERE id = ?').run(treeId, id);
+    // saveTree recorded the new thread; the extracted branch left its old one.
+    recordStructureChange({ entity: 'node', op: 'moved', workspaceId, nodeId, treeId });
     // Links are tree-local. Merge and digest references may cross tree boundaries.
     for (const edge of listEdges(workspaceId)) {
       if (edge.kind === 'link' && plan.moving.has(edge.source_node_id) !== plan.moving.has(edge.target_node_id)) {

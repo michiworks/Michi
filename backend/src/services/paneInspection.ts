@@ -20,6 +20,7 @@ import {
   AgentRunEventType,
   decodePaneId,
   encodePaneId,
+  isArchiveGroupId,
   PANE_INSPECTION_ERROR_CODES,
   PANE_INSPECTION_LIMITS,
   PaneInspectionError,
@@ -28,26 +29,35 @@ import {
   type PaneDescriptorV1,
   type PaneLocator,
   type PaneTarget,
+  type SurfacePaneKind,
 } from 'michi-shared';
 import { chatHub, type ChatObservationSnapshot } from '../agents/chatHub';
-import { agentRunToDescriptor, type AgentRunCancellationEventsInput } from './paneInspectionProjection.run';
-import { chatNodeToDescriptor, isArchivedPaneNode } from './paneInspectionProjection.chat';
+import { agentRunToDescriptor, selectedAttempt, type AgentRunCancellationEventsInput } from './paneInspectionProjection.run';
+import { chatNodeToDescriptor } from './paneInspectionProjection.chat';
 import { persistedChatPreview, readRunEventsThrough } from './paneInspectionSources';
-import { surfaceToDescriptor, SURFACE_PANE_KINDS, type SurfacePaneKind } from './paneInspectionProjection.surface';
+import { surfaceToDescriptor, SURFACE_PANE_KINDS } from './paneInspectionProjection.surface';
 import { paneInspectionRing, type AuthorizationScope } from './paneInspectionRing';
 import {
   getAiGlobalContext,
   getCompletedTurnCount,
+  getLatestTurn,
   getMessageCountsByNode,
   getNode,
+  getSavedTurn,
   getWorkspace,
+  isTreeArchived,
   listEdges,
   type NodeRow,
-  type TurnRow,
 } from './dbRepository';
 import { getDb } from './db';
 import { AgentRunsRepository } from './agentRunsRepository';
 import { panePresenceRegistry } from './panePresence';
+
+/** Archived as agents see it: the node (the older status or the archive lane) or its thread. */
+export function isArchivedPaneNode(node: NodeRow): boolean {
+  return node.status === 'archived' || (node.deleted_at != null && isArchiveGroupId(node.deletion_group_id))
+    || isTreeArchived(node.tree_id);
+}
 
 /** Re-exported under the old name so the P1-6b surface tests keep compiling. They now exercise the
  *  SAME instance the presence routes write to, which is the point of the fix: previously this
@@ -60,9 +70,9 @@ export { panePresenceRegistry as __testOnlyPanePresenceRegistry };
 // ---------------------------------------------------------------------------
 
 /**
- * The authenticated/session-bound caller, resolved upstream (route auth middleware, or the
- * runtime-session-bound tool caller) and handed to this service as already-trusted data. This
- * service NEVER reads ownerUserId/workspaceId/backendConnectionId from a request payload —
+ * The authenticated/session-bound caller, resolved upstream (`buildPaneInspectionCaller` in
+ * paneInspectionTools.ts, from the session binding) and handed to this service as
+ * already-trusted data. This service NEVER reads ownerUserId/workspaceId/backendConnectionId from a request payload —
  * brief step 2's "server-derived caller context only, never an id from the payload" applies to
  * every field here.
  *
@@ -86,29 +96,21 @@ export interface PaneInspectionCaller {
   assistant?: boolean;
 }
 
-/** Maps a caller onto the ring's `AuthorizationScope` shape. MUST stay structurally identical to
- *  `paneInspectionSubscribe.ts`'s own private `scopeFor` — a cursor minted here under one scope
- *  shape and resolved there under a differently-derived one would never match, silently defeating
- *  the whole boundary this task closes. Both derive the same three fields from the same
- *  `PaneInspectionCaller` shape, so keeping this as the one shared export (rather than each file
- *  re-deriving it) removes the chance of the two drifting apart. */
+/** Maps a caller onto the ring's `AuthorizationScope` shape. Every module that mints or resolves
+ *  cursors uses this one: a cursor minted under one scope shape and resolved under a
+ *  differently-derived one would never match. */
 export function scopeForCaller(caller: PaneInspectionCaller): AuthorizationScope {
   return { ownerUserId: caller.ownerUserId, workspaceId: caller.workspaceId, runOwnerId: caller.runOwner?.runId ?? null };
 }
 
 /**
- * The subset of a `PaneDescriptorV1` that constitutes "content" for the ring's revision
- * bookkeeping. MUST stay structurally identical to `paneInspectionSubscribe.ts`'s own private
- * `toContentSnapshot` — both this function and that one feed the SAME `PaneInspectionRing`
- * instance's `contentEquals` (deep-JSON) comparison for the SAME paneId, so a divergent shaping
- * here would make `inspect`'s baseline and `subscribePanes`'s first diff disagree about whether
- * anything actually changed, which is exactly the kind of gap this task exists to close. Strips
- * `observation.observedAt` (a plain re-read must never look like a change — design §8) and
- * `presence.views[].registeredAt/lastSeenAt` (keepalive-only fields) for the same reason
- * `paneInspectionSubscribe.ts` strips them. `cursor` is never part of "content" either way — it
- * is derived FROM the content, not a member of it, so including it here would be circular.
+ * The subset of a `PaneDescriptorV1` that constitutes "content": what inspect, wait_pane and the
+ * pane feed compare (with the ring's `contentEquals`) to decide whether a pane changed, and what
+ * the ring's revisions count. Strips `observation.observedAt` and `cursor` (a plain re-read must
+ * never look like a change — design §8; the cursor is derived FROM the content) and
+ * `presence.views[].registeredAt/lastSeenAt` (keepalive-only fields).
  */
-export function toRingContentSnapshot(descriptor: PaneDescriptorV1): unknown {
+export function paneContentSnapshot(descriptor: PaneDescriptorV1): unknown {
   const { observation, presence, ...rest } = descriptor;
   return {
     ...rest,
@@ -246,9 +248,9 @@ export function paneTargetWorkspaceId(ownerUserId: string, target: PaneTarget): 
 
 /**
  * The caller scoped to the workspace the located target lives in. `base` carries the
- * server-derived identity (HTTP session or tool binding); the workspace comes only from the
+ * server-derived identity (the tool binding); the workspace comes only from the
  * target, owner-scoped by `paneTargetWorkspaceId`, so a target another owner holds resolves to
- * null in cloud mode. The HTTP routes and the assistant's tools both scope through this; null
+ * null in cloud mode. The agent tools (paneInspectionTools.ts) scope through this; null
  * means NOT_FOUND. `authorizeCaller` still checks the target against the returned caller.
  */
 export function resolveCallerForTarget(
@@ -406,7 +408,7 @@ function chatDescriptor(
     paneInspectionRing.releaseSubscriber(paneId);
   }
 
-  const durableTurn = fetchLatestTurnForNode(node.id, caller.ownerUserId);
+  const durableTurn = getLatestTurn(node.id, caller.ownerUserId);
   const counts = getMessageCountsByNode(node.id, caller.ownerUserId);
   const turns = getCompletedTurnCount(node.id, caller.ownerUserId);
   const lineage = buildChatLineage(node, caller);
@@ -420,7 +422,7 @@ function chatDescriptor(
   // already proved the ref belongs to this node.
   let effectiveDurableTurn = durableTurn;
   if (executionRef && executionRef.kind === 'chat_turn' && executionRef.turnId !== effectiveObservation?.turnId) {
-    const requestedTurn = fetchTurnById(executionRef.turnId, caller.ownerUserId);
+    const requestedTurn = getSavedTurn(node.id, executionRef.turnId, caller.ownerUserId)?.turn ?? null;
     // requestedTurn is guaranteed non-null here: validateExecutionRefForNode already confirmed
     // this turnId exists and belongs to this node before we got this far.
     effectiveDurableTurn = requestedTurn;
@@ -439,6 +441,7 @@ function chatDescriptor(
     lineage,
     runtime,
     presence,
+    archived: isArchivedPaneNode(node),
     backendConnectionId: caller.backendConnectionId,
     observedAt,
     previousOutput: persistedChatPreview(node.id, executionRef?.kind === 'chat_turn' ? executionRef.turnId : undefined),
@@ -503,7 +506,7 @@ function sameChatWatermark(a: ChatObservationSnapshot | null, b: ChatObservation
  *  no-op-for-revision on an unchanged repeat call (P3-1's own contract), which is exactly what
  *  makes "inspect run repeatedly does not advance revision" true here for free. */
 function mintChatCursor(descriptor: PaneDescriptorV1, paneId: string, scope: AuthorizationScope): PaneDescriptorV1 {
-  const content = toRingContentSnapshot(descriptor);
+  const content = paneContentSnapshot(descriptor);
   const payload = { version: 1, paneId, cursor: '', emittedAt: descriptor.observation.observedAt,
     type: 'changed', changedSections: Object.keys(descriptor), descriptor };
   const cursor = paneInspectionRing.mintInspectionCursor(paneId, scope, content, {
@@ -519,7 +522,6 @@ function mintChatCursor(descriptor: PaneDescriptorV1, paneId: string, scope: Aut
 function digestDescriptor(caller: PaneInspectionCaller, node: NodeRow, observedAt: number): PaneDescriptorV1 {
   const presence = panePresenceRegistry.getPresence({ kind: 'node', nodeId: node.id });
   const paneId = encodePaneId({ kind: 'node', nodeId: node.id });
-  const scope = scopeForCaller(caller);
   const descriptor: PaneDescriptorV1 = {
     version: 1,
     ref: { backendConnectionId: caller.backendConnectionId, paneId },
@@ -551,7 +553,6 @@ function digestDescriptor(caller: PaneInspectionCaller, node: NodeRow, observedA
 function artifactDescriptor(caller: PaneInspectionCaller, node: NodeRow, observedAt: number): PaneDescriptorV1 {
   const presence = panePresenceRegistry.getPresence({ kind: 'node', nodeId: node.id });
   const paneId = encodePaneId({ kind: 'node', nodeId: node.id });
-  const scope = scopeForCaller(caller);
   const descriptor: PaneDescriptorV1 = {
     version: 1,
     ref: { backendConnectionId: caller.backendConnectionId, paneId },
@@ -627,12 +628,7 @@ function inspectAgentRun(
   // Run itself is terminal. There is no per-attempt ExecutionRef in the shared contract to
   // disambiguate further; see the report for why this is a deliberate no-op beyond validation.
   const cancellationRequested = allEvents.filter((event) => event.type === AgentRunEventType.CancellationRequested);
-  const selectedAttemptId = run.activeAttemptId
-    ?? attempts.reduce((latest: string | null, attempt) => {
-      if (!latest) return attempt.id;
-      const latestAttempt = attempts.find((candidate) => candidate.id === latest);
-      return latestAttempt && attempt.attemptIndex > latestAttempt.attemptIndex ? attempt.id : latest;
-    }, null as string | null);
+  const selectedAttemptId = selectedAttempt(run, attempts)?.id ?? null;
   const assistantEvents: AgentRunEventV1[] = selectedAttemptId
     ? allEvents.filter((event) => event.type === AgentRunEventType.Assistant && event.attemptId === selectedAttemptId)
     : [];
@@ -686,8 +682,7 @@ function validateExecutionRefForNode(node: NodeRow, ref: ExecutionRef): void {
   if (ref.nodeId !== node.id) {
     throw new PaneInspectionError('INVALID_ARGUMENT', 'executionRef', "executionRef does not belong to the target object");
   }
-  const row = getDb().prepare('SELECT node_id FROM turns WHERE turn_id = ?').get(ref.turnId) as { node_id: string } | undefined;
-  if (!row || row.node_id !== node.id) {
+  if (!getSavedTurn(node.id, ref.turnId)) {
     throw new PaneInspectionError('INVALID_ARGUMENT', 'executionRef', 'executionRef does not identify a known turn on this node');
   }
 }
@@ -699,48 +694,6 @@ function validateExecutionRefForRun(run: import('michi-shared').AgentRunDtoV1, r
   if (ref.runId !== run.id) {
     throw new PaneInspectionError('INVALID_ARGUMENT', 'executionRef', 'executionRef does not belong to the target object');
   }
-}
-
-// ---------------------------------------------------------------------------
-// Turn fetching — no existing dbRepository export returns "the latest turn row for a node" or
-// "a turn row by id" with owner scoping, so this service owns those two small, targeted SELECTs
-// (adapters are pure by design — brief: "all database fetching is yours").
-// ---------------------------------------------------------------------------
-
-/** Owner/workspace-scoped fetch of the most recently started turn row for a node, or null if the
- *  node has no turn rows at all. Mirrors dbRepository's own owner-scoping convention exactly
- *  (`process.env.MICHI_CLOUD === '1' && userId` branch joining nodes/workspaces on
- *  owner_user_id, unscoped otherwise) rather than inventing a new one — COMMON.md decision 5. */
-function fetchLatestTurnForNode(nodeId: string, userId?: string): TurnRow | null {
-  const cloudScoped = process.env.MICHI_CLOUD === '1' && userId;
-  const row = cloudScoped
-    ? getDb().prepare(
-        `SELECT t.* FROM turns t
-         JOIN nodes n ON t.node_id = n.id
-         JOIN workspaces w ON n.workspace_id = w.id
-         WHERE t.node_id = ? AND w.owner_user_id = ?
-         ORDER BY t.started_at DESC LIMIT 1`,
-      ).get(nodeId, userId)
-    : getDb().prepare(
-        'SELECT * FROM turns WHERE node_id = ? ORDER BY started_at DESC LIMIT 1',
-      ).get(nodeId);
-  return (row as TurnRow | undefined) ?? null;
-}
-
-/** Owner/workspace-scoped fetch of a single turn row by its turn_id. Used only after
- *  `validateExecutionRefForNode` has already proven the turnId belongs to the caller-visible
- *  node, so this is a plain lookup rather than a second ownership check. */
-function fetchTurnById(turnId: string, userId?: string): TurnRow | null {
-  const cloudScoped = process.env.MICHI_CLOUD === '1' && userId;
-  const row = cloudScoped
-    ? getDb().prepare(
-        `SELECT t.* FROM turns t
-         JOIN nodes n ON t.node_id = n.id
-         JOIN workspaces w ON n.workspace_id = w.id
-         WHERE t.turn_id = ? AND w.owner_user_id = ?`,
-      ).get(turnId, userId)
-    : getDb().prepare('SELECT * FROM turns WHERE turn_id = ?').get(turnId);
-  return (row as TurnRow | undefined) ?? null;
 }
 
 // ---------------------------------------------------------------------------

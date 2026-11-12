@@ -32,7 +32,7 @@
   },
   "scripts": {
     "typecheck": "npm --prefix .. run shared:build && tsc --noEmit -p tsconfig.json",
-    "test": "npm --prefix .. run shared:build && node --require ts-node/register --test --test-timeout=30000 test/*.test.ts",
+    "test": "npm --prefix .. run shared:build && node --require ts-node/register --require ./test/helpers/goldenWriteGuard.cjs --test --test-timeout=30000 --test-concurrency=8 test/*.test.ts",
     "build": "npm --prefix .. run shared:build && node scripts/build.mjs",
     "pack:check": "npm run build && node scripts/pack.mjs"
   },

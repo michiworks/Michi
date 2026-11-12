@@ -7,13 +7,17 @@
 // identical hand-written read+frame loop. This module collapses that loop into
 // one place; the per-frame semantics stay with each caller via `onFrame`.
 
+import { HttpResponseError } from './httpError';
+
 /**
  * A non-2xx HTTP response on an SSE subscribe endpoint. Callers inspect
- * `.status` to decide whether a reconnect is worthwhile.
+ * `.status` to decide whether a reconnect is worthwhile; shouldRetryRequest
+ * tells a transient answer from a refusal.
  */
-export class SseHttpError extends Error {
-  constructor(public readonly status: number, prefix = 'subscribe failed', public readonly code?: string, message?: string) {
-    super(message || `${prefix}: ${status}`);
+export class SseHttpError extends HttpResponseError {
+  constructor(status: number, prefix = 'subscribe failed', code?: string, message?: string) {
+    super(message || `${prefix}: ${status}`, status, code);
+    this.name = 'SseHttpError';
   }
 }
 
@@ -31,6 +35,32 @@ export interface ReadSseStreamOptions {
   shouldStop?: () => boolean;
 }
 
+export interface SseBlock {
+  /** The `event:` field, trimmed; `message` when the frame names none. */
+  event: string;
+  /** The `data:` lines, each without one leading space, joined with `\n`. */
+  data: string;
+  /** Every line that is not a `data:` line, as written. */
+  otherLines: string[];
+}
+
+/** One frame (the text between blank lines) read as the SSE spec reads it. */
+export function parseSseBlock(block: string): SseBlock {
+  let event = 'message';
+  const data: string[] = [];
+  const otherLines: string[] = [];
+  for (const line of block.split('\n')) {
+    if (line.startsWith('data:')) {
+      const rest = line.slice(5);
+      data.push(rest.startsWith(' ') ? rest.slice(1) : rest);
+      continue;
+    }
+    if (line.startsWith('event:')) event = line.slice(6).trim();
+    otherLines.push(line);
+  }
+  return { event, data: data.join('\n'), otherLines };
+}
+
 /**
  * Drain an SSE byte stream, invoking `onFrame(event, data)` once per frame that
  * carries non-empty data. `onFrame` may return a promise; when it does the loop
@@ -38,10 +68,9 @@ export interface ReadSseStreamOptions {
  * background feed's replay-gap reconciliation). When it returns void the loop
  * stays fully synchronous, preserving legacy frame-dispatch timing.
  *
- * SSE `data:` handling matches the spec: strip exactly ONE leading space if
- * present, then concatenate verbatim. Never `.trim()` — that ate whitespace
- * inside JSON payloads and corrupted multi-byte UTF-8 frames whose first byte
- * happened to be ASCII whitespace.
+ * Frames are read by parseSseBlock. Never `.trim()` data — that ate
+ * whitespace inside JSON payloads and corrupted multi-byte UTF-8 frames whose
+ * first byte happened to be ASCII whitespace.
  */
 export async function readSseStream(
   reader: ReadableStreamDefaultReader<Uint8Array>,
@@ -62,18 +91,9 @@ export async function readSseStream(
         if (opts.shouldStop?.()) return;
         const block = buf.slice(0, idx);
         buf = buf.slice(idx + 2);
-        const lines = block.split('\n');
-        let evt = 'message';
-        let data = '';
-        for (const l of lines) {
-          if (l.startsWith('event:')) evt = l.slice(6).trim();
-          else if (l.startsWith('data:')) {
-            const rest = l.slice(5);
-            data += rest.startsWith(' ') ? rest.slice(1) : rest;
-          }
-        }
+        const { event, data } = parseSseBlock(block);
         if (!data) continue;
-        const maybe = onFrame(evt, data);
+        const maybe = onFrame(event, data);
         if (maybe) await maybe;
       }
     }

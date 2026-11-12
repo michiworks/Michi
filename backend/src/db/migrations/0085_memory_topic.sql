@@ -1,0 +1,12 @@
+-- Michi Memory: what a memory is about, in a few words (MemoryRecord.topic),
+-- chosen when it is saved (memory_save, automatic extraction, an import's
+-- note title). Settings groups memories by it and About the user takes its
+-- topics from it. NULL: none was given (every memory saved before this).
+--
+-- No index: topicsInUse groups one owner's memories, which the owner index
+-- already narrows, and a partial index on topic made recall's planner slower
+-- (memoryRecallIndex.test.ts's 10,000-document search).
+--
+-- Numbered after 0084 so the Companion branch's 0081-0084 keep their names;
+-- the runner applies whichever files a database has not recorded.
+ALTER TABLE memories ADD COLUMN topic TEXT;

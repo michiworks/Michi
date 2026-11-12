@@ -22,8 +22,9 @@ const mockStoreState = {
 };
 const structuralSelectors: Array<(nodes: Record<string, unknown>) => unknown> = [];
 
+const mockPrefs: Record<string, unknown> = { showSidebarTimestamps: false };
 vi.mock('../../state/prefs', () => ({
-  usePrefs: () => ({ prefs: { showSidebarTimestamps: false } }),
+  usePrefs: () => ({ prefs: mockPrefs }),
 }));
 
 // ThreadRow no longer owns selection: every click is forwarded to onActivate,
@@ -86,7 +87,127 @@ describe('ThreadRow', () => {
     mockStoreState.node = makeNode();
     mockStoreState.nodes = {};
     mockStoreState.projects = [];
+    delete mockPrefs.sidebarRowStyle;
     localStorage.clear();
+  });
+
+  describe('a thread with no title yet', () => {
+    const label = () => document.querySelector('[data-sidebar-row="n1"] [data-provisional]') as HTMLElement | null;
+    const untitled = (text?: string): ChatNodeState => ({
+      ...makeNode(),
+      title: undefined,
+      messages: text === undefined ? [] : [{ id: 'm1', role: 'user', text, createdAt: 1 } as ChatNodeState['messages'][number]],
+    });
+
+    it.each(['classic', 'square-full'])('shows an excerpt of the first message as a provisional label in %s rows', (style) => {
+      mockPrefs.sidebarRowStyle = style;
+      mockStoreState.node = untitled('> a quoted line\nwhere does the warm-pool effort default live');
+      renderThreadRow({ isActive: false });
+      expect(label()?.textContent).toBe('where does the warm-pool effort default live');
+      expect(label()?.style.fontStyle).toBe('italic');
+      expect(label()?.style.color).toBe('var(--term-muted)');
+      expect(screen.queryByText('Untitled')).toBeNull();
+    });
+
+    it('stays provisional above the workspace name in Activity rows', () => {
+      mockPrefs.sidebarRowStyle = 'square-full';
+      mockStoreState.node = untitled('tail-spacer e2e once more');
+      renderThreadRow({ subtitle: 'Michi' });
+      expect(label()?.textContent).toBe('tail-spacer e2e once more');
+      expect(label()?.style.color).toBe('var(--term-muted)');
+      expect(label()?.style.fontStyle).toBe('italic');
+    });
+
+    it('drops the provisional look once a title arrives, and says Untitled with nothing to quote', () => {
+      mockStoreState.node = { ...untitled('first words'), title: 'A real title' };
+      const { rerender } = renderThreadRow();
+      expect(screen.getByText('A real title')).toBeTruthy();
+      expect(label()).toBeNull();
+      mockStoreState.node = untitled();
+      rerender({});
+      expect(screen.getByText('Untitled').style.fontStyle).toBe('');
+      expect(label()).toBeNull();
+    });
+  });
+
+  describe('keyboard', () => {
+    const row = () => document.querySelector('[data-sidebar-row="n1"]') as HTMLElement;
+
+    it('is a button to the keyboard: Tab stop, Enter/Space open, arrows fold, Shift+F10 opens the menu', () => {
+      const { props } = renderThreadRow({ hasBranches: true, expanded: false });
+      expect(row().getAttribute('role')).toBe('button');
+      expect(row().tabIndex).toBe(0);
+      expect(row().getAttribute('aria-label')).toBe('Root title');
+      expect(row().getAttribute('aria-current')).toBe('true');
+      expect(row().getAttribute('aria-expanded')).toBe('false');
+      expect(row().classList.contains('t-row-focus')).toBe(true);
+
+      fireEvent.keyDown(row(), { key: 'Enter' });
+      fireEvent.keyDown(row(), { key: ' ' });
+      expect(props.onActivate).toHaveBeenCalledTimes(2);
+      fireEvent.keyDown(row(), { key: 'ArrowRight' });
+      expect(props.onToggleExpand).toHaveBeenCalledTimes(1);
+      // ← on a folded row does nothing; shortcuts with ⌘ pass through.
+      fireEvent.keyDown(row(), { key: 'ArrowLeft' });
+      fireEvent.keyDown(row(), { key: 'Enter', metaKey: true });
+      expect(props.onToggleExpand).toHaveBeenCalledTimes(1);
+      expect(props.onActivate).toHaveBeenCalledTimes(2);
+
+      fireEvent.keyDown(row(), { key: 'F10', shiftKey: true });
+      expect(screen.getByRole('menu')).toBeTruthy();
+    });
+
+    it('marks only the current row, and leaves keys typed into the rename field to it', async () => {
+      const { props, actions } = renderThreadRow({ isActive: false });
+      expect(row().hasAttribute('aria-current')).toBe(false);
+      fireEvent.contextMenu(row());
+      fireEvent.click(screen.getByText(/^Rename/));
+      // ContextMenu runs the item after its confirm blink.
+      const input = await screen.findByRole('textbox', { name: 'Thread name' });
+      fireEvent.keyDown(input, { key: ' ' });
+      fireEvent.change(input, { target: { value: 'Renamed' } });
+      fireEvent.keyDown(input, { key: 'Enter' });
+      expect(actions.renameTree).toHaveBeenCalledWith('t1', 'Renamed');
+      expect(props.onActivate).not.toHaveBeenCalled();
+    });
+
+    it('keeps the current Activity row clear of its ⋯ in card rows', () => {
+      mockPrefs.sidebarRowStyle = 'square-full';
+      const { rerender } = renderThreadRow({ subtitle: 'Michi', isActive: false });
+      expect(row().style.paddingRight).toBe('16px');
+      rerender({ isActive: true });
+      expect(row().style.paddingRight).toBe('calc(16px + 16px + var(--row-kebab-extra, 0px))');
+    });
+  });
+
+  describe('workspace name (Activity view)', () => {
+    const row = () => document.querySelector('[data-sidebar-row="n1"]') as HTMLElement;
+    const workspace = () => row().querySelector('[data-row-workspace]') as HTMLElement | null;
+
+    it.each(['square-full', 'rounded-inset'])('is a second muted line inside the row, under the title, in %s rows', (style) => {
+      mockPrefs.sidebarRowStyle = style;
+      renderThreadRow({ subtitle: 'Michi' });
+      const title = screen.getByText('Root title');
+      expect(workspace()?.textContent).toBe('Michi');
+      // Below the title line, not on it: the title keeps the whole first line.
+      expect(workspace()?.contains(title)).toBe(false);
+      expect(title.parentElement?.nextElementSibling).toBe(workspace());
+      expect(workspace()?.style.color).toBe('var(--term-muted)');
+      expect(workspace()?.querySelector('svg')).not.toBeNull();
+      expect(title.style.flex).toBe('1 1 0%');
+    });
+
+    it('is left to Activity view in classic rows, which draws it under the row', () => {
+      mockPrefs.sidebarRowStyle = 'classic';
+      renderThreadRow({ subtitle: 'Michi' });
+      expect(workspace()).toBeNull();
+    });
+
+    it('is absent in Structure view, which passes no workspace name', () => {
+      mockPrefs.sidebarRowStyle = 'square-full';
+      renderThreadRow();
+      expect(workspace()).toBeNull();
+    });
   });
 
   describe('unread dot', () => {
@@ -155,6 +276,38 @@ describe('ThreadRow', () => {
     expect(onActivate.mock.calls[0][0]).toMatchObject({ ctrlKey: true });
   });
 
+  describe('open rail', () => {
+    const rail = () => {
+      const last = document.querySelector('[data-sidebar-row="n1"]')!.lastElementChild as HTMLElement;
+      return last.style.position === 'absolute' && last.style.width === '2px' ? last : null;
+    };
+
+    it('pulses in the run colour while the thread runs', () => {
+      renderThreadRow({ openState: 'streaming' });
+      expect(rail()!.style.background).toBe('var(--term-run)');
+      expect(rail()!.className, 'the running dot class, which Reduce motion stops').toContain('term-dot-i--run');
+      expect(rail()!.style.right).toBe('2px');
+    });
+
+    it('marks an open pane in the accent only while the thread is collapsed', () => {
+      const { rerender } = renderThreadRow({ openState: 'idle' });
+      expect(rail()!.style.background).toBe('var(--term-accent)');
+      expect(rail()!.style.animation).toBe('');
+      rerender({ openState: 'idle', expanded: true });
+      expect(rail()).toBeNull();
+    });
+  });
+
+  it('closes its menu on a second press of the ⋯', () => {
+    renderThreadRow();
+    const kebab = screen.getByRole('button', { name: 'Actions for Root title' });
+    fireEvent.click(kebab);
+    expect(screen.getByRole('menu')).toBeTruthy();
+    fireEvent.mouseDown(kebab);
+    fireEvent.click(kebab);
+    expect(screen.queryByRole('menu')).toBeNull();
+  });
+
   it('renames a thread from the context menu inline editor', async () => {
     const { actions } = renderThreadRow();
 
@@ -184,5 +337,18 @@ describe('ThreadRow', () => {
 
     expect(actions.renameTree).not.toHaveBeenCalled();
     expect(screen.getByText('Root title')).toBeTruthy();
+  });
+  it.each([{ isComposing: true }, { keyCode: 229 }])('leaves Enter and Esc that end an IME composition to it (%o)', async (ime) => {
+    const { actions } = renderThreadRow();
+    fireEvent.contextMenu(screen.getByText('Root title').closest('[data-sidebar-row]')!);
+    fireEvent.click(screen.getByText(/Rename/));
+    const input = await screen.findByLabelText('Thread name');
+    fireEvent.change(input, { target: { value: '研究计划' } });
+    fireEvent.keyDown(input, { key: 'Enter', ...ime });
+    fireEvent.keyDown(input, { key: 'Escape', ...ime });
+    expect(actions.renameTree).not.toHaveBeenCalled();
+    expect(screen.getByLabelText('Thread name')).toBe(input);
+    fireEvent.keyDown(input, { key: 'Enter' });
+    expect(actions.renameTree).toHaveBeenCalledWith('t1', '研究计划');
   });
 });

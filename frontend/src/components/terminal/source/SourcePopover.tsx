@@ -3,8 +3,9 @@ import { useIsPresent } from 'motion/react';
 import { ChevronRight, MessageSquare, X } from 'lucide-react';
 import { measureSurface, PopoverSurface } from '../../ui/Popover';
 import { Button } from '../../ui/controls';
-import { useAnchoredPosition } from '../../ui/useAnchoredPosition';
-import { formatMichiAge } from '../content/michiFormat';
+import { placeBelowAnchor, useAnchoredPosition } from '../../ui/useAnchoredPosition';
+import { useBackLayer } from '../../../lib/backStack';
+import { formatMichiAgo } from '../content/michiFormat';
 import { fetchSourcePreview, type SourcePreview } from '../../../state/sourceNav/sourceApi';
 import type { SourcePopoverState } from '../../../state/sourceNav/sourceNav';
 import './source.css';
@@ -20,12 +21,6 @@ const RUNTIME_LABELS: Record<string, string> = { claude: 'Claude', codex: 'Codex
 export function runtimeLabel(runtimeId: string | null | undefined): string | null {
   if (!runtimeId) return null;
   return RUNTIME_LABELS[runtimeId] ?? runtimeId;
-}
-
-export function sourceAge(at: number | null | undefined, now = Date.now()): string {
-  if (at == null) return '';
-  const age = formatMichiAge(at, now);
-  return age === 'now' ? 'just now' : `${age} ago`;
 }
 
 type Loaded = { status: 'loading' } | { status: 'ready'; preview: SourcePreview } | { status: 'missing' } | { status: 'error' };
@@ -51,6 +46,7 @@ export function SourcePopover({ popover, onClose, onGo }: SourcePopoverProps) {
   const present = useIsPresent();
   const presentRef = React.useRef(present);
   presentRef.current = present;
+  useBackLayer(present, { back: () => { anchor?.focus({ preventScroll: true }); onCloseRef.current(); } });
 
   React.useEffect(() => {
     const controller = new AbortController();
@@ -73,10 +69,7 @@ export function SourcePopover({ popover, onClose, onGo }: SourcePopoverProps) {
       if (!anchor) { setPosition({ left: Math.max(PAD, (window.innerWidth - width) / 2), top: 96 }); return; }
       // The page under it went away (another page opened): so does the popover.
       if (!anchor.isConnected) { onCloseRef.current(); return; }
-      const rect = anchor.getBoundingClientRect();
-      const left = Math.max(PAD, Math.min(window.innerWidth - width - PAD, rect.left - LEAD));
-      let top = rect.bottom + GAP;
-      if (top + height > window.innerHeight - PAD && rect.top - GAP - height >= PAD) top = rect.top - GAP - height;
+      const { left, top } = placeBelowAnchor(anchor.getBoundingClientRect(), { width, height }, { lead: LEAD, gap: GAP, pad: PAD });
       setPosition((current) => current && current.left === left && current.top === top ? current : { left, top });
     },
     dependencies: [loaded.status],
@@ -110,7 +103,7 @@ export function SourcePopover({ popover, onClose, onGo }: SourcePopoverProps) {
   const archived = preview?.state === 'archived';
   const closed = gone || archived;
   const runtime = runtimeLabel(preview?.runtimeId);
-  const meta = [preview?.workspaceName, sourceAge(preview?.message?.at)].filter(Boolean).join(' · ');
+  const meta = [preview?.workspaceName, formatMichiAgo(preview?.message?.at)].filter(Boolean).join(' · ');
   const title = preview?.title || (loaded.status === 'loading' ? '' : 'Conversation');
   const text = gone ? '' : preview?.message?.text ?? '';
 
@@ -119,6 +112,7 @@ export function SourcePopover({ popover, onClose, onGo }: SourcePopoverProps) {
       ref={surfaceRef}
       role="dialog"
       aria-label={title ? `Source: ${title}` : 'Source'}
+      escapeLayer="over"
       className="source-pop"
       width={WIDTH}
       maxWidth={`calc(100vw - ${PAD * 2}px)`}

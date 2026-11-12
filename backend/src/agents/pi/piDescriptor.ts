@@ -43,6 +43,9 @@ export const PI_RUNTIME_DESCRIPTOR: RuntimeDescriptor = {
     historyReplay: "messages",
     backgroundTurns: false,
     titles: "none",
+    // An ephemeral session is an SDK session kept in memory (piSdkHarness);
+    // the agent-core rollback keeps none on disk either.
+    ephemeralSessions: "native",
   },
   run: PI_RUN,
 };

@@ -362,3 +362,35 @@ describe('panePresence: DELETE performs no cancellation', () => {
     assert.equal(node?.status, 'idle');
   });
 });
+
+describe('panePresence: conversations the user left (automatic memory reads them at once)', () => {
+  test('a conversation no live lease shows any more is reported once: switched away, removed, or its lease expired', () => {
+    seedNode('node-2', WORKSPACE_ID);
+    const registry = new PanePresenceRegistry(fakeRuns({}), { now: clock, ttlMs: 1_000, tombstoneRetentionMs: 1_000 });
+    const left: string[][] = [];
+    const unsubscribe = registry.subscribeConversationsLeft((nodeIds) => left.push([...nodeIds]));
+    const view = (nodeId: string, windowId: string, visible = true) => ({
+      paneId: encodePaneId({ kind: 'node', nodeId }), windowId, uiPaneId: `ui-${nodeId}`, treeId: null, visible, openedAtClient: null,
+    });
+    const a = registry.submitPresence(caller(), { viewRevision: 1, windowId: 'w-a', views: [view('node-1', 'w-a')] }) as { rendererLeaseId: string };
+    const b = registry.submitPresence(caller({ connectionId: 'conn-2' }), { viewRevision: 1, windowId: 'w-b', views: [view('node-1', 'w-b')] }) as { rendererLeaseId: string };
+    assert.deepEqual(left, []);
+    // Window a switches to another conversation: window b still shows node-1, so nobody left it.
+    registry.submitPresence(caller(), { rendererLeaseId: a.rendererLeaseId, viewRevision: 2, windowId: 'w-a', views: [view('node-2', 'w-a')] });
+    assert.deepEqual(left, []);
+    // Window b hides it (a background slot): it was left.
+    registry.submitPresence(caller({ connectionId: 'conn-2' }), { rendererLeaseId: b.rendererLeaseId, viewRevision: 2, windowId: 'w-b', views: [view('node-1', 'w-b', false)] });
+    assert.deepEqual(left, [['node-1']]);
+    // Window a closes its pane.
+    registry.removePresence(caller(), { rendererLeaseId: a.rendererLeaseId, paneIds: [encodePaneId({ kind: 'node', nodeId: 'node-2' })] });
+    assert.deepEqual(left, [['node-1'], ['node-2']]);
+    // A window that stops reporting: its lease expires and what it showed was left.
+    registry.submitPresence(caller(), { rendererLeaseId: a.rendererLeaseId, viewRevision: 3, windowId: 'w-a', views: [view('node-2', 'w-a')] });
+    clockNow = 5_000;
+    registry.getPresence({ kind: 'node', nodeId: 'node-2' });
+    assert.deepEqual(left, [['node-1'], ['node-2'], ['node-2']]);
+    unsubscribe();
+    registry.submitPresence(caller(), { viewRevision: 1, windowId: 'w-c', views: [view('node-1', 'w-c')] });
+    assert.equal(left.length, 3);
+  });
+});

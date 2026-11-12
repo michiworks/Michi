@@ -142,13 +142,10 @@ export const MICHI_DB_LIMITS = {
   /** Row ids in one `?ids=` read. */
   readIds: 2000,
   columns: 100,
+  /** Options in one select or multi-select column. */
+  options: 100,
   views: 50,
   rows: 5000,
   /** Graphemes in a database or column name. */
   title: 100,
 } as const;
-
-
-
-/** A database without its columns, views and rows. */
-export type MichiDbHead = Omit<MichiDatabase, 'columns' | 'views' | 'rows'>;

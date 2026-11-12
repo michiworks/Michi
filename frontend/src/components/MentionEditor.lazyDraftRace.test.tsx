@@ -1,7 +1,7 @@
 import React, { createRef, lazy, Suspense, useEffect, useRef, useState } from 'react';
 import { act, render, waitFor } from '@testing-library/react';
 import { describe, expect, it, vi } from 'vitest';
-import type { MentionRecord } from './mentions';
+import type { MentionRecord } from '../lib/mentions';
 
 import type MentionEditorComponent from './MentionEditor';
 import type { MentionEditorHandle } from './MentionEditor';

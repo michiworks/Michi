@@ -1,0 +1,542 @@
+/* ==========================================================================
+   5. Replica kit (owner: engine). Every .mk-* piece of brief §5.2, built from
+   the app's own values: tokens.ts SLATE with the violet accent override,
+   index.css, and the component inline styles listed in brief §8.3. Where the
+   brief's table and the app source disagree, the source wins (see ENGINE.md,
+   "Kit values"). All sizes are design px at k = 1. Motion and state classes
+   live in 31-kit-motion.css.
+   ========================================================================== */
+
+/* -- 5.1 Token scope (brief §7.1) ---------------------------------------- */
+.mk {
+  --term-bg: #f3f4f6; --term-page-bg: #f3f4f6; --term-surface: #ffffff; --term-alt: #e5e7eb; --term-alt2: #d8dbe1;
+  --term-line: #d1d5db; --term-line-s: #9ca3af; --term-fg: #111827; --term-mid: #4b5563;
+  --term-muted: #616876; --term-faint: #7d8491;
+  --term-accent: #6d4aa8; --term-accent-f: #dbeafe;   /* the palette's accent fill survives the override */
+  --term-accent-dark: #5b408e;                         /* color-mix(accent 80%, fg): ASKED, MAIN */
+  --term-select: #c48300; --term-select-f: #fef3c7;
+  --term-digest: #2f6b4e; --term-digest-f: #d1fae5;
+  --term-mauve: #6d4aa8; --term-mauve-f: #ede9fe; --term-danger: #b91c1c;
+  --sel-bar-bg: #2f3a49; --sel-bar-fg: #eef3f9; --sel-bar-mid: #c2cfdf; --sel-bar-muted: #aabacd;
+  --sel-bar-line: #4f6075; --sel-bar-hover: #3c4b5d; --sel-bar-quote-bg: #26303d;
+  --sel-bar-action-bg: #bfcee2; --sel-bar-action-fg: #2f3a49;
+  --sel-bar-shadow: 0 2px 6px rgba(16,24,32,.09), 0 12px 26px rgba(16,24,32,.14);
+  --term-float-shadow: 0 1px 2px rgba(0,0,0,.08), 0 12px 34px rgba(0,0,0,.08);
+  --term-composer-bg: #fefefe;
+  --term-composer-shadow: 0 1px 2px rgba(0,0,0,.08), 0 12px 34px rgba(0,0,0,.08);
+  --term-composer-shadow-muted: 0 1px 2px rgba(0,0,0,.04), 0 10px 28px rgba(0,0,0,.035);
+  --map-card-shadow: 0 2px 6px rgba(17,24,39,.05), 0 16px 40px -20px rgba(17,24,39,.22);
+  --fs-2xs: 9px; --fs-xs: 10px; --fs-sm: 11px; --fs-md: 12px; --fs-lg: 13px; --fs-xl: 14px; --fs-2xl: 16px;
+  --msg: 15px; --msg-lead: 1.5;
+  --ui-radius: 4px; --ui-radius-sm: 2px; --ui-radius-lg: 8px;
+  /* Additions from index.css :root (letter-spacing, sidebar ground). */
+  --ls-caps: .08em; --ls-caps-wide: .14em; --ls-wide: .04em; --ls-tight: -.01em;
+  --term-sidebar: #fafafb;
+  /* Slate values of every other colour the kit paints (no rule below carries a
+     literal). App source per token: THEME-MONOKAI.md §1-2; a palette overrides
+     them in 95-monokai.css. Light themes: float bg = surface, composer focus
+     = white with black-alpha borders. */
+  --term-float-bg: var(--term-surface);              /* branch card (--term-float-bg) */
+  --term-composer-bg-focus: #fff; --term-composer-line: rgba(0,0,0,.08); --term-composer-line-focus: rgba(0,0,0,.18);
+  --mk-chrome: var(--term-bg); --mk-chrome-line: var(--term-alt);   /* top row and rail; their hairlines */
+  --mk-split: var(--term-alt); --mk-srow-sel: var(--term-alt);      /* pane split; active sidebar row */
+  --mk-srow-caret: var(--term-line-s);               /* row caret: the brief's lineS (the app's is muted) */
+  --mk-rail: var(--term-accent);                     /* open-in-pane rail at rest (live: accent) */
+  --mk-rail-glow: none;                              /* live rail: the brief pulses only (the app adds 0 0 6px accent) */
+  --mk-frame: rgba(17,24,39,.09);                    /* OS window hairline (not app) */
+  --mk-frame-shadow: 0 1px 2px rgba(17,24,39,.04), 0 24px 64px -32px rgba(17,24,39,.30);
+  --mk-fade: rgb(255 255 255 / 0);                   /* pane top fade end */
+  --mk-user-bg: #f9f8fc;                             /* color-mix(accent 4%, surface) */
+  --mk-user-shadow: 0 1px 0 rgba(109,74,168,.06), 0 1px 2px rgba(0,0,0,.03), 0 6px 18px -10px rgba(109,74,168,.22);
+  --mk-tool-run: rgba(109,74,168,.05);               /* accent 5 % */
+  --mk-sel: #d9d0e8; --mk-mark: #d3c9e5;             /* accent 26 % / 30 % on surface */
+  --mk-anchor-wash: #e9e4f2;                         /* mauve 15 % on surface */
+  --mk-hot: #ede9f5; --mk-hot-rest: #f3f1f8;         /* landing-only invite / touch rest: accent 12 % / 8 % */
+  --mk-flash: rgba(109,74,168,.14);                  /* pane-entrance-bg, accent 14 % */
+  --sel-bar-press: #46505e;
+  --mk-mention-bg: #ede9f5; --mk-mention-fg: var(--term-mauve);   /* mauve 12 % */
+  --mk-card-hover: rgba(17,24,39,.05);               /* branch card item hover, fg 5 % */
+  --mk-tray-line: rgba(209,213,219,.65);             /* Home tray, line 65 % */
+  --map-card-line: rgba(17,24,39,.09);               /* fg 9 % */
+  --map-merge-bg: #f9f8fc;                           /* color-mix(mauve 4%, surface) */
+  --map-source-shadow: 0 0 0 1px var(--term-mauve), var(--map-card-shadow);
+  --map-breathe: 0 2px 6px rgba(109,74,168,.08), 0 16px 44px -14px rgba(109,74,168,.40), 0 0 0 1px rgba(109,74,168,.22);
+  --map-heat-track: #e0e3e7; --map-heat-hot: #a996cb; --map-heat-mid: #b6a4d4;
+  --map-asked-bg: #f1f2f4;                           /* color-mix(alt 55%, surface) */
+  --map-edge: rgba(17,24,39,.25);                    /* fg 25 % */
+  --map-bar-shadow: 0 8px 24px rgba(17,24,39,.22); --map-bar-n-fg: var(--term-fg);
+  --map-btn-line: rgba(255,255,255,.42); --map-press: brightness(.94);   /* surface 42 %; white buttons darken */
+  --mk-font: var(--font); --mk-mono: var(--mono);   /* the page stacks (01-tokens.css) */
+  font-family: var(--mk-font); color: var(--term-fg); -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  font-size: var(--fs-md); font-weight: 400; line-height: 1.4; letter-spacing: 0; text-align: left;
+  font-feature-settings: "kern" 1, "liga" 1;
+}
+/* The app is border-box everywhere (Tailwind preflight). */
+.mk, .mk *, .mk *::before, .mk *::after { box-sizing: border-box; }
+.mk :where(p, ol, ul, li, h1, h2, h3, h4, figure, blockquote, dl, dd) { margin: 0; padding: 0; }
+.mk :where(ol, ul) { list-style: none; }
+.mk :where(b, strong) { font-weight: 600; }
+.mk :where(i, em) { font-style: normal; }
+
+/* Icons: inline lucide <svg class="i">, stroke from currentColor. Paste-ready
+   markup and stroke widths are in ENGINE.md, "Icons". */
+.mk .i { display: inline-block; flex: none; fill: none; stroke: currentColor;
+  stroke-linecap: round; stroke-linejoin: round; vertical-align: middle; overflow: visible; }
+.mk .i.fill { fill: currentColor; stroke: none; }
+.mk .i-r90 { transform: rotate(90deg); }   /* BranchIcon = lucide Split rotated 90 deg */
+
+/* -- 5.2 Scaled canvas (brief §5.3) ---------------------------------------
+   <div class="mk-fit" data-w="1280" data-h="620"><div class="mk mk-canvas">…
+   The wrapper reserves W*k x H*k (CLS 0); the canvas is laid out at W x H and
+   scaled. JS writes --k (00-core.js fit); without JS the section's CSS
+   fallback --k applies (brief §7.4). */
+.mk-fit { --k: 1; --w: 1280; --h: 620; position: relative; flex: none;
+  width: calc(var(--w) * var(--k) * 1px); aspect-ratio: var(--w) / var(--h); }
+.mk-fit > .mk-canvas { position: absolute; left: 0; top: 0;
+  width: calc(var(--w) * 1px); height: calc(var(--h) * 1px);
+  transform: scale(var(--k)); transform-origin: 0 0; }
+/* Opt-in if Safari softens scaled text while children animate (brief §5.3). */
+.mk-fit.use-zoom > .mk-canvas { transform: none; zoom: var(--k); }
+.mk-fit[data-w="1280"] { --w: 1280; } .mk-fit[data-w="1180"] { --w: 1180; } .mk-fit[data-w="1000"] { --w: 1000; }
+.mk-fit[data-w="760"] { --w: 760; } .mk-fit[data-w="640"] { --w: 640; } .mk-fit[data-w="500"] { --w: 500; }
+.mk-fit[data-h="740"] { --h: 740; } .mk-fit[data-h="620"] { --h: 620; } .mk-fit[data-h="520"] { --h: 520; }
+.mk-fit[data-h="440"] { --h: 440; } .mk-fit[data-h="360"] { --h: 360; } .mk-fit[data-h="300"] { --h: 300; }
+
+/* -- 5.3 Window, top row, body ------------------------------------------- */
+.mk-window { position: relative; width: 100%; height: 100%; display: flex; flex-direction: column;
+  background: var(--term-bg); border: 1px solid var(--mk-frame); border-radius: 10px;
+  box-shadow: var(--mk-frame-shadow);
+  overflow: hidden; contain: layout paint; isolation: isolate; }
+.mk-winbody { position: relative; flex: 1; min-height: 0; display: flex; }
+
+.mk-top { position: relative; flex: none; height: 40px; display: flex; align-items: center;
+  background: var(--mk-chrome); border-bottom: 1px solid var(--mk-chrome-line); }
+.mk-top-l { position: relative; flex: none; width: 280px; height: 100%; display: flex; align-items: center; padding-left: 14px; }
+/* The app tile: <span class="mk-tile"><svg viewBox="0 0 1078 1080">…</svg></span>
+   (michi-mark.svg without its clipPath; the span clips the rx 236 corners). */
+.mk-tile { display: block; flex: none; overflow: hidden; border-radius: 21.9%; }
+.mk-tile > svg { display: block; width: 100%; height: 100%; }
+.mk-top-tile { width: 18px; height: 18px; }
+.mk-top-name { margin-left: 8px; font-size: 15px; font-weight: 600; line-height: 1; color: var(--term-fg); }
+.mk-top-icons { position: absolute; left: 104px; top: 0; bottom: 0; display: flex; align-items: center; gap: 11px; color: var(--term-muted); }
+/* Right of the brand zone the app puts the pane captions and, pinned to the
+   window's right edge (14 px in), the view cluster (Topbar.tsx). No
+   breadcrumb or New chat button sits beside open panes. */
+.mk-top-r { position: relative; flex: 1; min-width: 0; height: 100%; display: flex; align-items: center; padding: 0 14px 0 16px; }
+
+/* -- 5.4 Area rail (rail/AreaRail.tsx, rail.css) ------------------------- */
+.mk-rail { position: relative; flex: none; width: 48px; display: flex; flex-direction: column; align-items: center;
+  gap: 6px; padding: 10px 0 12px; background: var(--mk-chrome); border-right: 1px solid var(--mk-chrome-line); }
+.mk-rail-btn { position: relative; flex: none; width: 34px; height: 34px; display: grid; place-items: center;
+  border-radius: 7px; color: var(--term-mid); }
+.mk-rail-btn.is-on { background: var(--term-alt2); color: var(--term-accent); }
+.mk-rail-btn.is-on::before { content: ""; position: absolute; left: -7px; top: 8px; bottom: 8px; width: 2px;
+  border-radius: 0 2px 2px 0; background: var(--term-accent); }
+.mk-rail-spacer { flex: 1; }
+
+/* -- 5.5 Sidebar (Sidebar.tsx, WorkspaceTree.tsx, frame 43) ---------------- */
+.mk-side { position: relative; flex: none; width: 232px; display: flex; flex-direction: column;
+  background: var(--term-sidebar); border-right: 1px solid var(--mk-chrome-line); padding: 12px 0 10px; }
+.mk-side-label { display: flex; align-items: center; height: 28px; padding: 0 16px; font-size: var(--fs-sm); font-weight: 600;
+  letter-spacing: var(--ls-caps); text-transform: uppercase; color: var(--term-muted); }   /* sidebar.css .sidebar-section-label */
+.mk-srow { position: relative; display: flex; align-items: center; gap: 6px; height: 30px; padding: 0 14px 0 var(--in, 16px);
+  font-size: var(--fs-xl); font-weight: 500; line-height: 1; color: var(--term-fg); white-space: nowrap; }
+.mk-srow > .mk-srow-t { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.mk-srow.is-project { font-weight: 600; }
+.mk-srow.is-project::before { content: ""; position: absolute; left: 0; top: 4px; bottom: 4px; width: 2px; background: var(--c, var(--term-line)); }
+.mk-srow.is-thread { --in: 24px; }
+.mk-srow.is-child { --in: 40px; font-weight: 400; }
+.mk-srow.is-sel { background: var(--mk-srow-sel); }
+.mk-srow-caret { margin-left: auto; font-size: var(--fs-xs); color: var(--mk-srow-caret); }
+/* Open-in-pane marker on the sidebar's right edge. */
+.mk-srow-rail { position: absolute; right: 3px; top: 4px; bottom: 4px; width: 2px; background: var(--mk-rail); transform-origin: 50% 50%; }
+.mk-srow-rail.is-live { background: var(--term-accent); }   /* streaming (ThreadRow.tsx) */
+.mk-side-gap { height: 10px; flex: none; }
+.mk-side-foot { margin-top: auto; display: flex; flex-direction: column; padding-top: 6px; }
+.mk-sfoot { display: flex; align-items: center; gap: 10px; height: 32px; padding: 0 16px;
+  font-size: var(--fs-xl); line-height: 1; color: var(--term-mid); }
+.mk-sfoot .i { color: var(--term-muted); }
+
+/* -- 5.6 Pane strip, pane, header (PaneCaption.tsx) ----------------------- */
+.mk-strip { position: relative; flex: 1; min-width: 0; height: 100%; display: flex; overflow: hidden; background: var(--term-surface); }
+.mk-pane { position: relative; flex: none; width: var(--pane-w, 500px); height: 100%; display: flex; flex-direction: column;
+  background: var(--term-surface); }
+/* 1 px split between panes, drawn above the header flash. */
+.mk-pane + .mk-pane::before { content: ""; position: absolute; left: 0; top: 0; bottom: 0;
+  width: 1px; background: var(--mk-split); z-index: 3; pointer-events: none; }
+/* The header sits above the list, and its surface reaches 2 px down, so a line
+   scrolled to the cut never leaves anti-aliased slivers under the caption. */
+.mk-head { position: relative; z-index: 2; flex: none; height: 36px; display: flex; align-items: center; gap: 8px; padding: 0 12px 0 16px;
+  background: var(--term-surface); box-shadow: 0 2px 0 var(--term-surface); }
+.mk-head-title { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  font-size: var(--fs-lg); font-weight: 400; line-height: 1.2; color: var(--term-mid); }
+.mk-pane.is-focused .mk-head-title { font-weight: 600; color: var(--term-fg); }
+/* The view cluster (Topbar.tsx): PaneLauncher "+" in mid, then Overview, Map,
+   Digest, Artifacts toggles (icons.tsx, 14 px) in faint; 26 px buttons, 6
+   apart. At 700 px and under the app folds it into one "⋯" (ResponsiveToolbar). */
+.mk-head-icons { margin-left: auto; display: flex; align-items: center; gap: 6px; color: var(--term-faint); }
+.mk-head-icons > .i { box-sizing: content-box; padding: 6px; }
+.mk-hplus, .mk-hmore { display: inline-grid; place-items: center; width: 26px; height: 26px; font-size: 16px; line-height: 1; color: var(--term-mid); }
+.mk-hmore { display: none; width: 36px; height: 36px; color: var(--term-fg); }
+@media (max-width: 700px) { .mk-head-icons > :not(.mk-hmore) { display: none; } .mk-head-icons > .mk-hmore { display: inline-grid; } }
+.mk-pane:not(.is-focused) .mk-head-icons { display: none; }
+/* Status dot (primitives.tsx Dot): faint idle, accent focused, amber + pulse while streaming. */
+.mk-dot { display: inline-block; flex: none; width: 6px; height: 6px; border-radius: 999px;
+  background: var(--term-faint); color: var(--term-faint); }
+.mk-pane.is-focused > .mk-head .mk-dot { background: var(--term-accent); color: var(--term-accent); }
+.mk-pane.is-streaming > .mk-head .mk-dot { background: var(--term-select); color: var(--term-select); }
+
+/* -- 5.7 Message viewport, list, column -----------------------------------
+   Before boot the list is bottom-anchored (tB, no JS). Booted, it is top-
+   anchored and follow-the-tail translates it up (00-core.js), so a row that
+   grows at the tail never moves earlier text in layout (CLS 0). */
+.mk-view { position: relative; flex: 1; min-height: 0; overflow: hidden; display: flex; flex-direction: column; justify-content: flex-end; }
+html[data-motion] .mk-view { justify-content: flex-start; }
+/* The pane's top fade (TPane.tsx paneTopFadeHeight): what scrolls under the
+   header fades out instead of ending in a cut. It covers the list's 16 px top
+   padding, so a top-aligned start frame never sits under it. */
+.mk-view::before { content: ""; position: absolute; inset: 0 0 auto; z-index: 1; height: 16px; pointer-events: none;
+  background: linear-gradient(var(--term-surface) 4px, var(--mk-fade)); }
+.mk-list { position: relative; flex: none; min-height: 100%; padding: 16px 0; }
+.mk-col { width: var(--col, 460px); margin: 0 auto; display: flex; flex-direction: column; }
+.mk-col > * + * { margin-top: 18px; }
+
+/* -- 5.8 Messages (MessageBlock.tsx, index.css .terminal-message-user, .prose) */
+.mk-user { position: relative; align-self: flex-end; max-width: 72%; padding: 9px 15px 10px;
+  background: var(--mk-user-bg); border-right: 2px solid var(--term-accent);
+  box-shadow: var(--mk-user-shadow);
+  font-size: var(--msg); line-height: var(--msg-lead); color: var(--term-fg); overflow-wrap: anywhere; }
+.mk-over { display: block; margin-bottom: 4px; font-family: var(--mk-mono); font-size: var(--fs-xs); font-weight: 500;
+  line-height: 1; letter-spacing: var(--ls-caps-wide); text-transform: uppercase; color: var(--term-accent); }
+.mk-msg { position: relative; display: flex; flex-direction: column; }
+.mk-msg > * + * { margin-top: 10px; }
+.mk-msg > .mk-prose { margin-top: 12px; }
+.mk-msg > .mk-label + * { margin-top: 0; }
+/* "> michi" (MessageBlock.tsx, comfortable density): the message font, muted. */
+.mk-label { margin-bottom: 4px; font-size: 10.5px; line-height: 1.2; color: var(--term-muted); }
+.mk-prose { font-size: var(--msg); line-height: var(--msg-lead); color: var(--term-fg); overflow-wrap: break-word; }
+.mk-prose > * + * { margin-top: .75em; }
+.mk-prose ol { list-style: decimal; padding-left: 2em; }
+.mk-prose ul { list-style: disc; padding-left: 2em; }
+.mk-prose li { padding-left: .5em; }
+.mk-prose li + li { margin-top: .25em; }
+.mk-prose li::marker { color: var(--term-mid); }
+.mk-prose li.lw:not(.on)::marker { color: transparent; }
+
+/* Pre-blocks (index.css .t-pre-block; QuoteChip.tsx, CommentChips.tsx,
+   PaneComposerPreBlocks.tsx): quote chip, pending and sent comments. */
+.mk-pre { --tone: var(--term-accent); display: flex; align-items: flex-start; gap: 10px; padding: 6px 10px;
+  margin: 8px 12px 0; border-left: 2px solid var(--tone); line-height: 1.4; }
+.mk-pre + .mk-pre { margin-top: 4px; }
+.mk-pre.tone-select { --tone: var(--term-select); }
+.mk-pre.is-msg { margin: 0 0 8px; }
+.mk-pre-col { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.mk-pre-cap { font-size: var(--fs-xs); line-height: 1.4; letter-spacing: var(--ls-caps); color: var(--term-muted); }
+.mk-pre-cap b { font-weight: 600; color: var(--term-fg); }
+.mk-pre-body { font-size: var(--fs-md); line-height: 1.4; color: var(--term-mid); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.mk-pre-q { font-size: var(--fs-sm); line-height: 1.4; color: var(--term-muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.mk-pre-r { font-size: var(--fs-md); line-height: 1.4; color: var(--term-fg); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.mk-pre-exp { flex: none; margin-top: 1px; font-size: var(--fs-xs); line-height: 1.4; letter-spacing: var(--ls-wide); color: var(--term-muted); white-space: nowrap; }
+.mk-pre-x { flex: none; display: inline-flex; align-items: center; justify-content: center; width: 24px; height: 20px;
+  border: 1px solid var(--term-line); border-radius: var(--ui-radius-sm); font-size: var(--fs-sm); line-height: 1; color: var(--term-muted); }
+
+/* -- 5.9 Agent blocks, card style (AgentBlockVariants.tsx, MessageBlock.tsx) */
+/* Thought row: "Thought for 0.4s" */
+.mk-thought { display: flex; align-items: center; gap: 8px; padding: 7px 11px; border: 1px solid var(--term-line);
+  background: var(--term-surface); color: var(--term-muted); }
+.mk-thought-label { flex: 1; min-width: 0; font-size: var(--fs-md); font-weight: 500; line-height: 1.4; color: var(--term-mid); white-space: nowrap; }
+.mk-chev { flex: none; font-size: var(--fs-2xs); line-height: 1; color: var(--term-faint); }
+/* Tool row (CardToolRow): icon slot 13 x 16, purpose title, mono subtitle,
+   duration, check. .is-running: accent wash, accent icon, spinner, no duration. */
+.mk-tool { border: 1px solid var(--term-line); background: var(--term-surface); }
+.mk-tool-row { position: relative; display: flex; align-items: flex-start; gap: 9px; padding: 6px 11px;
+  transition: background-color var(--t-enter) ease-out; }
+.mk-tool-row + .mk-tool-row, .mk-group-head + .mk-group-rows > .mk-tool-row:first-child,
+.mk-group-head + .mk-tool-row { border-top: 1px solid var(--term-line); }
+.mk-tool-row.is-line { align-items: center; }
+.mk-tool-ic { flex: none; display: inline-flex; align-items: center; justify-content: center; width: 13px; height: 16px; color: var(--term-muted); }
+.mk-tool-main { flex: 1; min-width: 0; }
+.mk-tool-title { display: block; font-size: var(--fs-md); font-weight: 500; line-height: 16px; color: var(--term-fg); }
+.mk-group .mk-tool-title { font-size: var(--fs-sm); font-weight: 400; }
+.mk-tool-sub { display: block; margin-top: 1px; font-family: var(--mk-mono); font-size: var(--fs-xs); line-height: 1.4;
+  color: var(--term-muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+/* One-line row (no purpose): name + mono detail. */
+.mk-tool-name { flex: none; max-width: 50%; font-size: var(--fs-sm); font-weight: 500; line-height: 16px; color: var(--term-fg);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.mk-tool-detail { flex: 1; min-width: 0; font-family: var(--mk-mono); font-size: var(--fs-xs); line-height: 16px; color: var(--term-muted);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.mk-tool-dur { flex: none; font-family: var(--mk-mono); font-size: var(--fs-xs); line-height: 16px; color: var(--term-muted); }
+.mk-tool-st { flex: none; position: relative; display: inline-grid; place-items: center end; min-width: 10px; height: 16px; color: var(--term-muted); }
+.mk-tool-st > * { grid-area: 1 / 1; }
+.mk-tool-row .mk-spin { display: none; }
+.mk-tool-row.is-running { background: var(--mk-tool-run); }
+.mk-tool-row.is-running .mk-tool-ic { color: var(--term-accent); }
+.mk-tool-row.is-running .mk-tool-sub, .mk-tool-row.is-running .mk-tool-detail { color: var(--term-mid); }
+.mk-tool-row.is-running .mk-check { opacity: 0; }
+.mk-tool-row.is-running .mk-spin { display: inline-block; }
+.mk-check { transition: opacity var(--t-soft) var(--ease); }
+/* Card spinner (index.css .agent-spinner) */
+.mk-spin { display: inline-block; flex: none; width: 10px; height: 10px; border: 1.5px solid var(--term-line);
+  border-top-color: var(--term-accent); border-radius: 50%; }
+/* Tool group (CardGroupHeader): ">_" icon, label, mono meta, chevron. The
+   label keeps its text while running (only the icon becomes the spinner and
+   the meta counts done/total): the collapsed summary, or "N tool calls" in fg
+   when expanded (.is-open, chevron ▾). */
+.mk-group { border: 1px solid var(--term-line); background: var(--term-surface); }
+.mk-group-head { display: flex; align-items: center; gap: 8px; padding: 7px 11px; color: var(--term-muted); }
+.mk-group-ic { flex: none; display: inline-grid; place-items: center; width: 13px; height: 13px; }
+.mk-group-ic > * { grid-area: 1 / 1; }
+.mk-group-ic .mk-spin { display: none; }
+.mk-group.is-running .mk-group-ic .mk-spin { display: inline-block; }
+.mk-group.is-running .mk-group-ic .i { visibility: hidden; }
+.mk-group-label { flex: 1; min-width: 0; font-size: var(--fs-md); font-weight: 500; line-height: 1.4;
+  color: var(--term-mid); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.mk-group.is-open .mk-group-label { color: var(--term-fg); }
+.mk-group-meta { flex: none; font-family: var(--mk-mono); font-size: var(--fs-xs); line-height: 1.4; color: var(--term-muted); }
+.mk-group-rows { display: block; }
+.mk-group-rows .mk-tool-row { padding-left: 13px; }
+/* Done check (AgentBlockVariants CheckIcon: 10 px, viewBox 14, stroke 1.6). */
+.mk-check { display: inline-block; flex: none; color: var(--term-muted); }
+
+/* -- 5.10 Composer (ComposerShell.tsx, index.css .t-toolbar-chip, .t-action-btn) */
+.mk-composer { position: relative; flex: none; margin: 0 16px 12px; display: flex; flex-direction: column;
+  background: var(--term-composer-bg); border: 1px solid var(--term-composer-line); border-radius: 0;
+  box-shadow: var(--term-composer-shadow-muted); font-size: var(--fs-md); line-height: 1.4;
+  transition: background-color var(--t-soft) ease-out, border-color var(--t-soft) ease-out, box-shadow var(--t-soft) ease-out; }
+.mk-composer.is-focused { background: var(--term-composer-bg-focus); border-color: var(--term-composer-line-focus); box-shadow: var(--term-composer-shadow); }
+.mk-cpre { display: block; }
+.mk-cin { position: relative; display: flex; align-items: flex-start; gap: 8px; padding: 10px 12px 4px; }
+.mk-prompt { flex: none; font-size: var(--msg); line-height: var(--msg-lead); color: var(--term-accent); user-select: none; }
+.mk-input { position: relative; flex: 1; min-width: 0; min-height: calc(var(--msg) * var(--msg-lead) * var(--rows, 1.5));
+  font-size: var(--msg); line-height: var(--msg-lead); color: var(--term-fg); white-space: pre-wrap; overflow-wrap: anywhere; }
+.mk-placeholder { position: absolute; left: 0; top: 0; color: var(--term-faint); pointer-events: none; white-space: nowrap; }
+:is(.mk-input, .mk-bcomp-input).has-text > .mk-placeholder { visibility: hidden; }
+.mk-tools { position: relative; display: flex; align-items: center; gap: 4px; min-height: 34px; padding: 4px 10px 8px; color: var(--term-mid); }
+.mk-tools-gap { flex: 1; min-width: 0; }
+.mk-tchip { flex: none; display: inline-flex; align-items: center; gap: 6px; height: 30px; padding: 0 12px;
+  font-size: var(--fs-sm); font-weight: 500; line-height: 1; letter-spacing: var(--ls-wide); color: var(--term-mid); white-space: nowrap; }
+.mk-tchip.is-icon { width: 30px; padding: 0; justify-content: center; }
+.mk-tchip.is-model { gap: 6px; padding: 0 8px; color: var(--term-fg); }
+.mk-tchip-effort { color: var(--term-muted); }
+.mk-tchip .i { color: inherit; }
+.mk-tchip.is-ws .i { color: var(--term-faint); }
+.mk-tchip.is-ws { color: var(--term-fg); }
+/* A streaming pane disables its model trigger (ComposerModelPicker.css). The
+   permission chip has no disabled look. No context ring: the app draws none
+   below 50 % usage (ContextRing.tsx). */
+.mk-pane.is-streaming .mk-tchip.is-model { opacity: .45; }
+/* Narrow toolbars (TPane.tsx tierFor): under 360 px of toolbar (tier 1) the
+   permission chip keeps only its shield and the model chip drops its effort.
+   Queried on the composer's content box (toolbar + 2 x 10 padding), hence 380. */
+.mk-composer { container-type: inline-size; }
+@container (max-width: 379.98px) {
+  .mk-tchip.is-perm { width: 30px; padding: 0; justify-content: center; }
+  .mk-tchip.is-perm > span, .mk-tchip-effort { display: none; }
+}
+/* Branch (PaneComposerActions.tsx, .t-action-btn.is-outline): 30 px, no
+   border, mid, BranchIcon 16, shown while the draft has text (the send is
+   neither empty nor stop), its shortcut badge only on hover. It sits out of
+   flow beside the send and the chips before it translate 34 px, so typing
+   never reflows the toolbar. Toolbars under 260 px leave it out. */
+.mk-tbranch { position: absolute; top: 4px; right: 48px; display: inline-grid; place-items: center; width: 30px; height: 30px;
+  color: var(--term-mid); visibility: hidden; }
+@container (min-width: 280px) {
+  .mk-tools:has(> .mk-send:not(.is-empty, .is-stop)) > .mk-tbranch { visibility: visible; }
+  .mk-tools:has(> .mk-send:not(.is-empty, .is-stop)) > :is(.is-perm, .is-model) { translate: -34px 0; }
+}
+/* Send: 30 px hit square, 26 px accent plate (radius 4); empty = disabled .4. The glyph is the pane
+   surface (index.css .t-action-btn primary), white only in light palettes. */
+.mk-send { position: relative; flex: none; display: inline-flex; align-items: center; justify-content: center;
+  width: 30px; height: 30px; margin-left: 4px; padding: 1px; border: 1px solid transparent; border-radius: 6px;
+  background-color: var(--term-accent); background-clip: content-box; color: var(--term-surface);
+  transition: opacity var(--t-quick) var(--ease), background-color var(--t-quick) var(--ease); }
+.mk-send.is-empty { opacity: .4; }
+.mk-send > .i { grid-area: 1 / 1; }
+.mk-send .when-stop { display: none; }
+.mk-send.is-stop .when-send { display: none; }
+.mk-send.is-stop .when-stop { display: inline-block; }
+/* Typing caret (the engine marks the last typed character .at). */
+:is(.mk-input, .mk-bcomp-input).has-caret .c.at { box-shadow: 1.5px 0 0 0 var(--caret, currentColor); }
+:is(.mk-input, .mk-bcomp-input).has-caret:not(.has-text)::before { content: ""; position: absolute; left: 0; top: .1em;
+  width: 1.5px; height: 1.3em; background: var(--caret, currentColor); }
+.mk-caret { display: inline-block; width: 1.5px; height: 1.3em; margin-right: -1.5px; vertical-align: -.25em; background: var(--caret, currentColor); }
+
+/* -- 5.11 Selection tint, highlight mark, branch underline ----------------- */
+/* .mk-hl wraps the phrase. .is-sel = native tint (accent 26 %), wiped in left
+   to right; .is-mark = the composer-open highlight (accent 30 %, radius 2). */
+.mk-hl { border-radius: 0; background-image: linear-gradient(var(--mk-sel), var(--mk-sel)); background-repeat: no-repeat;
+  background-size: 0% 100%; background-position: 0 0; -webkit-box-decoration-break: slice; box-decoration-break: slice;
+  transition: background-size var(--t-pane) var(--ease), background-color var(--t-decay) ease-out, border-radius 0s; }
+.mk-hl.is-sel { background-size: 100% 100%; }
+.mk-hl.is-mark { background-image: none; background-color: var(--mk-mark); border-radius: var(--ui-radius-sm);
+  transition: background-size 0s, background-color 0s; }
+/* Branch underline (.t-branch-anchor-underline). Hover/open = mauve 15 %. */
+.mk-anchor { text-decoration: underline dotted var(--term-mauve) 1.5px; -webkit-text-decoration: underline dotted var(--term-mauve);
+  text-decoration-thickness: 1.5px; text-underline-offset: 4px; border-radius: var(--ui-radius-sm);
+  -webkit-box-decoration-break: clone; box-decoration-break: clone;
+  transition: text-decoration-color var(--t-enter) var(--ease-out), background-color var(--t-quick) var(--ease); }
+.mk-anchor.is-off { text-decoration-color: transparent; }
+.mk-anchor.is-open, .mk-anchor:hover { background-color: var(--mk-anchor-wash); }
+/* Hot phrase invitation / touch rest tint (brief §5.5, §5.6). */
+.mk-hot { border-radius: var(--ui-radius-sm); -webkit-box-decoration-break: clone; box-decoration-break: clone; }
+.mk-hot.is-rest { background-color: var(--mk-hot-rest); }
+
+/* -- 5.12 Selection bar and branch composer (SelectionActions.tsx) -------- */
+.mk-float { position: absolute; background: var(--sel-bar-bg); color: var(--sel-bar-fg); border: 1px solid var(--sel-bar-line);
+  border-radius: var(--ui-radius); box-shadow: var(--sel-bar-shadow); font-size: var(--fs-md); font-weight: 450; line-height: 1.4;
+  overflow: hidden; z-index: 20; }
+.mk-selbar-tools { display: flex; align-items: center; padding: 3px; }
+.mk-selbar-btn { position: relative; flex: 1; min-width: 0; display: inline-flex; align-items: center; justify-content: center; gap: 6px;
+  padding: 5px 10px; border-radius: var(--ui-radius-sm); white-space: nowrap;
+  transition: background-color var(--t-exit) var(--ease-out); }
+.mk-selbar-btn + .mk-selbar-btn::before { content: ""; position: absolute; left: 0; top: 5px; bottom: 5px; width: 1px; background: var(--sel-bar-line); }
+.mk-selbar-btn .i { width: 12px; height: 12px; color: var(--sel-bar-mid); }
+.mk-selbar-btn.is-pressed { background-color: var(--sel-bar-press); transition-duration: var(--t-quick); }
+.mk-bcomp-head { display: flex; align-items: center; justify-content: space-between; padding: 10px 12px 8px;
+  font-size: var(--fs-md); font-weight: 500; color: var(--sel-bar-fg); }
+.mk-bcomp-x { display: grid; place-items: center; width: 24px; height: 24px; margin: -4px -4px -4px 0; border-radius: var(--ui-radius-sm);
+  font-size: var(--fs-2xl); line-height: 1; color: var(--sel-bar-muted); }
+.mk-bcomp-quote { margin: 0 12px 10px; padding: 7px 9px; border-left: 2px solid var(--sel-bar-muted); background: var(--sel-bar-quote-bg);
+  font-size: var(--fs-sm); line-height: 1.65; color: var(--sel-bar-mid); white-space: pre-wrap; overflow-wrap: anywhere; }
+.mk-bcomp-input { position: relative; min-height: 76px; margin: 10px 12px; font-size: var(--fs-lg); line-height: 1.5; color: var(--sel-bar-fg);
+  white-space: pre-wrap; overflow-wrap: anywhere; --caret: var(--sel-bar-fg); }
+.mk-bcomp-input > .mk-placeholder { color: var(--sel-bar-muted); }
+.mk-bcomp-foot { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 6px 10px;
+  border-top: 1px solid var(--sel-bar-line); }
+.mk-bcomp-btn { flex: none; display: inline-flex; align-items: center; gap: 5px; padding: 4px 7px; border-radius: var(--ui-radius-sm);
+  font-size: var(--fs-sm); font-weight: 450; line-height: 1.4; color: var(--sel-bar-mid); white-space: nowrap; }
+.mk-bcomp-btn.is-submit { background: var(--sel-bar-action-bg); color: var(--sel-bar-action-fg); font-weight: 550; }
+.mk-kbd { font-family: inherit; font-size: var(--fs-2xs); color: inherit; opacity: .7; }
+
+/* -- 5.13 Branch card (BranchQuoteUnderline.tsx, .t-branch-card*). Footnote
+   cards reuse it outside replicas: <div class="mk mk-bcard" role="dialog">. */
+.mk-bcard { position: absolute; z-index: 30; width: min(364px, calc(100vw - 16px)); background: var(--term-float-bg);
+  border: 1px solid var(--term-line); border-radius: var(--ui-radius-lg); box-shadow: var(--term-float-shadow);
+  color: var(--term-fg); overflow: hidden; }
+.mk-bcard-item { display: flex; flex-direction: column; gap: 9px; width: 100%; padding: 11px 14px 12px; color: inherit;
+  text-align: left; transition: background-color var(--t-quick) var(--ease); }
+.mk-bcard-item + .mk-bcard-item { border-top: 1px solid var(--term-line); }
+.mk-bcard-head { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.mk-bcard-glyph { flex: none; color: var(--term-mauve); }
+.mk-bcard-title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  font-size: var(--fs-lg); font-weight: 600; line-height: 1.45; }
+.mk-bcard-state { flex: none; display: inline-flex; align-items: center; gap: 5px; font-size: var(--fs-sm); line-height: 1.45;
+  font-variant-numeric: tabular-nums; color: var(--term-muted); white-space: nowrap; }
+.mk-bcard-state.is-running { color: var(--term-select); }
+.mk-bcard-open { flex: none; margin-left: -2px; color: var(--term-mid); opacity: 0; transition: opacity var(--t-quick) var(--ease); }
+.mk-bcard-item:is(:hover, :focus-visible) .mk-bcard-open { opacity: 1; }
+.mk-bcard-ex { display: grid; grid-template-columns: 34px minmax(0, 1fr); gap: 5px 8px; font-size: var(--fs-md); line-height: 1.65; }
+.mk-bcard-who { font-size: var(--fs-sm); line-height: 1.8; color: var(--term-faint); }
+.mk-bcard-q, .mk-bcard-r { display: -webkit-box; -webkit-box-orient: vertical; overflow: hidden; overflow-wrap: anywhere; }
+.mk-bcard-q { color: var(--term-fg); -webkit-line-clamp: 2; }
+.mk-bcard-r { color: var(--term-mid); -webkit-line-clamp: 3; }
+.mk-bcard-r-stack { display: grid; }
+.mk-bcard-r-stack > * { grid-area: 1 / 1; }
+.mk-bcard-typing { display: inline-flex; align-items: center; height: 1.65em; }
+.mk-bcard-typing > i { display: inline-block; width: 4px; height: 4px; margin-right: 4px; border-radius: 50%; background: var(--term-select); }
+@media (hover: none) and (pointer: coarse) { .mk-bcard-open { opacity: 1; } }
+
+/* -- 5.14 Branch list (BranchAnchorRow.tsx, .t-branch-anchors, container
+   variant under 520 px; message size 15 -> name 14, meta 12). */
+.mk-blist { margin: 26px 0 10px; }
+.mk-blist-h { display: flex; align-items: center; gap: 8px; margin: 0 0 8px; font-size: var(--fs-md); font-weight: 500; line-height: 1.5; color: var(--term-mid); }
+.mk-blist-h > span { color: var(--term-muted); }
+.mk-brow { display: grid; grid-template-columns: 18px minmax(0, 1fr); align-items: center; gap: 8px 10px; padding: 14px 12px;
+  border-bottom: 1px solid var(--term-line); }
+.mk-blist .mk-brow:last-child, .mk-blist > .grow:last-child .mk-brow { border-bottom: 0; }
+.mk-brow-glyph { display: inline-flex; color: var(--term-muted); }
+.mk-brow-name { min-width: 0; font-size: 14px; font-weight: 500; line-height: 1.55; color: var(--term-fg); overflow-wrap: anywhere; }
+.mk-brow-meta { grid-column: 2; display: flex; flex-wrap: wrap; align-items: center; gap: 10px; font-size: var(--fs-md); line-height: 1.6;
+  font-variant-numeric: tabular-nums; color: var(--term-mid); }
+.mk-bstat { display: inline-grid; white-space: nowrap; }
+.mk-bstat > * { grid-area: 1 / 1; display: inline-flex; align-items: center; gap: 5px; }
+.mk-bstat .is-running { color: var(--term-select); }
+.mk-bdetails { display: inline-flex; align-items: center; gap: 8px; }
+
+/* -- 5.15 Edge bookmark (PaneArrivals.tsx, paneArrivals.css) ------------- */
+.mk-arrivals { position: absolute; top: 0; right: 0; bottom: 0; z-index: 10; display: flex; flex-direction: column;
+  justify-content: center; align-items: flex-end; gap: 6px; pointer-events: none; }
+.mk-arrival { display: flex; align-items: center; gap: 8px; max-width: 240px; padding: 7px 10px 7px 12px;
+  border: 1px solid var(--term-line); border-right: 0; border-radius: var(--ui-radius) 0 0 var(--ui-radius); background: var(--term-surface);
+  box-shadow: var(--term-float-shadow), inset 2px 0 0 var(--term-accent); font-size: var(--fs-sm); line-height: 1.4; color: var(--term-fg); }
+.mk-arrival > .i { flex: none; color: var(--term-muted); }
+.mk-arrival .mk-dot { background: var(--term-muted); color: var(--term-muted); }
+.mk-arrival.is-working .mk-dot { background: var(--term-accent); color: var(--term-accent); }
+.mk-arrival-text { display: flex; flex-direction: column; min-width: 0; }
+.mk-arrival-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.mk-arrival-status { display: inline-grid; font-size: var(--fs-xs); color: var(--term-muted); white-space: nowrap; }
+.mk-arrival-status > * { grid-area: 1 / 1; }
+
+/* -- 5.16 Mention chip (index.css .mention-chip) -------------------------- */
+.mk-mention { display: inline; padding: 1px 6px; border-radius: var(--ui-radius-sm); background: var(--mk-mention-bg); color: var(--mk-mention-fg);
+  font-weight: 500; white-space: nowrap; }
+
+/* -- 5.17 MapCard (map/MapCard.tsx, index.css .map-card*) ----------------- */
+.mk-mcard { position: relative; width: 300px; display: flex; flex-direction: column; background: var(--term-surface);
+  border: 1px solid var(--map-card-line); border-radius: 0; overflow: hidden; box-shadow: var(--map-card-shadow);
+  font-size: var(--fs-md); line-height: 1.4; text-align: left; color: var(--term-fg);
+  transition: opacity 150ms var(--ease), border-color 150ms var(--ease), box-shadow 150ms var(--ease); }
+.mk-mcard.is-merge { border-left: 3px solid var(--term-mauve); background: var(--map-merge-bg); }
+.mk-mcard.is-anc { border-color: var(--term-accent); }
+.mk-mcard.is-merge.is-anc { border-left-color: var(--term-mauve); }
+.mk-mcard.is-dim { opacity: .45; }
+.mk-mcard.is-source { border-color: var(--term-mauve); box-shadow: var(--map-source-shadow); }
+.mk-mcard:is(.is-anc, .is-dim, .is-source) { transition-duration: 100ms; }
+/* Heat bar: a 3 px strip with a fill child (<i>) so it can grow. */
+.mk-heat { position: relative; flex: none; height: 3px; width: 100%; overflow: hidden; background: var(--map-heat-track); }
+.mk-heat > i { position: absolute; inset: 0; display: block; transform-origin: 0 50%;
+  background: linear-gradient(90deg, var(--term-accent), var(--map-heat-hot)); }
+.mk-heat.is-streaming > i { background: linear-gradient(90deg, var(--term-accent), var(--map-heat-mid), var(--term-accent)); }
+.mk-asked { display: flex; flex-direction: column; gap: 3px; padding: 8px 16px; background: var(--map-asked-bg); border-bottom: 1px solid var(--term-line); }
+.mk-asked-k { font-family: var(--mk-mono); font-size: var(--fs-xs); line-height: 1.4; letter-spacing: var(--ls-caps-wide); color: var(--term-accent-dark); }
+.mk-asked-q { font-size: var(--fs-lg); line-height: 1.5; color: var(--term-mid);
+  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+.mk-mbody { padding: 12px 16px; }
+.mk-mtitle-row { display: flex; align-items: flex-start; gap: 8px; }
+.mk-mtitle { flex: 1; min-width: 0; font-family: var(--mk-mono); font-size: var(--fs-2xl); font-weight: 700; line-height: 1.35; color: var(--term-fg);
+  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+.mk-mchev { flex: none; font-size: var(--fs-md); line-height: 1.8; color: var(--term-faint); }
+.mk-msum { margin-top: 6px; font-size: var(--fs-xl); line-height: 1.55; color: var(--term-mid);
+  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+.mk-mchips { margin-top: 10px; display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.mk-mchip { font-family: var(--mk-mono); font-size: var(--fs-sm); line-height: 1.4; padding: 2px 8px; white-space: nowrap; }
+.mk-mchip.is-main { color: var(--term-accent-dark); background: var(--term-accent-f); }
+.mk-mchip.is-merged { color: var(--term-mauve); background: var(--term-mauve-f); }
+.mk-mchip.is-msgs { color: var(--term-muted); background: var(--term-alt); }
+.mk-mtime { font-family: var(--mk-mono); font-size: var(--fs-sm); line-height: 1.4; color: var(--term-muted); white-space: nowrap; }
+.mk-mlive { font-family: var(--mk-mono); font-size: var(--fs-sm); line-height: 1.4; color: var(--term-accent); white-space: nowrap; }
+/* Selection outline sits on the card's positioned slot (pages/Map.tsx L888). */
+.mk-mslot { position: absolute; outline: 2px solid transparent; outline-offset: 2px; transition: outline-color var(--t-soft) var(--ease-out); }
+.mk-mslot.is-picked { outline-color: var(--term-select); }
+
+/* Map edges (pages/Map.tsx strokeFor). Paths use pathLength="1" for draws. */
+.mk-medges { position: absolute; left: 0; top: 0; overflow: visible; pointer-events: none; }
+.mk-medge { fill: none; stroke: var(--map-edge); stroke-width: 1.4; stroke-linecap: round; stroke-linejoin: round;
+  transition: stroke 150ms var(--ease), stroke-width 150ms var(--ease), opacity 150ms var(--ease); }
+.mk-medge.is-lit { stroke: var(--term-accent); stroke-width: 1.8; }
+.mk-medge.is-merge { stroke: var(--term-mauve); stroke-dasharray: 6 4; opacity: .65; }
+.mk-medge.is-merge.is-lit { stroke: var(--term-mauve); stroke-dasharray: none; }
+.mk-medge.is-flow { stroke: var(--term-accent); stroke-width: 1.8; stroke-dasharray: 5 9; }
+.mk-medge.is-dim { opacity: .3; }
+.mk-medge.is-merge.is-dim { opacity: .195; }
+.mk-medge:is(.is-lit, .is-dim) { transition-duration: 100ms; }
+
+/* Map bar (pages/Map.tsx L1051-1130). */
+.mk-mapbar { position: absolute; left: 16px; right: 16px; bottom: 14px; z-index: 5; display: flex; align-items: center; gap: 8px;
+  padding: 8px 10px 8px 14px; background: var(--term-fg); color: var(--term-surface); font-size: var(--fs-md); line-height: 1.4;
+  box-shadow: var(--map-bar-shadow); }
+.mk-mapbar-n { flex: none; padding: 2px 8px; background: var(--term-select); color: var(--map-bar-n-fg); font-weight: 700; }
+.mk-mapbar-k { flex: none; letter-spacing: var(--ls-wide); }
+.mk-mapbar-dot { flex: none; color: var(--term-faint); }
+.mk-mapbar-names { flex: 1; min-width: 0; color: var(--term-alt); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.mk-mapbar-btn { flex: none; padding: 3px 9px; border: 1px solid var(--map-btn-line); border-radius: 0; background: var(--term-surface);
+  color: var(--term-fg); font-weight: 600; white-space: nowrap; }
+
+
+/* -- 5.18 Home (pages/Home.tsx, home/homeCards.css) ------------------------ */
+.mk-home { position: relative; width: 100%; height: 100%; display: flex; flex-direction: column; align-items: center;
+  justify-content: center; gap: 28px; padding: 0 24px; background: var(--term-page-bg); }
+.mk-home-h { margin: 0; font-size: 28px; font-weight: 500; line-height: 1.3; letter-spacing: var(--ls-tight); text-align: center; color: var(--term-fg); }
+.mk-home-mark { color: var(--term-accent); }
+.mk-composer.is-home { --rows: 2; width: 560px; max-width: 100%; margin: 0; }

@@ -39,10 +39,8 @@ for (const port of [undefined, 43117]) {
     try {
       for (const id of [slot.slotId, 'abc']) {
         assert.deepEqual(fake.endpoint(id), real.endpoint(id));
-        assert.equal(fake.hookEndpoint(id, 'stop'), real.hookEndpoint(id, 'stop'));
       }
       assert.deepEqual(fake.sessionEndpoint(groupId), real.sessionEndpoint(groupId));
-      assert.throws(() => fake.hookEndpoint('abc', 'start' as 'stop'), /Unknown MCP slot hook: start/);
     } finally {
       real.disposeSessionGroup(groupId);
       await real.dispose(slot.slotId);
@@ -59,7 +57,6 @@ test('fakeMcpRegistry reads a port function each time, as McpSlotRegistry does',
     assert.deepEqual(fake.endpoint('abc'), real.endpoint('abc'));
     assert.equal(fake.endpoint('abc').url, `http://127.0.0.1:${bound}/api/mcp/abc`);
     assert.deepEqual(fake.sessionEndpoint('g'), real.sessionEndpoint('g'));
-    assert.equal(fake.hookEndpoint('abc', 'stop'), real.hookEndpoint('abc', 'stop'));
   }
 });
 

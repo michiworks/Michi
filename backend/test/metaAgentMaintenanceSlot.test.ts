@@ -38,7 +38,7 @@ test('history and workspace-home tools refuse a send without a home run', async 
     for (const name of HOME_TOOLS) {
       const result = await tools[name]!.handler({ nodeId: 'n' });
       assert.equal(result.isError, true, name);
-      assert.match(result.content[0].text, /only available while the Meta agent writes a home page/, name);
+      assert.match(result.content[0].text, /only available while Pages upkeep writes a home page/, name);
     }
   }
   assert.deepEqual(createMaintenanceTools(incremental).slice(-4).map((tool) => tool.name), HOME_TOOLS);

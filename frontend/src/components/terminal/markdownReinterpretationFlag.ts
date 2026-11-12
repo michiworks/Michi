@@ -1,3 +1,5 @@
+import { readRuntimeSetting } from '../../lib/runtimeFlags';
+
 export const MARKDOWN_REINTERPRET_HZ_STORAGE_KEY = 'michi:ff:markdownReinterpretHz';
 
 const DEFAULT_MARKDOWN_REINTERPRET_HZ = 3;
@@ -18,14 +20,6 @@ function normalizeHz(value: unknown): number | null {
  * advancing the visible text independently.
  */
 export function markdownReinterpretationHz(): number {
-  if (typeof window !== 'undefined') {
-    try {
-      const stored = normalizeHz(window.localStorage.getItem(MARKDOWN_REINTERPRET_HZ_STORAGE_KEY));
-      if (stored !== null) return stored;
-    } catch {
-      // Fall through to env/default.
-    }
-  }
-  return normalizeHz(import.meta.env.VITE_MARKDOWN_REINTERPRET_HZ)
+  return readRuntimeSetting(MARKDOWN_REINTERPRET_HZ_STORAGE_KEY, import.meta.env.VITE_MARKDOWN_REINTERPRET_HZ, normalizeHz)
     ?? DEFAULT_MARKDOWN_REINTERPRET_HZ;
 }

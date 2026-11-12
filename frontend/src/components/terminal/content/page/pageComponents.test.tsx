@@ -1,4 +1,3 @@
-import React from 'react';
 import { beforeAll, describe, expect, it, vi } from 'vitest';
 import { fireEvent, render, screen, within } from '@testing-library/react';
 import type { MichiPageBlock } from 'michi-shared';
@@ -223,6 +222,23 @@ describe('plan vs actual in days', () => {
     expect([...container.querySelectorAll('.michi-doc-pa__key')].map((key) => key.textContent)).toEqual(['plan', 'actual', 'over plan', 'forecast']);
     expect(container.querySelector('[aria-label^="Schema"]')?.getAttribute('aria-label')).toBe('Schema: planned Oct 10 to Oct 14; actual Oct 10 to Oct 16; over plan');
     expect(container.querySelectorAll('.michi-doc-pa__today')).toHaveLength(3);
+  });
+
+  it('says the year of another year’s days, as database dates do', () => {
+    const lastYear = planScheduleModel({ type: 'plan-actual', items: [
+      { label: 'Pilot', planStart: '2025-10-10', planEnd: '2025-10-20', actualStart: '2025-10-10', actualEnd: '2025-10-18' },
+    ] }, NOW);
+    expect(lastYear.rows[0].words).toBe('Pilot: planned Oct 10, 2025 to Oct 20, 2025; actual Oct 10, 2025 to Oct 18, 2025');
+    expect(lastYear.axis.map((label) => label.text)).toEqual(['Oct 10, 2025', 'Oct 20, 2025']);
+  });
+
+  it('keeps a start label that says its year clear of today', () => {
+    // Dec 20, 2025 to Feb 28, 2026 seen on Jan 1: today sits about 0.17 in.
+    const model = planScheduleModel({ type: 'plan-actual', items: [
+      { label: 'Winter', planStart: '2025-12-20', planEnd: '2026-02-28' },
+    ] }, new Date(2026, 0, 1, 12).getTime());
+    expect(model.today).toBeGreaterThan(0.14);
+    expect(model.axis.map((label) => label.text)).toEqual(['today', 'Feb 28']);
   });
 });
 

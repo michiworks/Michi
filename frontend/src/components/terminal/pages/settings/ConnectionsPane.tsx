@@ -1,9 +1,11 @@
 import {
   cloneElement,
   useEffect,
+  useId,
   useState,
   type ReactElement,
 } from 'react';
+import { ChevronRight, Ellipsis, Pencil, RefreshCw, Trash2 } from 'lucide-react';
 import {
   deleteBackendConnection,
   listBackendConnections,
@@ -15,16 +17,19 @@ import {
   setKnownBackendConnections,
   type BackendConnectionSummary,
 } from '../../../../config/backendConnections';
+import { redactRemoteLog } from 'michi-shared';
 import { backendEntityId } from '../../../../config/backendIdentity';
 import type { Project } from '../../../../state/chatTypes';
 import { Button } from '../../../ui/controls';
+import { ActionMenu, type ActionMenuEntry } from '../../../ui/ActionMenu';
 import '../../../RemoteConnection.css';
 import { confirmDialog } from '../../../ui/ConfirmDialog';
 import { RemoteDesktopConnect } from '../../../RemoteDesktopConnect';
 import { RemoteUpdateNotice } from '../../../RemoteUpdateNotice';
 import { useRemoteWorkspaces, type RemoteWorkspacesState } from './useRemoteWorkspaces';
-import { SettingsSection } from './SettingsSection';
 import { MobileAccessPanel } from './MobileAccessPanel';
+import { describeConnectionProblem, plainConnectionLog } from './connectionProblem';
+import { SettingsSection } from './SettingsSection';
 
 type ConnectionDraft = {
   id?: string;
@@ -184,8 +189,8 @@ export function ConnectionsPane({ projects, onOpenWorkspace }: { projects: Proje
           <Button variant="primary" onClick={() => { setQuickConnect(true); setMessage(null); }}>
             Connect remote
           </Button>
-          <Button variant="ghost" onClick={() => { setDraft({ ...EMPTY_DRAFT }); setMessage(null); }}>
-            Manual setup…
+          <Button onClick={() => { setDraft({ ...EMPTY_DRAFT }); setMessage(null); }}>
+            Manual setup
           </Button>
         </div>
         <p className="remote-connections__hint">Connect a Linux machine over SSH.</p>
@@ -295,6 +300,16 @@ function RemoteConnectionRow({ onRemove, ...props }: Omit<ConnectionRowProps, 'l
   }} />;
 }
 
+/** A machine's status at the right of its row, by tunnel state. */
+const TUNNEL_STATUS = { connected: 'Connected', connecting: 'Connecting', error: 'Offline', disconnected: 'Connects when needed' } as const;
+
+/**
+ * One machine as a compact row: its icon, name and "SSH · host · N
+ * workspaces" on the left, its status and a ⋯ menu (Refresh workspaces,
+ * Edit, Remove) on the right. The workspace count opens the machine's
+ * workspaces under the row. A machine Michi cannot reach shows the problem,
+ * with Retry and Edit, in its row.
+ */
 function ConnectionRow({
   connection,
   local = false,
@@ -305,18 +320,31 @@ function ConnectionRow({
   onEdit,
   onRemove,
 }: ConnectionRowProps) {
+  const listId = useId();
+  const [listOpen, setListOpen] = useState(false);
+  const [menu, setMenu] = useState<HTMLButtonElement | null>(null);
   const workspaces = workspaceState?.status === 'ready' ? workspaceState.workspaces.filter(workspace => !workspace.deletedAt) : [];
   const loading = workspaceState?.status === 'loading';
+  const ssh = !local && connection.transport === 'ssh';
   const address = local ? 'Workspaces on this computer'
-    : connection.transport === 'ssh'
+    : ssh
       ? `SSH · ${connection.sshUser ? `${connection.sshUser}@` : ''}${connection.sshHost}${connection.sshPort ? `:${connection.sshPort}` : ''}`
       : connection.apiUrl;
   const tunnelState = workspaceState?.status === 'ready' ? 'connected'
     : workspaceState?.status === 'loading' ? 'connecting'
       : workspaceState?.status === 'error' ? 'error' : connection.tunnelStatus ?? 'disconnected';
-  const status = local ? 'Built in'
-    : connection.transport === 'direct' ? 'Direct URL'
-      : { connected: 'SSH connected', connecting: 'Connecting…', error: 'Connection issue', disconnected: 'Connects when needed' }[tunnelState];
+  const status = local ? 'Built in' : connection.transport === 'direct' ? 'Direct URL' : TUNNEL_STATUS[tunnelState];
+  // An unreachable machine says so, with Retry and Edit beside it; its workspaces wait for the retry.
+  const failure = !local && workspaceState?.status === 'error' ? workspaceState.message : null;
+  const tunnelLog = connection.tunnelError ? redactRemoteLog(connection.tunnelError) : '';
+  const failureLog = failure === null ? '' : tunnelLog && !failure.includes(tunnelLog.trim()) ? `${failure}\n\n${tunnelLog}` : failure;
+  const count = `${workspaces.length} ${workspaces.length === 1 ? 'workspace' : 'workspaces'}`;
+  // Retry and Edit sit with the problem while a machine is unreachable, so its menu does not repeat them.
+  const actions: ActionMenuEntry[] = local ? [] : [
+    ...(onRefresh && failure === null ? [{ id: 'refresh', label: 'Refresh workspaces', icon: <RefreshCw size={14} aria-hidden="true" />, disabled: loading, onSelect: onRefresh }] : []),
+    ...(onEdit && failure === null ? [{ id: 'edit', label: 'Edit', icon: <Pencil size={14} aria-hidden="true" />, onSelect: onEdit }] : []),
+    ...(onRemove ? [{ id: 'remove', label: 'Remove', icon: <Trash2 size={14} aria-hidden="true" />, danger: true, disabled: loading, dividerBefore: failure === null, onSelect: onRemove }] : []),
+  ];
   return (
     <li className="remote-machine" aria-label={connection.name}>
       <svg className="remote-machine__icon" width="18" height="18" viewBox="0 0 18 18" fill="none"
@@ -324,44 +352,65 @@ function ConnectionRow({
         {local ? <><rect x="2" y="3" width="14" height="10" rx="1.5" /><path d="M6 16h6M9 13v3" /></>
           : <><rect x="3" y="2" width="12" height="14" rx="1.5" /><path d="M3 9h12M6 5.5h.01M6 12.5h.01M9 5.5h3M9 12.5h3" /></>}
       </svg>
-      <div>
-        <div className="remote-machine__heading">
-          <span className="remote-machine__name">{connection.name}</span>
-          <span className="remote-machine__status" data-state={!local && connection.transport === 'ssh' ? tunnelState : undefined}>
-            {!local && connection.transport === 'ssh' && <span className="remote-machine__dot" aria-hidden="true" />}
-            {status}
-          </span>
-        </div>
-        <div className="remote-machine__address" title={address}>{address}</div>
-        {!local && <RemoteUpdateNotice connectionId={connection.id} name={connection.name} onUpdated={onRefresh} />}
-        {!local && <div className="remote-machine__footer">
-          <div className="remote-machine__actions">
-            {onRefresh && <Button variant="ghost" size="sm" disabled={loading} onClick={onRefresh}>
-              {workspaceState?.status === 'error' ? 'Retry workspaces' : 'Refresh workspaces'}
-            </Button>}
-            {onEdit && <Button variant="ghost" size="sm" onClick={onEdit}>Edit</Button>}
-            {onRemove && <Button variant="ghost" size="sm" danger disabled={loading} onClick={onRemove}>Remove</Button>}
-          </div>
-        </div>}
-        {!local && <details className="remote-machine__workspaces" aria-busy={loading}>
-          <summary>{loading ? 'Reading remote workspaces…' : workspaceState?.status === 'error' ? 'Workspaces unavailable'
-            : `${workspaces.length} ${workspaces.length === 1 ? 'workspace' : 'workspaces'}`}</summary>
-          {loading && <p role="status">Connecting to this machine and reading its current workspaces…</p>}
-          {workspaceState?.status === 'error' && <p role="alert" className="remote-connection-notice" data-tone="error">{workspaceState.message}</p>}
-          {workspaceState?.status === 'ready' && (workspaces.length === 0 ? <p>No workspaces on this machine.</p> : <ul aria-label={`Workspaces on ${connection.name}`}>
-            {workspaces.map(workspace => <li key={workspace.id} className="remote-machine__workspace">
-              <div className="remote-machine__workspace-heading">
-                {onOpenWorkspace && !workspace.archivedAt && canOpenWorkspace?.(workspace.id)
-                  ? <Button variant="ghost" size="sm" className="remote-machine__workspace-link" onClick={() => onOpenWorkspace(workspace.id)}>{workspace.name}</Button>
-                  : <span className="remote-machine__workspace-name">{workspace.name}</span>}
-                {!!workspace.archivedAt && <span className="remote-machine__workspace-archived">Archived</span>}
-              </div>
-              <span className="remote-machine__workspace-path" title={workspace.cwd ?? undefined}>{workspace.cwd || 'No folder'}</span>
-            </li>)}
-          </ul>)}
-        </details>}
-      </div>
+      <span className="remote-machine__name">{connection.name}</span>
+      <span className="remote-machine__sub">
+        <span className="remote-machine__address" title={address}>{address}</span>
+        {!local && failure === null && (loading
+          ? <span className="remote-machine__count">Reading workspaces…</span>
+          : workspaceState?.status === 'ready' && <button type="button" className="remote-machine__count" aria-expanded={listOpen} aria-controls={listId}
+            onClick={() => setListOpen(open => !open)}>{count}<ChevronRight size={12} strokeWidth={1.75} aria-hidden="true" /></button>)}
+      </span>
+      <span className="remote-machine__status" data-state={ssh ? tunnelState : undefined}>
+        {ssh && <span className="remote-machine__dot" aria-hidden="true" />}
+        {status}
+      </span>
+      {actions.length > 0
+        ? <button type="button" className="remote-machine__more" aria-label={`More actions for ${connection.name}`} aria-haspopup="menu"
+          aria-expanded={!!menu} onClick={event => setMenu(menu ? null : event.currentTarget)}>
+          <Ellipsis size={15} aria-hidden="true" />
+        </button>
+        : <span className="remote-machine__more" aria-hidden="true" />}
+      {menu && <ActionMenu anchor={menu} onClose={() => setMenu(null)} label={`${connection.name} actions`} items={actions} />}
+      {!local && <RemoteUpdateNotice connectionId={connection.id} name={connection.name} onUpdated={onRefresh} unreachable={failure !== null} />}
+      {failure !== null && <ConnectionProblemNotice name={connection.name} log={failureLog} onRetry={onRefresh} onEdit={onEdit} />}
+      {/* Hidden rather than removed while unreachable, so an open list is open again after a retry. */}
+      {!local && <div id={listId} className="remote-machine__workspaces" aria-busy={loading} hidden={failure !== null || !listOpen}>
+        {loading && <p role="status">Connecting to this machine and reading its current workspaces…</p>}
+        {workspaceState?.status === 'ready' && (workspaces.length === 0 ? <p>No workspaces on this machine.</p> : <ul aria-label={`Workspaces on ${connection.name}`}>
+          {workspaces.map(workspace => <li key={workspace.id} className="remote-machine__workspace">
+            <div className="remote-machine__workspace-heading">
+              {onOpenWorkspace && !workspace.archivedAt && canOpenWorkspace?.(workspace.id)
+                ? <Button variant="ghost" size="sm" className="remote-machine__workspace-link" onClick={() => onOpenWorkspace(workspace.id)}>{workspace.name}</Button>
+                : <span className="remote-machine__workspace-name">{workspace.name}</span>}
+              {!!workspace.archivedAt && <span className="remote-machine__workspace-archived">Archived</span>}
+            </div>
+            <span className="remote-machine__workspace-path" title={workspace.cwd ?? undefined}>{workspace.cwd || 'No folder'}</span>
+          </li>)}
+        </ul>)}
+      </div>}
     </li>
+  );
+}
+
+/** A machine Michi cannot reach: what is wrong in one sentence, why when the log shows it, then the log itself. */
+function ConnectionProblemNotice({ name, log, onRetry, onEdit }: { name: string; log: string; onRetry?: () => void; onEdit?: () => void }) {
+  const { title, cause } = describeConnectionProblem(name, log);
+  const plain = plainConnectionLog(log);
+  return (
+    <div className="remote-problem">
+      <div className="remote-problem__text" role="alert">
+        <p className="remote-problem__title">{title}</p>
+        {cause && <p className="remote-problem__cause">{cause}</p>}
+      </div>
+      {(onRetry || onEdit) && <div className="remote-problem__actions">
+        {onRetry && <Button variant="primary" size="sm" onClick={onRetry}>Retry</Button>}
+        {onEdit && <Button size="sm" onClick={onEdit}>Edit</Button>}
+      </div>}
+      {plain && <details className="remote-problem__log">
+        <summary>Show log</summary>
+        <pre>{plain}</pre>
+      </details>}
+    </div>
   );
 }
 

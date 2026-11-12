@@ -7,7 +7,7 @@ import { getFirstRun, updateFirstRun } from '../pages/firstRun';
 import { listWorkspaceHomes } from '../pages/homePages';
 import { readNode, readNodeOverview, type ReadNodeOpts } from '../globalContext';
 import {
-  finishHomeRun, firstRunReadNodeIds, getHomeRun, recordFirstRunReads, type HomeRunKind, type HomeRunRecord,
+  finishHomeRun, firstRunReadNodeIds, getHomeRun, HOME_RUN_ID_PREFIX, recordFirstRunReads, type HomeRunKind, type HomeRunRecord,
 } from './firstRunStore';
 import { FIRST_RUN_LIST_PAGE, firstRunWindowDays, historyListPage, listHistoryConversations } from './firstRunHistory';
 import { homeWritePayloadHash, writeHomePage } from './firstRunWriter';
@@ -21,7 +21,6 @@ export interface HomeToolContext {
   execution: BlockSource & { runId: string };
 }
 
-export const HOME_RUN_ID_PREFIX = 'mhr-';
 const invalid = (message: string) => new PageWriteError(400, 'invalid', message);
 
 /** The home run a maintenance send is bound to, or null for an incremental plan. */
@@ -34,19 +33,14 @@ export function homeRunFor(context: HomeToolContext): HomeRunRecord | null {
   return run;
 }
 
-function authority(context: HomeToolContext, now: number): void {
-  assertMaintenanceAuthority({ workspaceId: context.workspaceId, ownerUserId: context.ownerUserId, jobId: context.jobId,
-    runId: context.runId, claimedBy: context.claimedBy, configRevision: context.configRevision }, now);
-}
-
 function activeRun(context: HomeToolContext, kind: HomeRunKind | null, now: number): HomeRunRecord {
   const run = homeRunFor(context);
-  if (!run) throw new PageWriteError(409, 'invalid', 'This tool is only available while the Meta agent writes a home page');
+  if (!run) throw new PageWriteError(409, 'invalid', 'This tool is only available while Pages upkeep writes a home page');
   if (kind && run.kind !== kind) {
     throw new PageWriteError(409, 'invalid', kind === 'first-run'
       ? 'History tools are only available during a first-time generation' : 'Workspace homes are only read for the Spaces Home summary');
   }
-  authority(context, now);
+  assertMaintenanceAuthority(context, now);
   return run;
 }
 
@@ -122,9 +116,15 @@ export function readHistoryNode(context: HomeToolContext, args: Record<string, u
   if (args.role === 'user' || args.role === 'assistant') opts.role = args.role;
   if (args.from === 'head' || args.from === 'tail') opts.from = args.from;
   if (args.offset !== undefined) opts.offset = integer(args.offset, 'offset', 1, 100_000, 1);
-  const result = nodeText(readNode(context.workspaceId, context.ownerUserId, nodeId, opts));
+  if (args.messageId !== undefined) {
+    if (typeof args.messageId !== 'string' || !args.messageId.trim()) throw invalid('messageId must be a message id');
+    opts.messageId = args.messageId;
+    opts.charOffset = integer(args.charOffset, 'charOffset', 0, Number.MAX_SAFE_INTEGER, 0);
+  }
+  const read = readNode(context.workspaceId, context.ownerUserId, nodeId, opts);
+  const result = nodeText(read);
   markRead(context, [nodeId], now);
-  noteReadMessages(run.id, nodeId, result.text);
+  noteReadMessages(run.id, nodeId, read.shownMessageIds ?? []);
   return result;
 }
 
@@ -203,7 +203,7 @@ export function writeTargetPage(context: HomeToolContext, args: Record<string, u
   if (!targetIsHome(run)) throw new PageWriteError(404, 'not_found', 'Home page not found');
   const sources = sourcesFor(run, context, args.ops);
   const result = pagesTransaction(() => {
-    authority(context, now);
+    assertMaintenanceAuthority(context, now);
     const current = homeRunFor(context)!;
     stillOpen(current);
     const page = writeHomePage({ ownerUserId: context.ownerUserId, pageId, ops: sources.ops, execution: context.execution,
@@ -228,7 +228,7 @@ export function recordTargetNoChange(context: HomeToolContext, args: Record<stri
   if (run.state === 'no_change' && JSON.stringify(run.result) === JSON.stringify(result)) return result;
   stillOpen(run);
   const recorded = pagesTransaction(() => {
-    authority(context, now);
+    assertMaintenanceAuthority(context, now);
     if (!finishHomeRun(run.id, { state: 'no_change', result }, now)) throw new PageWriteError(409, 'stale_revision', 'This home run already finished');
     finishProgress(run, context, now);
     return result;

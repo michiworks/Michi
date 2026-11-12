@@ -30,7 +30,11 @@ import { McpSlotRegistry, buildMcpServerForSlot } from '../src/services/mcpServe
 import { buildPiTools } from '../src/agents/pi/piTools';
 import { buildPreamble } from '../src/agents/preamble';
 import { configureRuntimeDeps, __resetRuntimeDeps } from '../src/agents/runtimeDeps';
+import { clearAllSessions } from '../src/agents/sessionRegistry';
+import { recordCompanionTaint, recordUntrustedSource } from '../src/services/turnTrust';
 import { chatOwner, runOwner } from './helpers/owners';
+import { activeTurnRow } from './helpers/checkinNodes';
+import { registerLiveSession } from './helpers/liveSession';
 
 const TOOL_NAMES: ScheduledJobToolName[] = [
   'list_scheduled_jobs', 'create_scheduled_job', 'update_scheduled_job', 'run_scheduled_job', 'delete_scheduled_job',
@@ -147,6 +151,22 @@ describe('scheduled job agent tools', () => {
     assert.deepEqual(changes.map((change) => change.change), ['created']);
   });
 
+  test('every card quotes the prompt whole, line breaks kept, as its last line', async () => {
+    const long = `Step 1: check the branch.\n\n${'Keep every rule. '.repeat(40)}\r\n  - indented item\n`;
+    const whole = `Prompt: “Step 1: check the branch.\n\n${'Keep every rule. '.repeat(40)}\n  - indented item”`;
+    parse(await call('create_scheduled_job', { ...hourly, prompt: long }));
+    assert.equal(asked[0].lines.at(-1), whole);
+
+    const [job] = scheduler.listJobs();
+    parse(await call('run_scheduled_job', { jobId: job.id }));
+    assert.equal(asked[1].lines.at(-1), whole);
+
+    parse(await call('update_scheduled_job', { jobId: job.id, name: 'Weekly', prompt: 'Short now.' }));
+    const lines = asked[2].lines;
+    assert.equal(lines.at(-1), `Prompt: “${whole.slice('Prompt: “'.length, -1)}” → “Short now.”`);
+    assert.match(lines.at(-2) ?? '', /^Permissions \(unchanged\): /);
+  });
+
   test('the agent can choose the permission mode, and the card shows it', async () => {
     parse(await call('create_scheduled_job', { ...hourly, permissionMode: 'ask', sessionMode: 'persistent' }));
     assert.match(asked[0].lines.join('\n'), /Permissions: Ask: tool approvals wait for you/);
@@ -192,6 +212,25 @@ describe('scheduled job agent tools', () => {
     // Not started: this process holds no scheduler lease.
     const list = parse(await call('list_scheduled_jobs', {}));
     assert.match(list.note, /Another Michi instance/);
+  });
+
+  test('list names each blocked execution with its age and automatic release, hiding other workspaces’ jobs', async () => {
+    const own = scheduler.createJob({ ...hourly, workspaceId: 'ws-a', timeoutSeconds: 7200 });
+    const other = scheduler.createJob({ ...hourly, name: 'Other', workspaceId: 'ws-b', timeoutSeconds: 3 * 3600 });
+    for (const [job, blockedMinutes] of [[own, 85], [other, 80]] as const) {
+      getDb().prepare(`INSERT INTO scheduler_execution_claims (run_id, job_id, holder, generation, acquired_at, workspace_id, quarantined_at, reason)
+        VALUES (?, ?, 'old-backend', 1, ?, ?, ?, 'Scheduler ownership changed')`)
+        .run(`run-${job.id}`, job.id, NOW - 90 * 60_000, job.workspaceId, NOW - blockedMinutes * 60_000);
+    }
+    const list = parse(await call('list_scheduled_jobs', {}));
+    assert.match(list.note, /^New scheduled runs are on hold: 2 earlier runs have not confirmed they stopped\. /);
+    // Started 90 min ago (19:30 in Tokyo): released 10 min after a 2 h and a 3 h limit.
+    assert.match(list.note, /“Digest”: blocked for 1 hour 25 minutes, releases automatically at Oct 16, 2026, 21:40 GMT\+9; /);
+    assert.match(list.note, /A job in another workspace: blocked for 1 hour 20 minutes, releases automatically at Oct 16, 2026, 22:40 GMT\+9\. /);
+    assert.doesNotMatch(list.note, /“Other”/);
+    assert.match(list.note, /Runs resume when all are released, or sooner if the user .* confirms it on the Scheduled page\. Another Michi instance/);
+    const detail = parse(await call('list_scheduled_jobs', { jobId: own.id }));
+    assert.match(detail.note, /“Digest”: blocked for 1 hour 25 minutes/);
   });
 
   test('list shows only this workspace and details one job with its runs', async () => {
@@ -240,8 +279,10 @@ describe('scheduled job agent tools', () => {
     assert.equal(resumed.status, 'updated');
     assert.equal(asked.length, 1);
     assert.equal(asked[0].approveLabel, 'Save changes');
-    assert.match(asked[0].lines.join('\n'), /Turns the job back on/);
-    assert.match(asked[0].lines.join('\n'), /Permissions → YOLO/);
+    // Each change names what it replaces.
+    assert.match(asked[0].lines.join('\n'), /^Status: paused → on$/m);
+    assert.match(asked[0].lines.join('\n'), /^Permissions: Trust: .+ → YOLO: /m);
+    assert.doesNotMatch(asked[0].lines.join('\n'), /\(unchanged\)/);
     assert.equal(scheduler.getJob(job.id).permissionMode, 'yolo');
     assert.deepEqual(changes.map((change) => change.change), ['updated', 'updated']);
   });
@@ -305,6 +346,113 @@ describe('scheduled job agent tools', () => {
     answer = { approved: false, reason: 'unavailable' };
     assert.match(errorText(await call('create_scheduled_job', hourly)), /^APPROVAL_UNAVAILABLE/);
     assert.equal(scheduler.listJobs().length, 0);
+  });
+
+  describe('the create-approval setting', () => {
+    let needsApproval: boolean;
+    beforeEach(() => {
+      needsApproval = false;
+      deps = { ...deps, createNeedsApproval: () => needsApproval };
+    });
+
+    test('off: creates without asking and returns what was saved', async () => {
+      answer = { approved: false, reason: 'unavailable' };
+      const result = parse(await call('create_scheduled_job', { ...hourly, sessionMode: 'fresh', notify: false }));
+      assert.equal(asked.length, 0, 'the user is not asked, even where the runtime could not ask');
+      assert.equal(result.status, 'created');
+      assert.equal(result.job.name, 'Digest');
+      assert.equal(result.job.scheduleText, 'Every 1 hour');
+      assert.deepEqual(result.job.schedule, { kind: 'every', everySeconds: 3600 });
+      assert.equal(result.job.nextRun.at, new Date(NOW + 3_600_000).toISOString());
+      assert.equal(result.job.permissionMode, 'trust');
+      assert.equal(result.job.sessionMode, 'fresh');
+      assert.equal(result.job.notify, false);
+      assert.equal(result.job.promptPreview, 'Summarize overnight changes.');
+      assert.match(result.next, /Tell the user what you scheduled/);
+      assert.equal(scheduler.listJobs().length, 1);
+    });
+
+    test('off: invalid input is still rejected, and other changes still ask', async () => {
+      assert.match(errorText(await call('create_scheduled_job', { ...hourly, schedule: { kind: 'every', everySeconds: 10 } })), /^INVALID_ARGUMENT/);
+      const created = parse(await call('create_scheduled_job', hourly));
+      answer = { approved: false, reason: 'declined' };
+      assert.equal(parse(await call('update_scheduled_job', { jobId: created.job.jobId, name: 'Renamed' })).status, 'declined');
+      assert.equal(parse(await call('run_scheduled_job', { jobId: created.job.jobId })).status, 'declined');
+      assert.equal(parse(await call('delete_scheduled_job', { jobId: created.job.jobId })).status, 'declined');
+      assert.deepEqual(asked.map((request) => request.action), ['update', 'run', 'delete']);
+    });
+
+    test('on: asks before creating, read at each call', async () => {
+      needsApproval = true;
+      answer = { approved: false, reason: 'declined' };
+      assert.equal(parse(await call('create_scheduled_job', hourly)).status, 'declined');
+      assert.equal(asked.length, 1);
+      assert.equal(scheduler.listJobs().length, 0);
+      answer = { approved: true };
+      const approved = parse(await call('create_scheduled_job', hourly));
+      assert.equal(approved.status, 'created');
+      assert.equal(approved.next, undefined, 'only a create nobody approved asks the agent to report it');
+      assert.equal(asked.length, 2);
+      needsApproval = false;
+      assert.equal(parse(await call('create_scheduled_job', { ...hourly, name: 'Second' })).status, 'created');
+      assert.equal(asked.length, 2);
+    });
+
+    test('the Scheduled window follows it too, and still checks the workspace', async () => {
+      const window: AssistantScheduledJobCaller = {
+        ownerUserId: null,
+        nodeId: 'n-schedule',
+        workspace: (id) => (id === 'ws-a' ? { id, name: 'Research' } : { refused: 'NAVIGATION_DISABLED', message: `AI navigation is off in ${id}` }),
+      };
+      assert.match(errorText(await assistantScheduledJobTool('create_scheduled_job', window, { ...hourly, workspaceId: 'ws-b' }, approve, deps)),
+        /^NAVIGATION_DISABLED/);
+      const created = parse(await assistantScheduledJobTool('create_scheduled_job', window, { ...hourly, workspaceId: 'ws-a' }, approve, deps));
+      assert.deepEqual(created.job.workspace, { id: 'ws-a', name: 'Research' });
+      assert.equal(asked.length, 0);
+    });
+
+    test('off: a turn that read outside content or check-in material asks anyway, and the card says why', async (t) => {
+      getDb().prepare("INSERT INTO nodes (id, workspace_id, kind, status, created_at) VALUES ('n-chat', 'ws-a', 'chat', 'idle', 1)").run();
+      // The chat's live session, which carries check-in material to its next turn (services/turnTrust.ts).
+      registerLiveSession('n-chat');
+      t.after(() => clearAllSessions());
+      const turn = (turnId: string) => {
+        getDb().prepare("UPDATE turns SET status = 'completed' WHERE node_id = 'n-chat'").run();
+        activeTurnRow('n-chat', turnId, `a-${turnId}`);
+        return { nodeId: 'n-chat', turnId };
+      };
+      turn('turn-clean');
+      assert.equal(parse(await call('create_scheduled_job', hourly)).status, 'created', 'a clean turn: the setting holds');
+      assert.equal(asked.length, 0);
+
+      answer = { approved: false, reason: 'declined' };
+      recordUntrustedSource(turn('turn-web'), { tool: 'WebFetch', runtimeId: 'claude' });
+      assert.equal(parse(await call('create_scheduled_job', { ...hourly, name: 'From the web' })).status, 'declined');
+      recordCompanionTaint(turn('turn-items'), 'companion_items', 'collector');
+      assert.equal(parse(await call('create_scheduled_job', { ...hourly, name: 'From Today' })).status, 'declined');
+      turn('turn-next');
+      assert.equal(parse(await call('create_scheduled_job', { ...hourly, name: 'Carried' })).status, 'declined', 'what its session took in earlier');
+      assert.deepEqual(asked.map((request) => request.lines.at(-1)), Array(3).fill('Michi asks because this conversation read content from outside it.'));
+      assert.deepEqual(scheduler.listJobs().map((job) => job.name), ['Digest'], 'only the clean turn\'s job');
+
+      // With the setting on it asks as it always did: no reason needed.
+      needsApproval = true;
+      answer = { approved: true };
+      assert.equal(parse(await call('create_scheduled_job', { ...hourly, name: 'Asked' })).status, 'created');
+      assert.equal(asked.length, 4);
+      assert.equal(asked[3].lines.some((line) => line.startsWith('Michi asks because')), false);
+    });
+
+    test('off: the assistant\'s conversation asks the same in such a turn', async () => {
+      getDb().prepare("INSERT INTO nodes (id, workspace_id, kind, status, created_at) VALUES ('n-schedule', 'ws-a', 'chat', 'idle', 1)").run();
+      activeTurnRow('n-schedule', 'turn-v', 'a-turn-v');
+      recordCompanionTaint({ nodeId: 'n-schedule', turnId: 'turn-v' }, 'companion_read', 'checkin');
+      const window: AssistantScheduledJobCaller = { ownerUserId: null, nodeId: 'n-schedule', workspace: (id) => ({ id, name: 'Research' }) };
+      answer = { approved: false, reason: 'declined' };
+      assert.equal(parse(await assistantScheduledJobTool('create_scheduled_job', window, { ...hourly, workspaceId: 'ws-a' }, approve, deps)).status, 'declined');
+      assert.equal(asked.length, 1);
+      assert.equal(scheduler.listJobs().length, 0);
+    });
   });
 
   describe('the Scheduled window (assistantScheduledJobTool)', () => {
@@ -385,7 +533,7 @@ describe('scheduled job agent tools', () => {
 
       assert.equal(parse(await callAs('update_scheduled_job', { jobId: job.id, prompt: 'Summarize the archive.' })).status, 'updated');
       assert.equal(asked[0].lines[0], 'Workspace: Archive');
-      assert.match(asked[0].lines.join('\n'), /Prompt → “Summarize the archive\.”/);
+      assert.match(asked[0].lines.join('\n'), /^Prompt: “[^”]+” → “Summarize the archive\.”$/m);
 
       assert.equal(parse(await callAs('run_scheduled_job', { jobId: job.id })).status, 'started');
       assert.equal(asked[1].lines[0], 'Workspace: Archive');
@@ -501,5 +649,13 @@ describe('scheduled job tool registration', () => {
 
   test('they are never offered as Agent capabilities', () => {
     for (const name of TOOL_NAMES) assert.ok(CHAT_ONLY_BUILTIN_TOOLS.has(name));
+  });
+
+  test('create_scheduled_job leaves an omitted thread mode to the user\'s default, as validation does', () => {
+    const create = listEnabledBuiltinTools().find((tool) => tool.name === 'create_scheduled_job')!;
+    const fields = (create.parameters as { object: Record<string, { description?: string }> }).object;
+    assert.doesNotMatch(fields.sessionMode!.description ?? '', /fresh \(default\)/);
+    assert.match(fields.sessionMode!.description ?? '', /Settings › Background/);
+    assert.doesNotMatch(create.description, /a new thread \(or one persistent thread\)/);
   });
 });

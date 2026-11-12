@@ -13,6 +13,13 @@ export interface MarkdownLinkRenderer {
   /** True for the exact hrefs this renderer owns. */
   matches(href: string): boolean;
   render(href: string, children: ReactNode): ReactNode;
+  /**
+   * false: nothing in the Markdown under this provider loads on its own.
+   * Images and other embedded media render as their alt text or fallback
+   * words, whatever the caller's features say (a conversation whose author
+   * may repeat untrusted material). Omitted: the caller's features decide.
+   */
+  remoteMedia?: false;
 }
 
 export const MarkdownLinkRendererContext = createContext<MarkdownLinkRenderer | null>(null);

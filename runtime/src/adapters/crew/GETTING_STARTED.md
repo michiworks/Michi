@@ -80,7 +80,7 @@ For a source installation, run `npm start` from the built checkout and open the 
 
 In Michi:
 
-1. Open **Settings → Model** and select **Kiro Crew**, or select it in a new chat's composer Runtime menu.
+1. Open **Settings → Runtime & model** and select **Kiro Crew**, or select it in a new chat's composer Runtime menu.
 2. Choose a model and reasoning level.
 3. Create a new chat and send a message.
 
@@ -94,7 +94,7 @@ In the Crew sidebar, new Michi chats are filed under **Michi Crew / <workspace n
 
 ## 5. Choose a Memory mode
 
-When the runtime selected in **Settings → Model** is **Kiro Crew**, a **Memory** selector appears above **FOLLOW-UPS**. It sets the default for **new Crew chats**.
+When the runtime selected in **Settings → Runtime & model** is **Kiro Crew**, a **Memory** selector appears above **FOLLOW-UPS**. It sets the default for **new Crew chats**.
 
 | Mode | Behavior |
 | --- | --- |
@@ -108,7 +108,7 @@ Memory is separate from chat history. **Off** does not delete messages; Michi st
 
 ## 6. Choose how tools are approved
 
-Set the mode in **Michi Settings → Model → Permissions**:
+Set the mode in **Michi Settings → Runtime & model → Permissions**:
 
 - **Use global permissions on:** one setting applies across chats; the composer hides its permission switch.
 - **Use global permissions off:** choose **Ask / Trust** in each chat's composer.

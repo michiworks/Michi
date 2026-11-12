@@ -58,3 +58,37 @@ describe('hydrateBackendWorkspaces — maintenance trees', () => {
     }
   });
 });
+
+describe('hydrateBackendWorkspaces — Scheduled-only runs, Trash and the archive', () => {
+  const withRest = (activeTreeId: string | null) => ({
+    ...workspace(activeTreeId),
+    trees: [
+      { id: 't-chat', root_node_id: 'n-chat', created_at: 1, last_active_at: 10 },
+      { id: 't-old', root_node_id: 'n-old', created_at: 1, last_active_at: 15, archived_at: 16 },
+      { id: 't-binned', root_node_id: 'n-binned', created_at: 2, last_active_at: 20 },
+      { id: 't-sched', root_node_id: 'n-sched', created_at: 3, last_active_at: 30 },
+    ],
+    nodes: [
+      { id: 'n-chat', created_at: 1, kind: 'chat' },
+      { id: 'n-old', created_at: 1, kind: 'chat' },
+      { id: 'n-binned', created_at: 2, kind: 'chat', deleted_at: 25, deletion_group_id: 'del-1' },
+      { id: 'n-sched', created_at: 3, kind: 'chat', scheduled_only_job_id: 'job-hidden' },
+    ],
+  });
+
+  it('lands on the newest listed thread, past a newer thread in Trash or a Scheduled-only run', () => {
+    for (const requested of [null, 't-binned', 't-sched', 't-gone']) {
+      expect(hydrateBackendWorkspaces([withRest(requested)]).projects[0].activeTreeId).toBe('t-chat');
+    }
+  });
+
+  it('keeps a requested archived thread, which the archive opens', () => {
+    expect(hydrateBackendWorkspaces([withRest('t-old')]).projects[0].activeTreeId).toBe('t-old');
+  });
+
+  it('lands nowhere when every thread is in Trash', () => {
+    const binned = withRest(null);
+    binned.trees = binned.trees.filter((tree) => tree.id === 't-binned');
+    expect(hydrateBackendWorkspaces([binned]).projects[0].activeTreeId).toBeNull();
+  });
+});

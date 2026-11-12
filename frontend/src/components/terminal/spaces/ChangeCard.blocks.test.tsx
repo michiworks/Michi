@@ -33,8 +33,8 @@ describe('ChangeCard previews of structured blocks', () => {
     )).toBe('Next\nYou · Confirm → Notes\nAgent · Test');
     expect(preview(
       { id: 't', rev: 1, type: 'timeline', items: [] },
-      { id: 't', rev: 2, type: 'timeline', title: 'Progress', items: [{ title: 'Merged', at: 0, detail: 'Green' }] },
-    )).toBe('Progress\nMerged · Green');
+      { id: 't', rev: 2, type: 'timeline', title: 'Progress', items: [{ title: 'Merged', at: '2031-03-04', detail: 'Green' }] },
+    )).toBe('Progress\n2031-03-04 · Merged · Green');
   });
 });
 
@@ -65,6 +65,15 @@ describe('ChangeCard inline suggestion', () => {
     expect(view.querySelector('.page-change-prop__body')!.textContent).not.toMatch(/预算$|住宿/);
   });
 
+  it('shows the dates a suggestion moves on a timeline', () => {
+    const view = card(
+      { id: 't', rev: 1, type: 'timeline', title: 'Plan', items: [{ title: 'Ship', at: '2031-03-04' }] },
+      { id: 't', rev: 2, type: 'timeline', title: 'Plan', items: [{ title: 'Ship', at: '2031-03-11' }] },
+    );
+    expect(view.querySelector('.page-change-prop__old')!.textContent).toBe('2031-03-04 · Ship');
+    expect(view.querySelector('.page-change-prop__new')!.textContent).toBe('2031-03-11 · Ship');
+  });
+
   it('shows the whole new text when only something besides the text changed', () => {
     const view = card(
       { id: 'c', rev: 1, type: 'callout', tone: 'info', title: 'Note', text: 'Same words' },
@@ -85,18 +94,18 @@ describe('ChangeCard inline source', () => {
 
   it('links background maintenance to the conversation message it read, named by that conversation', () => {
     const onOpenSource = vi.fn();
-    const sourceLabel = vi.fn((source: PageChangeDto['source']) => (source.kind === 'chat' && source.nodeId === 'chat-node' ? '排查公证失败' : 'Meta agent'));
+    const sourceLabel = vi.fn((source: PageChangeDto['source']) => (source.kind === 'chat' && source.nodeId === 'chat-node' ? '排查公证失败' : 'Pages upkeep'));
     const { getByRole } = render(<ChangeCard variant="inline" change={applied({ kind: 'maintenance', ...run, jobId: 'job', runId: 'run', evidence: [read] })}
       sourceLabel={sourceLabel} onAccept={vi.fn()} onDismiss={vi.fn()} onReopen={vi.fn()} onRevert={vi.fn()} onRedo={vi.fn()} onOpenSource={onOpenSource} />);
     getByRole('button', { name: '“排查公证失败”' }).click();
     expect(onOpenSource).toHaveBeenCalledWith({ kind: 'chat', ...read });
   });
 
-  it('falls back to the run when a maintenance change cites no conversation', () => {
+  it('falls back to the run, named as the agent’s Pages upkeep, when a maintenance change cites no conversation', () => {
     const onOpenSource = vi.fn();
     const { getByRole } = render(<ChangeCard variant="inline" change={applied({ kind: 'maintenance', ...run, jobId: 'job', runId: 'run', evidence: [] })}
       onAccept={vi.fn()} onDismiss={vi.fn()} onReopen={vi.fn()} onRevert={vi.fn()} onRedo={vi.fn()} onOpenSource={onOpenSource} />);
-    getByRole('button', { name: 'the Meta agent' }).click();
+    getByRole('button', { name: 'Michi · Pages upkeep' }).click();
     expect(onOpenSource).toHaveBeenCalledWith({ kind: 'chat', ...run });
   });
 

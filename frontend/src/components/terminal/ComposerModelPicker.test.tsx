@@ -1,7 +1,7 @@
-import React from 'react';
 import { act, fireEvent, render, screen, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ComposerModelPicker, type ComposerModelPickerProps } from './ComposerModelPicker';
+import { backTarget, hasBackLayer, registerBackLayer } from '../../lib/backStack';
 
 const baseProps: ComposerModelPickerProps = {
   anchor: { x: 100, y: 650, anchorBottom: 610 },
@@ -55,6 +55,31 @@ describe('ComposerModelPicker', () => {
     expect(screen.queryByRole('slider')).toBeNull();
     expect(screen.queryByText('Thinking effort')).toBeNull();
     expect(onSaveReasoning).not.toHaveBeenCalled();
+  });
+
+  it("steps the phone's Back like Escape: a list back to the summary, then closed, never the page under it", () => {
+    const page = vi.fn();
+    const removePage = registerBackLayer(() => ({ level: 'page', back: page }));
+    const onClose = vi.fn();
+    try {
+      const view = render(<ComposerModelPicker {...baseProps} onClose={onClose} />);
+      fireEvent.click(screen.getByRole('button', { name: /Select model:/ }));
+      expect(screen.getByRole('menu', { name: 'Models' })).toBeTruthy();
+      act(() => { backTarget()?.back(); });
+      expect(screen.queryByRole('menu', { name: 'Models' })).toBeNull();
+      expect(onClose).not.toHaveBeenCalled();
+      act(() => { backTarget()?.back(); });
+      expect(onClose).toHaveBeenCalledTimes(1);
+      expect(page).not.toHaveBeenCalled();
+      view.unmount();
+    } finally {
+      removePage();
+    }
+    // With no page to go back to, the open picker still holds the system Back.
+    const view = render(<ComposerModelPicker {...baseProps} />);
+    expect(hasBackLayer()).toBe(true);
+    view.unmount();
+    expect(hasBackLayer()).toBe(false);
   });
 
   it('supports nested Escape and restores focus to the trigger', () => {
@@ -139,6 +164,44 @@ describe('ComposerModelPicker', () => {
     expect(onSaveModel).not.toHaveBeenCalled();
   });
 
+  it('keeps a saved effort shown until the binding catches up, and reverts a failed save', async () => {
+    const onSaveReasoning = vi.fn().mockResolvedValueOnce(undefined).mockRejectedValueOnce(new Error('Refused'));
+    const view = render(<ComposerModelPicker {...baseProps} onSaveReasoning={onSaveReasoning} />);
+    const slider = screen.getByRole('slider');
+    fireEvent.change(slider, { target: { value: '3' } });
+    await act(async () => {});
+    // Saved, but the reloaded status has not arrived: no step back to Medium.
+    expect(slider.getAttribute('aria-valuetext')).toBe('Extra high');
+    view.rerender(<ComposerModelPicker {...baseProps} onSaveReasoning={onSaveReasoning} resolvedBinding={{ ...baseProps.resolvedBinding, reasoning: 'xhigh' }} />);
+    expect(slider.getAttribute('aria-valuetext')).toBe('Extra high');
+    fireEvent.change(slider, { target: { value: '0' } });
+    await act(async () => {});
+    expect(slider.getAttribute('aria-valuetext')).toBe('Extra high');
+    expect(screen.getByRole('alert').textContent).toBe('Refused');
+  });
+
+  it('saves a newer effort after the one in flight, without a Saving row or a step back', async () => {
+    let finishFirst!: () => void;
+    const onSaveReasoning = vi.fn()
+      .mockReturnValueOnce(new Promise<void>((resolve) => { finishFirst = resolve; }))
+      .mockResolvedValueOnce(undefined);
+    const view = render(<ComposerModelPicker {...baseProps} onSaveReasoning={onSaveReasoning} />);
+    const slider = screen.getByRole('slider');
+    fireEvent.change(slider, { target: { value: '3' } });
+    expect(screen.queryByText('Saving…')).toBeNull();
+    expect((slider as HTMLInputElement).disabled).toBe(false);
+    fireEvent.change(slider, { target: { value: '0' } });
+    expect(onSaveReasoning).toHaveBeenCalledOnce();
+    expect(slider.getAttribute('aria-valuetext')).toBe('Low');
+    await act(async () => { finishFirst(); });
+    expect(onSaveReasoning).toHaveBeenLastCalledWith('low');
+    // The first pick's value arrives after both saves settled.
+    view.rerender(<ComposerModelPicker {...baseProps} onSaveReasoning={onSaveReasoning} resolvedBinding={{ ...baseProps.resolvedBinding, reasoning: 'xhigh' }} />);
+    expect(slider.getAttribute('aria-valuetext')).toBe('Low');
+    view.rerender(<ComposerModelPicker {...baseProps} onSaveReasoning={onSaveReasoning} resolvedBinding={{ ...baseProps.resolvedBinding, reasoning: 'low' }} />);
+    expect(slider.getAttribute('aria-valuetext')).toBe('Low');
+  });
+
   it('exposes providers separately with key-configuration status', () => {
     const onSaveProvider = vi.fn();
     render(<ComposerModelPicker {...baseProps} catalogCapabilities={{ ...baseProps.agentStatus!.capabilities, providerModels: true }}
@@ -211,6 +274,19 @@ describe('ComposerModelPicker placement', () => {
     expect(surfaceTop()).toBe(306);
   });
 
+  it('opens below the composer frame that holds the trigger, not over its edge', () => {
+    layout.content = 150;
+    const trigger = triggerAt(270);
+    const frame = document.createElement('div');
+    frame.className = 'terminal-composer';
+    frame.getBoundingClientRect = () => ({ top: 200, bottom: 310, left: 0, right: 600, width: 600, height: 110, x: 0, y: 200, toJSON: () => ({}) });
+    frame.append(trigger);
+    document.body.append(frame);
+    triggers.push(frame);
+    render(<ComposerModelPicker {...baseProps} anchor={{ ...baseProps.anchor, trigger, preferBelow: true }} />);
+    expect(surfaceTop()).toBe(316);
+  });
+
   it('flips a below-preferring summary above when only that side fits', () => {
     const trigger = triggerAt(700);
     render(<ComposerModelPicker {...baseProps} anchor={{ ...baseProps.anchor, trigger, preferBelow: true }} />);
@@ -231,5 +307,71 @@ describe('ComposerModelPicker placement', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Select runtime: Codex' }));
     expect(screen.getByRole('menu', { name: 'Runtimes' })).toBeTruthy();
     expect(surfaceTop()).toBe(306);
+  });
+
+  describe('Ultracode', () => {
+    const claude: Partial<ComposerModelPickerProps> = {
+      resolvedBinding: { runtime: 'claude', model: 'opus', reasoning: 'high', provider: undefined, source: 'node' },
+      catalogCapabilities: { ...baseProps.agentStatus!.capabilities, ultracode: true },
+      providerModels: [{ id: 'opus', label: 'Opus' }],
+    };
+
+    it('is a switch under the effort slider on a runtime that has it, saved for the chat', async () => {
+      const onSaveUltracode = vi.fn(async () => {});
+      const view = render(<ComposerModelPicker {...baseProps} {...claude} ultracode={{ enabled: false }} onSaveUltracode={onSaveUltracode} />);
+      const toggle = screen.getByRole('switch', { name: /Ultracode/ });
+      expect(toggle.getAttribute('aria-checked')).toBe('false');
+      expect(toggle.textContent).toMatch(/multi-agent workflow for each task/);
+      await act(async () => { fireEvent.click(toggle); });
+      expect(onSaveUltracode).toHaveBeenCalledExactlyOnceWith(true);
+      expect(screen.queryByRole('alert')).toBeNull();
+      // Saved, but the chat's choice has not arrived yet: no step back to off.
+      expect(toggle.getAttribute('aria-checked')).toBe('true');
+      view.rerender(<ComposerModelPicker {...baseProps} {...claude} ultracode={{ enabled: true, available: true }} onSaveUltracode={onSaveUltracode} />);
+      expect(screen.getByRole('switch', { name: /Ultracode/ }).getAttribute('aria-checked')).toBe('true');
+    });
+
+    it('says when the model or setup cannot run it, and shows why a save failed', async () => {
+      const onSaveUltracode = vi.fn(async () => { throw new Error('Ultracode is not available in this chat'); });
+      render(<ComposerModelPicker {...baseProps} {...claude} ultracode={{ enabled: true, available: false }} onSaveUltracode={onSaveUltracode} />);
+      const toggle = screen.getByRole('switch', { name: /Ultracode/ });
+      expect(toggle.textContent).toMatch(/On, but this model or setup cannot run it/);
+      expect(toggle.getAttribute('data-unavailable')).toBe('true');
+      await act(async () => { fireEvent.click(toggle); });
+      expect(onSaveUltracode).toHaveBeenCalledExactlyOnceWith(false);
+      expect(screen.getByRole('alert').textContent).toBe('Ultracode is not available in this chat');
+    });
+
+    it('turns at once while it saves, keeps the summary as it is, and turns back after a failure', async () => {
+      let fail!: (error: Error) => void;
+      const onSaveUltracode = vi.fn(() => new Promise<void>((_, reject) => { fail = reject; }));
+      render(<ComposerModelPicker {...baseProps} {...claude} ultracode={{ enabled: false }} onSaveUltracode={onSaveUltracode} />);
+      const toggle = screen.getByRole('switch', { name: /Ultracode/ }) as HTMLButtonElement;
+      fireEvent.click(toggle);
+      expect(toggle.getAttribute('aria-checked')).toBe('true');
+      expect(screen.queryByText('Saving…')).toBeNull();
+      expect(toggle.disabled).toBe(false);
+      expect((screen.getByRole('slider') as HTMLInputElement).disabled).toBe(false);
+      await act(async () => { fail(new Error('Refused')); });
+      expect(toggle.getAttribute('aria-checked')).toBe('false');
+      expect(screen.getByRole('alert').textContent).toBe('Refused');
+    });
+
+    it('is not offered on a runtime without it, or where the chat cannot have it', () => {
+      const { rerender } = render(<ComposerModelPicker {...baseProps} ultracode={{ enabled: false }} onSaveUltracode={vi.fn()} />);
+      expect(screen.queryByRole('switch')).toBeNull();
+      rerender(<ComposerModelPicker {...baseProps} {...claude} />);
+      expect(screen.queryByRole('switch')).toBeNull();
+    });
+
+    it('Right does not toggle it: only a summary row opens its page', () => {
+      const onSaveUltracode = vi.fn();
+      render(<ComposerModelPicker {...baseProps} {...claude} ultracode={{ enabled: false }} onSaveUltracode={onSaveUltracode} />);
+      const toggle = screen.getByRole('switch', { name: /Ultracode/ });
+      toggle.focus();
+      fireEvent.keyDown(toggle, { key: 'ArrowRight' });
+      expect(onSaveUltracode).not.toHaveBeenCalled();
+      expect(screen.queryByRole('menu')).toBeNull();
+    });
   });
 });

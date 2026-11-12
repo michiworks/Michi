@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { isMichiBackendHealth } from 'michi-shared';
 import { getMichiConnectionConfigPath } from './configPaths';
 import { readJsonConfig, updateJsonConfig } from './jsonConfigStore';
 
@@ -268,12 +269,13 @@ export async function probeBackendConnection(input: {
     const response = await fetch(`${apiUrl}/health`, { headers,
       signal: input.signal ? AbortSignal.any([controller.signal, input.signal]) : controller.signal });
     input.onDiagnostic?.('GET ' + apiUrl + '/health → HTTP ' + response.status);
-    const body = await response.json().catch(() => null) as Record<string, unknown> | null;
+    const body = await response.json().catch(() => null) as unknown;
     if (!response.ok) {
-      const detail = body && typeof body.error === 'string' ? `: ${body.error}` : '';
+      const error = (body as { error?: unknown } | null)?.error;
+      const detail = typeof error === 'string' ? `: ${error}` : '';
       return { ok: false, apiUrl, reachable: true, httpStatus: response.status, error: `Backend returned ${response.status}${detail}` };
     }
-    if (body?.service !== 'michi-backend' || body?.status !== 'healthy') {
+    if (!isMichiBackendHealth(body)) {
       return { ok: false, apiUrl, reachable: true, httpStatus: response.status, error: 'The server did not identify itself as a Michi backend' };
     }
     return {

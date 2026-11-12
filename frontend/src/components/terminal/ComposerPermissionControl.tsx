@@ -1,11 +1,11 @@
-import React, { useState } from 'react';
+import { useState } from 'react';
 import { AnimatePresence } from 'motion/react';
 import type { ChatPermissionChoice, ChatPermissionMode } from 'michi-shared';
 import { useCrewIntegration } from './CrewIntegrationStatus';
 import { activeBackendApiBase } from '../../config/backendConnections';
 import ContextMenu, { menuOpenKey } from '../ContextMenu';
 import { ShieldIcon, ShieldOffIcon } from './icons';
-import { composerMenusOpenBelow, type PaneMenuAnchor } from './PaneComposerToolbarLeft';
+import { composerMenuBelowEdge, composerMenusOpenBelow, type PaneMenuAnchor } from './PaneComposerToolbarLeft';
 import { toast } from 'sonner';
 import { supportsChatYolo } from '../../lib/chatPermissionModes';
 
@@ -75,7 +75,7 @@ export function ComposerPermissionControl({ mode, runtimeIds, approveForMeRuntim
       onClick={(event) => {
         event.stopPropagation();
         const rect = event.currentTarget.getBoundingClientRect();
-        setAnchor(anchor ? null : { x: rect.left, y: rect.bottom + 6, anchorBottom: rect.top - 6, trigger: event.currentTarget,
+        setAnchor(anchor ? null : { x: rect.left, y: composerMenuBelowEdge(event.currentTarget), anchorBottom: rect.top - 6, trigger: event.currentTarget,
           preferBelow: composerMenusOpenBelow(event.currentTarget) });
       }} onKeyDown={(event) => {
         if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {

@@ -76,6 +76,12 @@ test('a Michi message reads with its conversation, workspace, runtime, turn and 
 test('trashed and archived conversations say so; other owners and bad queries are refused', async () => {
   assert.equal(homeSource({ ownerUserId: owner, nodeId: 'n-trash' }).state, 'deleted');
   assert.equal(homeSource({ ownerUserId: owner, nodeId: 'n-old' }).state, 'archived');
+  // The Map's Archive trims a branch into the archive lane: deleted_at is set, but it is not in Trash.
+  getDb().prepare("UPDATE nodes SET deletion_group_id='arch-1' WHERE id='n-trash'").run();
+  assert.equal(homeSource({ ownerUserId: owner, nodeId: 'n-trash' }).state, 'archived');
+  getDb().prepare("UPDATE nodes SET status='archived' WHERE id='n-a'").run();
+  assert.equal(homeSource({ ownerUserId: owner, nodeId: 'n-a' }).state, 'archived');
+  getDb().prepare("UPDATE nodes SET status='idle' WHERE id='n-a'").run();
   getDb().prepare("INSERT INTO trees(id,workspace_id,root_node_id,archived_at,last_active_at,created_at) VALUES ('tr','ws-a','n-a',9,1,1)").run();
   getDb().prepare("UPDATE nodes SET tree_id='tr' WHERE id='n-a'").run();
   assert.equal(homeSource({ ownerUserId: owner, nodeId: 'n-a' }).state, 'archived');

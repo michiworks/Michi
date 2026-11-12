@@ -1,4 +1,3 @@
-import React from 'react';
 import { render, screen, fireEvent, waitFor } from '@testing-library/react';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { DiffReceipt } from './DiffReceipt';
@@ -123,6 +122,19 @@ describe('DiffReceipt', () => {
     expect(header.getAttribute('aria-expanded')).toBe('false');
     if (row.isConnected) expect(row.closest('[aria-hidden="true"]')).not.toBeNull();
     await waitFor(() => expect(screen.queryByTestId('diff-receipt-file')).toBeNull());
+  });
+
+  it('shows an error, not endless loading, when the read is cut off by something other than closing', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => { throw new DOMException('Remote connection changed while reading data', 'AbortError'); },
+    }));
+    const m = msg([tool('write', { path: 'src/a.ts', content: 'x' })]);
+    render(<DiffReceipt message={m} workspaceId="ws1" />);
+    fireEvent.click(screen.getByTestId('diff-receipt-header'));
+    fireEvent.click(screen.getByTestId('diff-receipt-file'));
+    await waitFor(() => expect(screen.getByText(/failed to fetch diff/)).toBeTruthy());
+    expect(screen.queryByText('loading diff…')).toBeNull();
   });
 
   it('shows an error message when the diff endpoint 404s', async () => {

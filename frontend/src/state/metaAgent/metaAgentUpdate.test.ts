@@ -7,6 +7,7 @@ const api = vi.hoisted(() => ({
   round: vi.fn(),
   overview: vi.fn(),
   resume: vi.fn(),
+  refreshInfo: vi.fn(),
   retryGuard: vi.fn(),
   info: null as unknown,
   firstRunData: null as unknown,
@@ -15,10 +16,11 @@ const api = vi.hoisted(() => ({
 }));
 vi.mock('../../services/api/pageMaintenance', () => ({ runMetaAgentRoundNow: api.roundNow, fetchMetaAgentRound: api.round }));
 vi.mock('../pages/pageEvents', () => ({ notifyPageChanged: api.changed }));
-vi.mock('./useMetaAgentOverview', () => ({ refreshMetaAgentOverview: api.overview, resumeMetaAgent: api.resume }));
+vi.mock('./useMetaAgentOverview', () => ({ refreshMetaAgentOverview: api.overview, pauseMetaAgentMaintenance: api.resume }));
 vi.mock('./useMetaAgent', async (importOriginal) => ({
   ...(await importOriginal<typeof import('./useMetaAgent')>()),
   readMetaAgent: () => ({ status: 'ready', info: api.info, error: null }),
+  refreshMetaAgent: api.refreshInfo,
   retryMetaAgentGuard: api.retryGuard,
 }));
 vi.mock('./spacesFirstRun', async (importOriginal) => ({
@@ -40,7 +42,7 @@ const flush = () => act(async () => { for (let i = 0; i < 8; i++) await Promise.
 
 beforeEach(() => {
   vi.useFakeTimers();
-  for (const fn of [api.roundNow, api.round, api.overview, api.resume, api.retryGuard, api.wake, api.changed]) fn.mockReset();
+  for (const fn of [api.roundNow, api.round, api.overview, api.resume, api.refreshInfo, api.retryGuard, api.wake, api.changed]) fn.mockReset();
   api.overview.mockResolvedValue(null);
   api.info = { guard: { maintenance: null, chat: null } };
   api.firstRunData = null;
@@ -89,6 +91,12 @@ describe('runMetaAgentUpdate', () => {
     expect(readMetaAgentUpdate()).toMatchObject({ phase: 'failed', error: 'Meta agent restriction check failed on kiro: x' });
   });
 
+  it('says Pages upkeep could not start when a skipped workspace gives no reason', async () => {
+    api.roundNow.mockResolvedValue(answer(row('a', 'skipped', { skip: 'stopped' })));
+    await act(async () => { await runMetaAgentUpdate('remote-1'); });
+    expect(readMetaAgentUpdate()).toMatchObject({ phase: 'failed', error: 'Pages upkeep could not start' });
+  });
+
   it('reports a failed request', async () => {
     api.roundNow.mockRejectedValue(new Error('Scheduled jobs are off on this backend, so the Meta agent cannot run'));
     await act(async () => { await runMetaAgentUpdate('local'); });
@@ -130,12 +138,15 @@ describe('runMetaAgentUpdate', () => {
 });
 
 describe('retryStoppedMetaAgent', () => {
-  it('resumes this computer’s Meta agent, which restarts stopped workspaces, then runs one round', async () => {
+  it('resumes this computer’s Meta agent, which restarts stopped workspaces, re-reads it, runs one round, then reads the overview', async () => {
     const order: string[] = [];
-    api.resume.mockImplementation(async () => { order.push('resume'); });
+    api.resume.mockImplementation(async (paused: boolean) => { order.push(`resume:${paused}`); });
+    api.refreshInfo.mockImplementation(async () => { order.push('info'); });
     api.roundNow.mockImplementation(async () => { order.push('round'); return answer(row('a', 'no_new')); });
+    api.overview.mockImplementation(async () => { order.push('overview'); });
     await act(async () => { await retryStoppedMetaAgent('local'); });
-    expect(order).toEqual(['resume', 'round']);
+    expect(order.slice(0, 3)).toEqual(['resume:false', 'info', 'round']);
+    expect(order.at(-1)).toBe('overview');
   });
 
   it('does not resume through this computer for a remote backend, and stops when resuming fails', async () => {
@@ -146,7 +157,9 @@ describe('retryStoppedMetaAgent', () => {
 
     api.roundNow.mockClear();
     api.resume.mockRejectedValue(new Error('Could not resume A'));
+    api.overview.mockClear();
     await expect(retryStoppedMetaAgent('local')).rejects.toThrow('Could not resume A');
     expect(api.roundNow).not.toHaveBeenCalled();
+    expect(api.overview).toHaveBeenCalledTimes(1);
   });
 });

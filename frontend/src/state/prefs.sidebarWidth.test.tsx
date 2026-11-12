@@ -1,9 +1,8 @@
-import React from 'react';
 import { cleanup, render, screen } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { PrefsProvider, usePrefs } from './prefs';
 
-const api = vi.hoisted(() => ({ fetchPrefs: vi.fn(), savePrefs: vi.fn() }));
+const api = vi.hoisted(() => ({ fetchPrefs: vi.fn(), savePrefs: vi.fn(async () => true) }));
 vi.mock('../services/api', () => api);
 
 function Probe() {

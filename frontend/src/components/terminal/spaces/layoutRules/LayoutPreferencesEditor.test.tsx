@@ -1,4 +1,3 @@
-import React from 'react';
 import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { beforeEach, expect, it, vi } from 'vitest';
 import type { PageLayoutPreferences } from 'michi-shared';
@@ -51,6 +50,17 @@ it('keeps a focused dirty draft on background changes and requires an explicit c
   fireEvent.click(save());
   await screen.findByText('Preferences saved.');
   expect(api.saveLayoutPreferences).toHaveBeenCalledWith('p1', { text: 'My draft', expectedRevision: 3 }, 'local');
+});
+
+it('reads again only for a change of its own page on its own backend', async () => {
+  mount();
+  await screen.findByDisplayValue(initial.text);
+  const reads = api.fetchLayoutPreferences.mock.calls.length;
+  act(() => notifyPageChanged({ backendConnectionId: 'remote:other', pageId: 'p1' }));
+  act(() => notifyPageChanged({ backendConnectionId: 'local', pageId: 'p2' }));
+  expect(api.fetchLayoutPreferences).toHaveBeenCalledTimes(reads);
+  act(() => notifyPageChanged({ backendConnectionId: 'local', pageId: 'p1' }));
+  await waitFor(() => expect(api.fetchLayoutPreferences).toHaveBeenCalledTimes(reads + 1));
 });
 
 it('retains the draft after a rejected save, then reads and offers the latest version', async () => {

@@ -100,7 +100,7 @@ CREATE TABLE IF NOT EXISTS contexts (
 );
 CREATE INDEX IF NOT EXISTS idx_contexts_workspace ON contexts(workspace_id);
 
--- FTS5 virtual table: not modeled in drizzle schema (see schema.ts comment).
+-- FTS5 virtual table over messages.content, kept in sync by the triggers below.
 CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5(
   content,
   content=messages,

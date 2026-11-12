@@ -1,0 +1,13 @@
+{
+  // Check-only: npm run check:unused. Builds read tsconfig.json, not this file.
+  // Incremental is off so the check never rewrites dist/.tsbuildinfo.
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "composite": false,
+    "incremental": false,
+    "tsBuildInfoFile": null,
+    "noUnusedLocals": true,
+    "noFallthroughCasesInSwitch": true
+  }
+}

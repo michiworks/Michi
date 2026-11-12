@@ -1,5 +1,5 @@
 import {
-  applyPageDatabaseOps, parsePageDatabaseOps,
+  applyPageDatabaseOps, parsePageDatabaseOps, rowLocation,
   type PageDatabase, type PageDatabaseEditOp, type PageDatabaseRow,
   type PageDatabaseView,
 } from 'michi-shared';
@@ -9,7 +9,7 @@ import type {
   RowLocation, TargetMutation, TargetSnapshot,
 } from 'michi-shared';
 import {
-  invalidateDatabasePages, newPageId, PageWriteError, pagesTransaction,
+  invalidateDatabasePages, newPageId, pageTimestamp, PageWriteError, pagesTransaction,
   requireChatChangeSource,
 } from './core';
 import { createDatabase, getDatabase, requireDatabaseRecord, saveDatabase } from './repository';
@@ -17,7 +17,8 @@ import { getDb } from '../db';
 import { dismissPendingProposals, getTargetHead, insertChange, setTargetHead } from './historyRepository';
 import { pageComponents } from './components';
 import { pinHumanDatabaseViews } from './componentReferences';
-import { canonical } from './canonicalJson';
+import { sameCanonical } from './canonicalJson';
+import { dbSnapshot, rowSnapshot } from './changeSnapshots';
 import { assertMaintenanceAuthority, assertMaintenanceResourceCurrent, getMaintenancePlan, getMaintenanceReceipt,
   maintenanceOperationKey, persistMaintenanceReceiptInTransaction, type AuthorityInput } from './maintenanceRepository';
 
@@ -52,12 +53,6 @@ type Edit = { op: PageDatabaseEditOp; index: number };
 
 const json = (value: unknown): string => JSON.stringify(value);
 const same = (a: unknown, b: unknown): boolean => json(a) === json(b);
-const sameCanonical = (a: unknown, b: unknown): boolean => json(canonical(a)) === json(canonical(b));
-const safeNow = (value?: number): number => {
-  const now = value ?? Date.now();
-  if (!Number.isSafeInteger(now) || now < 0) throw new PageWriteError(400, 'invalid', 'Invalid timestamp');
-  return now;
-};
 const invalid = (message: string): PageWriteError => new PageWriteError(400, 'invalid', message);
 
 function parseOps(raw: unknown, actor: 'user' | 'agent'): PageDatabaseEditOp[] {
@@ -80,26 +75,9 @@ function parseAgentOps(raw: unknown): { items: Edit[]; rejected: Rejected[] } {
   return { items, rejected };
 }
 
-function rowLocation(database: PageDatabase, rowId: string): RowLocation {
-  const position = database.rows.findIndex((row) => row.id === rowId);
-  if (position < 0) return { position: database.rows.length, after: database.rows.at(-1)?.id ?? null };
-  return { position, after: database.rows[position - 1]?.id ?? null };
-}
-function rowSnapshot(database: PageDatabase, rowId: string): TargetSnapshot {
-  const row = database.rows.find((item) => item.id === rowId);
-  return row ? { kind: 'row', exists: true, row: structuredClone(row), location: rowLocation(database, rowId) }
-    : { kind: 'row', exists: false, id: rowId, location: null };
-}
 /** The snapshot with the location the row had at that step of a batch (the snapshot's own when unknown). */
 function atLocation(snapshot: TargetSnapshot, location: RowLocation | null | undefined): TargetSnapshot {
   return location && snapshot.kind === 'row' && snapshot.exists ? { ...snapshot, location } : snapshot;
-}
-function dbSnapshot(database: PageDatabase): TargetSnapshot {
-  return { kind: 'database', exists: true, database: {
-    id: database.id, workspaceId: database.workspaceId, title: database.title,
-    columns: structuredClone(database.columns), views: structuredClone(database.views),
-    revision: database.revision, updatedAt: database.updatedAt,
-  } };
 }
 function targetRev(target: ChangeTarget, before: TargetSnapshot, fallback: number): number {
   if (target.kind === 'row' && before.kind === 'row' && before.exists) return before.row.rev;
@@ -150,7 +128,7 @@ function assertExpectedDatabaseRevision(database: PageDatabase, revision: number
 /** Apply one ordinary database write as a transaction, with one resource revision and one history batch. */
 export function applyUserDatabaseEdits(input: ApplyUserDatabaseEditsInput): PageWriteResult {
   return pagesTransaction(() => {
-    const now = safeNow(input.now);
+    const now = pageTimestamp(input.now);
     const current = getDatabase(input.databaseId, input.ownerUserId, { write: true });
     assertExpectedDatabaseRevision(current, input.revision);
     const ops = parseOps(input.ops, 'user');
@@ -176,7 +154,6 @@ export function applyUserDatabaseEdits(input: ApplyUserDatabaseEditsInput): Page
     const beforeDb = dbSnapshot(current);
     const afterDb = dbSnapshot(working);
     const schemaOps = ops.filter((op) => op.op.startsWith('column.') || op.op === 'option.add' || op.op.startsWith('view.'));
-    const rowOps = ops.filter((op) => op.op.startsWith('row.'));
     const batchId = newPageId('batch');
     const source: ChangeSource = { kind: 'user' };
     const applied: PageChangeDto[] = [];
@@ -230,7 +207,7 @@ function applyAgentDbEditsWithSource(
   assignedRowIds?: string[],
 ): PageWriteResult {
   return pagesTransaction(() => {
-    const now = safeNow(input.now);
+    const now = pageTimestamp(input.now);
     const record = requireDatabaseRecord(input.databaseId, input.ownerUserId, { write: true });
     if (record.workspace_id !== input.workspaceId) throw new PageWriteError(404, 'not_found', 'Database not found');
     authorize();
@@ -437,7 +414,7 @@ export function applyComponentDbEdits(input: ApplyComponentDbEditsInput): PageWr
 /** Apply a frozen maintenance database row batch and commit its receipt atomically. */
 export function applyMaintenanceDatabaseSet(input: ApplyMaintenanceDatabaseSetInput): PageWriteResult & { receipt: MaintenanceReceipt } {
   return pagesTransaction(() => {
-    const now = safeNow(input.now);
+    const now = pageTimestamp(input.now);
     assertMaintenanceAuthority(input, now);
     const plan = getMaintenancePlan(input.planId, input.ownerUserId);
     if (!plan || plan.workspaceId !== input.workspaceId || plan.jobId !== input.jobId || plan.runId !== input.runId || plan.configRevision !== input.configRevision) {
@@ -488,7 +465,7 @@ export interface ApplyWatchDatabaseSetInput {
 /** A watch run's row batch, applied whole or not at all; cells a person edited become proposals. */
 export function applyWatchDatabaseSet(input: ApplyWatchDatabaseSetInput): PageWriteResult {
   return pagesTransaction(() => {
-    const now = safeNow(input.now);
+    const now = pageTimestamp(input.now);
     const ops = parseOps(input.ops, 'agent');
     if (!ops.length || ops.some((op) => !op.op.startsWith('row.'))) throw invalid('Watch database edits must contain row operations only');
     const current = getDatabase(input.databaseId, input.ownerUserId, { write: true });
@@ -517,7 +494,7 @@ export interface ConfigureDatabaseInput {
 /** A separate, bounded schema capability; row writers and maintenance retain their row-only parser. */
 export function configureDatabase(input: ConfigureDatabaseInput): PageWriteResult {
   return pagesTransaction(() => {
-    const now = safeNow(input.now);
+    const now = pageTimestamp(input.now);
     requireChatChangeSource(input.workspaceId, input.ownerUserId, input.source);
     const current = getDatabase(input.databaseId, input.ownerUserId, { write: true });
     if (current.workspaceId !== input.workspaceId) throw new PageWriteError(404, 'not_found', 'Database not found');
@@ -593,7 +570,7 @@ export function createAgentDatabase(input: {
 /** Configure a custom view to render a validated, versioned library component. */
 export function configureDatabaseView(input: ConfigureDatabaseViewInput): PageWriteResult & { viewId: string } {
   return pagesTransaction(() => {
-    const now = safeNow(input.now);
+    const now = pageTimestamp(input.now);
     requireChatChangeSource(input.workspaceId, input.ownerUserId, input.source);
     const record = requireDatabaseRecord(input.databaseId, input.ownerUserId, { write: true });
     if (record.workspace_id !== input.workspaceId) throw new PageWriteError(404, 'not_found', 'Database not found');
@@ -615,7 +592,7 @@ export function configureDatabaseView(input: ConfigureDatabaseViewInput): PageWr
       type: 'custom', config: { ...configWithoutPin, componentId: input.componentId,
         ...(input.pinnedVersion === undefined ? {} : { pinnedVersion: componentVersion }), props } };
     const nextViews = viewIndex < 0 ? [...current.views, view] : current.views.map((item, index) => index === viewIndex ? view : item);
-    if (same(current.views, nextViews)) return { resource: { kind: 'database', id: current.id }, revision: current.revision, applied: [], proposed: [], rejected: [], viewId };
+    if (sameCanonical(current.views, nextViews)) return { resource: { kind: 'database', id: current.id }, revision: current.revision, applied: [], proposed: [], rejected: [], viewId };
     const working: PageDatabase = { ...current, views: nextViews,
       revision: current.revision + 1, updatedAt: now };
     const target: ChangeTarget = { kind: 'database', databaseId: current.id };

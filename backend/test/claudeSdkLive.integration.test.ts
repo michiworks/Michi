@@ -36,7 +36,6 @@ async function createLiveHarness() {
     MICHI_DATA_DIR: path.join(root, 'data'), MICHI_CONFIG_DIR: path.join(root, 'config'),
     MICHI_LOG_DIR: path.join(root, 'logs'), CLAUDE_CONFIG_DIR: configDir,
     MICHI_CLAUDE_POOL_DISABLED: '1', MICHI_CLAUDE_BARE: '1', MICHI_CLAUDE_STRICT_MCP: '1',
-    MICHI_CLAUDE_FOLLOW_UPS_HOOK_POC: '0',
   });
   delete process.env.MICHI_CLOUD;
   const express = require('express') as typeof import('express');

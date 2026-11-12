@@ -214,6 +214,45 @@ test('legacy create rejects missing durable nodes and mismatched workspace owner
   assert.equal(created.length, 0);
 });
 
+test('legacy create and ensure-session refuse a malformed body the same way, before writing anything', async () => {
+  const malformed: Array<[string, Record<string, unknown>, string]> = [
+    ['extraContexts not an array', { extraContexts: 'x' }, 'extraContexts must be an array of at most 20 items'],
+    ['21 extraContexts', { extraContexts: Array.from({ length: 21 }, (_, i) => ({ name: `f${i}`, filePath: `/f${i}` })) },
+      'extraContexts must be an array of at most 20 items'],
+    ['a parent path', { extraContexts: [{ name: 'f', filePath: '/a/../b' }] }, 'extraContexts filePath must not contain ..'],
+    ['an unknown kind', { extraContexts: [{ name: 'f', filePath: '/f', kind: 'x' }] },
+      "extraContexts.kind must be 'embedded', 'reference', or 'symlink' if present"],
+    ['contextManifest not an array', { contextManifest: 'x' }, 'contextManifest must be an array'],
+    ['enableFollowUps not a boolean', { enableFollowUps: 'yes' }, 'enableFollowUps must be a boolean'],
+    ['a numeric model', { model: 5 }, 'model must be a string'],
+    ['a numeric mode', { modeId: 5 }, 'modeId must be a string'],
+    ['a relative folder', { cwd: 'relative/dir' }, 'Workspace folder must be an absolute path. Select an existing folder for this Workspace.'],
+  ];
+  const permissionMode = () => (getDb().prepare("SELECT permission_mode FROM nodes WHERE id = 'cancel-node'").get() as any).permission_mode;
+  const before = permissionMode();
+  for (const [name, extra, error] of malformed) {
+    const legacy = await post('/chats', { nodeId: 'cancel-node', workspaceId: 'ws', cwd: directory, ...extra });
+    const ensured = await post('/nodes/cancel-node/ensure-session', { workspaceId: 'ws', cwd: directory, ...extra });
+    const fresh = await post('/nodes/fresh-node/ensure-session', {
+      workspaceId: 'ws', cwd: directory, ...extra,
+      graphPrerequisite: { workspace: { id: 'ws', name: 'Cancel Test', createdAt: 1 }, node: { id: 'fresh-node', treeId: null, parentNodeId: null, createdAt: 2 }, edges: [] },
+    });
+    for (const response of [legacy, ensured, fresh]) {
+      assert.equal(response.status, 400, name);
+      assert.equal((await response.json() as { error: string }).error, error, name);
+    }
+  }
+  assert.equal(created.length, 0);
+  assert.equal(permissionMode(), before);
+  assert.equal(getNode('fresh-node') ?? null, null);
+});
+
+test('legacy create, like ensure-session, takes an empty modeId as no mode', async () => {
+  const response = await post('/chats', { nodeId: 'cancel-node', workspaceId: 'ws', cwd: directory, modeId: '' });
+  assert.equal(response.status, 200, await response.clone().text());
+  assert.equal(created.length, 1);
+});
+
 test('legacy create awaits worker commit and tears down an uncommitted session', async (t) => {
   t.mock.method(dbWorkerClient, 'isDbWorkerReady', () => true);
   t.mock.method(dbWorkerClient.dbWorker, 'persistResumeBinding', async () => { throw new Error('disk unavailable'); });

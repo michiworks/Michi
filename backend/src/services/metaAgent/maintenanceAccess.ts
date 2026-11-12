@@ -14,11 +14,12 @@ export const MAINTENANCE_ACCESS_TOOL_NAMES = ['maintenance_list_tools', 'mainten
 
 // These operations change only Michi-owned state, or read it. Launching or
 // messaging workers is external execution, even when initiated by a Michi tool.
+// delete_artifact is not here: unattended maintenance has nobody to approve it.
 const INTERNAL_TOOLS = new Set<string>([
   ...PAGE_TOOL_NAMES, 'michi_docs', 'list_workspaces', 'list_threads', 'search_messages',
   'read_node', 'read_node_overview', 'read_conversation_updates', 'report_conversation_no_change',
   'list_panes', 'inspect_pane', 'read_pane_output', 'wait_pane',
-  'save_artifact', 'update_artifact', 'layout_rules',
+  'save_artifact', 'update_artifact', 'list_artifacts', 'search_artifacts', 'layout_rules',
   'list_agents', 'check_agent', 'wait_agent', 'cancel_agent',
 ]);
 
@@ -112,7 +113,7 @@ export function createMaintenanceAccessTools(
     },
     {
       name: MAINTENANCE_ACCESS_TOOL_NAMES[1],
-      description: 'Call a tool discovered by maintenance_list_tools. Omit server for Michi tools; specify server for external read-only calls. External tools not declared read-only require persistent human approval. When approval is needed, continue with permitted alternatives or tell the user to review Settings → Meta agent → Tool approvals. Do not claim the blocked work completed. Arbitrary code/shell execution and launching unrestricted workers are unavailable. Existing maintenance writers remain the receipt path for source-batch page/database decisions.',
+      description: 'Call a tool discovered by maintenance_list_tools. Omit server for Michi tools; specify server for external read-only calls. External tools not declared read-only require persistent human approval. When approval is needed, continue with permitted alternatives or tell the user to review Tool approvals under Pages upkeep in Michi’s Settings. Do not claim the blocked work completed. Arbitrary code/shell execution and launching unrestricted workers are unavailable. Existing maintenance writers remain the receipt path for source-batch page/database decisions.',
       parameters: schema({ server: textSchema, tool: textSchema, arguments: { type: 'object', additionalProperties: true } }, ['tool', 'arguments']),
       execute: execute(async (args, context, signal) => {
         if (typeof args.tool !== 'string' || !args.arguments || typeof args.arguments !== 'object' || Array.isArray(args.arguments)) throw new Error('tool and arguments are required');
@@ -127,7 +128,7 @@ export function createMaintenanceAccessTools(
             if (!request) return result({ status: 'unavailable', message: 'The saved tool approval limit has been reached. Try permitted alternatives and tell the user this tool was not executed.', alternatives });
             return result({ status: request?.state === 'denied' || request?.state === 'revoked' ? request.state : 'approval_required',
               requestId: request?.id, server: config.serverName, tool: tool.name, alternatives,
-              message: 'This tool was not executed. Try permitted alternatives. If needed, tell the user to review Settings → Meta agent → Tool approvals. Do not claim the blocked work completed.' });
+              message: 'This tool was not executed. Try permitted alternatives. If needed, tell the user to review Tool approvals under Pages upkeep in Michi’s Settings. Do not claim the blocked work completed.' });
           }
           // Fresh discovery per call prevents a previous list from authorizing a changed catalog.
           check(context);

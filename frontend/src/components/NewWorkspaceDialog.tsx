@@ -2,6 +2,7 @@ import type { RemoteConnectionDiagnostic } from 'michi-shared';
 import { RemoteDiagnostics } from './RemoteDiagnostics';
 import React, { useEffect, useRef, useState } from 'react';
 import { getElectron } from '../lib/electronBridge';
+import { appendFolders, FOLDER_OVERLAP_MESSAGE, folderConflict, MAX_WORKSPACE_FOLDERS, pathBasename } from '../lib/workspaceFolders';
 import type { FolderEntry } from '../state/chatTypes';
 import { ModalShell } from './ui/ModalShell';
 import { Button } from './ui/controls';
@@ -16,6 +17,7 @@ import {
   setKnownBackendConnections,
   type BackendConnectionSummary,
 } from '../config/backendConnections';
+import { isImeComposing } from '../lib/ime';
 
 interface NewWorkspaceDialogProps {
   open: boolean;
@@ -27,22 +29,6 @@ interface NewWorkspaceDialogProps {
 
 // showDirectoryPicker is not in the default TS lib; narrow type.
 type DirectoryPicker = (opts?: { mode?: 'read' | 'readwrite' }) => Promise<{ name: string }>;
-
-const MAX_FOLDERS = 10;
-
-function basename(p: string): string {
-  return p.split('/').pop() || p;
-}
-
-/** Detect nesting between a candidate path and existing entries. */
-function hasNesting(candidate: string, entries: FolderEntry[]): boolean {
-  return entries.some(
-    (f) =>
-      candidate.startsWith(f.path + '/') ||
-      candidate === f.path ||
-      f.path.startsWith(candidate + '/'),
-  );
-}
 
 // Shared styles
 const PROMPT_ROW: React.CSSProperties = {
@@ -125,8 +111,8 @@ export default function NewWorkspaceDialog({ open, onClose, onCreate, onSkip }: 
   if (!open) return <ModalShell open={false} onClose={onClose}>{null}</ModalShell>;
 
   const addFolder = async () => {
-    if (folders.length >= MAX_FOLDERS) {
-      setError(`Maximum ${MAX_FOLDERS} folders reached`);
+    if (folders.length >= MAX_WORKSPACE_FOLDERS) {
+      setError(`Maximum ${MAX_WORKSPACE_FOLDERS} folders reached`);
       return;
     }
     setError(null);
@@ -136,25 +122,17 @@ export default function NewWorkspaceDialog({ open, onClose, onCreate, onSkip }: 
     if (electron?.chooseFolders) {
       const r = await electron.chooseFolders();
       if (r.canceled || r.folders.length === 0) return;
-      const newEntries: FolderEntry[] = [];
-      for (const picked of r.folders) {
-        if (folders.length + newEntries.length >= MAX_FOLDERS) {
-          setError(`Maximum ${MAX_FOLDERS} folders reached — some selections were skipped`);
-          break;
-        }
-        const allCurrent = [...folders, ...newEntries];
-        if (allCurrent.some((f) => f.path === picked.path)) continue; // dedupe
-        if (hasNesting(picked.path, allCurrent)) {
-          setError(`"${picked.name}" overlaps with an existing folder (nested or parent) — skipped`);
-          continue;
-        }
-        newEntries.push({
-          id: Math.random().toString(36).slice(2, 10),
-          path: picked.path,
-          label: picked.name,
-          addedAt: Date.now(),
-        });
+      const { added, skipped, limitHit } = appendFolders(folders, r.folders);
+      for (const { pick, reason } of skipped) {
+        if (reason === 'overlap') setError(`"${pick.name}" overlaps with an existing folder (nested or parent) — skipped`);
       }
+      if (limitHit) setError(`Maximum ${MAX_WORKSPACE_FOLDERS} folders reached — some selections were skipped`);
+      const newEntries: FolderEntry[] = added.map((picked) => ({
+        id: Math.random().toString(36).slice(2, 10),
+        path: picked.path,
+        label: picked.name,
+        addedAt: Date.now(),
+      }));
       if (newEntries.length > 0) {
         setFolders((prev) => [...prev, ...newEntries]);
       }
@@ -165,12 +143,8 @@ export default function NewWorkspaceDialog({ open, onClose, onCreate, onSkip }: 
     if (electron?.chooseFolder) {
       const r = await electron.chooseFolder();
       if (r.canceled || !r.path) return;
-      if (hasNesting(r.path, folders)) {
-        setError('This folder overlaps with an existing folder (nested or parent)');
-        return;
-      }
-      if (folders.some((f) => f.path === r.path)) {
-        setError('This folder is already added');
+      if (folderConflict(r.path, folders)) {
+        setError(FOLDER_OVERLAP_MESSAGE);
         return;
       }
       const entry: FolderEntry = {
@@ -251,9 +225,9 @@ export default function NewWorkspaceDialog({ open, onClose, onCreate, onSkip }: 
   const isRemote = connectionId !== LOCAL_BACKEND_CONNECTION_ID;
   const remotePath = remoteCwd.trim();
   const primaryFolder = isRemote && remotePath
-    ? { id: `remote-${connectionId.slice(0, 8)}`, path: remotePath, label: basename(remotePath), addedAt: Date.now() }
+    ? { id: `remote-${connectionId.slice(0, 8)}`, path: remotePath, label: pathBasename(remotePath), addedAt: Date.now() }
     : folders[0];
-  const finalName = trimmedName || (primaryFolder ? basename(primaryFolder.path) : undefined);
+  const finalName = trimmedName || (primaryFolder ? pathBasename(primaryFolder.path) : undefined);
   const hasFolders = folders.length > 0;
 
   const handleCreate = () => {
@@ -280,11 +254,11 @@ export default function NewWorkspaceDialog({ open, onClose, onCreate, onSkip }: 
           type="text"
           value={name}
           onChange={(e) => setName(e.target.value)}
-          placeholder={primaryFolder ? basename(primaryFolder.path) : 'untitled workspace'}
+          placeholder={primaryFolder ? pathBasename(primaryFolder.path) : 'untitled workspace'}
           autoFocus
           style={PROMPT_INPUT}
           onKeyDown={(e) => {
-            if (e.nativeEvent.isComposing) return;
+            if (isImeComposing(e)) return;
             if (e.key === 'Enter') {
               e.preventDefault();
               handleCreate();
@@ -416,7 +390,7 @@ export default function NewWorkspaceDialog({ open, onClose, onCreate, onSkip }: 
                 onMakePrimary={() => makePrimary(f.id)}
               />
             ))}
-            {folders.length < MAX_FOLDERS && (
+            {folders.length < MAX_WORKSPACE_FOLDERS && (
               <button
                 type="button"
                 onClick={() => { void addFolder(); }}
@@ -446,7 +420,7 @@ export default function NewWorkspaceDialog({ open, onClose, onCreate, onSkip }: 
           style={{
             padding: '8px 14px 0',
             fontSize: 'var(--fs-md)',
-            color: 'var(--term-danger)',
+            color: 'var(--term-danger-text)',
             fontFamily: 'var(--ui-font)',
           }}
         >
@@ -500,8 +474,11 @@ interface FolderRowProps {
 
 function FolderRow({ folder, isPrimary, onRemove, onMakePrimary }: FolderRowProps) {
   const [hovered, setHovered] = useState(false);
+  // Its buttons are hover reveals: shown on the row's hover or focus too, so
+  // the keyboard reaches them.
   return (
     <div
+      className="t-reveal-host"
       style={{
         display: 'flex',
         alignItems: 'center',
@@ -527,7 +504,7 @@ function FolderRow({ folder, isPrimary, onRemove, onMakePrimary }: FolderRowProp
             whiteSpace: 'nowrap',
           }}
         >
-          {folder.label || basename(folder.path)}
+          {folder.label || pathBasename(folder.path)}
         </div>
         <div
           style={{
@@ -561,9 +538,10 @@ function FolderRow({ folder, isPrimary, onRemove, onMakePrimary }: FolderRowProp
         </span>
       )}
 
-      {!isPrimary && hovered && (
+      {!isPrimary && (
         <button
           type="button"
+          className="t-reveal"
           onClick={onMakePrimary}
           title="Make this the working directory"
           style={{
@@ -585,18 +563,20 @@ function FolderRow({ folder, isPrimary, onRemove, onMakePrimary }: FolderRowProp
 
       <button
         type="button"
+        className="t-reveal"
         onClick={onRemove}
         title="Remove folder"
+        aria-label="Remove folder"
         style={{
           background: 'transparent',
           border: 'none',
-          color: hovered ? 'var(--term-fg)' : 'transparent',
+          color: 'var(--term-fg)',
           cursor: 'pointer',
           fontSize: 'var(--fs-xl)',
           lineHeight: 1,
           padding: '2px 4px',
           flexShrink: 0,
-          transition: 'color var(--t-soft)',
+          transition: 'opacity var(--t-soft)',
         }}
       >
         ×

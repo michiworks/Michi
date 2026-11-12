@@ -24,13 +24,10 @@ function entry<T>(map: Map<string, T>, runId: string, create: () => T): T {
   return value;
 }
 
-/** Message lines of a read_node answer, as `globalContext.readNode` writes them with message ids. */
-const MESSAGE_LINE = /^(?:user|assistant) \[message ([^\]\s]+)\]: /gm;
-
-/** Records the messages a read_node answer showed this run. */
-export function noteReadMessages(runId: string, nodeId: string, text: string): void {
+/** Records the messages a read_node answer showed whole this run (ReadNodeResult.shownMessageIds). */
+export function noteReadMessages(runId: string, nodeId: string, messageIds: readonly string[]): void {
   const messages = entry(readMessages, runId, () => new Map<string, string>());
-  for (const match of text.matchAll(MESSAGE_LINE)) messages.set(match[1]!, nodeId);
+  for (const messageId of messageIds) messages.set(messageId, nodeId);
 }
 
 export function noteReadHome(runId: string, workspaceId: string): void {

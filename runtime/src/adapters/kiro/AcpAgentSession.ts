@@ -38,14 +38,19 @@ import type {
     RuntimeToolProfile,
 } from "../../contract/types";
 import type { NormalizedEvent, PlanEntry } from "../../contract/events";
+import { omitInlineImages, TOOL_PAYLOAD_MAX } from "../../contract/toolPayload";
 import { ACPRequestNotSentError, type AcpClient, type AcpPromptBlock, type AcpUpdate } from "./acpClient";
 import type { AcpAgentRuntime } from "./AcpAgentRuntime";
 import { KIRO_FLAVOR, type AcpAgentFlavor } from "./acpAgentFlavor";
 import { injectedHostEvent } from "./kiroHostEvents";
-import { KIRO_APPROVE_FOR_ME_PRESET, KIRO_METADATA_DONE_SENTINEL } from "./kiroProtocol";
-import { imageMimeType, prepareAttachments, type ResolvedAttachment } from "../../core/attachments";
+import { KIRO_APPROVE_FOR_ME_PRESET, KIRO_METADATA_DONE_SENTINEL, restrictedSessionName, type KiroPageTurnAttribution } from "./kiroProtocol";
+import { describeLinkedImages, imageMimeType, prepareAttachments, type ResolvedAttachment } from "../../core/attachments";
+import { expandSkillPrompt, skillHistoryText } from "../../core/skills";
+import { turnContextPrefix } from "../../core/turnText";
 import { classifyAcpError, isRetryable, KiroCancelRecoveryBusyError, needsRespawn, retryReason, toErrorKind } from "./acpErrors";
 import { HEARTBEAT_INTERVAL_MS } from "../../core/constants";
+import { kiroRequestDetail } from "../../core/workflows/kiroWorkflowBridge";
+import { bindMaintenanceTurn, pageAttributionFor } from "../../core/maintenanceTurn";
 
 /** How often a cancel recovery blocked by a busy peer checks again. */
 const CANCEL_RECOVERY_POLL_MS = 500;
@@ -84,14 +89,6 @@ function buildImageLinkBlocks(images: ResolvedAttachment[]): AcpPromptBlock[] {
         } as unknown as AcpPromptBlock;
         return [block];
     });
-}
-
-/** The prompt note naming linked images, so the model knows to open them. */
-function describeLinkedImages(images: ResolvedAttachment[]): string {
-    const lines = images.filter((attachment) => imageMimeType(attachment.absPath))
-        .map((attachment) => `- ${attachment.name || path.basename(attachment.absPath)} → ${attachment.absPath}`);
-    if (lines.length === 0) return "";
-    return ["", "[Attached images]", "The user attached these images. Read them with your file tool:", ...lines].join("\n");
 }
 
 const ACP_TOKEN_FIELDS = ["totalTokens", "inputTokens", "cachedInputTokens", "outputTokens", "reasoningOutputTokens"] as const;
@@ -246,11 +243,41 @@ export class AcpAgentSession implements AgentSession {
     private readonly ownerUserId: string | null;
     private activeMaintenanceExecutionContext: MaintenanceExecutionContext | null = null;
     private agentTurn: AbortController | null = null;
+    /** Last acquisition, turn start or turn end (see KiroRuntime.idleRelease). */
+    private lastUsedAt = Date.now();
 
     get nativeEngine() { return this.runtime.engine; }
 
-    getActivePageTurnAttribution(): { turnId: string; assistantId: string } | null {
-        return this.owner?.mode === 'interactive' ? this.activePageTurnAttribution : null;
+    /** Refresh idle retention (session directory lookups, turns). */
+    touch(): void {
+        this.lastUsedAt = Date.now();
+    }
+
+    getLastUsedAt(): number {
+        return this.lastUsedAt;
+    }
+
+    /** A turn of ours or one Kiro started on its own is still being read. */
+    hasActiveTurn(): boolean {
+        return this.activeTurn !== null || this.agentTurn !== null;
+    }
+
+    getActivePageTurnAttribution(): KiroPageTurnAttribution | null {
+        const turn = this.owner?.mode === 'interactive' ? this.activePageTurnAttribution : null;
+        return turn && this.holdsApproveForMe() ? { ...turn, approveForMe: true } : turn;
+    }
+
+    /**
+     * The session holds Approve for me now: what its Kiro process opened it
+     * with, read at each call. Only a Kiro V3 interactive chat without a tool
+     * profile is ever opened with it (AcpAgentRuntime.policyPresetsFor), so
+     * V, a check-in and Pages upkeep never are; for such a chat, a session
+     * the process does not know counts as holding it (fail closed).
+     */
+    private holdsApproveForMe(): boolean {
+        if (!this.runtime.approveForMe || this.toolProfile || !isInteractiveOwner(this.owner)) return false;
+        const presets = this.runtime.getClient?.(this.cwd)?.policyPresets?.(this.nativeSessionId);
+        return presets === undefined || presets.includes(KIRO_APPROVE_FOR_ME_PRESET);
     }
 
     getActiveMaintenanceExecutionContext(): MaintenanceExecutionContext | null {
@@ -258,20 +285,10 @@ export class AcpAgentSession implements AgentSession {
     }
 
     private maintenanceContextForSend(input?: AgentTurnInput): MaintenanceExecutionContext | null {
-        if (!this.runtime.host.profile.isMaintenance?.(this.toolProfile)) {
-            if (input?.maintenanceContext) throw new Error('Maintenance context supplied to a non-maintenance Kiro session');
-            return null;
-        }
-        const context = input?.maintenanceContext;
-        if (!context || this.owner?.mode !== 'interactive' || !input?.turnId || !input.assistantMessageId
-            || context.workspaceId !== this.workspaceId
-            || context.ownerUserId !== (this.ownerUserId ?? 'local-user')
-            || !context.jobId || !context.runId || !context.claimedBy || !context.planId
-            || !Number.isSafeInteger(context.configRevision) || context.configRevision < 1
-            || !Array.isArray(context.sources)) {
-            throw new Error('Maintenance Kiro send is missing a valid owner, workspace, or canonical turn binding');
-        }
-        return { ...context, execution: { nodeId: this.owner.key, turnId: input.turnId, assistantId: input.assistantMessageId, runId: context.runId } };
+        return bindMaintenanceTurn(input, {
+            maintenance: this.runtime.host.profile.isMaintenance?.(this.toolProfile) === true, owner: this.owner, workspaceId: this.workspaceId,
+            expectedOwnerUserId: this.runtime.host.principal.resolve(this.ownerUserId), runtimeLabel: 'Kiro',
+        });
     }
 
     getNativeResumeToken() {
@@ -309,7 +326,7 @@ export class AcpAgentSession implements AgentSession {
             canonicalize: (toolName) => permissions.grantKey?.(toolName) ?? toolName,
         });
         this.parentChatId = opts?.parentChatId;
-        this.enableFollowUps = opts?.enableFollowUps !== false;
+        this.enableFollowUps = opts?.enableFollowUps !== false && !opts?.toolProfile?.assistant;
         this.owner = opts?.owner;
         this.runtimeProfileHash = opts?.runtimeProfileHash ?? null;
         this.toolProfile = opts?.toolProfile;
@@ -424,36 +441,42 @@ export class AcpAgentSession implements AgentSession {
     async *send(text: string, input?: AgentTurnInput): AsyncIterableIterator<NormalizedEvent> {
         const metaAgent = this.runtime.host.profile.isRestricted(this.toolProfile);
         const maintenanceContext = this.maintenanceContextForSend(input);
+        // Kiro V3 leaves a typed `/skill` to the model, and Crew and
+        // Antigravity load skills their own way, so the skill's instructions
+        // lead the user's part of the prompt, ahead of the text.
+        const userText = input?.skill ? expandSkillPrompt(input.skill, text) : text;
         if (metaAgent) {
             // kiro-cli runs a leading slash command itself (e.g. /agent swap).
-            if (text.trimStart().startsWith('/')) throw new Error('Kiro commands are off for the Meta agent.');
+            if (userText.trimStart().startsWith('/')) throw new Error(this.commandsOffMessage());
             this.runtime.assertMetaAgentReady(this.nativeSessionId);
         }
         this.turnPermissionMode = this.runtime.host.permissions.mode(this.owner);
         const turn = new AbortController();
         this.activeTurn = turn;
+        this.touch();
         this.pendingCancelAck = null;
-        const pageTurnAttribution = this.owner?.mode === 'interactive' && input?.turnId && input.assistantMessageId
-            ? { turnId: input.turnId, assistantId: input.assistantMessageId } : null;
-        this.history.push({ role: "user", content: text });
+        const pageTurnAttribution = pageAttributionFor(input, this.owner);
+        // A branch's transcript of this chat shows the command the user ran, not the skill's whole text.
+        this.history.push({ role: "user", content: input?.skill ? skillHistoryText(input.skill, text) : text });
 
         // The host's per-turn reminders go to the model only — history stays clean.
         const userTurnCount = this.history.filter(m => m.role === "user").length;
         // Non-image attachments have no ACP block type, so name them by path
         // instead of dropping them silently; kiro-cli can read them itself.
-        const { images: imageAttachments, promptNote } = prepareAttachments(input?.attachments);
+        const { images: imageAttachments, promptNote } = prepareAttachments(input?.attachments, userText);
         const linkImages = this.flavor.promptImages === 'resourceLink';
-        const turnSuffix = metaAgent || this.toolProfile?.assistant || maintenanceContext ? '' : this.runtime.host.prompt.turnSuffix({
-            metadataChannel: this.flavor.prompt.metadataChannel,
-            userTurnCount,
-            enableFollowUps: this.enableFollowUps,
-            owner: this.owner,
-        });
-        const textForModel = (this.runtime.host.profile.maintenancePromptPrefix?.(maintenanceContext) ?? '')
-            + (input?.memoryContext ? `${input.memoryContext}\n\n---\n\n` : '')
-            + (input?.pageContext ? `${input.pageContext}\n\n---\n\n` : '')
-            + text + promptNote + (linkImages ? describeLinkedImages(imageAttachments) : '') + turnSuffix
-            + (this.runtime.getMcpSessionReminder?.(this.nativeSessionId) ?? '');
+        // A skill turn follows the skill's own output rules instead of Michi's turn metadata.
+        const turnSuffix = metaAgent || this.toolProfile?.assistant || maintenanceContext ? ''
+            : input?.skill ? (this.runtime.host.prompt.skillTurnNote?.() ?? '')
+            : this.runtime.host.prompt.turnSuffix({
+                metadataChannel: this.flavor.prompt.metadataChannel,
+                userTurnCount,
+                enableFollowUps: this.enableFollowUps,
+                owner: this.owner,
+            });
+        const textForModel = turnContextPrefix(this.runtime.host.profile.maintenancePromptPrefix?.(maintenanceContext) ?? '', input)
+            + userText + promptNote + (linkImages ? describeLinkedImages(imageAttachments, userText) : '') + turnSuffix
+            + (this.runtime.getMcpSessionReminder?.(this.nativeSessionId, input?.skill ? { skill: true } : undefined) ?? '');
 
         const transportText = this.firstMessagePreamble
             ? `${this.firstMessagePreamble}\n${textForModel}`
@@ -491,6 +514,7 @@ export class AcpAgentSession implements AgentSession {
                 this.activeTurn = null;
                 this.pendingAssistantBuf = undefined;
             }
+            this.touch();
             if (this.activePageTurnAttribution === pageTurnAttribution) this.activePageTurnAttribution = null;
             if (this.activeMaintenanceExecutionContext === maintenanceContext) this.activeMaintenanceExecutionContext = null;
         }
@@ -744,6 +768,7 @@ export class AcpAgentSession implements AgentSession {
         this.turnPermissionMode = this.runtime.host.permissions.mode(this.owner);
         const turn = new AbortController();
         this.agentTurn = turn;
+        this.touch();
         const buf: string[] = [];
         let ended = false;
         let endMcpTurn: (() => void) | undefined;
@@ -760,6 +785,7 @@ export class AcpAgentSession implements AgentSession {
             this.clearPermissions();
             if (buf.length > 0) this.history.push({ role: 'assistant', content: buf.join('') });
             if (this.agentTurn === turn) this.agentTurn = null;
+            this.touch();
             // The chat stopped showing it before Kiro ended it (an error, or
             // the chat went away): stop the native turn, so it cannot hold
             // the session or wait on approvals nobody sees.
@@ -861,13 +887,14 @@ export class AcpAgentSession implements AgentSession {
                     .flatMap((block: any) => block?.type === 'content' && block.content?.type === 'text'
                         ? [block.content.text] : block?.type === 'diff' ? [JSON.stringify(block)] : [])
                     .join('\n') : undefined;
-                const rawOutputStr = this.standardAcp ? standardToolOutput(update.rawOutput, contentOutput) : (update.rawOutput != null
-                    ? (typeof update.rawOutput === "string" ? update.rawOutput : JSON.stringify(update.rawOutput))
+                // The chip's copy of the result, without inline images; the agent already has the original.
+                const rawOutput: any = omitInlineImages(update.rawOutput);
+                const rawOutputStr = this.standardAcp ? standardToolOutput(rawOutput, contentOutput) : (rawOutput != null
+                    ? (typeof rawOutput === "string" ? rawOutput : JSON.stringify(rawOutput))
                     : contentOutput) || undefined;
                 const outputStr = rawOutputStr
                     ? this.runtime.host.prompt.toolResultForDisplay?.(rawOutputStr) ?? rawOutputStr
                     : undefined;
-                const MAX_PAYLOAD = 16 * 1024;
                 const delegation = isKiroDelegation(update);
                 // agy keeps reporting a declined call as in_progress after the decline.
                 const declined = this.standardAcp && this.declinedToolCalls.has(update.toolCallId)
@@ -881,8 +908,8 @@ export class AcpAgentSession implements AgentSession {
                     // the UI renders them as subagent cards.
                     kindType: delegation ? 'subagent' : update.kind || undefined,
                     detail: purpose,
-                    inputJson: inputStr && inputStr.length > MAX_PAYLOAD ? inputStr.slice(0, MAX_PAYLOAD) : inputStr,
-                    output: outputStr && outputStr.length > MAX_PAYLOAD ? outputStr.slice(0, MAX_PAYLOAD) : outputStr,
+                    inputJson: inputStr && inputStr.length > TOOL_PAYLOAD_MAX ? inputStr.slice(0, TOOL_PAYLOAD_MAX) : inputStr,
+                    output: outputStr && outputStr.length > TOOL_PAYLOAD_MAX ? outputStr.slice(0, TOOL_PAYLOAD_MAX) : outputStr,
                     ...acpToolIdentity(update, {
                         resolveName: resolveToolName,
                         calledAs: toolCallNames.get(update.toolCallId),
@@ -971,6 +998,7 @@ export class AcpAgentSession implements AgentSession {
                             requestId: update.requestId,
                             toolCallId: update.toolCall?.toolCallId,
                             title: subagentPermissionTitle(update, this.toolTitle(update.toolCall) ?? "Tool call"),
+                            detail: kiroRequestDetail({ toolCall: update.toolCall, meta: update._meta }),
                             options: rawOptions,
                             source: "acp_permission",
                         };
@@ -980,7 +1008,8 @@ export class AcpAgentSession implements AgentSession {
                         (option: { kind?: string }) => option.kind !== 'allow_always' && option.kind !== 'reject_always',
                     );
                     const allow = options.find((option: { kind?: string }) => option.kind === 'allow_once');
-                    const toolName = acpPermissionToolName(update.toolCall, update._meta, resolveToolName);
+                    const toolName = this.flavor.tools?.relayedHostTool?.(update.toolCall, update._meta)
+                        ?? acpPermissionToolName(update.toolCall, update._meta, resolveToolName, toolCallNames.get(update.toolCall?.toolCallId));
                     const owner = this.owner ?? interactiveOwner(this.id);
                     if (allow && this.approvals.policy(owner, null, toolName ?? '', true, this.turnPermissionMode) === 'allow') {
                         this.runtime.respondToPermission(this.nativeSessionId, update.requestId, allow.optionId);
@@ -997,8 +1026,7 @@ export class AcpAgentSession implements AgentSession {
                         requestId: update.requestId,
                         toolCallId: update.toolCall?.toolCallId,
                         title: subagentPermissionTitle(update, toolName ? `Approve ${toolName}?` : this.toolTitle(update.toolCall) ?? "Tool call"),
-                        detail: typeof update.toolCall?.rawInput === 'string' ? update.toolCall.rawInput
-                            : update.toolCall?.rawInput != null ? JSON.stringify(update.toolCall.rawInput) : undefined,
+                        detail: kiroRequestDetail({ toolCall: update.toolCall, meta: update._meta }),
                         options,
                         source: "acp_permission",
                     };
@@ -1108,25 +1136,6 @@ export class AcpAgentSession implements AgentSession {
                     requestId: update.requestId,
                     answers: Array.isArray(update.answers) ? update.answers : [],
                 };
-            } else if (kind === "available_commands_update") {
-                // Kiro publishes its slash-command catalog (e.g. /compact,
-                // /mode, custom per-agent commands) via this update. We
-                // surface it unchanged so the UI can render an autocomplete.
-                const raw = Array.isArray(update.availableCommands)
-                    ? update.availableCommands
-                    : [];
-                const commands = raw
-                    .map((c: any) => ({
-                        name: typeof c?.name === "string" ? c.name : "",
-                        description:
-                            typeof c?.description === "string" ? c.description : undefined,
-                        input:
-                            c?.input && typeof c.input === "object"
-                                ? { type: String(c.input.type ?? "unstructured") }
-                                : undefined,
-                    }))
-                    .filter((c: { name: string }) => c.name.length > 0);
-                yield { kind: "commands", commands };
                 } else if (kind === "turn_end") {
                     yield* flush();
                     yield { kind: "turn_end", stopReason: update.stopReason };
@@ -1230,8 +1239,13 @@ export class AcpAgentSession implements AgentSession {
             const instructions = args?.instructions ?? args?.value;
             return c.compact(this.nativeSessionId, typeof instructions === 'string' ? instructions : undefined);
         }
-        if (this.runtime.host.profile.isRestricted(this.toolProfile)) return { success: false, message: 'Kiro commands are off for the Meta agent.' };
+        if (this.runtime.host.profile.isRestricted(this.toolProfile)) return { success: false, message: this.commandsOffMessage() };
         return c.executeCommand(this.nativeSessionId, command, args);
+    }
+
+    /** A restricted session takes no Kiro command; named as the person knows it (Pages upkeep, a check-in). */
+    private commandsOffMessage(): string {
+        return `Kiro commands are off in the ${restrictedSessionName(this.runtime.host.profile.toolset?.(this.toolProfile))} session.`;
     }
 
     /** Wait for native completion, including v2's asynchronous status event. */

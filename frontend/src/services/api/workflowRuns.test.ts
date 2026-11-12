@@ -1,7 +1,9 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { WorkflowRunDtoV1 } from 'michi-shared';
+import { backendApiBase } from '../../config/backendConnections';
+import { backendEntityId } from '../../config/backendIdentity';
 import * as streamTransport from './streamTransport';
-import { subscribeWorkflowRuns } from './workflowRuns';
+import { actOnWorkflowRun, answerWorkflowApproval, getWorkflowRun, subscribeWorkflowRuns } from './workflowRuns';
 
 function run(patch: Partial<WorkflowRunDtoV1> = {}): WorkflowRunDtoV1 {
   return {
@@ -87,5 +89,51 @@ describe('subscribeWorkflowRuns', () => {
     await vi.waitFor(() => expect(onDisconnect).toHaveBeenCalledTimes(1));
     expect(onRun).toHaveBeenCalledTimes(1);
     expect(onDisconnect).toHaveBeenCalledWith(undefined);
+  });
+
+  it('drops a feed that hears nothing for three heartbeats', async () => {
+    vi.useFakeTimers();
+    try {
+      vi.spyOn(streamTransport, 'fetchStream').mockImplementation(async (_url, init) => new Response(
+        new ReadableStream<Uint8Array>({
+          start(controller) {
+            init?.signal?.addEventListener('abort', () => controller.error(new DOMException('aborted', 'AbortError')));
+          },
+        }),
+        { status: 200, headers: { 'Content-Type': 'text/event-stream' } },
+      ));
+      const onDisconnect = vi.fn();
+      subscribeWorkflowRuns('ws', { onRun: vi.fn(), onDisconnect });
+      await vi.advanceTimersByTimeAsync(44_999);
+      expect(onDisconnect).not.toHaveBeenCalled();
+      await vi.advanceTimersByTimeAsync(1);
+      await vi.waitFor(() => expect(onDisconnect).toHaveBeenCalledTimes(1));
+      expect(onDisconnect.mock.calls[0][0]).toMatchObject({ message: expect.stringContaining('stalled') });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
+
+describe('workflow run requests on a remote connection', () => {
+  const connectionId = 'remote-wf';
+  const remote = (id: string) => backendEntityId(connectionId, id);
+  const base = backendApiBase(connectionId);
+  afterEach(() => { vi.unstubAllGlobals(); });
+
+  function stubFetch(body: unknown) {
+    const fetch = vi.fn(async (_url: string, _init?: RequestInit) => new Response(JSON.stringify(body)));
+    vi.stubGlobal('fetch', fetch);
+    return fetch;
+  }
+
+  it('returns the run of a read, a control and an approval in renderer ids', async () => {
+    stubFetch({ run: run({ workspaceId: 'p-1', nodeId: 'n-1' }) });
+    const runs = await Promise.all([
+      getWorkflowRun(connectionId, 'wfr_1'),
+      actOnWorkflowRun(connectionId, 'wfr_1', 'stop'),
+      answerWorkflowApproval(connectionId, 'wfr_1', 'ap-1', 'allow'),
+    ]);
+    for (const result of runs) expect(result).toMatchObject({ id: 'wfr_1', workspaceId: remote('p-1'), nodeId: remote('n-1') });
   });
 });

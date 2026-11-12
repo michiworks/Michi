@@ -10,4 +10,6 @@ it('uses the source tree root when refreshing a digest from an inactive tree', (
   const payload = buildDigestPayload(project, ['source'], nodes);
   expect(payload.rootTitle).toBe('Old tree');
   expect(payload.nodes).toEqual([digestSourceSnapshot(nodes.source)]);
+  project.trees[1].name = 'Renamed thread';
+  expect(buildDigestPayload(project, ['source'], nodes).rootTitle).toBe('Renamed thread');
 });

@@ -1,3 +1,5 @@
+import { closesFence, openingFence, type MarkdownFence } from 'michi-shared';
+
 // Michi's one-line summaries (where a thread stopped, what is next) are often
 // copied from an agent's Markdown answer. On a row, card or menu line they
 // read as plain words: Markdown's syntax goes, what it marked up stays.
@@ -18,8 +20,8 @@ function tableRows(text: string): string {
 // Code is held out of the passes below as a placeholder and put back
 // verbatim at the end, so `__init__.py`, `[x](y)` and `a**2` survive.
 const HELD = /\uE000(\d+)\uE001/g;
-// A fence, perhaps inside a block quote: its quote marks, its fence, the rest.
-const FENCE = /^([ \t]*(?:>[ \t]?)*)[ \t]*(`{3,}|~{3,})(.*)$/;
+// A line's indent and block-quote marks; a fence after them may be quoted.
+const QUOTE_MARKS = /^[ \t]*(?:>[ \t]?)*/;
 // An inline code span; it never reaches into a held block (the placeholder's marks).
 const INLINE_CODE = /(`+)(?!`)([^\uE000\uE001]*?[^`\uE000\uE001])\1(?!`)/g;
 const quoteDepth = (marks: string) => (marks.match(/>/g) ?? []).length;
@@ -68,20 +70,21 @@ export function michiLeadingCodeEnd(text: string): number {
 function holdCode(text: string, held: string[]): string {
   const hold = (code: string) => `\uE000${held.push(code) - 1}\uE001`;
   const lines: string[] = [];
-  let fence: { mark: string; depth: number; marks: string } | null = null;
+  let fence: { mark: MarkdownFence; depth: number; marks: string } | null = null;
   let body: string[] = [];
   for (const line of text.split('\n')) {
-    const found = FENCE.exec(line);
+    const marks = QUOTE_MARKS.exec(line)![0];
+    // Any indent: an agent's fence nested in a list item is still code.
+    const rest = line.slice(marks.length).trimStart();
     if (fence === null) {
-      if (found) {
-        fence = { mark: found[2], depth: quoteDepth(found[1]), marks: found[1] };
+      const mark = openingFence(rest);
+      if (mark) {
+        fence = { mark, depth: quoteDepth(marks), marks };
         body = [];
       } else lines.push(line);
       continue;
     }
-    const closes = found && found[2][0] === fence.mark[0] && found[2].length >= fence.mark.length
-      && found[3].trim() === '' && quoteDepth(found[1]) === fence.depth;
-    if (closes) {
+    if (closesFence(rest, fence.mark) && quoteDepth(marks) === fence.depth) {
       lines.push(fence.marks + hold(body.join('\n')));
       fence = null;
     } else {

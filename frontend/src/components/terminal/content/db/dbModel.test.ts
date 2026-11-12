@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { MichiDatabase, MichiDbViewConfig } from 'michi-shared';
-import { applyView, convertValue, effectiveConfig, emptyConfig, limitGroups, listDefaultColumns, rowsInOrder, shownColumns, startValues, titleColumn } from './dbModel';
+import { applyView, convertValue, dayOf, effectiveConfig, emptyConfig, limitGroups, listDefaultColumns, parseNumberText, rowsInOrder, shownColumns, startValues, titleColumn } from './dbModel';
 import { threadsDatabase, userDatabase } from './dbTestData';
 
 const cfg = (extra: Partial<MichiDbViewConfig> = {}): MichiDbViewConfig => ({ ...emptyConfig(), ...extra });
@@ -123,6 +123,21 @@ describe('convertValue', () => {
   });
 });
 
+describe('parseNumberText', () => {
+  it('reads typed numbers and percents, clears on empty, and refuses anything else', () => {
+    expect(parseNumberText('40%', true)).toEqual({ ok: true, value: 0.4 });
+    expect(parseNumberText('40', true)).toEqual({ ok: true, value: 0.4 });
+    expect(parseNumberText('150', true)).toEqual({ ok: true, value: 1 });
+    expect(parseNumberText('-5', true)).toEqual({ ok: true, value: 0 });
+    expect(parseNumberText('1,200', false)).toEqual({ ok: true, value: 1200 });
+    expect(parseNumberText('1 200', false)).toEqual({ ok: true, value: 1200 });
+    expect(parseNumberText('1,5', false)).toEqual({ ok: true, value: 15 });
+    expect(parseNumberText('  ', false)).toEqual({ ok: true, value: null });
+    expect(parseNumberText('abc', false)).toEqual({ ok: false });
+    expect(parseNumberText('1.2.3', true)).toEqual({ ok: false });
+  });
+});
+
 describe('columns and views', () => {
   it('names a thread by its title and anything else by its first text column', () => {
     expect(titleColumn(threadsDatabase([]))?.id).toBe('title');
@@ -213,5 +228,18 @@ describe('a Conversations column', () => {
     expect(convertValue(['n1', 'n1', 'n2'], 'threads')).toEqual({ value: ['n1', 'n2'], ok: true });
     expect(convertValue('n1', 'threads')).toEqual({ value: null, ok: false });
     expect(convertValue(null, 'threads')).toEqual({ value: null, ok: true });
+  });
+});
+
+describe('a day that does not exist', () => {
+  // Agents can store any short string in a date cell; 2026-04-31 must not roll over to May 1.
+  it('is no day, so filters by date leave it out', () => {
+    expect(dayOf('2026-04-31')).toBeNull();
+    expect(dayOf('2026-02-29')).toBeNull();
+    expect(dayOf('2024-02-29')).toBe('2024-02-29');
+    const db = userDatabase();
+    db.rows[1].values.c_due = { start: '2026-04-31' };
+    expect(ids(applyView(db, cfg({ filters: [{ column: 'c_due', op: 'before', value: '2026-05-02' }] })))).toEqual([]);
+    expect(ids(applyView(db, cfg({ filters: [{ column: 'c_due', op: 'after', value: '2026-04-30' }] })))).toEqual(['r1']);
   });
 });

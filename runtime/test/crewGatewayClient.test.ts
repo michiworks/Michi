@@ -9,9 +9,21 @@ import type { AddressInfo } from 'node:net';
 import { CrewGatewayClient, createCrewGateway } from '../src/adapters/crew/acp/gatewayClient';
 import { CrewGatewayError, type CrewChatEvent, type CrewGatewayConfig } from '../src/adapters/crew/acp/gatewayTypes';
 import { CREW_APP_VERSION } from '../src/adapters/crew/crewAppVersion';
+import { sanitizeErrorMessage } from '../src/adapters/crew/acp/crewFrames';
+import { classifyAcpError } from '../src/adapters/kiro/acpErrors';
+import { KIRO_CONNECTION_MARKERS } from '../src/adapters/kiro/kiroErrorMarkers';
 
 const APP = 'michi-crew-runtime';
-const BANNED = /timed out|response stream|connection reset|ECONNRESET/i;
+/** Michi reads these as process death and respawns the adapter. */
+const BANNED = new RegExp(KIRO_CONNECTION_MARKERS.join('|'), 'i');
+
+test('the adapter rewrites every connection marker out of its error text', () => {
+    for (const marker of KIRO_CONNECTION_MARKERS) {
+        const message = sanitizeErrorMessage(`Gateway said: ${marker.toUpperCase()} (${marker})`);
+        assert.doesNotMatch(message, BANNED, marker);
+        assert.notEqual(classifyAcpError(new Error(message)), 'connection', marker);
+    }
+});
 
 test('MCP readiness rereads the configured App and Stub route without Gateway calls', async (t) => {
     const home = tempHome(t, null);
@@ -29,6 +41,27 @@ test('MCP readiness rereads the configured App and Stub route without Gateway ca
     assert.equal(await client.mcpAvailable(), true);
     fs.writeFileSync(path.join(home, 'config.json'), JSON.stringify({ mcp_gateway: { stub_servers: [`${APP}:michi`], stub_overrides: { [`${APP}:michi`]: false } } }));
     assert.equal(await client.mcpAvailable(), false);
+});
+
+test("approval readiness is Michi's own Crew integration status", async (t) => {
+    const app = { version: CREW_APP_VERSION, permissions: { sessionApproval: true } };
+    const cases: Array<[string, object, object, unknown, boolean]> = [
+        ['all good', app, { enabled: true }, undefined, true],
+        ['permission missing', { version: CREW_APP_VERSION }, { enabled: true }, undefined, false],
+        ['consent pending', app, { enabled: true, sessionApprovalConsentPending: true }, undefined, false],
+        ['disabled', app, { enabled: false }, undefined, false],
+        ['config.json is null', app, { enabled: true }, null, false],
+    ];
+    for (const [label, manifest, installed, crewConfig, expected] of cases) {
+        const home = tempHome(t, null);
+        const dir = path.join(home, 'apps', APP);
+        fs.mkdirSync(dir, { recursive: true });
+        fs.writeFileSync(path.join(dir, 'app.json'), JSON.stringify(manifest));
+        fs.writeFileSync(path.join(dir, 'installed.json'), JSON.stringify(installed));
+        if (crewConfig !== undefined) fs.writeFileSync(path.join(home, 'config.json'), JSON.stringify(crewConfig));
+        const client = new CrewGatewayClient({ baseUrl: 'http://127.0.0.1:5476', appName: APP, kirocrewHome: home });
+        assert.equal(await client.approvalsAvailable(), expected, label);
+    }
 });
 
 type Handler = (req: http.IncomingMessage, res: http.ServerResponse, body: string) => void;
@@ -445,7 +478,7 @@ test('aborting before the Gateway answers ends iteration quietly', async (t) => 
 
 test('error messages never carry phrases Michi reads as process death', async (t) => {
     const tokens = withTokens((req, res) => {
-        if (req.url === '/api/models') return json(res, 503, { error: 'model list timed out' });
+        if (req.url === '/api/models') return json(res, 503, { error: 'model list timed out after a dispatch failure' });
         if (req.url?.endsWith('/stop')) return undefined; // never answers
         if (req.url === '/api/chat') {
             res.writeHead(200, { 'Content-Type': 'text/event-stream' });
@@ -479,7 +512,7 @@ test('error messages never carry phrases Michi reads as process death', async (t
 
     assert.equal(messages.length, 5);
     for (const message of messages) assert.doesNotMatch(message, BANNED, message);
-    assert.match(messages[0], /\(HTTP 503\): model list took too long/);
+    assert.match(messages[0], /\(HTTP 503\): model list took too long after a dispatch problem/);
     assert.match(messages[1], /no answer to POST \/api\/chat\/slots\/s1\/stop within 100 ms/);
     assert.match(messages[2], /network error/);
     assert.match(messages[3], /broke before \[DONE\]/);

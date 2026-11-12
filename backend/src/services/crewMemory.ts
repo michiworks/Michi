@@ -12,11 +12,17 @@ function key(userId?: string | null): string {
     return 'crew_memory:desktop';
 }
 
+/**
+ * The mode a new Crew chat starts with: the user's saved choice, else
+ * MICHI_CREW_MEMORY_MODE, else Read only ('incognito'). Michi Memory is the
+ * one store that learns from Michi's chats, so by default Crew recalls what
+ * its own memory already holds and writes nothing new to it.
+ */
 export function defaultCrewMemory(userId?: string | null): CrewMemoryMode {
     const row = getDb().prepare('SELECT value FROM meta WHERE key = ?').get(key(userId)) as { value: string } | undefined;
     if (isCrewMemoryMode(row?.value)) return row.value;
     const env = process.env.MICHI_CREW_MEMORY_MODE;
-    return isCrewMemoryMode(env) ? env : 'persistent';
+    return isCrewMemoryMode(env) ? env : 'incognito';
 }
 
 export function saveDefaultCrewMemory(mode: CrewMemoryMode, userId?: string | null): void {

@@ -1,6 +1,6 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { AnimatePresence, motion, useReducedMotionConfig } from 'motion/react';
-import { AgentRunStatus } from 'michi-shared';
+import { AgentRunStatus, isAgentRunTerminal } from 'michi-shared';
 import type {
   AgentRunAttemptDtoV1,
   AgentRunEventV1,
@@ -9,14 +9,66 @@ import type {
   JsonValue,
 } from 'michi-shared';
 import type { AgentResourceIdentity } from '../../../state/agentIdentity';
+import { useNow } from '../../../hooks/useNow';
 import { AgentRunContextView } from './AgentRunContextView';
 import { AgentRunInteractions } from './AgentRunInteractions';
 import { AgentRunTimeline } from './AgentRunTimeline';
 import { elapsedRunLabel, runIdentity, runtimeProfileLabel, type LocatedAgentRun } from './agentRunSelectors';
 import { AgentRunActions } from './AgentRunActions';
 import { EASE } from '../../../motion/tokens';
+import { PopoverSurface } from '../../ui/Popover';
+import { placeBelowAnchor, useAnchoredPosition } from '../../ui/useAnchoredPosition';
+import { useBackLayer } from '../../../lib/backStack';
+import { isImeComposing } from '../../../lib/ime';
+import { kbd } from '../../../lib/platform';
 
-const TERMINAL = new Set<AgentRunStatus>([AgentRunStatus.Completed, AgentRunStatus.Failed, AgentRunStatus.Cancelled]);
+const META_WIDTH = 340;
+
+/**
+ * The run's metadata, hung from the agent's name. Esc, a press outside it or
+ * Back closes it; Esc gives focus back to the name.
+ */
+function RunMetadataPopover({ anchor, onClose, children }: {
+  anchor: HTMLElement;
+  onClose: (restoreFocus: boolean) => void;
+  children: React.ReactNode;
+}) {
+  const surface = useRef<HTMLDivElement>(null);
+  const [position, setPosition] = useState<{ left: number; top: number } | null>(null);
+  const closeRef = useRef(onClose);
+  closeRef.current = onClose;
+  useBackLayer(true, { back: () => closeRef.current(true) });
+  useAnchoredPosition({ anchor, surfaceRef: surface, measure: () => {
+    const box = surface.current?.getBoundingClientRect();
+    const { left, top } = placeBelowAnchor(anchor.getBoundingClientRect(), { width: box?.width || META_WIDTH, height: box?.height || 0 }, { gap: 6 });
+    setPosition((current) => (current?.left === left && current.top === top ? current : { left, top }));
+  } });
+  useEffect(() => {
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key !== 'Escape' || isImeComposing(event)) return;
+      event.preventDefault();
+      event.stopPropagation();
+      closeRef.current(true);
+    };
+    const onPointer = (event: PointerEvent) => {
+      const target = event.target as Node | null;
+      if (target && (surface.current?.contains(target) || anchor.contains(target))) return;
+      closeRef.current(false);
+    };
+    document.addEventListener('keydown', onKey, true);
+    document.addEventListener('pointerdown', onPointer, true);
+    return () => {
+      document.removeEventListener('keydown', onKey, true);
+      document.removeEventListener('pointerdown', onPointer, true);
+    };
+  }, [anchor]);
+  return (
+    <PopoverSurface ref={surface} role="dialog" aria-label="Agent metadata" escapeLayer="over" animate={false}
+      width={META_WIDTH} left={position?.left ?? 0} top={position?.top ?? 0} style={position ? undefined : { visibility: 'hidden' }}>
+      <div data-testid="run-metadata-popover">{children}</div>
+    </PopoverSurface>
+  );
+}
 
 const REVEAL = { duration: 0.2, ease: EASE.out };
 const STATUS_FADE = { duration: 0.12, ease: EASE.out };
@@ -43,7 +95,7 @@ function RunReveal({ body, children }: { body: React.RefObject<HTMLElement | nul
 }
 
 const STATUS_COLOR: Partial<Record<AgentRunStatus, string>> = {
-  [AgentRunStatus.Running]: 'var(--term-accent)',
+  [AgentRunStatus.Running]: 'var(--term-run)',
   [AgentRunStatus.Waiting]: 'var(--term-select)',
   [AgentRunStatus.Recovering]: 'var(--term-mauve)',
   [AgentRunStatus.Failed]: 'var(--term-danger)',
@@ -76,11 +128,13 @@ export function AgentRunPane({
   onClose, onCancel, onSendInput, onRespondInteraction, onOpenParent,
 }: AgentRunPaneProps) {
   const run = resource.value;
+  const clock = useNow(1_000, now === undefined && run.completedAt === null);
   const identity = runIdentity(resource);
   const [input, setInput] = useState('');
   const [metaOpen, setMetaOpen] = useState(false);
+  const nameRef = useRef<HTMLButtonElement>(null);
   const activeAttempt = attempts.find((attempt) => attempt.id === run.activeAttemptId) ?? attempts.at(-1);
-  const terminal = TERMINAL.has(run.status);
+  const terminal = isAgentRunTerminal(run.status);
   const submit = (mode: AgentRunInputRequestV1['mode']) => {
     const text = input.trim();
     if (!text || !onSendInput) return;
@@ -99,7 +153,7 @@ export function AgentRunPane({
     <section data-testid="agent-run-pane" style={{ display: 'flex', flexDirection: 'column', minWidth: 0, height: '100%', background: 'var(--term-bg)', color: 'var(--term-fg)', fontFamily: 'var(--ui-font)', position: 'relative' }}>
       {/* Boxless identity header: plain text + status dot, no chips. */}
       <header style={{ height: 36, display: 'flex', alignItems: 'center', gap: 8, borderBottom: '1px solid var(--term-line)', padding: '0 12px', background: 'var(--term-surface)', flexShrink: 0 }}>
-        <button type="button" aria-label="Agent metadata" aria-expanded={metaOpen} onClick={() => setMetaOpen((open) => !open)}
+        <button ref={nameRef} type="button" aria-label="Agent metadata" aria-expanded={metaOpen} onClick={() => setMetaOpen((open) => !open)}
           style={{ border: 0, padding: 0, background: 'transparent', cursor: 'pointer', color: 'var(--term-fg)', fontSize: 'var(--fs-lg)', fontWeight: 700, borderBottom: '1px dotted var(--term-line-s)' }}>
           {run.effectiveDefinition.name}
         </button>
@@ -107,7 +161,7 @@ export function AgentRunPane({
           <span aria-hidden style={{ width: 5, height: 5, borderRadius: 'var(--ui-radius-pill)', background: statusColor, transition: STATUS_TINT }} />
           {/* A new status fades its word in; the clock beside it ticks on unanimated. */}
           <motion.span key={run.status} initial={statusSeen.current ? { opacity: 0 } : false} animate={{ opacity: 1 }} transition={STATUS_FADE}>{run.status}</motion.span>
-          {' · '}{elapsedRunLabel(run, now)}
+          {' · '}{elapsedRunLabel(run, now ?? clock)}
         </span>
         <span style={{ flex: 1 }} />
         <span style={{ fontFamily: 'var(--font-mono)', fontSize: 'var(--fs-sm)', color: 'var(--term-muted)' }}>{runtimeProfileLabel(run)}</span>
@@ -120,8 +174,8 @@ export function AgentRunPane({
       </header>
 
       {/* Metadata popover — everything the old kv sections carried. */}
-      {metaOpen && (
-        <div data-testid="run-metadata-popover" style={{ position: 'absolute', left: 14, top: 36, width: 340, zIndex: 6, background: 'var(--term-surface)', border: '1px solid var(--term-line-s)', boxShadow: 'var(--term-float-shadow, 0 12px 34px rgba(0,0,0,.14))' }}>
+      {metaOpen && nameRef.current && (
+        <RunMetadataPopover anchor={nameRef.current} onClose={(restoreFocus) => { setMetaOpen(false); if (restoreFocus) nameRef.current?.focus({ preventScroll: true }); }}>
           <div style={{ padding: '7px 12px 6px', borderBottom: '1px solid var(--term-line)', display: 'flex', alignItems: 'center', gap: 8 }}>
             <span style={{ fontFamily: 'var(--font-mono)', fontSize: 'var(--fs-xs)', fontWeight: 600, letterSpacing: 'var(--ls-caps-wide)', textTransform: 'uppercase', color: 'var(--term-muted)' }}>Agent metadata</span>
             <span style={{ flex: 1 }} />
@@ -147,7 +201,7 @@ export function AgentRunPane({
               <button type="button" onClick={() => onOpenParent(identity)} style={{ border: 0, padding: 0, background: 'transparent', color: 'var(--term-accent)', fontSize: 'var(--fs-sm)', cursor: 'pointer' }}>↰ Open parent</button>
             </div>
           )}
-        </div>
+        </RunMetadataPopover>
       )}
 
       {/* Conversation body: task bubble → event flow → interactions → result. */}
@@ -214,16 +268,21 @@ export function AgentRunPane({
         <footer style={{ flexShrink: 0, padding: '10px 14px 12px' }}>
           <div style={{ border: 'var(--term-composer-border, 1px solid var(--term-line))', background: 'var(--term-composer-bg, var(--term-surface))', boxShadow: 'var(--term-composer-shadow-muted, none)' }}>
             <textarea aria-label="Steer Agent Run" value={input} onChange={(event) => setInput(event.target.value)}
+              onKeyDown={(event) => {
+                if (event.key !== 'Enter' || event.shiftKey || event.metaKey || event.ctrlKey || isImeComposing(event)) return;
+                event.preventDefault();
+                if (event.altKey) { if (activeAttempt) submit('immediate'); } else submit('queued');
+              }}
               placeholder={`Message ${run.effectiveDefinition.name}…`}
               style={{ width: '100%', minHeight: 44, boxSizing: 'border-box', resize: 'vertical', border: 0, outline: 'none', background: 'transparent', color: 'var(--term-fg)', padding: '9px 11px 0', fontFamily: 'var(--ui-font)', fontSize: 'var(--fs-md)' }} />
             <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '7px 11px 9px' }}>
               <button type="button" aria-label="Queue input" onClick={() => submit('queued')} disabled={!input.trim()}
                 style={{ display: 'inline-flex', alignItems: 'center', gap: 6, height: 24, padding: '0 9px', border: '1px solid var(--term-line)', background: 'var(--term-alt)', color: 'var(--term-fg)', fontSize: 'var(--fs-sm)', fontWeight: 600, cursor: 'pointer' }}>
-                <span style={{ fontFamily: 'var(--font-mono)', fontSize: 'var(--fs-xs)', color: 'var(--term-muted)', fontWeight: 400 }}>⏎</span>Queue input
+                <span style={{ fontFamily: 'var(--font-mono)', fontSize: 'var(--fs-xs)', color: 'var(--term-muted)', fontWeight: 400 }}>{kbd('enter')}</span>Queue input
               </button>
               <button type="button" aria-label="Stop & redirect" onClick={() => submit('immediate')} disabled={!input.trim() || !activeAttempt}
                 style={{ display: 'inline-flex', alignItems: 'center', gap: 6, height: 24, padding: '0 9px', border: '1px solid var(--term-line)', background: 'var(--term-surface)', color: 'var(--term-mid)', fontSize: 'var(--fs-sm)', cursor: 'pointer' }}>
-                <span style={{ fontFamily: 'var(--font-mono)', fontSize: 'var(--fs-xs)', color: 'var(--term-muted)' }}>⌥⏎</span>Stop &amp; redirect
+                <span style={{ fontFamily: 'var(--font-mono)', fontSize: 'var(--fs-xs)', color: 'var(--term-muted)' }}>{kbd('alt', 'enter')}</span>Stop &amp; redirect
               </button>
               <span style={{ flex: 1 }} />
               <span style={{ fontSize: 'var(--fs-sm)', color: 'var(--term-muted)' }}>Enter never cancels active work.</span>

@@ -6,6 +6,7 @@ import { useLayoutRules } from './layoutRules/useLayoutRules';
 import { layoutRuleMeta } from './layoutRules/LayoutRulesPopover';
 import { LayoutPreferencesEditor } from './layoutRules/LayoutPreferencesEditor';
 import { MaintenanceStatus } from './MaintenanceStatus';
+import { useCompanionName } from '../../../state/companion/companionName';
 import './spaceSettings.css';
 
 const SUGGESTIONS = ['Put risks first', 'Show the next decisions at the top', 'Keep the summary short'];
@@ -15,6 +16,7 @@ export function SpaceSettings({ page, connectionId, spaceId, spaceTitle, onBack,
   onBack(): void; onRename(title: string): Promise<void>; onComponents(): void;
 }) {
   const rules = useLayoutRules(page.id, connectionId, true);
+  const agentName = useCompanionName();
   const [name, setName] = useState(page.title);
   const [text, setText] = useState('');
   const [busy, setBusy] = useState(false);
@@ -44,10 +46,10 @@ export function SpaceSettings({ page, connectionId, spaceId, spaceTitle, onBack,
     </section>
     <section className="space-settings__section">
       <h2>Layout rules</h2>
-      <p>Tell the Meta agent how to organize this page. Rules apply when it next updates the page.</p>
+      <p>Tell {agentName} how to organize this page. Rules apply when it next updates the page.</p>
       {rules.error && <p role="alert">{rules.error} <button type="button" onClick={() => rules.refresh({ report: true })}>Retry</button></p>}
       {rules.rules === null ? (!rules.error && <p role="status">Loading rules…</p>) : rules.rules.length ? <ul className="space-settings__rules">{rules.rules.map(rule => <li key={rule.id}>
-        <div><span>{rule.text}</span><small>{layoutRuleMeta(rule)}</small></div>
+        <div><span>{rule.text}</span><small>{layoutRuleMeta(rule, agentName)}</small></div>
         <button type="button" disabled={busy} aria-label={`Delete rule: ${rule.text}`} onClick={() => void run(() => rules.remove(rule.id))}>Delete</button>
       </li>)}</ul> : <p>No layout rules yet.</p>}
       <form className="space-settings__form" onSubmit={event => {

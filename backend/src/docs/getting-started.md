@@ -1,8 +1,6 @@
 # Getting started with Michi
 
-Applies to: ordinary chats in desktop/web, with local or connected remote backends. Source checked: 2026-10-16. Runtime availability depends on the backend installation. This is a source-reviewed guide, not a live test of your credentials.
-
-Pages-related sections checked against source on 2026-10-26; other topics retain the review scope above.
+Applies to: ordinary chats in desktop/web, with local or connected remote backends. Source checked: 2026-11-08. Runtime availability depends on the backend installation. This is a source-reviewed guide, not a live test of your credentials.
 
 ## Install, launch and update
 
@@ -28,7 +26,7 @@ Success check: the workspace shows the intended folder and backend. A laptop pat
 
 ## 2. Connect one runtime
 
-Open Settings → Model for the backend you are using. Choose an available runtime and model. A runtime is the agent engine; a model is the model it uses.
+Open Settings → Runtime & model for the backend you are using. Choose an available runtime and model. A runtime is the agent engine; a model is the model it uses.
 
 | Runtime | What must be ready on the backend machine |
 | --- | --- |
@@ -37,14 +35,15 @@ Open Settings → Model for the backend you are using. Choose an available runti
 | Pi | Provider credentials configured; no separate agent CLI |
 | Claude | Claude CLI installed and authenticated/configured |
 | Codex | Codex CLI installed and authenticated/configured |
+| Antigravity | Off by default: the backend must start with `MICHI_ENABLE_ANTIGRAVITY=1` (or `antigravity` in `MICHI_ENABLED_RUNTIMES`); `agy` installed and signed in |
 
 The desktop app does not bundle agent CLIs. A listed runtime may be unavailable, and opening Michi does not prove provider authentication works. See `runtimes` for prerequisites.
 
-Choose Ask while learning. With Use global permissions enabled in Settings → Model → Permissions, the backend's global mode applies and per-chat permission controls are hidden. See `permissions` for each choice's scope.
+Choose Ask while learning. With Use global permissions enabled in Settings → Runtime & model → Permissions, the backend's global mode applies and per-chat permission controls are hidden. See `permissions` for each choice's scope.
 
 ## 3. Complete a first task
 
-Send this in a new chat from Home or the workspace composer:
+Send this in a new chat from Home (with that workspace selected) or the workspace composer:
 
 > Tell me the workspace directory you are using. Read the top-level filenames and explain what is here in three sentences. Do not edit files or run project scripts.
 
@@ -60,7 +59,7 @@ Success check: the file exists on the backend machine, its contents match the re
 
 ## 4. Resume and branch
 
-Reopen the same conversation from Home's Continue list or the workspace's Chats list and ask a follow-up. Michi saves history; native session restoration depends on the runtime and settings. See `sessions-and-recovery`.
+Reopen the same conversation under its workspace in the Conversations sidebar and ask a follow-up. Michi saves history; native session restoration depends on the runtime and settings. See `sessions-and-recovery`.
 
 Create a branch for another direction with inherited context. For example:
 
@@ -70,7 +69,7 @@ Explicitly ask when you want split work. `spawn_branches` fans out at most five 
 
 ## 5. Keep useful results
 
-Use Artifacts for reusable specs, reports, files, images and links. Ask the agent to save a summary as an Artifact, then reference its name with `@` in another prompt. Favoriting an Artifact changes its shelf ordering; it does not send the full document on every turn.
+Use Artifacts for reusable specs, reports, files, images and links. Ask the agent to save a summary as an Artifact, then reference its name with `@` in another prompt. Favoriting an Artifact moves it to the Artifacts drawer's Favorites group; it does not send the full document on every turn.
 
 Use a thread's Export action for a Markdown transcript. A transcript is useful for reading and sharing, but is not a full restorable application backup. See `files-and-artifacts` and `data-and-backups`.
 
@@ -78,11 +77,11 @@ Use a thread's Export action for a Markdown transcript. A transcript is useful f
 
 Open **Pages** for native documents, child pages and database views. Click **+** to start text, or choose **Other blocks** for another native block. Use **Page actions → Layout preferences** to describe how this page should be organized. The Pages **Assistant** has saved conversation history, **New conversation** and a **Full screen** view within Pages.
 
-Pages currently supports the local backend only. Automatic updates require workspace maintenance to be enabled, the page tree not to be excluded, and an available Meta agent configured in **Settings → Meta agent**; saving a preference does not start an update. See `pages-and-components`, `pages-maintenance` and `page-component-design` before relying on automation or generating custom components.
+Pages currently supports the local backend only. Automatic updates require workspace maintenance to be enabled, the page tree not to be excluded, and an available Pages upkeep runtime configured in **Settings → Michi → Pages upkeep** (the Settings page is named after your agent: Michi unless you renamed it); saving a preference does not start an update. See `pages-and-components`, `pages-maintenance` and `page-component-design` before relying on automation or generating custom components.
 
 ## Get help
 
-If a chat disconnects, reopen it before repeating the task; the backend may still be working. Use Stop to request cancellation. A remote backend can continue after desktop exit; local execution ends when its backend process stops.
+If a chat disconnects, reopen it before repeating the task; the backend may still be working. Use Stop to request cancellation. A remote backend, the macOS background service (Settings → Scheduled jobs → Background → Keep Michi running in the background) or a Linux `michi start` server keeps running after you close the desktop app or browser. Otherwise local execution ends when the app's backend process stops.
 
 Ask: “Consult Michi's built-in docs and diagnose this error. Distinguish documented behavior from what you actually checked.” The agent can call `michi_docs` when available. If Michi tools are missing, open the human guide directly; a missing docs tool cannot diagnose itself.
 

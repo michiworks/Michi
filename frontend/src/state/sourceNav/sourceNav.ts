@@ -1,5 +1,6 @@
 import { useMemo, useSyncExternalStore } from 'react';
 import { toast } from 'sonner';
+import type { ThreadCardItem } from 'michi-shared';
 import { backendEntityId } from '../../config/backendIdentity';
 import { describePageReference, fetchSourcePreview } from './sourceApi';
 
@@ -47,6 +48,12 @@ export interface SourceReference {
 /** A conversation opened without a message (a new conversation's card): only its composer may take focus. */
 export interface SourceFocusRequest { nodeId: string; token: number }
 
+/** A jump to a message from outside its pane (search, the ask bar, a page's source link): no back bar, no "Referenced by" mark. */
+export interface MessageJumpRequest { nodeId: string; messageId: string; token: number }
+
+/** What a conversation's pane still has to do: scroll to the message, flash it, and what gets focus (null leaves it). */
+export interface PendingSourceJump { token: number; messageId: string | null; focus: 'composer' | 'message' | null; flash: boolean }
+
 /** What the shell does for the store: it alone knows what Spaces shows and how to get there. */
 export interface SourceNavigator {
   currentOrigin(): SourceOrigin | null;
@@ -59,13 +66,26 @@ interface State {
   back: SourceBack | null;
   reference: SourceReference | null;
   focus: SourceFocusRequest | null;
+  jump: MessageJumpRequest | null;
 }
 
-let state: State = { popover: null, back: null, reference: null, focus: null };
+let state: State = { popover: null, back: null, reference: null, focus: null, jump: null };
 let navigator: SourceNavigator | null = null;
 let token = 0;
 const claimed = new Set<number>();
 const listeners = new Set<() => void>();
+
+interface PendingJump {
+  token: number;
+  nodeId: string;
+  messageId: string | null;
+  focus: 'composer' | 'message';
+  previous: Pick<State, 'back' | 'reference' | 'focus'>;
+}
+/** The jump whose reveal is running now (openConversationFromSpaces), until it returns. */
+let pendingJump: PendingJump | null = null;
+/** Jumps a reveal took into the agent's panel (takeSourceJumpInto): their caller adds no page label. */
+const tookJumps = new Set<number>();
 
 function set(next: Partial<State>): void {
   state = { ...state, ...next };
@@ -82,6 +102,7 @@ export function getSourceNavState(): State { return state; }
 
 const referenceFor = (nodeId: string) => () => (state.reference?.nodeId === nodeId ? state.reference : null);
 const focusFor = (nodeId: string) => () => (state.focus?.nodeId === nodeId ? state.focus : null);
+const jumpFor = (nodeId: string) => () => (state.jump?.nodeId === nodeId ? state.jump : null);
 
 /** The highlighted message of this conversation, while the back bar names its page. */
 export function useSourceReference(nodeId: string): SourceReference | null {
@@ -89,16 +110,43 @@ export function useSourceReference(nodeId: string): SourceReference | null {
   return useSyncExternalStore(subscribe, get, get);
 }
 
-/** The jump into this conversation still to be carried out: where to scroll, and what gets focus. */
-export function useSourceJump(nodeId: string): { token: number; messageId: string | null; focus: 'composer' | 'message' } | null {
+/** The jump into this conversation still to be carried out; a newer request replaces an older one. */
+export function useSourceJump(nodeId: string): PendingSourceJump | null {
   const reference = useSourceReference(nodeId);
   const getFocus = useMemo(() => focusFor(nodeId), [nodeId]);
   const focus = useSyncExternalStore(subscribe, getFocus, getFocus);
+  const getJump = useMemo(() => jumpFor(nodeId), [nodeId]);
+  const jump = useSyncExternalStore(subscribe, getJump, getJump);
   return useMemo(() => {
-    if (reference && !claimed.has(reference.token)) return { token: reference.token, messageId: reference.messageId, focus: reference.focus };
-    if (focus && !claimed.has(focus.token)) return { token: focus.token, messageId: null, focus: 'composer' };
-    return null;
-  }, [focus, reference]);
+    const requests: PendingSourceJump[] = [
+      ...(reference ? [{ token: reference.token, messageId: reference.messageId, focus: reference.focus, flash: false }] : []),
+      ...(jump ? [{ token: jump.token, messageId: jump.messageId, focus: null, flash: true }] : []),
+      ...(focus ? [{ token: focus.token, messageId: null, focus: 'composer' as const, flash: false }] : []),
+    ];
+    const latest = requests.reduce<PendingSourceJump | null>((newest, request) => (!newest || request.token > newest.token ? request : newest), null);
+    return latest && !claimed.has(latest.token) ? latest : null;
+  }, [focus, jump, reference]);
+}
+
+/**
+ * Scroll a conversation to one of its messages and flash it, as soon as its
+ * pane shows it. `nodeId` is the renderer's id (namespaced for a remote backend).
+ */
+export function requestMessageJump(nodeId: string, messageId: string): void {
+  const jump = ++token;
+  supersede(nodeId, jump);
+  set({ jump: { nodeId, messageId, token: jump } });
+}
+
+/**
+ * Each request keeps its own slot, so a replaced one would come back once the
+ * newer one leaves its slot (another conversation's jump, a closed back bar).
+ * The reference stays in place for its "Referenced by" mark.
+ */
+function supersede(nodeId: string, newer: number): void {
+  for (const request of [state.reference, state.jump, state.focus]) {
+    if (request?.nodeId === nodeId && request.token < newer) claimed.add(request.token);
+  }
 }
 
 /** A conversation carries out a jump once; returning to it later keeps the user's own scroll. */
@@ -167,6 +215,16 @@ export function openSourcePopover(input: { target: SourceTarget; anchor?: HTMLEl
     target: input.target, anchor, page: input.page ?? null,
     origin: navigator?.currentOrigin() ?? null, scroll: captureScroll(anchor),
   } });
+}
+
+/**
+ * Open a conversation a thread card or a task names. One archived out of its
+ * thread has no pane to open in: it opens read-only, in the popover, which
+ * shows its latest reply and cannot continue it. Any other goes to `open`.
+ */
+export function openThreadCard(backendConnectionId: string, item: ThreadCardItem, open: (item: ThreadCardItem) => void): void {
+  if (item.archived) openSourcePopover({ target: { backendConnectionId, workspaceId: item.workspaceId, nodeId: item.nodeId, messageId: item.messageId } });
+  else open(item);
 }
 
 export function closeSourcePopover(): void {
@@ -242,10 +300,20 @@ export async function openConversationFromSpaces(input: SourceTarget & {
     } : null,
     focus: !messageId && input.focus ? { nodeId, token: jump } : null,
   });
-  if (!await nav.reveal(workspaceId, nodeId)) {
+  pendingJump = { token: jump, nodeId, messageId, focus: input.focus ? 'composer' : 'message', previous };
+  let revealed: boolean;
+  try {
+    revealed = await nav.reveal(workspaceId, nodeId);
+  } finally {
+    if (pendingJump?.token === jump) pendingJump = null;
+  }
+  if (!revealed) {
     if (token === jump) set(previous);
     return failed();
   }
+  // The conversation showed in the agent's panel (takeSourceJumpInto): nothing more to mark.
+  if (tookJumps.delete(jump)) return true;
+  supersede(nodeId, jump);
   if (messageId && input.page) {
     const page = input.page;
     void describePageReference(page, messageId).then((blocks) => {
@@ -275,10 +343,30 @@ export function dismissSourceBack(): void {
   if (state.back || state.reference || state.focus) set({ back: null, reference: null, focus: null });
 }
 
+/**
+ * The reveal of a jump shows `nodeId` in the agent's panel instead of the
+ * conversation area (F1b-review #6): the user stays where they are, so the
+ * jump leaves no "Back to <page>" bar and no highlighted reference behind.
+ * Returns what the jump was for (the panel shows that message), or null when
+ * no jump into `nodeId` is being revealed.
+ */
+export function takeSourceJumpInto(nodeId: string): { messageId: string | null; focus: 'composer' | 'message' } | null {
+  const jump = pendingJump;
+  if (!jump || jump.nodeId !== nodeId) return null;
+  pendingJump = null;
+  tookJumps.add(jump.token);
+  claimed.add(jump.token);
+  if (token === jump.token) set(jump.previous);
+  return { messageId: jump.messageId, focus: jump.focus };
+}
+
+/** @testonly */
 export function resetSourceNavForTests(): void {
-  state = { popover: null, back: null, reference: null, focus: null };
+  state = { popover: null, back: null, reference: null, focus: null, jump: null };
   navigator = null;
   lastActivated = null;
   token = 0;
   claimed.clear();
+  pendingJump = null;
+  tookJumps.clear();
 }

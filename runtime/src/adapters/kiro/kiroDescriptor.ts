@@ -147,8 +147,8 @@ export function kiroDescriptor(input: KiroDescriptorInput): RuntimeDescriptor {
 
 /**
  * Without an instance (no engine, no clients): the v2 shape of kiro-cli with
- * Michi's tools and sidecar titles. It stays the compatibility table
- * (describeRuntimeCapabilities) although Michi now starts v3 by default, whose
+ * Michi's tools and sidecar titles. It stays the compatibility table a host
+ * reports without an instance, although Michi now starts v3 by default, whose
  * capabilities depend on what a process negotiates; an instance reports those
  * itself.
  */

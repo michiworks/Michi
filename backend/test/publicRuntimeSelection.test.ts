@@ -10,7 +10,6 @@ import type { AgentRuntime } from '../src/agents/types';
 
 delete process.env.MICHI_DEFAULT_RUNTIME;
 delete process.env.MICHI_AGENT_RUNTIME;
-delete process.env.MICHI_AGENT;
 delete process.env.MICHI_CLOUD;
 const { loadAgentConfig, getAgentConfig, updateAgentConfig, reconcileRuntimeWithRegistered } = require('../src/services/agentConfig');
 const configPath = path.join(isolatedConfigDir, 'config.json');

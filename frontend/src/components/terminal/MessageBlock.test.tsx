@@ -2,15 +2,18 @@
 // User: right-aligned paper-card bubble with no role/time label; surface +
 //   drop shadow + 72% max-width live in index.css (.terminal-message-user),
 //   not inline. The time shows only in the hover action row.
-// Assistant: flush-left, no border, no fill, "> michi" label above.
+// Assistant: flush-left, no border, no fill, no speaker line; one meta line
+//   (copy / retry / branch, time · tokens) under it.
 // Asserts on inline style strings because jsdom doesn't resolve var()/color-mix()/calc().
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import React from 'react';
-import { act, render, fireEvent, waitFor } from '@testing-library/react';
-import { MessageBlock, TermThoughtBlock } from './MessageBlock';
+import { act, render, fireEvent, screen, waitFor } from '@testing-library/react';
+import { MessageBlock, TermThoughtBlock, userTextToMarkdown } from './MessageBlock';
+import { kbd } from '../../lib/platform';
 import { AgentBlockStyleOverride } from '../../state/prefs';
 import { recordBackendObservation, resetBackendClocksForTest } from '../../services/backendClock';
 import type { AssistantBlock, ChatMessage } from '../../state/chatTypes';
+import { rememberRuntimeLabels, resetSkillCatalogs } from '../../state/skillCatalog';
 
 const baseMsg = {
   id: 'm1',
@@ -41,7 +44,7 @@ function renderMessage(
       // error-tail row.
       onRetry={extraProps?.onRetry}
       onEdit={noop}
-      onCopy={noop}
+      copyText={() => ''}
       showThoughts={false}
       fontFamily={'inherit'}
       density={'comfortable'}
@@ -61,7 +64,7 @@ describe('MessageBlock — role styling', () => {
         index={0}
         isDark={false}
         onEdit={noop}
-        onCopy={noop}
+        copyText={() => ''}
         showThoughts={false}
         fontFamily={'inherit'}
         density={'comfortable'}
@@ -74,10 +77,59 @@ describe('MessageBlock — role styling', () => {
     fireEvent.click(getByRole('button', { name: 'Research notes' }));
     expect(onMentionClick).toHaveBeenCalledWith('Research notes', 'node', 'n-a');
   });
+
+  it('marks a woken thread reply as the other thread\'s reply', () => {
+    const { container } = renderMessage({
+      text: 'The API section looks right.',
+      threadMessage: { fromNodeId: 'n-b', fromTitle: 'Implementation', kind: 'reply', hop: 2 },
+    });
+    const marker = container.querySelector('.terminal-message-thread-source');
+    expect(marker?.textContent).toBe('Reply from Implementation');
+    expect(marker?.getAttribute('title')).toMatch(/answer to a message this thread sent/);
+    expect(container.querySelector('.terminal-message-user')?.textContent).toContain('The API section looks right.');
+  });
+
+  it('marks a message that ran a skill with where the skill came from, by the label its backend gave the runtime', () => {
+    const { container } = renderMessage({
+      text: '/review the diff',
+      skill: { id: 'library:review', name: 'review', origin: 'library', args: 'the diff' },
+    });
+    const chip = container.querySelector('.terminal-message-skill');
+    expect(chip?.textContent).toBe('Skill · Michi');
+    expect(chip?.getAttribute('title')).toBe('Ran the review skill');
+    expect(container.querySelector('.terminal-message-user')?.textContent).toContain('/review the diff');
+    const builtin = renderMessage({ text: '/compare queues', skill: { id: 'builtin:compare', name: 'compare', origin: 'builtin', args: 'queues' } });
+    expect(builtin.container.querySelector('.terminal-message-skill')?.textContent).toBe('Skill · Built-in');
+    const runtime = renderMessage({ text: '/deploy', skill: { id: 'runtime:acme:user:deploy', name: 'deploy', origin: 'runtime', runtimeId: 'acme', args: '' } });
+    const caption = () => runtime.container.querySelector('.terminal-message-skill')?.textContent;
+    expect(caption()).toBe('Skill · acme');
+    act(() => { rememberRuntimeLabels('local', [{ id: 'acme', label: 'Acme Agent' }]); });
+    expect(caption()).toBe('Skill · Acme Agent');
+    resetSkillCatalogs();
+  });
 });
 
-describe('MessageBlock — turn usage', () => {
-  it('shows native Codex token usage beside the completed assistant turn', () => {
+describe('userTextToMarkdown', () => {
+  it('keeps every line break outside code and leaves a nested code example untouched', () => {
+    expect(userTextToMarkdown('one\ntwo\n````md\n```js\nx\n```\n````\nthree\nfour'))
+      .toBe('one  \ntwo  \n````md\n```js\nx\n```\n````\nthree  \nfour');
+  });
+
+  it('leaves a code block indented inside a list item untouched', () => {
+    expect(userTextToMarkdown('1. Run it:\n    ```sh\n    npm test\n    npm run build\n    ```\n2. Done'))
+      .toBe('1. Run it:  \n    ```sh\n    npm test\n    npm run build\n    ```\n2. Done');
+  });
+});
+
+describe('MessageBlock — answer meta line', () => {
+  const answerProps = {
+    index: 0, isDark: false, copyText: () => '', onRetry: noop, onBranch: noop, onEdit: noop, showThoughts: false,
+    fontFamily: 'inherit', density: 'comfortable' as const,
+  };
+  const answer = { ...baseMsg, role: 'assistant' as const, text: 'The answer', createdAt: new Date(2026, 7, 18, 16, 35).getTime() };
+  const actionsOf = (container: HTMLElement) => container.querySelector('.t-answer-meta .t-msg-actions') as HTMLElement;
+
+  it('shows native Codex token usage on the line, with the breakdown in its tooltip', () => {
     const { getByTestId } = renderMessage(
       { role: 'assistant', text: 'done', streaming: false },
       {
@@ -94,9 +146,94 @@ describe('MessageBlock — turn usage', () => {
       },
     );
     const usage = getByTestId('turn-usage');
-    expect(usage.textContent).toBe('usage 1.5k tokens (1.2k in / 300 out) · 9.7s');
-    expect(usage.getAttribute('title')).toContain('800 cached input tokens');
-    expect(usage.getAttribute('title')).toContain('12.5% context used');
+    expect(usage.textContent).toBe('1.5k tokens');
+    const title = (usage.closest('[title]') as HTMLElement).title;
+    expect(title).toContain('Duration 9.7 seconds');
+    expect(title).toContain('1,234 input tokens');
+    expect(title).toContain('800 cached input tokens');
+    expect(title).toContain('12.5% context used');
+  });
+
+  it('is one 12px line: copy, retry and branch, then time · tokens, and no speaker line above the answer', () => {
+    const { container, getByRole, queryByRole } = render(
+      <MessageBlock {...answerProps} m={answer} usageInfo={{ totalTokens: 46_000 }} />,
+    );
+    expect(container.textContent).not.toContain('> michi');
+    const root = container.firstElementChild!;
+    expect(root.firstElementChild!.classList.contains('terminal-message-assistant')).toBe(true);
+    const line = container.querySelector('.t-answer-meta')!;
+    const buttons = [...line.querySelectorAll('button')].map((b) => b.getAttribute('aria-label'));
+    expect(buttons).toEqual(['copy message', 'retry this turn', 'branch from here']);
+    // Edit belongs to the user's message.
+    expect(queryByRole('button', { name: 'edit and resend' })).toBeNull();
+    const parts = [...line.querySelectorAll('.t-answer-meta__part')].map((p) => p.textContent);
+    expect(parts).toEqual([expect.stringMatching(/^(8\/18 )?16:35$/), '46k tokens']);
+    expect(line.contains(getByRole('button', { name: 'copy message' }))).toBe(true);
+  });
+
+  it('shows only what the answer has', () => {
+    const { container } = render(<MessageBlock {...answerProps} m={{ ...answer, createdAt: undefined }} usageInfo={{ durationMs: 1_000 }} />);
+    expect(container.querySelector('.t-answer-meta__text')).toBeNull();
+    expect(container.querySelector('.t-answer-meta button[aria-label="copy message"]')).not.toBeNull();
+  });
+
+  it('stays shown under the latest answer and waits for a hover under earlier ones', () => {
+    const latest = render(<MessageBlock {...answerProps} m={answer} pinned />);
+    expect(actionsOf(latest.container).style.opacity).toBe('1');
+    expect(actionsOf(latest.container).style.pointerEvents).toBe('auto');
+    latest.unmount();
+    const earlier = render(<MessageBlock {...answerProps} m={answer} />);
+    const actions = actionsOf(earlier.container);
+    expect(actions.style.opacity).toBe('0');
+    expect(actions.style.pointerEvents).toBe('none');
+    fireEvent.mouseOver(earlier.container.querySelector('.terminal-message-assistant')!);
+    expect(actions.style.opacity).toBe('1');
+  });
+
+  it('keeps its buttons in the tab order while hidden, so keyboard focus can reveal them (index.css :has(:focus-visible))', () => {
+    const { container } = render(<MessageBlock {...answerProps} m={answer} />);
+    for (const button of container.querySelectorAll<HTMLButtonElement>('.t-answer-meta button')) {
+      expect(button.tabIndex).toBe(0);
+      expect(button.disabled).toBe(false);
+    }
+  });
+
+  it('shows no meta line while the answer streams', () => {
+    const { container } = render(<MessageBlock {...answerProps} m={{ ...answer, streaming: true }} pinned />);
+    expect(container.querySelector('.t-answer-meta')).toBeNull();
+    const tail = render(<MessageBlock {...answerProps} m={answer} hideActions pinned />);
+    expect(tail.container.querySelector('.t-answer-meta')).toBeNull();
+  });
+});
+
+describe('MessageBlock — actions at rest', () => {
+  function renderReply(actionsAtRest: boolean) {
+    return render(
+      <MessageBlock
+        m={{ ...baseMsg, role: 'assistant', text: 'done' }}
+        index={0}
+        isDark={false}
+        onRetry={noop}
+        copyText={() => ''}
+        onBranch={noop}
+        showThoughts={false}
+        fontFamily={'inherit'}
+        density={'comfortable'}
+        actionsAtRest={actionsAtRest}
+      />,
+    );
+  }
+
+  it('marks only the latest reply for touch screens to show without a tap', () => {
+    const latest = renderReply(true);
+    const row = latest.container.querySelector('[data-msg-actions]');
+    expect(row?.getAttribute('data-msg-actions')).toBe('rest');
+    // Hidden for a mouse until hover; index.css reveals it on touch.
+    expect((latest.container.querySelector('.t-msg-actions') as HTMLElement).style.opacity).toBe('0');
+    latest.unmount();
+
+    const older = renderReply(false);
+    expect(older.container.querySelector('[data-msg-actions]')).toBeNull();
   });
 });
 
@@ -119,11 +256,31 @@ describe('MessageBlock — error-tail row', () => {
     fireEvent.click(getByTestId('error-tail-retry'));
     expect(onRetry).toHaveBeenCalledTimes(1);
   });
+
+  it('leaves no hover tint on Test Connection once a test the pointer left finishes', async () => {
+    let finish!: (result: { ok: boolean }) => void;
+    const { getByTestId } = render(
+      <MessageBlock
+        m={{ ...baseMsg, role: 'assistant', text: 'cannot connect' }}
+        index={0} isDark={false} onEdit={noop} copyText={() => ''} showThoughts={false}
+        fontFamily="inherit" density="comfortable"
+        isErrorTail errorKind="connection"
+        onTestConnection={() => new Promise((resolve) => { finish = resolve; })}
+      />,
+    );
+    const button = getByTestId('error-tail-test-connection');
+    fireEvent.mouseEnter(button);
+    fireEvent.click(button);
+    fireEvent.mouseLeave(button);
+    await act(async () => { finish({ ok: false }); });
+    expect(button.textContent).toBe('⚙ Test Connection');
+    expect(button.style.background).not.toContain('danger');
+  });
 });
 
 describe('MessageBlock — highlight frame', () => {
   const props = {
-    index: 0, isDark: false, onEdit: noop, onCopy: noop, onRetry: noop, showThoughts: false,
+    index: 0, isDark: false, onEdit: noop, copyText: () => '', onRetry: noop, showThoughts: false,
     fontFamily: 'inherit', density: 'comfortable' as const,
   };
   const reply = { ...baseMsg, role: 'assistant' as const, text: 'The cited reply' };
@@ -150,8 +307,37 @@ describe('MessageBlock — highlight frame', () => {
     const { container, getByRole } = render(<MessageBlock {...props} m={reply} />);
     expect(container.querySelector('.terminal-message-highlight')).toBeNull();
     const root = container.firstElementChild!;
-    expect(root.firstElementChild!.textContent).toBe('> michi');
+    expect(root.firstElementChild!.classList.contains('terminal-message-assistant')).toBe(true);
     expect(root.contains(getByRole('button', { name: 'copy message' }))).toBe(true);
+  });
+});
+
+describe('MessageBlock — copy', () => {
+  const reply = { ...baseMsg, role: 'assistant' as const, text: 'The reply' };
+  afterEach(() => { vi.unstubAllGlobals(); });
+  const press = async (copyText: () => string) => {
+    const view = render(
+      <MessageBlock m={reply} index={0} isDark={false} copyText={copyText} showThoughts={false} fontFamily="inherit" density="comfortable" />,
+    );
+    const button = view.getByRole('button', { name: 'copy message' });
+    await act(async () => { fireEvent.click(button); });
+    return { view, button };
+  };
+
+  it('ticks only once the text is on the clipboard', async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    vi.stubGlobal('navigator', { clipboard: { writeText } });
+    const { view, button } = await press(() => 'run text');
+    expect(writeText).toHaveBeenCalledWith('run text');
+    expect(button.querySelector('path')!.getAttribute('d')).toBe('M3 8.5l3.5 3.5L13 5');
+    expect(view.getByRole('status').textContent).toBe('Copied');
+  });
+
+  it('says so instead of ticking when the browser has no clipboard here', async () => {
+    vi.stubGlobal('navigator', {});
+    const { view, button } = await press(() => 'run text');
+    expect(button.querySelector('path')!.getAttribute('d')).not.toBe('M3 8.5l3.5 3.5L13 5');
+    expect(view.getByRole('status').textContent).toMatch(/Couldn’t copy/);
   });
 });
 
@@ -178,6 +364,77 @@ describe('MessageBlock — user modules', () => {
       ],
     });
     expect(container.querySelectorAll('[data-testid="comment-quote"]').length).toBe(2);
+  });
+
+  it('floats its action row and lets pointers through it until the message is hovered', () => {
+    const { container, getByRole } = renderMessage({ role: 'user', text: 'hello' });
+    const root = container.firstElementChild as HTMLElement;
+    const row = container.querySelector('.t-user-msg-actions') as HTMLElement;
+    // The row is positioned against the message and laid over the next
+    // message's first line, so while hidden it must not take that line's clicks.
+    expect(root.style.position).toBe('relative');
+    expect(row.style.pointerEvents).toBe('none');
+    fireEvent.mouseEnter(root);
+    expect(row.style.pointerEvents).toBe('');
+    expect(row.contains(getByRole('button', { name: 'edit and resend' }))).toBe(true);
+    fireEvent.mouseLeave(root);
+    expect(row.style.pointerEvents).toBe('none');
+  });
+});
+
+describe('MessageBlock — editing a sent message', () => {
+  it.each([{ isComposing: true }, { keyCode: 229 }])('leaves an Esc that ends an IME composition to it (%o)', (ime) => {
+    const onEditCancel = vi.fn();
+    const onEditSave = vi.fn();
+    const { container } = render(
+      <MessageBlock
+        m={baseMsg}
+        index={0}
+        isDark={false}
+        onEdit={noop}
+        copyText={() => ''}
+        showThoughts={false}
+        fontFamily={'inherit'}
+        density={'comfortable'}
+        editing
+        onEditCancel={onEditCancel}
+        onEditSave={onEditSave}
+      />,
+    );
+    const area = container.querySelector('textarea.user-edit-area') as HTMLTextAreaElement;
+    fireEvent.change(area, { target: { value: 'hello 修改' } });
+    fireEvent.keyDown(area, { key: 'Escape', ...ime });
+    expect(onEditCancel).not.toHaveBeenCalled();
+    expect(area.value).toBe('hello 修改');
+    fireEvent.keyDown(area, { key: 'Escape' });
+    expect(onEditCancel).toHaveBeenCalledTimes(1);
+    expect(onEditSave).not.toHaveBeenCalled();
+  });
+
+  it('labels Save with the key that saves', () => {
+    const onEditSave = vi.fn();
+    const { container } = render(
+      <MessageBlock
+        m={baseMsg}
+        index={0}
+        isDark={false}
+        onEdit={noop}
+        copyText={() => ''}
+        showThoughts={false}
+        fontFamily={'inherit'}
+        density={'comfortable'}
+        editing
+        onEditCancel={noop}
+        onEditSave={onEditSave}
+      />,
+    );
+    const area = container.querySelector('textarea.user-edit-area') as HTMLTextAreaElement;
+    fireEvent.change(area, { target: { value: 'hello again' } });
+    fireEvent.keyDown(area, { key: 'Enter' });
+    expect(onEditSave).not.toHaveBeenCalled();
+    expect(screen.getByRole('button', { name: /Save/ }).querySelector('kbd')?.textContent).toBe(kbd('mod', 'enter'));
+    fireEvent.keyDown(area, { key: 'Enter', ctrlKey: true });
+    expect(onEditSave).toHaveBeenCalledWith('hello again');
   });
 });
 
@@ -213,7 +470,7 @@ describe('MessageBlock — subagents forwarding', () => {
         m={m}
         index={0}
         isDark={true}
-        onCopy={noop}
+        copyText={() => ''}
         showThoughts={true}
         fontFamily="monospace"
         density="comfortable"
@@ -323,7 +580,7 @@ describe('MessageBlock — branch anchors motion', () => {
     ({ childNodeId, title: `Branch ${childNodeId}`, messageCount: 1, createdAt, status: 'idle' as const });
   const block = (anchors: ReturnType<typeof anchor>[]) => (
     <MessageBlock
-      m={reply} index={0} isDark={false} onEdit={noop} onCopy={noop} showThoughts={false}
+      m={reply} index={0} isDark={false} onEdit={noop} copyText={() => ''} showThoughts={false}
       fontFamily="inherit" density="comfortable" turnAnchors={anchors} onOpenBranch={noop}
     />
   );
@@ -440,6 +697,36 @@ describe('MessageBlock — expanded activity scroll', () => {
   });
 });
 
+describe('MessageBlock — thought block motion', () => {
+  const variants = ['card', 'terminal', 'plain'] as const;
+  const view = (variant: (typeof variants)[number], streaming: boolean) => (
+    <AgentBlockStyleOverride.Provider value={variant}>
+      <TermThoughtBlock text="Some reasoning" streaming={streaming} />
+    </AgentBlockStyleOverride.Provider>
+  );
+  afterEach(() => vi.restoreAllMocks());
+
+  it.each(variants)('%s: the live header leaves hidden and unclickable as the block finishes', (variant) => {
+    const { container, rerender } = render(view(variant, true));
+    rerender(view(variant, false));
+    const leaving = container.querySelector('.term-shimmer')!.closest('[aria-hidden="true"]') as HTMLElement;
+    expect(leaving).not.toBeNull();
+    expect(leaving.style.pointerEvents).toBe('none');
+  });
+
+  it.each(variants)('%s: a body the user toggles opens from 1px and closes from 1px under its height', (variant) => {
+    const { container, getByText } = render(view(variant, false));
+    const header = () => container.querySelector('[data-agent-block] [style*="cursor: pointer"]') as HTMLElement;
+    fireEvent.click(header());
+    const body = getByText('Some reasoning').closest('[data-reveal="disclosure"]') as HTMLElement;
+    expect(body.style.height).toBe('1px');
+
+    vi.spyOn(HTMLElement.prototype, 'offsetHeight', 'get').mockReturnValue(40);
+    fireEvent.click(header());
+    expect(body.style.height).toBe('39px');
+  });
+});
+
 describe('MessageBlock — thought activity sync', () => {
   function renderCardMessage(m: ChatMessage) {
     return render(
@@ -448,7 +735,7 @@ describe('MessageBlock — thought activity sync', () => {
           m={m}
           index={0}
           isDark={false}
-          onCopy={noop}
+          copyText={() => ''}
           showThoughts
           fontFamily="inherit"
           density="comfortable"
@@ -610,6 +897,32 @@ describe('MessageBlock — thought activity sync', () => {
     expect(queryByText(/Worked/)).toBeNull();
   });
 
+  it.each(['terminal', 'plain'] as const)('counts only the calls a thought block shows (%s)', (variant) => {
+    const m: ChatMessage = {
+      ...baseMsg,
+      role: 'assistant',
+      text: 'Done',
+      streaming: false,
+      toolCalls: [
+        { id: 't1', title: 'Read a.ts', kind: 'read', status: 'completed' },
+        { id: 't2', title: 'set_branch_overview', status: 'completed' },
+      ],
+      blocks: [
+        { id: 'b1', kind: 'thinking', rawText: 'Reading', streaming: false },
+        { id: 'b2', kind: 'tool', toolCallId: 't1', section: 'thinking', rawOffset: 7 },
+        { id: 'b3', kind: 'tool', toolCallId: 't2', section: 'thinking', rawOffset: 7 },
+        { id: 'b4', kind: 'answer', rawText: 'Done', streaming: false },
+      ],
+    };
+    const { container } = render(
+      <AgentBlockStyleOverride.Provider value={variant}>
+        <MessageBlock m={m} index={0} isDark={false} copyText={() => ''} showThoughts fontFamily="inherit" density="comfortable" />
+      </AgentBlockStyleOverride.Provider>,
+    );
+    expect(container.textContent).toMatch(/1 tool(?!s)/);
+    expect(container.textContent).not.toMatch(/2 tool/);
+  });
+
   it('keeps Thought for when a duration is known but there were no tools', () => {
     const { getByText, queryByText } = render(
       <AgentBlockStyleOverride.Provider value="card">
@@ -654,8 +967,8 @@ it('renders durable answered and skipped cards without pending node state', () =
 
 it('labels estimated USD costs with their unit and provenance', () => {
   const { getByTestId } = renderMessage({ role: 'assistant', text: 'done' }, { usageInfo: { charge: { amount: 0.0123, unit: 'USD', provenance: 'sdk_estimate' } } });
-  expect(getByTestId('turn-usage').textContent).toBe('usage estimated 0.0123 USD');
-  expect(getByTestId('turn-usage').title).toContain('sdk estimate');
+  expect(getByTestId('turn-usage').textContent).toBe('estimated 0.0123 USD');
+  expect((getByTestId('turn-usage').closest('[title]') as HTMLElement).title).toContain('sdk estimate');
 });
 
 describe('MessageBlock — durable agent timer', () => {
@@ -667,7 +980,7 @@ describe('MessageBlock — durable agent timer', () => {
   function renderCard(m: ChatMessage) {
     return render(
       <AgentBlockStyleOverride.Provider value="card">
-        <MessageBlock m={m} index={0} isDark={false} onCopy={noop} showThoughts fontFamily="inherit" density="comfortable" />
+        <MessageBlock m={m} index={0} isDark={false} copyText={() => ''} showThoughts fontFamily="inherit" density="comfortable" />
       </AgentBlockStyleOverride.Provider>,
     );
   }
@@ -775,7 +1088,7 @@ describe('MessageBlock — thought block motion', () => {
     vi.spyOn(HTMLElement.prototype, 'offsetHeight', 'get').mockReturnValue(28);
     const pending: ChatMessage = { ...baseMsg, id: 'a1', role: 'assistant', text: '', streaming: true, blocks: [] };
     const view = (m: ChatMessage) => card(
-      <MessageBlock m={m} index={0} isDark={false} onCopy={noop} showThoughts fontFamily="inherit" density="comfortable" />,
+      <MessageBlock m={m} index={0} isDark={false} copyText={() => ''} showThoughts fontFamily="inherit" density="comfortable" />,
     );
     const { container, getByRole, queryByRole, rerender } = render(view(pending));
     expect(getByRole('status', { name: 'loading' })).not.toBeNull();
@@ -844,7 +1157,7 @@ describe('MessageBlock — thought block motion', () => {
       blocks: [{ id: 'a1-b-0', kind: 'thinking', rawText: 'Resumed thought', streaming: true }],
     };
     const { container } = render(card(
-      <MessageBlock m={m} index={0} isDark={false} onCopy={noop} showThoughts fontFamily="inherit" density="comfortable" />,
+      <MessageBlock m={m} index={0} isDark={false} copyText={() => ''} showThoughts fontFamily="inherit" density="comfortable" />,
     ));
     expect(block(container).style.height).toBe('');
     expect(block(container).style.opacity).toBe('');

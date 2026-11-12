@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useState } from 'react';
 import { Toaster } from 'sonner';
 import TerminalShell from './components/terminal/TerminalShell';
 import { TOPBAR_HEIGHT } from './components/terminal/Topbar';
+import { MichiLinkScope } from './components/terminal/assistant/AssistantLinks';
 import ApiKeyGate from './components/ApiKeyGate';
 import FirstRunSetup from './components/FirstRunSetup';
 import { ConfirmDialogHost } from './components/ui/ConfirmDialog';
@@ -13,6 +14,7 @@ import { ChatProvider, useChatActions, useChatStore, useChatNodesSnapshot, activ
 import { PrefsProvider, usePrefs } from './state/prefs';
 import { AgentDomainProvider } from './state/agentDomain';
 import { WorkflowDomainProvider, type EndedBackgroundSubagentsOfWorkspace } from './state/workflowDomain';
+import { useHoldBackgroundSubagentFeeds } from './state/runningWork';
 import { DARK_PALETTES } from './components/terminal/tokens';
 import {
   runTranscript,
@@ -20,20 +22,14 @@ import {
   saveMarkdown,
   defaultExportFilename,
 } from './lib/exportWorkspace';
-import { stripSentinelsStreamingSafe } from './state/assistantParsing';
+import { exportPanelEvent, type ExportPanelRequest } from './state/appEvents';
+import { visibleDigestMarkdown } from './state/digest';
 import { startupMarkOnce } from './services/startupTrace';
 import AppErrorBoundary from './components/AppErrorBoundary';
 import { MotionRoot } from './motion/MotionRoot';
 import './index.css';
 
 const ExportPanel = React.lazy(() => import('./components/ExportPanel'));
-
-type ExportEventDetail = {
-  projectId?: string;
-  treeId?: string;
-  nodeIds?: string[];
-  digestNodeId?: string;
-};
 
 function exportTitleForThread(
   project: NonNullable<ReturnType<typeof useChatStore>['activeProject']>,
@@ -98,12 +94,11 @@ function ExportPanelManager() {
   }, [exportState]);
 
   useEffect(() => {
-    const onExport = async (event: Event) => {
+    const onExport = async (detail: ExportPanelRequest) => {
       const request = ++exportRequestRef.current;
       setOpen(true);
       setExportState({ kind: 'idle' });
 
-      const detail = (event as CustomEvent<ExportEventDetail | undefined>).detail;
       const projectId =
         detail?.projectId
         ?? (detail?.digestNodeId ? nodesRef.current[detail.digestNodeId]?.projectId : undefined);
@@ -117,13 +112,7 @@ function ExportPanelManager() {
       // immediately.
       if (detail?.digestNodeId) {
         const digestNode = nodesRef.current[detail.digestNodeId];
-        const raw = digestNode?.digest?.content ?? '';
-        // The digest content can carry the inline `[TITLE: ...]` and
-        // `[FOLLOW-UPS: ...]` PREAMBLE sentinels that the in-app renderer
-        // hides at view time. Strip them here so the exported markdown is
-        // what the user actually sees on screen.
-        const { visibleText } = stripSentinelsStreamingSafe(raw);
-        const markdown = visibleText.trim();
+        const markdown = visibleDigestMarkdown(digestNode?.digest?.content ?? '');
         if (!markdown) {
           setExportState({
             kind: 'error',
@@ -182,10 +171,10 @@ function ExportPanelManager() {
       }
     };
 
-    window.addEventListener('michi:toggle-export-panel', onExport);
+    const unsubscribe = exportPanelEvent.subscribe((detail) => { void onExport(detail); });
     return () => {
       exportRequestRef.current += 1;
-      window.removeEventListener('michi:toggle-export-panel', onExport);
+      unsubscribe();
     };
   }, [ensureCompleteHistory]);
 
@@ -310,7 +299,18 @@ function ChatWorkflowDomainProvider({ children }: { children: React.ReactNode })
   const onBackgroundSubagentsEnded = useCallback((ended: EndedBackgroundSubagentsOfWorkspace) => {
     dispatch({ type: 'background-subagents-ended', nodeId: ended.nodeId, workspaceId: ended.workspaceId, subagents: ended.subagents });
   }, [dispatch]);
-  return <WorkflowDomainProvider onBackgroundSubagentsEnded={onBackgroundSubagentsEnded}>{children}</WorkflowDomainProvider>;
+  return (
+    <WorkflowDomainProvider onBackgroundSubagentsEnded={onBackgroundSubagentsEnded}>
+      <BackgroundSubagentFeeds />
+      {children}
+    </WorkflowDomainProvider>
+  );
+}
+
+/** Keeps the feeds of workspaces with pending background agents live (useHoldBackgroundSubagentFeeds). */
+function BackgroundSubagentFeeds() {
+  useHoldBackgroundSubagentFeeds();
+  return null;
 }
 
 function App() {
@@ -322,12 +322,14 @@ function App() {
         <AuthGate>
           <AgentDomainProvider>
             <ChatWorkflowDomainProvider>
+            <MichiLinkScope>
             <ShellSwitcher />
             <FirstRunSetup />
             <ApiKeyGate />
             <DigestPromptListener />
             <ExportPanelManager />
             <ConfirmDialogHost />
+            </MichiLinkScope>
             </ChatWorkflowDomainProvider>
           </AgentDomainProvider>
         </AuthGate>

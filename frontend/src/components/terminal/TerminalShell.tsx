@@ -1,37 +1,48 @@
 import TerminalSettingsArea from './rail/SettingsMain';
 import { deferredComponent } from '../deferredComponent';
 import { useShellNavigation, type ShellLocation } from './useShellNavigation';
+import { navigateToNode } from '../../state/navigateToNode';
 import { useLinkOpening } from './useLinkOpening';
 import { useScheduledRunOpening } from './scheduled/useScheduledRunOpening';
 import React, { useEffect, useState } from 'react';
 import { useChatActions, useChatPanes, useChatProjects, useStructuralSelector } from '../../state/chatStore';
 import { paneScopeKey } from '../../state/paneState';
 import { useTerminalColors } from './useTerminalColors';
-import { useEdgeSwipe, useSwipeLeft } from '../../hooks/useEdgeSwipe';
-import TerminalSidebar from './Sidebar';
+import { animate, useMotionValue } from 'motion/react';
+import { useSwipeTrack, type SwipeTrack } from '../../hooks/useEdgeSwipe';
+import { useBackSwipe, useSystemBack } from '../../hooks/useBackNavigation';
+import { usePhoneLayout } from '../../hooks/usePhoneLayout';
+import { escLayerOpen, modalOpen, useBackLayer } from '../../lib/backStack';
+import { TRANSITION } from '../../motion/tokens';
+import { installTouchContextMenu } from '../../lib/touchContextMenu';
+import TerminalSidebar, { narrowOverlayWidth } from './Sidebar';
 import TerminalTopbar from './Topbar';
 import { RemoteRecoveryDrawer, RemoteRecoveryIndicator } from '../RemoteRecoveryBanner';
 import { RemoteAuthenticationDialog } from '../RemoteAuthenticationDialog';
 import { RemoteServiceRecoveryMonitor } from '../RemoteServiceRecoveryMonitor';
 import { useRemoteAuthentication } from '../../state/remoteAuthentication';
 import WarmFailedBanner from './WarmFailedBanner';
-import AskUserAlertBar from './AskUserAlertBar';
+import WorkspaceSyncNotice from './WorkspaceSyncNotice';
+import ShellNotices from './ShellNotices';
 import TerminalDashboard from './pages/Dashboard';
 import TerminalHome from './pages/Home';
 import NewWorkspaceDialog from '../NewWorkspaceDialog';
 import { NewWorkspaceAutoOpen } from './NewWorkspaceAutoOpen';
-import { usePrefs } from '../../state/prefs';
+import { usePrefs, useDigestEnabled } from '../../state/prefs';
 import { DrawerShell } from '../ui/DrawerShell';
 import { ModalShell } from '../ui/ModalShell';
 import type { PageId } from '../../state/commands';
+import { navPageEvent } from '../../state/appEvents';
+import type { MapView } from './pages/mapView';
 import { PROFILE_PAGE_ENABLED } from '../../state/featureFlags';
 import { IS_MAC } from '../../lib/platform';
 import { setManageWorkspaceId, useManageWorkspaceId } from '../../state/manageRoute';
 import { setManageAgentRoute, useManageAgentRoute } from '../../state/manageRoute';
 import { useAgentDomain } from '../../state/agentDomain';
 import { agentResourceKey, backendConnectionIdFromApiBase } from '../../state/agentIdentity';
-import { activeBackendApiBase, backendConnectionIdForWorkspace, getKnownBackendConnections } from '../../config/backendConnections';
+import { activeBackendApiBase, backendConnectionIdForWorkspace, getKnownBackendConnections, isLocalProject } from '../../config/backendConnections';
 import { AgentEnableBlockedError, createAgentDefinition, deleteAgentDefinition, disableAgentDefinition, duplicateAgentDefinition, enableAgentDefinition, getAgentDefinition, updateAgentDefinition } from '../../services/api';
+import { HttpResponseError } from '../../services/api/httpError';
 import type { AgentEnableBlockerV1, CreateAgentDefinitionRequestV1, RuntimeProfileV1 } from 'michi-shared';
 import { AgentDefinitionStatus } from 'michi-shared';
 import type { AgentDefinitionFormValue } from './agents/AgentDefinitionForm';
@@ -42,14 +53,7 @@ import { setPanePresenceDashboardVisible } from '../../state/panePresenceVisibil
 import { onOpenBackgroundWork, type OpenBackgroundWorkDetail } from './backgroundWork/backgroundWorkEvents';
 
 import { REMOTE_DIAGNOSTIC_AGENT_EVENT, type DiagnosticAgentRequest } from '../../services/remoteDiagnosticAgent';
-import { AssistantPanelHost, assistantPanelTakesEscape } from './assistant/AssistantPanel';
-import { escapeIsForPage, isInAssistantPanel } from './escapeLayers';
-import {
-  closeAssistantPanel,
-  getAssistantSnapshot,
-  openAssistantPanel,
-  toggleAssistantPanel,
-} from '../../state/assistant/assistantStore';
+import { escapeClosesPanelOverPage, escapeIsForPage, isInAssistantPanel } from './escapeLayers';
 import { isSystemWorkspace, withoutSystemWorkspaces } from '../../state/assistant/systemWorkspace';
 import { useReturnFromSystemWorkspace } from '../../state/assistant/userWorkspace';
 import { CreateSpaceDialog, OPEN_NATIVE_PAGE_EVENT, type NativePageRoute, type OpenNativePageRoute } from './spaces/SpacesPage';
@@ -57,21 +61,29 @@ import { SpacesSidebar, type SpacesSidebarCurrent } from './spaces/SpacesSidebar
 import { SpacesSettings } from './spaces/SpacesSettings';
 import { SpaceConversationWatcher } from './spaces/conversation/SpaceConversationWatcher';
 import { MemoryNotifications } from './settings/memory/MemoryNotifications';
+import { CompanionPanelHost } from './companion/CompanionPanel';
+import { CompanionNotifications } from './companion/CompanionNotifications';
+import { closeCompanionPanel, registerCompanionOpenSource, toggleCompanionPanel } from '../../state/companion/companionPanel';
 import { AreaRail, AreaTabs } from './rail/AreaRail';
 import { useRailBadges } from './rail/useRailBadges';
 import { ScheduledSidebar } from './rail/AreaSidebars';
 import type { SettingsLevel } from './rail/SettingsMain';
-import { openScheduledHome, requestScheduledJobDetail, setScheduledRoute, useScheduledRoute } from './scheduled/scheduledNav';
-import { META_AGENT_PAGE_TITLE, OPEN_SETTINGS_SECTION_EVENT } from './scheduled/metaAgent/metaAgentNav';
-import { useMetaAgentOverviewSnapshot } from './scheduled/metaAgent/useMetaAgentOverview';
-import { SpacesMetaChat, useMetaChatWindow, type SpacesChatView } from './spaces/metaChat';
+import { openScheduledHome, requestScheduledJobDetail, setScheduledRoute, useScheduledCrumb, useScheduledRoute } from './scheduled/scheduledNav';
+import { OPEN_SETTINGS_SECTION_EVENT, requestMetaAgentSettings } from './scheduled/metaAgent/metaAgentNav';
+import { pagesUpkeepTitle } from './scheduled/metaAgent/metaAgentCopy';
+import { useCompanionName } from '../../state/companion/companionName';
+import { useMetaAgentApprovalReview } from '../../state/metaAgent/useMetaAgent';
+import { useMetaAgentOverviewSnapshot } from '../../state/metaAgent/useMetaAgentOverview';
+import { SpacesMetaChat, type SpacesChatView } from './spaces/metaChat/SpacesMetaChat';
 import { ALL_TASKS, SPACES_HOME, areaForPage, entryPageForArea, type ShellArea, type SpacesHomeTarget } from '../../state/shellArea';
 import { settingsPageForRequest, type SettingsPage } from './rail/settingsPages';
+import type { SettingsHeaderAction } from './pages/settings/settingsPhone';
 import { SourcePopoverHost } from './source';
-import { dismissSourceBack, openExactSourcePopover, registerSourceNavigator, type SourceOrigin } from '../../state/sourceNav/sourceNav';
+import { dismissSourceBack, openExactSourcePopover, openSourcePopover, registerSourceNavigator, type SourceOrigin, type SourcePage } from '../../state/sourceNav/sourceNav';
 import { useSpaceTopbar } from '../../state/pages/spaceTopbar';
 import { OPEN_WORKSPACE_HOME_EVENT, isWorkspaceHomeTarget, type WorkspaceHomeTarget } from '../../state/pages/workspaceHomeNav';
 import { OPEN_ALL_TASKS_EVENT } from '../../state/pages/allTasksNav';
+import { isImeComposing } from '../../lib/ime';
 
 function readSavedSpaceRoute(): NativePageRoute {
   try {
@@ -89,16 +101,14 @@ function readSavedSpaceRoute(): NativePageRoute {
 const TerminalSpaces = React.lazy(() => import('./spaces/SpacesPage'));
 const TerminalSpaceView = React.lazy(() => import('./spaces/SpaceView'));
 
-const NARROW_THRESHOLD = 700;
-const TerminalMap = deferredComponent<{ onNav: (page: PageId) => void }>(() => import('./pages/Map'), <PageLoading />);
-const TerminalBranches = React.lazy(() => import('./pages/Branches'));
+/** A choice in the drawer may land a moment after the drawer closed (a workspace loading). */
+const ROOT_CHOICE_MS = 1500;
+const TerminalMap = deferredComponent<{ onNav: (page: PageId) => void; initialView?: MapView }>(() => import('./pages/Map'), <PageLoading />);
 const TerminalDigest = React.lazy(() => import('./pages/Digest'));
 const ArtifactsDrawer = React.lazy(() => import('./ArtifactsDrawer'));
 const BackgroundWorkDrawer = React.lazy(() => import('./backgroundWork/BackgroundWorkDrawer'));
 const TerminalWorkspaces = deferredComponent<{ onNav: (page: PageId) => void }>(() => import('./pages/Workspaces'), <PageLoading />);
 const TerminalWorkspaceManage = React.lazy(() => import('./pages/WorkspaceManage'));
-const TerminalTrash = React.lazy(() => import('./pages/Trash'));
-const TerminalArchived = React.lazy(() => import('./pages/Archived'));
 const TerminalProfile = React.lazy(() => import('./pages/Profile'));
 const TerminalScheduled = React.lazy(() => import('./pages/Scheduled'));
 const TerminalMetaAgentScheduled = React.lazy(() => import('./scheduled/metaAgent/MetaAgentDetail'));
@@ -116,15 +126,21 @@ function LazyPage({ children }: { children: React.ReactNode }) {
 
 export default function TerminalShell() {
   const cssVars = useTerminalColors();
-  const [width, setWidth] = useState<number>(
-    typeof window === 'undefined' ? 1440 : window.innerWidth,
-  );
+  // A long press on a touch screen opens the menu a right-click would.
+  useEffect(() => installTouchContextMenu(), []);
   const [spaceRoute, setSpaceRoute] = useState<NativePageRoute>(readSavedSpaceRoute);
   const [page, setPage] = useState<PageId>(() => {
     const saved = readSavedSpaceRoute();
     return saved.type === 'space' ? 'space' : 'home';
   });
   const area = areaForPage(page);
+  // The view Map opens on; `key` remounts an open Map when it changes.
+  const [mapStart, setMapStart] = useState<{ view: MapView; key: number }>({ view: 'graph', key: 0 });
+  // Settings › Digest. Off: the Digest page is unreachable and leaves if open.
+  const digestEnabled = useDigestEnabled();
+  useEffect(() => {
+    if (!digestEnabled && page === 'digest') setPage('dashboard');
+  }, [digestEnabled, page]);
   const [spacesHome, setSpacesHome] = useState<SpacesHomeTarget>(SPACES_HOME);
   const [spacesSettingsOpen, setSpacesSettingsOpen] = useState(false);
   const spacesSettingsReturnPage = React.useRef<PageId>('spaces');
@@ -136,12 +152,20 @@ export default function TerminalShell() {
   // one page. Opening it plainly starts on the list; a request for one page
   // opens on that page. Back to the list once the drawer is gone.
   const [settingsView, setSettingsView] = useState<SettingsLevel>('menu');
+  // A level open inside a Settings page (an item opened from Trash); the
+  // phone's header Back closes it before it leaves the page.
+  const settingsBackRef = React.useRef<(() => void) | null>(null);
+  // A page's primary action (New skill) in the phone drawer's header.
+  const [settingsAction, setSettingsAction] = useState<SettingsHeaderAction | null>(null);
   useEffect(() => {
     if (!settingsOpen && !settingsPresent) setSettingsView('menu');
   }, [settingsOpen, settingsPresent]);
   const scheduledRoute = useScheduledRoute();
   const scheduledJobId = scheduledRoute.kind === 'job' ? scheduledRoute.jobId : null;
   const metaAgentOpen = scheduledRoute.kind === 'meta-agent';
+  const scheduledCrumb = useScheduledCrumb();
+  // The upkeep page's crumb carries the agent's name, as its row and title do (DESIGN-v2 §1.5).
+  const companionName = useCompanionName();
   const metaAgentOverview = useMetaAgentOverviewSnapshot();
   // Managed jobs redirect to the system detail; their intermediate route is
   // not a destination to revisit with Back, even if opened before data loaded.
@@ -159,9 +183,8 @@ export default function TerminalShell() {
     window.addEventListener(OPEN_SETTINGS_SECTION_EVENT, onSection);
     return () => window.removeEventListener(OPEN_SETTINGS_SECTION_EVENT, onSection);
   }, []);
+  useMetaAgentApprovalReview(requestMetaAgentSettings);
   const [createSpaceOpen, setCreateSpaceOpen] = useState(false);
-  // Above everything that unmounts when leaving Spaces: the window keeps its form and box.
-  const chat = useMetaChatWindow();
   const lastConversationPageRef = React.useRef<PageId>(page);
   useEffect(() => { if (areaForPage(page) === 'conversations') lastConversationPageRef.current = page; }, [page]);
   React.useLayoutEffect(() => {
@@ -172,6 +195,9 @@ export default function TerminalShell() {
   const manageAgentRoute = useManageAgentRoute();
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [artifactsOpen, setArtifactsOpen] = useState(false);
+  /** The artifact the drawer opens once it is mounted (showArtifactInDrawer). */
+  const [artifactRequest, setArtifactRequest] = useState<string | null>(null);
+  const clearArtifactRequest = React.useCallback(() => setArtifactRequest(null), []);
   const [artifactsPresent, setArtifactsPresent] = useState(false);
   // Background work drawer: opened only by a user click (pane-title badge,
   // in-chat subagent/workflow card) through michi:open-background-work.
@@ -190,10 +216,28 @@ export default function TerminalShell() {
   const handleNav = React.useCallback((p: PageId) => {
     // Old navigation events may still refer to the removed All threads page.
     if (p === 'threads') p = 'home';
+    if (p === 'digest' && !digestEnabled) return;
+    // The Overview page was folded into Map › Doc; requests for it open Doc
+    // (remounting an open Map so it switches view rather than toggling shut).
+    if (p === 'branches') {
+      setSpacesSettingsOpen(false);
+      setSettingsOpen(false);
+      setMapStart((s) => ({ view: 'doc', key: s.key + 1 }));
+      setPage('map');
+      return;
+    }
+    if (p === 'map') setMapStart((s) => (s.view === 'graph' ? s : { view: 'graph', key: s.key + 1 }));
     if (p === 'settings') { setSettingsOpen(open => !open); return; }
+    // Trash, Archived and Skills are Settings pages; requests name them as pages.
+    if (p === 'trash' || p === 'archived' || p === 'skills') {
+      setSettingsPage(p);
+      setSettingsView('section');
+      setSettingsOpen(true);
+      return;
+    }
     setSpacesSettingsOpen(false);
     setSettingsOpen(false);
-    const TOGGLE_PAGES: PageId[] = ['branches', 'map', 'digest', 'workspaces'];
+    const TOGGLE_PAGES: PageId[] = ['map', 'digest', 'workspaces'];
     if (p === 'spaces') {
       const route: NativePageRoute = { type: 'spaces' };
       setSpacesHome(SPACES_HOME);
@@ -201,7 +245,7 @@ export default function TerminalShell() {
       try { sessionStorage.setItem('michi.native-page-route', JSON.stringify(route)); } catch { /* optional session restore */ }
     }
     setPage((current) => (TOGGLE_PAGES.includes(p) && current === p ? 'dashboard' : p));
-  }, []);
+  }, [digestEnabled]);
   const openSpaceRoute = React.useCallback((route: NativePageRoute) => {
     setSpacesSettingsOpen(false);
     setSpaceRoute(route);
@@ -263,7 +307,11 @@ export default function TerminalShell() {
     projects, hydrated,
     agentStatus,
   } = useChatProjects();
-  const { openPanes, tabPanes, pagePane, focusedPane, paneItems } = useChatPanes();
+  const { openPanes, tabPanes, pagePane, focusedPane, zoomedPane, paneItems } = useChatPanes();
+  // A phone shows one pane at a time: nothing to zoom. It also lays the
+  // <name> panel over the page (narrowMode below is the same predicate).
+  const phoneLayout = usePhoneLayout();
+  // What Pages shows, for the panel's messages from there (DESIGN-v2 §1.3) and the topbar's crumb.
   const spacesChatView = React.useMemo<SpacesChatView>(() => {
     if (page === 'space' && spaceRoute.type === 'space') {
       return { kind: 'page', backendConnectionId: spaceRoute.backendConnectionId, workspaceId: spaceRoute.workspaceId, pageId: spaceRoute.pageId };
@@ -282,6 +330,7 @@ export default function TerminalShell() {
     createThread,
     sendMessage,
     focusPane,
+    zoomPane,
     closePane,
     openPane,
     createBlankChild,
@@ -293,6 +342,7 @@ export default function TerminalShell() {
     activateTree,
     setFocusedNodeId,
     selectProject,
+    revealNode,
     revealBackendNode,
   } = useChatActions();
   const location = React.useMemo<ShellLocation>(() => ({
@@ -317,14 +367,16 @@ export default function TerminalShell() {
     const project = projects.find(item => item.id === entry.projectId);
     return !!project && !project.deletedAt && project.chatIds.includes(entry.nodeId) && !deletedNodeIdsKey.split('\0').includes(entry.nodeId);
   }, [projects, deletedNodeIdsKey]);
+  const navigationDeps = React.useMemo(() => ({
+    projects, activeProjectId: activeProject?.id ?? null, selectProject, openPane, openPaneInTree, activateTree, setFocusedNodeId,
+  }), [projects, activeProject?.id, selectProject, openPane, openPaneInTree, activateTree, setFocusedNodeId]);
   const navigation = useShellNavigation({
-    location, hydrated, restore: restoreLocation, isChatLive, isScheduledJobLive,
-    deps: { projects, activeProjectId: activeProject?.id ?? null, selectProject, openPane, openPaneInTree, activateTree, setFocusedNodeId },
+    location, hydrated, restore: restoreLocation, isChatLive, isScheduledJobLive, deps: navigationDeps,
   });
   const { canBack: canNavBack, canForward: canNavForward, onBack: navBack, onForward: navForward } = navigation;
-  // Overview, Map and Digest show the active workspace's thread: with the
+  // Map and Digest show the active workspace's thread: with the
   // assistant's hidden workspace active they return to the user's (as Home does).
-  useReturnFromSystemWorkspace(page === 'branches' || page === 'map' || page === 'digest', activeProject, projects, selectProject);
+  useReturnFromSystemWorkspace(page === 'map' || page === 'digest', activeProject, projects, selectProject);
   useLinkOpening();
   // Source links jump from Spaces to a conversation; the shell knows what Spaces
   // shows (for "Back to <page>") and how to return to it.
@@ -353,6 +405,24 @@ export default function TerminalShell() {
     if (spaceRoute.type !== 'space') return false;
     return openExactSourcePopover(spaceRoute, source, { page: { ...spaceRoute, title: spaceTopbar?.title ?? 'page' } });
   }, [spaceRoute, spaceTopbar?.title]);
+  // In Pages a conversation link in the panel opens its source popover over
+  // the page, so the user stays in Pages; elsewhere it opens the conversation
+  // (DESIGN-v2 §1.4). Registered only while Pages is the area on screen.
+  const spacesSourcePageRef = React.useRef<SourcePage | null>(null);
+  spacesSourcePageRef.current = page === 'space' && spaceRoute.type === 'space'
+    ? { backendConnectionId: spaceRoute.backendConnectionId, workspaceId: spaceRoute.workspaceId, pageId: spaceRoute.pageId, title: spaceTopbar?.title ?? 'page' }
+    : null;
+  React.useEffect(() => {
+    if (area !== 'spaces') return undefined;
+    return registerCompanionOpenSource('spaces', (target: { kind: string; id: string; messageId?: string }) => {
+      if (target.kind !== 'node') return false;
+      openSourcePopover({
+        target: { backendConnectionId: 'local', nodeId: target.id, messageId: target.messageId ?? null },
+        page: spacesSourcePageRef.current,
+      });
+      return true;
+    });
+  }, [area]);
   const [diagnosticRequest, setDiagnosticRequest] = useState<{ projectId: string; request: DiagnosticAgentRequest } | null>(null);
   const diagnosticPending = React.useRef(false);
   useEffect(() => {
@@ -375,7 +445,7 @@ export default function TerminalShell() {
     const { request } = diagnosticRequest;
     try {
       if (request.cancelled) return;
-      if (activeProject.backendConnectionId && activeProject.backendConnectionId !== 'local') throw new Error('Diagnostics require a local workspace.');
+      if (!isLocalProject(activeProject)) throw new Error('Diagnostics require a local workspace.');
       const nodeId = createThread();
       if (!nodeId) throw new Error('Could not create a local diagnostic conversation.');
       sendMessage(nodeId, request.prompt, request.binding);
@@ -404,12 +474,6 @@ export default function TerminalShell() {
       return null;
     }, [activeProject, slotPanes]),
   );
-
-  useEffect(() => {
-    const onResize = () => setWidth(window.innerWidth);
-    window.addEventListener('resize', onResize);
-    return () => window.removeEventListener('resize', onResize);
-  }, []);
 
   // Pause all CSS animations when the tab is hidden (GPU idle).
   useEffect(() => {
@@ -447,7 +511,9 @@ export default function TerminalShell() {
       if (remoteAuthenticationOpen) return;
       // The recovery drawer owns keyboard interaction, including Escape.
       if (remoteRecoveryOpen) return;
-      const meta = e.metaKey || e.ctrlKey;
+      // ⌘ or Ctrl, not both, as for the chords a Browser pane passes on
+      // (electron/paneShortcuts.ts); ⌃⌘ chords such as ⌃⌘F stay the system's.
+      const meta = e.metaKey !== e.ctrlKey;
       // Settings is an overlay: toggling it never navigates the page below it.
       if (meta && !e.shiftKey && !e.altKey && e.key === ',') {
         e.preventDefault();
@@ -494,25 +560,12 @@ export default function TerminalShell() {
         setPaletteOpen((v) => !v);
         return;
       }
-      // ⌘J toggles the assistant panel — inside inputs too, like ⌘K. Without
-      // an assistant on this backend it does nothing. In Spaces it minimizes
-      // or restores the Meta agent window instead.
-      if (meta && !e.shiftKey && !e.altKey && (e.key === 'j' || e.key === 'J')) {
+      // ⌘J opens, focuses or closes the <name> panel on Chat, ⇧⌘J on Today
+      // (DESIGN-v2 §1.2): in every area, Pages included, and inside inputs
+      // too, like ⌘K. The panel decides which of the three it is.
+      if (meta && !e.altKey && (e.key === 'j' || e.key === 'J')) {
         e.preventDefault();
-        if (areaForPage(page) === 'spaces') {
-          chat.toggleMinimized();
-          return;
-        }
-        // The assistant open as a pane on screen goes back to the floating
-        // panel: the pane closes (back to the user's workspace) and the panel
-        // opens on the same conversation.
-        const assistantNodeId = getAssistantSnapshot().info?.nodeId;
-        if (page === 'dashboard' && assistantNodeId && openPanes.includes(assistantNodeId)) {
-          closePane(assistantNodeId);
-          openAssistantPanel();
-          return;
-        }
-        toggleAssistantPanel();
+        toggleCompanionPanel(e.shiftKey ? 'today' : 'chat');
         return;
       }
       // ⌘F → dispatch per-pane find for the focused pane (works inside inputs).
@@ -537,10 +590,10 @@ export default function TerminalShell() {
       // this the shortcut would be swallowed whenever the user click-switched
       // into a pane.
       if (meta && !e.shiftKey && (e.key === 'w' || e.key === 'W')) {
-        // Typing in the assistant panel: ⌘W closes the panel, not a pane.
+        // Focus in the <name> panel: ⌘W closes the panel, not a pane.
         if (isInAssistantPanel(document.activeElement)) {
           e.preventDefault();
-          closeAssistantPanel();
+          closeCompanionPanel();
           return;
         }
         if (focusedPane) {
@@ -549,10 +602,25 @@ export default function TerminalShell() {
         }
         return;
       }
+      // ⇧⌘↩ zooms the focused pane to fill the strip, or ends the zoom. Like
+      // ⌘W it runs before the isEditable gate, because the focused pane's
+      // composer usually has focus (MentionEditor leaves this chord alone).
+      if (meta && e.shiftKey && !e.altKey && e.key === 'Enter' && !isImeComposing(e)) {
+        if (page !== 'dashboard' || phoneLayout || tabPanes || isInAssistantPanel(document.activeElement)) return;
+        const strip = openPanes.filter((id) => paneItems[id]?.kind !== 'browser');
+        if (zoomedPane) {
+          e.preventDefault();
+          zoomPane(null);
+        } else if (focusedPane && strip.length > 1 && strip.includes(focusedPane)) {
+          e.preventDefault();
+          zoomPane(focusedPane);
+        }
+        return;
+      }
       // ⌘[ / ⌘] step back / forward through visible page/chat history (browser-style;
       // crosses trees + workspaces). Placed before the isEditable gate — like
-      // ⌘K/⌘W — so it works while a pane's composer is auto-focused. Guarded by
-      // the store: no-op when the respective stack is empty.
+      // ⌘K/⌘W — so it works while a pane's composer is auto-focused. No-op when
+      // the respective stack is empty.
       if (meta && !e.shiftKey && !e.altKey && e.key === '[') {
         e.preventDefault();
         if (canNavBack) {
@@ -572,7 +640,7 @@ export default function TerminalShell() {
       // refocuses its composer when a reply finishes, which is exactly when
       // users reach for them. While typing on macOS only ⌘ counts, because
       // Ctrl+T is the system "transpose characters" binding in text fields.
-      const tMod = typing && IS_MAC ? e.metaKey : meta;
+      const tMod = typing && IS_MAC ? e.metaKey && !e.ctrlKey : meta;
       // ⌘T new thread → open home (thread is created on first send)
       if (tMod && !e.altKey && !e.shiftKey && (e.key === 't' || e.key === 'T')) {
         e.preventDefault();
@@ -595,15 +663,17 @@ export default function TerminalShell() {
         return;
       }
       if (typing) return;
-      // Escape on the page closes the ⌘J panel floating over it first (the
-      // panel handles Escape inside itself; an open menu or dialog keeps it).
-      if (assistantPanelTakesEscape(e)) {
+      // In a narrow window (the phone layout) the <name> panel lies over the
+      // page: the page's Esc closes it first. Docked beside the page it stays
+      // (only an Esc inside it closes it) and the page's Esc goes on below
+      // (DESIGN-v2 §1.2).
+      if (phoneLayout && escapeClosesPanelOverPage(e)) {
         e.preventDefault();
-        closeAssistantPanel();
+        closeCompanionPanel();
         return;
       }
       // What follows (clearing the selection, leaving the page) is for an Esc
-      // on the page itself: not one pressed in the ⌘J panel or that another
+      // on the page itself: not one pressed in the panel or that another
       // layer took, nor while a menu, a dialog or another Esc layer is open,
       // whose own listener may run after this one.
       if (e.key === 'Escape' && !escapeIsForPage(e, 'all')) return;
@@ -620,7 +690,7 @@ export default function TerminalShell() {
       // conversation — same destination as the topbar's
       // ‹ back crumb. Runs after the selection branch so a first Esc on the
       // Map clears the selection and a second one leaves the page.
-      if (e.key === 'Escape' && (page === 'branches' || page === 'map' || page === 'digest')) {
+      if (e.key === 'Escape' && (page === 'map' || page === 'digest')) {
         e.preventDefault();
         setPage('dashboard');
         return;
@@ -636,10 +706,8 @@ export default function TerminalShell() {
       if (!e.shiftKey && (e.key === 'z' || e.key === 'Z')) {
         e.preventDefault();
         const restoredRoot = restoreLastDeletion();
-        if (restoredRoot) {
-          openPane(restoredRoot);
-          setPage('dashboard');
-        }
+        // Deleting moved the shown thread on: reveal the root in its own.
+        if (restoredRoot) revealNode(restoredRoot);
         return;
       }
       // ⌘B toggle sidebar (Profile owns a fullscreen navigation rail).
@@ -666,7 +734,8 @@ export default function TerminalShell() {
       if (!e.shiftKey && e.key === '\\') {
         if (reopenCandidate) {
           e.preventDefault();
-          openPane(reopenCandidate);
+          // It may be another thread's chat: open it there, not in this slot.
+          navigateToNode(navigationDeps, reopenCandidate, activeProject?.id);
           setPage('dashboard');
         }
         return;
@@ -688,6 +757,7 @@ export default function TerminalShell() {
           break;
         case 'd':
         case 'D':
+          if (!digestEnabled) break;
           e.preventDefault();
           handleNav('digest');
           break;
@@ -700,7 +770,7 @@ export default function TerminalShell() {
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [hydrated, page, openPanes, slotPanes, focusedPane, focusedLastMessageId, reopenCandidate, focusPane, closePane, openPane, createBlankChild, restoreLastDeletion, selection, clearSelection, treeSelection, clearTreeSelection, selectAllTrees, prefs.sidebarCollapsed, setPref, handleNav, navBack, navForward, canNavBack, canNavForward, remoteAuthenticationOpen, remoteRecoveryOpen, settingsOpen, projects, chat.toggleMinimized]);
+  }, [hydrated, page, openPanes, slotPanes, focusedPane, zoomedPane, zoomPane, phoneLayout, tabPanes, paneItems, focusedLastMessageId, reopenCandidate, navigationDeps, activeProject?.id, focusPane, closePane, createBlankChild, restoreLastDeletion, revealNode, selection, clearSelection, treeSelection, clearTreeSelection, selectAllTrees, prefs.sidebarCollapsed, setPref, handleNav, digestEnabled, navBack, navForward, canNavBack, canNavForward, remoteAuthenticationOpen, remoteRecoveryOpen, settingsOpen, projects]);
 
   useEffect(() => {
     const onEvt = () => { if (hydrated) setNewWsOpen(true); };
@@ -709,7 +779,13 @@ export default function TerminalShell() {
   }, [hydrated]);
 
   useEffect(() => {
-    const onEvt = () => { if (hydrated) setArtifactsOpen((v) => !v); };
+    const onEvt = (event: CustomEvent<{ artifactId?: string } | null>) => {
+      if (!hydrated) return;
+      const artifactId = event.detail?.artifactId;
+      setArtifactRequest(artifactId ?? null);
+      if (artifactId) setArtifactsOpen(true);
+      else setArtifactsOpen((v) => !v);
+    };
     window.addEventListener('michi:toggle-artifacts', onEvt as EventListener);
     return () => window.removeEventListener('michi:toggle-artifacts', onEvt as EventListener);
   }, [hydrated]);
@@ -730,15 +806,10 @@ export default function TerminalShell() {
     if (backgroundWorkOpen && !backgroundWorkOwned) setBackgroundWorkOpen(false);
   }, [backgroundWorkOpen, backgroundWorkOwned]);
 
-  useEffect(() => {
-    const onEvt = (e: Event) => {
-      const detail = (e as CustomEvent<{ page?: PageId }>).detail;
-      if (detail?.page === 'settings') setSettingsOpen(true);
-      else if (detail?.page) handleNav(detail.page);
-    };
-    window.addEventListener('michi:nav-page', onEvt as EventListener);
-    return () => window.removeEventListener('michi:nav-page', onEvt as EventListener);
-  }, [handleNav]);
+  useEffect(() => navPageEvent.subscribe(({ page }) => {
+    if (page === 'settings') setSettingsOpen(true);
+    else handleNav(page);
+  }), [handleNav]);
 
   useEffect(() => {
     const onOpenManage = (e: Event) => {
@@ -763,8 +834,27 @@ export default function TerminalShell() {
     && !(agentStatus && agentStatus.capabilities.apiKeys && !agentStatus.hasRequiredKey);
   const autoOpenNewWorkspace = React.useCallback(() => setNewWsOpen(true), []);
 
-  const narrowMode = width < NARROW_THRESHOLD;
+  const narrowMode = usePhoneLayout();
   const [narrowOverlayOpen, setNarrowOverlayOpen] = useState(false);
+  // The phone's page Back: what was opened from within the page since the
+  // last destination picked in the drawer, which starts afresh as a tab
+  // does. With nothing to go back to, a back swipe opens the drawer. A
+  // destination is a root when it changed with the drawer open, or as the
+  // first change after a choice in it (which closes it at once). Home is
+  // always one, however it was reached (the topbar's +, a deleted thread).
+  const overlayOpenRef = React.useRef(narrowOverlayOpen);
+  const overlayChoiceAtRef = React.useRef(-Infinity);
+  const noteOverlayChoice = React.useCallback(() => { overlayChoiceAtRef.current = performance.now(); }, []);
+  const isRootNavigation = React.useCallback((to: ShellLocation) => {
+    const root = to.page === 'home' || overlayOpenRef.current || performance.now() - overlayChoiceAtRef.current < ROOT_CHOICE_MS;
+    overlayChoiceAtRef.current = -Infinity;
+    return root;
+  }, []);
+  const phoneNavigation = useShellNavigation({
+    location, hydrated, restore: restoreLocation, isChatLive, isScheduledJobLive, deps: navigationDeps, isRoot: isRootNavigation,
+  });
+  // After the history above recorded this commit's location (its effect runs first).
+  React.useLayoutEffect(() => { overlayOpenRef.current = narrowOverlayOpen; }, [narrowOverlayOpen]);
   // Closing the overlay when the window grows back to wide.
   useEffect(() => {
     if (!narrowMode && narrowOverlayOpen) setNarrowOverlayOpen(false);
@@ -790,14 +880,69 @@ export default function TerminalShell() {
   // Profile owns its own navigation rail, so the application sidebar stays
   // out of the layout without overwriting the user's persisted preference.
   const profileFullscreen = page === 'profile';
-  // A swipe right from the left screen edge opens the narrow drawer, and a
-  // swipe left anywhere closes it again.
-  const openNarrowOverlay = React.useCallback(() => setNarrowOverlayOpen(true), []);
-  const dismissNarrowOverlay = React.useCallback(() => setNarrowOverlayOpen(false), []);
-  const drawerSwipeEnabled = narrowMode && !profileFullscreen
-    && !settingsOpen && !paletteOpen && !remoteAuthenticationOpen && !remoteRecoveryOpen;
-  useEdgeSwipe(drawerSwipeEnabled && !narrowOverlayOpen, openNarrowOverlay);
-  useSwipeLeft(drawerSwipeEnabled && narrowOverlayOpen, dismissNarrowOverlay);
+  // Back on a phone (lib/backStack.ts): the page steps back through
+  // phoneNavigation, sliding away with the finger; the drawer closes. Open
+  // layers above register their own.
+  const contentColRef = React.useRef<HTMLDivElement>(null);
+  useBackLayer(narrowMode && phoneNavigation.canBack, {
+    level: 'page',
+    back: phoneNavigation.onBack,
+    swipe: { panel: () => contentColRef.current, exit: 'slide' },
+  });
+  // A swipe right closes nothing on the open drawer (only Back does).
+  useBackLayer(narrowMode && narrowOverlayOpen, { back: () => setNarrowOverlayOpen(false), swipe: false });
+  useSystemBack(narrowMode);
+  // The drawer follows a swipe: right from the left edge with nothing to go
+  // back to opens it, left anywhere closes it.
+  const sidebarX = useMotionValue<number | string>('-100%');
+  const sidebarScrim = useMotionValue(0);
+  const [sidebarDragging, setSidebarDragging] = useState(false);
+  const shellRef = React.useRef<HTMLDivElement>(null);
+  const settleSidebar = React.useCallback((x: number, scrim: number, then: () => void) => {
+    const transition = { duration: TRANSITION.enter.duration, ease: TRANSITION.enter.ease };
+    animate(sidebarX, x, transition);
+    void animate(sidebarScrim, scrim, transition).then(then, then);
+  }, [sidebarX, sidebarScrim]);
+  const openSidebarTrack = React.useCallback((): SwipeTrack | null => {
+    if (profileFullscreen) return null;
+    const width = narrowOverlayWidth();
+    sidebarX.stop();
+    sidebarScrim.stop();
+    setSidebarDragging(true);
+    setNarrowOverlayOpen(true);
+    return {
+      distance: width,
+      move: (travel) => {
+        const shown = Math.min(travel, width);
+        sidebarX.set(shown - width);
+        sidebarScrim.set(shown / width);
+      },
+      commit: () => settleSidebar(0, 1, () => setSidebarDragging(false)),
+      cancel: () => settleSidebar(-width, 0, () => { setNarrowOverlayOpen(false); setSidebarDragging(false); }),
+    };
+  }, [profileFullscreen, sidebarX, sidebarScrim, settleSidebar]);
+  const closeSidebarTrack = React.useCallback((): SwipeTrack | null => {
+    // A menu or a modal over the drawer is what a swipe would close first.
+    if (escLayerOpen() || modalOpen()) return null;
+    const aside = shellRef.current?.querySelector<HTMLElement>('aside.terminal-sidebar');
+    const width = aside?.getBoundingClientRect().width || narrowOverlayWidth();
+    sidebarX.stop();
+    sidebarScrim.stop();
+    setSidebarDragging(true);
+    return {
+      distance: width,
+      move: (travel) => {
+        const hidden = Math.min(travel, width);
+        sidebarX.set(-hidden);
+        sidebarScrim.set(1 - hidden / width);
+      },
+      commit: () => settleSidebar(-width, 0, () => { setNarrowOverlayOpen(false); setSidebarDragging(false); }),
+      cancel: () => settleSidebar(0, 1, () => setSidebarDragging(false)),
+    };
+  }, [sidebarX, sidebarScrim, settleSidebar]);
+  useBackSwipe(narrowMode && hydrated, openSidebarTrack);
+  useSwipeTrack(narrowMode && narrowOverlayOpen, -1, 'anywhere', closeSidebarTrack);
+  const sidebarDrag = React.useMemo(() => ({ x: sidebarX, scrim: sidebarScrim, active: sidebarDragging }), [sidebarX, sidebarScrim, sidebarDragging]);
   const sidebarCollapsedEffective = profileFullscreen
     || (narrowMode ? !narrowOverlayOpen : prefs.sidebarCollapsed);
   const handleToggleSidebarEffective = React.useCallback(() => {
@@ -824,11 +969,18 @@ export default function TerminalShell() {
     return () => window.removeEventListener('michi:goto-home', onEvt as EventListener);
   }, []);
 
+  // Inside a Settings page, Back (the header's, Esc, the phone's) first
+  // closes a level open in it, then returns to the page list.
+  const settingsStepBack = settingsView === 'section'
+    ? () => { if (settingsBackRef.current) settingsBackRef.current(); else setSettingsView('menu'); }
+    : undefined;
+
   return (
     <>
     <PaneViewStateProvider items={paneItems}>
     <PanePresentationProvider ids={openPanes} items={paneItems} focusedPane={focusedPane} scope={paneScopeKey(activeProject, pagePane)} enabled={hydrated && page === 'dashboard'}>
     <div
+      ref={shellRef}
       className="terminal-shell"
       data-sidebar-layout={profileFullscreen ? 'hidden' : narrowMode ? 'overlay' : 'docked'}
       style={{
@@ -864,19 +1016,20 @@ export default function TerminalShell() {
         // Narrow windows have none: their drawer carries the areas instead.
         sidebarRail={!profileFullscreen && !narrowMode && sidebarCollapsedEffective}
         onToggleSidebar={handleToggleSidebarEffective}
+        phoneBack={narrowMode && phoneNavigation.canBack ? phoneNavigation.onBack : undefined}
         onNewThread={() => { setPage('home'); if (narrowMode) setNarrowOverlayOpen(false); }}
         onOpenPalette={() => { if (hydrated) setPaletteOpen(true); }}
         artifactsOpen={artifactsOpen}
         remoteRecoveryControl={<RemoteRecoveryIndicator onOpenDetails={openRemoteRecovery} />}
         spacesCrumb={spacesSettingsOpen ? 'Settings' : page === 'spaces' ? (spacesHome.kind === 'all-tasks' ? 'All tasks' : spacesChatView.kind === 'workspace' ? spacesChatView.name : 'Home') : undefined}
         onAreaHome={page === 'scheduled' ? openScheduledHome : undefined}
-        areaCrumb={page === 'scheduled' && metaAgentOpen ? META_AGENT_PAGE_TITLE : undefined}
-        spacesAssistant={area === 'spaces' ? { open: !chat.state.minimized, onToggle: chat.toggleMinimized } : undefined}
+        areaCrumb={page === 'scheduled' ? (metaAgentOpen ? pagesUpkeepTitle(companionName) : scheduledCrumb ?? undefined) : undefined}
       />
       <RemoteServiceRecoveryMonitor />
       <RemoteAuthenticationDialog />
       {hydrated && <WarmFailedBanner />}
-      {hydrated && <AskUserAlertBar onNav={handleNav} />}
+      {hydrated && <WorkspaceSyncNotice />}
+      {hydrated && <ShellNotices />}
       <div className="terminal-body" style={{ flex: 1, display: 'flex', minHeight: 0, gap: 'var(--term-content-gap, 0px)', position: 'relative' }}>
         {!profileFullscreen && !narrowMode && <ShellRail area={area} onSelect={selectArea} settingsOpen={settingsOpen} />}
         {!profileFullscreen && (
@@ -887,11 +1040,9 @@ export default function TerminalShell() {
                 onOpenHome={() => { handleNav('spaces'); closeNarrowOverlay(); }}
                 onOpenWorkspace={(target) => { openWorkspaceHome(target); closeNarrowOverlay(); }}
                 onOpenPage={(target) => { openSpaceRoute({ type: 'space', ...target }); closeNarrowOverlay(); }}
-                onOpenAssistant={() => { chat.restore(); closeNarrowOverlay(); }}
                 onOpenAllTasks={() => { openAllTasks(); closeNarrowOverlay(); }}
-                onOpenSettings={() => { if (!spacesSettingsOpen) spacesSettingsReturnPage.current = page; setPage('spaces'); setSpacesSettingsOpen(true); chat.minimize(); closeNarrowOverlay(); }}
+                onOpenSettings={() => { if (!spacesSettingsOpen) spacesSettingsReturnPage.current = page; setPage('spaces'); setSpacesSettingsOpen(true); closeNarrowOverlay(); }}
                 settingsOpen={spacesSettingsOpen}
-                assistantOpen={!chat.state.minimized}
                 onNewSpace={() => setCreateSpaceOpen(true)}
               />
             ) : area === 'scheduled' ? (
@@ -906,6 +1057,8 @@ export default function TerminalShell() {
             narrowMode={narrowMode}
             narrowOverlayOpen={narrowOverlayOpen}
             onCloseOverlay={() => setNarrowOverlayOpen(false)}
+            overlayDrag={sidebarDrag}
+            onOverlayChoice={noteOverlayChoice}
             overlayHeader={<ShellAreaTabs area={area} settingsOpen={settingsOpen} onSelect={(next) => {
               selectArea(next);
               // Settings opens its own drawer; other areas swap this drawer's list.
@@ -913,7 +1066,11 @@ export default function TerminalShell() {
             }} />}
           />
         )}
-        <div className="terminal-content-col" style={{ flex: 1, display: 'flex', flexDirection: 'column', minHeight: 0, minWidth: 0 }}>
+        {/* Under the open phone drawer nothing here takes a touch. iOS picks
+            the view a drag scrolls from composited layers, not the DOM, so a
+            drag over the glass drawer or its scrim could scroll the transcript
+            beneath; without pointer events it has no hit region to be found by. */}
+        <div ref={contentColRef} className="terminal-content-col" style={{ flex: 1, display: 'flex', flexDirection: 'column', minHeight: 0, minWidth: 0, pointerEvents: narrowMode && narrowOverlayOpen ? 'none' : undefined }}>
           {/* Keep the data barrier, not a root-level rendering barrier. */}
           {!hydrated ? (
             <div role="status" aria-label="Loading workspaces" style={{ flex: 1, display: 'grid', placeItems: 'center', color: 'var(--term-muted)', fontSize: 'var(--fs-md)' }}>
@@ -921,30 +1078,30 @@ export default function TerminalShell() {
             </div>
           ) : <>
           {page === 'home' && <TerminalHome onSubmitted={() => setPage('dashboard')} />}
-          <SpacesMetaChat controller={chat} active={area === 'spaces'} view={spacesChatView}>
-            {spacesSettingsOpen ? <SpacesSettings onBack={() => { setSpacesSettingsOpen(false); setPage(spacesSettingsReturnPage.current); }} /> : <>
+          {/* Pages has no window of its own: this tells the panel what Pages shows. */}
+          <SpacesMetaChat active={area === 'spaces'} view={spacesChatView}>
+            {area === 'spaces' && (spacesSettingsOpen ? <SpacesSettings onBack={() => { setSpacesSettingsOpen(false); setPage(spacesSettingsReturnPage.current); }} /> : <>
               {page === 'spaces' && <LazyPage><TerminalSpaces target={spacesHome} onOpenPage={(target) => openSpaceRoute({ type: 'space', ...target })} /></LazyPage>}
               {page === 'space' && spaceRoute.type === 'space' && <LazyPage><TerminalSpaceView route={spaceRoute} onBack={() => handleNav('spaces')} onOpenPage={(target) => openSpaceRoute({ type: 'space', ...target })} onOpenSource={openSpaceSource} /></LazyPage>}
-            </>}
+            </>)}
           </SpacesMetaChat>
           {page === 'dashboard' && <TerminalDashboard />}
-          {page === 'branches' && <LazyPage><TerminalBranches onNav={handleNav} /></LazyPage>}
-          {page === 'map' && <LazyPage><TerminalMap onNav={handleNav} /></LazyPage>}
-          {page === 'digest' && <LazyPage><TerminalDigest onNav={handleNav} /></LazyPage>}
+          {page === 'map' && <LazyPage><TerminalMap key={mapStart.key} initialView={mapStart.view} onNav={handleNav} /></LazyPage>}
+          {page === 'digest' && digestEnabled && <LazyPage><TerminalDigest onNav={handleNav} /></LazyPage>}
           {page === 'workspaces' && <LazyPage><TerminalWorkspaces onNav={handleNav} /></LazyPage>}
           {page === 'workspace-manage' && (
             <LazyPage>
               <TerminalWorkspaceManage workspaceId={manageWorkspaceId} onNav={handleNav} />
             </LazyPage>
           )}
-          {page === 'trash' && <LazyPage><TerminalTrash onNav={handleNav} /></LazyPage>}
           {page === 'scheduled' && (metaAgentOpen ? <LazyPage><TerminalMetaAgentScheduled /></LazyPage> : <LazyPage><TerminalScheduled onNav={handleNav} /></LazyPage>)}
-          {page === 'archived' && <LazyPage><TerminalArchived onNav={handleNav} /></LazyPage>}
           {page === 'profile' && PROFILE_PAGE_ENABLED && <LazyPage><TerminalProfile onNav={handleNav} /></LazyPage>}
           {page === 'agents' && <LazyPage><AgentManagementLibrary onNav={handleNav} /></LazyPage>}
           {page === 'agent-manage' && <LazyPage><AgentManagementEditor route={manageAgentRoute} onNav={handleNav} /></LazyPage>}
           </>}
         </div>
+        {/* Shell-level and docked right of every page (over the page in a narrow window). */}
+        {hydrated && <CompanionPanelHost narrow={narrowMode} page={page} />}
       </div>
       {hydrated && paletteOpen && (
         <React.Suspense fallback={null}>
@@ -981,9 +1138,13 @@ export default function TerminalShell() {
           page to the list. A wider window shows Settings as a window over the app. */}
       {narrowMode ? (
         <DrawerShell open={settingsOpen} title="Settings" width={720} motion={drawerMotion} onPresenceChange={setSettingsPresent}
-          onClose={() => { if (settingsView === 'section') setSettingsView('menu'); else setSettingsOpen(false); }}
-          closeControl="back">
-          <TerminalSettingsArea page={settingsPage} onPageChange={setSettingsPage} view={settingsView} onViewChange={setSettingsView} stacked workspaceReady={hydrated} onNav={handleNav} />
+          onClose={settingsStepBack ?? (() => setSettingsOpen(false))}
+          onBack={settingsStepBack}
+          closeControl="back"
+          headerActions={settingsView === 'section' && settingsAction ? <button type="button" className="settings-header-action"
+            aria-label={settingsAction.label} onClick={settingsAction.onClick}>{settingsAction.short ?? settingsAction.label}</button> : undefined}>
+          <TerminalSettingsArea page={settingsPage} onPageChange={setSettingsPage} view={settingsView} onViewChange={setSettingsView} stacked workspaceReady={hydrated} onNav={handleNav} backRef={settingsBackRef}
+            onHeaderAction={setSettingsAction} />
         </DrawerShell>
       ) : (
         <ModalShell open={settingsOpen} onClose={() => setSettingsOpen(false)} title="Settings" width={1080} maxHeight="calc(100vh - 48px)" layer="window">
@@ -991,15 +1152,16 @@ export default function TerminalShell() {
         </ModalShell>
       )}
       <RemoteRecoveryDrawer open={remoteRecoveryOpen} onClose={closeRemoteRecovery} motion={drawerMotion} onPresenceChange={setRemoteRecoveryPresent} />
-      {hydrated && area !== 'spaces' && <AssistantPanelHost page={page} />}
       {hydrated && (artifactsOpen || artifactsPresent) && (
         <React.Suspense fallback={null}>
-          <ArtifactsDrawer key={activeProject?.id ?? 'none'} open={artifactsOpen} motion={drawerMotion} onPresenceChange={setArtifactsPresent} onClose={() => { setArtifactsOpen(false); }} />
+          <ArtifactsDrawer key={activeProject?.id ?? 'none'} open={artifactsOpen} motion={drawerMotion} onPresenceChange={setArtifactsPresent} onClose={() => { setArtifactsOpen(false); }}
+            openArtifactId={artifactRequest} onOpenArtifactHandled={clearArtifactRequest} />
         </React.Suspense>
       )}
       {hydrated && <SourcePopoverHost />}
       {hydrated && <SpaceConversationWatcher page={page} />}
-      {hydrated && <MemoryNotifications />}
+      {hydrated && <MemoryNotifications noticeReady={prefs.onboardingCompletedAt != null && userProjectCount > 0} />}
+      {hydrated && <CompanionNotifications />}
       {hydrated && backgroundWork && (backgroundWorkShown || backgroundWorkPresent) && (
         <React.Suspense fallback={null}>
           <BackgroundWorkDrawer
@@ -1052,10 +1214,9 @@ function AgentManagementLibrary({ onNav }: { onNav: (page: PageId) => void }) {
       if (!cancelled) { setError(null); setFeatureUnavailable(false); }
     }).catch((reason) => {
       if (!cancelled) {
-        const message = reason instanceof Error ? reason.message : String(reason);
-        const unavailable = message.includes('404');
+        const unavailable = reason instanceof HttpResponseError && reason.status === 404;
         setFeatureUnavailable(unavailable);
-        setError(unavailable ? null : message);
+        setError(unavailable ? null : reason instanceof Error ? reason.message : String(reason));
       }
     }).finally(() => { if (!cancelled) setLoading(false); });
     return () => { cancelled = true; };

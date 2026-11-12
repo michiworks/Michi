@@ -5,10 +5,16 @@
 export type KiroToolNameResolver = (toolCall: Record<string, any> | undefined) => string | undefined;
 
 /** ACP titles can be prose. Only the agent's own name for the call, explicit
- * provider metadata or known exact built-in identifiers can become a
- * reusable tool grant. */
-export function acpPermissionToolName(toolCall: any, meta?: any, resolveName?: KiroToolNameResolver): string | undefined {
-    return agentToolName(toolCall, resolveName) ?? providerToolName(toolCall, meta) ?? builtinTitle(toolCall);
+ * provider metadata, a tool of Michi's MCP server (hostToolRequestName) or
+ * known exact built-in identifiers can become a reusable tool grant.
+ * `calledAs`, the name the call's tool_call update gave it (see
+ * KiroToolCallNames), is read for Michi's tools only: built-in requests keep
+ * the names saved grants were made under. Every Michi tool reaches the
+ * host's policy by name this way, not only a few listed as built-ins, so
+ * one the host gates itself gets no second ACP prompt. */
+export function acpPermissionToolName(toolCall: any, meta?: any, resolveName?: KiroToolNameResolver, calledAs?: string): string | undefined {
+    return agentToolName(toolCall, resolveName) ?? providerToolName(toolCall, meta)
+        ?? hostToolRequestName(toolCall, meta, calledAs) ?? builtinTitle(toolCall);
 }
 
 function agentToolName(toolCall: any, resolveName?: KiroToolNameResolver): string | undefined {
@@ -35,9 +41,6 @@ function kiroToolId(meta?: any): string | undefined {
 const ACP_BUILTIN_TOOL_NAMES = new Set([
     'read', 'write', 'edit', 'bash', 'Bash', 'Read', 'Write', 'Edit',
     'fs_read', 'fs_write', 'execute_bash', 'use_aws',
-    '@michi/send_to_thread',
-    // Michi Memory: the host's chat policy runs all but delete without a prompt.
-    '@michi/memory_search', '@michi/memory_save', '@michi/memory_update', '@michi/memory_delete',
 ]);
 
 /**
@@ -92,12 +95,17 @@ export function canonicalKiroToolName(toolName: string): string {
  * Tool ids and update names come before the title because a shell request
  * is titled with its command (v3) or a description (v2), which may itself be
  * a built-in name such as `write`. Any other update name falls back to the
- * title, as before.
+ * title, as before: a built-in name, else a Michi tool as a chat request
+ * names it (hostToolRequestName).
  */
 export function kiroBrokerToolName(toolCall: any, meta?: any, calledAs?: string, resolveName?: KiroToolNameResolver): string {
     const name = agentToolName(toolCall, resolveName) ?? providerToolName(toolCall, meta) ?? kiroToolId(meta)
-        ?? kiroBuiltinName(calledAs) ?? builtinTitle(toolCall);
-    return name ? canonicalKiroToolName(name) : 'unknown';
+        ?? kiroBuiltinName(calledAs) ?? builtinTitle(toolCall) ?? hostToolRequestName(toolCall, meta, calledAs);
+    if (!name) return 'unknown';
+    // Michi's own tools by their own names, as the other runtimes send them; grant keys keep `@michi/`.
+    // A v3 tool id (`mcp_michi_<tool>`) names one only as hostToolRequestName reads it.
+    const host = hostTool(name) ?? (name === kiroToolId(meta) ? hostTool(hostToolRequestName(toolCall, meta, calledAs)) : undefined);
+    return host ?? canonicalKiroToolName(name);
 }
 
 function kiroBuiltinName(name: string | undefined): string | undefined {
@@ -114,6 +122,61 @@ const HOST_MCP_SERVER = 'michi';
 function kiroMcpToolName(name: string): AcpMcpToolName | undefined {
     const match = /^@([^/\s]+)\/(.+)$/.exec(name) ?? /^([^:\s]+)::(.+)$/.exec(name);
     return match ? { server: match[1], tool: match[2] } : undefined;
+}
+
+/** An MCP tool name, not prose. */
+const HOST_TOOL = /^[A-Za-z_][\w-]*$/;
+
+/** The tool a Kiro MCP name of a Michi tool names (kiroMcpToolName: `@michi/<tool>`, `michi::<tool>`). */
+function hostTool(name: string | undefined): string | undefined {
+    const mcp = name === undefined ? undefined : kiroMcpToolName(name);
+    return mcp?.server === HOST_MCP_SERVER && HOST_TOOL.test(mcp.tool) ? mcp.tool : undefined;
+}
+
+/** The tool of a title that is exactly `@michi/<tool>`, as kiro-cli titles a call of Michi's MCP server. */
+function hostToolOfTitle(toolCall: any): string | undefined {
+    const title = toolCall?.title;
+    return typeof title === 'string' && title.startsWith(`@${HOST_MCP_SERVER}/`) ? hostTool(title) : undefined;
+}
+
+/** Kiro's name for a Michi tool, which chat grants and the host's policy read. */
+function hostToolName(tool: string | undefined): string | undefined {
+    return tool === undefined ? undefined : `@${HOST_MCP_SERVER}/${tool}`;
+}
+
+/**
+ * kiro-cli's identity of the MCP tool a permission request runs: v3's
+ * `_meta.kiro.mcpTool.identity`, v2's `_meta.mcpToolIdentity` (kiro-cli
+ * 3.1.0). kiro-cli writes it, not the model.
+ */
+function kiroMcpIdentity(meta: any): AcpMcpToolName | undefined {
+    const identity = meta?.kiro?.mcpTool?.identity ?? meta?.mcpToolIdentity;
+    const server = identity?.serverName;
+    const tool = identity?.toolName;
+    return typeof server === 'string' && server && typeof tool === 'string' && tool ? { server, tool } : undefined;
+}
+
+/**
+ * The tool of Michi's MCP server a permission request runs, by Kiro's name
+ * for it (`@michi/<tool>`). kiro-cli 3.1.0 names an MCP call in its identity
+ * (kiroMcpIdentity), which settles it: v3 titles the request
+ * `@michi/<tool>` with tool id `mcp_michi_<tool>`, v2 titles it
+ * `Running: @michi/<tool>`. Without that identity, kiro-cli's other name
+ * for the call (v3's tool id, on the request or on its toolCall, the call's
+ * tool_call update: `calledAs`) must name the same Michi tool as a title
+ * that is exactly `@michi/<tool>`, or name one itself; with neither, that
+ * title alone does. A request kiro-cli names any other way is no Michi
+ * tool, whatever its title: v3 titles a shell request with its command,
+ * which the model writes.
+ */
+function hostToolRequestName(toolCall: any, meta: any, calledAs: string | undefined): string | undefined {
+    const identity = kiroMcpIdentity(meta);
+    if (identity) return identity.server === HOST_MCP_SERVER && HOST_TOOL.test(identity.tool) ? hostToolName(identity.tool) : undefined;
+    const titled = hostToolOfTitle(toolCall);
+    const named = kiroToolId(meta) ?? kiroToolId(toolCall?._meta) ?? (calledAs?.trim() || undefined);
+    if (named === undefined) return hostToolName(titled);
+    const sameTool = titled !== undefined && (named === titled || named === `mcp_${HOST_MCP_SERVER}_${titled}`);
+    return hostToolName(hostTool(named) ?? (sameTool ? titled : undefined));
 }
 
 /** A title that is an identifier rather than prose: Kiro titles some calls with the bare tool name. */

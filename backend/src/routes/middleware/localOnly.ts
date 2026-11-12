@@ -1,7 +1,6 @@
 import type { NextFunction, Request, RequestHandler, Response } from 'express';
+import { isLoopbackHostname } from 'michi-runtime/internal/core/loopback';
 import { isLocalControlRequest } from './localControl';
-
-const LOCAL_HOSTNAMES = new Set(['127.0.0.1', 'localhost', '[::1]']);
 
 function loopbackHost(req: Request): boolean {
   let hostname = '';
@@ -10,7 +9,7 @@ function loopbackHost(req: Request): boolean {
   } catch {
     // Unparseable Host header: not loopback.
   }
-  return LOCAL_HOSTNAMES.has(hostname);
+  return isLoopbackHostname(hostname);
 }
 
 /**

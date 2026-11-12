@@ -4,9 +4,9 @@ import { CHATS_WORKSPACE_ID, useChatStore, useStructuralSelector } from '../../.
 import type { ChatNodeState } from '../../../state/chatTypes';
 import ManageComposer, { type ManageComposerHandle } from '../manage/ManageComposer';
 import { HomeWorkspaceChip } from '../HomeWorkspaceChip';
-import { buildContinueItems } from './homeContinue';
 import { useMinuteClock } from '../content/home/useMinuteClock';
 import { isSystemWorkspace } from '../../../state/assistant/systemWorkspace';
+import { isListedThread } from '../../../state/conversationVisibility';
 import { useReturnFromSystemWorkspace } from '../../../state/assistant/userWorkspace';
 import { entryPageForArea } from '../../../state/shellArea';
 import { useHomeCards } from '../../../state/homeCards/useHomeCards';
@@ -14,6 +14,7 @@ import { HomeGreeting } from '../home/HomeGreeting';
 import { HomeCardGrid } from '../home/HomeCards';
 import { useHomeRecommendations } from '../../../state/prefs';
 import { ONBOARDING_CARDS } from '../home/onboardingCards';
+import { navPageEvent } from '../../../state/appEvents';
 
 const ChatHomeDocument = lazy(() => import('../home/ChatHomeDocument'));
 
@@ -31,7 +32,7 @@ const HOME_TOOLBAR_COMPACTION = { glyphsBelow: 640, hideAgentBelow: 480 };
 const HOME_TRAY_BELOW = 480;
 
 function openSpacesHome() {
-  window.dispatchEvent(new CustomEvent('michi:nav-page', { detail: { page: entryPageForArea('spaces', 'home') } }));
+  navPageEvent.dispatch({ page: entryPageForArea('spaces', 'home') });
 }
 
 export default function TerminalHome({ onSubmitted }: HomeProps) {
@@ -52,7 +53,7 @@ export default function TerminalHome({ onSubmitted }: HomeProps) {
   const chipActive = homeProject?.id === CHATS_WORKSPACE_ID ? null : homeProject;
 
   const hasConversationSelector = useCallback(
-    (nodesMap: Record<string, ChatNodeState>) => buildContinueItems(liveProjects, nodesMap, null, 1).length > 0,
+    (nodesMap: Record<string, ChatNodeState>) => liveProjects.some((p) => p.trees.some((t) => isListedThread(t, nodesMap[t.rootNodeId]))),
     [liveProjects],
   );
   const hasConversation = useStructuralSelector(hasConversationSelector);
@@ -160,6 +161,9 @@ export default function TerminalHome({ onSubmitted }: HomeProps) {
   // Keep the original hero until Home has something to show. The composer
   // stays in the same position in the React tree so loading cannot lose a draft.
   const defaultLayout = contentMode === 'default' && (!recommendations || (!homeCards.greeting && !grid && !homeCards.cardsCustomized));
+  // With nothing under the composer, the greeting starts where the default
+  // hero does instead of at the top of an otherwise empty pane.
+  const centered = !defaultLayout && (contentMode === 'hidden' || (contentMode === 'default' && !grid));
 
   return (
     <div
@@ -173,7 +177,7 @@ export default function TerminalHome({ onSubmitted }: HomeProps) {
         background: 'var(--term-page-bg, var(--term-bg))',
       }}
     >
-      <div className="home-page" data-default-layout={defaultLayout || undefined}>
+      <div className="home-page" data-default-layout={defaultLayout || undefined} data-centered={centered || undefined}>
         {defaultLayout ? (
           <h1 className="home-default-headline">
             <span className="michi-home-headline__mark">_ </span>

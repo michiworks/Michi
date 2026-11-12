@@ -1,15 +1,15 @@
 import React, { useId } from 'react';
 import { ChevronRight, type LucideIcon } from 'lucide-react';
-import type { PageId } from '../../../state/commands';
 import { useChatProjects } from '../../../state/chatStore';
 import { usePrefs } from '../../../state/prefs';
 import { useBackendConnections } from '../../../state/useBackendConnections';
 import { useAuthSession } from '../../../services/auth';
 import { LOCAL_BACKEND_CONNECTION_ID } from '../../../config/backendConnections';
-import { composerModelLabel } from '../composerModelLabel';
+import { modelDisplayLabel } from '../../../lib/modelLabel';
 import { ACCENT_HUES, resolveAccent } from '../tokens';
 import { NOTIFICATION_OPTIONS } from '../pages/settings/NotificationsPane';
-import { SETTINGS_GROUPS, SETTINGS_PAGES, type SettingsPage } from './settingsPages';
+import { useLibrarySkillCount } from '../pages/settings/skillsModel';
+import { SETTINGS_GROUPS, SETTINGS_PAGES, settingsPageLabel, type SettingsPage } from './settingsPages';
 
 type Tone = 'ok' | 'error';
 
@@ -17,7 +17,7 @@ type Tone = 'ok' | 'error';
 function useRuntimeSummary(): string | undefined {
   const { agentStatus } = useChatProjects();
   if (!agentStatus) return undefined;
-  const model = agentStatus.model ? composerModelLabel(agentStatus.runtime, agentStatus.model, []) : null;
+  const model = agentStatus.model ? modelDisplayLabel(agentStatus.runtime, agentStatus.model, []) : null;
   if (!model || model === 'Default model') return agentStatus.label;
   return `${agentStatus.label.split(' ')[0]} · ${model}`;
 }
@@ -82,17 +82,17 @@ function PhoneGroup({ title, children }: { title: string; children: React.ReactN
 /**
  * Settings as a phone lists it: one row per topic, grouped, each with its
  * current value, so the list says what is set before anything is opened.
- * Trash and Archived open their pages; every other row opens its page here.
+ * Every row opens its page here; Skills, Trash and Archived show how many items they hold.
  * The account sits above the groups; keyboard shortcuts stay on desktop.
  */
-export function PhoneSettingsMenu({ onOpen, onNav, history, metaAgentAlert, memoryPending = '', rowRef }: {
+export function PhoneSettingsMenu({ name, onOpen, history, metaAgentAlert, rowRef }: {
+  /** The agent's name: Settings › <name>'s row. */
+  name: string;
   onOpen: (page: SettingsPage) => void;
-  onNav: (page: PageId) => void;
   /** Counts for Trash and Archived; zero shows none. */
   history: { trash: number; archived: number };
+  /** Pages upkeep needs attention: Settings › <name>'s row says so. */
   metaAgentAlert: boolean;
-  /** Memories waiting for approval ("" for none). */
-  memoryPending?: string;
   rowRef: (id: string, button: HTMLButtonElement | null) => void;
 }) {
   const { prefs } = usePrefs();
@@ -100,14 +100,17 @@ export function PhoneSettingsMenu({ onOpen, onNav, history, metaAgentAlert, memo
   const runtime = useRuntimeSummary();
   const machines = useMachinesSummary();
   const appearance = useAppearanceSummary();
+  const skills = useLibrarySkillCount();
   const values: Partial<Record<SettingsPage, Partial<PhoneRowProps>>> = {
     runtime: { value: runtime },
-    'meta-agent': metaAgentAlert ? { value: 'Needs attention', tone: 'error', status: 'needs attention' } : {},
-    memory: memoryPending ? { value: `${memoryPending} waiting`, status: `${memoryPending} waiting for confirmation` } : {},
+    companion: metaAgentAlert ? { value: 'Needs attention', tone: 'error', status: 'needs attention' } : {},
+    skills: { value: skills || undefined },
     machines: { ...machines, status: machines.tone === 'error' ? 'connection issue' : undefined },
     appearance: { value: appearance },
     notifications: { value: NOTIFICATION_OPTIONS.find((option) => option.value === prefs.notifications)?.label },
     links: { value: prefs.linkOpenTarget === 'external' ? 'System browser' : 'Michi Browser' },
+    trash: { value: history.trash || undefined },
+    archived: { value: history.archived || undefined },
   };
   return (
     <nav className="terminal-settings-categories settings-phone" aria-label="Settings sections">
@@ -120,14 +123,10 @@ export function PhoneSettingsMenu({ onOpen, onNav, history, metaAgentAlert, memo
         </PhoneRow>
       </div>}
       {SETTINGS_GROUPS.map((group) => {
-        const items = group.items.filter((item) => item.kind === 'place'
-          || (item.page !== 'account' && SETTINGS_PAGES[item.page].only !== 'window'));
+        const pages = group.pages.filter((item) => item !== 'account' && SETTINGS_PAGES[item].only !== 'window');
         return <PhoneGroup key={group.title} title={group.title}>
-          {items.map((item) => item.kind === 'place'
-            ? <PhoneRow key={item.place.id} id={item.place.id} label={item.place.label} icon={item.place.icon}
-              value={history[item.place.id] || undefined} onClick={() => onNav(item.place.page)} rowRef={rowRef} />
-            : <PhoneRow key={item.page} id={item.page} label={SETTINGS_PAGES[item.page].label} icon={SETTINGS_PAGES[item.page].icon}
-              onClick={() => onOpen(item.page)} rowRef={rowRef} {...values[item.page]} />)}
+          {pages.map((item) => <PhoneRow key={item} id={item} label={settingsPageLabel(item, name)} icon={SETTINGS_PAGES[item].icon}
+            onClick={() => onOpen(item)} rowRef={rowRef} {...values[item]} />)}
         </PhoneGroup>;
       })}
       <p className="settings-phone__note">Keyboard shortcuts and pane layout are in Settings on a computer.</p>

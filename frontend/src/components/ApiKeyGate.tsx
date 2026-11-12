@@ -1,9 +1,11 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { fetchAgentStatus, saveAgentOptions, saveProviderKey, verifyProviderKey } from '../services/api';
-import type { AgentStatus, VerifyProviderKeyResult } from '../services/api';
-import { providerOptionSuffix, providerRequiresUserKey, shouldPromptForProviderKey } from '../lib/providerCapabilities';
+import { saveAgentOptions, saveProviderKey, verifyProviderKey } from '../services/api';
+import type { VerifyProviderKeyResult } from '../services/api';
+import { providerOptionSuffix, providerRequiresUserKey, shouldPromptForProviderKey, verifyModelFor } from '../lib/providerCapabilities';
 import { ModalShell } from './ui/ModalShell';
 import { Button } from './ui/controls';
+import { isLocalProject } from '../config/backendConnections';
+import { useChatProjects } from '../state/chatStore';
 import { usePrefs } from '../state/prefs';
 
 /**
@@ -22,16 +24,19 @@ import { usePrefs } from '../state/prefs';
  * over). The backend-unreachable notice is NOT gated — it's useful cold-start
  * feedback regardless of onboarding state.
  *
+ * Status, its retry and the unreachable flag come from the chat store, so
+ * the window always describes the backend of the active workspace, the one
+ * a saved key goes to.
+ *
  * Behavior on submit:
  * - If the user picked a provider different from `status.provider`, persist
  *   that via `saveAgentOptions({ provider })` first.
  * - Persist the typed key via `saveProviderKey(provider, key)`.
- * - Re-fetch status; once `hasRequiredKey` flips true, we render null.
+ * - Reload status; once `hasRequiredKey` flips true, we render null.
  */
 export default function ApiKeyGate() {
   const { prefs } = usePrefs();
-  const [status, setStatus] = useState<AgentStatus | null>(null);
-  const [backendUnreachable, setBackendUnreachable] = useState(false);
+  const { agentStatus: status, agentStatusUnreachable, refreshAgentStatus, activeProject } = useChatProjects();
   const [key, setKey] = useState('');
   const [selectedProvider, setSelectedProvider] = useState<string>('');
   const [saving, setSaving] = useState(false);
@@ -39,35 +44,9 @@ export default function ApiKeyGate() {
   const [error, setError] = useState<string | null>(null);
   const [verifyResult, setVerifyResult] = useState<VerifyProviderKeyResult | null>(null);
   const [dismissed, setDismissed] = useState(false);
-  const loadRequestIdRef = useRef(0);
-
-  // Backoff schedule for cold backend startup. Caps at ~5s between retries
-  // so the user sees a "loading" state instead of a stuck blank screen.
-  // `reopen` undoes a dismissal together with the status it fetched: the
-  // status on hand may belong to the runtime the user just switched away from.
-  const load = async ({ reopen = false }: { reopen?: boolean } = {}) => {
-    const requestId = ++loadRequestIdRef.current;
-    setBackendUnreachable(false);
-    const delays = [0, 250, 500, 1000, 2000, 5000, 5000];
-    for (let i = 0; i < delays.length; i++) {
-      if (delays[i]! > 0) await new Promise((r) => setTimeout(r, delays[i]!));
-      if (requestId !== loadRequestIdRef.current) return;
-      try {
-        const s = await fetchAgentStatus();
-        if (requestId !== loadRequestIdRef.current) return;
-        setStatus(s);
-        if (reopen) setDismissed(false);
-        return;
-      } catch {
-        // Try again
-      }
-    }
-    if (requestId !== loadRequestIdRef.current) return;
-    setBackendUnreachable(true);
-  };
+  const reopenWithNextStatusRef = useRef(false);
 
   useEffect(() => {
-    void load();
     // Allow other parts of the app (chatStreamRunner on auth errors, the
     // Settings provider picker, FirstRunSetup's "Set up key" action) to force
     // the gate to re-show. `detail.silent: true` refreshes status without
@@ -76,14 +55,19 @@ export default function ApiKeyGate() {
     const handler = (e: Event) => {
       const silent = (e as CustomEvent).detail?.silent === true;
       if (silent) setDismissed(true);
-      void load({ reopen: !silent });
+      reopenWithNextStatusRef.current = !silent;
     };
     window.addEventListener('michi:reload-agent-status', handler);
-    return () => {
-      loadRequestIdRef.current += 1;
-      window.removeEventListener('michi:reload-agent-status', handler);
-    };
+    return () => window.removeEventListener('michi:reload-agent-status', handler);
   }, []);
+
+  // A reload undoes a dismissal together with the status it brings back: the
+  // status on hand may belong to the runtime the user just switched away from.
+  useEffect(() => {
+    if (!status || !reopenWithNextStatusRef.current) return;
+    reopenWithNextStatusRef.current = false;
+    setDismissed(false);
+  }, [status]);
 
   // Follow the backend's active provider when it changes (Settings switched
   // to Cerebras). Depend on provider id only so a status refetch does not
@@ -101,7 +85,10 @@ export default function ApiKeyGate() {
 
   // Backend persistently unreachable — a hard-blocking notice with a retry.
   // Not gated on onboarding: it's useful cold-start feedback either way.
-  if (backendUnreachable) {
+  // Local only: its advice is for the desktop app, a remote outage has its
+  // own recovery UI, and blocking would also cover the local workspaces.
+  const localBackend = !activeProject || isLocalProject(activeProject);
+  if (agentStatusUnreachable && localBackend) {
     return (
       <ModalShell open onClose={() => {}} title="Michi" titleGlyph="◆" width={420} dismissible={false}>
         <div style={{ padding: '18px 18px 20px', display: 'flex', flexDirection: 'column', gap: 14 }}>
@@ -115,7 +102,7 @@ export default function ApiKeyGate() {
             </div>
           </div>
           <div style={{ display: 'flex', justifyContent: 'flex-end' }}>
-            <Button variant="primary" onClick={() => void load()}>
+            <Button variant="primary" onClick={refreshAgentStatus}>
               Retry
             </Button>
           </div>
@@ -168,8 +155,8 @@ export default function ApiKeyGate() {
           return;
         }
       }
-      // Re-fetch status; if hasRequiredKey is now true the modal will unmount.
-      await load();
+      // Reload status; if hasRequiredKey is now true the modal will unmount.
+      refreshAgentStatus();
     } catch (err: any) {
       setError(err?.message ?? 'Something went wrong. Please try again.');
     } finally {
@@ -185,8 +172,7 @@ export default function ApiKeyGate() {
     try {
       const result = await verifyProviderKey(selectedProviderInfo.id, {
         key: key.trim() || undefined,
-        model:
-          selectedProviderInfo.id === status.provider ? status.model : selectedProviderInfo.defaultModel,
+        model: verifyModelFor(selectedProviderInfo, status),
       });
       setVerifyResult(result);
     } catch (err: any) {
@@ -276,14 +262,14 @@ export default function ApiKeyGate() {
             />
           </div>
 
-          {error && <div style={{ fontSize: 'var(--fs-lg)', color: 'var(--term-danger)' }}>{error}</div>}
+          {error && <div style={{ fontSize: 'var(--fs-lg)', color: 'var(--term-danger-text)' }}>{error}</div>}
 
           {verifyResult && (
             <div
               style={{
                 fontFamily: 'var(--font-mono)',
                 fontSize: 'var(--fs-md)',
-                color: verifyResult.ok ? 'var(--term-digest)' : 'var(--term-danger)',
+                color: verifyResult.ok ? 'var(--term-digest)' : 'var(--term-danger-text)',
               }}
             >
               {verifyResult.ok

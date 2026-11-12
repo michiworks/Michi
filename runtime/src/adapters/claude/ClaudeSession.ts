@@ -1,5 +1,6 @@
 import { assertToolCatalog, catalogUnavailable, guardError } from '../../core/restrictedCatalog';
 import { ApprovalCoordinator, chatApprovalOptions } from '../../core/approvals';
+import { assertPermissionAnswer, nextInteractionRequestId } from '../../core/pendingInteractions';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import type { ChildProcessWithoutNullStreams } from 'node:child_process';
@@ -16,6 +17,7 @@ import type {
   RuntimeSessionOwner,
   RuntimeToolProfile,
   MaintenanceExecutionContext,
+  SkillTurnInvocation,
   SteerResult,
 } from '../../contract/types';
 import type { NormalizedEvent } from '../../contract/events';
@@ -25,7 +27,6 @@ import {
   ownerMode,
   RuntimeHostConfigError,
   type BackgroundSubagentContext, type BackgroundSubagentSink, type FollowUpsExperimentMode, type RuntimeHost, type RuntimePerf,
-  type TurnMetadataTracker,
 } from '../../contract/host';
 import { isHeadlessOwner, isInteractiveOwner } from './claudeOwner';
 import { resolveSubmitCallback } from '../../core/runMcpSlot';
@@ -38,28 +39,37 @@ import {
   type AgentToolBridge,
   type RunWorkerToolProfile,
 } from '../../contract/tools';
-import { createClaudeSdkTransport, type ClaudeSdkTransport } from './claudeSdkTransport';
+import { createClaudeSdkTransport, type ClaudePreToolUseVerdict, type ClaudeSdkTransport } from './claudeSdkTransport';
 import type { SDKUserMessage, PermissionMode, PermissionResult } from '@anthropic-ai/claude-agent-sdk';
 import { CLAUDE_MODES, isClaudeWorkMode, type ClaudeWorkMode } from './claudeModes';
 import { resolveClaudeCliModelId } from './claudeModelCatalog';
 import { createTranslator, type ClaudeCompaction } from './claudeEventTranslator';
 import { getClaudeJsonlPath } from './claudeProjectsPath';
 import {
-  buildClaudeMcpConfig, claudeInitCatalog, claudeLacksRestrictedFlag, claudeLacksToolsFlag, michiMcpToolName,
+  buildClaudeMcpConfig, claudeInitCatalog, claudeLacksRestrictedFlag, claudeLacksToolsFlag, CLAUDE_UP_FRONT_TOOL_META, michiMcpToolName,
 } from './claudeMcpConfig';
 import { resolveShowImage } from '../../core/showImage';
 import { hostEventSink } from '../../core/hostEventSink';
 import { imageMimeType, prepareAttachments, type ResolvedAttachment } from '../../core/attachments';
 import { canonicalClaudeToolName } from './claudeToolNames';
 import type { AgentReasoning } from '../../contract/types';
-import { resolveReasoningOptions, subagentEndOf, SUBAGENT_SESSION_ENDED_ERROR, type SubagentInfo } from 'michi-shared';
+import { formatTokenCount, resolveReasoningOptions, subagentEndOf, SUBAGENT_SESSION_ENDED_ERROR, type SubagentInfo } from 'michi-shared';
 import { getClaudeReasoningCapabilities } from './claudeModelCatalog';
 import { EventQueue } from '../../core/eventQueue';
+import { NativeResumeUnavailableError } from '../../contract/errors';
 import { killProcessTree } from '../../core/processTree';
 import { abortable, withDeadline } from '../../core/runtimeLifecycle';
 import { AsyncGate } from '../../core/asyncGate';
 import { createClaudeWorkflowTap, type ClaudeWorkflowTap } from '../../core/workflows/claudeWorkflowTap';
-import { buildClaudeFollowUpsHookPocSettings } from './claudeFollowUpsHookPoc';
+import { sessionOwnerContext } from '../../core/ownerContext';
+import { bindMaintenanceTurn, pageAttributionFor } from '../../core/maintenanceTurn';
+import { expandSkillPrompt, skillContextText, skillHistoryText } from '../../core/skills';
+import { turnContextPrefix } from '../../core/turnText';
+import { firstString, permissionDetail, permissionDetailLine } from '../../core/permissionPrompt';
+import {
+  claudeHostCommands, claudeLibraryCommand, claudeLibraryRow, claudeRunsOwnCommand, claudeSkillCommands, NO_CLAUDE_SKILL_LIBRARY,
+  parseClaudeSlashCommands, readClaudeSkillLibrary, withoutClaudeLibraryRows, type ClaudeSkillLibrary, type ClaudeSlashCommand,
+} from './claudeSkills';
 
 // claude --effort accepts low|medium|high|xhigh|max. Pi's "minimal" tier
 // has no claude equivalent, so it maps to the next-lowest claude level.
@@ -79,16 +89,15 @@ function reasoningToClaudeEffort(
 const SDK_CONTROL_TIMEOUT_MS = 10_000;
 const ASSISTANT_TOOL_DENIAL = 'The Michi assistant does not edit files, run commands or use other tools';
 const ASSISTANT_UNVERIFIED = 'The Michi assistant\'s tools are unavailable: Claude Code has not reported a safe setup for this session';
-
-// Interactions keep their numeric protocol IDs, but must not reuse an ID when
-// a node gets a replacement/restored Session. The timestamp seed also keeps a
-// renderer's old replies apart from requests after a backend restart.
-let lastInteractionRequestId = Date.now() * 1_000;
-function nextInteractionRequestId(): number {
-  lastInteractionRequestId = Math.max(lastInteractionRequestId + 1, Date.now() * 1_000);
-  if (!Number.isSafeInteger(lastInteractionRequestId)) throw new Error('Claude interaction request ID exhausted');
-  return lastInteractionRequestId;
-}
+/**
+ * Turns off Claude Code's auto memory (the project's memory directory, read
+ * into each session and written from it, and its background consolidation)
+ * whatever the settings files say; CLAUDE.md and rules still load. For a host
+ * whose RuntimeConfigPort.features.nativeMemory is false.
+ */
+const AUTO_MEMORY_OFF_ENV: Readonly<NodeJS.ProcessEnv> = Object.freeze({ CLAUDE_CODE_DISABLE_AUTO_MEMORY: '1' });
+// The PreToolUse hook's reason when the host requires its own approval (ClaudeAdapterOptions.requireHostApproval).
+const HOST_APPROVAL_REQUIRED = 'This tool call needs the user\'s approval in this turn';
 
 // Session-state versions keep rising across sessions and backend restarts,
 // so a renderer never takes a newer session's state for an older one.
@@ -109,6 +118,13 @@ const PLAN_REJECTED = 'The user did not approve the plan. Stay in plan mode and 
 // ---- Session state -----------------------------------------------------------
 
 type SessionState = 'spawning' | 'idle' | 'in_turn' | 'crashed' | 'disposed';
+
+/**
+ * Who holds the session's one turn (takeTurn). `self` is the idle pump
+ * running a turn Claude started on its own; every other owner parks the pump
+ * while it holds the turn.
+ */
+type TurnOwner = 'send' | 'warm' | 'compact' | 'model' | 'command' | 'self';
 
 export interface ClaudeSessionDeps {
   nodeId: string;
@@ -135,6 +151,13 @@ export interface ClaudeSessionDeps {
   reasoning?: AgentReasoning | null;
   /** Anonymous warm processes have no durable node until handoff. */
   persistNativeIdentity?: boolean;
+  /**
+   * NewAgentSessionOptions.ephemeral (DESIGN-v2 §3.2): the CLI keeps no
+   * transcript (persistSession false) and starts without telemetry
+   * (claudeEphemeralEnv); a crashed process is never restored with --resume:
+   * the turn fails.
+   */
+  ephemeral?: boolean;
   /** Where background subagents are reported (tests); the host's backgroundSubagents by default. */
   backgroundSubagents?: BackgroundSubagentSink;
 }
@@ -205,6 +228,18 @@ export class ClaudeSession implements AgentSession {
   private workMode: ClaudeWorkMode = 'default';
   /** SDK permission-mode changes, one at a time. */
   private nativeModeOp: Promise<void> = Promise.resolve();
+  /**
+   * Ultracode (RuntimeConfigPort.features.ultracode): the chat's choice as
+   * last read, what the live process was told (null: unknown, as after a
+   * failed change) and what the CLI last reported of it (get_settings).
+   */
+  private ultracodeWanted = false;
+  private nativeUltracode: boolean | null = null;
+  private ultracodeReported: { active: boolean; available: boolean } | null = null;
+  /** The live process runs with --bare, which skips Ultracode's reminders. */
+  private spawnedBare = false;
+  /** Ultracode changes of the live process, one at a time. */
+  private nativeUltracodeOp: Promise<void> = Promise.resolve();
   private readonly stateListeners = new Set<() => void>();
   private stateVersion = nextStateVersion();
   private nodeId: string;
@@ -239,12 +274,12 @@ export class ClaudeSession implements AgentSession {
   private slotId: string | null = null;
   private externalSessionId: string | null = null;
   private persistNativeIdentity: boolean;
+  /** ClaudeSessionDeps.ephemeral: no transcript, no telemetry, never restored. */
+  readonly ephemeral: boolean;
   private lastUsedAt = Date.now();
   private readonly stderrWarningsSent = new Set<string>();
-  private readonly followUpsHookPocEnabled: boolean;
-  /** The host's follow-up protocol and its per-turn tracker, fixed at construction. */
+  /** The host's follow-up protocol, fixed at construction. */
   private readonly followUpsExperimentMode: FollowUpsExperimentMode;
-  private readonly turnMetadata: TurnMetadataTracker;
 
   private queue: EventQueue;
   private readonly history: ChatMessage[] = [];
@@ -274,6 +309,32 @@ export class ClaudeSession implements AgentSession {
   private releaseHeldTurn: (() => void) | null = null;
   /** The CLI's protocol capabilities, from system/init. */
   private nativeCapabilities: ReadonlySet<string> = new Set();
+  /**
+   * The CLI's command table (its initialize answer, then each
+   * commands_changed push) and the transport it describes. A skill turn
+   * runs the skill as a command only when that transport is the live one
+   * and the table has it.
+   */
+  private nativeCommands: readonly ClaudeSlashCommand[] = [];
+  private nativeCommandsOf: ClaudeSdkTransport | null = null;
+  /** The library folder the live process was given (ClaudeAdapterOptions.skillLibraryDir). */
+  private spawnedSkillDir: string | null = null;
+  /** The library as the CLI had it when it sent nativeCommands: which of its rows are the library's. */
+  private nativeLibrary: ClaudeSkillLibrary = NO_CLAUDE_SKILL_LIBRARY;
+  /** The library as the CLI loaded it at its start or a reload, for the next table it sends. */
+  private nextLibrary: ClaudeSkillLibrary | null = null;
+  /** Tables observed: whether a reload's own push came before its answer. */
+  private nativeTables = 0;
+  /** Stops the live process's reloads on library changes. */
+  private stopSkillLibraryUpdates: (() => void) | null = null;
+  /** The library changed during a turn: reload once it ends. */
+  private skillReloadPending = false;
+  /**
+   * The CLI reported an authentication_failed retry and no model output has
+   * arrived since. The first such retry is the CLI renewing expired
+   * credentials (Bedrock's hourly STS rotation); a second one fails the process.
+   */
+  private authRetryPending = false;
   private readonly backgroundSubagents: BackgroundSubagentSink;
   /** This session's reports to the registry (unique per session object). */
   private readonly backgroundSubagentSource = `claude:${randomUUID()}`;
@@ -288,7 +349,7 @@ export class ClaudeSession implements AgentSession {
 
   // Per-turn perf instrumentation. Reset in send() before writeStdin; read by
   // the envelope parser callback to time the first init/model envelope after
-  // we write a user prompt. All no-cost when MICHI_PERF is off.
+  // we write a user prompt. All no-cost when metrics are off.
   private stdinWriteAt = 0;
   private initSeenThisTurn = false;
   private firstModelEnvelopeThisTurn = false;
@@ -303,9 +364,13 @@ export class ClaudeSession implements AgentSession {
   private lastFailure: string | null = null;
   private lastGuardError: Error | null = null;
 
-  // Turn mutex: non-null while a turn is in flight
-  private turnLock: Promise<void> | null = null;
-  private turnLockRelease: (() => void) | null = null;
+  /**
+   * The session's one turn, null when it is free. `nativeEnded`: the CLI's
+   * result for it arrived while its owner still drains the events, so the
+   * CLI runs nothing of it. Only takeTurn, releaseTurn and the result
+   * handler change it.
+   */
+  private turn: { owner: TurnOwner; nativeEnded: boolean } | null = null;
 
   // Permission state
   private readonly pendingPermissions = new Map<
@@ -324,8 +389,6 @@ export class ClaudeSession implements AgentSession {
   private readonly idleGate = new AsyncGate();
   private selfTurnCallback: SelfTurnCallback | null = null;
   private idlePumpRunning = false;
-  /** True after the idle pump has claimed the first frame of a self-turn. */
-  private idlePumpTurnClaimed = false;
   /** Background workflows (the `Workflow` tool) reported outside turns. */
   private readonly workflowTap: ClaudeWorkflowTap;
 
@@ -343,6 +406,7 @@ export class ClaudeSession implements AgentSession {
     this.permissionBroker = deps.permissionBroker;
     this.reasoning = deps.reasoning ?? null;
     this.persistNativeIdentity = deps.persistNativeIdentity ?? true;
+    this.ephemeral = deps.ephemeral === true;
     this.systemPromptAppend = deps.systemPromptAppend;
     this.mcpRegistry = deps.mcpRegistry;
     this.bridge = deps.bridge;
@@ -359,13 +423,11 @@ export class ClaudeSession implements AgentSession {
       ]);
     }
     this.perf = this.host.observability.perf;
-    this.followUpsHookPocEnabled = !this.host.profile.isRestricted(deps.toolProfile) && !deps.toolProfile?.assistant && this.options.followUpsHookPoc();
     this.approvals = new ApprovalCoordinator({
       permissions: this.host.permissions,
       canonicalize: (toolName) => this.host.permissions.grantKey?.(toolName) ?? toolName,
     });
     this.followUpsExperimentMode = this.host.prompt.followUpsExperimentMode();
-    this.turnMetadata = this.host.prompt.turnMetadata(this.followUpsExperimentMode);
     this.backgroundSubagents = backgroundSubagents;
 
     this.queue = new EventQueue((idleMs) => {
@@ -376,15 +438,7 @@ export class ClaudeSession implements AgentSession {
     this.history.push(...(deps.replayHistory ?? []).map((message) => ({ ...message })));
     this.workflowTap = createClaudeWorkflowTap({
       hub: workflows,
-      context: () => {
-        // A cloud session without a user has no owner to show the run to.
-        if (!this.ownerUserId && this.host.principal.enforceUserOwnership()) return null;
-        return {
-          ownerUserId: this.host.principal.resolve(this.ownerUserId),
-          workspaceId: this.workspaceId,
-          owner: this.owner,
-        };
-      },
+      context: () => sessionOwnerContext(this.host.principal, this.ownerUserId, this.workspaceId, this.owner),
       stopTask: (taskId) => this.stopTask(taskId),
     });
   }
@@ -418,15 +472,10 @@ export class ClaudeSession implements AgentSession {
     if (context) this.backgroundSubagents.report(context, this.backgroundSubagentSource, ids);
   }
 
-  /** Chat sessions only. A cloud session without a user has no owner to show them to. */
+  /** Chat sessions only. */
   private backgroundSubagentContext(): BackgroundSubagentContext | null {
     if (ownerMode(this.owner) !== 'interactive') return null;
-    if (!this.ownerUserId && this.host.principal.enforceUserOwnership()) return null;
-    return {
-      ownerUserId: this.host.principal.resolve(this.ownerUserId),
-      workspaceId: this.workspaceId,
-      owner: this.owner,
-    };
+    return sessionOwnerContext(this.host.principal, this.ownerUserId, this.workspaceId, this.owner);
   }
 
   /**
@@ -480,20 +529,10 @@ export class ClaudeSession implements AgentSession {
   }
 
   private maintenanceContextForSend(input?: AgentTurnInput): MaintenanceExecutionContext | null {
-    if (!this.host.profile.isMaintenance?.(this.toolProfile)) {
-      if (input?.maintenanceContext) throw new Error('Maintenance context supplied to a non-maintenance Claude session');
-      return null;
-    }
-    const context = input?.maintenanceContext;
-    if (!context || this.owner.mode !== 'interactive' || !input?.turnId || !input.assistantMessageId
-      || context.workspaceId !== this.workspaceId
-      || context.ownerUserId !== (this.ownerUserId ?? 'local-user')
-      || !context.jobId || !context.runId || !context.claimedBy || !context.planId
-      || !Number.isSafeInteger(context.configRevision) || context.configRevision < 1
-      || !Array.isArray(context.sources)) {
-      throw new Error('Maintenance Claude send is missing a valid owner, workspace, or canonical turn binding');
-    }
-    return { ...context, execution: { nodeId: this.owner.key, turnId: input.turnId, assistantId: input.assistantMessageId, runId: context.runId } };
+    return bindMaintenanceTurn(input, {
+      maintenance: this.host.profile.isMaintenance?.(this.toolProfile) === true, owner: this.owner, workspaceId: this.workspaceId,
+      expectedOwnerUserId: this.host.principal.resolve(this.ownerUserId), runtimeLabel: 'Claude',
+    });
   }
 
   async *send(text: string, input?: AgentTurnInput): AsyncIterableIterator<NormalizedEvent> {
@@ -505,20 +544,13 @@ export class ClaudeSession implements AgentSession {
     const tSendIn = this.perf.now();
     this.perf.mark('claude:send_entered', { sid: this.id, textLen: text.length, state: this.state });
     const maintenanceContext = this.maintenanceContextForSend(input);
-    // Acquiring the lock must be the first mutating step. A losing send must
+    // Claiming the turn must be the first mutating step. A losing send must
     // leave the active owner (foreground or idle-pump self-turn) entirely
-    // alone: closing its gate or interrupting its single EventQueue waiter
-    // would truncate that owner's stream.
-    this.acquireTurnLock();
+    // alone: takeTurn throws before it touches the gate or the queue.
+    this.takeTurn('send');
     const controller = new AbortController();
     this.turnAbort = controller;
-    const pageTurnAttribution = this.owner.mode === 'interactive' && input?.turnId && input.assistantMessageId
-      ? { turnId: input.turnId, assistantId: input.assistantMessageId } : null;
-    this.idleGate.close();
-    // Once the pump has claimed a real self-turn it owns EventQueue until the
-    // terminal frame. Interrupting that waiter would splice the remaining
-    // self-turn frames into this foreground send().
-    if (!this.idlePumpTurnClaimed) this.queue.interruptWaiter();
+    const pageTurnAttribution = pageAttributionFor(input, this.owner);
     this.perf.measure('claude:send_lock_acquired', tSendIn, { sid: this.id });
     try {
       this.activePageTurnAttribution = pageTurnAttribution;
@@ -546,7 +578,17 @@ export class ClaudeSession implements AgentSession {
         }
         yield { kind: 'retry_end' };
       }
+      // Before the crash check: a CLI that dies while this waits on it is
+      // restored below, like one that died before the turn began.
+      await this.reconcileUltracode(controller.signal);
       if (this.state === 'crashed') {
+        // An ephemeral session has no transcript to resume from, by design.
+        if (this.ephemeral) {
+          if (this.lastGuardError) throw this.lastGuardError;
+          throw new Error(this.lastFailure
+            ? `Claude stopped during a session Michi keeps no record of: ${this.lastFailure} It is not restored.`
+            : 'Claude stopped during a session Michi keeps no record of. It is not restored.');
+        }
         if (!this.externalSessionId) {
           // Keep the reason: the turn that saw it may be long gone.
           if (this.lastGuardError) throw this.lastGuardError;
@@ -562,36 +604,43 @@ export class ClaudeSession implements AgentSession {
       }
       controller.signal.throwIfAborted();
 
+      const skill = input?.skill;
+      const skillCommand = skill ? await this.nativeSkillCommand(skill, controller.signal) : null;
+      // That may have waited for a process that has died since.
+      if (skill && ((this.state as SessionState) === 'crashed' || (this.state as SessionState) === 'disposed')) {
+        throw this.lastGuardError ?? new Error(this.lastFailure ?? 'Claude stopped before the skill could run.');
+      }
+
       this.state = 'in_turn';
 
       // Inject per-chat preamble on the first real turn, then mark consumed.
       // Empty prefix is a no-op. The warm-init turn does NOT pass through
       // this branch — it uses its own envelope path in warmInit().
-      let outgoingText = this.firstTurnPrefixConsumed || !this.firstTurnPrefix
-        ? text
-        : `${this.firstTurnPrefix}\n\n---\n\n${text}`;
+      const turnPrefix = this.firstTurnPrefixConsumed || !this.firstTurnPrefix ? '' : `${this.firstTurnPrefix}\n\n---\n\n`;
       this.firstTurnPrefixConsumed = true;
+      // A skill the CLI does not run itself reaches the model as its text, then the turn's.
+      const outgoingText = turnPrefix + (skill && !skillCommand ? expandSkillPrompt(skill, text) : text);
 
       // Append follow-up reminder for the model only — keep history clean so
-      // fork/branch transcripts don't accumulate reminder noise.
+      // fork/branch transcripts don't accumulate reminder noise. A skill
+      // turn follows the skill's own output rules instead.
       const userTurnCount = this.history.filter(m => m.role === 'user').length + 1;
-      const reminder = (this.host.profile.isRestricted(this.toolProfile) || this.toolProfile?.assistant) ? '' : this.host.prompt.followUpsTurnReminder(
-        userTurnCount,
-        this.followUpsHookPocEnabled,
-        this.followUpsExperimentMode,
-        this.enableFollowUps,
-      );
+      const reminder = skill ? (this.host.prompt.skillTurnNote?.() ?? '')
+        : (this.host.profile.isRestricted(this.toolProfile) || this.toolProfile?.assistant) ? '' : this.host.prompt.followUpsTurnReminder(
+          userTurnCount,
+          false,
+          this.followUpsExperimentMode,
+          this.enableFollowUps,
+        );
       // Non-image attachments have no stream-json block type, so name them by
       // path rather than dropping them silently; the CLI can Read them itself.
-      const { images: imageAttachments, promptNote } = prepareAttachments(input?.attachments);
-      const textForModel = (this.host.profile.maintenancePromptPrefix?.(maintenanceContext) ?? '')
-        + (input?.memoryContext ? `${input.memoryContext}\n\n---\n\n` : '')
-        + (input?.pageContext ? `${input.pageContext}\n\n---\n\n` : '')
-        + (reminder ? outgoingText + reminder : outgoingText) + promptNote;
+      const { images: imageAttachments, promptNote } = prepareAttachments(input?.attachments, text);
+      const modelPrefix = turnContextPrefix(this.host.profile.maintenancePromptPrefix?.(maintenanceContext) ?? '', input);
+      const textForModel = modelPrefix + (reminder ? outgoingText + reminder : outgoingText) + promptNote;
 
-      this.armFollowUpsHookPoc(userTurnCount);
-
-      this.history.push({ role: 'user', content: outgoingText });
+      // History keeps a skill turn as its command: the skill's text is the model's.
+      const skillContext = skill ? skillContextText(text, skill.args) : '';
+      this.history.push({ role: 'user', content: skill ? turnPrefix + skillHistoryText(skill, text) : outgoingText });
       this.markTranslatorTurnStart?.();
       this.pendingSteers.clear();
       this.turnSteers.clear();
@@ -606,8 +655,11 @@ export class ClaudeSession implements AgentSession {
           `Claude native restore did not initialize within ${this.options.limits.initTimeoutMs / 1000} seconds. Original session retained; please retry.`,
         )), this.options.limits.initTimeoutMs);
       }
-      const outgoingMessage = userEnvelope(textForModel, imageBlocks,
-        ownerMode(this.owner) === 'interactive' && input?.humanOrigin === true && this.options.cli().humanOrigin);
+      const human = ownerMode(this.owner) === 'interactive' && input?.humanOrigin === true && this.options.cli().humanOrigin;
+      const outgoingMessage = skillCommand
+        ? userMessage(skillCommandContent(skillContextBlock(modelPrefix + turnPrefix, skillContext, reminder + promptNote),
+          imageBlocks, skillCommand), human)
+        : userEnvelope(textForModel, imageBlocks, human);
       const nativeUserMessageId = outgoingMessage.uuid;
       this.sendInput(outgoingMessage);
       this.perf.measure('claude:write_stdin', tStdin, { sid: this.id });
@@ -675,9 +727,7 @@ export class ClaudeSession implements AgentSession {
       if (this.activePageTurnAttribution === pageTurnAttribution) this.activePageTurnAttribution = null;
       if (this.activeMaintenanceExecutionContext === maintenanceContext) this.activeMaintenanceExecutionContext = null;
       this.pendingAssistantBuf = null;
-      this.finishFollowUpsHookPocTurn();
-      this.releaseTurnLock();
-      this.idleGate.open();
+      this.releaseTurn();
     }
   }
 
@@ -730,6 +780,10 @@ export class ClaudeSession implements AgentSession {
       this.history.splice(0, this.history.length, ...opts.replayHistory.map((message) => ({ ...message })));
     }
     this.syncMcpSlotBinding();
+    // A warm process was spawned before it knew the chat: take its Ultracode
+    // choice now rather than at the first turn (which checks it again).
+    this.ultracodeWanted = this.desiredUltracode();
+    if (this.transport) this.syncNativeUltracode(this.transport);
   }
 
   matchesOwner(owner: RuntimeSessionOwner): boolean {
@@ -844,11 +898,8 @@ export class ClaudeSession implements AgentSession {
       throw new Error(`warmInit on ${this.state} session`);
     }
 
-    // See send(): do not alter idle-pump coordination until this turn owns the
-    // lock, otherwise a concurrent warm-init can break the active owner.
-    this.acquireTurnLock();
-    this.idleGate.close();
-    if (!this.idlePumpTurnClaimed) this.queue.interruptWaiter();
+    // See send(): a concurrent warm-init that loses leaves the active owner alone.
+    this.takeTurn('warm');
     try {
       this.lastUsedAt = Date.now();
       this.state = 'in_turn';
@@ -880,8 +931,7 @@ export class ClaudeSession implements AgentSession {
       }
       this.lastUsedAt = Date.now();
     } finally {
-      this.releaseTurnLock();
-      this.idleGate.open();
+      this.releaseTurn();
     }
   }
 
@@ -899,6 +949,13 @@ export class ClaudeSession implements AgentSession {
   }
 
   private async cancelActiveTurn(): Promise<CancelAck> {
+    if (this.turn?.nativeEnded && this.state === 'idle') {
+      // The CLI already answered: only the turn's last events are still
+      // being drained. Nothing runs that an interrupt could stop, and the
+      // process (with its background work) stays.
+      this.turnAbort?.abort();
+      return { acknowledged: true, source: 'native', confidence: 'native', nativeMethod: 'SDK result' };
+    }
     const canInterrupt = this.transport && this.state === 'in_turn' && !this.resumePending;
     this.turnAbort?.abort();
     this.clearInteractions();
@@ -1014,7 +1071,7 @@ export class ClaudeSession implements AgentSession {
     if (this.host.profile.isRestricted(this.toolProfile) || ownerMode(this.owner) !== 'interactive') {
       return { started: false, detail: 'unsupported' };
     }
-    if (this.turnLock || this.state === 'in_turn') {
+    if (this.turn || this.state === 'in_turn') {
       return { started: false, detail: 'Wait for the active turn to finish before compacting.' };
     }
     if (this.resumePending) {
@@ -1023,9 +1080,7 @@ export class ClaudeSession implements AgentSession {
     if (this.state !== 'idle' || !this.transport || !this.externalSessionId) {
       return { started: false, detail: 'Claude has no conversation to compact yet.' };
     }
-    this.acquireTurnLock();
-    this.idleGate.close();
-    if (!this.idlePumpTurnClaimed) this.queue.interruptWaiter();
+    this.takeTurn('compact');
     try {
       this.lastUsedAt = Date.now();
       this.state = 'in_turn';
@@ -1045,14 +1100,12 @@ export class ClaudeSession implements AgentSession {
       if (stopReason !== 'end_turn' || compaction?.result === 'failed' || compaction?.postTokens === undefined) {
         return { started: false, detail: compaction?.error ? `Compaction failed: ${compaction.error}` : 'Claude did not compact the conversation.' };
       }
-      const size = (n: number) => (n >= 1000 ? `${(n / 1000).toFixed(1)}k` : String(n));
       return { started: true, completed: true,
         detail: compaction.preTokens !== undefined
-          ? `Compacted ${size(compaction.preTokens)} → ${size(compaction.postTokens)} tokens.`
-          : `Compacted to ${size(compaction.postTokens)} tokens.` };
+          ? `Compacted ${formatTokenCount(compaction.preTokens)} → ${formatTokenCount(compaction.postTokens)} tokens.`
+          : `Compacted to ${formatTokenCount(compaction.postTokens)} tokens.` };
     } finally {
-      this.releaseTurnLock();
-      this.idleGate.open();
+      this.releaseTurn();
     }
   }
 
@@ -1098,6 +1151,9 @@ export class ClaudeSession implements AgentSession {
         if (this.child === child) {
           this.transport = null;
           this.child = null;
+          this.stopSkillLibraryUpdates?.();
+          this.stopSkillLibraryUpdates = null;
+          this.skillReloadPending = false;
           this.markTranslatorTurnStart = null;
           this.getNativeForkAnchor = null;
           this.translatorHasBackgroundSubagents = null;
@@ -1136,7 +1192,7 @@ export class ClaudeSession implements AgentSession {
 
   /** Switch models without discarding the native process or session. */
   async setModel(modelId: string): Promise<void> {
-    if (this.turnLock || this.state === 'in_turn') {
+    if (this.turn || this.state === 'in_turn') {
       throw new Error('Cannot switch model during an active turn — cancel the turn first');
     }
     if (this.state === 'disposed') {
@@ -1146,9 +1202,7 @@ export class ClaudeSession implements AgentSession {
       this.model = modelId || this.model;
       return;
     }
-    this.acquireTurnLock();
-    this.idleGate.close();
-    this.queue.interruptWaiter();
+    this.takeTurn('model');
     try {
       if (this.retirement) await this.retirement;
       if (this.transport && this.state !== 'crashed') {
@@ -1168,10 +1222,12 @@ export class ClaudeSession implements AgentSession {
       // Only an unused, uninitialized process may be replaced without resume.
       if (!this.transport && !this.externalSessionId && !this.firstTurnPrefixConsumed) {
         await this.spawnFresh();
+      } else if (this.transport && this.state !== 'crashed') {
+        // Whether Ultracode can run depends on the model (xhigh effort).
+        void this.refreshUltracodeReport(this.transport);
       }
     } finally {
-      this.releaseTurnLock();
-      this.idleGate.open();
+      this.releaseTurn();
     }
   }
 
@@ -1180,7 +1236,115 @@ export class ClaudeSession implements AgentSession {
     return { runtimeId: 'claude', nativeEngine: 'agent-sdk', version: this.stateVersion, modelId: this.currentModelId,
       currentModeId: this.currentModeId,
       availableModes: modes ? CLAUDE_MODES.map(({ id, label, description }) => ({ id, name: label, description })) : [],
-      commands: ['status', 'model', 'context', 'mcp'].map(name => ({ name })) };
+      commands: [...claudeHostCommands(), ...this.advertisedSkills()],
+      ...(this.supportsUltracode() ? { ultracode: this.ultracodeState() } : {}) };
+  }
+
+  /**
+   * A restricted session (the Michi assistant) takes no skill turns, so its
+   * menu offers none; nor does a host that shows no host skills.
+   */
+  private advertisedSkills(): import('michi-shared').AgentCommand[] {
+    if (this.host.profile.isRestricted(this.toolProfile) || this.options.advertiseSkills?.() === false) return [];
+    // The host lists its library itself.
+    return claudeSkillCommands(withoutClaudeLibraryRows(this.nativeCommands, this.nativeLibrary));
+  }
+
+  /** The CLI's command table for `transport`: its initialize answer, or a later push, which replaces it. */
+  private observeNativeCommands(transport: ClaudeSdkTransport, value: unknown, pushed: boolean): void {
+    if (this.transport !== transport || (!pushed && this.nativeCommandsOf === transport)) return;
+    const commands = parseClaudeSlashCommands(value);
+    if (!commands) return;
+    const before = JSON.stringify(this.advertisedSkills());
+    this.nativeCommands = commands;
+    this.nativeCommandsOf = transport;
+    this.nativeTables += 1;
+    if (this.nextLibrary) {
+      this.nativeLibrary = this.nextLibrary;
+      this.nextLibrary = null;
+    }
+    if (JSON.stringify(this.advertisedSkills()) !== before) this.publishSessionState();
+  }
+
+  /** The library a reload loaded, with the table its push has already brought. */
+  private applyReloadedLibrary(library: ClaudeSkillLibrary): void {
+    const before = JSON.stringify(this.advertisedSkills());
+    this.nativeLibrary = library;
+    this.nextLibrary = null;
+    if (JSON.stringify(this.advertisedSkills()) !== before) this.publishSessionState();
+  }
+
+  /**
+   * The command line that runs a skill as the CLI's own command, or null
+   * when the live process does not list it under that name: the CLI would
+   * send an unknown command to the model as text, a turn spent on nothing.
+   * A library skill is `<folder>:<name>` where a personal or project skill
+   * has its name, else `<name>` (claudeLibraryCommand). A runtime skill
+   * whose row is the library skill's (a project command it hides) is sent
+   * as its text.
+   */
+  private async nativeSkillCommand(skill: SkillTurnInvocation, signal: AbortSignal): Promise<string | null> {
+    // The host's built-in skills are never mounted: a CLI command of their name is another one.
+    if (skill.origin === 'builtin') return null;
+    const library = skill.origin === 'library' && !skill.nativeName;
+    if (library && !this.spawnedSkillDir) return null;
+    const transport = this.transport;
+    if (!transport) return null;
+    if (this.nativeCommandsOf !== transport) {
+      // A process that has just started may not have answered initialize yet.
+      // Without an answer the skill is expanded instead.
+      const answered = Promise.resolve(transport.initialized).then(() => undefined, () => undefined);
+      await abortable(withDeadline(answered, SDK_CONTROL_TIMEOUT_MS, 'Claude did not list its commands').catch(() => undefined), signal);
+    }
+    if (this.transport !== transport || this.nativeCommandsOf !== transport) return null;
+    const own = skill.nativeName ?? skill.name;
+    const name = library ? claudeLibraryCommand(this.nativeCommands, this.nativeLibrary, skill.name)
+      : claudeRunsOwnCommand(this.nativeCommands, own) && !claudeLibraryRow(this.nativeCommands, this.nativeLibrary, own) ? own : null;
+    if (!name) return null;
+    return `/${name}${skill.args ? ` ${skill.args}` : ''}`;
+  }
+
+  /**
+   * The library changed. The CLI does not notice its links change: reload
+   * the skills of an idle process now and of a busy one once its turn ends,
+   * so a running turn keeps the listing it started with.
+   */
+  private onSkillLibraryChanged(transport: ClaudeSdkTransport): void {
+    if (this.transport !== transport) return;
+    if (this.state === 'in_turn') this.skillReloadPending = true;
+    else this.reloadNativeSkills(transport);
+  }
+
+  /**
+   * Its commands_changed push updates the command table. The library is
+   * read just before, as the CLI is about to load it, and goes with the
+   * reloaded table: CLI 2.1.319 pushes that just before it answers; from a
+   * CLI that answers first, the next push brings it. Until then the old
+   * names stand, so a skill added meanwhile is sent as its text. Failures
+   * leave the old skills.
+   */
+  private reloadNativeSkills(transport: ClaudeSdkTransport): void {
+    this.skillReloadPending = false;
+    if (this.transport !== transport || this.state === 'crashed' || this.state === 'disposed') return;
+    const query = transport.query as Partial<Pick<typeof transport.query, 'reloadSkills'>>;
+    const reloadSkills = query.reloadSkills;
+    if (typeof reloadSkills !== 'function') return;
+    const dir = this.spawnedSkillDir;
+    void (async () => {
+      const library = dir ? await readClaudeSkillLibrary(dir) : NO_CLAUDE_SKILL_LIBRARY;
+      if (this.transport !== transport) return;
+      const tables = this.nativeTables;
+      await withDeadline(reloadSkills.call(transport.query), SDK_CONTROL_TIMEOUT_MS, 'Claude skill reload timed out');
+      if (this.transport !== transport) return;
+      if (this.nativeTables !== tables) this.applyReloadedLibrary(library);
+      else this.nextLibrary = library;
+    })()
+      .catch((error) => {
+        if (this.transport !== transport) return;
+        this.host.observability.log('warn', 'chat', 'claude skills could not be reloaded', {
+          nodeId: this.nodeId, error: error instanceof Error ? error.message : String(error),
+        });
+      });
   }
 
   onSessionState(notify: () => void): () => void {
@@ -1244,6 +1408,143 @@ export class ClaudeSession implements AgentSession {
     }
   }
 
+  // ---- Ultracode ---------------------------------------------------------------
+
+  /**
+   * Only an ordinary chat runs Ultracode: it has the Workflow tool. Agent
+   * Runs, brokered and restricted sessions and chats with a tool profile (the
+   * assistant, custom agents) never do; their spawns pin it off.
+   */
+  private supportsUltracode(): boolean {
+    return this.supportsModes() && !this.toolProfile;
+  }
+
+  /** The chat's Ultracode choice, read from the host; off for other sessions. */
+  private desiredUltracode(): boolean {
+    if (!this.supportsUltracode()) return false;
+    try {
+      return this.host.config.features.ultracode?.(this.owner, this.ownerUserId) === true;
+    } catch (error) {
+      this.host.observability.log('warn', 'chat', 'claude ultracode choice could not be read; leaving it off', {
+        nodeId: this.nodeId, error: error instanceof Error ? error.message : String(error),
+      });
+      return false;
+    }
+  }
+
+  private ultracodeState(): import('michi-shared').SessionUltracodeState {
+    const reported = this.ultracodeReported;
+    return {
+      requested: this.ultracodeWanted,
+      ...(reported ? { active: reported.active && !this.spawnedBare, available: reported.available && !this.spawnedBare } : {}),
+    };
+  }
+
+  /**
+   * Bring the live process to the chat's Ultracode choice before a turn: a
+   * warm process was spawned before it knew the chat, and an earlier change
+   * may have failed. A failure leaves the turn to run as the CLI is.
+   */
+  private async reconcileUltracode(signal: AbortSignal): Promise<void> {
+    // Changes still in flight first: compare with the process as they leave it.
+    await abortable(this.nativeUltracodeOp, signal);
+    const wanted = this.desiredUltracode();
+    const changed = wanted !== this.ultracodeWanted;
+    this.ultracodeWanted = wanted;
+    const transport = this.transport;
+    if (transport && this.state !== 'crashed' && this.nativeUltracode !== wanted
+      && await abortable(this.applyNativeUltracode(wanted), signal)) {
+      // What took effect is for the indicator: the prompt does not wait for it.
+      void this.refreshUltracodeReport(transport);
+    }
+    if (changed) this.publishSessionState();
+  }
+
+  /**
+   * Set Ultracode in the live process (the SDK flag-settings layer), after any
+   * earlier change. Resolves whether it changed the process; never rejects:
+   * a failure is logged and the next turn tries again.
+   */
+  private applyNativeUltracode(enabled: boolean): Promise<boolean> {
+    const run = this.nativeUltracodeOp.then(async () => {
+      const transport = this.transport;
+      if (!transport || this.state === 'crashed' || this.state === 'disposed' || this.nativeUltracode === enabled) return false;
+      const query = transport.query as Partial<Pick<typeof transport.query, 'applyFlagSettings'>>;
+      if (typeof query.applyFlagSettings !== 'function') return false;
+      try {
+        await withDeadline(query.applyFlagSettings.call(transport.query, { ultracode: enabled }), SDK_CONTROL_TIMEOUT_MS,
+          'Claude Ultracode change timed out');
+        if (this.transport !== transport) return false;
+        this.nativeUltracode = enabled;
+        return true;
+      } catch (error) {
+        if (this.transport === transport) this.nativeUltracode = null;
+        this.host.observability.log('warn', 'chat', 'claude ultracode could not be applied; the next turn retries', {
+          nodeId: this.nodeId, enabled, error: error instanceof Error ? error.message : String(error),
+        });
+        return false;
+      }
+    });
+    this.nativeUltracodeOp = run.then(() => undefined);
+    return run;
+  }
+
+  /** Apply the wanted choice in the background, then read what took effect. */
+  private syncNativeUltracode(transport: ClaudeSdkTransport): void {
+    if (this.nativeUltracode === this.ultracodeWanted) return;
+    void this.applyNativeUltracode(this.ultracodeWanted).then((applied) => {
+      if (applied) void this.refreshUltracodeReport(transport);
+    });
+  }
+
+  /**
+   * What the CLI reports of Ultracode (get_settings `applied`): in effect only
+   * when requested, with workflows enabled and a model that supports it. The
+   * SDK implements getSettings without declaring it. The response carries
+   * every settings source (env, hooks): read `applied` and log none of it.
+   */
+  private async refreshUltracodeReport(transport: ClaudeSdkTransport): Promise<void> {
+    if (!this.supportsUltracode()) return;
+    const query = transport.query as unknown as { getSettings?: () => Promise<unknown> };
+    if (typeof query.getSettings !== 'function') return;
+    let applied: Record<string, unknown> | null;
+    try {
+      applied = asRecord(asRecord(await withDeadline(query.getSettings.call(transport.query), SDK_CONTROL_TIMEOUT_MS,
+        'Claude settings read timed out'))?.applied);
+    } catch (error) {
+      this.host.observability.log('debug', 'chat', 'claude ultracode state could not be read', {
+        nodeId: this.nodeId, error: error instanceof Error ? error.name : 'unknown',
+      });
+      return;
+    }
+    if (this.transport !== transport || !applied || typeof applied.ultracodeAvailable !== 'boolean') return;
+    const next = { active: applied.ultracode === true, available: applied.ultracodeAvailable };
+    const previous = this.ultracodeReported;
+    if (previous?.active === next.active && previous.available === next.available) return;
+    this.ultracodeReported = next;
+    this.publishSessionState();
+  }
+
+  /**
+   * The chat's Ultracode choice changed (the host has saved it): apply it to
+   * the live process now, so a self-turn before the next message (a workflow
+   * completing) already runs under it. Without a process the next spawn reads it.
+   */
+  async setUltracode(enabled: boolean): Promise<void> {
+    if (!this.supportsUltracode()) {
+      if (!enabled) return;
+      throw new Error('Ultracode is available only in Claude chats without a custom agent or tool profile');
+    }
+    if (this.state === 'disposed') return;
+    if (this.ultracodeWanted !== enabled) {
+      this.ultracodeWanted = enabled;
+      this.publishSessionState();
+    }
+    // Outside a turn, so the caller (the toggle) gets what took effect.
+    const transport = this.transport;
+    if (transport && this.state !== 'crashed' && await this.applyNativeUltracode(enabled)) await this.refreshUltracodeReport(transport);
+  }
+
   /** A changed mode reaches the running turn's stream and every state listener. */
   private publishSessionState(): void {
     this.stateVersion = nextStateVersion();
@@ -1283,14 +1584,14 @@ export class ClaudeSession implements AgentSession {
 
   /** Host command bridge over official SDK controls; these are not TUI pages. */
   async executeCommand(command: string, args?: Record<string, unknown>): Promise<{ success: boolean; message?: string; data?: unknown }> {
-    if (this.turnLock || this.state === 'in_turn') throw new Error('Wait for the active turn to finish before executing a command.');
+    if (this.turn || this.state === 'in_turn') throw new Error('Wait for the active turn to finish before executing a command.');
     if (this.state !== 'idle' || !this.transport) return { success: false, message: 'Claude session is not connected.' };
     const query = this.transport.query;
     if (command === 'model' && typeof args?.value === 'string' && args.value.trim()) {
       await this.setModel(args.value.trim());
       return { success: true, message: `Model changed to ${this.currentModelId}.` };
     }
-    this.acquireTurnLock();
+    this.takeTurn('command');
     try {
       if (command === 'status') return { success: true, message: 'Claude session status', data: {
         engine: 'Claude Agent SDK', state: this.state, sessionId: this.externalSessionId,
@@ -1302,12 +1603,11 @@ export class ClaudeSession implements AgentSession {
       if (command === 'context') return { success: true, data: await withDeadline(query.getContextUsage({ detail: 'summary' }), SDK_CONTROL_TIMEOUT_MS, 'Claude context timed out') };
       if (command === 'mcp') return { success: true, data: await withDeadline(query.mcpServerStatus(), SDK_CONTROL_TIMEOUT_MS, 'Claude MCP status timed out') };
       return { success: false, message: `/${command} is not available through the Claude SDK command bridge.` };
-    } finally { this.releaseTurnLock(); }
+    } finally { this.releaseTurn(); }
   }
 
   respondToPermission(requestId: number, optionId: string): void {
-    if (ownerMode(this.owner) === 'headless' && optionId === 'allow_session') throw new Error('Invalid permission option');
-    if (optionId !== 'allow_once' && optionId !== 'allow_always' && optionId !== 'allow_session' && optionId !== 'reject_once') throw new Error('Invalid permission option');
+    assertPermissionAnswer(this.owner, optionId);
     const entry = this.pendingPermissions.get(requestId);
     if (!entry) return;
     clearTimeout(entry.timer);
@@ -1391,10 +1691,10 @@ export class ClaudeSession implements AgentSession {
    * is idle (no active send/warmInit). When it detects the start of a
    * self-initiated turn, it emits the events via selfTurnCallback.
    *
-   * Coordination with send():
-   *   - send()/warmInit() call idleGate.close() before draining
+   * Coordination with every other turn owner (takeTurn):
+   *   - claiming the turn closes idleGate and wakes a pump waiting in pull()
    *   - idlePump awaits idleGate.wait() before each pull()
-   *   - send()/warmInit() call idleGate.open() when done
+   *   - releasing the turn opens idleGate again
    *
    * The pump auto-stops when the session is disposed or crashed.
    */
@@ -1423,17 +1723,14 @@ export class ClaudeSession implements AgentSession {
         if (ev.kind === 'heartbeat') continue;
 
         // A real event arrived while idle → self-initiated turn. Claim the
-        // same runtime mutex used by send()/warmInit() before yielding the
-        // first frame. The flag is set synchronously before the first await so
-        // a racing send() cannot interrupt the self iterator's queue waiter.
-        this.idlePumpTurnClaimed = true;
+        // session's turn before yielding the first frame, synchronously, so a
+        // racing send() cannot interrupt the self iterator's queue waiter.
         try {
-          this.acquireTurnLock();
-        } catch (lockErr: any) {
-          // Race: send() acquired the lock between our pull() and this point.
-          // Push the event back so send() can drain it, then loop back to
-          // gate.wait() which will block (send closes the gate).
-          this.idlePumpTurnClaimed = false;
+          this.takeTurn('self');
+        } catch {
+          // Race: another owner claimed the turn between our pull() and this
+          // point. Push the event back so its owner can drain it, then loop
+          // back to gate.wait(), which blocks: that owner closed the gate.
           this.queue.pushFront(ev);
           continue;
         }
@@ -1504,8 +1801,7 @@ export class ClaudeSession implements AgentSession {
           if (this.cancellation) await this.cancellation;
           if (this.turnAbort === controller) this.turnAbort = null;
           if (completed && this.state === 'in_turn') this.state = 'idle';
-          this.releaseTurnLock();
-          this.idlePumpTurnClaimed = false;
+          this.releaseTurn();
         }
       }
       this.idlePumpRunning = false;
@@ -1539,12 +1835,13 @@ export class ClaudeSession implements AgentSession {
         if (!r.ok) return { error: r.error };
         return { relPath: r.relPath, mimeType: r.mimeType, size: r.size };
       },
-      ...(this.followUpsHookPocEnabled ? this.followUpsHookCallbacks() : {}),
       onAskUser: this.makeOnAskUser(),
       agentRuns: this.resolveAgentRunTools(),
       agentRunToolNames: this.allowedAgentRunToolNames(),
       onSubmitAgentResult: this.submitAgentResultCallback(),
       ...this.assistantSlotExposure(),
+      // Tools the host marks loadUpFront (Michi's memory tools) skip Claude Code's tool search: the model sees their descriptions.
+      upFrontToolMeta: CLAUDE_UP_FRONT_TOOL_META,
     }, {
       nodeId: ownerMode(this.owner) === 'interactive' ? this.nodeId : null,
       workspaceId: this.workspaceId,
@@ -1553,7 +1850,7 @@ export class ClaudeSession implements AgentSession {
 
     const mcpConfig = buildClaudeMcpConfig(this.mcpRegistry.endpoint(slot.slotId), {
       // The assistant has no ToolSearch to load deferred tools: its Michi tools load up front.
-      alwaysLoad: this.followUpsHookPocEnabled || ownerMode(this.owner) === 'headless' || this.host.profile.isRestricted(this.toolProfile),
+      alwaysLoad: ownerMode(this.owner) === 'headless' || this.host.profile.isRestricted(this.toolProfile),
     });
     // claude --session-id requires UUID format; michi nodeIds don't conform.
     // The placeholder is overwritten when system/init reports the real session_id.
@@ -1566,6 +1863,7 @@ export class ClaudeSession implements AgentSession {
   }
 
   async spawnResume(externalSessionId: string): Promise<void> {
+    if (this.ephemeral) throw new NativeResumeUnavailableError('An ephemeral Claude session is never resumed');
     if (this.retirement) await this.retirement;
     if (this.child) await this.retireProcess();
     this.turnAbort?.signal.throwIfAborted();
@@ -1595,12 +1893,13 @@ export class ClaudeSession implements AgentSession {
         if (!r.ok) return { error: r.error };
         return { relPath: r.relPath, mimeType: r.mimeType, size: r.size };
       },
-      ...(this.followUpsHookPocEnabled ? this.followUpsHookCallbacks() : {}),
       onAskUser: this.makeOnAskUser(),
       agentRuns: this.resolveAgentRunTools(),
       agentRunToolNames: this.allowedAgentRunToolNames(),
       onSubmitAgentResult: this.submitAgentResultCallback(),
       ...this.assistantSlotExposure(),
+      // Tools the host marks loadUpFront (Michi's memory tools) skip Claude Code's tool search: the model sees their descriptions.
+      upFrontToolMeta: CLAUDE_UP_FRONT_TOOL_META,
     }, {
       nodeId: ownerMode(this.owner) === 'interactive' ? this.nodeId : null,
       workspaceId: this.workspaceId,
@@ -1609,7 +1908,7 @@ export class ClaudeSession implements AgentSession {
 
     const mcpConfig = buildClaudeMcpConfig(this.mcpRegistry.endpoint(slot.slotId), {
       // The assistant has no ToolSearch to load deferred tools: its Michi tools load up front.
-      alwaysLoad: this.followUpsHookPocEnabled || ownerMode(this.owner) === 'headless' || this.host.profile.isRestricted(this.toolProfile),
+      alwaysLoad: ownerMode(this.owner) === 'headless' || this.host.profile.isRestricted(this.toolProfile),
     });
     await this.doSpawn({ resumeSessionId: externalSessionId, mcpConfig });
   }
@@ -1639,8 +1938,6 @@ export class ClaudeSession implements AgentSession {
       if (!isCurrent()) return;
       if (this.turnAbort?.signal.aborted && (ev.kind === 'mcp_server_error'
         || (ev.kind === 'warning' && (ev.source === 'anthropic-api' || ev.source === 'claude-cli')))) return;
-      this.observeFollowUpsSentinelEvent(ev);
-      if (this.suppressFollowUpsInternalEvent(ev)) return;
       // Drive the idle transition from the claude process's own end-of-turn
       // signal (the `result` envelope, which the translator turns into
       // turn_end) rather than from whether the HTTP consumer drains the
@@ -1656,7 +1953,9 @@ export class ClaudeSession implements AgentSession {
       if (ev.kind === 'turn_end' && this.state === 'in_turn') {
         this.state = 'idle';
         this.lastUsedAt = Date.now();
+        if (this.turn) this.turn.nativeEnded = true;
       }
+      if (ev.kind === 'turn_end' && this.skillReloadPending && this.transport) this.reloadNativeSkills(this.transport);
       if (ev.kind === 'turn_end') this.settleInterrupt?.();
       if (ev.kind === 'turn_end') {
         this.heldTurnEnd = false;
@@ -1688,6 +1987,7 @@ export class ClaudeSession implements AgentSession {
     this.turnSteers.clear();
     this.heldTurnEnd = false;
     this.nativeCapabilities = new Set();
+    this.authRetryPending = false;
 
     const onMessage = (envelope: Record<string, unknown>) => {
         if (!isCurrent()) return;
@@ -1705,10 +2005,27 @@ export class ClaudeSession implements AgentSession {
           }
           return;
         }
-        if (envelope.type === 'system' && envelope.subtype === 'api_retry' && envelope.error === 'authentication_failed') {
-          this.failProcess(new Error('Claude authentication failed. Refresh the CLI credentials and retry; the original session is retained.'));
+        // The whole command table again, after skills or plugins changed.
+        if (envelope.type === 'system' && envelope.subtype === 'commands_changed') {
+          if (this.transport) this.observeNativeCommands(this.transport, envelope.commands, true);
           return;
         }
+        if (envelope.type === 'system' && envelope.subtype === 'api_retry' && envelope.error === 'authentication_failed') {
+          // Let the CLI's first retry renew expired credentials unseen; fail
+          // fast if its credentials are still rejected, rather than back off.
+          if (this.authRetryPending) {
+            this.failProcess(new Error('Claude authentication failed. Refresh the CLI credentials and retry; the original session is retained.'));
+            return;
+          }
+          this.authRetryPending = true;
+          this.host.observability.log('info', 'chat', 'claude authentication retry', {
+            nodeId: this.nodeId,
+            sessionId: this.id,
+            attempt: typeof envelope.attempt === 'number' ? envelope.attempt : undefined,
+          });
+          return;
+        }
+        if (['assistant', 'stream_event', 'result'].includes(String(envelope.type))) this.authRetryPending = false;
         const isInit = envelope['type'] === 'system' && envelope['subtype'] === 'init';
         if (this.resumePending && !isInit) {
           if (['assistant', 'stream_event', 'result'].includes(String(envelope['type']))) {
@@ -1797,31 +2114,17 @@ export class ClaudeSession implements AgentSession {
           && typeof envelope['permissionMode'] === 'string') {
           this.observeNativeMode(envelope['permissionMode'] as PermissionMode);
         }
-        this.logFollowUpsHookEnvelope(envelope);
-        this.completeFollowUpsOutputBoundaryFromEnvelope(envelope);
         translator.feed(envelope);
     };
 
-    const systemPromptAppend = [
-      this.systemPromptAppend,
-      this.followUpsHookPocEnabled
-        ? this.options.hostText?.followUpsHookPocInstruction?.(this.followUpsExperimentMode) ?? ''
-        : '',
-    ].filter(Boolean).join('\n');
-    if (this.followUpsHookPocEnabled) {
-      this.host.observability.log('info', 'chat', 'claude follow-ups hook poc enabled', {
-        nodeId: this.nodeId,
-        sessionId: this.id,
-        // A prefix only, as the MCP host logs ids: the slot id is a capability.
-        slotId: this.slotId ? `${this.slotId.slice(0, 4)}…` : undefined,
-        followUpsMode: this.followUpsExperimentMode,
-      });
-    }
+    const systemPromptAppend = this.systemPromptAppend || '';
 
     const tCliSpawn = this.perf.now();
     let child: ChildProcessWithoutNullStreams;
     let transportReady = false;
     let startupError: Error | undefined;
+    let skillDir: string | null = null;
+    let skillLibrary = NO_CLAUDE_SKILL_LIBRARY;
     try {
       const permissionMode = (this.turnAbort ? this.turnPermissionMode : undefined) ?? this.host.permissions.mode(this.owner, this.ownerUserId);
       // A restricted session (the Michi assistant) never bypasses, has no
@@ -1832,6 +2135,20 @@ export class ClaudeSession implements AgentSession {
       // A respawn during planning (a restore, a recovered Stop) keeps planning.
       const spawnMode = this.supportsModes() && this.workMode === 'plan' ? 'plan' as const : spawnPolicy.permissionMode;
       this.nativePermissionMode = spawnMode;
+      // Session-scoped in the CLI: every spawn, a resume too, passes it again.
+      // Off is sent as well, so a settings file cannot turn it on unseen.
+      const ultracode = this.desiredUltracode();
+      this.ultracodeWanted = ultracode;
+      this.nativeUltracode = ultracode;
+      this.ultracodeReported = null;
+      const bare = ownerMode(this.owner) === 'headless' ? true : this.options.cli().bare;
+      this.spawnedBare = bare === true;
+      skillDir = this.skillLibraryDir();
+      // What the CLI is about to load, for the table it answers initialize with.
+      if (skillDir) skillLibrary = await readClaudeSkillLibrary(skillDir);
+      // A Stop or dispose while the library was read starts no process.
+      this.turnAbort?.signal.throwIfAborted();
+      if ((this.state as SessionState) === 'disposed') throw new Error('Claude session was disposed during startup');
       const transport = await createClaudeSdkTransport({
         onMessage,
         onError: (error) => { if (!transportReady) startupError = error; else if (isCurrent()) this.failProcess(error); },
@@ -1847,18 +2164,18 @@ export class ClaudeSession implements AgentSession {
         // Restricted: mandatory host hooks, and no YOLO switch to bypassPermissions later.
         restricted: assistant || ownerMode(this.owner) === 'headless'
           || (!!this.toolProfile && (!this.toolProfile.assistant || !!this.toolProfile.allowedToolNames)) || !!this.permissionBroker,
-        // The user's settings, hooks, plugins and skills never reach the assistant.
+        // The user's own settings, hooks, plugins and skills never reach the
+        // assistant; nor do the library's (addDirs below).
         ...(spawnPolicy.isolateSettings ? { isolateSettings: true } : {}),
         ...(spawnPolicy.restrictedMode ? { restrictedMode: true } : {}),
         sessionId: opts.sessionId,
         resumeSessionId: opts.resumeSessionId,
         forkSession: opts.forkSession,
+        ...(this.ephemeral ? { persistSession: false, quietTelemetry: true } : {}),
         permissionMode: spawnMode,
         mcpConfigInline: opts.mcpConfig,
-        settingsInline: this.followUpsHookPocEnabled
-          ? buildClaudeFollowUpsHookPocSettings()
-          : undefined,
-        includeHookEvents: this.followUpsHookPocEnabled,
+        ultracode,
+        includeHookEvents: false,
         // Surface in-session Task subagents as a live roster (subagent_list_update /
         // subagent_tool_activity) instead of an opaque "Used N tools" chip.
         forwardSubagentText: this.options.cli().forwardSubagentText,
@@ -1870,10 +2187,8 @@ export class ClaudeSession implements AgentSession {
         strictMcpConfig: ownerMode(this.owner) === 'headless' || spawnPolicy.strictMcpConfig === true
           || this.options.cli().strictMcp,
         // Bare mode skips SessionStart hooks, plugins, skills, MCP auto-discovery
-        // (see ClaudeCliFlags.bare); the Stop-hook POC needs hooks, an Agent Run never does.
-        bare: ownerMode(this.owner) === 'headless'
-          ? true
-          : (this.followUpsHookPocEnabled ? false : this.options.cli().bare),
+        // (see ClaudeCliFlags.bare); an Agent Run never needs them.
+        bare,
         model: this.model,
         effort: reasoningToClaudeEffort(resolveReasoningOptions(
           { reasoning: true }, getClaudeReasoningCapabilities(this.model ?? 'sonnet'), undefined,
@@ -1884,6 +2199,13 @@ export class ClaudeSession implements AgentSession {
         // its ~/.claude default.
         configDir: this.options.configDir?.(),
         systemPromptAppend,
+        ...(this.host.config.features.nativeMemory?.('claude', this.ownerUserId) === false ? { env: { ...AUTO_MEMORY_OFF_ENV } } : {}),
+        // Library skills load with the user's settings. Isolated and bare
+        // processes do not load them: the assistant has no library at all,
+        // and bare chats and Agent Runs reach it through michi_skills where
+        // their tools include it; a skill turn sends the skill's text. One
+        // path in every mode, so warm processes keep identical arguments.
+        ...(skillDir ? { addDirs: [skillDir] } : {}),
       });
       this.transport = transport;
       child = transport.child;
@@ -1914,8 +2236,16 @@ export class ClaudeSession implements AgentSession {
       if (this.child === child) this.failProcess(error);
     });
 
-    child.on('exit', () => {
+    child.on('exit', (code: number | null, signal: NodeJS.Signals | null) => {
       exitResolve();
+      this.host.observability.log('info', 'chat', 'claude process exited', {
+        nodeId: this.nodeId,
+        sessionId: this.id,
+        pid: child.pid,
+        code,
+        signal,
+        current: this.child === child,
+      });
       // Background workflows run inside the CLI process and end with it.
       this.workflowTap.release('The Claude session ended before this workflow finished');
       if (this.child !== child) return;
@@ -1934,131 +2264,53 @@ export class ClaudeSession implements AgentSession {
     // gated on that validated identity rather than an allocated placeholder.
     this.state = 'idle';
     this.startIdlePump();
-  }
-
-  private armFollowUpsHookPoc(userTurnCount: number): void {
-    if (!this.followUpsHookPocEnabled) return;
-    this.turnMetadata.begin();
-    this.host.observability.log('debug', 'chat', 'claude follow-ups hook poc turn armed', {
-      nodeId: this.nodeId,
-      sessionId: this.id,
-      userTurnCount,
-    });
-  }
-
-  private followUpsHookCallbacks(): {
-    onSetFollowUps?: (followUps: string[]) => void;
-    onSetBranchOverview: (overview: string) => void;
-    onValidateFollowUps: () => Record<string, unknown>;
-  } {
-    return {
-      ...(this.followUpsExperimentMode === 'hook-tool' ? {
-        onSetFollowUps: (followUps: string[]) => {
-          // Warm Claude slots are bound before the per-chat setting is known.
-          const cleaned = this.turnMetadata.setFollowUps(followUps, this.enableFollowUps);
-          if (!cleaned) return;
-          this.host.observability.log('debug', 'mcp', 'claude follow-ups hook poc set_follow_ups received', {
-            nodeId: this.nodeId,
-            sessionId: this.id,
-            count: cleaned.length,
-            validationActive: this.turnMetadata.validationActive,
-          });
-          this.queue.push({ kind: 'host_event', type: 'follow_ups_status', payload: { status: 'in_progress' } });
-          this.queue.push({ kind: 'host_event', type: 'follow_ups', payload: { followUps: cleaned } });
-        },
-      } : {}),
-      onSetBranchOverview: (overview) => {
-        const result = this.turnMetadata.setOverview(overview);
-        if (!result) return;
-        if (result.beforeSentinelsComplete && this.enableFollowUps) {
-          this.host.observability.log('warn', 'mcp', 'claude branch overview arrived before follow-up sentinels completed', {
-            nodeId: this.nodeId,
-            sessionId: this.id,
-          });
-        }
-        this.host.observability.log('debug', 'mcp', 'claude follow-ups hook poc set_branch_overview received', {
-          nodeId: this.nodeId,
-          sessionId: this.id,
-          length: result.overview.length,
-          validationActive: this.turnMetadata.validationActive,
+    // Whether this process can run Ultracode (model, workflows) is the CLI's
+    // to say; the session state carries it to the chat's indicator.
+    // A choice changed while the process started (setUltracode found none) is
+    // applied once it is up.
+    const spawned = this.transport;
+    if (spawned && this.supportsUltracode()) {
+      void Promise.resolve(spawned.initialized).then(() => {
+        if (this.transport !== spawned) return;
+        this.syncNativeUltracode(spawned);
+        void this.refreshUltracodeReport(spawned);
+      }, () => {});
+    }
+    if (spawned) {
+      this.spawnedSkillDir = skillDir;
+      this.nextLibrary = skillLibrary;
+      // The skills the chat's menu offers, and which a skill turn runs as a command.
+      void Promise.resolve(spawned.initialized).then(
+        (answer) => this.observeNativeCommands(spawned, (answer as { commands?: unknown } | undefined)?.commands, false), () => {});
+      try {
+        this.stopSkillLibraryUpdates?.();
+        this.stopSkillLibraryUpdates = this.options.subscribeSkillLibraryChanges?.(() => this.onSkillLibraryChanged(spawned)) ?? null;
+      } catch (error) {
+        this.stopSkillLibraryUpdates = null;
+        this.host.observability.log('warn', 'chat', 'claude session cannot follow skill library changes', {
+          nodeId: this.nodeId, error: error instanceof Error ? error.message : String(error),
         });
-        this.queue.push({ kind: 'host_event', type: 'branch_overview', payload: { overview: result.overview } });
-      },
-      onValidateFollowUps: () => {
-        const result = this.turnMetadata.validate(this.enableFollowUps);
-        const context = { nodeId: this.nodeId, sessionId: this.id };
-        switch (result.status) {
-          case 'inactive':
-            this.host.observability.log('debug', 'mcp', 'claude follow-ups hook poc validator skipped', { ...context, reason: 'non-user-turn' });
-            break;
-          case 'complete':
-            this.host.observability.log('debug', 'mcp', 'claude follow-ups hook poc validator passed', context);
-            break;
-          case 'repair':
-            this.host.observability.log('warn', 'mcp', 'claude follow-ups hook poc blocked stop', { ...context, attempt: 1 });
-            break;
-          case 'fail_open':
-            this.host.observability.log('warn', 'mcp', 'claude follow-ups hook poc fail-open', {
-              ...context, reason: `${result.missingTools.join(', ')} still missing after one continuation`,
-            });
-            break;
-        }
-        return result.response;
-      },
-    };
-  }
-
-  private suppressFollowUpsInternalEvent(ev: NormalizedEvent): boolean {
-    if (!this.followUpsHookPocEnabled) return false;
-    return this.turnMetadata.suppressOutput(ev.kind);
-  }
-
-  private observeFollowUpsSentinelEvent(ev: NormalizedEvent): void {
-    if (!this.followUpsHookPocEnabled || ev.kind !== 'chunk') return;
-    this.turnMetadata.observeChunk(ev.text, this.enableFollowUps);
-  }
-
-  private completeFollowUpsOutputBoundaryFromEnvelope(
-    envelope: Record<string, unknown>,
-  ): void {
-    const type = typeof envelope.type === 'string' ? envelope.type : '';
-    const streamEvent = envelope.event as Record<string, unknown> | undefined;
-    const streamEventType = typeof streamEvent?.type === 'string' ? streamEvent.type : '';
-    if (type !== 'result' && !(type === 'stream_event' && streamEventType === 'message_stop')) return;
-    if (!this.turnMetadata.completeOutputBoundary()) return;
-    this.host.observability.log('debug', 'chat', 'claude follow-ups visible output boundary completed', {
-      nodeId: this.nodeId,
-      sessionId: this.id,
-      reason: type === 'result' ? 'turn-result' : 'message-stop',
-    });
-    this.queue.push({ kind: 'host_event', type: 'follow_ups_status', payload: { status: 'completed' } });
-  }
-
-  private finishFollowUpsHookPocTurn(): void {
-    const suppressed = this.turnMetadata.finish();
-    if (suppressed.chunks > 0 || suppressed.thoughts > 0) {
-      this.host.observability.log('debug', 'chat', 'claude follow-ups hook poc hidden metadata output suppressed', {
-        nodeId: this.nodeId,
-        sessionId: this.id,
-        ...suppressed,
-      });
+      }
+      // A change while the process started came before the subscription: reload for it.
+      if (skillDir) {
+        const names = (library: ClaudeSkillLibrary) => [...library.names].sort().join('\n');
+        void readClaudeSkillLibrary(skillDir).then((now) => {
+          if (this.transport === spawned && names(now) !== names(skillLibrary)) this.onSkillLibraryChanged(spawned);
+        }, () => {});
+      }
     }
   }
 
-  private logFollowUpsHookEnvelope(envelope: Record<string, unknown>): void {
-    if (!this.followUpsHookPocEnabled) return;
-    const type = typeof envelope.type === 'string' ? envelope.type : '';
-    const subtype = typeof envelope.subtype === 'string' ? envelope.subtype : '';
-    const hookName = typeof envelope.hook_name === 'string' ? envelope.hook_name : '';
-    if (type !== 'system' || !subtype.startsWith('hook_') || hookName !== 'Stop') return;
-    this.host.observability.log('debug', 'chat', 'claude follow-ups hook poc lifecycle event', {
-      nodeId: this.nodeId,
-      sessionId: this.id,
-      type: subtype,
-      hookName,
-      hookId: typeof envelope.hook_id === 'string' ? envelope.hook_id : undefined,
-      outcome: typeof envelope.outcome === 'string' ? envelope.outcome : undefined,
-    });
+  /** The host's library folder for a new process; a failure only leaves the library out. */
+  private skillLibraryDir(): string | null {
+    try {
+      return this.options.skillLibraryDir?.() ?? null;
+    } catch (error) {
+      this.host.observability.log('warn', 'chat', 'claude skill library is unavailable for this process', {
+        nodeId: this.nodeId, error: error instanceof Error ? error.message : String(error),
+      });
+      return null;
+    }
   }
 
   private checkAndRepairJsonl(cwd: string, claudeSessionId: string, ownerUserId?: string | null): void {
@@ -2144,7 +2396,7 @@ export class ClaudeSession implements AgentSession {
     if (!this.host.profile.isRestricted(this.toolProfile) || this.host.profile.isMaintenance?.(this.toolProfile)) return undefined;
     if (!this.assistantToolsAvailable()) return { behavior: 'deny', message: ASSISTANT_UNVERIFIED };
     if (signal.aborted || this.turnAbort?.signal.aborted) return { behavior: 'deny', message: 'Turn cancelled' };
-    return restrictedToolApproval(this.options, michiMcpToolName(name)) === 'allow'
+    return restrictedToolApproval(this.options, michiMcpToolName(name), this.toolProfile) === 'allow'
       ? { behavior: 'allow', updatedInput: input }
       : { behavior: 'deny', message: ASSISTANT_TOOL_DENIAL };
   }
@@ -2160,9 +2412,30 @@ export class ClaudeSession implements AgentSession {
       : { behavior: 'deny', message: 'This Claude session may run only dedicated maintenance tools.' };
   }
 
+  /**
+   * Whether the host wants this call of an unrestricted session answered by
+   * canUseTool, whatever the CLI's own settings and mode would decide
+   * (ClaudeAdapterOptions.requireHostApproval). A callback that throws asks:
+   * the approval policy then decides.
+   */
+  private hostRequiresApproval(name: string): boolean {
+    const check = this.options.requireHostApproval;
+    if (!check) return false;
+    try {
+      return check({ owner: this.owner, ownerUserId: this.ownerUserId, toolName: name, hostToolName: michiMcpToolName(name) }) === true;
+    } catch (error) {
+      this.host.observability.log('warn', 'chat', 'claude host approval check failed; the call asks', {
+        nodeId: this.nodeId, toolName: name, error: error instanceof Error ? error.message : String(error),
+      });
+      return true;
+    }
+  }
+
   /** Apply mandatory Run restrictions before native auto-approval. Ordinary
-   * chat policy still handles native permission requests through canUseTool. */
-  private async enforceSdkPolicy(name: string, input: Record<string, unknown>, id: string, signal: AbortSignal): Promise<PermissionResult | undefined> {
+   * chat policy still handles native permission requests through canUseTool;
+   * a call the host requires approval for asks it even where the user's
+   * settings or the mode would approve it. */
+  private async enforceSdkPolicy(name: string, input: Record<string, unknown>, id: string, signal: AbortSignal): Promise<ClaudePreToolUseVerdict | undefined> {
     const assistant = this.assistantSdkVerdict(name, input, signal);
     if (assistant) return assistant;
     const maintenance = this.maintenanceSdkVerdict(name, input, signal);
@@ -2172,6 +2445,7 @@ export class ClaudeSession implements AgentSession {
     if (!this.isToolAllowed(toolName)) return { behavior: 'deny', message: 'tool is not enabled for this Agent Run' };
     if (toolName === 'ToolSearch' && this.toolProfile && !this.host.profile.isMaintenance?.(this.toolProfile)) return { behavior: 'allow', updatedInput: input };
     if (this.permissionBroker) return this.authorizeSdkTool(toolName, input, id, signal);
+    if (this.hostRequiresApproval(name)) return { behavior: 'ask', message: HOST_APPROVAL_REQUIRED };
     return undefined;
   }
 
@@ -2180,12 +2454,16 @@ export class ClaudeSession implements AgentSession {
     if (assistant) return assistant;
     const maintenance = this.maintenanceSdkVerdict(toolName, input, signal);
     if (maintenance) return maintenance;
+    // The host's policy is told the name was its own server's, since it sees it without the prefix.
+    const hostTool = michiMcpToolName(toolName) !== null;
     toolName = toolName.replace(/^mcp____michi_internal____/, '');
     if (signal.aborted || this.turnAbort?.signal.aborted) return { behavior: 'deny', message: 'Turn cancelled' };
     if (!this.isToolAllowed(toolName)) return { behavior: 'deny', message: 'tool is not enabled for this Agent Run' };
-    this.ensureSelfTurnController();
     // Native AskUserQuestion uses the same durable interaction UI as ask_user.
     if (toolName === 'AskUserQuestion') {
+      // A question asked while idle opens a self-turn. A tool approval decides
+      // that itself (makeOnApprove): while a workflow runs, the run carries it.
+      this.ensureSelfTurnController();
       const questionTurn = this.turnAbort;
       // A native question is still subject to the Run's mandatory host policy.
       // Do not let the interaction shortcut bypass an explicit broker denial.
@@ -2198,7 +2476,7 @@ export class ClaudeSession implements AgentSession {
       return answers && !signal.aborted && !questionTurn?.signal.aborted && this.turnAbort === questionTurn
         ? { behavior: 'allow', updatedInput: { ...input, answers } } : { behavior: 'deny', message: 'User input cancelled' };
     }
-    const result = await this.makeOnApprove()({ toolName, input, toolUseId }, signal);
+    const result = await this.makeOnApprove()({ toolName, input, toolUseId, ...(hostTool ? { hostTool } : {}) }, signal);
     return result.behavior === 'allow' ? { behavior: 'allow', updatedInput: (result.updatedInput ?? input) as Record<string, unknown> } : result;
   }
 
@@ -2218,29 +2496,35 @@ export class ClaudeSession implements AgentSession {
 
   // ---- Turn mutex ------------------------------------------------------------
 
-  private acquireTurnLock(): void {
-    if (this.turnLock) {
-      // Already a turn in flight — reject with ESESSION_BUSY
+  /**
+   * Take the session's one turn for `owner`, or throw ESESSION_BUSY without
+   * changing anything when another owner holds it. Every owner but the idle
+   * pump then parks the pump: the gate closes and a pump waiting in pull()
+   * gets null. A frame that arrives meanwhile stays queued until the turn is
+   * released. A pump left running would take it, fail to claim the turn,
+   * hand it back and take it again without ever yielding to the event loop.
+   */
+  private takeTurn(owner: TurnOwner): void {
+    if (this.turn) {
       throw Object.assign(new Error('Session is busy with an in-flight turn'), { code: 'ESESSION_BUSY' });
     }
-    let release!: () => void;
-    this.turnLock = new Promise<void>((r) => { release = r; });
-    this.turnLockRelease = release;
+    this.turn = { owner, nativeEnded: false };
+    if (owner === 'self') return;
+    this.idleGate.close();
+    this.queue.interruptWaiter();
   }
 
-  private releaseTurnLock(): void {
-    if (this.turnLockRelease) {
-      const r = this.turnLockRelease;
-      this.turnLock = null;
-      this.turnLockRelease = null;
-      r();
-    }
+  private releaseTurn(): void {
+    const turn = this.turn;
+    if (!turn) return;
+    this.turn = null;
+    if (turn.owner !== 'self') this.idleGate.open();
   }
 
   /** An interaction can be the first frame of a native background turn. Its
    * callbacks and the idle pump must capture the same cancellation identity. */
   private ensureSelfTurnController(): AbortController | null {
-    if (!this.turnAbort && !this.turnLock && this.state === 'idle') {
+    if (!this.turnAbort && !this.turn && this.state === 'idle') {
       this.turnAbort = new AbortController();
     }
     return this.turnAbort;
@@ -2249,21 +2533,25 @@ export class ClaudeSession implements AgentSession {
   // ---- Permission handling ---------------------------------------------------
 
   private makeOnApprove() {
-    return async (params: { toolName: string; input: unknown; toolUseId: string }, signal?: AbortSignal): Promise<
+    // hostTool: toolName is a tool of Michi's MCP server, its prefix removed (authorizeSdkTool).
+    return async (params: { toolName: string; input: unknown; toolUseId: string; hostTool?: boolean }, signal?: AbortSignal): Promise<
       { behavior: 'allow'; updatedInput?: unknown } | { behavior: 'deny'; message: string }
     > => {
       // No chat turn is running or claimed: the asker is background work.
       // While workflows run, they carry its chat approval (below) instead of
       // a self-turn, so it gets a self-turn identity only if asked in the chat.
-      const viaWorkflowPossible = !this.turnAbort && !this.idlePumpTurnClaimed
+      const viaWorkflowPossible = !this.turnAbort && this.turn?.owner !== 'self'
         && !this.permissionBroker && !this.host.profile.isRestricted(this.toolProfile) && this.workflowTap.hasOpenRuns();
-      let permissionTurn = viaWorkflowPossible ? null : this.ensureSelfTurnController();
+      // The self-turn identity is created only when a request is queued in the
+      // chat: one answered by policy must not leave an idle controller behind,
+      // which would send later workflow approvals to the chat.
+      let permissionTurn = viaWorkflowPossible ? null : this.turnAbort;
       const isActive = () => !signal?.aborted && !permissionTurn?.signal.aborted
         && this.turnAbort === permissionTurn && this.state !== 'disposed' && this.state !== 'crashed';
       if (!isActive()) return { behavior: 'deny', message: 'permission request is no longer active' };
       if (this.host.profile.isRestricted(this.toolProfile) && !this.host.profile.isMaintenance?.(this.toolProfile)) {
         // Only the assistant's own Michi tools, which enforce their own approvals.
-        return restrictedToolApproval(this.options, michiMcpToolName(params.toolName)) === 'allow'
+        return restrictedToolApproval(this.options, michiMcpToolName(params.toolName), this.toolProfile) === 'allow'
           ? { behavior: 'allow', updatedInput: params.input }
           : { behavior: 'deny', message: ASSISTANT_TOOL_DENIAL };
       }
@@ -2286,6 +2574,8 @@ export class ClaudeSession implements AgentSession {
         if (decision !== 'ask') return { behavior: 'allow', updatedInput: params.input };
         // Ask uses the same runtime-native request queue as chat permissions,
         // but the resulting event is projected into a durable Run interaction.
+        if (!permissionTurn) permissionTurn = this.ensureSelfTurnController();
+        if (!isActive()) return { behavior: 'deny', message: 'permission request is no longer active' };
         const requestId = nextInteractionRequestId();
         this.queue.push({
           kind: 'permission_request',
@@ -2323,7 +2613,11 @@ export class ClaudeSession implements AgentSession {
         return answer?.startsWith('allow') ? { behavior: 'allow', updatedInput: params.input } : { behavior: 'deny', message: PLAN_REJECTED };
       }
 
-      const policy = this.approvals.policy(this.owner, this.ownerUserId, params.toolName, true, this.turnPermissionMode);
+      // A turn decides under the mode it started with. Background work asking
+      // between turns (a workflow agent) follows the chat's current mode, so
+      // moving the chat to Ask holds a running workflow's next tool call.
+      const policy = this.approvals.policy(this.owner, this.ownerUserId, params.toolName, true,
+        this.turn ? this.turnPermissionMode : undefined, params.hostTool === true);
       if (policy === 'allow') return { behavior: 'allow', updatedInput: params.input };
       if (policy === 'deny') return { behavior: 'deny', message: 'policy denied' };
 
@@ -2444,9 +2738,14 @@ export class ClaudeSession implements AgentSession {
     if (signal?.aborted) return Promise.resolve(null);
     const abort = () => this.cancelPermission(requestId);
     signal?.addEventListener('abort', abort, { once: true });
+    // The queue the request was pushed on, so the resolution reaches its turn.
+    const queue = this.queue;
     return new Promise<string | null>((resolve) => {
       const timer = setTimeout(() => {
         this.pendingPermissions.delete(requestId);
+        // Unanswered: the tool is denied. Say so, as ACP does, so the host
+        // clears the pending request and no late answer is offered.
+        queue.push({ kind: 'permission_resolved', requestId });
         resolve(null);
       }, this.options.limits.approveTimeoutMs);
       this.pendingPermissions.set(requestId, { resolve, timer, toolName });
@@ -2508,11 +2807,39 @@ function userEnvelope(text: string, imageBlocks: ClaudeImageBlock[] = [], human 
   const content = imageBlocks.length > 0
     ? [{ type: 'text' as const, text }, ...imageBlocks]
     : text;
+  return userMessage(content, human);
+}
+
+type ClaudeUserContent = string | Array<{ type: 'text'; text: string } | ClaudeImageBlock>;
+
+function userMessage(content: ClaudeUserContent, human: boolean): SDKUserMessage {
   // A person typed this prompt (and ClaudeCliFlags.humanOrigin is on). The CLI
   // gates prompt keywords that launch background work (e.g. `ultracode` →
   // Workflow) on a human origin.
   const origin: Pick<SDKUserMessage, 'origin'> = human ? { origin: { kind: 'human' } } : {};
   return { type: 'user', message: { role: 'user', content: content as SDKUserMessage['message']['content'] }, parent_tool_use_id: null, session_id: '', uuid: randomUUID(), ...origin };
+}
+
+/**
+ * The CLI runs a message as a command when its last content block is text
+ * starting with '/' (no leading whitespace). Anything after the command
+ * would become the skill's arguments, so the turn's other text and its
+ * images come first: they reach the model in the same turn as the skill.
+ */
+function skillCommandContent(context: string, imageBlocks: ClaudeImageBlock[], command: string): ClaudeUserContent {
+  if (!context && imageBlocks.length === 0) return command;
+  return [...(context ? [{ type: 'text' as const, text: context }] : []), ...imageBlocks, { type: 'text' as const, text: command }];
+}
+
+/**
+ * The text a skill turn sends before its command: the model prefix and
+ * first-turn preamble, the turn's own text other than the skill's
+ * arguments, then the reminder and attachment note. Each prefix part ends
+ * in a separator, which leads into nothing when the turn has no text of
+ * its own.
+ */
+function skillContextBlock(prefix: string, context: string, suffix: string): string {
+  return ((context ? prefix + context : prefix.replace(/\n\n---\n\n$/, '')) + suffix).trim();
 }
 
 /** Read local image attachments into base64 stream-json image blocks. Mirrors
@@ -2534,74 +2861,12 @@ function buildClaudeImageBlocks(images: ResolvedAttachment[]): ClaudeImageBlock[
 }
 
 function formatPermissionDetail(toolName: string, input: unknown): string | undefined {
+  if (toolName !== 'ExitPlanMode') return permissionDetail(canonicalClaudeToolName(toolName), input);
   const args = asRecord(input);
-  if (!args) return undefined;
-
-  const canonical = canonicalClaudeToolName(toolName);
-  if (toolName === 'ExitPlanMode') return formatField('Plan', firstString(args, ['plan', 'planFilePath']), 6000);
-
-  if (canonical === 'bash') {
-    const lines = compact([
-      formatField('Description', firstString(args, ['description']), 180),
-      formatField('Command', firstString(args, ['command', 'cmd']), 600),
-    ]);
-    return lines.length > 0 ? lines.join('\n') : undefined;
-  }
-
-  if (canonical === 'edit') {
-    const lines = compact([
-      formatField('File', firstString(args, ['file_path', 'path', 'notebook_path']), 320),
-      formatEditCount(args),
-    ]);
-    return lines.length > 0 ? lines.join('\n') : undefined;
-  }
-
-  if (canonical === 'write') {
-    const lines = compact([
-      formatField('File', firstString(args, ['file_path', 'path']), 320),
-      formatContentSize(args),
-    ]);
-    return lines.length > 0 ? lines.join('\n') : undefined;
-  }
-
-  return undefined;
+  return args ? permissionDetailLine('Plan', firstString(args, ['plan', 'planFilePath']), 6000) : undefined;
 }
 
 function asRecord(value: unknown): Record<string, unknown> | null {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
   return value as Record<string, unknown>;
-}
-
-function firstString(record: Record<string, unknown>, keys: string[]): string | undefined {
-  for (const key of keys) {
-    const value = record[key];
-    if (typeof value === 'string' && value.trim()) return value.trim();
-  }
-  return undefined;
-}
-
-function formatField(label: string, value: string | undefined, maxLength: number): string | undefined {
-  if (!value) return undefined;
-  return `${label}: ${truncate(value, maxLength)}`;
-}
-
-function formatEditCount(args: Record<string, unknown>): string | undefined {
-  const edits = args.edits;
-  if (!Array.isArray(edits)) return undefined;
-  return `Edits: ${edits.length}`;
-}
-
-function formatContentSize(args: Record<string, unknown>): string | undefined {
-  const content = args.content;
-  if (typeof content !== 'string') return undefined;
-  return `Content: ${content.length} chars`;
-}
-
-function truncate(value: string, maxLength: number): string {
-  if (value.length <= maxLength) return value;
-  return `${value.slice(0, Math.max(0, maxLength - 3))}...`;
-}
-
-function compact(values: Array<string | undefined>): string[] {
-  return values.filter((value): value is string => Boolean(value));
 }

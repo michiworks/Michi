@@ -277,7 +277,8 @@
           "availableModels": [
             {
               "id": "m1",
-              "label": "Model one"
+              "label": "Model one",
+              "supportsReasoning": false
             },
             {
               "id": "m2",
@@ -293,28 +294,44 @@
           "nativeEngine": "v3",
           "commands": [
             {
-              "name": "clear"
+              "name": "clear",
+              "kind": "command",
+              "description": "Start Kiro on a fresh context; the messages stay in Michi"
             },
             {
-              "name": "tools"
+              "name": "tools",
+              "kind": "command",
+              "description": "Show the tools this chat has"
             },
             {
-              "name": "mcp"
+              "name": "mcp",
+              "kind": "command",
+              "description": "Show the MCP servers and their status"
             },
             {
-              "name": "effort"
+              "name": "effort",
+              "kind": "command",
+              "description": "Show the reasoning effort, or set it",
+              "argumentHint": "[level]"
             },
             {
-              "name": "compact"
+              "name": "compact",
+              "kind": "command"
             },
             {
-              "name": "context"
+              "name": "context",
+              "kind": "command",
+              "description": "Show what fills the context window"
             },
             {
-              "name": "history"
+              "name": "history",
+              "kind": "command",
+              "description": "Show the history Kiro keeps for this chat"
             },
             {
-              "name": "usage"
+              "name": "usage",
+              "kind": "command",
+              "description": "Show your Kiro usage"
             }
           ]
         }
@@ -360,7 +377,7 @@
     "p1": [
       {
         "sessionUpdate": "permission_request",
-        "requestId": 5,
+        "requestId": "michi:5",
         "toolCall": {
           "toolCallId": "perm-5",
           "title": "Edit file"
@@ -386,7 +403,7 @@
       },
       {
         "sessionUpdate": "permission_request",
-        "requestId": -1,
+        "requestId": "michi:abc",
         "toolCall": {
           "toolCallId": "perm-abc",
           "title": "Edit file"
@@ -412,7 +429,7 @@
       },
       {
         "sessionUpdate": "permission_request",
-        "requestId": -2,
+        "requestId": "michi:5#2",
         "toolCall": {
           "toolCallId": "perm-5",
           "title": "Edit file"
@@ -438,7 +455,7 @@
       },
       {
         "sessionUpdate": "permission_request",
-        "requestId": 6,
+        "requestId": "michi:6",
         "toolCall": {
           "toolCallId": "perm-6",
           "title": "Edit file"
@@ -473,7 +490,7 @@
       },
       {
         "sessionUpdate": "permission_request",
-        "requestId": 7,
+        "requestId": "michi:7",
         "toolCall": {
           "toolCallId": "perm-7",
           "title": "Edit file"
@@ -506,7 +523,7 @@
       },
       {
         "sessionUpdate": "permission_request",
-        "requestId": 1.5,
+        "requestId": "michi:1.5",
         "toolCall": {
           "toolCallId": "perm-1.5",
           "title": "Edit file"
@@ -655,7 +672,7 @@
     "p1": [
       {
         "sessionUpdate": "permission_resolved",
-        "requestId": 1.5
+        "requestId": "michi:1.5"
       }
     ]
   },
@@ -664,7 +681,7 @@
     "p1": [
       {
         "sessionUpdate": "permission_request",
-        "requestId": 10,
+        "requestId": "michi:10",
         "toolCall": {
           "toolCallId": "perm-10",
           "title": "Edit file"
@@ -690,7 +707,7 @@
       },
       {
         "sessionUpdate": "permission_request",
-        "requestId": 11,
+        "requestId": "michi:11",
         "toolCall": {
           "toolCallId": "perm-11",
           "title": "Edit file"
@@ -739,7 +756,7 @@
     "p1": [
       {
         "sessionUpdate": "permission_request",
-        "requestId": 12,
+        "requestId": "michi:12",
         "toolCall": {},
         "options": "<undefined>",
         "_meta": "<undefined>"

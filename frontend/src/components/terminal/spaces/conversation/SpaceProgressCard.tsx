@@ -6,7 +6,7 @@ import { useChatProjects, useNodesSelector } from '../../../../state/chatStore';
 import type { ChatNodeState } from '../../../../state/chatTypes';
 import { cardLiveState, replySummary } from '../../../../state/spaceConversations/liveStatus';
 import { Button } from '../../../ui/controls';
-import { homeAge } from '../home/homeFormat';
+import { formatMichiAgo } from '../../content/michiFormat';
 import { EASE, SPRING, TRANSITION } from '../../../../motion/tokens';
 import '../../content/michi.css';
 
@@ -145,7 +145,7 @@ export function SpaceProgressCard({ card, clock, onOpen, onDismiss }: {
   );
   const open = (continueChat: boolean) => onOpen(card, { continueChat });
   // A finished card counts from when it finished ("Done · 5m ago"); one not started yet, from when it was asked for.
-  const meta = [card.workspaceName, running ? view.line : STATUS_WORD[view.status], running ? null : homeAge(card.finishedAt ?? card.createdAt, clock)]
+  const meta = [card.workspaceName, running ? view.line : STATUS_WORD[view.status], running ? null : formatMichiAgo(card.finishedAt ?? card.createdAt, clock)]
     .filter(Boolean).join(' · ');
   const waiting = view.awaiting ? WAITING[view.awaiting] : null;
 

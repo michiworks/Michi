@@ -1,12 +1,15 @@
-import React, { memo, useCallback, useDeferredValue, useEffect, useMemo, useRef, useState } from 'react';
+import { memo, useCallback, useDeferredValue, useEffect, useMemo, useRef, useState } from 'react';
 import type { ArtifactEntry, Project } from '../../state/chatTypes';
 import type { FilesPaneItem } from '../../state/paneItems';
 import { useChatActions, useChatProjects } from '../../state/chatStore';
 import { usePaneShellStyle } from '../../hooks/usePaneShellStyle';
-import { fetchArtifactContent } from '../../services/api';
+import { useSideColumn } from './useSideColumn';
+import { readWorkspaceFile } from '../../services/workspaceFileReader';
 import { getElectron, type FilePreviewResult, type FileTreeEntry } from '../../lib/electronBridge';
+import { artifactHostPath, isAbsoluteFilePath } from '../../lib/workspaceFilePath';
 import MarkdownContent from '../MarkdownContent';
 import { ExternalLinkIcon } from './icons';
+import { isLocalProject } from '../../config/backendConnections';
 
 const MARKDOWN_EXTS = new Set(['md', 'mdx', 'markdown']);
 
@@ -42,19 +45,12 @@ export function workspaceRoots(project: Project | undefined): string[] {
 
 export function resolveArtifactSelection(artifact: ArtifactEntry, project: Project | undefined): FileSelection | null {
   if (!artifact.filePath || artifact.type === 'link') return null;
-  if (project?.backendConnectionId) {
-    return { id: `artifact:${artifact.id}`, label: artifact.name, artifactPath: artifact.filePath };
-  }
-  if (artifact.filePath.startsWith('/')) {
-    return { id: `artifact:${artifact.id}`, label: artifact.name, absolutePath: artifact.filePath };
-  }
+  const id = `artifact:${artifact.id}`;
+  // folders[0] is the cwd; a project without a cwd keeps its first folder.
   const cwd = project?.cwd ?? project?.folders?.[0]?.path;
-  return {
-    id: `artifact:${artifact.id}`,
-    label: artifact.name,
-    absolutePath: cwd ? `${cwd.replace(/\/$/, '')}/${artifact.filePath}` : undefined,
-    artifactPath: artifact.filePath,
-  };
+  const absolutePath = artifactHostPath(artifact, project && { ...project, cwd }) ?? undefined;
+  if (absolutePath && isAbsoluteFilePath(artifact.filePath)) return { id, label: artifact.name, absolutePath };
+  return { id, label: artifact.name, absolutePath, artifactPath: artifact.filePath };
 }
 
 function isTreeMatch(entry: FileTreeEntry, filter: string, directories: Record<string, DirectoryState>): boolean {
@@ -93,6 +89,7 @@ const TreeRow = memo(function TreeRow({
         type="button"
         onClick={() => isDirectory ? onToggle(entry.path) : onSelect(entry)}
         title={entry.path}
+        className={selectedPath === entry.path ? 't-row-hover is-active' : 't-row-hover'}
         style={{
           width: '100%',
           minHeight: 27,
@@ -109,8 +106,6 @@ const TreeRow = memo(function TreeRow({
           fontSize: 'var(--fs-sm)',
           textAlign: 'left',
         }}
-        onMouseEnter={(event) => { if (selectedPath !== entry.path) event.currentTarget.style.background = 'var(--term-hover-bg, var(--term-alt))'; }}
-        onMouseLeave={(event) => { if (selectedPath !== entry.path) event.currentTarget.style.background = 'transparent'; }}
       >
         <span aria-hidden style={{ color: 'var(--term-muted)', fontFamily: 'var(--font-mono)', textAlign: 'center' }}>
           {isDirectory ? (isExpanded ? '⌄' : '›') : '·'}
@@ -120,7 +115,7 @@ const TreeRow = memo(function TreeRow({
       {isDirectory && isExpanded ? (
         <div>
           {state?.phase === 'loading' ? <div style={{ padding: `4px 8px 4px ${29 + depth * 14}px`, color: 'var(--term-muted)', fontSize: 'var(--fs-xs)' }}>loading…</div> : null}
-          {state?.phase === 'error' ? <div style={{ padding: `4px 8px 4px ${29 + depth * 14}px`, color: 'var(--term-danger)', fontSize: 'var(--fs-xs)' }}>{state.message}</div> : null}
+          {state?.phase === 'error' ? <div style={{ padding: `4px 8px 4px ${29 + depth * 14}px`, color: 'var(--term-danger-text)', fontSize: 'var(--fs-xs)' }}>{state.message}</div> : null}
           {state?.entries.map((child) => (
             <TreeRow
               key={child.path}
@@ -152,17 +147,10 @@ function Preview({ selection, project }: { selection: FileSelection | null; proj
     let active = true;
     setState({ phase: 'loading' });
     const load = async (): Promise<FilePreviewResult> => {
-      const electron = getElectron();
-      if (selection.absolutePath && electron?.readFilePreview) {
-        const result = await electron.readFilePreview(selection.absolutePath);
-        if (!result) throw new Error('File is not readable or exceeds 5 MB');
-        return result;
-      }
-      if (selection.artifactPath && project) {
-        const result = await fetchArtifactContent(project.id, selection.artifactPath);
-        return { kind: 'text', content: result.content, size: result.size, modifiedAt: result.modifiedAt, extension: result.extension };
-      }
-      throw new Error('Workspace browsing is available in the desktop app');
+      // The host path also reaches a symlink artifact's target outside the workspace.
+      const path = selection.absolutePath ?? selection.artifactPath;
+      if (!path || !project) throw new Error('Failed to read file');
+      return readWorkspaceFile({ workspaceId: project.id, local: isLocalProject(project), path });
     };
     void load()
       .then((result) => { if (active) setState({ phase: 'loaded', result }); })
@@ -200,7 +188,7 @@ function Preview({ selection, project }: { selection: FileSelection | null; proj
           </div>
         ) : null}
         {state.phase === 'loading' ? <div style={{ color: 'var(--term-muted)', fontSize: 'var(--fs-sm)' }}>loading {selection?.label}…</div> : null}
-        {state.phase === 'error' ? <div style={{ color: 'var(--term-danger)', fontSize: 'var(--fs-sm)' }}>{state.message}</div> : null}
+        {state.phase === 'error' ? <div style={{ color: 'var(--term-danger-text)', fontSize: 'var(--fs-sm)' }}>{state.message}</div> : null}
         {state.phase === 'loaded' && state.result.kind === 'image' ? (
           <img src={state.result.dataUrl} alt={selection?.label ?? 'Preview'} style={{ display: 'block', maxWidth: '100%', maxHeight: '100%', margin: '0 auto', objectFit: 'contain' }} />
         ) : null}
@@ -217,11 +205,12 @@ function Preview({ selection, project }: { selection: FileSelection | null; proj
 
 export default function FilesPane({ item }: { item: FilesPaneItem }) {
   const { projects } = useChatProjects();
-  const { focusPane, setFocusedNodeId } = useChatActions();
+  const { focusPane } = useChatActions();
   const project = projects.find((candidate) => candidate.id === item.projectId);
   const roots = useMemo(() => workspaceRoots(project), [project]);
   const rootsKey = roots.join('\0');
   const shellStyle = usePaneShellStyle(item.id);
+  const side = useSideColumn('files-tree');
   const [directories, setDirectories] = useState<Record<string, DirectoryState>>({});
   const directoriesRef = useRef(directories);
   directoriesRef.current = directories;
@@ -283,16 +272,16 @@ export default function FilesPane({ item }: { item: FilesPaneItem }) {
       data-pane-id={item.id}
       data-pane-kind="files"
       className="terminal-pane"
-      onMouseDown={() => { focusPane(item.id); setFocusedNodeId(null); }}
+      onMouseDown={() => focusPane(item.id)}
       style={shellStyle}
     >
-      <div style={{ flex: 1, minHeight: 0, minWidth: 0, display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) minmax(220px, 31%)' }}>
+      <div style={{ flex: 1, minHeight: 0, minWidth: 0, display: 'grid', gridTemplateColumns: side.columns }}>
         <Preview selection={selection} project={project} />
-        <aside style={{ minWidth: 0, minHeight: 0, display: 'flex', flexDirection: 'column', borderLeft: '1px solid var(--term-line)', background: 'var(--term-pane-bg)' }}>
+        <aside ref={side.columnRef} style={{ position: 'relative', minWidth: 0, minHeight: 0, display: 'flex', flexDirection: 'column', borderLeft: '1px solid var(--term-line)', background: 'var(--term-pane-bg)' }}>
           <div style={{ height: 48, flexShrink: 0, display: 'flex', alignItems: 'center', padding: '0 9px', borderBottom: '1px solid var(--term-line)' }}>
-            <label style={{ width: '100%', height: 29, display: 'flex', alignItems: 'center', gap: 7, padding: '0 9px', border: '1px solid var(--term-line)', borderRadius: 'var(--ui-radius)', color: 'var(--term-muted)', background: 'var(--term-bg)' }}>
+            <label className="ui-search ui-search--compact">
               <span aria-hidden>⌕</span>
-              <input value={filter} onChange={(event) => setFilter(event.target.value)} placeholder="Filter files…" aria-label="Filter files" style={{ flex: 1, minWidth: 0, border: 0, outline: 0, background: 'transparent', color: 'var(--term-fg)', fontFamily: 'var(--ui-font)', fontSize: 'var(--fs-sm)' }} />
+              <input value={filter} onChange={(event) => setFilter(event.target.value)} placeholder="Filter files…" aria-label="Filter files" />
             </label>
           </div>
           <div className="term-scrollbar" style={{ flex: 1, minHeight: 0, overflow: 'auto', padding: '5px 0 14px' }}>
@@ -306,7 +295,7 @@ export default function FilesPane({ item }: { item: FilesPaneItem }) {
                 {expanded.has(root) ? (
                   <div>
                     {directories[root]?.phase === 'loading' ? <div style={{ padding: '5px 12px 5px 29px', color: 'var(--term-muted)', fontSize: 'var(--fs-xs)' }}>loading…</div> : null}
-                    {directories[root]?.phase === 'error' ? <div style={{ padding: '5px 12px 5px 29px', color: 'var(--term-danger)', fontSize: 'var(--fs-xs)' }}>{(directories[root] as Extract<DirectoryState, { phase: 'error' }>).message}</div> : null}
+                    {directories[root]?.phase === 'error' ? <div style={{ padding: '5px 12px 5px 29px', color: 'var(--term-danger-text)', fontSize: 'var(--fs-xs)' }}>{(directories[root] as Extract<DirectoryState, { phase: 'error' }>).message}</div> : null}
                     {directories[root]?.entries.map((entry) => (
                       <TreeRow key={entry.path} entry={entry} depth={0} directories={directories} expanded={expanded} filter={normalizedFilter} selectedPath={selection?.absolutePath} onToggle={toggleDirectory} onSelect={(chosen) => setSelection({ id: chosen.path, label: chosen.name, absolutePath: chosen.path })} />
                     ))}
@@ -326,6 +315,7 @@ export default function FilesPane({ item }: { item: FilesPaneItem }) {
               </section>
             ) : null}
           </div>
+          {side.handle}
         </aside>
       </div>
     </div>

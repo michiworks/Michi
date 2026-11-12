@@ -247,6 +247,20 @@ describe('Custom Agent Definition HTTP router', () => {
     assert.equal(tooLong.response.status, 400);
   });
 
+  test('answers a refused request with its reason and an internal failure without it', async () => {
+    const created = await request('POST', '/agents', 'owner-a', definition());
+    const stale = await request('PATCH', `/agents/${created.payload.definition.id}`, 'owner-a', {
+      version: 1, expectedRevision: 7, description: 'Late edit',
+    });
+    assert.deepEqual([stale.response.status, stale.payload], [409, { error: 'definition revision conflict' }]);
+    const unowned = await request('GET', '/agents?workspaceId=ws-a');
+    assert.deepEqual([unowned.response.status, unowned.payload], [401, { error: 'authentication required' }]);
+
+    service.list = () => { throw Object.assign(new Error('no such column: owner_user_id'), { code: 'ERR_SQLITE_ERROR' }); };
+    const failed = await request('GET', '/agents?workspaceId=ws-a', 'owner-a');
+    assert.deepEqual([failed.response.status, failed.payload], [500, { error: 'Internal server error' }]);
+  });
+
   test('local mode supplies the stable local owner sentinel', async () => {
     delete process.env.MICHI_CLOUD;
     const created = await request('POST', '/agents', undefined, definition({ workspaceId: 'ws-local' }));

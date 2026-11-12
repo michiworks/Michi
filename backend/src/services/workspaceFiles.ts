@@ -4,8 +4,8 @@ import os from 'node:os';
 import path from 'node:path';
 import { promisify } from 'node:util';
 import type { Request } from 'express';
-import { PathSandboxError } from '../agents/tools/pathSandbox';
-import { deriveSandboxCwd, NotFoundError } from './workspaceSandbox';
+import { isWithinRoot, PathSandboxError } from '../agents/tools/pathSandbox';
+import { deriveVerifiedSandboxCwd, NotFoundError } from './workspaceSandbox';
 import { getWorkspace } from './dbRepository';
 
 export const WORKSPACE_FILE_ID_RE = /^[a-zA-Z0-9_-]{1,64}$/;
@@ -28,7 +28,8 @@ function directoryExists(dir: string): boolean {
  * A saved session cwd wins. Otherwise retain an existing upload directory;
  * legacy Electron scratch directories are used only when no upload exists.
  * Allocation may precede desktop workspace persistence, while reads require a row.
- * Cloud roots always verify ownership, including on allocation.
+ * Cloud roots always verify ownership, including on allocation, and that the
+ * sandbox on disk is the user's own directory, not a symlink to another's.
  */
 export function resolveWorkspaceFileRoot(
   req: Pick<Request, 'user'>,
@@ -38,7 +39,7 @@ export function resolveWorkspaceFileRoot(
   if (!WORKSPACE_FILE_ID_RE.test(workspaceId)) throw new NotFoundError(workspaceId);
   if (process.env.MICHI_CLOUD === '1') {
     if (!req.user?.id) throw new NotFoundError(workspaceId);
-    return deriveSandboxCwd(req.user.id, workspaceId);
+    return deriveVerifiedSandboxCwd(req.user.id, workspaceId);
   }
   const workspace = getWorkspace(workspaceId);
   if (!workspace && !options.allocate) throw new NotFoundError(workspaceId);
@@ -54,11 +55,46 @@ export function resolveWorkspaceFileRoot(
   return path.resolve(root);
 }
 
-function assertContained(candidate: string, root: string): void {
-  const rel = path.relative(root, candidate);
-  if (rel === '..' || rel.startsWith(`..${path.sep}`) || path.isAbsolute(rel)) {
-    throw new PathSandboxError(candidate, root);
+/** Message attachments stay out of .contexts/, which the first-turn manifest
+ * advertises; anything unrecognised falls back to the legacy .contexts/. */
+export function importSubdir(raw: unknown): '.attachments' | '.contexts' {
+  return raw === '.attachments' || raw === '.contexts' ? raw : '.contexts';
+}
+
+export type WorkspaceFilePlacement =
+  | { target: string; file: { name: string; displayName: string; filePath: string } }
+  | { status: number; error: string };
+
+/** Sanitise originalName and pick the first free name for it in cwd/subdir,
+ * creating the directory. The caller writes the bytes to target. */
+export function placeWorkspaceFile(cwd: string, subdir: string, originalName: string): WorkspaceFilePlacement {
+  const base = path.basename(originalName);
+  const ext = path.extname(base);
+  const stem = base.slice(0, base.length - ext.length).replace(/[^a-zA-Z0-9_-]/g, '_') || 'file';
+  const safeExt = ext.replace(/[^a-zA-Z0-9.]/g, '');
+  const dir = path.join(cwd, subdir);
+  try {
+    fs.mkdirSync(dir, { recursive: true });
+  } catch (err) {
+    return { status: 500, error: `mkdir ${subdir} failed: ${(err as Error).message}` };
   }
+  let name = stem;
+  let filename = `${stem}${safeExt}`;
+  let attempt = 0;
+  // lstat, not existsSync: a dangling link keeps its name, so no write follows it.
+  while (fs.lstatSync(path.join(dir, filename), { throwIfNoEntry: false })) {
+    attempt += 1;
+    name = `${stem}-${attempt}`;
+    filename = `${name}${safeExt}`;
+    if (attempt > 9999) return { status: 500, error: 'could not allocate unique filename' };
+  }
+  const target = path.join(dir, filename);
+  if (!target.startsWith(dir + path.sep)) return { status: 400, error: `resolved path escapes ${subdir}` };
+  return { target, file: { name, displayName: base, filePath: `${subdir}/${filename}` } };
+}
+
+function assertContained(candidate: string, root: string): void {
+  if (!isWithinRoot(candidate, root)) throw new PathSandboxError(candidate, root);
 }
 
 /** HTTP input is already decoded once by Express. Never expand mentions/home,

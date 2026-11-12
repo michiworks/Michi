@@ -1,24 +1,26 @@
 import React from 'react';
-import type { HomeSectionKey, PageLayoutRule } from 'michi-shared';
+import { HOME_SECTION_SHORT_TITLES, type PageLayoutRule } from 'michi-shared';
 import { PopoverSurface } from '../../../ui/Popover';
+import { useBackLayer } from '../../../../lib/backStack';
 import { Button } from '../../../ui/controls';
-import { formatMichiAge } from '../../content/michiFormat';
+import { placeBelowAnchor, useAnchoredPosition } from '../../../ui/useAnchoredPosition';
+import { formatMichiAgo } from '../../content/michiFormat';
 import { LayoutPreferencesEditor } from './LayoutPreferencesEditor';
+import { useCompanionName } from '../../../../state/companion/companionName';
+import { isImeComposing } from '../../../../lib/ime';
 import '../../content/page/michiPage.css';
 import './layoutRules.css';
 
 const GAP = 4;
 const PAD = 8;
 const WIDTH = 320;
-const SECTION: Record<HomeSectionKey, string> = { waiting: 'Waiting', stalled: 'Stalled', done: 'Done' };
 
 /** Who the rule binds and where it came from: "Stalled · applied by Michi · from your message · 2h ago". */
-export function layoutRuleMeta(rule: PageLayoutRule, now = Date.now()): string {
-  const age = formatMichiAge(rule.createdAt, now);
+export function layoutRuleMeta(rule: PageLayoutRule, name: string, now = Date.now()): string {
   return [
-    rule.sectionLimit ? `${SECTION[rule.sectionLimit.section]} · applied by Michi` : 'followed by the Meta agent',
+    rule.sectionLimit ? `${HOME_SECTION_SHORT_TITLES[rule.sectionLimit.section]} · applied by Michi` : `followed by ${name}`,
     rule.createdBy === 'user' ? 'added by you' : rule.sourceMessage ? 'from your message to the assistant' : null,
-    age ? (age === 'now' ? 'just now' : `${age} ago`) : null,
+    formatMichiAgo(rule.createdAt, now) || null,
   ].filter(Boolean).join(' · ');
 }
 
@@ -36,6 +38,7 @@ export function LayoutRulesPopover({ anchor, rules, error, readOnly, preferences
   onDelete: (rule: PageLayoutRule) => Promise<void>;
   onClose: (restoreFocus: boolean) => void;
 }) {
+  const name = useCompanionName();
   const surface = React.useRef<HTMLDivElement>(null);
   const [position, setPosition] = React.useState<{ left: number; top: number } | null>(null);
   const [busy, setBusy] = React.useState<string | null>(null);
@@ -43,30 +46,19 @@ export function LayoutRulesPopover({ anchor, rules, error, readOnly, preferences
   const editableDocument = Boolean(preferences);
   const closeRef = React.useRef(onClose);
   closeRef.current = onClose;
+  useBackLayer(true, { back: () => closeRef.current(true) });
 
-  React.useLayoutEffect(() => {
-    const place = () => {
-      const rect = anchor.getBoundingClientRect();
-      const box = surface.current?.getBoundingClientRect();
-      const w = box?.width || (editableDocument ? 440 : WIDTH);
-      const h = box?.height || 0;
-      const left = Math.max(PAD, Math.min(window.innerWidth - w - PAD, rect.right - w));
-      let top = rect.bottom + GAP;
-      if (top + h > window.innerHeight - PAD && rect.top - GAP - h >= PAD) top = rect.top - GAP - h;
-      setPosition(current => current?.left === left && current.top === top ? current : { left, top });
-    };
-    place();
-    if (!editableDocument) return undefined;
-    window.addEventListener('resize', place);
-    const observer = typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(place);
-    if (surface.current) observer?.observe(surface.current);
-    return () => { window.removeEventListener('resize', place); observer?.disconnect(); };
-  }, [anchor, rules?.length, editableDocument]);
+  // Follows its button as the page scrolls or the window or its content resizes.
+  useAnchoredPosition({ anchor, surfaceRef: surface, dependencies: [rules?.length, editableDocument], measure: () => {
+    const box = surface.current?.getBoundingClientRect();
+    const { left, top } = placeBelowAnchor(anchor.getBoundingClientRect(), { width: box?.width || (editableDocument ? 440 : WIDTH), height: box?.height || 0 }, { align: 'end', gap: GAP, pad: PAD });
+    setPosition(current => current?.left === left && current.top === top ? current : { left, top });
+  } });
 
   React.useEffect(() => {
     surface.current?.querySelector<HTMLElement>('button:not(:disabled)')?.focus({ preventScroll: true });
     const onKey = (event: KeyboardEvent) => {
-      if (event.key !== 'Escape' || event.isComposing) return;
+      if (event.key !== 'Escape' || isImeComposing(event)) return;
       event.preventDefault();
       event.stopPropagation();
       closeRef.current(true);
@@ -111,6 +103,7 @@ export function LayoutRulesPopover({ anchor, rules, error, readOnly, preferences
       top={position?.top ?? 0}
       role="dialog"
       aria-label={preferences ? 'Layout preferences' : 'Layout rules'}
+      escapeLayer="over"
       className="michi-doc-menu layout-rules-menu"
       style={position ? undefined : { visibility: 'hidden' }}
     >
@@ -122,14 +115,14 @@ export function LayoutRulesPopover({ anchor, rules, error, readOnly, preferences
         {rules === null && error && <li className="layout-rules-menu__note" role="alert">{error}</li>}
         {rules?.length === 0 && (
           <li className="layout-rules-menu__note">
-            No layout rules yet. Ask the Meta agent, for example “Stalled: only the last 3 days”.
+            No layout rules yet. Ask {name}, for example “Stalled: only the last 3 days”.
           </li>
         )}
         {rules?.map((rule) => (
           <li key={rule.id} className="ui-menu-item michi-doc-menu__item--sub layout-rules-menu__rule" data-testid="layout-rule">
             <span className="michi-menu-label michi-doc-menu__label">
               <span className="michi-doc-menu__title">{rule.text}</span>
-              <span className="michi-doc-menu__sub">{layoutRuleMeta(rule)}</span>
+              <span className="michi-doc-menu__sub">{layoutRuleMeta(rule, name)}</span>
             </span>
             <Button variant="ghost" size="sm" danger disabled={readOnly || busy !== null} aria-label={`Delete rule: ${rule.text}`}
               aria-busy={busy === rule.id || undefined} onClick={() => { void remove(rule); }}>

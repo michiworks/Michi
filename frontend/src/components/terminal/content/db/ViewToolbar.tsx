@@ -2,11 +2,12 @@ import React, { useEffect, useRef, useState } from 'react';
 import { ArrowUpDown, GripVertical, ListFilter, Rows3, SlidersHorizontal, X } from 'lucide-react';
 import type { MichiDatabase, MichiDbColumn, MichiDbFilter, MichiDbFilterOp, MichiDbSort, MichiDbView, MichiDbViewConfig } from 'michi-shared';
 import { DbPopover, DbSwitch } from './DbPopover';
-import { boardGroupColumn, coverColumn, isActiveFilter, isThreadsDb, NO_VALUE_OPS, OPS_FOR, shownColumns, titleColumn, type CellValue } from './dbModel';
+import { boardGroupColumn, coverColumn, isActiveFilter, isThreadsDb, NO_VALUE_OPS, OPS_FOR, parseNumberText, shownColumns, titleColumn, type CellValue } from './dbModel';
 import { columnName, filterChipText, OP_LABEL, optionName, sortLabel } from './dbLabels';
 import { toggleColumnOp, viewSave } from './dbOps';
 import type { GroupPrefs } from './dbPrefs';
 import type { DbEdit } from './views/viewTypes';
+import { isImeComposing } from '../../../../lib/ime';
 
 const GROUPABLE = new Set<MichiDbColumn['type']>(['select', 'multi', 'app', 'checkbox', 'date', 'number', 'progress', 'text']);
 
@@ -290,25 +291,41 @@ function ValueInput({ db, column: c, filter: f, label, onChange }: { db: MichiDa
       />
     );
   }
-  if (c.type === 'number' || c.type === 'progress') {
-    const pct = c.type === 'progress';
-    const start = typeof f.value === 'number' ? String(pct ? Math.round(f.value * 100) : f.value) : '';
-    return (
+  if (c.type === 'number' || c.type === 'progress') return <NumberValue pct={c.type === 'progress'} filter={f} label={label} onChange={onChange} />;
+  return <Typed label={label} start={typeof f.value === 'string' ? f.value : ''} placeholder="Value" onCommit={(text) => onChange(text.trim() ? text : undefined)} />;
+}
+
+/** Read as a cell reads it (40%, 1,200); text that is not a number keeps the condition's value and says so. */
+function NumberValue({ pct, filter: f, label, onChange }: { pct: boolean; filter: MichiDbFilter; label: string; onChange: (value: CellValue | undefined) => void }) {
+  const [bad, setBad] = useState(false);
+  const start = typeof f.value === 'number' ? String(pct ? Math.round(f.value * 100) : f.value) : '';
+  return (
+    <span className="michi-db-rule__value michi-db-rule__number">
       <Typed
         label={label}
         start={start}
         placeholder={pct ? '%' : 'Value'}
+        invalid={bad}
+        onEdit={() => setBad(false)}
         onCommit={(text) => {
-          const n = Number(text);
-          onChange(text.trim() === '' || !Number.isFinite(n) ? undefined : pct ? n / 100 : n);
+          const r = parseNumberText(text, pct);
+          if (!r.ok) setBad(true);
+          else onChange(r.value ?? undefined);
         }}
       />
-    );
-  }
-  return <Typed label={label} start={typeof f.value === 'string' ? f.value : ''} placeholder="Value" onCommit={(text) => onChange(text.trim() ? text : undefined)} />;
+      {bad && <span className="michi-db-editor__error" role="alert">{pct ? 'Type a percent, like 40' : 'Type a number'}</span>}
+    </span>
+  );
 }
 
-function Typed({ label, start, placeholder, onCommit }: { label: string; start: string; placeholder: string; onCommit: (text: string) => void }) {
+function Typed({ label, start, placeholder, invalid, onEdit, onCommit }: {
+  label: string;
+  start: string;
+  placeholder: string;
+  invalid?: boolean;
+  onEdit?: () => void;
+  onCommit: (text: string) => void;
+}) {
   const [text, setText] = useState(start);
   const sent = useRef(start);
   const latest = useRef(text);
@@ -326,12 +343,13 @@ function Typed({ label, start, placeholder, onCommit }: { label: string; start: 
     <input
       className="michi-db-input michi-db-rule__value"
       aria-label={label}
+      aria-invalid={invalid || undefined}
       placeholder={placeholder}
       value={text}
-      onChange={(event) => setText(event.currentTarget.value)}
+      onChange={(event) => { setText(event.currentTarget.value); onEdit?.(); }}
       onBlur={commit}
       onKeyDown={(event) => {
-        if (event.key === 'Enter' && !event.nativeEvent.isComposing) {
+        if (event.key === 'Enter' && !isImeComposing(event)) {
           event.preventDefault();
           commit();
         }

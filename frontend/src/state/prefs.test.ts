@@ -1,4 +1,5 @@
-import { CORNER_RADIUS_MAX, DEFAULT_PREFS, normalizeCornerRadius } from './prefs';
+import { SERVER_PREF_KEYS } from 'michi-shared';
+import { CORNER_RADIUS_MAX, DEFAULT_PREFS, PREF_STORAGE, normalizeCornerRadius } from './prefs';
 
 describe('DEFAULT_PREFS', () => {
   it('has slate as default terminal palette', () => {
@@ -28,6 +29,14 @@ describe('DEFAULT_PREFS', () => {
   it('gives a new profile a 252px sidebar', () => {
     expect(DEFAULT_PREFS.terminalSidebarWidth).toBe(252);
   });
+
+  it('keeps window glass on until the user turns it off', () => {
+    expect(DEFAULT_PREFS.windowGlass).toBe(true);
+  });
+
+  it('keeps Digest off until the user turns it on', () => {
+    expect(DEFAULT_PREFS.digestEnabled).toBe(false);
+  });
 });
 
 describe('Kiro sidecar title preference', () => {
@@ -43,5 +52,12 @@ describe('Corner radius preference', () => {
     expect(normalizeCornerRadius(6.6)).toBe(7);
     expect(normalizeCornerRadius('8')).toBe(DEFAULT_PREFS.cornerRadius);
     expect(normalizeCornerRadius(Number.NaN)).toBe(DEFAULT_PREFS.cornerRadius);
+  });
+});
+
+describe('where prefs are kept', () => {
+  it('keeps on the backend exactly the keys it persists', () => {
+    const server = Object.entries(PREF_STORAGE).filter(([, where]) => where === 'server').map(([key]) => key);
+    expect(server.sort()).toEqual([...SERVER_PREF_KEYS].sort());
   });
 });

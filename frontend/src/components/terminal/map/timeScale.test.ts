@@ -2,7 +2,6 @@ import { describe, it, expect } from 'vitest';
 import { buildElasticScale, layoutChips, formatAxisLabel } from './timeScale';
 
 const MIN = 60_000;
-const HOUR = 3_600_000;
 const DAY = 86_400_000;
 const BASE = 1_700_000_000_000; // arbitrary base epoch ms
 
@@ -38,8 +37,6 @@ describe('buildElasticScale', () => {
 });
 
 describe('layoutChips', () => {
-  const simpleScale = buildElasticScale([0, 100]);
-
   it('pushes overlapping chips to higher rows', () => {
     // Two events at very close times → overlapping chips
     const scale = buildElasticScale([0, 10, 1000]);

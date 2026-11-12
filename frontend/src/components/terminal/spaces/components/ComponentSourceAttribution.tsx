@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import { useEffect, useState } from 'react';
 import type { PageComponentVersionSource } from 'michi-shared';
 
 export function ComponentSourceAttribution({ source, onOpenSource }: {

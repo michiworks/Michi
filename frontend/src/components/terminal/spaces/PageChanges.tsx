@@ -1,4 +1,4 @@
-import React, { useMemo } from 'react';
+import { useMemo } from 'react';
 import type { PageChangeDto } from 'michi-shared';
 import { ChangeCard, isPageChangeRevertible, type AcceptedPageEdit } from './ChangeCard';
 import type { ExactPageSource } from './SourceTrace';
@@ -60,4 +60,3 @@ export { buildPageChangeIndex } from './changeIndex';
 export { ChangeCard } from './ChangeCard';
 export { isPageChangeRevertible, isPageChangeRedoable } from './ChangeCard';
 export type { AcceptedPageEdit, ChangeCardProps } from './ChangeCard';
-export { latestPageChangesForTarget } from './changeIndex';

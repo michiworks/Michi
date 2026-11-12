@@ -19,11 +19,16 @@ const capabilities: AgentCapabilities = {
   supportedReasoningLevels: ['low', 'medium', 'high', 'xhigh'], apiKeys: false,
   warmSessions: false, saveContext: false, spawnBranches: false,
 };
+/** Claude alone offers Ultracode, as its runtime does. */
+const runtimeCapabilities = (runtime: string): AgentCapabilities => ({
+  ...capabilities, providerModels: runtime === 'pi', ...(runtime === 'claude' ? { ultracode: true } : {}),
+});
 const providers = ['openrouter', 'openai', 'local'].map((id) => ({ id, label: id === 'openai' ? 'OpenAI' : id === 'local' ? 'Local' : 'OpenRouter', keyLabel: 'API key', envVars: [], defaultModel: 'provider/model-0', supportsReasoning: id !== 'local', hasKey: true }));
 
 export async function installComposerModels(page: Page, options: { failSave?: boolean; catalogDelay?: number } = {}) {
   const patches: AgentOptionsPatch[] = [];
   const ensures: Array<Record<string, unknown>> = [];
+  const ultracodeSaves: Array<{ nodeId: string; body: Record<string, unknown> }> = [];
   const catalogRequests: string[] = [];
   const status: AgentStatus = {
     runtime: 'codex', label: 'Codex', model: 'gpt-5.4', reasoning: 'medium', customAgentsEnabled: false, hasRequiredKey: true,
@@ -58,11 +63,17 @@ export async function installComposerModels(page: Page, options: { failSave?: bo
         const runtime = url.searchParams.get('runtime') ?? status.runtime;
         catalogRequests.push(runtime);
         if (options.catalogDelay) await new Promise((resolve) => setTimeout(resolve, options.catalogDelay));
-        return json({ models: composerModels[runtime as keyof typeof composerModels] ?? [], providers, capabilities: { ...capabilities, providerModels: runtime === 'pi' }, sanitizedModel: null });
+        return json({ models: composerModels[runtime as keyof typeof composerModels] ?? [], providers, capabilities: runtimeCapabilities(runtime), sanitizedModel: null });
+      }
+      const ultracode = /^\/nodes\/([^/]+)\/ultracode$/.exec(path);
+      if (request.method() === 'PUT' && ultracode) {
+        const body = request.postDataJSON() as Record<string, unknown>;
+        ultracodeSaves.push({ nodeId: decodeURIComponent(ultracode[1]), body });
+        return json({ enabled: body.enabled === true });
       }
       if (request.method() === 'POST' && /^\/nodes\/[^/]+\/ensure-session$/.test(path)) ensures.push(request.postDataJSON());
       return false;
     },
   });
-  return { patches, ensures, catalogRequests, status };
+  return { patches, ensures, catalogRequests, status, ultracodeSaves };
 }

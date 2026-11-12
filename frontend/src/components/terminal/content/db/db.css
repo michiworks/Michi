@@ -1,5 +1,5 @@
-/* Michi databases (All threads and the ones a person makes): side list, view
-   tabs, toolbar and panels, the six views, cells and editors. Palette tokens
+/* Michi databases (All threads and the ones a person makes): view tabs,
+   toolbar and panels, the six views, cells and editors. Palette tokens
    only (--term-*, --sel-bar-*), so Monokai, Bone, Slate and Gruvbox all read. */
 
 .michi-db-mono {
@@ -8,104 +8,6 @@
 }
 .michi-db-muted {
   color: var(--term-muted);
-}
-
-/* ── Page: side list + database ──────────────────────────────── */
-.michi-threads.michi-db-page {
-  flex-direction: row;
-}
-.michi-db-page__main {
-  display: flex;
-  flex: 1;
-  flex-direction: column;
-  min-width: 0;
-  min-height: 0;
-}
-.michi-db-side {
-  display: flex;
-  flex-direction: column;
-  flex-shrink: 0;
-  gap: 6px;
-  width: 220px;
-  padding: 16px 10px;
-  overflow-y: auto;
-  border-right: 1px solid var(--term-line);
-}
-.michi-db-side .michi-section-label {
-  padding: 8px 8px 2px;
-}
-.michi-db-side__list {
-  display: flex;
-  flex-direction: column;
-  gap: 1px;
-  margin: 0;
-  padding: 0;
-  list-style: none;
-}
-.michi-db-side__row {
-  position: relative;
-  display: flex;
-  align-items: center;
-}
-.michi-db-side__item {
-  display: flex;
-  flex: 1;
-  align-items: center;
-  gap: 8px;
-  min-width: 0;
-  height: 28px;
-  padding: 0 8px;
-  border: 0;
-  border-radius: var(--ui-radius-sm);
-  background: transparent;
-  color: var(--term-mid);
-  font: inherit;
-  font-size: var(--fs-md);
-  text-align: left;
-  cursor: pointer;
-}
-.michi-db-side__item:hover {
-  background: var(--term-hover-bg, var(--term-alt));
-  color: var(--term-fg);
-}
-.michi-db-side__item[aria-current='true'] {
-  background: var(--term-alt);
-  color: var(--term-fg);
-}
-.michi-db-side__item:focus-visible {
-  outline: 2px solid var(--term-accent);
-  outline-offset: -2px;
-}
-.michi-db-side__name {
-  flex: 1;
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.michi-db-side__count {
-  color: var(--term-muted);
-  font-size: var(--fs-sm);
-}
-.michi-db-side__more {
-  position: absolute;
-  right: 2px;
-  opacity: 0;
-}
-.michi-db-side__row:hover .michi-db-side__more,
-.michi-db-side__more:focus-visible,
-.michi-db-side__more[aria-expanded='true'] {
-  opacity: 1;
-}
-.michi-db-side__row:hover .michi-db-side__count {
-  visibility: hidden;
-}
-.michi-db-side__new {
-  color: var(--term-muted);
-}
-.michi-db-side__input {
-  width: 100%;
-  height: 28px;
 }
 
 /* ── Database: bar, tabs, toolbar ────────────────────────────── */
@@ -178,7 +80,7 @@
 .michi-db-cell:focus-visible,
 .michi-db-open:focus-visible,
 .michi-db-new-row:focus-visible {
-  outline: 2px solid var(--term-accent);
+  outline: var(--focus-ring);
   outline-offset: -2px;
 }
 .michi-db-icon-btn {
@@ -262,8 +164,19 @@
   color: var(--term-bg);
   font-weight: 600;
 }
-.michi-db-btn--primary:hover {
+.michi-db-btn--primary:hover:not(:disabled) {
   background: color-mix(in srgb, var(--term-accent) 86%, var(--term-fg));
+}
+/* As .ui-btn:disabled and its neutral disabled primary in index.css. */
+.michi-db-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+.michi-db-btn--primary:disabled {
+  opacity: 1;
+  border-color: transparent;
+  background: var(--term-alt2);
+  color: var(--term-muted);
 }
 .michi-db-link-btn {
   align-self: flex-start;
@@ -348,9 +261,9 @@
 .michi-db-panel__cap {
   padding: 4px 8px 6px;
   color: var(--term-muted);
-  font-size: 10px;
+  font-size: var(--fs-xs);
   font-weight: 500;
-  letter-spacing: 0.14em;
+  letter-spacing: var(--ls-caps-wide);
   text-transform: uppercase;
 }
 .michi-db-pop__sep {
@@ -387,7 +300,7 @@
   cursor: not-allowed;
 }
 .michi-db-mi[data-danger='true'] {
-  color: var(--term-danger);
+  color: var(--term-danger-text);
 }
 .michi-db-mi__icon {
   display: inline-flex;
@@ -465,13 +378,18 @@
   flex: 1;
   min-width: 0;
 }
+/* Room under a number field for why its text was not taken. */
+.michi-db-rule__number {
+  position: relative;
+  display: flex;
+}
 .michi-db-grip {
   display: inline-flex;
   color: var(--term-faint);
   cursor: grab;
 }
 .michi-db-grip:focus-visible {
-  outline: 2px solid var(--term-accent);
+  outline: var(--focus-ring);
   color: var(--term-fg);
 }
 .michi-db-input,
@@ -551,7 +469,7 @@ textarea.michi-db-input {
   background: var(--term-surface);
 }
 .michi-db-switch:focus-visible {
-  outline: 2px solid var(--term-accent);
+  outline: var(--focus-ring);
   outline-offset: -2px;
 }
 .michi-db-form {
@@ -720,7 +638,7 @@ textarea.michi-db-input {
   padding: 2px 6px;
   border-radius: var(--ui-radius-sm);
   background: var(--term-surface);
-  color: var(--term-danger);
+  color: var(--term-danger-text);
   font-size: var(--fs-sm);
   white-space: nowrap;
 }
@@ -852,7 +770,7 @@ textarea.michi-db-input {
   outline-offset: -1px;
 }
 .michi-db-row:focus-visible {
-  outline: 2px solid var(--term-accent);
+  outline: var(--focus-ring);
   outline-offset: -2px;
 }
 .michi-db-cell {
@@ -883,7 +801,6 @@ textarea.michi-db-input {
 }
 .michi-db-open {
   display: inline-flex;
-  opacity: 0;
   flex-shrink: 0;
   align-items: center;
   gap: 3px;
@@ -896,11 +813,6 @@ textarea.michi-db-input {
   font: inherit;
   font-size: var(--fs-xs);
   cursor: pointer;
-}
-.michi-db-row:hover .michi-db-open,
-.michi-db-row:focus-within .michi-db-open,
-.michi-db-open:focus-visible {
-  opacity: 1;
 }
 .michi-db-group-row th {
   height: 32px;
@@ -970,9 +882,9 @@ textarea.michi-db-input {
 }
 .michi-db-col__head .michi-db-group__label {
   color: var(--term-muted);
-  font-size: 10px;
+  font-size: var(--fs-xs);
   font-weight: 500;
-  letter-spacing: 0.14em;
+  letter-spacing: var(--ls-caps-wide);
   text-transform: uppercase;
 }
 .michi-db-col__drop {
@@ -1291,7 +1203,7 @@ textarea.michi-db-input {
   box-shadow: inset 2px 0 0 var(--term-accent);
 }
 .michi-db-list__row:focus-visible {
-  outline: 2px solid var(--term-accent);
+  outline: var(--focus-ring);
   outline-offset: -2px;
 }
 .michi-db-list__dot {
@@ -1402,7 +1314,7 @@ textarea.michi-db-input {
   color: var(--term-faint);
 }
 .michi-db-peek__value:focus-visible {
-  outline: 2px solid var(--term-accent);
+  outline: var(--focus-ring);
 }
 .michi-db-peek__editing {
   display: flex;
@@ -1422,7 +1334,7 @@ textarea.michi-db-input {
   transition: bottom var(--t-soft) ease;
 }
 .michi-batch__btn[data-danger='true'] {
-  color: var(--term-danger);
+  color: var(--term-danger-text);
 }
 
 @media (prefers-reduced-motion: reduce) {
@@ -1478,13 +1390,13 @@ button.michi-db-thread:hover {
 
 /* Task board: cards, attention mark and status glyphs */
 .michi-card[data-attention='true'] {
-  box-shadow: inset 3px 0 0 var(--term-accent);
+  box-shadow: inset 3px 0 0 var(--term-waiting);
 }
 .michi-card[data-attention='true'][aria-current='true'] {
-  box-shadow: inset 3px 0 0 var(--term-accent), 0 0 0 1px var(--term-accent);
+  box-shadow: inset 3px 0 0 var(--term-waiting), 0 0 0 1px var(--term-accent);
 }
 .michi-card__attention {
-  color: var(--term-accent);
+  color: var(--term-waiting);
   font-weight: 500;
 }
 .michi-card__none {
@@ -1493,7 +1405,7 @@ button.michi-db-thread:hover {
 }
 .michi-task-status[data-status='todo'] { color: var(--term-muted); }
 .michi-task-status[data-status='doing'] { color: var(--term-mid); }
-.michi-task-status[data-status='waiting'] { color: var(--term-accent); }
+.michi-task-status[data-status='waiting'] { color: var(--term-waiting); }
 .michi-task-status[data-status='done'] { color: var(--term-digest); }
 
 /* ── A task's details ────────────────────────────────────────── */

@@ -1,8 +1,5 @@
 import { formatQuotedMessage, QuoteSource } from './quoteFormat';
 
-const CONTEXT =
-  'Context: The user selected the passage below from the previous assistant reply. Treat it as source context, not as text authored by the user.';
-
 describe('formatQuotedMessage with artifact source', () => {
   const source: QuoteSource = {
     type: 'artifact',

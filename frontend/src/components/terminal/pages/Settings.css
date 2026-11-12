@@ -66,7 +66,7 @@
 
 .terminal-settings-category:focus-visible,
 .terminal-settings-history-command:focus-visible {
-  outline: 2px solid var(--term-accent);
+  outline: var(--focus-ring);
   outline-offset: -2px;
 }
 
@@ -148,7 +148,7 @@
 .settings-section__aside {
   flex: none;
   color: var(--term-muted);
-  font-size: var(--fs-sm);
+  font-size: var(--fs-md);
   white-space: nowrap;
 }
 .settings-section__intro {
@@ -163,7 +163,7 @@
 /* Content that is not a row (a radio list, an action bar) keeps the rows' rhythm. */
 .settings-section__block { margin-top: 12px; }
 .settings-section__status { margin: 12px 0 0; color: var(--term-muted); font-size: var(--fs-md); }
-.settings-section__error { margin: 12px 0 0; color: var(--term-danger); font-size: var(--fs-md); }
+.settings-section__error { margin: 12px 0 0; color: var(--term-danger-text); font-size: var(--fs-md); }
 /* Rows and blocks under the title; a phone draws it as a card. */
 .settings-section__body { display: contents; }
 
@@ -200,8 +200,8 @@
 .settings-row__body { grid-column: 1 / -1; min-width: 0; }
 .settings-row__note { margin: 8px 0 0; color: var(--term-muted); font-size: var(--fs-md); line-height: 1.55; text-wrap: pretty; }
 .settings-row__note:first-child { margin-top: 0; }
-.settings-row__note[role='alert'] { color: var(--term-danger); }
-.settings-row__state { color: var(--term-mid); font-size: var(--fs-sm); white-space: nowrap; }
+.settings-row__note[role='alert'] { color: var(--term-danger-text); }
+.settings-row__state { color: var(--term-mid); font-size: var(--fs-md); white-space: nowrap; }
 .settings-row__select.ui-select { width: auto; min-width: 0; max-width: 220px; }
 .settings-row__link {
   padding: 0;
@@ -212,7 +212,7 @@
   cursor: pointer;
 }
 .settings-row__link:hover { text-decoration: underline; }
-.settings-row__link:focus-visible { outline: 2px solid var(--term-accent); outline-offset: 2px; }
+.settings-row__link:focus-visible { outline: var(--focus-ring); outline-offset: 2px; }
 .settings-row fieldset { min-width: 0; margin: 0; padding: 0; border: 0; }
 
 @container settings-section (max-width: 360px) {
@@ -221,16 +221,12 @@
   .settings-row__select.ui-select { max-width: 100%; }
 }
 
-/* ── Labelled controls (controls.tsx): a name over its control ───── */
-.settings-field { padding: 12px 0; border-bottom: 1px solid var(--term-line); }
-.settings-field__head { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; margin-bottom: 10px; }
-.settings-field__label { font-family: var(--ui-font); font-size: var(--fs-lg); font-weight: 600; color: var(--term-fg); }
-
+/* ── Controls (controls.tsx) ─────────────────────────────────────── */
 .settings-radio { display: flex; flex-direction: column; border: 1px solid var(--term-line); }
 .settings-radio__option {
   position: relative;
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   gap: 10px;
   padding: 8px 12px;
   background: var(--term-surface);
@@ -245,16 +241,219 @@
   margin: 0;
   border: 1px solid var(--term-line-s);
   background: var(--term-surface-glass);
+  margin-top: 1px;
   appearance: none;
   cursor: pointer;
 }
 .settings-radio__input:checked { border-color: var(--term-accent); background: var(--term-accent); box-shadow: inset 0 0 0 2px var(--term-surface); }
-.settings-radio__label { font-family: var(--ui-font); font-size: var(--fs-md); color: var(--term-mid); }
+.settings-radio__label { display: block; font-family: var(--ui-font); font-size: var(--fs-md); line-height: 1.4; color: var(--term-mid); }
 .settings-radio__option.is-active .settings-radio__label { color: var(--term-fg); }
-.settings-radio__description { display: block; margin-top: 2px; font-size: var(--fs-sm); color: var(--term-muted); }
+.settings-radio__description { display: block; margin-top: 2px; font-size: var(--fs-md); line-height: 1.55; color: var(--term-muted); }
 
-.settings-toggle { display: flex; align-items: center; gap: 10px; padding: 4px 6px; margin: 0 -6px; }
-.settings-toggle__label { font-family: var(--ui-font); font-size: var(--fs-md); color: var(--term-mid); }
+/* Segmented: a few short choices side by side, in a row's control slot.
+   Square like the other settings controls, 28px tall in a 1px rule; the
+   chosen one takes a faint ink fill. */
+.settings-segmented {
+  display: inline-flex;
+  flex-wrap: wrap;
+  max-width: 100%;
+  border: 1px solid var(--term-line);
+  border-radius: var(--ui-radius-sm);
+}
+.settings-segmented__option {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  min-height: 26px;
+  padding: 0 12px;
+  color: var(--term-muted);
+  font-family: var(--ui-font);
+  font-size: var(--fs-md);
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+  line-height: 1.2;
+  white-space: nowrap;
+  cursor: pointer;
+}
+.settings-segmented__option + .settings-segmented__option { border-left: 1px solid var(--term-line); }
+.settings-segmented__option:has(:checked) { background: color-mix(in srgb, var(--term-fg) 10%, transparent); color: var(--term-fg); }
+.settings-segmented__option:has(:focus-visible) { z-index: 1; outline: var(--focus-ring); outline-offset: -2px; }
+.settings-segmented__option:has(:disabled) { cursor: default; }
+.settings-segmented[aria-disabled='true'] { opacity: 0.6; }
+.settings-segmented__input { position: absolute; inset: 0; width: 100%; height: 100%; margin: 0; opacity: 0; cursor: inherit; }
+@media (hover: hover) and (pointer: fine) { .settings-segmented__option:not(:has(:disabled)):hover { color: var(--term-fg); } }
+
+/* Switch: a 34×18 square track; off is a faint well with a faint knob, on is
+   the accent with the knob 16px over in the colour that sits on accent. */
+.terminal-settings .ui-switch {
+  width: 34px;
+  height: 18px;
+  border: 0;
+  border-radius: var(--ui-radius-sm);
+  background: var(--term-alt2);
+  box-shadow: inset 0 0 0 1px var(--term-line);
+  transition: background var(--t-soft) var(--t-ease), box-shadow var(--t-soft) var(--t-ease);
+}
+.terminal-settings .ui-switch[aria-checked='true'] { background: var(--term-accent); box-shadow: none; }
+.terminal-settings .ui-switch .ui-switch__knob {
+  top: 3px;
+  left: 3px;
+  border-radius: 1px;
+  background: var(--term-faint);
+  transition: transform var(--t-soft) var(--t-ease), background var(--t-soft) var(--t-ease);
+}
+.terminal-settings .ui-switch[aria-checked='true'] .ui-switch__knob { left: 3px; transform: translateX(16px); background: var(--on-accent); }
+.terminal-settings .ui-switch:focus-visible { outline: var(--focus-ring); outline-offset: 2px; }
+:root[data-reduce-motion='on'] .terminal-settings .ui-switch .ui-switch__knob { transition: none; }
+
+/* Selects: one square look (28px, a 1px rule, medium weight) with a faint
+   chevron drawn from two gradients, so it takes the palette's colour. The
+   Model picker (ModelCombobox) is a button drawn the same; a model shown by
+   its ID is set in the code face. */
+.terminal-settings select.ui-select,
+.terminal-settings .settings-model-combo__trigger.ui-select {
+  --select-chevron: var(--term-faint);
+  height: 28px;
+  padding: 0 28px 0 10px;
+  border-radius: var(--ui-radius-sm);
+  background-color: transparent;
+  background-image:
+    linear-gradient(45deg, transparent 40%, var(--select-chevron) 40%, var(--select-chevron) 60%, transparent 60%),
+    linear-gradient(-45deg, transparent 40%, var(--select-chevron) 40%, var(--select-chevron) 60%, transparent 60%);
+  background-position: right 14px center, right 10px center;
+  background-size: 4px 4px;
+  background-repeat: no-repeat;
+  color: var(--term-fg);
+  font-weight: 500;
+  line-height: 1.2;
+  -webkit-appearance: none;
+  appearance: none;
+  cursor: pointer;
+}
+.terminal-settings select.ui-select:disabled,
+.terminal-settings .settings-model-combo__trigger.ui-select:disabled { opacity: 0.55; cursor: default; }
+@media (hover: hover) and (pointer: fine) {
+  .terminal-settings select.ui-select:not(:disabled):hover,
+  .terminal-settings .settings-model-combo__trigger.ui-select:not(:disabled):hover { background-color: color-mix(in srgb, var(--term-fg) 6%, transparent); }
+}
+/* Options open in a native list, drawn in the palette's colours. */
+.terminal-settings select.ui-select option { background: var(--term-surface); color: var(--term-fg); font-weight: 400; }
+.terminal-settings .settings-row__select.ui-select { min-width: min(132px, 100%); }
+.terminal-settings .settings-model-combo__trigger[data-mono] { font-family: var(--font-mono); font-size: var(--fs-sm); }
+/* A memory's scope sits in its line, so it stays a size smaller. */
+.terminal-settings .memory-item__scope.ui-select { height: 24px; }
+
+/* Palette: each one a small window in its own colours, its name under it;
+   the current one is ringed in the accent. */
+.settings-themes { display: grid; grid-template-columns: repeat(4, minmax(0, 88px)); gap: 10px; margin-top: 2px; }
+.settings-theme {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+  padding: 0 0 4px;
+  border: 0;
+  background: none;
+  color: var(--term-muted);
+  font-family: var(--ui-font);
+  font-size: var(--fs-md);
+  line-height: 1.4;
+  text-align: center;
+  cursor: pointer;
+}
+.settings-theme__thumb {
+  position: relative;
+  display: block;
+  height: 50px;
+  overflow: hidden;
+  border: 1px solid var(--term-line);
+  border-radius: var(--ui-radius-sm);
+  background: var(--thumb-page);
+}
+.settings-theme__thumb::before { content: ''; position: absolute; top: 0; bottom: 0; left: 0; width: 30%; background: var(--thumb-sidebar); }
+.settings-theme__thumb::after {
+  content: '';
+  position: absolute;
+  top: 34%;
+  left: 40%;
+  right: 12%;
+  height: 5px;
+  background: var(--thumb-ink);
+  box-shadow: 0 11px 0 var(--thumb-rule);
+}
+.settings-theme__name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.settings-theme[aria-pressed='true'] { color: var(--term-fg); font-weight: 500; }
+.settings-theme[aria-pressed='true'] .settings-theme__thumb { border-color: var(--term-accent); box-shadow: 0 0 0 1px var(--term-accent); }
+.settings-theme:focus-visible { outline: none; }
+.settings-theme:focus-visible .settings-theme__thumb { outline: var(--focus-ring); outline-offset: 3px; }
+@media (hover: hover) and (pointer: fine) {
+  .settings-theme:hover { color: var(--term-fg); }
+  .settings-theme:not([aria-pressed='true']):hover .settings-theme__thumb { border-color: var(--term-line-s); }
+}
+
+/* Accent: square hues named by their aria-label and title, right of the
+   row's text and wrapping; the current one is ringed in its own hue, with
+   the page showing between. */
+.settings-hues { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 6px; max-width: 230px; }
+.settings-hue {
+  flex: none;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border: 0;
+  border-radius: var(--ui-radius-sm);
+  background: var(--hue);
+  cursor: pointer;
+}
+.settings-hue[aria-pressed='true'] { box-shadow: 0 0 0 2px var(--settings-ring-gap, var(--term-surface)), 0 0 0 3px var(--hue); }
+.settings-hue:focus-visible { outline: var(--focus-ring); outline-offset: 4px; }
+@media (hover: hover) and (pointer: fine) {
+  .settings-hue:not([aria-pressed='true']):hover { box-shadow: 0 0 0 2px var(--settings-ring-gap, var(--term-surface)), 0 0 0 3px var(--term-line-s); }
+}
+
+/* A slider and its value. */
+.settings-range { display: flex; align-items: center; gap: 10px; }
+.settings-range > input[type='range'] { flex: 1; min-width: 0; accent-color: var(--term-accent); }
+.settings-range > input[type='range']:disabled { opacity: 0.4; }
+.settings-range__value {
+  flex: none;
+  min-width: 42px;
+  color: var(--term-fg);
+  font-family: var(--ui-font);
+  font-size: var(--fs-md);
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+}
+.settings-range__toggle.ui-btn[aria-pressed='true'] { border-color: var(--term-fg); background: var(--term-fg); color: var(--term-surface); }
+/* In a row's control slot the slider keeps a fixed width beside the row's name. */
+.settings-range--row { width: 220px; max-width: 100%; }
+.settings-range--row:has(.settings-range__toggle) { width: 300px; }
+
+/* Appearance › Advanced: under its group label, one row says what it holds
+   and opens it in place; its chevron turns down while it is open. */
+.appearance-advanced {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  min-height: 46px;
+  padding: 12px 0;
+  border: 0;
+  background: transparent;
+  color: var(--term-mid);
+  font-family: var(--ui-font);
+  font-size: var(--fs-lg);
+  line-height: 1.5;
+  text-align: left;
+  cursor: pointer;
+}
+.appearance-advanced__chevron { flex: none; margin-left: auto; color: var(--term-faint); transition: transform var(--t-soft) var(--t-ease); }
+.appearance-advanced[aria-expanded='true'] .appearance-advanced__chevron { transform: rotate(90deg); }
+@media (hover: hover) and (pointer: fine) { .appearance-advanced:hover { color: var(--term-fg); } }
+.appearance-advanced:focus-visible { outline: var(--focus-ring); outline-offset: -2px; }
+/* The rows it opens follow it as rows follow each other. */
+.appearance-advanced__rows { display: contents; }
+.appearance-advanced + .appearance-advanced__rows > .settings-row:first-child { border-top: 1px solid var(--term-line); }
 
 /* Connected machines: the list sits under the intro like a row group. */
 .settings-section .remote-connections__list { margin-top: 12px; }
@@ -265,23 +464,13 @@
 .settings-account__who { display: flex; flex-direction: column; min-width: 0; }
 .settings-account__email { color: var(--term-muted); font-size: var(--fs-md); font-weight: 400; overflow-wrap: anywhere; }
 
-/* Shortcuts: reference tables, one per group. */
-.settings-shortcuts__group { margin-top: 14px; }
-.settings-shortcuts__group-title {
-  margin: 0 0 6px;
-  color: var(--term-muted);
-  font-size: var(--fs-xs);
-  font-weight: 400;
-  letter-spacing: var(--ls-caps-wide);
-  text-transform: uppercase;
-}
-.settings-shortcuts__table { border: 1px solid var(--term-line); background: var(--term-surface-glass); }
+/* Shortcuts: one section per group, a row per binding. */
 .settings-shortcut-row {
   display: grid;
-  grid-template-columns: 120px minmax(0, 1fr);
+  grid-template-columns: 132px minmax(0, 1fr);
   align-items: center;
   gap: 12px;
-  padding: 7px 12px;
+  padding: 9px 0;
 }
 .settings-shortcut-row + .settings-shortcut-row { border-top: 1px solid var(--term-line); }
 .settings-shortcut-row__keys {
@@ -292,27 +481,29 @@
   color: var(--term-fg);
   font-size: var(--fs-sm);
 }
-.settings-shortcut-row__label { color: var(--term-mid); font-size: var(--fs-md); }
+.settings-shortcut-row__label { color: var(--term-fg); font-size: var(--fs-lg); line-height: 1.5; }
 
 @container settings-section (max-width: 320px) {
   .settings-shortcut-row { grid-template-columns: minmax(0, 1fr); gap: 4px; }
 }
 
 /* ── Cards: the phone drawer and the desktop window ───────────────
-   Both draw a page's groups as cards on a tinted page: a group heading in
-   small capitals over a card of rows, each control on the right of its name.
-   The drawer adds finger-sized rows (Phone, below); the window its navigation
-   and search (Window, below). */
+   Both draw a page on a tinted page with each group under a heading in small
+   capitals, each control on the right of its name. The drawer puts a group's
+   rows in a card and makes them finger-sized (Phone, below); the window lists
+   them as rows divided by hairlines, and adds its navigation and search
+   (Window, below). */
 .terminal-settings[data-cards] {
   --settings-page: color-mix(in srgb, var(--term-alt) 50%, var(--term-surface));
   --settings-card: var(--term-surface);
   --settings-inset: 14px;
+  /* What shows between a chosen accent and its ring: the card it sits on. */
+  --settings-ring-gap: var(--settings-card);
   background: var(--settings-page);
 }
 
 .settings-phone__group,
 .terminal-settings[data-cards] .settings-section__body,
-.terminal-settings[data-cards] .settings-field__body,
 .terminal-settings[data-cards] .settings-backup__card {
   display: block;
   border: 1px solid var(--term-line);
@@ -325,8 +516,7 @@
   border-top: 0;
 }
 .terminal-settings[data-cards] .settings-section__head { margin: 0 4px 7px; }
-.terminal-settings[data-cards] .settings-section__title,
-.terminal-settings[data-cards] .settings-field__label {
+.terminal-settings[data-cards] .settings-section__title {
   color: var(--term-muted);
   font-size: var(--fs-sm);
   font-weight: 500;
@@ -351,8 +541,7 @@
   font-size: var(--fs-lg);
   line-height: 1.5;
 }
-.terminal-settings[data-cards] .settings-section__body,
-.terminal-settings[data-cards] .settings-field__body {
+.terminal-settings[data-cards] .settings-section__body {
   padding: 0 var(--settings-inset);
 }
 .terminal-settings[data-cards] .settings-backup { margin-top: 0; padding-top: 0; border-top: 0; }
@@ -360,58 +549,47 @@
 .terminal-settings[data-cards] .settings-backup__intro p + p { margin-top: 6px; }
 .terminal-settings[data-cards] .settings-backup__card { padding: 14px var(--settings-inset); }
 .terminal-settings[data-cards] .settings-backup__card > p { margin: 12px 0 0; }
-.terminal-settings[data-cards] .settings-section__body > :not(.settings-row):first-child,
-.terminal-settings[data-cards] .settings-section__body > :not(.settings-row):last-child { margin-bottom: 12px; }
+.terminal-settings[data-cards] .settings-section__body > :not(.settings-row, .settings-shortcut-row, .appearance-advanced, .appearance-advanced__rows):first-child,
+.terminal-settings[data-cards] .settings-section__body > :not(.settings-row, .settings-shortcut-row, .appearance-advanced, .appearance-advanced__rows):last-child { margin-bottom: 12px; }
 .terminal-settings[data-cards] .settings-section__body > .settings-section__block:first-child,
-.terminal-settings[data-cards] .settings-section__body > :not(.settings-row):first-child { margin-top: 12px; }
+.terminal-settings[data-cards] .settings-section__body > :not(.settings-row, .settings-shortcut-row, .appearance-advanced, .appearance-advanced__rows):first-child { margin-top: 12px; }
 .terminal-settings[data-cards] .settings-row { grid-template-columns: minmax(0, 1fr) auto; }
 .terminal-settings[data-cards] .settings-row__control { justify-content: flex-end; }
 
-/* Machines: the list fills its card. */
-.terminal-settings[data-cards] .settings-section__body > .remote-connections__list { margin: 0; border-top: 0; }
-.terminal-settings[data-cards] .remote-connections__actions { margin-top: 14px; }
+/* Machines: the list fills its card; a machine's name reads as a setting's,
+   its line under it and its status as a row's description. */
+.terminal-settings[data-cards] .settings-section__body > .remote-connections__list { margin: 0; border-block: 0; }
+.terminal-settings[data-cards] .remote-connections__actions { margin-top: 12px; }
+.terminal-settings[data-cards] .remote-machine__name { font-size: var(--fs-lg); font-weight: 500; line-height: 1.5; }
+.terminal-settings[data-cards] .remote-machine__sub,
+.terminal-settings[data-cards] .remote-machine__status,
+.terminal-settings[data-cards] .remote-connections__hint { font-size: var(--fs-md); }
 
-/* Labelled controls: the name is the group heading, the control its card. */
-.terminal-settings[data-cards] .settings-field { padding: 0; border-bottom: 0; }
-.terminal-settings[data-cards] .settings-field + .settings-field,
-.terminal-settings[data-cards] .settings-field + div { margin-top: 24px; }
-.terminal-settings[data-cards] .settings-field__head { margin: 0 4px 7px; }
-.terminal-settings[data-cards] .settings-field__body { padding-top: 12px; padding-bottom: 12px; }
-.terminal-settings[data-cards] .settings-toggle {
-  flex-direction: row-reverse;
-  justify-content: space-between;
-  gap: 16px;
-  min-height: 30px;
-  margin: 0;
-  padding: 0;
-}
-.terminal-settings[data-cards] .settings-toggle__label { color: var(--term-fg); font-size: var(--fs-lg); line-height: 1.4; }
-/* Old toggle labels start in lower case; a row starts its name with a capital. */
-.terminal-settings[data-cards] .settings-toggle__label::first-letter { text-transform: uppercase; }
-.terminal-settings[data-cards] .appearance-advanced {
-  margin-left: 4px;
-  font-size: var(--fs-sm) !important;
-  font-weight: 500 !important;
-  color: var(--term-muted) !important;
-}
+/* Compact buttons keep their padding, not a smaller face. */
+.terminal-settings[data-cards] .ui-btn--sm { font-size: var(--fs-md); padding: 3px 10px; }
 
 /* Radio lists sit in their card as rows. */
 .terminal-settings[data-cards] .settings-radio { margin: 0 calc(-1 * var(--settings-inset)); border: 0; }
-.terminal-settings[data-cards] .settings-field__body .settings-radio { margin: -12px calc(-1 * var(--settings-inset)); }
-.terminal-settings[data-cards] .settings-radio__option { gap: 12px; min-height: 40px; padding: 9px var(--settings-inset); background: transparent; }
+.terminal-settings[data-cards] .settings-radio__option { gap: 12px; min-height: 40px; padding: 10px var(--settings-inset); background: transparent; }
+.terminal-settings[data-cards] .settings-radio__option + .settings-radio__option { border-top: 0; }
+.terminal-settings[data-cards] .settings-radio__option + .settings-radio__option::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  right: var(--settings-inset);
+  left: var(--settings-inset);
+  border-top: 1px solid var(--term-line);
+}
 .terminal-settings[data-cards] .settings-radio__option.is-active { background: transparent; }
 .terminal-settings[data-cards] .settings-radio__input { width: 16px; height: 16px; border-radius: 50%; }
 .terminal-settings[data-cards] .settings-radio__input:checked { box-shadow: inset 0 0 0 4px var(--term-surface); }
 .terminal-settings[data-cards] .settings-radio__label { color: var(--term-fg); font-size: var(--fs-lg); }
 .terminal-settings[data-cards] .settings-section__body > .settings-section__block:has(> .settings-radio) { margin: 0; }
 
-/* Shortcut tables are the card's own rows. */
-.terminal-settings[data-cards] .settings-shortcuts__table { border: 0; background: transparent; }
-.terminal-settings[data-cards] .settings-shortcuts__group { margin: 12px 0; }
-.terminal-settings[data-cards] .settings-shortcut-row { padding-inline: 0; }
 
-/* Legacy inline-sized controls never push a page sideways. */
-.terminal-settings[data-cards] .terminal-settings-content select,
+/* Legacy inline-sized controls never push a page sideways. A row's select
+   keeps its own minimum (min(132px, 100%)), which already fits. */
+.terminal-settings[data-cards] .terminal-settings-content select:not(.settings-row__select),
 .terminal-settings[data-cards] .terminal-settings-content input:not([type='radio']):not([type='checkbox']) {
   max-width: 100%;
   min-width: 0 !important;
@@ -435,15 +613,43 @@
 .terminal-settings[data-cards] .meta-set__body {
   display: flex;
   flex-direction: column;
-  gap: 10px;
-  padding: 4px var(--settings-inset);
+  padding: 0 var(--settings-inset);
   border: 1px solid var(--term-line);
   background: var(--settings-card);
 }
-.terminal-settings[data-cards] .meta-set__body > :first-child:not(.meta-set__row) { margin-top: 8px; }
-.terminal-settings[data-cards] .meta-set__body > :last-child:not(.meta-set__row) { margin-bottom: 8px; }
-.terminal-settings[data-cards] .meta-set__body > .meta-set__row:last-of-type { border-bottom: 0; }
-.terminal-settings[data-cards] .meta-set__row-k { color: var(--term-fg); }
+.terminal-settings[data-cards] .meta-set__body > :not(.meta-set__row, .meta-set__radio) { margin-block: 12px; }
+.terminal-settings[data-cards] .meta-set__body > :not(.meta-set__row, .meta-set__radio) + :not(.meta-set__row, .meta-set__radio) { margin-top: 0; }
+/* A setting: its name over what it does, the control on the right. */
+.terminal-settings[data-cards] .meta-set__row {
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 2px 16px;
+  padding: 12px 0;
+  border-bottom: 0;
+}
+.terminal-settings[data-cards] .meta-set__row + .meta-set__row { border-top: 1px solid var(--term-line); }
+.terminal-settings[data-cards] .meta-set__row-k { grid-column: 1; color: var(--term-fg); font-size: var(--fs-lg); font-weight: 500; line-height: 1.5; }
+.terminal-settings[data-cards] .meta-set__row-v { grid-column: 1; grid-row: 2; color: var(--term-muted); font-size: var(--fs-md); line-height: 1.55; text-wrap: pretty; }
+.terminal-settings[data-cards] .meta-set__ctl { grid-column: 2; grid-row: 1 / span 2; }
+.terminal-settings[data-cards] .meta-set__state,
+.terminal-settings[data-cards] .meta-set__saved,
+.terminal-settings[data-cards] .meta-set__chip-note,
+.terminal-settings[data-cards] .meta-set__catalog { font-size: var(--fs-md); }
+.terminal-settings[data-cards] .meta-set__tag { font-size: var(--fs-sm); }
+/* The runtime choice: the radio list of the other pages. */
+.terminal-settings[data-cards] .meta-set__radio { border-bottom: 0; }
+.terminal-settings[data-cards] .meta-set__radio + .meta-set__radio { border-top: 1px solid var(--term-line); }
+.terminal-settings[data-cards] .meta-set__radio-head { gap: 12px; padding: 10px 0; }
+.terminal-settings[data-cards] .meta-set__radio-head input {
+  width: 16px;
+  height: 16px;
+  margin-top: 1px;
+  border: 1px solid var(--term-line-s);
+  background: var(--term-surface-glass);
+}
+.terminal-settings[data-cards] .meta-set__radio-head input:checked { border-color: var(--term-accent); background: var(--term-accent); box-shadow: inset 0 0 0 4px var(--term-surface); }
+.terminal-settings[data-cards] .meta-set__radio-t { font-size: var(--fs-lg); font-weight: 400; line-height: 1.4; }
+.terminal-settings[data-cards] .meta-set__radio-d { margin-top: 2px; line-height: 1.55; }
+.terminal-settings[data-cards] .meta-set__custom { padding-left: 28px; }
 
 /* A setting a search result opened is outlined for a moment. */
 .terminal-settings [data-search-hit] {
@@ -485,7 +691,7 @@
 .settings-phone__heading {
   margin: 22px 4px 7px;
   color: var(--term-muted);
-  font-size: var(--fs-sm);
+  font-size: var(--fs-xs);
   font-weight: 500;
   letter-spacing: var(--ls-caps-wide);
   text-transform: uppercase;
@@ -516,7 +722,7 @@
   border-top: 1px solid var(--term-line);
 }
 .settings-phone__row:active { background: var(--term-alt); }
-.settings-phone__row:focus-visible { outline: 2px solid var(--term-accent); outline-offset: -2px; }
+.settings-phone__row:focus-visible { outline: var(--focus-ring); outline-offset: -2px; }
 .settings-phone__icon {
   display: grid;
   flex: none;
@@ -547,13 +753,13 @@
   min-width: 0;
   max-width: 100%;
   overflow: hidden;
-  font-size: 15px;
+  font-size: var(--fs-md);
   line-height: 1.3;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 .settings-phone__text .settings-phone__label { flex: none; font-weight: 600; }
-.settings-phone__sub { overflow: hidden; color: var(--term-muted); font-size: var(--fs-md); text-overflow: ellipsis; white-space: nowrap; }
+.settings-phone__sub { overflow: hidden; color: var(--term-muted); font-size: var(--fs-sm); text-overflow: ellipsis; white-space: nowrap; }
 .settings-phone__value {
   display: inline-flex;
   flex: 0 1 auto;
@@ -562,15 +768,15 @@
   min-width: 0;
   overflow: hidden;
   color: var(--term-muted);
-  font-size: var(--fs-xl);
+  font-size: var(--fs-md);
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 .settings-phone__dot { flex: none; width: 7px; height: 7px; border-radius: 50%; background: currentColor; }
 .settings-phone__value[data-tone='ok'] .settings-phone__dot { background: var(--term-digest); }
-.settings-phone__value[data-tone='error'] { color: var(--term-danger); }
+.settings-phone__value[data-tone='error'] { color: var(--term-danger-text); }
 .settings-phone__chevron { flex: none; margin-right: -4px; color: var(--term-faint); }
-.settings-phone__note { margin: 14px 4px 0; color: var(--term-muted); font-size: var(--fs-md); line-height: 1.5; }
+.settings-phone__note { margin: 14px 4px 0; color: var(--term-muted); font-size: var(--fs-sm); line-height: 1.5; }
 
 /* A page: its title, then the pane's groups as cards, at finger size. */
 .terminal-settings--drawer[data-stacked] .terminal-settings-content {
@@ -584,10 +790,13 @@
   line-height: 1.15;
 }
 .terminal-settings--drawer[data-stacked] .settings-row { min-height: 52px; padding: 11px 0; }
-.terminal-settings--drawer[data-stacked] .settings-row__label { font-size: 15px; font-weight: 400; line-height: 1.35; }
-.terminal-settings--drawer[data-stacked] .settings-row__desc { font-size: var(--fs-md); }
+.terminal-settings--drawer[data-stacked] .settings-row__label { font-size: var(--fs-md); font-weight: 400; line-height: 1.35; }
+.terminal-settings--drawer[data-stacked] .settings-row__desc { font-size: var(--fs-sm); }
 .terminal-settings--drawer[data-stacked] .settings-row__select.ui-select { max-width: 52vw; }
-.terminal-settings--drawer[data-stacked] .settings-section__aside { font-size: var(--fs-md); }
+/* Selects at finger size. */
+.terminal-settings--drawer[data-stacked] select.ui-select,
+.terminal-settings--drawer[data-stacked] .settings-model-combo__trigger.ui-select { height: auto; min-height: 40px; }
+.terminal-settings--drawer[data-stacked] .settings-section__aside { font-size: var(--fs-sm); }
 /* A select with a description takes the full width under the text. */
 .terminal-settings--drawer[data-stacked] .settings-row:has(> .settings-row__text > .settings-row__desc):has(> .settings-row__control > select) {
   grid-template-columns: minmax(0, 1fr);
@@ -597,19 +806,41 @@
   width: 100%;
   max-width: 100%;
 }
-.terminal-settings--drawer[data-stacked] .remote-machine__name { font-size: 15px; }
-.terminal-settings--drawer[data-stacked] .remote-machine__actions { margin-left: -8px; }
+.terminal-settings--drawer[data-stacked] .remote-machine__name { font-size: var(--fs-md); font-weight: 400; }
+/* A link in a row's control slot (Open) reads at the row's size. */
+.terminal-settings--drawer[data-stacked] .settings-row__control > .settings-row__link { font-size: var(--fs-md); }
+/* A machine's ⋯ at finger size. */
+.terminal-settings--drawer[data-stacked] .remote-machine { grid-template-columns: 18px minmax(0, 1fr) auto 40px; }
+.terminal-settings--drawer[data-stacked] .remote-machine__more { width: 40px; height: 40px; }
 /* Switches at finger size, with a larger hit area than they draw. */
 .terminal-settings--drawer[data-stacked] .ui-switch { zoom: 1.4; }
 .terminal-settings--drawer[data-stacked] .ui-switch::after { content: ''; position: absolute; inset: -10px -6px; }
-.terminal-settings--drawer[data-stacked] .settings-toggle { min-height: 36px; }
-.terminal-settings--drawer[data-stacked] .settings-toggle__label { font-size: 15px; line-height: 1.35; }
+/* Accent hues wrap under the row's name, from its left edge. */
+.terminal-settings--drawer[data-stacked] .settings-row:has(> .settings-row__control > .settings-hues) { grid-template-columns: minmax(0, 1fr); }
+.terminal-settings--drawer[data-stacked] .settings-row__control:has(> .settings-hues) { justify-content: flex-start; }
+.terminal-settings--drawer[data-stacked] .settings-hues { justify-content: flex-start; max-width: none; gap: 10px; }
+.terminal-settings--drawer[data-stacked] .settings-hue { width: 32px; height: 32px; }
+/* Choices and sliders take the full width under the row's name, at finger size. */
+.terminal-settings--drawer[data-stacked] .settings-row:has(> .settings-row__control > :is(.settings-segmented, .settings-range)) { grid-template-columns: minmax(0, 1fr); }
+.terminal-settings--drawer[data-stacked] .settings-row__control:has(> :is(.settings-segmented, .settings-range)) { justify-content: stretch; }
+.terminal-settings--drawer[data-stacked] .settings-row__control > .settings-range--row { width: 100%; }
+.terminal-settings--drawer[data-stacked] .settings-row__control > .settings-segmented { display: flex; width: 100%; }
+.terminal-settings--drawer[data-stacked] .settings-segmented__option { flex: 1 0 auto; justify-content: center; min-height: 40px; font-size: var(--fs-md); }
 .terminal-settings--drawer[data-stacked] .settings-radio__option { min-height: 48px; padding-block: 10px; }
 .terminal-settings--drawer[data-stacked] .settings-radio__input { width: 18px; height: 18px; }
-.terminal-settings--drawer[data-stacked] .settings-radio__label { font-size: 15px; }
-.terminal-settings--drawer[data-stacked] .settings-radio__description { font-size: var(--fs-md); }
+.terminal-settings--drawer[data-stacked] .settings-radio__label { font-size: var(--fs-md); }
+.terminal-settings--drawer[data-stacked] .settings-radio__description { font-size: var(--fs-sm); }
 .terminal-settings--drawer[data-stacked] .meta-set__body > .meta-set__row { min-height: 52px; padding: 10px 0; }
-.terminal-settings--drawer[data-stacked] .meta-set__row-k { font-size: 15px; }
+.terminal-settings--drawer[data-stacked] .meta-set__row-k { font-size: var(--fs-md); font-weight: 400; line-height: 1.35; }
+.terminal-settings--drawer[data-stacked] .meta-set__radio-head { min-height: 48px; }
+.terminal-settings--drawer[data-stacked] .meta-set__radio-head input { width: 18px; height: 18px; }
+.terminal-settings--drawer[data-stacked] .meta-set__radio-t { font-size: var(--fs-md); }
+/* On the drawer's scale, intros, descriptions and notes sit one step below
+   the body (--fs-md), and the uppercase group labels at --fs-xs. */
+.terminal-settings--drawer[data-stacked] :is(.settings-section__intro, .settings-section__intro p, .settings-backup__intro p, .settings-section__status,
+  .settings-row__note, .settings-history__empty p, .meta-set__lede, .meta-set__row-v,
+  .meta-set__radio-d, .meta-set__usage, .remote-machine__sub, .remote-machine__status, .remote-connections__hint) { font-size: var(--fs-sm); }
+.terminal-settings--drawer[data-stacked] :is(.settings-section__title, .meta-set__sec > h2, .meta-set__head > h2) { font-size: var(--fs-xs); }
 
 /* ── Window ───────────────────────────────────────────────────────
    On a desktop Settings is a window over the app (ModalShell): search and the
@@ -622,12 +853,17 @@
   height: min(740px, calc(100vh - 96px));
   min-height: 0;
 }
+/* The whole window is one sheet of the overlay glass (ModalShell's .term-glass,
+   or its frozen capture): the navigation shows it directly and the page column
+   only lifts it a little, so there is no seam between two materials. A chosen
+   accent's ring gap takes the lifted glass's near-opaque surface. */
+.terminal-settings--window[data-cards] { background: transparent; --settings-ring-gap: color-mix(in srgb, var(--term-fg) 3%, var(--term-surface)); }
+.terminal-settings--window > .terminal-settings-content { background: color-mix(in srgb, var(--term-fg) 3%, transparent); }
 .settings-window__nav {
   min-height: 0;
   overflow-y: auto;
   padding: 12px 10px 20px;
   border-right: 1px solid var(--term-line);
-  background: var(--term-surface);
   overscroll-behavior-y: contain;
 }
 .settings-window__search {
@@ -638,7 +874,7 @@
   margin: 0 2px 2px;
   padding: 0 6px 0 9px;
   border: 1px solid var(--term-line);
-  background: var(--term-bg);
+  background: var(--term-surface-glass);
   color: var(--term-faint);
 }
 .settings-window__search:focus-within { border-color: var(--term-accent); box-shadow: 0 0 0 2px var(--term-accent-f); }
@@ -668,11 +904,11 @@
   color: var(--term-muted);
   cursor: pointer;
 }
-.settings-window__clear:focus-visible { outline: 2px solid var(--term-accent); }
+.settings-window__clear:focus-visible { outline: var(--focus-ring); }
 .settings-window__heading {
   margin: 14px 8px 4px;
   color: var(--term-muted);
-  font-size: var(--fs-xs);
+  font-size: var(--fs-sm);
   font-weight: 500;
   letter-spacing: var(--ls-caps-wide);
   text-transform: uppercase;
@@ -695,18 +931,19 @@
 }
 .settings-window__item svg { flex: none; color: var(--term-faint); }
 .settings-window__item span { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.settings-window__item em { color: var(--term-muted); font-size: var(--fs-sm); font-style: normal; font-variant-numeric: tabular-nums; }
-/* Selection is the bar, tint and accent; the weight stays put so the label never reflows. */
+.settings-window__item em { color: var(--term-muted); font-size: var(--fs-md); font-style: normal; font-variant-numeric: tabular-nums; }
+/* Selection is the bar, tint and accent; the weight stays put so the label never reflows.
+   Fills are the app sidebar's translucent ones, so the glass shows through them. */
 .settings-window__item[aria-current='page'] {
   border-left-color: var(--term-accent);
-  background: var(--term-alt);
+  background: var(--sb-card-fill);
   color: var(--term-accent);
 }
 .settings-window__item[aria-current='page'] svg { color: var(--term-accent); }
-.settings-window__item:focus-visible { outline: 2px solid var(--term-accent); outline-offset: -2px; }
+.settings-window__item:focus-visible { outline: var(--focus-ring); outline-offset: -2px; }
 @media (hover: hover) and (pointer: fine) {
-  .settings-window__item:hover { background: var(--term-alt); color: var(--term-fg); }
-  .settings-window__item[aria-current='page']:hover { color: var(--term-accent); }
+  .settings-window__item:hover { background: var(--sb-card-hover); color: var(--term-fg); }
+  .settings-window__item[aria-current='page']:hover { background: var(--sb-card-fill); color: var(--term-accent); }
 }
 .settings-window__alert { flex: none; width: 6px; height: 6px; border-radius: 50%; background: var(--term-danger); }
 
@@ -718,6 +955,28 @@
   overscroll-behavior-y: contain;
 }
 .terminal-settings--window .terminal-settings-heading { margin: 0 4px 14px; font-size: var(--fs-4xl); }
+
+/* Rows: under each group's heading its settings are rows divided by hairlines,
+   the name and what it does on the left and the control on the right, with
+   no card around them. The rows line up with the headings' 4px inset. Trash
+   and Archived keep their lists in cards (history.css). */
+.terminal-settings--window[data-cards] .settings-section__body,
+.terminal-settings--window[data-cards] .meta-set__body,
+.terminal-settings--window[data-cards] .settings-backup__card {
+  border: 0;
+  background: transparent;
+  padding-inline: 4px;
+}
+.terminal-settings--window[data-cards] .settings-backup__card { padding-block: 2px 0; }
+.terminal-settings--window[data-cards] .settings-section__head { margin-bottom: 2px; }
+.terminal-settings--window[data-cards] .meta-set__sec > h2,
+.terminal-settings--window[data-cards] .meta-set__head { margin-bottom: 2px; }
+/* Something between rows (a radio list, a note) is divided from the row after it as rows are. */
+.terminal-settings--window[data-cards] .settings-section__body > :not(.settings-row) + .settings-row { border-top: 1px solid var(--term-line); }
+/* A radio list's options are rows too, flush with the names above them. */
+.terminal-settings--window[data-cards] .settings-radio { margin-inline: 0; }
+.terminal-settings--window[data-cards] .settings-radio__option { padding-inline: 0; }
+.terminal-settings--window[data-cards] .settings-radio__option + .settings-radio__option::before { right: 0; left: 28px; }
 
 /* Search results: where each setting is, its name and what it does. */
 .settings-window__count { margin: 0 4px 12px; color: var(--term-muted); font-size: var(--fs-md); }
@@ -735,9 +994,9 @@
   text-align: left;
   cursor: pointer;
 }
-.settings-window__hit:focus-visible { outline: 2px solid var(--term-accent); outline-offset: -1px; }
+.settings-window__hit:focus-visible { outline: var(--focus-ring); outline-offset: -1px; }
 @media (hover: hover) and (pointer: fine) { .settings-window__hit:hover { border-color: var(--term-line-s); } }
-.settings-window__path { grid-column: 1; color: var(--term-muted); font-size: var(--fs-sm); }
+.settings-window__path { grid-column: 1; color: var(--term-muted); font-size: var(--fs-md); }
 .settings-window__name { grid-column: 1; font-size: var(--fs-lg); font-weight: 500; }
 .settings-window__desc { grid-column: 1; color: var(--term-muted); font-size: var(--fs-md); line-height: 1.5; }
 .settings-window__chevron { grid-column: 2; grid-row: 1 / span 3; align-self: center; color: var(--term-faint); }
@@ -809,9 +1068,6 @@
 .terminal-settings-heading:focus { outline: none; }
 
 @container (max-width: 740px) {
-  .terminal-settings--drawer .meta-set__row { grid-template-columns: minmax(0, 1fr) auto; gap: 6px 12px; }
-  .terminal-settings--drawer .meta-set__row-v { grid-column: 1; grid-row: 2; font-size: var(--fs-md); color: var(--term-muted); }
-  .terminal-settings--drawer .meta-set__ctl { grid-column: 2; grid-row: 1 / span 2; }
   .terminal-settings--drawer .meta-set__notice { flex-wrap: wrap; }
 }
 
@@ -836,9 +1092,12 @@
 }
 .settings-model-combo__trigger.ui-select:disabled { opacity: 0.55; cursor: default; }
 .settings-model-combo__trigger[aria-busy='true'] { cursor: progress; }
+.settings-model-combo__trigger[aria-expanded='true'] { border-color: color-mix(in srgb, var(--term-accent) 70%, var(--term-line)); }
+/* Touch screens draw native selects at 16px (index.css); the model picker beside them matches. */
+@media (hover: none) and (pointer: coarse) {
+  .settings-model-combo__trigger.ui-select { font-size: 16px; }
+}
 .settings-model-combo__value { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.settings-model-combo__chevron { flex: none; color: var(--term-muted); transform: rotate(90deg); }
-.settings-model-combo__trigger[aria-expanded='true'] .settings-model-combo__chevron { transform: rotate(-90deg); }
 .settings-model-combo__popover { display: flex; flex-direction: column; }
 .settings-model-combo__body { display: flex; flex: 1 1 auto; flex-direction: column; min-height: 0; }
 .settings-model-combo__list { flex: 0 1 auto; max-height: 300px; }

@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { AnimatePresence, motion, useIsPresent } from 'motion/react';
+import { AnimatePresence, motion, useIsPresent, type MotionValue } from 'motion/react';
 import { SidebarContentPrefsProvider, usePrefs } from '../../state/prefs';
 import { DUR, EASE, TRANSITION } from '../../motion/tokens';
 import { PROFILE_PAGE_ENABLED } from '../../state/featureFlags';
@@ -10,23 +10,46 @@ import TreeSelectionBar from './TreeSelectionBar';
 import ResizeHandle from '../ResizeHandle';
 import { rowGeom, rowPadding, spinePadding, WORKSPACE_ICON_SIZE, WORKSPACE_ICON_GAP, type RowGeom } from './sidebarRowStyle';
 import './sidebar.css';
+import { AgentIcon, UserIcon } from './icons';
 import {
-  ActivityIcon,
-  AgentIcon,
-  HomeIcon,
-  WorkspacesIcon,
-  UserIcon,
-} from './icons';
+  SidebarConnectionChip,
+  SidebarNewChatRow,
+  SidebarViewPanel,
+  SidebarViewTabs,
+  useSidebarViewTabsId,
+} from './sidebar/SidebarChrome';
 import type { PageId } from '../../state/commands';
 import { AREA_RAIL_WIDTH } from './rail/AreaRail';
 
 // Rail + sidebar must cover the Topbar Zone 1 button cluster so drag-resizing
-// can't push the left chrome narrower than its header icons. ZONE1_WIDTH
-// (Topbar.tsx) is TRAFFIC_LIGHT_PAD(96) + 6×26 + 5×4 + RIGHT_PAD(8) = 280px.
+// can't push the left chrome narrower than its header icons (Topbar.tsx
+// zone1WidthFor: 250px for its five buttons). 280px held the old six-button
+// cluster.
 const MIN_SIDEBAR_WIDTH = 280 - AREA_RAIL_WIDTH;
 const MAX_SIDEBAR_WIDTH = 400;
 const DEFAULT_SIDEBAR_WIDTH = 252;
 const OVERLAY_WIDTH = 'min(85vw, 340px)';
+
+/** The Topbar's Zone 1 width: the area rail plus the sidebar. */
+function setRootSidebarWidth(sidebarWidth: number) {
+  document.documentElement.style.setProperty('--term-sidebar-width', `${sidebarWidth + AREA_RAIL_WIDTH}px`);
+}
+
+/** OVERLAY_WIDTH in px, for a drag that starts before the drawer is on screen. */
+export function narrowOverlayWidth(): number {
+  return Math.min(window.innerWidth * 0.85, 340);
+}
+
+/**
+ * A swipe moving the phone drawer: while `active`, the drawer and its scrim
+ * sit where these values put them (the finger), not where their own
+ * animation would. The values drive both at all times.
+ */
+interface NarrowOverlayDrag {
+  x: MotionValue<number | string>;
+  scrim: MotionValue<number>;
+  active: boolean;
+}
 
 /** Sidebar scrollbars appear on pointer/focus entry, then linger this long. */
 const SCROLLBAR_LINGER_MS = 2000;
@@ -56,19 +79,23 @@ export default function TerminalSidebar({
   workspaceReady = true,
   customAgentsEnabled = false,
   onNav,
+  onOpenPalette,
+  onNewThread,
   areaContent,
   narrowMode = false,
   narrowOverlayOpen = false,
   onCloseOverlay,
   overlayHeader,
+  overlayDrag,
+  onOverlayChoice,
 }: {
   activePage: PageId;
   workspaceReady?: boolean;
   customAgentsEnabled?: boolean;
   onNav: (p: PageId) => void;
-  /** @deprecated The area rail owns these entry points now; kept for existing callers. */
+  /** The narrow drawer's Search button (⌘K). Wide windows keep it in the Topbar. */
   onOpenPalette?: () => void;
-  /** @deprecated See onOpenPalette. */
+  /** The narrow drawer's New chat button (⌘T): opens Home. Wide windows keep it in the Topbar. */
   onNewThread?: () => void;
   /** Sidebar body for the Spaces, Scheduled and Settings areas; the conversation tree when omitted. */
   areaContent?: React.ReactNode;
@@ -77,6 +104,9 @@ export default function TerminalSidebar({
   onCloseOverlay?: () => void;
   /** First row of the narrow overlay; narrow windows have no area rail. */
   overlayHeader?: React.ReactNode;
+  overlayDrag?: NarrowOverlayDrag;
+  /** A click or Enter/Space inside the phone drawer: what it opens is a root (TerminalShell). */
+  onOverlayChoice?: () => void;
 }) {
   const { prefs, setPref } = usePrefs();
   const asideRef = useRef<HTMLElement>(null);
@@ -103,24 +133,54 @@ export default function TerminalSidebar({
   useEffect(() => () => {
     if (scrollbarTimer.current !== undefined) window.clearTimeout(scrollbarTimer.current);
   }, []);
+  // The shell passes fresh handlers on every render; the rows hold stable ones
+  // so the memoised contents below are not rebuilt by a render that changed nothing.
+  const newThreadRef = useRef(onNewThread);
+  newThreadRef.current = onNewThread;
+  const openPaletteRef = useRef(onOpenPalette);
+  openPaletteRef.current = onOpenPalette;
+  const closeOverlayRef = useRef(onCloseOverlay);
+  closeOverlayRef.current = onCloseOverlay;
+  const hasNewThread = !!onNewThread;
+  const hasPalette = !!onOpenPalette;
+  const newThread = useCallback(() => newThreadRef.current?.(), []);
+  // Only the drawer shows this Search, and it closes itself first.
+  const openPalette = useCallback(() => { closeOverlayRef.current?.(); openPaletteRef.current?.(); }, []);
   const contents = useMemo(
-    () => areaContent ?? <SidebarContents activePage={activePage} workspaceReady={workspaceReady} customAgentsEnabled={customAgentsEnabled} onNav={onNav} lensToggle={narrowMode} />,
-    [areaContent, activePage, workspaceReady, customAgentsEnabled, onNav, narrowMode],
+    () => <>
+      {/* The drawer's scrim covers the Topbar's New chat and Search, so the
+          drawer carries its own. A wide sidebar leaves them to the Topbar. */}
+      {narrowMode && (
+        <SidebarNewChatRow
+          onNewChat={hasNewThread ? newThread : undefined}
+          onOpenPalette={hasPalette ? openPalette : undefined}
+          searchDisabled={!workspaceReady}
+        />
+      )}
+      {areaContent ?? <SidebarContents activePage={activePage} workspaceReady={workspaceReady} customAgentsEnabled={customAgentsEnabled} onNav={onNav} />}
+      <SidebarConnectionChip />
+    </>,
+    [areaContent, activePage, workspaceReady, customAgentsEnabled, onNav, narrowMode, hasNewThread, hasPalette, newThread, openPalette],
   );
 
+  // A drag keeps its width here and saves it to prefs once, on release: a pref
+  // write re-renders every prefs consumer (the chat store, every sidebar row),
+  // which is far too much work for every frame of a drag.
+  const [dragWidth, setDragWidth] = useState<number | null>(null);
+  const dragWidthRef = useRef<number | null>(null);
   // Clamp persisted width to current MIN so legacy narrower values auto-correct.
-  const effectiveWidth = Math.max(prefs.terminalSidebarWidth, MIN_SIDEBAR_WIDTH);
+  const effectiveWidth = dragWidth ?? Math.max(prefs.terminalSidebarWidth, MIN_SIDEBAR_WIDTH);
   useEffect(() => {
+    // During a drag the width goes to the Topbar's spacer alone (onResize): a
+    // custom property set on the root restyles the whole document.
+    if (dragWidth != null) return;
     // The Topbar's Zone 1 spans the area rail and the sidebar.
-    document.documentElement.style.setProperty(
-      '--term-sidebar-width',
-      `${effectiveWidth + AREA_RAIL_WIDTH}px`,
-    );
+    setRootSidebarWidth(effectiveWidth);
     // Persist the correction so we don't recompute every render.
     if (prefs.terminalSidebarWidth < MIN_SIDEBAR_WIDTH) {
       setPref('terminalSidebarWidth', MIN_SIDEBAR_WIDTH);
     }
-  }, [effectiveWidth, prefs.terminalSidebarWidth, setPref]);
+  }, [dragWidth, effectiveWidth, prefs.terminalSidebarWidth, setPref]);
 
   // Broadcast the width animation window so panes can pause ResizeObserver
   // reflows. The width transition itself is the clock; a fallback timer only
@@ -160,8 +220,11 @@ export default function TerminalSidebar({
   // The shell closes the drawer within the choosing click or key, so a mark
   // that lasts until the next task covers exactly that close.
   const choseInDrawerRef = useRef(false);
+  const onOverlayChoiceRef = useRef(onOverlayChoice);
+  onOverlayChoiceRef.current = onOverlayChoice;
   const noteChoice = useCallback(() => {
     choseInDrawerRef.current = true;
+    onOverlayChoiceRef.current?.();
     window.setTimeout(() => { choseInDrawerRef.current = false; }, 0);
   }, []);
   const noteKeyChoice = useCallback((event: React.KeyboardEvent) => {
@@ -201,7 +264,11 @@ export default function TerminalSidebar({
       ? `0 ${spinePadding(geom, geom.rightGap)} 5px ${spinePadding(geom, geom.titleX)}`
       : 'var(--sb-row-py, 5px) 10px var(--sb-row-py, 4px) 6px',
     '--sb-section-top': geom.isCard ? '18px' : '8px',
-    '--sb-section-tracking': geom.isCard ? 'var(--ls-caps)' : 'var(--ls-wide)',
+    // Where a section label's text starts and ends, measured from the
+    // sidebar's own edges: the sidebar's first row and view tabs sit outside
+    // the list's inset container and line up on these.
+    '--sb-spine-left': geom.isCard ? `${geom.titleX}px` : 'calc(6px + var(--sb-inset))',
+    '--sb-spine-right': geom.isCard ? `${geom.rightGap}px` : 'calc(10px + var(--sb-inset))',
     // Horizontal gutter between sidebar content and its edges. Applied as
     // padding on the scrollable tree + bottom nav (below), so it stacks on
     // top of each row's own left/right padding. 0 = flush (original look).
@@ -299,6 +366,7 @@ export default function TerminalSidebar({
             style={asideStyle}
             handlers={{ ...scrollbarHandlers, onClickCapture: noteChoice, onKeyDownCapture: noteKeyChoice }}
             onClose={onCloseOverlay}
+            drag={overlayDrag}
           >
             {body}
           </NarrowSidebarOverlay>
@@ -322,7 +390,16 @@ export default function TerminalSidebar({
         <ResizeHandle
           paneRef={asideRef}
           min={MIN_SIDEBAR_WIDTH}
-          onResize={(w) => setPref('terminalSidebarWidth', Math.min(MAX_SIDEBAR_WIDTH, w))}
+          onResize={(w) => {
+            const next = Math.min(MAX_SIDEBAR_WIDTH, w);
+            dragWidthRef.current = next;
+            setDragWidth(next);
+            window.dispatchEvent(
+              new CustomEvent('michi:sidebar-resizing', {
+                detail: { resizing: true, width: next + AREA_RAIL_WIDTH },
+              }),
+            );
+          }}
           onReset={() => setPref('terminalSidebarWidth', DEFAULT_SIDEBAR_WIDTH)}
           onResizeStart={() => {
             setIsResizing(true);
@@ -331,6 +408,15 @@ export default function TerminalSidebar({
             );
           }}
           onResizeEnd={() => {
+            // Same batch as clearing dragWidth, so the width never flashes back.
+            // The root value is set first: the Topbar drops its own copy below.
+            const final = dragWidthRef.current;
+            if (final != null) {
+              setRootSidebarWidth(final);
+              setPref('terminalSidebarWidth', final);
+            }
+            dragWidthRef.current = null;
+            setDragWidth(null);
             setIsResizing(false);
             window.dispatchEvent(
               new CustomEvent('michi:sidebar-resizing', { detail: { resizing: false } }),
@@ -340,6 +426,27 @@ export default function TerminalSidebar({
       )}
     </aside>
   );
+}
+
+/** What a drag from `target` scrolls in the drawer: the nearest element that scrolls and has more than it shows. */
+function drawerScroller(target: EventTarget | null, drawer: HTMLElement): HTMLElement | null {
+  for (let el = target instanceof Element ? target : null; el && drawer.contains(el); el = el.parentElement) {
+    if (!(el instanceof HTMLElement)) continue;
+    const style = getComputedStyle(el);
+    if ((/auto|scroll/.test(style.overflowY) && el.scrollHeight > el.clientHeight)
+      || (/auto|scroll/.test(style.overflowX) && el.scrollWidth > el.clientWidth)) return el;
+  }
+  return null;
+}
+
+/** A touch on selected text, or on a rename field with a selection, is dragging the selection's handles. */
+function adjustsSelection(target: EventTarget | null): boolean {
+  if (!(target instanceof Element)) return false;
+  const selection = window.getSelection();
+  if (selection && !selection.isCollapsed && selection.containsNode(target, true)) return true;
+  return (target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement)
+    && document.activeElement === target
+    && (target.selectionStart ?? 0) < (target.selectionEnd ?? 0);
 }
 
 /**
@@ -357,6 +464,7 @@ function NarrowSidebarOverlay({
   style,
   handlers,
   onClose,
+  drag,
   children,
 }: {
   asideRef: React.RefObject<HTMLElement | null>;
@@ -365,15 +473,56 @@ function NarrowSidebarOverlay({
   style: React.CSSProperties;
   handlers: Pick<React.HTMLAttributes<HTMLElement>, 'onPointerEnter' | 'onPointerLeave' | 'onFocusCapture' | 'onBlurCapture' | 'onClickCapture' | 'onKeyDownCapture'>;
   onClose?: () => void;
+  drag?: NarrowOverlayDrag;
   children: React.ReactNode;
 }) {
   const present = useIsPresent();
+  const dragging = !!drag?.active;
+  // A drag in the drawer layer scrolls only a drawer list with more than it
+  // shows. One anywhere else (the scrim, the area tabs, the bottom rows, a
+  // list too short to scroll) is cancelled, so nothing behind it moves; iOS
+  // would otherwise scroll what is under the drawer. React Aria's
+  // usePreventScroll uses the same rule. Native and non-passive: React's
+  // touch listeners are passive and cannot cancel a scroll. The shell's
+  // swipe-to-close listens on window and still sees every move.
+  const scrimRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    const scrim = scrimRef.current;
+    const aside = asideRef.current;
+    if (!scrim || !aside) return;
+    let scroller: HTMLElement | null = null;
+    let keepMove = false;
+    const onStart = (event: TouchEvent) => {
+      scroller = drawerScroller(event.target, aside);
+      keepMove = adjustsSelection(event.target);
+    };
+    const onMove = (event: TouchEvent) => {
+      if (keepMove || event.touches.length > 1 || !event.cancelable) return; // pinch zoom stays
+      // overscroll-behavior does not hold a list that does not overflow
+      // (https://bugs.webkit.org/show_bug.cgi?id=243452), so check again here.
+      if (!scroller || (scroller.scrollHeight <= scroller.clientHeight && scroller.scrollWidth <= scroller.clientWidth)) {
+        event.preventDefault();
+      }
+    };
+    const options = { passive: false } as const;
+    for (const layer of [scrim, aside]) {
+      layer.addEventListener('touchstart', onStart, options);
+      layer.addEventListener('touchmove', onMove, options);
+    }
+    return () => {
+      for (const layer of [scrim, aside]) {
+        layer.removeEventListener('touchstart', onStart);
+        layer.removeEventListener('touchmove', onMove);
+      }
+    };
+  }, [asideRef]);
   return (
     <>
       <motion.div
+        ref={scrimRef}
         onMouseDown={present ? onClose : undefined}
         initial={{ opacity: 0 }}
-        animate={{ opacity: 1 }}
+        animate={dragging ? undefined : { opacity: 1 }}
         exit={{ opacity: 0, transition: OVERLAY_SCRIM_EXIT }}
         transition={TRANSITION.enter}
         style={{
@@ -382,6 +531,7 @@ function NarrowSidebarOverlay({
           background: 'rgba(0,0,0,0.32)',
           zIndex: 'var(--z-sidebar-scrim)',
           pointerEvents: present ? undefined : 'none',
+          opacity: drag?.scrim,
         }}
       />
       <motion.aside
@@ -395,10 +545,10 @@ function NarrowSidebarOverlay({
         aria-hidden={present ? undefined : true}
         inert={!present}
         initial={{ x: '-100%' }}
-        animate={{ x: 0 }}
+        animate={dragging ? undefined : { x: 0 }}
         exit={{ x: '-100%', transition: OVERLAY_PANEL_EXIT }}
         transition={TRANSITION.enter}
-        style={{ ...style, pointerEvents: present ? undefined : 'none' }}
+        style={{ ...style, pointerEvents: present ? undefined : 'none', x: drag?.x }}
         {...handlers}
       >
         {children}
@@ -407,38 +557,17 @@ function NarrowSidebarOverlay({
   );
 }
 
-/** Phone drawer header for the conversation list. Narrow windows hide the
- *  Topbar's Activity button and have no ⌥⌘U, so the lens switch lives here. */
-function SidebarLensHeader() {
-  const { prefs, setPref } = usePrefs();
-  const activity = prefs.sidebarView === 'activity';
-  return (
-    <div className="sidebar-lens-header">
-      <span className="sidebar-lens-header__title">{activity ? 'Activity' : 'Structure'}</span>
-      <button
-        type="button"
-        className="sidebar-lens-header__toggle"
-        aria-label="Activity view"
-        aria-pressed={activity}
-        onClick={() => setPref('sidebarView', activity ? 'structure' : 'activity')}
-      >
-        <ActivityIcon size={16} />
-      </button>
-    </div>
-  );
-}
-
-function SidebarContents({ activePage, workspaceReady, customAgentsEnabled, onNav, lensToggle = false }: {
+function SidebarContents({ activePage, workspaceReady, customAgentsEnabled, onNav }: {
   activePage: PageId;
   workspaceReady: boolean;
   customAgentsEnabled: boolean;
   onNav: (p: PageId) => void;
-  /** Show the Structure/Activity switch; the narrow drawer has no other one. */
-  lensToggle?: boolean;
 }) {
   const { prefs } = usePrefs();
   const geom = rowGeom(prefs.sidebarRowStyle, prefs.sidebarInset);
+  const tabsId = useSidebarViewTabsId();
   const onActivate = React.useCallback(() => onNav('dashboard'), [onNav]);
+  const onOpenWorkspaces = React.useCallback(() => onNav('workspaces'), [onNav]);
   return <>
     {!workspaceReady ? (
       <div aria-hidden="true" style={{ flex: 1, padding: '18px 16px' }}>
@@ -447,13 +576,21 @@ function SidebarContents({ activePage, workspaceReady, customAgentsEnabled, onNa
         ))}
       </div>
     ) : <>
-    {lensToggle && <SidebarLensHeader />}
+    {/* Above the list's scroller, so the tabs stay put while the list scrolls. */}
+    <SidebarViewTabs id={tabsId} />
     <TreeSelectionBar />
-    {prefs.sidebarView === 'activity' ? (
-      <ActivityView onActivate={onActivate} />
-    ) : (
-      <WorkspaceTree onActivate={onActivate} chatViewActive={activePage === 'dashboard'} />
-    )}
+    <SidebarViewPanel tabsId={tabsId}>
+      {prefs.sidebarView === 'activity' ? (
+        <ActivityView onActivate={onActivate} chatViewActive={activePage === 'dashboard'} />
+      ) : (
+        <WorkspaceTree
+          onActivate={onActivate}
+          chatViewActive={activePage === 'dashboard'}
+          onOpenWorkspaces={onOpenWorkspaces}
+          workspacesPageOpen={activePage === 'workspaces'}
+        />
+      )}
+    </SidebarViewPanel>
     </>}
     <BottomNav activePage={activePage} customAgentsEnabled={customAgentsEnabled} onNav={onNav} geom={geom} />
   </>;
@@ -594,18 +731,20 @@ function BottomNav({
   onNav: (p: PageId) => void;
   geom: RowGeom;
 }) {
-  // While Michi is unreachable but was answering, the sidebar keeps what it last said.
+  // Home is the logo, ⌘0 and New chat; Workspaces is By project's "All N ›"
+  // and ⌘O. What is left here are the optional pages.
   const nav = { activePage, onNav, geom };
+  if (!customAgentsEnabled && !PROFILE_PAGE_ENABLED) return null;
 
   return (
+    // The phone drawer draws a hairline over it and fades the list into it (sidebar.css).
     <div
+      className="sidebar-bottom-nav"
       style={{
         padding: '6px var(--sb-inset, 0px)',
         flexShrink: 0,
       }}
     >
-      <BottomNavItem {...nav} id="home" glyph={<HomeIcon size={15} />} label="Home" />
-      <BottomNavItem {...nav} id="workspaces" glyph={<WorkspacesIcon size={15} />} label="Workspaces" />
       {customAgentsEnabled && (
         <BottomNavItem {...nav} id="agents" glyph={<AgentIcon size={15} />} label="Agents" />
       )}

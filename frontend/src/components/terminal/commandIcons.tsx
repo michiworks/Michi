@@ -15,6 +15,7 @@ import {
   SettingsIcon,
   ShieldIcon,
   ShieldOffIcon,
+  SkillIcon,
   StopIcon,
   ThreadIcon,
   TrashIcon,
@@ -44,6 +45,7 @@ const COMMAND_ICONS: Record<CommandIcon, (props: { size?: number }) => React.Rea
   chat: ChatIcon,
   threads: AllThreadsIcon,
   clock: ClockIcon,
+  skill: SkillIcon,
 };
 
 /** The house SVG for a command palette row, sized to the menu icon slot. */

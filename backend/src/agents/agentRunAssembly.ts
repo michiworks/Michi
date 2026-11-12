@@ -3,8 +3,6 @@ import { promisify } from 'node:util';
 import path from 'node:path';
 import { readdir, readFile, rm } from 'node:fs/promises';
 import {
-  AgentPolicyCategory,
-  AgentPolicyDecision,
   AgentRunStatus,
   MAX_RUN_TTL_MS,
   type AgentPermissionPolicyV1,
@@ -20,7 +18,8 @@ import {
 import { AgentRunsRepository } from '../services/agentRunsRepository';
 import { getDb, runInTransaction } from '../services/db';
 import { getMichiDataDir } from '../services/dataDir';
-import { getWorkspace, listWorkspaces } from '../services/dbRepository';
+import { chatTargetUnavailable } from '../services/chatTarget';
+import { getNode, getWorkspace, listWorkspaces } from '../services/dbRepository';
 import { workspaceOwnerMatches } from '../services/agentOwner';
 import { AgentRunApiService, type AgentRunRouteService } from '../routes/agentRuns';
 import type { AgentRunSseDeps } from '../routes/agentRunSse';
@@ -29,6 +28,7 @@ import { AgentRunWatchCoordinator } from './runs/agentRunWatchCoordinator';
 import { AgentRunRetention } from './runs/agentRunRetention';
 import { DefaultExecutionEnvironmentProvider } from './runs/executionEnvironment';
 import { GitWorktreeEnvironment } from './runs/gitWorktreeEnvironment';
+import { isWithinRoot } from './tools/pathSandbox';
 import { FileRunContextSnapshotStore } from './runs/runContextSnapshotStore';
 import { RuntimeRunExecutor } from './runs/runtimeRunExecutor';
 import { RuntimeRunAdapterRegistry } from './runs/runtimeRunAdapterRegistry';
@@ -36,13 +36,13 @@ import { PiRunAdapter } from './runs/piRunAdapter';
 import { ClaudeRunAdapter } from './runs/claudeRunAdapter';
 import { KiroRunAdapter } from './runs/kiroRunAdapter';
 import { CodexRunAdapter } from './runs/codexRunAdapter';
+import { DEFAULT_PLATFORM_POLICY } from './runs/effectivePermissionPolicy';
 import {
   systemAgentRunClock,
   type AgentRunClock,
   type AgentRunCleanupResources,
   type AgentRunExecutor,
   type AgentRunNotifier,
-  type AgentRunRepositoryPort,
   type AgentRunResourceCleaner,
   type AgentRunWorkspaceResolver,
   type ParentContinuationSink,
@@ -58,27 +58,15 @@ import {
 } from './agentRunParentDelivery';
 import type { ChatManager } from '../services/chatManager';
 import { chatHub as defaultChatHub, type ChatHub } from './chatHub';
+import { acquireSessionRestoreLock } from '../services/nativeResume';
+import { isRegisteredLiveSession, startUnderRestoreLock } from './requestedTurnStart';
+import type { ThreadMessagingDeps } from './threadMessageTool';
 import { log } from '../services/logger';
 
 const execFileAsync = promisify(execFile);
 
 const DEFAULT_HEARTBEAT_MS = 10_000;
 const DEFAULT_MAINTENANCE_MS = 60_000;
-
-export const DEFAULT_PLATFORM_POLICY: AgentPermissionPolicyV1 = {
-  version: 1,
-  preset: 'build',
-  categories: {
-    [AgentPolicyCategory.ExternalAction]: AgentPolicyDecision.Ask,
-    [AgentPolicyCategory.SpawnAgent]: AgentPolicyDecision.Allow,
-  },
-  maxDelegationDepth: 4,
-  maxConcurrentRuns: 8,
-  maxWallTimeMs: 24 * 60 * 60 * 1_000,
-  maxAttempts: 3,
-  maxTokens: null,
-  maxSpendMicros: null,
-};
 
 export interface RecoveryRunRecord {
   run: AgentRunDtoV1;
@@ -230,6 +218,8 @@ export class ProductionParentTarget {
     private readonly chatManager: ChatManager,
     private readonly hub: ChatHub,
     private readonly coordinator: AgentRunCoordinator,
+    /** nativeResume.acquireSessionRestoreLock and isRegisteredLiveSession, as for send_to_thread. */
+    private readonly restore: Pick<ThreadMessagingDeps, 'acquireRestoreLock' | 'isLiveSession'>,
   ) {}
 
   async continueParent(input: ParentContinuationDeliveryInput): Promise<'delivered' | 'undeliverable'> {
@@ -240,20 +230,24 @@ export class ProductionParentTarget {
       'Continue the Parent task using only this compact handoff. Do not assume access to worker transcripts.',
     ].join('\n\n');
     if (input.parentNodeId) {
+      // Archived, in the Trash or moved since the Watch was set: the wake has nowhere to run.
+      if (chatTargetUnavailable(getNode(input.parentNodeId), input.workspaceId)) return 'undeliverable';
       const session = await this.chatManager.ensureParentSession({
         ownerUserId: input.ownerUserId,
         workspaceId: input.workspaceId,
         nodeId: input.parentNodeId,
       });
       if (!session) return 'undeliverable';
-      const turn = await this.hub.startRequestedSelfTurn({
+      const nodeId = input.parentNodeId;
+      const release = await this.restore.acquireRestoreLock(nodeId);
+      const turn = await startUnderRestoreLock(release, session, this.restore.isLiveSession, () => this.hub.startRequestedSelfTurn({
         chatId: session.id,
-        nodeId: input.parentNodeId,
+        nodeId,
         ownerUserId: input.ownerUserId,
         turnId: input.requestedTurnId,
         text: prompt,
         session,
-      });
+      }));
       await turn.done;
       return this.hub.requestedTurnStatus(input.requestedTurnId) === 'completed'
         ? 'delivered'
@@ -298,7 +292,7 @@ export class FileSystemRunCleaner implements AgentRunResourceCleaner {
   private readonly worktreesRoot: string;
   private readonly leasesRoot: string;
 
-  constructor(private readonly dataDir: string, private readonly contexts: RunContextSnapshotStore) {
+  constructor(dataDir: string, private readonly contexts: RunContextSnapshotStore) {
     this.contextsRoot = path.resolve(dataDir, 'agent-runs', 'context-snapshots');
     this.worktreesRoot = path.resolve(dataDir, 'agent-runs', 'worktrees');
     this.leasesRoot = path.resolve(dataDir, 'agent-runs', 'environment-leases');
@@ -320,7 +314,7 @@ export class FileSystemRunCleaner implements AgentRunResourceCleaner {
     for (const entry of manifest.entries ?? []) {
       if (!entry.snapshotPath) continue;
       const candidate = path.resolve(entry.snapshotPath, '..', '..');
-      if (inside(this.contextsRoot, candidate)) snapshotRoots.add(candidate);
+      if (isWithinRoot(candidate, this.contextsRoot)) snapshotRoots.add(candidate);
     }
     for (const root of snapshotRoots) await rm(root, { recursive: true, force: true });
     await this.contexts.cleanup(runId);
@@ -328,7 +322,7 @@ export class FileSystemRunCleaner implements AgentRunResourceCleaner {
     const environment = resources.executionEnvironment as { kind?: string; cwd?: string };
     if (environment.kind !== 'git_worktree' || !environment.cwd) return;
     const worktree = path.resolve(environment.cwd);
-    if (!inside(this.worktreesRoot, worktree)) throw new Error('Run worktree escaped the Michi data directory');
+    if (!isWithinRoot(worktree, this.worktreesRoot)) throw new Error('Run worktree escaped the Michi data directory');
     for (const name of await readdir(this.leasesRoot).catch(() => [] as string[])) {
       const directory = path.join(this.leasesRoot, name);
       const markerPath = path.join(directory, 'lease.json');
@@ -345,11 +339,6 @@ export class FileSystemRunCleaner implements AgentRunResourceCleaner {
     }
     if (await exists(worktree)) throw new Error('Run worktree ownership marker is missing');
   }
-}
-
-function inside(root: string, candidate: string): boolean {
-  const relative = path.relative(root, candidate);
-  return relative === '' || (!path.isAbsolute(relative) && relative !== '..' && !relative.startsWith(`..${path.sep}`));
 }
 
 async function exists(filePath: string): Promise<boolean> {
@@ -388,7 +377,7 @@ export class AgentRunAssembly {
   private watchEvaluationRunning = false;
   private watchEvaluationDirty = false;
 
-  constructor(private readonly deps: AgentRunAssemblyDeps) {
+  constructor(deps: AgentRunAssemblyDeps) {
     const initialEnabled = deps.enabled ?? process.env.MICHI_CUSTOM_AGENTS === '1';
     this.isFeatureEnabled = deps.isEnabled ?? (() => initialEnabled);
     this.admissionOpen = deps.isEnabled ? false : this.enabled;
@@ -446,7 +435,8 @@ export class AgentRunAssembly {
     });
     const hub = deps.chatHub ?? defaultChatHub;
     const productionParentSink = deps.parentSink ?? (deps.chatManager
-      ? new AgentRunParentDelivery(new WatchDeliveryRecordStore(), new ProductionParentTarget(deps.chatManager, hub, this.coordinator))
+      ? new AgentRunParentDelivery(new WatchDeliveryRecordStore(), new ProductionParentTarget(deps.chatManager, hub, this.coordinator,
+        { acquireRestoreLock: acquireSessionRestoreLock, isLiveSession: isRegisteredLiveSession }))
       : placeholderSink);
     this.watches = deps.watches ?? new AgentRunWatchCoordinator(this.repository, notifier, productionParentSink, this.clock);
     const api = new AgentRunApiService(this.coordinator, this.repository, this.watches);

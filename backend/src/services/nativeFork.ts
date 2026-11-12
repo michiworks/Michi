@@ -42,8 +42,8 @@ export async function tryForkChatSession(
     || !workspaceOwnerMatches(workspace.owner_user_id ?? null, opts.ownerUserId ?? LOCAL_AGENT_OWNER_ID)
     || normalizeWorkspaceCwd(workspace.cwd ?? process.cwd()) !== normalizeWorkspaceCwd(opts.cwd)) return null;
   const nativeId = nativeResumeIdFor(runtime, parent);
-  if (!nativeId || nativeId === parent.id || parent.status === 'streaming' || chatHub.isActive(parent.id)
-    || chatHub.isOwnerTurnActive(parent.id) || chatHub.hasPendingSelfTurn(parent.id)) return null;
+  if (!nativeId || nativeId === parent.id || parent.status === 'streaming'
+    || chatHub.isBusy(parent.id)) return null;
   const live = getSessionForOwner(parent.id, chatOwner(parent.id), opts.ownerUserId ?? null);
   if (live?.getPendingAssistant() !== undefined) return null;
   // A never-sent session has no stored history for the runtime to fork.

@@ -37,7 +37,10 @@ export const CLAUDE_RUNTIME_DESCRIPTOR: RuntimeDescriptor = {
     historyReplay: 'preamble',
     // Background task completions start turns of their own (onSelfTurn).
     backgroundTurns: true,
-    titles: 'none',
+    // A one-shot CLI on the host's title model (claudeTitleGenerator.ts).
+    titles: 'sidecar',
+    // persistSession false keeps an ephemeral session's transcript off disk (probe P2).
+    ephemeralSessions: 'native',
   },
   run: CLAUDE_RUN,
 };

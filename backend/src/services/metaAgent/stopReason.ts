@@ -8,6 +8,7 @@
 
 import type { MetaAgentStopReason } from 'michi-shared';
 import { classifyAcpError } from 'michi-runtime/internal/adapters/kiro/acpErrors';
+import { KIRO_QUOTA_MARKERS } from 'michi-runtime/internal/adapters/kiro/kiroErrorMarkers';
 
 const LABELS: Readonly<Record<string, string>> = { claude: 'Claude', pi: 'Pi', codex: 'Codex', kiro: 'Kiro', crew: 'Crew' };
 
@@ -28,11 +29,17 @@ const SIGNED_OUT = [
   /\bunauthori[sz]ed\b/, /\b401\b/,
 ];
 
-// Claude's usage-limit message, Codex's usageLimitExceeded, Kiro's request
-// counters and throttling, generic HTTP 429s.
+// Signed in, but the provider rejected the credentials: Claude's own
+// authentication failure (claudeAuthRetry.ts), Bedrock's expired or invalid
+// security token.
+const REJECTED = [/\bauthentication failed\b/, /\bsecurity token\b.*\b(expired|invalid)\b/, /\bexpiredtoken/];
+
+// Claude's usage-limit message, Codex's usageLimitExceeded, Kiro's
+// throttling, generic HTTP 429s; Kiro's request counters are its quota markers.
+// A run that still fails throttled has met a rate limit, though classifyAcpError
+// retries throttling as transient.
 const QUOTA = [
   /\busage limit\b/, /\busagelimitexceeded\b/, /\brate.?limit/, /\bquota\b/, /\btoo many requests\b/, /\b429\b/, /\bthrottl/,
-  /\bmonthlyrequestcount\b/, /\bdailyrequestcount\b/, /\binsufficientmodelcapacity\b/,
 ];
 
 // The maintenance reader's own errors for a batch it cannot read.
@@ -77,7 +84,17 @@ export function classifyMetaAgentRunError(error: string, input: { runtimeId: str
     const message = /\bapi key not (configured|set)\b/.test(text) ? `${label} has no API key set up` : `${label} is not signed in`;
     return { reason: 'signed-out', message, firstLine };
   }
-  if (matches(text, QUOTA)) return { reason: 'quota', message: `${label} reached its usage or rate limit`, firstLine };
+  if (matches(text, REJECTED)) return { reason: 'signed-out', message: `${label}'s credentials were rejected`, firstLine };
+  if (matches(text, QUOTA) || KIRO_QUOTA_MARKERS.some((marker) => text.includes(marker))) return { reason: 'quota', message: `${label} reached its usage or rate limit`, firstLine };
   if (matches(text, UNREADABLE)) return { reason: 'needs-attention', message: `A conversation in ${input.workspaceName} could not be read`, firstLine };
   return { reason: 'other', message: firstLine, firstLine };
+}
+
+/**
+ * Whether a run failed on sign-in or credentials (`signed-out` above). That
+ * clears up outside Michi, by a refreshed credential or a new login, so a
+ * maintenance execution stopped by it is tried again (maintenanceCoordinator.ts).
+ */
+export function isSignInFailure(error: string | null | undefined): boolean {
+  return !!error && classifyMetaAgentRunError(error, { runtimeId: '', workspaceName: '' }).reason === 'signed-out';
 }

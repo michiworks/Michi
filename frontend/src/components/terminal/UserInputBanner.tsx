@@ -1,4 +1,4 @@
-import React, { useState, useCallback, useEffect, useLayoutEffect, useRef } from 'react';
+import { useState, useCallback, useEffect, useLayoutEffect, useReducer, useRef } from 'react';
 import { animate, motion, type AnimationPlaybackControls } from 'motion/react';
 import type { UserInputRequest } from '../../state/chatTypes';
 import type { UserInputAnswer } from '../../services/chatStreamEvents';
@@ -6,6 +6,7 @@ import { usePrefs } from '../../state/prefs';
 import { prefersReducedMotion } from '../../hooks/useReducedMotion';
 import { DUR, EASE } from '../../motion/tokens';
 import { useFresh } from '../../motion/useFresh';
+import { isImeComposing } from '../../lib/ime';
 import './UserInputBanner.css';
 
 /**
@@ -27,49 +28,231 @@ export interface QuestionDetail {
   value: string;
   /** The value was wrapped in “…”: a quoted text such as a prompt. */
   quoted?: boolean;
+  /** `before → after`: what a change replaces (`value` is then the new value). */
+  before?: string;
 }
+
+/** `“old” → “new”` (quoted texts may contain arrows) or `old → new`. */
+const QUOTED_CHANGE = /^“([\s\S]*)” → “([\s\S]*)”$/;
+const CHANGE_ARROW = ' → ';
 
 /** `Label: value`, `Label：value` or `Label → value`, with a short label. */
 const DETAIL_LINE = /^([^\s:：→“”"][^:：→“”"]{0,39}?)(?::\s+|：\s*|\s+→\s+)(\S[\s\S]*)$/;
 const QUOTED = /^“([\s\S]*)”$/;
 
+function detailOf(label: string, value: string): QuestionDetail {
+  const quotedChange = QUOTED_CHANGE.exec(value);
+  if (quotedChange) return { label, before: quotedChange[1], value: quotedChange[2], quoted: true };
+  const parts = value.split(CHANGE_ARROW);
+  if (parts.length === 2 && parts[0].trim() && parts[1].trim()) return { label, before: parts[0], value: parts[1] };
+  const quoted = QUOTED.exec(value);
+  return quoted ? { label, value: quoted[1], quoted: true } : { label, value };
+}
+
+/** A quoted text (or a change of one) that closes on the line it opens. */
+function closesOnItsLine(value: string): boolean {
+  return QUOTED.test(value) || QUOTED_CHANGE.test(value);
+}
+
 /**
  * A question written as a title line followed by one fact per line, at least
  * one of them `Label: value` (approval questions, such as scheduled jobs).
- * Returns null for any other shape, including text separated by a blank line
- * (a message to approve), which keeps rendering as written.
+ * The last fact may be a quoted text over several lines, blank ones included
+ * (a scheduled job's full prompt): it opens with “ and runs to the closing ”
+ * that ends the question. Returns null for any other shape, including text
+ * separated by a blank line (a message to approve), which keeps rendering as
+ * written.
  */
 export function questionLayout(text: string): { title: string; details: QuestionDetail[] } | null {
-  const lines = text.split('\n').map((line) => line.trim());
-  if (lines.length < 2 || lines.some((line) => !line)) return null;
-  const details = lines.slice(1).map((line): QuestionDetail => {
+  const raw = text.split('\n');
+  const lines = raw.map((line) => line.trim());
+  if (lines.length < 2 || !lines[0]) return null;
+  const details: QuestionDetail[] = [];
+  for (let i = 1; i < lines.length; i++) {
+    const line = lines[i];
+    if (!line) return null;
     const match = DETAIL_LINE.exec(line);
-    if (!match) return { value: line };
-    const quoted = QUOTED.exec(match[2]);
-    return quoted
-      ? { label: match[1].trim(), value: quoted[1], quoted: true }
-      : { label: match[1].trim(), value: match[2] };
-  });
+    if (!match) {
+      details.push({ value: line });
+      continue;
+    }
+    const label = match[1].trim();
+    const rest = i + 1 < lines.length && match[2].startsWith('“')
+      ? [match[2], ...raw.slice(i + 1).map((l) => l.replace(/\s+$/, ''))].join('\n').trimEnd()
+      : null;
+    // A quoted text that does not close on its line, or that holds a blank
+    // line, takes the rest of the question; its own indentation stays.
+    if (rest !== null && rest.endsWith('”') && (!closesOnItsLine(match[2]) || lines.slice(i + 1).some((l) => !l))) {
+      const block = detailOf(label, rest);
+      if (block.quoted) {
+        details.push(block);
+        break;
+      }
+    }
+    details.push(detailOf(label, match[2]));
+  }
   if (!details.some((detail) => detail.label)) return null;
   return { title: lines[0], details };
 }
 
-function QuestionText({ text }: { text: string }) {
-  const layout = questionLayout(text);
-  if (!layout) return <span className="ask-card-qtext">{text}</span>;
+/** A long text shows this many lines until the user opens it. */
+const CLAMP_LINES = 6;
+/** Texts with more lines, or more characters, than this start collapsed. */
+const CLAMP_CHARS = 360;
+
+function isLongText(text: string): boolean {
+  return text.length > CLAMP_CHARS || text.split('\n').length > CLAMP_LINES;
+}
+
+/**
+ * A fact's value. A long one (a full prompt) starts collapsed to a few lines
+ * with a toggle under it; the toggle goes away when the text already fits.
+ * `onResize` tells the card its height changed.
+ */
+function DetailText({ text, className, as: Tag = 'span', focusable, onResize }: {
+  text: string;
+  className: string;
+  as?: 'span' | 'del' | 'ins';
+  focusable: boolean;
+  onResize?: () => void;
+}) {
+  const long = isLongText(text);
+  const [open, setOpen] = useState(false);
+  const [fits, setFits] = useState(false);
+  const ref = useRef<HTMLElement | null>(null);
+  const mounted = useRef(false);
+
+  useLayoutEffect(() => {
+    const el = ref.current;
+    if (!long || open || !el) return;
+    const measure = () => {
+      if (el.clientHeight > 0) setFits(el.scrollHeight <= el.clientHeight + 1);
+    };
+    measure();
+    if (typeof ResizeObserver === 'undefined') return;
+    const ro = new ResizeObserver(measure);
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, [long, open]);
+
+  useLayoutEffect(() => {
+    if (!mounted.current) {
+      mounted.current = true;
+      return;
+    }
+    onResize?.();
+  }, [open, fits, onResize]);
+
+  if (!long) return <Tag className={className}>{text}</Tag>;
+  const lineCount = text.split('\n').length;
   return (
-    <div className="ask-card-qtext ask-card-qtext-structured">
-      <div className="ask-card-qtitle">{layout.title}</div>
-      <div className="ask-card-details">
-        {layout.details.map((detail, i) => detail.label ? (
-          <div key={i} className={`ask-card-detail${detail.quoted ? ' is-quoted' : ''}`}>
-            <span className="ask-card-detail-label">{detail.label}</span>
-            <span className="ask-card-detail-value">{detail.value}</span>
-          </div>
-        ) : (
-          <div key={i} className="ask-card-detail is-note">{detail.value}</div>
-        ))}
+    <span className="ask-clamp">
+      <Tag
+        ref={(el: HTMLElement | null) => { ref.current = el; }}
+        className={`${className} ask-clamp-text${open ? '' : ' is-clamped'}`}
+      >
+        {text}
+      </Tag>
+      {(open || !fits) && (
+        <button
+          type="button"
+          className="ask-clamp-toggle"
+          aria-expanded={open}
+          tabIndex={focusable ? 0 : -1}
+          onClick={() => setOpen((v) => !v)}
+        >
+          {open ? 'Show less' : lineCount > 1 ? `Show all ${lineCount} lines` : 'Show all'}
+        </button>
+      )}
+    </span>
+  );
+}
+
+/** Beyond this many characters a change stacks its two values instead of one line. */
+const INLINE_CHANGE_MAX = 56;
+
+/**
+ * A changed fact: the old value struck through and quiet, the new one in full.
+ * Short values read on one line (`hourly → daily`); long ones and quoted texts
+ * (a prompt) stack as Was / Now so neither is cut short.
+ */
+function ChangeValue({ before, after, quoted, focusable, onResize }: {
+  before: string;
+  after: string;
+  quoted: boolean;
+  focusable: boolean;
+  onResize?: () => void;
+}) {
+  const stacked = quoted || before.length + after.length > INLINE_CHANGE_MAX;
+  if (!stacked) {
+    return (
+      <span className="ask-card-detail-value ask-change">
+        <del className="ask-change-before">{before}</del>
+        <span className="ask-change-arrow" aria-hidden>→</span>
+        <ins className="ask-change-after">{after}</ins>
+      </span>
+    );
+  }
+  return (
+    <span className="ask-card-detail-value ask-change is-stacked">
+      <span className="ask-change-row">
+        <span className="ask-change-tag">Was</span>
+        <DetailText as="del" className="ask-change-before" text={before} focusable={focusable} onResize={onResize} />
+      </span>
+      <span className="ask-change-row">
+        <span className="ask-change-tag">Now</span>
+        <DetailText as="ins" className="ask-change-after" text={after} focusable={focusable} onResize={onResize} />
+      </span>
+    </span>
+  );
+}
+
+/**
+ * The question says itself once: a waiting mark and its text (or, for an
+ * approval question, its title line) lead the card, the header rides along as
+ * a quiet tag, and an approval's facts follow as the same label/value list the
+ * scheduled-job receipt uses.
+ */
+function QuestionHeader({ text, header, multiSelect, focusable, onResize }: {
+  text: string;
+  header?: string;
+  multiSelect?: boolean;
+  focusable: boolean;
+  onResize?: () => void;
+}) {
+  const layout = questionLayout(text);
+  return (
+    <div className="ask-card-qheader">
+      <div className="ask-card-qrow">
+        <span className="ask-card-qmark" aria-hidden />
+        {layout
+          ? <span className="ask-card-qtitle">{layout.title}</span>
+          : <span className="ask-card-qtext">{text}</span>}
+        {header && <span className="ask-card-chip">{header}</span>}
       </div>
+      {layout && (
+        <div className="ask-card-details">
+          {layout.details.map((detail, i) => detail.label ? (
+            <div key={i} className={`ask-card-detail${detail.quoted ? ' is-quoted' : ''}`}>
+              <span className="ask-card-detail-label">{detail.label}</span>
+              {detail.before === undefined ? (
+                <DetailText className="ask-card-detail-value" text={detail.value} focusable={focusable} onResize={onResize} />
+              ) : (
+                <ChangeValue
+                  before={detail.before}
+                  after={detail.value}
+                  quoted={!!detail.quoted}
+                  focusable={focusable}
+                  onResize={onResize}
+                />
+              )}
+            </div>
+          ) : (
+            <div key={i} className="ask-card-detail is-note">{detail.value}</div>
+          ))}
+        </div>
+      )}
+      {multiSelect && <span className="ask-card-hint">Select all that apply</span>}
     </div>
   );
 }
@@ -215,7 +398,7 @@ function playHandoff(card: HTMLElement, { entry, delay }: HandoffClaim): () => v
   const { ghost } = entry;
   const body = card.querySelector<HTMLElement>('.ask-card-body');
   const settledHeight = card.offsetHeight;
-  const reduce = prefersReducedMotion(document.documentElement.dataset.reduceMotion === 'on');
+  const reduce = prefersReducedMotion();
   Object.assign(card.style, { position: 'relative', isolation: 'isolate', height: `${entry.height}px` });
   if (body) body.style.opacity = '0';
   card.appendChild(ghost);
@@ -309,6 +492,8 @@ export default function UserInputBanner({ userInput, onSubmit, onSkip, readOnly 
   const [currentIdx, setCurrentIdx] = useState(0);
   const [selections, setSelections] = useState<Map<number, Set<string>>>(() => new Map());
   const [otherTexts, setOtherTexts] = useState<Map<number, string>>(() => new Map());
+  /** Single-select questions whose Other text is kept but not chosen (an option was picked after it). */
+  const [otherOff, setOtherOff] = useState<Set<number>>(() => new Set());
   const [answered, setAnswered] = useState<Set<number>>(() => new Set());
 
   // --- sliding-track measurements (horizontal slide, viewport height follows) ---
@@ -318,6 +503,8 @@ export default function UserInputBanner({ userInput, onSubmit, onSkip, readOnly 
   const advanceTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [qWidth, setQWidth] = useState<number | undefined>(undefined);
   const [viewH, setViewH] = useState<number | undefined>(undefined);
+  /** Bumped when a question's own content changes height (a long fact opened or closed). */
+  const [contentTick, bumpContent] = useReducer((n: number) => n + 1, 0);
   const [slideAnim, setSlideAnim] = useState(false);
 
   // --- answering (see the hand-off notes above ResolvedUserInput) ---
@@ -380,7 +567,7 @@ export default function UserInputBanner({ userInput, onSubmit, onSkip, readOnly 
   }, []);
 
   // Measure the active question's height whenever the step, the locked width,
-  // or content that can change wrapping does. Runs after commit, so the
+  // or content that can change wrapping or height does. Runs after commit, so the
   // width lock is already applied to the DOM.
   useLayoutEffect(() => {
     const item = questionRefs.current[safeIdx];
@@ -388,16 +575,12 @@ export default function UserInputBanner({ userInput, onSubmit, onSkip, readOnly 
     setViewH(item.offsetHeight + 2);
     if (!measuredRef.current) {
       measuredRef.current = true;
-      const reduce =
-        prefs.reduceMotion || (
-        typeof window !== 'undefined' &&
-        typeof window.matchMedia === 'function' &&
-        window.matchMedia('(prefers-reduced-motion: reduce)').matches);
+      const reduce = prefersReducedMotion(prefs.reduceMotion);
       // Enable transitions only after the first paint-ready measure so the
       // initial layout doesn't animate from empty.
       if (!reduce) setSlideAnim(true);
     }
-  }, [safeIdx, qWidth, questions, selections, otherTexts]);
+  }, [safeIdx, qWidth, questions, selections, otherTexts, contentTick]);
 
   useEffect(() => () => {
     if (advanceTimer.current) clearTimeout(advanceTimer.current);
@@ -406,7 +589,6 @@ export default function UserInputBanner({ userInput, onSubmit, onSkip, readOnly 
   const q = questions[safeIdx];
 
   const currentSelections = selections.get(safeIdx) ?? new Set<string>();
-  const currentOtherText = otherTexts.get(safeIdx) ?? '';
 
   const markAnswered = useCallback((idx: number) => {
     setAnswered(prev => {
@@ -422,8 +604,37 @@ export default function UserInputBanner({ userInput, onSubmit, onSkip, readOnly 
     setCurrentIdx(Math.min(Math.max(next, 0), questions.length - 1));
   }, [questions.length]);
 
+  // In a single-select question Other and the listed options are mutually
+  // exclusive. Picking an option turns Other off but keeps its text, so
+  // clicking or typing in Other chooses it again (and drops the pick). A
+  // multiSelect question may combine them.
+  const chooseOther = useCallback((idx: number) => {
+    // The pick may still be waiting to advance; choosing Other replaces it.
+    if (advanceTimer.current) clearTimeout(advanceTimer.current);
+    setOtherOff(prev => {
+      if (!prev.has(idx)) return prev;
+      const next = new Set(prev);
+      next.delete(idx);
+      return next;
+    });
+    setSelections(prev => {
+      if (!prev.get(idx)?.size) return prev;
+      const next = new Map(prev);
+      next.delete(idx);
+      return next;
+    });
+  }, []);
+
   const toggleOption = useCallback((label: string) => {
     if (readOnly || !q || answeringRef.current) return;
+    if (!q.multiSelect) {
+      setOtherOff(prev => {
+        if (prev.has(safeIdx)) return prev;
+        const next = new Set(prev);
+        next.add(safeIdx);
+        return next;
+      });
+    }
     setSelections(prev => {
       const next = new Map(prev);
       const set = new Set(prev.get(safeIdx) ?? []);
@@ -454,14 +665,19 @@ export default function UserInputBanner({ userInput, onSubmit, onSkip, readOnly 
       next.set(safeIdx, text);
       return next;
     });
-    if (text.trim()) markAnswered(safeIdx);
-  }, [safeIdx, markAnswered]);
+    if (!text.trim()) return;
+    if (!q?.multiSelect) chooseOther(safeIdx);
+    markAnswered(safeIdx);
+  }, [safeIdx, q, chooseOther, markAnswered]);
+
+  /** Other's text, when it is part of question `idx`'s answer. */
+  const otherAnswer = (idx: number): string => (otherOff.has(idx) ? '' : (otherTexts.get(idx) ?? '').trim());
 
   const buildAnswer = (idx: number): string => {
     const sel = selections.get(idx) ?? new Set<string>();
-    const other = otherTexts.get(idx) ?? '';
+    const other = otherAnswer(idx);
     const parts = [...sel];
-    if (other.trim()) parts.push(other.trim());
+    if (other) parts.push(other);
     return parts.join(', ');
   };
 
@@ -531,7 +747,7 @@ export default function UserInputBanner({ userInput, onSubmit, onSkip, readOnly 
   if (!q) return null;
 
   const isLastQuestion = safeIdx === questions.length - 1;
-  const hasSelection = currentSelections.size > 0 || currentOtherText.trim().length > 0;
+  const hasSelection = currentSelections.size > 0 || otherAnswer(safeIdx).length > 0;
   /** While the answer is on its way, the controls say so to AT (they ignore input). */
   const busy = answering ? true : undefined;
 
@@ -544,14 +760,6 @@ export default function UserInputBanner({ userInput, onSubmit, onSkip, readOnly 
       animate={{ opacity: 1, y: 0 }}
       transition={{ duration: DUR.decay, ease: ASK_EASE }}
     >
-      <div className="ask-card-head">
-        <span className="ask-head-icon" aria-hidden>?</span>
-        <span className="ask-head-title">{isMultiQuestion ? 'Questions' : 'Question'}</span>
-        {isMultiQuestion && (
-          <span className="ask-head-count">{safeIdx + 1} / {questions.length}</span>
-        )}
-      </div>
-
       <div
         ref={viewportRef}
         className="ask-viewport"
@@ -568,6 +776,8 @@ export default function UserInputBanner({ userInput, onSubmit, onSkip, readOnly 
             const active = qi === safeIdx;
             const qSelections = selections.get(qi) ?? new Set<string>();
             const qOther = otherTexts.get(qi) ?? '';
+            /** Other is part of the answer (its text may be kept while it is off). */
+            const otherOn = otherAnswer(qi).length > 0;
             return (
               <div
                 key={qi}
@@ -577,12 +787,18 @@ export default function UserInputBanner({ userInput, onSubmit, onSkip, readOnly 
                 data-active={active ? 'true' : undefined}
                 aria-hidden={active ? undefined : true}
               >
-                <div className="ask-card-qheader">
-                  {question.header && <span className="ask-card-chip">{question.header}</span>}
-                  <QuestionText text={question.question} />
-                  {question.multiSelect && <span className="ask-card-hint">Select all that apply.</span>}
-                </div>
-                <div className="ask-card-options" role={question.multiSelect ? 'group' : 'radiogroup'} aria-label={question.question}>
+                <QuestionHeader
+                  text={question.question}
+                  header={question.header}
+                  multiSelect={question.multiSelect}
+                  focusable={active}
+                  onResize={bumpContent}
+                />
+                <div
+                  className="ask-card-options"
+                  role={question.multiSelect ? 'group' : 'radiogroup'}
+                  aria-label={questionLayout(question.question)?.title ?? question.question}
+                >
                   {question.options.map((opt) => {
                     const chosen = qSelections.has(opt.label);
                     const fading = answering && !chosen;
@@ -613,18 +829,19 @@ export default function UserInputBanner({ userInput, onSubmit, onSkip, readOnly 
                     );
                   })}
                   <motion.div
-                    className={`ask-card-opt ask-card-opt-other${qOther.trim() ? ' selected' : ''}`}
+                    className={`ask-card-opt ask-card-opt-other${otherOn ? ' selected' : ''}`}
                     onClick={(e) => {
                       if (!active) return;
                       (e.currentTarget.querySelector('input') as HTMLInputElement | null)?.focus();
+                      if (!readOnly && !answeringRef.current && !question.multiSelect && qOther.trim()) chooseOther(qi);
                     }}
-                    data-ask-fade={answering && !qOther.trim() ? '' : undefined}
-                    style={answering ? (qOther.trim() ? FILL_HOST : { pointerEvents: 'none' }) : undefined}
+                    data-ask-fade={answering && !otherOn ? '' : undefined}
+                    style={answering ? (otherOn ? FILL_HOST : { pointerEvents: 'none' }) : undefined}
                     initial={false}
-                    animate={{ opacity: answering && !qOther.trim() ? 0 : 1 }}
+                    animate={{ opacity: answering && !otherOn ? 0 : 1 }}
                     transition={{ duration: DUR.soft, ease: 'linear' }}
                   >
-                    {answering && qOther.trim() && <AnswerFill />}
+                    {answering && otherOn && <AnswerFill />}
                     <span className={`ask-card-indicator${question.multiSelect ? ' checkbox' : ''}`} />
                     <input
                       type="text"
@@ -633,7 +850,7 @@ export default function UserInputBanner({ userInput, onSubmit, onSkip, readOnly 
                       tabIndex={active ? 0 : -1}
                       onChange={(e) => { if (active) setOtherText(e.target.value); }}
                       onKeyDown={(e) => {
-                        if (e.key === 'Enter' && !e.shiftKey) {
+                        if (e.key === 'Enter' && !e.shiftKey && !isImeComposing(e)) {
                           e.preventDefault();
                           if (isLastQuestion) handleSubmit();
                           else goToStep(safeIdx + 1);
@@ -658,6 +875,7 @@ export default function UserInputBanner({ userInput, onSubmit, onSkip, readOnly 
           <div className="ask-card-footer-right">
             {isMultiQuestion && (
               <>
+                <span className="ask-card-count">{safeIdx + 1} / {questions.length}</span>
                 <button type="button" className="ask-nav-arrow" aria-label="Previous question" aria-disabled={busy}
                   onClick={() => goToStep(safeIdx - 1)} disabled={safeIdx === 0}>‹</button>
                 <button type="button" className="ask-nav-arrow" aria-label="Next question" aria-disabled={busy}
@@ -667,7 +885,7 @@ export default function UserInputBanner({ userInput, onSubmit, onSkip, readOnly 
             {isLastQuestion ? (
               <button
                 type="button"
-                className="ask-card-submit"
+                className="ui-btn ui-btn--primary ask-card-submit"
                 aria-disabled={busy}
                 onClick={handleSubmit}
                 disabled={!hasSelection && !answered.size}
@@ -675,7 +893,7 @@ export default function UserInputBanner({ userInput, onSubmit, onSkip, readOnly 
                 {isMultiQuestion ? 'Submit all ✓' : q.multiSelect && currentSelections.size > 0 ? `Submit (${currentSelections.size})` : 'Submit'}
               </button>
             ) : (
-              <button type="button" className="ask-card-submit" aria-disabled={busy} onClick={() => goToStep(safeIdx + 1)} disabled={!hasSelection}>
+              <button type="button" className="ui-btn ui-btn--primary ask-card-submit" aria-disabled={busy} onClick={() => goToStep(safeIdx + 1)} disabled={!hasSelection}>
                 Next →
               </button>
             )}

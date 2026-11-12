@@ -1,11 +1,11 @@
-import React from 'react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { fireEvent, render, screen, within } from '@testing-library/react';
 import type { PageDatabase, ThreadCardItem } from 'michi-shared';
 import { taskDatabaseColumns, taskDatabaseViews } from 'michi-shared';
 import { fetchThreadStates } from '../../../services/api/spacesHome';
 import { usePageDatabase } from '../../../state/pages/usePageDatabase';
-import { NativeDatabase } from './NativeDatabase';
+import { getSourceNavState, resetSourceNavForTests } from '../../../state/sourceNav/sourceNav';
+import NativeDatabase from './NativeDatabase';
 
 vi.mock('../../../state/pages/usePageDatabase', () => ({ usePageDatabase: vi.fn() }));
 vi.mock('./components/CustomDatabaseView', () => ({
@@ -199,6 +199,18 @@ describe('NativeDatabase as a task board', () => {
     expect(onOpenThread).toHaveBeenCalledWith(waitingCard);
     expect(fetchThreadStates).toHaveBeenCalledWith('local', { nodeIds: ['n1'], signal: expect.any(AbortSignal) });
     expect(root.querySelector('.michi-card')?.getAttribute('data-attention')).toBe('true');
+  });
+
+  it('opens a linked conversation archived out of its thread read-only, not through the host', async () => {
+    resetSourceNavForTests();
+    vi.mocked(fetchThreadStates).mockResolvedValue([{ ...waitingCard, state: 'done', archived: true }]);
+    hook.mockReturnValue({ database: taskDb, status: 'ready', error: null, stale: false, refresh: vi.fn(), edit: vi.fn() });
+    const onOpenThread = vi.fn();
+    render(<NativeDatabase databaseId="db-tasks" workspaceId="ws-1" connectionId="local" viewId="tasks-board" presentation="page" onOpenThread={onOpenThread} />);
+    fireEvent.click(await screen.findByTitle('Schema naming'));
+    expect(onOpenThread).not.toHaveBeenCalled();
+    expect(getSourceNavState().popover?.target).toEqual({ backendConnectionId: 'local', workspaceId: 'ws-1', nodeId: 'n1', messageId: null });
+    resetSourceNavForTests();
   });
 
   it('says how to start on an empty board, and when the conversations could not be read', async () => {

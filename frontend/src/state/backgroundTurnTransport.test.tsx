@@ -27,4 +27,42 @@ describe('remote event replay after connection recovery', () => {
     window.dispatchEvent(new CustomEvent(BACKEND_CONNECTION_READY, { detail: { connectionId: 'remote' } }));
     expect(api.subscribeBackground).toHaveBeenCalledTimes(2);
   });
+
+  it('reconnects at once when the window comes back to the foreground, not while hidden', async () => {
+    let visibility: DocumentVisibilityState = 'hidden';
+    const spy = vi.spyOn(document, 'visibilityState', 'get').mockImplementation(() => visibility);
+    const transport = createBackgroundTurnTransport({ handlersForChat: () => ({}), random: () => 0.5, reconnectDelayMs: 60_000, maxReconnectDelayMs: 60_000 });
+    transport.start();
+    api.subscribeBackground.mock.calls[0][1].onDisconnect({ retryable: true });
+    document.dispatchEvent(new Event('visibilitychange'));
+    expect(api.subscribeBackground).toHaveBeenCalledTimes(1);
+    visibility = 'visible';
+    document.dispatchEvent(new Event('visibilitychange'));
+    expect(api.subscribeBackground).toHaveBeenCalledTimes(2);
+    // A live subscription is not overlapped.
+    document.dispatchEvent(new Event('visibilitychange'));
+    expect(api.subscribeBackground).toHaveBeenCalledTimes(2);
+    transport.stop();
+    document.dispatchEvent(new Event('visibilitychange'));
+    expect(api.subscribeBackground).toHaveBeenCalledTimes(2);
+    spy.mockRestore();
+  });
+
+  it('says when the feed opens again after a disconnect (the backend may be another build), never at its first open', async () => {
+    const onReconnect = vi.fn();
+    const transport = createBackgroundTurnTransport({ connectionId: 'local', handlersForChat: () => ({}), onReconnect, random: () => 0.5 });
+    transport.start();
+    api.subscribeBackground.mock.calls[0][1].onOpen();
+    expect(onReconnect).not.toHaveBeenCalled();
+    // The backend goes away; the first attempt after it fails before opening, the next one opens.
+    api.subscribeBackground.mock.calls[0][1].onDisconnect({ retryable: true });
+    await vi.advanceTimersByTimeAsync(500);
+    api.subscribeBackground.mock.calls[1][1].onDisconnect({ retryable: true });
+    expect(onReconnect).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(api.subscribeBackground).toHaveBeenCalledTimes(3);
+    api.subscribeBackground.mock.calls[2][1].onOpen();
+    expect(onReconnect).toHaveBeenCalledTimes(1);
+    transport.stop();
+  });
 });

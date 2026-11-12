@@ -1,8 +1,7 @@
-import React from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import type { PageDto } from 'michi-shared';
-import { NativePageDocument } from './NativePageDocument';
+import NativePageDocument from './NativePageDocument';
 
 const initial: PageDto = {
   id: 'page', workspaceId: 'ws', parentId: null, position: 0, title: 'Notes', color: null,

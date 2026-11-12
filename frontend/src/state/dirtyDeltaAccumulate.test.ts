@@ -1,10 +1,13 @@
 import { describe, it, expect } from 'vitest';
 import {
   accumulateWorkspaceDirtyDelta,
+  buildExplicitWorkspaceCommands,
   emptyWorkspaceDirtyDelta,
+  serializeEdgeRow,
   serializedEdgeId,
   type WorkspaceDirtyDelta,
 } from './workspacePersistence';
+import { backendEntityId, mapBackendPayload } from '../config/backendIdentity';
 import type { ChatNodeState, Project, ProjectEdge, Tree, ArtifactEntry } from './chatTypes';
 
 function makeProject(id: string, nodeIds: string[], extras: Partial<Project> = {}): Project {
@@ -95,5 +98,34 @@ describe('accumulateWorkspaceDirtyDelta — edges', () => {
     expect(d.edgeDeleteIds.has(eId)).toBe(true);
     expect(d.edgeUpsertIds.has(eId)).toBe(false);
     assertNoOverlap(d);
+  });
+});
+
+describe('remote workspace edges', () => {
+  // Real id shapes: connections are remote-<uuid>, nodes n-<uuid>.
+  const connection = 'remote-6f0c2f0e-5a52-4d0b-9a7e-0b1c2d3e4f50';
+  const root = backendEntityId(connection, 'n-1b2c3d4e-0000-4000-8000-000000000001');
+  const branch = backendEntityId(connection, 'n-1b2c3d4e-0000-4000-8000-000000000002');
+  const removed = edge(root, branch);
+  const project = makeProject(backendEntityId(connection, 'ws-r'), [root, branch], { backendConnectionId: connection, edges: [removed] });
+
+  it('deletes a removed edge by the id its backend stores', () => {
+    const cur = { ...project, edges: [] };
+    const delta = accumulateWorkspaceDirtyDelta(project, cur, {}, {}, emptyWorkspaceDirtyDelta());
+    const { commands } = buildExplicitWorkspaceCommands(cur, {}, delta, new Map());
+    const stored = serializeEdgeRow(project, removed).id;
+
+    expect(mapBackendPayload(commands, connection, 'server')).toEqual([{ type: 'edge.delete', payload: { id: stored } }]);
+    expect(stored).toBe('branch-n-1b2c3d4e-0000-4000-8000-000000000001-n-1b2c3d4e-0000-4000-8000-000000000002');
+    // The backend refuses longer entity ids.
+    expect(stored.length).toBeLessThanOrEqual(160);
+  });
+
+  it('upserts an added edge under the same id', () => {
+    const before = { ...project, edges: [] };
+    const delta = accumulateWorkspaceDirtyDelta(before, project, {}, {}, emptyWorkspaceDirtyDelta());
+    const { commands } = buildExplicitWorkspaceCommands(project, {}, delta, new Map());
+    expect(commands.map((command) => [command.type, command.payload.id])).toEqual([['edge.upsert', serializedEdgeId(removed)]]);
+    expect([...delta.edgeUpsertIds]).toEqual([serializeEdgeRow(project, removed).id]);
   });
 });

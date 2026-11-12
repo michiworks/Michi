@@ -1,7 +1,10 @@
 import { getDb } from '../db';
 import { workspaceOwnerMatches } from '../agentOwner';
-import { PageWriteError, pagesTransaction, invalidatePages, newPageId, requirePagesWorkspace, requireChatChangeSource, type ChatChangeSource } from './core';
-import { isAssistantWorkspaceSettings, isSystemWorkspaceSettings } from 'michi-shared';
+import { savedChatHomePageId } from '../homeCards/chatHomePage';
+import { PageWriteError, pagesTransaction, pageTimestamp, invalidatePages, newPageId, requirePagesWorkspace, requireChatChangeSource, type ChatChangeSource } from './core';
+import { isCheckinNodeId, isSystemWorkspaceSettings } from 'michi-shared';
+import { checkinSourceResolver, companionActorOf } from './checkinSources';
+import { checkinBlocksProblem, databaseRemoteProblem, titleRemoteProblem, type RemoteContentProblem } from './remoteMedia';
 import type { PagesWorkspace } from './core';
 import {
   parsePageBlock, pageViewProblem, type PageBlock, type PageBlockInput,
@@ -62,11 +65,6 @@ export interface SaveDatabaseOptions {
 
 const db = () => getDb();
 const ownerRequired = (owner: string): void => { if (!owner?.trim()) throw new PageWriteError(404, 'not_found', 'Resource not found'); };
-const safeNow = (value?: number): number => {
-  const now = value ?? Date.now();
-  if (!Number.isSafeInteger(now) || now < 0) throw new PageWriteError(400, 'invalid', 'Invalid timestamp');
-  return now;
-};
 const json = (value: unknown): string => JSON.stringify(value);
 const parseJson = <T>(value: string): T => JSON.parse(value) as T;
 const compare = <T>(a: T, b: T): boolean => json(a) === json(b);
@@ -189,8 +187,7 @@ export function getMaintenanceDatabasePage(databaseId: string, ownerUserId: stri
     throw new PageWriteError(400, 'invalid', `Maintenance database reads are limited to ${MAINTENANCE_DATABASE_READ_MAX_ROWS} rows`);
   }
   if (options.includeBodies !== undefined && typeof options.includeBodies !== 'boolean') throw new PageWriteError(400, 'invalid', 'Invalid includeBodies flag');
-  const cursor = options.cursor ? /^([0-9]+):(.{1,200})$/.exec(options.cursor) : null;
-  if (options.cursor && (!cursor || !Number.isSafeInteger(Number(cursor[1])))) throw new PageWriteError(400, 'invalid', 'Invalid database row cursor');
+  const cursor = pageCursor(options.cursor, 'Invalid database row cursor');
   const columns = parseJson<PageDatabase['columns']>(database.columns_json);
   const columnIds = options.columnIds ?? columns.slice(0, MAINTENANCE_DATABASE_READ_MAX_COLUMNS).map((column) => column.id);
   if (!Array.isArray(columnIds) || columnIds.length > MAINTENANCE_DATABASE_READ_MAX_COLUMNS || (columns.length > 0 && columnIds.length < 1) ||
@@ -199,7 +196,7 @@ export function getMaintenanceDatabasePage(databaseId: string, ownerUserId: stri
   }
   const params: Array<string | number> = [database.id];
   const afterClause = cursor ? ' AND (position>? OR (position=? AND id>?))' : '';
-  if (cursor) params.push(Number(cursor[1]), Number(cursor[1]), cursor[2]!);
+  if (cursor) params.push(cursor.position, cursor.position, cursor.id);
   params.push(limit + 1);
   const rows = db().prepare(`SELECT id,position,values_json,body,rev,edited,body_edited_at,updated_at
     FROM page_database_rows WHERE database_id=?${afterClause} ORDER BY position,id LIMIT ?`).all(...params) as unknown as Array<{
@@ -224,7 +221,7 @@ export function getMaintenanceDatabasePage(databaseId: string, ownerUserId: stri
   const response = () => {
     const last = selected.at(-1);
     return { ...metadata, rows: selected, nextCursor: (hasMore || selected.length < Math.min(rows.length, limit)) && last
-      ? `${last.position}:${last.id}` : null };
+      ? makeCursor(last.position, last.id) : null };
   };
   while (selected.length && Buffer.byteLength(JSON.stringify(response()), 'utf8') > MAINTENANCE_DATABASE_READ_MAX_BYTES) selected = selected.slice(0, -1);
   if (!selected.length && rows.length) throw new PageWriteError(400, 'invalid', 'Requested database projection exceeds the 64 KB read limit; select fewer columns or omit row bodies');
@@ -233,10 +230,10 @@ export function getMaintenanceDatabasePage(databaseId: string, ownerUserId: stri
   return result;
 }
 
-function pageCursor(cursor?: string | null): { position: number; id: string } | null {
+function pageCursor(cursor?: string | null, message = 'Invalid page cursor'): { position: number; id: string } | null {
   if (!cursor) return null;
   const match = /^(\d+):(.{1,200})$/.exec(cursor);
-  if (!match) throw new PageWriteError(400, 'invalid', 'Invalid page cursor');
+  if (!match || !Number.isSafeInteger(Number(match[1]))) throw new PageWriteError(400, 'invalid', message);
   return { position: Number(match[1]), id: match[2] };
 }
 function makeCursor(position: number, id: string): string { return `${position}:${id}`; }
@@ -271,7 +268,7 @@ function pageDescendants(pageId: string, workspaceId: string): PageRow[] {
   ) SELECT p.* FROM pages p JOIN tree t ON t.id=p.id ORDER BY p.position,p.id`).all(pageId, workspaceId, workspaceId) as unknown as PageRow[];
 }
 
-function contributors(pageIds: readonly string[]): string[] {
+function contributors(pageIds: readonly string[], ownerUserId: string): string[] {
   if (!pageIds.length) return [];
   const placeholders = pageIds.map(() => '?').join(',');
   // Maintenance rows written before source_node_id named the conversation still hold the run's node; their evidence names the conversation.
@@ -279,7 +276,14 @@ function contributors(pageIds: readonly string[]): string[] {
     WHERE c.source_node_id IS NOT NULL AND
     (c.page_id IN (${placeholders}) OR c.database_id IN (SELECT database_id FROM page_database_refs WHERE page_id IN (${placeholders})))
     ORDER BY nodeId`).all(...pageIds, ...pageIds) as unknown as Array<{ nodeId: string }>;
-  return rows.map((row) => row.nodeId);
+  // A check-in's node is purged after its run: it contributed as the conversation it posted in.
+  const resolver = checkinSourceResolver(ownerUserId);
+  const ids = rows.flatMap((row) => {
+    if (!isCheckinNodeId(row.nodeId)) return [row.nodeId];
+    const target = resolver.target(row.nodeId);
+    return target ? [target.nodeId] : [];
+  });
+  return [...new Set(ids)].sort();
 }
 
 /** Suggestions waiting for review on these pages, or on a database they show. */
@@ -292,15 +296,15 @@ export function pendingProposalCount(pageIds: readonly string[]): number {
 }
 
 /**
- * Who made a page: its first revision records the source that created it. A
- * conversation in the Meta agent's own workspace is the Meta agent's chat.
+ * Who made a page: its first revision records the source that created it.
+ * The user's own agent (a conversation in its workspace, a check-in, or
+ * upkeep) is a CompanionActor (checkinSources.ts companionActorOf).
  */
 function pageCreator(pageId: string): NonNullable<SpaceSummaryDto['createdBy']> {
   const row = db().prepare('SELECT source FROM page_revisions WHERE page_id=? AND revision=1').get(pageId) as { source: string } | undefined;
-  const source = row ? parseJson<{ kind?: unknown; nodeId?: unknown }>(row.source) : null;
-  if (!source || source.kind === 'user' || typeof source.nodeId !== 'string') return 'user';
-  const node = db().prepare('SELECT w.settings FROM nodes n JOIN workspaces w ON w.id=n.workspace_id WHERE n.id=?').get(source.nodeId) as { settings: string | null } | undefined;
-  return node && isAssistantWorkspaceSettings(node.settings) ? 'meta-agent' : 'agent';
+  const source = row ? parseJson<ChangeSource>(row.source) : null;
+  if (!source || source.kind === 'user') return 'user';
+  return companionActorOf(source) ?? 'agent';
 }
 
 function spaceSummary(root: PageRow, workspace: PagesWorkspace): SpaceSummaryDto {
@@ -310,7 +314,7 @@ function spaceSummary(root: PageRow, workspace: PagesWorkspace): SpaceSummaryDto
     WHERE r.page_id IN (${ids.map(() => '?').join(',')}) AND d.deleted_at IS NULL`).get(...ids) as { count: number } : { count: 0 };
   const childTitles = db().prepare('SELECT title FROM pages WHERE parent_id=? AND deleted_at IS NULL ORDER BY position,id').all(root.id) as unknown as Array<{ title: string }>;
   return { ...summary(root), pendingProposals: pendingProposalCount(ids), workspaceName: workspace.name, childTitles: childTitles.map((page) => page.title), pageCount: subtree.length,
-    databaseCount: refCount.count, contributorNodeIds: contributors(ids), createdBy: pageCreator(root.id) };
+    databaseCount: refCount.count, contributorNodeIds: contributors(ids, root.owner_user_id), createdBy: pageCreator(root.id) };
 }
 
 export function listSpaces(ownerUserId: string, options: SpaceListOptions = {}): { items: SpaceSummaryDto[]; nextCursor: string | null } {
@@ -372,8 +376,19 @@ function saveRevision(page: PageDto, source: ChangeSource, now: number): void {
   db().prepare('INSERT OR REPLACE INTO page_revisions(page_id,revision,snapshot,source,created_at) VALUES(?,?,?,?,?)').run(page.id, page.revision, json(snapshot), json(source), now);
 }
 
+/** Whether a write comes from a check-in, by its node id alone (DESIGN-v2 §0.3: the prefix decides, fail closed). */
+function fromCheckin(source: { kind: string; nodeId?: unknown } | undefined): boolean {
+  return !!source && typeof source.nodeId === 'string' && isCheckinNodeId(source.nodeId);
+}
+
+/** A check-in's content that would reach outside Michi when shown (remoteMedia.ts) is refused here too, whatever tool wrote it. */
+function refuseRemoteContent(found: RemoteContentProblem | null): void {
+  if (found) throw new PageWriteError(400, 'invalid', found.message);
+}
+
 function validateBlockList(blocks: unknown): PageBlock[] {
-  if (!Array.isArray(blocks) || blocks.length > 40) throw new PageWriteError(400, 'invalid', 'Invalid page blocks');
+  if (!Array.isArray(blocks)) throw new PageWriteError(400, 'invalid', 'Invalid page blocks');
+  if (blocks.length > PAGE_LIMITS.blocks) throw new PageWriteError(400, 'invalid', `A page may contain at most ${PAGE_LIMITS.blocks} blocks`);
   const result: PageBlock[] = [];
   const ids = new Set<string>();
   for (const value of blocks) {
@@ -401,7 +416,7 @@ export function replacePageDatabaseRefs(pageId: string, ownerUserId: string, blo
   db().prepare('DELETE FROM page_database_refs WHERE page_id=?').run(pageId);
   const insert = db().prepare('INSERT INTO page_database_refs(page_id,database_id) VALUES(?,?)');
   for (const id of databaseIds) insert.run(pageId, id);
-  safeNow(now);
+  pageTimestamp(now);
   return databaseIds;
 }
 
@@ -435,17 +450,30 @@ export function pageConversationIds(blocks: readonly PageBlock[]): Set<string> {
 }
 
 /**
+ * A check-in's own node (DESIGN-v2 §2.5) is purged when its run ends, and no
+ * response may name it (§2.7): no block or task names one for the first time,
+ * even on the Spaces Home, which shares the assistant's workspace on a local
+ * install (C2-review #1).
+ */
+function refuseCheckinConversation(nodeId: string): void {
+  if (isCheckinNodeId(nodeId)) {
+    throw new PageWriteError(400, 'invalid', `Conversation ${nodeId} is a check-in's own and is discarded when the check-in ends; name a conversation the user can open instead`);
+  }
+}
+
+/**
  * A write may name, for the first time, only a conversation of the page's
- * workspace; with `live`, only one that is still a chat there. One the page
- * named already stays named wherever it went since (deleted, or moved to
- * another workspace): its card says it is no longer here, and the page stays
- * writable.
+ * workspace, never a check-in's own; with `live`, only one that is still a
+ * chat there. One the page named already stays named wherever it went since
+ * (deleted, or moved to another workspace): its card says it is no longer
+ * here, and the page stays writable.
  */
 export function validateConversationReferences(workspaceId: string, blocks: readonly PageBlock[], named: ReadonlySet<string>, live = false): void {
   const find = db().prepare('SELECT workspace_id,kind,deleted_at,purged_at FROM nodes WHERE id=?');
   for (const block of blocks) {
     for (const nodeId of blockConversationIds(block)) {
       if (named.has(nodeId)) continue;
+      refuseCheckinConversation(nodeId);
       const node = find.get(nodeId) as { workspace_id: string; kind: string; deleted_at: number | null; purged_at: number | null } | undefined;
       if (node && node.workspace_id !== workspaceId) throw new PageWriteError(400, 'invalid', `Conversation ${nodeId} is in another workspace; a block names only conversations of its page's workspace`);
       if (live && (!node || node.kind !== 'chat' || node.deleted_at !== null || node.purged_at !== null)) {
@@ -458,7 +486,7 @@ export function validateConversationReferences(workspaceId: string, blocks: read
 export function createPage(input: PageCreateInput): PageDto {
   ownerRequired(input.ownerUserId);
   assertTitle(input.title);
-  const now = safeNow(input.now);
+  const now = pageTimestamp(input.now);
   const workspace = requireContentWorkspace(input.workspaceId, input.ownerUserId);
   const source = input.source ?? { kind: 'user' as const };
   if (input.source) requireChatChangeSource(workspace.id, input.ownerUserId, input.source);
@@ -475,6 +503,10 @@ export function createPage(input: PageCreateInput): PageDto {
     idFactory: (kind) => kind === 'database' ? newPageId('db') : kind === 'block' ? newPageId('block') : kind === 'row' ? newPageId('row') : kind === 'column' ? newPageId('column') : newPageId('view'),
   });
   if (input.source) template.blocks = template.blocks.map((block) => ({ ...block, sources: [{ nodeId: input.source!.nodeId, turnId: input.source!.turnId, assistantId: input.source!.assistantId }] }));
+  if (fromCheckin(input.source)) {
+    refuseRemoteContent(titleRemoteProblem(input.title) ?? checkinBlocksProblem(template.blocks, [])
+      ?? template.databases.reduce<RemoteContentProblem | null>((found, database) => found ?? databaseRemoteProblem(database), null));
+  }
   for (const database of template.databases) writeDatabase(database, input.ownerUserId, now);
   const position = nextPosition(workspace.id, input.parentId ?? null);
   db().prepare(`INSERT INTO pages(id,owner_user_id,workspace_id,parent_id,position,title,color,blocks,revision,view_version,updated_at,updated_by,created_at)
@@ -494,7 +526,7 @@ export function createPage(input: PageCreateInput): PageDto {
 export function insertHomePage(input: { ownerUserId: string; workspaceId: string; title: string; role: 'spaces-home' | 'workspace-home'; now: number }): string {
   ownerRequired(input.ownerUserId);
   assertTitle(input.title);
-  const now = safeNow(input.now);
+  const now = pageTimestamp(input.now);
   const id = newPageId('pg');
   db().prepare(`INSERT INTO pages(id,owner_user_id,workspace_id,parent_id,position,title,color,blocks,revision,view_version,updated_at,updated_by,created_at,role)
     VALUES(?,?,?,NULL,?,?,NULL,'[]',1,1,?,'user',?,?)`).run(id, input.ownerUserId, input.workspaceId, nextPosition(input.workspaceId, null), input.title, now, now, input.role);
@@ -506,7 +538,7 @@ export function createDatabase(input: DatabaseCreateInput): PageDatabase {
   ownerRequired(input.ownerUserId);
   if (!input.title?.trim() || input.title.length > PAGE_LIMITS.title) throw new PageWriteError(400, 'invalid', 'Invalid database title');
   const workspace = requireContentWorkspace(input.workspaceId, input.ownerUserId);
-  const now = safeNow(input.now);
+  const now = pageTimestamp(input.now);
   return pagesTransaction(() => {
     const id = newPageId('db');
     const columns = (input.columns ?? []).map((column) => ({ ...column, id: column.id || newPageId('column') }));
@@ -548,7 +580,7 @@ function assertDatabaseShape(database: PageDatabase): void {
 
 function updatePageMetadataUnsafe(pageId: string, ownerUserId: string, patch: PageMetadataPatch, options: { expectedRevision: number; now?: number }): PageDto {
   const page = accessiblePage(pageId, ownerUserId, false, true);
-  const now = safeNow(options.now);
+  const now = pageTimestamp(options.now);
   if (options.expectedRevision !== page.revision) throw new PageWriteError(409, 'stale_revision', 'Page revision changed');
   if (page.role !== null && patch.parentId !== undefined && patch.parentId !== page.parent_id) throw new PageWriteError(400, 'invalid', 'Home pages cannot move');
   if (patch.title !== undefined) assertTitle(patch.title);
@@ -581,6 +613,16 @@ export function updatePageMetadata(pageId: string, ownerUserId: string, patch: P
 }
 
 /**
+ * Whether a page is a home: the Pages Home or a workspace home. The Meta agent keeps
+ * homes up to date, so there a change to a block an agent wrote applies directly even
+ * after a person edited it, instead of waiting as a suggestion.
+ */
+export function isHomePage(pageId: string): boolean {
+  const row = db().prepare('SELECT role FROM pages WHERE id=?').get(pageId) as { role: string | null } | undefined;
+  return !!row?.role;
+}
+
+/**
  * A task board shows its workspace's tasks, which the Pages Home's system workspace has none of.
  * Content that somehow holds one already stays writable; only a board this write adds is refused.
  * Every path that persists or proposes content calls this, so a proposal can't be created that could never be accepted.
@@ -594,7 +636,7 @@ export function assertNoNewTaskBoardOnHome(workspaceId: string, ownerUserId: str
 /** Internal content persistence. Caller owns the encompassing pagesTransaction and view invalidation. */
 export function savePageContent(pageId: string, ownerUserId: string, snapshot: PageDto, options: SavePageContentOptions & { source: ChangeSource; now: number }): PageDto {
   const page = accessiblePage(pageId, ownerUserId, false, true);
-  if (options.source.kind === 'maintenance' && db().prepare("SELECT 1 FROM home_customization WHERE owner_user_id=? AND json_extract(preferences,'$.pageId')=?").get(ownerUserId, pageId)) {
+  if (options.source.kind === 'maintenance' && savedChatHomePageId(ownerUserId) === pageId) {
     throw new PageWriteError(409, 'invalid', 'Chat Home layout is customized by the user; automatic maintenance cannot replace it');
   }
   if (options.expectedRevision !== undefined && options.expectedRevision !== page.revision) throw new PageWriteError(409, 'stale_revision', 'Page revision changed');
@@ -605,7 +647,10 @@ export function savePageContent(pageId: string, ownerUserId: string, snapshot: P
   const metadataUnchanged = snapshot.title === page.title && snapshot.color === page.color && snapshot.position === page.position;
   const stored = decodeBlocks(page.blocks);
   if (compare(blocks, stored) && metadataUnchanged) return pageDto(page);
-  const now = safeNow(options.now);
+  if (fromCheckin(options.source)) {
+    refuseRemoteContent((snapshot.title === page.title ? null : titleRemoteProblem(snapshot.title)) ?? checkinBlocksProblem(blocks, stored));
+  }
+  const now = pageTimestamp(options.now);
   const revision = snapshot.revision;
   if (!Number.isSafeInteger(revision) || revision <= page.revision) throw new PageWriteError(400, 'invalid', 'New page revision must increase');
   assertNoNewTaskBoardOnHome(page.workspace_id, ownerUserId, blocks, stored);
@@ -624,7 +669,8 @@ export function savePageContent(pageId: string, ownerUserId: string, snapshot: P
 
 /**
  * A task links at most 20 conversations, each once. One it links for the first
- * time has to be a conversation of the database's workspace; one linked
+ * time has to be a conversation of the database's workspace, never a
+ * check-in's own; one linked
  * already stays linked wherever it went since (its card says it is no longer
  * here, and the person unlinks it), as thread cards do. A restore from change
  * history skips that check: the links it brings back were valid when recorded.
@@ -644,6 +690,7 @@ function assertTaskThreads(next: PageDatabase, prior: PageDatabase, restore = fa
     const known = before.get(row.id);
     for (const nodeId of ids) {
       if (known?.has(nodeId)) continue;
+      refuseCheckinConversation(nodeId);
       const node = find.get(nodeId) as { workspace_id: string; kind: string; deleted_at: number | null; purged_at: number | null } | undefined;
       if (!node || node.workspace_id !== next.workspaceId || node.kind !== 'chat' || node.deleted_at !== null || node.purged_at !== null) {
         throw new PageWriteError(400, 'invalid', `Conversation ${nodeId} is not a conversation of this workspace`);
@@ -661,7 +708,7 @@ export function saveDatabase(database: PageDatabase, ownerUserId: string, option
   const roleProblem = databaseRoleProblem(working, prior.role);
   if (roleProblem) throw new PageWriteError(400, 'invalid', roleProblem);
   if (prior.role === TASK_DATABASE_ROLE) assertTaskThreads(working, decodeDatabase(prior), options.restore);
-  const now = safeNow(options.now ?? working.updatedAt);
+  const now = pageTimestamp(options.now ?? working.updatedAt);
   if (!Number.isSafeInteger(working.revision) || working.revision <= prior.revision) throw new PageWriteError(400, 'invalid', 'Database revision must increase');
   db().prepare('UPDATE page_databases SET title=?,columns_json=?,views_json=?,revision=?,updated_at=? WHERE id=? AND owner_user_id=?')
     .run(working.title, json(working.columns), json(working.views), working.revision, now, working.id, ownerUserId);
@@ -697,11 +744,59 @@ export function listPageTrash(workspaceId: string, ownerUserId: string, options:
   return { items, nextCursor: hasMore && last ? makeCursor(last.position, last.id) : null };
 }
 
+/** A page as its first revision made it: what "Undo all" compares the page with before it puts it in the trash. */
+export interface MadePage {
+  id: string; createdAt: number;
+  made: { title: string; color: string | null; parentId: string | null; blocks: PageBlock[] };
+}
+
+/** The pages a write source made, oldest first: their first revision has this node and turn as its source (a check-in run's). */
+export function pagesMadeBy(source: { nodeId: string; turnId: string }, ownerUserId: string): MadePage[] {
+  ownerRequired(ownerUserId);
+  const rows = db().prepare(`SELECT r.page_id,r.snapshot,r.created_at FROM page_revisions r JOIN pages p ON p.id=r.page_id
+    WHERE r.revision=1 AND p.owner_user_id=? AND json_extract(r.source,'$.nodeId')=? AND json_extract(r.source,'$.turnId')=?
+    ORDER BY r.created_at,r.page_id`).all(ownerUserId, source.nodeId, source.turnId) as unknown as Array<{ page_id: string; snapshot: string; created_at: number }>;
+  return rows.map((row) => {
+    const snapshot = parseJson<{ title: string; color: string | null; parentId: string | null; blocks: PageBlock[] }>(row.snapshot);
+    return { id: row.page_id, createdAt: row.created_at, made: { title: snapshot.title, color: snapshot.color, parentId: snapshot.parentId, blocks: snapshot.blocks } };
+  });
+}
+
+/** Live pages under this one. */
+export function hasChildPages(pageId: string): boolean {
+  return !!db().prepare('SELECT 1 FROM pages WHERE parent_id=? AND deleted_at IS NULL LIMIT 1').get(pageId);
+}
+
+/** The databases that go to the trash with this page and only it (deletePage's rule): shown by no other page, and not the task database. */
+export function pageOwnDatabaseIds(pageId: string): string[] {
+  return (db().prepare(`SELECT DISTINCT r.database_id FROM page_database_refs r WHERE r.page_id=?
+    AND NOT EXISTS (SELECT 1 FROM page_database_refs x WHERE x.database_id=r.database_id AND x.page_id<>?)
+    AND NOT EXISTS (SELECT 1 FROM page_databases d WHERE d.id=r.database_id AND d.role='tasks')`).all(pageId, pageId) as unknown as Array<{ database_id: string }>)
+    .map((row) => row.database_id);
+}
+
+/** Whether any page, in the trash or not, shows this database. */
+export function databaseShown(databaseId: string): boolean {
+  return !!db().prepare('SELECT 1 FROM page_database_refs WHERE database_id=? LIMIT 1').get(databaseId);
+}
+
+/**
+ * Takes away a database no page shows (it has no Trash group of its own):
+ * marked deleted with a deletion group of its own, its data kept. "Undo all"
+ * does this to a database a check-in made, once nothing else touched it.
+ */
+export function setAsideUnshownDatabase(databaseId: string, ownerUserId: string, options: { now?: number } = {}): void {
+  const record = accessibleDatabase(databaseId, ownerUserId, false, true);
+  if (databaseShown(record.id) || record.role !== null) throw new PageWriteError(409, 'invalid', 'A database a page shows goes to the trash with its page');
+  db().prepare('UPDATE page_databases SET deleted_at=?,deletion_group_id=? WHERE id=? AND owner_user_id=? AND deleted_at IS NULL')
+    .run(pageTimestamp(options.now), newPageId('del'), record.id, ownerUserId);
+}
+
 /** Soft-delete the active page subtree as one reversible operation. */
 export function deletePage(pageId: string, ownerUserId: string, options: { now?: number } = {}): string {
   const root = accessiblePage(pageId, ownerUserId, false, true);
   if (root.role !== null) throw new PageWriteError(409, 'invalid', 'Home pages cannot be deleted; hide them instead');
-  const now = safeNow(options.now);
+  const now = pageTimestamp(options.now);
   const groupId = newPageId('del');
   pagesTransaction(() => {
     const members = pageDescendants(pageId, root.workspace_id);
@@ -728,7 +823,7 @@ export function deletePage(pageId: string, ownerUserId: string, options: { now?:
 /** Restore only records carrying this deletion group, preserving independently trashed descendants. */
 export function restorePageDeletionGroup(deletionGroupId: string, ownerUserId: string, options: { now?: number } = {}): number {
   ownerRequired(ownerUserId);
-  const now = safeNow(options.now);
+  const now = pageTimestamp(options.now);
   return pagesTransaction(() => {
     const members = db().prepare('SELECT id,parent_id FROM pages WHERE owner_user_id=? AND deletion_group_id=? AND deleted_at IS NOT NULL')
       .all(ownerUserId, deletionGroupId) as unknown as Array<{ id: string; parent_id: string | null }>;

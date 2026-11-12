@@ -1,13 +1,6 @@
-import type { HomeSectionItem, HomeSectionKey, PageBlock, PageChangeDto, SpaceActivityItem } from 'michi-shared';
-import { formatMichiAge } from '../../content/michiFormat';
+import { HOME_SECTION_TITLES, type HomeSectionItem, type HomeSectionKey, type PageBlock, type PageChangeDto, type SpaceActivityItem } from 'michi-shared';
+import { formatMichiAge, formatMichiAgo } from '../../content/michiFormat';
 import { michiHomeEyebrow } from '../../content/home/michiHomeFormat';
-
-/** `12m ago`, `just now`; empty when the time is unknown. */
-export function homeAge(ts: number | null, now: number = Date.now()): string {
-  if (ts == null) return '';
-  const age = formatMichiAge(ts, now);
-  return age === 'now' ? 'just now' : `${age} ago`;
-}
 
 /** Today as Michi Home writes it, `Fri, Oct 23`, whatever the browser's locale. */
 export function homeDateLabel(now: Date): string {
@@ -62,9 +55,9 @@ export function splitHomeBlocks<T extends { type: string }>(blocks: readonly T[]
 }
 
 export const HOME_SECTION_COPY: Record<HomeSectionKey, { title: string; empty: string }> = {
-  waiting: { title: 'Waiting on you', empty: 'Nothing is waiting on you.' },
-  stalled: { title: 'Stalled', empty: 'Nothing has stalled.' },
-  done: { title: 'Just done', empty: 'Nothing finished since you last looked.' },
+  waiting: { title: HOME_SECTION_TITLES.waiting, empty: 'Nothing is waiting on you.' },
+  stalled: { title: HOME_SECTION_TITLES.stalled, empty: 'Nothing has stalled.' },
+  done: { title: HOME_SECTION_TITLES.done, empty: 'Nothing finished since you last looked.' },
 };
 
 /** The one action a section row offers; a conversation in no section (All threads) just opens. */
@@ -83,7 +76,7 @@ export function homeRowAge(section: HomeSectionKey | null, item: HomeSectionItem
     const age = formatMichiAge(item.at, now);
     return age === 'now' ? 'just now' : `quiet ${age}`;
   }
-  return homeAge(item.at, now);
+  return formatMichiAgo(item.at, now);
 }
 
 /** The newest page an agent wrote, from Space activity (newest first): where and when. */

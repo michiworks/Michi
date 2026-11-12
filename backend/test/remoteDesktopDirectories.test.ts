@@ -76,7 +76,7 @@ test('post-install verification stays in the selected directory despite another 
   const fresh = await inspect(buildRemoteInstallScript('ssh://example/repo', 'dev'));
   assert.equal(fresh.dataDir, current.dataDir);
   assert.equal(fresh.healthy, false);
-  const existingScript = buildRemoteInstallScript('ssh://example/repo', 'dev', undefined, undefined, legacy.dataDir);
+  const existingScript = buildRemoteInstallScript('ssh://example/repo', 'dev', undefined, legacy.dataDir);
   execFileSync('bash', ['-n'], { input: existingScript });
   const existing = await inspect(existingScript);
   assert.equal(existing.dataDir, legacy.dataDir);

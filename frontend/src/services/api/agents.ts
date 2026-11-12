@@ -7,7 +7,8 @@ import type {
   CreateAgentDefinitionRequestV1,
   UpdateAgentDefinitionRequestV1,
 } from 'michi-shared';
-import { parseAgentDefinitionDtoV1 } from 'michi-shared';
+import { parseAgentDefinitionDtoV1, readApiError } from 'michi-shared';
+import { HttpResponseError } from './httpError';
 import {
   activeBackendApiBase,
   backendApiBase,
@@ -41,15 +42,14 @@ function parseBlockers(value: unknown): AgentEnableBlockerV1[] | null {
   return blockers;
 }
 
+/** httpError's jsonResponse, plus the enable blockers a refusal can carry. */
 async function jsonResponse(response: Response, operation: string): Promise<unknown> {
   const body: unknown = await response.json().catch(() => null);
   if (!response.ok) {
-    const message = body && typeof body === 'object' && 'error' in body && typeof body.error === 'string'
-      ? body.error
-      : `${operation} failed: ${response.status}`;
+    const { message = `${operation} failed: ${response.status}`, code } = readApiError(body);
     const blockers = parseBlockers(body);
     if (blockers) throw new AgentEnableBlockedError(message, blockers);
-    throw new Error(message);
+    throw new HttpResponseError(message, response.status, code);
   }
   return body;
 }

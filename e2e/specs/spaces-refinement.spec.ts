@@ -1,12 +1,14 @@
 import { expect, test } from '@playwright/test';
 import { resolve } from 'node:path';
 import { mkdirSync } from 'node:fs';
-import type { PageLayoutRule } from 'michi-shared';
+import { PAGE_BLOCK_CATALOG, PAGE_BLOCK_TYPES, type PageLayoutRule } from 'michi-shared';
 import { bootWithWorkspace, installMockApi } from '../fixtures/mockApi';
 import { createPagesMockController } from '../fixtures/pagesFixtures';
 import { leaveSettings, openArea, openSettings } from '../fixtures/shell';
 
 const evidence = resolve('.artifacts/spaces-michi-refinement');
+// The catalog lists every block type that has an example, except references (BuiltinComponents.tsx).
+const builtinCount = PAGE_BLOCK_TYPES.filter((type) => PAGE_BLOCK_CATALOG[type].example && PAGE_BLOCK_CATALOG[type].category !== 'references').length;
 
 for (const palette of ['bone', 'monokai']) test(`Space settings and component previews stay plain and usable in ${palette}`, async ({ page }) => {
   mkdirSync(evidence, { recursive: true });
@@ -52,9 +54,8 @@ for (const palette of ['bone', 'monokai']) test(`Space settings and component pr
   const dialog = page.getByRole('dialog', { name: 'New workspace' });
   if (await dialog.count()) await dialog.getByRole('button', { name: 'Close' }).click();
   await openArea(page, 'spaces');
-  const assistant = page.getByRole('region', { name: 'Assistant', exact: true });
-  await assistant.or(page.getByRole('button', { name: /^Ask assistant/ })).first().waitFor();
-  if (await assistant.isVisible()) await assistant.getByRole('button', { name: 'Minimize', exact: true }).click();
+  // Pages has no assistant window to put away (DESIGN-v2 §1.4).
+  await expect(page.locator('.meta-chat-area, button.meta-chat-pill')).toHaveCount(0);
   await page.locator('.spaces-side').getByRole('button', { name: 'New page', exact: true }).click();
   const create = page.locator('.spaces-modal');
   await create.getByLabel('Name').fill('Launch plan');
@@ -77,18 +78,21 @@ for (const palette of ['bone', 'monokai']) test(`Space settings and component pr
   await page.screenshot({ path: resolve(evidence, `space-settings-${palette}.png`) });
   await settings.getByRole('button', { name: 'Browse components' }).click();
   const catalog = page.getByRole('region', { name: 'Built-in components' });
-  await expect(catalog.getByRole('article')).toHaveCount(16);
+  await expect(catalog.getByRole('article')).toHaveCount(builtinCount);
   await expect(page.getByLabel('Component code')).toHaveCount(0);
   await expect(catalog.getByRole('button', { name: 'All', exact: true })).toHaveAttribute('aria-pressed', 'true');
   const previewTask = catalog.getByRole('checkbox', { name: 'Verify the installer' });
   await previewTask.click();
+  // A ticked item folds under its checklist's "Show N done" row.
+  await catalog.getByRole('button', { name: 'Show 2 done', exact: true }).click();
   await expect(previewTask).toBeChecked();
   expect(mock.pages.get('page-1')!.blocks.some(block => block.type === 'checklist')).toBe(false);
   await page.screenshot({ path: resolve(evidence, `space-components-${palette}.png`) });
   await catalog.getByRole('searchbox').fill('metrics');
-  await expect(catalog.getByRole('article')).toHaveCount(5);
+  await expect(catalog.getByRole('article').filter({ has: page.getByRole('heading', { name: 'Metrics', exact: true }) })).toHaveCount(1);
   await catalog.getByRole('button', { name: /^Add metrics to the page$/i }).click();
-  await expect(catalog).toHaveCount(0);
+  // The closing panel stays in the DOM, hidden and inert, until its collapse ends.
+  await expect(space.locator('.component-catalog')).toHaveCount(0);
   await expect(space.locator('[data-michi-block="metrics"]')).toBeVisible();
   expect(mock.pages.get('page-1')!.blocks.some(block => block.type === 'metrics')).toBe(true);
 
@@ -113,13 +117,16 @@ for (const palette of ['bone', 'monokai']) test(`Space settings and component pr
   expect(await settingsElement?.evaluate(element => element.isConnected)).toBe(true);
   await expect(settings.getByLabel('Page name')).toHaveValue('Draft name stays here');
 
-  await openSettings(page, 'Components');
-  await expect(page.getByRole('region', { name: 'Built-in components' }).getByRole('article')).toHaveCount(16);
+  // Components moved from the global Settings into Pages settings (96629efb).
+  await page.locator('.spaces-side').getByRole('button', { name: 'Pages settings' }).click();
+  await page.getByRole('main', { name: 'Pages settings', exact: true }).getByRole('button', { name: 'Browse components' }).click();
+  await expect(page.getByRole('region', { name: 'Built-in components' }).getByRole('article')).toHaveCount(builtinCount);
   await expect(page.getByLabel('Workspace', { exact: true })).toBeVisible();
   await page.screenshot({ path: resolve(evidence, `settings-components-${palette}.png`) });
-  await openSettings(page, 'Meta agent');
+  // Settings › Meta agent is part of Settings › <name> now (DESIGN-v2 §1.5).
+  await openSettings(page, 'Michi');
   const meta = page.locator('.meta-set');
-  await expect(meta.getByRole('heading', { name: 'Reading', exact: true })).toBeVisible();
+  await expect(meta.getByRole('heading', { name: 'Runtime', exact: true })).toBeVisible();
   await expect(meta.getByLabel('First-run range')).toBeVisible();
   for (const row of await meta.locator('.meta-set__radio').all()) {
     await expect(row).toHaveCSS('background-color', 'rgba(0, 0, 0, 0)');

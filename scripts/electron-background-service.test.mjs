@@ -137,6 +137,42 @@ test("helpers derive bundle path, build stamp and the backend server id", () => 
   assert.equal(service.serviceBuildStamp("/definitely/missing", "2.0.0"), "2.0.0");
 });
 
+// The same file backend/test/bootEnv.test.ts gives the background service.
+const dotenvFixture = JSON.parse(fs.readFileSync(new URL("../backend/test/fixtures/michiDotenv.json", import.meta.url), "utf8"));
+
+test("the backend the app forks gets ~/.michi/.env by the background service's rules", () => {
+  const home = tempDir();
+  try {
+    assert.equal(service.michiDotenvPath(home), path.join(home, ".michi", ".env"));
+    assert.deepEqual(service.readDotenvFile(service.michiDotenvPath(home)), {}, "no file");
+    fs.mkdirSync(path.join(home, ".michi"));
+    fs.writeFileSync(service.michiDotenvPath(home), dotenvFixture.dotenv);
+    const dotenv = service.readDotenvFile(service.michiDotenvPath(home));
+    assert.deepEqual(dotenv, dotenvFixture.parsed);
+
+    const forced = { PORT: "51234", MICHI_LOG_DIR: "/Users/test/.michi/logs", MICHI_BIND_HOST: "127.0.0.1", MICHI_REMOTE_ACCESS: "0" };
+    const expected = { ...dotenvFixture.parsed, ...forced };
+    for (const key of dotenvFixture.dropped) delete expected[key];
+    const input = { base: {}, dotenv, port: 51234, logDir: forced.MICHI_LOG_DIR };
+    assert.deepEqual(service.desktopBackendEnv({ ...input, packaged: true }), expected);
+    // A development build keeps the dev-renderer keys; never the remote token.
+    const dev = service.desktopBackendEnv({ ...input, packaged: false });
+    assert.equal(dev.MICHI_RENDERER_URL, "http://127.0.0.1:5173");
+    assert.equal(dev.MICHI_REMOTE_TOKEN, undefined);
+    // The app's own environment wins over the file; the forced keys win over both.
+    const fromShell = service.desktopBackendEnv({ ...input, base: { MICHI_DATA_DIR: "/shell", PORT: "1", MICHI_REMOTE_TOKEN: "shell" }, packaged: true });
+    assert.deepEqual([fromShell.MICHI_DATA_DIR, fromShell.PORT, fromShell.MICHI_REMOTE_TOKEN], ["/shell", "51234", undefined]);
+
+    // The service's /api/health serverId hashes the data directory it read from the file.
+    assert.equal(
+      service.expectedServerId({ ...dotenv, PATH: "/usr/bin" }, home),
+      createHash("sha256").update("/Users/test/michi-data").digest("hex").slice(0, 16),
+    );
+  } finally {
+    fs.rmSync(home, { recursive: true, force: true });
+  }
+});
+
 function fakeLaunchctl(script = {}) {
   const calls = [];
   const run = async (args) => {

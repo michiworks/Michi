@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import { useState } from 'react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { fireEvent, render, screen, within } from '@testing-library/react';
 import type { MichiDatabase, MichiDbEditOp, MichiDbRow, ThreadCardItem } from 'michi-shared';
@@ -69,6 +69,19 @@ describe('a task’s details', () => {
     expect(within(links).getByText('This conversation is no longer here')).toBeTruthy();
     fireEvent.click(within(links).getByRole('button', { name: 'Unlink' }));
     expect(edits).toHaveBeenLastCalledWith([{ op: 'row.update', id: 't1', values: { threads: ['a'] } }], 'Unlinked a conversation');
+  });
+
+  it('lists a conversation archived out of its thread as archived, opened like the others and not offered to unlink', () => {
+    const branch = { ...card('b', 'done', 'Side idea', 'Split it in two'), archived: true as const };
+    render(<LiveThreadsContext.Provider value={{ ...states, byNode: new Map([['b', branch]]) }}>
+      <DatabaseView db={taskDatabase([task({ task: 'Pick a schema naming rule', status: 'doing', threads: ['b'] }, { status: 1 })])} edit={async () => true} viewId={TASK_VIEW.board} onViewChange={() => {}} threadOf={() => undefined} now={NOW} services={{}} />
+    </LiveThreadsContext.Provider>);
+    const links = within(details('Pick a schema naming rule')).getByRole('region', { name: 'Conversations' });
+    const row = within(links).getByRole('button', { name: /Side idea/ });
+    expect(row.textContent).toContain('Archived · Split it in two');
+    expect(within(links).queryByRole('button', { name: 'Unlink' })).toBeNull();
+    fireEvent.click(row);
+    expect(open).toHaveBeenCalledWith(branch);
   });
 
   it('link conversations of the workspace from Link', async () => {

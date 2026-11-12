@@ -5,6 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { closeDb, getDb, initDb } from '../src/services/db';
 import { ClaudeRuntime } from 'michi-runtime/internal/adapters/claude/ClaudeRuntime';
+import { getClaudeJsonlPath } from 'michi-runtime/internal/adapters/claude/claudeProjectsPath';
 import { saveClaudeForkAnchor } from '../src/services/claudeForkAnchors';
 import { NativeResumeUnavailableError } from '../src/services/nativeResume';
 import type { ForkAgentSessionOptions } from '../src/agents/types';
@@ -15,6 +16,7 @@ let directory: string;
 let runtime: ClaudeRuntime;
 let forks: unknown[];
 let loads: any[];
+let creates: any[];
 let opts: ForkAgentSessionOptions;
 const originalEnv = { ...process.env };
 
@@ -25,8 +27,8 @@ beforeEach((context) => {
   delete process.env.MICHI_CLOUD;
   closeDb(); initDb();
   getDb().exec(`INSERT INTO workspaces (id,name,cwd,created_at,updated_at) VALUES ('ws','Test','/tmp',1,1);
-    INSERT INTO nodes (id,workspace_id,kind,status,runtime_id,external_session_id,created_at)
-      VALUES ('parent','ws','chat','idle','claude','parent-native',1);
+    INSERT INTO nodes (id,workspace_id,kind,status,runtime_id,external_session_id,title,created_at)
+      VALUES ('parent','ws','chat','idle','claude','parent-native','Parent chat',1);
     INSERT INTO nodes (id,workspace_id,parent_node_id,kind,status,created_at)
       VALUES ('child','ws','parent','chat','idle',2);
     INSERT INTO messages (id,node_id,role,content,seq,created_at) VALUES
@@ -34,7 +36,7 @@ beforeEach((context) => {
       ('answer-2','parent','assistant','Later answer',2,2);`);
   getDb().prepare("UPDATE workspaces SET cwd=? WHERE id='ws'").run(directory);
   saveClaudeForkAnchor({ nodeId: 'parent', nativeSessionId: 'parent-native', assistantMessageId: 'answer-1', nativeMessageId: 'first-native' });
-  forks = []; loads = [];
+  forks = []; loads = []; creates = [];
   t.mock.method(require('michi-runtime/internal/adapters/claude/claudeSdkHistory'), 'forkClaudeHistory', async (_options: unknown, input: unknown) => {
     forks.push(input); return 'fork-native';
   });
@@ -47,6 +49,10 @@ beforeEach((context) => {
     loadSession: async (input: unknown) => {
       loads.push(input);
       return { id: 'child', nativeSessionId: 'fork-native', setEnableFollowUps() {} };
+    },
+    createSession: async (input: unknown) => {
+      creates.push(input);
+      return { id: 'child', nativeSessionId: 'child-native' };
     },
   } });
   opts = { sessionId: 'child', owner: chatOwner('child'),
@@ -74,6 +80,22 @@ test('historical fork resolves the server anchor and resumes the child with its 
   assert.match(loads[0].bootstrapInstructions, /Explicitly attached reference/);
   assert.doesNotMatch(loads[0].bootstrapInstructions, /First answer|Later answer|Inherited branch transcript/,
     'native copied history must not also be injected as a textual ancestor');
+  assert.match(loads[0].bootstrapInstructions, /a branch of the thread "Parent chat" \(node parent\) in the same conversation tree/,
+    'the copied history reads as the child\'s own, so the child is told it is a branch');
+});
+
+test('latest-state fork tells the child it is a branch in its parent\'s tree', async () => {
+  // Keep the parent transcript out of the developer's own ~/.claude.
+  const options = { ...(runtime as any).options, configDir: () => path.join(directory, 'claude-config') };
+  Object.assign(runtime, { options });
+  const file = getClaudeJsonlPath(options, directory, 'parent-native');
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.writeFileSync(file, '');
+  await runtime.forkSession({ ...opts, anchorMessageId: undefined });
+  assert.equal(creates.length, 1);
+  assert.equal(creates[0].forkFromNativeSessionId, 'parent-native');
+  assert.match(creates[0].firstTurnPrefix, /Explicitly attached reference/);
+  assert.match(creates[0].firstTurnPrefix, /a branch of the thread "Parent chat" \(node parent\) in the same conversation tree/);
 });
 
 test('unknown historical anchor fails explicitly without forking latest or creating a child', async () => {

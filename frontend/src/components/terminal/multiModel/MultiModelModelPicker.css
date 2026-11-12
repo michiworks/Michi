@@ -1,0 +1,85 @@
+/* The ready-models picker (MultiModelModelPicker.tsx), under a row of the
+   in-chat card (.mm-card) or of the Background work drawer's card (.mm-dpick). */
+/* The in-chat card floats it under the row; the drawer card, which clips
+   its content and sits in a scrolling drawer, keeps it in the flow. */
+.mm-card .picker {
+  position: absolute;
+  z-index: 10;
+  left: 24px;
+  right: 0;
+}
+.mm-dpick .picker {
+  position: relative;
+}
+:is(.mm-card, .mm-dpick) .picker {
+  margin-top: 4px;
+  border: 1px solid var(--term-line-s);
+  background: var(--term-surface);
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.32);
+  padding: 6px 0;
+  max-height: 300px;
+  overflow: auto;
+  cursor: auto;
+}
+:is(.mm-card, .mm-dpick) .picker .ph2 {
+  padding: 4px 12px 6px;
+  font-size: var(--fs-xs);
+  color: var(--term-muted);
+  border-bottom: 1px solid var(--term-line);
+  margin-bottom: 4px;
+}
+:is(.mm-card, .mm-dpick) .picker .pstate {
+  padding: 6px 12px;
+  font-size: var(--fs-md);
+  color: var(--term-muted);
+}
+:is(.mm-card, .mm-dpick) .picker .g {
+  padding: 6px 12px 2px;
+  font-size: var(--fs-2xs);
+  letter-spacing: var(--ls-caps);
+  text-transform: uppercase;
+  color: var(--term-faint);
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+:is(.mm-card, .mm-dpick) .picker .g.sub {
+  padding-left: 20px;
+  text-transform: none;
+  letter-spacing: 0;
+  font-size: var(--fs-xs);
+}
+:is(.mm-card, .mm-dpick) .picker .opt {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  border: 0;
+  background: transparent;
+  padding: 6px 12px;
+  text-align: left;
+  font-size: var(--fs-md);
+  color: var(--term-fg);
+  cursor: pointer;
+}
+:is(.mm-card, .mm-dpick) .picker .opt:focus-visible { background: var(--term-alt); outline: none; }
+@media (hover: hover) {
+  :is(.mm-card, .mm-dpick) .picker .opt:not(:disabled):hover { background: var(--term-alt); }
+}
+:is(.mm-card, .mm-dpick) .picker .opt .ol {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+:is(.mm-card, .mm-dpick) .picker .opt .rd {
+  margin-left: auto;
+  font-size: var(--fs-xs);
+  color: var(--term-muted);
+  flex-shrink: 0;
+}
+:is(.mm-card, .mm-dpick) .picker .opt.cur .rd { color: var(--term-digest); }
+:is(.mm-card, .mm-dpick) .picker .opt:disabled {
+  color: var(--term-faint);
+  cursor: not-allowed;
+}

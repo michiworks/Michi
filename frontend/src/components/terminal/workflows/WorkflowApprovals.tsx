@@ -1,10 +1,12 @@
 import React from 'react';
 import type { WorkflowApprovalDto, WorkflowRunDtoV1 } from 'michi-shared';
+import { workflowApprovalSource } from './workflowPresentation';
 
 /**
  * Tool approvals a workflow's steps wait on, answered in place. Mirrors the
  * chat permission card: a select-tinted rule, the request, its detail in
- * mono, and one button per option (allow first, reject quiet).
+ * mono, and one button per option (allow first, reject quiet). Without a way
+ * to answer, the request still shows, without its buttons.
  */
 
 const MONO = 'var(--font-mono)';
@@ -28,14 +30,9 @@ function ApprovalRow({ run, approval, busy, onAnswer }: {
   run: WorkflowRunDtoV1;
   approval: WorkflowApprovalDto;
   busy: boolean;
-  onAnswer: (approvalId: string, optionId: string) => void;
+  onAnswer?: (approvalId: string, optionId: string) => void;
 }) {
-  const step = approval.nodeId
-    ? run.nodes.find((node) => node.id === approval.nodeId)?.title ?? approval.nodeId
-    : approval.scope === 'session' ? 'from this chat' : undefined;
-  const stepTitle = approval.scope === 'session' && !approval.nodeId
-    ? 'The runtime does not say which agent asked. This request shows on each running workflow of the chat; answering it once answers it everywhere.'
-    : undefined;
+  const source = workflowApprovalSource(run, approval);
   return (
     <div
       role="group"
@@ -45,27 +42,29 @@ function ApprovalRow({ run, approval, busy, onAnswer }: {
     >
       <div style={{ display: 'flex', alignItems: 'baseline', gap: 8, minWidth: 0 }}>
         <span style={{ fontSize: 'var(--fs-sm)', fontWeight: 600, color: 'var(--term-fg)' }}>{approval.title}</span>
-        {step && <span title={stepTitle} style={{ fontFamily: MONO, fontSize: 'var(--fs-xs)', color: 'var(--term-muted)' }}>{step}</span>}
+        {source.label && <span title={source.title} style={{ fontFamily: MONO, fontSize: 'var(--fs-xs)', color: 'var(--term-muted)' }}>{source.label}</span>}
       </div>
       {approval.detail && (
         <pre className="term-scrollbar" style={{ margin: 0, maxHeight: 140, overflow: 'auto', fontFamily: MONO, fontSize: 'var(--fs-xs)', lineHeight: 1.5, color: 'var(--term-mid)', whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>
           {approval.detail}
         </pre>
       )}
-      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
-        {approval.options.map((option, index) => (
-          <button
-            key={option.optionId}
-            type="button"
-            disabled={busy}
-            className="t-hover-fg"
-            onClick={() => onAnswer(approval.id, option.optionId)}
-            style={{ ...optionStyle(option.kind, index === 0), opacity: busy ? 0.6 : 1 }}
-          >
-            {option.name}
-          </button>
-        ))}
-      </div>
+      {onAnswer && (
+        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+          {approval.options.map((option, index) => (
+            <button
+              key={option.optionId}
+              type="button"
+              disabled={busy}
+              className="t-hover-fg"
+              onClick={() => onAnswer(approval.id, option.optionId)}
+              style={{ ...optionStyle(option.kind, index === 0), opacity: busy ? 0.6 : 1 }}
+            >
+              {option.name}
+            </button>
+          ))}
+        </div>
+      )}
     </div>
   );
 }
@@ -76,7 +75,7 @@ export function WorkflowApprovals({ run, busy = false, onAnswer }: {
   onAnswer?: (approvalId: string, optionId: string) => void;
 }) {
   const approvals = run.approvals ?? [];
-  if (approvals.length === 0 || !onAnswer) return null;
+  if (approvals.length === 0) return null;
   return (
     <div data-testid="workflow-approvals" style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
       {approvals.map((approval) => (

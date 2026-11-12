@@ -7,8 +7,9 @@ import { createSpacesHomeMock } from '../fixtures/spacesHomeFixtures';
 import { openArea } from '../fixtures/shell';
 
 const evidence = resolve('.artifacts/native-visual');
-// The specimen renders one block per catalog type that has an example, except threads.
-const specimenBlockCount = PAGE_BLOCK_TYPES.filter((type) => PAGE_BLOCK_CATALOG[type].example && type !== 'threads').length;
+// The specimen renders one block per catalog type that has an example, except
+// the two that need the chat store (NativeBlocksSpecimen.tsx).
+const specimenBlockCount = PAGE_BLOCK_TYPES.filter((type) => PAGE_BLOCK_CATALOG[type].example && type !== 'threads' && type !== 'home-section').length;
 const diagram = '<svg xmlns="http://www.w3.org/2000/svg" width="480" height="280"><rect width="480" height="280" fill="#bbc4cc"/><circle cx="240" cy="140" r="70" fill="#687d8e"/></svg>';
 
 for (const palette of ['bone', 'monokai']) test(`all native content renders with the new visual components in ${palette}`, async ({ page }) => {
@@ -64,7 +65,6 @@ test('native block actions prefill the visible Spaces Assistant and preserve its
   await page.addInitScript(() => {
     localStorage.setItem('michi:v1:prefs', JSON.stringify({ onboardingCompletedAt: 1, terminalPalette: 'bone' }));
     localStorage.setItem('michi:migrated', '1');
-    localStorage.setItem('michi:metaChat:window:v1', JSON.stringify({ form: 'float', minimized: true, rect: null, dockRatio: 50 }));
   });
   await installMockApi(page, {
     workspaces: [
@@ -85,16 +85,13 @@ test('native block actions prefill the visible Spaces Assistant and preserve its
   await openArea(page, 'spaces');
   await page.locator('.spaces-side').getByRole('button', { name: /^Visual review/ }).click();
   await page.getByRole('button', { name: 'Draft reply', exact: true }).click();
-  const panel = page.getByRole('region', { name: 'Assistant', exact: true });
+  // A block's action opens the one panel about the block, its prompt left for review (DESIGN-v2 §1.3).
+  const panel = page.getByRole('complementary', { name: 'Michi', exact: true });
   await expect(panel).toBeVisible();
   await expect(panel.locator('.terminal-composer [contenteditable="true"]')).toHaveText('Draft a release reply for review');
   await expect(panel).toContainText('Targeting:');
   expect(sends).toEqual([]);
-  await panel.getByRole('button', { name: 'Full screen', exact: true }).click();
-  await expect(panel).toHaveAttribute('data-form', 'full');
-  await expect(panel.getByRole('button', { name: 'New conversation' })).toBeVisible();
-  await panel.getByRole('button', { name: 'Exit full screen' }).click();
-  await panel.getByRole('button', { name: 'Minimize', exact: true }).click();
+  // The panel docks beside the page: the form stays usable while it is open.
   await page.getByRole('combobox', { name: /City/ }).click();
   await page.getByRole('option', { name: 'Kyoto', exact: true }).click();
   await page.getByRole('button', { name: 'Submit', exact: true }).click();

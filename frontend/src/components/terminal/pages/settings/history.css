@@ -1,0 +1,376 @@
+/* ── Settings › Trash, Archived and Skills (HistoryList.tsx) ────────
+   Lists inside the Settings card system (Settings.css): a bar that sticks
+   while the rows scroll, titled groups as cards of rows, and an item's
+   read-only detail as a level of the page. */
+
+.settings-history__lede {
+  max-width: 68ch;
+  margin: -6px 4px 22px;
+  color: var(--term-muted);
+  font-size: var(--fs-lg);
+  line-height: 1.55;
+  text-wrap: pretty;
+}
+.settings-history__note { margin: 8px 4px 0; color: var(--term-muted); font-size: var(--fs-md); line-height: 1.5; }
+
+/* The bar: search, filters and sort, or the selection's actions. */
+.settings-history__toolbar {
+  --history-pad: 32px;
+  position: sticky;
+  top: -22px;
+  z-index: 2;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  min-height: 52px;
+  margin: 18px calc(-1 * var(--history-pad)) 0;
+  padding: 10px var(--history-pad);
+  background: var(--settings-page);
+}
+.terminal-settings--drawer .settings-history__toolbar { --history-pad: 16px; top: -18px; }
+.settings-history__search.ui-search { flex: 1 1 200px; height: 32px; background: var(--settings-card); }
+.settings-history__search input { font-size: var(--fs-lg); }
+.settings-history__filter {
+  display: inline-flex;
+  flex: none;
+  gap: 2px;
+  max-width: 100%;
+  padding: 2px;
+  overflow-x: auto;
+  border: 1px solid var(--term-line);
+  border-radius: var(--ui-radius);
+  background: var(--settings-card);
+  scrollbar-width: none;
+}
+.settings-history__filter button {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  gap: 5px;
+  height: 26px;
+  padding: 0 9px;
+  border: 0;
+  border-radius: var(--ui-radius-sm);
+  background: transparent;
+  color: var(--term-mid);
+  font: inherit;
+  font-size: var(--fs-md);
+  white-space: nowrap;
+  cursor: pointer;
+}
+.settings-history__filter button em { color: var(--term-faint); font-size: var(--fs-sm); font-style: normal; font-variant-numeric: tabular-nums; }
+.settings-history__filter button[aria-pressed='true'] { background: var(--term-alt); color: var(--term-fg); }
+.settings-history__filter button[aria-pressed='true'] em { color: var(--term-muted); }
+.settings-history__filter button:focus-visible { outline: var(--focus-ring); outline-offset: -2px; }
+.settings-history__toolbar .ui-select { width: auto; max-width: 200px; height: 30px; background-color: var(--settings-card); }
+.settings-history__select-all { display: inline-flex; align-items: center; gap: 10px; padding-left: 13px; font-size: var(--fs-lg); font-weight: 500; cursor: pointer; }
+.settings-history__spacer { flex: 1; }
+
+/* Upcoming automatic deletion. */
+.settings-history__notice {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 10px;
+  margin-top: 6px;
+  padding: 8px var(--settings-inset);
+  border: 1px solid color-mix(in srgb, var(--term-select) 35%, var(--term-line));
+  background: color-mix(in srgb, var(--term-select) 7%, var(--settings-card));
+  font-size: var(--fs-lg);
+}
+.settings-history__notice > svg { flex: none; color: var(--term-select); }
+.settings-history__notice > span { flex: 1; min-width: 12ch; }
+
+.settings-history__error {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 10px;
+  padding: 8px 8px 8px var(--settings-inset);
+  border: 1px solid color-mix(in srgb, var(--term-danger) 40%, var(--term-line));
+  background: color-mix(in srgb, var(--term-danger) 7%, var(--settings-card));
+  color: var(--term-fg);
+  font-size: var(--fs-lg);
+}
+.settings-history__error > span { flex: 1; }
+
+/* ── Groups and rows ─────────────────────────────────────────────── */
+.settings-history__group { margin-top: 18px; }
+.settings-history__group-title { display: flex; align-items: center; gap: 8px; margin: 0 4px 7px; color: var(--term-mid); font-size: var(--fs-md); font-weight: 600; }
+.settings-history__group-title em { color: var(--term-faint); font-style: normal; font-weight: 400; font-variant-numeric: tabular-nums; }
+.settings-history__badge {
+  display: inline-grid;
+  flex: none;
+  place-items: center;
+  width: 16px;
+  height: 16px;
+  border-radius: 3px;
+  background: var(--ws-accent);
+  /* White on the fixed workspace badge palette (workspaceAccent.ts), in every theme. */
+  color: #fff;
+  font-size: var(--fs-2xs);
+  font-weight: 700;
+}
+.settings-history__ws { display: inline-flex; align-items: center; gap: 6px; min-width: 0; }
+.settings-history__ws::before { content: ''; flex: none; width: 7px; height: 7px; border-radius: 2px; background: var(--ws-accent); }
+.settings-history__card { margin: 0; padding: 0; list-style: none; border: 1px solid var(--term-line); background: var(--settings-card); }
+
+.settings-history__row {
+  position: relative;
+  display: grid;
+  grid-template-columns: 28px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 12px;
+  min-height: 54px;
+  padding: 8px var(--settings-inset) 8px 12px;
+  transition: background var(--t-soft) var(--t-ease);
+}
+.settings-history__row + .settings-history__row::before { content: ''; position: absolute; top: 0; left: 52px; right: 0; border-top: 1px solid var(--term-line); }
+.settings-history__row[data-selected] { background: color-mix(in srgb, var(--term-accent) 7%, var(--settings-card)); }
+.settings-history__row:has(.settings-history__open:focus-visible) { box-shadow: inset 0 0 0 2px var(--term-accent); }
+
+/* The kind's icon, until the pointer, the keyboard or a selection asks for the checkbox. */
+.settings-history__lead { position: relative; display: grid; place-items: center; width: 28px; height: 28px; }
+.settings-history__kind { display: grid; place-items: center; width: 28px; height: 28px; border-radius: var(--ui-radius-sm); background: var(--term-alt); color: var(--term-mid); transition: opacity var(--t-soft) var(--t-ease); }
+.settings-history__lead .settings-history__check { position: absolute; opacity: 0; }
+.settings-history__row:focus-within .settings-history__check,
+[data-history-selecting] .settings-history__check { opacity: 1; }
+.settings-history__row:focus-within .settings-history__kind,
+[data-history-selecting] .settings-history__kind { opacity: 0; }
+
+.settings-history__check {
+  appearance: none;
+  position: relative;
+  flex: none;
+  width: 15px;
+  height: 15px;
+  margin: 0;
+  border: 1px solid var(--term-line-s);
+  border-radius: 3px;
+  background: var(--term-surface);
+  cursor: pointer;
+  transition: opacity var(--t-soft) var(--t-ease), background var(--t-soft) var(--t-ease), border-color var(--t-soft) var(--t-ease);
+}
+.settings-history__check:checked,
+.settings-history__check:indeterminate { border-color: var(--term-accent); background: var(--term-accent); }
+.settings-history__check:checked::after {
+  content: '';
+  position: absolute;
+  left: 4.5px;
+  top: 1.5px;
+  width: 4px;
+  height: 8px;
+  border: solid var(--term-surface);
+  border-width: 0 1.75px 1.75px 0;
+  transform: rotate(45deg);
+}
+.settings-history__check:indeterminate::after { content: ''; position: absolute; left: 3px; right: 3px; top: 6px; height: 1.75px; background: var(--term-surface); }
+.settings-history__check:focus-visible { outline: var(--focus-ring); outline-offset: 2px; }
+.settings-history__check:disabled { cursor: not-allowed; }
+
+.settings-history__open {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+/* The whole row opens the item; the checkbox and the actions sit above it. */
+.settings-history__open::after { content: ''; position: absolute; inset: 0 0 0 52px; }
+.settings-history__open:focus-visible { outline: none; }
+.settings-history__title { overflow: hidden; color: var(--term-fg); font-size: var(--fs-lg); font-weight: 500; line-height: 1.4; text-overflow: ellipsis; white-space: nowrap; }
+.settings-history__meta { display: flex; align-items: center; gap: 6px; min-width: 0; overflow: hidden; color: var(--term-muted); font-size: var(--fs-md); white-space: nowrap; }
+.settings-history__meta > * { flex: none; overflow: hidden; text-overflow: ellipsis; }
+.settings-history__meta > :last-child { flex: 0 1 auto; }
+.settings-history__dot { color: var(--term-faint); }
+
+/* The time at rest; with a mouse, the row's actions take its place on hover or focus.
+   Only the actions take clicks here: a click on the time opens the row like any other. */
+.settings-history__end { position: relative; z-index: 1; display: grid; align-items: center; justify-items: end; min-width: 96px; pointer-events: none; }
+.settings-history__end > * { grid-area: 1 / 1; }
+.settings-history__when { display: inline-flex; align-items: center; gap: 5px; color: var(--term-muted); font-size: var(--fs-md); white-space: nowrap; transition: opacity var(--t-soft) var(--t-ease); }
+.settings-history__when[data-soon] { color: var(--term-select); }
+/* Above the time: while it fades out, opacity gives it a layer of its own that would take the clicks. */
+.settings-history__actions { position: relative; z-index: 1; display: inline-flex; align-items: center; gap: 4px; pointer-events: auto; transition: opacity var(--t-soft) var(--t-ease); }
+.settings-history__more {
+  display: inline-grid;
+  place-items: center;
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  border: 0;
+  border-radius: var(--ui-radius);
+  background: transparent;
+  color: var(--term-mid);
+  cursor: pointer;
+}
+.settings-history__more:hover:not(:disabled),
+.settings-history__more[aria-expanded='true'] { background: var(--term-alt); color: var(--term-fg); }
+.settings-history__more:focus-visible { outline: var(--focus-ring); outline-offset: -2px; }
+.settings-history__more:disabled { opacity: .5; cursor: not-allowed; }
+.settings-history__row:not(:focus-within, :has([aria-expanded='true'])) .settings-history__actions { opacity: 0; pointer-events: none; }
+.settings-history__row:is(:focus-within, :has([aria-expanded='true'])) .settings-history__when { opacity: 0; }
+[data-history-selecting] .settings-history__actions { display: none; }
+[data-history-selecting] .settings-history__row .settings-history__when { opacity: 1; }
+@media (hover: hover) and (pointer: fine) {
+  .settings-history__row:hover { background: color-mix(in srgb, var(--term-alt) 55%, var(--settings-card)); }
+  .settings-history__row[data-selected]:hover { background: color-mix(in srgb, var(--term-accent) 10%, var(--settings-card)); }
+  .settings-history__row:hover .settings-history__check { opacity: 1; }
+  .settings-history__row:hover .settings-history__kind { opacity: 0; }
+  .settings-history__row:hover .settings-history__actions { opacity: 1; pointer-events: auto; }
+  .settings-history__row:hover .settings-history__when { opacity: 0; }
+  [data-history-selecting] .settings-history__row:hover .settings-history__when { opacity: 1; }
+}
+/* A touch screen in the window has no hover: the time and the actions sit side by side. */
+@media (hover: none) {
+  .terminal-settings--window .settings-history__end { display: flex; gap: 10px; }
+  .terminal-settings--window .settings-history__row .settings-history__actions { opacity: 1; pointer-events: auto; }
+  .terminal-settings--window .settings-history__row .settings-history__when { opacity: 1; }
+  .terminal-settings--window .settings-history__check { opacity: 1; }
+  .terminal-settings--window .settings-history__kind { opacity: 0; }
+}
+
+.settings-history__empty { margin-top: 18px; padding: 28px 24px 30px; border: 1px dashed var(--term-line-s); text-align: center; }
+.settings-history__empty > svg { color: var(--term-faint); }
+.settings-history__empty h3 { margin: 10px 0 4px; font-size: var(--fs-xl); font-weight: 600; }
+.settings-history__empty p { max-width: 46ch; margin: 0 auto; color: var(--term-muted); font-size: var(--fs-lg); line-height: 1.55; text-wrap: pretty; }
+.settings-history__empty .ui-btn { margin-top: 14px; }
+
+.settings-history__loading { display: grid; gap: 8px; margin-top: 18px; }
+.settings-history__loading span { height: 54px; border: 1px solid var(--term-line); background: linear-gradient(90deg, var(--settings-card), var(--term-alt), var(--settings-card)); background-size: 200% 100%; animation: settings-history-shimmer 1.2s ease-in-out infinite; }
+@keyframes settings-history-shimmer { from { background-position: 100% 0; } to { background-position: -100% 0; } }
+
+/* ── An item's detail ─────────────────────────────────────────────── */
+.settings-history__detail { animation: settings-history-in 180ms cubic-bezier(.16, 1, .3, 1); }
+@keyframes settings-history-in { from { opacity: 0; transform: translateX(12px); } }
+.settings-history__back {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  margin: -4px 0 10px;
+  padding: 2px 6px 2px 0;
+  border: 0;
+  background: transparent;
+  color: var(--term-accent);
+  font: inherit;
+  font-size: var(--fs-lg);
+  cursor: pointer;
+}
+.settings-history__back:hover { text-decoration: underline; text-underline-offset: 3px; }
+.settings-history__back:focus-visible { outline: var(--focus-ring); outline-offset: 2px; }
+.settings-history__detail-title { margin: 0 4px 4px; font-size: var(--fs-3xl); font-weight: 600; line-height: 1.35; text-wrap: balance; }
+.settings-history__detail-title:focus { outline: none; }
+/* A level whose title is the page's (pageTitle): its kind follows close under it. */
+.terminal-settings .settings-history__detail > h1.terminal-settings-heading { margin-bottom: 4px; text-wrap: balance; }
+.settings-history__detail-kind { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin: 0 4px 22px; color: var(--term-muted); font-size: var(--fs-lg); }
+.settings-history__lock { display: inline-flex; align-items: center; gap: 4px; margin-left: 4px; padding: 1px 7px; border: 1px solid var(--term-line); border-radius: 999px; font-size: var(--fs-sm); }
+.settings-history__details { margin: 0; }
+.terminal-settings[data-cards] .settings-history__details .settings-row { grid-template-columns: 150px minmax(0, 1fr); padding: 10px 0; }
+.settings-history__details dt { color: var(--term-muted); font-size: var(--fs-lg); }
+.settings-history__details dd { min-width: 0; margin: 0; font-size: var(--fs-lg); overflow-wrap: anywhere; }
+.settings-history__details dd[data-soon] { color: var(--term-select); }
+.settings-history__details code { color: var(--term-mid); font-family: var(--message-code-font); font-size: var(--fs-md); }
+.settings-history__contents { margin: 0; padding-block: 0; list-style: none; }
+.terminal-settings[data-cards] .settings-history__contents .settings-row { grid-template-columns: 16px minmax(0, 1fr) auto; gap: 10px; padding: 9px 0; font-size: var(--fs-lg); }
+.settings-history__contents svg { color: var(--term-faint); }
+.settings-history__contents small { color: var(--term-muted); font-size: var(--fs-sm); }
+.settings-history__contents button { padding: 0; border: 0; background: none; color: var(--term-accent); font: inherit; text-align: left; cursor: pointer; }
+.settings-history__transcript { padding-block: 4px; }
+.settings-history__message { padding: 12px 0; }
+.settings-history__message + .settings-history__message { border-top: 1px solid var(--term-line); }
+.settings-history__message h4 { margin: 0 0 4px; color: var(--term-muted); font-size: var(--fs-sm); font-weight: 500; letter-spacing: var(--ls-caps); text-transform: uppercase; }
+.settings-history__message p {
+  display: -webkit-box;
+  max-width: 72ch;
+  margin: 0;
+  overflow: hidden;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 4;
+  color: var(--term-mid);
+  font-family: var(--message-latin-font), var(--message-cjk-font);
+  font-size: var(--fs-xl);
+  line-height: 1.55;
+  white-space: pre-wrap;
+}
+.settings-history__message[data-role='user'] p { color: var(--term-fg); }
+.settings-history__preview-empty { margin: 12px 0; color: var(--term-muted); font-size: var(--fs-lg); }
+.settings-history__preview-error { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 12px 0; color: var(--term-danger-text); font-size: var(--fs-lg); }
+.settings-history__preview-error p { margin: 0; }
+.settings-history__transcript .settings-history__loading { margin: 12px 0; }
+.settings-history__transcript .settings-history__loading span { height: 36px; }
+.settings-history__detail-actions {
+  position: sticky;
+  bottom: -36px;
+  z-index: 2;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin: 24px -32px -36px;
+  padding: 12px 32px 16px;
+  border-top: 1px solid var(--term-line);
+  background: var(--settings-page);
+}
+.settings-history__detail-actions .ui-btn { padding: 7px 14px; font-size: var(--fs-lg); }
+.settings-history__detail-actions p { margin: 0 0 0 auto; color: var(--term-muted); font-size: var(--fs-md); }
+
+/* ── Phone ─────────────────────────────────────────────────────────
+   Finger-sized rows; a tap opens the item (or selects it with Select on),
+   and the detail's actions sit at the bottom of the screen. */
+.terminal-settings--drawer[data-stacked] .settings-history__lede { margin-top: -10px; font-size: var(--fs-md); }
+.terminal-settings--drawer[data-stacked] .settings-history__note { font-size: var(--fs-sm); }
+.terminal-settings--drawer[data-stacked] .settings-history__toolbar { position: static; margin-inline: 0; padding-inline: 0; }
+/* While selecting, the bar with the selection's actions stays in reach. */
+.terminal-settings--drawer[data-stacked] .settings-history__toolbar[data-selecting] { position: sticky; margin-inline: -16px; padding-inline: 16px; }
+.terminal-settings--drawer[data-stacked] .settings-history__search.ui-search { flex-basis: 100%; height: 40px; }
+.terminal-settings--drawer[data-stacked] .settings-history__filter { flex: 1 1 auto; }
+.terminal-settings--drawer[data-stacked] .settings-history__filter button { height: 32px; font-size: var(--fs-sm); }
+.terminal-settings--drawer[data-stacked] .settings-history__toolbar .ui-btn { min-height: 36px; font-size: var(--fs-md); }
+.terminal-settings--drawer[data-stacked] .settings-history__notice { font-size: var(--fs-sm); }
+.terminal-settings--drawer[data-stacked] .settings-history__group-title { font-size: var(--fs-sm); }
+.terminal-settings--drawer[data-stacked] .settings-history__row { grid-template-columns: 32px minmax(0, 1fr) auto; min-height: 64px; padding-block: 10px; }
+.terminal-settings--drawer[data-stacked] .settings-history__row + .settings-history__row::before { left: 56px; }
+.terminal-settings--drawer[data-stacked] .settings-history__lead,
+.terminal-settings--drawer[data-stacked] .settings-history__kind { width: 32px; height: 32px; }
+.terminal-settings--drawer[data-stacked] .settings-history__open::after { left: 0; }
+.terminal-settings--drawer[data-stacked] .settings-history__row:not([data-history-selecting] *) .settings-history__check { opacity: 0; pointer-events: none; }
+.terminal-settings--drawer[data-stacked] .settings-history__row:not([data-history-selecting] *) .settings-history__kind { opacity: 1; }
+.terminal-settings--drawer[data-stacked] .settings-history__check { width: 20px; height: 20px; border-radius: 50%; }
+.terminal-settings--drawer[data-stacked] .settings-history__check:checked::after { left: 6.5px; top: 3px; width: 5px; height: 10px; }
+.terminal-settings--drawer[data-stacked] .settings-history__title { display: -webkit-box; font-size: var(--fs-md); white-space: normal; -webkit-box-orient: vertical; -webkit-line-clamp: 2; }
+.terminal-settings--drawer[data-stacked] .settings-history__meta,
+.terminal-settings--drawer[data-stacked] .settings-history__when { font-size: var(--fs-sm); }
+.terminal-settings--drawer[data-stacked] .settings-history__end { display: flex; gap: 6px; min-width: 0; }
+.terminal-settings--drawer[data-stacked] .settings-history__chevron { color: var(--term-faint); }
+.terminal-settings--drawer[data-stacked] .settings-history__detail-title { font-size: 22px; }
+.terminal-settings--drawer[data-stacked] .settings-history__detail-kind { font-size: var(--fs-md); }
+.terminal-settings--drawer[data-stacked] .settings-history__details .settings-row { grid-template-columns: minmax(0, auto) minmax(0, 1fr); min-height: 48px; }
+.terminal-settings--drawer[data-stacked] .settings-history__details dt,
+.terminal-settings--drawer[data-stacked] .settings-history__details dd { font-size: var(--fs-md); }
+.terminal-settings--drawer[data-stacked] .settings-history__details dd { text-align: right; }
+.terminal-settings--drawer[data-stacked] .settings-history__message p { font-size: 15px; }
+.terminal-settings--drawer[data-stacked] .settings-history__detail-actions {
+  bottom: -40px;
+  margin: 24px -16px -40px;
+  padding: 10px 16px calc(14px + env(safe-area-inset-bottom));
+  background: var(--term-surface);
+}
+.terminal-settings--drawer[data-stacked] .settings-history__detail-actions .ui-btn { flex: 1; min-height: 44px; font-size: var(--fs-md); }
+.terminal-settings--drawer[data-stacked] .settings-history__detail-actions p { display: none; }
+
+/* A row that only opens keeps its icon and its status, and all of it opens the item. */
+.settings-history__row:not(:has(.settings-history__check)) .settings-history__kind { opacity: 1; }
+.settings-history__row:not(:has(.settings-history__check)) .settings-history__open::after { left: 0; }
+.settings-history__row:not(:has(.settings-history__check)) .settings-history__when { opacity: 1; }
+
+@media (prefers-reduced-motion: reduce) {
+  .settings-history__detail { animation: none; }
+  .settings-history__loading span { animation: none; }
+}

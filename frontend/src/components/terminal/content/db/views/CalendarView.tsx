@@ -1,10 +1,11 @@
-import React, { useMemo, useRef, useState } from 'react';
+import { useMemo, useRef, useState } from 'react';
 import type { MichiDatabase, MichiDbRow, DatabaseRowStatus } from 'michi-shared';
 import { ChevronLeftIcon, ChevronRightIcon } from '../../../icons';
 import { ThreadStateDot } from '../../ThreadStateDot';
 import { threadItemProps, type ThreadItemHandlers } from '../../threads/threadItem';
 import { cellEditable, cellOf, dateColumn, isThreadsDb, localDay, rowsInOrder } from '../dbModel';
-import { columnName, formatDay } from '../dbLabels';
+import { columnName } from '../dbLabels';
+import { formatDay } from '../../michiFormat';
 import { calendarMoveOps } from '../dbOps';
 import { rowTitle, useReportDrawn, } from './RowBits';
 import { spanOf } from './TimelineView';

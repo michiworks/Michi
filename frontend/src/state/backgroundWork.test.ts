@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { SUBAGENT_LIMITS, SUBAGENT_UNTRACKED_ERROR, type WorkflowRunDtoV1 } from 'michi-shared';
+import { SUBAGENT_LIMITS, SUBAGENT_UNTRACKED_ERROR, type MultiModelRunView, type WorkflowRunDtoV1 } from 'michi-shared';
 import type { ChatMessage, ChatNodeState, SubagentInfo } from './chatTypes';
 import type { LocatedWorkflowRun } from './workflowDomain';
 import {
@@ -574,6 +574,55 @@ describe('selectBackgroundWork: workflows', () => {
     expect(runIds(selectBackgroundWork(chat(messages), [old], { runKeys: new Set([key]) }).workflows)).toEqual(['old-done']);
     const unloaded = chat([], { messagesLoaded: false });
     expect(runIds(selectBackgroundWork(unloaded, [old, run({ id: 'live', status: 'running' })]).workflows)).toEqual(['live']);
+  });
+});
+
+describe('selectBackgroundWork: multi-model runs', () => {
+  const messages = [user('u1'), assistant('plan', { createdAt: 100 }), user('u2'), assistant('later', { createdAt: 200 })];
+  function plan(id: string, multiModel: Partial<MultiModelRunView>, patch: Partial<WorkflowRunDtoV1> = {}): LocatedWorkflowRun {
+    return run({
+      id, runtime: 'michi', status: 'running', startedAt: 110,
+      multiModel: {
+        version: 1, phase: 'running', title: id, askPreview: '', callerNodeId: 'n1', callerMessageId: 'plan', callerRuntimeId: 'claude',
+        callerRuntimeLabel: 'Claude Code', callerModelLabel: 'Opus 5.5', permissionMode: 'ask', reviewRounds: 0, threads: [],
+        synthesis: { status: 'pending' }, startedAt: 120, ...multiModel,
+      },
+      ...patch,
+    });
+  }
+
+  it('leaves out plans that never started, unless kept', () => {
+    // Both were proposed in the latest turn, which would list them otherwise.
+    const proposed = plan('proposed', { phase: 'proposed', startedAt: undefined, callerMessageId: 'plan-2' }, { status: 'paused' });
+    const cancelled = plan('cancelled', { phase: 'cancelled', startedAt: undefined, callerMessageId: 'plan-2' }, { status: 'cancelled' });
+    const started = plan('started', {});
+    const node = chat([...messages, user('u3'), assistant('plan-2', { createdAt: 300 })]);
+    expect(runIds(selectBackgroundWork(node, [proposed, cancelled, started]).workflows)).toEqual(['started']);
+    const keep = { runKeys: new Set([JSON.stringify(['local', 'proposed'])]) };
+    expect(runIds(selectBackgroundWork(node, [proposed, cancelled], keep).workflows)).toEqual(['proposed']);
+  });
+
+  it('places a run at its plan message and keeps it with the turn of its synthesis or latest addendum', () => {
+    const finished = (lastMessageId: string | undefined) => plan('done', { phase: 'completed', lastMessageId }, { status: 'completed' });
+    // The plan message is not the latest turn any more, and nothing runs.
+    expect(selectBackgroundWork(chat(messages), [finished(undefined)]).workflows).toEqual([]);
+    const [item] = selectBackgroundWork(chat(messages), [finished('later')]).workflows;
+    expect([item.messageId, item.active, item.latestTurn]).toEqual(['plan', false, true]);
+    // An addendum reply after that: the run follows it.
+    const addendum = [...messages, assistant('addendum', { createdAt: 300 })];
+    expect(selectBackgroundWork(chat(addendum), [finished('later')]).workflows).toEqual([]);
+    expect(runIds(selectBackgroundWork(chat(addendum), [finished('addendum')]).workflows)).toEqual(['done']);
+  });
+
+  it('flags the indicator waiting while a run asks for an approval, and counts no plan waiting for Start', () => {
+    const approval = { id: 'a', nodeId: 't1@0', title: 'Approve Bash?', options: [], requestedAt: 1 };
+    const nodes = { n1: chat(messages) };
+    expect(selectBackgroundWorkIndicator(nodes, ['n1'], 'n1', [plan('asks', {}, { approvals: [approval] })])).toEqual({
+      nodeId: 'n1', running: { subagents: 0, workflows: 1 }, total: 1, waiting: true,
+    });
+    expect(selectBackgroundWorkIndicator(nodes, ['n1'], 'n1', [plan('asks', {})])).toMatchObject({ waiting: false });
+    const proposed = plan('proposed', { phase: 'proposed', startedAt: undefined, callerMessageId: 'later' }, { status: 'paused' });
+    expect(selectBackgroundWorkIndicator(nodes, ['n1'], 'n1', [proposed])).toBeNull();
   });
 });
 

@@ -212,6 +212,9 @@ test("maintenance_list_tasks finds the routed task database's tasks, and a write
   const launch = ok(list({ query: 'LAUNCH' }));
   assert.deepEqual(launch.tasks.map((item: { task: string; goneConversationIds: string[] }) => [item.task, item.goneConversationIds]),
     [['Plan the launch', ['old-node']]], 'a deleted conversation is named, to be unlinked');
+  getDb().prepare("UPDATE nodes SET deletion_group_id='arch-1' WHERE id='old-node'").run();
+  assert.deepEqual(ok(list({ query: 'LAUNCH' })).tasks.map((item: { goneConversationIds: string[] }) => item.goneConversationIds), [[]],
+    'a branch archived from the Map is kept: unarchiving it would not bring the link back');
   assert.deepEqual(ok(list({ statuses: ['todo'] })).tasks.map((item: { task: string }) => item.task), ['Plan the launch']);
   const one = ok(list({ limit: 1 }));
   assert.deepEqual([one.tasks.length, one.more], [1, true]);
@@ -298,10 +301,10 @@ test("a task's origin says who made it and from how many conversations", () => {
   const finished = Date.now();
   assert.deepEqual(taskOrigin(databaseId, taskNamed(databaseId, 'Ship the release').id, OWNER), { by: 'agent', conversations: 1, at: 3 });
   const made = taskOrigin(databaseId, taskNamed(databaseId, 'Write the release notes').id, OWNER)!;
-  assert.deepEqual([made.by, made.conversations], ['meta-agent', 1]);
+  assert.deepEqual([made.by, made.conversations], [{ kind: 'companion', via: 'upkeep' }, 1]);
   assert.ok(made.at >= started && made.at <= finished);
 
-  // The Pages Assistant writes from the assistant's own workspace: that is the Meta agent too.
+  // A conversation in the assistant's own workspace is the user's agent too, as that conversation.
   const db = getDb();
   db.prepare("INSERT INTO workspaces(id,name,owner_user_id,settings,created_at,updated_at) VALUES ('meta','Michi assistant',?,'{\"system\":\"assistant\"}',1,1)").run(OWNER);
   db.prepare("INSERT INTO nodes(id,workspace_id,kind,status,title,created_at) VALUES ('meta-node','meta','chat','idle','Pages Assistant',1)").run();
@@ -309,7 +312,7 @@ test("a task's origin says who made it and from how many conversations", () => {
   applyAgentDbEdits({ databaseId, workspaceId: 'ws', ownerUserId: OWNER, now: 50,
     source: { kind: 'chat', nodeId: 'meta-node', turnId: 'turn-meta', assistantId: 'a-meta' },
     ops: [{ op: 'row.add', values: { task: 'Book the launch room', status: 'todo' } }] });
-  assert.deepEqual(taskOrigin(databaseId, taskNamed(databaseId, 'Book the launch room').id, OWNER), { by: 'meta-agent', conversations: 0, at: 50 });
+  assert.deepEqual(taskOrigin(databaseId, taskNamed(databaseId, 'Book the launch room').id, OWNER), { by: { kind: 'companion', via: 'conversation' }, conversations: 0, at: 50 });
 
   applyUserDatabaseEdits({ databaseId, ownerUserId: OWNER, revision: getDatabase(databaseId, OWNER).revision, now: 60,
     ops: [{ op: 'row.add', values: { task: 'Mine' } }] });

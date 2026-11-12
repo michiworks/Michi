@@ -11,10 +11,14 @@ import type { MichiMenuEntry } from '../content/page/MichiMenu';
 import { useChatActions, useChatProjects, useChatNodesSnapshot } from '../../../state/chatStore';
 import { revealPageSource } from '../../../state/pages/revealSource';
 import { useSpaceTree } from '../../../state/pages/useSpaceTree';
-import { usePage } from '../../../state/pages/usePage';
-import { dispatchPageHelperDraft } from '../../../state/pages/pageHelperDraft';
+import { usePage, type PageApplyResult } from '../../../state/pages/usePage';
 import { pageIsWithin, pageSpaceSubtree, usePageActions } from './usePageActions';
-import NativePageDocument from './NativePageDocument';
+import NativePageDocument, { companionBlockTarget, spaceBlockTitle, useCompanionTargeting } from './NativePageDocument';
+import { dispatchPageHelperDraft } from '../../../state/pages/pageHelperDraft';
+import { isCompanionActor } from 'michi-shared';
+import { useCompanionName } from '../../../state/companion/companionName';
+import { openCompanionPanel, type CompanionPanelTarget } from '../../../state/companion/companionPanel';
+import { companionActorName } from '../content/db/taskActivity';
 import NativeDatabase from './NativeDatabase';
 import { NativeTaskView } from './NativeTaskView';
 import SpaceOutline from './SpaceOutline';
@@ -23,14 +27,14 @@ import { DocumentShell } from '../content/page/DocumentShell';
 import { MichiMenu } from '../content/page/MichiMenu';
 import { MoreHorizontal, Sparkles, Settings2 } from 'lucide-react';
 import { useSpaces } from '../../../state/pages/useSpaces';
-import { homeAge } from './home/homeFormat';
+import { formatMichiAgo } from '../content/michiFormat';
 // A Space page is laid out like the workspace homes: their column, header and block styles.
 import './home/home.css';
 import { publishSpaceTopbar } from '../../../state/pages/spaceTopbar';
 import { PageChanges } from './PageChanges';
 import { PageChangeTargets } from './PageChangeTargets';
-import { blockItemTarget, useMetaChatTargeting } from './metaChat/SpacesMetaChat';
-import { useMetaChatDocked } from './metaChat/MetaChatArea';
+import { pageChangeHandlers } from './nativePageHost';
+import { pageBlockTarget } from './metaChat/blockTarget';
 import { MaintenanceStatus } from './MaintenanceStatus';
 import { readPageComponent } from '../../../services/api/pageComponents';
 import { CustomBlock } from './components/CustomBlock';
@@ -83,9 +87,15 @@ function defaultComponentProps(schema: JsonSchema | null | undefined): Record<st
   return validated;
 }
 
-/** `Space · rabbitholes · created by you`: the Space's workspace and who made it. */
-export function spaceCaption(workspaceName: string, createdBy: SpaceSummaryDto['createdBy']): string {
-  const by = createdBy === 'user' ? 'created by you' : createdBy === 'meta-agent' ? 'created by the Meta agent' : createdBy === 'agent' ? 'created by an agent' : null;
+/**
+ * `Page · rabbitholes · created by you`: the Space's workspace and who made
+ * it. The user's own agent goes by its name, its background upkeep as
+ * "<name> · Pages upkeep" (DESIGN-v2 §1.5, §2.7).
+ */
+export function spaceCaption(workspaceName: string, createdBy: SpaceSummaryDto['createdBy'], name: string): string {
+  const by = createdBy === 'user' ? 'created by you'
+    : isCompanionActor(createdBy) ? `created by ${companionActorName(createdBy, name)}`
+    : createdBy === 'agent' ? 'created by an agent' : null;
   return ['Page', workspaceName, by].filter(Boolean).join(' · ');
 }
 
@@ -102,10 +112,24 @@ export function spaceMetaLine({ pagesInside, parentTitle, conversations, updated
     pagesInside ? `${pagesInside} ${pagesInside === 1 ? 'page' : 'pages'} inside` : null,
     parentTitle ? `in ${parentTitle}` : null,
     conversations ? `${conversations} ${conversations === 1 ? 'conversation' : 'conversations'} wrote here` : null,
-    `updated ${homeAge(updatedAt, now)}`,
+    `updated ${formatMichiAgo(updatedAt, now)}`,
     state,
   ].filter(Boolean).join(' · ');
   return line.charAt(0).toUpperCase() + line.slice(1);
+}
+
+type DatabaseRowRef = { databaseId: string; rowId: string; text: string };
+
+/**
+ * A database block's target narrowed to one of its rows (the row drawer's
+ * Ask): the chip names the row, and the message carries it as `blockRow`,
+ * never together with a checklist item.
+ */
+function databaseRowTarget(target: CompanionPanelTarget, row: DatabaseRowRef): CompanionPanelTarget & { row: DatabaseRowRef } {
+  const flat = row.text.replace(/\s+/g, ' ').trim();
+  const chars = Array.from(flat);
+  const { itemIndex: _index, itemText: _text, ...rest } = target;
+  return { ...rest, title: chars.length > 60 ? `${chars.slice(0, 59).join('')}…` : flat || 'Untitled row', row: { ...row, text: flat } };
 }
 
 /** The conversations whose words are on these blocks. */
@@ -150,7 +174,7 @@ function PanelReveal({ column, children }: { column: () => Element | null; child
   );
 }
 
-export function SpaceView({ route, onBack, onOpenPage, onOpenSource, changesPanel }: {
+function SpaceView({ route, onBack, onOpenPage, onOpenSource, changesPanel }: {
   route: Extract<SpaceRoute, { type: 'space' }>;
   onBack(): void;
   onOpenPage(route: OpenNativePageRoute): void;
@@ -170,9 +194,7 @@ export function SpaceView({ route, onBack, onOpenPage, onOpenSource, changesPane
   const pageTree = React.useMemo(() => pageSpaceSubtree(pages ?? [], route.pageId), [pages, route.pageId]);
   const [actionError, setActionError] = React.useState<string | null>(null);
   const [busy, setBusy] = React.useState(false);
-  const targeting = useMetaChatTargeting();
-  // Docked beside the chat window the page has half the area: databases take their narrow form, as in the beside-chat pane.
-  const narrow = useMetaChatDocked();
+  const companionName = useCompanionName();
   // Thread cards and a conflict's versions open their conversation the way the homes' rows do.
   const { openThread } = useHomeNavigation(route.backendConnectionId, route.pageId);
   // The Spaces sidebar carries the page tree; the outline (Move, headings) opens as a panel from the page menu.
@@ -190,19 +212,10 @@ export function SpaceView({ route, onBack, onOpenPage, onOpenSource, changesPane
   });
   const { createChild, rename, move, trash } = pageActions;
 
-  const applyEdits = async (ops: PageEditOp[], revision: number): Promise<'ok' | 'stale' | 'gone' | 'failed'> => {
+  const applyEdits = async (ops: PageEditOp[], revision: number): Promise<PageApplyResult> => {
     if (!page || pageState.stale || archivedWorkspace) return 'failed';
-    if (page.revision !== revision) { pageState.refresh(); return 'stale'; }
     setBusy(true);
-    try {
-      await pageState.edit(ops);
-      return 'ok';
-    } catch (error) {
-      const status = (error as { status?: number })?.status;
-      if (status === 409) { await pageState.refresh(); return 'stale'; }
-      if (status === 404 || status === 410) return 'gone';
-      return 'failed';
-    } finally { setBusy(false); }
+    try { return await pageState.apply(ops, revision); } finally { setBusy(false); }
   };
   const insertComponent = async (component: PageComponent, version: number) => {
     if (readOnly || !page) return;
@@ -242,23 +255,28 @@ export function SpaceView({ route, onBack, onOpenPage, onOpenSource, changesPane
     workspaceId={route.workspaceId}
     connectionId={route.backendConnectionId}
     viewId={block.viewId}
-    compact={compact || narrow}
+    compact={compact}
     readOnly={blockReadOnly || readOnly}
     presentation="page"
     onNavigatePage={changePage}
     onOpenSource={openExactSource}
     onAskDraft={(text) => {
+      // A page helper's draft: the panel opens with it, about this block (DESIGN-v2 §1.3).
       dispatchPageHelperDraft({
         ...identity,
         pageId: page?.id ?? route.pageId,
         text,
-        blockContext: { blockId: block.id, title: `Database ${block.databaseId}`, content: 'Native database view' },
+        blockContext: { blockId: block.id, title: pageBlockTarget(block).title, content: 'Native database view' },
       });
     }}
+    // A row's Ask opens the panel about that row of this block, as a block's Ask does about the block.
+    onAskRow={targeting.onAskAssistant && page ? (row) => openCompanionPanel({
+      target: databaseRowTarget(companionBlockTarget(page, block.id, spaceBlockTitle(block)), { databaseId: block.databaseId, rowId: row.id, text: row.title }),
+      focusComposer: true,
+    }) : undefined}
     />
     <PageChangeTargets quiet changes={changes} target={{ kind: 'database', databaseId: block.databaseId }}
-      onAccept={(change, edited) => pageState.accept(change.id, edited)} onDismiss={onChange(pageState.dismiss)} onReopen={onChange(pageState.reopen)}
-      onRevert={onChange(pageState.revert)} onRedo={onChange(pageState.redo)} onOpenSource={openChangeSource} loading={readOnly} error={pageState.error} />
+      {...changeHandlers} onOpenSource={openChangeSource} loading={readOnly} error={pageState.error} />
   </>;
   // A task board needs the workspace's task database: made first, the first time.
   const { backendConnectionId, workspaceId } = route;
@@ -305,32 +323,14 @@ export function SpaceView({ route, onBack, onOpenPage, onOpenSource, changesPane
       })();
     },
   }, taskBoardEntry((block) => pageState.edit([{ op: 'insert', block, after: afterId || null }]))], [identity, pageState, readOnly, route.workspaceId, taskBoardEntry]);
-  const blockTarget = (block: PageBlock) => {
-    const title = block.type === 'heading' ? block.text : block.type === 'callout' ? block.title || 'Callout' : block.type === 'checklist' ? block.title || 'Checklist' : block.type === 'database-ref' ? 'Database' : block.type === 'page-link' ? 'Linked page' : 'Page section';
-    const content = block.type === 'heading' || block.type === 'markdown' || block.type === 'callout' ? block.text : block.type === 'checklist' ? block.items.map((item) => `${item.done ? '[x]' : '[ ]'} ${item.text}`).join('\n') : '';
-    return { ...identity, pageId: route.pageId, blockId: block.id, title, content };
-  };
-  const askAssistant = (block: PageBlock, item?: { index: number; text: string }) => targeting?.askAbout(item ? blockItemTarget(blockTarget(block), item) : blockTarget(block));
-  const selectBlock = (selection: { blockId: string } | null) => {
-    const block = selection ? page?.blocks.find((candidate) => candidate.id === selection.blockId) : undefined;
-    targeting?.setTarget(block ? blockTarget(block) : null);
-  };
-  const targetIds = targeting?.target && targeting.target.pageId === route.pageId ? [targeting.target.blockId] : [];
+  // Blocks are the panel's targets: Ask <name>, and a click while the panel is open (DESIGN-v2 §1.3).
+  const targeting = useCompanionTargeting(page, spaceBlockTitle, readOnly);
   const openExactSource = (source: { kind: 'chat' | 'helper'; nodeId: string; turnId: string; assistantId: string }) => {
-    // Provenance records how the source was created. Its current page binding
-    // decides whether it still lives in an embedded helper or was promoted.
-    const sourceNode = nodes[source.nodeId];
-    const sourcePageId = sourceNode
-      ? sourceNode.projectId === route.workspaceId ? sourceNode.pageId ?? null : null
-      : (pages ?? []).find((candidate) => candidate.helperNodeId === source.nodeId)?.id ?? null;
-    const current = { ...source, kind: sourcePageId ? 'helper' as const : 'chat' as const };
-    if (onOpenSource) return Promise.resolve(onOpenSource(current)).then((result) => result !== false);
-    return revealPageSource(identity, current, revealBackendNode);
+    if (onOpenSource) return Promise.resolve(onOpenSource(source)).then((result) => result !== false);
+    return revealPageSource(identity, source, revealBackendNode);
   };
   const openChangeSource = (source: { kind: 'chat' | 'helper'; nodeId: string; turnId: string; assistantId: string }) => openExactSource(source);
-  // The promise goes back to the card: an answered suggestion takes its buttons back if the answer did not take.
-  const onChange = (action: (changeId: string) => Promise<unknown> | void) => (change: PageChangeDto): Promise<void> =>
-    Promise.resolve(action(change.id)).then(() => undefined);
+  const changeHandlers = pageChangeHandlers(pageState);
   const renderComponent = React.useCallback((block: PageBlock) => block.type === 'component' && page ? (
     <CustomBlock
       block={block}
@@ -345,7 +345,7 @@ export function SpaceView({ route, onBack, onOpenPage, onOpenSource, changesPane
           ...identity,
           pageId: page.id,
           text,
-          blockContext: { blockId: block.id, title: `Component ${block.componentId}`, content: 'Custom page component' },
+          blockContext: { blockId: block.id, title: pageBlockTarget(block).title, content: 'Custom page component' },
         });
       }}
     />
@@ -361,7 +361,7 @@ export function SpaceView({ route, onBack, onOpenPage, onOpenSource, changesPane
       connectionId={route.backendConnectionId}
       viewId={block.viewId}
       title={block.title}
-      compact={compact || narrow}
+      compact={compact}
       readOnly={blockReadOnly || readOnly}
       onOpenThread={(item) => { void openThread({ nodeId: item.nodeId, workspaceId: item.workspaceId, messageId: item.messageId }); }}
       onNavigatePage={changePage}
@@ -421,7 +421,7 @@ export function SpaceView({ route, onBack, onOpenPage, onOpenSource, changesPane
 
   const isRoot = page.id === rootId;
   const summary = isRoot ? spaces?.find((space) => space.id === page.id) ?? null : null;
-  const caption = isRoot ? spaceCaption(workspaceName, summary?.createdBy) : `Page · ${root?.title ?? workspaceName}`;
+  const caption = isRoot ? spaceCaption(workspaceName, summary?.createdBy, companionName) : `Page · ${root?.title ?? workspaceName}`;
   const meta = spaceMetaLine({
     pagesInside: isRoot ? Math.max(0, pageTree.length - 1) : null,
     parentTitle: isRoot ? null : root?.title ?? null,
@@ -505,9 +505,9 @@ export function SpaceView({ route, onBack, onOpenPage, onOpenSource, changesPane
       if (result !== 'ok') throw new Error('Could not add this component. Refresh the page and try again.');
       setPanel(null);
     }} onInsert={(component, version) => insertComponent(component, version)} onOpenSource={openExactSource} /></section></PanelReveal>}
-    {panel === 'activity' && <PanelReveal column={pageColumn} key="activity"><section className="space-panel" aria-label="Activity">{panelHeader('Activity')}<PageChanges changes={changes} onAccept={(change, edited) => pageState.accept(change.id, edited)} onDismiss={onChange(pageState.dismiss)} onReopen={onChange(pageState.reopen)} onRevert={onChange(pageState.revert)} onRedo={onChange(pageState.redo)} onRevertBatch={(batchId) => pageState.revertBatch(batchId)} onOpenSource={openChangeSource} loading={readOnly} error={pageState.error} hasMore={pageState.hasMoreChanges} onLoadMore={pageState.loadMoreChanges} /></section></PanelReveal>}
+    {panel === 'activity' && <PanelReveal column={pageColumn} key="activity"><section className="space-panel" aria-label="Activity">{panelHeader('Activity')}<PageChanges changes={changes} {...changeHandlers} onRevertBatch={(batchId) => pageState.revertBatch(batchId)} onOpenSource={openChangeSource} loading={readOnly} error={pageState.error} hasMore={pageState.hasMoreChanges} onLoadMore={pageState.loadMoreChanges} /></section></PanelReveal>}
     </AnimatePresence>
-    <NativePageDocument page={page} onEdit={applyEdits} onOpenPage={changePage} onOpenSource={(source) => openExactSource({ kind: 'chat', ...source })} sourceLabel={(source) => sourceLabel({ kind: 'chat', ...source })} onAskAssistant={readOnly || !targeting ? undefined : askAssistant} onSelectionChange={readOnly || !targeting ? undefined : selectBlock} selectedBlockIds={targetIds} selectOnClick={!!targeting} renderDatabaseRef={renderDatabaseRef} renderComponent={renderComponent} renderThreads={renderThreads} renderTaskView={renderTaskView} onOpenConversation={openConversation} onStartConversation={readOnly ? undefined : startConversation} renderDecorations={(block) => page ? <><PageChangeTargets quiet changes={changes} target={{ kind: 'block', pageId: page.id, blockId: block.id }} sourceLabel={sourceLabel} onAccept={(change, edited) => pageState.accept(change.id, edited)} onDismiss={onChange(pageState.dismiss)} onReopen={onChange(pageState.reopen)} onRevert={onChange(pageState.revert)} onRedo={onChange(pageState.redo)} onOpenSource={openChangeSource} loading={readOnly} error={pageState.error} /></> : null} addEntries={addEntries} slotAddEntries={slotAddEntries} readOnly={readOnly} />
+    <NativePageDocument page={page} onEdit={applyEdits} onOpenPage={changePage} onOpenSource={(source) => openExactSource({ kind: 'chat', ...source })} sourceLabel={(source) => sourceLabel({ kind: 'chat', ...source })} onAskAssistant={targeting.onAskAssistant} onSelectionChange={targeting.onSelectionChange} selectedBlockIds={targeting.selectedBlockIds} selectOnClick={targeting.selectOnClick} renderDatabaseRef={renderDatabaseRef} renderComponent={renderComponent} renderThreads={renderThreads} renderTaskView={renderTaskView} onOpenConversation={openConversation} onStartConversation={readOnly ? undefined : startConversation} renderDecorations={(block) => page ? <><PageChangeTargets quiet changes={changes} target={{ kind: 'block', pageId: page.id, blockId: block.id }} sourceLabel={sourceLabel} {...changeHandlers} onOpenSource={openChangeSource} loading={readOnly} error={pageState.error} /></> : null} addEntries={addEntries} slotAddEntries={slotAddEntries} readOnly={readOnly} />
   </DocumentShell>;
 }
 

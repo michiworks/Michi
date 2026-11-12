@@ -16,8 +16,8 @@
   {
     "id": "concepts-and-context",
     "title": "Understand workspaces, branches and context",
-    "summary": "Mental model, inheritance, @ references, instructions, summaries, Artifacts and Memory.",
-    "keywords": "context branch inherit fork tree pane overview weave digest memory instructions @ 忘了 失忆 上下文 继承 分支 工作区 摘要 引用 没读 历史 记忆",
+    "summary": "Mental model, inheritance, @ references, instructions, summaries, Artifacts, Michi Memory and Crew Memory.",
+    "keywords": "context branch inherit fork tree pane overview weave digest memory remember memory_search memory_save instructions @ 忘了 失忆 上下文 继承 分支 工作区 摘要 引用 没读 历史 记忆",
     "source": "docs/concepts-and-context.md"
   },
   {
@@ -30,29 +30,36 @@
   {
     "id": "runtimes",
     "title": "Choose and configure a runtime",
-    "summary": "Kiro CLI, Crew, Pi, Claude and Codex prerequisites, authentication and model selection.",
-    "keywords": "runtime model provider credentials authentication login kiro crew pi claude codex 运行时 模型 配置 认证 登录",
+    "summary": "Kiro CLI, Crew, Pi, Claude, Codex and opt-in Antigravity prerequisites, authentication and model selection.",
+    "keywords": "runtime model provider credentials authentication login kiro crew pi claude codex antigravity agy 运行时 模型 配置 认证 登录",
     "source": "docs/runtimes.md"
   },
   {
     "id": "runtime-capabilities",
     "title": "Runtime capabilities in Michi",
     "summary": "Integration comparison: images, steer, queue, fork, resume, compaction, tools and native limits.",
-    "keywords": "capability comparison matrix native support feature steer compact image memory 功能对比 能力 支持 区别 对照表 原生 图片 压缩",
+    "keywords": "capability comparison matrix native support feature steer compact image memory antigravity 功能对比 能力 支持 区别 对照表 原生 图片 压缩",
     "source": "docs/runtime-capabilities.md"
+  },
+  {
+    "id": "skills",
+    "title": "Skills: the Michi skill library and runtime skills",
+    "summary": "SKILL.md format, library location, how each runtime gets library skills, read-only runtime skills, / invocation, Settings › Skills and cloud mode.",
+    "keywords": "skill skills SKILL.md agent skills library slash command menu michi_skills plugin mount settings argument-hint user-invocable disable-model-invocation skills-state.json 技能 技能库 斜杠 命令 设置",
+    "source": "docs/skills.md"
   },
   {
     "id": "pages-and-components",
     "title": "Pages, databases and native components",
-    "summary": "Pages navigation, Assistant, native blocks/databases, tasks and task boards, responsive grid, per-item Sources, layout preferences, write receipts and the component sandbox contract.",
-    "keywords": "pages page spaces database component custom view sandbox props data call onMichiComponentUpdate list_pages read_page edit_page create_page create_database configure_database read_database edit_database list_page_components read_page_component save_page_component configure_database_view open_task_database list_tasks task tasks task-view board needsYou 页面 数据库 组件 沙箱 视图 任务 任务库 看板 待办 grid segmentSources sources layout preferences assistant full screen ignore archive responsive 布局 偏好 来源 网格 全屏 all-tasks upkeep suggestion 全部任务",
+    "summary": "Pages navigation, Assistant, native blocks/databases, tasks and task boards, responsive grid, per-item Sources, layout preferences, write receipts, the component sandbox contract and chat Home customization (read_home/edit_home).",
+    "keywords": "pages page spaces database component custom view sandbox props data call onMichiComponentUpdate list_pages read_page edit_page create_page create_database configure_database read_database edit_database list_page_components read_page_component save_page_component configure_database_view open_task_database list_tasks task tasks task-view board needsYou 页面 数据库 组件 沙箱 视图 任务 任务库 看板 待办 grid segmentSources sources layout preferences assistant full screen ignore archive responsive 布局 偏好 来源 网格 全屏 all-tasks upkeep suggestion 全部任务 read_home edit_home home-section greeting cards contentMode 首页",
     "source": "docs/pages-and-components.md"
   },
   {
     "id": "pages-maintenance",
-    "title": "Pages automatic updates and the Meta agent",
-    "summary": "Local Meta agent configuration, initial Home generation, conversation maintenance, workspace instructions, watches, catch-up, evidence, protected proposals and durable progress.",
-    "keywords": "pages maintenance meta agent automatic updates first run home conversation completion cursor catch-up reconsider paused runtime kiro claude pi codex crew 后台 自动更新 页面维护 初次生成 补读 追赶 maintenance_list_tasks task database tasks 任务库 watch watches monitor tickets interval workspace instructions 监控 定时检查 工单 工作区指令",
+    "title": "Pages automatic updates and Pages upkeep",
+    "summary": "Local Pages upkeep configuration, initial Home generation, conversation maintenance, workspace instructions, watches, catch-up, evidence, protected proposals and durable progress.",
+    "keywords": "pages maintenance pages upkeep meta agent automatic updates first run home conversation completion cursor catch-up reconsider paused runtime kiro claude pi codex crew antigravity 后台 自动更新 页面维护 初次生成 补读 追赶 maintenance_list_tasks task database tasks 任务库 watch watches monitor tickets interval workspace instructions 监控 定时检查 工单 工作区指令",
     "source": "docs/pages-maintenance.md"
   },
   {
@@ -80,7 +87,7 @@
     "id": "sessions-and-recovery",
     "title": "Task states, queued messages and session recovery",
     "summary": "Busy input, Stop, close/reload/quit, reconnect, native resume/fork and edit/resend.",
-    "keywords": "session queue steer stop cancel reconnect resume fork turn_active 410 409 会话 排队 同轮 停止 中断 重连 恢复 关窗口 关闭窗口 重发 忙碌",
+    "keywords": "session queue steer stop cancel reconnect resume fork turn_active 410 409 interrupted credentials auth expired 会话 排队 同轮 停止 中断 重连 恢复 关窗口 关闭窗口 重发 忙碌 被打断 凭证过期",
     "source": "docs/sessions-and-recovery.md"
   },
   {
@@ -100,22 +107,22 @@
   {
     "id": "configuration",
     "title": "Configure Michi, credentials and updates",
-    "summary": "Installation paths, environment precedence, settings timing, CLI PATH, credentials and updates.",
-    "keywords": "configuration config settings env PATH CLI credential auth update sync precedence web search jina tavily fetch_content 配置 设置 环境变量 找不到CLI 终端能用 桌面不能用 生效 优先级 更新 联网搜索",
+    "summary": "Installation paths, environment precedence, settings timing, CLI PATH, credentials, Pi web search, updates and the macOS background service.",
+    "keywords": "configuration config settings env PATH CLI credential auth update sync precedence web search jina tavily fetch_content background service launchd LaunchAgent 后台运行 配置 设置 环境变量 找不到CLI 终端能用 桌面不能用 生效 优先级 更新 联网搜索",
     "source": "docs/configuration.md"
   },
   {
     "id": "performance-and-usage",
     "title": "Response time, context and usage",
     "summary": "Latency diagnosis, reasoning/context/template tradeoffs, compaction and tokens versus billing.",
-    "keywords": "performance latency slow thinking reasoning token cost billing credits usage system prompt cache 性能 慢 一直思考 思考太久 上下文 账单 费用 额度 用量",
+    "keywords": "performance latency slow thinking reasoning token cost billing credits usage system prompt cache compact /compact compaction 性能 慢 一直思考 思考太久 上下文 账单 费用 额度 用量",
     "source": "docs/performance-and-usage.md"
   },
   {
     "id": "privacy-and-data",
     "title": "Where data goes and how access works",
-    "summary": "Storage locations, provider/MCP recipients, local/remote auth, telemetry, logs and deletion scope.",
-    "keywords": "privacy security data storage telemetry reporting secrets retention 隐私 安全 数据存哪 上传什么 上报 凭据 数据删除",
+    "summary": "Storage locations, provider/MCP recipients, Michi Memory, local/remote auth, telemetry, logs and deletion scope.",
+    "keywords": "privacy security data storage telemetry reporting memory auth secrets retention 记忆 隐私 安全 数据存哪 上传什么 上报 凭据 数据删除",
     "source": "docs/privacy-and-data.md"
   },
   {
@@ -142,8 +149,15 @@
   {
     "id": "remote-backend",
     "title": "Connect a remote backend",
-    "summary": "Remote server setup, SSH tunnels, connection tokens and lifecycle.",
-    "keywords": "remote backend ssh tunnel connection token 远程 后端 连接 隧道 断线",
+    "summary": "Remote server setup, connecting by host/SSH tunnel/URL, connection tokens, updating a connected machine, remote runtimes and folders, sign-in recovery, lifecycle and network security.",
+    "keywords": "remote backend ssh tunnel connection token host update folders recovery security 远程 后端 连接 隧道 断线",
     "source": "../../docs/remote-backend.md"
+  },
+  {
+    "id": "mobile-access",
+    "title": "Phone access",
+    "summary": "Opening Michi on a phone through Tailscale, updating from the phone, phone panes and security boundaries.",
+    "keywords": "phone mobile iphone ios android tailscale tunnel qr self-update 手机 移动端 隧道 扫码",
+    "source": "../../docs/mobile-access.md"
   }
 ]

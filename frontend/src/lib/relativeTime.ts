@@ -4,7 +4,7 @@
  */
 export function relativeTime(updatedAt: number, now: number = Date.now()): string {
   const deltaMs = now - updatedAt;
-  if (deltaMs < 30_000) return 'now';
+  if (deltaMs < 60_000) return 'now';
   const min = Math.floor(deltaMs / 60_000);
   if (min < 60) return `${min}m`;
   const hr = Math.floor(deltaMs / (60 * 60_000));

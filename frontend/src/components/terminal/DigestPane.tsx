@@ -1,24 +1,17 @@
 import React, { useMemo } from 'react';
 import { useChatStore, useChatNode, useChatNodesSnapshot } from '../../state/chatStore';
 import { usePaneShellStyle } from '../../hooks/usePaneShellStyle';
-import { parseDigestStructure, staleSources } from '../../state/digest';
+import { useDigestEnabled } from '../../state/prefs';
+import { parseDigestStructure, staleSources, visibleDigestMarkdown } from '../../state/digest';
+import { requestDigestFocus } from '../../state/digestFocus';
 import MarkdownContent from '../MarkdownContent';
 import DigestGenerationStatus from './DigestGenerationStatus';
 import { Tag } from './primitives';
+import { navPageEvent } from '../../state/appEvents';
+import { formatDigestAge } from './content/michiFormat';
 
 const DIGEST_PROSE =
   'prose prose-sm max-w-none wrap-break-word [&>*:first-child]:mt-0 [&>*:last-child]:mb-0 [&_h1]:text-(--term-fg) [&_h2]:text-(--term-fg) [&_h3]:text-(--term-fg) [&_h4]:text-(--term-fg) [&_p]:text-(--term-mid) [&_li]:text-(--term-mid) [&_strong]:text-(--term-fg) [&_a]:text-(--term-accent)';
-
-function formatRelative(ts: number): string {
-  if (!ts) return '—';
-  const diff = Math.max(0, Date.now() - ts);
-  const m = Math.floor(diff / 60000);
-  if (m < 1) return 'just now';
-  if (m < 60) return `${m}m ago`;
-  const h = Math.floor(m / 60);
-  if (h < 24) return `${h}h ago`;
-  return `${Math.floor(h / 24)}d ago`;
-}
 
 export default function DigestPane({
   nodeId,
@@ -27,12 +20,17 @@ export default function DigestPane({
   nodeId: string;
   contentMaxWidth?: number | null;
 }) {
-  const { focusedPane, focusPane, setFocusedNodeId, refreshDigest, createChildChat } = useChatStore();
+  const { focusPane, refreshDigest, createChildChat } = useChatStore();
   const n = useChatNode(nodeId);
   const nodesSnapshot = useChatNodesSnapshot();
   const paneShellStyle = usePaneShellStyle(nodeId);
+  const digestEnabled = useDigestEnabled();
 
-  const content = n?.digest?.content;
+  const savedContent = n?.digest?.content;
+  const content = useMemo(
+    () => (savedContent !== undefined ? visibleDigestMarkdown(savedContent) : undefined),
+    [savedContent],
+  );
   const parsed = useMemo(
     () => (content !== undefined ? parseDigestStructure(content) : null),
     [content],
@@ -70,12 +68,8 @@ export default function DigestPane({
       : { width: '100%' };
 
   const openFullDetail = () => {
-    window.dispatchEvent(
-      new CustomEvent('michi:focus-digest', { detail: { nodeId } }),
-    );
-    window.dispatchEvent(
-      new CustomEvent('michi:nav-page', { detail: { page: 'digest' } }),
-    );
+    requestDigestFocus(nodeId);
+    navPageEvent.dispatch({ page: 'digest' });
   };
 
   return (
@@ -83,10 +77,7 @@ export default function DigestPane({
       data-node-id={nodeId}
       data-pane-kind="digest"
       className="terminal-pane"
-      onMouseDown={() => {
-        focusPane(nodeId);
-        setFocusedNodeId(nodeId);
-      }}
+      onMouseDown={() => focusPane(nodeId)}
       style={{
         ...paneShellStyle,
         borderLeft: '3px solid var(--term-digest)',
@@ -133,8 +124,11 @@ export default function DigestPane({
         </span>
         {stale.length > 0 && <Tag color="var(--term-select)">{stale.length} stale</Tag>}
         <span style={{ color: 'var(--term-muted)', fontSize: 'var(--fs-xs)' }}>
-          {d.status === 'streaming' ? 'streaming…' : formatRelative(d.generatedAt)}
+          {d.status === 'streaming' ? 'streaming…' : formatDigestAge(d.generatedAt)}
         </span>
+        {/* Settings › Digest off: an already-open digest stays readable, without
+            rebuild or the Digest page it would open. */}
+        {digestEnabled && <>
         <button
           type="button"
           onClick={(e) => {
@@ -176,6 +170,7 @@ export default function DigestPane({
         >
           ↗ detail
         </button>
+        </>}
       </div>
 
       <div
@@ -269,8 +264,8 @@ export default function DigestPane({
             </>
           ) : !parsed?.tldr && !parsed?.openThreads.length ? (
             <div style={{ color: 'var(--term-mid)' }}>
-              {d.content ? (
-                <MarkdownContent text={d.content} className={DIGEST_PROSE} />
+              {content ? (
+                <MarkdownContent text={content} className={DIGEST_PROSE} />
               ) : d.status === 'idle' ? (
                 <span style={{ color: 'var(--term-muted)' }}>— digest is empty —</span>
               ) : null}

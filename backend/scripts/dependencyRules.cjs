@@ -8,12 +8,15 @@
 //   edges.txt   <rule>\t<from>\t<to>
 //
 // CLI (from the repository root):
-//   node backend/scripts/dependencyRules.cjs           check; exit 1 on new edges
-//   node backend/scripts/dependencyRules.cjs --write   rewrite the baseline
+//   node backend/scripts/dependencyRules.cjs                         check; exit 1 on new or stale edges
+//   node backend/scripts/dependencyRules.cjs --prune                 drop edges that no longer occur; never adds
+//   node backend/scripts/dependencyRules.cjs --accept-new "<reason>" add the current new edges; put the reason in the commit body
+//   node backend/scripts/dependencyRules.cjs --write                 deprecated alias of --prune
 
 const fs = require('node:fs');
 const path = require('node:path');
 const boundary = require('./runtimeBoundary.cjs');
+const ratchet = require('../../scripts/lib/ratchet-args.cjs');
 
 const REPO_ROOT = path.resolve(__dirname, '..', '..');
 const FIXTURE_FILE = path.join(REPO_ROOT, 'backend', 'test', 'fixtures', 'dependencyRules', 'edges.txt');
@@ -47,6 +50,7 @@ const RULES = [
 ];
 
 const DESCRIBE = '<rule>\\t<from>\\t<to>: an import that breaks a layering rule';
+const COMMAND = 'node backend/scripts/dependencyRules.cjs';
 
 function resolveTarget(source, root, file, specifier) {
   const target = boundary.resolveRepoModule(source, root, file, specifier);
@@ -115,9 +119,9 @@ function writeFixture(current, file = FIXTURE_FILE) {
   const header = [
     '# Layer dependency baseline (backend/scripts/dependencyRules.cjs).',
     `# ${DESCRIBE}`,
-    '# One entry per line, byte-sorted; # lines are comments. New entries fail',
-    '# npm run check:deps and backend/test/dependencyRules.test.ts. Remove entries as edges go away.',
-    '# Regenerate with: node backend/scripts/dependencyRules.cjs --write',
+    '# One entry per line, byte-sorted; # lines are comments. New entries and entries',
+    '# that no longer occur fail npm run check:deps and backend/test/dependencyRules.test.ts.',
+    `# Drop stale entries with: ${COMMAND} --prune`,
   ];
   fs.mkdirSync(path.dirname(file), { recursive: true });
   fs.writeFileSync(file, `${[...header, ...current].join('\n')}\n`);
@@ -127,29 +131,44 @@ function formatAdded(added) {
   const reasons = RULES.filter((rule) => added.some((line) => line.startsWith(`${rule.id}\t`)))
     .map((rule) => `  ${rule.id}: ${rule.reason}`);
   return [`New layer dependency edges:\n${added.join('\n')}`, `Rules:\n${reasons.join('\n')}`,
-    'Move the code to the right layer or inject the dependency. If an edge is unavoidable, add it to\n'
-    + 'backend/test/fixtures/dependencyRules/edges.txt and give the reason in the commit message.'].join('\n\n');
+    'Move the code to the right layer or inject the dependency. If an edge is unavoidable, run\n'
+    + `${COMMAND} --accept-new "<reason>" and put the reason in the commit body.`].join('\n\n');
 }
 
-function main(argv) {
+/**
+ * @param {string[]} argv
+ * @param {{ repoRoot?: string, fixtureFile?: string, log?: Function, error?: Function }} [io]
+ *   Tests pass a temporary repository and baseline.
+ */
+function main(argv, io = {}) {
+  const { repoRoot = REPO_ROOT, fixtureFile = FIXTURE_FILE, log = console.log, error = console.error } = io;
+  const args = ratchet.parseRatchetArgs(argv);
+  if (args.error || args.rest.length) {
+    error(`${args.error ?? `Unknown argument: ${args.rest[0]}`}\nUsage: ${COMMAND} ${ratchet.RATCHET_FLAGS}`);
+    return 2;
+  }
+  if (args.deprecatedWrite) error(ratchet.writeDeprecation(COMMAND));
+
   const started = Date.now();
-  const current = scan(REPO_ROOT);
-  if (argv.includes('--write')) {
-    writeFixture(current);
-    console.log(`Wrote ${path.relative(REPO_ROOT, FIXTURE_FILE)}: ${counts(current)}`);
-    return 0;
-  }
-  const { added, stale } = compare(current, loadFixture());
-  console.log(`layer dependencies: ${counts(current)} (${Date.now() - started}ms)`);
-  if (stale.length) console.log(`\nStale baseline entries (no longer present; run with --write to drop them):\n${stale.join('\n')}`);
-  if (added.length) {
-    console.error(`\n${formatAdded(added)}`);
-    return 1;
-  }
-  return 0;
+  const current = scan(repoRoot);
+  const fixture = loadFixture(fixtureFile);
+  const before = compare(current, fixture);
+  let next = fixture;
+  if (args.prune) next = next.filter((line) => current.includes(line));
+  if (args.acceptNew) next = boundary.sortedUnique([...next, ...before.added]);
+  if (next.join('\n') !== fixture.join('\n')) writeFixture(next, fixtureFile);
+  const label = path.relative(repoRoot, fixtureFile);
+  if (args.prune) log(`Pruned ${before.stale.length} stale edge${before.stale.length === 1 ? '' : 's'} from ${label}`);
+  if (args.acceptNew) log(ratchet.formatAccepted(label, args.acceptNew, before.added));
+
+  const { added, stale } = compare(current, next);
+  log(`layer dependencies: ${counts(current)} (${Date.now() - started}ms)`);
+  if (stale.length) error(`\nStale baseline edges (no longer present):\n${stale.join('\n')}\n\n${ratchet.pruneHint(COMMAND)}`);
+  if (added.length) error(`\n${formatAdded(added)}`);
+  return added.length || stale.length ? 1 : 0;
 }
 
-module.exports = { RULES, scan, loadFixture, compare, writeFixture };
+module.exports = { RULES, scan, loadFixture, compare, writeFixture, main };
 
 if (require.main === module) {
   process.exitCode = main(process.argv.slice(2));

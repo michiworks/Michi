@@ -41,16 +41,16 @@ test('session-end is wired on BrowserWindow and never on App', () => {
 test('hidden login start still creates a BrowserWindow so shutdown events have a target', () => {
   assert.equal(/onAppReady\(\s*\{\s*launchedHidden/.test(main), true);
   assert.equal(/hidden:\s*ready\.startHidden/.test(main), true);
-  assert.equal(/await createWindow\(backendPort, healthPromise, undefined, \{ hidden: ready\.startHidden \}\)/.test(main), true);
+  assert.equal(/createWindow\(undefined, undefined, \{ hidden: ready\.startHidden \}\)/.test(main), true);
 });
 
 test('non-Windows second-instance keeps the original create-window path', () => {
   const start = main.indexOf("app.on('second-instance'");
   assert.notEqual(start, -1);
   const block = main.slice(start, start + 650);
-  assert.equal(/process\.platform !== ['"]win32['"]/.test(block), true);
+  assert.equal(/process\.platform === ['"]win32['"]/.test(block), true);
   assert.equal(block.includes('BACKGROUND_LAUNCH_ARG'), true);
-  assert.equal(block.includes('createWindow(resolvedBackendPort)'), true);
+  assert.equal(block.includes('createWindow()'), true);
   assert.equal(block.includes('handleSecondInstance'), true);
 });
 

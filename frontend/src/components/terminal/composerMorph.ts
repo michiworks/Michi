@@ -63,7 +63,7 @@ function settledLook(root: HTMLElement): Look {
 
 export function composerMotionAllowed(): boolean {
   if (typeof Element === 'undefined' || typeof Element.prototype.animate !== 'function') return false;
-  return !prefersReducedMotion(document.documentElement.dataset.reduceMotion === 'on');
+  return !prefersReducedMotion();
 }
 
 /** The --t-enter duration and --t-ease curve, read from the theme. */
@@ -78,7 +78,8 @@ function timing(): { duration: number; easing: string } {
 /**
  * Animate from `prev` to `next`, both taken after a commit. Returns a
  * function that ends the animation at once and removes what it added;
- * `onDone` runs once either way.
+ * `onDone` runs once either way. `override` replaces the theme's timing
+ * (milliseconds and a CSS easing), for a rest that rides the keyboard.
  */
 export function morphComposer(
   root: HTMLElement,
@@ -86,8 +87,9 @@ export function morphComposer(
   prev: ComposerSnapshot,
   next: ComposerSnapshot,
   onDone: () => void,
+  override?: { duration: number; easing: string },
 ): () => void {
-  const { duration, easing } = timing();
+  const { duration, easing } = override ?? timing();
   const animations: Animation[] = [];
   const ghosts: HTMLElement[] = [];
   const play = (el: Element, keyframes: Keyframe[], options: KeyframeAnimationOptions) => {

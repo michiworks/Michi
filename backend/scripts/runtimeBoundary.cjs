@@ -13,19 +13,27 @@
 // Each file is parsed on its own with ts.createSourceFile (no Program, no type
 // checking), so a full scan stays well under a few seconds.
 //
+// Baselines only shrink. New entries fail the CLI check, backend/test/runtimeBoundary.test.ts
+// and the backend build; entries that no longer occur fail the CLI check and the test but never
+// the build, which every push-triggered remote install runs.
+//
 // CLI (from the repository root):
-//   node backend/scripts/runtimeBoundary.cjs              check; exit 1 on new entries
-//   node backend/scripts/runtimeBoundary.cjs --write      rewrite the baseline files
-//   node backend/scripts/runtimeBoundary.cjs --ref <ref>  print the scan of a git ref
+//   node backend/scripts/runtimeBoundary.cjs                         check; exit 1 on new or stale entries
+//   node backend/scripts/runtimeBoundary.cjs --prune                 drop entries that no longer occur; never adds
+//   node backend/scripts/runtimeBoundary.cjs --accept-new "<reason>" add the current new entries; put the reason in the commit body
+//   node backend/scripts/runtimeBoundary.cjs --write                 deprecated alias of --prune
+//   node backend/scripts/runtimeBoundary.cjs --ref <ref>             print the scan of a git ref
 
 const fs = require('node:fs');
 const path = require('node:path');
 const { execFileSync } = require('node:child_process');
 const { builtinModules } = require('node:module');
 const ts = require('typescript');
+const ratchet = require('../../scripts/lib/ratchet-args.cjs');
 
 const REPO_ROOT = path.resolve(__dirname, '..', '..');
 const FIXTURE_DIR = path.join(REPO_ROOT, 'backend', 'test', 'fixtures', 'runtimeBoundary');
+const COMMAND = 'node backend/scripts/runtimeBoundary.cjs';
 
 /**
  * Files whose outgoing dependencies are checked. Later extraction steps extend
@@ -36,9 +44,8 @@ const CANDIDATE_GLOBS = [
   'backend/src/agents/workflows/**/*.ts',
   'backend/src/agents/{registry,sessionRegistry,sessionStateFeed,chatApprovalState}.ts',
   // Directory-index shims left at the old paths of modules moved into runtime/src/.
-  'backend/src/agents/{asyncGate,processTree,executableLookup,runtimeLifecycle,types,attachments,runtimeModelCache,runtimeModelRefresh,modelReasoning,eventQueue,runtimeModelCatalog,sessionAcquisition}/index.ts',
+  'backend/src/agents/{asyncGate,processTree,executableLookup,runtimeLifecycle,types,attachments,runtimeModelCache,runtimeModelRefresh,modelReasoning,runtimeModelCatalog,sessionAcquisition}/index.ts',
   'backend/src/services/chatEvents/index.ts',
-  'backend/src/agents/runs/runMcpSlot/index.ts',
   // The extracted package itself; any import from it into backend/ counts as an edge.
   'runtime/src/**/*.ts',
   // Reserved for generated Codex protocol types; no generated files are checked in.
@@ -89,8 +96,8 @@ const REMEDIATION = [
   'Inject the dependency through a runtime port or option instead of importing app code',
   'or reading process.env in the runtime layer; express runtime differences as runtime',
   'capabilities/options instead of comparing runtime ids outside the adapter directories.',
-  'If an entry is truly unavoidable, add it to backend/test/fixtures/runtimeBoundary/',
-  'and give the reason in the commit message.',
+  'If an entry is truly unavoidable, run',
+  `${COMMAND} --accept-new "<reason>" and put the reason in the commit body.`,
 ].join('\n');
 
 // ---------------------------------------------------------------------------
@@ -442,18 +449,11 @@ function readFixtureLines(file, kind) {
   return lines;
 }
 
-/**
- * Load `<kind>.txt` merged with `<kind>.pending.txt`; runtime-id counts merge by maximum.
- * `{ pending: false }` reads only the baseline, `{ baseline: false }` only the pending files.
- */
-function loadFixture(dir, options = {}) {
-  const { baseline = true, pending = true } = options;
+/** Load `<kind>.txt` for each kind; a repeated runtime-id key keeps its highest count. */
+function loadFixture(dir) {
   const fixture = {};
   for (const kind of KINDS) {
-    const lines = [
-      ...(baseline ? readFixtureLines(path.join(dir, `${kind.file}.txt`), kind) : []),
-      ...(pending ? readFixtureLines(path.join(dir, `${kind.file}.pending.txt`), kind) : []),
-    ];
+    const lines = readFixtureLines(path.join(dir, `${kind.file}.txt`), kind);
     if (kind.columns === 3) {
       const max = new Map();
       for (const line of lines) {
@@ -469,8 +469,9 @@ function loadFixture(dir, options = {}) {
 }
 
 /**
- * Added: present now but not in the fixture, or a runtime-id count above it (fails the check).
- * Stale: in the fixture but gone now, or a runtime-id count below it (informational).
+ * Added: present now but not in the fixture, or a runtime-id count above it.
+ * Stale: in the fixture but gone now, or a runtime-id count below it.
+ * Both fail the check; only added entries fail the build (see buildGate).
  */
 function compare(current, fixture) {
   const added = {};
@@ -490,7 +491,44 @@ function compare(current, fixture) {
       stale[kind.key] = allowed.filter((line) => !nowSet.has(line));
     }
   }
-  return { added, stale, hasAdded: KINDS.some((kind) => added[kind.key].length > 0) };
+  return {
+    added,
+    stale,
+    hasAdded: KINDS.some((kind) => added[kind.key].length > 0),
+    hasStale: KINDS.some((kind) => stale[kind.key].length > 0),
+  };
+}
+
+/** The fixture without entries that no longer occur; runtime-id counts only go down. Never adds. */
+function pruneFixture(fixture, current) {
+  const next = {};
+  for (const kind of KINDS) {
+    const allowed = fixture[kind.key] ?? [];
+    const now = current[kind.key] ?? [];
+    if (kind.columns === 3) {
+      const nowCounts = new Map(now.map((line) => [runtimeIdKey(line), runtimeIdCount(line)]));
+      next[kind.key] = allowed.flatMap((line) => {
+        const total = Math.min(runtimeIdCount(line), nowCounts.get(runtimeIdKey(line)) ?? 0);
+        return total > 0 ? [`${runtimeIdKey(line)}\t${total}`] : [];
+      });
+    } else {
+      const nowSet = new Set(now);
+      next[kind.key] = allowed.filter((line) => nowSet.has(line));
+    }
+  }
+  return next;
+}
+
+/** The fixture plus the current new entries; runtime-id counts rise to the current count. */
+function acceptNewEntries(fixture, current) {
+  const { added } = compare(current, fixture);
+  const next = {};
+  for (const kind of KINDS) {
+    const raised = new Set(added[kind.key].map((line) => (kind.columns === 3 ? runtimeIdKey(line) : line)));
+    const kept = (fixture[kind.key] ?? []).filter((line) => !raised.has(kind.columns === 3 ? runtimeIdKey(line) : line));
+    next[kind.key] = sortedUnique([...kept, ...added[kind.key]]);
+  }
+  return next;
 }
 
 function writeFixture(dir, current) {
@@ -500,8 +538,9 @@ function writeFixture(dir, current) {
       `# Runtime boundary baseline, ${kind.label}.`,
       `# ${kind.describe}`,
       '# One entry per line, byte-sorted; # lines are comments. New entries fail',
-      '# backend/test/runtimeBoundary.test.ts and the backend build (see AGENTS.md).',
-      '# Regenerate with: node backend/scripts/runtimeBoundary.cjs --write (leaves *.pending.txt alone).',
+      '# backend/test/runtimeBoundary.test.ts and the backend build; entries that no longer',
+      '# occur fail the test (see AGENTS.md).',
+      `# Drop stale entries with: ${COMMAND} --prune`,
     ];
     fs.writeFileSync(path.join(dir, `${kind.file}.txt`), `${[...header, ...current[kind.key]].join('\n')}\n`);
   }
@@ -524,14 +563,14 @@ function formatComparison(comparison) {
   return sections.join('\n\n');
 }
 
-/** Baseline entries that no longer occur. Pending entries are expected to be absent until their branch lands. */
-function formatStale(baselineStale) {
+/** Baseline entries that no longer occur. */
+function formatStale(stale) {
   const sections = [];
   for (const kind of KINDS) {
-    const stale = baselineStale[kind.key];
-    if (stale.length > 0) sections.push(`Stale ${kind.file}.txt entries (no longer present):\n${stale.join('\n')}`);
+    const lines = stale[kind.key];
+    if (lines.length > 0) sections.push(`Stale ${kind.file}.txt entries (no longer present):\n${lines.join('\n')}`);
   }
-  if (sections.length > 0) sections.push('Run `node backend/scripts/runtimeBoundary.cjs --write` to drop them.');
+  if (sections.length > 0) sections.push(`The baseline only shrinks. ${ratchet.pruneHint(COMMAND)}`);
   return sections.join('\n\n');
 }
 
@@ -540,61 +579,104 @@ function runCheck(repoRoot = REPO_ROOT, fixtureDir = FIXTURE_DIR) {
   const started = Date.now();
   const current = scan(repoRoot);
   const comparison = compare(current, loadFixture(fixtureDir));
-  const baselineStale = compare(current, loadFixture(fixtureDir, { pending: false })).stale;
-  const pendingAbsent = compare(current, loadFixture(fixtureDir, { baseline: false })).stale;
-  const pendingCount = KINDS.reduce((total, kind) => total + pendingAbsent[kind.key].length, 0);
-  const pendingNote = pendingCount > 0 ? `; ${pendingCount} *.pending.txt entries not on this branch yet` : '';
   return {
     current,
     comparison,
     hasAdded: comparison.hasAdded,
-    summary: `runtime boundary: ${counts(current)} (${Date.now() - started}ms${pendingNote})`,
+    hasStale: comparison.hasStale,
+    summary: `runtime boundary: ${counts(current)} (${Date.now() - started}ms)`,
     failure: formatComparison(comparison),
-    stale: formatStale(baselineStale),
+    stale: formatStale(comparison.stale),
   };
 }
 
-function main(argv) {
-  const usage = 'Usage: node backend/scripts/runtimeBoundary.cjs [--write | --ref <git-ref>]';
-  let write = false;
-  let ref;
-  for (let i = 0; i < argv.length; i += 1) {
-    const arg = argv[i];
-    if (arg === '--write') write = true;
-    else if (arg === '--ref') ref = argv[++i];
-    else if (arg.startsWith('--ref=')) ref = arg.slice('--ref='.length);
-    else if (arg === '--help' || arg === '-h') { console.log(usage); return 0; }
-    else { console.error(`Unknown argument: ${arg}\n${usage}`); return 2; }
+/**
+ * What backend/scripts/build.mjs does with a runCheck result. Only new entries fail the build.
+ * Stale entries print a note and never fail it: every push-triggered remote install runs
+ * `npm run build`, so a session that deleted code without pruning would otherwise break installs.
+ * The --watch dev loop only warns about new entries so a work-in-progress edit never blocks it.
+ * @returns {{ exitCode: 0 | 1, level: 'log' | 'warn' | 'error', message: string }}
+ */
+function buildGate(result, { watch = false } = {}) {
+  if (!result.hasAdded) {
+    const note = result.hasStale
+      ? `\n[backend] note: stale runtime boundary entries do not fail the build, but they fail backend/test/runtimeBoundary.test.ts.\n${result.stale}`
+      : '';
+    return { exitCode: 0, level: 'log', message: `[backend] ${result.summary}${note}` };
   }
-  if ((write && ref !== undefined) || (argv.includes('--ref') && ref === undefined)) {
-    console.error(usage);
+  if (watch) {
+    const rule = '!'.repeat(78);
+    return {
+      exitCode: 0,
+      level: 'warn',
+      message: `\n${rule}\n[backend] WARNING: new runtime boundary entries; \`npm run build\` will fail on these.\n\n${result.failure}\n${rule}\n`,
+    };
+  }
+  return { exitCode: 1, level: 'error', message: `[backend] ${result.summary}\n\n${result.failure}` };
+}
+
+/**
+ * @param {string[]} argv
+ * @param {{ repoRoot?: string, fixtureDir?: string, log?: Function, error?: Function }} [io]
+ *   Tests pass a temporary repository and fixture directory.
+ */
+function main(argv, io = {}) {
+  const { repoRoot = REPO_ROOT, fixtureDir = FIXTURE_DIR, log = console.log, error = console.error } = io;
+  const usage = `Usage: ${COMMAND} [--prune] [--accept-new "<reason>"] | --ref <git-ref>`;
+  const args = ratchet.parseRatchetArgs(argv);
+  let problem = args.error;
+  let ref;
+  for (let i = 0; !problem && i < args.rest.length; i += 1) {
+    const arg = args.rest[i];
+    if (arg === '--help' || arg === '-h') {
+      log(usage);
+      return 0;
+    }
+    if (arg === '--ref' || arg.startsWith('--ref=')) {
+      ref = arg === '--ref' ? args.rest[++i] ?? '' : arg.slice('--ref='.length);
+      if (ref === '' || args.prune || args.acceptNew) problem = '--ref takes a git ref and cannot be combined with --prune or --accept-new';
+    } else {
+      problem = `Unknown argument: ${arg}`;
+    }
+  }
+  if (problem) {
+    error(`${problem}\n${usage}`);
     return 2;
   }
+  if (args.deprecatedWrite) error(ratchet.writeDeprecation(COMMAND));
 
   if (ref !== undefined) {
-    const sha = resolveRef(REPO_ROOT, ref);
-    const current = scan(REPO_ROOT, { ref });
+    const sha = resolveRef(repoRoot, ref);
+    const current = scan(repoRoot, { ref });
     const out = [`# runtime boundary scan: ${ref} @ ${sha}`];
     for (const kind of KINDS) out.push(`# ${kind.file} (${current[kind.key].length})`, ...current[kind.key]);
     process.stdout.write(`${out.join('\n')}\n`);
     return 0;
   }
 
-  if (write) {
-    const current = scan(REPO_ROOT);
-    writeFixture(FIXTURE_DIR, current);
-    console.log(`Wrote ${toPosix(path.relative(REPO_ROOT, FIXTURE_DIR))}/*.txt: ${counts(current)}`);
-    return 0;
+  if (args.prune || args.acceptNew) {
+    const current = scan(repoRoot);
+    const fixture = loadFixture(fixtureDir);
+    const before = compare(current, fixture);
+    let next = fixture;
+    if (args.prune) next = pruneFixture(next, current);
+    if (args.acceptNew) next = acceptNewEntries(next, current);
+    if (KINDS.some((kind) => next[kind.key].join('\n') !== fixture[kind.key].join('\n'))) writeFixture(fixtureDir, next);
+    const label = toPosix(path.relative(repoRoot, fixtureDir));
+    if (args.prune) {
+      const pruned = KINDS.reduce((total, kind) => total + before.stale[kind.key].length, 0);
+      log(`Pruned ${pruned} stale entr${pruned === 1 ? 'y' : 'ies'} from ${label}/*.txt`);
+    }
+    if (args.acceptNew) {
+      log(ratchet.formatAccepted(`${label}/*.txt`, args.acceptNew, KINDS.flatMap((kind) => before.added[kind.key])));
+    }
   }
 
-  const result = runCheck();
-  console.log(result.summary);
-  if (result.stale) console.log(`\n${result.stale}`);
-  if (result.hasAdded) {
-    console.error(`\n${result.failure}`);
-    return 1;
-  }
-  return 0;
+  const result = runCheck(repoRoot, fixtureDir);
+  log(result.summary);
+  if (result.hasStale) error(`\n${result.stale}`);
+  if (result.hasAdded) error(`\n${result.failure}`);
+  return result.hasAdded || result.hasStale ? 1 : 0;
 }
 
 module.exports = {
@@ -605,9 +687,13 @@ module.exports = {
   scan,
   loadFixture,
   compare,
+  pruneFixture,
+  acceptNewEntries,
   writeFixture,
   runCheck,
+  buildGate,
   formatComparison,
+  main,
   // Scanner helpers reused by scripts/dependencyRules.cjs.
   createMatcher,
   scanRoots,

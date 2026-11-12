@@ -2,12 +2,14 @@ import React, { useCallback, useEffect, useId, useRef, useState } from 'react';
 import { Check, TriangleAlert } from 'lucide-react';
 import { toast } from 'sonner';
 import {
+  formatTokenCount,
   META_AGENT_DEFAULT_FIRST_RUN_DAYS,
   META_AGENT_FIRST_RUN_DAYS,
   META_AGENT_RUNTIMES,
   type MetaAgentFirstRunDays,
   type MetaAgentSettings as Settings,
   type MetaAgentSettingsPatch,
+  type MetaAgentToolApproval,
   type MetaAgentUsageToday,
 } from 'michi-shared';
 import { FOLLOW_GLOBAL_PATCH, type MetaAgentInfo } from '../../../../services/api/metaAgent';
@@ -25,33 +27,39 @@ import { useRuntimeCatalog } from '../../../../hooks/useRuntimeCatalog';
 import { filterAvailableRuntimes } from '../../../../lib/runtimeVisibility';
 import { useBackendScope } from '../../../../hooks/useBackendScope';
 import { resolveComposerReasoning } from '../../composerReasoning';
-import { composerModelLabel } from '../../composerModelLabel';
+import { modelDisplayLabel } from '../../../../lib/modelLabel';
 import { REASONING_LABELS } from '../../PaneComposerToolbarLeft';
 import { Button, Switch } from '../../../ui/controls';
 import { MetaAgentGuardAlert } from './MetaAgentGuardAlert';
-import { pauseMetaAgentMaintenance, refreshMetaAgentOverview, useMetaAgentOverview } from '../../scheduled/metaAgent/useMetaAgentOverview';
-import { META_AGENT_HEADLINE, metaAgentStatus } from '../../../../state/metaAgent/metaAgentStatus';
-import { runMetaAgentUpdate } from '../../../../state/metaAgent/metaAgentUpdate';
+import { META_AGENT_PAGE_POLL_MS, pauseMetaAgentMaintenance, refreshMetaAgentOverview, useMetaAgentOverview } from '../../../../state/metaAgent/useMetaAgentOverview';
+import { metaAgentStatus } from '../../../../state/metaAgent/metaAgentStatus';
+import { retryStoppedMetaAgent } from '../../../../state/metaAgent/metaAgentUpdate';
+import { useCompanionName } from '../../../../state/companion/companionName';
+import { UPKEEP_HEADLINE } from '../../scheduled/metaAgent/metaAgentCopy';
 import {
   isMetaAgentRuntimeSupported, metaAgentProfileText, metaAgentRuntimeLabel, runtimeUnavailableText, type MetaAgentProfile,
 } from './runtimeCopy';
+import { smoothScrollBehavior } from '../../../../hooks/useReducedMotion';
 import './metaAgentSettings.css';
+import { LOCAL_BACKEND_CONNECTION_ID } from '../../../../config/backendConnections';
 
-/** Settings › Meta agent: which runtime it uses, how it is restricted, and what it reads and writes. */
-export function MetaAgentSettings() {
+/**
+ * Settings › <name> › Pages upkeep (DESIGN-v2 §1.5; Settings › Meta agent
+ * before v2): which runtime the background Pages upkeep uses, how it is
+ * restricted, and what it reads and writes. Its subsections are h3s under
+ * the page's Pages upkeep heading.
+ */
+export function PagesUpkeepSettings() {
   const { status, info, error } = useMetaAgent();
   return (
     <div className="meta-set">
-      <p className="meta-set__lede">
-        Reads conversations in all your workspaces, keeps every home page up to date, and answers questions and edits pages in Pages.
-      </p>
-      {status === 'loading' && !info && <p className="meta-set__quiet" role="status">Loading the Meta agent…</p>}
+      {status === 'loading' && !info && <p className="meta-set__quiet" role="status">Loading Pages upkeep…</p>}
       {status === 'unavailable' && (
-        <p className="meta-set__quiet" role="status">This Michi backend does not run the Meta agent yet. Its settings appear here once it does.</p>
+        <p className="meta-set__quiet" role="status">This Michi backend does not run Pages upkeep yet. Its settings appear here once it does.</p>
       )}
       {status === 'error' && !info && (
         <p className="meta-set__quiet is-error" role="alert">
-          Couldn’t load the Meta agent{error ? `: ${error}` : ''}.{' '}
+          Couldn’t load Pages upkeep{error ? `: ${error}` : ''}.{' '}
           <button type="button" className="meta-set__link" onClick={() => { void refreshMetaAgent(); }}>Try again</button>
         </p>
       )}
@@ -60,13 +68,14 @@ export function MetaAgentSettings() {
   );
 }
 
-function useLocalAgentStatus(): AgentStatus | null {
-  const scope = useBackendScope('local');
+/** The local backend's agent status: what the global runtime settings are now. */
+export function useLocalAgentStatus(): AgentStatus | null {
+  const scope = useBackendScope(LOCAL_BACKEND_CONNECTION_ID);
   const [status, setStatus] = useState<AgentStatus | null>(null);
   useEffect(() => {
     const controller = new AbortController();
     let live = true;
-    fetchAgentStatus('local', controller.signal).then(
+    fetchAgentStatus(LOCAL_BACKEND_CONNECTION_ID, controller.signal).then(
       (next) => { if (live) setStatus(next); },
       () => { if (live) setStatus(null); },
     );
@@ -99,13 +108,14 @@ function SectionError({ error, section }: { error: { section: SettingsSection; m
 function SectionHead({ id, title, saved }: { id?: string; title: string; saved: boolean }) {
   return (
     <div className="meta-set__head">
-      <h2 id={id}>{title}</h2>
+      <h3 id={id}>{title}</h3>
       <span className="meta-set__saved" aria-live="polite">{saved && <><Check size={13} strokeWidth={2} aria-hidden="true" />Saved</>}</span>
     </div>
   );
 }
 
 function MetaAgentForm({ info }: { info: MetaAgentInfo }) {
+  const name = useCompanionName();
   const agentStatus = useLocalAgentStatus();
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<{ section: SettingsSection; message: string } | null>(null);
@@ -135,15 +145,15 @@ function MetaAgentForm({ info }: { info: MetaAgentInfo }) {
       await saveMetaAgentSettings(patch);
       if (mounted.current) noteSaved(section);
     } catch (err) {
-      if (mounted.current) setError({ section, message: err instanceof Error && err.message ? err.message : 'Couldn’t save the Meta agent settings' });
+      if (mounted.current) setError({ section, message: err instanceof Error && err.message ? err.message : 'Couldn’t save the Pages upkeep settings' });
     } finally {
       if (mounted.current) setSaving(false);
     }
   };
   const runtimeAvailable = (id: string) => isMetaAgentRuntimeSupported(id)
     && agentStatus?.availableRuntimes.find((runtime) => runtime.id === id)?.available !== false;
-  // Custom starts from what the Meta agent runs on now, so choosing it changes nothing until a
-  // runtime is picked; when that runtime cannot run the Meta agent, it starts from the first one that can.
+  // Custom starts from what Pages upkeep runs on now, so choosing it changes nothing until a
+  // runtime is picked; when that runtime cannot run it, it starts from the first one that can.
   const chooseCustom = () => {
     if (custom) return;
     if (info.availability.available) {
@@ -155,13 +165,27 @@ function MetaAgentForm({ info }: { info: MetaAgentInfo }) {
   };
   const chooseFollow = () => { if (custom) void save(FOLLOW_GLOBAL_PATCH); };
   const changeRuntime = () => {
-    runtimeRef.current?.scrollIntoView?.({ behavior: 'smooth', block: 'start' });
+    runtimeRef.current?.scrollIntoView?.({ behavior: smoothScrollBehavior(), block: 'start' });
     customRef.current?.focus({ preventScroll: true });
+  };
+  // Tool approvals sit near the bottom; a request waiting for a decision is pointed to from the top,
+  // where the approval notice's Review opens this page.
+  const approvalsRef = useRef<HTMLElement>(null);
+  const pendingApprovals = (info.toolApprovals ?? []).filter((request) => request.state === 'pending').length;
+  const reviewApprovals = () => {
+    approvalsRef.current?.scrollIntoView?.({ behavior: smoothScrollBehavior(), block: 'start' });
+    approvalsRef.current?.querySelector<HTMLButtonElement>('[data-pending] button')?.focus({ preventScroll: true });
   };
 
   return (
     <>
-      <ToolApprovals info={info} />
+      {pendingApprovals > 0 && (
+        <p className="meta-set__pending" role="status">
+          <TriangleAlert size={14} strokeWidth={1.75} aria-hidden="true" />
+          {pendingApprovals === 1 ? 'A tool is waiting for your approval.' : `${pendingApprovals} tools are waiting for your approval.`}{' '}
+          <button type="button" className="meta-set__link" onClick={reviewApprovals}>Review</button>
+        </p>
+      )}
       <MetaAgentGuardAlert failures={failures} onRetry={retryMetaAgentGuard} onChangeRuntime={changeRuntime} />
       <StoppedAlert info={info} onChangeRuntime={changeRuntime} />
 
@@ -171,7 +195,7 @@ function MetaAgentForm({ info }: { info: MetaAgentInfo }) {
         {!info.availability.available && (
           <div className="meta-set__notice" role="status">
             <TriangleAlert size={15} strokeWidth={1.75} aria-hidden="true" />
-            <p>{info.availability.reason ?? `The Meta agent cannot run on ${metaAgentRuntimeLabel(resolved.runtimeId)}.`}</p>
+            <p>{info.availability.reason ?? `Pages upkeep cannot run on ${metaAgentRuntimeLabel(resolved.runtimeId)}.`}</p>
             {!custom && <Button disabled={saving} onClick={chooseCustom}>Use a custom runtime</Button>}
           </div>
         )}
@@ -182,7 +206,7 @@ function MetaAgentForm({ info }: { info: MetaAgentInfo }) {
               <span className="meta-set__radio-t">Follow global settings</span>
               <span className="meta-set__radio-d">
                 {globalProfile ? `Now ${metaAgentProfileText(globalProfile)}. ` : 'Uses Settings › Runtime (global). '}
-                Change the global settings and the Meta agent follows from its next run.
+                Change the global settings and Pages upkeep follows from its next run.
               </span>
             </span>
           </label>
@@ -192,7 +216,7 @@ function MetaAgentForm({ info }: { info: MetaAgentInfo }) {
             <input ref={customRef} type="radio" name={radioName} checked={custom} disabled={saving} onChange={chooseCustom} />
             <span>
               <span className="meta-set__radio-t">Custom</span>
-              <span className="meta-set__radio-d">Only for background maintenance. Assistant chat and new conversations use the global settings.</span>
+              <span className="meta-set__radio-d">Only for Pages upkeep. Your conversation with {name}, and its check-ins, stay on what the conversation uses.</span>
             </span>
           </label>
           {custom && <CustomRuntime settings={settings} resolved={resolved} agentStatus={agentStatus} saving={saving} onSave={(patch) => { void save(patch); }} />}
@@ -204,7 +228,7 @@ function MetaAgentForm({ info }: { info: MetaAgentInfo }) {
       <section className="meta-set__sec">
         <SectionHead title="Reading" saved={saved === 'reading'} />
         <div className="meta-set__body">
-        <BackgroundUpdatesRow onSaved={() => noteSaved('reading')} onError={(message) => setError(message ? { section: 'reading', message } : null)} />
+        <BackgroundUpdatesRow name={name} onSaved={() => noteSaved('reading')} onError={(message) => setError(message ? { section: 'reading', message } : null)} />
         <SettingRow label="First run" control={(
           <select
             className="ui-select"
@@ -220,7 +244,7 @@ function MetaAgentForm({ info }: { info: MetaAgentInfo }) {
           Last {firstRunDays} days of conversations, up to 1,000
         </SettingRow>
         <SettingRow label="Never read">
-          Scheduled-job output, the Meta agent’s own chat, and archived or deleted conversations
+          Scheduled-job output, your conversation with {name}, and archived or deleted conversations
         </SettingRow>
         <SectionError error={error} section="reading" />
         </div>
@@ -253,14 +277,16 @@ function MetaAgentForm({ info }: { info: MetaAgentInfo }) {
             <Switch on disabled onChange={() => {}} aria-label="Human-edited blocks only get suggestions" />
           </>
         )}>
-          Never overwritten: the Meta agent suggests a change and you accept it
+          {name} suggests a change and you accept it. On home pages it updates its own blocks directly, also after you tick or edit them
         </SettingRow>
         <SectionError error={error} section="writing" />
         </div>
       </section>
 
+      <ToolApprovals info={info} sectionRef={approvalsRef} />
+
       <section className="meta-set__sec">
-        <h2>Usage</h2>
+        <h3>Usage</h3>
         <div className="meta-set__body"><p className="meta-set__usage">{usageText(info.usageToday ?? null)}</p></div>
       </section>
     </>
@@ -269,27 +295,20 @@ function MetaAgentForm({ info }: { info: MetaAgentInfo }) {
 
 const plural = (n: number, one: string) => `${n.toLocaleString('en-US')} ${n === 1 ? one : `${one}s`}`;
 
-/** 950 → 950; 41,000 → 41k; 1,250,000 → 1.3M. */
-function tokenCount(n: number): string {
-  if (n < 1_000) return String(n);
-  if (n < 1_000_000) return `${Math.round(n / 1_000)}k`;
-  return `${(n / 1_000_000).toFixed(1).replace(/\.0$/, '')}M`;
-}
-
 function usageText(usage: MetaAgentUsageToday | null): string {
   if (!usage) return 'Today’s usage could not be counted.';
   const calls = `Today: ${plural(usage.checks, 'check')}, ${plural(usage.modelCalls, 'AI call')}`;
   return usage.tokens === null
     ? `${calls}; the AI service didn’t say how many tokens it used.`
-    : `${calls}, about ${tokenCount(usage.tokens)} tokens.`;
+    : `${calls}, about ${formatTokenCount(usage.tokens)} tokens.`;
 }
 
 /**
  * Pausing and resuming the background updates: the same switch as the
- * Meta agent's row in Scheduled. The chat window keeps working while paused.
+ * Pages upkeep row in Scheduled. The conversation keeps working while paused.
  */
-function BackgroundUpdatesRow({ onSaved, onError }: { onSaved: () => void; onError: (message: string | null) => void }) {
-  const load = useMetaAgentOverview();
+function BackgroundUpdatesRow({ name, onSaved, onError }: { name: string; onSaved: () => void; onError: (message: string | null) => void }) {
+  const load = useMetaAgentOverview(META_AGENT_PAGE_POLL_MS);
   const [busy, setBusy] = useState(false);
   const mounted = useRef(true);
   useEffect(() => {
@@ -320,7 +339,7 @@ function BackgroundUpdatesRow({ onSaved, onError }: { onSaved: () => void; onErr
       </>
     )}>
       {paused
-        ? 'Paused. New conversations aren’t read and pages aren’t updated in the background. The chat window in Pages still works.'
+        ? `Paused. New conversations aren’t read and pages aren’t updated in the background. Your conversation with ${name} still works.`
         : 'Checks every workspace for new conversations every 60 seconds; when nothing is new, no AI is used'}
     </SettingRow>
   );
@@ -376,7 +395,7 @@ function CustomRuntime({ settings, resolved, agentStatus, saving, onSave }: {
   onSave: (patch: MetaAgentSettingsPatch) => void;
 }) {
   const runtimeId = settings.runtimeId ?? '';
-  const catalog = useRuntimeCatalog({ enabled: true, connectionId: 'local', runtime: runtimeId, provider: settings.providerId });
+  const catalog = useRuntimeCatalog({ enabled: true, connectionId: LOCAL_BACKEND_CONNECTION_ID, runtime: runtimeId, provider: settings.providerId });
   const binding: ResolvedNodeBinding = {
     runtime: runtimeId,
     provider: settings.providerId ?? undefined,
@@ -400,7 +419,7 @@ function CustomRuntime({ settings, resolved, agentStatus, saving, onSave }: {
   const defaultProvider = settings.providerId === null
     ? defaultOf(catalog.providers.find((provider) => provider.id === resolved.providerId)?.label ?? resolved.providerId) : 'Default';
   const defaultModel = settings.modelId === null && resolved.modelId
-    ? defaultOf(composerModelLabel(runtimeId, resolved.modelId, catalog.models)) : 'Default';
+    ? defaultOf(modelDisplayLabel(runtimeId, resolved.modelId, catalog.models)) : 'Default';
   const defaultReasoning = settings.reasoning === null && resolved.reasoning
     ? defaultOf(REASONING_LABELS[resolved.reasoning] ?? resolved.reasoning) : 'Default';
 
@@ -413,7 +432,7 @@ function CustomRuntime({ settings, resolved, agentStatus, saving, onSave }: {
 
   return (
     <div className="meta-set__custom">
-      <div className="meta-set__chips" role="group" aria-label="Meta agent runtime">
+      <div className="meta-set__chips" role="group" aria-label="Pages upkeep runtime">
         {META_AGENT_RUNTIMES.filter((id) => visibleRuntimeIds.has(id) && isMetaAgentRuntimeSupported(id)).map((id) => (
             <Button
               key={id}
@@ -438,7 +457,7 @@ function CustomRuntime({ settings, resolved, agentStatus, saving, onSave }: {
             Provider
             <select
               className="ui-select"
-              aria-label="Meta agent provider"
+              aria-label="Pages upkeep provider"
               value={settings.providerId ?? ''}
               disabled={saving}
               onChange={(event) => onSave({ providerId: event.target.value || null, modelId: null, reasoning: null })}
@@ -453,13 +472,13 @@ function CustomRuntime({ settings, resolved, agentStatus, saving, onSave }: {
           Model
           <select
             className="ui-select"
-            aria-label="Meta agent model"
+            aria-label="Pages upkeep model"
             value={settings.modelId ?? ''}
             disabled={saving}
             onChange={(event) => saveModel(event.target.value || null)}
           >
             <option value="">{defaultModel}</option>
-            {modelMissing && <option value={settings.modelId!}>{composerModelLabel(runtimeId, settings.modelId!, catalog.models)}</option>}
+            {modelMissing && <option value={settings.modelId!}>{modelDisplayLabel(runtimeId, settings.modelId!, catalog.models)}</option>}
             {catalog.models.map((model) => <option key={model.id} value={model.id}>{model.label || model.id}</option>)}
           </select>
         </label>
@@ -468,7 +487,7 @@ function CustomRuntime({ settings, resolved, agentStatus, saving, onSave }: {
             Reasoning
             <select
               className="ui-select"
-              aria-label="Meta agent reasoning"
+              aria-label="Pages upkeep reasoning"
               value={pickedLevel ?? ''}
               disabled={saving}
               onChange={(event) => onSave({ reasoning: (event.target.value || null) as AgentReasoning | null })}
@@ -498,7 +517,7 @@ const sentence = (text: string) => (/[.!?…]$/.test(text.trim()) ? text.trim() 
  */
 function StoppedAlert({ info, onChangeRuntime }: { info: MetaAgentInfo; onChangeRuntime: () => void }) {
   const { status: infoStatus } = useMetaAgent();
-  const load = useMetaAgentOverview();
+  const load = useMetaAgentOverview(META_AGENT_PAGE_POLL_MS);
   const [busy, setBusy] = useState(false);
   const mounted = useRef(true);
   useEffect(() => {
@@ -508,21 +527,22 @@ function StoppedAlert({ info, onChangeRuntime }: { info: MetaAgentInfo; onChange
   if (load.kind !== 'ready') return null;
   const status = metaAgentStatus({ info, infoStatus, overview: load.overview, runtimeLabel: metaAgentRuntimeLabel });
   if (status.kind !== 'stopped' && !(status.kind === 'unsupported' && info.availability.available)) return null;
-  // Same path as Scheduled › Meta agent's Retry: resume what stopped, then run one round now.
+  // Same path as Scheduled › Pages upkeep's Retry: resume what stopped, then run one round now.
   const retry = () => {
     setBusy(true);
-    pauseMetaAgentMaintenance(false)
-      .then(() => refreshMetaAgent())
-      .then(() => runMetaAgentUpdate('local'))
-      .catch((reason: unknown) => { toast.error(reason instanceof Error && reason.message ? reason.message : 'Couldn’t retry the Meta agent'); })
-      .finally(() => { if (mounted.current) setBusy(false); void refreshMetaAgentOverview(); });
+    retryStoppedMetaAgent(LOCAL_BACKEND_CONNECTION_ID)
+      .catch((reason: unknown) => { toast.error(reason instanceof Error && reason.message ? reason.message : 'Couldn’t retry Pages upkeep'); })
+      .finally(() => { if (mounted.current) setBusy(false); });
   };
   return (
     <div className="meta-set__alert" role="alert">
       <TriangleAlert className="meta-set__alert-icon" size={16} strokeWidth={1.75} aria-hidden="true" />
       <div className="meta-set__alert-body">
-        <b>{status.kind === 'stopped' ? META_AGENT_HEADLINE.stopped : META_AGENT_HEADLINE.unsupported}</b>
-        <p>{sentence(status.reason ?? 'The reason is unknown')} Pages won’t update in the background until it runs again.</p>
+        <b>{status.kind === 'stopped' ? UPKEEP_HEADLINE.stopped : UPKEEP_HEADLINE.unsupported}</b>
+        <p>{sentence(status.reason ?? 'The reason is unknown')} {status.stop?.reason === 'signed-out'
+          // The backend tries a sign-in stop again on its own (maintenanceCoordinator.ts SIGN_IN_RETRY_MS).
+          ? 'It tries again every hour, or press Retry once sign-in works.'
+          : 'Pages won’t update in the background until it runs again.'}</p>
         {status.stop?.detail && <p className="meta-set__alert-detail">{status.stop.detail}</p>}
       </div>
       <div className="meta-set__alert-actions">
@@ -535,9 +555,17 @@ function StoppedAlert({ info, onChangeRuntime }: { info: MetaAgentInfo; onChange
   );
 }
 
-function ToolApprovals({ info }: { info: MetaAgentInfo }) {
+const APPROVAL_STATE: Record<MetaAgentToolApproval['state'], string> = {
+  pending: 'Needs approval',
+  approved: 'Allowed',
+  denied: 'Denied',
+  revoked: 'Revoked',
+};
+
+function ToolApprovals({ info, sectionRef }: { info: MetaAgentInfo; sectionRef: React.Ref<HTMLElement> }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const headingId = useId();
   const decide = async (id: string, state: 'approved' | 'denied' | 'revoked') => {
     setBusy(true); setError(null);
     try { await saveMetaAgentToolApproval(id, state); }
@@ -545,18 +573,34 @@ function ToolApprovals({ info }: { info: MetaAgentInfo }) {
     finally { setBusy(false); }
   };
   if (!info.toolApprovals?.length) return null;
-  return <section className="meta-set__sec" aria-label="Tool approvals">
-    <h2>Tool approvals</h2>
-    <p>Approve a tool for future background runs, including external changes it supports, with any valid arguments. Approval lasts until revoked or its definition or connection configuration changes.</p>
-    {info.toolApprovals.map(request => <div className="meta-set__row" key={request.id}>
-      <span className="meta-set__row-k">{request.server} / {request.tool}</span>
-      <span className="meta-set__row-v">{request.description}<br />{request.state === 'pending' ? 'Needs your approval; not executed' : request.state}</span>
-      <span className="meta-set__ctl">
-        {request.state !== 'approved' && <Button disabled={busy} onClick={() => { void decide(request.id, 'approved'); }}>Always allow this tool</Button>}
-        {request.state === 'pending' && <Button disabled={busy} onClick={() => { void decide(request.id, 'denied'); }}>Deny</Button>}
-        {request.state === 'approved' && <Button disabled={busy} onClick={() => { void decide(request.id, 'revoked'); }}>Revoke</Button>}
-      </span>
-    </div>)}
-    {error && <p role="alert">{error}</p>}
-  </section>;
+  return (
+    <section className="meta-set__sec" ref={sectionRef} aria-labelledby={headingId}>
+      <h3 id={headingId}>Tool approvals</h3>
+      <div className="meta-set__body">
+        <p className="meta-set__note">
+          An allowed tool can run in background updates with any valid arguments, including the external changes it makes.
+          The approval lasts until you revoke it or the tool’s definition or connection changes.
+        </p>
+        {info.toolApprovals.map((request) => {
+          const pending = request.state === 'pending';
+          return (
+            <div className="meta-set__row" key={request.id} data-pending={pending || undefined}>
+              <span className="meta-set__row-k">{request.server} / {request.tool}</span>
+              {request.description && <span className="meta-set__row-v">{request.description}</span>}
+              <span className="meta-set__ctl">
+                <span className="meta-set__state">{APPROVAL_STATE[request.state]}</span>
+                {request.state !== 'approved' && (
+                  <Button size="sm" variant={pending ? 'primary' : 'secondary'} disabled={busy}
+                    onClick={() => { void decide(request.id, 'approved'); }}>Always allow</Button>
+                )}
+                {pending && <Button size="sm" disabled={busy} onClick={() => { void decide(request.id, 'denied'); }}>Deny</Button>}
+                {request.state === 'approved' && <Button size="sm" disabled={busy} onClick={() => { void decide(request.id, 'revoked'); }}>Revoke</Button>}
+              </span>
+            </div>
+          );
+        })}
+        {error && <p className="meta-set__error" role="alert">{error}</p>}
+      </div>
+    </section>
+  );
 }

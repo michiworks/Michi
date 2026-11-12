@@ -94,10 +94,14 @@ describe('PaneComposerToolbarLeft', () => {
 
     const home = document.body.appendChild(document.createElement('div'));
     home.className = 'home-compose';
-    renderToolbar(props, home);
+    // The chips sit inside the composer frame; the menus open under the frame.
+    const frame = home.appendChild(document.createElement('div'));
+    frame.className = 'terminal-composer';
+    frame.getBoundingClientRect = () => ({ top: 20, bottom: 120, left: 0, right: 600, width: 600, height: 100, x: 0, y: 20, toJSON: () => ({}) });
+    renderToolbar(props, frame);
     openBoth();
-    expect(onOpenAgentMenu).toHaveBeenLastCalledWith(expect.objectContaining({ preferBelow: true }));
-    expect(onOpenModelMenu).toHaveBeenLastCalledWith(expect.objectContaining({ preferBelow: true }));
+    expect(onOpenAgentMenu).toHaveBeenLastCalledWith(expect.objectContaining({ preferBelow: true, y: 126 }));
+    expect(onOpenModelMenu).toHaveBeenLastCalledWith(expect.objectContaining({ preferBelow: true, y: 126 }));
     cleanup();
     home.remove();
   });

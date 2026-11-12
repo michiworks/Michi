@@ -372,7 +372,10 @@ export function closeAllArtifactWatchers(): void {
   pool.clear();
 }
 
-/** Test-only: number of live watcher entries in the pool. */
+/**
+ * Test-only: number of live watcher entries in the pool.
+ * @testonly
+ */
 export function _activeWatcherCount(): number {
   return pool.size;
 }

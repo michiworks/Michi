@@ -116,4 +116,13 @@ describe('buildAtMentionItems — cross-tree nodes', () => {
     const items = buildAtMentionItems('CDK', [], [], 'other', crossTreeNodes);
     expect(items[0].token).toBe('node:x3');
   });
+
+  it('lists a not-yet-loaded node with its stored message count, and still leaves out a blank one', () => {
+    const placeholder = { ...mkNode('p1', 'Unopened thread', 0), messagesLoaded: false, messageCount: 4 };
+    const blank = { ...mkNode('p2', 'Blank chat', 0), messagesLoaded: true, messageCount: 0 };
+    const sameTree = buildAtMentionItems('', [], [placeholder, blank], 'other');
+    expect(sameTree.map(i => [i.id, i.description])).toEqual([['node-p1', 'node · 4 msgs']]);
+    const cross = buildAtMentionItems('Unopened', [], [], 'other', [{ treeTitle: 'Elsewhere', nodes: [placeholder, blank] }]);
+    expect(cross.map(i => [i.id, i.description])).toEqual([['node-p1', 'Elsewhere · 4 msgs']]);
+  });
 });

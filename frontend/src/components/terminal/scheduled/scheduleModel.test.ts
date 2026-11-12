@@ -36,6 +36,12 @@ describe('draftToSchedule', () => {
     expect(draftToSchedule({ ...base, mode: 'cron', cron: ' ' }).error).toMatch(/cron/);
     expect(draftToSchedule({ ...base, mode: 'once', onceAt: '' }).error).toMatch(/date/);
   });
+
+  it('keeps intervals within the limits the server enforces', () => {
+    expect(draftToSchedule({ ...base, mode: 'interval', intervalValue: 366, intervalUnit: 'days' }).schedule).toEqual({ kind: 'every', everySeconds: 366 * 86_400 });
+    expect(draftToSchedule({ ...base, mode: 'interval', intervalValue: 367, intervalUnit: 'days' }).error).toBe('Run at least once every 366 days');
+    expect(draftToSchedule({ ...base, mode: 'interval', intervalValue: 59, intervalUnit: 'seconds' }).error).toBe('Run at most once a minute');
+  });
 });
 
 describe('scheduleToDraft', () => {
@@ -47,6 +53,13 @@ describe('scheduleToDraft', () => {
     expect(scheduleToDraft({ kind: 'every', everySeconds: 7200 })).toMatchObject({ mode: 'interval', intervalValue: 2, intervalUnit: 'hours' });
     expect(scheduleToDraft({ kind: 'every', everySeconds: 600 })).toMatchObject({ intervalValue: 10, intervalUnit: 'minutes' });
   });
+
+  it('reopens every interval the backend accepts without changing it', () => {
+    // Agents may set any whole number of seconds; saving another field must not round it.
+    for (const everySeconds of [60, 90, 3600, 5400, 86_400, 172_800]) {
+      expect(draftToSchedule(scheduleToDraft({ kind: 'every', everySeconds })).schedule).toEqual({ kind: 'every', everySeconds });
+    }
+  });
 });
 
 describe('describeSchedule', () => {
@@ -54,6 +67,8 @@ describe('describeSchedule', () => {
     expect(describeSchedule({ kind: 'every', everySeconds: 60 }, 'UTC')).toBe('Every minute');
     expect(describeSchedule({ kind: 'every', everySeconds: 3600 }, 'UTC')).toBe('Every hour');
     expect(describeSchedule({ kind: 'every', everySeconds: 172_800 }, 'UTC')).toBe('Every 2 days');
+    expect(describeSchedule({ kind: 'every', everySeconds: 90 }, 'UTC')).toBe('Every 90 seconds');
+    expect(describeSchedule({ kind: 'every', everySeconds: 5400 }, 'UTC')).toBe('Every 90 minutes');
     expect(describeSchedule({ kind: 'cron', expression: '0 9 * * 1-5', timezone: 'UTC' }, 'UTC')).toBe('Weekdays at 09:00');
     expect(describeSchedule({ kind: 'cron', expression: '30 18 * * 1,5', timezone: 'UTC' }, 'UTC')).toBe('Mon, Fri at 18:30');
     expect(describeSchedule({ kind: 'cron', expression: '0 9 * * *', timezone: 'Asia/Tokyo' }, 'UTC')).toBe('Daily at 09:00 (Asia/Tokyo)');
@@ -96,5 +111,12 @@ describe('validateJobForm', () => {
       permissionMode: 'trust', sessionMode: 'persistent', notify: true, timeoutSeconds: 900,
     });
     expect(input?.schedule.kind).toBe('cron');
+  });
+
+  it('keeps the time limit within the server\'s bounds', () => {
+    const value = { ...formValueFromJob(null, { workspaceId: 'ws-1' }), name: 'Digest', prompt: 'Summarize' };
+    expect(validateJobForm({ ...value, timeoutMinutes: 1440 }).errors.timeout).toBeUndefined();
+    expect(validateJobForm({ ...value, timeoutMinutes: 1441 }).errors.timeout).toBe('Between 1 and 1440 minutes');
+    expect(validateJobForm({ ...value, timeoutMinutes: 0 }).errors.timeout).toBe('Between 1 and 1440 minutes');
   });
 });

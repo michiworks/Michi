@@ -61,6 +61,10 @@ const sampleEvents: ChatStreamEvent[] = [
     data: { name: 'repo_notes', filePath: '.artifacts/repo_notes.md', size: 84 },
   },
   {
+    event: CHAT_STREAM_EVENTS.artifactDeleted,
+    data: { contextId: 'ctx-1', name: 'repo_notes' },
+  },
+  {
     event: CHAT_STREAM_EVENTS.image,
     data: { path: '.shot.png', caption: 'a screenshot', mimeType: 'image/png', size: 53248 },
   },
@@ -186,6 +190,21 @@ describe('parseChatStreamEvent', () => {
     expect(parseChatStreamEvent(CHAT_STREAM_EVENTS.chunk, '{')).toBeNull();
   });
 
+  it('parses artifact_deleted defensively and dispatches it to onArtifactDeleted', () => {
+    expect(parseChatStreamEvent('artifact_deleted', '{"contextId":"ctx-1","name":"notes","filePath":"x"}')).toEqual({
+      event: CHAT_STREAM_EVENTS.artifactDeleted,
+      data: { contextId: 'ctx-1', name: 'notes' },
+    });
+    expect(parseChatStreamEvent('artifact_deleted', '{"contextId":7,"name":3}')).toEqual({
+      event: CHAT_STREAM_EVENTS.artifactDeleted,
+      data: { contextId: undefined, name: '' },
+    });
+    const onArtifactDeleted = vi.fn();
+    dispatchChatStreamEvent(parseChatStreamEvent('artifact_deleted', '{"contextId":"ctx-1","name":"notes"}')!, { onArtifactDeleted });
+    dispatchChatStreamEvent(parseChatStreamEvent('artifact_deleted', '{"name":"other"}')!, { onArtifactDeleted });
+    expect(onArtifactDeleted.mock.calls).toEqual([['notes', 'ctx-1'], ['other', undefined]]);
+  });
+
   it('dispatches typed events to matching handlers', () => {
     const onArtifactSaved = vi.fn();
     const onArtifactUpdated = vi.fn();
@@ -238,5 +257,25 @@ describe('parseChatStreamEvent', () => {
       'a-n1-T1',
       'T1',
     );
+  });
+
+  it('hands done its node completion facts only when both are counts, seen held to completed', () => {
+    const onDone = vi.fn();
+    const deliver = (data: Record<string, unknown>) => dispatchChatStreamEvent(
+      parseChatStreamEvent(CHAT_STREAM_EVENTS.done, JSON.stringify({ turnId: 'T1', assistantId: 'a1', stopReason: 'end_turn', persisted: true, completedAt: 9, ...data }))!,
+      { onDone },
+    );
+    deliver({ nodeCompletionSeq: 4, nodeSeenCompletionSeq: 2 });
+    deliver({ nodeCompletionSeq: 4, nodeSeenCompletionSeq: 6 });
+    deliver({ nodeCompletionSeq: 4 });
+    deliver({ nodeCompletionSeq: -1, nodeSeenCompletionSeq: 0 });
+    deliver({ nodeCompletionSeq: 1.5, nodeSeenCompletionSeq: 0 });
+    expect(onDone.mock.calls).toEqual([
+      ['end_turn', 'a1', 'T1', true, 9, { completionSeq: 4, seenCompletionSeq: 2 }],
+      ['end_turn', 'a1', 'T1', true, 9, { completionSeq: 4, seenCompletionSeq: 4 }],
+      ['end_turn', 'a1', 'T1', true, 9],
+      ['end_turn', 'a1', 'T1', true, 9],
+      ['end_turn', 'a1', 'T1', true, 9],
+    ]);
   });
 });

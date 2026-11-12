@@ -109,7 +109,7 @@ export interface RetainedEvent {
  *  equality — it does not know or care what the fields mean. */
 export type ContentSnapshot = unknown;
 
-function contentEquals(a: ContentSnapshot, b: ContentSnapshot): boolean {
+export function contentEquals(a: ContentSnapshot, b: ContentSnapshot): boolean {
   // Deep-equality via canonical JSON. Both snapshots are caller-controlled plain data (arrays of
   // view descriptors, a visible flag, an outcome enum) — never containing functions, Dates,
   // Maps, or other JSON-hostile types — so this is exact, not a heuristic. Property insertion
@@ -128,10 +128,6 @@ export type ResyncReason =
 export type CursorResolution =
   | { ok: true; paneId: string; revision: number; cursorRevision: number; replay: RetainedEvent[] }
   | { ok: false; reason: ResyncReason };
-
-export interface RegisterOptions {
-  now?: number;
-}
 
 // ---------------------------------------------------------------------------
 // Internal per-object state
@@ -195,8 +191,8 @@ export interface PaneInspectionRingOptions {
 
 /** The bounded per-object observation cache ring and its cursor store. One instance is intended
  *  to be a module-scope singleton per backend process (mirrors `PanePresenceRegistry`'s own
- *  contract) — P1-8/P3-2 wiring constructs it once and imports it from routes, the feed, and
- *  wait_pane. */
+ *  contract): `paneInspectionRing` below is that instance, imported by paneInspection.ts and
+ *  paneInspectionWait.ts. */
 export class PaneInspectionRing {
   private readonly now: () => number;
   private readonly createToken: () => string;
@@ -227,12 +223,6 @@ export class PaneInspectionRing {
     this.ringMaxEvents = opts.ringMaxEvents ?? PANE_INSPECTION_LIMITS.ringMaxEvents;
     this.ringMaxBytes = opts.ringMaxBytes ?? PANE_INSPECTION_LIMITS.ringMaxBytes;
     this.workspaceRingBudgetBytes = opts.workspaceRingBudgetBytes ?? PANE_INSPECTION_LIMITS.workspaceRingBudgetBytes;
-  }
-
-  /** Exposed for tests and diagnostics: the current epoch this instance is tagging new cursors
-   *  with. */
-  getEpoch(): string {
-    return this.epoch;
   }
 
   /** Test-only: simulates "the backend process restarted" WITHOUT constructing a new instance —
@@ -521,15 +511,6 @@ export class PaneInspectionRing {
     this.removeObject(paneId);
   }
 
-  /** Public entry point for a caller (P3-2, or a periodic sweep) to trigger workspace-budget
-   *  enforcement explicitly, e.g. after recording a batch of events for several objects in one
-   *  workspace without re-running the check after every single one. `recordContentChange` and
-   *  `recordSnapshot` already call this internally after growing a ring, so most callers never
-   *  need to call it directly. */
-  enforceWorkspaceBudgetFor(workspaceId: string): void {
-    this.enforceWorkspaceBudget(workspaceId, this.now());
-  }
-
   // -------------------------------------------------------------------------
   // Cursors
   // -------------------------------------------------------------------------
@@ -672,14 +653,10 @@ export class PaneInspectionRing {
 /** One instance per backend process (mirrors `panePresenceRegistry`'s own contract — see that
  *  module's doc comment on why two independently-constructed instances is a real bug class, not
  *  a style nit: a cursor minted against one instance's `objects`/`cursors` maps is invisible to
- *  another). `paneInspection.ts` (P3-3, the `inspect` boundary) and `paneInspectionSubscribe.ts`
- *  via `routes/paneInspection.ts` (P3-2, the feed) MUST share this exact instance — that sharing
- *  is what makes the acceptance criterion "a cursor minted by inspect resolves through this
- *  ring" true at all. `routes/paneInspection.ts` previously constructed its OWN
- *  `new PaneInspectionRing(...)` (added alongside the P3-2 feed route) — the exact same
- *  double-instance bug this campaign already hit once for `panePresenceRegistry` (see that
- *  module's own doc comment). Fixed as part of this task: that file now imports and re-exports
- *  this singleton instead. Real `Date.now()` clock in production; tests construct their own
+ *  another). `paneInspection.ts` (P3-3, the `inspect` boundary) and `paneInspectionWait.ts`
+ *  (which hands it to `paneInspectionSubscribe.ts`'s `PaneFeed`) MUST share this exact instance —
+ *  that sharing is what makes the acceptance criterion "a cursor minted by inspect resolves
+ *  through this ring" true at all. Real `Date.now()` clock in production; tests construct their own
  *  `new PaneInspectionRing({ now: fakeClock.now })` instead of importing this singleton, exactly
  *  like `paneInspectionSubscribe.test.ts` already does. */
 export const paneInspectionRing = new PaneInspectionRing({ now: () => Date.now() });

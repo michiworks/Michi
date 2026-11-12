@@ -1,16 +1,12 @@
 import { Router } from 'express';
-import type { NextFunction, Request, Response } from 'express';
+import type { Request, Response } from 'express';
 import type { SpacesFirstRunStatus } from 'michi-shared';
-import { LOCAL_AGENT_OWNER_ID } from '../services/agentOwner';
+import { requestAgentOwner } from '../services/agentOwner';
 import { PageWriteError } from '../services/pages/core';
 import type { ScheduledJobScheduler } from '../services/scheduledJobs/scheduler';
 import { retrySpacesFirstRun, spacesFirstRunStatus, startSpacesFirstRun } from '../services/metaAgent/firstRun';
-
-type Obj = Record<string, unknown>;
-const isObject = (value: unknown): value is Obj => typeof value === 'object' && value !== null && !Array.isArray(value);
-const owner = (req: Request): string => process.env.MICHI_CLOUD === '1'
-  ? (req as Request & { user?: { id?: string } }).user?.id ?? ''
-  : LOCAL_AGENT_OWNER_ID;
+import { isObject, pageBody, pageErrors, route, type Obj } from './pageRouteKit';
+const owner = (req: Request): string => requestAgentOwner((req as Request & { user?: { id?: string } }).user?.id);
 
 function requireOwner(req: Request): string {
   const ownerUserId = owner(req);
@@ -18,23 +14,14 @@ function requireOwner(req: Request): string {
   return ownerUserId;
 }
 
+/** These bodies are optional, and small enough to skip the Pages write limit. */
 function body(req: Request, keys: readonly string[]): Obj {
   if (req.body === undefined || (isObject(req.body) && Object.keys(req.body).length === 0)) return {};
-  if (!isObject(req.body) || !Object.keys(req.body).every((key) => keys.includes(key))) throw new PageWriteError(400, 'invalid', 'Invalid request body');
-  return req.body;
+  return pageBody(req, keys, { sizeCap: false });
 }
 
 /** Every answer is the shared SpacesFirstRunStatus the client reads. */
 const answer = (res: Response, status: SpacesFirstRunStatus) => { res.json(status); };
-
-function route(fn: (req: Request, res: Response) => unknown) {
-  return (req: Request, res: Response, next: NextFunction) => { Promise.resolve().then(() => fn(req, res)).catch(next); };
-}
-
-function errors(error: unknown, _req: Request, res: Response, _next: NextFunction): void {
-  if (error instanceof PageWriteError) { res.status(error.status).json({ error: { code: error.code, message: error.message } }); return; }
-  res.status(500).json({ error: { code: 'internal_error', message: 'Unable to complete the Spaces first-run request' } });
-}
 
 /**
  * First-time generation of the workspace homes and the Spaces Home. Mount at /api.
@@ -46,7 +33,7 @@ export function setupSpacesHomeRunRoutes(deps: { scheduler: ScheduledJobSchedule
   const router = Router();
   const now = () => (deps.clock ?? Date.now)();
   const scheduler = (): ScheduledJobScheduler => {
-    if (!deps.scheduler) throw new PageWriteError(409, 'invalid', 'The Meta agent needs scheduled jobs, which are off on this backend');
+    if (!deps.scheduler) throw new PageWriteError(409, 'invalid', 'Pages upkeep needs scheduled jobs, which are off on this backend');
     return deps.scheduler;
   };
 
@@ -67,6 +54,6 @@ export function setupSpacesHomeRunRoutes(deps: { scheduler: ScheduledJobSchedule
     answer(res, retrySpacesFirstRun(scheduler(), requireOwner(req), (input.workspaceId as string | undefined) ?? null, now()));
   }));
 
-  router.use('/spaces-home/first-run', errors);
+  router.use('/spaces-home/first-run', pageErrors('Unable to complete the Spaces first-run request'));
   return router;
 }

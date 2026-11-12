@@ -1,15 +1,8 @@
-import type { FollowUpsExperimentMode, MetadataOutputMode } from '../../contract/host';
+import type { MetadataOutputMode } from '../../contract/host';
 
-/** Overview tools are standard for Codex; only structured follow-ups need the
- * opt-in Stop-hook experiment. Keep this separate from Claude's legacy modes. */
-export function codexMetadataOutputMode(
-  hookEnabled: boolean,
-  mode: FollowUpsExperimentMode,
-): MetadataOutputMode {
-  return hookEnabled && mode === 'hook-tool'
-    ? 'structured-tool'
-    : 'sentinel-followups-tool-overview';
-}
+/** A Codex chat reports its branch overview through the host's tool and its
+ * follow-ups as sentinel lines. Keep this separate from Claude's mode. */
+export const CODEX_METADATA_OUTPUT_MODE: MetadataOutputMode = 'sentinel-followups-tool-overview';
 
 // The turn-metadata instruction text itself is the host's
 // (CodexAdapterOptions.hostText.turnMetadataInstruction; Michi: hostText/codex.ts).

@@ -17,6 +17,7 @@ const KIND_LABEL: Record<MichiContextItem['kind'], string> = {
   node: 'Thread',
   block: 'Block',
   row: 'Row',
+  companion_item: 'Today',
 };
 
 function oneLine(text: string): string {
@@ -100,7 +101,12 @@ export function formatAssistantContext(
   return lines.length > 0 ? lines.join('\n') : null;
 }
 
-const CONTEXT_START = /^(On screen: |- (thread|node|block|row): )/;
+/**
+ * How formatAssistantContext opens its lines: the page, then one `- <kind>: `
+ * per item, for every kind of item it writes (KIND_LABEL lists them all, so a
+ * new kind, such as Today's companion_item, is never read as a selection).
+ */
+const CONTEXT_START = new RegExp(`^(On screen: |- (${Object.keys(KIND_LABEL).join('|')}): )`);
 
 /**
  * The quote's framing on the wire when it is replayed from its text alone (a

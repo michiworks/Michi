@@ -15,11 +15,12 @@ import type * as KiroOptions from '../src/agents/michiKiroOptions';
 import { AcpAgentRuntime } from 'michi-runtime/internal/adapters/kiro/AcpAgentRuntime';
 import { michiTestHost } from './helpers/michiTestHost';
 import { fakeMcpRegistry } from './helpers/fakeMcpRegistry';
+import { agentSpawnEnv } from '../src/agents/agentSpawnEnv';
 
 const ENV = [
   'MICHI_KIRO_MAX_PROCESSES', 'MICHI_KIRO_IDLE_TTL_MS', 'MICHI_KIRO_WARM_POOL_SIZE', 'ACP_TIMEOUT_MS',
   'MICHI_KIRO_MAX_CONCURRENT', 'MICHI_APPROVE_TIMEOUT_MS', 'MICHI_CUSTOM_AGENTS', 'KIRO_CLI_BIN', 'LOCALAPPDATA',
-  'MICHI_KIRO_ENGINE', 'MICHI_KIRO_PRELOAD_TOOLS',
+  'MICHI_KIRO_ENGINE', 'MICHI_KIRO_PRELOAD_TOOLS', 'MICHI_KIRO_SESSION_IDLE_TTL_MS',
 ] as const;
 type EnvName = (typeof ENV)[number];
 
@@ -45,19 +46,32 @@ function loadFactories(env: Partial<Record<EnvName, string>>): typeof Factories 
 
 /** The options' values, with each function called now. */
 function settings(options: ReturnType<typeof KiroOptions.kiroEnvOptions>) {
-  const { approveTimeoutMs, customAgents, kiroCli, spawnEnv, preloadTools, ...values } = options;
-  assert.equal(spawnEnv?.(), process.env, 'kiro-cli gets the environment of the moment it starts');
+  const { approveTimeoutMs, customAgents, kiroCli, spawnEnv, preloadTools, advertiseSkills, ...values } = options;
+  // Compared by name: a failure must not print the environment's values.
+  assert.deepEqual(Object.keys(spawnEnv?.() ?? {}).sort(), Object.keys(agentSpawnEnv()).sort(),
+    'kiro-cli gets the environment of the moment it starts, less the backend\'s own');
   return { ...values, approveTimeoutMs: approveTimeoutMs?.(), customAgents: customAgents?.(), kiroCli: kiroCli?.(),
-    preloadTools: preloadTools?.() };
+    preloadTools: preloadTools?.(), advertiseSkills: advertiseSkills?.() };
 }
 
 test('unset: the defaults AcpAgentRuntime and AcpClient used', (t) => {
   const { kiroEnvOptions } = loadFactories({});
   assert.deepEqual(settings(kiroEnvOptions()), {
     processCap: 20, idleTtlMs: 300_000, warmPoolSize: 3, acpIdleTimeoutMs: 180_000, concurrencyCap: 100,
+    sessionIdleTtlMs: 900_000,
     approveTimeoutMs: 300_000, customAgents: false, kiroCli: { kiroCliBin: undefined, localAppData: undefined },
-    preloadTools: true,
+    preloadTools: true, advertiseSkills: true,
   });
+});
+
+test('MICHI_KIRO_SESSION_IDLE_TTL_MS: milliseconds, 0 keeps every session, anything else the default', () => {
+  const ttl = (raw: string) => loadFactories({ MICHI_KIRO_SESSION_IDLE_TTL_MS: raw }).kiroEnvOptions().sessionIdleTtlMs;
+  assert.equal(ttl('120000'), 120_000);
+  assert.equal(ttl('0'), 0);
+  for (const raw of ['-1', 'soon', '', 'Infinity']) assert.equal(ttl(raw), 900_000, raw);
+  const { kiroEnvOptions } = loadFactories({});
+  process.env.MICHI_KIRO_SESSION_IDLE_TTL_MS = '5000';
+  assert.equal(kiroEnvOptions().sessionIdleTtlMs, 5_000, 'read when the runtime is created, after backend/.env');
 });
 
 test('set: parsed as before, malformed values included', (t) => {
@@ -68,8 +82,9 @@ test('set: parsed as before, malformed values included', (t) => {
   });
   assert.deepEqual(settings(kiroEnvOptions()), {
     processCap: 7, idleTtlMs: 0, warmPoolSize: 0, acpIdleTimeoutMs: 0, concurrencyCap: NaN,
+    sessionIdleTtlMs: 900_000,
     approveTimeoutMs: 1500, customAgents: false, kiroCli: { kiroCliBin: '/opt/kiro-cli', localAppData: 'C:\\Local' },
-    preloadTools: false,
+    preloadTools: false, advertiseSkills: true,
   });
   // Only the exact string turns preloading off, as kiroEnv read it.
   for (const raw of ['true', 'FALSE', '0', '']) {
@@ -77,6 +92,10 @@ test('set: parsed as before, malformed values included', (t) => {
   }
   for (const raw of ['-1', 'soon', 'Infinity']) {
     assert.equal(loadFactories({ ACP_TIMEOUT_MS: raw }).kiroEnvOptions().acpIdleTimeoutMs, 180_000, raw);
+  }
+  // An approval wait that is not a positive number keeps the default, for every runtime.
+  for (const raw of ['0', '-1', 'soon']) {
+    assert.equal(loadFactories({ MICHI_APPROVE_TIMEOUT_MS: raw }).kiroEnvOptions().approveTimeoutMs?.(), 300_000, raw);
   }
   assert.equal(loadFactories({ MICHI_CUSTOM_AGENTS: '1' }).kiroEnvOptions().customAgents?.(), true);
 });
@@ -115,6 +134,31 @@ test('Kiro takes its engine from MICHI_KIRO_ENGINE (unset is v3); Crew stays v2 
   const { RUNTIME_FACTORIES } = loadFactories({ MICHI_KIRO_ENGINE: 'v4' });
   assert.throws(() => RUNTIME_FACTORIES.find((factory) => factory.id === 'kiro')!.create(deps()), /MICHI_KIRO_ENGINE must be v2 or v3/);
   runtimes.push(RUNTIME_FACTORIES.find((factory) => factory.id === 'crew')!.create(deps()));
+});
+
+test("Kiro and Crew's adapter start without the backend's own environment, read at each spawn", async (t) => {
+  const names = ['MICHI_REMOTE_TOKEN', 'MICHI_DATA_DIR', 'NODE_ENV', 'KIRO_API_KEY', 'MICHI_CREW_AGENT'] as const;
+  const saved = Object.fromEntries(names.map((name) => [name, process.env[name]]));
+  const runtimes: Array<{ shutdown(): Promise<void> }> = [];
+  t.after(async () => {
+    await Promise.all(runtimes.map((runtime) => runtime.shutdown()));
+    for (const name of names) {
+      if (saved[name] === undefined) delete process.env[name]; else process.env[name] = saved[name];
+    }
+  });
+  const { RUNTIME_FACTORIES } = loadFactories({});
+  const create = (id: string) => {
+    const runtime = RUNTIME_FACTORIES.find((factory) => factory.id === id)!.create({ bridge, mcpRegistry: fakeMcpRegistry() as any, mcpPort: 0, host: michiTestHost() });
+    runtimes.push(runtime);
+    return (runtime as any).runtimeOptions as { spawnEnv?: () => NodeJS.ProcessEnv; launch?: { env?: () => NodeJS.ProcessEnv } };
+  };
+  const kiro = create('kiro').spawnEnv!;
+  const crew = create('crew').launch!.env!;
+  Object.assign(process.env, { MICHI_REMOTE_TOKEN: 'fixture-token', MICHI_DATA_DIR: '/fixture/data', NODE_ENV: 'production', KIRO_API_KEY: 'fixture-key', MICHI_CREW_AGENT: 'fixture-agent' });
+  for (const [id, env] of [['kiro', kiro], ['crew', crew]] as const) {
+    const child = env();
+    assert.deepEqual(names.filter((name) => name in child), ['KIRO_API_KEY', 'MICHI_CREW_AGENT'], id);
+  }
 });
 
 test('an AcpAgentRuntime without these options runs on the defaults, whatever the environment says', async (t) => {

@@ -49,7 +49,7 @@
 .ui-sheet__action > svg { flex: none; color: var(--term-mid); }
 .ui-sheet__action:active,
 .ui-sheet__action:hover { background: var(--term-hover-bg, var(--term-alt)); }
-.ui-sheet__action:focus-visible { outline: 2px solid var(--term-accent); outline-offset: -2px; }
+.ui-sheet__action:focus-visible { outline: var(--focus-ring); outline-offset: -2px; }
 .ui-sheet__action[data-danger],
 .ui-sheet__action[data-danger] > svg { color: var(--term-danger-text); }
 .ui-sheet__action:disabled { color: var(--term-faint); cursor: not-allowed; }

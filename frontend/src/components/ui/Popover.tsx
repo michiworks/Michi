@@ -11,7 +11,7 @@ import {
   type TargetAndTransition,
   type Transition,
 } from 'motion/react';
-import { lastInputWasTouch } from '../../lib/inputModality';
+import { lastInputWasKeyboard, lastInputWasTouch } from '../../lib/inputModality';
 import { EASE } from '../../motion/tokens';
 import './Menu.css';
 
@@ -98,6 +98,9 @@ export interface PopoverSurfaceProps {
   glass?: boolean;
   role?: string;
   'aria-label'?: string;
+  /** `over`: an Esc layer (escapeLayers.ts) whatever its role. Esc, and the
+   *  phone's Back (backStack.ts), close it before the page under it. */
+  escapeLayer?: 'over';
   /** Inline overrides for the rare callsite that needs e.g. `bottom`
    *  anchoring instead of `top`. Merged last so it wins. */
   style?: React.CSSProperties;
@@ -134,6 +137,7 @@ export const PopoverSurface = React.forwardRef<HTMLDivElement, PopoverSurfacePro
       exit,
       glass = false,
       role,
+      escapeLayer,
       style,
       className,
       onMouseDown,
@@ -188,6 +192,7 @@ export const PopoverSurface = React.forwardRef<HTMLDivElement, PopoverSurfacePro
           exit={exit ?? MENU_OUT}
           role={role}
           ariaLabel={ariaLabel}
+          escapeLayer={escapeLayer}
           className={surfaceClassName}
           menuKind={menuKind}
           solidGlass={solidGlass}
@@ -207,6 +212,7 @@ export const PopoverSurface = React.forwardRef<HTMLDivElement, PopoverSurfacePro
         ref={ref}
         role={role}
         aria-label={ariaLabel}
+        data-escape-layer={escapeLayer}
         className={surfaceClassName}
         data-menu={menuKind}
         data-glass={solidGlass ? 'solid' : undefined}
@@ -268,6 +274,7 @@ function GrowingSurface({
   exit,
   role,
   ariaLabel,
+  escapeLayer,
   className,
   menuKind,
   solidGlass,
@@ -282,6 +289,7 @@ function GrowingSurface({
   exit: TargetAndTransition;
   role?: string;
   ariaLabel?: string;
+  escapeLayer?: 'over';
   className?: string;
   menuKind?: MenuKind;
   solidGlass: boolean;
@@ -353,6 +361,7 @@ function GrowingSurface({
       ref={setNode}
       role={leaving ? undefined : role}
       aria-label={ariaLabel}
+      data-escape-layer={leaving ? undefined : escapeLayer}
       aria-hidden={leaving || undefined}
       inert={leaving}
       className={className}
@@ -381,6 +390,7 @@ interface TooltipAnchorProps {
   onFocus?: React.FocusEventHandler<HTMLElement>;
   onBlur?: React.FocusEventHandler<HTMLElement>;
   onPointerDown?: React.PointerEventHandler<HTMLElement>;
+  'aria-describedby'?: string;
 }
 
 /**
@@ -394,6 +404,7 @@ interface TooltipAnchorProps {
  */
 export function Tooltip({
   anchorRef,
+  id,
   label,
   kbd,
   offset = 6,
@@ -402,6 +413,8 @@ export function Tooltip({
   side = 'bottom',
 }: {
   anchorRef: React.RefObject<HTMLElement | null>;
+  /** Set on the label, for the anchor's aria-describedby. */
+  id?: string;
   label: React.ReactNode;
   kbd?: React.ReactNode;
   offset?: number;
@@ -491,7 +504,7 @@ export function Tooltip({
         textOverflow: 'ellipsis',
       }}
     >
-      <span style={{ minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis' }}>{label}</span>
+      <span id={id} style={{ minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis' }}>{label}</span>
       {kbd && <span style={{ flex: 'none', color: 'var(--term-muted)', fontSize: 'var(--fs-xs)' }}>{kbd}</span>}
     </PopoverSurface>
   );
@@ -510,10 +523,16 @@ export interface HoverTipProps {
   children: React.ReactElement<TooltipAnchorProps>;
 }
 
+/** Until then a hover opens its tip at once: the pointer is moving along a
+ * row of tipped controls whose last tip just closed. */
+let hoverTipWarmUntil = 0;
+const HOVER_TIP_WARM_MS = 600;
+
 /**
  * Attach a delayed hover/focus tooltip to one anchor element. The anchor is
  * cloned (no wrapper DOM) so layout is unchanged, and its own handlers/ref are
- * chained ahead of the tooltip's. Hover uses `delayMs`; focus is immediate.
+ * chained ahead of the tooltip's. Hover uses `delayMs`; keyboard focus is
+ * immediate, and a click's focus opens nothing. Esc closes it.
  */
 export function HoverTip({
   label,
@@ -528,6 +547,7 @@ export function HoverTip({
   const anchorRef = React.useRef<HTMLElement | null>(null);
   const timerRef = React.useRef<ReturnType<typeof setTimeout> | null>(null);
   const [open, setOpen] = React.useState(false);
+  const tipId = React.useId();
   const childRef = children.props.ref;
 
   const clearTimer = React.useCallback(() => {
@@ -550,7 +570,7 @@ export function HoverTip({
   const showAfterHover = React.useCallback(() => {
     if (disabled || lastInputWasTouch()) return;
     clearTimer();
-    if (delayMs <= 0) {
+    if (delayMs <= 0 || Date.now() < hoverTipWarmUntil) {
       setOpen(true);
       return;
     }
@@ -565,6 +585,16 @@ export function HoverTip({
     return clearTimer;
   }, [clearTimer, disabled, hide]);
 
+  React.useEffect(() => {
+    if (!open) return;
+    const onKey = (event: KeyboardEvent) => { if (event.key === 'Escape') hide(); };
+    window.addEventListener('keydown', onKey);
+    return () => {
+      window.removeEventListener('keydown', onKey);
+      hoverTipWarmUntil = Date.now() + HOVER_TIP_WARM_MS;
+    };
+  }, [open, hide]);
+
   const setAnchor = React.useCallback((el: HTMLElement | null) => {
     anchorRef.current = el;
     if (typeof childRef === 'function') childRef(el);
@@ -573,8 +603,10 @@ export function HoverTip({
     }
   }, [childRef]);
 
+  const shown = open && !disabled;
   const anchor = React.cloneElement(children, {
     ref: setAnchor,
+    'aria-describedby': shown ? tipId : children.props['aria-describedby'],
     onMouseEnter: (event: React.MouseEvent<HTMLElement>) => {
       children.props.onMouseEnter?.(event);
       showAfterHover();
@@ -585,7 +617,7 @@ export function HoverTip({
     },
     onFocus: (event: React.FocusEvent<HTMLElement>) => {
       children.props.onFocus?.(event);
-      showNow();
+      if (lastInputWasKeyboard()) showNow();
     },
     onBlur: (event: React.FocusEvent<HTMLElement>) => {
       children.props.onBlur?.(event);
@@ -600,9 +632,10 @@ export function HoverTip({
   return (
     <>
       {anchor}
-      {open && !disabled && (
+      {shown && (
         <Tooltip
           anchorRef={anchorRef}
+          id={tipId}
           label={label}
           kbd={kbd}
           offset={offset}

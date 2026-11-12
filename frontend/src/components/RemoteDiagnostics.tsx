@@ -1,11 +1,12 @@
 import { useEffect, useRef, useState } from 'react';
 import { formatRemoteDiagnostic, remoteSignInLabel, type RemoteConnectionDiagnostic } from 'michi-shared';
 import { fetchAgentStatus } from '../services/api/agentRuntime';
+import { copyText } from '../lib/clipboard';
 import { askLocalDiagnosticAgent, localDiagnosticRuntime } from '../services/remoteDiagnosticAgent';
 import { Button } from './ui/controls';
 import './RemoteConnection.css';
 import { requestRemoteAuthentication } from '../state/remoteAuthentication';
-import { getKnownBackendConnections } from '../config/backendConnections';
+import { getKnownBackendConnections, LOCAL_BACKEND_CONNECTION_ID } from '../config/backendConnections';
 
 const STAGE_LABELS: Record<string, string> = { request: 'starting the request', ssh: 'SSH connection', node: 'Node.js setup', source: 'fetching source', build: 'remote build', start: 'service startup', tunnel: 'SSH forwarding', verify: 'connection verification', runtime: 'runtime detection', workspace: 'restoring remote workspaces' };
 
@@ -20,7 +21,7 @@ export function RemoteDiagnostics({ report, onBusyChange }: {
   const request = useRef<AbortController | null>(null);
   useEffect(() => {
     const controller = new AbortController();
-    void fetchAgentStatus('local', AbortSignal.any([controller.signal, AbortSignal.timeout(8000)])).then(status => {
+    void fetchAgentStatus(LOCAL_BACKEND_CONNECTION_ID, AbortSignal.any([controller.signal, AbortSignal.timeout(8000)])).then(status => {
       if (controller.signal.aborted) return;
       const agent = localDiagnosticRuntime(status); setLocalAgent(agent);
       setAgentStatus(agent ? 'Opens a new local chat with ' + agent.label + ' and sends these diagnostics.' : 'No ready local runtime. View or copy diagnostics below.');
@@ -29,15 +30,15 @@ export function RemoteDiagnostics({ report, onBusyChange }: {
   }, []);
 
   const copy = async () => {
-    try { await navigator.clipboard.writeText(formatRemoteDiagnostic(report)); setFeedback('Diagnostics copied.'); }
-    catch { setShowLogs(true); setFeedback('Clipboard unavailable. Select the log text below and copy it.'); }
+    if (await copyText(formatRemoteDiagnostic(report))) { setFeedback('Diagnostics copied.'); return; }
+    setShowLogs(true); setFeedback('Clipboard unavailable. Select the log text below and copy it.');
   };
   const askAgent = async () => {
     if (sending) return;
     const controller = new AbortController(); request.current = controller;
     setSending(true); onBusyChange?.(true); setFeedback('');
     try {
-      const agent = localDiagnosticRuntime(await fetchAgentStatus('local', AbortSignal.any([controller.signal, AbortSignal.timeout(8000)])));
+      const agent = localDiagnosticRuntime(await fetchAgentStatus(LOCAL_BACKEND_CONNECTION_ID, AbortSignal.any([controller.signal, AbortSignal.timeout(8000)])));
       if (controller.signal.aborted) return;
       if (!agent) { setLocalAgent(null); throw new Error('No ready local runtime. Copy diagnostics instead.'); }
       await askLocalDiagnosticAgent(report, agent.binding, controller.signal);

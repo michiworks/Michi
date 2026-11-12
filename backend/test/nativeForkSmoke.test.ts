@@ -17,9 +17,7 @@ for (const runtimeId of ['codex', 'claude']) {
     const directory = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), `michi-native-fork-${runtimeId}-`)));
     const priorEnv = { ...process.env };
     Object.assign(process.env, { MICHI_DATA_DIR: directory, MICHI_CLAUDE_POOL_DISABLED: '1',
-      MICHI_CLAUDE_BARE: '1', MICHI_CLAUDE_STRICT_MCP: '1', MICHI_TITLE_MODEL_CODEX: 'off',
-      MICHI_CLAUDE_FOLLOW_UPS_HOOK_POC: '0',
-      MICHI_CODEX_FOLLOW_UPS_HOOK_POC: '0' });
+      MICHI_CLAUDE_BARE: '1', MICHI_CLAUDE_STRICT_MCP: '1', MICHI_TITLE_MODEL_CODEX: 'off' });
     delete process.env.MICHI_CLOUD;
     const { closeDb, getDb, initDb } = require('../src/services/db') as typeof import('../src/services/db');
     const repo = require('../src/services/dbRepository') as typeof import('../src/services/dbRepository');

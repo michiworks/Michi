@@ -91,6 +91,33 @@ describe('NewWorkspaceDialog multi-folder', () => {
     expect(screen.queryByText('sub')).toBeNull();
   });
 
+  it('rejects a nested Windows folder and names the workspace after its folder', async () => {
+    let callCount = 0;
+    mockElectron = {
+      chooseFolder: vi.fn().mockImplementation(async () => {
+        callCount++;
+        if (callCount === 1) return { canceled: false, path: 'C:\\Users\\me\\proj', name: 'proj' };
+        return { canceled: false, path: 'C:\\Users\\me\\proj\\sub', name: 'sub' };
+      }),
+    };
+    const props = renderDialog();
+
+    await act(async () => {
+      fireEvent.click(screen.getByText(/Add folders the agent can read and edit/i));
+    });
+    await act(async () => {
+      const addBtn = screen.getByText((_content, el) =>
+        el?.tagName === 'BUTTON' && el.textContent === '+ Add folder',
+      );
+      fireEvent.click(addBtn);
+    });
+
+    expect(screen.getByText(/overlaps with an existing folder/i)).toBeTruthy();
+    expect(screen.queryByText('sub')).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: /^create$/i }));
+    expect(props.onCreate).toHaveBeenCalledWith('proj', 'C:\\Users\\me\\proj', [expect.objectContaining({ path: 'C:\\Users\\me\\proj' })]);
+  });
+
   it('allows removing a non-primary folder', async () => {
     let callCount = 0;
     mockElectron = {
@@ -120,6 +147,33 @@ describe('NewWorkspaceDialog multi-folder', () => {
 
     expect(screen.queryByText('second')).toBeNull();
     expect(screen.getByText('first')).toBeTruthy();
+  });
+
+  it('lets the keyboard reach a folder\'s Make primary and remove, with no pointer over the row', async () => {
+    let callCount = 0;
+    mockElectron = {
+      chooseFolder: vi.fn().mockImplementation(async () => {
+        callCount++;
+        return callCount === 1 ? { canceled: false, path: '/a/first', name: 'first' } : { canceled: false, path: '/b/second', name: 'second' };
+      }),
+    };
+    renderDialog();
+    await act(async () => {
+      fireEvent.click(screen.getByText(/Add folders the agent can read and edit/i));
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByText((_content, el) => el?.tagName === 'BUTTON' && el.textContent === '+ Add folder'));
+    });
+    // Never hovered: both controls are in the document, revealed by focus.
+    const makePrimary = screen.getByRole('button', { name: 'Make primary' });
+    const remove = screen.getAllByRole('button', { name: 'Remove folder' })[1];
+    for (const control of [makePrimary, remove]) {
+      expect(control.classList.contains('t-reveal')).toBe(true);
+      expect(control.style.color).not.toBe('transparent');
+    }
+    expect(makePrimary.closest('.t-reveal-host')).toBe(remove.closest('.t-reveal-host'));
+    fireEvent.click(makePrimary);
+    expect(screen.getByText('second').closest('.t-reveal-host')?.textContent).toContain('Primary');
   });
 
   it('creates without folders when none are added', () => {

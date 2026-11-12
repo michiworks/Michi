@@ -90,6 +90,13 @@ export interface HostToolDef<B> {
   /** Sent to clients as-is. Arguments are not validated against it; the handler owns validation. */
   inputSchema: JsonSchemaObject;
   annotations?: ToolAnnotations;
+  /**
+   * The model needs this tool's description from the start (it says when to
+   * call the tool): a client that holds tool definitions back until the model
+   * searches for them is asked to load this one up front, in the `_meta` the
+   * slot's CreateSlotOptions.upFrontToolMeta gives.
+   */
+  loadUpFront?: boolean;
   /** Evaluated on every tools/list and tools/call. Hidden tools are reported as unknown when called. */
   visible?(slot: SlotView<B>): boolean;
   handler(args: Record<string, unknown>, ctx: ToolCallContext<B>): Promise<ToolResult>;
@@ -151,6 +158,12 @@ export interface CreateSlotOptions<B> {
   /** When present, only these tool names are exposed, builtins included. */
   allowTools?: ReadonlySet<string>;
   builtins?: SlotBuiltins;
+  /**
+   * The tool `_meta` this slot's client reads as "load this tool up front"
+   * (the adapter's: each agent CLI has its own key); tools/list puts it on
+   * every tool marked HostToolDef.loadUpFront. Absent: none.
+   */
+  upFrontToolMeta?: Readonly<Record<string, unknown>>;
   /**
    * Default true. false: the slot has no URL of its own (its
    * `<basePath>/<slotId>` and hook routes answer 404, endpoint() throws) but

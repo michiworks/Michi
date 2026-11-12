@@ -13,9 +13,11 @@ import { michiClaudeAdapterOptions } from "./michiClaudeOptions";
 import { AcpAgentRuntime } from "michi-runtime/internal/adapters/kiro/AcpAgentRuntime";
 import { resolveKiroEngine } from "michi-runtime/internal/adapters/kiro/kiroProtocol";
 import { createCrewRuntime } from "michi-runtime/internal/adapters/crew/crewRuntime";
-import { crewEnvOptions, kiroEnvOptions } from "./michiKiroOptions";
+import { crewEnvOptions, kiroEnvOptions, kiroSkillOptions } from "./michiKiroOptions";
 import { CodexRuntime, type CodexAdapterOptions } from "michi-runtime/internal/adapters/codex/index";
-import { michiCodexHostText } from "./michiCodexOptions";
+import { michiCodexHostText, michiCodexSkillOptions } from "./michiCodexOptions";
+import { agentSpawnEnv } from "./agentSpawnEnv";
+import { approveTimeoutMs } from "./approveTimeout";
 import { probeKiroCli } from 'michi-runtime/internal/adapters/kiro/kiroCli';
 import { kiroAuth } from './kiro/kiroAuth';
 import { getProviderEnvBindings } from "./pi/piProviders";
@@ -62,7 +64,6 @@ export interface RuntimeFactoryDeps {
 
 export interface RuntimeFactory {
     id: string;
-    label: string;
     /** Provider env-var bindings collected by secrets.ts at startup. */
     envBindings?: ProviderEnvBinding[];
     /**
@@ -79,10 +80,10 @@ export interface RuntimeFactory {
 export const RUNTIME_FACTORIES: readonly RuntimeFactory[] = [
     {
         id: "kiro",
-        label: "Kiro",
         staticDescriptor: STATIC_RUNTIME_DESCRIPTORS.kiro,
         create: (deps) => new AcpAgentRuntime({
             ...kiroEnvOptions(),
+            ...kiroSkillOptions(),
             restrictedAgent: michiKiroRestrictedAgent,
             startClient: (launch) => {
                 const cli = probeKiroCli();
@@ -100,7 +101,6 @@ export const RUNTIME_FACTORIES: readonly RuntimeFactory[] = [
     },
     {
         id: "crew",
-        label: "Kiro Crew",
         staticDescriptor: STATIC_RUNTIME_DESCRIPTORS.crew,
         // The preset pins engine v2, so MICHI_KIRO_ENGINE=v3 does not flip Crew
         // to per-session workers. It reads the adapter and App locations from
@@ -118,14 +118,12 @@ export const RUNTIME_FACTORIES: readonly RuntimeFactory[] = [
     },
     {
         id: "pi",
-        label: "Pi (multi-provider)",
         envBindings: getProviderEnvBindings(),
         staticDescriptor: STATIC_RUNTIME_DESCRIPTORS.pi,
         create: (deps) => new PiRuntime(deps.bridge),
     },
     {
         id: "claude",
-        label: "Claude",
         staticDescriptor: STATIC_RUNTIME_DESCRIPTORS.claude,
         create: (deps) => new ClaudeRuntime({
             ...michiClaudeAdapterOptions(deps.host, { cache: deps.modelCache }),
@@ -135,7 +133,6 @@ export const RUNTIME_FACTORIES: readonly RuntimeFactory[] = [
     },
     {
         id: "codex",
-        label: "Codex",
         staticDescriptor: STATIC_RUNTIME_DESCRIPTORS.codex,
         create: (deps) => new CodexRuntime({
             ...codexAdapterOptions(deps),
@@ -145,13 +142,11 @@ export const RUNTIME_FACTORIES: readonly RuntimeFactory[] = [
     },
     {
         id: "antigravity",
-        label: "Antigravity",
         staticDescriptor: STATIC_RUNTIME_DESCRIPTORS.antigravity,
         create: (deps) => new AntigravityRuntime({ modelCache: deps.modelCache }),
     },
     {
         id: "cursor",
-        label: "Cursor",
         staticDescriptor: STATIC_RUNTIME_DESCRIPTORS.cursor,
         create: (deps) => new CursorRuntime(
             deps.bridge,
@@ -163,7 +158,6 @@ export const RUNTIME_FACTORIES: readonly RuntimeFactory[] = [
     },
     {
         id: "grok",
-        label: "Grok",
         staticDescriptor: STATIC_RUNTIME_DESCRIPTORS.grok,
         create: (deps) => new GrokRuntime(
             deps.bridge,
@@ -175,40 +169,29 @@ export const RUNTIME_FACTORIES: readonly RuntimeFactory[] = [
     },
 ];
 
-const CODEX_FOLLOW_UPS_HOOK_POC_VALUES = new Set(["1", "true", "yes", "on"]);
-
 /**
  * The Codex adapter's options from `env`, parsed as the adapter itself did
- * before it took options. The app-server child gets `env` itself; the title
- * deadline is read at each title, the rest once, here.
+ * before it took options. The app-server child gets `env` less the backend's
+ * own (agentSpawnEnv); the binary cache still follows MICHI_DATA_DIR, read
+ * here. The title deadline is the host's (titleGeneration.titleModelConfig).
  */
 export function codexAdapterOptions(
     deps: Pick<RuntimeFactoryDeps, "host" | "modelCache">,
     env: NodeJS.ProcessEnv = process.env,
 ): CodexAdapterOptions {
-    const followUpsHookPoc = CODEX_FOLLOW_UPS_HOOK_POC_VALUES.has(
-        (env.MICHI_CODEX_FOLLOW_UPS_HOOK_POC ?? "").trim().toLowerCase(),
-    );
     return {
         host: deps.host,
         modelCache: deps.modelCache,
         binaryPath: env.CODEX_CLI_BIN,
         binaryCacheFile: path.join(env.MICHI_DATA_DIR || path.join(os.homedir(), ".michi"), "cache", "codex-binary.json"),
         codexHome: env.CODEX_HOME,
-        spawnEnv: () => env,
+        spawnEnv: () => agentSpawnEnv(env),
         rpcTimeoutMs: parseInt(env.MICHI_CODEX_RPC_TIMEOUT_MS ?? "30000", 10),
         initTimeoutMs: parseInt(env.MICHI_CODEX_INIT_TIMEOUT_MS ?? "30000", 10),
-        approveTimeoutMs: parseInt(env.MICHI_APPROVE_TIMEOUT_MS ?? "300000", 10),
-        titleTimeoutMs: () => parseInt(env.MICHI_CODEX_TITLE_TIMEOUT_MS ?? "10000", 10),
+        approveTimeoutMs: approveTimeoutMs(env),
         maxConcurrent: Number(env.MICHI_CODEX_MAX_CONCURRENT),
         hostText: michiCodexHostText(),
-        ...(followUpsHookPoc ? {
-            followUpsHook: {
-                // The POC's own CODEX_HOME, so bypass_hook_trust never sees the user's hooks.
-                isolatedCodexHome: path.resolve(env.MICHI_CODEX_FOLLOW_UPS_HOOK_HOME
-                    || path.join(env.MICHI_DATA_DIR || path.join(os.homedir(), ".michi"), "codex-follow-ups-hook-poc")),
-            },
-        } : {}),
+        ...michiCodexSkillOptions(env),
     };
 }
 

@@ -1,4 +1,4 @@
-import { parseAgentDefinitionDtoV1, type AgentDefinitionDtoV1 } from 'michi-shared';
+import { IDEMPOTENCY_KEY_HEADER, parseAgentDefinitionDtoV1, randomUuid, readApiError, type AgentDefinitionDtoV1 } from 'michi-shared';
 import { backendApiBase } from '../../config/backendConnections';
 import { backendFetch } from './backendRequest';
 import type { AgentResourceIdentity, LocatedAgentResource } from '../../state/agentIdentity';
@@ -29,13 +29,15 @@ export class AgentRunActionApiError extends Error {
 }
 
 export function createAgentRunActionOperationId(): string {
-  return globalThis.crypto?.randomUUID?.() ?? `agent-run-action-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+  return randomUuid();
 }
 
 async function responseJson(response: Response, operation: string): Promise<Record<string, any>> {
   const body = await response.json().catch(() => null) as Record<string, any> | null;
-  if (!response.ok) throw new AgentRunActionApiError(typeof body?.error === 'string' ? body.error : 'request_failed',
-    typeof body?.message === 'string' ? body.message : `${operation} failed: ${response.status}`);
+  if (!response.ok) {
+    const { message, code } = readApiError(body);
+    throw new AgentRunActionApiError(code ?? 'request_failed', message ?? `${operation} failed: ${response.status}`);
+  }
   if (!body || typeof body !== 'object') throw new Error(`${operation} returned a malformed response`);
   return body;
 }
@@ -43,7 +45,7 @@ async function responseJson(response: Response, operation: string): Promise<Reco
 export async function continueAgentRunAsBranch(identity: AgentResourceIdentity,
   request: ContinueAgentRunActionRequest, operationId: string, signal?: AbortSignal): Promise<ContinueAgentRunActionResult> {
   const payload = await responseJson(await backendFetch(`${backendApiBase(identity.backendConnectionId)}/agent-runs/${encodeURIComponent(identity.id)}/continue-as-branch`, {
-    method: 'POST', headers: { 'Content-Type': 'application/json', 'x-idempotency-key': operationId },
+    method: 'POST', headers: { 'Content-Type': 'application/json', [IDEMPOTENCY_KEY_HEADER]: operationId },
     body: JSON.stringify(request), signal,
   }), 'continueAgentRunAsBranch');
   return payload as unknown as ContinueAgentRunActionResult;
@@ -53,7 +55,7 @@ export async function saveAgentRunAsCustomAgent(identity: AgentResourceIdentity,
   request: { version: 1; workspaceId: string; name?: string }, operationId: string,
   signal?: AbortSignal): Promise<LocatedAgentResource<AgentDefinitionDtoV1>> {
   const payload = await responseJson(await backendFetch(`${backendApiBase(identity.backendConnectionId)}/agent-runs/${encodeURIComponent(identity.id)}/save-as-agent`, {
-    method: 'POST', headers: { 'Content-Type': 'application/json', 'x-idempotency-key': operationId },
+    method: 'POST', headers: { 'Content-Type': 'application/json', [IDEMPOTENCY_KEY_HEADER]: operationId },
     body: JSON.stringify(request), signal,
   }), 'saveAgentRunAsCustomAgent');
   return locatedAgentResource(identity.backendConnectionId, parseAgentDefinitionDtoV1(payload.definition));

@@ -6,9 +6,26 @@ export interface NavigateToNodeDeps {
   activeProjectId: string | null;
   selectProject: (projectId: string) => void;
   openPane: (nodeId: string) => void;
-  openPaneInTree: (projectId: string, treeId: string, nodeId: string) => void;
+  openPaneInTree: (projectId: string, treeId: string | null, nodeId: string) => void;
   activateTree: (treeId: string, targetProjectId?: string) => void;
   setFocusedNodeId: (nodeId: string | null) => void;
+}
+
+/**
+ * The thread whose slot shows `nodeId`. A node no branch edge reaches (a
+ * digest) has none of its own: it goes back to `treeIdHint` (the thread it was
+ * recorded in), else its first source's thread, else the workspace's shown one.
+ */
+function homeTreeId(nodeId: string, project: Project, treeIdHint?: string): string | null {
+  const own = findTreeIdForNode(nodeId, project);
+  if (own) return own;
+  if (treeIdHint && project.trees.some((tree) => tree.id === treeIdHint && !tree.archivedAt)) return treeIdHint;
+  for (const edge of project.edges) {
+    if (edge.kind !== 'digest-source' || edge.target !== nodeId) continue;
+    const sourceTreeId = findTreeIdForNode(edge.source, project);
+    if (sourceTreeId) return sourceTreeId;
+  }
+  return project.activeTreeId;
 }
 
 /**
@@ -29,22 +46,23 @@ export function navigateToNode(
   deps: NavigateToNodeDeps,
   nodeId: string,
   projectId?: string,
+  treeIdHint?: string,
 ): void {
   const project =
     (projectId ? deps.projects.find((p) => p.id === projectId) : undefined) ??
     deps.projects.find((p) => p.chatIds.includes(nodeId));
-  const treeId = project ? findTreeIdForNode(nodeId, project) : null;
-  if (!project || !treeId) {
+  if (!project) {
     // Unknown home (shouldn't happen for live nodes) — keep legacy behavior.
     deps.openPane(nodeId);
     return;
   }
+  const treeId = homeTreeId(nodeId, project, treeIdHint);
   const crossesProject = project.id !== deps.activeProjectId;
   const crossesTree = treeId !== project.activeTreeId;
   if (crossesProject) deps.selectProject(project.id);
   if (crossesProject || crossesTree) {
     deps.openPaneInTree(project.id, treeId, nodeId);
-    deps.activateTree(treeId, project.id);
+    if (treeId) deps.activateTree(treeId, project.id);
   } else {
     deps.openPane(nodeId);
   }

@@ -1,0 +1,390 @@
+/* ── 'line' agent-block chrome (AgentLineBlocks.tsx) ─────────────────────────
+   W2 · outcome-first ("Same Box"): one 28px native disclosure button per run
+   (36px on touch, 32px for a step), set a size below the prose (13/18).
+   Grid: hanging icon 16 | lead + rest | failure fragment | duration | chevron.
+   The icon hangs outside the prose edge; under ~560px of column it moves
+   inline. Colour by role: fg = live / open words, mid = what is read, muted =
+   what is scanned, faint = decoration; --term-danger only for glyphs and
+   --term-danger-text for error words. Only transform and opacity animate. */
+
+.agent-line-run {
+  --agent-line-hang: 24px;
+  --agent-line-hover: color-mix(in srgb, var(--term-fg) 6%, transparent);
+  --agent-line-press: color-mix(in srgb, var(--term-fg) 10%, transparent);
+  position: relative;
+  container-type: inline-size;
+  font-family: var(--ui-font);
+}
+/* 16px from the prose on either side; runs that follow each other touch, so
+   the space around the work is wider than the space inside it. */
+.agent-line-group,
+.agent-line-run--thought,
+.agent-line-workfold { margin: 16px 0; }
+.agent-line-group + .agent-line-group,
+.agent-line-run--thought + .agent-line-group,
+.agent-line-group + .agent-line-run--thought { margin-top: -16px; }
+
+.agent-line {
+  display: grid;
+  grid-template-columns: 16px minmax(0, 1fr) auto auto 12px;
+  align-items: center;
+  column-gap: 8px;
+  box-sizing: border-box;
+  width: calc(100% + var(--agent-line-hang) + 8px);
+  margin: 0 0 0 calc(-1 * var(--agent-line-hang) - 4px);
+  min-height: 28px;
+  padding: 5px 4px;
+  border: 0;
+  border-radius: var(--ui-radius);
+  background: transparent;
+  color: var(--term-muted);
+  font: 400 var(--fs-lg)/18px var(--ui-font);
+  text-align: left;
+  position: relative;
+  user-select: none;
+  -webkit-tap-highlight-color: transparent;
+  touch-action: manipulation;
+  transition: background-color var(--t-soft) ease-out, color var(--t-soft) ease-out;
+}
+button.agent-line { cursor: pointer; }
+/* Rows of a list, not lone buttons: 28px gives a pointer room past WCAG 2.5.8's
+   24px; 36px clears it with room for a finger. */
+@media (pointer: coarse) {
+  .agent-line { min-height: 36px; }
+  .agent-line--step { min-height: 32px; }
+}
+@container (max-width: 560px) {
+  .agent-line, .agent-line-steps__thought, .agent-line-stepbox, .agent-line-workfold__work { --agent-line-hang: 0px; }
+  .agent-line__more { display: none; }
+}
+/* The hang needs the comfortable pane's 32px gutter (24px hang + 8px air). In
+   tighter gutters (compact 24, dense 22, the meta chat window's 16) the icon
+   moves inline, as in a narrow column, instead of sitting on the pane edge. */
+.terminal-pane__transcript:not([data-density='comfortable']) .agent-line-run,
+.meta-chat-conversation .agent-line-run { --agent-line-hang: 0px; }
+.agent-line[data-live] { color: var(--term-mid); }
+.agent-line[aria-expanded='true'] { color: var(--term-fg); }
+@media (hover: hover) {
+  button.agent-line:hover { background: var(--agent-line-hover); color: var(--term-fg); }
+}
+button.agent-line:active { background: var(--agent-line-press); color: var(--term-fg); }
+.agent-line:focus-visible { outline: var(--focus-ring); outline-offset: 1px; }
+
+.agent-line__ico {
+  grid-column: 1;
+  width: 16px;
+  height: 16px;
+  display: grid;
+  place-items: center;
+}
+.agent-line__glyph { grid-area: 1 / 1; display: grid; place-items: center; transform-origin: center; }
+.agent-line__svg.is-fail { color: var(--term-danger); }
+.agent-line__svg.is-agent { color: var(--term-mauve); }
+
+/* Lead + rest are one sentence on one line. Under 6em of room the rest wraps
+   onto a clipped second line: readable or gone, never "ran 2 t…". */
+.agent-line__txt {
+  grid-column: 2;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  column-gap: 8px;
+  min-width: 0;
+  height: 18px;
+  overflow: hidden;
+}
+.agent-line__lead,
+.agent-line__rest { display: grid; grid-template-columns: minmax(0, 1fr); min-width: 0; }
+.agent-line__layer {
+  grid-area: 1 / 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  line-height: 18px;
+}
+.agent-line__layer[data-leaving] { pointer-events: none; }
+.agent-line__lead {
+  flex: 0 1 auto;
+  max-width: 100%;
+  font-weight: 500;
+  color: var(--term-mid);
+  transition: color 220ms ease-out;
+}
+/* A settled run's sentence: one muted line across the whole text column. */
+.agent-line__lead.is-sentence { flex: 1 1 0; font-weight: 400; color: var(--term-muted); }
+.agent-line__sentence { position: relative; display: flex; min-width: 0; max-width: 100%; }
+.agent-line__fit { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.agent-line__plus { flex: none; white-space: nowrap; }
+.agent-line__measure { position: absolute; left: 0; top: 0; visibility: hidden; white-space: nowrap; pointer-events: none; }
+.agent-line[aria-expanded='true'] .agent-line__lead.is-sentence { color: var(--term-fg); }
+@media (hover: hover) {
+  button.agent-line:hover .agent-line__lead.is-sentence { color: var(--term-mid); }
+  button.agent-line[aria-expanded='true']:hover .agent-line__lead.is-sentence { color: var(--term-fg); }
+}
+.agent-line__rest { flex: 1 1 0; min-width: 6em; color: var(--term-muted); transition: color var(--t-soft) ease-out; }
+.agent-line__rest.is-empty { min-width: 0; flex: 0 0 0; }
+.agent-line__rest.is-thought { font-family: var(--message-latin-font), var(--message-cjk-font); }
+.agent-line__rest:is(.is-cmd, .is-error) { font: 400 var(--fs-md)/18px var(--font-mono); }
+.agent-line__rest.is-error { color: var(--term-danger-text); }
+.agent-line[data-live] .agent-line__lead,
+.agent-line[aria-expanded='true'] .agent-line__lead { color: var(--term-fg); }
+.agent-line[aria-expanded='true'] .agent-line__rest:not(.is-error) { color: var(--term-mid); }
+@media (hover: hover) {
+  button.agent-line:hover .agent-line__lead { color: var(--term-fg); }
+  button.agent-line:hover .agent-line__rest:not(.is-error) { color: var(--term-mid); }
+}
+/* Step rows: what each call did at 400, its command in muted mono. */
+.agent-line--step .agent-line__lead { font-weight: 400; color: inherit; }
+.agent-line--step .agent-line__rest:not(.is-error),
+.agent-line--step:hover .agent-line__rest:not(.is-error) { color: var(--term-muted); }
+
+.agent-line__frag { grid-column: 3; display: inline-grid; white-space: nowrap; }
+.agent-line__frag-i { grid-area: 1 / 1; display: inline-flex; align-items: center; gap: 4px; }
+.agent-line__frag.is-danger { color: var(--term-danger-text); }
+.agent-line__frag.is-danger .agent-line__x { color: var(--term-danger); }
+.agent-line__frag.is-calm { color: var(--term-muted); }
+.agent-line__x { flex: none; }
+
+.agent-line__meta {
+  grid-column: 4;
+  min-width: 6.5ch;
+  text-align: right;
+  font: 400 var(--fs-md)/18px var(--ui-font);
+  font-variant-numeric: tabular-nums;
+  color: var(--term-muted);
+  white-space: nowrap;
+}
+.agent-line[aria-expanded='true'] .agent-line__meta { color: var(--term-mid); }
+@media (hover: hover) { button.agent-line:hover .agent-line__meta { color: var(--term-mid); } }
+
+.agent-line__chev { grid-column: 5; justify-self: end; color: var(--term-faint); }
+.agent-line:is(:focus-visible, [aria-expanded='true']) .agent-line__chev { color: var(--term-muted); }
+@media (hover: hover) { button.agent-line:hover .agent-line__chev { color: var(--term-muted); } }
+.agent-line__chev-g { transform-box: fill-box; transform-origin: center; transition: transform var(--t-enter) ease-out; }
+.agent-line[aria-expanded='true'] > .agent-line__chev .agent-line__chev-g { transform: rotate(90deg); }
+.agent-line--step .agent-line__chev { opacity: 0; transition: opacity var(--t-soft) ease-out; }
+.agent-line--step:is(:hover, :focus-visible, [aria-expanded='true']) .agent-line__chev { opacity: 1; }
+
+.agent-line__flash {
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  background: var(--term-danger);
+  pointer-events: none;
+}
+
+/* Spinner: rotates on a <g> for as long as the run is live. */
+.agent-line-spin__g { transform-box: fill-box; transform-origin: center; animation: agentLineSpin var(--t-loop-fast) linear infinite; }
+@keyframes agentLineSpin { to { transform: rotate(360deg); } }
+
+/* ── Body: step rows, thought prose, payload wells ── */
+.agent-line-body { position: relative; }
+/* An opened Work fold (LineWorkFold): the turn's work as it ran, hung from a
+   line under the row's icon like a run's steps, and a step quieter than the
+   final answer below it — its prose in mid, its open words too. */
+.agent-line-workfold__work {
+  --term-fg: var(--term-mid);
+  position: relative;
+  padding: 0 0 2px 24px;
+  color: var(--term-mid);
+}
+.agent-line-workfold__work::before {
+  content: '';
+  position: absolute;
+  left: calc(-1 * var(--agent-line-hang) + 7.5px);
+  top: 0;
+  bottom: 10px;
+  width: 1px;
+  background: var(--term-line);
+  pointer-events: none;
+}
+.agent-line-workfold__work > :first-child { margin-top: 4px; }
+.agent-line-workfold__work > :last-child { margin-bottom: 8px; }
+/* An opened run's steps sit under its words, hung from a line under its icon,
+   and show twelve rows at most (six on a phone, and never more than half the
+   window): more scroll inside, and the edge that hides more fades. A settled
+   run opens at its first step, a live one follows its newest (StepList). An
+   open step's payload gets room of its own. */
+.agent-line-stepbox {
+  --agent-line-step-pitch: 28px;
+  position: relative;
+  padding: 0 0 4px 24px;
+}
+@media (pointer: coarse) { .agent-line-stepbox { --agent-line-step-pitch: 32px; } }
+.agent-line-stepbox::before {
+  content: '';
+  position: absolute;
+  left: calc(-1 * var(--agent-line-hang) + 7.5px);
+  top: 0;
+  bottom: 10px;
+  width: 1px;
+  background: var(--term-line);
+  pointer-events: none;
+}
+.agent-line-steps-scroll {
+  max-height: min(calc(12 * var(--agent-line-step-pitch) + 4px), 50vh);
+  overflow-y: auto;
+  /* The rows hang their icon and hover past this box: it reaches as far, so
+     the scroll clip does not cut them, and its padding puts them back. */
+  margin: 0 -4px 0 calc(-1 * var(--agent-line-hang) - 4px);
+  padding: 0 4px 0 calc(var(--agent-line-hang) + 4px);
+  scrollbar-width: thin;
+  scrollbar-color: var(--term-line) transparent;
+}
+/* An opened step's payload scrolls inside this cap: the run keeps its height.
+   The phone breakpoint of mobile.css: a phone keeps six rows, too few for a
+   payload, so there an open payload still raises the cap. */
+@media (max-width: 700px), (pointer: coarse) and (max-height: 500px) {
+  .agent-line-steps-scroll { max-height: calc(6 * var(--agent-line-step-pitch) + 4px); }
+  .agent-line-steps-scroll:has(.agent-line-body:not([hidden])) { max-height: calc(6 * var(--agent-line-step-pitch) + 304px); }
+}
+.agent-line-steps-scroll:focus-visible { outline: var(--focus-ring); outline-offset: -2px; }
+.agent-line-steps-scroll[data-more='up'] { -webkit-mask-image: linear-gradient(to bottom, transparent, #000 18px); mask-image: linear-gradient(to bottom, transparent, #000 18px); }
+.agent-line-steps-scroll[data-more='down'] { -webkit-mask-image: linear-gradient(to top, transparent, #000 18px); mask-image: linear-gradient(to top, transparent, #000 18px); }
+.agent-line-steps-scroll[data-more='up down'] {
+  -webkit-mask-image: linear-gradient(to bottom, transparent, #000 18px, #000 calc(100% - 18px), transparent);
+  mask-image: linear-gradient(to bottom, transparent, #000 18px, #000 calc(100% - 18px), transparent);
+}
+.agent-line-steps { list-style: none; margin: 0; padding: 0; }
+/* Steps and the prose between them read the run's width, so both move their
+   icon inline at the same column width. */
+.agent-line-stepbox .agent-line-run { container-type: normal; }
+.agent-line-steps > li.is-new { animation: agentLineArrive var(--t-enter) linear; }
+@keyframes agentLineArrive { from { opacity: 0; } }
+/* Thought prose between steps: no glyph, aligned with the step rows' icons
+   (the run's own words above), a size below the prose. */
+.agent-line-steps__thought {
+  margin-left: calc(-1 * var(--agent-line-hang));
+  padding: 3px 0 5px;
+}
+.agent-line-steps__thought .agent-line-thought {
+  --message-body-size: calc(var(--message-body-size-base, 16px) * 0.8125);
+  --message-body-leading: 1.55;
+}
+.agent-line-thought {
+  --message-body-size: calc(var(--message-body-size-base, 16px) * 0.875);
+  --message-body-leading: 1.57;
+  min-width: 0;
+  color: var(--term-mid);
+  font-family: var(--message-latin-font), var(--message-cjk-font);
+  font-size: var(--message-body-size);
+  line-height: var(--message-body-leading);
+}
+.agent-line-thought p { margin: 0; }
+.agent-line-thought--body {
+  margin: 2px 0 6px;
+  padding: 2px 0 2px 12px;
+  border-left: 1px solid var(--term-line);
+  max-height: min(60vh, 480px);
+  overflow-y: auto;
+  scrollbar-width: thin;
+  scrollbar-color: var(--term-line) transparent;
+}
+.agent-line-thought--body:focus-visible { outline: var(--focus-ring); outline-offset: 2px; }
+
+.agent-line-payload {
+  margin: 4px 0 8px;
+  border: 1px solid var(--term-line);
+  border-radius: var(--ui-radius);
+  background: var(--term-bg-deep, var(--term-surface));
+  color: var(--term-mid);
+  font: 400 var(--fs-md)/18px var(--font-mono);
+}
+.agent-line-payload__cmd {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 7px 6px 7px 10px;
+  border-bottom: 1px solid var(--term-line);
+}
+.agent-line-payload__cmd code {
+  flex: 1;
+  min-width: 0;
+  /* A command keeps its lines now (heredocs, scripts): a long one scrolls. */
+  max-height: calc(18px * 12);
+  overflow: auto;
+  font-family: inherit;
+  font-size: inherit;
+  line-height: inherit;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  color: var(--term-fg);
+}
+.agent-line-payload__prompt { flex: none; color: var(--term-muted); }
+.agent-line-payload__out {
+  margin: 0;
+  padding: 8px 10px;
+  font-family: inherit;
+  font-size: inherit;
+  line-height: inherit;
+  color: var(--term-mid);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  max-height: 216px;
+  overflow-y: auto;
+  scrollbar-width: thin;
+  scrollbar-color: var(--term-line) transparent;
+}
+.agent-line-payload__out:focus-visible { outline: var(--focus-ring); outline-offset: -2px; }
+.agent-line-payload__raw { border-top: 1px solid var(--term-line); }
+.agent-line-payload__wait { padding: 8px 10px; color: var(--term-muted); font-family: var(--ui-font); }
+.agent-line-payload__foot {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 3px 4px 3px 10px;
+  border-top: 1px solid var(--term-line);
+  color: var(--term-muted);
+  font: 400 var(--fs-md)/18px var(--ui-font);
+  font-variant-numeric: tabular-nums;
+}
+.agent-line-payload__bad { display: inline-flex; align-items: center; gap: 4px; color: var(--term-danger-text); }
+.agent-line-payload__bad svg { color: var(--term-danger); }
+
+.agent-line-icon-btn,
+.agent-line-link {
+  flex: none;
+  border: 0;
+  border-radius: var(--ui-radius);
+  background: transparent;
+  color: var(--term-muted);
+  cursor: pointer;
+  touch-action: manipulation;
+  transition: background-color var(--t-soft) ease-out, color var(--t-soft) ease-out;
+}
+.agent-line-icon-btn { width: 24px; height: 24px; display: grid; place-items: center; margin: -3px 0; }
+.agent-line-link { margin-left: auto; min-height: 24px; padding: 0 6px; font-family: inherit; font-size: inherit; line-height: inherit; }
+@media (pointer: coarse) {
+  .agent-line-icon-btn { width: 44px; height: 44px; margin: -13px -10px; }
+  .agent-line-link { min-height: 44px; }
+}
+@media (hover: hover) {
+  .agent-line-icon-btn:hover,
+  .agent-line-link:hover { background: var(--agent-line-hover); color: var(--term-fg); }
+}
+.agent-line-icon-btn:focus-visible,
+.agent-line-link:focus-visible { outline: var(--focus-ring); outline-offset: 0; }
+
+/* Subagents: today's line (opens Background work), in the line's metrics. */
+.agent-line--sub { display: flex; }
+.agent-line-sub + .agent-line-sub { margin-top: 2px; }
+
+/* Verbatim mono text: Geist Mono's contextual alternates draw "rev-list --count"
+   as "rev-list--count" and "dev...origin" as "dev.origin". Declared last and
+   scoped, because every `font:` shorthand above resets ligature settings. */
+.agent-line .agent-verbatim,
+.agent-line-payload code,
+.agent-line-payload pre,
+.agent-line-sub .agent-verbatim {
+  font-variant-ligatures: none;
+  font-feature-settings: "calt" 0, "liga" 0;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .agent-line-spin__g { animation: none; }
+  .agent-line__chev-g,
+  .agent-line,
+  .agent-line__lead { transition: none; }
+  .agent-line-steps > li.is-new { animation: none; }
+}

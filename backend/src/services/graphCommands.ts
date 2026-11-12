@@ -1,8 +1,9 @@
 import { DomainError } from './domainErrors';
-import { assertNodePlacement } from './nodePlacement';
+import { assertActiveTree, assertEdgePlacement, assertNodePlacement, assertTreeRoot } from './nodePlacement';
 import { assertGraphNodeInput, requiredGraphId as requiredId } from './graphCommandValidation';
 import { nodePlacementRepository } from './nodePlacementRepository';
 import { getDb, runInTransaction } from './db';
+import { recordStructureChange, recordTreeRowChange } from './structureEvents';
 import {
   getNode,
   getWorkspace,
@@ -17,7 +18,7 @@ import {
   type TreeRow,
   type WorkspaceRow,
 } from './dbRepository';
-import type { EnsureDurableGraphNodeInput } from './graphCommandTypes';
+import type { EnsureDurableGraphNodeInput, TreeRowChange } from './graphCommandTypes';
 
 export type { EnsureDurableGraphNodeInput };
 
@@ -59,16 +60,68 @@ export function rollbackProvisionalSpawnNode(
       || row.message_count !== 0
     ) return false;
     getDb().prepare('DELETE FROM nodes WHERE id = ? AND workspace_id = ?').run(nodeId, workspaceId);
+    recordStructureChange({ entity: 'node', op: 'purged', workspaceId, nodeId, ownerUserId: row.owner_user_id });
     return true;
   });
+}
+
+/** What of a graph prerequisite existed before the worker thread ensures it. */
+export interface GraphNodePresence {
+  workspaceName: string | null;
+  node: boolean;
+}
+
+export function graphNodePresence(input: EnsureDurableGraphNodeInput): GraphNodePresence {
+  return {
+    workspaceName: getWorkspace(input.workspace.id)?.name ?? null,
+    node: !!getNode(input.node.id),
+  };
+}
+
+/**
+ * The worker thread writes on its own connection, out of sight of the
+ * repository's change records: record what its committed ensure changed.
+ * `treeChange` is what the worker's saveTree read and wrote, recorded as
+ * dbRepository.saveTree records it.
+ */
+export function recordEnsuredGraphNode(
+  input: EnsureDurableGraphNodeInput,
+  before: GraphNodePresence,
+  treeChange: TreeRowChange | null,
+): void {
+  const workspaceId = input.workspace.id;
+  const after = getWorkspace(workspaceId);
+  if (!after) return;
+  const ownerUserId = after.owner_user_id ?? null;
+  if (before.workspaceName === null) {
+    recordStructureChange({ entity: 'workspace', op: 'created', workspaceId, ownerUserId });
+  } else if (before.workspaceName !== after.name) {
+    recordStructureChange({ entity: 'workspace', op: 'renamed', workspaceId, ownerUserId });
+  }
+  if (treeChange) recordTreeRowChange(treeChange.before, treeChange.after);
+  if (!before.node && getNode(input.node.id)) {
+    recordStructureChange({
+      entity: 'node',
+      op: 'created',
+      workspaceId,
+      nodeId: input.node.id,
+      ...(input.node.treeId ? { treeId: input.node.treeId } : {}),
+      ownerUserId,
+    });
+  }
 }
 
 /**
  * Idempotent graph prerequisite command used before a node can own a runtime
  * session. It intentionally creates only the addressed graph slice, never a
- * full workspace snapshot.
+ * full workspace snapshot. `server` carries server-owned marks for a node it
+ * creates (never from a request body): `scheduledOnlyJobId` hides a
+ * Scheduled-only run's thread in the same transaction that creates it.
  */
-export function ensureDurableGraphNode(input: EnsureDurableGraphNodeInput): EnsureDurableGraphNodeResult {
+export function ensureDurableGraphNode(
+  input: EnsureDurableGraphNodeInput,
+  server: { scheduledOnlyJobId?: string } = {},
+): EnsureDurableGraphNodeResult {
   assertGraphNodeInput(input);
   return runInTransaction(() => {
     const workspaceId = requiredId(input.workspace.id, 'workspace.id');
@@ -156,39 +209,22 @@ export function ensureDurableGraphNode(input: EnsureDurableGraphNodeInput): Ensu
         composer_draft: input.node.composerDraft ?? null,
         created_at: input.node.createdAt,
       }, input.ownerUserId ?? undefined);
-    }
-
-    if (input.tree) {
-      const root = getNode(input.tree.rootNodeId);
-      if (
-        !root
-        || root.workspace_id !== workspaceId
-        || root.tree_id !== input.tree.id
-      ) {
-        throw new DomainError('conflict', 'tree_root_mismatch', `tree ${input.tree.id} root must belong to the same workspace and tree`);
+      if (server.scheduledOnlyJobId) {
+        getDb().prepare('UPDATE nodes SET scheduled_only_job_id = ? WHERE id = ? AND workspace_id = ?')
+          .run(server.scheduledOnlyJobId, nodeId, workspaceId);
       }
     }
 
-    const activeTreeId = getWorkspace(workspaceId)?.active_tree_id;
-    if (
-      activeTreeId
-      && !listTrees(workspaceId).some((candidate) => candidate.id === activeTreeId)
-    ) {
-      throw new DomainError('conflict', 'active_tree_workspace_mismatch', 'active tree must belong to the same workspace');
+    if (input.tree) {
+      assertTreeRoot(workspaceId, { id: input.tree.id, workspace_id: workspaceId, root_node_id: input.tree.rootNodeId }, nodePlacementRepository);
     }
+    assertActiveTree(getWorkspace(workspaceId)?.active_tree_id, () => listTrees(workspaceId));
 
     for (const edge of input.edges) {
       if (edge.targetNodeId !== nodeId) {
         throw new DomainError('conflict', 'edge_target_mismatch', 'graph prerequisite edges must target the ensured node');
       }
-      const source = getNode(edge.sourceNodeId);
-      const target = getNode(edge.targetNodeId);
-      if (!source || !target || source.workspace_id !== workspaceId || target.workspace_id !== workspaceId) {
-        throw new DomainError('conflict', 'edge_workspace_mismatch', 'edge endpoints must belong to the same workspace');
-      }
-      if (edge.kind === 'branch' && source.tree_id !== target.tree_id) {
-        throw new DomainError('conflict', 'edge_tree_mismatch', 'branch edge endpoints must belong to the same tree');
-      }
+      assertEdgePlacement(workspaceId, edge, nodePlacementRepository);
       const existingEdge = getDb().prepare(`
         SELECT workspace_id, source_node_id, target_node_id, kind FROM edges WHERE id = ?
       `).get(edge.id) as {

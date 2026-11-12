@@ -2,46 +2,16 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { TurnMetadataState } from '../src/agents/turnMetadataState';
 
-test('metadata repairs once, normalizes values, and completes one visible boundary', () => {
-  const state = new TurnMetadataState('hook-tool');
-  assert.equal(state.validate(true).status, 'inactive');
+test('the overview trims, and an empty one is none', () => {
+  const state = new TurnMetadataState();
   state.begin();
-  const first = state.validate(true);
-  assert.equal(first.status, 'repair');
-  assert.deepEqual(first.missingTools, ['set_branch_overview', 'set_follow_ups']);
-  assert.equal(first.response.decision, 'block');
-  assert.match(String(first.response.reason), /Do not repeat the user-facing answer/);
-  assert.equal(state.suppressOutput('chunk'), true);
-  assert.equal(state.suppressOutput('thought'), true);
-  assert.equal(state.suppressOutput('tool_call'), false);
-  assert.equal(state.validate(true).status, 'fail_open');
-  assert.equal(state.setFollowUps([' ', ' one? ', 'two?', 'three?', 'four?'], true)?.join(','), 'one?,two?,three?');
-  assert.deepEqual(state.setOverview(' Current state. '), { overview: 'Current state.', beforeSentinelsComplete: false });
-  assert.equal(state.validate(true).status, 'complete');
-  assert.equal(state.completeOutputBoundary(), true);
-  assert.equal(state.completeOutputBoundary(), false);
-  assert.deepEqual(state.finish(), { chunks: 1, thoughts: 1 });
-  assert.equal(state.validationActive, false);
-  assert.equal(state.suppressOutput('chunk'), false);
-  state.begin();
-  assert.equal(state.validate(true).status, 'repair');
-});
-
-test('disabled follow-ups skip both output and repair requirements, retaining overview', () => {
-  const state = new TurnMetadataState('hook-tool');
-  state.begin();
-  assert.equal(state.acceptsFollowUps(false), false);
-  assert.equal(state.setFollowUps(['one?', 'two?', 'three?'], false), null);
-  assert.equal(state.completeOutputBoundary(), false);
-  assert.deepEqual(state.validate(false).missingTools, ['set_branch_overview']);
-  state.setOverview('Overview only.');
-  assert.deepEqual(state.validate(false).response, {});
+  assert.deepEqual(state.setOverview(' Current state. '), { overview: 'Current state.', beforeSentinelsComplete: true });
+  assert.equal(state.setOverview('  '), null);
 });
 
 test('sentinel mode recognizes split final markers before suppressing overview tail', () => {
-  const state = new TurnMetadataState('sentinel');
+  const state = new TurnMetadataState();
   state.begin();
-  assert.equal(state.setFollowUps(['one?'], true), null);
   assert.equal(state.setOverview('Earlier overview.')?.beforeSentinelsComplete, true);
   assert.equal(state.suppressOutput('chunk'), false);
   state.observeChunk('answer\n[FOLLOW-UP 3/', true);
@@ -49,12 +19,13 @@ test('sentinel mode recognizes split final markers before suppressing overview t
   assert.equal(state.setOverview('Final overview.')?.beforeSentinelsComplete, false);
   assert.equal(state.suppressOutput('chunk'), true);
   assert.equal(state.suppressOutput('thought'), true);
-  assert.equal(state.validate(true).status, 'complete');
+  assert.equal(state.suppressOutput('tool_call'), false);
   assert.deepEqual(state.finish(), { chunks: 1, thoughts: 1 });
+  assert.equal(state.suppressOutput('chunk'), false, 'finish resets the turn');
 });
 
 test('sentinel detection is bounded and disabled follow-ups do not hide the answer tail', () => {
-  const state = new TurnMetadataState('sentinel');
+  const state = new TurnMetadataState();
   state.begin();
   state.observeChunk('[FOLLOW-UP 3/3:', true);
   state.observeChunk('x'.repeat(12_000) + ' last?]', true);
@@ -66,3 +37,21 @@ test('sentinel detection is bounded and disabled follow-ups do not hide the answ
   state.setOverview('No follow-ups requested.');
   assert.equal(state.suppressOutput('chunk'), false);
 });
+
+for (const [label, chunks, complete] of [
+  ['a third follow-up without /3', ['answer\n[FOLLOW-UP 2/3: b?]\n[FOLLOW-UP 3: c?]'], true],
+  ['a third follow-up closed by a line break', ['[FOLLOW-UP 3/3: c?', '\n'], true],
+  ['a third follow-up left open before another on its line', ['[FOLLOW-UP 3/3: c? [FOLLOW-UP 1/3: a?]'], false],
+  ['a third follow-up still being written', ['[FOLLOW-UP 3/3: c'], false],
+  ['a third follow-up without /3 still being written', ['[FOLLOW-UP 3: c?'], false],
+  ['an empty third follow-up', ['answer\n[FOLLOW-UP 1/3: a?]\n[FOLLOW-UP 2/3: b?]\n[FOLLOW-UP 3/3: ]', '\n'], false],
+  ['an empty third follow-up after unclosed ones on its line', ['answer [FOLLOW-UP 1/3: a? [FOLLOW-UP 2/3: b? ', '[FOLLOW-UP 3/3: ]'], false],
+] as const) {
+  test(`sentinel mode reads ${label} as the renderers do`, () => {
+    const state = new TurnMetadataState();
+    state.begin();
+    for (const chunk of chunks) state.observeChunk(chunk, true);
+    assert.equal(state.setOverview('Final overview.')?.beforeSentinelsComplete, !complete);
+    assert.equal(state.suppressOutput('thought'), complete, 'the reasoning after the overview is hidden once the sentinels are complete');
+  });
+}

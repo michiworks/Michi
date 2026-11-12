@@ -1,6 +1,6 @@
-import { isSystemWorkspaceSettings, type ConversationUpdates } from 'michi-shared';
+import type { ConversationUpdates } from 'michi-shared';
+import { assistantTargetWorkspace } from '../assistant/identity';
 import { readConversationUpdates } from '../services/conversationUpdates';
-import { getWorkspace } from '../services/dbRepository';
 import { workspaceIdKindHint } from '../services/idKindHint';
 import { buildPaneInspectionCaller, type PaneInspectionToolBinding } from './paneInspectionTools';
 
@@ -37,8 +37,8 @@ export function readMetaAgentConversationUpdatesTool(binding: PaneInspectionTool
   if (typeof workspaceId !== 'string' || !workspaceId.trim() || workspaceId.length > 160) {
     return failure('invalid_argument', 'workspaceId is required; get one from list_workspaces');
   }
-  const workspace = getWorkspace(workspaceId.trim(), binding.ownerUserId ?? undefined);
-  if (!workspace || workspace.deleted_at != null || isSystemWorkspaceSettings(workspace.settings)) {
+  const workspace = assistantTargetWorkspace(binding.ownerUserId, workspaceId.trim());
+  if (!workspace) {
     return failure('not_found', `Workspace not found.${workspaceIdKindHint(workspaceId)} Get workspace ids from list_workspaces.`);
   }
   return readConversationUpdatesTool({ ...binding, workspaceId: workspace.id, assistant: false, runOwnerRunId: null }, input);

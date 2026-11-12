@@ -5,7 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { closeDb, getDb, initDb } from '../src/services/db';
 import { deleteWorkspace, saveNode } from '../src/services/dbRepository';
-import { createDatabase, createPage, deletePage, getDatabase, getPage, listPageTrash, listPages, listSpaces, purgePageDeletionGroup, purgeWorkspacePages, restorePageDeletionGroup, savePageContent, updatePageMetadata } from '../src/services/pages/repository';
+import { createDatabase, createPage, deletePage, getDatabase, getMaintenanceDatabasePage, getPage, listPageTrash, listPages, listSpaces, purgePageDeletionGroup, purgeWorkspacePages, restorePageDeletionGroup, savePageContent, updatePageMetadata } from '../src/services/pages/repository';
 
 let dir: string;
 let oldData: string | undefined;
@@ -59,6 +59,28 @@ test('creates nested template pages with revision snapshots, refs and owner-scop
   assert.equal(getPage(root.id, 'alice').title, 'Release');
   assert.throws(() => listPages('ws', 'bob'), /Workspace not found/);
   assert.equal(stale.id, root.id);
+});
+
+test('a page cursor whose position is not a safe integer is refused', () => {
+  const page = createPage({ workspaceId: 'ws', ownerUserId: 'alice', title: 'Notes', now: 10 });
+  assert.equal(listPages('ws', 'alice', { cursor: `0:${page.id}` }).items.length, 0);
+  assert.throws(() => listPages('ws', 'alice', { cursor: '99999999999999999999:x' }), /Invalid page cursor/);
+});
+
+test('page and maintenance row cursors resume at the next row and reject unsafe positions', () => {
+  const pages = [1, 2, 3].map((index) => createPage({ workspaceId: 'ws', ownerUserId: 'alice', title: `Page ${index}`, now: 10 + index }));
+  const firstPages = listPages('ws', 'alice', { limit: 2 });
+  assert.deepEqual(firstPages.items.map((item) => item.id), pages.slice(0, 2).map((page) => page.id));
+  assert.deepEqual(listPages('ws', 'alice', { limit: 2, cursor: firstPages.nextCursor }).items.map((item) => item.id), [pages[2]!.id]);
+
+  const database = createDatabase({ workspaceId: 'ws', ownerUserId: 'alice', title: 'Rows', now: 20, columns: [{ id: 'task', name: 'Task', type: 'text' }], views: [],
+    rows: [0, 1, 2].map((position) => ({ id: `row-${position}`, position, values: { task: `Task ${position}` }, rev: 1, edited: {}, bodyEditedAt: null, updatedAt: 20 })) });
+  const firstRows = getMaintenanceDatabasePage(database.id, 'alice', { limit: 2 });
+  assert.deepEqual(getMaintenanceDatabasePage(database.id, 'alice', { limit: 2, cursor: firstRows.nextCursor }).rows.map((row) => row.id), ['row-2']);
+
+  const unsafe = '99999999999999999999:x';
+  assert.throws(() => listPages('ws', 'alice', { cursor: unsafe }), /Invalid page cursor/);
+  assert.throws(() => getMaintenanceDatabasePage(database.id, 'alice', { cursor: unsafe }), /Invalid database row cursor/);
 });
 
 test('delete and restore preserve independently trashed children and shared databases', () => {

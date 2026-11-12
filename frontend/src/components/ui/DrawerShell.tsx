@@ -1,31 +1,43 @@
 import React from 'react';
-import { motion, MotionConfigContext, type Transition } from 'motion/react';
+import { motion, type Transition } from 'motion/react';
 import { DUR, EASE } from '../../motion/tokens';
+import { usePhoneLayout } from '../../hooks/usePhoneLayout';
+import { useReducedMotion } from '../../hooks/useReducedMotion';
+import { useBackLayer } from '../../lib/backStack';
+import { isImeComposing } from '../../lib/ime';
+import ResizeHandle from '../ResizeHandle';
 import './DrawerShell.css';
 import { useOverlayFocus } from './useOverlayFocus';
 import './OverlaySurface.css';
 
-const REDUCED_MOTION = '(prefers-reduced-motion: reduce)';
 const EXIT_TIMEOUT_MS = 220;
+/** Narrowest a dragged drawer gets. */
+const DRAWER_MIN_WIDTH = 320;
+/** Widest a dragged drawer gets, as a share of the window; DrawerShell.css caps it the same. */
+const DRAWER_MAX_VIEWPORT_SHARE = 0.75;
+
+/** A drawer's dragged width and where it is kept (e.g. usePanelWidth). */
+interface DrawerResize {
+  /** The dragged width; undefined shows the drawer's `width`. */
+  width: number | undefined;
+  set: (width: number) => void;
+  /** Back to the drawer's `width` (double-click on the edge). */
+  reset: () => void;
+}
+
 // The scrim fades in like the shared .ui-scrim (fadeIn at --t-enter) and out
 // a little faster, inside the panel's slide.
 const SCRIM_IN: Transition = { duration: DUR.enter, ease: 'easeOut' };
 const SCRIM_OUT: Transition = { duration: DUR.scrimExit, ease: EASE.out };
 
-function subscribeMotionPreference(notify: () => void) {
-  const query = window.matchMedia?.(REDUCED_MOTION);
-  query?.addEventListener('change', notify);
-  return () => query?.removeEventListener('change', notify);
-}
-
-function prefersReducedMotion() {
-  return window.matchMedia?.(REDUCED_MOTION).matches ?? false;
-}
-
 /** Shared right-anchored drawer. Presence includes the retiring panel. */
 export interface DrawerShellProps {
   open: boolean;
   onClose: () => void;
+  /** Set while the drawer shows a level inside it: Back (the phone's back
+   *  swipe, the system Back) steps back one level instead of closing it,
+   *  and the swipe shows the edge arrow rather than dragging the panel. */
+  onBack?: () => void;
   motion?: 'standard' | 'instant';
   onPresenceChange?: (present: boolean) => void;
   /** Uppercased in the header via CSS; pass plain text e.g. "Settings". */
@@ -38,11 +50,14 @@ export interface DrawerShellProps {
    *  lightbox) should consume Escape first. Default true. */
   closeOnEscape?: boolean;
   /** How the header offers onClose. 'close' (default) is the trailing ×.
-   *  'back' puts a back chevron before the title instead, for a drawer that
-   *  fills a phone screen and reads as a page. */
+   *  'back' puts a back chevron before the title instead. A phone, where the
+   *  drawer fills the screen and reads as a page, always shows 'back'. */
   closeControl?: 'close' | 'back';
   /** Override the default CSS width (440px). Applied as an inline style. */
   width?: number;
+  /** Makes the drawer's left edge draggable on desktop (a phone's drawer
+   *  fills the screen). Null or absent keeps the width fixed. */
+  resize?: DrawerResize | null;
   /** Default true. False keeps the page usable beside the drawer: no scrim,
    *  no outside-click close, no aria-modal (still a labelled dialog that takes
    *  focus on open and gives it back on close). */
@@ -54,14 +69,16 @@ export interface DrawerShellProps {
 export function DrawerShell({
   open,
   onClose,
+  onBack,
   motion: motionMode = 'standard',
   onPresenceChange,
   title,
   headerActions,
   titleBadge,
   closeOnEscape = true,
-  closeControl = 'close',
+  closeControl: requestedCloseControl = 'close',
   width,
+  resize: requestedResize,
   modal = true,
   children,
   ...rest
@@ -69,10 +86,8 @@ export function DrawerShell({
   const ariaLabel = rest['aria-label'];
   const panelRef = React.useRef<HTMLDivElement>(null);
   useOverlayFocus({ open, panelRef, trap: modal, initialFocus: 'panel', trackOutsideFocus: !modal });
-  const osReduced = React.useSyncExternalStore(subscribeMotionPreference, prefersReducedMotion, () => false);
-  // MotionRoot maps the in-app Reduce motion preference to 'always'.
-  const appReduced = React.useContext(MotionConfigContext).reducedMotion === 'always';
-  const instant = motionMode === 'instant' || osReduced || appReduced;
+  const reducedMotion = useReducedMotion();
+  const instant = motionMode === 'instant' || reducedMotion;
   const [retained, setRetained] = React.useState(open);
   const present = open || (!instant && retained);
 
@@ -99,7 +114,7 @@ export function DrawerShell({
   React.useEffect(() => {
     if (!open || !closeOnEscape) return;
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') {
+      if (e.key === 'Escape' && !isImeComposing(e)) {
         e.preventDefault();
         onClose();
       }
@@ -107,6 +122,18 @@ export function DrawerShell({
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
   }, [open, onClose, closeOnEscape]);
+
+  // A phone shows the drawer as a page over the app: its header goes back,
+  // and so does Back, dragging the panel off to the right. Its body text
+  // reads a step larger (data-phone; the sizes are in mobile.css).
+  const phone = usePhoneLayout();
+  const closeControl = phone ? 'back' : requestedCloseControl;
+  const resize = phone ? null : requestedResize ?? null;
+  const shownWidth = resize?.width ?? width;
+  useBackLayer(open, {
+    back: onBack ?? onClose,
+    swipe: onBack ? undefined : { panel: () => panelRef.current, exit: 'owner' },
+  });
 
   if (!present) return null;
 
@@ -128,13 +155,15 @@ export function DrawerShell({
         data-glass="solid"
         data-state={open ? 'open' : 'closed'}
         data-motion={instant ? 'instant' : 'standard'}
+        data-phone={phone || undefined}
         tabIndex={-1}
         inert={!open}
         role="dialog"
         aria-modal={modal || undefined}
         aria-hidden={!open || undefined}
         aria-label={typeof title === 'string' ? title : ariaLabel}
-        style={width ? { width } : undefined}
+        data-resizable={resize ? 'true' : undefined}
+        style={shownWidth ? { width: shownWidth } : undefined}
         onTransitionEnd={(event) => {
           if (!open && event.target === event.currentTarget && event.propertyName === 'transform') {
             setRetained(false);
@@ -173,6 +202,15 @@ export function DrawerShell({
           )}
         </div>
         {children}
+        {resize && open && (
+          <ResizeHandle
+            paneRef={panelRef}
+            side="left"
+            min={DRAWER_MIN_WIDTH}
+            onResize={(w) => resize.set(Math.min(w, Math.round(window.innerWidth * DRAWER_MAX_VIEWPORT_SHARE)))}
+            onReset={resize.reset}
+          />
+        )}
       </div>
     </>
   );

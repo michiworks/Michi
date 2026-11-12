@@ -1,4 +1,3 @@
-import React from 'react';
 import { AtSign, Plus } from 'lucide-react';
 import { usePhoneLayout } from '../../hooks/usePhoneLayout';
 import type { AgentStatus, SessionMode } from '../../services/api';
@@ -21,6 +20,12 @@ export const REASONING_LABELS: Record<string, string> = {
  *  top of the screen: the tray under the composer, and Home, whose composer
  *  sits at the top of the page. Elsewhere they open above. */
 export const composerMenusOpenBelow = (trigger: Element) => !!trigger.closest('.composer-tray, .home-compose');
+
+/** Where a toolbar menu's top goes when it opens below: 6px under the
+ *  composer's frame, which would otherwise cover the frame's bottom edge.
+ *  A trigger outside the frame (the tray) is measured from itself. */
+export const composerMenuBelowEdge = (trigger: Element) =>
+  (trigger.closest('.terminal-composer') ?? trigger).getBoundingClientRect().bottom + 6;
 
 export interface PaneMenuAnchor {
   x: number;
@@ -116,7 +121,7 @@ export function PaneComposerToolbarLeft({
           onClick={(e) => {
             e.stopPropagation();
             const r = e.currentTarget.getBoundingClientRect();
-            onOpenAgentMenu({ x: r.left, y: r.bottom + 6, anchorBottom: r.top - 6, preferBelow: composerMenusOpenBelow(e.currentTarget), trigger: e.currentTarget });
+            onOpenAgentMenu({ x: r.left, y: composerMenuBelowEdge(e.currentTarget), anchorBottom: r.top - 6, preferBelow: composerMenusOpenBelow(e.currentTarget), trigger: e.currentTarget });
           }}
         >
           {/* Chip icons follow the 11px label (14px); ⌄ marks it as a picker, like the model chip. */}

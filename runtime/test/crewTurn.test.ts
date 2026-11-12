@@ -38,6 +38,14 @@ test('out-of-order WS enrichment joins exact SSE timestamps, dedupes approvals a
     assert.equal(new Set(f.updates.map((u) => u.toolCallId)).size, 1);
 });
 
+test('an image in a Gateway tool result becomes a placeholder before the content cap', async () => {
+    const f = fixture();
+    const data = Buffer.concat([Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]), Buffer.alloc(30_000, 5)]).toString('base64');
+    f.event('tool_result', 'call', { output: [{ type: 'text', text: 'shot' }, { type: 'image', data, mimeType: 'image/png' }] });
+    await f.turn.tool(row('t1', 'call'));
+    assert.deepEqual(JSON.parse(f.updates.at(-1).rawOutput), [{ type: 'text', text: 'shot' }, { type: 'image', data: '[image image/png 29 KB omitted]', mimeType: 'image/png' }]);
+});
+
 test('approval input joins the same native tool call when approval arrives before its row', async () => {
     const f = fixture();
     const input = JSON.stringify({ tool: 'read_page', arguments: { pageId: 'page-1' } });

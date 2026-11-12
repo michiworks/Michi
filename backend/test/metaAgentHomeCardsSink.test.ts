@@ -7,7 +7,7 @@ import { LOCAL_AGENT_OWNER_ID } from '../src/services/agentOwner';
 import { closeDb, initDb } from '../src/services/db';
 import { readHomeCards } from '../src/services/homeCards/repository';
 import { repositoryHomeCardsSink } from '../src/services/metaAgent/homeCardsSink';
-import type { HomeCard, HomeCardsWrite } from '../src/services/metaAgent/homeCardsGenerator';
+import type { HomeCard, HomeCardsWrite } from 'michi-shared';
 
 let dir: string;
 let prior: string | undefined;

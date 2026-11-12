@@ -9,7 +9,6 @@ import {
   resolveModel,
   resolveReasoning,
   resolveProvider,
-  updateProviderForRuntime,
 } from "../services/agentConfig";
 import {
   getProviderApiKey,

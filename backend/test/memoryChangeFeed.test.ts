@@ -194,7 +194,7 @@ describe('GET /api/memories/changes/stream (cloud)', () => {
     });
     assert.equal(added.status, 201);
     const fromAgent = createMemory({ ownerUserId: 'alice' }, {
-      scope: { kind: 'user' }, kind: 'fact', body: 'from a web page', status: 'pending', origin: 'explicit',
+      scope: { kind: 'user' }, kind: 'fact', body: 'from a web page', status: 'active', origin: 'explicit',
       source: { nodeId: 'node-1' }, sourceRisk: 'untrusted',
     });
     remember('bob', 'bob only');
@@ -202,7 +202,7 @@ describe('GET /api/memories/changes/stream (cloud)', () => {
 
     assert.deepEqual(alice.events.map((event) => [event.action, event.status, event.body, event.workspaceId]), [
       ['created', 'active', 'use 2 spaces', 'ws-alice'],
-      ['created', 'pending', 'from a web page', null],
+      ['created', 'active', 'from a web page', null],
     ]);
     assert.equal(alice.events[1].memoryId, fromAgent.id);
     assert.equal(alice.events[1].nodeId, 'node-1');

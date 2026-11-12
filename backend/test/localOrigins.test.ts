@@ -3,12 +3,16 @@ import http from 'node:http';
 import { test, type TestContext } from 'node:test';
 import express from 'express';
 import {
+  authModeOrigins,
   configuredOrigins,
+  createAuthCors,
   installLocalAccessGuards,
   isAllowedLocalHost,
   isAllowedLocalOrigin,
+  parseOriginList,
   type LocalAccessGuardOptions,
 } from '../src/services/localOrigins';
+import { getAuthForHost } from '../src/services/auth';
 import { log } from '../src/services/logger';
 
 const HOST = '127.0.0.1:3000';
@@ -87,6 +91,71 @@ test('defaults come from the environment', (t) => {
   assert.equal(isAllowedLocalOrigin('http://localhost:5173', HOST), true);
 });
 
+test('origin lists name origins the way browsers send them', () => {
+  assert.deepEqual(
+    parseOriginList(' https://X.example.com:443/app/ ,https://x.example.com, http://127.0.0.1:4100/ , ,not a url// '),
+    ['https://x.example.com', 'http://127.0.0.1:4100', 'not a url'],
+  );
+  // url.origin would be "null" here, which every sandboxed iframe sends.
+  assert.deepEqual(parseOriginList('chrome-extension://abcdef/'), ['chrome-extension://abcdef']);
+  assert.deepEqual(parseOriginList(undefined), []);
+});
+
+/** Auth mode's CORS as server.ts mounts it, with its 500 error handler. */
+async function authCorsApp(t: TestContext, origins: readonly string[]) {
+  const app = express();
+  app.use(createAuthCors(origins));
+  app.post('/api/auth/sign-in/social', (_req, res) => { res.json({ ok: true }); });
+  app.use((_err: Error, _req: express.Request, res: express.Response, _next: express.NextFunction) => { res.status(500).json({ error: 'Something broke!' }); });
+  const server = app.listen(0, '127.0.0.1');
+  t.after(() => new Promise<void>((resolve) => server.close(() => resolve())));
+  await new Promise<void>((resolve) => server.once('listening', () => resolve()));
+  const address = server.address();
+  assert.ok(address && typeof address === 'object');
+  return async (origin: string) => {
+    const response = await fetch(`http://127.0.0.1:${address.port}/api/auth/sign-in/social`, { method: 'POST', headers: { origin } });
+    await response.arrayBuffer();
+    return { status: response.status, acao: response.headers.get('access-control-allow-origin'), credentials: response.headers.get('access-control-allow-credentials') };
+  };
+}
+
+test('auth mode: CORS admits a listed origin however it is written, exactly when sign-in serves that host', async (t) => {
+  const keys = ['MICHI_CORS_ORIGINS', 'BETTER_AUTH_URL', 'BETTER_AUTH_SECRET', 'GOOGLE_CLIENT_ID', 'GOOGLE_CLIENT_SECRET'] as const;
+  const saved = Object.fromEntries(keys.map((key) => [key, process.env[key]]));
+  t.after(() => {
+    for (const key of keys) {
+      if (saved[key] === undefined) delete process.env[key];
+      else process.env[key] = saved[key];
+    }
+  });
+  Object.assign(process.env, {
+    BETTER_AUTH_URL: 'https://fallback.example.com',
+    BETTER_AUTH_SECRET: 'local-origins-test-secret-with-at-least-32-characters',
+    GOOGLE_CLIENT_ID: 'isolated-client-no-network',
+    GOOGLE_CLIENT_SECRET: 'isolated-client-secret',
+  });
+  const baseUrlFor = (host: string) => (getAuthForHost(host) as unknown as { options: { baseURL: string } }).options.baseURL;
+  // Copied from the address bar, typed in capitals, with the default port or a path.
+  for (const entry of ['https://x.example.com/', 'https://X.example.com', 'https://x.example.com:443', 'https://x.example.com/app', 'https://other.example.com, https://x.example.com/']) {
+    process.env.MICHI_CORS_ORIGINS = entry;
+    const request = await authCorsApp(t, authModeOrigins());
+    assert.deepEqual(await request('https://x.example.com'), { status: 200, acao: 'https://x.example.com', credentials: 'true' }, entry);
+    assert.equal(baseUrlFor('x.example.com'), 'https://x.example.com', entry);
+    // Nothing outside the list is admitted.
+    assert.equal((await request('https://evil.example.com')).status, 500, entry);
+    assert.equal(baseUrlFor('evil.example.com'), 'https://fallback.example.com', entry);
+  }
+
+  // Unset (current behaviour, kept until the default is decided): CORS admits
+  // `npm run dev`'s pair, while sign-in serves BETTER_AUTH_URL's host.
+  delete process.env.MICHI_CORS_ORIGINS;
+  assert.deepEqual(authModeOrigins(), ['http://localhost:3001', 'http://localhost:3000']);
+  const request = await authCorsApp(t, authModeOrigins());
+  assert.equal((await request('http://localhost:3001')).status, 200);
+  assert.equal((await request('https://fallback.example.com')).status, 500);
+  assert.equal(baseUrlFor('fallback.example.com'), 'https://fallback.example.com');
+});
+
 test('hosts: loopback names, IP literals and listed names pass; other DNS names do not', () => {
   const listed = new Set(['michi.tunnel.example']);
   for (const host of [undefined, '127.0.0.1:3000', 'LOCALHOST:3000', 'localhost', '[::1]:3000', '192.168.1.20:3000', '10.0.0.5', '[fe80::1]:3000', 'michi.tunnel.example:443', 'MICHI.Tunnel.Example']) {
@@ -145,6 +214,31 @@ test('allowed origins get CORS headers; other sites get none and their requests 
   // Each refused origin is logged once.
   await request({ origin: 'https://untrusted.example' });
   assert.deepEqual(warned.filter((data) => (data as { origin?: string }).origin === 'https://untrusted.example').length, 1);
+});
+
+test("both CORS stacks admit the request headers Michi's renderer sends", async (t) => {
+  const preflight = async (app: express.Express) => {
+    app.post('/api/ping', (_req, res) => { res.json({ ok: true }); });
+    const server = app.listen(0, '127.0.0.1');
+    t.after(() => new Promise<void>((resolve) => server.close(() => resolve())));
+    await new Promise<void>((resolve) => server.once('listening', () => resolve()));
+    const address = server.address();
+    assert.ok(address && typeof address === 'object');
+    const response = await fetch(`http://127.0.0.1:${address.port}/api/ping`, { method: 'OPTIONS', headers: {
+      origin: 'http://localhost:3001', 'access-control-request-method': 'POST',
+      'access-control-request-headers': 'content-type,x-michi-window-id,x-idempotency-key',
+    } });
+    await response.arrayBuffer();
+    return (response.headers.get('access-control-allow-headers') ?? '').toLowerCase().split(',').map((name) => name.trim());
+  };
+  const noAuth = express();
+  installLocalAccessGuards(noAuth, { remoteAccess: false, configured: [], allowAnyLoopback: false, devRenderer: true, allowedHosts: [] });
+  const auth = express();
+  auth.use(createAuthCors(['http://localhost:3001']));
+  for (const [label, app] of [['no-auth', noAuth], ['auth', auth]] as const) {
+    const allowed = await preflight(app);
+    for (const name of ['content-type', 'x-michi-window-id', 'x-idempotency-key']) assert.ok(allowed.includes(name), `${label}: ${name}`);
+  }
 });
 
 test('a rebound host name is refused; loopback, IP and listed hosts pass', async (t) => {

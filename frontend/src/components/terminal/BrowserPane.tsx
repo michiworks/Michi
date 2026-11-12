@@ -1,5 +1,5 @@
 import { openExternalUrl } from '../../services/openUrl';
-import React, { FormEvent, useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
+import { FormEvent, useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import type { BrowserPaneItem } from '../../state/paneItems';
 import { normalizeBrowserUrl } from '../../state/paneItems';
 import { useChatActions } from '../../state/chatStore';
@@ -12,10 +12,11 @@ const EMPTY_STATE: BrowserSurfaceState = {
 };
 
 export default function BrowserPane({ item, active = true }: { item: BrowserPaneItem; active?: boolean }) {
-  const { closePane, focusPane, setFocusedNodeId, updatePaneItem } = useChatActions();
+  const { closePane, focusPane, updatePaneItem } = useChatActions();
   const closePaneRef = useRef(closePane);
   closePaneRef.current = closePane;
-  const shellStyle = usePaneShellStyle(item.id);
+  // Never dimmed: the native page cannot share the unfocused dim.
+  const shellStyle = usePaneShellStyle(item.id, { dim: false });
   const viewportRef = useRef<HTMLDivElement>(null);
   // Don't make the native surface visible until creation has completed.
   // Early set-bounds IPC messages (from the drift loop) that arrive while the
@@ -72,10 +73,17 @@ export default function BrowserPane({ item, active = true }: { item: BrowserPane
     const offFocus = electron.onBrowserFocus?.((surfaceId) => {
       if (surfaceId !== item.surfaceId) return;
       focusPane(item.id);
-      setFocusedNodeId(null);
     });
     const offCloseRequest = electron.onBrowserCloseRequest?.((surfaceId) => {
       if (surfaceId === item.surfaceId) closePaneRef.current(item.id);
+    });
+    // The page's keys never reach this document, so TerminalShell's own
+    // keydown handler takes the chords Electron passes on from the view.
+    const offShortcut = electron.onBrowserShortcut?.((surfaceId, chord) => {
+      if (surfaceId !== item.surfaceId) return;
+      window.dispatchEvent(new KeyboardEvent('keydown', {
+        key: chord.key, metaKey: chord.meta, ctrlKey: chord.control, shiftKey: chord.shift, altKey: chord.alt, bubbles: true, cancelable: true,
+      }));
     });
     electron.browserCreate(item.surfaceId, item.projectId, item.url)
       .then((next) => {
@@ -120,12 +128,13 @@ export default function BrowserPane({ item, active = true }: { item: BrowserPane
       offState?.();
       offFocus?.();
       offCloseRequest?.();
+      offShortcut?.();
       electron.browserSetBounds?.(item.surfaceId, { x: 0, y: 0, width: 1, height: 1 }, false);
     };
     // item.url changes as navigation events arrive; creation is keyed only by
     // the stable surface id so a redirect cannot recreate the WebContentsView.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [electron, focusPane, item.id, item.projectId, item.surfaceId, publishBounds, setFocusedNodeId, updatePaneItem]);
+  }, [electron, focusPane, item.id, item.projectId, item.surfaceId, publishBounds, updatePaneItem]);
 
   useEffect(() => {
     const element = viewportRef.current;
@@ -194,9 +203,8 @@ export default function BrowserPane({ item, active = true }: { item: BrowserPane
   };
 
   const desktopAvailable = !!electron?.browserCreate;
-  // filter: 'none' because the native page cannot share the unfocused dim.
   return (
-    <div data-pane-id={item.id} data-pane-kind="browser" className="terminal-pane" onMouseDown={() => { focusPane(item.id); setFocusedNodeId(null); }} style={{ ...shellStyle, filter: 'none' }}>
+    <div data-pane-id={item.id} data-pane-kind="browser" className="terminal-pane" onMouseDown={() => focusPane(item.id)} style={shellStyle}>
       <div style={{ height: 36, padding: '0 8px', display: 'flex', alignItems: 'center', gap: 4, borderBottom: '1px solid var(--term-line)', flexShrink: 0 }}>
         <button type="button" className="t-icon-btn" disabled={!state.canGoBack} onClick={() => electron?.browserBack?.(item.surfaceId)} aria-label="Back"><ChevronLeftIcon size={14} /></button>
         <button type="button" className="t-icon-btn" disabled={!state.canGoForward} onClick={() => electron?.browserForward?.(item.surfaceId)} aria-label="Forward"><ChevronRightIcon size={14} /></button>
@@ -208,14 +216,15 @@ export default function BrowserPane({ item, active = true }: { item: BrowserPane
             onFocus={(event) => event.currentTarget.select()}
             aria-label="Browser address"
             spellCheck={false}
-            style={{ width: '100%', height: 25, boxSizing: 'border-box', border: '1px solid var(--term-line)', borderRadius: 'var(--ui-radius-sm)', background: 'var(--term-alt)', color: 'var(--term-fg)', padding: '0 9px', fontFamily: 'var(--ui-font)', fontSize: 'var(--fs-sm)', outline: 'none' }}
+            className="ui-input"
+            style={{ height: 25, padding: '0 9px', fontSize: 'var(--fs-sm)' }}
           />
         </form>
         <button type="button" className="t-icon-btn" onClick={() => { if (state.url) openExternalUrl(state.url); }} aria-label="Open in system browser"><ExternalLinkIcon size={14} /></button>
       </div>
       <div ref={viewportRef} style={{ marginLeft: desktopAvailable ? 8 : 0, flex: 1, minHeight: 0, position: 'relative', background: 'var(--term-bg)', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
         {!desktopAvailable ? <div style={{ maxWidth: 280, padding: 20, textAlign: 'center', color: 'var(--term-muted)', fontSize: 'var(--fs-sm)', lineHeight: 1.6 }}>Native browser surfaces are available in the Michi desktop app. Web deployments cannot bypass site iframe policies.</div> : null}
-        {state.error ? <div style={{ position: 'absolute', inset: 0, padding: 20, background: 'var(--term-bg)', color: 'var(--term-danger)', fontSize: 'var(--fs-sm)', zIndex: 1 }}>⚠ {state.error}</div> : null}
+        {state.error ? <div style={{ position: 'absolute', inset: 0, padding: 20, background: 'var(--term-bg)', color: 'var(--term-danger-text)', fontSize: 'var(--fs-sm)', zIndex: 1 }}>⚠ {state.error}</div> : null}
       </div>
     </div>
   );

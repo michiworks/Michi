@@ -6,7 +6,11 @@ import { afterEach, beforeEach, mock, test } from 'node:test';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { applyTurnEvent, createDurableTurn, type ChatStreamEvent, type PageWriteResult } from 'michi-shared';
+import {
+  applyTurnEvent, createDurableTurn, META_AGENT_FIRST_RUN_HELD_PREFIX, META_AGENT_HELD_WRITE_TOOLS, PAGE_WRITE_TOOL_NAMES,
+  type ChatStreamEvent, type HomeCardsWrite, type PageWriteResult,
+} from 'michi-shared';
+import { PAGE_TOOL_NAMES } from '../src/agents/pageToolNames';
 import type { AgentRuntime, AgentSession } from '../src/agents/types';
 import { registerRuntime } from '../src/agents/registry';
 import { updateMetaAgentSettings } from '../src/services/metaAgent/settings';
@@ -26,15 +30,16 @@ import {
 } from '../src/services/scheduledJobs/scheduler';
 import { planHomeRun, retrySpacesFirstRun, spacesFirstRunStatus, startSpacesFirstRun } from '../src/services/metaAgent/firstRun';
 import { getHomeState } from '../src/services/metaAgent/firstRunStore';
-import { configureHomeCardsSink, type HomeCardsWrite } from '../src/services/metaAgent/homeCardsGenerator';
+import { configureHomeCardsSink } from '../src/services/metaAgent/homeCardsGenerator';
 import { ensureAssistant } from '../src/assistant/store';
 import { ASSISTANT_TOOLS } from '../src/assistant/tools';
 import type { StartRequestedSelfTurnArgs, StartedRequestedSelfTurn } from '../src/agents/chatHub';
 import { configureThreadMessaging, type ThreadMessagingDeps } from '../src/agents/threadMessageTool';
-import { withMetaAgentContext } from '../src/services/metaAgent/chatTurnContext';
+import { withAssistantTurnContext } from '../src/services/metaAgent/chatTurnContext';
 import { firstRunTurnNote, holdWindowPageWrite, resumeHeldEdits } from '../src/services/metaAgent/firstRunHold';
 import { parseFirstRunEnd } from '../src/services/metaAgent/firstRunNarration';
 import { saveMessage } from '../src/services/dbRepository';
+import { setMemorySettings } from '../src/services/memory/memoryService';
 
 const OWNER = 'local-user';
 const DAY = 86_400_000;
@@ -77,8 +82,14 @@ class FakeModel implements ScheduledJobExecutor {
   processExitStopsExecution = true;
   started: ModelRun[] = [];
   script: (run: ModelRun) => Script = () => () => {};
+  /** Runs before the session opens, as the real executor's setup does; it then checks the run is still current. */
+  setup: (() => Promise<void>) | null = null;
 
   async start(job: ScheduledJobRecord, run: ScheduledJobRunRecord, hooks: ScheduledRunHooks): Promise<ScheduledRunHandle> {
+    if (this.setup) {
+      await this.setup();
+      if (hooks.isCurrent && !hooks.isCurrent()) throw new Error('Scheduled execution was cancelled or lost scheduler ownership');
+    }
     const index = this.started.length + 1;
     const nodeId = `maintenance-node-${index}`;
     const turnId = `maintenance-turn-${index}`;
@@ -110,6 +121,8 @@ class FakeModel implements ScheduledJobExecutor {
 }
 
 function flush(): Promise<void> { return new Promise((resolve) => setImmediate(resolve)); }
+/** Narration posts are queued (chatHub.postSelfMessage): lets every queued post land before a check that nothing more came. */
+async function postsLanded(): Promise<void> { for (let i = 0; i < 20; i += 1) await flush(); }
 /** Waits for a condition; the scheduler's own timer waits a real second between runs, so idle due jobs are ticked here. */
 async function until(predicate: () => boolean, label = 'condition', sched?: ScheduledJobScheduler): Promise<void> {
   for (let i = 0; i < 400; i += 1) {
@@ -206,6 +219,9 @@ beforeEach(() => {
   cardWrites = [];
   configureHomeCardsSink({ write: (_owner, cards) => { cardWrites.push(cards); } });
   updateMetaAgentSettings({ runtimeId: 'pi' });
+  // Automatic memory is on by default and shares the maintenance coordinator;
+  // FakeModel drives only the Pages maintenance tools.
+  setMemorySettings(OWNER, { mode: 'off' });
 });
 
 afterEach(() => {
@@ -487,6 +503,7 @@ test('a restart resumes an unfinished first run without rewriting a finished hom
     startSpacesFirstRun(first, OWNER, now);
     await until(() => model.started.length === 2 && getFirstRun('ws-b', OWNER)?.readCount === 1, 'second run mid-read', first);
     assert.equal(getFirstRun('ws-a', OWNER)?.state, 'done');
+    await until(() => windowNarration().length === 2, 'the start and ws-a lines');
     assert.deepEqual(windowNarration().map((entry) => [entry.kind, entry.workspaceId]), [['start', undefined], ['workspace', 'ws-a']]);
     const homeA = getPage(homeOf('ws-a'), OWNER).revision;
     await first.stop();
@@ -506,6 +523,7 @@ test('a restart resumes an unfinished first run without rewriting a finished hom
     await until(() => model.started.length === 3 && idle(first), 'resumed run', first);
     assert.equal(getFirstRun('ws-b', OWNER)?.state, 'done');
     startSpacesFirstRun(first, OWNER, now);
+    await postsLanded();
     assert.deepEqual(windowNarration().map((entry) => [entry.kind, entry.workspaceId]),
       [['start', undefined], ['workspace', 'ws-a'], ['workspace', 'ws-b']], 'the restart posted only what was still to come');
     assert.equal(getFirstRun('ws-b', OWNER)?.readCount, 1);
@@ -513,6 +531,36 @@ test('a restart resumes an unfinished first run without rewriting a finished hom
     assert.equal(model.started.filter((run) => run.job.workspaceId === 'ws-a').length, 1);
   } finally {
     release();
+    await first.stop();
+  }
+});
+
+test('a first run stopped while its session is still opening resumes after the restart instead of failing', async () => {
+  workspace('ws-a', 'Workspace A');
+  conversation('ws-a', 'One', now - 3_600_000);
+  const model = new FakeModel();
+  let first = scheduler(model, 'before-restart');
+  let entered!: () => void;
+  const entering = new Promise<void>((resolve) => { entered = resolve; });
+  let release!: () => void;
+  model.setup = () => { entered(); return new Promise<void>((resolve) => { release = resolve; }); };
+  try {
+    startSpacesFirstRun(first, OWNER, now);
+    await entering;
+    await first.stop();
+    release();
+    const claims = () => (getDb().prepare('SELECT COUNT(*) AS n FROM scheduler_execution_claims').get() as { n: number }).n;
+    await until(() => claims() === 0, 'the stopped setup to end');
+    assert.equal(getFirstRun('ws-a', OWNER)?.state, 'reading');
+
+    model.setup = null;
+    model.script = () => (current) => { writesHome(current, 'A'); };
+    now += 91_000;
+    first = scheduler(model, 'after-restart');
+    startSpacesFirstRun(first, OWNER, now);
+    await until(() => getFirstRun('ws-a', OWNER)?.state === 'done', 'the resumed run', first);
+  } finally {
+    release?.();
     await first.stop();
   }
 });
@@ -691,8 +739,11 @@ test('the window conversation hears the first run: what it reads, each home, the
   };
   try {
     startSpacesFirstRun(sched, OWNER, now);
+    await until(() => windowNarration().length > 0, 'the start message');
     const [start] = windowNarration();
     assert.equal(start?.kind, 'start');
+    assert.deepEqual({ ...(getDb().prepare('SELECT node_id, status, user_message_id FROM turns WHERE turn_id = ?').get(start!.id) as object) },
+      { node_id: ensureAssistant().nodeId, status: 'completed', user_message_id: null }, 'posted as a turn of its own (chatHub.postSelfMessage), no user message');
     assert.match(start!.text, /last 30 days of history, 3 conversations in 2 workspaces/);
     assert.match(start!.text, /The first time, I read each past conversation once\. After that I check every 60 seconds/);
     assert.doesNotMatch(start!.text, /list_threads|read_node|read_conversation_updates/);
@@ -728,6 +779,7 @@ test('the window conversation hears the first run: what it reads, each home, the
     now += 61_000; await sched.tick();
     await until(() => summaryPrompts.length === 2 && idle(sched), 'second summary', sched);
     assert.doesNotMatch(summaryPrompts[1]!, /closes the first-time generation/);
+    await postsLanded();
     assert.equal(windowNarration().length, 4);
   } finally {
     await sched.stop();
@@ -754,7 +806,7 @@ test('after the first run closed, a workspace home change runs an ordinary summa
     now += 61_000; await sched.tick();
     await until(() => spacesFirstRunStatus(OWNER, now).summary.state === 'done' && idle(sched), 'the closing summary', sched);
     assert.equal(during[0]!.closed, false, 'the summary that closes the first run is still the first run');
-    assert.match(during[0]!.held ?? '', /^HELD: the Meta agent's first-time generation is still writing/);
+    assert.match(during[0]!.held ?? '', /^HELD: Pages upkeep's first-time generation is still writing/);
     assert.equal(spacesFirstRunStatus(OWNER, now).closed, true);
 
     const homeA = homeOf('ws-a');
@@ -821,11 +873,19 @@ test('while the first run writes, window page changes wait for it and come back 
     saveMessage({ id: 'u-a-w1', node_id: assistant.nodeId, role: 'user', content: 'Add a risks section to Workspace A', seq: 50, created_at: now });
     const held = await tool('edit_page').execute(ctx('w1'), { pageId: homeOf('ws-a'), revision: 1, ops: [] });
     assert.equal(held.isError, true);
-    assert.match(held.content[0]!.text, /^HELD: the Meta agent's first-time generation is still writing \(0 of 1 workspace homes written/);
+    assert.match(held.content[0]!.text, /^HELD: Pages upkeep's first-time generation is still writing \(0 of 1 workspace homes written/);
     assert.match(held.content[0]!.text, /will make this change after the first run/);
+    // The window shows exactly these as held (shared META_AGENT_HELD_WRITE_TOOLS, frontend toolLines).
+    for (const name of META_AGENT_HELD_WRITE_TOOLS) {
+      const answer = await tool(name).execute(ctx('w1'), { pageId: homeOf('ws-a'), action: 'add', text: 'Keep it short' });
+      assert.ok(answer.content[0]!.text.startsWith(META_AGENT_FIRST_RUN_HELD_PREFIX), name);
+    }
+    for (const name of PAGE_TOOL_NAMES) {
+      assert.equal(tool(name).sequential === true, (PAGE_WRITE_TOOL_NAMES as readonly string[]).includes(name), name);
+    }
     const read = await tool('read_page').execute(ctx('w1'), { pageId: homeOf('ws-a') });
     assert.doesNotMatch(read.content[0]!.text, /HELD/, 'reading goes ahead');
-    assert.match(withMetaAgentContext('Why is B stalled?', { pageId: null }),
+    assert.match(withAssistantTurnContext('Why is B stalled?', { area: { kind: 'spaces', context: { pageId: null } }, nodeId: ensureAssistant().nodeId, now }).text,
       /Your first-time generation is still writing: 0 of 1 workspace homes written[\s\S]*\n\nWhy is B stalled\?$/);
 
     const started: StartRequestedSelfTurnArgs[] = [];
@@ -849,6 +909,8 @@ test('while the first run writes, window page changes wait for it and come back 
     assert.equal(started[0]!.nodeId, assistant.nodeId);
     assert.match(started[0]!.turnId, /^mfr-held-\d+$/);
     assert.match(started[0]!.text, /held until now[\s\S]*1\. > Add a risks section to Workspace A/);
+    await until(() => windowNarration().at(-1)?.kind === 'notice', 'the notice');
+    await postsLanded();
     assert.deepEqual(windowNarration().map((entry) => entry.kind), ['start', 'workspace', 'notice'], 'the closing message waits for the held turn');
     assert.match(windowNarration().at(-1)!.text, /^The first run is done\. Now making the page change you asked for while I was writing\.$/);
     assert.equal(await resumeHeldEdits(OWNER, deps), false, 'handed back once');

@@ -2,24 +2,16 @@
  * Electron-main client for the backend's scheduled job notification stream.
  * Kept free of `electron` imports so the SSE handling is testable in Node.
  */
+import type { ScheduledJobRunEvent } from 'michi-shared';
 import * as http from 'node:http';
 
-/** Mirror of shared ScheduledJobRunEvent; Electron main does not load workspace packages. */
-export interface ScheduledRunNotice {
-  phase: 'started' | 'finished' | 'attention';
-  runId: string;
-  jobId: string;
-  jobName: string;
-  workspaceId: string;
-  nodeId: string | null;
-  treeId: string | null;
-  status: string;
-  summary: string | null;
-  error: string | null;
-  notify: boolean;
-  attention?: 'approval' | 'input';
-  at: number;
-}
+/**
+ * Shared ScheduledJobRunEvent, with any status: a status this build does not
+ * know is acknowledged without a notice. Electron main cannot load shared at
+ * runtime, so the event name and guard are copies that
+ * scripts/electron-lifecycle-helpers.test.mjs keeps equal to shared's.
+ */
+export type ScheduledRunNotice = Omit<ScheduledJobRunEvent, 'status'> & { status: string };
 
 export const SCHEDULED_JOB_RUN_EVENT = 'scheduled_job_run';
 

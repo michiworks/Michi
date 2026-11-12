@@ -1,15 +1,14 @@
 import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { AnimatePresence } from 'motion/react';
 import dagre from '@dagrejs/dagre';
-import { useChatStore, useChatNodesSnapshot, useStructuralSelector, chatLabel } from '../../../state/chatStore';
-import { sortTrees } from '../../../state/sidebarSelectors';
-import { relativeTime } from '../../../lib/relativeTime';
-import { Dot } from '../primitives';
-import ContextMenu from '../../ContextMenu';
-import { visibleMapNodeIds } from './mapVisibility';
-import { buildTreeContextMenu } from '../../../lib/treeContextMenu';
+import { useChatStore, useChatNodesSnapshot } from '../../../state/chatStore';
+import { useStreamingNodeIds } from '../../../state/nodeActivity';
+import ContextMenu, { menuOpenKey } from '../../ContextMenu';
+import { isMapGraphEdge, mapGraphNodeIds, visibleMapNodeIds } from './mapVisibility';
+import { buildTreeContextMenu, selectionActionState, type SelectionActionState, type SelectionRules } from '../../../lib/treeContextMenu';
 import { requestDigest } from '../../../lib/digestPrompt';
-import { findTreeIdForNode } from '../../../state/tree';
+import { requestDigestFocus } from '../../../state/digestFocus';
+import { useDigestEnabled } from '../../../state/prefs';
 import { MapTimeline } from '../map/MapTimeline';
 import { MapCard } from '../map/MapCard';
 import { autoCamera, boundsOf, focusIds, FOCUS_BRANCHES, type Camera } from '../map/mapCamera';
@@ -17,12 +16,14 @@ import { useCameraSnapshot, useMapCamera, type MapCameraController } from '../ma
 import { CARD_H, CARD_W, mapCardHeight } from '../map/mapCardMetrics';
 import { branchRibbonText } from '../../../state/mapOverviewSelectors';
 import { isNodeUnread } from '../../../state/sidebarSelectors';
+import { isBranchEdge } from '../../../state/tree';
 import Branches from './Branches';
 import { MAP_VIEWS, MAP_VIEW_LABELS, type MapView } from './mapView';
 import { useElkLayout, elkEdgePathD } from './useElkLayout';
 import type { PageId } from '../../../state/commands';
-import type { Tree, ProjectEdge } from '../../../state/chatTypes';
+import type { Tree } from '../../../state/chatTypes';
 import { DUR } from '../../../motion/tokens';
+import { exportPanelEvent } from '../../../state/appEvents';
 
 // MapCard boxes fed to the layout engines use measured DOM heights (see
 // cardHeights below). Expanding a card reflows the graph so neighbors slide
@@ -30,7 +31,6 @@ import { DUR } from '../../../motion/tokens';
 // transition).
 const NODE_SEP = 48;         // gap between sibling cards (cross-axis, vertical in LR)
 const RANK_SEP = 110;        // gap between ranks (main-axis, horizontal in LR)
-const TREE_GAP = 80;
 const FIT_PADDING = 72;
 // A grown-in card keeps its grow flag until map-card-in and map-edge-draw
 // (both var(--t-slow) = DUR.slow, index.css) have finished, plus a hair.
@@ -42,54 +42,9 @@ const GLASS_BG = 'color-mix(in srgb, var(--term-surface) 82%, transparent)';
 const GLASS_BORDER = '1px solid color-mix(in srgb, var(--term-fg) 8%, transparent)';
 const GLASS_SHADOW = '0 12px 36px -18px color-mix(in srgb, var(--term-fg) 35%, transparent)';
 
-type MapMode = 'overview' | 'thread' | 'graph';
-const DEFAULT_MAP_MODE: MapMode = 'thread';
 const EMPTY_TREES: readonly Tree[] = [];
-
-type TreeSummary = {
-  tree: Tree;
-  ids: string[];
-  title: string;
-  nodeCount: number;
-  messageCount: number;
-  splitCount: number;
-  leafCount: number;
-  streaming: boolean;
-  selected: boolean;
-  lastActiveAt: number;
-};
-
-function truncateByWidth(s: string, maxWidthChars: number): string {
-  let w = 0;
-  for (let i = 0; i < s.length; i++) {
-    const inc = /[一-鿿＀-￯　-ゟ゠-ヿ]/.test(s[i]) ? 2 : 1;
-    if (w + inc > maxWidthChars) return s.slice(0, i) + '…';
-    w += inc;
-  }
-  return s;
-}
-
-function collectReachableIds(
-  rootId: string,
-  children: Map<string, string[]>,
-  liveSet: Set<string>,
-): string[] {
-  const ids: string[] = [];
-  const seen = new Set<string>();
-  const queue = [rootId];
-  while (queue.length) {
-    const id = queue.shift()!;
-    if (seen.has(id) || !liveSet.has(id)) continue;
-    seen.add(id);
-    ids.push(id);
-    for (const c of children.get(id) ?? []) queue.push(c);
-  }
-  return ids;
-}
-
-function isBranchEdge(e: ProjectEdge): boolean {
-  return e.kind === undefined || e.kind === 'branch';
-}
+// The bar and the context menu share these, so both refuse the same merges.
+const MAP_SELECTION_RULES: SelectionRules = { requireIdle: true, requireSingleThread: true };
 
 function sameStringArray(a: readonly string[], b: readonly string[]): boolean {
   if (a === b) return true;
@@ -129,7 +84,10 @@ function useStableLayoutTrees(value: readonly Tree[]): readonly Tree[] {
   return ref.current;
 }
 
-export default function TerminalMap({ onNav }: { onNav?: (p: PageId) => void } = {}) {
+export default function TerminalMap({
+  onNav,
+  initialView = 'graph',
+}: { onNav?: (p: PageId) => void; initialView?: MapView } = {}) {
   const {
     activeProject,
     edges,
@@ -145,29 +103,16 @@ export default function TerminalMap({ onNav }: { onNav?: (p: PageId) => void } =
     createMergedChat,
     createDigest,
     archiveTree,
-    activateTree,
     pinNode,
     unpinNode,
   } = useChatStore();
   const nodesSnapshot = useChatNodesSnapshot();
-  const streamingIds = useStructuralSelector(
-    (ns) => {
-      const out = new Set<string>();
-      for (const [id, n] of Object.entries(ns)) {
-        if (n.status === 'streaming') out.add(id);
-      }
-      return out;
-    },
-    (a, b) => {
-      if (a === b) return true;
-      if (a.size !== b.size) return false;
-      for (const id of a) if (!b.has(id)) return false;
-      return true;
-    },
-  );
-  // Top-level view (graph / timeline / doc). Session-only, always opens on graph.
+  const digestEnabled = useDigestEnabled();
+  const streamingIds = useStreamingNodeIds();
+  // Top-level view (graph / timeline / doc). Session-only; opens on graph unless
+  // the shell asks for another (the old Overview route opens Doc).
   // The switcher floats top-right on the canvas, under the Topbar's icon row.
-  const [view, setView] = useState<MapView>('graph');
+  const [view, setView] = useState<MapView>(initialView);
   // Which graph cards are expanded (in-place, pushes neighbors via dagre). Session-only.
   const [expandedSet, setExpandedSet] = useState<Set<string>>(new Set());
   const toggleExpanded = (id: string) => {
@@ -215,7 +160,6 @@ export default function TerminalMap({ onNav }: { onNav?: (p: PageId) => void } =
   }
   // Cleanup the ResizeObserver on unmount.
   useEffect(() => () => { roRef.current?.disconnect(); }, []);
-  const [mode, setMode] = useState<MapMode>(DEFAULT_MAP_MODE);
   const [hoveredId, setHoveredId] = useState<string | null>(null);
   // fanout grow-in: ids that appeared since the last render play the grow
   // animation once. `seenIdsRef` is the StrictMode-safe ledger of ids already
@@ -228,9 +172,6 @@ export default function TerminalMap({ onNav }: { onNav?: (p: PageId) => void } =
   const [menu, setMenu] = useState<{ x: number; y: number; targetId: string } | null>(null);
   const surfaceRef = useRef<HTMLDivElement | null>(null);
   const [surfaceSize, setSurfaceSize] = useState({ width: 0, height: 0 });
-  const setMapMode = (nextMode: MapMode) => {
-    setMode(nextMode);
-  };
 
   const hasActiveProject = activeProject !== null;
   const projectTrees = activeProject?.trees ?? EMPTY_TREES;
@@ -244,6 +185,11 @@ export default function TerminalMap({ onNav }: { onNav?: (p: PageId) => void } =
     [activeProject, nodesSnapshot],
   );
   const liveIds = useStableStringArray(computedLiveIds);
+  const computedGraphIds = useMemo(
+    () => mapGraphNodeIds(activeProject, nodesSnapshot),
+    [activeProject, nodesSnapshot],
+  );
+  const graphIds = useStableStringArray(computedGraphIds);
 
   const liveSet = useMemo(() => new Set(liveIds), [liveIds]);
 
@@ -256,29 +202,24 @@ export default function TerminalMap({ onNav }: { onNav?: (p: PageId) => void } =
     return out;
   }, [liveIds, expandedSet, headHeights, measuredHeights]);
 
-  const branchChildren = useMemo(() => {
-    const children = new Map<string, string[]>();
-    for (const e of edges) {
-      if (!isBranchEdge(e)) continue;
-      if (!liveSet.has(e.source) || !liveSet.has(e.target)) continue;
-      const arr = children.get(e.source) ?? [];
-      arr.push(e.target);
-      children.set(e.source, arr);
-    }
-    return children;
-  }, [edges, liveSet]);
+  // 'link' (cross-tree reference) and 'digest-source' (digest fan-in) edges
+  // are decorative: feeding them to a layout yanks roots sideways and pulls
+  // digests into the middle of the tree. 'merge' edges keep the synthesize
+  // node anchored near its sources.
+  const graphEdges = useMemo(
+    () => edges.filter((e) => isMapGraphEdge(e) && liveSet.has(e.source) && liveSet.has(e.target)),
+    [edges, liveSet],
+  );
 
   const graphChildren = useMemo(() => {
     const children = new Map<string, string[]>();
-    for (const e of edges) {
-      if (e.kind && e.kind !== 'branch' && e.kind !== 'merge') continue;
-      if (!liveSet.has(e.source) || !liveSet.has(e.target)) continue;
+    for (const e of graphEdges) {
       const arr = children.get(e.source) ?? [];
       arr.push(e.target);
       children.set(e.source, arr);
     }
     return children;
-  }, [edges, liveSet]);
+  }, [graphEdges]);
 
   // child -> parent (branch edges only), for the hover-ancestor-chain highlight.
   const parentOf = useMemo(() => {
@@ -313,31 +254,6 @@ export default function TerminalMap({ onNav }: { onNav?: (p: PageId) => void } =
     return new Set([hoveredId, ...node.mergeSources]);
   }, [hoveredId, nodesSnapshot]);
 
-  const treeSummaries = useMemo<TreeSummary[]>(() => {
-    if (!activeProject) return [];
-    return sortTrees(activeProject.trees ?? [], activeProject.activeTreeId)
-      .filter((tree) => !tree.archivedAt && tree.kind !== 'merge' && liveSet.has(tree.rootNodeId))
-      .map((tree) => {
-        const ids = collectReachableIds(tree.rootNodeId, branchChildren, liveSet);
-        const root = nodesSnapshot[tree.rootNodeId];
-        const splitCount = ids.filter((id) => (branchChildren.get(id)?.length ?? 0) > 1).length;
-        const leafCount = ids.filter((id) => (branchChildren.get(id)?.length ?? 0) === 0).length;
-        const messageCount = ids.reduce((sum, id) => sum + (nodesSnapshot[id]?.messages.length ?? 0), 0);
-        return {
-          tree,
-          ids,
-          title: tree.name?.trim() || (root ? (root.title || chatLabel(root)) : '') || 'Untitled thread',
-          nodeCount: ids.length,
-          messageCount,
-          splitCount,
-          leafCount,
-          streaming: ids.some((id) => streamingIds.has(id)),
-          selected: ids.some((id) => selection.has(id)),
-          lastActiveAt: tree.lastActiveAt || tree.createdAt,
-        };
-      });
-  }, [activeProject, branchChildren, liveSet, nodesSnapshot, selection, streamingIds]);
-
   const activeTree = useMemo(() => {
     if (!activeTreeId) return null;
     const tree = layoutTrees.find((item) => item.id === activeTreeId) ?? null;
@@ -345,70 +261,11 @@ export default function TerminalMap({ onNav }: { onNav?: (p: PageId) => void } =
   }, [activeTreeId, layoutTrees]);
 
   const dagreLayout = useMemo(() => {
-    if (!hasActiveProject || mode === 'overview') return null;
-
-    const graphTrees = mode === 'thread'
-      ? activeTree
-        ? [activeTree]
-        : []
-      : [...layoutTrees]
-          .filter((t) => !t.archivedAt && liveSet.has(t.rootNodeId))
-          .sort((a, b) => a.createdAt - b.createdAt);
-
-    // Per-tree dagre pass (rankdir LR: root on the left, children fan right).
-    // Each tree is placed in its own local coord space; we record the root's
-    // local y so we can stack trees vertically below.
-    type LaidTree = {
-      ids: string[];
-      nodeLocal: Map<string, { x: number; y: number }>;
-      localMinX: number;
-      localMinY: number;
-      localMaxY: number;
-    };
-    const laid: LaidTree[] = [];
-
-    for (const tree of graphTrees) {
-      const ids = collectReachableIds(tree.rootNodeId, graphChildren, liveSet);
-      if (ids.length === 0) continue;
-      const idSet = new Set(ids);
-
-      const g = new dagre.graphlib.Graph();
-      // align UL: a parent lines up with its first child, so the root sits at
-      // the top-left and later branches continue downward.
-      g.setGraph({ rankdir: 'LR', nodesep: NODE_SEP, ranksep: RANK_SEP, align: 'UL' });
-      g.setDefaultEdgeLabel(() => ({}));
-      for (const id of ids) {
-        g.setNode(id, { width: CARD_W, height: cardHeights.get(id) ?? CARD_H });
-      }
-      for (const e of edges) {
-        // dagre layout should only follow real parent/child branches.
-        // 'link' (cross-tree reference) and 'digest-source' (digest fan-in)
-        // are decorative — feeding them as edges yanks roots sideways and
-        // pulls digests into the middle of the tree. 'merge' edges keep
-        // the synthesize node anchored near its sources.
-        if (e.kind && e.kind !== 'branch' && e.kind !== 'merge') continue;
-        if (!idSet.has(e.source) || !idSet.has(e.target)) continue;
-        g.setEdge(e.source, e.target, { kind: e.kind ?? 'branch' });
-      }
-      dagre.layout(g);
-
-      const nodeLocal = new Map<string, { x: number; y: number }>();
-      let minX = Infinity;
-      let minY = Infinity;
-      let maxY = -Infinity;
-      for (const id of ids) {
-        const p = g.node(id);
-        if (!p) continue;
-        nodeLocal.set(id, { x: p.x, y: p.y });
-        if (p.x < minX) minX = p.x;
-        if (p.y < minY) minY = p.y;
-        if (p.y > maxY) maxY = p.y;
-      }
-      laid.push({ ids, nodeLocal, localMinX: minX, localMinY: minY, localMaxY: maxY });
-    }
+    if (!hasActiveProject) return null;
 
     const PAD = 36;
-    if (laid.length === 0) {
+    const ids = graphIds;
+    if (ids.length === 0) {
       return {
         ids: [],
         positions: new Map<string, { x: number; y: number }>(),
@@ -416,49 +273,64 @@ export default function TerminalMap({ onNav }: { onNav?: (p: PageId) => void } =
         height: CARD_H + PAD * 2,
       };
     }
+    // rankdir LR: root on the left, children fan right.
+    const g = new dagre.graphlib.Graph();
+    // align UL: a parent lines up with its first child, so the root sits at
+    // the top-left and later branches continue downward.
+    g.setGraph({ rankdir: 'LR', nodesep: NODE_SEP, ranksep: RANK_SEP, align: 'UL' });
+    g.setDefaultEdgeLabel(() => ({}));
+    for (const id of ids) {
+      g.setNode(id, { width: CARD_W, height: cardHeights.get(id) ?? CARD_H });
+    }
+    for (const e of graphEdges) {
+      g.setEdge(e.source, e.target, { kind: e.kind ?? 'branch' });
+    }
+    dagre.layout(g);
 
-    // Left edge (root center) shared by every tree; each tree stacks vertically.
+    const nodeLocal = new Map<string, { x: number; y: number }>();
+    let minX = Infinity;
+    let minY = Infinity;
+    let maxY = -Infinity;
+    for (const id of ids) {
+      const p = g.node(id);
+      if (!p) continue;
+      nodeLocal.set(id, { x: p.x, y: p.y });
+      if (p.x < minX) minX = p.x;
+      if (p.y < minY) minY = p.y;
+      if (p.y > maxY) maxY = p.y;
+    }
+
     const leftX = PAD + CARD_W / 2;
     const positions = new Map<string, { x: number; y: number }>();
-    const ids: string[] = [];
-    let cursorY = PAD;
+    const laidIds: string[] = [];
     let maxX = -Infinity;
-    for (const t of laid) {
-      const offsetY = -t.localMinY + cursorY;
-      for (const id of t.ids) {
-        const local = t.nodeLocal.get(id);
-        if (!local) continue;
-        ids.push(id);
-        const x = local.x - t.localMinX + leftX;
-        const y = local.y + offsetY;
-        positions.set(id, { x, y });
-        if (x > maxX) maxX = x;
-      }
-      cursorY += (t.localMaxY - t.localMinY) + CARD_H + TREE_GAP;
+    for (const id of ids) {
+      const local = nodeLocal.get(id);
+      if (!local) continue;
+      laidIds.push(id);
+      const x = local.x - minX + leftX;
+      positions.set(id, { x, y: local.y - minY + PAD });
+      if (x > maxX) maxX = x;
     }
 
     return {
-      ids,
+      ids: laidIds,
       positions,
       width: maxX + CARD_W / 2 + PAD,
-      height: cursorY - TREE_GAP + PAD,
+      height: (maxY - minY) + CARD_H + PAD * 2,
     };
     // cardHeights changes on expand/collapse and when DOM measurements land,
     // so neighbors slide to make room.
-  }, [hasActiveProject, layoutTrees, activeTree, edges, graphChildren, liveSet, mode, cardHeights]);
+  }, [hasActiveProject, graphIds, graphEdges, cardHeights]);
 
   // The Map's one layout: ELK layered, orthogonal edge routing. ELK loads and
   // lays out asynchronously, so the synchronous dagre pass above stands in
   // until its first result lands (and keeps the Map usable if it never does).
   const elkResult = useElkLayout({
     enabled: view === 'graph',
-    trees: layoutTrees,
-    activeTree,
-    edges,
-    liveSet,
-    mode,
+    ids: graphIds,
+    edges: graphEdges,
     cardHeights,
-    graphChildren,
   });
 
   const layout = elkResult ?? dagreLayout;
@@ -505,7 +377,7 @@ export default function TerminalMap({ onNav }: { onNav?: (p: PageId) => void } =
 
   // Layout effect so the first paint is already framed (no flash at 1x).
   useLayoutEffect(() => {
-    if (mode === 'overview' || view !== 'graph') return;
+    if (view !== 'graph') return;
     const surface = surfaceRef.current;
     if (!surface) return;
 
@@ -535,7 +407,7 @@ export default function TerminalMap({ onNav }: { onNav?: (p: PageId) => void } =
       window.cancelAnimationFrame(frame);
       observer.disconnect();
     };
-  }, [layout?.height, layout?.width, mode, view]);
+  }, [layout?.height, layout?.width, view]);
 
   // Auto framing target: the root and its first FOCUS_BRANCHES branches
   // (the whole graph when it has no more than that). Everything else is
@@ -544,16 +416,14 @@ export default function TerminalMap({ onNav }: { onNav?: (p: PageId) => void } =
     if (!layout || layout.ids.length === 0) return null;
     if (surfaceSize.width <= 0 || surfaceSize.height <= 0) return null;
     const sizeOf = (id: string) => ({ width: CARD_W, height: cardHeights.get(id) ?? CARD_H });
-    const rootId = mode === 'thread'
-      ? activeTree?.rootNodeId
-      : layoutTrees.find((t) => layout.positions.has(t.rootNodeId))?.rootNodeId;
+    const rootId = activeTree?.rootNodeId;
     const ids = rootId ? focusIds(rootId, graphChildren, layout.positions, FOCUS_BRANCHES) : [];
     const focus = boundsOf(ids.length > 0 ? ids : layout.ids, layout.positions, sizeOf);
     if (!focus) return null;
     const anchor = (rootId ? layout.positions.get(rootId) : undefined)
       ?? { x: (focus.minX + focus.maxX) / 2, y: (focus.minY + focus.maxY) / 2 };
     return autoCamera({ focus, anchor, viewport: surfaceSize, padding: FIT_PADDING });
-  }, [layout, surfaceSize, cardHeights, mode, activeTree, layoutTrees, graphChildren]);
+  }, [layout, surfaceSize, cardHeights, activeTree, graphChildren]);
 
   const camera = useMapCamera({
     viewport: surfaceSize,
@@ -565,77 +435,16 @@ export default function TerminalMap({ onNav }: { onNav?: (p: PageId) => void } =
     surfaceRef.current = el;
     bindCameraSurface(el);
   }, [bindCameraSurface]);
-  // Switching thread or map mode starts from the default framing again.
+  // Switching thread starts from the default framing again.
   const resetCameraToAuto = camera.resetToAuto;
   useEffect(() => {
     resetCameraToAuto();
-  }, [activeTreeId, mode, resetCameraToAuto]);
+  }, [activeTreeId, resetCameraToAuto]);
   const closeMenuFromMapPointerDown = (event: React.PointerEvent) => {
     if (event.button === 0 && menu) setMenu(null);
   };
 
   if (!activeProject || !layout) {
-    if (activeProject && mode === 'overview') {
-      return (
-        <MapFrame view={view} setView={setView}>
-          <OverviewSurface
-            summaries={treeSummaries}
-            activeTreeId={activeProject.activeTreeId}
-            onOpenThread={(treeId) => {
-              activateTree(treeId, activeProject.id);
-              setMapMode('thread');
-            }}
-            onOpenRoot={(nodeId) => {
-              openPane(nodeId);
-              onNav?.('dashboard');
-            }}
-            onToggleRootSelection={toggleSelection}
-            onPointerDownCapture={closeMenuFromMapPointerDown}
-            onContextMenu={(event, nodeId) => {
-              event.preventDefault();
-              setMenu({ x: event.clientX, y: event.clientY, targetId: nodeId });
-            }}
-          />
-          <AnimatePresence>{menu && activeProject && (
-            <ContextMenu
-              key={`${menu.x}:${menu.y}`}
-              x={menu.x}
-              y={menu.y}
-              sections={buildTreeContextMenu({
-                project: activeProject,
-                nodes: nodesSnapshot,
-                targetId: menu.targetId,
-                selection,
-                actions: {
-                  openPane,
-                  createBlankChild,
-                  toggleSelection,
-                  clearSelection,
-                  deleteNode,
-                  trimNode,
-                  extractNodeTree: async (id) => {
-                    if (await extractNodeTree(id)) onNav?.('dashboard');
-                  },
-                  archiveNode,
-                  createMergedChat,
-                  createDigest,
-                  openExportPanel: () =>
-                    window.dispatchEvent(new CustomEvent('michi:toggle-export-panel')),
-                  archiveTree,
-                  focusOrOpen: (id) => {
-                    openPane(id);
-                    onNav?.('dashboard');
-                  },
-                  pinNode,
-                  unpinNode,
-                },
-              })}
-              onClose={() => setMenu(null)}
-            />
-          )}</AnimatePresence>
-        </MapFrame>
-      );
-    }
     return (
       <div
         style={{
@@ -652,28 +461,20 @@ export default function TerminalMap({ onNav }: { onNav?: (p: PageId) => void } =
     );
   }
 
-  const streamingCount = liveIds.filter((id) => streamingIds.has(id)).length;
-  // Selection is global store state, but the Map action bar must only operate
-  // on live nodes visible in this map. This prevents a stale selection from a
-  // digest/archived surface from silently joining a merge or export.
+  // Selection is global store state, but the Map's action bar and context
+  // menu must only operate on live nodes visible in this map. This prevents a
+  // stale selection from another thread, or a digest/archived surface, from
+  // silently joining a merge, export, archive or delete.
   const selectedMapIds = liveIds.filter((id) => selection.has(id));
-  const selectedTreeIds = selectedMapIds.map((id) => findTreeIdForNode(id, activeProject));
-  const selectionHasStreaming = selectedMapIds.some((id) => streamingIds.has(id));
-  const knownSelectedTreeIds = selectedTreeIds.filter((id): id is string => !!id);
-  const selectionSpansTrees =
-    knownSelectedTreeIds.length !== selectedMapIds.length
-    || new Set(knownSelectedTreeIds).size > 1;
-  const canMergeSelection =
-    selectedMapIds.length >= 2
-    && !selectionHasStreaming
-    && !selectionSpansTrees;
-  const canDigestSelection =
-    selectedMapIds.length >= 1
-    && !selectionHasStreaming
-    && !selectionSpansTrees;
+  const selectionState = selectionActionState({
+    ids: selectedMapIds,
+    project: activeProject,
+    nodes: nodesSnapshot,
+    ...MAP_SELECTION_RULES,
+  });
 
   const mergeSelection = async () => {
-    if (!canMergeSelection) return;
+    if (!selectionState.canWeave) return;
     try {
       await createMergedChat(selectedMapIds);
       clearSelection();
@@ -684,17 +485,13 @@ export default function TerminalMap({ onNav }: { onNav?: (p: PageId) => void } =
   };
 
   const digestSelection = () => {
-    if (!canDigestSelection) return;
+    if (!selectionState.canDigest) return;
     requestDigest(activeProject.id, selectedMapIds);
     clearSelection();
   };
 
-  const exportSelection = () => {
-    window.dispatchEvent(
-      new CustomEvent('michi:toggle-export-panel', {
-        detail: { projectId: activeProject.id, nodeIds: selectedMapIds },
-      }),
-    );
+  const exportNodes = (nodeIds: string[]) => {
+    exportPanelEvent.dispatch({ projectId: activeProject.id, nodeIds });
   };
 
   const strokeFor = (
@@ -842,6 +639,7 @@ export default function TerminalMap({ onNav }: { onNav?: (p: PageId) => void } =
                 <div
                   key={id}
                   data-map-node={id}
+                  data-context-target=""
                   ref={(el) => {
                     const ro = roRef.current!;
                     const prev = cardRefsMap.current.get(id);
@@ -903,10 +701,8 @@ export default function TerminalMap({ onNav }: { onNav?: (p: PageId) => void } =
                     mergeSource={mergeHighlightSet != null && mergeHighlightSet.has(id) && id !== hoveredId}
                     onOpenPane={() => {
                       openPane(id);
-                      if (n.kind === 'digest') {
-                        window.dispatchEvent(
-                          new CustomEvent('michi:focus-digest', { detail: { nodeId: id } }),
-                        );
+                      if (n.kind === 'digest' && digestEnabled) {
+                        requestDigestFocus(id);
                         onNav?.('digest');
                       } else {
                         onNav?.('dashboard');
@@ -926,13 +722,10 @@ export default function TerminalMap({ onNav }: { onNav?: (p: PageId) => void } =
           <MapSelectionBar
             count={selectedMapIds.length}
             names={selectedMapIds.map((id) => nodesSnapshot[id]?.title || id)}
-            canMerge={canMergeSelection}
-            canDigest={canDigestSelection}
-            selectionHasStreaming={selectionHasStreaming}
-            selectionSpansTrees={selectionSpansTrees}
+            state={selectionState}
             onMerge={mergeSelection}
-            onDigest={digestSelection}
-            onExport={exportSelection}
+            onDigest={digestEnabled ? digestSelection : undefined}
+            onExport={() => exportNodes(selectedMapIds)}
             onClear={clearSelection}
           />
         )}
@@ -940,14 +733,16 @@ export default function TerminalMap({ onNav }: { onNav?: (p: PageId) => void } =
       )}
       <AnimatePresence>{menu && view === 'graph' && activeProject && (
         <ContextMenu
-          key={`${menu.x}:${menu.y}`}
+          key={menuOpenKey(menu)}
           x={menu.x}
           y={menu.y}
           sections={buildTreeContextMenu({
             project: activeProject,
             nodes: nodesSnapshot,
             targetId: menu.targetId,
-            selection,
+            selection: new Set(selectedMapIds),
+            rules: MAP_SELECTION_RULES,
+            digestEnabled,
             actions: {
               openPane,
               createBlankChild,
@@ -961,8 +756,7 @@ export default function TerminalMap({ onNav }: { onNav?: (p: PageId) => void } =
               archiveNode,
               createMergedChat,
               createDigest,
-              openExportPanel: () =>
-                window.dispatchEvent(new CustomEvent('michi:toggle-export-panel')),
+              openExportPanel: exportNodes,
               archiveTree,
               focusOrOpen: (id) => {
                 openPane(id);
@@ -1028,10 +822,7 @@ function ZoomPill({ camera }: { camera: MapCameraController }) {
 export function MapSelectionBar({
   count,
   names,
-  canMerge,
-  canDigest,
-  selectionHasStreaming,
-  selectionSpansTrees,
+  state,
   onMerge,
   onDigest,
   onExport,
@@ -1039,12 +830,10 @@ export function MapSelectionBar({
 }: {
   count: number;
   names: string[];
-  canMerge: boolean;
-  canDigest: boolean;
-  selectionHasStreaming: boolean;
-  selectionSpansTrees: boolean;
+  state: SelectionActionState;
   onMerge: () => void;
-  onDigest: () => void;
+  /** Absent while Settings › Digest is off; the Digest action is not shown. */
+  onDigest?: () => void;
   onExport: () => void;
   onClear: () => void;
 }) {
@@ -1058,18 +847,9 @@ export function MapSelectionBar({
     cursor: enabled ? 'pointer' : 'not-allowed',
     opacity: enabled ? 1 : 0.62,
   });
-  const digestTitle = selectionHasStreaming
-    ? 'Wait for streaming to finish before creating a digest.'
-    : selectionSpansTrees
-      ? 'Digest requires nodes from a single thread.'
-      : 'Create a digest from the selected nodes.';
-  const mergeTitle = selectionHasStreaming
-    ? 'Wait for streaming to finish before merging.'
-    : selectionSpansTrees
-      ? 'Merge requires nodes from a single thread.'
-    : count < 2
-      ? 'Select at least two nodes to merge.'
-      : 'Merge selected nodes into a new thread.';
+  const { canWeave: canMerge, canDigest } = state;
+  const digestTitle = state.digestReason ?? 'Create a digest from the selected nodes.';
+  const mergeTitle = state.weaveReason ?? 'Merge selected nodes into a new thread.';
 
   return (
     <div
@@ -1118,9 +898,11 @@ export function MapSelectionBar({
       <button type="button" disabled={!canMerge} title={mergeTitle} onClick={onMerge} style={actionStyle(canMerge)}>
         Merge
       </button>
-      <button type="button" disabled={!canDigest} title={digestTitle} onClick={onDigest} style={actionStyle(canDigest)}>
-        Digest
-      </button>
+      {onDigest && (
+        <button type="button" disabled={!canDigest} title={digestTitle} onClick={onDigest} style={actionStyle(canDigest)}>
+          Digest
+        </button>
+      )}
       <button type="button" onClick={onExport} style={actionStyle(true)}>
         Export
       </button>
@@ -1199,193 +981,6 @@ function MapFrame({
         })}
       </div>
       {children}
-    </div>
-  );
-}
-
-function OverviewSurface({
-  summaries,
-  activeTreeId,
-  onOpenThread,
-  onOpenRoot,
-  onToggleRootSelection,
-  onPointerDownCapture,
-  onContextMenu,
-}: {
-  summaries: TreeSummary[];
-  activeTreeId: string | null;
-  onOpenThread: (treeId: string) => void;
-  onOpenRoot: (nodeId: string) => void;
-  onToggleRootSelection: (nodeId: string) => void;
-  onPointerDownCapture: (event: React.PointerEvent) => void;
-  onContextMenu: (event: React.MouseEvent, nodeId: string) => void;
-}) {
-  return (
-    <div
-      onPointerDownCapture={onPointerDownCapture}
-      style={{
-        flex: 1,
-        overflow: 'auto',
-        backgroundImage: 'radial-gradient(color-mix(in srgb, var(--term-line) 55%, var(--term-bg)) 1px, transparent 1px)',
-        backgroundSize: '20px 20px',
-        minHeight: 0,
-        padding: 18,
-      }}
-    >
-      {summaries.length === 0 ? (
-        <div
-          style={{
-            height: '100%',
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'center',
-            color: 'var(--term-muted)',
-            fontSize: 'var(--fs-lg)',
-          }}
-        >
-          no live threads
-        </div>
-      ) : (
-        <div
-          style={{
-            display: 'grid',
-            gridTemplateColumns: 'repeat(auto-fill, minmax(300px, 1fr))',
-            gap: 12,
-            alignItems: 'stretch',
-          }}
-        >
-          {summaries.map((summary) => {
-            const active = summary.tree.id === activeTreeId;
-            const title = truncateByWidth(summary.title, 42);
-            return (
-              <div
-                key={summary.tree.id}
-                onClick={(event) => {
-                  if (event.metaKey || event.ctrlKey || event.shiftKey) {
-                    onToggleRootSelection(summary.tree.rootNodeId);
-                    return;
-                  }
-                  onOpenThread(summary.tree.id);
-                }}
-                onDoubleClick={(event) => {
-                  event.stopPropagation();
-                  onOpenRoot(summary.tree.rootNodeId);
-                }}
-                onContextMenu={(event) => onContextMenu(event, summary.tree.rootNodeId)}
-                style={{
-                  minHeight: 132,
-                  border: active
-                    ? '1px solid var(--term-accent)'
-                    : summary.selected
-                      ? '1px solid var(--term-select)'
-                      : '1px solid var(--term-line)',
-                  background: active ? 'var(--term-alt)' : 'var(--term-surface)',
-                  boxShadow: active ? 'inset 3px 0 0 var(--term-accent)' : undefined,
-                  padding: '12px 13px 11px',
-                  cursor: 'pointer',
-                  display: 'flex',
-                  flexDirection: 'column',
-                  gap: 10,
-                }}
-              >
-                <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                  <span
-                    style={{
-                      color: active ? 'var(--term-accent)' : 'var(--term-muted)',
-                      fontSize: 'var(--fs-xs)',
-                      letterSpacing: 'var(--ls-caps-wide)',
-                      textTransform: 'uppercase',
-                    }}
-                  >
-                    {summary.tree.kind === 'merge' ? 'merge thread' : summary.tree.archivedAt ? 'archived' : 'thread'}
-                  </span>
-                  {summary.tree.pinnedAt && (
-                    <span style={{ color: 'var(--term-select)', fontSize: 'var(--fs-sm)' }}>
-                      pinned
-                    </span>
-                  )}
-                  <div style={{ flex: 1 }} />
-                  {summary.streaming && <Dot color="var(--term-select)" size={6} pulse />}
-                  <span style={{ color: 'var(--term-muted)', fontSize: 'var(--fs-sm)' }}>
-                    {relativeTime(summary.lastActiveAt)}
-                  </span>
-                </div>
-                <div
-                  title={summary.title}
-                  style={{
-                    color: 'var(--term-fg)',
-                    fontSize: 'var(--fs-2xl)',
-                    lineHeight: 1.25,
-                    fontWeight: 700,
-                    fontFamily: 'var(--ui-font)',
-                    minHeight: 38,
-                  }}
-                >
-                  {title}
-                </div>
-                <div
-                  style={{
-                    display: 'grid',
-                    gridTemplateColumns: 'repeat(4, minmax(0, 1fr))',
-                    border: '1px solid var(--term-line)',
-                    background: 'var(--term-bg)',
-                  }}
-                >
-                  <Metric label="nodes" value={summary.nodeCount} />
-                  <Metric label="msgs" value={summary.messageCount} />
-                  <Metric label="splits" value={summary.splitCount} />
-                  <Metric label="leaves" value={summary.leafCount} />
-                </div>
-                <div
-                  style={{
-                    height: 16,
-                    display: 'flex',
-                    alignItems: 'center',
-                    gap: 4,
-                    color: 'var(--term-muted)',
-                    fontSize: 'var(--fs-xs)',
-                  }}
-                >
-                  <span
-                    style={{
-                      width: 16,
-                      height: 1,
-                      background: active ? 'var(--term-accent)' : 'var(--term-line-s)',
-                    }}
-                  />
-                  <span>{summary.nodeCount === 1 ? 'single node' : 'open thread map'}</span>
-                  <div style={{ flex: 1 }} />
-                  {summary.selected && <span style={{ color: 'var(--term-select)' }}>selected</span>}
-                </div>
-              </div>
-            );
-          })}
-        </div>
-      )}
-    </div>
-  );
-}
-
-function Metric({ label, value }: { label: string; value: number }) {
-  return (
-    <div
-      style={{
-        padding: '6px 7px',
-        borderRight: label === 'leaves' ? 'none' : '1px solid var(--term-line)',
-        minWidth: 0,
-      }}
-    >
-      <div style={{ color: 'var(--term-fg)', fontSize: 'var(--fs-xl)', fontWeight: 700 }}>{value}</div>
-      <div
-        style={{
-          color: 'var(--term-muted)',
-          fontSize: 'var(--fs-2xs)',
-          letterSpacing: 'var(--ls-caps)',
-          textTransform: 'uppercase',
-        }}
-      >
-        {label}
-      </div>
     </div>
   );
 }

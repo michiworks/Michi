@@ -1,14 +1,21 @@
-import { useBackendScope } from '../hooks/useBackendScope';
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useState } from 'react';
+import { LOCAL_BACKEND_CONNECTION_ID } from '../config/backendConnections';
+import { backendConnectionProvisional, backendConnectionUnavailable } from '../config/backendConnectionState';
 import { searchNodesGrouped, type NodeGroupedResult, type NodeGroupedSnippet } from '../services/api';
+import { getRemoteRecoveryIssues } from './remoteRecovery';
+
+const SEARCH_LIMIT = 30;
+/** A remote that has not answered by then is left out of this search. */
+export const REMOTE_SEARCH_TIMEOUT_MS = 5_000;
 
 export interface NodeSearchState {
   nodes: NodeGroupedResult[];
   totalNodes: number;
-  loading: boolean;
+  /** idle: no query. error: the search failed, which is not "no results". */
+  status: 'idle' | 'loading' | 'ready' | 'error';
 }
 
-const EMPTY: NodeSearchState = { nodes: [], totalNodes: 0, loading: false };
+const EMPTY: NodeSearchState = { nodes: [], totalNodes: 0, status: 'idle' };
 
 const isObject = (v: unknown): v is Record<string, unknown> => typeof v === 'object' && v !== null && !Array.isArray(v);
 const text = (v: unknown, fallback = '') => (typeof v === 'string' ? v : fallback);
@@ -48,44 +55,80 @@ export function readNodeSearchAnswer(raw: unknown): { results: NodeGroupedResult
 }
 
 /**
- * Server-side node-grouped FTS search for the command palette.
+ * Whether a search may ask this backend now. A remote counts only while this
+ * window holds its live data: a request to one that is not connected would
+ * start its tunnel or its recovery, and the search must not.
+ */
+function searchableNow(connectionId: string): boolean {
+  if (connectionId === LOCAL_BACKEND_CONNECTION_ID) return true;
+  return !backendConnectionUnavailable(connectionId)
+    && !backendConnectionProvisional(connectionId)
+    && !getRemoteRecoveryIssues().some((issue) => issue.connectionId === connectionId);
+}
+
+/** Each backend's answer as one list, most recent activity first, as each backend orders its own. */
+function mergeNodeSearchAnswers(
+  answers: readonly { results: NodeGroupedResult[]; totalNodes: number }[],
+  limit = SEARCH_LIMIT,
+): { results: NodeGroupedResult[]; totalNodes: number } {
+  const results = answers.flatMap((answer) => answer.results)
+    .sort((a, b) => b.lastMessageAt - a.lastMessageAt)
+    .slice(0, limit);
+  return { results, totalNodes: answers.reduce((sum, answer) => sum + answer.totalNodes, 0) };
+}
+
+/**
+ * Server-side node-grouped FTS search for the command palette, across the
+ * local backend and each of `connectionIds` connected now (searchableNow).
  *
  * Returns deduplicated nodes, time-sorted (most recent activity first),
  * each with a root-first breadcrumb trail and up to 3 best-matching
- * snippets with `<mark>` tags for highlight rendering.
+ * snippets with `<mark>` tags for highlight rendering. Hits show as each
+ * backend answers. A remote that fails or times out adds nothing and is
+ * never reported; only a failed local search with nothing found elsewhere
+ * is an error.
  */
-export function useNodeSearch(debouncedQuery: string, connectionId?: string): NodeSearchState {
-  const scope = useBackendScope(connectionId);
-  const key = JSON.stringify([scope.key, debouncedQuery.trim()]);
+export function useNodeSearch(debouncedQuery: string, connectionIds: readonly string[] = []): NodeSearchState {
+  const q = debouncedQuery.trim();
+  const backends = [LOCAL_BACKEND_CONNECTION_ID,
+    ...[...new Set(connectionIds)].filter((id) => id !== LOCAL_BACKEND_CONNECTION_ID).sort()].join('\n');
+  const key = JSON.stringify([backends, q]);
   const [snapshot, setSnapshot] = useState<{ key: string; value: NodeSearchState }>({ key, value: EMPTY });
-  const reqIdRef = useRef(0);
 
   useEffect(() => {
     const setState = (value: NodeSearchState) => setSnapshot({ key, value });
-    const q = debouncedQuery.trim();
     if (!q) {
       setState(EMPTY);
       return;
     }
-    const reqId = ++reqIdRef.current;
-    const controller = new AbortController();
     let cancelled = false;
+    const targets = backends.split('\n').filter(searchableNow);
+    const answers: { results: NodeGroupedResult[]; totalNodes: number }[] = [];
+    let pending = targets.length;
+    let localFailed = false;
 
-    setState({ ...EMPTY, loading: true });
+    setState({ ...EMPTY, status: 'loading' });
 
-    (async () => {
-      try {
-        const { results, totalNodes } = readNodeSearchAnswer(await searchNodesGrouped(q, undefined, 30, { connectionId: scope.connectionId, signal: controller.signal }));
-        if (cancelled || reqId !== reqIdRef.current) return;
-        setState({ nodes: results, totalNodes, loading: false });
-      } catch {
-        if (cancelled || reqId !== reqIdRef.current) return;
-        setState(EMPTY);
-      }
-    })();
+    const requests = targets.map((connectionId) => {
+      const request = new AbortController();
+      const local = connectionId === LOCAL_BACKEND_CONNECTION_ID;
+      const timer = local ? undefined : setTimeout(() => request.abort(), REMOTE_SEARCH_TIMEOUT_MS);
+      void searchNodesGrouped(q, undefined, SEARCH_LIMIT, { connectionId, signal: request.signal })
+        .then((raw) => { if (!cancelled) answers.push(readNodeSearchAnswer(raw)); })
+        .catch(() => { if (local) localFailed = true; })
+        .finally(() => {
+          clearTimeout(timer);
+          if (cancelled) return;
+          pending -= 1;
+          const { results, totalNodes } = mergeNodeSearchAnswers(answers);
+          const status = pending > 0 ? 'loading' : localFailed && results.length === 0 ? 'error' : 'ready';
+          setState({ nodes: results, totalNodes, status });
+        });
+      return request;
+    });
 
-    return () => { cancelled = true; controller.abort(); };
-  }, [debouncedQuery, key, scope.key, scope.connectionId]);
+    return () => { cancelled = true; requests.forEach((request) => request.abort()); };
+  }, [key, backends, q]);
 
-  return snapshot.key === key ? snapshot.value : { ...EMPTY, loading: !!debouncedQuery.trim() };
+  return snapshot.key === key ? snapshot.value : { ...EMPTY, status: q ? 'loading' : 'idle' };
 }

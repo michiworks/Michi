@@ -1,4 +1,4 @@
-import React from 'react';
+import { markRemoteFirstPaint, resetRemoteFirstPaint } from '../../../state/remoteFirstPaint';
 import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { AgentCapabilities, AgentDefinitionDtoV1 } from 'michi-shared';
@@ -6,7 +6,7 @@ import { AgentDefinitionStatus } from 'michi-shared';
 import { locatedAgentResource } from '../../../state/agentIdentity';
 import AgentEditorPage from './AgentEditorPage';
 
-afterEach(() => vi.unstubAllGlobals());
+afterEach(() => { vi.unstubAllGlobals(); resetRemoteFirstPaint(); });
 
 const runtimeCapabilities: AgentCapabilities = {
   modes: false, permissions: true, models: true, providerModels: false,
@@ -105,6 +105,7 @@ it('keeps a new global draft catalog bound to the route Backend while that route
 });
 
 it('blocks Enable for known unsupported primary and fallback reasoning while preserving Draft save', async () => {
+  markRemoteFirstPaint('reasoning-editor');
   vi.stubGlobal('fetch', vi.fn(async (url: string) => {
     if (url.includes('/agent-capabilities')) return jsonResponse({ capabilities: [] });
     if (url.includes('/runtime-catalog')) return jsonResponse({ providers: [], models: [{ id: 'model', supportedReasoningLevels: ['high'] }], capabilities: runtimeCapabilities });

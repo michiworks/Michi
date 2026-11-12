@@ -4,7 +4,6 @@ import { installMockApi } from '../fixtures/mockApi';
 for (const kiroAvailable of [false, true]) {
   test(`first launch requires an explicit choice with Kiro ${kiroAvailable ? 'installed' : 'absent'}`, async ({ page }) => {
     let selected = '';
-    let completed: number | null = null;
     const selections: string[] = [];
     await installMockApi(page, {
       custom: async route => {
@@ -14,11 +13,8 @@ for (const kiroAvailable of [false, true]) {
           await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(body) });
           return true;
         };
-        if (path === '/prefs' && request.method() === 'GET') return json({ prefs: { onboardingCompletedAt: completed } });
-        if (path === '/prefs' && request.method() === 'PUT') {
-          completed = request.postDataJSON().prefs?.onboardingCompletedAt ?? request.postDataJSON().onboardingCompletedAt ?? completed;
-          return json({ ok: true });
-        }
+        // The backend keeps no onboarding state: this browser's own prefs do.
+        if (path === '/prefs' && request.method() === 'GET') return json({ prefs: {} });
         if (path === '/agent/status') return json({
           runtime: selected, label: selected || 'Choose a runtime', hasRequiredKey: true,
           capabilities: { modes: false, models: false, permissions: false, providerModels: false, reasoning: false,
@@ -52,7 +48,8 @@ for (const kiroAvailable of [false, true]) {
     await setup.getByRole('button', { name: 'Start with Codex →' }).click();
     await expect(setup).toHaveCount(0);
     expect(selections).toEqual(['codex']);
-    await expect.poll(() => completed).not.toBeNull();
+    await expect.poll(() => page.evaluate(() =>
+      JSON.parse(localStorage.getItem('michi:v1:prefs') ?? '{}').onboardingCompletedAt ?? null)).not.toBeNull();
     await page.reload();
     await expect(page.getByRole('dialog', { name: 'Setup', exact: true })).toHaveCount(0);
     expect(selected).toBe('codex');

@@ -96,7 +96,12 @@ const CLAUDE_NAMES: Array<[string, string, string, string]> = [
   ['mcp____michi_internal____send_to_thread', 'send_to_thread', 'external_action', 'send_to_thread'],
   ['mcp____michi_internal____set_follow_ups', 'set_follow_ups', 'external_action', 'set_follow_ups'],
   ['mcp____michi_internal____set_branch_overview', 'set_branch_overview', 'external_action', 'set_branch_overview'],
-  ['mcp____michi_internal____michi_docs', 'michi_docs', 'external_action', 'michi_docs'],
+  ['mcp____michi_internal____michi_docs', 'michi_docs', 'read', 'michi_docs'],
+  ['mcp____michi_internal____michi_skills', 'michi_skills', 'read', 'michi_skills'],
+  ['mcp____michi_internal____inspect_pane', 'inspect_pane', 'read', 'inspect_pane'],
+  ['mcp____michi_internal____read_pane_output', 'read_pane_output', 'read', 'read_pane_output'],
+  ['mcp____michi_internal____list_panes', 'list_panes', 'read', 'list_panes'],
+  ['mcp____michi_internal____wait_pane', 'wait_pane', 'read', 'wait_pane'],
   ['mcp____michi_internal____open_url', 'open_url', 'external_action', 'open_url'],
   ['mcp____michi_internal____report_conversation_no_change', 'report_conversation_no_change', 'external_action', 'report_conversation_no_change'],
   ['mcp____michi_internal____submit_agent_result', 'submit_agent_result', '(always allowed)', 'submit_agent_result'],
@@ -162,6 +167,13 @@ const title = (text: string) => ({ toolCall: { title: text } });
 const v3Shell = (command: string) => ({ toolCall: { toolCallId: 't', status: 'pending', title: command },
   meta: { kiro: { toolId: 'run_command', command, consent: { capability: 'shell', resource: command } } } });
 const meta = (name: string) => ({ toolCall: { title: 'Using a tool' }, meta: { toolName: name } });
+/** kiro-cli 3.1.0's request for an MCP tool, as recorded: v3 and v2 (`--agent-engine v2`). */
+const v3Mcp = (server: string, tool: string) => ({ toolCall: { toolCallId: 't', status: 'pending', title: `@${server}/${tool}` },
+  meta: { kiro: { toolId: `mcp_${server}_${tool}`, agentManagesTrust: true, consentRound: 1,
+    consent: { capability: 'mcp', resource: `${server}/${tool}`, askType: 'implicit', workspaceRoot: '/tmp' },
+    mcpTool: { version: 1, identity: { serverName: server, toolName: tool }, annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false } } } } });
+const v2Mcp = (server: string, tool: string) => ({ toolCall: { toolCallId: 't', title: `Running: @${server}/${tool}`, rawInput: {} },
+  meta: { mcpToolIdentity: { serverName: server, toolName: tool }, mcpAnnotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false } } });
 const KIRO_REQUESTS: Array<[string, { toolCall: unknown; meta?: unknown }, string, string, string, string | null]> = [
   ['title fs_read', title('fs_read'), 'read', 'read', 'external_action', 'fs_read'],
   ['title fs_write', title('fs_write'), 'write', 'filesystem_write', 'external_action', 'fs_write'],
@@ -179,7 +191,14 @@ const KIRO_REQUESTS: Array<[string, { toolCall: unknown; meta?: unknown }, strin
   ['title write', title('write'), 'write', 'filesystem_write', 'filesystem_write', 'write'],
   ['title edit', title('edit'), 'edit', 'filesystem_write', 'filesystem_write', 'edit'],
   ['title bash', title('bash'), 'bash', 'shell_exec', 'shell_exec', 'bash'],
-  ['title @michi/send_to_thread', title('@michi/send_to_thread'), '@michi/send_to_thread', 'external_action', 'external_action', '@michi/send_to_thread'],
+  // Michi's own tools reach the broker by their own names, as on Claude; grant keys keep Kiro's spelling.
+  ['title @michi/send_to_thread', title('@michi/send_to_thread'), 'send_to_thread', 'external_action', 'external_action', '@michi/send_to_thread'],
+  ['title @michi/list_ready_models', title('@michi/list_ready_models'), 'list_ready_models', 'external_action', 'external_action', '@michi/list_ready_models'],
+  ['title @michi/propose_multi_model_plan', title('@michi/propose_multi_model_plan'), 'propose_multi_model_plan', 'external_action', 'external_action', '@michi/propose_multi_model_plan'],
+  ['meta @michi/read_node', meta('@michi/read_node'), 'read_node', 'read', 'external_action', '@michi/read_node'],
+  ['meta @michi/inspect_pane', meta('@michi/inspect_pane'), 'inspect_pane', 'read', 'external_action', '@michi/inspect_pane'],
+  ['meta @michi/submit_agent_result', meta('@michi/submit_agent_result'), 'submit_agent_result', '(always allowed)', 'external_action', '@michi/submit_agent_result'],
+  ['v3 Michi tool id', { toolCall: { title: 'x' }, meta: { kiro: { toolId: 'michi::read_node' } } }, 'read_node', 'read', 'external_action', '@michi/read_node'],
   ['meta MCP tool', meta('@github/create_issue'), '@github/create_issue', 'external_action', 'external_action', '@github/create_issue'],
   ['prose title', title('Running: rm -rf build'), 'unknown', 'external_action', 'external_action', null],
   // kiro-cli 2.34.0 v2: no name in the request; the tool_call update before it has _meta.kiro.toolName.
@@ -203,6 +222,31 @@ const KIRO_REQUESTS: Array<[string, { toolCall: unknown; meta?: unknown }, strin
     'write', 'filesystem_write', 'external_action', 'execute_bash'],
   ['v3 blank toolId', { toolCall: { title: 'x' }, meta: { kiro: { toolId: '  ' } } }, 'unknown', 'external_action', 'external_action', null],
   ['provider name before toolId', { toolCall: { title: 'x' }, meta: { toolName: 'fs_read', kiro: { toolId: 'run_command' } } }, 'read', 'read', 'external_action', 'fs_read'],
+  // A tool of Michi's MCP server, as kiro-cli 3.1.0 asks for it (v2wire/v3wire, recorded 2026-11-07):
+  // its identity names server and tool. The chat name is Kiro's for a Michi tool.
+  ['v3 Michi tool request', v3Mcp('michi', 'set_branch_overview'),
+    'set_branch_overview', 'external_action', 'external_action', '@michi/set_branch_overview'],
+  ['v2 Michi tool request', v2Mcp('michi', 'set_branch_overview'), 'set_branch_overview', 'external_action', 'external_action', '@michi/set_branch_overview'],
+  ['v3 Michi tool request, prose title', { toolCall: { title: 'Saving a note' }, meta: v3Mcp('michi', 'memory_save').meta },
+    'memory_save', 'external_action', 'external_action', '@michi/memory_save'],
+  // Another server's tool is no Michi tool, whatever its title; it still gets no chat name.
+  ['v3 other server\'s tool', v3Mcp('github', 'create_issue'), 'mcp_github_create_issue', 'external_action', 'external_action', null],
+  ['v3 other server titled @michi/read_node', { toolCall: { title: '@michi/read_node' }, meta: v3Mcp('slack', 'read_node').meta },
+    'mcp_slack_read_node', 'external_action', 'external_action', null],
+  ['v2 other server titled @michi/read_node', { toolCall: { title: '@michi/read_node' }, meta: v2Mcp('slack', 'read_node').meta },
+    'unknown', 'external_action', 'external_action', null],
+  // Without that identity: an exact @michi/<tool> title, unless kiro-cli names the call something else.
+  ['title @michi/set_branch_overview', title('@michi/set_branch_overview'), 'set_branch_overview', 'external_action', 'external_action', '@michi/set_branch_overview'],
+  ['v3 tool id of the titled Michi tool', { toolCall: { title: '@michi/search_messages' }, meta: { kiro: { toolId: 'mcp_michi_search_messages' } } },
+    'search_messages', 'search', 'external_action', '@michi/search_messages'],
+  ['title @michi/ with prose', title('@michi/set branch overview'), 'unknown', 'external_action', 'external_action', null],
+  ['v2 title Running: @michi/<tool>', title('Running: @michi/memory_save'), 'unknown', 'external_action', 'external_action', null],
+  // v3 titles a shell request with its command, which can be a Michi tool's name.
+  ['v3 run_command titled @michi/memory_save', v3Shell('@michi/memory_save'), 'bash', 'shell_exec', 'external_action', null],
+  ['v3 fs_write titled @michi/send_to_thread', { toolCall: { title: '@michi/send_to_thread' }, meta: { kiro: { toolId: 'fs_write' } } },
+    'write', 'filesystem_write', 'external_action', null],
+  ['v3 other tool id titled @michi/read_node', { toolCall: { title: '@michi/read_node' }, meta: { kiro: { toolId: 'mcp_michi_x_read_node' } } },
+    'mcp_michi_x_read_node', 'external_action', 'external_action', null],
 ];
 
 test('Kiro sends the broker canonical built-in names; chat grant keys are unchanged', async () => {
@@ -212,6 +256,35 @@ test('Kiro sends the broker canonical built-in names; chat grant keys are unchan
     assert.equal(await brokerCategory(beforeKiroBrokerName(request.toolCall, request.meta)), categoryBefore, `${label}: category before`);
     const chatName = acpPermissionToolName(request.toolCall, request.meta);
     assert.equal(chatName === undefined ? null : michiGrantKey(chatName), grantKey, `${label}: grant key`);
+  }
+});
+
+test('Kiro names every tool of Michi\'s own MCP server for the chat policy; the broker names an exact Michi title the same way, as an external action (W4 failure 2)', async () => {
+  // [label, request, calledAs, chat name]
+  const rows: Array<[string, { toolCall: unknown; meta?: unknown }, string | undefined, string | undefined]> = [
+    ['title @michi/companion_item', title('@michi/companion_item'), undefined, '@michi/companion_item'],
+    ['title @michi/companion_session_send', title('@michi/companion_session_send'), undefined, '@michi/companion_session_send'],
+    ['title @michi/companion_set_name', title('@michi/companion_set_name'), undefined, '@michi/companion_set_name'],
+    ['title @michi/start_conversation', title('@michi/start_conversation'), undefined, '@michi/start_conversation'],
+    ['v3 tool id michi::companion_item', { toolCall: { title: 'Reading an item' }, meta: { kiro: { toolId: 'michi::companion_item' } } }, undefined, '@michi/companion_item'],
+    ['v3 tool id @michi/companion_read', { toolCall: { title: 'x' }, meta: { kiro: { toolId: '@michi/companion_read' } } }, undefined, '@michi/companion_read'],
+    ['toolCall v3 tool id', { toolCall: { title: 'x', _meta: { kiro: { toolId: 'michi::read_page' } } } }, undefined, '@michi/read_page'],
+    ['v2 update name', { toolCall: { toolCallId: 't', title: 'Using a tool' } }, '@michi/companion_items', '@michi/companion_items'],
+    // Not Michi's: another server, a prose title, a built-in update name, a name with spaces.
+    ['title @github/create_issue', title('@github/create_issue'), undefined, undefined],
+    ['v3 tool id jira::get_issue', { toolCall: { title: 'x' }, meta: { kiro: { toolId: 'jira::get_issue' } } }, undefined, undefined],
+    ['prose title', title('Calling @michi/companion_item now'), undefined, undefined],
+    ['v2 shell update', { toolCall: { toolCallId: 't', title: 'Running: echo hi' } }, 'shell', undefined],
+    ['spaced name', title('@michi/companion item'), undefined, undefined],
+  ];
+  for (const [label, request, calledAs, chatName] of rows) {
+    assert.equal(acpPermissionToolName(request.toolCall, request.meta, undefined, calledAs), chatName, label);
+  }
+  // The Agent Run broker names an exact @michi/<tool> title by the tool's own name, as Claude's adapter does
+  // (KIRO_REQUESTS above); these two have no broker category of their own, so they stay external actions.
+  for (const [name, bare] of [['@michi/companion_item', 'companion_item'], ['@michi/send_to_thread', 'send_to_thread']]) {
+    assert.equal(kiroBrokerToolName(title(name).toolCall), bare, name);
+    assert.equal(await brokerCategory(bare), 'external_action', name);
   }
 });
 
@@ -241,15 +314,24 @@ const KIRO_CALLED_AS: Array<[string, { toolCall: unknown; meta?: unknown }, stri
   // Provider metadata and v3's tool id still come first.
   ['v3 tool id', { toolCall: { title: 'x' }, meta: { kiro: { toolId: 'fs_write' } } }, 'shell', 'write', 'filesystem_write'],
   ['provider name', { toolCall: { title: 'x' }, meta: { toolName: 'fs_read' } }, 'shell', 'read', 'read'],
+  // A shell call titled like a Michi tool is the shell.
+  ['v2 shell titled @michi/memory_save', v2Request('@michi/memory_save'), 'shell', 'bash', 'shell_exec'],
 ];
 
-test('Kiro gives the broker the built-in name of a request\'s tool_call update; chat names ignore it', async () => {
+test('Kiro gives the broker the built-in name of a request\'s tool_call update; chat names read it only for Michi\'s tools', async () => {
   for (const [label, request, calledAs, brokerName, category] of KIRO_CALLED_AS) {
     assert.equal(kiroBrokerToolName(request.toolCall, request.meta, calledAs), brokerName, `${label}: broker name`);
     assert.equal(await brokerCategory(brokerName), category, `${label}: category`);
   }
-  // The chat name has no update parameter: v2 chat requests still offer no grant.
+  // v2 built-in chat requests still offer no grant, with or without the update's name.
   assert.equal(acpPermissionToolName(v2Request('Running: echo hi').toolCall), undefined);
+  assert.equal(acpPermissionToolName(v2Request('Running: echo hi').toolCall, undefined, undefined, 'shell'), undefined);
+  // The update's name tells a Michi tool's title from a shell call titled like one, and can name the tool itself.
+  assert.equal(acpPermissionToolName(v2Request('@michi/memory_save').toolCall), '@michi/memory_save');
+  assert.equal(acpPermissionToolName(v2Request('@michi/memory_save').toolCall, undefined, undefined, 'shell'), undefined);
+  assert.equal(acpPermissionToolName(v2Request('@michi/memory_save').toolCall, undefined, undefined, '@michi/memory_save'), '@michi/memory_save');
+  assert.equal(acpPermissionToolName(v2Request('@michi/memory_save').toolCall, undefined, undefined, 'memory_save'), '@michi/memory_save');
+  assert.equal(acpPermissionToolName(v2Request('Saving a memory').toolCall, undefined, undefined, '@michi/memory_save'), '@michi/memory_save');
 });
 
 test('KiroToolCallNames keeps a turn\'s named calls and drops the least recently named when full', () => {

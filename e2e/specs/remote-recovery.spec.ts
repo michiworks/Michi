@@ -65,7 +65,8 @@ test('a remote that reconnects during startup never shows an unavailable indicat
   let online = false;
   let attempts = 0;
   const localWorkspace = { workspace: { id: 'local-ws', name: 'Local project', created_at: 1 }, nodes: [], trees: [], edges: [], messages: [], artifacts: [] };
-  const remoteWorkspace = { ...localWorkspace, workspace: { id: 'remote-ws', name: 'Remote recovered', created_at: 2 } };
+  // Created today: a workspace idle for a month would fold into the sidebar's Earlier group.
+  const remoteWorkspace = { ...localWorkspace, workspace: { id: 'remote-ws', name: 'Remote recovered', created_at: Date.now() } };
   await installMockApi(page, { workspaces: [localWorkspace], custom: async route => {
     const path = new URL(route.request().url()).pathname;
     if (path === '/api/backend-connections') { await route.fulfill({ json: { connections: [connection] } }); return true; }
@@ -98,7 +99,7 @@ for (const hasLocalRuntime of [true, false]) {
     let attempts = 0;
     const sends: { path: string; body: unknown }[] = [];
     const localWorkspace = { workspace: { id: 'local-ws', name: 'Local project', created_at: 1 }, nodes: [], trees: [], edges: [], messages: [], artifacts: [] };
-    const remoteWorkspace = { ...localWorkspace, workspace: { id: 'remote-ws', name: 'Remote recovered', cwd: '/home/u/project', created_at: 2 } };
+    const remoteWorkspace = { ...localWorkspace, workspace: { id: 'remote-ws', name: 'Remote recovered', cwd: '/home/u/project', created_at: Date.now() } };
     await installMockApi(page, { workspaces: [localWorkspace], custom: async route => {
       const req = route.request(); const path = new URL(req.url()).pathname;
       if (path === '/api/backend-connections') { await route.fulfill({ json: { connections: [connection] } }); return true; }
@@ -243,7 +244,8 @@ test('long remote names and diagnostics fit a narrow dark window, with both clos
   await expect.poll(() => drawer.evaluate(el => el.scrollWidth <= el.clientWidth)).toBe(true);
   await expect.poll(() => drawer.locator('.remote-recovery-details').evaluate(el => el.scrollWidth <= el.clientWidth)).toBe(true);
   await page.screenshot({ path: testInfo.outputPath('remote-details-narrow-dark.png') });
-  await drawer.getByRole('button', { name: 'Close', exact: true }).click();
+  // 620px is the phone layout, where a drawer's header control is Back.
+  await drawer.getByRole('button', { name: 'Back', exact: true }).click();
   await expect(page.locator('.drawer-shell-panel')).toHaveCount(0);
   await expect(notice).toHaveCount(0);
   await page.getByRole('button', { name: /Remote connection details:/ }).click();

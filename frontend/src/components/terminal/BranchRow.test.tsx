@@ -1,4 +1,5 @@
-import { render, waitFor } from '@testing-library/react';
+import React from 'react';
+import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { describe, expect, it, vi } from 'vitest';
 import BranchRow from './BranchRow';
 import type { ChatNodeState, ProjectEdge } from '../../state/chatTypes';
@@ -29,7 +30,7 @@ vi.mock('../../state/chatStore', () => ({
     selector(Object.fromEntries([...store.unread].map((id) => [id, nodeState(id)]))),
 }));
 
-function renderRow(nodeId: string) {
+function renderRow(nodeId: string, props: Partial<React.ComponentProps<typeof BranchRow>> = {}) {
   return render(
     <div data-testid="tree">
       <BranchRow
@@ -44,6 +45,7 @@ function renderRow(nodeId: string) {
         onContextMenu={vi.fn()}
         openState="streaming"
         getOpenState={() => 'none'}
+        {...props}
       />
     </div>,
   );
@@ -146,5 +148,22 @@ describe('BranchRow unread dot', () => {
     } finally {
       store.unread = new Set();
     }
+  });
+});
+
+describe('BranchRow rename', () => {
+  it.each([{ isComposing: true }, { keyCode: 229 }])('leaves Enter and Esc that end an IME composition to it (%o)', (ime) => {
+    const onRenameNode = vi.fn();
+    const onRenameEnd = vi.fn();
+    renderRow('b1', { renamingNodeId: 'b1', onRenameNode, onRenameEnd });
+    const input = screen.getByRole('textbox');
+    fireEvent.change(input, { target: { value: '分支方案' } });
+    fireEvent.keyDown(input, { key: 'Enter', ...ime });
+    fireEvent.keyDown(input, { key: 'Escape', ...ime });
+    expect(onRenameNode).not.toHaveBeenCalled();
+    expect(onRenameEnd).not.toHaveBeenCalled();
+    fireEvent.keyDown(input, { key: 'Enter' });
+    expect(onRenameNode).toHaveBeenCalledWith('b1', '分支方案');
+    expect(onRenameEnd).toHaveBeenCalledOnce();
   });
 });

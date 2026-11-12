@@ -206,6 +206,17 @@ describe('SelectionActions', () => {
     expect(screen.queryByRole('textbox')).toBeNull();
   });
 
+  it.each([{ isComposing: true }, { keyCode: 229 }])('keeps the comment draft on the Esc that ends an IME composition (%o)', (ime) => {
+    // A key of its own: a draft left under a shared key comes back on the next render.
+    render(<ContextHarness onQuote={vi.fn()} onBranch={vi.fn()} onComment={vi.fn()} selectionDraftKey={`ime/${JSON.stringify(ime)}`} />);
+    selectContextSource();
+    fireEvent.click(screen.getByRole('button', { name: 'Comment' }));
+    const draft = screen.getByRole('textbox');
+    fireEvent.change(draft, { target: { value: '这里要改' } });
+    fireEvent.keyDown(draft, { key: 'Escape', ...ime });
+    expect(screen.getByRole('textbox')).toHaveProperty('value', '这里要改');
+  });
+
   it('plays the entrance for a new selection but shows a draft restored with its view settled', () => {
     const props = { onQuote: vi.fn(), onBranch: vi.fn(), onComment: vi.fn(), selectionDraftKey: 'entrance/file' };
     const first = render(<ContextHarness {...props} />);
@@ -822,16 +833,25 @@ describe('SelectionActions on a phone', () => {
     expect(bar()).toBeNull();
   });
 
-  it('opens the Branch sheet from the docked bar', () => {
+  it('opens the Branch sheet from the docked bar and branches from its composer row', () => {
+    const onBranch = vi.fn();
     document.documentElement.style.setProperty('--ui-radius', '6px');
     try {
-      render(<Harness />);
+      render(<Harness onBranch={onBranch} />);
       select('touch');
       fireEvent.click(screen.getByRole('button', { name: 'Branch' }));
       expect(bar()!.classList.contains('is-sheet')).toBe(true);
       expect(bar()!.classList.contains('is-dock')).toBe(false);
-      // The sheet swaps in place and keeps its own top-only corners from CSS.
+      // The sheet swaps in place; its corners come from CSS.
       expect(bar()!.style.borderRadius).toBe('');
+      // No dialog footer: × closes, and the composer's Send button branches.
+      expect(screen.queryByRole('button', { name: /^Cancel/ })).toBeNull();
+      const send = screen.getByRole('button', { name: 'Branch' }) as HTMLButtonElement;
+      expect(send.classList.contains('t-action-btn')).toBe(true);
+      expect(send.disabled).toBe(true);
+      fireEvent.change(screen.getByRole('textbox'), { target: { value: 'why did it time out?' } });
+      fireEvent.click(send);
+      expect(onBranch).toHaveBeenCalledWith('hello', 'why did it time out?', undefined, expect.any(Range));
     } finally {
       document.documentElement.style.removeProperty('--ui-radius');
     }

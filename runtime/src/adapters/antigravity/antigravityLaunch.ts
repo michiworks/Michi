@@ -33,6 +33,7 @@ const NOT_FOUND = 'Antigravity CLI (agy) not found. Install it and sign in, or s
  */
 export function resolveAntigravityLaunchDetailed(options: AntigravityAdapterOptions): AntigravityLaunchResolution {
     const extraArgs = options.extraArgs ?? [];
+    // agy takes its model through the session's config option, not argv.
     const args = () => ['acp', ...extraArgs];
     const binPath = options.binPath?.trim();
     if (binPath) {

@@ -4,6 +4,7 @@ import { pageViewActionFromHref, pageViewIndex, parsePageViewAction, type PageDt
 import { MarkdownLinkRendererContext } from '../../../markdownLinkRenderer';
 import { DrawerShell } from '../../../ui/DrawerShell';
 import { ModalShell } from '../../../ui/ModalShell';
+import { usePanelWidth } from '../../../../state/prefs';
 import './pageViews.css';
 
 interface Session { presentation: PageViewPresentation; stack: string[]; origin: string; trigger: HTMLElement; outlet: HTMLElement | null }
@@ -82,10 +83,15 @@ export function PageViewHost({ page, children, renderBlocks }: { page: PageDto; 
     },
   }), [previousLinks]);
   const current = session ? views.get(session.stack[session.stack.length - 1]) : undefined;
-  const back = session && session.stack.length > 1 ? <button type="button" className="page-view-back" onClick={() => {
+  const drawerWidth = usePanelWidth('page-view');
+  const stepBack = useCallback(() => {
+    if (!session || session.stack.length < 2) return;
     navigating.current = true;
     setSession({ ...session, stack: session.stack.slice(0, -1) });
-  }}>Back</button> : null;
+  }, [session]);
+  // Back (the button, the phone's back swipe) steps through the views first.
+  const onBack = session && session.stack.length > 1 ? stepBack : undefined;
+  const back = onBack ? <button type="button" className="page-view-back" onClick={onBack}>Back</button> : null;
   const content = session && <div ref={contentRef} tabIndex={-1} className="page-view-content" id={contentId} data-page-view-content="">
     {session.stack.map((id, index) => {
       const view = views.get(id);
@@ -101,7 +107,7 @@ export function PageViewHost({ page, children, renderBlocks }: { page: PageDto; 
   return <Context.Provider value={context}><MarkdownLinkRendererContext.Provider value={links}>
     {children}
     {session?.presentation === 'inline' && (session.outlet?.isConnected ? createPortal(inline, session.outlet) : inline)}
-    <DrawerShell open={session?.presentation === 'drawer'} modal={false} title={title} aria-label={title} width={640} onClose={close} headerActions={back}>{session?.presentation === 'drawer' && content}</DrawerShell>
-    <ModalShell open={session?.presentation === 'modal'} title={title} aria-label={title} width={760} maxHeight="85vh" onClose={close} headerTrailing={back}>{session?.presentation === 'modal' && content}</ModalShell>
+    <DrawerShell open={session?.presentation === 'drawer'} modal={false} title={title} aria-label={title} width={640} resize={drawerWidth} onClose={close} onBack={onBack} headerActions={back}>{session?.presentation === 'drawer' && content}</DrawerShell>
+    <ModalShell open={session?.presentation === 'modal'} title={title} aria-label={title} width={760} maxHeight="85vh" onClose={close} onBack={onBack} headerTrailing={back}>{session?.presentation === 'modal' && content}</ModalShell>
   </MarkdownLinkRendererContext.Provider></Context.Provider>;
 }

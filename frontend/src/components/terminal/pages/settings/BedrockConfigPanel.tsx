@@ -1,8 +1,8 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import type { AgentProviderInfo, VerifyProviderKeyResult, BedrockCredentialSource, BedrockConfigSanitized, BedrockConfigInput } from '../../../../services/api';
 import { getBedrockConfig, saveBedrockConfig as saveBedrock, clearBedrockConfig, verifyBedrockConfig } from '../../../../services/api';
-import { BorderBtn } from '../../primitives';
 import { confirmDialog } from '../../../ui/ConfirmDialog';
+import { Button } from '../../../ui/controls';
 
 const BEDROCK_REGIONS = [
   'us-east-1',
@@ -20,17 +20,6 @@ const BEDROCK_REGIONS = [
   'sa-east-1',
   'ca-central-1',
 ];
-
-const fieldStyle: React.CSSProperties = {
-  fontFamily: 'var(--ui-font)',
-  fontSize: 'var(--fs-md)',
-  padding: '6px 8px',
-  border: '1px solid var(--term-line)',
-  background: 'var(--term-surface-glass)',
-  color: 'var(--term-fg)',
-  minWidth: 320,
-  outline: 'none',
-};
 
 const labelStyle: React.CSSProperties = {
   fontSize: 'var(--fs-sm)',
@@ -90,13 +79,18 @@ export function BedrockConfigPanel({
       body.accessKeyId = accessKeyId.trim();
       body.secretAccessKey = secretAccessKey.trim();
     }
-    const result = await saveBedrock(body);
-    setSaving(false);
-    if (!result.ok) {
-      setError('error' in result ? result.error : 'Failed to save');
-    } else {
+    try {
+      const result = await saveBedrock(body);
+      if (!result.ok) {
+        setError('error' in result ? result.error : 'Failed to save');
+        return;
+      }
       await load();
       onChanged();
+    } catch (err: any) {
+      setError(err?.message ?? 'Failed to save');
+    } finally {
+      setSaving(false);
     }
   };
 
@@ -120,7 +114,17 @@ export function BedrockConfigPanel({
       message: 'Clear all saved Bedrock credentials?',
       confirmLabel: 'Clear',
     }))) return;
-    await clearBedrockConfig();
+    setError(null);
+    try {
+      const result = await clearBedrockConfig();
+      if (!result.ok) {
+        setError(result.error);
+        return;
+      }
+    } catch (err: any) {
+      setError(err?.message ?? 'Failed to clear');
+      return;
+    }
     setProfile('');
     setBearerToken('');
     setAccessKeyId('');
@@ -180,7 +184,8 @@ export function BedrockConfigPanel({
         <select
           value={region}
           onChange={(e) => setRegion(e.target.value)}
-          style={fieldStyle}
+          className="ui-select"
+          style={{ width: 'auto', minWidth: 320 }}
         >
           {BEDROCK_REGIONS.map((r) => (
             <option key={r} value={r}>{r}</option>
@@ -226,7 +231,8 @@ export function BedrockConfigPanel({
                     value={profile}
                     onChange={(e) => setProfile(e.target.value)}
                     placeholder="Profile name (e.g. claude)"
-                    style={{ ...fieldStyle, minWidth: 280 }}
+                    className="ui-input"
+                    style={{ width: 'auto', minWidth: 280 }}
                   />
                 )}
                 {credentialSource === opt.value && opt.value === 'bearer-token' && (
@@ -235,7 +241,8 @@ export function BedrockConfigPanel({
                     value={bearerToken}
                     onChange={(e) => setBearerToken(e.target.value)}
                     placeholder="Bearer token"
-                    style={{ ...fieldStyle, minWidth: 280 }}
+                    className="ui-input"
+                    style={{ width: 'auto', minWidth: 280 }}
                   />
                 )}
                 {credentialSource === opt.value && opt.value === 'access-keys' && (
@@ -245,14 +252,16 @@ export function BedrockConfigPanel({
                       value={accessKeyId}
                       onChange={(e) => setAccessKeyId(e.target.value)}
                       placeholder="Access Key ID"
-                      style={{ ...fieldStyle, minWidth: 180 }}
+                      className="ui-input"
+                      style={{ width: 'auto', minWidth: 180 }}
                     />
                     <input
                       type="password"
                       value={secretAccessKey}
                       onChange={(e) => setSecretAccessKey(e.target.value)}
                       placeholder="Secret Access Key"
-                      style={{ ...fieldStyle, minWidth: 180 }}
+                      className="ui-input"
+                      style={{ width: 'auto', minWidth: 180 }}
                     />
                   </div>
                 )}
@@ -275,7 +284,8 @@ export function BedrockConfigPanel({
           value={authRefreshCommand}
           onChange={(e) => setAuthRefreshCommand(e.target.value)}
           placeholder="e.g. aws sso login --profile my-profile"
-          style={{ ...fieldStyle, minWidth: 480, width: '100%', maxWidth: 600 }}
+          className="ui-input"
+          style={{ minWidth: 480, maxWidth: 600 }}
         />
         <div style={{ fontSize: 'var(--fs-sm)', color: 'var(--term-muted)', marginTop: 4, lineHeight: 1.5 }}>
           Runs automatically when credentials expire. Similar to Claude Code's awsAuthRefresh.
@@ -284,52 +294,13 @@ export function BedrockConfigPanel({
 
       {/* Action buttons */}
       <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
-        <button
-          onClick={() => void handleSave()}
-          disabled={saving}
-          style={{
-            fontFamily: 'var(--ui-font)',
-            fontSize: 'var(--fs-md)',
-            padding: '6px 12px',
-            border: '1px solid var(--term-line)',
-            background: 'var(--term-surface-glass)',
-            color: 'var(--term-fg)',
-            cursor: saving ? 'default' : 'pointer',
-            opacity: saving ? 0.55 : 1,
-          }}
-        >
-          {saving ? 'Saving...' : 'Save'}
-        </button>
-        <button
-          onClick={() => void handleVerify()}
-          disabled={verifying}
-          style={{
-            fontFamily: 'var(--ui-font)',
-            fontSize: 'var(--fs-md)',
-            padding: '6px 12px',
-            border: '1px solid var(--term-line)',
-            background: verifyResult?.ok ? 'var(--term-alt)' : 'var(--term-surface-glass)',
-            color: verifyResult?.ok ? 'var(--term-accent)' : 'var(--term-fg)',
-            cursor: verifying ? 'default' : 'pointer',
-            opacity: verifying ? 0.55 : 1,
-          }}
-        >
-          {verifying ? 'Verifying...' : 'Verify connection'}
-        </button>
-        <button
-          onClick={() => void handleClear()}
-          style={{
-            fontFamily: 'var(--ui-font)',
-            fontSize: 'var(--fs-md)',
-            padding: '6px 12px',
-            border: '1px solid var(--term-line)',
-            background: 'var(--term-surface-glass)',
-            color: 'var(--term-mid)',
-            cursor: 'pointer',
-          }}
-        >
-          Clear
-        </button>
+        <Button variant="primary" disabled={saving} onClick={() => void handleSave()}>
+          {saving ? 'Saving…' : 'Save'}
+        </Button>
+        <Button disabled={verifying} onClick={() => void handleVerify()}>
+          {verifying ? 'Verifying…' : 'Verify connection'}
+        </Button>
+        <Button variant="ghost" onClick={() => void handleClear()}>Clear</Button>
       </div>
 
       {/* Status */}
@@ -337,7 +308,7 @@ export function BedrockConfigPanel({
         <div
           style={{
             fontSize: 'var(--fs-sm)',
-            color: verifyResult.ok ? 'var(--term-accent)' : 'var(--term-danger)',
+            color: verifyResult.ok ? 'var(--term-accent)' : 'var(--term-danger-text)',
             marginTop: 8,
           }}
         >
@@ -347,7 +318,7 @@ export function BedrockConfigPanel({
         </div>
       )}
       {error && (
-        <div style={{ fontSize: 'var(--fs-sm)', color: 'var(--term-danger)', marginTop: 6 }}>{error}</div>
+        <div style={{ fontSize: 'var(--fs-sm)', color: 'var(--term-danger-text)', marginTop: 6 }}>{error}</div>
       )}
       {config?.configured && !verifyResult && (
         <div style={{ fontSize: 'var(--fs-sm)', color: 'var(--term-muted)', marginTop: 8 }}>

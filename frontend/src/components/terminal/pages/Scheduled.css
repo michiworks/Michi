@@ -35,13 +35,17 @@
   color: var(--term-mid); font-size: var(--fs-md); line-height: 1.5;
 }
 .sched-banner > .ui-btn { flex-shrink: 0; }
-.sched-error {
-  display: flex; align-items: center; justify-content: space-between; gap: 12px;
-  margin-bottom: 16px; padding: 8px 12px;
+/* An error box: the page's (.sched-error) and a job's or a run's, smaller (.sched-detail-error). */
+.sched-error, .sched-detail-error {
+  padding: 8px 12px;
   border: 1px solid color-mix(in srgb, var(--term-danger) 30%, transparent);
   border-radius: var(--ui-radius);
   background: color-mix(in srgb, var(--term-danger) 5%, transparent);
-  color: var(--term-danger); font-size: var(--fs-md); overflow-wrap: anywhere;
+  color: var(--term-danger-text); overflow-wrap: anywhere;
+}
+.sched-error {
+  display: flex; align-items: center; justify-content: space-between; gap: 12px;
+  margin-bottom: 16px; font-size: var(--fs-md);
 }
 
 .sched-blocked { display: block; }
@@ -55,7 +59,7 @@
 .sched-blocked-run { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 10px; }
 .sched-blocked-run strong { display: block; color: var(--term-fg); font-size: var(--fs-md); font-weight: 500; overflow-wrap: anywhere; }
 .sched-blocked-run span { color: var(--term-muted); font-size: var(--fs-sm); }
-.sched-blocked-error { color: var(--term-danger); overflow-wrap: anywhere; }
+.sched-blocked-error { color: var(--term-danger-text); overflow-wrap: anywhere; }
 
 .sched-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 14px; margin-bottom: 22px; }
 .sched-result-count { color: var(--term-muted); font-size: var(--fs-sm); font-variant-numeric: tabular-nums; }
@@ -77,8 +81,8 @@
 .sched-swap__layer { grid-area: 1 / 1; display: inline-flex; align-items: center; }
 .sched-swap__glyph { display: inline-flex; }
 .sched-next { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: pre; }
-.sched-next[data-tone='danger'] { color: var(--term-danger); }
-.sched-next[data-tone='active'] { color: var(--term-accent); }
+.sched-next[data-tone='danger'] { color: var(--term-danger-text); }
+.sched-next[data-tone='active'] { color: var(--term-run); }
 .sched-last { display: flex; flex-direction: column; align-items: flex-end; gap: 3px; min-width: 0; font-size: var(--fs-md); color: var(--term-muted); white-space: nowrap; }
 .sched-last-status { display: inline-flex; align-items: center; gap: 6px; color: var(--term-mid); }
 .sched-last-time { font-size: var(--fs-sm); font-variant-numeric: tabular-nums; }
@@ -87,8 +91,8 @@
 .sched-status-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--term-faint); flex-shrink: 0; }
 .sched-status-dot[data-tone='ok'] { background: var(--term-digest); }
 .sched-status-dot[data-tone='error'] { background: var(--term-danger); }
-.sched-status-dot[data-tone='active'] { background: var(--term-accent); animation: sched-pulse var(--t-loop) ease-in-out infinite; }
-.sched-spin { animation: sched-spin var(--t-loop-fast) linear infinite; color: var(--term-accent); }
+.sched-status-dot[data-tone='active'] { background: var(--term-run); animation: sched-pulse var(--t-loop) ease-in-out infinite; }
+.sched-spin { animation: sched-spin var(--t-loop-fast) linear infinite; color: var(--term-run); }
 @keyframes sched-spin { to { transform: rotate(360deg); } }
 @keyframes sched-pulse { 50% { opacity: .35; } }
 
@@ -107,7 +111,7 @@
 .sched-field { display: flex; flex-direction: column; gap: 7px; min-width: 0; }
 .sched-field-label { font-size: var(--fs-sm); font-weight: 500; color: var(--term-mid); }
 .sched-field-hint { margin: 0; font-size: var(--fs-sm); line-height: 1.5; color: var(--term-muted); }
-.sched-field-error { margin: 0; font-size: var(--fs-sm); line-height: 1.5; color: var(--term-danger); overflow-wrap: anywhere; }
+.sched-field-error { margin: 0; font-size: var(--fs-sm); line-height: 1.5; color: var(--term-danger-text); overflow-wrap: anywhere; }
 .sched-catchup { margin-top: -10px; }
 .sched-editor .ui-input, .sched-editor .ui-select { min-height: 32px; }
 .sched-textarea { resize: vertical; min-height: 112px; line-height: 1.55; padding: 8px 10px; }
@@ -172,11 +176,7 @@
   border: 1px solid var(--term-line); border-radius: var(--ui-radius); background: var(--term-alt);
   color: var(--term-mid); font-size: var(--fs-md); line-height: 1.65; white-space: pre-wrap; overflow-wrap: anywhere;
 }
-.sched-detail-error {
-  margin: 0 0 6px; padding: 8px 12px; border: 1px solid color-mix(in srgb, var(--term-danger) 30%, transparent);
-  border-radius: var(--ui-radius); background: color-mix(in srgb, var(--term-danger) 5%, transparent);
-  color: var(--term-danger); font-size: var(--fs-sm); line-height: 1.5; overflow-wrap: anywhere;
-}
+.sched-detail-error { margin: 0 0 6px; font-size: var(--fs-sm); line-height: 1.5; }
 .sched-detail-empty { margin: 0; color: var(--term-muted); font-size: var(--fs-md); }
 .sched-runs { list-style: none; margin: 0; padding: 0; }
 .sched-run {
@@ -196,10 +196,38 @@
 .sched-run-open { display: inline-flex; gap: 2px; margin-top: 3px; color: var(--term-muted); }
 .sched-detail footer { display: flex; flex-shrink: 0; align-items: center; justify-content: space-between; padding: 14px 24px; border-top: 1px solid var(--term-line); }
 .sched-detail-actions { display: flex; gap: 8px; }
+.sched-detail-note { margin: 10px 0 0; color: var(--term-muted); font-size: var(--fs-sm); line-height: 1.55; }
 
-.terminal-scheduled button:focus-visible, .sched-editor button:focus-visible, .sched-detail button:focus-visible {
-  outline: 2px solid var(--term-accent); outline-offset: 2px;
+/* ── A run, as its conversation ─────────────────────────────────────────── */
+/* Fills the page like a pane; the bar sits where a composer would. */
+.terminal-scheduled-run { display: flex; flex: 1; min-width: 0; min-height: 0; }
+.sched-run-page {
+  position: relative; display: flex; flex: 1; flex-direction: column; min-width: 0; min-height: 0;
+  background: var(--term-pane-bg, var(--term-surface)); font-family: var(--ui-font); color: var(--term-fg);
 }
+.sched-run-page *, .sched-run-page-bar * { letter-spacing: 0; }
+.sched-run-page-thread { position: relative; display: flex; flex: 1 1 0; flex-direction: column; min-height: 0; }
+.sched-run-page-thread > .terminal-pane { flex: 1; height: auto; border-right: 0 !important; }
+.sched-run-page-message { margin: 40px auto; width: min(100% - 48px, 676px); }
+.sched-run-page-empty {
+  display: flex; flex: 1; flex-direction: column; align-items: center; justify-content: center; gap: 12px;
+  padding: 32px; color: var(--term-muted); text-align: center; font-size: var(--fs-md); line-height: 1.6;
+}
+.sched-run-page-empty p { max-width: 440px; margin: 0; }
+.sched-run-page-bar {
+  display: flex; flex-shrink: 0; align-items: center; justify-content: space-between; gap: 14px;
+  width: calc(100% - 24px); margin: 0 auto 12px; padding: 10px 10px 10px 16px;
+  border: 1px solid color-mix(in srgb, var(--term-line) 65%, transparent);
+  border-radius: calc(var(--ui-radius) * 2.5); background: var(--term-surface);
+  box-shadow: 0 2px 3px color-mix(in srgb, var(--term-bg) 3%, transparent), 0 10px 30px -12px color-mix(in srgb, black 10%, transparent);
+}
+.sched-run-page-bar .ui-btn { display: inline-flex; align-items: center; gap: 7px; }
+.sched-run-page-bar-info { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+.sched-run-page-status { display: flex; align-items: center; gap: 8px; margin: 0; min-width: 0; }
+.sched-run-page-status .sched-run-meta { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sched-run-page-note { margin: 0; overflow: hidden; color: var(--term-muted); font-size: var(--fs-sm); text-overflow: ellipsis; white-space: nowrap; }
+.sched-run-page-actions { display: flex; flex-shrink: 0; gap: 6px; }
+
 
 @media (hover: hover) and (pointer: fine) {
   .terminal-scheduled .sched-row:hover, .sched-run:not(:disabled):hover { background: var(--trash-hover); }
@@ -225,6 +253,8 @@
   .terminal-scheduled { padding: 23px 18px 28px; }
   .sched-grid { grid-template-columns: minmax(0, 1fr); }
   .sched-editor-scroll, .sched-detail-scroll { padding: 18px; }
+  .sched-run-page-bar { flex-wrap: wrap; }
+  .sched-run-page-note { white-space: normal; }
 }
 
 @media (pointer: coarse) {

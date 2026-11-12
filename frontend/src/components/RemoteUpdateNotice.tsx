@@ -20,7 +20,15 @@ interface UpdateView {
 const fromJob = (job: RemoteUpdateJob): UpdateView => ({ phase: job.phase, message: job.message, diagnostic: job.diagnostic ?? null });
 const errorMessage = (failure: unknown) => failure instanceof Error ? failure.message : String(failure);
 
-export function RemoteUpdateNotice({ connectionId, name, onUpdated }: { connectionId: string; name: string; onUpdated?: () => void }) {
+export function RemoteUpdateNotice({ connectionId, name, onUpdated, unreachable = false }: {
+  connectionId: string;
+  name: string;
+  onUpdated?: () => void;
+  /** The caller already says this machine cannot be reached, so a version
+   *  check that failed for the same reason adds nothing. The check runs again
+   *  once the machine is reachable. */
+  unreachable?: boolean;
+}) {
   const [status, setStatus] = useState<RemoteUpdateStatus | null>(null);
   const [checkError, setCheckError] = useState('');
   const [view, setView] = useState<UpdateView | null>(null);
@@ -35,6 +43,11 @@ export function RemoteUpdateNotice({ connectionId, name, onUpdated }: { connecti
   const settled = useRef(false);
   const onUpdatedRef = useRef(onUpdated);
   useEffect(() => { onUpdatedRef.current = onUpdated; }, [onUpdated]);
+  const wasUnreachable = useRef(unreachable);
+  useEffect(() => {
+    if (wasUnreachable.current && !unreachable) setCheck(value => value + 1);
+    wasUnreachable.current = unreachable;
+  }, [unreachable]);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -110,7 +123,7 @@ export function RemoteUpdateNotice({ connectionId, name, onUpdated }: { connecti
   const succeeded = view?.phase === 'succeeded' && status?.state === 'current';
   const failed = view?.phase === 'failed' && status?.state !== 'current' ? view : null;
   const progress = running ? view.message : succeeded ? UP_TO_DATE : '';
-  const showCheckError = !!checkError && !status && !running;
+  const showCheckError = !!checkError && !status && !running && !unreachable;
   if (!older && !running && !progress && !failed && !showCheckError) return null;
   return <div className="remote-update" aria-label={`Michi update for ${name}`} aria-busy={running}>
     {older ? <>

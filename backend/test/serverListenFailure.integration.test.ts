@@ -59,7 +59,12 @@ describe('server listen failure', () => {
     assert.equal(code, 1, 'the backend should exit 1 when its port is taken');
     const backendLog = fs.readFileSync(path.join(tmpDir, 'logs', 'backend.log'), 'utf8');
     assert.match(backendLog, /listen failed; exiting .*code=EADDRINUSE/);
+    // The Companion v2 merge runs at boot, after the runtimes register (it reads them) and before the listener.
+    assert.match(backendLog, /boot\s+assistant v2 merge mergedAt=\d+/);
+    assert.doesNotMatch(backendLog, /assistant v2 merge failed/);
+    assert.ok(backendLog.indexOf('runtime registered') < backendLog.indexOf('assistant v2 merge'), 'merged after the runtimes registered');
     assert.doesNotMatch(backendLog, /boot\s+listening port=/);
     assert.doesNotMatch(backendLog, /scheduled jobs started/);
+    assert.doesNotMatch(backendLog, /companion started/, 'nor does the Companion poll or speak for it');
   });
 });

@@ -94,3 +94,26 @@ test('numeric and UUID IDs cannot overwrite pending permissions; automatic cance
     assert.deepEqual(writes.map((r) => r.id), [-1, 'uuid-a', -2, 'uuid-b', 'uuid-unknown', 'uuid-late']);
     assert.equal(internal.pendingPermissions.size, 0);
 });
+
+test('a restarted agent numbering its requests from 1 again gets new permission IDs', async () => {
+    const clients: Array<{ client: AcpClient; writes: any[]; id: number }> = [];
+    for (const _ of [0, 1]) {
+        const client = new AcpClient('/bin/false', '/tmp', undefined, 'v3');
+        const internal = client as any;
+        internal.send = async () => ({ sessionId: 'native' });
+        await client.newSession();
+        const writes: any[] = [];
+        internal.proc = { stdin: { destroyed: false, write: (line: string) => writes.push(JSON.parse(line)) } };
+        internal.dispatch({ jsonrpc: '2.0', id: 1, method: 'session/request_permission', params: {
+            sessionId: 'native', toolCall: { toolCallId: 'call-1', title: 'Write File' },
+            options: [{ optionId: 'allow', kind: 'allow_once', name: 'Allow' }, { optionId: 'deny', kind: 'reject_once', name: 'Deny' }],
+        } });
+        clients.push({ client, writes, id: [...internal.pendingPermissions.keys()][0] });
+    }
+    const [before, after] = clients;
+    assert.ok(Number.isSafeInteger(after.id) && after.id > before.id);
+    after.client.respondToPermission(before.id, 'allow');
+    assert.deepEqual(after.writes, []);
+    after.client.respondToPermission(after.id, 'deny');
+    assert.deepEqual(after.writes, [{ jsonrpc: '2.0', id: 1, result: { outcome: { outcome: 'selected', optionId: 'deny' } } }]);
+});

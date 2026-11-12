@@ -7,7 +7,8 @@ import { AcpAgentRuntime } from 'michi-runtime/internal/adapters/kiro/AcpAgentRu
 import { AcpAgentSession } from 'michi-runtime/internal/adapters/kiro/AcpAgentSession';
 import { CREW_KIRO_FLAVOR } from 'michi-runtime/internal/adapters/crew/crewFlavor';
 import { RUNTIME_FACTORIES } from '../src/agents/runtimeFactories';
-import { CREW_DESCRIPTOR, describeRuntimeCapabilities } from '../src/agents/capabilityDescriptors';
+import { CREW_HARNESS } from 'michi-runtime/internal/adapters/crew/crewDescriptor';
+import { staticRuntimeDescriptor } from '../src/agents/runtimeStaticDescriptors';
 import { crewAvailability, crewIntegrationStatus, resolveCrewAcpLaunch, resolveCrewAcpLaunchDetailed } from 'michi-runtime/internal/adapters/crew/crewLaunch';
 import { CREW_APP_VERSION, crewAppNeedsSync } from 'michi-runtime/internal/adapters/crew/crewAppVersion';
 import { AcpClient, ACPError } from 'michi-runtime/internal/adapters/kiro/acpClient';
@@ -92,8 +93,8 @@ describe('crew runtime registration', () => {
     assert.equal(runtime.descriptor.topology.cancel, 'native-ack');
     assert.equal(d.sessionFork.availability, 'native');
     assert.equal(d.sessionFork.confidence, 'projected');
-    assert.deepEqual(d, CREW_DESCRIPTOR);
-    assert.deepEqual(describeRuntimeCapabilities('crew'), CREW_DESCRIPTOR);
+    assert.deepEqual(d, CREW_HARNESS);
+    assert.deepEqual(staticRuntimeDescriptor('crew').harness, CREW_HARNESS);
   });
 
   test('engine stays v2 under MICHI_KIRO_ENGINE=v3', () => {
@@ -362,7 +363,8 @@ describe('crew session state', () => {
       assert.equal(state.nativeEngine, 'v2');
       assert.equal(state.currentModeId, 'template:reviewer');
       assert.equal(state.modelId, 'm2');
-      assert.deepEqual(state.commands?.map((command) => command.name), ['crew-help']);
+      // effort is the adapter's own command (executeCommand), whether or not it advertises it.
+      assert.deepEqual(state.commands?.map((command) => [command.name, command.kind ?? null]), [['effort', 'command'], ['crew-help', null]]);
     } finally {
       await runtime.shutdown();
     }

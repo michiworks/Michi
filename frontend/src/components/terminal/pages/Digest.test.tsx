@@ -1,12 +1,13 @@
-import React from 'react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import TerminalDigest from './Digest';
 import ManageComposer from '../manage/ManageComposer';
+import { requestDigestFocus } from '../../../state/digestFocus';
 
 const createDigest = vi.hoisted(() => vi.fn());
 const markDigestViewed = vi.hoisted(() => vi.fn());
 const setDigestPrompt = vi.hoisted(() => vi.fn());
+const revealNode = vi.hoisted(() => vi.fn(() => true));
 const store = vi.hoisted(() => ({
   project: null as any,
   nodes: {} as Record<string, any>,
@@ -20,6 +21,7 @@ vi.mock('../../../state/chatStore', () => ({
     setDigestPrompt,
     markDigestViewed,
     openPane: vi.fn(),
+    revealNode,
     createChildChat: vi.fn(),
   }),
   useChatNodesSnapshot: () => store.nodes,
@@ -89,6 +91,7 @@ beforeEach(() => {
   createDigest.mockReset().mockResolvedValue('new-digest');
   markDigestViewed.mockReset();
   setDigestPrompt.mockReset();
+  revealNode.mockClear();
   vi.mocked(ManageComposer).mockClear();
   store.project = project();
   store.nodes = {
@@ -143,6 +146,33 @@ describe('TerminalDigest thread scope', () => {
     expect(markDigestViewed).toHaveBeenCalledWith('d1');
   });
 
+  it('takes a source row to that conversation on the Dashboard', () => {
+    const onNav = vi.fn();
+    render(<TerminalDigest onNav={onNav} />);
+    fireEvent.click(screen.getByText('Root one'));
+    expect(revealNode).toHaveBeenCalledWith('r1', { workspaceId: 'p1' });
+    expect(onNav).toHaveBeenCalledWith('dashboard');
+  });
+
+  it('opens a section\'s source from a button the keyboard reaches', () => {
+    const onNav = vi.fn();
+    store.nodes.d1 = { ...store.nodes.d1, digest: { ...store.nodes.d1.digest, content: '# Current digest\n\n## §01 First point\nsource: r1\n\nBody.' } };
+    render(<TerminalDigest onNav={onNav} />);
+    const source = screen.getByRole('button', { name: /source/ });
+    fireEvent.click(source);
+    expect(revealNode).toHaveBeenCalledWith('r1', { workspaceId: 'p1' });
+    expect(onNav).toHaveBeenCalledWith('dashboard');
+  });
+
+  it('opens on the digest the Map or a digest pane asked for, not the thread\'s newest', () => {
+    store.project = { ...project(), chatIds: [...project().chatIds, 'd0'] };
+    store.nodes.d0 = digest('d0', 'r1', 'Older digest', 5);
+    requestDigestFocus('d0');
+    render(<TerminalDigest onNav={vi.fn()} />);
+    expect(screen.getByText('Older digest body')).toBeTruthy();
+    expect(screen.queryByText('Current digest body')).toBeNull();
+  });
+
   it('shows generation errors instead of an empty digest', () => {
     store.nodes.d1.digest = { ...store.nodes.d1.digest, status: 'error', content: '', error: 'Runtime unavailable' };
     render(<TerminalDigest onNav={vi.fn()} />);
@@ -155,6 +185,20 @@ describe('TerminalDigest thread scope', () => {
     render(<TerminalDigest onNav={vi.fn()} />);
     expect(screen.getAllByText('Summary so far')).toHaveLength(1);
     expect(screen.queryByText('# Title\n\nSummary so far')).toBeNull();
+  });
+
+  it('counts the messages a send added since the thread loaded', () => {
+    store.project = { ...project(), chatIds: ['r1', 'c1', 'r2'] };
+    const sent = ['u', 'a', 'u2', 'a2'].map((id, i) => ({ id, role: i % 2 ? 'assistant' : 'user', text: id, toolCalls: [] }));
+    store.nodes = {
+      r1: { ...chat('r1', 'Root one', 2), messages: sent, messagesLoaded: true },
+      c1: chat('c1', 'Child one', 3),
+      r2: chat('r2', 'Root two', 4),
+    };
+
+    render(<TerminalDigest onNav={vi.fn()} />);
+
+    expect(screen.getByText('7 messages')).toBeTruthy();
   });
 
   it('shows an inline prompt and creates a digest from every chat in the active thread', async () => {

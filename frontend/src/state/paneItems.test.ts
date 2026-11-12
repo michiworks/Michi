@@ -18,6 +18,11 @@ describe('pane items', () => {
       filePath: 'a.md', viewMode: 'rendered',
     })).toBe(true);
     expect(isPaneItem({ id: 'pane:terminal:1', kind: 'terminal', projectId: 'p1', treeId: 't1', title: 'Terminal', createdAt: 1 })).toBe(false);
+    const terminal = { id: 'pane:terminal:1', kind: 'terminal', projectId: 'p1', treeId: null, title: 'Terminal', createdAt: 1, surfaceId: 's1', cwd: '/w' };
+    expect(isPaneItem(terminal)).toBe(true);
+    expect(isPaneItem({ ...terminal, transport: 'backend', backendConnectionId: 'box' })).toBe(true);
+    expect(isPaneItem({ ...terminal, transport: 'ssh' })).toBe(false);
+    expect(isPaneItem({ ...terminal, transport: 'backend', backendConnectionId: 7 })).toBe(false);
     expect(isPaneItem({ id: 'pane:launcher:1', kind: 'launcher', projectId: 'p1', treeId: 't1', title: 'New pane', createdAt: 1, anchorNodeId: 42 })).toBe(false);
     expect(isPaneItem({ id: 'pane:file:1', kind: 'unknown', projectId: 'p1', treeId: 't1', title: '', createdAt: 1 })).toBe(false);
   });

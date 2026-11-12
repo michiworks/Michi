@@ -1,5 +1,7 @@
-import React, { useMemo, useState } from 'react';
+import { useMemo, useState } from 'react';
 import {
+  dayAt,
+  localDayIndex,
   PAGE_BLOCK_CATALOG,
   PAGE_BLOCK_CATEGORIES,
   PAGE_BLOCK_TYPES,
@@ -37,16 +39,9 @@ const LISTED = PAGE_BLOCK_CATEGORIES.filter((category) => category.id !== 'refer
 const WIDE = new Set<PageBlockType>(['plan-actual', 'compare', 'conflict', 'table', 'criteria', 'chart', 'gallery', 'threads', 'grid']);
 const HOUR = 3_600_000;
 
-/** The local calendar day `offset` days from `now`, as YYYY-MM-DD. */
-function dayFrom(now: number, offset: number): string {
-  const at = new Date(now);
-  const day = new Date(at.getFullYear(), at.getMonth(), at.getDate() + offset);
-  return `${day.getFullYear()}-${String(day.getMonth() + 1).padStart(2, '0')}-${String(day.getDate()).padStart(2, '0')}`;
-}
-
 /** A plan in days around today: one phase on time, one late, one under way and one still ahead with its forecast. */
 function planSample(now: number): PageBlockInput {
-  const d = (offset: number) => dayFrom(now, offset);
+  const d = (offset: number) => dayAt(localDayIndex(now) + offset);
   return { type: 'plan-actual', title: 'Plan vs actual', items: [
     { label: 'Plan', planStart: d(-14), planEnd: d(-12), actualStart: d(-14), actualEnd: d(-12) },
     { label: 'Schema', planStart: d(-11), planEnd: d(-7), actualStart: d(-11), actualEnd: d(-5) },

@@ -81,6 +81,10 @@ workflow here; the commands above are integration points, not a scheduled job.
   event is still needed; a stale banner cannot grant or reply to the cleared request.
 - Declined tool status is preserved into durable projection. Dedicated declined
   styling is not included. Native interruption normalizes to `cancelled`.
+- Skills: `skills/extraRoots/set` (Michi's library mount) follows every app-server
+  start, `skills/list` answers are cached until `skills/changed`, and a skill
+  turn sends a path-keyed `skill` input. `skills/config/write` is never sent: it
+  writes the user's own `~/.codex/config.toml`.
 - Independent idle compaction, global/idle MCP startup, plan/diff/authoritative
   text reconciliation, new item rendering, all client APIs, reconnect/replay
   traces and live-daemon compatibility are not certified by this first batch.

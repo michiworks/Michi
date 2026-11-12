@@ -27,7 +27,9 @@ export function shouldBranchOnSubmit(params: {
   return params.forceBranch || params.slashBranched;
 }
 
-export const FANOUT_PREFIX = /^\/(fanout|fan-out|explore)\b[ \t]*/i;
+// The command itself, then whitespace or the end: `/explore-codebase` or
+// `/explore:deep` names a skill, which must not fan out.
+export const FANOUT_PREFIX = /^\/(fanout|fan-out|explore)(?=\s|$)[ \t]*/i;
 
 /**
  * Parse a /fanout command into a list of topic strings, one per branch.
@@ -76,26 +78,4 @@ export function parseFanoutCommand(text: string): { topics: string[] } | null {
     }
   }
   return { topics };
-}
-
-export function isNodeInArchivedTree(
-  nodeId: string,
-  project: { trees: Array<{ id: string; rootNodeId: string; archivedAt?: number }>; edges: readonly { source: string; target: string; kind?: string }[] } | null | undefined,
-): boolean {
-  if (!project) return false;
-  // Find tree via branch-edge walk (reuse logic inline to keep this module free of tree.ts dependency cycles)
-  const parentOf = new Map<string, string>();
-  for (const e of project.edges) {
-    if (e.kind !== undefined && e.kind !== 'branch') continue;
-    parentOf.set(e.target, e.source);
-  }
-  const seen = new Set<string>();
-  let cur: string | undefined = nodeId;
-  while (cur && !seen.has(cur)) {
-    seen.add(cur);
-    const matched = project.trees.find((t) => t.rootNodeId === cur);
-    if (matched) return !!matched.archivedAt;
-    cur = parentOf.get(cur);
-  }
-  return false;
 }

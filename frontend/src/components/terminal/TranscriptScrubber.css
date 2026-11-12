@@ -1,0 +1,127 @@
+/* Phone transcript scrubber (TranscriptScrubber.tsx). The track runs down the
+   transcript's right edge between the top fade and the composer; TPane sets
+   its top and bottom. Only the handle takes touches, and only while it is out. */
+.transcript-scrubber {
+  position: absolute;
+  left: 0;
+  right: 0;
+  z-index: 3;
+  pointer-events: none;
+}
+
+/* While the scrubber is available its handle is the transcript's thumb; the
+   native indicator would say the same thing on the same edge. Shorter
+   transcripts keep it, since they have no handle. */
+.terminal-pane__transcript[data-scrubber] { scrollbar-width: none; }
+.terminal-pane__transcript[data-scrubber]::-webkit-scrollbar { display: none; }
+
+.transcript-scrubber__handle {
+  position: absolute;
+  top: 0;
+  right: 0;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  /* A 46×58 touch target around the 20×42 grip. */
+  width: 46px;
+  height: 58px;
+  margin-top: -29px;
+  pointer-events: none;
+  touch-action: none;
+  -webkit-user-select: none;
+  user-select: none;
+  -webkit-touch-callout: none;
+  will-change: transform;
+}
+.transcript-scrubber__handle[data-shown] { pointer-events: auto; }
+
+.transcript-scrubber__grip {
+  display: grid;
+  place-items: center;
+  width: 20px;
+  height: 42px;
+  border: 1px solid var(--term-line);
+  border-right: 0;
+  border-radius: 12px 0 0 12px;
+  background: var(--term-surface);
+  color: var(--term-muted);
+  box-shadow: var(--term-float-shadow);
+  opacity: 0;
+  transform: translateX(26px);
+  transition:
+    transform var(--t-enter) var(--t-ease),
+    opacity var(--t-soft) var(--t-ease),
+    width var(--t-soft) var(--t-ease),
+    background var(--t-soft),
+    color var(--t-soft),
+    border-color var(--t-soft);
+}
+.transcript-scrubber__handle[data-shown] .transcript-scrubber__grip { opacity: 1; transform: none; }
+.transcript-scrubber__handle[data-dragging] .transcript-scrubber__grip {
+  width: 26px;
+  border-color: var(--sel-bar-line);
+  background: var(--sel-bar-bg);
+  color: var(--sel-bar-fg);
+}
+
+.transcript-scrubber__bubble {
+  position: absolute;
+  top: 0;
+  right: 40px;
+  width: max-content;
+  min-width: 168px;
+  max-width: min(76%, 290px);
+  padding: 8px 12px 9px;
+  border: 1px solid var(--sel-bar-line);
+  border-radius: var(--ui-radius-lg);
+  background: var(--sel-bar-bg);
+  color: var(--sel-bar-fg);
+  color-scheme: var(--sel-bar-color-scheme);
+  box-shadow: var(--sel-bar-shadow);
+  opacity: 0;
+  transform: translateX(10px) scale(.96);
+  transform-origin: right center;
+  transition: opacity var(--t-soft) var(--t-ease), transform var(--t-enter) var(--t-ease);
+  pointer-events: none;
+}
+.transcript-scrubber__bubble[data-shown] { opacity: 1; transform: none; }
+
+.transcript-scrubber__meta {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 3px;
+  color: var(--sel-bar-muted);
+  font-family: var(--font-mono);
+  font-size: var(--fs-sm);
+  font-variant-numeric: tabular-nums;
+}
+.transcript-scrubber__meta b { color: var(--sel-bar-fg); font-weight: 600; }
+
+.transcript-scrubber__text {
+  display: -webkit-box;
+  overflow: hidden;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  font-family: var(--ui-font);
+  font-size: var(--fs-xl);
+  line-height: 1.42;
+  overflow-wrap: anywhere;
+}
+.transcript-scrubber__text[data-dir='next'] { animation: transcript-scrubber-next var(--t-enter) var(--t-ease); }
+.transcript-scrubber__text[data-dir='prev'] { animation: transcript-scrubber-prev var(--t-enter) var(--t-ease); }
+@keyframes transcript-scrubber-next { from { opacity: .2; transform: translateY(5px); } }
+@keyframes transcript-scrubber-prev { from { opacity: .2; transform: translateY(-5px); } }
+
+/* The question the bubble names. */
+.terminal-message-frame[data-scrub-target] :is(.terminal-message-user, .terminal-message-user-editing) {
+  outline: 2px solid color-mix(in srgb, var(--term-accent) 55%, transparent);
+  outline-offset: 2px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .transcript-scrubber__grip, .transcript-scrubber__bubble { transition: opacity var(--t-soft); }
+  .transcript-scrubber__bubble { transform: none; }
+  .transcript-scrubber__text[data-dir] { animation: none; }
+}
+html[data-reduce-motion='on'] .transcript-scrubber__bubble { transform: none; }

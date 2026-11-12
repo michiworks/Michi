@@ -172,7 +172,7 @@ for (const engine of ['v2', 'v3'] as const) {
         const { AcpClient } = require('michi-runtime/internal/adapters/kiro/acpClient') as typeof import('michi-runtime/internal/adapters/kiro/acpClient');
         const { RuntimeRunExecutor } = require('../src/agents/runs/runtimeRunExecutor') as typeof import('../src/agents/runs/runtimeRunExecutor');
         const { intersectPermissionPolicies } = require('../src/agents/runs/effectivePermissionPolicy') as typeof import('../src/agents/runs/effectivePermissionPolicy');
-        const { DEFAULT_PLATFORM_POLICY } = require('../src/agents/agentRunAssembly') as typeof import('../src/agents/agentRunAssembly');
+        const { DEFAULT_PLATFORM_POLICY } = require('../src/agents/runs/effectivePermissionPolicy') as typeof import('../src/agents/runs/effectivePermissionPolicy');
         const { michiTestHost } = require('./helpers/michiTestHost') as typeof import('./helpers/michiTestHost');
         const { kiroEnvOptions } = require('../src/agents/michiKiroOptions') as typeof import('../src/agents/michiKiroOptions');
         closeDb(); initDb();

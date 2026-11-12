@@ -1,8 +1,10 @@
 import React from 'react';
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
-import type { PageDto, PageEditOp } from 'michi-shared';
-import { NativePageDocument } from './NativePageDocument';
+import { PAGE_BLOCK_CATALOG, type PageDto, type PageEditOp } from 'michi-shared';
+import NativePageDocument from './NativePageDocument';
+import { getCompanionPanelState, resetCompanionPanelForTests, takeCompanionRequests } from '../../../state/companion/companionPanel';
+import { resetCompanionStoreForTests } from '../../../state/companion/companionStore';
 
 const makePage = (revision = 2, blocks: PageDto['blocks'] = [{ id: 'b1', rev: 1, type: 'markdown', text: 'Before' }]): PageDto => ({
   id: 'pg-1', workspaceId: 'ws-1', parentId: null, position: 0, title: 'Research notes', color: null,
@@ -12,6 +14,8 @@ const makePage = (revision = 2, blocks: PageDto['blocks'] = [{ id: 'b1', rev: 1,
 const noopEdit = vi.fn(async (_ops: PageEditOp[], _revision: number) => 'ok' as const);
 
 describe('NativePageDocument', () => {
+  afterEach(() => { Reflect.deleteProperty(navigator, 'clipboard'); });
+
   it('saves a nested checklist as an atomic parent edit without renderer-only child IDs', async () => {
     const edit = vi.fn(async () => 'ok' as const);
     render(<NativePageDocument page={makePage(2, [{ id: 'group', rev: 1, type: 'toggle', title: 'Details', blocks: [{ type: 'checklist', items: [{ text: 'Review', done: false }] }] }])} onEdit={edit} onOpenPage={vi.fn()} renderDatabaseRef={() => null} />);
@@ -43,10 +47,11 @@ describe('NativePageDocument', () => {
     Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText: copy } });
     const { container } = render(<NativePageDocument page={makePage(2, [{ id: 'b1', rev: 1, type: 'markdown', text: 'Before', sources: [source] }])} onEdit={noopEdit} onOpenPage={vi.fn()} renderDatabaseRef={() => null} onAskAssistant={onAskAssistant} onOpenSource={onOpenSource} sourceLabel={() => 'Research conversation'} />);
     const menu = () => { fireEvent.click(screen.getByRole('button', { name: 'Block menu' })); return screen.getByRole('menu'); };
-    expect(within(menu()).getAllByRole('menuitem').map(item => item.textContent)).toEqual(['Select', 'Ask', 'Sources', 'Ignore', 'Archive', 'Copy text']);
+    // The menu's Ask hands the block to the panel, so it is named after the agent, as the toolbar's is (DESIGN-v2 §1.5).
+    expect(within(menu()).getAllByRole('menuitem').map(item => item.textContent)).toEqual(['Select', 'Ask Michi', 'Sources', 'Ignore', 'Archive', 'Copy text']);
     fireEvent.click(screen.getByRole('menuitem', { name: 'Select' }));
     expect(container.querySelector('[data-block-id="b1"]')?.getAttribute('data-selected')).toBe('true');
-    fireEvent.click(within(menu()).getByRole('menuitem', { name: 'Ask' }));
+    fireEvent.click(within(menu()).getByRole('menuitem', { name: 'Ask Michi' }));
     expect(onAskAssistant).toHaveBeenCalledWith(expect.objectContaining({ id: 'b1' }));
     fireEvent.click(within(menu()).getByRole('menuitem', { name: 'Sources' }));
     fireEvent.click(screen.getByRole('button', { name: 'Research conversation' }));
@@ -56,6 +61,14 @@ describe('NativePageDocument', () => {
     expect(container.querySelector('.native-page-sources')).toBeNull();
   });
 
+  it('says when Copy text could not reach the clipboard', async () => {
+    Object.defineProperty(navigator, 'clipboard', { configurable: true, value: undefined });
+    render(<NativePageDocument page={makePage(2, [{ id: 'b1', rev: 1, type: 'markdown', text: 'Before' }])} onEdit={noopEdit} onOpenPage={vi.fn()} renderDatabaseRef={() => null} />);
+    fireEvent.click(screen.getByRole('button', { name: 'Block menu' }));
+    fireEvent.click(within(screen.getByRole('menu')).getByRole('menuitem', { name: 'Copy text' }));
+    expect((await screen.findByRole('alert')).textContent).toMatch(/Couldn’t copy the text/);
+  });
+
   it('exposes native actions as hover icons with accessible labels and exact source navigation', async () => {
     const source = { nodeId: 'n', turnId: 't', assistantId: 'a' };
     const open = vi.fn();
@@ -63,11 +76,11 @@ describe('NativePageDocument', () => {
     const edit = vi.fn().mockResolvedValue('ok');
     render(<NativePageDocument page={makePage(2, [{ id: 'b1', rev: 1, type: 'markdown', text: 'Before', sources: [source] }])} onEdit={edit} onOpenPage={vi.fn()} renderDatabaseRef={() => null} onAskAssistant={ask} onOpenSource={open} sourceLabel={() => 'Research'} />);
     const toolbar = screen.getByRole('toolbar');
-    expect(within(toolbar).getAllByRole('button').map(button => button.getAttribute('aria-label'))).toEqual(['Select', 'Ask assistant', 'Sources', 'Ignore', 'Archive', 'Edit']);
+    expect(within(toolbar).getAllByRole('button').map(button => button.getAttribute('aria-label'))).toEqual(['Select', 'Ask Michi', 'Sources', 'Ignore', 'Archive', 'Edit']);
     expect(toolbar.textContent).toBe('');
     fireEvent.click(within(toolbar).getByRole('button', { name: 'Select' }));
     expect(within(toolbar).getByRole('button', { name: 'Deselect' }).getAttribute('aria-pressed')).toBe('true');
-    fireEvent.click(within(toolbar).getByRole('button', { name: 'Ask assistant' }));
+    fireEvent.click(within(toolbar).getByRole('button', { name: 'Ask Michi' }));
     expect(ask).toHaveBeenCalledTimes(1);
     fireEvent.click(within(toolbar).getByRole('button', { name: 'Sources' }));
     fireEvent.click(screen.getByRole('button', { name: 'Research' }));
@@ -98,6 +111,28 @@ describe('NativePageDocument', () => {
     fireEvent.click(screen.getByRole('menuitem', { name: 'Archive' }));
     expect((await screen.findByRole('alert')).textContent).toBe('The page changed. Try again.');
     expect(screen.getByText('Before')).toBeTruthy();
+  });
+
+  it('says why text added below a block on a full page was not saved, and keeps the words', async () => {
+    const full = makePage(2, Array.from({ length: 40 }, (_, i) => ({ id: `b${i}`, rev: 1, type: 'markdown' as const, text: `Block ${i}` })));
+    const onEdit = vi.fn(async () => 'ok' as const);
+    render(<NativePageDocument page={full} onEdit={onEdit} onOpenPage={vi.fn()} renderDatabaseRef={() => null} />);
+    fireEvent.click(screen.getAllByRole('button', { name: 'Add block below' })[0]!);
+    fireEvent.change(screen.getByRole('textbox', { name: 'New text' }), { target: { value: 'One more' } });
+    fireEvent.click(screen.getByText('Add', { selector: 'button' }), { detail: 1 });
+    expect((await screen.findByRole('alert')).textContent).toBe('A page may contain at most 40 blocks');
+    expect(onEdit).not.toHaveBeenCalled();
+    expect((screen.getByRole('textbox', { name: 'New text' }) as HTMLTextAreaElement).value).toBe('One more');
+  });
+
+  it('reports a block edit the page refused', async () => {
+    const onEdit = vi.fn(async () => 'failed' as const);
+    render(<NativePageDocument page={makePage()} onEdit={onEdit} onOpenPage={vi.fn()} renderDatabaseRef={() => null} />);
+    fireEvent.click(screen.getByRole('button', { name: 'Add block below' }));
+    fireEvent.change(screen.getByRole('textbox', { name: 'New text' }), { target: { value: 'After' } });
+    fireEvent.click(screen.getByText('Add', { selector: 'button' }), { detail: 1 });
+    expect((await screen.findByRole('alert')).textContent).toBe('Could not save this change. Try again.');
+    expect(onEdit).toHaveBeenCalledTimes(1);
   });
 
   it('uses the shared editor and submits a strict update with the opened page revision', async () => {
@@ -151,6 +186,16 @@ describe('NativePageDocument', () => {
     fireEvent.change(screen.getByRole('textbox', { name: 'New page content' }), { target: { value: 'First note' } });
     fireEvent.click(screen.getByRole('button', { name: 'Add text' }));
     expect(onEdit).toHaveBeenCalledWith([{ op: 'insert', block: { type: 'markdown', text: 'First note' }, after: null }], 1);
+  });
+
+  it('says when the changed-page Copy of a blank page draft could not reach the clipboard', async () => {
+    Object.defineProperty(navigator, 'clipboard', { configurable: true, value: undefined });
+    const props = { onEdit: noopEdit, onOpenPage: vi.fn(), renderDatabaseRef: () => null };
+    const { rerender } = render(<NativePageDocument page={makePage(1, [])} {...props} />);
+    fireEvent.change(screen.getByRole('textbox', { name: 'New page content' }), { target: { value: 'Draft' } });
+    rerender(<NativePageDocument page={makePage(2, [])} {...props} />);
+    fireEvent.click(screen.getByRole('button', { name: 'Copy' }));
+    await waitFor(() => expect(screen.getByText(/your text couldn’t be copied/)).toBeTruthy());
   });
 
   const homeBlocks: PageDto['blocks'] = [
@@ -271,5 +316,172 @@ describe('NativePageDocument', () => {
     await waitFor(() => expect(edit).toHaveBeenCalledWith([{ op: 'update', id: 'outer', expectRev: 1, block: {
       type: 'toggle', title: 'Outer', blocks: [{ type: 'grid', regions: [{ id: 'main', span: 12, title: 'Inner', blocks: [{ type: 'markdown', text: 'Notes' }, { type: 'task-view' }] }] }],
     } }], 2));
+  });
+
+  describe('blocks a check-in wrote (DESIGN-v2 §2.6.2)', () => {
+    const checkin = { nodeId: 'n-cmph-r1', turnId: 'cmp-r1', assistantId: 'self-n-cmph-r1-cmp-r1' };
+    const user = { nodeId: 'n-user', turnId: 't', assistantId: 'a' };
+    const picture = (sources: unknown[]) => ({ id: 'pic', rev: 1, type: 'markdown' as const, text: 'Look ![chart](https://example.com/chart.png)', sources: sources as never });
+
+    it('hold their images behind "Load images" until the user asks', () => {
+      const { container } = render(<NativePageDocument page={makePage(2, [picture([checkin])])} onEdit={noopEdit} onOpenPage={vi.fn()} renderDatabaseRef={() => null} />);
+      expect(container.querySelector('img')).toBeNull();
+      expect(container.querySelector('[data-checkin-media="held"]')).not.toBeNull();
+      fireEvent.click(screen.getByRole('button', { name: 'Load images' }));
+      expect(container.querySelector('[data-checkin-media="held"]')).toBeNull();
+      expect(container.querySelector('img')?.getAttribute('src')).toBe('https://example.com/chart.png');
+    });
+
+    it('know the check-in by the DTO’s mark too, once the source points at the post', () => {
+      const posted = { nodeId: 'n-v', turnId: 'cmp-post-r1', assistantId: 'cmp-post-r1', checkin: true as const };
+      const { container } = render(<NativePageDocument page={makePage(2, [picture([posted])])} onEdit={noopEdit} onOpenPage={vi.fn()} renderDatabaseRef={() => null} />);
+      expect(container.querySelector('img')).toBeNull();
+      expect(screen.getByRole('button', { name: 'Load images' })).toBeTruthy();
+    });
+
+    it('leave the user’s own blocks and media-free check-in blocks as they are', () => {
+      const { container } = render(<NativePageDocument page={makePage(2, [picture([user]), { id: 'plain', rev: 1, type: 'markdown', text: 'Just words, and a [link](https://reviews.example.com/x).', sources: [checkin] }])} onEdit={noopEdit} onOpenPage={vi.fn()} renderDatabaseRef={() => null} />);
+      expect(container.querySelector('img')?.getAttribute('src')).toBe('https://example.com/chart.png');
+      expect(screen.queryByRole('button', { name: 'Load images' })).toBeNull();
+    });
+
+    it('keep a video or audio player behind the button, even nested in a container', () => {
+      const video = { id: 'vid', rev: 1, type: 'toggle' as const, title: 'Demo', blocks: [{ type: 'video', url: 'https://example.com/demo.mp4' }], sources: [checkin] } as unknown as PageDto['blocks'][number];
+      const { container } = render(<NativePageDocument page={makePage(2, [video])} onEdit={noopEdit} onOpenPage={vi.fn()} renderDatabaseRef={() => null} />);
+      expect(container.querySelector('video')).toBeNull();
+      expect(screen.getByText('Media not loaded.')).toBeTruthy();
+      // "Load images" lets the player in.
+      fireEvent.click(screen.getByRole('button', { name: 'Load images' }));
+      expect(screen.queryByText('Media not loaded.')).toBeNull();
+      fireEvent.click(screen.getByText('Demo'));
+      expect(container.querySelector('video')?.getAttribute('src')).toBe('https://example.com/demo.mp4');
+    });
+
+    it('leave the user’s own player as it is', () => {
+      const video = { id: 'vid', rev: 1, type: 'toggle' as const, title: 'Demo', blocks: [{ type: 'video', url: 'https://example.com/demo.mp4' }], sources: [user] } as unknown as PageDto['blocks'][number];
+      const { container } = render(<NativePageDocument page={makePage(2, [video])} onEdit={noopEdit} onOpenPage={vi.fn()} renderDatabaseRef={() => null} />);
+      expect(screen.queryByRole('button', { name: 'Load images' })).toBeNull();
+      fireEvent.click(screen.getByText('Demo'));
+      expect(container.querySelector('video')?.getAttribute('src')).toBe('https://example.com/demo.mp4');
+    });
+
+    const block = (id: string, content: Record<string, unknown>, sources: unknown[] = [checkin]) => ({ id, rev: 1, ...content, sources }) as unknown as PageDto['blocks'][number];
+
+    it('hold a person’s avatar, and leave link cards (drawn without a picture) and people without one alone', () => {
+      const page = makePage(2, [
+        block('card', { type: 'link', url: 'https://reviews.example.com/packages/Michi', title: 'Michi package', image: 'https://example.com/og.png' }),
+        block('who', { type: 'person', name: 'Robin', avatar: 'https://example.com/robin.png' }),
+        block('also', { type: 'person', name: 'Kim', avatar: 'https://example.com/kim.png' }),
+        block('nobody', { type: 'person', name: 'Sam' }),
+      ]);
+      const { container } = render(<NativePageDocument page={page} onEdit={noopEdit} onOpenPage={vi.fn()} renderDatabaseRef={() => null} />);
+      const frame = (id: string) => container.querySelector<HTMLElement>(`.michi-doc-block[data-block-id="${id}"]`)!;
+      expect(container.querySelector('img')).toBeNull();
+      expect(frame('who').querySelector('[data-checkin-media="held"]')).not.toBeNull();
+      expect(frame('card').querySelector('[data-checkin-media="held"]')).toBeNull();
+      expect(within(frame('card')).getByText('Michi package')).toBeTruthy();
+      expect(frame('nobody').querySelector('[data-checkin-media="held"]')).toBeNull();
+      expect(within(frame('nobody')).getByText('Sam')).toBeTruthy();
+      // Loading one block's images loads that block's only.
+      fireEvent.click(within(frame('who')).getByRole('button', { name: 'Load images' }));
+      expect(frame('who').querySelector('[data-checkin-media="held"]')).toBeNull();
+      expect(frame('also').querySelector('[data-checkin-media="held"]')).not.toBeNull();
+    });
+
+    it('leave an embed alone: its page loads only on a click', () => {
+      const page = makePage(2, [block('frame', { type: 'embed', url: 'https://reviews.example.com/reviews/CR-1', title: 'Review' })]);
+      render(<NativePageDocument page={page} onEdit={noopEdit} onOpenPage={vi.fn()} renderDatabaseRef={() => null} />);
+      expect(screen.queryByRole('button', { name: 'Load images' })).toBeNull();
+      expect(screen.getByRole('button', { name: 'Load page' })).toBeTruthy();
+    });
+
+    it('fail closed: a library component a check-in wrote waits whole, though pictures do not reach it', () => {
+      const page = makePage(2, [block('lib', { type: 'component', componentId: 'c1', pinnedVersion: 1, props: {}, height: 200 })]);
+      const { container } = render(<NativePageDocument page={page} onEdit={noopEdit} onOpenPage={vi.fn()} renderDatabaseRef={() => null}
+        renderComponent={() => <iframe title="Library component" src="https://example.com/widget" />} />);
+      expect(container.querySelector('iframe')).toBeNull();
+      expect(screen.getByText('Media not loaded.')).toBeTruthy();
+      fireEvent.click(screen.getByRole('button', { name: 'Load images' }));
+      expect(container.querySelector('iframe')?.getAttribute('src')).toBe('https://example.com/widget');
+    });
+  });
+
+  describe('databases and task boards where the page is narrow (F1b-review #5)', () => {
+    const observers: Array<() => void> = [];
+    let width = 0;
+    beforeEach(() => {
+      observers.length = 0;
+      vi.stubGlobal('ResizeObserver', class {
+        private readonly callback: () => void;
+        constructor(callback: () => void) { this.callback = callback; observers.push(callback); }
+        observe() {}
+        unobserve() {}
+        disconnect() { const at = observers.indexOf(this.callback); if (at >= 0) observers.splice(at, 1); }
+      });
+      const original = HTMLElement.prototype.getBoundingClientRect;
+      vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockImplementation(function (this: HTMLElement) {
+        return this.classList.contains('michi-doc-blocks') ? { width, height: 400, top: 0, left: 0, right: width, bottom: 400, x: 0, y: 0, toJSON: () => ({}) } as DOMRect : original.call(this);
+      });
+    });
+    afterEach(() => { vi.unstubAllGlobals(); vi.restoreAllMocks(); });
+
+    const page = makePage(2, [{ id: 'db', rev: 1, type: 'database-ref', databaseId: 'tasks' }, { id: 'board', rev: 1, type: 'task-view' }] as PageDto['blocks']);
+    const renderPage = (compact?: boolean) => render(<NativePageDocument page={page} onEdit={noopEdit} onOpenPage={vi.fn()} compact={compact}
+      renderDatabaseRef={(_block, narrow) => <span data-testid="database" data-compact={String(Boolean(narrow))} />}
+      renderTaskView={(_block, narrow) => <span data-testid="board" data-compact={String(Boolean(narrow))} />} />);
+    const shapes = () => [screen.getByTestId('database').dataset.compact, screen.getByTestId('board').dataset.compact];
+
+    it('take their narrow form below three board columns, as when the panel is docked beside the page, and their wide form again after', () => {
+      width = 1100;
+      renderPage();
+      expect(shapes()).toEqual(['false', 'false']);
+      width = 560;
+      act(() => observers.forEach((notify) => notify()));
+      expect(shapes()).toEqual(['true', 'true']);
+      width = 900;
+      act(() => observers.forEach((notify) => notify()));
+      expect(shapes()).toEqual(['false', 'false']);
+    });
+
+    it('count an unmeasured page as wide, and keep a compact host compact', () => {
+      width = 0;
+      const { unmount } = renderPage();
+      expect(shapes()).toEqual(['false', 'false']);
+      unmount();
+      width = 1100;
+      renderPage(true);
+      expect(shapes()).toEqual(['true', 'true']);
+    });
+  });
+
+  describe('a block’s own choices and prompts (DESIGN-v2 §1.3)', () => {
+    afterEach(() => { resetCompanionPanelForTests(); resetCompanionStoreForTests(); });
+
+    it('leave a prompt in the panel’s composer, with the block as the target, in any area', () => {
+      resetCompanionPanelForTests();
+      const actions = { id: 'act', rev: 1, type: 'actions', buttons: [{ label: 'Draft reply', prompt: 'Draft the release reply' }] } as unknown as PageDto['blocks'][number];
+      render(<NativePageDocument page={makePage(2, [actions])} onEdit={noopEdit} onOpenPage={vi.fn()} renderDatabaseRef={() => null} />);
+      fireEvent.click(screen.getByRole('button', { name: 'Draft reply' }));
+      expect(getCompanionPanelState()).toMatchObject({ open: true, tab: 'chat', target: { pageId: 'pg-1', blockId: 'act', workspaceId: 'ws-1', title: 'Draft reply' } });
+      expect(takeCompanionRequests()).toEqual([{ draft: 'Draft the release reply' }]);
+    });
+
+    it('send a visible choice right away through the panel', () => {
+      resetCompanionPanelForTests();
+      const poll = { id: 'p', rev: 1, ...PAGE_BLOCK_CATALOG.poll.example! } as unknown as PageDto['blocks'][number];
+      render(<NativePageDocument page={makePage(2, [poll])} onEdit={noopEdit} onOpenPage={vi.fn()} renderDatabaseRef={() => null} />);
+      fireEvent.click(screen.getByRole('radio', { name: 'Sushi' }));
+      fireEvent.click(screen.getByRole('button', { name: 'Vote' }));
+      expect(getCompanionPanelState().target).toMatchObject({ pageId: 'pg-1', blockId: 'p' });
+      expect(takeCompanionRequests()).toEqual([{ send: 'For “Lunch?” I pick: Sushi' }]);
+    });
+
+    it('are not offered on a read-only page or where there is no assistant', () => {
+      resetCompanionStoreForTests({ assistant: { status: 'unsupported', info: null, error: null } });
+      const actions = { id: 'act', rev: 1, type: 'actions', buttons: [{ label: 'Draft reply', prompt: 'Draft the release reply' }] } as unknown as PageDto['blocks'][number];
+      render(<NativePageDocument page={makePage(2, [actions])} onEdit={noopEdit} onOpenPage={vi.fn()} renderDatabaseRef={() => null} />);
+      fireEvent.click(screen.getByRole('button', { name: 'Draft reply' }));
+      expect(getCompanionPanelState().open).toBe(false);
+    });
   });
 });

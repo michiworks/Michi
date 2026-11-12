@@ -1,0 +1,81 @@
+/* ==========================================================================
+   50-how.css (owner: verbs). #how, brief §3.6, §5.7, P15, T1-T6: the verbs
+   list (a tablist with JS) and one 760 x 520 replica. Also the replica
+   helpers the verbs and recall panes share (.how-scene, .rec-pane, .vb-*).
+   ========================================================================== */
+
+/* Layout: list beside the replica >= 1280, three tabs above it 768-1279,
+   a stacked list above a fluid pane below 768. */
+.how-grid { display: grid; grid-template-columns: minmax(0, 1fr); row-gap: 32px; margin-top: var(--sp-body-fig); }
+.how-tabs { border-top: 1px solid var(--rule); }
+.how-tab { position: relative; padding: 18px 0 20px; border-bottom: 1px solid var(--rule); cursor: pointer; }
+.how-tab-t { font-size: 18px; line-height: 1.35; font-weight: 600; letter-spacing: -.01em; color: var(--ink-60);
+  transition: color 150ms var(--ease); }
+.how-tab:hover .how-tab-t { color: var(--ink-2); transition-duration: 0ms; }
+.how-tab.is-on .how-tab-t { color: var(--ink); }
+.how-tab-l { max-width: 30em; margin-top: 6px; font-size: 15px; line-height: 1.55; color: var(--ink-3); text-wrap: pretty; }
+/* P15: the active row's hairline fills over its scene, linear, and pauses
+   with the take (.is-paused stops the animation). */
+.how-prog { position: absolute; left: 0; right: 0; bottom: -1px; height: 1px; background: var(--violet);
+  transform: scaleX(0); transform-origin: 0 50%; opacity: 0; }
+.how-prog.is-fill, .how-prog.is-full { opacity: 1; }
+.how-prog.is-fill { animation: how-fill var(--fill, 4.4s) linear forwards; }
+.how-prog.is-full, .how-prog.is-past { transform: none; }
+.how-prog.is-past { transition: opacity var(--t-exit) var(--ease-out); }
+@keyframes how-fill { to { transform: none; } }
+@media (min-width: 1280px) {
+  .how-grid { grid-template-columns: repeat(12, minmax(0, 1fr)); column-gap: var(--gutter); }
+  .how-tabs { grid-column: 1 / 6; align-self: start; margin-right: 24px; }
+  .how-panel { grid-column: 6 / -1; }
+}
+@media (min-width: 768px) and (max-width: 1279px) {
+  .how-tabs { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); column-gap: var(--gutter); border-top: 0; }
+  .how-tab { padding-top: 0; }
+}
+
+/* Replica boxes. --k is the no-JS fallback (brief §7.4, kept inside the
+   narrowest viewport of each band); JS writes the continuous value. */
+.how-panel { min-width: 0; }
+.how-fit, .rec-fit { --k: .98; margin-inline: auto; }
+@media (min-width: 1280px) and (max-width: 1439px) { .how-fit, .rec-fit { --k: .87; } }
+@media (min-width: 1024px) and (max-width: 1279px) { .how-fit, .rec-fit { --k: 1; } }
+@media (min-width: 768px) and (max-width: 1023px) { .how-fit, .rec-fit { --k: .9; } }
+
+/* One pane with a 560 reading measure, as a single pane is in the app
+   (TPane contentMaxWidth applies to the list and the composer alike). */
+.how-scene { position: absolute; inset: 0; }
+.how-scene, .rec-pane { --pane-w: 100%; --col: 560px; }
+:is(.how-scene, .rec-pane) .mk-composer { width: var(--col); margin: 0 auto 12px; }
+/* Two drafts share the main composer's input; both are laid out, one shows. */
+.how-in { display: grid; }
+.how-in > * { grid-area: 1 / 1; }
+/* Text typed and then sent: hidden at tB (the composer is empty again). */
+:is(.how-draft, .rec-draft).is-sent { visibility: hidden; }
+.vb-chev { color: var(--term-muted); }
+/* T4: a question gets the amber selection tint while its comment is pending. */
+.how-q { border-radius: 2px; transition: background-color var(--t-decay) ease-out; }
+.how-q.is-tint { background-color: var(--term-select-f); transition: background-color var(--t-enter) var(--ease); }
+.how-cmt + .how-cmt .mk-pre { margin-top: 4px; }
+/* The branch list grows in a wrapper; its own 26 px margin is the gap. */
+.mk-msg > .how-bl { margin-top: 0; }
+/* Edge bookmarks centre on the strip below the caption row (the app docks pane
+   captions in the top bar); the one left re-centres (layout="position"). */
+.how-fit .mk-arrivals { top: 36px; }
+.how-bmw { transition: transform var(--t-pane) var(--ease-pane); }
+.how-bmw.is-gone { display: none; }
+
+/* Below 768 the replica is a fluid pane in a fixed box (the kit's composer
+   container query applies the app's narrow-toolbar tier). */
+@media (max-width: 767px) {
+  .how-fit, .rec-fit { width: 100%; max-width: 640px; height: 520px; aspect-ratio: auto; }
+  :is(.how-fit, .rec-fit) > .mk-canvas { width: auto; height: auto; right: 0; bottom: 0; transform: none; }
+  /* The new chat is as tall as its whole answer (all of it is laid out from
+     tA), so the question stays in view and nothing scrolls. */
+  .rec-fit { height: auto; }
+  .rec-fit > .mk-canvas { position: relative; }
+  .how-scene, .rec-pane { --col: auto; }
+  :is(.how-scene, .rec-pane) .mk-col { margin: 0 16px; }
+  :is(.how-scene, .rec-pane) .mk-composer { margin: 0 12px 12px; }
+  /* The app pins no edge bookmarks in its phone layout (Dashboard.tsx). */
+  .how-fit .mk-arrivals { display: none; }
+}

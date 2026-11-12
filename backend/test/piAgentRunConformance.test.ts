@@ -94,6 +94,9 @@ function createPiHarness(): ConformanceHarness {
       };
     },
 
+    acquireSession: (opts) => runtime.newSession({ ...opts, cwd: process.cwd(), toolProfile: makeConformanceToolProfile(),
+      workspaceId: 'ws-conformance', bootstrapInstructions: 'Conformance test instructions.', replayHistory: [] }),
+
     // Pi does NOT support native resume
     resumeRunSession: undefined,
 

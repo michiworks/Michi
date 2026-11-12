@@ -1,12 +1,15 @@
 import { createHash } from 'node:crypto';
 import type { DatabaseSync } from 'node:sqlite';
-import type { MemoryKind, MemoryExtractionScopeHint } from 'michi-shared';
-import { getDb } from '../db';
+import { DEFAULT_MEMORY_SETTINGS, type MemoryExtractionScopeHint } from 'michi-shared';
+import { getDb, runInTransaction } from '../db';
 
 /**
- * Storage for automatic memory extraction (migration 0061). Every query
- * names its owner; callers in extractionRun.ts and extractionTools.ts decide
- * what is allowed. Nothing here stores the text of a deleted memory.
+ * Storage for automatic memory extraction (migrations 0061, 0072, 0074 and
+ * 0076: a run reads one conversation, or rebuilds the user's profile,
+ * userProfile.ts). Every query names its owner; callers in extractionRun.ts,
+ * extractionTools.ts and extractionV2.ts decide what is allowed. Nothing here
+ * keeps the text of a deleted memory, and a run's staged payload goes when
+ * the run finishes.
  */
 
 const db = () => getDb();
@@ -65,25 +68,31 @@ export function restartExtractionAt(ownerUserId: string, cursorFor: (workspaceId
   const move = database.prepare(`UPDATE memory_extraction_cursors
     SET completion_cursor = MAX(completion_cursor, ?), revision = revision + 1, updated_at = ?
     WHERE workspace_id = ? AND owner_user_id = ?`);
-  // A savepoint, so this composes with a caller's transaction.
-  database.exec('SAVEPOINT extraction_restart');
-  try {
+  runInTransaction(() => {
     for (const { workspace_id: workspaceId } of workspaces) move.run(cursorFor(workspaceId), now, workspaceId, ownerUserId);
+    // Every conversation now starts at its workspace's cursor.
+    database.prepare('DELETE FROM memory_extraction_conversations WHERE owner_user_id = ?').run(ownerUserId);
     database.prepare(`INSERT INTO memory_extraction_state(owner_user_id, enabled_at, updated_at) VALUES (?, ?, ?)
       ON CONFLICT(owner_user_id) DO UPDATE SET enabled_at = excluded.enabled_at, updated_at = excluded.updated_at`)
       .run(ownerUserId, now, now);
-    database.exec('RELEASE SAVEPOINT extraction_restart');
-  } catch (error) {
-    database.exec('ROLLBACK TO SAVEPOINT extraction_restart');
-    database.exec('RELEASE SAVEPOINT extraction_restart');
-    throw error;
-  }
+  });
 }
 
-/** Owners whose memory mode is auto. */
-export function listAutoModeOwners(): string[] {
-  return (db().prepare("SELECT owner_user_id FROM memory_settings WHERE mode = 'auto' ORDER BY owner_user_id").all() as Array<{ owner_user_id: string }>)
+/**
+ * Owners whose memory is on (mode auto in effect): every stored mode but off
+ * (the retired explicit counts as auto), and `defaultOwnerUserId` (the
+ * desktop's local user) while it has no stored mode, because memory is on by
+ * default. In id order.
+ */
+export function listAutoModeOwners(defaultOwnerUserId: string | null): string[] {
+  const owners = (db().prepare("SELECT owner_user_id FROM memory_settings WHERE mode <> 'off' ORDER BY owner_user_id").all() as Array<{ owner_user_id: string }>)
     .map((row) => row.owner_user_id);
+  if (defaultOwnerUserId !== null && DEFAULT_MEMORY_SETTINGS.mode !== 'off'
+    && !db().prepare('SELECT 1 FROM memory_settings WHERE owner_user_id = ?').get(defaultOwnerUserId)) {
+    owners.push(defaultOwnerUserId);
+    owners.sort();
+  }
+  return owners;
 }
 
 // ── cursors ──────────────────────────────────────────────────────────────────
@@ -144,12 +153,77 @@ export function setExtractionWorkspacePaused(workspaceId: string, ownerUserId: s
   return Number(changed.changes) === 1;
 }
 
-/** Compare-and-set; false when the cursor moved or the consumer was reconfigured. */
-export function advanceExtractionCursor(input: { workspaceId: string; ownerUserId: string; jobId: string; from: number; to: number; now: number }): boolean {
+/**
+ * Moves a workspace's cursor forward to `to` (never back): no turn at or
+ * below it is read any more. The conversations' own positions at or below it
+ * go, since the cursor says as much.
+ */
+export function raiseExtractionCursor(workspaceId: string, ownerUserId: string, to: number, now: number): boolean {
   const changed = db().prepare(`UPDATE memory_extraction_cursors SET completion_cursor = ?, updated_at = ?
-    WHERE workspace_id = ? AND owner_user_id = ? AND job_id = ? AND completion_cursor = ?`)
-    .run(input.to, input.now, input.workspaceId, input.ownerUserId, input.jobId, input.from);
-  return Number(changed.changes) === 1;
+    WHERE workspace_id = ? AND owner_user_id = ? AND completion_cursor < ?`).run(to, now, workspaceId, ownerUserId, to);
+  if (Number(changed.changes) !== 1) return false;
+  db().prepare('DELETE FROM memory_extraction_conversations WHERE workspace_id = ? AND owner_user_id = ? AND extracted_seq <= ?')
+    .run(workspaceId, ownerUserId, to);
+  return true;
+}
+
+/** The workspace's completion counter (conversationUpdates.conversationCompletionCounter's meta key), read here to keep the memory modules free of the feed's imports. */
+export function workspaceCompletionCounter(workspaceId: string): number {
+  const row = db().prepare('SELECT value FROM meta WHERE key = ?').get(`conversation_completion_seq:${workspaceId}`) as { value: string } | undefined;
+  const value = row ? Number(row.value) : 0;
+  return Number.isSafeInteger(value) && value > 0 ? value : 0;
+}
+
+// ── conversations ────────────────────────────────────────────────────────────
+
+/**
+ * Where extraction stands in one conversation: the completion position it
+ * settled up to, or its workspace's cursor (`floor`) when that is later or
+ * the conversation has no row yet.
+ */
+export function conversationExtractedSeq(nodeId: string, ownerUserId: string, floor: number): number {
+  const row = db().prepare('SELECT extracted_seq FROM memory_extraction_conversations WHERE node_id = ? AND owner_user_id = ?')
+    .get(nodeId, ownerUserId) as { extracted_seq: number } | undefined;
+  return Math.max(floor, row?.extracted_seq ?? 0);
+}
+
+/**
+ * Compare-and-set of a conversation's position (conversationExtractedSeq)
+ * from `from` to `to`; false when it moved meanwhile. With `firstSeq` (the
+ * first turn the batch read), a position that rose past `from` only as the
+ * workspace's cursor did, and not to that turn, still counts as unmoved: the
+ * conversation has no turn in between. Call inside the caller's transaction.
+ */
+export function advanceConversationExtraction(input: {
+  nodeId: string; ownerUserId: string; workspaceId: string; floor: number; from: number; to: number; firstSeq?: number; now: number;
+}): boolean {
+  const position = conversationExtractedSeq(input.nodeId, input.ownerUserId, input.floor);
+  const own = (db().prepare('SELECT extracted_seq FROM memory_extraction_conversations WHERE node_id = ? AND owner_user_id = ?')
+    .get(input.nodeId, input.ownerUserId) as { extracted_seq: number } | undefined)?.extracted_seq ?? 0;
+  const unmoved = position === input.from
+    || (input.firstSeq !== undefined && position > input.from && position < input.firstSeq && own <= input.from);
+  if (!unmoved || input.to < input.from) return false;
+  db().prepare(`INSERT INTO memory_extraction_conversations (node_id, owner_user_id, workspace_id, extracted_seq, updated_at)
+      VALUES (?, ?, ?, ?, ?)
+    ON CONFLICT(node_id, owner_user_id) DO UPDATE SET workspace_id = excluded.workspace_id, extracted_seq = excluded.extracted_seq,
+      updated_at = excluded.updated_at`).run(input.nodeId, input.ownerUserId, input.workspaceId, input.to, input.now);
+  return true;
+}
+
+/**
+ * A conversation went back to learning (its memory setting): what was said
+ * in it meanwhile is never read. Its position moves to its newest completed
+ * turn, never back.
+ */
+export function skipConversationExtraction(input: { nodeId: string; ownerUserId: string; workspaceId: string; now: number }): void {
+  const newest = (db().prepare('SELECT COALESCE(MAX(completion_seq), 0) AS seq FROM turns WHERE node_id = ? AND completion_seq IS NOT NULL')
+    .get(input.nodeId) as { seq: number }).seq;
+  if (newest <= 0) return;
+  db().prepare(`INSERT INTO memory_extraction_conversations (node_id, owner_user_id, workspace_id, extracted_seq, updated_at)
+      VALUES (?, ?, ?, ?, ?)
+    ON CONFLICT(node_id, owner_user_id) DO UPDATE SET workspace_id = excluded.workspace_id,
+      extracted_seq = MAX(memory_extraction_conversations.extracted_seq, excluded.extracted_seq), updated_at = excluded.updated_at`)
+    .run(input.nodeId, input.ownerUserId, input.workspaceId, newest, input.now);
 }
 
 /** Each consumer with its execution identity's scheduler state (repeated-failure stop). */
@@ -174,52 +248,95 @@ export function memoryExtractionJobIds(ownerUserId: string, database: DatabaseSy
 
 export type ExtractionRunState = 'active' | 'succeeded' | 'failed' | 'cancelled';
 export type ExtractionStopReason = 'invalid_limit' | 'budget';
+/**
+ * What a run does (migration 0074): read conversation turns, rebuild the
+ * user's profile (userProfile.ts), or tidy Michi's own notes (consolidation.ts,
+ * migration 0077).
+ */
+export type ExtractionRunKind = 'extract' | 'profile' | 'consolidate';
+
+/**
+ * An existing memory a run's prompt listed (an update may target only these).
+ * A consolidation run's listing adds the version, group and input mark of
+ * each line (consolidation.ConsolidationListing).
+ */
+export interface ExtractionRelatedRef { ref: string; memoryId: string; version?: number; group?: number | null; input?: boolean }
 
 export interface ExtractionRunRecord {
-  id: string; ownerUserId: string; workspaceId: string; jobId: string; runId: string; configRevision: number;
+  id: string; kind: ExtractionRunKind; ownerUserId: string; workspaceId: string; jobId: string; runId: string; configRevision: number;
   after: number; through: number; memoryVersion: number; tombstoneMark: number; state: ExtractionRunState;
   invalidCalls: number; stoppedReason: ExtractionStopReason | null; tokenBudget: number; estimatedTokens: number;
   reportedTokens: number | null; proposedCount: number; droppedCount: number; noChangeCount: number;
   summary: string | null; error: string | null; startedAt: number; finishedAt: number | null;
+  /** The memory_extract arguments staged until the run settles (JSON), or null. */
+  payload: string | null;
+  related: ExtractionRelatedRef[];
 }
 
 interface RunRow {
-  id: string; owner_user_id: string; workspace_id: string; job_id: string; run_id: string; config_revision: number;
+  id: string; kind: string | null; owner_user_id: string; workspace_id: string; job_id: string; run_id: string; config_revision: number;
   after_seq: number; through_seq: number; memory_version: number; tombstone_mark: number; state: ExtractionRunState;
   invalid_calls: number; stopped_reason: ExtractionStopReason | null; token_budget: number; estimated_tokens: number;
   reported_tokens: number | null; proposed_count: number; dropped_count: number; no_change_count: number;
   summary: string | null; error: string | null; started_at: number; finished_at: number | null;
+  payload: string | null; related_memories: string | null;
+}
+
+function relatedRefs(stored: string | null): ExtractionRelatedRef[] {
+  if (!stored) return [];
+  try {
+    const parsed = JSON.parse(stored) as unknown;
+    return Array.isArray(parsed) ? parsed.filter((entry): entry is ExtractionRelatedRef => !!entry && typeof entry === 'object'
+      && typeof (entry as ExtractionRelatedRef).ref === 'string' && typeof (entry as ExtractionRelatedRef).memoryId === 'string') : [];
+  } catch {
+    return [];
+  }
+}
+
+function runKind(kind: string | null): ExtractionRunKind {
+  return kind === 'profile' || kind === 'consolidate' ? kind : 'extract';
 }
 
 function runDto(row: RunRow): ExtractionRunRecord {
-  return { id: row.id, ownerUserId: row.owner_user_id, workspaceId: row.workspace_id, jobId: row.job_id, runId: row.run_id,
+  return { id: row.id, kind: runKind(row.kind), ownerUserId: row.owner_user_id, workspaceId: row.workspace_id,
+    jobId: row.job_id, runId: row.run_id,
     configRevision: row.config_revision, after: row.after_seq, through: row.through_seq, memoryVersion: row.memory_version,
     tombstoneMark: row.tombstone_mark, state: row.state, invalidCalls: row.invalid_calls, stoppedReason: row.stopped_reason,
     tokenBudget: row.token_budget, estimatedTokens: row.estimated_tokens, reportedTokens: row.reported_tokens,
     proposedCount: row.proposed_count, droppedCount: row.dropped_count, noChangeCount: row.no_change_count,
-    summary: row.summary, error: row.error, startedAt: row.started_at, finishedAt: row.finished_at };
+    summary: row.summary, error: row.error, startedAt: row.started_at, finishedAt: row.finished_at,
+    payload: row.payload ?? null, related: relatedRefs(row.related_memories) };
 }
 
 export interface ExtractionSourceInput {
   sourceTurnId: string; nodeId: string; userMessageId: string; assistantMessageId: string;
-  completionSeq: number; completedAt: number; untrusted: boolean; correctionPattern: string | null;
+  completionSeq: number; completedAt: number; untrusted: boolean;
 }
 
+/**
+ * Records a run as active. A profile run (kind 'profile') has no sources: it
+ * stays at the cursor (after = through), memoryVersion is the user scope's,
+ * and related lists the notes its prompt shows.
+ */
 export function insertExtractionRun(input: {
-  id: string; ownerUserId: string; workspaceId: string; jobId: string; runId: string; configRevision: number;
+  id: string; kind?: ExtractionRunKind; ownerUserId: string; workspaceId: string; jobId: string; runId: string; configRevision: number;
   after: number; through: number; memoryVersion: number; tombstoneMark: number; tokenBudget: number; estimatedTokens: number;
-  now: number; sources: ExtractionSourceInput[];
+  now: number; sources: ExtractionSourceInput[]; related: readonly ExtractionRelatedRef[];
 }): void {
-  db().prepare(`INSERT INTO memory_extraction_runs(id, owner_user_id, workspace_id, job_id, run_id, config_revision, after_seq, through_seq,
-      memory_version, tombstone_mark, state, token_budget, context_tokens, estimated_tokens, started_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, ?, ?)`)
-    .run(input.id, input.ownerUserId, input.workspaceId, input.jobId, input.runId, input.configRevision, input.after, input.through,
-      input.memoryVersion, input.tombstoneMark, input.tokenBudget, input.estimatedTokens, input.estimatedTokens, input.now);
+  db().prepare(`INSERT INTO memory_extraction_runs(id, kind, owner_user_id, workspace_id, job_id, run_id, config_revision, after_seq, through_seq,
+      memory_version, tombstone_mark, state, token_budget, context_tokens, estimated_tokens, started_at, related_memories)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, ?, ?, ?)`)
+    .run(input.id, input.kind ?? 'extract', input.ownerUserId, input.workspaceId, input.jobId, input.runId, input.configRevision, input.after,
+      input.through, input.memoryVersion, input.tombstoneMark, input.tokenBudget, input.estimatedTokens, input.estimatedTokens, input.now,
+      JSON.stringify(input.related.map(({ ref, memoryId, version, group, input: listedInput }) => ({
+        ref, memoryId, ...(version !== undefined ? { version } : {}), ...(group !== undefined ? { group } : {}),
+        ...(listedInput !== undefined ? { input: listedInput } : {}),
+      }))));
   const source = db().prepare(`INSERT INTO memory_extraction_sources(run_id, source_turn_id, node_id, user_message_id, assistant_message_id,
-      completion_seq, completed_at, untrusted, correction_pattern) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`);
+      completion_seq, completed_at, untrusted) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`);
   for (const item of input.sources) {
     source.run(input.id, item.sourceTurnId, item.nodeId, item.userMessageId, item.assistantMessageId, item.completionSeq,
-      item.completedAt, item.untrusted ? 1 : 0, item.correctionPattern);
+      item.completedAt, item.untrusted ? 1 : 0);
   }
 }
 
@@ -230,26 +347,37 @@ export function getExtractionRun(id: string, ownerUserId: string): ExtractionRun
 
 /** Runs still marked active whose scheduler run is no longer running: the process stopped under them. */
 export function failOrphanedExtractionRuns(workspaceId: string, ownerUserId: string, now: number): void {
-  db().prepare(`UPDATE memory_extraction_runs AS x SET state = 'failed', error = 'The run stopped before it finished', finished_at = ?
+  db().prepare(`UPDATE memory_extraction_runs AS x SET state = 'failed', error = 'The run stopped before it finished', finished_at = ?,
+      payload = NULL
     WHERE x.workspace_id = ? AND x.owner_user_id = ? AND x.state = 'active'
       AND NOT EXISTS (SELECT 1 FROM scheduled_job_runs r WHERE r.id = x.run_id AND r.status = 'running')`).run(now, workspaceId, ownerUserId);
 }
 
-export function listRecentExtractionRuns(ownerUserId: string, limit: number, database: DatabaseSync = db()): ExtractionRunRecord[] {
-  return (database.prepare('SELECT * FROM memory_extraction_runs WHERE owner_user_id = ? ORDER BY started_at DESC, rowid DESC LIMIT ?')
-    .all(ownerUserId, limit) as unknown as RunRow[]).map(runDto);
+/** SQL for an optional kinds filter on memory_extraction_runs (alias `alias`); '' when every kind counts. */
+function kindsClause(kinds: readonly ExtractionRunKind[] | undefined, alias = ''): { sql: string; params: string[] } {
+  if (!kinds) return { sql: '', params: [] };
+  return { sql: ` AND ${alias}kind IN (${kinds.map(() => '?').join(', ')})`, params: [...kinds] };
 }
 
-/** The newest finished run of a workspace, for batch sizing after a budget failure. */
+/** The owner's newest runs; `kinds`: of these kinds only (Settings › Memory shows extraction and profile runs, never consolidation's). */
+export function listRecentExtractionRuns(ownerUserId: string, limit: number, database: DatabaseSync = db(), kinds?: readonly ExtractionRunKind[]): ExtractionRunRecord[] {
+  const filter = kindsClause(kinds);
+  return (database.prepare(`SELECT * FROM memory_extraction_runs WHERE owner_user_id = ?${filter.sql} ORDER BY started_at DESC, rowid DESC LIMIT ?`)
+    .all(ownerUserId, ...filter.params, limit) as unknown as RunRow[]).map(runDto);
+}
+
+/** The newest finished extraction run of a workspace (profile runs aside), for batch sizing after a budget failure. */
 export function lastFinishedExtractionRun(workspaceId: string, ownerUserId: string): ExtractionRunRecord | null {
   const row = db().prepare(`SELECT * FROM memory_extraction_runs WHERE workspace_id = ? AND owner_user_id = ? AND state <> 'active'
-    ORDER BY started_at DESC, rowid DESC LIMIT 1`).get(workspaceId, ownerUserId) as RunRow | undefined;
+    AND kind = 'extract' ORDER BY started_at DESC, rowid DESC LIMIT 1`).get(workspaceId, ownerUserId) as RunRow | undefined;
   return row ? runDto(row) : null;
 }
 
-export function liveExtractionRunCount(ownerUserId: string): number {
-  return (db().prepare(`SELECT COUNT(*) AS n FROM memory_extraction_runs x WHERE x.owner_user_id = ? AND x.state = 'active'
-    AND EXISTS (SELECT 1 FROM scheduled_job_runs r WHERE r.id = x.run_id AND r.status = 'running')`).get(ownerUserId) as { n: number }).n;
+/** The owner's live runs (active, their scheduler run running); `kinds`: of these kinds only. */
+export function liveExtractionRunCount(ownerUserId: string, kinds?: readonly ExtractionRunKind[]): number {
+  const filter = kindsClause(kinds, 'x.');
+  return (db().prepare(`SELECT COUNT(*) AS n FROM memory_extraction_runs x WHERE x.owner_user_id = ? AND x.state = 'active'${filter.sql}
+    AND EXISTS (SELECT 1 FROM scheduled_job_runs r WHERE r.id = x.run_id AND r.status = 'running')`).get(ownerUserId, ...filter.params) as { n: number }).n;
 }
 
 export function isExtractionRunLive(id: string): boolean {
@@ -277,32 +405,46 @@ export function chargeExtractionCall(id: string, callTokens: number): number {
   return (db().prepare('SELECT estimated_tokens FROM memory_extraction_runs WHERE id = ?').get(id) as { estimated_tokens: number } | undefined)?.estimated_tokens ?? 0;
 }
 
-export function stopExtractionRun(id: string, reason: ExtractionStopReason): void {
-  db().prepare("UPDATE memory_extraction_runs SET stopped_reason = COALESCE(stopped_reason, ?) WHERE id = ? AND state = 'active'").run(reason, id);
+/**
+ * Stages a run's memory_extract arguments; the first call wins. False when
+ * the run already has them or is no longer active.
+ */
+export function stageExtractionPayload(id: string, payload: string): boolean {
+  const changed = db().prepare("UPDATE memory_extraction_runs SET payload = ? WHERE id = ? AND state = 'active' AND payload IS NULL")
+    .run(payload, id);
+  return Number(changed.changes) === 1;
 }
 
+/** Ends an active run; its staged payload goes with it, committed or not. */
 export function finishExtractionRun(input: {
   id: string; state: Exclude<ExtractionRunState, 'active'>; summary: string | null; error: string | null; reportedTokens: number | null;
   counts?: { proposed: number; dropped: number; noChange: number }; now: number;
 }): boolean {
   const changed = db().prepare(`UPDATE memory_extraction_runs SET state = ?, summary = ?, error = ?, reported_tokens = ?,
       proposed_count = COALESCE(?, proposed_count), dropped_count = COALESCE(?, dropped_count), no_change_count = COALESCE(?, no_change_count),
-      finished_at = ? WHERE id = ? AND state = 'active'`)
+      finished_at = ?, payload = NULL WHERE id = ? AND state = 'active'`)
     .run(input.state, input.summary, input.error ? input.error.slice(0, 2000) : null, input.reportedTokens,
       input.counts?.proposed ?? null, input.counts?.dropped ?? null, input.counts?.noChange ?? null, input.now, input.id);
-  if (Number(changed.changes) === 1 && input.state !== 'succeeded') {
-    // A run that does not commit keeps no candidate text.
-    db().prepare("UPDATE memory_extraction_candidates SET body = NULL, state = 'dropped', drop_reason = COALESCE(drop_reason, 'run_not_committed') WHERE run_id = ? AND state = 'staged'")
-      .run(input.id);
-  }
   return Number(changed.changes) === 1;
 }
 
-/** Keep the latest runs per workspace; their sources and candidates cascade. */
+/**
+ * Keep the latest runs per workspace; their sources and candidates cascade.
+ * Consolidation runs are left to pruneConsolidation (kept about 7 days, for
+ * the spacing and backoff rules and a revert).
+ */
 export function pruneExtractionRuns(workspaceId: string, ownerUserId: string, keep: number): void {
-  db().prepare(`DELETE FROM memory_extraction_runs WHERE workspace_id = ? AND owner_user_id = ? AND state <> 'active' AND id NOT IN (
-      SELECT id FROM memory_extraction_runs WHERE workspace_id = ? AND owner_user_id = ? ORDER BY started_at DESC, rowid DESC LIMIT ?)`)
+  db().prepare(`DELETE FROM memory_extraction_runs WHERE workspace_id = ? AND owner_user_id = ? AND state <> 'active' AND kind <> 'consolidate'
+    AND id NOT IN (SELECT id FROM memory_extraction_runs WHERE workspace_id = ? AND owner_user_id = ? AND kind <> 'consolidate'
+      ORDER BY started_at DESC, rowid DESC LIMIT ?)`)
     .run(workspaceId, ownerUserId, workspaceId, ownerUserId, keep);
+}
+
+/** The owner's finished consolidation runs, and its consolidation log rows, from before `before` (ms) go. */
+export function pruneConsolidation(ownerUserId: string, before: number): void {
+  db().prepare(`DELETE FROM memory_extraction_runs WHERE owner_user_id = ? AND kind = 'consolidate' AND state <> 'active' AND started_at < ?`)
+    .run(ownerUserId, before);
+  db().prepare('DELETE FROM memory_consolidation_log WHERE owner_user_id = ? AND created_at < ?').run(ownerUserId, before);
 }
 
 // ── sources and receipts ─────────────────────────────────────────────────────
@@ -313,18 +455,14 @@ export interface ExtractionSourceRecord extends ExtractionSourceInput {
 
 interface SourceRow {
   source_turn_id: string; node_id: string; user_message_id: string; assistant_message_id: string; completion_seq: number;
-  completed_at: number; untrusted: number; correction_pattern: string | null; read_at: number | null;
+  completed_at: number; untrusted: number; read_at: number | null;
   decision: 'proposed' | 'no_change' | null; reason: string | null;
 }
 
 function sourceDto(row: SourceRow): ExtractionSourceRecord {
   return { sourceTurnId: row.source_turn_id, nodeId: row.node_id, userMessageId: row.user_message_id, assistantMessageId: row.assistant_message_id,
-    completionSeq: row.completion_seq, completedAt: row.completed_at, untrusted: row.untrusted === 1, correctionPattern: row.correction_pattern,
+    completionSeq: row.completion_seq, completedAt: row.completed_at, untrusted: row.untrusted === 1,
     readAt: row.read_at, decision: row.decision, reason: row.reason };
-}
-
-export function markExtractionSourceRead(runId: string, sourceTurnId: string, now: number): void {
-  db().prepare('UPDATE memory_extraction_sources SET read_at = COALESCE(read_at, ?) WHERE run_id = ? AND source_turn_id = ?').run(now, runId, sourceTurnId);
 }
 
 export function listExtractionSources(runId: string): ExtractionSourceRecord[] {
@@ -335,11 +473,6 @@ export function extractionSourceCount(runId: string): number {
   return (db().prepare('SELECT COUNT(*) AS n FROM memory_extraction_sources WHERE run_id = ?').get(runId) as { n: number }).n;
 }
 
-export function getExtractionSource(runId: string, sourceTurnId: string): ExtractionSourceRecord | null {
-  const row = db().prepare('SELECT * FROM memory_extraction_sources WHERE run_id = ? AND source_turn_id = ?').get(runId, sourceTurnId) as SourceRow | undefined;
-  return row ? sourceDto(row) : null;
-}
-
 /** Records a receipt once: a no-change keeps its first reason; a turn never holds both kinds. */
 export function recordExtractionDecision(runId: string, sourceTurnId: string, decision: 'proposed' | 'no_change', reason: string | null, now: number): boolean {
   const changed = db().prepare(`UPDATE memory_extraction_sources SET decision = ?, reason = ?, decided_at = ?
@@ -348,51 +481,7 @@ export function recordExtractionDecision(runId: string, sourceTurnId: string, de
   return Number(changed.changes) === 1;
 }
 
-// ── candidates and the proposal ledger ───────────────────────────────────────
-
-export interface ExtractionCandidateRecord {
-  runId: string; idempotencyKey: string; sourceTurnId: string; body: string | null; bodyHash: string; kind: MemoryKind;
-  scopeHint: MemoryExtractionScopeHint; supersedesId: string | null; sourceRisk: 'untrusted' | null;
-  state: 'staged' | 'committed' | 'dropped'; dropReason: string | null; memoryId: string | null;
-}
-
-interface CandidateRow {
-  run_id: string; idempotency_key: string; source_turn_id: string; body: string | null; body_hash: string; kind: MemoryKind;
-  scope_hint: MemoryExtractionScopeHint; supersedes_id: string | null; source_risk: 'untrusted' | null;
-  state: 'staged' | 'committed' | 'dropped'; drop_reason: string | null; memory_id: string | null;
-}
-
-function candidateDto(row: CandidateRow): ExtractionCandidateRecord {
-  return { runId: row.run_id, idempotencyKey: row.idempotency_key, sourceTurnId: row.source_turn_id, body: row.body, bodyHash: row.body_hash,
-    kind: row.kind, scopeHint: row.scope_hint, supersedesId: row.supersedes_id, sourceRisk: row.source_risk, state: row.state,
-    dropReason: row.drop_reason, memoryId: row.memory_id };
-}
-
-export function getExtractionCandidate(runId: string, idempotencyKey: string): ExtractionCandidateRecord | null {
-  const row = db().prepare('SELECT * FROM memory_extraction_candidates WHERE run_id = ? AND idempotency_key = ?').get(runId, idempotencyKey) as CandidateRow | undefined;
-  return row ? candidateDto(row) : null;
-}
-
-export function listExtractionCandidates(runId: string): ExtractionCandidateRecord[] {
-  return (db().prepare('SELECT * FROM memory_extraction_candidates WHERE run_id = ? ORDER BY created_at, rowid').all(runId) as unknown as CandidateRow[]).map(candidateDto);
-}
-
-export function insertExtractionCandidate(input: {
-  runId: string; idempotencyKey: string; sourceTurnId: string; body: string | null; bodyHash: string; kind: MemoryKind;
-  scopeHint: MemoryExtractionScopeHint; supersedesId: string | null; sourceRisk: 'untrusted' | null;
-  state: 'staged' | 'dropped'; dropReason: string | null; memoryId?: string | null; now: number;
-}): void {
-  db().prepare(`INSERT INTO memory_extraction_candidates(run_id, idempotency_key, source_turn_id, body, body_hash, kind, scope_hint,
-      supersedes_id, source_risk, state, drop_reason, memory_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
-    .run(input.runId, input.idempotencyKey, input.sourceTurnId, input.state === 'staged' ? input.body : null, input.bodyHash, input.kind,
-      input.scopeHint, input.supersedesId, input.sourceRisk, input.state, input.dropReason, input.memoryId ?? null, input.now);
-}
-
-export function settleExtractionCandidate(runId: string, idempotencyKey: string, outcome: { state: 'committed'; memoryId: string } | { state: 'dropped'; reason: string }): void {
-  db().prepare(`UPDATE memory_extraction_candidates SET state = ?, body = NULL, memory_id = ?, drop_reason = ?
-    WHERE run_id = ? AND idempotency_key = ? AND state = 'staged'`)
-    .run(outcome.state, outcome.state === 'committed' ? outcome.memoryId : null, outcome.state === 'dropped' ? outcome.reason : null, runId, idempotencyKey);
-}
+// ── the proposal ledger ──────────────────────────────────────────────────────
 
 export function getCommittedProposal(idempotencyKey: string): { memoryId: string; runId: string } | null {
   const row = db().prepare('SELECT memory_id, run_id FROM memory_extraction_proposals WHERE idempotency_key = ?').get(idempotencyKey) as
@@ -409,7 +498,7 @@ export function insertCommittedProposal(input: {
     input.scopeHint, input.runId, input.now);
 }
 
-/** Pending extracted memories whose candidate suggested making them global. */
+/** Pending extracted memories (an older version's) whose proposal suggested making them global. */
 export function pendingMaybeGlobalMemoryIds(ownerUserId: string): string[] {
   return (db().prepare(`SELECT p.memory_id FROM memory_extraction_proposals p JOIN memories m ON m.id = p.memory_id
       WHERE p.owner_user_id = ? AND m.owner_user_id = ? AND m.status = 'pending' AND p.scope_hint = 'maybe_global'
@@ -419,13 +508,6 @@ export function pendingMaybeGlobalMemoryIds(ownerUserId: string): string[] {
 export function pendingExtractedMemoryCount(ownerUserId: string): number {
   return (db().prepare("SELECT COUNT(*) AS n FROM memories WHERE owner_user_id = ? AND status = 'pending' AND origin = 'extracted'")
     .get(ownerUserId) as { n: number }).n;
-}
-
-/** An active or pending memory in this workspace or the owner's user scope with the same normalized body. */
-export function findSameBodyMemory(ownerUserId: string, workspaceId: string, bodyHash: string): string | null {
-  const rows = db().prepare(`SELECT id, body FROM memories WHERE owner_user_id = ? AND status IN ('active', 'pending')
-      AND (workspace_id IS NULL OR workspace_id = ?)`).all(ownerUserId, workspaceId) as Array<{ id: string; body: string }>;
-  return rows.find((row) => memoryBodyHash(row.body) === bodyHash)?.id ?? null;
 }
 
 // ── tombstones ───────────────────────────────────────────────────────────────
@@ -442,19 +524,54 @@ export function latestTombstoneSeq(ownerUserId: string): number {
 }
 
 /**
- * Whether a removal forbids proposing this candidate: one from the same
- * source turn, or one with the same body in this workspace (or the user
- * scope) removed after the source turn completed. A statement made again in
- * a turn that completed after the removal is a new expression and passes.
+ * Whether a removal names this turn: a memory saved from it was deleted, or
+ * the turn was kept out of automatic memory (recallIndex.keepTurnOutOfMemory).
+ * Automatic extraction never reads such a turn.
  */
-export function tombstoneBlocks(input: { ownerUserId: string; workspaceId: string; sourceTurnId: string; bodyHash: string; completedAt: number }): 'source_turn' | 'body' | null {
-  if (db().prepare('SELECT 1 FROM memory_extraction_tombstones WHERE owner_user_id = ? AND source_turn_id = ? LIMIT 1').get(input.ownerUserId, input.sourceTurnId)) {
-    return 'source_turn';
-  }
-  const body = db().prepare(`SELECT 1 FROM memory_extraction_tombstones WHERE owner_user_id = ? AND body_hash = ?
-    AND (workspace_id IS NULL OR workspace_id = ?) AND created_at >= ? LIMIT 1`)
-    .get(input.ownerUserId, input.bodyHash, input.workspaceId, input.completedAt);
-  return body ? 'body' : null;
+export function turnTombstoned(ownerUserId: string, sourceTurnId: string): boolean {
+  return !!db().prepare('SELECT 1 FROM memory_extraction_tombstones WHERE owner_user_id = ? AND source_turn_id = ? LIMIT 1').get(ownerUserId, sourceTurnId);
+}
+
+/**
+ * Whether a removal written after `mark` (latestTombstoneSeq when a run was
+ * planned) names one of these turns: the run read what the user has since
+ * removed or kept out of memory.
+ */
+export function turnsTombstonedAfter(ownerUserId: string, sourceTurnIds: readonly string[], mark: number): boolean {
+  if (sourceTurnIds.length === 0) return false;
+  return !!db().prepare(`SELECT 1 FROM memory_extraction_tombstones WHERE owner_user_id = ?
+    AND source_turn_id IN (SELECT value FROM json_each(?)) AND seq > ? LIMIT 1`).get(ownerUserId, JSON.stringify(sourceTurnIds), mark);
+}
+
+/**
+ * When the owner last removed a memory with this body (normalized hash,
+ * memoryBodyHash) at or after `since`, or null: one of the user scope or of
+ * `workspaceId`, and for a memory that would apply everywhere
+ * (`everywhere`), one of any workspace, since it would show there again.
+ * memory_save checks it too (agents/memoryTools.ts).
+ */
+export function bodyRemovedAt(input: { ownerUserId: string; bodyHash: string; workspaceId: string | null; everywhere: boolean; since?: number }): number | null {
+  const row = db().prepare(`SELECT MAX(created_at) AS at FROM memory_extraction_tombstones WHERE owner_user_id = ? AND body_hash = ?
+    AND (? = 1 OR workspace_id IS NULL OR workspace_id = ?) AND created_at >= ?`)
+    .get(input.ownerUserId, input.bodyHash, input.everywhere ? 1 : 0, input.workspaceId, input.since ?? 0) as { at: number | null } | undefined;
+  return row?.at ?? null;
+}
+
+/**
+ * Whether a removal bars this extracted memory: one from the same source
+ * turn, or one with the same body removed at or after `statedAt`, when the
+ * user sent the source turn (bodyRemovedAt: of this workspace or the user
+ * scope, and of any workspace for a memory that goes to the user scope). So a
+ * removal made while that turn ran (the turn that asked to forget it, often
+ * restating it) bars it too, and a statement the user sent again after the
+ * removal is a new expression and passes.
+ */
+export function tombstoneBlocks(input: {
+  ownerUserId: string; workspaceId: string; sourceTurnId: string; bodyHash: string; statedAt: number; everywhere?: boolean;
+}): 'source_turn' | 'body' | null {
+  if (turnTombstoned(input.ownerUserId, input.sourceTurnId)) return 'source_turn';
+  return bodyRemovedAt({ ownerUserId: input.ownerUserId, bodyHash: input.bodyHash, workspaceId: input.workspaceId,
+    everywhere: input.everywhere === true, since: input.statedAt }) === null ? null : 'body';
 }
 
 // ── usage ────────────────────────────────────────────────────────────────────
@@ -484,6 +601,7 @@ export function purgeWorkspaceExtraction(workspaceId: string): void {
   const database = db();
   database.prepare('DELETE FROM memory_extraction_runs WHERE workspace_id = ?').run(workspaceId);
   database.prepare('DELETE FROM memory_extraction_cursors WHERE workspace_id = ?').run(workspaceId);
+  database.prepare('DELETE FROM memory_extraction_conversations WHERE workspace_id = ?').run(workspaceId);
   database.prepare('DELETE FROM memory_extraction_proposals WHERE workspace_id = ?').run(workspaceId);
   database.prepare('DELETE FROM memory_extraction_tombstones WHERE workspace_id = ?').run(workspaceId);
 }
@@ -493,6 +611,7 @@ export function purgeOwnerExtraction(ownerUserId: string): void {
   const database = db();
   database.prepare('DELETE FROM memory_extraction_runs WHERE owner_user_id = ?').run(ownerUserId);
   database.prepare('DELETE FROM memory_extraction_cursors WHERE owner_user_id = ?').run(ownerUserId);
+  database.prepare('DELETE FROM memory_extraction_conversations WHERE owner_user_id = ?').run(ownerUserId);
   database.prepare('DELETE FROM memory_extraction_proposals WHERE owner_user_id = ?').run(ownerUserId);
   database.prepare('DELETE FROM memory_extraction_tombstones WHERE owner_user_id = ?').run(ownerUserId);
   database.prepare('DELETE FROM memory_extraction_usage WHERE owner_user_id = ?').run(ownerUserId);

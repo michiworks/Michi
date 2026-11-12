@@ -1,5 +1,5 @@
 import { test, expect, type Page, type Route } from '@playwright/test';
-import type { SubagentInfo, WorkflowRunDtoV1 } from '../../shared/src';
+import { settleWorkflowNodes, type SubagentInfo, type WorkflowRunDtoV1 } from '../../shared/src';
 import { installMockApi } from '../fixtures/mockApi';
 
 /**
@@ -93,7 +93,7 @@ async function openChat(page: Page, initial: WorkflowRunDtoV1) {
       actions.push(action);
       current = workflow({
         status: 'cancelled', statusDetail: 'Stopped by you', actions: [], revision: current.revision + 1, endedAt: Date.now(),
-        nodes: current.nodes.map((node) => node.status === 'running' ? { ...node, status: 'cancelled', currentTool: undefined } : node),
+        nodes: settleWorkflowNodes(current.nodes, 'cancelled', Date.now()),
       });
       await route.fulfill({ json: { run: current } });
       return true;
@@ -153,26 +153,30 @@ test('subagent and workflow cards open the Background work drawer; the pane badg
   const card = message.getByTestId('workflow-run-card');
   await expect(card).toContainText('read-probe');
   await expect(card).toContainText('1/2 agents');
-  await expect(card.getByTestId('workflow-now')).toContainText('beta ❯ Read beta.txt');
-
-  // Open → shows the run in the drawer, not in a pane.
-  await card.getByRole('button', { name: 'Open workflow read-probe' }).click();
+  await expect(card.getByTestId('workflow-now-step')).toHaveText('beta');
+  await expect(card.getByTestId('workflow-now')).toContainText('Read beta.txt');
+  // The card carries no run controls; a click anywhere on it shows the run
+  // in the drawer, not in a pane.
+  await expect(card.getByRole('button', { name: /^(Stop|Pause) workflow/ })).toHaveCount(0);
+  await card.getByTestId('workflow-now').click();
   await expect(drawer).toBeVisible();
   await expect(page.getByTestId('workflow-run-pane')).toHaveCount(0);
   const runRow = drawer.getByTestId('background-workflow-row');
-  await expect(runRow.getByRole('button', { name: 'Workflow read-probe, running' })).toHaveAttribute('aria-expanded', 'true');
-  await expect(runRow.getByTestId('workflow-node')).toHaveCount(3);
-  await runRow.getByRole('button', { name: 'Show alpha details' }).click();
+  await expect(runRow).toHaveAttribute('aria-label', 'Workflow read-probe, running');
+  // Opened from its card: the running phase's agents are open in place, one line each.
+  await expect(runRow.getByRole('button', { name: /^read, 1\/2/ })).toHaveAttribute('aria-expanded', 'true');
+  await expect(runRow.getByTestId('workflow-node')).toHaveCount(2);
+  await runRow.getByRole('button', { name: /^alpha, done/ }).click();
   await expect(runRow.getByTestId('workflow-node-detail')).toContainText('ALPHA_MARKER=A');
   await page.screenshot({ path: info.outputPath('background-work-drawer.png'), animations: 'disabled' });
 
   await runRow.getByRole('button', { name: 'Stop workflow read-probe' }).click();
   await expect.poll(() => actions).toEqual(['stop']);
-  await expect(runRow).toContainText('stopped');
+  await expect(runRow.getByTestId('background-workflow-status')).toContainText('Stopped');
   await expect(runRow.getByRole('button', { name: 'Stop workflow read-probe' })).toHaveCount(0);
   await page.keyboard.press('Escape');
   await expect(drawer).toBeHidden();
-  await expect(card).toContainText('stopped');
+  await expect(card).toContainText('Stopped');
   // Nothing runs any more: the badge goes away.
   await expect(badge).toHaveCount(0);
   expect(errors).toEqual([]);
@@ -199,17 +203,18 @@ test('a workflow step\'s approval is answered in the drawer opened from the pane
   await page.getByTestId('pane-background-work-badge').click();
   const drawer = page.getByRole('dialog', { name: 'Background work' });
   await expect(drawer).toBeVisible();
-  // Opened without a focus: one collapsed line that says it waits on you.
+  // Opened without a focus: the card says it waits on you and carries the
+  // approval itself; its agents stay folded.
   const runRow = drawer.getByTestId('background-workflow-row');
-  const toggle = runRow.getByRole('button', { name: 'Workflow read-probe, running, needs approval' });
-  await expect(toggle).toHaveAttribute('aria-expanded', 'false');
-  await toggle.click();
+  await expect(runRow).toHaveAttribute('aria-label', 'Workflow read-probe, needs approval');
+  await expect(drawer.getByTestId('background-work-waiting')).toHaveText('1 needs you');
+  await expect(runRow.getByRole('button', { name: /^read, / })).toHaveAttribute('aria-expanded', 'false');
   const approval = runRow.getByRole('group', { name: 'Approval needed: Read beta.txt' });
   await expect(approval).toContainText('fs_read beta.txt');
   await approval.getByRole('button', { name: 'Allow once' }).click();
   await expect.poll(() => answers).toEqual([{ approvalId: 'appr_1', optionId: 'allow_once' }]);
   await expect(runRow.getByTestId('workflow-approval')).toHaveCount(0);
-  await expect(runRow).not.toContainText('needs approval');
+  await expect(runRow).toHaveAttribute('aria-label', 'Workflow read-probe, running');
   await page.keyboard.press('Escape');
   await expect(card.getByTestId('workflow-approval')).toHaveCount(0);
   expect(errors).toEqual([]);

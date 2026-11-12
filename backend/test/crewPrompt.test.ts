@@ -6,6 +6,7 @@ import { test } from 'node:test';
 
 import { crewTurnFormat } from '../src/agents/hostText/kiro';
 import { buildFirstTurnPrefix, buildPreamble } from '../src/agents/preamble';
+import { CREW_FOLLOW_UP_SENTINELS, CREW_TITLE_SENTINEL } from '../src/agents/turnMetadataText';
 
 test('Crew sends variable context without repeating the stable Michi instructions', () => {
     const input = {
@@ -32,4 +33,13 @@ test('the Crew App prompt points task organizing at the Tasks section through mi
     assert.match(prompt, /Pages and their task boards/);
     assert.match(prompt, /Tasks section of the pages-and-components document with michi_docs \(through michi_call_tool\)/);
     assert.match(prompt, /even a short answered question, is evidence for a Done task/);
+});
+
+test('the Crew App prompt states the metadata lines crewTurnFormat asks for', () => {
+    // michi.json is static, so it restates them rather than importing them.
+    const { prompt } = JSON.parse(fs.readFileSync(path.join(__dirname, '../../crew-app/agents/michi.json'), 'utf8'));
+    for (const line of [CREW_TITLE_SENTINEL, CREW_FOLLOW_UP_SENTINELS]) {
+        assert.ok(prompt.includes(line), line);
+        assert.ok(crewTurnFormat(true).includes(line), line);
+    }
 });

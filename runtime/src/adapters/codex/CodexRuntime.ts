@@ -1,26 +1,35 @@
+import { hostSkillsPrefix } from '../../core/skills';
+import fs from 'node:fs';
+import path from 'node:path';
 import { assertToolCatalog, catalogUnavailable, guardError } from '../../core/restrictedCatalog';
 import { CODEX_META_AGENT_UNREMOVABLE_TOOLS, codexMetaAgentCatalog } from './codexToolCatalog';
 import type { RuntimeToolProfile } from '../../contract/types';
 import { RuntimeModelCatalog } from '../../core/modelCatalog';
-import { PendingSessionAcquisitions } from '../../core/sessionAcquisition';
+import { PendingSessionAcquisitions, assertSessionReusable, sessionIdentity } from '../../core/sessionAcquisition';
 import { isReasoningLevel, sanitizeReasoningLevels } from 'michi-shared';
 import type {
   AgentCapabilities,
   AgentRuntime,
   AgentSession,
   ForkAgentSessionOptions,
+  ListRuntimeSkillsOptions,
   LoadAgentSessionOptions,
   ModelInfo,
+  NativeSessionDiscardInput,
+  NativeSessionDiscardResult,
   NewAgentSessionOptions,
   RuntimeAvailability,
   RuntimeId,
   RuntimeResumeBinding,
   RuntimeSessionOwner,
+  RuntimeSkillListing,
   SessionMode,
+  SkillTurnInvocation,
+  StructuredCompletion,
+  StructuredCompletionOptions,
 } from '../../contract/types';
 import { assertReleaseOwnership } from '../../core/release';
-import { assertOwner, interactiveOwner } from '../../contract/types';
-import { withDeadline } from '../../core/runtimeLifecycle';
+import { abortable, withDeadline } from '../../core/runtimeLifecycle';
 import type { RuntimeDescriptor } from '../../contract/descriptor';
 import { CODEX_RUNTIME_DESCRIPTOR } from './codexDescriptor';
 import type { AgentToolBridge } from '../../contract/tools';
@@ -28,23 +37,26 @@ import type { McpSlotProvider } from '../../contract/mcp';
 import { ownerMode, type FollowUpsExperimentMode, type RuntimeHost } from '../../contract/host';
 import { assertHostPorts } from '../../core/defaultHost';
 import { CodexAppServerClient, CodexRpcError } from './CodexAppServerClient';
-import type { CodexCollaborationModeMask, CodexModel } from './codexProtocol';
 import {
-  buildCodexMcpConfig, CODEX_COLLABORATION_MODE_LIST, CODEX_SERVER_REQUESTS, CODEX_THREAD_FEATURES_OFF,
-  codexAccountLoginMissing, codexConfiguredMcpServers, codexDisableMcpServers, codexOpenUserMcpServers, isCodexModeKind,
+  CODEX_EPHEMERAL_APP_SERVER_ARGS, codexEphemeralConfigToml, prepareCodexEphemeralHome, removeCodexEphemeralHome,
+} from './codexEphemeralHome';
+import type { CodexCollaborationModeMask, CodexModel, CodexSkillsListing } from './codexProtocol';
+import {
+  buildCodexMcpConfig, CODEX_COLLABORATION_MODE_LIST, CODEX_MEMORIES_OFF, CODEX_SERVER_REQUESTS, CODEX_SKILLS_CHANGED,
+  CODEX_SKILLS_EXTRA_ROOTS_SET, CODEX_SKILLS_LIST, CODEX_STRUCTURED_BASE_INSTRUCTIONS, CODEX_STRUCTURED_CONFIG_OFF,
+  CODEX_STRUCTURED_FEATURES_OFF, CODEX_THREAD_FEATURES_OFF, codexAccountLoginMissing, codexConfiguredMcpServers,
+  codexDisableMcpServers, codexOpenUserMcpServers, codexSkillsListing, isCodexModeKind,
 } from './codexProtocol';
+import { codexRuntimeSkills, codexSkillInput, hostSkillFolders, type CodexSkillInput } from './codexSkills';
 import { CodexSession } from './CodexSession';
+import { completeCodexStructured } from './codexStructured';
 import {
   CODEX_RESTRICTED_TURN_POLICY, codexRestrictedMcpCheck, codexRestrictedThreadConfig, codexThreadSandbox,
 } from './codexRestrictedProfile';
 import { CodexAuthMissingError, configureCodexBinaryCache, findCodexBinary, preflightCodexAuth } from './codexBinary';
 import { NativeResumeUnavailableError } from '../../contract/errors';
 import type { RuntimeModelCache } from '../../core/runtimeModelCache';
-import {
-  buildCodexFollowUpsHookPocConfig,
-  prepareCodexFollowUpsHookPocEnv,
-} from './codexFollowUpsHookPoc';
-import { codexMetadataOutputMode } from './codexTurnMetadata';
+import { CODEX_METADATA_OUTPUT_MODE } from './codexTurnMetadata';
 
 // ---- Errors ------------------------------------------------------------------
 
@@ -101,6 +113,16 @@ export const CODEX_BACKGROUND_IDLE_TTL_MS = 2 * 60 * 60_000;
 /** …or this long after its own last use, whatever they do (matches Claude's reclaim protection). */
 export const CODEX_BACKGROUND_IDLE_CAP_MS = 6 * 60 * 60_000;
 const RECOVERY_TIMEOUT_MESSAGE = 'Codex native recovery exceeded 20 seconds. Original thread retained; please retry.';
+/** skills/list and skills/extraRoots/set: well under the RPC default, so neither holds up a start or a recovery for long. */
+const SKILLS_RPC_TIMEOUT_MS = 10_000;
+/** How long a skill turn waits for the listing that says whether Codex can run the skill itself. */
+const SKILL_LOOKUP_TIMEOUT_MS = 5_000;
+
+/** app-server does not know `method` (an older Codex): it answers -32600 "unknown variant", or JSON-RPC's -32601. */
+function codexMethodMissing(error: unknown, method: string): boolean {
+  return error instanceof CodexRpcError
+    && (error.code === -32601 || error.rpcMessage.includes(`unknown variant \`${method}\``));
+}
 
 /** What the agent menu says about each Codex collaboration mode (collaborationMode/list names them only). */
 const CODEX_MODE_DESCRIPTIONS: Record<string, string> = {
@@ -115,24 +137,16 @@ function restrictedConfig(config: Record<string, unknown>, subagentLimit: boolea
   return { ...config, features: { ...features, multi_agent_v2: false } };
 }
 
-/** A session's public id: a headless owner's key, else the chat's own id. */
-function publicSessionId(owner: RuntimeSessionOwner, chatId: string): string {
-  return ownerMode(owner) === 'headless' ? owner.key : chatId;
-}
-
 // ---- CodexRuntime ------------------------------------------------------------
 
 /** Wording the Codex adapter adds for the host. Each absent member adds nothing. */
 export interface CodexHostText {
   /** Turn-metadata rules: appended to an interactive session's developer instructions and to each of its turns. */
   turnMetadataInstruction?(mode: FollowUpsExperimentMode, enableFollowUps?: boolean): string;
-  /**
-   * The same under the follow-ups Stop-hook POC, appended to each turn.
-   * @experimental Follow-ups Stop-hook POC; outside the v1 compatibility guarantee.
-   */
-  followUpsHookPocInstruction?(mode: FollowUpsExperimentMode, enableFollowUps?: boolean): string;
   /** Developer instructions of the title thread; the user's message is sent as its turn. */
   titleInstructions?(): string;
+  /** The title thread's turn for AgentTurnInput.titleSource. Default: its text. */
+  titleInput?(text: string, context?: string): string;
 }
 
 /**
@@ -167,19 +181,32 @@ export interface CodexAdapterOptions {
   initTimeoutMs?: number;
   /** How long a tool approval waits for the user before it is declined. Default: 300s. */
   approveTimeoutMs?: number;
-  /** The title thread's deadline, read at each title. Default: 10s. */
+  /** The title thread's deadline, read at each title. Default: the host's titleModel deadline. */
   titleTimeoutMs?: () => number;
   /** Live and pending sessions allowed at once; anything but a positive safe integer means no cap. */
   maxConcurrent?: number;
-  /**
-   * Turns on the follow-ups Stop-hook POC. The app-server then runs under
-   * `isolatedCodexHome` as its CODEX_HOME, which shares only auth.json with
-   * `codexHome`. `runnerPath` and `nodePath` default to the bundled Stop-hook
-   * runner and this process's executable.
-   * @experimental Follow-ups Stop-hook POC; outside the v1 compatibility guarantee.
-   */
-  followUpsHook?: { isolatedCodexHome: string; runnerPath?: string; nodePath?: string };
   hostText?: CodexHostText;
+  /**
+   * Absolute folders of the host's own skills for app-server to scan beside
+   * its own (Michi: the flat mount of its skill library), read at each
+   * app-server start and on `onSkillRootsChanged`. app-server keeps one such
+   * list per process and forgets it on exit, so it is sent after every start
+   * (skills/extraRoots/set). Their skills are left out of listSkills, which
+   * reports the runtime's own; a library skill turn runs them natively.
+   */
+  skillRoots?: () => readonly string[];
+  /**
+   * Subscribes to changes of those folders or the skills in them; returns
+   * an unsubscribe. The running app-server then gets the roots again, which
+   * makes it re-scan them, and the next listing re-reads every folder.
+   */
+  onSkillRootsChanged?: (listener: () => void) => () => void;
+  /**
+   * Where ephemeral sessions (NewAgentSessionOptions.ephemeral, a Companion
+   * check-in) get their own Codex homes, one directory per session
+   * (codexEphemeralHome.ts). Default: `<host data dir>/codex-ephemeral-homes`.
+   */
+  ephemeralHomeRoot?: string;
 }
 
 /** What CodexRuntime is built from: the adapter's options plus the host's tool effects and MCP slots. */
@@ -193,13 +220,18 @@ export interface CodexRuntimeOptions extends CodexAdapterOptions {
 /** @internal Not covered by the v1 contract. */
 export interface CodexRuntimeTestSeams {
   client?: CodexAppServerClient;
-  /** Overrides whether `followUpsHook` is on, without the isolated home. */
-  followUpsHookPocEnabled?: boolean;
   /** As if the Codex home had no auth.json: sessions ask app-server (account/read) first. */
   authFileMissing?: string;
   /** false: restricted threads omit the sub-agent thread limit, leaving only the session's spawn guard. */
   restrictedSubagentLimit?: boolean;
-  followUpsExperimentMode?: FollowUpsExperimentMode;
+  /** The app-server client of an ephemeral session, given its home and the app-server arguments it would get. */
+  ephemeralClient?: (home: string, extraArgs: readonly string[]) => CodexAppServerClient;
+}
+
+/** An ephemeral session's own app-server and home (codexEphemeralHome.ts). */
+interface CodexEphemeralServer {
+  client: CodexAppServerClient;
+  home: string;
 }
 
 /** Every port the adapter reads. */
@@ -219,12 +251,11 @@ export class CodexRuntime implements AgentRuntime {
   private readonly host: RuntimeHost;
   private readonly concurrencyCap: number;
   private readonly idleSweep: ReturnType<typeof setInterval>;
-  private readonly followUpsHookPocEnabled: boolean;
-  private readonly followUpsExperimentMode: FollowUpsExperimentMode;
-  private readonly followUpsHook: CodexAdapterOptions['followUpsHook'];
   private readonly binaryPath: string | undefined;
   private readonly approveTimeoutMs: number | undefined;
   private readonly titleTimeoutMs: (() => number) | undefined;
+  /** The title thread's deadline: the adapter option, else the host's titleModel deadline. */
+  private readonly titleDeadlineMs = (): number => this.titleTimeoutMs?.() ?? this.host.config.titleModel(this.id).timeoutMs;
   private readonly hostText: CodexHostText | undefined;
 
   private readonly sessions = new Map<string, CodexSession>();
@@ -243,6 +274,30 @@ export class CodexRuntime implements AgentRuntime {
   private authError: string | undefined;
   private modeCatalog: SessionMode[] | null = null;
   private readonly restrictedSubagentLimit: boolean;
+  /** Everything an ephemeral session's app-server needs (CodexAdapterOptions.ephemeralHomeRoot). */
+  private readonly ephemeralSetup: {
+    root: string;
+    codexHome: string | undefined;
+    spawnEnv: NodeJS.ProcessEnv;
+    rpcTimeoutMs: number | undefined;
+    initTimeoutMs: number | undefined;
+    client?: CodexRuntimeTestSeams['ephemeralClient'];
+  };
+  /** Ephemeral sessions' app-servers by public id, from open until release. */
+  private readonly ephemeralServers = new Map<string, CodexEphemeralServer>();
+
+  private readonly skillRoots: (() => readonly string[]) | undefined;
+  private readonly unsubscribeSkillRoots: (() => void) | undefined;
+  /** The roots last given to an app-server; kept after it exits, since cached listings still hold their skills. */
+  private skillRootsSent: string[] = [];
+  /** How the running app-server took them; null while none runs or before it is initialized. */
+  private skillRootsOnDaemon: 'pending' | 'applied' | 'failed' | 'unsupported' | null = null;
+  private extraRootsMissingLogged = false;
+  /** skills/list answers per cwd, until app-server reports a change (skills/changed) or the host's roots change. */
+  private readonly skillListings = new Map<string, Promise<CodexSkillsListing>>();
+  /** The next skills/list re-reads skills from disk: the host's skills changed, and app-server misses edits in linked folders. */
+  private skillsReloadPending = false;
+  private unwatchSkills: (() => void) | null = null;
 
   /**
    * Binary lookup, plus the login state app-server last reported. A missing
@@ -279,15 +334,10 @@ export class CodexRuntime implements AgentRuntime {
     this.approveTimeoutMs = options.approveTimeoutMs;
     this.titleTimeoutMs = options.titleTimeoutMs;
     this.hostText = options.hostText;
-    this.followUpsHook = options.followUpsHook;
     const configuredCap = options.maxConcurrent;
     this.concurrencyCap = configuredCap !== undefined && Number.isSafeInteger(configuredCap) && configuredCap > 0
       ? configuredCap : Infinity;
 
-    let followUpsHookPocEnabled =
-      testSeams?.followUpsHookPocEnabled ?? !!options.followUpsHook;
-    this.followUpsExperimentMode =
-      testSeams?.followUpsExperimentMode ?? this.host.prompt.followUpsExperimentMode();
 
     let authFileMissing = testSeams?.authFileMissing;
     if (testSeams?.client) {
@@ -299,33 +349,22 @@ export class CodexRuntime implements AgentRuntime {
       } catch (err) {
         authFileMissing = (err as Error).message;
       }
-      let spawnEnv: NodeJS.ProcessEnv = { ...options.spawnEnv?.() };
-      if (followUpsHookPocEnabled) {
-        try {
-          if (!options.followUpsHook) throw new Error('no isolated CODEX_HOME is configured');
-          spawnEnv = prepareCodexFollowUpsHookPocEnv(spawnEnv, {
-            codexHome: options.codexHome,
-            isolatedHome: options.followUpsHook.isolatedCodexHome,
-          });
-          console.info('[CodexRuntime] follow-ups Hook POC using isolated CODEX_HOME', {
-            codexHome: spawnEnv.CODEX_HOME,
-          });
-        } catch (err) {
-          followUpsHookPocEnabled = false;
-          console.warn(
-            '[CodexRuntime] follow-ups Hook POC disabled because isolation setup failed:',
-            (err as Error).message,
-          );
-        }
-      }
       this.client = new CodexAppServerClient({
-        spawnEnv,
+        spawnEnv: { ...options.spawnEnv?.() },
         binaryPath: options.binaryPath,
         rpcTimeoutMs: options.rpcTimeoutMs,
         initTimeoutMs: options.initTimeoutMs,
       });
     }
-    this.followUpsHookPocEnabled = followUpsHookPocEnabled;
+    this.ephemeralSetup = {
+      root: path.resolve(options.ephemeralHomeRoot ?? path.join(this.host.config.dataDir(), 'codex-ephemeral-homes')),
+      codexHome: options.codexHome,
+      // The user's environment without CODEX_HOME, which the session's own home replaces.
+      spawnEnv: { ...options.spawnEnv?.() },
+      rpcTimeoutMs: options.rpcTimeoutMs,
+      initTimeoutMs: options.initTimeoutMs,
+      client: testSeams?.ephemeralClient,
+    };
     this.authFileMissing = authFileMissing;
     this.restrictedSubagentLimit = testSeams?.restrictedSubagentLimit !== false;
     this.modelCatalog = new RuntimeModelCatalog({
@@ -358,14 +397,35 @@ export class CodexRuntime implements AgentRuntime {
     }, 60_000);
     this.idleSweep.unref();
 
-    // Wire server-request (approval) handler once, shared across all sessions.
-    this.client.onServerRequest((method, params, respond, context) => {
+    this.wireServerRequests(this.client);
+
+    // When daemon exits unexpectedly, crash all live sessions.
+    this.client.onExit(() => {
+      this.daemonDisconnected = true;
+      this.nativeAuthChecked = false;
+      this.skillsDaemonStopped();
+      for (const session of this.sessions.values()) {
+        if (this.ephemeralServers.has(session.id)) continue;
+        session.markCrashed('codex app-server exited unexpectedly');
+      }
+    });
+
+    this.skillRoots = options.skillRoots;
+    if (this.skillRoots) {
+      this.client.onStarted(() => this.applySkillRoots(true));
+      this.unsubscribeSkillRoots = options.onSkillRootsChanged?.(() => this.skillRootsChanged());
+    }
+  }
+
+  /** The server-request (approval, question) handler of an app-server; shared by every session on it. */
+  private wireServerRequests(client: CodexAppServerClient): void {
+    client.onServerRequest((method, params, respond, context) => {
       if (method === CODEX_SERVER_REQUESTS.requestUserInput) {
         this.handleUserInputRequest(params, respond, context?.signal);
         return;
       }
       if (method === CODEX_SERVER_REQUESTS.mcpElicitation) {
-        this.handleMcpElicitationRequest(params, respond);
+        this.handleMcpElicitationRequest(params, respond, context?.signal);
         return;
       }
       if (method === CODEX_SERVER_REQUESTS.permissionsApproval) {
@@ -383,15 +443,6 @@ export class CodexRuntime implements AgentRuntime {
         return;
       }
       context.reject(-32601, 'Server request is not supported by Michi');
-    });
-
-    // When daemon exits unexpectedly, crash all live sessions.
-    this.client.onExit(() => {
-      this.daemonDisconnected = true;
-      this.nativeAuthChecked = false;
-      for (const session of this.sessions.values()) {
-        session.markCrashed('codex app-server exited unexpectedly');
-      }
     });
   }
 
@@ -462,6 +513,97 @@ export class CodexRuntime implements AgentRuntime {
     return modes;
   }
 
+  // ---- skills --------------------------------------------------------------
+
+  /**
+   * The skills app-server loads for `cwd` (skills/list, no thread): repo,
+   * user, system, admin and plugin skills, without the host's own from
+   * `skillRoots`. Cached per cwd; `refresh` re-reads them from disk.
+   */
+  async listSkills(opts: ListRuntimeSkillsOptions): Promise<RuntimeSkillListing> {
+    const pending = this.codexSkills(opts.cwd, opts.refresh === true);
+    const listing = await (opts.signal ? abortable(pending, opts.signal) : pending);
+    return codexRuntimeSkills(listing, await hostSkillFolders(this.skillRootsSent));
+  }
+
+  private codexSkills(cwd: string, refresh: boolean, timeoutMs = SKILLS_RPC_TIMEOUT_MS): Promise<CodexSkillsListing> {
+    const cached = refresh ? undefined : this.skillListings.get(cwd);
+    if (cached) return cached;
+    this.unwatchSkills ??= this.client.onGlobalNotification((method) => {
+      if (method === CODEX_SKILLS_CHANGED) this.skillListings.clear();
+    });
+    const reloadPending = this.skillsReloadPending;
+    this.skillsReloadPending = false;
+    const listing = (async () => {
+      await this.client.ensureStarted();
+      const result = await this.client.request(CODEX_SKILLS_LIST, { cwds: [cwd], forceReload: refresh || reloadPending }, timeoutMs);
+      return codexSkillsListing(result, cwd);
+    })();
+    this.skillListings.set(cwd, listing);
+    listing.catch(() => {
+      if (this.skillListings.get(cwd) === listing) this.skillListings.delete(cwd);
+      if (reloadPending) this.skillsReloadPending = true;
+    });
+    return listing;
+  }
+
+  /**
+   * The skill input that runs `skill` in a thread at `cwd`, or null to send
+   * it as text. Library skills need the host's roots on this app-server.
+   */
+  private async skillInputFor(skill: SkillTurnInvocation, cwd: string): Promise<CodexSkillInput | null> {
+    try {
+      const listing = await this.codexSkills(cwd, false, SKILL_LOOKUP_TIMEOUT_MS);
+      return await codexSkillInput(skill, listing, this.skillRootsOnDaemon === 'applied' ? this.skillRootsSent : []);
+    } catch (err) {
+      this.host.observability.log('warn', 'chat', 'codex skills/list failed; sending the skill as text', {
+        cwd, skill: skill.name, error: err instanceof Error ? err.message : String(err),
+      });
+      return null;
+    }
+  }
+
+  /**
+   * Gives the running app-server the host's skill roots. `fresh`: a new
+   * app-server (onStarted). Never throws; an app-server without the method
+   * (an older Codex) is noted once, and library skills then run as text.
+   */
+  private async applySkillRoots(fresh: boolean): Promise<void> {
+    if (fresh) this.skillRootsOnDaemon = 'pending';
+    const roots = [...(this.skillRoots?.() ?? [])];
+    let outcome: 'applied' | 'failed' | 'unsupported' = 'applied';
+    try {
+      await this.client.request(CODEX_SKILLS_EXTRA_ROOTS_SET, { extraRoots: roots }, SKILLS_RPC_TIMEOUT_MS);
+    } catch (err) {
+      outcome = codexMethodMissing(err, CODEX_SKILLS_EXTRA_ROOTS_SET) ? 'unsupported' : 'failed';
+      if (outcome === 'failed') {
+        this.host.observability.log('warn', 'chat', 'codex skills/extraRoots/set failed; library skills run as text', {
+          error: err instanceof Error ? err.message.slice(0, 300) : String(err),
+        });
+      } else if (!this.extraRootsMissingLogged) {
+        this.extraRootsMissingLogged = true;
+        this.host.observability.log('info', 'chat', 'this Codex has no skills/extraRoots/set; library skills run as text');
+      }
+    }
+    // That app-server exited meanwhile; the next one gets the roots when it starts.
+    if (this.skillRootsOnDaemon === null) return;
+    this.skillRootsOnDaemon = outcome;
+    if (outcome === 'applied') this.skillRootsSent = roots;
+  }
+
+  /** app-server stopped: the next one starts without the host's roots, and its listings may differ. */
+  private skillsDaemonStopped(): void {
+    this.skillRootsOnDaemon = null;
+    this.skillListings.clear();
+  }
+
+  private skillRootsChanged(): void {
+    this.skillsReloadPending = true;
+    this.skillListings.clear();
+    // Setting the roots again makes app-server re-scan them (it misses edits and removals in linked folders).
+    if (this.skillRootsOnDaemon === 'applied' || this.skillRootsOnDaemon === 'failed') void this.applySkillRoots(false);
+  }
+
   // ---- newSession ----------------------------------------------------------
 
   async newSession(opts: NewAgentSessionOptions): Promise<AgentSession> {
@@ -473,17 +615,9 @@ export class CodexRuntime implements AgentRuntime {
     create: () => Promise<AgentSession>,
   ): Promise<AgentSession> {
     if (!opts.sessionId) throw new Error('sessionId is required for CodexRuntime');
-    const owner: RuntimeSessionOwner = opts.owner ?? interactiveOwner(opts.sessionId);
-    const id = publicSessionId(owner, opts.sessionId);
-    const compatible = (session: AgentSession): AgentSession => {
-      assertOwner(session.owner ?? interactiveOwner(session.id), owner);
-      if ((session as CodexSession).getOwnerUserId() !== (opts.ownerUserId ?? null)) throw new Error('session user owner mismatch');
-      if ((session.runtimeProfileHash ?? null) !== (opts.profileHash ?? null)) {
-        throw new Error(`session ${id} runtime profile hash mismatch`);
-      }
-      session.touch?.();
-      return session;
-    };
+    const { owner, id } = sessionIdentity(opts.owner, opts.sessionId);
+    const compatible = (session: AgentSession): AgentSession => assertSessionReusable(session,
+      { owner, ownerUserId: opts.ownerUserId, profileHash: opts.profileHash }, (s) => (s as CodexSession).getOwnerUserId());
     const deadline = Date.now() + RECOVERY_TIMEOUT_MS;
     while (this.recovery) {
       const remaining = deadline - Date.now();
@@ -510,7 +644,7 @@ export class CodexRuntime implements AgentRuntime {
     if (opts.anchorMessageId) {
       throw new NativeResumeUnavailableError('Codex native fork cannot stop at a historical branch anchor');
     }
-    return this.acquireSession(opts, () => this.createSession(opts, opts.sourceNativeSessionId));
+    return this.acquireSession(opts, () => this.createSession({ ...opts, branchContext: undefined }, opts.sourceNativeSessionId));
   }
 
   private async createSession(opts: NewAgentSessionOptions, forkFrom?: string): Promise<AgentSession> {
@@ -518,13 +652,13 @@ export class CodexRuntime implements AgentRuntime {
 
     // Resolve the owner. A headless owner's session id is its key; a chat's
     // is the id it was opened under.
-    const owner: RuntimeSessionOwner = opts.owner ?? interactiveOwner(nodeId);
-    const publicId = publicSessionId(owner, nodeId);
+    const { owner, id: publicId } = sessionIdentity(opts.owner, nodeId);
     const interactive = ownerMode(owner) === 'interactive';
 
     // Double-load guard
     const existing = this.sessions.get(publicId);
     if (existing) return existing;
+    if (opts.ephemeral && forkFrom) throw new NativeResumeUnavailableError('An ephemeral Codex session is never forked');
 
     await this.startClient();
 
@@ -562,6 +696,7 @@ export class CodexRuntime implements AgentRuntime {
       : this.host.profile.composeFirstTurnPrefix(this.host.prompt.firstTurnPrefix({
           cwd: opts.cwd,
           contextManifest: opts.contextManifest,
+          ...(opts.artifactCount !== undefined ? { artifactCount: opts.artifactCount } : {}),
           extraContexts: opts.extraContexts,
           ancestors: ancestorChain,
           mergeContexts: [
@@ -569,57 +704,77 @@ export class CodexRuntime implements AgentRuntime {
             ...(opts.mergeContexts ?? []),
           ],
           workspaceInstructions,
+          ...(forkFrom && opts.parentChatId ? { nativeForkParentNodeId: opts.parentChatId } : {}),
+          ...(opts.toolProfile ? { toolProfile: opts.toolProfile } : {}),
+          // The host's library is one of app-server's extra skill roots when it gives them.
+          ...hostSkillsPrefix(this.host.profile, { interactive, toolProfile: opts.toolProfile, librarySkillsLoaded: this.skillRoots !== undefined }),
         }), opts.bootstrapInstructions, opts.toolProfile);
 
     const effort = opts.reasoning !== undefined ? opts.reasoning : this.host.config.defaultReasoning(this.id, opts.ownerUserId) ?? null;
     const enableFollowUps = opts.enableFollowUps !== false && !this.host.profile.isRestricted(opts.toolProfile);
+    // Resolved on the main app-server before an ephemeral one starts.
+    const titleModel = await this.resolveTitleModel();
+    // An ephemeral session runs on an app-server of its own, on a new home.
+    // Once it runs, any failure before the session is registered stops it.
+    const client = opts.ephemeral ? await this.openEphemeralServer(publicId, opts.cwd) : this.client;
+    let session: CodexSession;
+    let slotId: string;
+    try {
+      // Create MCP slot (session pre-wires the callbacks but MCP slot created here)
+      // We construct the session first so it can own the slot.
+      session = new CodexSession({
+        nodeId: publicId,
+        threadId: '', // will be set below after thread/start
+        cwd: opts.cwd,
+        workspaceId: opts.workspaceId ?? null,
+        parentChatId: interactive ? opts.parentChatId : undefined,
+        client,
+        host: this.host,
+        mcpRegistry: this.mcpRegistry,
+        bridge: this.bridge,
+        ownerUserId: opts.ownerUserId ?? null,
+        firstTurnPrefix,
+        effort: effort ? String(effort) : null,
+        model: modelId || null,
+        // The title thread is a separate thread outside the assistant's lockdown
+        // (shell, plugins, the user's MCP servers); the assistant's title is fixed.
+        generateTitleOnFirstTurn: interactive && !this.host.profile.isRestricted(opts.toolProfile)
+          && this.host.title.enabled(this.id),
+        titleModel,
+        enableFollowUps,
+        approveTimeoutMs: this.approveTimeoutMs,
+        titleTimeoutMs: this.titleDeadlineMs,
+        hostText: this.hostText,
+        owner,
+        profileHash: opts.profileHash,
+        toolProfile: opts.toolProfile,
+        permissionBroker: opts.permissionBroker,
+        // An ephemeral thread has no rollout to resume: its turn fails instead.
+        recover: opts.ephemeral
+          ? async () => { throw new Error('This Codex session keeps no native record and is not restored after its app-server stopped.'); }
+          : (s) => this.recoverSession(s),
+        // The main app-server's skill listing does not describe an ephemeral
+        // session's own app-server (another home, no host roots): its skill
+        // turns send the skill as text.
+        ...(opts.ephemeral ? {} : { skillInput: (skill: SkillTurnInvocation, cwd: string) => this.skillInputFor(skill, cwd) }),
+      });
 
-    // Create MCP slot (session pre-wires the callbacks but MCP slot created here)
-    // We construct the session first so it can own the slot.
-    const session = new CodexSession({
-      nodeId: publicId,
-      threadId: '', // will be set below after thread/start
-      cwd: opts.cwd,
-      workspaceId: opts.workspaceId ?? null,
-      parentChatId: interactive ? opts.parentChatId : undefined,
-      client: this.client,
-      host: this.host,
-      mcpRegistry: this.mcpRegistry,
-      bridge: this.bridge,
-      ownerUserId: opts.ownerUserId ?? null,
-      firstTurnPrefix,
-      effort: effort ? String(effort) : null,
-      model: modelId || null,
-      // The title thread is a separate thread outside the assistant's lockdown
-      // (shell, plugins, the user's MCP servers); the assistant's title is fixed.
-      generateTitleOnFirstTurn: interactive && !this.host.profile.isRestricted(opts.toolProfile)
-        && this.host.title.enabled(this.id),
-      titleModel: await this.resolveTitleModel(),
-      enableFollowUps,
-      followUpsHookPocEnabled: this.followUpsHookPocEnabled && !this.host.profile.isRestricted(opts.toolProfile),
-      followUpsExperimentMode: this.followUpsExperimentMode,
-      approveTimeoutMs: this.approveTimeoutMs,
-      titleTimeoutMs: this.titleTimeoutMs,
-      hostText: this.hostText,
-      owner,
-      profileHash: opts.profileHash,
-      toolProfile: opts.toolProfile,
-      permissionBroker: opts.permissionBroker,
-      recover: (s) => this.recoverSession(s),
-    });
+      // A native fork copies the parent's history, and with it the mode Codex
+      // keeps for the thread; carry the live parent's mode so its turns say so.
+      if (forkFrom && opts.parentChatId) {
+        const parentMode = this.host.sessions.getSession(opts.parentChatId)?.currentModeId;
+        if (isCodexModeKind(parentMode)) session.currentModeId = parentMode;
+      }
 
-    // A native fork copies the parent's history, and with it the mode Codex
-    // keeps for the thread; carry the live parent's mode so its turns say so.
-    if (forkFrom && opts.parentChatId) {
-      const parentMode = this.host.sessions.getSession(opts.parentChatId)?.currentModeId;
-      if (isCodexModeKind(parentMode)) session.currentModeId = parentMode;
+      slotId = session.createMcpSlot();
+    } catch (error) {
+      if (opts.ephemeral) await this.closeEphemeralServer(publicId);
+      throw error;
     }
-
-    const slotId = session.createMcpSlot();
 
     // Start the thread on codex app-server
     try {
-      await this.openThread(session, slotId, opts.cwd, (config) => this.client.request(forkFrom ? 'thread/fork' : 'thread/start', {
+      await this.openThread(session, slotId, opts.cwd, (config) => client.request(forkFrom ? 'thread/fork' : 'thread/start', {
         ...(forkFrom ? { threadId: forkFrom } : {}),
         model: modelId || undefined,
         cwd: opts.cwd,
@@ -629,6 +784,10 @@ export class CodexRuntime implements AgentRuntime {
         sandbox: codexThreadSandbox(this.host.profile.isRestricted(opts.toolProfile)),
         config,
         ...(effort ? { reasoningEffort: String(effort) } : {}),
+        // Not materialized on disk (P3: no rollout, path null). Its memory
+        // mode cannot be set (P3: "ephemeral thread does not support
+        // metadata updates"); the app-server has memories off instead.
+        ...(opts.ephemeral ? { ephemeral: true } : {}),
       }) as Promise<Record<string, unknown>>, (threadStartResult) => {
         const thread = threadStartResult['thread'] as Record<string, unknown> | undefined;
         const started = (thread?.['id'] as string | undefined) ?? (threadStartResult['threadId'] as string | undefined);
@@ -639,9 +798,15 @@ export class CodexRuntime implements AgentRuntime {
         (session as any).threadId = started;
         // Update nativeSessionId after threadId is known
         (session as any).nativeSessionId = started;
-      });
+        // An app-server that ignored `ephemeral` (said false, or nothing)
+        // would keep a rollout: only an explicit `true` is accepted.
+        if (opts.ephemeral && thread?.['ephemeral'] !== true) {
+          throw new Error('codex thread/start did not open an ephemeral thread');
+        }
+      }, client);
     } catch (error) {
       await session.dispose();
+      if (opts.ephemeral) await this.closeEphemeralServer(publicId);
       if (forkFrom && /no rollout found for thread id|method not found/i.test(error instanceof Error ? error.message : '')) {
         throw new NativeResumeUnavailableError('Codex native fork is unavailable');
       }
@@ -674,8 +839,7 @@ export class CodexRuntime implements AgentRuntime {
   }
 
   private async restoreSession(opts: LoadAgentSessionOptions): Promise<AgentSession> {
-    const owner: RuntimeSessionOwner = opts.owner ?? interactiveOwner(opts.sessionId);
-    const publicId = publicSessionId(owner, opts.sessionId);
+    const { owner, id: publicId } = sessionIdentity(opts.owner, opts.sessionId);
 
     // Double-load guard
     const existing = this.sessions.get(publicId);
@@ -731,16 +895,15 @@ export class CodexRuntime implements AgentRuntime {
       effort: effort ? String(effort) : null,
       model: modelId || null,
       enableFollowUps: opts.enableFollowUps !== false && !this.host.profile.isRestricted(opts.toolProfile),
-      followUpsHookPocEnabled: this.followUpsHookPocEnabled && !this.host.profile.isRestricted(opts.toolProfile),
-      followUpsExperimentMode: this.followUpsExperimentMode,
       approveTimeoutMs: this.approveTimeoutMs,
-      titleTimeoutMs: this.titleTimeoutMs,
+      titleTimeoutMs: this.titleDeadlineMs,
       hostText: this.hostText,
       owner,
       profileHash: opts.profileHash,
       toolProfile: opts.toolProfile,
       permissionBroker: opts.permissionBroker,
       recover: (s) => this.recoverSession(s),
+      skillInput: (skill, cwd) => this.skillInputFor(skill, cwd),
     });
 
     const slotId = session.createMcpSlot();
@@ -778,6 +941,7 @@ export class CodexRuntime implements AgentRuntime {
       }
       throw err;
     }
+    await this.disableResumedThreadMemory(session);
 
     session.wireNotifications();
 
@@ -812,7 +976,11 @@ export class CodexRuntime implements AgentRuntime {
         if (this.pendingSessions.size || [...this.sessions.values()].some((s) => s !== session && s.isBusy()) || this.client.hasPendingRequests(unhealthy)) {
           throw new Error('Codex recovery is waiting for other tasks to finish. Their work was not interrupted; retry this message afterward.');
         }
-        for (const peer of this.sessions.values()) peer.markCrashed('Codex connection is restarting; native threads retained.');
+        // Ephemeral sessions run on app-servers of their own, which keep running.
+        for (const peer of this.sessions.values()) {
+          if (!this.ephemeralServers.has(peer.id)) peer.markCrashed('Codex connection is restarting; native threads retained.');
+        }
+        this.skillsDaemonStopped();
         await this.client.shutdown();
         // shutdown only succeeds after exit is confirmed. Every old native turn
         // is now stopped, even though each peer still needs its own thread resume.
@@ -840,6 +1008,7 @@ export class CodexRuntime implements AgentRuntime {
       }, remaining()) as Promise<{ thread?: { id?: string }; threadId?: string }>, (result) => {
         if ((result.thread?.id ?? result.threadId) !== session.threadId) throw new Error('Codex native recovery returned a different thread identity. Original binding retained.');
       });
+      await this.disableResumedThreadMemory(session, Math.min(5_000, remaining()));
       remaining();
       assertRegistered();
       session.completeNativeResume();
@@ -853,38 +1022,44 @@ export class CodexRuntime implements AgentRuntime {
 
   private buildDeveloperInstructions(enableFollowUps: boolean, owner: RuntimeSessionOwner, toolProfile?: RuntimeToolProfile | null): string {
     // Run workers keep their Executor-owned tool profile and metadata behavior.
+    // The profile goes along so the host's tool notes name only the tools the Run has.
     if (ownerMode(owner) === 'headless') {
       return this.host.prompt.stableSystemPrompt(
-        this.host.prompt.followUpsMetadataOutputMode(this.followUpsHookPocEnabled, this.followUpsExperimentMode),
+        this.host.prompt.followUpsMetadataOutputMode(false, 'sentinel'),
         enableFollowUps,
+        undefined,
+        undefined,
+        toolProfile ?? undefined,
       );
     }
     const assistant = this.host.profile.isRestricted(toolProfile) || toolProfile?.assistant === true;
-    const metadataMode = codexMetadataOutputMode(
-      this.followUpsHookPocEnabled,
-      this.followUpsExperimentMode,
-    );
     // A restricted session gets the host's short tool note for its profile.
-    return this.host.prompt.stableSystemPrompt(metadataMode, enableFollowUps, false, assistant, toolProfile ?? undefined)
-      + (assistant ? '' : this.hostText?.turnMetadataInstruction?.(
-        metadataMode === 'structured-tool' ? 'hook-tool' : 'sentinel',
-        enableFollowUps,
-      ) ?? '');
+    return this.host.prompt.stableSystemPrompt(CODEX_METADATA_OUTPUT_MODE, enableFollowUps, false, assistant, toolProfile ?? undefined)
+      + (assistant ? '' : this.hostText?.turnMetadataInstruction?.('sentinel', enableFollowUps) ?? '');
   }
 
-  private buildThreadConfig(slotId: string, followUpsHooks: boolean): Record<string, unknown> {
-    const hooks: Record<string, unknown> = followUpsHooks
-      ? buildCodexFollowUpsHookPocConfig(slotId, this.mcpRegistry.hookEndpoint(slotId, 'stop'), {
-        runnerPath: this.followUpsHook?.runnerPath,
-        nodePath: this.followUpsHook?.nodePath,
-      })
-      : {};
-    const hookFeatures = hooks.features && typeof hooks.features === 'object' ? hooks.features as Record<string, unknown> : {};
+  private buildThreadConfig(slotId: string, nativeMemory: boolean): Record<string, unknown> {
     return {
       ...buildCodexMcpConfig(this.mcpRegistry.endpoint(slotId)),
-      ...hooks,
-      features: { ...hookFeatures, ...CODEX_THREAD_FEATURES_OFF },
+      features: { ...CODEX_THREAD_FEATURES_OFF },
+      ...(nativeMemory ? {} : { memories: { ...CODEX_MEMORIES_OFF } }),
     };
+  }
+
+  /**
+   * A resumed thread keeps the memory mode it was started with whatever its
+   * config says (CODEX_MEMORIES_OFF), so a session that keeps no native memory
+   * sets it off. Best effort: app-servers before codex 0.167 lack the method.
+   */
+  private async disableResumedThreadMemory(session: CodexSession, timeoutMs = 5_000): Promise<void> {
+    if (session.keepsNativeMemory()) return;
+    try {
+      await this.client.request('thread/memoryMode/set', { threadId: session.threadId, mode: 'disabled' }, timeoutMs);
+    } catch (error) {
+      this.host.observability.log('warn', 'chat', 'codex kept the resumed thread\'s own memory mode', {
+        nodeId: session.id, error: error instanceof Error ? error.message : String(error),
+      });
+    }
   }
 
   /**
@@ -907,15 +1082,16 @@ export class CodexRuntime implements AgentRuntime {
     cwd: string,
     open: (config: Record<string, unknown>) => Promise<T>,
     bind: (result: T) => void,
+    client: CodexAppServerClient = this.client,
   ): Promise<void> {
-    const base = this.buildThreadConfig(slotId, this.followUpsHookPocEnabled && !session.isMetaAgent);
+    const base = this.buildThreadConfig(slotId, session.keepsNativeMemory());
     const profile = session.metaAgentToolProfile;
     const toolset = this.host.profile.toolset?.(profile) ?? 'restricted';
     if (!session.isAssistant) {
-      await this.openIsolatedThread(session, cwd, base, open, bind);
+      await this.openIsolatedThread(session, cwd, base, open, bind, client);
       return;
     }
-    const disable = codexConfiguredMcpServers(await this.client.request('config/read', { cwd }));
+    const disable = codexConfiguredMcpServers(await client.request('config/read', { cwd }));
     session.userMcpServers = [...disable];
     const refused = (stillOpen: string[], detail: string) => guardError(this.host, {
       runtimeId: this.id, toolset, unexpectedTools: stillOpen.map((name) => `mcp_server:${name}`), detail,
@@ -942,7 +1118,7 @@ export class CodexRuntime implements AgentRuntime {
         throw refused(retried, `Codex would not turn off ${retried.join(', ')}: ${error instanceof Error ? error.message : String(error)}`);
       }
       bind(opened);
-      const statuses = await this.threadMcpServers(session.threadId);
+      const statuses = await this.threadMcpServers(session.threadId, client);
       const check = codexRestrictedMcpCheck(statuses);
       if (check.ok) {
         assertToolCatalog(this.host, {
@@ -953,7 +1129,7 @@ export class CodexRuntime implements AgentRuntime {
       const fresh = check.open.filter((name) => !disable.includes(name));
       if (check.fatal || attempt >= 2 || fresh.length === 0) throw refused(check.open, check.reason);
       // Let this thread go; the next open disables those servers too.
-      await this.client.request('thread/unsubscribe', { threadId: session.threadId }, 2_000).catch(() => {});
+      await client.request('thread/unsubscribe', { threadId: session.threadId }, 2_000).catch(() => {});
       disable.push(...fresh);
       session.userMcpServers = [...disable];
       retried = fresh;
@@ -972,12 +1148,13 @@ export class CodexRuntime implements AgentRuntime {
     base: Record<string, unknown>,
     open: (config: Record<string, unknown>) => Promise<T>,
     bind: (result: T) => void,
+    client: CodexAppServerClient = this.client,
   ): Promise<void> {
     const warn = (msg: string, data: Record<string, unknown>) =>
       this.host.observability.log('warn', 'chat', msg, { nodeId: session.id, cwd, ...data });
     let disable: string[] = [];
     try {
-      disable = codexConfiguredMcpServers(await this.client.request('config/read', { cwd }));
+      disable = codexConfiguredMcpServers(await client.request('config/read', { cwd }));
     } catch (error) {
       warn('codex config/read failed; the user\'s MCP servers stay enabled in this thread', {
         error: error instanceof Error ? error.message : String(error),
@@ -998,7 +1175,7 @@ export class CodexRuntime implements AgentRuntime {
     bind(opened);
     session.userMcpServers = disable;
     try {
-      const statuses = await this.threadMcpServers(session.threadId);
+      const statuses = await this.threadMcpServers(session.threadId, client);
       const stillOpen = statuses ? codexOpenUserMcpServers(statuses) : [];
       if (stillOpen.length > 0) {
         warn('codex thread still runs MCP servers outside Michi', { threadId: session.threadId, servers: stillOpen });
@@ -1011,11 +1188,13 @@ export class CodexRuntime implements AgentRuntime {
   }
 
   /** The thread's MCP servers as mcpServerStatus/list reports them; null when it answers without a list. */
-  private async threadMcpServers(threadId: string): Promise<Array<{ name?: unknown; runtimeStatus?: unknown; tools?: unknown }> | null> {
+  private async threadMcpServers(
+    threadId: string, client: CodexAppServerClient = this.client,
+  ): Promise<Array<{ name?: unknown; runtimeStatus?: unknown; tools?: unknown }> | null> {
     const statuses: Array<{ name?: unknown; runtimeStatus?: unknown; tools?: unknown }> = [];
     let cursor: string | null = null;
     for (let page = 0; page < 20; page += 1) {
-      const result = await this.client.request('mcpServerStatus/list', {
+      const result = await client.request('mcpServerStatus/list', {
         threadId, detail: 'toolsAndAuthOnly', ...(cursor ? { cursor } : {}),
       }) as { data?: unknown; nextCursor?: unknown } | undefined;
       if (!Array.isArray(result?.data)) return null;
@@ -1080,9 +1259,83 @@ export class CodexRuntime implements AgentRuntime {
     this.host.sessions.dropSession(sessionId);
     // A subsequent resume must wait for the old thread/unsubscribe and MCP
     // cleanup, otherwise that cleanup can detach the newly resumed thread.
-    const releasing = session.dispose();
+    const releasing = session.dispose().finally(() => this.closeEphemeralServer(sessionId));
     this.releasingSessions.set(sessionId, releasing);
     try { await releasing; } finally { this.releasingSessions.delete(sessionId); }
+  }
+
+  // ---- ephemeral sessions ---------------------------------------------------
+
+  /**
+   * Starts the app-server of an ephemeral session on a new Codex home
+   * (codexEphemeralHome.ts): the user's auth.json linked in, and the model
+   * and provider keys of the user's effective config (the main app-server's
+   * config/read for this cwd) as its config.toml. Its exit crashes only that
+   * session, which is then not restored.
+   */
+  private async openEphemeralServer(publicId: string, cwd: string): Promise<CodexAppServerClient> {
+    const setup = this.ephemeralSetup;
+    const read = await this.client.request('config/read', { cwd });
+    const home = prepareCodexEphemeralHome({
+      root: setup.root, sessionId: publicId, codexHome: setup.codexHome, configToml: codexEphemeralConfigToml(read),
+    });
+    const client = setup.client?.(home, CODEX_EPHEMERAL_APP_SERVER_ARGS) ?? new CodexAppServerClient({
+      spawnEnv: { ...setup.spawnEnv, CODEX_HOME: home },
+      binaryPath: this.binaryPath,
+      rpcTimeoutMs: setup.rpcTimeoutMs,
+      initTimeoutMs: setup.initTimeoutMs,
+      extraArgs: CODEX_EPHEMERAL_APP_SERVER_ARGS,
+    });
+    this.wireServerRequests(client);
+    client.onExit(() => {
+      if (this.ephemeralServers.get(publicId)?.client !== client) return;
+      this.sessions.get(publicId)?.markCrashed('This Codex session\'s app-server exited; it keeps no native record and is not restored.');
+    });
+    this.ephemeralServers.set(publicId, { client, home });
+    try {
+      await client.ensureStarted();
+    } catch (error) {
+      await this.closeEphemeralServer(publicId);
+      throw error;
+    }
+    return client;
+  }
+
+  /** Stops an ephemeral session's app-server; its home stays until discardNativeSession. */
+  private async closeEphemeralServer(publicId: string): Promise<void> {
+    const server = this.ephemeralServers.get(publicId);
+    if (!server) return;
+    this.ephemeralServers.delete(publicId);
+    await server.client.shutdown().catch((error: unknown) => {
+      this.host.observability.log('warn', 'chat', 'codex ephemeral app-server did not stop cleanly', {
+        sessionId: publicId, error: error instanceof Error ? error.message : String(error),
+      });
+    });
+  }
+
+  /**
+   * Removes a released session's native record (DESIGN-v2 §3.2): its
+   * ephemeral home, and with it everything its app-server wrote. Without a
+   * home, a native id the main app-server persisted is deleted there with
+   * `thread/delete` (rollout and state rows; P3), and an id it does not have
+   * answers `absent`. `deferred` while the session is live or opening.
+   */
+  async discardNativeSession(input: NativeSessionDiscardInput): Promise<NativeSessionDiscardResult> {
+    if (this.sessions.has(input.sessionId) || this.pendingSessions.has(input.sessionId) || this.releasingSessions.has(input.sessionId)) {
+      return 'deferred';
+    }
+    await this.closeEphemeralServer(input.sessionId);
+    if (removeCodexEphemeralHome(this.ephemeralSetup.root, input.sessionId)) return 'discarded';
+    if (!input.nativeSessionId) return 'absent';
+    await this.startClient();
+    try {
+      await this.client.request('thread/delete', { threadId: input.nativeSessionId });
+      return 'discarded';
+    } catch (error) {
+      const message = error instanceof CodexRpcError ? error.rpcMessage : '';
+      if (/^no rollout found for thread id|^thread is not persisted/.test(message)) return 'absent';
+      throw error;
+    }
   }
 
   // ---- listModels ----------------------------------------------------------
@@ -1117,15 +1370,55 @@ export class CodexRuntime implements AgentRuntime {
     return this.modelCatalog.refresh();
   }
 
+  // ---- completeStructured ----------------------------------------------------
+
+  /**
+   * One structured answer on an ephemeral thread (codexStructured.ts), in a
+   * neutral folder, with the user's MCP servers, Codex's memories, its tools
+   * and its instruction blocks off and a short base prompt
+   * (codexProtocol.CODEX_STRUCTURED_*). Without a model named: the title
+   * model when the account lists it, else the user's default.
+   */
+  async completeStructured(opts: StructuredCompletionOptions): Promise<StructuredCompletion> {
+    opts.signal?.throwIfAborted();
+    await this.startClient();
+    const cwd = path.join(this.host.config.dataDir(), 'structured-cwd');
+    fs.mkdirSync(cwd, { recursive: true });
+    const model = opts.model?.trim() || await this.resolveTitleModel() || this.host.config.defaultModel(this.id, opts.ownerUserId) || null;
+    let disable: string[] = [];
+    try {
+      disable = codexConfiguredMcpServers(await this.client.request('config/read', { cwd }));
+    } catch (error) {
+      this.host.observability.log('warn', 'chat', 'codex config/read failed; a structured answer keeps the user\'s MCP servers configured', {
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+    const effort = opts.reasoning && (CODEX_CAPABILITIES.supportedReasoningLevels as readonly string[] | undefined)?.includes(opts.reasoning)
+      ? opts.reasoning : 'low';
+    return completeCodexStructured({
+      client: this.client, cwd, model, system: opts.system, prompt: opts.prompt, schema: opts.schema, effort,
+      baseInstructions: CODEX_STRUCTURED_BASE_INSTRUCTIONS,
+      config: codexDisableMcpServers({
+        ...CODEX_STRUCTURED_CONFIG_OFF, features: { ...CODEX_STRUCTURED_FEATURES_OFF }, memories: { ...CODEX_MEMORIES_OFF },
+      }, disable),
+      timeoutMs: opts.timeoutMs, signal: opts.signal,
+    });
+  }
+
   // ---- shutdown ------------------------------------------------------------
 
   async shutdown(): Promise<void> {
     clearInterval(this.idleSweep);
+    this.unsubscribeSkillRoots?.();
+    this.unwatchSkills?.();
+    this.unwatchSkills = null;
     const sessions = [...this.sessions.values()];
     for (const session of sessions) {
       await this.releaseSession(session.id);
     }
     await Promise.all(this.releasingSessions.values());
+    await Promise.all([...this.ephemeralServers.keys()].map((id) => this.closeEphemeralServer(id)));
+    this.skillsDaemonStopped();
     await this.client.shutdown();
   }
 
@@ -1142,12 +1435,24 @@ export class CodexRuntime implements AgentRuntime {
       respond({ answers: {} });
       return;
     }
+    // A restricted session's thread has Codex's question tool off
+    // (CODEX_RESTRICTED_TOOLS_OFF). One that asks anyway gets no answers and
+    // shows no question, as its elicitations are declined: its turns may run
+    // with no one to answer, and the question's wording is the model's.
+    if (session.isMetaAgent) {
+      this.host.observability.log('warn', 'chat', 'codex restricted session asked the user a question; answered with none', {
+        nodeId: session.id, threadId,
+      });
+      respond({ answers: {} });
+      return;
+    }
     void session.askUserInput(params, respond, signal);
   }
 
   private handleMcpElicitationRequest(
     params: Record<string, unknown>,
     respond: (result: unknown) => void,
+    signal?: AbortSignal,
   ): void {
     const threadId = typeof params['threadId'] === 'string' ? params['threadId'] : null;
     const session = threadId ? this.threadToSession.get(threadId) : null;
@@ -1156,7 +1461,7 @@ export class CodexRuntime implements AgentRuntime {
       respond({ action: 'decline', content: null, _meta: null });
       return;
     }
-    void session.askMcpElicitation(params, respond);
+    void session.askMcpElicitation(params, respond, signal);
   }
 
   // ---- Approval handler ----------------------------------------------------

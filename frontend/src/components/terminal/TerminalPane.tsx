@@ -1,5 +1,5 @@
-import React, { useEffect, useRef, useState } from 'react';
-import { Terminal } from '@xterm/xterm';
+import { useEffect, useRef, useState } from 'react';
+import type { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import '@xterm/xterm/css/xterm.css';
 import type { TerminalPaneItem } from '../../state/paneItems';
@@ -7,14 +7,21 @@ import { useChatActions } from '../../state/chatStore';
 import { usePaneShellStyle } from '../../hooks/usePaneShellStyle';
 import { getElectron } from '../../lib/electronBridge';
 import { usePrefs } from '../../state/prefs';
+import { terminalTargetForPane } from '../../state/terminalTarget';
+import BackendTerminalPane from './BackendTerminalPane';
 import { terminalTheme } from './terminalTheme';
-
-function cssVar(element: HTMLElement, name: string, fallback: string): string {
-  return getComputedStyle(element).getPropertyValue(name).trim() || fallback;
-}
+import { createPaneTerminal } from './terminalXterm';
 
 export default function TerminalPane({ item }: { item: TerminalPaneItem }) {
-  const { focusPane, setFocusedNodeId } = useChatActions();
+  const target = terminalTargetForPane(item);
+  return target.transport === 'native'
+    ? <NativeTerminalPane item={item} />
+    : <BackendTerminalPane item={item} connectionId={target.connectionId} />;
+}
+
+/** Electron's local PTY, over IPC (electron/main.ts). */
+function NativeTerminalPane({ item }: { item: TerminalPaneItem }) {
+  const { focusPane } = useChatActions();
   const { prefs } = usePrefs();
   const terminalRef = useRef<Terminal | null>(null);
   const shellStyle = usePaneShellStyle(item.id);
@@ -29,19 +36,7 @@ export default function TerminalPane({ item }: { item: TerminalPaneItem }) {
       setStatus('unavailable');
       return;
     }
-    const terminal = new Terminal({
-      allowProposedApi: false,
-      convertEol: false,
-      cursorBlink: true,
-      fontFamily: cssVar(host, '--font-mono', 'ui-monospace, SFMono-Regular, monospace'),
-      // eslint-disable-next-line no-restricted-syntax -- xterm takes px as a number; matches --fs-lg
-      fontSize: 13,
-      lineHeight: 1.25,
-      scrollback: 10_000,
-      smoothScrollDuration: 80,
-      // CLI ANSI/256-color/truecolor output must remain readable in light themes.
-      minimumContrastRatio: 4.5,
-    });
+    const terminal = createPaneTerminal(host);
     terminalRef.current = terminal;
     const fit = new FitAddon();
     terminal.loadAddon(fit);
@@ -100,7 +95,7 @@ export default function TerminalPane({ item }: { item: TerminalPaneItem }) {
   }, [prefs.terminalPalette, prefs.terminalAccentOverrides, item.cwd, item.surfaceId]);
 
   return (
-    <div data-pane-id={item.id} data-pane-kind="terminal" className="terminal-pane" onMouseDown={() => { focusPane(item.id); setFocusedNodeId(null); }} style={shellStyle}>
+    <div data-pane-id={item.id} data-pane-kind="terminal" className="terminal-pane" onMouseDown={() => focusPane(item.id)} style={shellStyle}>
       <div style={{ height: 32, padding: '0 10px', display: 'flex', alignItems: 'center', gap: 8, borderBottom: '1px solid var(--term-line)', flexShrink: 0, fontSize: 'var(--fs-xs)', color: 'var(--term-muted)' }}>
         <span style={{ color: status === 'ready' ? 'var(--term-digest)' : status === 'exited' ? 'var(--term-danger)' : 'var(--term-muted)' }}>●</span>
         <span style={{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{item.cwd || '~'}</span>
@@ -108,8 +103,8 @@ export default function TerminalPane({ item }: { item: TerminalPaneItem }) {
       </div>
       <div ref={hostRef} style={{ flex: 1, minHeight: 0, padding: '8px 8px 4px', background: 'var(--term-pane-bg)' }} />
       {status === 'unavailable' ? (
-        <div style={{ padding: '8px 12px', borderTop: '1px solid var(--term-line)', color: 'var(--term-danger)', fontSize: 'var(--fs-xs)' }}>
-          Native terminal is available in the Michi desktop app.
+        <div style={{ padding: '8px 12px', borderTop: '1px solid var(--term-line)', color: 'var(--term-danger-text)', fontSize: 'var(--fs-xs)' }}>
+          The terminal could not start.
         </div>
       ) : null}
     </div>

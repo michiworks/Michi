@@ -1,9 +1,12 @@
 import React, { useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { AnimatePresence } from 'motion/react';
-import { activeTreeRootNodeId, chatLabel, shallowArrayEqual, useChatActions, useChatPanes, useChatProjects, useStructuralSelector } from '../../state/chatStore';
+import { activeTreeRootNodeId, shallowArrayEqual, useChatActions, useChatPanes, useChatProjects, useStructuralSelector } from '../../state/chatStore';
 import { buildTree, type TreeNode } from '../../state/tree';
+import { paneTitle } from '../../state/paneLabels';
+import { useCloseOtherPanes } from '../../state/closeOtherPanes';
 import { DUR, EASE } from '../../motion/tokens';
+import ContextMenu, { MenuPresence, menuOpenKey } from '../ContextMenu';
 import { PopoverSurface } from '../ui/Popover';
 import { branchMotionAllowed, branchMotionReduced, isFreshBranch, playBranchFlight, pulseBranchTarget, type BranchFlightOrigin } from './branchMotion';
 import { BranchIcon } from './icons';
@@ -24,7 +27,10 @@ export function MobilePaneSwitcher() {
   const { activeProject } = useChatProjects();
   const { openPanes, tabPanes, focusedPane, paneItems = {} } = useChatPanes();
   const { openPane, focusPane, closePane } = useChatActions();
+  const { closeOtherPanes, canCloseOtherPanes } = useCloseOtherPanes();
   const [open, setOpen] = useState(false);
+  // An open pane's own menu (a long press on its row): what a tab's menu offers.
+  const [rowMenu, setRowMenu] = useState<{ id: string; x: number; y: number } | null>(null);
   const trigger = useRef<HTMLButtonElement>(null);
   const panel = useRef<HTMLDivElement>(null);
   const id = useId();
@@ -39,10 +45,11 @@ export function MobilePaneSwitcher() {
     for (const paneId of panes) if (paneItems[paneId]?.kind !== 'browser' && !result.some(row => row.id === paneId)) result.push({ id: paneId, depth: 0 });
     return result;
   }, [activeProject, aliveIds, panes, paneItems]);
-  const titles = useStructuralSelector(nodes => rows.map(row => paneItems[row.id]?.title || nodes[row.id]?.title || chatLabel(nodes[row.id]) || 'Untitled'), shallowArrayEqual);
+  const titles = useStructuralSelector(nodes => rows.map(row => paneTitle(nodes[row.id], paneItems[row.id]) || 'Untitled'), shallowArrayEqual);
   const statuses = useStructuralSelector(nodes => rows.map(row => nodes[row.id]?.status === 'streaming' && !nodes[row.id]?.visibleResponseComplete ? 'streaming' : nodes[row.id]?.status === 'error' ? 'error' : 'idle'), shallowArrayEqual);
   const dismiss = (restore = true) => { setOpen(false); if (restore) trigger.current?.focus({ preventScroll: true }); };
   useEffect(() => { setOpen(false); }, [activeProject?.id, activeProject?.activeTreeId]);
+  useEffect(() => { if (!open) setRowMenu(null); }, [open]);
 
   // A branch started in the background changes nothing on screen, so show it
   // leaving the tap for the switcher. Foreground branches push in (Dashboard).
@@ -78,6 +85,8 @@ export function MobilePaneSwitcher() {
     if (!open) return;
     (panel.current?.querySelector<HTMLButtonElement>('.mobile-pane-row[aria-current="page"]') ?? panel.current?.querySelector<HTMLButtonElement>('.mobile-pane-row'))?.focus({ preventScroll: true });
     const pointer = (event: PointerEvent) => {
+      // A row's own menu is part of the list.
+      if ((event.target as Element | null)?.closest?.('[data-phone-menu]')) return;
       if (!panel.current?.contains(event.target as Node) && !trigger.current?.contains(event.target as Node)) setOpen(false);
     };
     const key = (event: KeyboardEvent) => {
@@ -95,14 +104,28 @@ export function MobilePaneSwitcher() {
     return () => { document.removeEventListener('pointerdown', pointer, true); document.removeEventListener('keydown', key, true); };
   }, [open]);
   if (rows.length < 2) return null;
+  // A pane it holds, other than the one on screen, is working: the icon's
+  // short middle line breathes in the accent, so a branch started here leaves
+  // a trace after its ring. Not a corner dot: on a phone that reads as unread.
+  const working = rows.some((row, index) => row.id !== focusedPane && statuses[index] === 'streaming');
+  // One parent line over two indented children: an outline of the tree, so it
+  // doesn't read as the hamburger that opens a drawer. Sized by mobile.css.
   return <>
-    <button ref={trigger} type="button" className="mobile-pane-trigger t-icon-btn" aria-label="Switch pane" aria-expanded={open} aria-controls={id}
-      onClick={() => setOpen(value => !value)}><svg width="23" height="23" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" aria-hidden="true"><path d="M4 6h16M9 12h11M4 18h16" /></svg></button>
+    <button ref={trigger} type="button" className="mobile-pane-trigger t-icon-btn" aria-label="Switch pane" aria-expanded={open} aria-controls={id} data-working={working ? 'true' : undefined}
+      onClick={() => setOpen(value => !value)}><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" aria-hidden="true"><path d="M4 6h16M10 18h10" /><path className="mobile-pane-trigger__live" d="M10 12h10" /></svg></button>
     <AnimatePresence>{open && <PopoverSurface key="list" ref={panel} role="navigation" aria-label="Branches and panes" right={12} top={52}
       width="min(300px, calc(100vw - 24px))" maxHeight="calc(100dvh - 76px)" className="mobile-pane-list" glass exit={LIST_EXIT}>
-      <div id={id} onBlur={event => { if (event.relatedTarget && !event.currentTarget.contains(event.relatedTarget as Node)) setOpen(false); }}>{rows.map((row, index) => {
+      <div id={id} onBlur={event => {
+        const next = event.relatedTarget as Element | null;
+        if (next && !event.currentTarget.contains(next) && !next.closest('[data-phone-menu]')) setOpen(false);
+      }}>{rows.map((row, index) => {
         const isOpen = panes.includes(row.id);
-        return <div key={row.id} className="mobile-pane-item" data-current={focusedPane === row.id ? '' : undefined}>
+        return <div key={row.id} className="mobile-pane-item" data-current={focusedPane === row.id ? '' : undefined}
+          data-context-target={isOpen ? '' : undefined}
+          onContextMenu={event => {
+            event.preventDefault();
+            if (isOpen) setRowMenu({ id: row.id, x: event.clientX, y: event.clientY });
+          }}>
           <button type="button" className="mobile-pane-row"
             style={{ '--pane-depth': Math.min(row.depth, 10) } as React.CSSProperties}
             aria-current={focusedPane === row.id ? 'page' : undefined}
@@ -119,6 +142,17 @@ export function MobilePaneSwitcher() {
         </div>;
       })}</div>
     </PopoverSurface>}</AnimatePresence>
+    <MenuPresence>{rowMenu && <ContextMenu key={menuOpenKey(rowMenu)} x={rowMenu.x} y={rowMenu.y} onClose={() => setRowMenu(null)} sections={[{
+      items: [
+        { id: 'close', label: 'Close', run: () => closePane(rowMenu.id) },
+        {
+          id: 'close-others',
+          label: 'Close Others',
+          disabled: !canCloseOtherPanes(rowMenu.id),
+          run: () => closeOtherPanes(rowMenu.id),
+        },
+      ],
+    }]} />}</MenuPresence>
     {flight && createPortal(<span ref={chip} key={flight.id} className="mobile-branch-flight" aria-hidden="true"><BranchIcon size={16} /></span>, document.body)}
   </>;
 }

@@ -1,11 +1,10 @@
-import React, { useState } from 'react';
+import { useState } from 'react';
 import type { MichiDatabase, MichiDbColumn, MichiDbEditOp, MichiDbRow } from 'michi-shared';
 import { DbPopover } from './DbPopover';
-import { cellEditable, isThreadsDb, writableOptions, type CellValue } from './dbModel';
+import { cellEditable, isThreadsDb, parseNumberText, writableOptions, type CellValue } from './dbModel';
 import { columnName, optionName } from './dbLabels';
 import { setColumnOps } from './dbOps';
 import type { DbEdit } from './views/viewTypes';
-import { useBatchBarPresence } from '../threads/batchBarPresence';
 import '../threads/threads.css';
 
 /** All threads' rows get one value at a time only for these; a title is each thread's own. */
@@ -60,7 +59,6 @@ export function RowsBatchBar({
   after?: BatchAction[];
   onClear: () => void;
 }) {
-  useBatchBarPresence();
   const count = rows.length;
   const label = `${count} ${unit}${count === 1 ? '' : 's'}`;
   const setColumn = defaultSetColumn(db, group);
@@ -138,19 +136,28 @@ function SetValueForm({
   };
   const [raw, setRaw] = useState<string>(() => (column.type === 'checkbox' ? 'true' : picks(column) && allowed ? firstOption(column) : ''));
 
-  const valueOf = (): CellValue => {
+  const numeric = column.type === 'number' || column.type === 'progress';
+  /** What the form sets, or undefined for number text that is not a number. */
+  const valueOf = (): CellValue | undefined => {
+    if (numeric) {
+      const r = parseNumberText(raw, column.type === 'progress');
+      return r.ok ? r.value : undefined;
+    }
     if (raw === '') return null;
     switch (column.type) {
       case 'checkbox': return raw === 'true';
       case 'multi': return [raw];
-      case 'progress': return Number(raw) / 100;
-      case 'number': return Number(raw);
       case 'date': return { start: raw };
       default: return raw;
     }
   };
   const apply = () => {
-    const check = setColumnOps(db, rows, column, valueOf());
+    const value = valueOf();
+    if (value === undefined) {
+      onRefused(column.type === 'progress' ? 'Type a percent, like 40' : 'Type a number');
+      return;
+    }
+    const check = setColumnOps(db, rows, column, value);
     if (!check.ok) {
       onRefused(check.reason);
       return;
@@ -194,7 +201,8 @@ function SetValueForm({
         ) : (
           <input
             className="michi-db-input"
-            type={column.type === 'date' ? 'date' : column.type === 'number' || column.type === 'progress' ? 'number' : 'text'}
+            type={column.type === 'date' ? 'date' : 'text'}
+            inputMode={numeric ? 'decimal' : undefined}
             placeholder={column.type === 'progress' ? '%' : 'Empty clears it'}
             value={raw}
             onChange={(event) => setRaw(event.currentTarget.value)}

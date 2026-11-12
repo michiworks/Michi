@@ -1,7 +1,8 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 
-import { surfaceToDescriptor, type SurfaceProjectionInput, type SurfacePaneKind } from '../src/services/paneInspectionProjection.surface';
+import type { SurfacePaneKind } from 'michi-shared';
+import { surfaceToDescriptor, type SurfaceProjectionInput } from '../src/services/paneInspectionProjection.surface';
 
 // ---------------------------------------------------------------------------
 // Fixture builder — plain object, no DB, no presence registry.

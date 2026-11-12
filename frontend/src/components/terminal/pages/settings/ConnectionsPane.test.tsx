@@ -1,4 +1,3 @@
-import React from 'react';
 import { act, fireEvent, render, screen, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ConnectionsPane } from './ConnectionsPane';
@@ -36,6 +35,11 @@ function deferred<T>() {
   let resolve!: (value: T) => void;
   const promise = new Promise<T>(done => { resolve = done; });
   return { promise, resolve };
+}
+/** Opens a machine's ⋯ menu and picks an action from it. */
+function pick(machine: string, action: string) {
+  fireEvent.click(screen.getByRole('button', { name: `More actions for ${machine}` }));
+  fireEvent.click(within(screen.getByRole('menu', { name: `${machine} actions` })).getByRole('menuitem', { name: action }));
 }
 
 describe('ConnectionsPane', () => {
@@ -80,9 +84,12 @@ describe('ConnectionsPane', () => {
     const projects = [project('Local project'), project('remote-project', desktop.id), project('stale-local', desktop.id),
       project('old-project', desktop.id, { archivedAt: 1 }), project('collision'), project('other-project', other.id)];
     render(<ConnectionsPane projects={projects} onOpenWorkspace={open} />);
-    const buildSummary = await screen.findByText('4 workspaces');
-    expect(buildSummary.closest('details')?.open).toBe(false);
+    const buildSummary = await screen.findByRole('button', { name: '4 workspaces' });
+    expect(buildSummary.getAttribute('aria-expanded')).toBe('false');
+    expect(document.getElementById(buildSummary.getAttribute('aria-controls')!)!.hidden).toBe(true);
     fireEvent.click(buildSummary);
+    expect(buildSummary.getAttribute('aria-expanded')).toBe('true');
+    expect(document.getElementById(buildSummary.getAttribute('aria-controls')!)!.hidden).toBe(false);
     fireEvent.click(await screen.findByText('1 workspace'));
     const list = await screen.findByRole('list', { name: 'Workspaces on Build box' });
     expect(within(list).getAllByRole('listitem')).toHaveLength(4);
@@ -98,7 +105,45 @@ describe('ConnectionsPane', () => {
     expect(within(screen.getByRole('list', { name: 'Workspaces on Other machine' })).getByRole('button', { name: 'Other project' })).toBeTruthy();
     expect(mocks.workspaces).toHaveBeenCalledWith(desktop.id, expect.any(AbortSignal));
     expect(mocks.workspaces).toHaveBeenCalledWith(other.id, expect.any(AbortSignal));
-    expect(within(screen.getByRole('listitem', { name: desktop.name })).getByText('SSH connected')).toBeTruthy();
+    // A compact row: what and where on the left, its status on the right.
+    const row = screen.getByRole('listitem', { name: desktop.name });
+    expect(row.querySelector('.remote-machine__sub')!.textContent).toBe('SSH · build+4 workspaces');
+    expect(within(row).getByText('Connected')).toBeTruthy();
+    expect(within(screen.getByRole('listitem', { name: 'Local' })).getByText('Built in')).toBeTruthy();
+    expect(within(screen.getByRole('listitem', { name: 'Local' })).queryByRole('button', { name: /More actions/ })).toBeNull();
+  });
+
+  it('keeps a machine’s actions in its ⋯ menu, Remove last and marked as danger', async () => {
+    mocks.list.mockResolvedValue([desktop]);
+    render(<ConnectionsPane projects={[]} />);
+    const machine = await screen.findByRole('listitem', { name: desktop.name });
+    await within(machine).findByRole('button', { name: '0 workspaces' });
+    expect(within(machine).queryByRole('button', { name: 'Refresh workspaces' })).toBeNull();
+    const more = within(machine).getByRole('button', { name: 'More actions for Build box' });
+    expect(more.getAttribute('aria-haspopup')).toBe('menu');
+    fireEvent.click(more);
+    expect(more.getAttribute('aria-expanded')).toBe('true');
+    const menu = screen.getByRole('menu', { name: 'Build box actions' });
+    expect(within(menu).getAllByRole('menuitem').map((item) => item.textContent)).toEqual(['Refresh workspaces', 'Edit', 'Remove']);
+    expect(within(menu).getByRole('menuitem', { name: 'Remove' }).getAttribute('data-danger')).toBe('true');
+    // Refresh reads the machine again.
+    fireEvent.click(within(menu).getByRole('menuitem', { name: 'Refresh workspaces' }));
+    expect(screen.queryByRole('menu')).toBeNull();
+    await vi.waitFor(() => expect(mocks.workspaces).toHaveBeenCalledTimes(2));
+    // Edit opens the connection's form.
+    await within(machine).findByRole('button', { name: '0 workspaces' });
+    pick(desktop.name, 'Edit');
+    expect((screen.getByLabelText('SSH host') as HTMLInputElement).value).toBe('build+');
+  });
+
+  it('puts Connect remote and Manual setup side by side as bordered buttons', async () => {
+    render(<ConnectionsPane projects={[]} />);
+    await screen.findByText('Local');
+    const connect = screen.getByRole('button', { name: 'Connect remote' });
+    const manual = screen.getByRole('button', { name: 'Manual setup' });
+    expect(connect.className).toContain('ui-btn--primary');
+    expect(manual.className).toBe('ui-btn');
+    expect(connect.parentElement).toBe(manual.parentElement);
   });
 
   it('keeps matching raw IDs on Local and other hosts separate when enabling and opening a workspace', async () => {
@@ -130,16 +175,17 @@ describe('ConnectionsPane', () => {
     await screen.findByText('Old name');
     const pending = deferred<Array<{ id: string; name: string }>>();
     mocks.workspaces.mockReturnValueOnce(pending.promise);
-    fireEvent.click(screen.getByRole('button', { name: 'Refresh workspaces' }));
+    pick(desktop.name, 'Refresh workspaces');
     expect(screen.queryByText('Old name')).toBeNull();
     expect(screen.queryByText('2 workspaces')).toBeNull();
+    expect(screen.getByText('Reading workspaces…')).toBeTruthy();
     await act(async () => pending.resolve([{ id: 'one', name: 'New name' }]));
     expect(await screen.findByText('New name')).toBeTruthy();
     expect(screen.getByText('1 workspace')).toBeTruthy();
     expect(screen.queryByText('Removed remotely')).toBeNull();
     mocks.workspaces.mockRejectedValueOnce(new Error('Remote backend unavailable'));
-    fireEvent.click(screen.getByRole('button', { name: 'Refresh workspaces' }));
-    expect(await screen.findByText('Workspaces unavailable')).toBeTruthy();
+    pick(desktop.name, 'Refresh workspaces');
+    expect(await screen.findByText('Can’t reach Build box')).toBeTruthy();
     expect(screen.queryByText('New name')).toBeNull();
     expect(screen.queryByText('1 workspace')).toBeNull();
     expect(screen.queryByText('0 workspaces')).toBeNull();
@@ -150,10 +196,11 @@ describe('ConnectionsPane', () => {
     const pending = deferred<Array<{ id: string; name: string }>>();
     mocks.workspaces.mockReturnValueOnce(pending.promise).mockResolvedValueOnce([{ id: 'new', name: 'New host workspace' }]);
     render(<ConnectionsPane projects={[]} />);
-    await screen.findByText('Reading remote workspaces…');
+    await screen.findByText('Reading workspaces…');
+    expect(screen.getByText('Connecting')).toBeTruthy();
     await vi.waitFor(() => expect(mocks.workspaces).toHaveBeenCalledWith(desktop.id, expect.any(AbortSignal)));
     const signal = mocks.workspaces.mock.calls[0][1] as AbortSignal;
-    fireEvent.click(screen.getByRole('button', { name: 'Edit' }));
+    pick(desktop.name, 'Edit');
     fireEvent.change(screen.getByLabelText('SSH host'), { target: { value: 'replacement' } });
     fireEvent.click(screen.getByRole('button', { name: 'Save' }));
     await screen.findByText('New host workspace');
@@ -169,7 +216,7 @@ describe('ConnectionsPane', () => {
     ]);
     render(<ConnectionsPane projects={[]} />);
     await screen.findByText('0 workspaces');
-    fireEvent.click(screen.getByRole('button', { name: 'Remove' }));
+    pick(desktop.name, 'Remove');
     expect(await screen.findByText('2 workspaces still use this connection.')).toBeTruthy();
     expect(screen.queryByText('Remote Trash')).toBeNull();
     expect(mocks.remove).not.toHaveBeenCalled();
@@ -181,7 +228,7 @@ describe('ConnectionsPane', () => {
     vi.spyOn(window, 'confirm').mockReturnValue(true);
     render(<ConnectionsPane projects={[project('stale-local', desktop.id)]} />);
     await screen.findByText('0 workspaces');
-    fireEvent.click(screen.getByRole('button', { name: 'Remove' }));
+    pick(desktop.name, 'Remove');
     await vi.waitFor(() => expect(mocks.remove).toHaveBeenCalledWith(desktop.id));
     expect(mocks.workspaces).toHaveBeenCalledTimes(2);
   });
@@ -218,13 +265,77 @@ describe('ConnectionsPane', () => {
     }]);
     render(<ConnectionsPane projects={[]} />);
     await screen.findByText('Remote Linux');
+    await screen.findByText('0 workspaces');
     fireEvent.click(screen.getByRole('button', { name: 'Connect remote' }));
     expect(screen.getByLabelText(/\S+ SSH host$/)).toBeTruthy();
-    fireEvent.click(screen.getByRole('button', { name: 'Edit' }));
+    pick('Remote Linux', 'Edit');
     expect(screen.queryByLabelText(/\S+ SSH host$/)).toBeNull();
     expect((screen.getByLabelText('SSH host') as HTMLInputElement).value).toBe('build+');
     fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
     expect(screen.getByRole('button', { name: 'Connect remote' })).toBeTruthy();
+  });
+
+  it('says in one sentence that a machine is unreachable and why, with Retry, Edit and a log without terminal codes', async () => {
+    mocks.list.mockResolvedValue([desktop]);
+    // The escape character is already gone from these codes, as in the logs people saw.
+    mocks.workspaces.mockRejectedValueOnce(new Error('Could not read remote workspaces (HTTP 502): [1G[2K[31mWSSH Proxy returned an error with code 400: '
+      + 'Could not resolve target host[0m\nWebSocket was closed before the connection was established'));
+    render(<ConnectionsPane projects={[]} />);
+    const machine = await screen.findByRole('listitem', { name: desktop.name });
+    const alert = (await within(machine).findByText('Can’t reach Build box')).closest<HTMLElement>('[role="alert"]')!;
+    expect(within(alert).getByText('The SSH proxy could not find the host. Check the VPN, then retry.')).toBeTruthy();
+    expect(within(machine).getByText('Offline')).toBeTruthy();
+    expect(machine.querySelector('.remote-machine__status')!.getAttribute('data-state')).toBe('error');
+    // Retry and Edit sit with the problem; the row offers no second copy of them.
+    expect(within(machine).getAllByRole('button', { name: /Retry|Refresh workspaces/ }).map((button) => button.textContent)).toEqual(['Retry']);
+    expect(within(machine).getAllByRole('button', { name: 'Edit' })).toHaveLength(1);
+    fireEvent.click(within(machine).getByRole('button', { name: 'More actions for Build box' }));
+    expect(within(screen.getByRole('menu', { name: 'Build box actions' })).getAllByRole('menuitem').map((item) => item.textContent)).toEqual(['Remove']);
+    fireEvent.keyDown(window, { key: 'Escape' });
+    expect(screen.queryByRole('menu')).toBeNull();
+    const log = within(machine).getByText('Show log').closest('details')!;
+    expect(log.open).toBe(false);
+    const text = log.querySelector('pre')!.textContent!;
+    expect(text).toBe('Could not read remote workspaces (HTTP 502): WSSH Proxy returned an error with code 400: Could not resolve target host\n'
+      + 'WebSocket was closed before the connection was established');
+    // Its workspaces wait for a retry, out of sight.
+    expect(machine.querySelector<HTMLElement>('.remote-machine__workspaces')!.hidden).toBe(true);
+    expect(within(machine).queryByRole('button', { name: /workspaces?$/ })).toBeNull();
+
+    mocks.workspaces.mockResolvedValueOnce([]);
+    fireEvent.click(within(machine).getByRole('button', { name: 'Retry' }));
+    expect(await within(machine).findByText('0 workspaces')).toBeTruthy();
+    expect(within(machine).queryByText('Can’t reach Build box')).toBeNull();
+    expect(within(machine).queryByText('Show log')).toBeNull();
+    fireEvent.click(within(machine).getByRole('button', { name: 'More actions for Build box' }));
+    expect(within(screen.getByRole('menu', { name: 'Build box actions' })).getByRole('menuitem', { name: 'Refresh workspaces' })).toBeTruthy();
+  });
+
+  it('opens a list again after a retry if it was open before the machine became unreachable', async () => {
+    mocks.list.mockResolvedValue([desktop]);
+    mocks.workspaces.mockResolvedValueOnce([{ id: 'one', name: 'Kept open' }]);
+    render(<ConnectionsPane projects={[]} />);
+    const machine = await screen.findByRole('listitem', { name: desktop.name });
+    fireEvent.click(await within(machine).findByRole('button', { name: '1 workspace' }));
+    expect(within(machine).getByText('Kept open')).toBeTruthy();
+    mocks.workspaces.mockRejectedValueOnce(new Error('Remote backend unavailable'));
+    pick(desktop.name, 'Refresh workspaces');
+    await within(machine).findByText('Can’t reach Build box');
+    mocks.workspaces.mockResolvedValueOnce([{ id: 'one', name: 'Kept open' }]);
+    fireEvent.click(within(machine).getByRole('button', { name: 'Retry' }));
+    expect(await within(machine).findByText('Kept open')).toBeTruthy();
+    expect(within(machine).getByRole('button', { name: '1 workspace' }).getAttribute('aria-expanded')).toBe('true');
+  });
+
+  it('opens the connection for editing from an unreachable machine, and names no cause it does not recognize', async () => {
+    mocks.list.mockResolvedValue([desktop]);
+    mocks.workspaces.mockRejectedValueOnce(new Error('Something unexpected happened'));
+    render(<ConnectionsPane projects={[]} />);
+    const alert = (await screen.findByText('Can’t reach Build box')).closest('[role="alert"]')!;
+    // The conclusion alone: no cause it would have to guess.
+    expect(alert.textContent).toBe('Can’t reach Build box');
+    fireEvent.click(within(alert.closest('.remote-problem')!).getByRole('button', { name: 'Edit' }));
+    expect((screen.getByLabelText('SSH host') as HTMLInputElement).value).toBe('build+');
   });
 
 });

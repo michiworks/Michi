@@ -1,5 +1,3 @@
-import React from 'react';
-
 type Tab = 'chats' | 'artifacts' | 'digests';
 
 interface Props {
@@ -11,6 +9,8 @@ interface Props {
   /** A phone's narrower column: the search takes its own full-width row above
    *  the tabs instead of squeezing in beside them. */
   compact?: boolean;
+  /** False while Settings › Digest is off: the Digests tab is not offered. */
+  showDigests?: boolean;
 }
 
 const TAB_LABELS: Record<Tab, string> = {
@@ -21,7 +21,8 @@ const TAB_LABELS: Record<Tab, string> = {
 
 const TABS: Tab[] = ['chats', 'artifacts', 'digests'];
 
-export default function ManageTabs({ activeTab, onChange, counts, filter, onFilterChange, compact = false }: Props) {
+export default function ManageTabs({ activeTab, onChange, counts, filter, onFilterChange, compact = false, showDigests = true }: Props) {
+  const tabs = showDigests ? TABS : TABS.filter((t) => t !== 'digests');
   return (
     <div
       style={{
@@ -33,7 +34,7 @@ export default function ManageTabs({ activeTab, onChange, counts, filter, onFilt
         marginBottom: 22,
       }}
     >
-      {TABS.map((t) => {
+      {tabs.map((t) => {
         const isActive = t === activeTab;
         return (
           <button
@@ -76,20 +77,15 @@ export default function ManageTabs({ activeTab, onChange, counts, filter, onFilt
       })}
       <div style={{ flex: 1 }} />
       <label
+        className={compact ? 'ui-search' : undefined}
         style={compact ? {
           order: -1,
           flexBasis: '100%',
-          display: 'flex',
-          alignItems: 'center',
-          gap: 8,
+          height: 'auto',
           minHeight: 44,
           marginBottom: 8,
           padding: '0 12px',
           boxSizing: 'border-box',
-          border: '1px solid var(--term-line)',
-          borderRadius: 'var(--ui-radius)',
-          background: 'var(--term-surface)',
-          color: 'var(--term-muted)',
         } : {
           display: 'flex',
           alignItems: 'center',
@@ -106,17 +102,15 @@ export default function ManageTabs({ activeTab, onChange, counts, filter, onFilt
           value={filter}
           onChange={(e) => onFilterChange(e.target.value)}
           placeholder="Search…"
-          style={{
+          style={compact ? { fontSize: 'var(--fs-xl)' } : {
             border: 'none',
             background: 'transparent',
             fontFamily: 'var(--ui-font)',
-            fontSize: compact ? 'var(--fs-xl)' : 'var(--fs-lg)',
+            fontSize: 'var(--fs-lg)',
             color: 'var(--term-fg)',
             padding: 0,
-            outline: 'none',
-            width: compact ? '100%' : 160,
+            width: 160,
             minWidth: 0,
-            flex: compact ? 1 : undefined,
           }}
         />
       </label>

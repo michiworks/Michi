@@ -17,16 +17,15 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 
-import { AgentPolicyCategory, AgentPolicyDecision, AgentRunEventType, AgentRunStatus, createDurableTurn, applyTurnEvent, PANE_KINDS, PaneInspectionError, type ChatStreamEvent, type EffectiveAgentDefinitionV1, type PaneFeedEventV1 } from 'michi-shared';
+import { AgentPolicyCategory, AgentPolicyDecision, AgentRunEventType, AgentRunStatus, createDurableTurn, applyTurnEvent, PANE_KINDS, PaneInspectionError, type ChatStreamEvent, type EffectiveAgentDefinitionV1, type PaneFeedEventV1, type SurfacePaneKind } from 'michi-shared';
 import { closeDb, initDb, getDb } from '../src/services/db';
-import { beginTurn, finalizeTurn, saveEdge, saveNode, saveTree, saveWorkspace, updateNodeTitle, saveMessage, getCompletedTurnCount, getNodesMetadataByIds, type NodeRow } from '../src/services/dbRepository';
+import { beginTurn, finalizeTurn, saveEdge, saveNode, saveTree, saveWorkspace, updateNodeTitle, saveMessage, getCompletedTurnCount, getMessageCountsByNode, getNodesMetadataByIds, type NodeRow } from '../src/services/dbRepository';
 
 import { AgentRunsRepository } from '../src/services/agentRunsRepository';
 import { LOCAL_AGENT_OWNER_ID } from '../src/services/agentOwner';
-import { inspect, scopeForCaller, type PaneInspectionCaller, __testOnlyPanePresenceRegistry } from '../src/services/paneInspection';
-import { paneInspectionRing } from '../src/services/paneInspectionRing';
+import { inspect, paneContentSnapshot, scopeForCaller, type PaneInspectionCaller, __testOnlyPanePresenceRegistry } from '../src/services/paneInspection';
+import { contentEquals, paneInspectionRing } from '../src/services/paneInspectionRing';
 import { PanePresenceRegistry } from '../src/services/panePresence';
-import { type SurfacePaneKind } from '../src/services/paneInspectionProjection.surface';
 import { readOutput } from '../src/services/paneInspectionOutput';
 import { waitPane } from '../src/services/paneInspectionWait';
 import { PaneFeed, systemPaneSubscribeClock, configurePaneInspectionEventBus } from '../src/services/paneInspectionSubscribe';
@@ -254,6 +253,20 @@ describe('PaneInspectionService.inspect', () => {
     assert.equal(paneInspectionRing.getRevision(descriptor.ref.paneId), revision);
   });
 
+  test('inspect and read_pane_output take the last updated of two turns started at once', () => {
+    for (const [nodeId, order] of [['tie-a', ['older', 'newer']], ['tie-b', ['newer', 'older']]] as const) {
+      seedNode(nodeId);
+      for (const name of order) seedCompletedTurn(nodeId, `${nodeId}-${name}`, 100);
+      getDb().prepare('UPDATE turns SET updated_at = ? WHERE turn_id = ?').run(500, `${nodeId}-newer`);
+      getDb().prepare('UPDATE turns SET updated_at = ? WHERE turn_id = ?').run(400, `${nodeId}-older`);
+      const execution = inspect(caller(), { locator: { nodeId } }).execution;
+      assert.equal(execution.status === 'ready' && execution.value?.ref.kind === 'chat_turn' ? execution.value.ref.turnId : null,
+        `${nodeId}-newer`, `inspect ${nodeId}`);
+      const output = readOutput(caller(), { locator: { nodeId }, selection: 'latest', limitBytes: 1024 });
+      assert.equal(output.outputId, `chat_turn:${nodeId}-newer`, `read_pane_output ${nodeId}`);
+    }
+  });
+
   test('mixed legacy history remains partial in both individual and batch metadata', () => {
     seedNode('legacy-node');
     saveMessage({ id: 'legacy-answer', node_id: 'legacy-node', role: 'assistant', content: 'old answer', seq: 0, created_at: 1 });
@@ -261,6 +274,33 @@ describe('PaneInspectionService.inspect', () => {
     assert.deepEqual(getCompletedTurnCount('legacy-node', OWNER), { count: null, coverage: 'partial' });
     assert.deepEqual(getNodesMetadataByIds(['legacy-node'], OWNER).get('legacy-node')?.completedTurns, { count: null, coverage: 'partial' });
     assert.equal(inspect(caller(), { locator: { nodeId: 'legacy-node' } }).timeline.firstExecutionStartedAt, null);
+  });
+
+  test('individual and batch metadata count messages and turns alike', () => {
+    seedNode('counted');
+    seedCompletedTurn('counted', 'counted-turn');
+    saveMessage({ id: 'counted-note', node_id: 'counted', role: 'system', content: 'note', seq: 5, created_at: 1 });
+    seedNode('empty');
+    seedNode('mixed');
+    saveMessage({ id: 'mixed-legacy', node_id: 'mixed', role: 'assistant', content: 'old', seq: 0, created_at: 1 });
+    seedCompletedTurn('mixed', 'mixed-turn');
+    getDb().prepare('UPDATE workspaces SET owner_user_id = ? WHERE id = ?').run(OWNER, WORKSPACE);
+    const ids = ['counted', 'empty', 'mixed'];
+    const individually = (userId: string) => Object.fromEntries(ids.map((id) => [id,
+      { messageCounts: getMessageCountsByNode(id, userId), completedTurns: getCompletedTurnCount(id, userId) }]));
+    const batched = (userId: string) => Object.fromEntries([...getNodesMetadataByIds(ids, userId)]
+      .map(([id, entry]) => [id, { messageCounts: entry.messageCounts, completedTurns: entry.completedTurns }]));
+    try {
+      for (const cloud of [false, true]) {
+        if (cloud) process.env.MICHI_CLOUD = '1';
+        assert.deepEqual(batched(OWNER), individually(OWNER), cloud ? 'cloud' : 'local');
+      }
+      assert.deepEqual(individually(OWNER).counted, {
+        messageCounts: { total: 3, user: 1, assistant: 1 }, completedTurns: { count: 1, coverage: 'complete' } });
+      assert.deepEqual(individually('other-owner').counted, {
+        messageCounts: { total: 0, user: 0, assistant: 0 }, completedTurns: { count: 0, coverage: 'complete' } });
+      assert.deepEqual(batched('other-owner'), {});
+    } finally { delete process.env.MICHI_CLOUD; }
   });
 
   test('legacy previews can be read by output identity without exposing user messages or another node', () => {
@@ -327,6 +367,38 @@ describe('PaneInspectionService.inspect', () => {
     assert.equal(hiddenRunLineage.value.parentRunId, null);
   });
 
+  test('pane content leaves out read times, cursors and keepalives, and keeps everything else', () => {
+    seedNode('content-node');
+    const descriptor = inspect(caller(), { locator: { nodeId: 'content-node' } });
+    const view = { windowId: 'w', uiPaneId: 'ui', treeId: null, visible: true, openedAtClient: 5, registeredAt: 1, lastSeenAt: 2 };
+    const base = { ...descriptor, presence: { ...descriptor.presence, views: [view] } };
+    const same = (other: typeof base) => contentEquals(paneContentSnapshot(base), paneContentSnapshot(other));
+    assert.equal(same({ ...base, observation: { ...base.observation, observedAt: 999, cursor: 'other-cursor' } }), true);
+    assert.equal(same({ ...base, presence: { ...base.presence, views: [{ ...view, registeredAt: 7, lastSeenAt: 9 }] } }), true);
+    assert.equal(same({ ...base, presence: { ...base.presence, views: [{ ...view, visible: false }] } }), false);
+    assert.equal(same({ ...base, presence: { ...base.presence, views: [{ ...view, openedAtClient: 6 }] } }), false);
+    assert.equal(same({ ...base, latestOutput: { status: 'unknown', reason: 'changed' } }), false);
+  });
+
+  test('a wait for a change outlasts presence keepalives', async () => {
+    seedNode('kept-alive');
+    const { ref } = inspect(caller(), { locator: { nodeId: 'kept-alive' } });
+    const presenceCaller = { ownerUserId: OWNER, workspaceId: WORKSPACE, connectionId: 'conn-1' };
+    const submitted = __testOnlyPanePresenceRegistry.submitPresence(presenceCaller, { viewRevision: 1, windowId: 'window-k',
+      views: [{ paneId: ref.paneId, windowId: 'window-k', uiPaneId: 'ui-k', treeId: null, visible: true, openedAtClient: null }] });
+    assert.equal(submitted.ok, true);
+    const before = inspect(caller(), { locator: { nodeId: 'kept-alive' } });
+    const keepalive = setTimeout(() => {
+      if (submitted.ok) __testOnlyPanePresenceRegistry.keepalive(presenceCaller, { rendererLeaseId: submitted.rendererLeaseId });
+    }, 20);
+    try {
+      const waited = await waitPane(caller(), { locator: { nodeId: 'kept-alive' }, until: 'changed', cursor: before.observation.cursor, timeoutMs: 80 });
+      assert.equal(waited.reason, 'timed_out');
+    } finally { clearTimeout(keepalive); }
+    const after = inspect(caller(), { locator: { nodeId: 'kept-alive' } });
+    assert.notEqual(after.presence.views[0]?.lastSeenAt, before.presence.views[0]?.lastSeenAt, 'the keepalive moved lastSeenAt');
+  });
+
   test('real inspect, wait and resumed feed preserve intervening changes and usable replay cursors', async () => {
     seedNode('resumed-node');
     const before = inspect(caller(), { locator: { nodeId: 'resumed-node' } });
@@ -361,6 +433,25 @@ describe('PaneInspectionService.inspect', () => {
     assert.ok(descriptor.latestOutput.status === 'ready' && descriptor.latestOutput.value?.text.endsWith('LATEST_MARKER'));
     repo.createAttempt({ operationId: 'attempt-two', ownerUserId: OWNER, runId: run.id, profileIndex: 0, runtimeProfile: RUNTIME_PROFILE, recoveryEnvelope: null });
     assert.equal(readOutput(caller(), { locator: { runId: run.id }, selection: 'latest', outputId: output.outputId, limitBytes: 65536 }).text, output.text);
+  });
+
+  test('inspect and read_pane_output name a live Attempt\'s output alike', () => {
+    const repo = new AgentRunsRepository();
+    const run = createRun(repo, 'live-output');
+    const attempt = repo.createAttempt({ operationId: 'live-attempt', ownerUserId: OWNER, runId: run.id, profileIndex: 0, runtimeProfile: RUNTIME_PROFILE, recoveryEnvelope: null });
+    for (const [seq, text] of ['Hello', 'World'].entries()) repo.appendEventAndProject(OWNER, run.id, seq, {
+      type: AgentRunEventType.Assistant, attemptId: attempt.id, payload: { version: 1, text },
+    });
+    const descriptor = inspect(caller(), { locator: { runId: run.id } });
+    assert.equal(descriptor.latestOutput.status, 'ready');
+    const preview = descriptor.latestOutput.status === 'ready' ? descriptor.latestOutput.value : null;
+    const output = readOutput(caller(), { locator: { runId: run.id }, selection: 'latest', limitBytes: 1024 });
+    assert.deepEqual(
+      { outputId: output.outputId, text: output.text, outputRevision: output.outputRevision, partial: output.partial },
+      { outputId: preview?.outputId, text: preview?.text, outputRevision: preview?.outputRevision, partial: preview?.partial },
+    );
+    assert.deepEqual({ outputId: output.outputId, text: output.text, partial: output.partial },
+      { outputId: `run-attempt:${attempt.id}`, text: 'HelloWorld', partial: true });
   });
 
   test('production event-bus configuration wakes default waits immediately and sends the final descriptor', async () => {

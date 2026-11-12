@@ -16,12 +16,6 @@ const entry = (over: Partial<PaneScrollEntry> = {}): PaneScrollEntry => ({
   ...over,
 });
 
-const msgs = [
-  { id: 'm1', createdAt: 500 },
-  { id: 'm2', createdAt: 900 },
-  { id: 'm3', createdAt: 1000 },
-];
-
 describe('resolvePaneRestore', () => {
   it('messages without createdAt are never unseen → bottom', () => {
     const legacyMsgs = [{ id: 'm1' }, { id: 'm2' }];

@@ -30,7 +30,7 @@ for (const palette of ['bone', 'monokai']) test(`global Settings opens as a wind
   // Its search starts with focus, and its pages sit in groups beside the page.
   const search = drawer.getByRole('searchbox', { name: 'Search settings' });
   const sections = drawer.getByRole('navigation', { name: 'Settings sections' });
-  await expect(sections.getByRole('group', { name: 'Connections' }).getByRole('button', { name: 'Machines', exact: true })).toBeVisible();
+  await expect(sections.getByRole('group', { name: 'Workspace' }).getByRole('button', { name: 'Machines', exact: true })).toBeVisible();
   await expect(sections.getByRole('button', { name: 'Keyboard shortcuts', exact: true })).toBeVisible();
   await expect(drawer.getByRole('complementary', { name: 'Preview' })).toBeVisible();
   await expect(areaButton(page, 'settings')).toHaveAttribute('aria-expanded', 'true');
@@ -72,9 +72,10 @@ for (const palette of ['bone', 'monokai']) test(`global Settings opens as a wind
   await expect(drawer).toHaveCount(0);
 
   await page.setViewportSize({ width: 390, height: 844 });
-  await openSettings(page, 'Meta agent');
+  // Settings › Meta agent is Settings › <name> now (DESIGN-v2 §1.5).
+  await openSettings(page, 'Michi');
   // A phone shows the chosen section alone; its header Back returns to the list.
-  await expect(drawer.getByRole('heading', { level: 1, name: 'Meta agent', exact: true })).toBeVisible();
+  await expect(drawer.getByRole('heading', { level: 1, name: 'Michi', exact: true })).toBeVisible();
   await expect(drawer.getByRole('navigation', { name: 'Settings sections' })).toBeHidden();
   await expect(drawer.getByRole('button', { name: 'Open sidebar', exact: true })).toHaveCount(0);
   const narrow = await drawer.boundingBox();
@@ -88,18 +89,18 @@ for (const palette of ['bone', 'monokai']) test(`global Settings opens as a wind
   await drawer.locator('.ui-overlay-header').getByRole('button', { name: 'Back', exact: true }).click();
   const list = drawer.getByRole('navigation', { name: 'Settings sections' });
   await expect(list).toBeVisible();
-  const machines = list.getByRole('group', { name: 'Connections' }).getByRole('button', { name: 'Machines', exact: true });
+  const machines = list.getByRole('group', { name: 'Workspace' }).getByRole('button', { name: 'Machines', exact: true });
   await expect(machines).toBeVisible();
   expect((await machines.boundingBox())!.height).toBeGreaterThanOrEqual(44);
   await expect(list.getByRole('button', { name: /shortcuts/i })).toHaveCount(0);
   expect(await drawer.locator('.terminal-settings-sidebar').evaluate(element => element.scrollWidth <= element.clientWidth)).toBe(true);
   await page.screenshot({ path: resolve(evidence, `global-settings-narrow-list-${palette}.png`) });
+  // Trash is a page of Settings: it opens in the drawer, and Back returns to the list.
   await list.getByRole('button', { name: 'Trash', exact: true }).click();
-  await expect(drawer).toHaveCount(0);
-  await expect(page.locator('.terminal-topbar')).toHaveAttribute('data-page', 'trash');
-  await openSettings(page, 'Appearance');
+  await expect(drawer.getByRole('heading', { level: 1, name: 'Trash', exact: true })).toBeVisible();
+  await drawer.locator('.ui-overlay-header').getByRole('button', { name: 'Back', exact: true }).click();
+  await expect(list).toBeVisible();
   await leaveSettings(page);
-  await expect(page.locator('.terminal-topbar')).toHaveAttribute('data-page', 'trash');
   expect(errors).toEqual([]);
 });
 

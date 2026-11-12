@@ -1,4 +1,4 @@
-import React, { useMemo, useState } from 'react';
+import { useMemo, useState } from 'react';
 import type { AgentResourceIdentity } from '../../../state/agentIdentity';
 import { AgentRunCard } from './AgentRunCard';
 import { selectAgentRunActivityGroups, type LocatedAgentRun } from './agentRunSelectors';

@@ -6,13 +6,14 @@ import type { ToolCallState } from '../../../../state/chatTypes';
 import { Button } from '../../../ui/controls';
 import { AssistantLinkChip } from '../../assistant/AssistantLinks';
 import {
-  normalizeToolResultEnvelope, normalizeTurnToolName, parseTurnPageReceipt, putsTaskBoard, taskBoardPageId, taskWriteLine, type TurnPageReceipt,
+  normalizeToolResultEnvelope, normalizeTurnToolName, parseTurnPageReceipt, putsTaskBoard, receiptPageId, receiptRevealTarget, receiptShows, taskBoardPageId, taskWriteLine, type TurnPageReceipt,
 } from '../../../../lib/turnPageReceipt';
 import { backendEntityId } from '../../../../config/backendIdentity';
 import { toolPurpose } from '../../toolCallGrouping';
 import { changePageChange, deletePage, fetchPage, fetchPageBatchState, listPageChanges, PageApiError, redoPageBatch, restorePage, revertPageBatch } from '../../../../services/api/pages';
 import { addLayoutRule, deleteLayoutRule, fetchLayoutRules } from '../../../../services/api/spacesHome';
 import { notifyPageChanged } from '../../../../state/pages/pageEvents';
+import { batchOutcomeNotice } from '../../../../state/pages/pageUndo';
 import { openSpacesPage } from '../../../../state/metaChat/spacesPages';
 import { parseConversationStart, type ConversationStartCard } from '../../../../state/metaChat/conversationStart';
 import {
@@ -20,7 +21,9 @@ import {
 } from '../../../../state/metaChat/pageCardStates';
 import { LayoutRulesPopover } from '../layoutRules/LayoutRulesPopover';
 import { useLayoutRules } from '../layoutRules/useLayoutRules';
-import { useMetaChatRevealPage } from './MetaChatArea';
+import { useMetaChatRevealPage } from './metaChatRevealPage';
+// The cards' and the panel's shared Pages styles (the window that loaded them is retired).
+import './metaChat.css';
 
 export interface MetaChatCardsContext {
   backendConnectionId: string;
@@ -105,9 +108,7 @@ function PageWriteCard({ toolId, tool, receipt, filled = NO_RECEIPTS, boardPageI
   const revealPage = useMetaChatRevealPage();
   const workspaceId = receipt.workspaceId ?? context.workspaceId;
   const identity = useMemo(() => ({ backendConnectionId: context.backendConnectionId, workspaceId }), [context.backendConnectionId, workspaceId]);
-  const pageId = receipt.resourceKind === 'page'
-    ? receipt.resourceId
-    : receipt.originatingPageId ?? receipt.originatingPageIds[0] ?? (receipt.tasks ? boardPageId : null);
+  const pageId = receiptPageId(receipt, boardPageId, context.currentPageId);
 
   useEffect(() => {
     if (getPageCardState(toolId)) return undefined;
@@ -139,10 +140,13 @@ function PageWriteCard({ toolId, tool, receipt, filled = NO_RECEIPTS, boardPageI
       return { kind: 'created', removed: true };
     }
     let conflicts = 0;
-    if (receipt.batchId) conflicts = (await revertPageBatch(receipt.batchId, identity)).conflicts.length;
-    else for (const change of applied) await changePageChange(change.id, 'revert', identity);
-    // Conflicting changes are skipped and stay applied, so the card stays on Undo, as it reads after a reload.
-    if (conflicts > 0) toast("Some changes couldn't be undone: they were edited since.");
+    if (receipt.batchId) {
+      const answer = await revertPageBatch(receipt.batchId, identity);
+      conflicts = answer.conflicts.length;
+      const notice = batchOutcomeNotice({ done: answer.reverted.length, conflicts }, 'undone');
+      // Conflicting changes are skipped and stay applied, so the card stays on Undo, as it reads after a reload.
+      if (notice) toast.error(notice);
+    } else for (const change of applied) await changePageChange(change.id, 'revert', identity);
     return { kind: 'applied', undone: conflicts === 0 };
   }, "Couldn't undo");
   const restore = () => run(async () => {
@@ -152,7 +156,9 @@ function PageWriteCard({ toolId, tool, receipt, filled = NO_RECEIPTS, boardPageI
     }
     // Undo reverted the whole batch (including a proposal accepted since, and a cut-off receipt's unknown changes), so Restore redoes the whole batch.
     if (receipt.batchId) {
-      if ((await redoPageBatch(receipt.batchId, identity)).conflicts.length > 0) toast("Some changes couldn't be restored: they were edited since.");
+      const answer = await redoPageBatch(receipt.batchId, identity);
+      const notice = batchOutcomeNotice({ done: answer.redone.length, conflicts: answer.conflicts.length }, 'restored');
+      if (notice) toast.error(notice);
     } else for (const change of applied) await changePageChange(change.id, 'redo', identity);
     return { kind: 'applied', undone: false };
   }, "Couldn't restore");
@@ -163,9 +169,10 @@ function PageWriteCard({ toolId, tool, receipt, filled = NO_RECEIPTS, boardPageI
       return;
     }
     revealPage?.();
+    const target = receipt.created ? null : receiptRevealTarget(receipt);
     void openSpacesPage({
       pageId, workspaceId, backendConnectionId: context.backendConnectionId,
-      ...(receipt.affectedTargetIds[0] && receipt.resourceKind === 'page' && !receipt.created ? { blockId: receipt.affectedTargetIds[0] } : {}),
+      ...(target ? { blockId: target.targetId, ...(target.databaseId ? { databaseId: target.databaseId } : {}) } : {}),
       currentPageId: context.currentPageId,
     });
   };
@@ -367,7 +374,7 @@ function foldCreatedPages(cards: CardItem[]): CardItem[] {
 export function MetaChatCards({ tools, context }: { tools: readonly ToolCallState[]; context: MetaChatCardsContext }) {
   const cards = useMemo(() => foldCreatedPages(tools.flatMap((tool): CardItem[] => {
     const receipt = parseTurnPageReceipt(tool, context.backendConnectionId);
-    if (receipt && (receipt.appliedCount > 0 || receipt.proposedCount > 0 || receipt.created)) return [{ kind: 'page', tool, receipt }];
+    if (receipt && receiptShows(receipt)) return [{ kind: 'page', tool, receipt }];
     const rule = parseLayoutRuleAdded(tool, context.backendConnectionId);
     if (rule) return [{ kind: 'rule', tool, rule }];
     const start = parseConversationStart(tool);

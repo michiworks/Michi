@@ -19,7 +19,8 @@ const performanceBuild = 'node_modules/.cache/pane-performance-build';
 export default defineConfig({
   testDir: './specs',
   fullyParallel: true,
-  forbidOnly: !!process.env.CI,
+  // No CI runs these, so a stray .only must fail the run instead of narrowing it.
+  forbidOnly: true,
   retries: process.env.CI ? 1 : 0,
   workers: process.env.CI ? 2 : undefined,
   reporter: process.env.CI ? [['github'], ['list']] : 'list',
@@ -50,6 +51,9 @@ export default defineConfig({
       ? `npm run shared:build && npm --prefix frontend run build:raw -- --outDir ${performanceBuild} && npm --prefix frontend run preview -- --outDir ${performanceBuild} --host 127.0.0.1 --port ${e2ePort} --strictPort`
       : `npm run shared:build && npm --prefix frontend run dev:raw -- --host 127.0.0.1 --port ${e2ePort}`,
     cwd: '..',
+    // Shells here can inherit NODE_ENV=production, which turns off Vite's dev
+    // mode (import.meta.env.DEV) for the dev server.
+    env: { NODE_ENV: production ? 'production' : 'development' },
     url: e2eBaseUrl,
     // A caller-supplied port is an isolation request: never reuse a server
     // from another checkout/worktree just because it happens to answer.

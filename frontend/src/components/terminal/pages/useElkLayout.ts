@@ -9,7 +9,7 @@
  */
 import { useState, useEffect, useRef } from 'react';
 import type { ELK, ElkNode, ElkExtendedEdge } from 'elkjs/lib/elk-api';
-import type { ProjectEdge, Tree } from '../../../state/chatTypes';
+import type { ProjectEdge } from '../../../state/chatTypes';
 import { CARD_H, CARD_W } from '../map/mapCardMetrics';
 
 // Share the engine and concurrent loads, but don't block Map's chrome or other
@@ -44,64 +44,31 @@ const PAD = 36;
 
 interface UseElkLayoutParams {
   enabled: boolean;
-  trees: readonly Tree[];
-  activeTree: Tree | null;
+  /** Card ids in model order (mapGraphNodeIds). */
+  ids: readonly string[];
+  /** The edges among `ids` that shape the layout. */
   edges: readonly ProjectEdge[];
-  liveSet: Set<string>;
-  mode: string; // 'thread' | 'graph' | 'overview'
   /** Layout height per card id (measured; CARD_H when unknown). */
   cardHeights: ReadonlyMap<string, number>;
-  graphChildren: Map<string, string[]>;
-}
-
-function collectReachableIds(
-  rootId: string,
-  children: Map<string, string[]>,
-  liveSet: Set<string>,
-): string[] {
-  const ids: string[] = [];
-  const seen = new Set<string>();
-  const queue = [rootId];
-  while (queue.length) {
-    const id = queue.shift()!;
-    if (seen.has(id) || !liveSet.has(id)) continue;
-    seen.add(id);
-    ids.push(id);
-    for (const c of children.get(id) ?? []) queue.push(c);
-  }
-  return ids;
 }
 
 export function useElkLayout({
   enabled,
-  trees,
-  activeTree,
+  ids,
   edges,
-  liveSet,
-  mode,
   cardHeights,
-  graphChildren,
 }: UseElkLayoutParams): ElkLayoutResult {
   const [result, setResult] = useState<ElkLayoutResult>(null);
   // Generation counter to discard stale async results.
   const genRef = useRef(0);
 
   useEffect(() => {
-    if (!enabled || mode === 'overview') {
+    if (!enabled) {
       setResult(null);
       return;
     }
 
-    const graphTrees =
-      mode === 'thread'
-        ? activeTree
-          ? [activeTree]
-          : []
-        : [...trees]
-            .filter((t) => !t.archivedAt && liveSet.has(t.rootNodeId))
-            .sort((a, b) => a.createdAt - b.createdAt);
-
-    if (graphTrees.length === 0) {
+    if (ids.length === 0) {
       setResult({
         ids: [],
         positions: new Map(),
@@ -115,33 +82,15 @@ export function useElkLayout({
     // Build a flat ELK graph with all visible nodes and edges.
     // ELK's layered algorithm handles the full graph at once, including
     // cross-tree merge edges, and routes edges around nodes.
-    const allIds: string[] = [];
-    const idSet = new Set<string>();
-
-    for (const tree of graphTrees) {
-      const ids = collectReachableIds(tree.rootNodeId, graphChildren, liveSet);
-      for (const id of ids) {
-        if (!idSet.has(id)) {
-          idSet.add(id);
-          allIds.push(id);
-        }
-      }
-    }
-
-    const elkNodes: ElkNode[] = allIds.map((id) => (
+    const elkNodes: ElkNode[] = ids.map((id) => (
       { id, width: CARD_W, height: cardHeights.get(id) ?? CARD_H }
     ));
 
-    const elkEdges: ElkExtendedEdge[] = [];
-    for (const e of edges) {
-      if (e.kind && e.kind !== 'branch' && e.kind !== 'merge') continue;
-      if (!idSet.has(e.source) || !idSet.has(e.target)) continue;
-      elkEdges.push({
-        id: `${e.source}->${e.target}`,
-        sources: [e.source],
-        targets: [e.target],
-      });
-    }
+    const elkEdges: ElkExtendedEdge[] = edges.map((e) => ({
+      id: `${e.source}->${e.target}`,
+      sources: [e.source],
+      targets: [e.target],
+    }));
 
     const graph: ElkNode = {
       id: 'root',
@@ -207,7 +156,7 @@ export function useElkLayout({
       }
 
       setResult({
-        ids: allIds,
+        ids: [...ids],
         positions,
         edgeRoutes,
         width: maxX + PAD,
@@ -219,7 +168,7 @@ export function useElkLayout({
       setResult(null);
     });
     return () => { genRef.current += 1; };
-  }, [enabled, trees, activeTree, edges, liveSet, mode, cardHeights, graphChildren]);
+  }, [enabled, ids, edges, cardHeights]);
 
   return result;
 }

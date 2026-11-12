@@ -94,11 +94,14 @@ describe('Pi long tasks survive stops, restarts and compaction', () => {
       provider: 'openai', model: 'gpt-4.1-mini', enableFollowUps: false, permissionBroker: allowTools };
   }
 
-  /** A fresh backend: its own runtime and ChatHub over the same SQLite and Pi session files. */
+  /**
+   * A fresh backend: its own runtime and ChatHub over the same SQLite and Pi session files. No Michi Memory block: these
+   * tests compare what the user typed with what reaches the model (a stopped turn's block is sent again next turn).
+   */
   function backend() {
     const runtime = new PiRuntime({ spawnBranches: async () => [], saveContext: () => null, updateContext: () => null });
     runtimes.push(runtime);
-    return { runtime, hub: new ChatHub({ retentionMs: 60_000, titleGenerator: null, pageManifestBuilder: () => '' }) };
+    return { runtime, hub: new ChatHub({ retentionMs: 60_000, titleGenerator: null, pageManifestBuilder: () => '', memoryInjector: null }) };
   }
 
   /** Start a turn and collect the frames a subscriber sees for it. */

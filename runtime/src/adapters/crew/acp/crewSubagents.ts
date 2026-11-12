@@ -1,6 +1,8 @@
 import {
   clampSubagentText,
+  oneLine,
   SUBAGENT_LIMITS,
+  subagentInitialQuery,
   type SubagentActivityPayload,
   type SubagentInfo,
 } from 'michi-shared';
@@ -30,11 +32,6 @@ function str(value: unknown): string | undefined {
   return typeof value === 'string' && value.trim() ? value : undefined;
 }
 
-function oneLine(text: string, max: number): string {
-  const flat = text.replace(/\s+/g, ' ').trim();
-  return flat.length > max ? `${flat.slice(0, max - 1)}…` : flat;
-}
-
 export function createCrewSubagentFold(now: () => number = Date.now) {
   const known = new Set<string>();
   const lastTool = new Map<string, { id: string; title: string; toolKind?: string }>();
@@ -48,7 +45,7 @@ export function createCrewSubagentFold(now: () => number = Date.now) {
       sessionId: id,
       sessionName: agent ?? '',
       agentName: agent ?? '',
-      initialQuery: task ? oneLine(task.split('\n')[0], 200) : '',
+      initialQuery: subagentInitialQuery(task),
       status: 'working',
       group: '',
       dependsOn: [],

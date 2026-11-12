@@ -279,6 +279,44 @@ describe('SshTunnelManager', () => {
     } finally { manager.shutdown(); }
   });
 
+  test('logs probe failures, the detach, each retry and reconnect, and SSH exits by connection id only', async (t) => {
+    t.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: 0 });
+    const lines: Array<[string, string, string, Record<string, unknown> | undefined]> = [];
+    const logger = {
+      info: (stage: string, msg: string, meta?: Record<string, unknown>) => { lines.push(['info', stage, msg, meta]); },
+      warn: (stage: string, msg: string, meta?: Record<string, unknown>) => { lines.push(['warn', stage, msg, meta]); },
+    };
+    const children: FakeChild[] = [];
+    let alive = false;
+    const manager = new SshTunnelManager({ allocatePort: async () => 32123,
+      spawnSsh: () => { const child = createFakeChild(); children.push(child); return child; }, waitUntilReady: async () => {},
+      probeTransport: async () => alive, probeIntervalMs: 100, probeFailureThreshold: 2, recoveryDelayMs: 10, logger });
+    const tick = async (ms: number) => { t.mock.timers.tick(ms); for (let i = 0; i < 12; i++) await Promise.resolve(); };
+    try {
+      await manager.apiUrl(sshConnection());
+      await tick(100); await tick(100); await tick(10);
+      await tick(100); alive = true; await tick(100);
+      emitExit(children[1], 255);
+      await tick(10);
+    } finally { manager.shutdown(); }
+    const id = { connectionId: 'remote-1' };
+    assert.deepEqual(lines, [
+      ['info', 'tunnel', 'connected', { ...id, attempt: 0 }],
+      ['warn', 'tunnel', 'forward probe failed', { ...id, failures: 1, threshold: 2 }],
+      ['warn', 'tunnel', 'forward stopped responding; detaching', { ...id, failures: 2 }],
+      ['info', 'tunnel', 'reconnect scheduled', { ...id, attempt: 1, delayMs: 10 }],
+      ['info', 'tunnel', 'reconnected', { ...id, attempt: 1 }],
+      ['warn', 'tunnel', 'forward probe failed', { ...id, failures: 1, threshold: 2 }],
+      ['info', 'tunnel', 'forward responding again', { ...id, failures: 1 }],
+      ['warn', 'tunnel', 'ssh exited', { ...id, code: 255, signal: null }],
+      ['info', 'tunnel', 'reconnect scheduled', { ...id, attempt: 1, delayMs: 10 }],
+      ['info', 'tunnel', 'reconnected', { ...id, attempt: 1 }],
+    ]);
+    for (const secret of ['build-server-box', 'builder', 'remote-secret-token', '2222', '4649']) {
+      assert.equal(JSON.stringify(lines).includes(secret), false, secret);
+    }
+  });
+
   test('a late failed health check cannot kill a new connection or reconnect after shutdown', async () => {
     let finish!: (alive: boolean) => void;
     const children: FakeChild[] = [];

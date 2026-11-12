@@ -1,4 +1,3 @@
-import React from 'react';
 import type { HomeSectionKey } from 'michi-shared';
 import { HomeSectionBlock } from './HomeSections';
 import { useSpacesHomeSections } from './homeCounts';

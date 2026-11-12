@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import {
-  LAYOUT_RULE_SECTION_LIMITS, PAGE_LAYOUT_RULE_LIMITS, PAGE_LAYOUT_PREFERENCES_LIMIT,
+  HOME_SECTION_KEYS, LAYOUT_RULE_SECTION_LIMITS, PAGE_LAYOUT_RULE_LIMITS, PAGE_LAYOUT_PREFERENCES_LIMIT,
   type HomeSectionKey, type LayoutRuleSectionLimit, type LayoutRuleSourceMessage, type PageLayoutRule, type PageLayoutPreferences,
 } from 'michi-shared';
 import { getDb } from '../db';
@@ -10,7 +10,6 @@ import { pageRecord } from './repository';
 
 const isObject = (value: unknown): value is Record<string, unknown> => typeof value === 'object' && value !== null && !Array.isArray(value);
 const shortId = (value: unknown): value is string => typeof value === 'string' && value.length > 0 && value.length <= 200;
-const SECTIONS: readonly HomeSectionKey[] = ['waiting', 'stalled', 'done'];
 const inRange = (value: unknown, max: number): value is number => Number.isSafeInteger(value) && (value as number) >= 1 && (value as number) <= max;
 
 function storedSource(value: unknown): LayoutRuleSourceMessage | null | undefined {
@@ -23,7 +22,7 @@ function storedSource(value: unknown): LayoutRuleSourceMessage | null | undefine
 export function parseSectionLimit(value: unknown): LayoutRuleSectionLimit | null | undefined {
   if (value === undefined || value === null) return null;
   if (!isObject(value) || !Object.keys(value).every((key) => ['section', 'maxAgeDays', 'maxItems'].includes(key))) return undefined;
-  if (!SECTIONS.includes(value.section as HomeSectionKey)) return undefined;
+  if (!HOME_SECTION_KEYS.includes(value.section as HomeSectionKey)) return undefined;
   const age = value.maxAgeDays;
   const items = value.maxItems;
   if (age !== undefined && !inRange(age, LAYOUT_RULE_SECTION_LIMITS.maxAgeDays)) return undefined;
@@ -185,7 +184,7 @@ export function effectiveSectionLimits(rules: readonly PageLayoutRule[]): Partia
     if (limit?.maxItems !== undefined) items.set(limit.section, rule);
   }
   const out: Partial<Record<HomeSectionKey, EffectiveSectionLimit>> = {};
-  for (const section of SECTIONS) {
+  for (const section of HOME_SECTION_KEYS) {
     const byAge = age.get(section);
     const byItems = items.get(section);
     if (!byAge && !byItems) continue;

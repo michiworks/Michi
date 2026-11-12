@@ -1,13 +1,24 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { parseWorkflowRunDto, type WorkflowRunDtoV1 } from 'michi-shared';
+import { approvalForRow } from '../components/terminal/multiModel/multiModelPresentation';
+import { workflowNodeRows } from '../components/terminal/workflows/workflowPresentation';
 import { backendEntityId, backendRequestUrl, mapBackendPayload } from '../config/backendIdentity';
 import { backendApiBase, indexBackendProjects, nodeBackendApiBase, workspaceBackendApiBase } from '../config/backendConnections';
 import { backendFetch, backendStreamResponse } from './api/backendRequest';
-import { backendConnectionGeneration, backendConnectionUnavailable, markBackendConnectionReady, markBackendConnectionUnavailable } from '../config/backendConnectionState';
+import {
+  backendConnectionGeneration, backendConnectionUnavailable, confirmBackendConnection, markBackendConnectionProvisional,
+  markBackendConnectionReady, markBackendConnectionUnavailable, resetBackendConnectionProvisional,
+} from '../config/backendConnectionState';
 import { hydrateBackendWorkspaces } from '../state/chatHydration';
 import { importWorkspaceFile } from './api/uploads';
+import { getPageMaintenance } from './api/pageMaintenance';
+import { listPageComponents } from './api/pageComponents';
+import { pagesFetch } from './api/pages';
 
 import { fetchStream } from './api/streamTransport';
-import { subscribeWorkflowRuns } from './api/workflowRuns';
+import { answerWorkflowApproval, getWorkflowRun, subscribeWorkflowRuns } from './api/workflowRuns';
+import { fetchReadyModels, startMultiModelRun } from './api/multiModelRuns';
+import { workflowCardSections } from '../components/terminal/backgroundWork/workflowCardModel';
 
 describe('remote connection data isolation', () => {
   const connectionId = 'remote-isolation';
@@ -15,7 +26,7 @@ describe('remote connection data isolation', () => {
   const nodeId = backendEntityId(connectionId, 'n1');
   const base = backendApiBase(connectionId);
   beforeEach(() => { markBackendConnectionReady(connectionId); indexBackendProjects([]); });
-  afterEach(() => { vi.unstubAllGlobals(); markBackendConnectionReady(connectionId); });
+  afterEach(() => { vi.unstubAllGlobals(); markBackendConnectionReady(connectionId); resetBackendConnectionProvisional(); });
 
   it('routes a detached remote identity to its own server and never needs a Local registration', async () => {
     const fetch = vi.fn(async (_url: string, _options?: RequestInit) => new Response(JSON.stringify({ workspace: { id: 'ws' }, nodes: [{ id: 'n1', workspace_id: 'ws', acp_session_id: 'n1' }] })));
@@ -73,6 +84,38 @@ describe('remote connection data isolation', () => {
     await importWorkspaceFile(workspaceId, '/srv', 'note.txt', 'abc', { onProgress: vi.fn() });
     expect(sent.url).toBe(`${base}/workspaces/import-file`);
     expect(JSON.parse(sent.body!)).toMatchObject({ workspaceId: 'ws', cwd: '/srv', content: 'abc' });
+  });
+
+  it('checks a healthy remote before a failed upload with progress marks it down, and holds it for a provisional one', async () => {
+    const sends = vi.fn();
+    let outcome: 'gateway' | 'network' = 'gateway';
+    vi.stubGlobal('XMLHttpRequest', class {
+      upload = {};
+      status = 502;
+      responseText = JSON.stringify({ error: 'socket closed' });
+      onload!: () => void;
+      onerror!: () => void;
+      open() {}
+      setRequestHeader() {}
+      send() { sends(); if (outcome === 'gateway') this.onload(); else this.onerror(); }
+    });
+    const health = vi.fn(async (_url: string) => Response.json({ service: 'michi-backend', status: 'healthy' }));
+    vi.stubGlobal('fetch', health);
+    const generation = backendConnectionGeneration(connectionId);
+    const upload = () => importWorkspaceFile(workspaceId, '/srv', 'note.txt', 'abc', { onProgress: vi.fn() });
+    await expect(upload()).rejects.toThrow('socket closed');
+    outcome = 'network';
+    await expect(upload()).rejects.toThrow('upload failed');
+    expect(health.mock.calls.map(([url]) => url)).toEqual([`${base}/health`, `${base}/health`]);
+    expect(backendConnectionUnavailable(connectionId)).toBe(false);
+    expect(backendConnectionGeneration(connectionId)).toBe(generation);
+    markBackendConnectionProvisional(connectionId);
+    const held = upload().catch(() => {});
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(sends).toHaveBeenCalledTimes(2);
+    confirmBackendConnection(connectionId);
+    await held;
+    expect(sends).toHaveBeenCalledTimes(3);
   });
 
   it('rejects stream headers from a previous connection generation', async () => {
@@ -134,6 +177,37 @@ describe('remote connection data isolation', () => {
     expect(fetch.mock.calls.map(([url]) => url)).toEqual([`${base}/workspaces/ws/commands`, `${base}/health`]);
     expect(backendConnectionUnavailable(connectionId)).toBe(false);
     expect(backendConnectionGeneration(connectionId)).toBe(generation);
+  });
+
+  it('keeps a healthy remote available when a Pages or component request fails, and shows the server\'s reason', async () => {
+    const generation = backendConnectionGeneration(connectionId);
+    const fetch = vi.fn(async (url: string) => url.endsWith('/health')
+      ? Response.json({ service: 'michi-backend', status: 'healthy' })
+      : url.endsWith('/maintenance')
+        ? Response.json({ error: { code: 'scheduler_unavailable', message: 'Scheduled jobs are off on this backend' } }, { status: 503 })
+        : Response.json({ error: { code: 'upstream', message: 'socket closed' } }, { status: 502 }));
+    vi.stubGlobal('fetch', fetch);
+    await expect(getPageMaintenance({ backendConnectionId: connectionId, workspaceId })).rejects.toMatchObject({
+      status: 503, code: 'scheduler_unavailable', message: 'Scheduled jobs are off on this backend',
+    });
+    await expect(listPageComponents(workspaceId, connectionId)).rejects.toMatchObject({ status: 502, message: 'socket closed' });
+    expect(fetch.mock.calls.map(([url]) => url)).toEqual([
+      `${base}/workspaces/ws/maintenance`, `${base}/health`, `${base}/workspaces/ws/components`, `${base}/health`,
+    ]);
+    expect(backendConnectionUnavailable(connectionId)).toBe(false);
+    expect(backendConnectionGeneration(connectionId)).toBe(generation);
+  });
+
+  it('holds a Pages write to a remote still shown from the local cache until its own data arrives', async () => {
+    const fetch = vi.fn(async (_url: string) => Response.json({}));
+    vi.stubGlobal('fetch', fetch);
+    markBackendConnectionProvisional(connectionId);
+    const write = pagesFetch(`${base}/pages/p1/edits`, { method: 'POST', body: '{}' });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(fetch).not.toHaveBeenCalled();
+    confirmBackendConnection(connectionId);
+    await write;
+    expect(fetch).toHaveBeenCalledTimes(1);
   });
 
   it('shares an outage check across failed requests and blocks writes when health also fails', async () => {
@@ -217,5 +291,99 @@ describe('remote connection data isolation', () => {
     expect(windowDraft.mentions[0].refId).toBe(backendEntityId(connectionId, 'child'));
     expect(JSON.parse(mapped.metadata).threadMessage.fromNodeId).toBe(backendEntityId(connectionId, 'parent'));
     expect(mapBackendPayload(mapped, connectionId, 'server')).toEqual(raw);
+  });
+
+  it('scopes a multi-model run\'s caller and branch nodes, so its card opens the drawer and branches on a remote', () => {
+    const raw = { run: { id: 'wfr_1', nodeId: 'n1', multiModel: { callerNodeId: 'n1', synthesis: { messageId: 'self-n1-turn' },
+      threads: [{ key: 't1', childNodeId: 'b2', previousChildNodeIds: ['b1'] }, { key: 't2', childNodeId: null }] } } };
+    const mapped = mapBackendPayload(raw, connectionId, 'renderer');
+    const view = mapped.run.multiModel;
+    expect(view.callerNodeId).toBe(nodeId);
+    expect(view.callerNodeId).toBe(mapped.run.nodeId);
+    expect(view.threads[0]).toEqual({ key: 't1', childNodeId: backendEntityId(connectionId, 'b2'), previousChildNodeIds: [backendEntityId(connectionId, 'b1')] });
+    expect(view.threads[1].childNodeId).toBeNull();
+    // Message ids are not connection-scoped; the synthesis link keeps the server's.
+    expect(view.synthesis.messageId).toBe('self-n1-turn');
+    expect(mapped.run.id).toBe('wfr_1');
+    expect(mapBackendPayload(mapped, connectionId, 'server')).toEqual(raw);
+  });
+
+  describe('a remote workflow run', () => {
+    const rawRun = {
+      version: 1, id: 'wfr_1', runtime: 'michi', nativeId: 'mm_1', workspaceId: 'ws', nodeId: 'n1', parentToolCallId: 'toolu_1',
+      name: 'Caches', status: 'running', actions: ['stop'], startedAt: 1, updatedAt: 2, revision: 3,
+      nodes: [
+        { id: 'answer', kind: 'phase', title: 'Answer', status: 'running' },
+        { id: 't1@0', parentId: 'answer', kind: 'agent', title: 'Codex · gpt', status: 'running' },
+      ],
+      approvals: [{ id: 'ap1', nodeId: 't1@0', title: 'Run: ls', requestedAt: 2,
+        options: [{ optionId: 'allow', name: 'Allow once', kind: 'allow_once' }, { optionId: 'deny', name: 'Deny', kind: 'reject_once' }] }],
+      log: [{ at: 2, text: 'Codex started', nodeId: 't1@0' }],
+      multiModel: {
+        version: 1, phase: 'running', title: 'Caches', askPreview: 'Which cache?', callerNodeId: 'n1', callerMessageId: 'm1',
+        callerRuntimeId: 'claude', callerRuntimeLabel: 'Claude', callerModelLabel: 'Opus', permissionMode: 'ask', reviewRounds: 0,
+        threads: [{ key: 't1', runtimeId: 'codex', providerId: null, modelId: 'gpt', reasoning: null, runtimeLabel: 'Codex',
+          modelLabel: 'gpt', context: 'fresh', promptPreview: 'Which cache?', childNodeId: 'c1', previousChildNodeIds: ['c0'],
+          steps: [{ kind: 'answer', round: 0, status: 'waiting' }] }],
+        synthesis: { status: 'pending' },
+      },
+    };
+    const parsed = parseWorkflowRunDto(rawRun)!;
+    // Only the chat references are connection-scoped; step ids are the runtime's own.
+    const expected = {
+      ...parsed, workspaceId, nodeId,
+      multiModel: { ...parsed.multiModel!, callerNodeId: nodeId, threads: [{ ...parsed.multiModel!.threads[0],
+        childNodeId: backendEntityId(connectionId, 'c1'), previousChildNodeIds: [backendEntityId(connectionId, 'c0')] }] },
+    };
+
+    it('keeps its step ids from the feed, so steps nest and a row finds its approval', async () => {
+      const frame = { version: 1, event: 'workflow_run', run: rawRun, emittedAt: 1 };
+      vi.stubGlobal('fetch', vi.fn(async () => new Response(`event: workflow_run\ndata: ${JSON.stringify(frame)}\n\n`)));
+      const onRun = vi.fn();
+      await new Promise<void>((resolve) => subscribeWorkflowRuns(workspaceId, { onRun, onDisconnect: () => resolve() }));
+      const run = onRun.mock.calls[0][0] as WorkflowRunDtoV1;
+      expect(run).toEqual(expected);
+      expect(workflowNodeRows(run.nodes).map(({ node, depth }) => [node.id, depth])).toEqual([['answer', 0], ['t1@0', 1]]);
+      expect(approvalForRow(run, 't1', 0)?.id).toBe('ap1');
+      expect(mapBackendPayload(run, connectionId, 'server')).toEqual(parsed);
+    });
+
+    it('keeps a Claude run\'s agents under their phases, as the Background work card groups them', async () => {
+      const claudeRun = {
+        version: 1, id: 'wfr_2', runtime: 'claude', nativeId: 'wf_1', workspaceId: 'ws', nodeId: 'n1', parentToolCallId: null,
+        name: 'probe', status: 'running', actions: [], startedAt: 1, updatedAt: 2, revision: 1,
+        nodes: [
+          { id: 'phase:1', kind: 'phase', title: 'Fix', status: 'running' },
+          { id: 'agent:1', kind: 'agent', title: 'fix:a', status: 'running', parentId: 'phase:1' },
+          { id: 'agent:2', kind: 'agent', title: 'fix:b', status: 'completed', parentId: 'phase:1' },
+        ],
+        omittedLeaves: { 'phase:1': { completed: 3 } },
+      };
+      const frame = { version: 1, event: 'workflow_run', run: claudeRun, emittedAt: 3 };
+      vi.stubGlobal('fetch', vi.fn(async () => new Response(`event: workflow_run\ndata: ${JSON.stringify(frame)}\n\n`)));
+      const onRun = vi.fn();
+      await new Promise<void>((resolve) => subscribeWorkflowRuns(workspaceId, { onRun, onDisconnect: () => resolve() }));
+      const run = onRun.mock.calls[0][0] as WorkflowRunDtoV1;
+      expect(run.omittedLeaves).toEqual(claudeRun.omittedLeaves);
+      expect(workflowCardSections(run.nodes).map((section) => [section.node?.title, section.leaves.length])).toEqual([['Fix', 2]]);
+    });
+
+    it('reads the same run from its own requests and commands as from the feed', async () => {
+      const fetch = vi.fn(async (_url: string, _init?: RequestInit) => Response.json({ run: rawRun }));
+      vi.stubGlobal('fetch', fetch);
+      await expect(getWorkflowRun(connectionId, 'wfr_1')).resolves.toEqual(expected);
+      await expect(answerWorkflowApproval(connectionId, 'wfr_1', 'ap1', 'allow')).resolves.toEqual(expected);
+      await expect(startMultiModelRun(connectionId, 'wfr_1')).resolves.toEqual(expected);
+      expect(fetch.mock.calls.map(([url]) => url)).toEqual([
+        `${base}/workflow-runs/wfr_1`, `${base}/workflow-runs/wfr_1/approvals/ap1`, `${base}/multi-model-runs/wfr_1/start`,
+      ]);
+    });
+
+    it('asks the remote for the ready models of its own workspace id', async () => {
+      const fetch = vi.fn(async (_url: string) => Response.json({ version: 1, runtimes: [] }));
+      vi.stubGlobal('fetch', fetch);
+      await expect(fetchReadyModels(connectionId, workspaceId)).resolves.toEqual({ version: 1, runtimes: [] });
+      expect(new URL(fetch.mock.calls[0][0]).searchParams.get('workspaceId')).toBe('ws');
+    });
   });
 });

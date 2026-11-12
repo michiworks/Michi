@@ -122,12 +122,31 @@ export function describeNonImageAttachments(
 
 /**
  * Convenience wrapper: partition once, and return both the image list and the
- * text suffix to append to the outgoing prompt.
+ * text suffix to append to the outgoing prompt. A readable file whose path
+ * `modelText` already holds (a host's own list of the attached files) is
+ * not named again; an unreadable one still is, since only this note says so.
  */
-export function prepareAttachments(attachments: AgentTurnInput["attachments"]): {
+export function prepareAttachments(attachments: AgentTurnInput["attachments"], modelText = ""): {
   images: ResolvedAttachment[];
   promptNote: string;
 } {
   const partition = partitionAttachments(attachments);
-  return { images: partition.images, promptNote: describeNonImageAttachments(partition) };
+  return {
+    images: partition.images,
+    promptNote: describeNonImageAttachments({
+      others: partition.others.filter((att) => !modelText.includes(att.absPath)),
+      unreadable: partition.unreadable,
+    }),
+  };
+}
+
+/**
+ * The note for images a runtime receives only as links to their files,
+ * leaving out those whose path `modelText` already holds.
+ */
+export function describeLinkedImages(images: ResolvedAttachment[], modelText = ""): string {
+  const lines = images.filter((attachment) => imageMimeType(attachment.absPath) && !modelText.includes(attachment.absPath))
+    .map((attachment) => `- ${attachment.name || path.basename(attachment.absPath)} → ${attachment.absPath}`);
+  if (lines.length === 0) return "";
+  return ["", "[Attached images]", "The user attached these images. Read them with your file tool:", ...lines].join("\n");
 }

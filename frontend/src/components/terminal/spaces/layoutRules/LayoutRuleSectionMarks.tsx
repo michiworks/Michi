@@ -2,6 +2,7 @@ import React from 'react';
 import type { PageLayoutRule } from 'michi-shared';
 import { deleteLayoutRule } from '../../../../services/api/spacesHome';
 import { notifyPageChanged } from '../../../../state/pages/pageEvents';
+import { useCompanionName } from '../../../../state/companion/companionName';
 import '../pageChanges.css';
 import './layoutRules.css';
 
@@ -18,6 +19,7 @@ export function LayoutRuleSectionMarks({ pageId, backendConnectionId, rules, rul
   ruleIds: readonly string[] | undefined;
   now?: number;
 }) {
+  const name = useCompanionName();
   const [busy, setBusy] = React.useState<string | null>(null);
   const [failed, setFailed] = React.useState<string | null>(null);
   const shown = rules.filter((rule) => ruleIds?.includes(rule.id));
@@ -41,7 +43,7 @@ export function LayoutRuleSectionMarks({ pageId, backendConnectionId, rules, rul
           <div key={rule.id} className="page-change-line" data-state="applied" data-quiet="true" data-testid="layout-rule-mark" title={`Layout rule: ${rule.text}`}>
             <span>Layout rule</span>
             <span aria-hidden="true">·</span>
-            <span>{rule.createdBy === 'user' ? 'added by you' : rule.sourceMessage ? 'from Assistant' : 'by the Meta agent'}</span>
+            <span>{rule.createdBy === 'user' ? 'added by you' : rule.sourceMessage ? 'from Assistant' : `by ${name}`}</span>
             <span aria-hidden="true">·</span>
             <button type="button" className="page-change-link" disabled={busy !== null} onClick={() => { void undo(rule); }}>Undo</button>
           </div>

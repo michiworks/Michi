@@ -4,6 +4,23 @@ import {
   type AgentPermissionPolicyV1,
 } from 'michi-shared';
 
+/** The platform ceiling every Run is intersected with, and the policy of a primary agent whose
+ * definition sets none. */
+export const DEFAULT_PLATFORM_POLICY: AgentPermissionPolicyV1 = {
+  version: 1,
+  preset: 'build',
+  categories: {
+    [AgentPolicyCategory.ExternalAction]: AgentPolicyDecision.Ask,
+    [AgentPolicyCategory.SpawnAgent]: AgentPolicyDecision.Allow,
+  },
+  maxDelegationDepth: 4,
+  maxConcurrentRuns: 8,
+  maxWallTimeMs: 24 * 60 * 60 * 1_000,
+  maxAttempts: 3,
+  maxTokens: null,
+  maxSpendMicros: null,
+};
+
 const categories = Object.values(AgentPolicyCategory);
 const rank: Record<AgentPolicyDecision, number> = {
   [AgentPolicyDecision.Deny]: 0,

@@ -158,6 +158,42 @@ test('changes a pane runtime without changing global defaults, then loads that r
   expect(patches).toHaveLength(0);
 });
 
+test('offers Ultracode for a Claude pane only, saves it for the chat and marks the model chip', async ({ page }) => {
+  const { ultracodeSaves, patches } = await installComposerModels(page);
+  await bootWithWorkspace(page);
+  const editor = page.locator(COMPOSER_EDITOR).first();
+  await editor.fill('Start a conversation');
+  await page.getByRole('button', { name: 'Send (Enter)', exact: true }).click();
+  await expect(page.getByText('Hello from mock kiro.').first()).toBeVisible();
+  const trigger = page.getByRole('button', { name: /^Model settings:/ });
+  await trigger.click();
+  const picker = page.getByRole('dialog', { name: 'Model settings' });
+  await expect(picker.getByRole('switch', { name: /Ultracode/ })).toHaveCount(0);
+  await picker.getByRole('button', { name: /Select runtime:/ }).click();
+  await page.getByRole('menuitemradio', { name: 'Claude', exact: true }).click();
+  const ultracode = picker.getByRole('switch', { name: /Ultracode/ });
+  await expect(ultracode).toHaveAttribute('aria-checked', 'false');
+  await expect(ultracode).toContainText('A multi-agent workflow for each task');
+  await ultracode.click();
+  await expect(ultracode).toHaveAttribute('aria-checked', 'true');
+  expect(ultracodeSaves).toHaveLength(1);
+  expect(ultracodeSaves[0].body).toMatchObject({ enabled: true });
+  expect(ultracodeSaves[0].body.graphPrerequisite).toMatchObject({ node: { id: ultracodeSaves[0].nodeId } });
+  await page.keyboard.press('Escape');
+  await expect(trigger).toHaveAttribute('aria-label', /Ultracode on/);
+  await expect(trigger.locator('[data-ultracode="on"]')).toBeVisible();
+  expect(patches, 'a chat choice, not a Home default').toHaveLength(0);
+  // Back on a runtime without it, neither the switch nor the mark shows.
+  await trigger.click();
+  await picker.getByRole('button', { name: /Select runtime:/ }).click();
+  await page.getByRole('menuitemradio', { name: 'Codex', exact: true }).click();
+  await expect(picker.getByRole('button', { name: /Select runtime: Codex/ })).toBeVisible();
+  await expect(picker.getByRole('switch', { name: /Ultracode/ })).toHaveCount(0);
+  await page.keyboard.press('Escape');
+  await expect(trigger).not.toHaveAttribute('aria-label', /Ultracode/);
+  await expect(trigger.locator('[data-ultracode]')).toHaveCount(0);
+});
+
 test('supports provider search, trigger toggle, and a failed-save retry', async ({ page }) => {
   await installComposerModels(page, { failSave: true });
   await bootWithWorkspace(page);

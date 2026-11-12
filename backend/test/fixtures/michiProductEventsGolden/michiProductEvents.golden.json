@@ -6,11 +6,7 @@
       "event: artifact_saved\ndata: {\"contextId\":\"claude-fresh-ctx-1\",\"name\":\"notes\",\"filePath\":\".contexts/notes.md\",\"size\":10}\n\n",
       "event: artifact_updated\ndata: {\"name\":\"notes\",\"filePath\":\".contexts/notes.md\",\"size\":12}\n\n",
       "event: image\ndata: {\"path\":\"chart.png\",\"caption\":\"Quarterly chart\",\"mimeType\":\"image/png\",\"size\":16}\n\n",
-      "event: image\ndata: {\"path\":\"chart.png\",\"mimeType\":\"image/png\",\"size\":16}\n\n",
-      "event: branch_overview\ndata: {\"overview\":\"Explored alpha and beta.\"}\n\n",
-      "event: follow_ups_status\ndata: {\"status\":\"in_progress\"}\n\n",
-      "event: follow_ups\ndata: {\"followUps\":[\"First?\",\"Second?\",\"Third?\"]}\n\n",
-      "event: follow_ups_status\ndata: {\"status\":\"completed\"}\n\n"
+      "event: image\ndata: {\"path\":\"chart.png\",\"mimeType\":\"image/png\",\"size\":16}\n\n"
     ],
     "run": {
       "events": [
@@ -28,11 +24,7 @@
       "event: artifact_saved\ndata: {\"contextId\":\"claude-resume-ctx-1\",\"name\":\"notes\",\"filePath\":\".contexts/notes.md\",\"size\":10}\n\n",
       "event: artifact_updated\ndata: {\"name\":\"notes\",\"filePath\":\".contexts/notes.md\",\"size\":12}\n\n",
       "event: image\ndata: {\"path\":\"chart.png\",\"caption\":\"Quarterly chart\",\"mimeType\":\"image/png\",\"size\":16}\n\n",
-      "event: image\ndata: {\"path\":\"chart.png\",\"mimeType\":\"image/png\",\"size\":16}\n\n",
-      "event: branch_overview\ndata: {\"overview\":\"Explored alpha and beta.\"}\n\n",
-      "event: follow_ups_status\ndata: {\"status\":\"in_progress\"}\n\n",
-      "event: follow_ups\ndata: {\"followUps\":[\"First?\",\"Second?\",\"Third?\"]}\n\n",
-      "event: follow_ups_status\ndata: {\"status\":\"completed\"}\n\n"
+      "event: image\ndata: {\"path\":\"chart.png\",\"mimeType\":\"image/png\",\"size\":16}\n\n"
     ],
     "run": {
       "events": [
@@ -51,10 +43,7 @@
       "event: artifact_updated\ndata: {\"name\":\"notes\",\"filePath\":\".contexts/notes.md\",\"size\":12}\n\n",
       "event: image\ndata: {\"path\":\"chart.png\",\"caption\":\"Quarterly chart\",\"mimeType\":\"image/png\",\"size\":16}\n\n",
       "event: image\ndata: {\"path\":\"chart.png\",\"mimeType\":\"image/png\",\"size\":16}\n\n",
-      "event: branch_overview\ndata: {\"overview\":\"Explored alpha and beta.\"}\n\n",
-      "event: follow_ups_status\ndata: {\"status\":\"in_progress\"}\n\n",
-      "event: follow_ups\ndata: {\"followUps\":[\"First?\",\"Second?\",\"Third?\"]}\n\n",
-      "event: follow_ups_status\ndata: {\"status\":\"completed\"}\n\n"
+      "event: branch_overview\ndata: {\"overview\":\"Explored alpha and beta.\"}\n\n"
     ],
     "run": {
       "events": [

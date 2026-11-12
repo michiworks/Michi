@@ -34,7 +34,10 @@ export function pageCardStands(toolId: string, fallback: PageCardState): boolean
   return state.resolved !== 'dismissed';
 }
 
-/** Test seam. */
+/**
+ * Test seam.
+ * @testonly
+ */
 export function resetPageCardStatesForTests(): void {
   states.clear();
 }

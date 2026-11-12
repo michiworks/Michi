@@ -4,11 +4,19 @@ import {
   MemoryApiError,
   createMemory,
   deleteMemory,
+  fetchConversationMemoryMode,
   fetchMemoryExtractionStatus,
+  fetchMemoryProfile,
+  fetchReplyMemorySources,
+  hideRecalledTurn,
   isMemoryNotFound,
   isMemoryUnavailable,
   isMemoryVersionConflict,
   listMemories,
+  markMemoryNoticeSeen,
+  removeMemoryProfileLine,
+  resetMemories,
+  saveConversationMemoryMode,
   saveMemorySettings,
   setMemoryExtractionPaused,
   subscribeMemoryChanges,
@@ -93,8 +101,89 @@ describe('memory REST client', () => {
   });
 });
 
+describe('what a reply was based on', () => {
+  const BASE = 'http://localhost:3000/api';
+  const MEMORY = { kind: 'memory', memoryId: 'mem-1', text: 'Use pnpm', savedBy: 'import', importSource: 'claude', at: 5, from: null };
+  const CHAT = { kind: 'conversation', docId: 7, text: 'The launch is on March 3', at: 6, from: { nodeId: 'n-2', messageId: 'u-1', title: null } };
+
+  it('asks the conversation’s backend for its messages at once, keeping well-formed sources only', async () => {
+    answer(200, { messages: [{ messageId: 'a,1', sources: [MEMORY, CHAT, { kind: 'memory' }] }, { broken: true }] });
+    expect(await fetchReplyMemorySources(BASE, 'n/1', ['a,1', 'a-2'])).toEqual({ messages: [{ messageId: 'a,1', sources: [MEMORY, CHAT] }] });
+    const { url } = lastCall();
+    expect(url.pathname).toBe('/api/nodes/n%2F1/memory-sources');
+    expect(url.search).toBe('?messages=a%2C1,a-2');
+    answer(404, '<html>Cannot GET</html>');
+    expect(isMemoryUnavailable(await fetchReplyMemorySources(BASE, 'n-1', ['a-1']).catch((error: unknown) => error))).toBe(true);
+  });
+
+  it('hides a past turn, and forgets a memory, on the conversation’s backend', async () => {
+    answer(200, { hidden: true });
+    await hideRecalledTurn(BASE, 7);
+    expect(lastCall().url.pathname).toBe('/api/memory-recall/hide');
+    expect(lastCall().init?.method).toBe('POST');
+    expect(JSON.parse(String(lastCall().init?.body))).toEqual({ docId: 7 });
+    answer(204);
+    await deleteMemory('mem 1', 'http://localhost:3000/api/backend-connections/remote-1/proxy');
+    expect(lastCall().url.pathname).toBe('/api/backend-connections/remote-1/proxy/memories/mem%201');
+    expect(lastCall().init?.method).toBe('DELETE');
+  });
+});
+
+describe('the profile, reset, the notice and a conversation’s setting', () => {
+  const BASE = 'http://localhost:3000/api';
+
+  it('keeps each profile line’s place in the backend’s list, and reads a backend without a profile as none', async () => {
+    answer(200, {
+      lines: [
+        { topic: 'Work', text: 'no refs' },
+        { topic: 'Home', text: 'Only an air fryer', refs: [{ ref: 'm:1v1', id: 'mem-1', body: 'I only have an air fryer' }, { broken: true }] },
+      ],
+      builtAt: 5, version: 2, rebuildRequested: true,
+    });
+    // Remove names a line by its place, so a skipped line must not shift the next one's.
+    expect(await fetchMemoryProfile()).toEqual({
+      lines: [{ index: 1, topic: 'Home', text: 'Only an air fryer', refs: [{ ref: 'm:1v1', id: 'mem-1', body: 'I only have an air fryer' }] }],
+      builtAt: 5, version: 2, rebuildRequested: true,
+    });
+    answer(404, '<html>Cannot GET</html>');
+    expect(await fetchMemoryProfile()).toBeNull();
+  });
+
+  it('removes a line at the version read, and reports a profile rebuilt since', async () => {
+    answer(409, { error: 'The profile changed since it was read', code: 'version_conflict' });
+    const conflict = await removeMemoryProfileLine(1, 2).catch((error: unknown) => error);
+    expect(isMemoryVersionConflict(conflict)).toBe(true);
+    expect(lastCall().url.pathname).toMatch(/\/memory-profile\/remove-line$/);
+    expect(JSON.parse(String(lastCall().init?.body))).toEqual({ index: 1, version: 2 });
+  });
+
+  it('confirms a reset, and records the one-time notice as seen', async () => {
+    answer(200, { removed: 4, hiddenTurns: 9 });
+    expect(await resetMemories()).toEqual({ removed: 4 });
+    expect(lastCall().url.pathname).toMatch(/\/memories\/reset$/);
+    expect(JSON.parse(String(lastCall().init?.body))).toEqual({ confirm: true });
+    answer(200, { mode: 'auto', migratedFromExplicit: true, noticeSeen: true });
+    expect(await markMemoryNoticeSeen()).toEqual({ mode: 'auto', migratedFromExplicit: true, noticeSeen: true });
+    expect(JSON.parse(String(lastCall().init?.body))).toEqual({ noticeSeen: true });
+  });
+
+  it('reads and saves a conversation’s setting on its backend, telling a chat it lacks from a backend without the setting', async () => {
+    answer(200, { mode: 'use_only' });
+    expect(await fetchConversationMemoryMode(BASE, 'n/1')).toBe('use_only');
+    expect(lastCall().url.pathname).toBe('/api/nodes/n%2F1/memory-mode');
+    answer(200, { mode: 'off', hiddenTurns: 3, removedMemories: 2 });
+    expect(await saveConversationMemoryMode(BASE, 'n-1', 'off')).toEqual({ mode: 'off', removedMemories: 2 });
+    expect(lastCall().init?.method).toBe('PUT');
+    expect(JSON.parse(String(lastCall().init?.body))).toEqual({ mode: 'off' });
+    answer(404, { error: 'Conversation not found', code: 'not_found' });
+    expect(isMemoryNotFound(await fetchConversationMemoryMode(BASE, 'n-new').catch((error: unknown) => error))).toBe(true);
+    answer(200, { __unmocked: '/nodes/n-1/memory-mode' });
+    expect(isMemoryUnavailable(await fetchConversationMemoryMode(BASE, 'n-1').catch((error: unknown) => error))).toBe(true);
+  });
+});
+
 describe('automatic memory status', () => {
-  const STATUS = { enabled: true, paused: false, lastRunAt: 5, lastError: null, pendingCount: 2, todayTokens: 1200, dailyTokenLimit: 50000 };
+  const STATUS = { enabled: true, paused: false, lastRunAt: 5, lastError: null, todayTokens: 1200, dailyTokenLimit: 50000 };
 
   it('reads the status, and null from a backend without it', async () => {
     answer(200, STATUS);
@@ -138,6 +227,26 @@ describe('subscribeMemoryChanges', () => {
     stream.fetchStream.mockResolvedValue(new Response('{}', { status: 404 }));
     const error = await new Promise<Error | undefined>((resolve) => subscribeMemoryChanges({ onEvent: vi.fn(), onDisconnect: resolve }));
     expect((error as { status?: number }).status).toBe(404);
+  });
+
+  it('drops a feed that hears nothing for three keepalives', async () => {
+    vi.useFakeTimers();
+    try {
+      stream.fetchStream.mockImplementation(async (_url: string, init?: RequestInit) => new Response(new ReadableStream({
+        start(controller) {
+          init?.signal?.addEventListener('abort', () => controller.error(new DOMException('aborted', 'AbortError')));
+        },
+      }), { status: 200, headers: { 'Content-Type': 'text/event-stream' } }));
+      const onDisconnect = vi.fn();
+      subscribeMemoryChanges({ onEvent: vi.fn(), onDisconnect });
+      await vi.advanceTimersByTimeAsync(74_999);
+      expect(onDisconnect).not.toHaveBeenCalled();
+      await vi.advanceTimersByTimeAsync(1);
+      await vi.waitFor(() => expect(onDisconnect).toHaveBeenCalledTimes(1));
+      expect(onDisconnect.mock.calls[0][0]).toMatchObject({ message: expect.stringContaining('stalled') });
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('stays silent after unsubscribe', async () => {

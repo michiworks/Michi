@@ -13,7 +13,8 @@ test('digest streams temporary thoughts, clears them on completion, and uses edi
   const errors: string[] = [];
   page.on('pageerror', error => errors.push(error.message));
   await page.setViewportSize({ width: 1440, height: 1000 });
-  await installMockApi(page);
+  // Digest is off by default (Settings switch); this spec exercises it.
+  await installMockApi(page, { prefs: { digestEnabled: true } });
   await page.addInitScript(() => {
     const originalFetch = window.fetch.bind(window);
     window.digestTestRequests = [];

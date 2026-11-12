@@ -1,5 +1,6 @@
 import { META_AGENT_DEFAULT_FIRST_RUN_DAYS, META_AGENT_FIRST_RUN_DAYS, parseBranchOverviewEntries } from 'michi-shared';
 import { getDb } from '../db';
+import { liveConversationSql } from '../nodeLifecycleSql';
 
 const DAY_MS = 24 * 3_600_000;
 export const FIRST_RUN_MAX_CONVERSATIONS = 1_000;
@@ -43,8 +44,8 @@ export function listHistoryConversations(workspaceId: string, asOf: number, days
   const rows = getDb().prepare(`SELECT n.id AS node_id,n.tree_id,n.title,n.branch_overview,MAX(m.created_at) AS last_at,COUNT(*) AS message_count
     FROM nodes n JOIN messages m ON m.node_id=n.id AND m.role IN ('user','assistant') AND m.created_at<=?
     LEFT JOIN trees tr ON tr.id=n.tree_id
-    WHERE n.workspace_id=? AND n.kind='chat' AND n.deleted_at IS NULL AND n.purged_at IS NULL AND n.status<>'archived'
-      AND tr.archived_at IS NULL AND n.maintenance_job_id IS NULL
+    WHERE n.workspace_id=? AND n.kind='chat' AND ${liveConversationSql({ node: 'n', tree: 'tr' })}
+      AND n.maintenance_job_id IS NULL AND n.scheduled_only_job_id IS NULL
     GROUP BY n.id HAVING MAX(m.created_at)>=? ORDER BY last_at DESC,n.id LIMIT ?`)
     .all(asOf, workspaceId, asOf - days * DAY_MS, Math.min(limit, FIRST_RUN_MAX_CONVERSATIONS)) as unknown as Row[];
   return rows.map((row) => ({ nodeId: row.node_id, treeId: row.tree_id, title: row.title, lastActiveAt: row.last_at,
@@ -72,5 +73,5 @@ export function historyListPage(all: HistoryConversation[], offset: number, limi
 /** Whether a workspace has a finished conversation of its own (not a maintenance run's). */
 export function hasCompletedConversation(workspaceId: string): boolean {
   return !!getDb().prepare(`SELECT 1 FROM turns t JOIN nodes n ON n.id=t.node_id WHERE n.workspace_id=? AND n.kind='chat'
-    AND n.deleted_at IS NULL AND n.maintenance_job_id IS NULL AND t.status='completed' LIMIT 1`).get(workspaceId);
+    AND n.deleted_at IS NULL AND n.maintenance_job_id IS NULL AND n.scheduled_only_job_id IS NULL AND t.status='completed' LIMIT 1`).get(workspaceId);
 }

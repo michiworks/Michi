@@ -7,8 +7,9 @@ const connections = [
   { id: 'build-box', name: 'Build box', transport: 'ssh', sshHost: 'build+', hasToken: true, createdAt: 1, updatedAt: 1 },
   { id: 'direct', name: 'Build server', transport: 'direct', apiUrl: 'https://build.example.com/api', hasToken: true, createdAt: 1, updatedAt: 1 },
 ];
+// Created today: a workspace idle for a month would fold into the sidebar's Earlier group.
 const workspace = (id: string, name: string, cwd: string) => ({
-  workspace: { id, name, cwd, created_at: 1 }, nodes: [], trees: [], edges: [], messages: [], artifacts: [],
+  workspace: { id, name, cwd, created_at: Date.now() }, nodes: [], trees: [], edges: [], messages: [], artifacts: [],
 });
 
 for (const palette of ['bone', 'gruvbox']) {
@@ -42,7 +43,7 @@ for (const palette of ['bone', 'gruvbox']) {
     } });
     await page.goto('/');
     await expect(page.getByRole('complementary').getByText('API service', { exact: true })).toBeVisible();
-    await page.getByText('Workspaces', { exact: true }).last().click();
+    await page.getByRole('complementary').getByRole('button', { name: /^All \d+ workspaces$/ }).click();
     const remote = page.getByTestId(`workspace-table-row-${backendEntityId('build-box', 'remote-api')}`);
     await expect(remote.getByText('Remote - Build box', { exact: true })).toBeVisible();
     await expect(page.getByTestId('workspace-table-row-local-project').getByText('Local', { exact: true })).toBeVisible();
@@ -58,6 +59,8 @@ for (const palette of ['bone', 'gruvbox']) {
     await expect(page.locator('header').getByText('Remote · Build box', { exact: true })).toBeVisible();
     const settings = await openSettings(page, 'General');
     const list = settings.getByRole('list', { name: 'Workspaces on Build box' });
+    // Each machine's workspace list starts collapsed behind its count.
+    await settings.getByText('2 workspaces', { exact: true }).click();
     await expect(list.getByRole('button', { name: 'API service', exact: true })).toBeVisible();
     await expect(list.getByRole('button', { name: 'Research', exact: true })).toBeVisible();
     await expect(list.getByText('/home/developer/projects/api', { exact: true })).toBeVisible();
@@ -65,6 +68,8 @@ for (const palette of ['bone', 'gruvbox']) {
     await page.screenshot({ path: testInfo.outputPath(`connections-${palette}.png`) });
     await page.setViewportSize({ width: 540, height: 850 });
     await expect.poll(() => settings.locator('.terminal-settings-content').evaluate(el => el.scrollWidth <= el.clientWidth)).toBe(true);
+    // The phone layout draws Settings afresh, with the list collapsed again.
+    await settings.getByText('2 workspaces', { exact: true }).click();
     await list.getByRole('button', { name: 'Research', exact: true }).click();
     await expect(settings).toBeHidden();
     await expect(page.getByRole('heading', { name: 'Research', exact: true })).toBeVisible();

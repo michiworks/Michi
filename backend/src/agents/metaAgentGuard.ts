@@ -26,13 +26,14 @@ export interface MetaAgentRuntimeAvailability {
 const META_AGENT_RUNNABLE_RUNTIMES: ReadonlySet<string> = new Set(['claude', 'pi', 'codex', 'kiro']);
 
 const META_AGENT_REFUSALS: Readonly<Record<string, string>> = {
-  crew: 'The Meta agent does not run on Kiro Crew yet. Choose another runtime for it in Settings › Meta agent.',
+  crew: 'Pages upkeep does not run on Kiro Crew yet. Choose another runtime for it under Pages upkeep in Settings.',
+  antigravity: 'Pages upkeep does not run on Antigravity yet. Choose another runtime for it under Pages upkeep in Settings.',
 };
 
 /** Whether a runtime can host the Meta agent; the same answer for both toolsets. */
 export function metaAgentRuntimeAvailability(runtimeId: string): MetaAgentRuntimeAvailability {
   if (META_AGENT_RUNNABLE_RUNTIMES.has(runtimeId)) return { available: true };
-  return { available: false, reason: META_AGENT_REFUSALS[runtimeId] ?? `Runtime "${runtimeId}" is not approved for the Meta agent.` };
+  return { available: false, reason: META_AGENT_REFUSALS[runtimeId] ?? `Runtime "${runtimeId}" is not approved for Pages upkeep.` };
 }
 
 /** The toolset a profile runs with, or null for an ordinary session. */
@@ -63,7 +64,8 @@ export class MetaAgentGuardError extends Error {
   readonly code = META_AGENT_GUARD_ERROR_CODE;
   constructor(readonly violation: MetaAgentGuardViolation) {
     const extra = violation.unexpectedTools.length ? `: ${violation.unexpectedTools.join(', ')}` : '';
-    super(`Meta agent restriction check failed on ${violation.runtimeId}${extra}${violation.detail ? ` (${violation.detail})` : ''}`);
+    // Stored halted reasons may still say "Meta agent restriction check failed": guardStatus.ts and firstRun.ts read both.
+    super(`Michi restriction check failed on ${violation.runtimeId}${extra}${violation.detail ? ` (${violation.detail})` : ''}`);
     this.name = 'MetaAgentGuardError';
   }
 }

@@ -345,19 +345,47 @@ describe('readOutput', () => {
   test('AgentRun: terminal + resultBundle previews handoff', () => {
     const runs = new AgentRunsRepository();
     const run = createRun(runs, 'run-2');
+    // queued -> preparing -> running -> completed: the projector refuses any other way there.
+    runs.claimRun(OWNER, run.id, 'worker', 'lease', Number.MAX_SAFE_INTEGER, 0);
     const attempt = runs.createAttempt({
       operationId: 'attempt-op-3', ownerUserId: OWNER, runId: run.id,
       profileIndex: 0, runtimeProfile: RUNTIME_PROFILE, recoveryEnvelope: null,
     });
-    runs.appendEventAndProject(OWNER, run.id, 0, {
+    runs.appendEventAndProject(OWNER, run.id, 1, {
+      type: AgentRunEventType.RunStatusChanged, attemptId: attempt.id,
+      payload: { version: 1, from: AgentRunStatus.Preparing, to: AgentRunStatus.Running },
+    }, { status: AgentRunStatus.Running });
+    runs.appendEventAndProject(OWNER, run.id, 2, {
       type: AgentRunEventType.Assistant, payload: { version: 1, text: 'raw assistant text' }, attemptId: attempt.id,
     });
-    runs.appendEventAndProject(OWNER, run.id, 1, {
+    runs.appendEventAndProject(OWNER, run.id, 3, {
       type: AgentRunEventType.RunStatusChanged, payload: { version: 1, from: AgentRunStatus.Running, to: AgentRunStatus.Completed },
     }, { status: AgentRunStatus.Completed, completedAt: 5_000, resultBundle: resultBundle() });
 
     const result = readOutput(caller(), { locator: { runId: run.id }, selection: 'latest', limitBytes: 1024 });
     assert.equal(result.kind, 'handoff');
     assert.match(result.text, /All done/);
+  });
+
+  test('AgentRun: a running Run joins its stored deltas with their whitespace intact', () => {
+    const runs = new AgentRunsRepository();
+    const run = createRun(runs, 'run-3');
+    runs.claimRun(OWNER, run.id, 'worker', 'lease', Number.MAX_SAFE_INTEGER, 0);
+    const attempt = runs.createAttempt({
+      operationId: 'attempt-op-4', ownerUserId: OWNER, runId: run.id,
+      profileIndex: 0, runtimeProfile: RUNTIME_PROFILE, recoveryEnvelope: null,
+    });
+    runs.appendEventAndProject(OWNER, run.id, 1, {
+      type: AgentRunEventType.RunStatusChanged, attemptId: attempt.id,
+      payload: { version: 1, from: AgentRunStatus.Preparing, to: AgentRunStatus.Running },
+    }, { status: AgentRunStatus.Running });
+    ['Hello', ' world', '.', '\n\n', 'Second', ' paragraph'].forEach((text, i) => {
+      runs.appendEventAndProject(OWNER, run.id, i + 2, {
+        type: AgentRunEventType.Assistant, payload: { version: 1, text }, attemptId: attempt.id,
+      });
+    });
+
+    const result = readOutput(caller(), { locator: { runId: run.id }, selection: 'latest', limitBytes: 1024 });
+    assert.equal(result.text, 'Hello world.\n\nSecond paragraph');
   });
 });

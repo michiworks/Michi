@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import type { MetaAgentOverview, SpacesFirstRunStatus } from 'michi-shared';
 import type { MetaAgentInfo } from '../../services/api/metaAgent';
-import { metaAgentStatus, type MetaAgentStatusInput } from './metaAgentStatus';
+import { UPKEEP_HEADLINE, metaAgentStatus, type MetaAgentStatusInput } from './metaAgentStatus';
 
 const INFO: MetaAgentInfo = {
   settings: { runtimeId: null, providerId: null, modelId: null, reasoning: null },
@@ -63,7 +63,7 @@ describe('metaAgentStatus', () => {
     expect(metaAgentStatus({ overview: overview({ state: 'error', stopped: { reason: 'runtime-unsupported', message: 'Not on Crew', workspaceIds: [] } }) }))
       .toMatchObject({ kind: 'unsupported', reason: 'Not on Crew', stop: null, settingsAlert: true });
     expect(metaAgentStatus({ info: { ...INFO, availability: { available: false, reason: null } }, runtimeLabel: () => 'Kiro' }).reason)
-      .toBe('The Meta agent cannot run on Kiro');
+      .toBe('Pages upkeep cannot run on Kiro');
   });
 
   it('turns a held first run into a failed check on the runtime it ran on', () => {
@@ -77,12 +77,19 @@ describe('metaAgentStatus', () => {
   });
 
   it('says not running for a backend without a Meta agent, and stays ordinary while its answer is loading', () => {
-    expect(metaAgentStatus({ infoStatus: 'unavailable' })).toMatchObject({ kind: 'not-running', reason: 'This Michi backend has no Meta agent yet' });
+    expect(metaAgentStatus({ infoStatus: 'unavailable' })).toMatchObject({ kind: 'not-running', reason: 'This Michi backend doesn’t run Pages upkeep yet' });
     expect(kind({ infoStatus: 'loading' })).toBe('normal');
   });
 
   it('keeps a stop an older backend reported only as an error', () => {
     expect(metaAgentStatus({ overview: overview({ state: 'error', error: 'Claude is not signed in', stopped: undefined }) }))
       .toMatchObject({ kind: 'stopped', reason: 'Claude is not signed in', stop: { reason: 'other', message: 'Claude is not signed in' } });
+  });
+
+  it('leads with Pages upkeep, the agent’s background maintenance, never a Meta agent (DESIGN-v2 §1.5)', () => {
+    expect(UPKEEP_HEADLINE).toEqual({
+      offline: 'Backend not connected', 'guard-failed': 'Pages upkeep stopped', 'not-running': 'Pages upkeep isn’t running',
+      unsupported: 'Pages upkeep isn’t running', stopped: 'Pages upkeep stopped', paused: 'Pages upkeep is paused',
+    });
   });
 });

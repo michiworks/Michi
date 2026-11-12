@@ -1,5 +1,9 @@
 # Dependencies
 node_modules/
+# scripts/worktree-setup.mjs: its marker, and node_modules symlinks, which the
+# directory-only pattern above misses.
+/.michi-linked-worktree
+node_modules
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
@@ -75,6 +79,10 @@ dist-electron/
 backend/.omc/
 frontend/.omc/
 .contexts/
+.aim/
+# A literal "?" directory, left by a tool that ran with HOME unset. Escaped,
+# because a bare ? matches any one-character name.
+/\?/
 
 # Design docs / archives (local-only) — historically gitignored to keep
 # private design notes out of the public repo. Specific docs that ARE
@@ -94,7 +102,6 @@ docs/
 docs/*
 !docs/access-modes.md
 !docs/user-guide.md
-!docs/harness-p0-p3-tasks.md
 !docs/remote-backend.md
 !docs/internal-usage-telemetry.md
 !docs/validation/
@@ -155,9 +162,13 @@ extension/
 feasibility-of-background-execution-during-sleep-*.md
 # Design mocks stay local.
 /mocks/
+# Same for Playwright-driven mocks that reuse e2e/fixtures; untracked, so not recoverable.
+/e2e/mocks/
 # Retired experiments may still have local generated results.
 /benchmarks/markdown-streaming/
 /prototypes/michi-touch/
+# Claude SDK probe raw captures hold local paths; the reports beside them stay tracked.
+/benchmarks/claude-sdk-probe/results/**/*.json
 
 # Stitch design snapshots and metadata
 /.stitch/

@@ -13,7 +13,7 @@ import {
 import { closeDb, getDb, initDb } from '../src/services/db';
 import { AgentDefinitionsRepository } from '../src/services/agentDefinitionsRepository';
 import { AgentRunsRepository } from '../src/services/agentRunsRepository';
-import { exportAgentRunBackup, importAgentRunBackup } from '../src/services/agentRunBackup';
+import { exportAgentRunBackup, importAgentRunBackup, sanitizePortableBackupJson } from '../src/services/agentRunBackup';
 
 const hash = 'a'.repeat(64);
 let dataDir: string;
@@ -153,5 +153,74 @@ describe('Agent Run backup v2', () => {
     assert.equal(syntheticAttempt.publicSessionId, syntheticAttempt.id);
     assert.equal((getDb().prepare('SELECT public_session_id FROM agent_run_attempts WHERE id = ?')
       .get(syntheticAttempt.id) as { public_session_id: string }).public_session_id, syntheticAttempt.id);
+  });
+
+  test('a restored Run is found by the same searches as the Run it was exported from', () => {
+    const runs = new AgentRunsRepository({ now: () => 10, createId: (kind) => `${kind}-search-fixture` });
+    const run = runs.createRun({
+      operationId: 'run-search-op', ownerUserId: 'owner-a', workspaceId: 'ws-source', definitionId: null,
+      definitionRevision: null, effectiveDefinition: { ...effective(), name: '  Ärger   Worker ' }, invocationMode: 'manual',
+      completionMode: AgentRunCompletionMode.Detach, parentRunId: null, parentAttemptId: null,
+      parentNodeId: null, parentTurnId: null, parentMessageId: null, parentToolCallId: null,
+      task: '  Fix the\n  login bug ', contextManifest: { version: 1, entries: [], assembledAt: 1, estimatedChars: 0 },
+      expectedResult: null, executionEnvironment: { version: 1, kind: 'shared_workspace', cwd: '/private/source',
+        sourceWorkspaceId: 'ws-source', snapshotHash: hash, createdAt: 1 }, expiresAt: null,
+      initialEvent: { type: AgentRunEventType.RunStatusChanged, payload: { version: 1, from: null, to: AgentRunStatus.Queued } },
+    });
+    runs.claimRun('owner-a', run.id, 'worker', 'lease', 1_000, 0);
+    const attempt = runs.createAttempt({ operationId: 'attempt-search-op', ownerUserId: 'owner-a', runId: run.id,
+      profileIndex: 0, runtimeProfile: effective().runtimeProfile, recoveryEnvelope: null });
+    runs.appendEventAndProject('owner-a', run.id, 1, { type: AgentRunEventType.RunStatusChanged,
+      payload: { version: 1, from: AgentRunStatus.Preparing, to: AgentRunStatus.Running } }, { status: AgentRunStatus.Running });
+    runs.finalizeAttempt('owner-a', run.id, attempt.id, 'lease', 'completed', AgentRunStatus.Completed, {
+      version: 1, status: 'completed', source: 'submitted',
+      handoff: { conclusion: 'Über die Anmeldung', artifactsOrChanges: 'auth-migration.sql', unresolvedIssues: 'Flaky\tretry' },
+      artifacts: [], resourceMutations: [], externalActions: [],
+    }, null, 2, { type: AgentRunEventType.RunStatusChanged,
+      payload: { version: 1, from: AgentRunStatus.Running, to: AgentRunStatus.Completed } });
+
+    const imported = importAgentRunBackup({ ownerUserId: 'owner-b', fragment: exportAgentRunBackup('owner-a', 'ws-source'),
+      workspaceIdMap: new Map([['ws-source', 'ws-dest']]), now: 100,
+      createId: (kind) => `search-${kind}-${Math.random().toString(36).slice(2)}` });
+    const restoredId = imported.runIds.get(run.id)!;
+    const searchColumns = (id: string) => ({ ...getDb().prepare(`SELECT task_search_text, agent_name_snapshot, handoff_search_text
+      FROM agent_runs WHERE id = ?`).get(id) as Record<string, string> });
+    assert.deepEqual(searchColumns(restoredId), searchColumns(run.id));
+    for (const q of ['the login bug', 'ärger worker', 'auth-migration', 'über', 'flaky retry']) {
+      assert.deepEqual(runs.listRuns('owner-a', { version: 1, workspaceId: 'ws-source', q }).map((item) => item.id), [run.id], q);
+      assert.deepEqual(runs.listRuns('owner-b', { version: 1, workspaceId: 'ws-dest', q, includeArchived: true }).map((item) => item.id), [restoredId], q);
+    }
+  });
+
+  test('sanitizing drops secret fields however their names are written', () => {
+    const secrets = ['API_KEY', 'PASSWORD', 'SECRET', 'apikey', 'APIKey', 'GITHUB_TOKEN', 'OPENAI_API_KEY',
+      'AWS_SECRET_ACCESS_KEY', 'X-Api-Key', 'githubToken', 'clientSecret', 'client_secret', 'privateKey', 'credentials', 'token'];
+    const kept = { inputTokens: 1, maxTokens: 2, author: 'a', oauth: 'o', changedFiles: ['notes.md'] };
+    assert.deepEqual(sanitizePortableBackupJson({ ...Object.fromEntries(secrets.map((key) => [key, 'secret-value'])), ...kept }), kept);
+  });
+
+  test('export drops ALL-CAPS secrets from runtime options and keeps emptied credential bindings', () => {
+    const runtimeProfile = { version: 1 as const, runtimeId: 'pi', options: { GITHUB_TOKEN: 'ghp_private', region: 'us' } };
+    new AgentDefinitionsRepository({ createId: () => 'definition-options' })
+      .create('owner-a', { ...definition('workspace', 'ws-source'), runtimeProfile }, 'options-op');
+    const runs = new AgentRunsRepository({ now: () => 10, createId: (kind) => `${kind}-options` });
+    const run = runs.createRun({
+      operationId: 'run-options-op', ownerUserId: 'owner-a', workspaceId: 'ws-source', definitionId: null,
+      definitionRevision: null, effectiveDefinition: { ...effective(), runtimeProfile }, invocationMode: 'manual',
+      completionMode: AgentRunCompletionMode.Detach, parentRunId: null, parentAttemptId: null,
+      parentNodeId: null, parentTurnId: null, parentMessageId: null, parentToolCallId: null,
+      task: 'Use options', contextManifest: { version: 1, entries: [], assembledAt: 1, estimatedChars: 0 },
+      expectedResult: null, executionEnvironment: { version: 1, kind: 'shared_workspace', cwd: '/private/source',
+        sourceWorkspaceId: 'ws-source', snapshotHash: hash, createdAt: 1 }, expiresAt: null,
+      initialEvent: { type: AgentRunEventType.RunStatusChanged, payload: { version: 1, from: null, to: AgentRunStatus.Queued } },
+    });
+    runs.createAttempt({ operationId: 'attempt-options-op', ownerUserId: 'owner-a', runId: run.id,
+      profileIndex: 0, runtimeProfile, recoveryEnvelope: null });
+
+    const exported = exportAgentRunBackup('owner-a', 'ws-source');
+    assert.equal(JSON.stringify(exported).includes('ghp_private'), false);
+    assert.deepEqual(exported.definitions[0].runtimeProfile.options, { region: 'us' });
+    assert.deepEqual(exported.attempts[0].runtimeProfile.options, { region: 'us' });
+    assert.deepEqual(exported.runs[0].effectiveDefinition.capabilitySnapshot.entries[0].credentialBindingIds, []);
   });
 });

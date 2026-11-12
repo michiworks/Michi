@@ -77,6 +77,8 @@ test('Chat Home renders and edits a native Page below its working composer, surv
   await expect.poll(() => mock.writes.filter(write => write.path.includes('/edits')).length).toBe(1);
   await page.reload();
   await expect(body.getByRole('heading', { name: 'My weekly focus' })).toBeVisible();
+  // A done item folds under its checklist's "Show N done" row.
+  await body.getByRole('button', { name: 'Show 1 done' }).click();
   await expect(body.getByRole('checkbox', { name: 'Review the plan' })).toBeChecked();
   await openArea(page, 'settings');
   const settings = page.locator('.terminal-settings');

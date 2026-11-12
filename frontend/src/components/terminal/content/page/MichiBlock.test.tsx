@@ -1,4 +1,3 @@
-import React from 'react';
 import { describe, expect, it, vi } from 'vitest';
 import { act, fireEvent, render, screen, within } from '@testing-library/react';
 import type { MichiPageBlock } from 'michi-shared';
@@ -155,13 +154,25 @@ describe('block renderers', () => {
     expect(screen.getByText('today')).toBeTruthy();
   });
 
-  it('ticks done checklist items read-only and strikes them', () => {
-    const { container } = renderBlock({ type: 'checklist', title: 'Before', items: [{ text: 'Book', done: true }, { text: 'Pack', done: false }] });
+  it('folds done checklist items under one row after the open ones, read-only and struck through', () => {
+    const { container } = renderBlock({ type: 'checklist', title: 'Before', items: [{ text: 'Book', done: true }, { text: 'Pack', done: false }, { text: 'Go', done: false }] });
+    expect(screen.getAllByRole('checkbox').map((b) => b.getAttribute('aria-label'))).toEqual(['Pack', 'Go']);
+    expect(screen.getByText('1/3')).toBeTruthy();
+    const fold = screen.getByRole('button', { name: 'Show 1 done' });
+    expect(fold.getAttribute('aria-expanded')).toBe('false');
+    fireEvent.click(fold);
     const boxes = screen.getAllByRole('checkbox');
-    expect(boxes.map((b) => b.getAttribute('aria-checked'))).toEqual(['true', 'false']);
+    expect(boxes.map((b) => b.getAttribute('aria-label'))).toEqual(['Pack', 'Go', 'Book']);
+    expect(boxes.map((b) => b.getAttribute('aria-checked'))).toEqual(['false', 'false', 'true']);
     expect(boxes.every((b) => b.getAttribute('aria-readonly') === 'true')).toBe(true);
     expect(container.querySelector('li[data-done="true"]')?.textContent).toBe('Book');
-    expect(screen.getByText('1/2')).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: 'Hide done' }));
+    expect(screen.queryByRole('checkbox', { name: 'Book' })).toBeNull();
+  });
+
+  it('shows no fold row for a checklist with nothing done', () => {
+    renderBlock({ type: 'checklist', title: 'Before', items: [{ text: 'Pack', done: false }] });
+    expect(screen.queryByRole('button', { name: /done/ })).toBeNull();
   });
 
   it('keeps choice buttons disabled outside a page assistant', () => {
@@ -267,6 +278,15 @@ describe('page editing hooks in renderers', () => {
     fireEvent.click(box);
     // The index is the item's place in the stored list, blank items included.
     expect(toggleItem).toHaveBeenCalledWith(block, 1);
+  });
+
+  it('unticks a folded done item by its stored place', () => {
+    const toggleItem = vi.fn();
+    const block: MichiPageBlock = { type: 'checklist', id: 'cl', title: 'Before', items: [{ text: 'Book', done: true }, { text: 'Pack', done: false }] };
+    renderBlock(block, ctx({ toggleItem }));
+    fireEvent.click(screen.getByRole('button', { name: 'Show 1 done' }));
+    fireEvent.click(screen.getByRole('checkbox', { name: 'Book' }));
+    expect(toggleItem).toHaveBeenCalledWith(block, 0);
   });
 
   it('keeps a checklist without an id read-only', () => {

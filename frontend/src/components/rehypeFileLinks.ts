@@ -22,6 +22,19 @@ export function fileLinkPath(value: string): string | null {
   return /^(?:\/|\.\.?\/)/.test(path) || /^[\w@.-]+(?:\/[\w .@()-]+)*\.[a-z\d]{1,12}(?::\d+(?::\d+)?)?(?:#L\d+)?$/i.test(path) ? path : null;
 }
 
+/**
+ * Inline code is often a command (`/review`, `/model`) or a shell argument
+ * (`../`, `./...`), not a path. Require a file name with an extension or two
+ * real segments; dot-only segments do not count.
+ */
+export function inlineCodeFilePath(value: string): string | null {
+  const path = fileLinkPath(value);
+  if (!path) return null;
+  const segments = path.split('/').filter(segment => segment && !/^\.+$/.test(segment));
+  const last = segments[segments.length - 1] ?? '';
+  return segments.length >= 2 || /\.[a-z\d]{1,12}(?::\d+)*(?:#L\d+)?$/i.test(last) ? path : null;
+}
+
 /** Link whole inline code paths; never rewrite source code blocks or existing links. */
 export function rehypeFileLinks() {
   return (tree: Node) => {
@@ -29,7 +42,7 @@ export function rehypeFileLinks() {
       if (['a', 'pre', 'script', 'style', 'svg', 'math'].includes(node.tagName ?? '')) return;
       if (node.tagName === 'code' && node.children?.length === 1 && node.children[0].type === 'text') {
         const value = node.children[0].value ?? '';
-        const path = fileLinkPath(value);
+        const path = inlineCodeFilePath(value);
         if (path) node.children = [{ type: 'element', tagName: 'a', properties: { href: encodeURI(path).replace(/#/g, '%23') }, children: node.children }];
         return;
       }

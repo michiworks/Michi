@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { AGENT_RUN_TERMINAL_STATUSES } from 'michi-shared';
 import type { AgentRunCleanupResources } from '../agents/runs/ports';
 import { getDb, runInTransaction } from './db';
 import {
@@ -68,7 +69,7 @@ export class AgentRunAdministrativeLifecycle {
           status: string;
           lease_token: string | null;
         }>;
-      const terminal = new Set(['completed', 'failed', 'cancelled']);
+      const terminal: ReadonlySet<string> = AGENT_RUN_TERMINAL_STATUSES;
       for (const row of rows) {
         if (!terminal.has(row.status) || row.lease_token !== null) {
           await this.deps.quiesceRun(ownerUserId, row.id);

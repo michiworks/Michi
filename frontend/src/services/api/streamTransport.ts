@@ -224,11 +224,12 @@ export function configureStreamTransport(base: string, available: Promise<boolea
   trackAvailability(gateway, available);
 }
 
-export async function fetchStream(url: string, options: RequestInit = {}): Promise<Response> {
+/** `mapPayload: false` leaves the body and frames as written (backendFetch's option). */
+export async function fetchStream(url: string, options: RequestInit = {}, { mapPayload = true }: { mapPayload?: boolean } = {}): Promise<Response> {
   const connectionId = connectionIdFromApiUrl(url);
   const generation = backendConnectionGeneration(connectionId);
   if (backendConnectionUnavailable(connectionId)) throw new Error('Remote connection is unavailable');
-  options = backendRequestOptions(url, options);
+  if (mapPayload) options = backendRequestOptions(url, options);
   url = backendRequestUrl(url);
   const current = gateway;
   if (current && typeof WebSocket !== 'undefined' && url.startsWith(`${current.base}/`)
@@ -240,8 +241,9 @@ export async function fetchStream(url: string, options: RequestInit = {}): Promi
       throw error;
     }
     if ([502, 503, 504].includes(response.status)) await confirmBackendConnectionUnavailable(connectionId, options.signal, generation);
-    return backendStreamResponse(response, connectionId, generation, options.signal);
+    return backendStreamResponse(response, connectionId, generation, options.signal, mapPayload);
   }
-  // Older gateways and isolated SSE mocks retain the original HTTP transport.
-  return backendStreamResponse(await backendFetch(url, options), connectionId, generation, options.signal);
+  // Older gateways and isolated SSE mocks retain the original HTTP transport,
+  // unchanged: streams write no structure, so they do not name the window.
+  return backendStreamResponse(await backendFetch(url, options, { windowIdentity: false, mapPayload }), connectionId, generation, options.signal, mapPayload);
 }

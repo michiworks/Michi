@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="en">
+<head><!-- build.mjs also writes a page per palette (monokai.html) from this
+     file, changing only four things: the html tag gains data-palette (its
+     name), color-scheme becomes dark, theme-color becomes that palette's
+     --ground, and the palette's CSS is inlined in a style element after the
+     styles.css link. Keep the html tag, those two metas and that link exactly
+     as written here. (No literal tags in this comment: smoke.mjs reads a
+     page's palette from the first html tag carrying data-palette, and
+     --keep-comments ships this comment.) -->
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Michi · Take the detour. The main thread keeps going.</title>
+<meta name="description" content="Michi is a desktop workspace that runs Claude Code, Codex, Kiro and Pi. Branch any sentence into its own pane. The main thread keeps going, and only what you choose comes back.">
+<meta name="color-scheme" content="light">
+<meta name="theme-color" content="#fbfbfc">
+<meta property="og:title" content="Michi · Take the detour. The main thread keeps going.">
+<meta property="og:description" content="Michi is a desktop workspace that runs Claude Code, Codex, Kiro and Pi. Branch any sentence into its own pane. The main thread keeps going, and only what you choose comes back.">
+<meta property="og:type" content="website">
+<meta name="twitter:card" content="summary_large_image">
+<link rel="icon" type="image/png" sizes="144x144" href="assets/favicon.png">
+<link rel="apple-touch-icon" href="assets/michi-icon-512.png">
+<script>(function(h){h.classList.add('js');var m=matchMedia('(prefers-reduced-motion: reduce)').matches,p=h.dataset.palette,s;
+try{s=sessionStorage.getItem('michi:hero'+(p?':'+p:''))}catch(e){}
+if(!m&&!location.hash&&!s&&scrollY<innerHeight/2)h.setAttribute('data-take-hero','t0');})(document.documentElement);</script>
+<link rel="preload" href="assets/fonts/geist-latin-400-normal.woff2" as="font" type="font/woff2" crossorigin>
+<link rel="preload" href="assets/fonts/geist-latin-700-normal.woff2" as="font" type="font/woff2" crossorigin>
+<link rel="stylesheet" href="styles.css">
+<script src="main.js" defer></script>
+</head>
+<body>

@@ -1,11 +1,13 @@
 import { useCallback, useEffect, useMemo, useRef, useSyncExternalStore } from 'react';
-import { toast } from 'sonner';
 import type { ProgressCardDto, ProgressCardStatus } from 'michi-shared';
 import { useChatNodesSnapshot, useChatPanes, useChatProjects, useStructuralSelector } from '../chatStore';
 import type { ChatNodeState } from '../chatTypes';
 import type { PageId } from '../commands';
-import { backendConnectionIdForWorkspace } from '../../config/backendConnections';
+import { backendConnectionIdForWorkspace, LOCAL_BACKEND_CONNECTION_ID } from '../../config/backendConnections';
+import { attentionTargetKey, presentAttention } from '../../services/attention/policy';
 import { markProgressCardSeen } from '../../services/api/spacesHome';
+import { isServerAttentionActive } from '../../services/serverAttentionStore';
+import { isNodeShownInWindow } from '../attention/targetVisibility';
 import { useProgressCards } from '../pages/useSpacesHome';
 import { cardLiveState, isFinished, threadTitle } from './liveStatus';
 import { dropPending, useSpaceConversationState } from './store';
@@ -40,6 +42,7 @@ export function useSpaceConversationBadges(): SpaceConversationBadges {
   return useSyncExternalStore(subscribeBadges, readBadges, readBadges);
 }
 
+/** @testonly */
 export function resetSpaceConversationBadgesForTests(): void {
   badges = NO_BADGES;
   for (const listener of badgeListeners) listener();
@@ -73,9 +76,11 @@ export interface WatcherOptions {
  */
 export function useSpaceConversationWatcher({ page, onOpen }: WatcherOptions): void {
   const { activeProject } = useChatProjects();
-  const { focusedPane } = useChatPanes();
-  const connectionId = activeProject ? backendConnectionIdForWorkspace(activeProject.id) : 'local';
-  const cards = useProgressCards(connectionId);
+  const { focusedPane, openPanes } = useChatPanes();
+  const openPanesRef = useRef(openPanes);
+  openPanesRef.current = openPanes;
+  const connectionId = activeProject ? backendConnectionIdForWorkspace(activeProject.id) : LOCAL_BACKEND_CONNECTION_ID;
+  const cards = useProgressCards(connectionId, { deferToFirstPaint: true });
   const refresh = cards.refresh;
   useSpaceConversationRunner(refresh);
   const { pending } = useSpaceConversationState();
@@ -105,16 +110,25 @@ export function useSpaceConversationWatcher({ page, onOpen }: WatcherOptions): v
       const before = previous.current.get(card.threadNodeId);
       if (before && !isFinished(before) && isFinished(status)) {
         finishedNow = true;
-        if (status === 'done' && viewing !== card.threadNodeId) {
-          toast.success(`New chat “${threadTitle(nodesRef.current[card.threadNodeId], card.title)}” finished`, {
-            action: { label: 'Open', onClick: () => onOpenRef.current(card) },
+        // A backend that decides attention announces the thread's finish itself.
+        if (status === 'done' && !isServerAttentionActive(connectionId)) {
+          const nodeId = card.threadNodeId;
+          const target = { type: 'node' as const, nodeId, backendConnectionId: connectionId };
+          // Same key as the thread's own "finished" notice: one of the two is shown.
+          presentAttention({
+            key: attentionTargetKey(target),
+            kind: 'finished',
+            title: `New chat “${threadTitle(nodesRef.current[nodeId], card.title)}” finished`,
+            target,
+            isTargetVisible: () => isNodeShownInWindow(nodeId, openPanesRef.current),
+            onOpen: () => onOpenRef.current(card),
           });
         }
       }
       previous.current.set(card.threadNodeId, status);
     }
     if (finishedNow) refresh();
-  }, [list, refresh, statuses, viewing]);
+  }, [connectionId, list, refresh, statuses]);
 
   useEffect(() => {
     if (!viewing) return;

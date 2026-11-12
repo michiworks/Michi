@@ -12,6 +12,7 @@ Start with [Getting started](../backend/src/docs/getting-started.md) to complete
 | [Common workflows](../backend/src/docs/common-workflows.md) | Research, implementation, review and handoff | `common-workflows` |
 | [Choose a Runtime](../backend/src/docs/runtimes.md) | Requirements, authentication and models | `runtimes` |
 | [Runtime capabilities](../backend/src/docs/runtime-capabilities.md) | Integration matrix, native features and limits | `runtime-capabilities` |
+| [Skills](../backend/src/docs/skills.md) | The Michi skill library, runtime skills and running skills with / | `skills` |
 | [Pages and components](../backend/src/docs/pages-and-components.md) | Pages/Assistant, native blocks, grid, Sources, preferences, database views and sandbox calls | `pages-and-components` |
 | [Pages maintenance](../backend/src/docs/pages-maintenance.md) | Meta agent, initial Home reads, automatic updates, catch-up and protected proposals | `pages-maintenance` |
 | [Component design](../backend/src/docs/page-component-design.md) | Visual conventions, supported tokens, sandbox limits and authoring/preview workflow | `page-component-design` |

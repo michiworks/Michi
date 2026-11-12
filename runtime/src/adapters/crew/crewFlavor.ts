@@ -3,6 +3,7 @@ import type { AcpAgentFlavor, KiroSessionMemory } from '../kiro/acpAgentFlavor';
 import { rewindPoints } from '../kiro/kiroProtocol';
 import type { AcpClient } from '../kiro/acpClient';
 import type { CancelAck } from '../../contract/types';
+import { crewRelayedHostTool } from './crewRelayTools';
 
 /** Longer than the adapter's 10 s stop grace, inside its 15 s ACP cancel limit. */
 const CANCEL_STATUS_TIMEOUT_MS = 12_000;
@@ -45,7 +46,9 @@ const CREW_MEMORY: KiroSessionMemory = {
  * session titles. A Gateway session may hold a private memory identity or a
  * restricted memory mode, so a lost one is never silently rebuilt. Its
  * adapter's rewind points carry the Gateway message id it forks at, so that
- * id is the fork anchor. Crew sessions keep one MCP slot each. A new
+ * id is the fork anchor. Crew sessions keep one MCP slot each, which their
+ * agents reach through Michi's relay, so a permission request for a relay
+ * call is named for the Michi tool it runs (crewRelayTools). A new
  * session names its Michi workspace, so the adapter can file it in the
  * Crew sidebar folder of that workspace. A cancel is acknowledged by the
  * Gateway's own stop record when one arrives.
@@ -62,7 +65,10 @@ export const CREW_KIRO_FLAVOR: AcpAgentFlavor = {
         replaceable: false,
         forkAnchor: async (client, sid) => ({ messageId: rewindPoints(await client.executeCommand(sid, 'rewind', {}, 5_000))[0]?.messageId }),
     },
+    tools: { relayedHostTool: crewRelayedHostTool },
     sessionAnchors: false,
+    // What the adapter runs itself (acp/acpServer.ts executeCommand); /compact is the host's.
+    hostCommands: [{ name: 'effort', description: 'Set the reasoning effort', kind: 'command', argumentHint: '<level>' }],
     memory: CREW_MEMORY,
     cancelAck: { kind: 'agent-record', confirm: crewCancelAck },
     sessionMetadata(host, opts) {

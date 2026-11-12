@@ -95,6 +95,8 @@ describe('Meta agent restriction check results', () => {
       }
       assert.deepEqual(metaAgentGuardFailureOf(metaAgentCatalogUnavailable('kiro', 'chat', 'no catalog (after 30s)')),
         { runtimeId: 'kiro', unexpectedTools: [], detail: 'no catalog (after 30s)' });
+      // Halted reasons and turn errors stored before the rename keep the older wording.
+      assert.deepEqual(metaAgentGuardFailureOf('Meta agent restriction check failed on pi: bash, web_fetch'), { runtimeId: 'pi', unexpectedTools: ['bash', 'web_fetch'] });
     });
 
     test('anything else is not a restriction failure', () => {

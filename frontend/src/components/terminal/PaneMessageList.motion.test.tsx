@@ -1,6 +1,6 @@
 import React from 'react';
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { PaneMessageList, isFreshMessage } from './PaneMessageList';
 import type { ChatAction, ChatNodeState } from '../../state/chatTypes';
 import { reduceNodes } from '../../state/chatReducers';
@@ -23,15 +23,16 @@ const noop = () => {};
 function list(node: ChatNodeState, extra: Partial<React.ComponentProps<typeof PaneMessageList>> = {}) {
   return <PaneMessageList
     node={node} prefs={DEFAULT_PREFS} contentStyle={{}} streaming={node.status === 'streaming'}
-    viewportHeight={800} onRetryTurn={noop} onEditUserMessage={noop}
+    onRetryTurn={noop} onEditUserMessage={noop}
     onContinueFollowUp={noop} onBranchFollowUp={noop} {...extra}
   />;
 }
 
 const frame = (container: HTMLElement, id: string) =>
   container.querySelector(`.terminal-message-frame[data-msg-id="${id}"]`) as HTMLElement;
-// The bubble rises from its bottom-right corner; settled messages carry no origin.
-const entered = (el: HTMLElement) => (el.firstElementChild as HTMLElement).style.transformOrigin !== '';
+// An entrance is motion's fade on the message root, written into its style;
+// settled messages render a plain root with no opacity of their own.
+const entered = (el: HTMLElement) => (el.firstElementChild as HTMLElement).style.opacity !== '';
 
 function reduce(node: ChatNodeState, action: ChatAction): ChatNodeState {
   return reduceNodes({ [node.nodeId]: node }, action)[node.nodeId];
@@ -98,65 +99,40 @@ describe('PaneMessageList message motion', () => {
     expect(answer.style.transition).toContain('opacity');
   });
 
-  describe('a picked follow-up becomes the new bubble', () => {
+  it('fades a steered bubble in where it lands, whatever the server clock says', () => {
+    const running: ChatNodeState = {
+      ...hydrated, status: 'streaming',
+      messages: [...hydrated.messages,
+        { id: 'u-run', role: 'user', text: 'run it', toolCalls: [], createdAt: 3 },
+        { id: 'a-run', role: 'assistant', text: '', toolCalls: [], blocks: [], streaming: true, createdAt: 4 }],
+    };
+    const { container, rerender } = render(list(running));
+    // The server stamped it seconds ago by our clock (skew plus the round trip).
+    const steered = reduce(running, { type: 'steer-accepted', nodeId: 'n1', data: {
+      messageId: 'u-steer', assistantId: 'a-run', turnId: 't', seq: 2, createdAt: Date.now() - 5_000, text: 'use cobalt', pending: true,
+    } });
+    rerender(list(steered));
+    expect(entered(frame(container, 'u-steer'))).toBe(true);
+  });
+
+  describe('follow-ups', () => {
     const withFollowUps: ChatNodeState = { ...hydrated, followUps: ['Dig into the cache', 'Compare with v1'] };
     const followUpPrefs = { ...DEFAULT_PREFS, enableFollowUps: true };
-    // The row sits low in the pane; the new bubble lands 500px above it.
-    beforeEach(() => {
-      vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockImplementation(function (this: HTMLElement) {
-        const top = this.classList.contains('terminal-message-user') ? 100 : 600;
-        return { left: 40, top, width: 300, height: 30, right: 340, bottom: top + 30, x: 40, y: top, toJSON() {} } as DOMRect;
-      });
-    });
-    afterEach(() => {
-      vi.restoreAllMocks();
-    });
-    /** Its own surface (pane): claims other tests made for these keys stay in theirs. */
-    const inPane = () => {
-      const container = document.createElement('div');
-      container.className = 'terminal-pane';
-      return { container: document.body.appendChild(container) };
-    };
 
-    /** Every transform a user bubble passed through (the animation may settle at once). */
-    function watchTransforms(container: HTMLElement): string[] {
-      const seen: string[] = [];
-      const probe = document.createElement('div');
-      const transformOf = (style: string | null) => {
-        probe.setAttribute('style', style ?? '');
-        return probe.style.transform;
-      };
-      new MutationObserver((records) => {
-        for (const r of records) {
-          const el = r.target as HTMLElement;
-          if (!el.classList?.contains('terminal-message-user')) continue;
-          for (const t of [transformOf(r.oldValue), el.style.transform]) if (t && !seen.includes(t)) seen.push(t);
-        }
-      }).observe(container, { subtree: true, attributes: true, attributeFilter: ['style'], attributeOldValue: true });
-      return seen;
-    }
-
-    it('flies the bubble from the clicked row while the rest of the section fades away', async () => {
+    it('a picked follow-up fades the section away and its bubble in', async () => {
       const onContinueFollowUp = vi.fn();
-      const { container, rerender } = render(list(withFollowUps, { prefs: followUpPrefs, onContinueFollowUp }), inPane());
+      const { container, rerender } = render(list(withFollowUps, { prefs: followUpPrefs, onContinueFollowUp }));
       const section = screen.getByRole('region', { name: 'Suggested follow-ups' });
-      const transforms = watchTransforms(container);
 
       fireEvent.click(screen.getByRole('button', { name: /Continue follow-up in current pane: Dig into the cache/ }));
       expect(onContinueFollowUp).toHaveBeenCalledWith('Dig into the cache');
       const sent = reduce(withFollowUps, { type: 'user-send', nodeId: 'n1', assistantId: 'a-local', userText: 'Dig into the cache' });
       rerender(list(sent, { prefs: followUpPrefs, onContinueFollowUp }));
-      await Promise.resolve();
 
-      // Lands from 500px lower, not the bubble's own rise (no double entrance).
-      expect(transforms).toContain('translateX(0px) translateY(500px)');
-      expect(entered(frame(container, 'u-a-local'))).toBe(false);
-      // The leaving section is out of reach, and the picked row is already gone from view.
+      expect(entered(frame(container, 'u-a-local'))).toBe(true);
+      // The leaving section is out of reach while it fades, all of it at once.
       expect(section.getAttribute('aria-hidden')).toBe('true');
       expect(section.hasAttribute('inert')).toBe(true);
-      const pickedRow = section.querySelectorAll<HTMLElement>('.t-followup-row')[0];
-      expect(pickedRow.style.visibility).toBe('hidden');
-      expect(section.querySelectorAll<HTMLElement>('.t-followup-row')[1].style.visibility).toBe('');
       await waitFor(() => expect(section.isConnected).toBe(false));
     });
 
@@ -180,18 +156,6 @@ describe('PaneMessageList message motion', () => {
       const { rerender } = render(list(withFollowUps, { prefs: followUpPrefs }));
       rerender(list({ ...withFollowUps, status: 'streaming', followUps: [] }, { prefs: followUpPrefs }));
       expect(document.querySelector('.t-followups')).toBeNull();
-    });
-
-    it('a typed send fades the section but rises the bubble in place', async () => {
-      const { container, rerender } = render(list(withFollowUps, { prefs: followUpPrefs }), inPane());
-      const section = screen.getByRole('region', { name: 'Suggested follow-ups' });
-      const transforms = watchTransforms(container);
-      const sent = reduce(withFollowUps, { type: 'user-send', nodeId: 'n1', assistantId: 'a-local', userText: 'something else' });
-      rerender(list(sent, { prefs: followUpPrefs }));
-      await Promise.resolve();
-      expect(transforms.some((t) => t.includes('translateY(500px)'))).toBe(false);
-      expect(entered(frame(container, 'u-a-local'))).toBe(true);
-      await waitFor(() => expect(section.isConnected).toBe(false));
     });
   });
 

@@ -1,5 +1,6 @@
-import { writeSseFrame } from "../services/httpSse";
+import { beginSse } from "../services/httpSse";
 export { writeSseFrame, type SseWritableResponse } from "../services/httpSse";
+import { createToolOutputStreamProjector, projectMessageRowsForTransport } from "./toolOutputTransport";
 import { resetKiroContext } from '../services/resetKiroContext';
 import { subscribeSessionStates } from '../agents/sessionStateFeed';
 import express from "express";
@@ -7,13 +8,20 @@ import path from "path";
 import fs from "fs";
 import { normalizeWorkspaceCwd } from "../agents/tools/pathSandbox";
 import {
-    assertCwdAllowed,
     getUserSandboxRoot,
     deriveSandboxCwd,
     NotFoundError,
+    workspaceSessionCwd,
+    ownedSandboxCwd,
 } from "../services/workspaceSandbox";
-import { ChatManager, ExtraContext, PrimaryAgentBindingError, primaryAgentSessionOptions } from "../services/chatManager";
-import { assistantPurposeOf, isAssistantNode } from "../assistant/identity";
+import { randomUUID } from "node:crypto";
+import { CheckinSessionError, ChatManager, ExtraContext, PrimaryAgentBindingError, primaryAgentSessionOptions } from "../services/chatManager";
+import { assistantPurposeOf, assistantTargetWorkspace, isAssistantNode, noteAssistantScheduleTurn } from "../assistant/identity";
+import { companionStartTaint } from "../assistant/startTaint";
+import { sessionReplayHistory } from "../agents/sessionReplayView";
+import { getCompanionSettings } from "../services/companion/settings";
+import { forgetCompanionContext } from "../services/companion/turnContext";
+import { activeTurnTrust, carriedCompanionTaintOf, clearCarriedCompanionTaint, recordCompanionTaint } from "../services/turnTrust";
 import { finalTerminalEvent } from "./chatStreamEvents";
 import { chatReplayUnavailable } from './chatReplay';
 import { getRuntime } from "../agents/registry";
@@ -22,15 +30,30 @@ import { getModelReasoningOptions } from '../agents/modelReasoning';
 import { getAgentConfig, resolveModel, resolveReasoning, resolveProvider, recordLastUsedProviderModel } from "../services/agentConfig";
 import { startupMark } from "../services/startupTrace";
 import { workspaceCwdError } from "../services/workspaceCwd";
+import { importSubdir, placeWorkspaceFile } from "../services/workspaceFiles";
 import { log } from "../services/logger";
 import * as sessionRegistry from "../agents/sessionRegistry";
 import { chatOwner } from "../agents/ownerMapping";
-import { chatHub, type BackgroundCursor, type HubSubscriber } from "../agents/chatHub";
+import { chatHub, TurnGuardError, type BackgroundCursor, type HubSubscriber } from "../agents/chatHub";
 import { encodeScheduledJobEvent, encodeScheduledJobsChangedEvent, scheduledJobEvents } from "../services/scheduledJobs/events";
+import { attentionFeed } from "../services/attention/attentionFeed";
+import { answerChatPermission, getSessionByIdentifier, resolvePublicNodeId } from "../services/chatPermissionAnswers";
+import { encodeWorkspaceStructureChangedEvent, structureEvents } from "../services/structureEvents";
 import { HEARTBEAT_INTERVAL_MS } from "../config/constants";
-import { CHAT_STREAM_EVENTS, encodeChatStreamEvent } from "michi-shared";
-import { MetaAgentChatContextError, hasSpacesTurnContext, isSystemWorkspaceSettings, parseMetaAgentChatTurnContext } from 'michi-shared';
-import { withMetaAgentContext, withScheduleAgentContext } from "../services/metaAgent/chatTurnContext";
+import { CHAT_STREAM_EVENTS, encodeChatStreamEvent, isNoAppliedTurnCursor, TURN_ERROR_CODES } from "michi-shared";
+import {
+    MetaAgentChatContextError,
+    hasSpacesTurnContext,
+    isCheckinNodeId,
+    parseMetaAgentChatTurnContext,
+    type CompanionTurnMetadata,
+    type MetaAgentChatTurnContext,
+} from 'michi-shared';
+import {
+    withAssistantTurnContext,
+    type AssistantTurnArea,
+    type CompanionTurnContext,
+} from "../services/metaAgent/chatTurnContext";
 import { isChatPermissionMode } from 'michi-shared';
 import { writeNodePermissionMode } from '../services/chatPermissions';
 import { isCrewMemoryMode } from 'michi-shared';
@@ -59,15 +82,24 @@ import {
     toBranchContext,
     type BranchBoundary,
 } from "../services/branchBoundary";
-import { ensureDurableGraphNode } from "../services/graphCommands";
-import { DomainError } from "../services/domainErrors";
-import { domainErrorResponse } from "./domainErrorResponse";
+import { multiModelForkBoundary, rebuildInheritance } from "../services/sessionRestore";
+import { ensureRequestedGraphNode } from "./graphPrerequisite";
 import { dbWorker, isDbWorkerReady } from "../services/dbWorkerClient";
 import { acquireSessionRestoreLock, loadNativeSession, NativeResumeFailedError, nativeResumeIdFor } from '../services/nativeResume';
 import { tryForkChatSession } from '../services/nativeFork';
 import { isNativeResumeEnabled } from '../services/agentConfig';
 import { requireWorkspaceOwner, requireChatOwner, requireNodeOwner } from "./middleware/ownership";
+import {
+    parseSkillInvocationRequest,
+    resolveSkillInvocation,
+    SkillInvocationError,
+    skillMessageMetadata,
+} from "../services/skills/invocation";
+import { workspaceSkillCwd } from "../services/skills/workspaceCwd";
+import type { SkillTurnInvocation } from "michi-runtime";
 import { META_AGENT_GUARD_ERROR_CODE, isMetaAgentGuardError } from '../agents/metaAgentGuard';
+import { artifactToolsForProfile, canLookUpArtifacts } from '../agents/artifactToolNames';
+import { workspaceArtifactManifest } from '../agents/artifactTools';
 import {
     buildCompatibleResumeContext,
     buildTargetResumeSignature,
@@ -89,17 +121,6 @@ function inferRuntimeId(row: ReturnType<typeof getNode> | null, nodeId: string):
     return sid === nodeId ? "pi" : "kiro";
 }
 
-function resolvePublicNodeId(identifier: string, userId?: string | null): string | null {
-    const live = getSessionForUser(identifier, userId ?? null);
-    if (live) return live.id;
-    return getNodeSessionBinding(identifier, userId ?? undefined)?.nodeId ?? null;
-}
-
-function getSessionByIdentifier(identifier: string, userId?: string | null): AgentSession | null {
-    const nodeId = resolvePublicNodeId(identifier, userId);
-    return nodeId ? getSessionForUser(nodeId, userId ?? null) : null;
-}
-
 /**
  * The Scheduled window's default workspace as its agent may use it: the
  * user's own, not deleted, archived or a system workspace, with AI navigation
@@ -107,8 +128,8 @@ function getSessionByIdentifier(identifier: string, userId?: string | null): Age
  */
 function scheduleDefaultWorkspace(workspaceId: string | null, userId: string | null): { id: string; name: string } | null {
     if (!workspaceId) return null;
-    const workspace = getWorkspace(workspaceId, userId ?? undefined);
-    if (!workspace || workspace.deleted_at != null || workspace.archived_at != null || isSystemWorkspaceSettings(workspace.settings)) return null;
+    const workspace = assistantTargetWorkspace(userId, workspaceId);
+    if (!workspace || workspace.archived_at != null) return null;
     if (!getAiGlobalContext(workspace.id, userId ?? undefined)) return null;
     return { id: workspace.id, name: workspace.name };
 }
@@ -129,6 +150,30 @@ export function isRuntimeChatBoundToNode(chatId: string, nodeId: string, userId?
     return getNodeSessionBinding(chatId, userId)?.nodeId === nodeId;
 }
 
+/** Artifacts a first turn's manifest names at most. */
+const CONTEXT_MANIFEST_MAX = 50;
+
+/**
+ * A contextManifest's first CONTEXT_MANIFEST_MAX entries. A client that sends
+ * no artifactCount sends every artifact, so a longer manifest used to be
+ * refused, and with it every message of a workspace with more artifacts. The
+ * agent finds the rest with list_artifacts and search_artifacts.
+ */
+function clampContextManifest(manifest: unknown[], route: string): unknown[] {
+    if (manifest.length <= CONTEXT_MANIFEST_MAX) return manifest;
+    log.warn('chat', 'contextManifest clamped', { route, received: manifest.length, kept: CONTEXT_MANIFEST_MAX });
+    return manifest.slice(0, CONTEXT_MANIFEST_MAX);
+}
+
+/** The body's artifactCount: how many artifacts the workspace has in all. Undefined when absent. */
+function readArtifactCount(raw: unknown): number | undefined {
+    if (raw === undefined || raw === null) return undefined;
+    if (typeof raw !== 'number' || !Number.isSafeInteger(raw) || raw < 0) {
+        throw new Error('artifactCount must be a non-negative integer');
+    }
+    return raw;
+}
+
 const MAX_BACKGROUND_CURSORS = 5_000;
 function readBackgroundCursors(raw: unknown): Record<string, BackgroundCursor> {
     if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return {};
@@ -137,10 +182,23 @@ function readBackgroundCursors(raw: unknown): Record<string, BackgroundCursor> {
         if (!chatId || !value || typeof value !== 'object' || Array.isArray(value)) continue;
         const turnId = (value as { turnId?: unknown }).turnId;
         const seq = (value as { seq?: unknown }).seq;
-        if (typeof turnId !== 'string' || !turnId || typeof seq !== 'number' || !Number.isFinite(seq)) continue;
+        if (typeof turnId !== 'string' || typeof seq !== 'number' || !Number.isFinite(seq)) continue;
+        // A chat the window knows without an applied turn names no turn: no
+        // replay log matches it, so a durable turn answers it with a gap.
+        if (!turnId && !isNoAppliedTurnCursor({ turnId, seq })) continue;
         out[chatId] = { turnId, seq: Math.max(-1, Math.trunc(seq)) };
     }
     return out;
+}
+
+/** The chat's node and the latest turn SQLite applied for it (owner-scoped in cloud mode). */
+function durableBackgroundCursor(chatId: string, ownerUserId: string | null): { nodeId: string; cursor?: BackgroundCursor } | null {
+    const binding = getNodeSessionBinding(chatId, ownerUserId);
+    if (!binding) return null;
+    const row = getNode(binding.nodeId);
+    return row?.last_applied_turn_id && typeof row.last_applied_seq === 'number'
+        ? { nodeId: binding.nodeId, cursor: { turnId: row.last_applied_turn_id, seq: row.last_applied_seq } }
+        : { nodeId: binding.nodeId };
 }
 
 function ensureCloudWorkspaceRow(userId: string | undefined, workspaceId: string | null | undefined): void {
@@ -168,8 +226,25 @@ function ensureCloudWorkspaceRow(userId: string | undefined, workspaceId: string
     saveWorkspace(row);
 }
 
+/** The agent's name in a replayed post's one-line fact (agents/sessionReplayView flattens it and falls back to the default). */
+const companionReplayName = () => getCompanionSettings().displayName;
+
+/**
+ * A node's stored conversation as a rebuilt session replays it (DESIGN-v2
+ * §2.8 T2): posted check-ins as Michi's one-line facts, never their text.
+ */
+function replayTranscript(nodeId: string, userId?: string): TranscriptMessage[] {
+    return sessionReplayHistory(listMessages(nodeId, userId), { name: companionReplayName });
+}
+
+/**
+ * The history a fresh session for this node starts from: the client's
+ * priorMessages for an ordinary chat that sends them, else the stored rows
+ * through the replay view. An assistant conversation always replays its own
+ * stored rows: a client's copy could carry a post's text (§2.8 T2).
+ */
 function readTranscriptMessages(input: unknown, nodeId: string, userId?: string): TranscriptMessage[] {
-    if (Array.isArray(input)) {
+    if (Array.isArray(input) && !isAssistantNode(nodeId)) {
         return input.flatMap((item): TranscriptMessage[] => {
             if (!item || typeof item !== "object") return [];
             const row = item as Record<string, unknown>;
@@ -184,12 +259,58 @@ function readTranscriptMessages(input: unknown, nodeId: string, userId?: string)
             return [{ role, content }];
         });
     }
-    return listMessages(nodeId, userId)
-        .filter((m) => m.role === "user" || m.role === "assistant")
-        .map((m) => ({
-            role: m.role === "assistant" ? "assistant" : "user",
-            content: m.content,
-        }));
+    return replayTranscript(nodeId, userId);
+}
+
+/**
+ * A conversation whose purpose is a check-in's (identity.ts assistantPurposeOf,
+ * w2-fix D13): an `n-cmph-` id, made or not, or a node recorded 'checkin' or
+ * 'companion' (the MVP's closed conversation). The prefix is checked before
+ * any lookup; a purpose that cannot be read leaves the id to the route's own
+ * lookups.
+ */
+function checkinPurposeId(id: unknown): boolean {
+    if (typeof id !== 'string' || !id) return false;
+    if (isCheckinNodeId(id)) return true;
+    try { return assistantPurposeOf(id) === 'checkin'; } catch { return false; }
+}
+
+/**
+ * A check-in's conversation (DESIGN-v2 §2.5) takes nothing from a client: no
+ * message, steer, compaction, session, reload, mode, model, command, stream,
+ * saved turn, cancel or answer to a prompt. Checked before the node is looked
+ * up, so a purged or never-made `n-cmph-` id is refused too. Writes the 409
+ * and returns true when one of `ids` is one.
+ */
+function refuseCheckinNode(res: express.Response, ...ids: unknown[]): boolean {
+    if (!ids.some(checkinPurposeId)) return false;
+    res.status(409).json({ code: 'checkin_node', error: "A check-in's conversation takes no requests" });
+    return true;
+}
+
+/**
+ * The chat's live session was compacted outside a turn (the compact route):
+ * the agent's standing [COMPANION CONTEXT] blocks go again on its next turn
+ * (a compaction inside a turn is seen by services/companion/turnContext.ts
+ * itself), and the check-in material earlier turns took in is no longer
+ * carried (w2-fix D1). execute-command does the same for /clear and /compact.
+ */
+function compactedOrCleared(nodeId: string, session: AgentSession | undefined): void {
+    if (session) forgetCompanionContext(session);
+    clearCarriedCompanionTaint(nodeId);
+}
+
+/**
+ * The fields of a user message's metadata only the backend writes (DESIGN-v2
+ * §8.1(e); `skill`, which skill a message ran); a client's copy is dropped.
+ */
+const SERVER_OWNED_USER_METADATA = ['companionTurn', 'companionSend', 'companionPost', 'skill'] as const;
+
+function clientUserMetadata(raw: unknown): Record<string, unknown> | undefined {
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return undefined;
+    const kept = { ...(raw as Record<string, unknown>) };
+    for (const key of SERVER_OWNED_USER_METADATA) delete kept[key];
+    return kept;
 }
 
 function readExistingSignature(
@@ -222,11 +343,20 @@ function sendAgentRouteError(res: express.Response, err: unknown): void {
         return;
     }
     if (err instanceof TurnBusyError) {
-        res.status(409).json({ code: 'turn_active', error: err.message });
+        res.status(409).json({ code: TURN_ERROR_CODES.active, error: err.message });
         return;
     }
     if (err instanceof NativeResumeFailedError) {
         res.status(503).json({ code: 'NATIVE_RESUME_FAILED', error: err.message });
+        return;
+    }
+    // DESIGN-v2 §2.5: a check-in node is refused before an open binding could answer for it.
+    if (err instanceof CheckinSessionError || (err instanceof TurnGuardError && err.code === 'checkin_node')) {
+        res.status(409).json({ code: 'checkin_node', error: err.message });
+        return;
+    }
+    if (err instanceof TurnGuardError) {
+        res.status(400).json({ code: err.code, error: err.message });
         return;
     }
     if (err instanceof PrimaryAgentBindingError) {
@@ -247,7 +377,7 @@ function sendAgentRouteError(res: express.Response, err: unknown): void {
 
 /** A turn holds its session until runtime cleanup ends, after the visible reply. */
 function turnBusy(nodeId: string): boolean {
-    return chatHub.isActive(nodeId) || chatHub.isOwnerTurnActive(nodeId);
+    return chatHub.holdsSession(nodeId);
 }
 
 /** The session is still held by a turn: a 409 `turn_active` the client may
@@ -264,7 +394,7 @@ function turnAlreadyBegan(turnId: string | undefined): boolean {
 }
 const TURN_ALREADY_BEGAN = {
     error: 'This message was already sent, so it was not sent again.',
-    code: 'turn_begin_failed',
+    code: TURN_ERROR_CODES.alreadyBegan,
 } as const;
 
 async function retireLiveSession(session: AgentSession | undefined): Promise<void> {
@@ -336,6 +466,130 @@ async function persistResumeBinding(
     }
 }
 
+/** The desktop cwd and absolute source file that link-file and copy-file take. */
+function desktopSourceFile(body: { cwd?: unknown; sourcePath?: unknown } | undefined, cloudError: string):
+    { cwd: string; sourcePath: string; size: number } | { status: number; body: object } {
+    if (process.env.MICHI_CLOUD === "1") return { status: 400, body: { error: cloudError } };
+    const cwd = body?.cwd;
+    const invalid = workspaceCwdError(cwd);
+    if (invalid) return { status: 400, body: invalid };
+    const sourcePath: unknown = body?.sourcePath;
+    if (typeof sourcePath !== "string" || !path.isAbsolute(sourcePath)) {
+        return { status: 400, body: { error: "sourcePath must be an absolute path" } };
+    }
+    // statSync follows symlinks, so a link-to-a-file source is accepted and
+    // its real size reported. Directories are rejected (symlink-to-dir would
+    // let the agent tree-walk outside cwd).
+    try {
+        const s = fs.statSync(sourcePath);
+        if (!s.isFile()) return { status: 400, body: { error: "sourcePath is not a file" } };
+        return { cwd: cwd as string, sourcePath, size: s.size };
+    } catch {
+        return { status: 400, body: { error: "sourcePath does not exist" } };
+    }
+}
+
+/** `max` refuses a longer list; without it (contextManifest) a longer one is clamped. */
+function readExtraContexts(raw: unknown, label: string, max?: number): ExtraContext[] | undefined {
+    if (raw === undefined) return undefined;
+    if (!Array.isArray(raw) || (max !== undefined && raw.length > max)) {
+        throw new Error(max === undefined ? `${label} must be an array` : `${label} must be an array of at most ${max} items`);
+    }
+    const items = max === undefined ? clampContextManifest(raw, "ensure-session") : raw;
+    for (const item of items) {
+        // Link artifacts carry `url` and an empty filePath; file/doc
+        // artifacts carry a real filePath. Require exactly one.
+        if (
+            typeof item !== "object" || item === null ||
+            typeof (item as ExtraContext).name !== "string" || (item as ExtraContext).name.length > 64 ||
+            typeof (item as ExtraContext).filePath !== "string" ||
+            (!(item as ExtraContext).filePath && typeof (item as ExtraContext).url !== "string")
+        ) {
+            throw new Error(`each ${label} item must have name (<=64 chars) and either filePath or url`);
+        }
+        const ctx = item as ExtraContext;
+        if (ctx.filePath.includes("..")) {
+            throw new Error(`${label} filePath must not contain ..`);
+        }
+        if ("url" in ctx && ctx.url !== undefined && typeof ctx.url !== "string") {
+            throw new Error(`${label}.url must be a string when provided`);
+        }
+        if ("size" in ctx && ctx.size !== undefined && (typeof ctx.size !== "number" || !Number.isFinite(ctx.size) || ctx.size < 0)) {
+            throw new Error(`${label}.size must be a non-negative number when provided`);
+        }
+        if ("kind" in ctx && ctx.kind !== undefined && ctx.kind !== "embedded" && ctx.kind !== "reference" && ctx.kind !== "symlink") {
+            throw new Error(`${label}.kind must be 'embedded', 'reference', or 'symlink' if present`);
+        }
+    }
+    return items as ExtraContext[];
+}
+
+/**
+ * The checks of an ensure-session body that need no node or session, so a
+ * malformed request is refused before the route writes the graph node or
+ * the permission mode. A cloud request's cwd is derived later, not read.
+ */
+function parseEnsureSessionBody(body: Record<string, unknown>): {
+    cwd?: string;
+    model?: string;
+    agentDefinitionId?: string;
+    modeId?: string;
+    mergeContexts: string[];
+    extraContexts?: ExtraContext[];
+    contextManifest?: ExtraContext[];
+    artifactCount?: number;
+    enableFollowUps: boolean;
+} | { invalid: Record<string, unknown> } {
+    const invalid = (error: string) => ({ invalid: { error } });
+    if (process.env.MICHI_CLOUD !== "1" && body.cwd !== undefined) {
+        const cwdError = workspaceCwdError(body.cwd);
+        if (cwdError) return { invalid: cwdError };
+    }
+    for (const field of ['runtimeId', 'providerId', 'modelId']) {
+        if (body[field] !== undefined && (typeof body[field] !== 'string' || !(body[field] as string).trim())) {
+            return invalid(`${field} must be a non-empty string`);
+        }
+    }
+    if (body.reasoning !== undefined && body.reasoning !== null && !normalizeReasoning(body.reasoning)) {
+        return invalid('Invalid reasoning level');
+    }
+    if (body.model !== undefined && typeof body.model !== "string") return invalid("model must be a string");
+    if (body.agentDefinitionId !== undefined && (typeof body.agentDefinitionId !== "string" || !body.agentDefinitionId.trim())) {
+        return invalid("agentDefinitionId must be a non-empty string");
+    }
+    // Desired agent/mode for a brand-new thread (e.g. Home composer pre-pick).
+    // Applied after a fresh session is created so the first prompt runs under it.
+    if (body.modeId !== undefined && typeof body.modeId !== "string") return invalid("modeId must be a string");
+    if (body.mergeContexts !== undefined
+        && (!Array.isArray(body.mergeContexts) || !body.mergeContexts.every((x) => typeof x === "string"))) {
+        return invalid("mergeContexts must be an array of strings");
+    }
+    let extraContexts: ExtraContext[] | undefined;
+    let contextManifest: ExtraContext[] | undefined;
+    let artifactCount: number | undefined;
+    try {
+        extraContexts = readExtraContexts(body.extraContexts, "extraContexts", 20);
+        contextManifest = readExtraContexts(body.contextManifest, "contextManifest");
+        artifactCount = readArtifactCount(body.artifactCount);
+    } catch (err) {
+        return invalid((err as Error).message);
+    }
+    if (body.enableFollowUps !== undefined && typeof body.enableFollowUps !== "boolean") {
+        return invalid("enableFollowUps must be a boolean");
+    }
+    return {
+        cwd: body.cwd as string | undefined,
+        model: body.model as string | undefined,
+        agentDefinitionId: body.agentDefinitionId as string | undefined,
+        modeId: body.modeId as string | undefined,
+        mergeContexts: (body.mergeContexts as string[] | undefined) ?? [],
+        extraContexts,
+        contextManifest,
+        ...(artifactCount !== undefined ? { artifactCount } : {}),
+        enableFollowUps: body.enableFollowUps !== false,
+    };
+}
+
 export function setupMichiRoutes(chatManager: ChatManager) {
     const router = express.Router();
 
@@ -359,22 +613,14 @@ export function setupMichiRoutes(chatManager: ChatManager) {
             if (typeof workspaceId !== "string" || !workspaceId) {
                 return res.status(400).json({ error: "workspaceId is required" });
             }
-            try {
-                cwd = deriveSandboxCwd(userId, workspaceId);
-            } catch (err) {
-                if (err instanceof NotFoundError) {
-                    return res.status(404).json({ error: "workspace not found" });
-                }
-                return res.status(400).json({ error: (err as Error).message });
-            }
-            // assertCwdAllowed stays as defense-in-depth even though cwd is server-derived.
-            assertCwdAllowed(cwd, userId);
+            const owned = ownedSandboxCwd(userId, workspaceId);
+            if ("error" in owned) return res.status(owned.status).json({ error: owned.error });
+            cwd = owned.cwd;
         } else {
             const cwdRaw: unknown = req.body?.cwd;
-            if (typeof cwdRaw !== "string" || !path.isAbsolute(cwdRaw)) {
-                return res.status(400).json({ error: "cwd must be an absolute path" });
-            }
-            cwd = cwdRaw;
+            const invalid = workspaceCwdError(cwdRaw);
+            if (invalid) return res.status(400).json(invalid);
+            cwd = cwdRaw as string;
         }
         if (typeof originalName !== "string" || originalName.length === 0) {
             return res.status(400).json({ error: "originalName required" });
@@ -407,59 +653,15 @@ export function setupMichiRoutes(chatManager: ChatManager) {
             }
         }
 
+        const subdir = importSubdir(req.body?.subdir);
+        const placed = placeWorkspaceFile(cwd, subdir, originalName);
+        if ("error" in placed) return res.status(placed.status).json({ error: placed.error });
         try {
-            const s = fs.statSync(cwd);
-            if (!s.isDirectory()) return res.status(400).json({ error: "cwd is not a directory" });
-        } catch {
-            return res.status(400).json({ error: "cwd does not exist" });
-        }
-
-        const base = path.basename(originalName);
-        const ext = path.extname(base);
-        const stem = base.slice(0, base.length - ext.length).replace(/[^a-zA-Z0-9_-]/g, "_") || "file";
-        const safeExt = ext.replace(/[^a-zA-Z0-9.]/g, "");
-
-        // Allowlist the write subdir. Message attachments land in .attachments/
-        // so they stay out of the agent's "workspace context" folder
-        // (.contexts/ — which the first-turn manifest advertises); anything
-        // unrecognised falls back to the legacy .contexts/, so this is
-        // backward compatible and can never escape the sandbox.
-        const subdirRaw: unknown = req.body?.subdir;
-        const subdir =
-            subdirRaw === ".attachments" || subdirRaw === ".contexts" ? subdirRaw : ".contexts";
-
-        const dir = path.join(cwd, subdir);
-        try {
-            fs.mkdirSync(dir, { recursive: true });
-        } catch (err) {
-            return res.status(500).json({ error: `mkdir ${subdir} failed: ${(err as Error).message}` });
-        }
-
-        let name = stem;
-        let filename = `${stem}${safeExt}`;
-        let attempt = 0;
-        while (fs.existsSync(path.join(dir, filename))) {
-            attempt += 1;
-            name = `${stem}-${attempt}`;
-            filename = `${name}${safeExt}`;
-            if (attempt > 9999) return res.status(500).json({ error: "could not allocate unique filename" });
-        }
-
-        const target = path.join(dir, filename);
-        if (!target.startsWith(dir + path.sep)) {
-            return res.status(400).json({ error: `resolved path escapes ${subdir}` });
-        }
-        try {
-            fs.writeFileSync(target, bytes);
+            fs.writeFileSync(placed.target, bytes);
         } catch (err) {
             return res.status(500).json({ error: `write failed: ${(err as Error).message}` });
         }
-        res.json({
-            name,
-            displayName: base,
-            filePath: `${subdir}/${filename}`,
-            size: bytes.length,
-        });
+        res.json({ ...placed.file, size: bytes.length });
     });
 
     // Creates a symlink inside <cwd>/.artifacts/ pointing at an externally-picked
@@ -473,85 +675,20 @@ export function setupMichiRoutes(chatManager: ChatManager) {
     // Desktop-only: in cloud mode the per-user sandbox must never point at arbitrary
     // host paths, so linking is refused there (upload/copy is the only import path).
     router.post("/workspaces/link-file", requireWorkspaceOwner, (req, res) => {
-        if (process.env.MICHI_CLOUD === "1") {
-            return res
-                .status(400)
-                .json({ error: "linking external files is not supported in cloud mode" });
-        }
-        const cwdRaw: unknown = req.body?.cwd;
-        if (typeof cwdRaw !== "string" || !path.isAbsolute(cwdRaw)) {
-            return res.status(400).json({ error: "cwd must be an absolute path" });
-        }
-        const cwd = cwdRaw;
-
-        const sourcePathRaw: unknown = req.body?.sourcePath;
-        if (typeof sourcePathRaw !== "string" || !path.isAbsolute(sourcePathRaw)) {
-            return res.status(400).json({ error: "sourcePath must be an absolute path" });
-        }
-        const sourcePath = sourcePathRaw;
-
+        const source = desktopSourceFile(req.body, "linking external files is not supported in cloud mode");
+        if ("status" in source) return res.status(source.status).json(source.body);
+        const placed = placeWorkspaceFile(source.cwd, ".artifacts", source.sourcePath);
+        if ("error" in placed) return res.status(placed.status).json({ error: placed.error });
         try {
-            const s = fs.statSync(cwd);
-            if (!s.isDirectory()) return res.status(400).json({ error: "cwd is not a directory" });
-        } catch {
-            return res.status(400).json({ error: "cwd does not exist" });
-        }
-
-        // statSync follows symlinks, so a link-to-a-file source is accepted and
-        // its real size reported. Directories are rejected (symlink-to-dir would
-        // let the agent tree-walk outside cwd).
-        let srcSize = 0;
-        try {
-            const s = fs.statSync(sourcePath);
-            if (!s.isFile()) return res.status(400).json({ error: "sourcePath is not a file" });
-            srcSize = s.size;
-        } catch {
-            return res.status(400).json({ error: "sourcePath does not exist" });
-        }
-
-        const base = path.basename(sourcePath);
-        const ext = path.extname(base);
-        const stem =
-            base.slice(0, base.length - ext.length).replace(/[^a-zA-Z0-9_-]/g, "_") || "file";
-        const safeExt = ext.replace(/[^a-zA-Z0-9.]/g, "");
-
-        const subdir = ".artifacts";
-        const dir = path.join(cwd, subdir);
-        try {
-            fs.mkdirSync(dir, { recursive: true });
-        } catch (err) {
-            return res.status(500).json({ error: `mkdir ${subdir} failed: ${(err as Error).message}` });
-        }
-
-        let name = stem;
-        let filename = `${stem}${safeExt}`;
-        let attempt = 0;
-        while (fs.existsSync(path.join(dir, filename))) {
-            attempt += 1;
-            name = `${stem}-${attempt}`;
-            filename = `${name}${safeExt}`;
-            if (attempt > 9999) return res.status(500).json({ error: "could not allocate unique filename" });
-        }
-
-        const target = path.join(dir, filename);
-        if (!target.startsWith(dir + path.sep)) {
-            return res.status(400).json({ error: `resolved path escapes ${subdir}` });
-        }
-        try {
-            fs.symlinkSync(sourcePath, target);
+            fs.symlinkSync(source.sourcePath, placed.target);
         } catch {
             try {
-                fs.copyFileSync(sourcePath, target);
+                fs.copyFileSync(source.sourcePath, placed.target);
             } catch (err) {
                 return res.status(500).json({ error: `link/copy failed: ${(err as Error).message}` });
             }
         }
-        res.json({
-            name,
-            displayName: base,
-            filePath: `${subdir}/${filename}`,
-            size: srcSize,
-        });
+        res.json({ ...placed.file, size: source.size });
     });
 
     // ── Copy-file: zero-encode local file import (Electron fast path) ──────
@@ -562,87 +699,20 @@ export function setupMichiRoutes(chatManager: ChatManager) {
     // fs.copyFile, and skip all base64 encoding / JSON serialization overhead.
     // Desktop-only (same restriction as link-file).
     router.post("/workspaces/copy-file", requireWorkspaceOwner, (req, res) => {
-        if (process.env.MICHI_CLOUD === "1") {
-            return res
-                .status(400)
-                .json({ error: "copy-file is not supported in cloud mode" });
-        }
-        const cwdRaw: unknown = req.body?.cwd;
-        if (typeof cwdRaw !== "string" || !path.isAbsolute(cwdRaw)) {
-            return res.status(400).json({ error: "cwd must be an absolute path" });
-        }
-        const cwd = cwdRaw;
-
-        const sourcePathRaw: unknown = req.body?.sourcePath;
-        if (typeof sourcePathRaw !== "string" || !path.isAbsolute(sourcePathRaw)) {
-            return res.status(400).json({ error: "sourcePath must be an absolute path" });
-        }
-        const sourcePath = sourcePathRaw;
-
-        try {
-            const s = fs.statSync(cwd);
-            if (!s.isDirectory()) return res.status(400).json({ error: "cwd is not a directory" });
-        } catch {
-            return res.status(400).json({ error: "cwd does not exist" });
-        }
-
-        let srcSize = 0;
-        try {
-            const s = fs.statSync(sourcePath);
-            if (!s.isFile()) return res.status(400).json({ error: "sourcePath is not a file" });
-            srcSize = s.size;
-        } catch {
-            return res.status(400).json({ error: "sourcePath does not exist" });
-        }
-
+        const source = desktopSourceFile(req.body, "copy-file is not supported in cloud mode");
+        if ("status" in source) return res.status(source.status).json(source.body);
         // 20MB cap consistent with import-file's base64 path
-        if (srcSize > 20_000_000) {
-            return res.status(413).json({ error: `file too large (${srcSize} bytes; max 20,000,000)` });
+        if (source.size > 20_000_000) {
+            return res.status(413).json({ error: `file too large (${source.size} bytes; max 20,000,000)` });
         }
-
-        const base = path.basename(sourcePath);
-        const ext = path.extname(base);
-        const stem =
-            base.slice(0, base.length - ext.length).replace(/[^a-zA-Z0-9_-]/g, "_") || "file";
-        const safeExt = ext.replace(/[^a-zA-Z0-9.]/g, "");
-
-        // Support the same subdir allowlist as import-file
-        const subdirRaw: unknown = req.body?.subdir;
-        const subdir =
-            subdirRaw === ".attachments" || subdirRaw === ".contexts" ? subdirRaw : ".contexts";
-
-        const dir = path.join(cwd, subdir);
+        const placed = placeWorkspaceFile(source.cwd, importSubdir(req.body?.subdir), source.sourcePath);
+        if ("error" in placed) return res.status(placed.status).json({ error: placed.error });
         try {
-            fs.mkdirSync(dir, { recursive: true });
-        } catch (err) {
-            return res.status(500).json({ error: `mkdir ${subdir} failed: ${(err as Error).message}` });
-        }
-
-        let name = stem;
-        let filename = `${stem}${safeExt}`;
-        let attempt = 0;
-        while (fs.existsSync(path.join(dir, filename))) {
-            attempt += 1;
-            name = `${stem}-${attempt}`;
-            filename = `${name}${safeExt}`;
-            if (attempt > 9999) return res.status(500).json({ error: "could not allocate unique filename" });
-        }
-
-        const target = path.join(dir, filename);
-        if (!target.startsWith(dir + path.sep)) {
-            return res.status(400).json({ error: `resolved path escapes ${subdir}` });
-        }
-        try {
-            fs.copyFileSync(sourcePath, target);
+            fs.copyFileSync(source.sourcePath, placed.target);
         } catch (err) {
             return res.status(500).json({ error: `copy failed: ${(err as Error).message}` });
         }
-        res.json({
-            name,
-            displayName: base,
-            filePath: `${subdir}/${filename}`,
-            size: srcSize,
-        });
+        res.json({ ...placed.file, size: source.size });
     });
 
     /**
@@ -670,16 +740,9 @@ export function setupMichiRoutes(chatManager: ChatManager) {
             if (typeof workspaceId !== "string" || !workspaceId) {
                 return res.status(400).json({ error: "workspaceId is required in cloud mode" });
             }
-            try {
-                cwd = deriveSandboxCwd(userId, workspaceId);
-            } catch (err) {
-                if (err instanceof NotFoundError) {
-                    return res.status(404).json({ error: "workspace not found" });
-                }
-                return res.status(400).json({ error: (err as Error).message });
-            }
-            // assertCwdAllowed stays as defense-in-depth.
-            assertCwdAllowed(cwd, userId);
+            const owned = ownedSandboxCwd(userId, workspaceId);
+            if ("error" in owned) return res.status(owned.status).json({ error: owned.error });
+            cwd = owned.cwd;
         } else {
             const cwdRaw: unknown = req.body?.cwd;
             const invalid = workspaceCwdError(cwdRaw);
@@ -723,28 +786,14 @@ export function setupMichiRoutes(chatManager: ChatManager) {
             if (typeof workspaceId !== "string" || !workspaceId) {
                 return res.status(400).json({ error: "workspaceId is required in cloud mode" });
             }
-            try {
-                cwd = deriveSandboxCwd(userId, workspaceId);
-            } catch (err) {
-                if (err instanceof NotFoundError) {
-                    return res.status(404).json({ error: "workspace not found" });
-                }
-                return res.status(400).json({ error: (err as Error).message });
-            }
-            assertCwdAllowed(cwd, userId);
+            const owned = ownedSandboxCwd(userId, workspaceId);
+            if ("error" in owned) return res.status(owned.status).json({ error: owned.error });
+            cwd = owned.cwd;
         } else {
             const cwdRaw: unknown = req.body?.cwd;
-            if (typeof cwdRaw !== "string" || !path.isAbsolute(cwdRaw)) {
-                return res.status(400).json({ error: "cwd must be an absolute path" });
-            }
-            cwd = cwdRaw;
-            try {
-                if (!fs.statSync(cwd).isDirectory()) {
-                    return res.status(400).json({ error: "cwd is not a directory" });
-                }
-            } catch {
-                return res.status(400).json({ error: "cwd does not exist or is not accessible" });
-            }
+            const invalid = workspaceCwdError(cwdRaw);
+            if (invalid) return res.status(400).json(invalid);
+            cwd = cwdRaw as string;
         }
 
         const userIdForConfig: string | undefined = process.env.MICHI_CLOUD === "1" ? req.user?.id : undefined;
@@ -772,132 +821,6 @@ export function setupMichiRoutes(chatManager: ChatManager) {
     router.post("/chats", requireWorkspaceOwner, async (req, res) => {
         try {
             const parentChatId: string | undefined = req.body?.parentChatId;
-            const mergeContexts: unknown = req.body?.mergeContexts;
-            const model: unknown = req.body?.model;
-            const modeId: unknown = req.body?.modeId;
-            if (model !== undefined && typeof model !== "string") {
-                return res.status(400).json({ error: "model must be a string" });
-            }
-            if (modeId !== undefined && (typeof modeId !== "string" || modeId.length === 0)) {
-                return res.status(400).json({ error: "modeId must be a non-empty string" });
-            }
-
-            // In cloud mode, derive cwd server-side from workspaceId; ignore client-supplied cwd.
-            // Desktop trusts client-supplied cwd.
-            let cwd: string | undefined;
-            if (process.env.MICHI_CLOUD === "1") {
-                const userId = req.user!.id;
-                const bodyWorkspaceIdForCwd: unknown = req.body?.workspaceId;
-                if (typeof bodyWorkspaceIdForCwd === "string" && bodyWorkspaceIdForCwd.length > 0) {
-                    try {
-                        cwd = deriveSandboxCwd(userId, bodyWorkspaceIdForCwd);
-                    } catch (err) {
-                        if (err instanceof NotFoundError) {
-                            return res.status(404).json({ error: "workspace not found" });
-                        }
-                        return res.status(400).json({ error: (err as Error).message });
-                    }
-                    // assertCwdAllowed stays as defense-in-depth.
-                    assertCwdAllowed(cwd, userId);
-                }
-                // If no workspaceId was sent yet (e.g. untitled chat), cwd stays undefined
-                // and falls back to process.cwd() below — same as before for that edge case.
-            } else {
-                const cwdRaw: unknown = req.body?.cwd;
-                if (cwdRaw !== undefined) {
-                    if (typeof cwdRaw !== "string" || !path.isAbsolute(cwdRaw)) {
-                        return res.status(400).json({ error: "cwd must be an absolute path" });
-                    }
-                    try {
-                        const s = fs.statSync(cwdRaw);
-                        if (!s.isDirectory()) {
-                            return res.status(400).json({ error: "cwd is not a directory" });
-                        }
-                    } catch {
-                        return res.status(400).json({ error: "cwd does not exist" });
-                    }
-                    cwd = cwdRaw;
-                }
-            }
-            let validatedMergeContexts: string[] | undefined;
-            if (mergeContexts !== undefined) {
-                if (!Array.isArray(mergeContexts) || !mergeContexts.every((x) => typeof x === "string")) {
-                    return res.status(400).json({ error: "mergeContexts must be an array of strings" });
-                }
-                validatedMergeContexts = mergeContexts as string[];
-            }
-            const extraContexts: unknown = req.body?.extraContexts;
-            let validatedExtraContexts: ExtraContext[] | undefined;
-            if (extraContexts !== undefined) {
-                if (!Array.isArray(extraContexts) || extraContexts.length > 20) {
-                    return res.status(400).json({ error: "extraContexts must be an array of at most 20 items" });
-                }
-                for (const item of extraContexts) {
-                    // A `link` artifact carries `url` and an empty filePath; a
-                    // file/doc artifact carries a real filePath. Require exactly
-                    // one to be present.
-                    if (
-                        typeof item !== "object" || item === null ||
-                        typeof item.name !== "string" || item.name.length > 64 ||
-                        typeof item.filePath !== "string" ||
-                        (!item.filePath && typeof item.url !== "string")
-                    ) {
-                        return res.status(400).json({ error: "each extraContext must have name (≤64 chars) and either filePath or url" });
-                    }
-                    if (item.filePath.includes('..')) {
-                        return res.status(400).json({ error: 'filePath must not contain ..' });
-                    }
-                    if ('url' in item && item.url !== undefined && typeof item.url !== 'string') {
-                        return res.status(400).json({ error: 'extraContext.url must be a string when provided' });
-                    }
-                    if ('size' in item && (typeof item.size !== 'number' || !Number.isFinite(item.size) || item.size < 0)) {
-                        return res.status(400).json({ error: 'extraContext.size must be a non-negative number when provided' });
-                    }
-                    if ('kind' in item && item.kind !== undefined && item.kind !== 'embedded' && item.kind !== 'reference' && item.kind !== 'symlink') {
-                        return res.status(400).json({ error: "extraContexts kind must be 'embedded', 'reference', or 'symlink' if present" });
-                    }
-                }
-                validatedExtraContexts = extraContexts as ExtraContext[];
-            }
-            const contextManifest: unknown = req.body?.contextManifest;
-            let validatedContextManifest: ExtraContext[] | undefined;
-            if (contextManifest !== undefined) {
-                if (!Array.isArray(contextManifest) || contextManifest.length > 50) {
-                    return res.status(400).json({ error: "contextManifest must be an array of at most 50 items" });
-                }
-                for (const item of contextManifest) {
-                    if (
-                        typeof item !== "object" || item === null ||
-                        typeof item.name !== "string" || item.name.length > 64 ||
-                        typeof item.filePath !== "string" ||
-                        (!item.filePath && typeof item.url !== "string")
-                    ) {
-                        return res.status(400).json({ error: "each contextManifest item must have name (≤64 chars) and either filePath or url" });
-                    }
-                    if (item.filePath.includes('..')) {
-                        return res.status(400).json({ error: 'contextManifest filePath must not contain ..' });
-                    }
-                    if ('url' in item && item.url !== undefined && typeof item.url !== 'string') {
-                        return res.status(400).json({ error: 'contextManifest.url must be a string when provided' });
-                    }
-                    if ('size' in item && (typeof item.size !== 'number' || !Number.isFinite(item.size) || item.size < 0)) {
-                        return res.status(400).json({ error: 'contextManifest.size must be a non-negative number when provided' });
-                    }
-                    if ('kind' in item && item.kind !== undefined && item.kind !== 'embedded' && item.kind !== 'reference' && item.kind !== 'symlink') {
-                        return res.status(400).json({ error: "contextManifest kind must be 'embedded', 'reference', or 'symlink' if present" });
-                    }
-                }
-                validatedContextManifest = contextManifest as ExtraContext[];
-            }
-            const enableFollowUpsRaw: unknown = req.body?.enableFollowUps;
-            let enableFollowUps: boolean = true;
-            if (enableFollowUpsRaw !== undefined) {
-                if (typeof enableFollowUpsRaw !== "boolean") {
-                    return res.status(400).json({ error: "enableFollowUps must be a boolean" });
-                }
-                enableFollowUps = enableFollowUpsRaw;
-            }
-
             // A durable public node must own every runtime session.
             const nodeId: unknown = req.body?.nodeId;
             let validatedSessionId: string | undefined;
@@ -941,13 +864,9 @@ export function setupMichiRoutes(chatManager: ChatManager) {
             }
 
             // Keep legacy callers on the same locked, durable resume path as
-            // the composer. A repeated create must not replace native history.
-            req.body = {
-                ...req.body, cwd, workspaceId, enableFollowUps,
-                mergeContexts: validatedMergeContexts,
-                extraContexts: validatedExtraContexts,
-                contextManifest: validatedContextManifest,
-            };
+            // the composer, which checks the rest of the body. A repeated
+            // create must not replace native history.
+            req.body = { ...req.body, workspaceId };
             (req.params as Record<string, string>).nodeId = validatedSessionId;
             return ensureNodeSession(req as express.Request<{ nodeId: string }>, res);
         } catch (err) {
@@ -958,6 +877,7 @@ export function setupMichiRoutes(chatManager: ChatManager) {
 
     router.post("/chats/:chatId/load", requireChatOwner, async (req, res) => {
         const { chatId } = req.params;
+        if (refuseCheckinNode(res, chatId, req.body?.nodeId)) return;
         const isCloud = process.env.MICHI_CLOUD === "1";
         // Cloud derives cwd from the node's own workspace below; body.cwd is ignored.
         const bodyCwd: unknown = req.body?.cwd;
@@ -965,15 +885,8 @@ export function setupMichiRoutes(chatManager: ChatManager) {
         const nodeId: unknown = req.body?.nodeId;
         const bodyRuntimeId: unknown = req.body?.runtimeId;
         if (!isCloud) {
-            if (typeof bodyCwd !== "string" || !path.isAbsolute(bodyCwd)) {
-                return res.status(400).json({ error: "cwd must be an absolute path" });
-            }
-            try {
-                const s = fs.statSync(bodyCwd);
-                if (!s.isDirectory()) return res.status(400).json({ error: "cwd is not a directory" });
-            } catch {
-                return res.status(400).json({ error: "cwd does not exist" });
-            }
+            const invalid = workspaceCwdError(bodyCwd);
+            if (invalid) return res.status(400).json(invalid);
         }
         if (model !== undefined && typeof model !== "string") {
             return res.status(400).json({ error: "model must be a string" });
@@ -987,6 +900,7 @@ export function setupMichiRoutes(chatManager: ChatManager) {
         const resolvedNodeId = typeof nodeId === "string"
             ? nodeId
             : resolvePublicNodeId(chatId, req.user?.id ?? null) ?? chatId;
+        if (refuseCheckinNode(res, resolvedNodeId)) return;
         if (process.env.MICHI_CLOUD === '1'
             && getNodeSessionBinding(chatId, req.user?.id)?.nodeId !== resolvedNodeId) {
             return res.status(404).json({ error: 'not_found' });
@@ -1009,16 +923,9 @@ export function setupMichiRoutes(chatManager: ChatManager) {
                 if (!cloudWorkspaceId) {
                     return res.status(404).json({ error: "workspace not found" });
                 }
-                try {
-                    cwd = deriveSandboxCwd(cloudUserId, cloudWorkspaceId);
-                } catch (err) {
-                    if (err instanceof NotFoundError) {
-                        return res.status(404).json({ error: "workspace not found" });
-                    }
-                    return res.status(400).json({ error: (err as Error).message });
-                }
-                // assertCwdAllowed stays as defense-in-depth.
-                assertCwdAllowed(cwd, cloudUserId);
+                const owned = ownedSandboxCwd(cloudUserId, cloudWorkspaceId);
+                if ("error" in owned) return res.status(owned.status).json({ error: owned.error });
+                cwd = owned.cwd;
             } else {
                 cwd = bodyCwd as string;
             }
@@ -1100,14 +1007,19 @@ export function setupMichiRoutes(chatManager: ChatManager) {
             };
             const nativeResumeEnabled = isNativeResumeEnabled(runtimeId, req.user?.id);
             const compatible = runtimeChanged || (runtime.capabilities.nativeResume && !nativeResumeEnabled);
-            const transcript = compatible ? listMessages(resolvedNodeId, req.user?.id)
-                .filter((message) => message.role === 'user' || message.role === 'assistant')
-                .map((message) => ({ role: message.role as 'user' | 'assistant', content: message.content })) : [];
+            // Posted check-ins replay as one-line facts (DESIGN-v2 §2.8 T2).
+            const transcript = compatible ? replayTranscript(resolvedNodeId, req.user?.id) : [];
             // Pi replays the history as its own turns; other runtimes read it as one prior-context block.
+            // Multi-model branches: a fresh one inherits nothing, a fork its cut of the caller.
+            const forkBoundary = compatible && row?.multi_model_run_id && row.fresh_context !== 1
+                ? multiModelForkBoundary(resolvedNodeId, row.parent_node_id ?? undefined, isCloud ? req.user?.id : undefined)
+                : null;
             const session = canReuse ? live : compatible
                 ? await runtime.newSession({
                     ...loadOptions,
-                    parentChatId: row?.parent_node_id ?? undefined,
+                    ...(row?.fresh_context === 1 ? {}
+                        : row?.multi_model_run_id ? (forkBoundary ? { branchContext: toBranchContext(forkBoundary) } : {})
+                        : { parentChatId: row?.parent_node_id ?? undefined }),
                     ...(runtime.id === 'pi' ? { replayHistory: transcript } : {
                         mergeContexts: [buildCompatibleResumeContext(transcript, { nodeId: resolvedNodeId, title: row?.title ?? null })]
                             .filter((value): value is string => !!value),
@@ -1143,6 +1055,8 @@ export function setupMichiRoutes(chatManager: ChatManager) {
 
     async function ensureNodeSession(req: express.Request<{ nodeId: string }>, res: express.Response) {
         const { nodeId } = req.params;
+        // Before the node lookup and the graph prerequisite: no client makes, binds or reopens a check-in node.
+        if (refuseCheckinNode(res, nodeId, req.body?.chatId, req.body?.parentChatId)) return;
         const routeStart = Date.now();
         startupMark("ensure_session_route_start", { nodeId });
         const body = (req.body ?? {}) as Record<string, unknown>;
@@ -1155,36 +1069,11 @@ export function setupMichiRoutes(chatManager: ChatManager) {
         if (!nodeId || nodeId.length > 128) {
             return res.status(400).json({ error: "nodeId must be a non-empty string <=128 chars" });
         }
-        if (!getNode(nodeId)) {
-            const prerequisite = body.graphPrerequisite;
-            if (!prerequisite || typeof prerequisite !== 'object') {
-                return res.status(409).json({
-                    error: 'durable node prerequisite required before session creation',
-                    code: 'NODE_NOT_PERSISTED',
-                });
-            }
-            try {
-                const graphInput = {
-                    ...(prerequisite as Parameters<typeof ensureDurableGraphNode>[0]),
-                    ownerUserId: process.env.MICHI_CLOUD === '1' ? (req.user?.id ?? null) : null,
-                };
-                if (graphInput.node?.id !== nodeId
-                    || (body.workspaceId && graphInput.workspace?.id !== body.workspaceId)) {
-                    throw new DomainError('conflict', 'graph_prerequisite_identity_mismatch', 'graph prerequisite must identify the requested node and workspace');
-                }
-                if (isDbWorkerReady()) {
-                    await dbWorker.ensureDurableGraphNode(graphInput);
-                } else {
-                    ensureDurableGraphNode(graphInput);
-                }
-            } catch (err) {
-                const failure = domainErrorResponse(err);
-                return res.status(failure.status).json({
-                    error: failure.error,
-                    code: 'NODE_PREREQUISITE_FAILED',
-                });
-            }
-        }
+        const parsed = parseEnsureSessionBody(body);
+        if ("invalid" in parsed) return res.status(400).json(parsed.invalid);
+        const { model: modelRaw, mergeContexts, extraContexts, contextManifest, artifactCount, enableFollowUps } = parsed;
+        const missing = await ensureRequestedGraphNode(req, nodeId, body.graphPrerequisite, { workspaceId: body.workspaceId });
+        if (missing) return res.status(missing.status).json(missing.body);
 
         const durableNode = getNode(nodeId);
         if (!durableNode) return res.status(409).json({ code: 'NODE_NOT_PERSISTED', error: 'durable node prerequisite required' });
@@ -1210,118 +1099,23 @@ export function setupMichiRoutes(chatManager: ChatManager) {
             if (wsIdForCwd) {
                 try {
                     ensureCloudWorkspaceRow(userId, wsIdForCwd);
-                    cwd = deriveSandboxCwd(userId, wsIdForCwd);
                 } catch (err) {
-                    if (err instanceof NotFoundError) {
-                        return res.status(404).json({ error: "workspace not found" });
-                    }
                     return res.status(400).json({ error: (err as Error).message });
                 }
-                // assertCwdAllowed stays as defense-in-depth.
-                assertCwdAllowed(cwd, userId);
+                const owned = ownedSandboxCwd(userId, wsIdForCwd);
+                if ("error" in owned) return res.status(owned.status).json({ error: owned.error });
+                cwd = owned.cwd;
             }
-        } else {
-            const cwdRaw = body.cwd;
-            if (cwdRaw !== undefined) {
-                if (typeof cwdRaw !== "string" || !path.isAbsolute(cwdRaw)) {
-                    return res.status(400).json({ error: "cwd must be an absolute path" });
-                }
-                try {
-                    const s = fs.statSync(cwdRaw);
-                    if (!s.isDirectory()) return res.status(400).json({ error: "cwd is not a directory" });
-                } catch {
-                    return res.status(400).json({ error: "cwd does not exist" });
-                }
-                cwd = cwdRaw;
-            }
+        } else if (parsed.cwd !== undefined) {
+            cwd = parsed.cwd;
         }
         cwd = normalizeWorkspaceCwd(cwd);
 
         const existingChatId = normalizeSignaturePart(body.chatId);
         const parentChatId = normalizeSignaturePart(body.parentChatId) ?? undefined;
         const workspaceId = normalizeSignaturePart(body.workspaceId) ?? getNodeWorkspaceId(nodeId);
-        const modelRaw = body.model;
-        for (const field of ['runtimeId', 'providerId', 'modelId']) {
-            if (body[field] !== undefined && (typeof body[field] !== 'string' || !(body[field] as string).trim())) {
-                return res.status(400).json({ error: `${field} must be a non-empty string` });
-            }
-        }
-        if (body.reasoning !== undefined && body.reasoning !== null && !normalizeReasoning(body.reasoning)) {
-            return res.status(400).json({ error: 'Invalid reasoning level' });
-        }
-        if (modelRaw !== undefined && typeof modelRaw !== "string") {
-            return res.status(400).json({ error: "model must be a string" });
-        }
-        if (body.agentDefinitionId !== undefined && (typeof body.agentDefinitionId !== "string" || !body.agentDefinitionId.trim())) {
-            return res.status(400).json({ error: "agentDefinitionId must be a non-empty string" });
-        }
-        const requestedDefinitionId = normalizeSignaturePart(body.agentDefinitionId);
-
-        // Desired agent/mode for a brand-new thread (e.g. Home composer pre-pick).
-        // Applied after a fresh session is created so the first prompt runs under it.
-        if (body.modeId !== undefined && typeof body.modeId !== "string") {
-            return res.status(400).json({ error: "modeId must be a string" });
-        }
-        const desiredModeId = normalizeSignaturePart(body.modeId);
-
-        const mergeContextsRaw = body.mergeContexts;
-        let mergeContexts: string[] = [];
-        if (mergeContextsRaw !== undefined) {
-            if (!Array.isArray(mergeContextsRaw) || !mergeContextsRaw.every((x) => typeof x === "string")) {
-                return res.status(400).json({ error: "mergeContexts must be an array of strings" });
-            }
-            mergeContexts = mergeContextsRaw as string[];
-        }
-
-        const readExtraContexts = (raw: unknown, label: string, max: number): ExtraContext[] | undefined => {
-            if (raw === undefined) return undefined;
-            if (!Array.isArray(raw) || raw.length > max) {
-                throw new Error(`${label} must be an array of at most ${max} items`);
-            }
-            for (const item of raw) {
-                // Link artifacts carry `url` and an empty filePath; file/doc
-                // artifacts carry a real filePath. Require exactly one.
-                if (
-                    typeof item !== "object" || item === null ||
-                    typeof (item as ExtraContext).name !== "string" || (item as ExtraContext).name.length > 64 ||
-                    typeof (item as ExtraContext).filePath !== "string" ||
-                    (!(item as ExtraContext).filePath && typeof (item as ExtraContext).url !== "string")
-                ) {
-                    throw new Error(`each ${label} item must have name (<=64 chars) and either filePath or url`);
-                }
-                const ctx = item as ExtraContext;
-                if (ctx.filePath.includes("..")) {
-                    throw new Error(`${label} filePath must not contain ..`);
-                }
-                if ("url" in ctx && ctx.url !== undefined && typeof ctx.url !== "string") {
-                    throw new Error(`${label}.url must be a string when provided`);
-                }
-                if ("size" in ctx && ctx.size !== undefined && (typeof ctx.size !== "number" || !Number.isFinite(ctx.size) || ctx.size < 0)) {
-                    throw new Error(`${label}.size must be a non-negative number when provided`);
-                }
-                if ("kind" in ctx && ctx.kind !== undefined && ctx.kind !== "embedded" && ctx.kind !== "reference" && ctx.kind !== "symlink") {
-                    throw new Error(`${label}.kind must be 'embedded', 'reference', or 'symlink' if present`);
-                }
-            }
-            return raw as ExtraContext[];
-        };
-
-        let extraContexts: ExtraContext[] | undefined;
-        let contextManifest: ExtraContext[] | undefined;
-        try {
-            extraContexts = readExtraContexts(body.extraContexts, "extraContexts", 20);
-            contextManifest = readExtraContexts(body.contextManifest, "contextManifest", 50);
-        } catch (err) {
-            return res.status(400).json({ error: (err as Error).message });
-        }
-
-        let enableFollowUps = true;
-        if (body.enableFollowUps !== undefined) {
-            if (typeof body.enableFollowUps !== "boolean") {
-                return res.status(400).json({ error: "enableFollowUps must be a boolean" });
-            }
-            enableFollowUps = body.enableFollowUps;
-        }
+        const requestedDefinitionId = normalizeSignaturePart(parsed.agentDefinitionId);
+        const desiredModeId = normalizeSignaturePart(parsed.modeId);
 
         const releaseRestore = await acquireSessionRestoreLock(nodeId);
         try {
@@ -1332,8 +1126,13 @@ export function setupMichiRoutes(chatManager: ChatManager) {
             // was trimmed after the branch was created.
             let branchBoundary: BranchBoundary | undefined;
             let branchContext: ReturnType<typeof toBranchContext> | undefined;
-            let effectiveParentChatId = parentChatId;
             const row = getNode(nodeId);
+            // Multi-model branches (nodes.multi_model_run_id): a fresh one
+            // inherits nothing from its caller, and a fork keeps its cut of the
+            // caller rather than the caller's current tail (rebuildInheritance).
+            // Both ignore the client's parentChatId.
+            const freshContext = row?.fresh_context === 1;
+            let effectiveParentChatId = freshContext ? undefined : parentChatId;
             const boundSignature = row?.acp_session_id || row?.external_session_id
                 ? normalizeResumeSignature({
                     runtimeId: row.runtime_id ?? inferRuntimeId(row, nodeId),
@@ -1349,6 +1148,20 @@ export function setupMichiRoutes(chatManager: ChatManager) {
                 nodeId,
                 definitionId: requestedDefinitionId,
             });
+            // The first message's artifact manifest, for a session this call
+            // creates. artifactCount goes only where it was sent, so a legacy
+            // client's list renders as before. A session that cannot list or
+            // search artifacts (a primary Agent: its allow-list leaves them
+            // out) is not told to: it gets the workspace's list itself,
+            // pinned first, as a client without artifactCount sends it.
+            let firstTurnArtifacts: { contextManifest?: ExtraContext[]; artifactCount?: number } | undefined;
+            const artifactManifestOptions = () => firstTurnArtifacts ??= artifactCount === undefined
+                ? { contextManifest }
+                : canLookUpArtifacts(artifactToolsForProfile(primaryAgentSessionOptions(primaryAgent).toolProfile))
+                    ? { contextManifest, artifactCount }
+                    : { contextManifest: workspaceId
+                        ? workspaceArtifactManifest(workspaceId, michiUserId, contextManifest ?? [], CONTEXT_MANIFEST_MAX)
+                        : contextManifest };
             const primaryProfile = primaryAgent?.effectiveDefinition.runtimeProfile;
             const requestedModeId = normalizeSignaturePart(primaryProfile?.modeId) ?? desiredModeId;
             const runtimeId = primaryProfile?.runtimeId ?? normalizeSignaturePart(body.runtimeId)
@@ -1485,7 +1298,7 @@ export function setupMichiRoutes(chatManager: ChatManager) {
                     throw error;
                 }
                 branchContext = branchBoundary ? toBranchContext(branchBoundary) : undefined;
-                effectiveParentChatId = parentChatId ?? branchBoundary?.parentNodeId;
+                effectiveParentChatId = freshContext ? undefined : parentChatId ?? branchBoundary?.parentNodeId;
                 // A fork replaces the node's session like the fallback below:
                 // wait for the turn to release it, and never orphan a live one.
                 // A branch-boundary conflict above is reported first: it does
@@ -1497,7 +1310,7 @@ export function setupMichiRoutes(chatManager: ChatManager) {
                 }
                 session = await tryForkChatSession(runtime, {
                     cwd, parentChatId: effectiveParentChatId, branchContext,
-                    mergeContexts, extraContexts, contextManifest, enableFollowUps,
+                    mergeContexts, extraContexts, ...artifactManifestOptions(), enableFollowUps,
                     model: targetSignature.modelId, provider: targetSignature.providerId,
                     reasoning: targetSignature.reasoning, sessionId: nodeId, workspaceId,
                     ownerUserId: req.user?.id ?? null, ...primaryAgentSessionOptions(primaryAgent),
@@ -1518,44 +1331,18 @@ export function setupMichiRoutes(chatManager: ChatManager) {
                     title: row?.title ?? null,
                 });
 
-                // Fallback: when branching and the parent session is dead in
-                // memory (or parentChatId was nulled during hydration), read
-                // the parent's transcript from SQLite and inject it as a merge
-                // context so the child still gets ancestor history.
-                let parentTranscriptContext: string | null = null;
-                const resolvedParentNodeId: string | null = branchContext
-                    ? null
-                    : (() => {
-                        if (effectiveParentChatId) {
-                            if (sessionRegistry.getSession(effectiveParentChatId)) return null; // live — runtime handles it
-                            const binding = getNodeSessionBinding(effectiveParentChatId, michiUserId);
-                            return binding?.nodeId ?? effectiveParentChatId;
-                        }
-                        // parentChatId absent (nulled on hydration) — look up via DB edge
-                        return row?.parent_node_id ?? null;
-                    })();
-                if (resolvedParentNodeId) {
-                    const parentRow = getNode(resolvedParentNodeId);
-                    if (parentRow) {
-                        const parentMessages = listMessages(resolvedParentNodeId, michiUserId)
-                            .filter((m) => m.role === "user" || m.role === "assistant")
-                            .map((m) => ({
-                                role: m.role as "user" | "assistant",
-                                content: m.content,
-                            }));
-                        if (parentMessages.length > 0) {
-                            parentTranscriptContext = buildCompatibleResumeContext(parentMessages, {
-                                nodeId: resolvedParentNodeId,
-                                title: parentRow.title ?? null,
-                            });
-                        }
-                    }
-                }
+                // When the parent session is dead in memory (or parentChatId
+                // was nulled during hydration), the parent's stored transcript
+                // is a merge context so the child still gets ancestor history.
+                const inherited = rebuildInheritance({
+                    nodeId, row, parentChatId: effectiveParentChatId, hasBranchContext: !!branchContext, userId: michiUserId,
+                });
+                effectiveParentChatId = inherited.parentChatId;
 
                 const replaysMessages = descriptorOf(runtime).topology.historyReplay === 'messages';
                 const seededMergeContexts = [
                     ...(resumeContext && !replaysMessages ? [resumeContext] : []),
-                    ...(parentTranscriptContext ? [parentTranscriptContext] : []),
+                    ...(inherited.context ? [inherited.context] : []),
                     ...mergeContexts,
                 ];
                 session = await runtime.newSession({
@@ -1566,7 +1353,7 @@ export function setupMichiRoutes(chatManager: ChatManager) {
                     ...(replaysMessages ? { replayHistory: transcript } : {}),
                     mergeContexts: seededMergeContexts.length > 0 ? seededMergeContexts : undefined,
                     extraContexts,
-                    contextManifest,
+                    ...artifactManifestOptions(),
                     enableFollowUps,
                     model: targetSignature.modelId,
                     provider: targetSignature.providerId,
@@ -1686,6 +1473,7 @@ export function setupMichiRoutes(chatManager: ChatManager) {
 
     router.post("/chats/:chatId/message", requireChatOwner, async (req, res) => {
         const requestedIdentifier = req.params.chatId;
+        if (refuseCheckinNode(res, requestedIdentifier, req.body?.nodeId)) return;
         const text: string = req.body?.text || "";
         const displayText: string = typeof req.body?.displayText === 'string'
             ? req.body.displayText
@@ -1695,46 +1483,66 @@ export function setupMichiRoutes(chatManager: ChatManager) {
             return res.status(400).json({ error: 'enableKiroSidecarTitle must be a boolean' });
         }
         const enableKiroSidecarTitle = enableKiroSidecarTitleRaw === true;
-        const userMetadata = req.body?.userMetadata && typeof req.body.userMetadata === 'object'
-            ? req.body.userMetadata
-            : undefined;
+        // What the route decides about the message (companionTurn, the skill it ran) is the backend's to write.
+        let userMetadata: Record<string, unknown> | undefined = clientUserMetadata(req.body?.userMetadata);
+        const skillRequested = req.body?.skill !== undefined;
         const legacyNodeId: string | undefined = req.body?.nodeId;
-        const turnId: string | undefined = typeof req.body?.turnId === 'string' && req.body.turnId.length > 0
+        let turnId: string | undefined = typeof req.body?.turnId === 'string' && req.body.turnId.length > 0
             ? req.body.turnId
             : undefined;
         const routeStart = Date.now();
         const session = getSessionByIdentifier(requestedIdentifier, req.user?.id ?? null);
         const nodeId = session?.id ?? null;
         startupMark("stream_route_start", { chatId: requestedIdentifier, nodeId, textLen: text.length });
-        if (!text) {
+        // A skill may run with no text after its name.
+        if (!text && !skillRequested) {
             return res.status(400).json({ error: "text is required" });
         }
         if (!session || !nodeId) {
             return res.status(404).json({ error: `unknown chat: ${requestedIdentifier}` });
         }
-        // The Spaces chat window's page context reaches the runtime as a prefix; displayText stays the user's own.
+        if (refuseCheckinNode(res, nodeId)) return;
+        let skill: SkillTurnInvocation | undefined;
+        if (skillRequested) {
+            try {
+                const request = parseSkillInvocationRequest(req.body.skill);
+                if (isAssistantNode(nodeId) || req.body?.metaAgentContext !== undefined) {
+                    throw new SkillInvocationError('skill_not_found', `Couldn’t run /${request.name}: the Michi assistant runs no skills.`);
+                }
+                const runtime = getRuntime(session.runtimeId);
+                if (!runtime) throw new SkillInvocationError('skill_not_found', `Couldn’t run /${request.name}: this chat’s runtime isn’t registered.`);
+                const workspaceId = getNode(nodeId)?.workspace_id;
+                const cwd = workspaceId ? workspaceSkillCwd(workspaceId, req.user?.id ?? null) : null;
+                skill = await resolveSkillInvocation({ request, runtime, cwd, ownerUserId: req.user?.id ?? null });
+            } catch (err) {
+                if (!(err instanceof SkillInvocationError)) throw err;
+                const status = err.code === 'invalid_skill' ? 400 : err.code === 'runtime_unavailable' ? 503 : 404;
+                return res.status(status).json({ error: err.message, code: err.code });
+            }
+            userMetadata = { ...(userMetadata ?? {}), skill: skillMessageMetadata(skill, session.runtimeId) };
+        }
+        // A message to the agent (V, DESIGN-v2 §1.3) carries the area it was written in: the
+        // Spaces fields (any area's block target goes as them) or the Scheduled one, never both.
+        const assistantMain = isAssistantNode(nodeId) && assistantPurposeOf(nodeId) === 'main';
         let wireText = text;
+        let turnContext: MetaAgentChatTurnContext | undefined;
+        let area: AssistantTurnArea = null;
         if (req.body?.metaAgentContext !== undefined) {
-            if (!isAssistantNode(nodeId)) {
+            if (!assistantMain) {
                 return res.status(400).json({ error: 'metaAgentContext is only accepted by the Michi assistant', code: 'invalid_meta_agent_context' });
             }
             try {
-                const context = parseMetaAgentChatTurnContext(req.body.metaAgentContext);
-                // Each window's context goes only to its own conversation (assistant/store.ts records the purpose).
-                const scheduling = assistantPurposeOf(nodeId) === 'schedule';
-                if (scheduling ? hasSpacesTurnContext(context) : context.schedule !== undefined) {
-                    return res.status(400).json({
-                        error: scheduling ? 'This conversation takes the Scheduled context only' : 'The Scheduled context is only accepted by the Scheduled window',
-                        code: 'invalid_meta_agent_context',
-                    });
-                }
-                wireText = scheduling
-                    ? withScheduleAgentContext(text, scheduleDefaultWorkspace(context.schedule?.workspaceId ?? null, req.user?.id ?? null))
-                    : withMetaAgentContext(text, context);
+                turnContext = parseMetaAgentChatTurnContext(req.body.metaAgentContext);
             } catch (err) {
                 if (!(err instanceof MetaAgentChatContextError)) throw err;
                 return res.status(400).json({ error: err.message, code: 'invalid_meta_agent_context' });
             }
+            if (hasSpacesTurnContext(turnContext) && turnContext.schedule !== undefined) {
+                return res.status(400).json({ error: 'Send the Spaces context or the Scheduled context, not both', code: 'invalid_meta_agent_context' });
+            }
+            area = turnContext.schedule !== undefined
+                ? { kind: 'schedule', workspace: scheduleDefaultWorkspace(turnContext.schedule.workspaceId ?? null, req.user?.id ?? null) }
+                : hasSpacesTurnContext(turnContext) ? { kind: 'spaces', context: turnContext } : null;
         }
         if (getNode(nodeId)?.maintenance_job_id) {
             return res.status(409).json({ error: 'Scheduled maintenance nodes cannot accept ordinary messages', code: 'MAINTENANCE_PROFILE_LOCKED' });
@@ -1748,16 +1556,16 @@ export function setupMichiRoutes(chatManager: ChatManager) {
         // A turn ID with a receipt already began. Checked before the busy
         // answers below: 409 turn_active must mean this turn never began.
         if (turnAlreadyBegan(turnId)) return res.status(409).json(TURN_ALREADY_BEGAN);
-        if (chatHub.isActive(nodeId) || chatHub.isOwnerTurnActive(nodeId)) {
+        if (chatHub.holdsSession(nodeId)) {
             // Only an explicit Stop may wait for cancellation cleanup. A new
             // message from another window must never interrupt the active turn.
             if (chatHub.getSnapshot(nodeId)?.cancelRequestedAt != null) {
                 try { await chatHub.cancelAndWait(nodeId); } catch { /* best-effort */ }
             }
-            if (chatHub.isActive(nodeId) || chatHub.isOwnerTurnActive(nodeId)) {
+            if (chatHub.holdsSession(nodeId)) {
                 return res.status(409).json({
                     error: "Waiting for the previous response to finish.",
-                    code: "turn_active",
+                    code: TURN_ERROR_CODES.active,
                 });
             }
         }
@@ -1766,8 +1574,39 @@ export function setupMichiRoutes(chatManager: ChatManager) {
         if (chatHub.hasPendingSelfTurn(nodeId)) {
             return res.status(409).json({
                 error: "Waiting for the previous response to finish.",
-                code: "turn_active",
+                code: TURN_ERROR_CODES.active,
             });
+        }
+        // Every message to the agent carries [COMPANION CONTEXT] (§3.5). Its rules unreadable, the
+        // message still goes, without it, and the agent's action tools refuse this turn (§1.3).
+        // A message that starts with check-in or collector material runs its turn in Ask (§2.8 T4):
+        // the untrusted source is recorded before the turn starts, where the runtime reads its mode.
+        // So does every later message on the same live session (w2-fix D1): what an earlier turn
+        // took in is still in it, so the turn records it too, and its line says why it asks.
+        let companionContext: CompanionTurnContext | null = null;
+        if (assistantMain) {
+            turnId ??= randomUUID();
+            // A job this turn creates is one "Create with agent" starts over for (w2-fix D6).
+            if (area?.kind === 'schedule') noteAssistantScheduleTurn(nodeId, turnId);
+            const composed = withAssistantTurnContext(text, { area, nodeId, session, now: Date.now() });
+            companionContext = composed.companion;
+            wireText = composed.text;
+            const startTaint = companionStartTaint({ context: turnContext, ownerUserId: req.user?.id ?? LOCAL_AGENT_OWNER_ID });
+            const carriedTaint = startTaint === 'checkin' ? null : carriedCompanionTaintOf(nodeId);
+            if (startTaint) recordCompanionTaint({ nodeId, turnId }, 'companion_context', startTaint);
+            if (carriedTaint) recordCompanionTaint({ nodeId, turnId }, 'companion_earlier_turn', carriedTaint);
+            const companionTurn: CompanionTurnMetadata = {
+                ...(companionContext.rulesUnavailable ? { rulesUnavailable: true as const } : {}),
+                ...(startTaint ? { startTaint } : {}),
+                // "Tools ask before running this turn: this conversation read check-in material earlier."
+                ...(carriedTaint && !startTaint ? { carriedTaint } : {}),
+            };
+            if (Object.keys(companionTurn).length > 0) userMetadata = { ...(userMetadata ?? {}), companionTurn };
+        } else {
+            // Any other chat whose live session took in check-in material earlier (w3-fix D17) asks for the
+            // same reason, and its message says so too (TR cross-owner #3); the turn records it as it reads its mode.
+            const carriedTaint = carriedCompanionTaintOf(nodeId);
+            if (carriedTaint) userMetadata = { ...(userMetadata ?? {}), companionTurn: { carriedTaint } satisfies CompanionTurnMetadata };
         }
 
         const releaseRestore = await acquireSessionRestoreLock(nodeId);
@@ -1779,10 +1618,10 @@ export function setupMichiRoutes(chatManager: ChatManager) {
             if (turnAlreadyBegan(turnId)) return res.status(409).json(TURN_ALREADY_BEGAN);
             // Another request may have started while this one waited for the
             // restore lock, or its iterator may still be releasing the runtime.
-            if (chatHub.isActive(nodeId) || chatHub.isOwnerTurnActive(nodeId) || chatHub.hasPendingSelfTurn(nodeId)) {
+            if (chatHub.isBusy(nodeId)) {
                 return res.status(409).json({
                     error: "Waiting for the previous response to finish.",
-                    code: "turn_active",
+                    code: TURN_ERROR_CODES.active,
                 });
             }
             started = await chatHub.startTurn({
@@ -1790,33 +1629,38 @@ export function setupMichiRoutes(chatManager: ChatManager) {
                 turnId,
                 ownerUserId: req.user?.id ?? null,
                 humanOrigin: true,
+                ...(skill ? { skill } : {}),
             });
         } catch (err) {
+            if (err instanceof TurnGuardError) {
+                return res.status(err.code === 'checkin_node' ? 409 : 400).json({ error: err.message, code: err.code });
+            }
             return res.status(409).json({
                 error: (err as Error).message,
-                code: 'turn_begin_failed',
+                code: TURN_ERROR_CODES.beginFailed,
             });
         } finally {
             releaseRestore();
         }
-        res.setHeader("Content-Type", "text/event-stream");
-        res.setHeader("Cache-Control", "no-cache");
-        res.setHeader("Connection", "keep-alive");
-        res.setHeader("X-Accel-Buffering", "no");
-        res.flushHeaders?.();
-
+        // The turn began: the card results and posts its context named count as told, and its
+        // standing blocks count as held once the turn completes (§3.5; delivered watches the turn).
+        if (companionContext) {
+            try {
+                companionContext.reportCards();
+                companionContext.markPostsTold();
+            } catch (err) {
+                log.warn('chat', 'companion context not marked told', { nodeId, error: (err as Error).message });
+            }
+            void companionContext.delivered(started.turnId);
+        }
+        const observer = beginSse(res);
         let wroteTerminal = false;
         let wroteFirstEvent = false;
-        let detached = false;
-        let detach = () => {};
-        const detachSubscriber = () => {
-            if (detached) return;
-            detached = true;
-            detach();
-        };
+        // The wire copy only: the hub and its in-process subscribers keep whole tool outputs.
+        const forWire = createToolOutputStreamProjector();
         const sub: HubSubscriber = {
             send: (ev) => {
-                if (res.writableEnded || res.destroyed) return;
+                if (observer.closed) return;
                 if (!wroteFirstEvent) {
                     wroteFirstEvent = true;
                     startupMark("stream_route_first_event", { chatId: nodeId, nodeId, kind: ev.event, durMs: Date.now() - routeStart });
@@ -1824,25 +1668,19 @@ export function setupMichiRoutes(chatManager: ChatManager) {
                 if (ev.event === CHAT_STREAM_EVENTS.done || ev.event === CHAT_STREAM_EVENTS.error) {
                     wroteTerminal = true;
                 }
-                if (!writeSseFrame(res, encodeChatStreamEvent(ev))) detachSubscriber();
+                observer.write(encodeChatStreamEvent(forWire(ev)));
             },
             close: () => {
                 const terminal = finalTerminalEvent({ wroteTerminal, aborted: false });
-                if (terminal && !res.writableEnded && !res.destroyed) {
-                    writeSseFrame(res, encodeChatStreamEvent(terminal));
-                }
+                if (terminal) observer.write(encodeChatStreamEvent(terminal));
                 if (!res.writableEnded && !res.destroyed) res.end();
             },
         };
         const subscription = chatHub.subscribeTurn(nodeId, started.turnId, sub, 0);
         if (!subscription) {
-            return res.status(410).json({ error: 'turn replay unavailable', code: 'turn_replay_unavailable' });
+            return res.status(410).json({ error: 'turn replay unavailable', code: TURN_ERROR_CODES.replayUnavailable });
         }
-        detach = subscription;
-        if (detached) detach();
-        res.on("close", () => {
-            detachSubscriber();
-        });
+        observer.addCleanup(subscription);
         try {
             await started.done;
         } finally {
@@ -1853,8 +1691,11 @@ export function setupMichiRoutes(chatManager: ChatManager) {
 
     router.post("/chats/:chatId/cancel", requireChatOwner, async (req, res) => {
         const requestedIdentifier = req.params.chatId;
+        // A check-in's hidden turn is the engine's to stop (DESIGN-v2 §2.5).
+        if (refuseCheckinNode(res, requestedIdentifier)) return;
         const session = getSessionByIdentifier(requestedIdentifier, req.user?.id ?? null);
         const nodeId = session?.id ?? resolvePublicNodeId(requestedIdentifier, req.user?.id ?? null) ?? requestedIdentifier;
+        if (refuseCheckinNode(res, nodeId)) return;
         const turnId: string | undefined = typeof req.body?.turnId === 'string'
             ? req.body.turnId
             : undefined;
@@ -1877,18 +1718,46 @@ export function setupMichiRoutes(chatManager: ChatManager) {
 
     router.post("/chats/:chatId/steer", requireChatOwner, async (req, res) => {
         const requestedIdentifier = req.params.chatId;
+        if (refuseCheckinNode(res, requestedIdentifier)) return;
         const session = getSessionByIdentifier(requestedIdentifier, req.user?.id ?? null);
         const nodeId = session?.id ?? resolvePublicNodeId(requestedIdentifier, req.user?.id ?? null) ?? requestedIdentifier;
+        if (refuseCheckinNode(res, nodeId)) return;
         const text = typeof req.body?.text === "string" ? req.body.text : "";
         if (!text.trim()) {
             return res.status(400).json({ error: "text is required", accepted: false });
+        }
+        let userMetadata = clientUserMetadata(req.body?.userMetadata);
+        // A steer into V's running turn that refers to check-in or collector material (the same refs
+        // a message sends, §2.8 T4) taints that turn before the runtime reads the steered text.
+        if (req.body?.metaAgentContext !== undefined) {
+            if (!isAssistantNode(nodeId) || assistantPurposeOf(nodeId) !== 'main') {
+                return res.status(400).json({ error: 'metaAgentContext is only accepted by the Michi assistant', code: 'invalid_meta_agent_context', accepted: false });
+            }
+            let steerContext: MetaAgentChatTurnContext;
+            try {
+                steerContext = parseMetaAgentChatTurnContext(req.body.metaAgentContext);
+            } catch (err) {
+                if (!(err instanceof MetaAgentChatContextError)) throw err;
+                return res.status(400).json({ error: err.message, code: 'invalid_meta_agent_context', accepted: false });
+            }
+            try {
+                const startTaint = companionStartTaint({ context: steerContext, ownerUserId: req.user?.id ?? LOCAL_AGENT_OWNER_ID });
+                if (startTaint) {
+                    // Without a running turn to taint, the steer could not reach one anyway.
+                    const running = activeTurnTrust(nodeId);
+                    if (!running) return res.status(409).json({ accepted: false, reason: 'invisible' });
+                    recordCompanionTaint({ nodeId, turnId: running.turnId }, 'companion_context', startTaint);
+                    userMetadata = { ...(userMetadata ?? {}), companionTurn: { startTaint } satisfies CompanionTurnMetadata };
+                }
+            } catch (err) {
+                return res.status(500).json({ error: (err as Error).message, accepted: false });
+            }
         }
         try {
             const result = await chatHub.steer(nodeId, text, {
                 displayText: typeof req.body?.displayText === 'string' ? req.body.displayText : undefined,
                 queueId: typeof req.body?.queueId === 'string' ? req.body.queueId : undefined,
-                userMetadata: req.body?.userMetadata && typeof req.body.userMetadata === 'object'
-                    && !Array.isArray(req.body.userMetadata) ? req.body.userMetadata : undefined,
+                userMetadata,
             });
             res.status(result.accepted ? 200 : 409).json(result);
         } catch (err) {
@@ -1902,17 +1771,43 @@ export function setupMichiRoutes(chatManager: ChatManager) {
     // 409 means the active session's runtime cannot compact.
     router.post("/chats/:chatId/compact", requireChatOwner, async (req, res) => {
         const requestedIdentifier = req.params.chatId;
+        if (refuseCheckinNode(res, requestedIdentifier)) return;
         const session = getSessionByIdentifier(requestedIdentifier, req.user?.id ?? null);
         const nodeId = session?.id ?? resolvePublicNodeId(requestedIdentifier, req.user?.id ?? null) ?? requestedIdentifier;
+        if (refuseCheckinNode(res, nodeId)) return;
         const instructions = typeof req.body?.instructions === "string" ? req.body.instructions : undefined;
         try {
             // Compaction is normally requested while idle, when chatHub holds
             // no active session — pass the registry-resolved one.
+            const idle = !chatHub.isActive(nodeId);
             const result = await chatHub.compact(nodeId, instructions, session ?? undefined);
+            // Inside a turn, that turn's own reads still count, and its events tell the context.
+            if (result.started && idle) compactedOrCleared(nodeId, session ?? undefined);
             res.status(result.started ? 200 : 409).json(result);
         } catch (err) {
             res.status(500).json({ error: (err as Error).message, started: false });
         }
+    });
+
+    // What SQLite applied for each chat, to check a window against without the
+    // feed (a window coming back to the foreground or opening a pane): the
+    // chats it is behind on reconcile through the same path as a replay gap.
+    router.post("/chats/background/cursors", (req, res) => {
+        const backgroundUserId = process.env.MICHI_CLOUD === "1" ? req.user?.id : undefined;
+        if (process.env.MICHI_CLOUD === "1" && !backgroundUserId) {
+            return res.status(401).json({ error: "unauthorized" });
+        }
+        const raw: unknown = req.body?.chatIds;
+        if (!Array.isArray(raw)) return res.status(400).json({ error: "chatIds must be an array" });
+        const cursors: Record<string, BackgroundCursor & { nodeId: string }> = {};
+        for (const chatId of raw.slice(0, MAX_BACKGROUND_CURSORS)) {
+            if (typeof chatId !== "string" || !chatId) continue;
+            // As in the feed below (w2-fix D13): no cursor names a check-in's node or turns.
+            if (checkinPurposeId(chatId)) continue;
+            const durable = durableBackgroundCursor(chatId, backgroundUserId ?? null);
+            if (durable?.cursor && !checkinPurposeId(durable.nodeId)) cursors[chatId] = { ...durable.cursor, nodeId: durable.nodeId };
+        }
+        res.json({ cursors });
     });
 
     router.post("/chats/background/subscribe", (req, res) => {
@@ -1925,92 +1820,79 @@ export function setupMichiRoutes(chatManager: ChatManager) {
         const durableCursors: Record<string, BackgroundCursor> = {};
         const nodeIds = new Map<string, string>();
         for (const [chatId, cursor] of Object.entries(requestedCursors)) {
-            const binding = getNodeSessionBinding(chatId, backgroundUserId ?? null);
-            if (process.env.MICHI_CLOUD === "1" && !binding) continue;
+            // One feed for every chat, so a check-in's cursor is refused alone (w2-fix D13): its
+            // private turns are never replayed, and no gap frame names its node or turns.
+            if (checkinPurposeId(chatId)) continue;
+            const durable = durableBackgroundCursor(chatId, backgroundUserId ?? null);
+            if (process.env.MICHI_CLOUD === "1" && !durable) continue;
+            if (durable && checkinPurposeId(durable.nodeId)) continue;
             cursors[chatId] = cursor;
-            if (!binding) continue;
-            nodeIds.set(chatId, binding.nodeId);
-            const row = getNode(binding.nodeId);
-            if (row?.last_applied_turn_id && typeof row.last_applied_seq === 'number') {
-                durableCursors[chatId] = {
-                    turnId: row.last_applied_turn_id,
-                    seq: row.last_applied_seq,
-                };
-            }
+            if (!durable) continue;
+            nodeIds.set(chatId, durable.nodeId);
+            if (durable.cursor) durableCursors[chatId] = durable.cursor;
         }
-        res.setHeader("Content-Type", "text/event-stream");
-        res.setHeader("Cache-Control", "no-cache");
-        res.setHeader("Connection", "keep-alive");
-        res.setHeader("X-Accel-Buffering", "no");
-        res.flushHeaders?.();
-
-        let detached = false;
-        let detach = () => {};
-        const detachSubscriber = () => {
-            if (detached) return;
-            detached = true;
-            detach();
-        };
+        const observer = beginSse(res);
+        // The wire copy only: the hub and its in-process subscribers keep whole tool outputs.
+        const forWire = createToolOutputStreamProjector();
         try {
-            detach = chatHub.subscribeBackground({
+            observer.addCleanup(chatHub.subscribeBackground({
             includeForeground: req.body?.includeForeground === true,
             send: (chatId, event, selfInitiated) => {
-                if (res.writableEnded || res.destroyed) return;
-                if (!writeSseFrame(res, selfInitiated === false
-                    ? `event: foreground_event\ndata: ${JSON.stringify(event)}\n\n`
-                    : encodeChatStreamEvent(event))) detachSubscriber();
+                if (observer.closed) return;
+                const wireEvent = forWire(event);
+                observer.write(selfInitiated === false
+                    ? `event: foreground_event\ndata: ${JSON.stringify(wireEvent)}\n\n`
+                    : encodeChatStreamEvent(wireEvent));
             },
             gap: (chatId, durableCursor) => {
                 const nodeId = nodeIds.get(chatId)
                     ?? getNodeSessionBinding(chatId, backgroundUserId ?? null)?.nodeId;
-                if (!writeSseFrame(res,
-                    `event: background_sync_required\ndata: ${JSON.stringify({ chatId, nodeId, ...durableCursor })}\n\n`,
-                )) detachSubscriber();
+                observer.write(`event: background_sync_required\ndata: ${JSON.stringify({ chatId, nodeId, ...durableCursor })}\n\n`);
             },
             close: () => {},
             ownerUserId: backgroundUserId,
-            }, { cursors, durableCursors });
-            const detachTurns = detach;
-            const detachStates = subscribeSessionStates((nodeId, state) => {
-                if (res.writableEnded || res.destroyed) return;
-                if (!writeSseFrame(res, encodeChatStreamEvent({ event: 'session_state', data: { ...state, nodeId, chatId: nodeId } }))) detachSubscriber();
-            }, backgroundUserId);
+            }, { cursors, durableCursors }));
+            observer.addCleanup(subscribeSessionStates((nodeId, state) => {
+                observer.write(encodeChatStreamEvent({ event: 'session_state', data: { ...state, nodeId, chatId: nodeId } }));
+            }, backgroundUserId));
             // Scheduled runs create threads without a renderer. This control
             // frame lets every open window install the new thread and refresh
             // it when the run ends. Scheduling is desktop-only (no owners).
-            const detachScheduled = process.env.MICHI_CLOUD === "1"
-                ? () => {}
-                : scheduledJobEvents.subscribe({
-                    send: (event) => {
-                        if (!writeSseFrame(res, encodeScheduledJobEvent(event))) detachSubscriber();
-                    },
+            if (process.env.MICHI_CLOUD !== "1") {
+                observer.addCleanup(scheduledJobEvents.subscribe({
+                    send: (event) => { observer.write(encodeScheduledJobEvent(event)); },
                     // Jobs created/edited elsewhere (another window, an agent tool).
-                    sendChange: (event) => {
-                        if (!writeSseFrame(res, encodeScheduledJobsChangedEvent(event))) detachSubscriber();
-                    },
-                });
-            detach = () => { detachTurns(); detachStates(); detachScheduled(); };
-            if (detached) detach();
+                    sendChange: (event) => { observer.write(encodeScheduledJobsChangedEvent(event)); },
+                }));
+            }
+            // Workspace/tree/thread structure changes (any window, tool or
+            // scheduled run), owner-scoped. Opens with the current cursor.
+            observer.addCleanup(structureEvents.subscribe({
+                ownerUserId: backgroundUserId,
+                send: (event) => { observer.write(encodeWorkspaceStructureChangedEvent(event)); },
+            }));
+            // Server-decided notifications (services/attention): the owner's
+            // active records first, then every new and resolved record.
+            if (!observer.closed) {
+                observer.addCleanup(attentionFeed.subscribe(
+                    backgroundUserId ?? LOCAL_AGENT_OWNER_ID,
+                    { send: (frame) => { observer.write(frame); } },
+                ));
+            }
         } catch {
-            detachSubscriber();
+            observer.close();
             if (!res.writableEnded) res.end();
             return;
         }
-
-        const keepalive = setInterval(() => {
-            if (res.writableEnded || res.destroyed) return;
-            if (!writeSseFrame(res, ': keepalive\n\n')) detachSubscriber();
-        }, HEARTBEAT_INTERVAL_MS);
-        keepalive.unref?.();
-        res.on("close", () => {
-            clearInterval(keepalive);
-            detachSubscriber();
-        });
+        observer.heartbeat(': keepalive\n\n', HEARTBEAT_INTERVAL_MS);
     });
 
     router.get("/chats/:chatId/stream", requireChatOwner, (req, res) => {
         const requestedIdentifier = req.params.chatId;
+        // A check-in's turn is private (DESIGN-v2 §2.5): no client replays it.
+        if (refuseCheckinNode(res, requestedIdentifier)) return;
         const nodeId = resolvePublicNodeId(requestedIdentifier, req.user?.id ?? null) ?? requestedIdentifier;
+        if (refuseCheckinNode(res, nodeId)) return;
         const fromSeqRaw = req.query.fromSeq;
         const fromTurnIdRaw = req.query.fromTurnId;
         const fromSeq = typeof fromSeqRaw === "string" ? parseInt(fromSeqRaw, 10) : 0;
@@ -2023,29 +1905,15 @@ export function setupMichiRoutes(chatManager: ChatManager) {
         // Validate the replay cursor before committing HTTP/SSE headers so a
         // gap remains an actionable 410 response rather than a hung stream.
         const probe = chatHub.subscribeTurn(nodeId, fromTurnId, { send: () => {}, close: () => {} }, Number.isFinite(fromSeq) ? fromSeq : 0);
-        if (!probe) return res.status(410).json(chatReplayUnavailable(nodeId, fromTurnId));
+        if (!probe) return res.status(410).json(chatReplayUnavailable(nodeId, fromTurnId, chatHub.isSelfTurn(nodeId, fromTurnId)));
         probe();
 
-        res.setHeader("Content-Type", "text/event-stream");
-        res.setHeader("Cache-Control", "no-cache");
-        res.setHeader("Connection", "keep-alive");
-        res.setHeader("X-Accel-Buffering", "no");
-        res.flushHeaders?.();
-
-        let detached = false;
-        let detach = () => {};
-        const detachSubscriber = () => {
-            if (detached) return;
-            detached = true;
-            detach();
-        };
+        const observer = beginSse(res);
+        // The wire copy only: the hub and its in-process subscribers keep whole tool outputs.
+        const forWire = createToolOutputStreamProjector();
         const sub: HubSubscriber = {
             send: (ev) => {
-                if (res.writableEnded || res.destroyed) return;
-                if (!writeSseFrame(res, encodeChatStreamEvent(ev))) {
-                    detachSubscriber();
-                    return;
-                }
+                if (observer.closed || !observer.write(encodeChatStreamEvent(forWire(ev)))) return;
                 if (ev.event === CHAT_STREAM_EVENTS.done || ev.event === CHAT_STREAM_EVENTS.error) {
                     // A replay/direct recovery stream is per-turn. It must
                     // release its HTTP/1.1 slot once that turn is terminal.
@@ -2059,28 +1927,21 @@ export function setupMichiRoutes(chatManager: ChatManager) {
             },
         };
         const subscription = chatHub.subscribeTurn(nodeId, fromTurnId, sub, Number.isFinite(fromSeq) ? fromSeq : 0);
-        if (!subscription) return res.status(410).json({ error: 'turn replay unavailable', code: 'turn_replay_unavailable' });
-        detach = subscription;
-        if (detached) detach();
-        const keepalive = setInterval(() => {
-            if (res.writableEnded || res.destroyed) return;
-            if (!writeSseFrame(res, ': keepalive\n\n')) detachSubscriber();
-        }, HEARTBEAT_INTERVAL_MS);
-        keepalive.unref?.();
-        res.on("close", () => {
-            clearInterval(keepalive);
-            detachSubscriber();
-        });
+        if (!subscription) return res.status(410).json({ error: 'turn replay unavailable', code: TURN_ERROR_CODES.replayUnavailable });
+        observer.addCleanup(subscription);
+        observer.heartbeat(': keepalive\n\n', HEARTBEAT_INTERVAL_MS);
     });
 
     // The saved outcome of one turn once its live replay (above) is gone. The
     // message is the stored row, so the renderer maps it as hydration does.
     router.get("/chats/:chatId/turns/:turnId", requireChatOwner, (req, res) => {
         const requestedIdentifier = req.params.chatId;
+        if (refuseCheckinNode(res, requestedIdentifier)) return;
         if (!canAccessRuntimeChat(requestedIdentifier, req.user?.id)) {
             return res.status(404).json({ error: 'not_found' });
         }
         const nodeId = resolvePublicNodeId(requestedIdentifier, req.user?.id ?? null) ?? requestedIdentifier;
+        if (refuseCheckinNode(res, nodeId)) return;
         const saved = getSavedTurn(nodeId, req.params.turnId, req.user?.id);
         if (!saved) return res.status(404).json({ error: 'not_found' });
         const { turn, message } = saved;
@@ -2091,7 +1952,8 @@ export function setupMichiRoutes(chatManager: ChatManager) {
             stopReason: turn.stop_reason,
             completedAt: turn.completed_at,
             lastSeq: turn.last_seq,
-            message,
+            // As the tree-messages routes send it, so a recovered turn matches a reloaded one.
+            message: message ? projectMessageRowsForTransport([message])[0] : message,
         });
     });
 
@@ -2105,41 +1967,28 @@ export function setupMichiRoutes(chatManager: ChatManager) {
     // The frontend sends { requestId, optionId } to approve, or
     // { requestId, cancel: true } to deny.
     router.post("/chats/:chatId/permission-response", requireChatOwner, (req, res) => {
-        const session = getSessionByIdentifier(req.params.chatId, req.user?.id ?? null);
-        if (!session) return res.status(404).json({ error: "unknown chat" });
-        const nodeId = session.id;
+        // A check-in asks nobody (DESIGN-v2 §2.5): no client answers for it.
+        if (refuseCheckinNode(res, req.params.chatId)) return;
+        if (refuseCheckinNode(res, resolvePublicNodeId(req.params.chatId, req.user?.id ?? null))) return;
         const { requestId, optionId, cancel } = req.body ?? {};
         if (typeof requestId !== "number") {
             return res.status(400).json({ error: "requestId (number) is required" });
         }
-        const pending = chatHub.getPendingPermission(nodeId);
-        if (!pending || pending.requestId !== requestId) {
-            return res.status(409).json({ error: 'Permission request is no longer pending' });
-        }
-        if (cancel === true) {
-            session.cancelPermission?.(requestId);
-            chatHub.resolvePermission(nodeId, requestId);
-            return res.json({ ok: true });
-        }
-        if (typeof optionId !== "string") {
+        if (cancel !== true && typeof optionId !== "string") {
             return res.status(400).json({ error: "optionId (string) required when not cancelling" });
         }
-        if (!pending.options.some((option) => option.optionId === optionId && !option.disabled)) {
-            return res.status(400).json({ error: 'Invalid permission option' });
-        }
-        if (!session.respondToPermission) {
-            return res.status(400).json({ error: "Session does not support permissions" });
-        }
-        session.respondToPermission(requestId, optionId);
-        chatHub.resolvePermission(nodeId, requestId);
-        res.json({ ok: true });
+        const r = answerChatPermission(req.params.chatId, req.user?.id ?? null,
+            cancel === true ? { requestId, cancel: true } : { requestId, optionId });
+        return r.ok ? res.json({ ok: true }) : res.status(r.status).json({ error: r.error });
     });
 
     // Respond to a pending AskUserQuestion from the agent.
     router.post("/chats/:chatId/user-input-response", requireChatOwner, (req, res) => {
+        if (refuseCheckinNode(res, req.params.chatId)) return;
         const session = getSessionByIdentifier(req.params.chatId, req.user?.id ?? null);
         if (!session) return res.status(404).json({ error: "unknown chat" });
         const nodeId = session.id;
+        if (refuseCheckinNode(res, nodeId)) return;
         const { requestId, interactionId, answers, skip } = req.body ?? {};
         if (typeof requestId !== "number") {
             return res.status(400).json({ error: "requestId (number) is required" });
@@ -2233,19 +2082,20 @@ export function setupMichiRoutes(chatManager: ChatManager) {
     router.get("/workspaces/:workspaceId/modes", requireWorkspaceOwner, async (req, res) => {
         const workspace = getWorkspace(req.params.workspaceId);
         if (!workspace) return res.status(404).json({ error: "workspace not found" });
-        const cwd = process.env.MICHI_CLOUD === "1"
-            ? deriveSandboxCwd(req.user!.id, req.params.workspaceId)
-            : normalizeWorkspaceCwd(workspace.cwd ?? process.cwd());
-        return sendModeCatalog(req, res, cwd);
+        return sendModeCatalog(req, res, workspaceSessionCwd(workspace, req.user?.id, process.cwd()));
     });
 
     router.get("/chats/:chatId/modes", requireChatOwner, (req, res) => {
+        // A check-in's session state is the engine's alone (DESIGN-v2 §2.5, w2-fix D13), reads included.
+        if (refuseCheckinNode(res, req.params.chatId)) return;
         const session = getSessionByIdentifier(req.params.chatId, req.user?.id ?? null);
         if (!session) return res.status(404).json({ error: "unknown chat" });
+        if (refuseCheckinNode(res, session.id)) return;
         res.json({ currentModeId: session.currentModeId ?? null, ...session.getSessionState?.() });
     });
 
     router.post("/chats/:chatId/set-mode", requireChatOwner, async (req, res) => {
+        if (refuseCheckinNode(res, req.params.chatId)) return;
         const modeId = req.body?.modeId;
         if (typeof modeId !== "string" || !modeId) {
             return res.status(400).json({ error: "modeId is required" });
@@ -2263,12 +2113,15 @@ export function setupMichiRoutes(chatManager: ChatManager) {
     });
 
     router.get("/chats/:chatId/model", requireChatOwner, (req, res) => {
+        if (refuseCheckinNode(res, req.params.chatId)) return;
         const session = getSessionByIdentifier(req.params.chatId, req.user?.id ?? null);
         if (!session) return res.status(404).json({ error: "unknown chat" });
+        if (refuseCheckinNode(res, session.id)) return;
         res.json({ currentModelId: session.currentModelId ?? null });
     });
 
     router.post("/chats/:chatId/set-model", requireChatOwner, async (req, res) => {
+        if (refuseCheckinNode(res, req.params.chatId)) return;
         const modelId = req.body?.modelId;
         if (typeof modelId !== "string" || !modelId) {
             return res.status(400).json({ error: "modelId is required" });
@@ -2281,7 +2134,7 @@ export function setupMichiRoutes(chatManager: ChatManager) {
                 return res.status(400).json({ error: "Active session does not support runtime model switching" });
             }
             if (turnBusy(nodeId)) {
-                return res.status(409).json({ code: 'turn_active', error: 'Cannot change model during an active turn' });
+                return res.status(409).json({ code: TURN_ERROR_CODES.active, error: 'Cannot change model during an active turn' });
             }
             await session.setModel(modelId);
             const row = getNode(nodeId);
@@ -2308,15 +2161,17 @@ export function setupMichiRoutes(chatManager: ChatManager) {
      * or via the background observer.
      */
     router.post("/chats/:chatId/execute-command", requireChatOwner, async (req, res) => {
+        if (refuseCheckinNode(res, req.params.chatId)) return;
         const { command, args } = req.body ?? {};
         if (typeof command !== "string" || !command) {
             return res.status(400).json({ error: "command is required" });
         }
         const session = getSessionByIdentifier(req.params.chatId, req.user?.id ?? null);
+        if (session && refuseCheckinNode(res, session.id)) return;
         if (!session?.executeCommand) {
             return res.status(400).json({ error: "Active session does not support command execution" });
         }
-        if (chatHub.isActive(session.id) || chatHub.isOwnerTurnActive(session.id)) return res.status(409).json({ error: 'Wait for the active turn to finish before executing a command.' });
+        if (chatHub.holdsSession(session.id)) return res.status(409).json({ error: 'Wait for the active turn to finish before executing a command.' });
         try {
             // Where /clear replaces the native session (Kiro v3), Michi resets the chat's context.
             const clearRuntime = command === 'clear' ? getRuntime(session.runtimeId) : undefined;
@@ -2326,6 +2181,8 @@ export function setupMichiRoutes(chatManager: ChatManager) {
                     workspaceId: getNode(session.id)?.workspace_id ?? null, nodeId: session.id,
                 });
                 const replacement = await resetKiroContext(session, req.user?.id ?? null, primaryAgentSessionOptions(primaryAgent));
+                // The new native session holds nothing earlier turns read (w2-fix D1).
+                clearCarriedCompanionTaint(session.id);
                 return res.json({ success: true, message: 'Started a new Kiro context. Previous messages remain in Michi.', sessionState: replacement.getSessionState?.() });
             }
             // The host command changes the same durable binding as the model
@@ -2335,7 +2192,7 @@ export function setupMichiRoutes(chatManager: ChatManager) {
                 const releaseRestore = await acquireSessionRestoreLock(nodeId);
                 try {
                     if (getSessionByIdentifier(req.params.chatId, req.user?.id ?? null) !== session
-                        || chatHub.isActive(nodeId) || chatHub.isOwnerTurnActive(nodeId)) {
+                        || chatHub.holdsSession(nodeId)) {
                         return res.status(409).json({ error: 'Cannot change model during an active turn' });
                     }
                     const result = await session.executeCommand(command, args);
@@ -2348,9 +2205,13 @@ export function setupMichiRoutes(chatManager: ChatManager) {
                     return res.json({ ...result, sessionState: session.getSessionState?.() });
                 } finally { releaseRestore(); }
             }
-            // A native command (an in-place /clear, /compact) may drop the Michi Memory block from the context.
+            // A native command (an in-place /clear, /compact) may drop the Michi Memory block and the
+            // agent's standing [COMPANION CONTEXT] blocks from the context: the next turn sends them again.
             chatHub.forgetInjectedMemory(session);
+            forgetCompanionContext(session);
             const result = await session.executeCommand(command, args ?? undefined);
+            // What earlier turns read of check-in material is gone from it too (w2-fix D1).
+            if (result.success && (command === 'clear' || command === 'compact')) clearCarriedCompanionTaint(session.id);
             res.json({ ...result, sessionState: session.getSessionState?.() });
         } catch (err) {
             res.status(500).json({ error: (err as Error).message });

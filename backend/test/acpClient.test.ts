@@ -233,16 +233,17 @@ describe('AcpClient subagent routing (per-tool-call Map)', () => {
   });
 });
 
-test('adapter permission expiry is bound to session and request ID', () => {
+test('adapter permission expiry is bound to session and the agent request ID', () => {
   const client = new AcpClient('/bin/false', '/tmp') as any;
   const events: unknown[] = [];
-  client.pendingPermissions.set(7, { sessionId: 'one' });
+  client.pendingPermissions.set(1001, { sessionId: 'one', rpcId: 7 });
   client.sessionQueues.set('one', { push: (event: unknown) => events.push(event) });
   client.dispatch({ method: '_michi/permission_resolved', params: { sessionId: 'two', requestId: 7 } });
-  assert.equal(client.pendingPermissions.has(7), true);
+  client.dispatch({ method: '_michi/permission_resolved', params: { sessionId: 'one', requestId: 1001 } });
+  assert.equal(client.pendingPermissions.has(1001), true);
   client.dispatch({ method: '_michi/permission_resolved', params: { sessionId: 'one', requestId: 7 } });
-  assert.equal(client.pendingPermissions.has(7), false);
-  assert.deepEqual(events, [{ update: { sessionUpdate: 'permission_resolved', requestId: 7 } }]);
+  assert.equal(client.pendingPermissions.has(1001), false);
+  assert.deepEqual(events, [{ update: { sessionUpdate: 'permission_resolved', requestId: 1001 } }]);
 });
 
 test('client options add argv and replace the environment for kiro-cli only', async t => {

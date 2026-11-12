@@ -56,17 +56,17 @@ vi.mock('../../../state/chatStore', async () => ({
 }));
 
 const withThreads: Project[] = [
-  { id: 'p1', name: 'rabbitholes', createdAt: 0, activeTreeId: 't1', chatIds: ['a'], edges: [],
+  { id: 'p1', name: 'sample-project', createdAt: 0, activeTreeId: 't1', chatIds: ['a'], edges: [],
     trees: [{ id: 't1', rootNodeId: 'a', createdAt: 0, lastActiveAt: 10 }] },
   { id: 'p2', name: 'agent-desk', createdAt: 0, activeTreeId: null, chatIds: [], edges: [], trees: [] },
 ] as unknown as Project[];
 const withoutThreads: Project[] = [
-  { id: 'p1', name: 'rabbitholes', createdAt: 0, activeTreeId: null, chatIds: [], edges: [], trees: [] },
+  { id: 'p1', name: 'sample-project', createdAt: 0, activeTreeId: null, chatIds: [], edges: [], trees: [] },
 ] as unknown as Project[];
 
 function card(id: string, extra: Partial<HomeCard> = {}): HomeCard {
   return {
-    id, kind: 'continue', label: '接着做 · rabbitholes', source: { workspaceId: 'p1' }, title: `Title ${id}`,
+    id, kind: 'continue', label: '接着做 · sample-project', source: { workspaceId: 'p1' }, title: `Title ${id}`,
     reason: `Reason ${id}`, buttonText: '接着做', prompt: `Prompt ${id}`, workspaceId: 'p1', ...extra,
   };
 }
@@ -304,6 +304,26 @@ describe('TerminalHome', () => {
     expect(screen.getByTestId('composer')).toBeTruthy();
   });
 
+  it('moves the greeting down only when nothing sits under the composer', async () => {
+    const centered = () => document.querySelector('.home-page')?.hasAttribute('data-centered');
+    let view = await renderHome();
+    expect(centered()).toBe(false);
+    for (const extra of [{ sets: [] }, { contentMode: 'hidden' as const }]) {
+      view.unmount();
+      __resetHomeCardsCacheForTests();
+      api.fetchHomeCards.mockResolvedValue(answer(extra));
+      view = await renderHome();
+      expect(screen.getByRole('heading', { level: 1 }).textContent).toContain('早上好');
+      expect(centered()).toBe(true);
+    }
+    view.unmount();
+    __resetHomeCardsCacheForTests();
+    api.fetchHomeCards.mockResolvedValue(answer({ contentMode: 'page', contentPage: { id: 'home', title: 'My home layout' } as never }));
+    await renderHome();
+    expect(await screen.findByRole('region', { name: 'Home content' })).toBeTruthy();
+    expect(centered()).toBe(false);
+  });
+
   it('gives a new user getting-started cards instead, whatever the backend holds', async () => {
     store.projects = withoutThreads;
     store.nodes = {};
@@ -323,6 +343,20 @@ describe('TerminalHome', () => {
     expect((onNav.mock.calls[0]![0] as CustomEvent).detail).toEqual({ page: 'spaces' });
     expect(api.markHomeCardUsed).not.toHaveBeenCalled();
     expect(submitted).not.toHaveBeenCalled();
+  });
+
+  it('counts only listed threads: hidden helpers, the archive and Trash leave a user new', async () => {
+    store.projects = [{
+      id: 'p1', name: 'sample-project', createdAt: 0, activeTreeId: null, chatIds: ['helper', 'shelved', 'binned'], edges: [],
+      trees: [
+        { id: 'th', rootNodeId: 'helper', createdAt: 0, lastActiveAt: 3 },
+        { id: 'ts', rootNodeId: 'shelved', createdAt: 0, lastActiveAt: 2, archivedAt: 4 },
+        { id: 'tb', rootNodeId: 'binned', createdAt: 0, lastActiveAt: 1 },
+      ],
+    }] as unknown as Project[];
+    store.nodes = { helper: node('helper', { pageId: 'pg-1' }), shelved: node('shelved'), binned: node('binned', { deletedAt: 5 }) };
+    await renderHome();
+    expect(cardTitles()).toEqual(['Start a conversation', 'Try branching', '@ a page', 'Open Pages']);
   });
 
   it('waits for the workspaces before deciding the user is new', async () => {

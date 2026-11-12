@@ -18,6 +18,11 @@ export default function BrowserDock({ items, focusedPane }: { items: BrowserPane
   const previousFocus = useRef<string | null>(null);
   const focusedBrowser = items.find(item => item.id === focusedPane);
   const selected = items.find(item => item.id === selection) ?? items[0];
+  // A drag holds its width here and saves it once on release, so the pane
+  // store (and every pane, sidebar row and the shell reading it) does not
+  // re-render on each frame of the drag.
+  const [dragWidth, setDragWidth] = useState<number | null>(null);
+  const dragWidthRef = useRef<number | null>(null);
   useLayoutEffect(() => {
     if (focusedBrowser && previousFocus.current !== focusedPane) setSelection(focusedBrowser.id);
     previousFocus.current = focusedBrowser?.id ?? null;
@@ -29,9 +34,14 @@ export default function BrowserDock({ items, focusedPane }: { items: BrowserPane
     if (!dock || !shell) return;
     setCaptionHost(shell.querySelector<HTMLElement>('[data-browser-caption-host]'));
     const buttons = shell.querySelector<HTMLElement>('.terminal-topbar-right');
+    // Only the topbar reads these. A custom property set on the shell would
+    // restyle the whole app each time the dock resizes (a sidebar or dock
+    // drag resizes it every frame); on the topbar it restyles the topbar.
+    const topbar = shell.querySelector<HTMLElement>('.terminal-topbar');
+    if (!topbar) return;
     const sync = () => {
-      shell.style.setProperty('--browser-dock-width', `${dock.getBoundingClientRect().width}px`);
-      shell.style.setProperty('--browser-caption-actions', `${buttons?.getBoundingClientRect().width ?? 0}px`);
+      topbar.style.setProperty('--browser-dock-width', `${dock.getBoundingClientRect().width}px`);
+      topbar.style.setProperty('--browser-caption-actions', `${buttons?.getBoundingClientRect().width ?? 0}px`);
     };
     sync();
     const observer = new ResizeObserver(sync);
@@ -39,16 +49,17 @@ export default function BrowserDock({ items, focusedPane }: { items: BrowserPane
     if (buttons) observer.observe(buttons);
     return () => {
       observer.disconnect();
-      shell.style.removeProperty('--browser-dock-width');
-      shell.style.removeProperty('--browser-caption-actions');
+      topbar.style.removeProperty('--browser-dock-width');
+      topbar.style.removeProperty('--browser-caption-actions');
     };
   }, []);
 
   if (!selected) return null;
   const focused = focusedPane === selected.id || focusedPane === null;
+  const width = dragWidth ?? selected.width;
   return <div ref={dockRef} data-browser-dock data-node-id={selected.id} style={{
     position: 'relative', display: 'flex', flexDirection: 'column', flexShrink: 0,
-    width: selected.width === undefined ? '50%' : `calc(${selected.width}px + 2 * var(--term-dashboard-padding, 0px))`,
+    width: width === undefined ? '50%' : `calc(${width}px + 2 * var(--term-dashboard-padding, 0px))`,
     maxWidth: '50%', boxSizing: 'border-box', padding: 'var(--term-dashboard-padding, 0px)',
     minWidth: 0, minHeight: 0, background: 'var(--term-bg)', overflow: 'hidden',
   }}>
@@ -77,10 +88,19 @@ export default function BrowserDock({ items, focusedPane }: { items: BrowserPane
       <PaneErrorBoundary paneId={item.id}><BrowserPane item={item} active={item.id === selected.id} /></PaneErrorBoundary>
     </div>)}
     <ResizeHandle paneRef={dockRef} side="left"
-      onResize={width => {
+      onResize={next => {
         const padding = parseFloat(getComputedStyle(dockRef.current!).paddingLeft) || 0;
-        const available = dockRef.current?.parentElement?.clientWidth ?? width * 2;
-        setPaneWidth(selected.id, Math.max(1, Math.min(width, available / 2) - padding * 2));
+        const available = dockRef.current?.parentElement?.clientWidth ?? next * 2;
+        dragWidthRef.current = Math.max(1, Math.min(next, available / 2) - padding * 2);
+        setDragWidth(dragWidthRef.current);
+      }}
+      onResizeEnd={() => {
+        const committed = dragWidthRef.current;
+        dragWidthRef.current = null;
+        // One batch: the saved width replaces the drag width without a frame
+        // at the old width in between.
+        if (committed !== null) setPaneWidth(selected.id, committed);
+        setDragWidth(null);
       }}
       onReset={() => setPaneWidth(selected.id, undefined)} />
   </div>;

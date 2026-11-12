@@ -2,19 +2,22 @@ import React from 'react';
 import { toast } from 'sonner';
 import { useChatActions, useChatPanes } from '../../state/chatStore';
 import { usePrefs } from '../../state/prefs';
+import { navPageEvent } from '../../state/appEvents';
+import { HoverTip } from '../ui/Popover';
+import { TOPBAR_TIP_DELAY_MS } from './TopbarIconButton';
 
 /** Open the browser directly, using the current pane's rendered width. */
 export default function BrowserLauncher() {
   const { openPanes, focusedPane, paneItems } = useChatPanes();
   const { openBrowserPane, focusPane, setPaneWidth } = useChatActions();
   const { prefs } = usePrefs();
-  return <button type="button" className="t-icon-btn" aria-label="Browser" title="Browser"
+  return <HoverTip label="Browser" delayMs={TOPBAR_TIP_DELAY_MS}><button type="button" className="t-icon-btn" aria-label="Browser"
     onClick={event => {
       try {
         const existing = openPanes.find(id => paneItems[id]?.kind === 'browser');
         if (existing) {
           focusPane(existing);
-          window.dispatchEvent(new CustomEvent('michi:nav-page', { detail: { page: 'dashboard' } }));
+          navPageEvent.dispatch({ page: 'dashboard' });
           return;
         }
         const shell = event.currentTarget.closest('.terminal-shell');
@@ -38,5 +41,5 @@ export default function BrowserLauncher() {
     }}
     style={{ width: 26, height: 26, color: 'var(--term-mid)', WebkitAppRegion: 'no-drag' } as React.CSSProperties}>
     <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" aria-hidden><circle cx="12" cy="12" r="9" /><ellipse cx="12" cy="12" rx="4" ry="9" /><path d="M3 12h18" /></svg>
-  </button>;
+  </button></HoverTip>;
 }

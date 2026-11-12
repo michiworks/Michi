@@ -86,10 +86,11 @@ test('the Spaces Home counts Waiting, Stalled and Just done from Michi conversat
   await home.screenshot({ path: '.artifacts/spaces-home-cleanup/home.png', animations: 'disabled' });
   await expect(home.getByText('Counted from your chats')).toHaveCount(3);
   await expect(home.getByRole('group', { name: "Today's agenda" })).toHaveCount(0);
-  await expect(areaButton(page, 'spaces')).toHaveAccessibleName('Pages, 2 waiting');
-  await expect(sidebar.getByRole('button', { name: /^Home/ })).toContainText('2');
+  // Pages navigation carries no reminder counts or waiting tone (1418037d).
+  await expect(areaButton(page, 'spaces')).toHaveAccessibleName('Pages');
+  await expect(sidebar.getByRole('button', { name: /^Home/ })).toHaveText('Home');
   await expect(sidebar.getByRole('button', { name: /^All threads/ })).toHaveCount(0);
-  await expect(sidebar.locator(`[data-workspace="${WS}"] .area-side__dot`)).toHaveAttribute('data-tone', 'waiting');
+  await expect(sidebar.locator(`[data-workspace="${WS}"] .area-side__dot`)).toHaveAttribute('data-tone', 'calm');
 
   await expect(waiting.getByTestId('spaces-home-row')).toHaveCount(2);
   await expect(waiting.getByText('Asked: 安装路径用 ~/.kiro/crew/apps，还是独立目录？')).toBeVisible();
@@ -167,7 +168,7 @@ test('Waiting can move, dismiss and snooze reminders with undo and matching badg
   await expect(home.locator('[data-native-page] > .michi-doc-block[data-top]').first()).toHaveAttribute('data-block-id', 'waiting');
   await waiting.getByRole('button', { name: 'No longer needs attention: Pages 增量读取边界' }).click();
   await expect(waiting.getByTestId('spaces-home-row')).toHaveCount(1);
-  await expect(areaButton(page, 'spaces')).toHaveAccessibleName('Pages, 1 waiting');
+  await expect(areaButton(page, 'spaces')).toHaveAccessibleName('Pages');
   await waiting.getByRole('button', { name: 'Undo' }).click();
   await expect(waiting.getByTestId('spaces-home-row')).toHaveCount(2);
   await waiting.getByRole('button', { name: 'Remind tomorrow: Pages 增量读取边界' }).click();

@@ -29,6 +29,13 @@
   padding: 0;
   gap: 28px;
 }
+/* A greeting with no cards or Page below starts at the default hero's top. */
+.home-page[data-centered] {
+  padding-top: clamp(60px, calc(44vh - 140px), 22vh);
+}
+@container home-scroll (max-width: 560px) {
+  .home-page[data-centered] { padding-top: clamp(28px, calc(44vh - 140px), 22vh); }
+}
 .home-default-headline {
   margin: 0;
   font-family: var(--ui-font);
@@ -156,7 +163,7 @@
   box-shadow: var(--term-composer-shadow-muted);
 }
 .home-card:focus-visible {
-  outline: 2px solid color-mix(in srgb, var(--term-accent) 60%, transparent);
+  outline: var(--focus-ring);
   outline-offset: 1px;
 }
 .home-card__kind {

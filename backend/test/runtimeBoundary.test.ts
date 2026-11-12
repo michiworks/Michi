@@ -6,15 +6,21 @@ import path from 'node:path';
 import { after, before, describe, test } from 'node:test';
 
 type Entries = { imports: string[]; env: string[]; runtimeIds: string[] };
-type Comparison = { added: Entries; stale: Entries; hasAdded: boolean };
+type Comparison = { added: Entries; stale: Entries; hasAdded: boolean; hasStale: boolean };
+type CheckResult = { hasAdded: boolean; hasStale: boolean; summary: string; failure: string; stale: string };
+type Print = (line: string) => void;
 interface RuntimeBoundary {
   CANDIDATE_GLOBS: string[];
   RUNTIME_ID_GLOBS: string[];
   KINDS: Array<{ key: keyof Entries; file: string; label: string }>;
   REMEDIATION: string;
   scan(repoRoot: string, options?: { ref?: string }): Entries;
-  loadFixture(dir: string, options?: { baseline?: boolean; pending?: boolean }): Entries;
+  loadFixture(dir: string): Entries;
   compare(current: Entries, fixture: Entries): Comparison;
+  writeFixture(dir: string, entries: Entries): void;
+  runCheck(repoRoot?: string, fixtureDir?: string): CheckResult;
+  buildGate(result: CheckResult, options?: { watch?: boolean }): { exitCode: number; level: 'log' | 'warn' | 'error'; message: string };
+  main(argv: string[], io?: { repoRoot?: string; fixtureDir?: string; log?: Print; error?: Print }): number;
 }
 
 // The scanner is a CommonJS build script (backend/scripts), not part of src/.
@@ -116,9 +122,9 @@ const MINI_REPO: Record<string, string> = {
     '}',
   ].join('\n'),
   'backend/src/agents/sessionRegistry.ts': 'export const registry = 1;\n',
-  'backend/src/agents/runs/runMcpSlot/index.ts': [
-    "import { hub } from '../../chatHub';",
-    "import { thing } from '../../../../../runtime/src/adapters/crew/crewThing';",
+  'backend/src/agents/types/index.ts': [
+    "import { hub } from '../chatHub';",
+    "import { thing } from '../../../../runtime/src/adapters/crew/crewThing';",
     "export const isCodex = (x: string) => x === 'codex' && hub && thing;",
   ].join('\n'),
   'backend/src/agents/runs/other.ts': [
@@ -203,7 +209,7 @@ describe('runtime boundary scanner', () => {
     assert.deepEqual(boundary.scan(root).imports, [
       'backend/src/agents/registry.ts\tbackend/src/services/appTypes.ts',
       'backend/src/agents/registry.ts\tbackend/src/services/reexport.tsx',
-      'backend/src/agents/runs/runMcpSlot/index.ts\tbackend/src/agents/chatHub.ts',
+      'backend/src/agents/types/index.ts\tbackend/src/agents/chatHub.ts',
       'backend/src/services/chatEvents/index.ts\tbackend/src/services/agentConfig.ts',
       `${ADAPTER}\tbackend/src/agents/chatHub.ts`,
       `${ADAPTER}\tbackend/src/agents/sessionRegistry.ts`,
@@ -243,7 +249,7 @@ describe('runtime boundary scanner', () => {
       'backend/src/agents/chatHub.ts\tcrew\t1',
       'backend/src/agents/chatHub.ts\tkiro\t3',
       'backend/src/agents/chatHub.ts\tpi\t1',
-      'backend/src/agents/runs/runMcpSlot/index.ts\tcodex\t1',
+      'backend/src/agents/types/index.ts\tcodex\t1',
       'backend/src/agents/workflows/flow.ts\tclaude\t1',
       'backend/src/routes/agent.ts\tcodex\t2',
       'backend/src/routes/agent.ts\tcrew\t1',
@@ -328,30 +334,17 @@ describe('runtime boundary scanner', () => {
 });
 
 describe('runtime boundary fixtures', () => {
-  test('loadFixture merges baseline and pending files, skipping comments and blank lines', () => {
+  test('loadFixture reads each kind\'s file, skipping comments and blank lines', () => {
     const dir = tempRepo('michi-runtime-boundary-fixture-');
     try {
       writeTree(dir, {
         'imports.txt': '# baseline\n\nb.ts\tapp/z.ts\na.ts\tapp/y.ts\r\n',
-        'imports.pending.txt': '# pending: feature @ abc123\na.ts\tapp/x.ts\nb.ts\tapp/z.ts\n',
-        'env.txt': 'a.ts\tHOME\n',
-        'runtime-ids.txt': 'a.ts\tkiro\t2\nc.ts\tpi\t1\n',
-        'runtime-ids.pending.txt': '# pending: feature @ abc123\na.ts\tkiro\t4\nb.ts\tcodex\t1\n',
+        'runtime-ids.txt': 'c.ts\tpi\t1\na.ts\tkiro\t2\na.ts\tkiro\t4\n',
       });
       assert.deepEqual(boundary.loadFixture(dir), {
-        imports: ['a.ts\tapp/x.ts', 'a.ts\tapp/y.ts', 'b.ts\tapp/z.ts'],
-        env: ['a.ts\tHOME'],
-        runtimeIds: ['a.ts\tkiro\t4', 'b.ts\tcodex\t1', 'c.ts\tpi\t1'],
-      });
-      assert.deepEqual(boundary.loadFixture(dir, { pending: false }), {
         imports: ['a.ts\tapp/y.ts', 'b.ts\tapp/z.ts'],
-        env: ['a.ts\tHOME'],
-        runtimeIds: ['a.ts\tkiro\t2', 'c.ts\tpi\t1'],
-      });
-      assert.deepEqual(boundary.loadFixture(dir, { baseline: false }), {
-        imports: ['a.ts\tapp/x.ts', 'b.ts\tapp/z.ts'],
         env: [],
-        runtimeIds: ['a.ts\tkiro\t4', 'b.ts\tcodex\t1'],
+        runtimeIds: ['a.ts\tkiro\t4', 'c.ts\tpi\t1'],
       });
     } finally {
       fs.rmSync(dir, { recursive: true, force: true });
@@ -368,7 +361,7 @@ describe('runtime boundary fixtures', () => {
     }
   });
 
-  test('compare fails only on additions and count increases; reports stale entries separately', () => {
+  test('compare reports additions and count increases separately from stale entries and count decreases', () => {
     const fixture = {
       imports: ['a.ts\tapp/old.ts', 'a.ts\tapp/kept.ts'],
       env: ['a.ts\tHOME'],
@@ -383,31 +376,143 @@ describe('runtime boundary fixtures', () => {
       added: { imports: ['a.ts\tapp/new.ts'], env: [], runtimeIds: ['a.ts\tkiro\t3', 'e.ts\tclaude\t1'] },
       stale: { imports: ['a.ts\tapp/old.ts'], env: [], runtimeIds: ['b.ts\tcodex\t3', 'c.ts\tpi\t1'] },
       hasAdded: true,
+      hasStale: true,
     });
     assert.equal(boundary.compare(fixture, fixture).hasAdded, false);
+    assert.equal(boundary.compare(fixture, fixture).hasStale, false);
+  });
+});
+
+describe('runtime boundary CLI and build gate', () => {
+  const IMPORT = 'runtime/src/index.ts\tbackend/src/services/x.ts';
+  const ENV = 'runtime/src/index.ts\tA';
+  const CODEX = 'backend/src/routes/r.ts\tcodex\t1';
+  const KIRO = 'backend/src/routes/r.ts\tkiro\t2';
+  const CURRENT: Entries = { imports: [IMPORT], env: [ENV], runtimeIds: [CODEX, KIRO] };
+  // Stale only: an import that is gone and a runtime-id count above today's.
+  const STALE: Entries = {
+    imports: [IMPORT, 'runtime/src/index.ts\tbackend/src/services/gone.ts'],
+    env: [ENV],
+    runtimeIds: [CODEX, 'backend/src/routes/r.ts\tkiro\t3'],
+  };
+  // Stale and new: a gone env read, a missing import, a missing codex key and a kiro count below today's.
+  const MIXED: Entries = { imports: [], env: [ENV, 'runtime/src/index.ts\tGONE'], runtimeIds: ['backend/src/routes/r.ts\tkiro\t1'] };
+  let repo: string;
+  let fixtureDir: string;
+
+  before(() => {
+    repo = tempRepo('michi-runtime-boundary-cli-');
+    writeTree(repo, {
+      'runtime/src/index.ts': "import { x } from '../../backend/src/services/x';\nexport const y = process.env.A ?? x;\n",
+      'backend/src/services/x.ts': 'export const x = 1;\n',
+      'backend/src/routes/r.ts': "export const k = (r: string) => r === 'kiro' || r === 'kiro' || r === 'codex';\n",
+    });
+    fixtureDir = path.join(repo, 'fixtures');
+  });
+
+  after(() => {
+    fs.rmSync(repo, { recursive: true, force: true });
+  });
+
+  function readFixtureFiles(): string {
+    return boundary.KINDS.map((kind) => fs.readFileSync(path.join(fixtureDir, `${kind.file}.txt`), 'utf8')).join('\0');
+  }
+
+  function cli(argv: string[], entries: Entries) {
+    boundary.writeFixture(fixtureDir, entries);
+    const before = readFixtureFiles();
+    const out: string[] = [];
+    const err: string[] = [];
+    const code = boundary.main(argv, { repoRoot: repo, fixtureDir, log: (line) => out.push(line), error: (line) => err.push(line) });
+    return { code, before, after: readFixtureFiles(), entries: boundary.loadFixture(fixtureDir), stdout: out.join('\n'), stderr: err.join('\n') };
+  }
+
+  test('the scan of the temporary repository matches CURRENT', () => {
+    assert.deepEqual(boundary.scan(repo), CURRENT);
+  });
+
+  test('--prune on an unchanged tree leaves the baseline byte-identical', () => {
+    const result = cli(['--prune'], CURRENT);
+    assert.equal(result.code, 0);
+    assert.equal(result.after, result.before);
+  });
+
+  test('stale entries fail the check and name the prune command', () => {
+    const result = cli([], STALE);
+    assert.equal(result.code, 1);
+    assert.equal(result.after, result.before, 'the check never writes');
+    assert.match(result.stderr, /Stale imports\.txt entries[^\n]*\nruntime\/src\/index\.ts\tbackend\/src\/services\/gone\.ts/);
+    assert.match(result.stderr, /Stale runtime-ids\.txt entries[^\n]*\nbackend\/src\/routes\/r\.ts\tkiro\t3/);
+    assert.match(result.stderr, /`node backend\/scripts\/runtimeBoundary\.cjs --prune`/);
+  });
+
+  test('--prune drops stale entries and lowers counts, never adds, and still fails on new entries', () => {
+    assert.deepEqual(cli(['--prune'], STALE).entries, CURRENT);
+    const result = cli(['--prune'], MIXED);
+    assert.deepEqual(result.entries, { imports: [], env: [ENV], runtimeIds: ['backend/src/routes/r.ts\tkiro\t1'] });
+    assert.equal(result.code, 1);
+    assert.match(result.stderr, /New import edges \(imports\):\nruntime\/src\/index\.ts\tbackend\/src\/services\/x\.ts/);
+  });
+
+  test('--write is a deprecated alias of --prune', () => {
+    const pruned = cli(['--prune'], MIXED);
+    const written = cli(['--write'], MIXED);
+    assert.equal(written.after, pruned.after);
+    assert.equal(written.code, pruned.code);
+    assert.match(written.stderr, /--write is deprecated and now means --prune/);
+  });
+
+  test('--accept-new without a non-empty reason is refused, and --ref takes no ratchet flags', () => {
+    for (const argv of [['--accept-new'], ['--accept-new', ''], ['--ref', 'HEAD', '--prune']]) {
+      const result = cli(argv, STALE);
+      assert.equal(result.code, 2, argv.join(' '));
+      assert.equal(result.after, result.before);
+    }
+  });
+
+  test('--accept-new adds new entries and raises counts, and prints the reason for the commit body', () => {
+    const result = cli(['--accept-new', 'the env read moves behind a port next'], { imports: [], env: [ENV], runtimeIds: ['backend/src/routes/r.ts\tkiro\t1'] });
+    assert.equal(result.code, 0);
+    assert.deepEqual(result.entries, CURRENT);
+    assert.match(result.stdout, /Reason: the env read moves behind a port next\n {4}runtime\/src\/index\.ts\tbackend\/src\/services\/x\.ts/);
+  });
+
+  // backend/scripts/build.mjs runs on every push-triggered remote install (remote:setup).
+  test('the build gate ignores stale entries and fails only on new ones', () => {
+    boundary.writeFixture(fixtureDir, STALE);
+    const stale = boundary.runCheck(repo, fixtureDir);
+    assert.equal(stale.hasStale, true);
+    assert.equal(stale.hasAdded, false);
+    const passed = boundary.buildGate(stale, { watch: false });
+    assert.equal(passed.exitCode, 0);
+    assert.equal(passed.level, 'log');
+    assert.match(passed.message, /do not fail the build[\s\S]*--prune/);
+
+    boundary.writeFixture(fixtureDir, MIXED);
+    const added = boundary.runCheck(repo, fixtureDir);
+    assert.equal(boundary.buildGate(added, { watch: false }).exitCode, 1);
+    assert.equal(boundary.buildGate(added, { watch: false }).level, 'error');
+    assert.equal(boundary.buildGate(added, { watch: true }).exitCode, 0, '--watch only warns');
   });
 });
 
 describe('runtime boundary ratchet', () => {
   let comparison: Comparison;
-  // Pending entries belong to unmerged branches, so only baseline entries can be stale.
-  let baselineStale: Entries;
 
   before(() => {
-    const current = boundary.scan(REPO_ROOT);
-    comparison = boundary.compare(current, boundary.loadFixture(FIXTURE_DIR));
-    baselineStale = boundary.compare(current, boundary.loadFixture(FIXTURE_DIR, { pending: false })).stale;
+    comparison = boundary.compare(boundary.scan(REPO_ROOT), boundary.loadFixture(FIXTURE_DIR));
   });
 
   for (const kind of boundary.KINDS) {
     test(`no new ${kind.label}`, () => {
-      const stale = baselineStale[kind.key];
-      if (stale.length > 0) {
-        console.log(`[runtime boundary] ${stale.length} stale ${kind.file}.txt entr${stale.length === 1 ? 'y' : 'ies'} `
-          + `(run \`node backend/scripts/runtimeBoundary.cjs --write\` to drop them):\n${stale.join('\n')}`);
-      }
       const added = comparison.added[kind.key];
       assert.deepEqual(added, [], `New runtime boundary ${kind.label} (${kind.file}):\n${added.join('\n')}\n\n${boundary.REMEDIATION}`);
+    });
+
+    test(`no stale ${kind.file}.txt entries`, () => {
+      const stale = comparison.stale[kind.key];
+      assert.deepEqual(stale, [], `Stale ${kind.file}.txt entries (no longer present):\n${stale.join('\n')}\n\n`
+        + 'The baseline only shrinks. Run `node backend/scripts/runtimeBoundary.cjs --prune` to drop them.');
     });
   }
 });

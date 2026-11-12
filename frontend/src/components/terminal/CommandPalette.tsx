@@ -1,23 +1,31 @@
 import React, { useEffect, useMemo, useRef, useState, useCallback } from 'react';
 import { useChatStore, useChatNodesSnapshot, selectAllChats } from '../../state/chatStore';
 import { isVisibleConversationNode } from '../../state/conversationVisibility';
-import { buildCommands, filterCommands, Command, PageId } from '../../state/commands';
-import { type MessageMatch } from '../../state/search';
+import { threadDisplayTitle } from '../../state/displayTitle';
+import { buildCommands, filterCommands, selectRecentThreads, startNewCompanionConversation, Command, CommandGroup, PageId, type CompanionCommands } from '../../state/commands';
 import { useNodeSearch } from '../../state/useNodeSearch';
 import { type NodeGroupedResult } from '../../services/api';
 import { relativeTime } from '../../lib/relativeTime';
 import { requestDigest } from '../../lib/digestPrompt';
-import { navigateToNode } from '../../state/navigateToNode';
+import { usePrefs } from '../../state/prefs';
 import { ModalShell } from '../ui/ModalShell';
 import { MenuItem } from '../ui/Popover';
 import { kbd } from '../../lib/platform';
 import { TreePrefetchContext, TREE_PREFETCH_INTENT_MS } from '../../state/treePrefetch';
 import { CommandIconGlyph } from './commandIcons';
 import { isSystemWorkspace, systemWorkspaceIds, withoutSystemWorkspaces } from '../../state/assistant/systemWorkspace';
-import { openAssistantPanel, useAssistantSnapshot } from '../../state/assistant/assistantStore';
+import { adoptCompanionSnapshot, useCompanion, useCompanionAssistant } from '../../state/companion/companionStore';
+import { openCompanionPanel } from '../../state/companion/companionPanel';
+import { useCompanionName } from '../../state/companion/companionName';
+import { CompanionApiError, checkCompanionNow, patchCompanionSettings } from '../../services/api/companion';
+import { OPEN_SETTINGS_SECTION_EVENT } from './scheduled/metaAgent/metaAgentNav';
+import { toast } from 'sonner';
 import { requestAllTasks } from '../../state/pages/allTasksNav';
 import { useBackendConnections } from '../../state/useBackendConnections';
+import { backendConnectionIdForWorkspace } from '../../config/backendConnections';
 import { workspaceRemoteNote } from '../WorkspaceLocation';
+import { exportPanelEvent } from '../../state/appEvents';
+import { isImeComposing } from '../../lib/ime';
 
 function renderSnippetWithMark(text: string, range: [number, number]) {
   const [s, e] = range;
@@ -69,6 +77,50 @@ const PROMPT_INPUT: React.CSSProperties = {
   color: 'var(--term-fg)',
   padding: 0,
 };
+
+// The palette has no title bar: its keys sit in a hint row under the list.
+const HINT_ROW: React.CSSProperties = {
+  display: 'flex',
+  alignItems: 'center',
+  gap: 16,
+  padding: '8px 14px',
+  borderTop: '1px solid var(--term-line)',
+  flexShrink: 0,
+  color: 'var(--term-muted)',
+  fontFamily: 'var(--ui-font)',
+  fontSize: 'var(--fs-sm)',
+};
+
+const HINT_KEY: React.CSSProperties = {
+  display: 'inline-block',
+  minWidth: 16,
+  marginRight: 5,
+  padding: '0 4px',
+  border: '1px solid var(--term-line)',
+  borderRadius: 'var(--ui-radius-sm)',
+  fontFamily: 'var(--font-mono)',
+  fontSize: 'var(--fs-xs)',
+  lineHeight: '16px',
+  textAlign: 'center',
+  color: 'var(--term-mid)',
+};
+
+const PALETTE_HINTS: Array<[keys: string[], label: string]> = [
+  [['↑', '↓'], 'move'],
+  [['↵'], 'open'],
+  [['esc'], 'close'],
+];
+
+// The palette's sections, in the order they show: render, highlight, ↑/↓,
+// ⌘1–9 and Enter all follow it. An empty query shows Recent, Navigate and
+// Actions; typing shows the rest and hides Recent.
+const SECTIONS: ReadonlyArray<readonly [CommandGroup, string]> = [
+  ['recent', 'Recent'],
+  ['nav', 'Navigate'],
+  ['action', 'Actions'],
+  ['workspace', 'Workspaces'],
+  ['chat', 'Chats'],
+];
 
 // ── Node-grouped search result styles ────────────────────────────────────
 
@@ -164,6 +216,8 @@ export function openWorkspaceFromPalette(
   actions.onClose();
 }
 
+const OPENING_ROWS = new Set(['agents.open', 'companion.ask']);
+
 export default function CommandPalette({
   onClose,
   setPage,
@@ -180,7 +234,6 @@ export default function CommandPalette({
     selection,
     clearSelection,
     openPane,
-    openPaneInTree,
     createDigest,
     createMergedChat,
     createThread,
@@ -188,10 +241,11 @@ export default function CommandPalette({
     archiveTree,
     unarchiveTree,
     selectProject,
-    setFocusedNodeId,
+    revealNode,
     setSearchHighlightTerm,
   } = useChatStore();
   const nodesSnapshot = useChatNodesSnapshot();
+  const digestEnabled = usePrefs().prefs.digestEnabled === true;
   const [query, setQuery] = useState('');
   const [debouncedQuery, setDebouncedQuery] = useState('');
   const [active, setActive] = useState(0);
@@ -208,11 +262,12 @@ export default function CommandPalette({
   }, [query]);
 
   // The assistant's system workspace is never offered: not as a workspace,
-  // a chat or a search hit. Navigation still resolves it (navDeps).
-  // The assistant's own id counts too: search can find its messages before
-  // this window has loaded its workspace.
-  const assistant = useAssistantSnapshot();
-  const assistantWorkspaceId = assistant.info?.workspaceId ?? null;
+  // a chat or a search hit. Navigation (revealNode) still resolves it.
+  // The conversation's own workspace counts too: search can find its
+  // messages before this window has loaded that workspace.
+  const companionState = useCompanion();
+  const assistant = useCompanionAssistant();
+  const assistantWorkspaceId = assistant.info?.workspaceId ?? companionState.snapshot?.conversation?.workspaceId ?? null;
   const userProjects = useMemo(() => withoutSystemWorkspaces(projects), [projects]);
   const hiddenWorkspaceIds = useMemo(() => {
     const ids = systemWorkspaceIds(projects);
@@ -221,55 +276,21 @@ export default function CommandPalette({
 
   // Server-side FTS search — node-grouped, time-sorted, with breadcrumbs.
   // Each result is one unique node with up to 3 best-matching snippets.
-  const nodeSearch = useNodeSearch(debouncedQuery);
+  // Every backend whose workspaces this window shows is asked, the remote
+  // ones only while connected (useNodeSearch).
+  const searchBackends = useMemo(() => projects.map((p) => backendConnectionIdForWorkspace(p.id)), [projects]);
+  const nodeSearch = useNodeSearch(debouncedQuery, searchBackends);
   const nodeResults = useMemo(
     () => nodeSearch.nodes.filter((r) => !hiddenWorkspaceIds.has(r.workspaceId) && isVisibleConversationNode(nodesSnapshot[r.nodeId])),
     [nodeSearch.nodes, hiddenWorkspaceIds, nodesSnapshot],
   );
 
-  const navDeps = useMemo(
-    () => ({
-      projects,
-      activeProjectId: activeProject?.id ?? null,
-      selectProject,
-      openPane,
-      openPaneInTree,
-      activateTree,
-      setFocusedNodeId,
-    }),
-    [projects, activeProject, selectProject, openPane, openPaneInTree, activateTree, setFocusedNodeId],
-  );
-
   /** Navigate to a node-grouped search result (goes to the node, not a specific message). */
   const navigateToNodeResult = useCallback((r: NodeGroupedResult, messageId?: string) => {
     if (query.trim()) setSearchHighlightTerm({ term: query.trim(), nodeId: r.nodeId });
-    navigateToNode(navDeps, r.nodeId, r.workspaceId);
-    setPage('dashboard');
-    if (messageId) {
-      requestAnimationFrame(() => {
-        window.dispatchEvent(
-          new CustomEvent('michi:scroll-to-message', {
-            detail: { nodeId: r.nodeId, messageId, messageIdx: -1 },
-          }),
-        );
-      });
-    }
+    revealNode(r.nodeId, { workspaceId: r.workspaceId, messageId });
     onClose();
-  }, [navDeps, setPage, onClose, query, setSearchHighlightTerm]);
-
-  const navigateToResult = useCallback((m: MessageMatch) => {
-    if (query.trim()) setSearchHighlightTerm({ term: query.trim(), nodeId: m.nodeId });
-    navigateToNode(navDeps, m.nodeId, m.projectId);
-    setPage('dashboard');
-    requestAnimationFrame(() => {
-      window.dispatchEvent(
-        new CustomEvent('michi:scroll-to-message', {
-          detail: { nodeId: m.nodeId, messageId: m.messageId, messageIdx: m.messageIdx },
-        }),
-      );
-    });
-    onClose();
-  }, [navDeps, setPage, onClose, query, setSearchHighlightTerm]);
+  }, [revealNode, onClose, query, setSearchHighlightTerm]);
 
   const allChats = useMemo(() => selectAllChats({ projects: userProjects, nodes: nodesSnapshot }), [userProjects, nodesSnapshot]);
 
@@ -283,10 +304,46 @@ export default function CommandPalette({
         .map((p) => ({ id: p.id, name: p.name, remoteNote: workspaceRemoteNote(p.backendConnectionId, connections) })),
     [userProjects, activeProject, connections],
   );
-  const openAssistant = useMemo(
-    () => (assistant.status === 'unsupported' ? undefined : () => { onClose(); openAssistantPanel(); }),
-    [assistant.status, onClose],
-  );
+  // The agent's rows (DESIGN-v2 §1.2). Chat needs only the conversation, not
+  // the Companion's state: a backend without an assistant has none. Check-ins
+  // act on that state, so they show once it has loaded.
+  const name = useCompanionName();
+  const snapshotLoaded = companionState.availability === 'available' && !!companionState.snapshot;
+  const companionPaused = companionState.snapshot?.settings.paused ?? false;
+  const conversationNodeId = assistant.info?.nodeId ?? companionState.snapshot?.conversation?.nodeId;
+  const companion = useMemo<CompanionCommands | undefined>(() => (assistant.status === 'unsupported' ? undefined : {
+    name,
+    ask: () => { onClose(); openCompanionPanel({ tab: 'chat', focusComposer: true }); },
+    today: () => { onClose(); openCompanionPanel({ tab: 'today' }); },
+    newConversation: () => {
+      onClose();
+      startNewCompanionConversation(conversationNodeId).catch((error: unknown) => {
+        toast.error(`Couldn’t start a new conversation: ${error instanceof Error ? error.message : 'unknown error'}`);
+      });
+    },
+    settings: () => {
+      onClose();
+      window.dispatchEvent(new CustomEvent(OPEN_SETTINGS_SECTION_EVENT, { detail: { section: 'companion' } }));
+    },
+    ...(snapshotLoaded ? { checkIns: {
+      checkNow: () => {
+        onClose();
+        checkCompanionNow().then(() => { toast(`${name}: checking now`); }, (error: unknown) => {
+          toast.error(error instanceof CompanionApiError && error.code === 'not_owner'
+            ? 'Another Michi window is doing the checking'
+            : `Couldn’t check now: ${error instanceof Error ? error.message : 'unknown error'}`);
+        });
+      },
+      paused: companionPaused,
+      togglePause: () => {
+        onClose();
+        patchCompanionSettings({ paused: !companionPaused }).then((snapshot) => {
+          adoptCompanionSnapshot(snapshot);
+          toast(snapshot.settings.paused ? `${name}: check-ins paused` : `${name}: check-ins resumed`);
+        }, (error: unknown) => { toast.error(`Couldn’t ${companionPaused ? 'resume' : 'pause'} check-ins: ${error instanceof Error ? error.message : 'unknown error'}`); });
+      },
+    } } : {}),
+  }), [assistant.status, snapshotLoaded, companionPaused, conversationNodeId, name, onClose]);
 
   const switchWorkspace = useCallback(
     (projectId: string) => {
@@ -300,13 +357,32 @@ export default function CommandPalette({
   // the assistant's thread would start a new conversation behind the panel.
   const threadProject = isSystemWorkspace(activeProject) ? null : activeProject;
   const liveTrees = useMemo(
-    () => (threadProject?.trees ?? []).filter((t) => !t.archivedAt).map((t) => ({ id: t.id, name: t.name || nodesSnapshot[t.rootNodeId]?.title || 'Untitled' })),
+    () => (threadProject?.trees ?? []).filter((t) => !t.archivedAt).map((t) => ({ id: t.id, name: threadDisplayTitle(t, nodesSnapshot[t.rootNodeId], 'Untitled') })),
     [threadProject, nodesSnapshot],
   );
   const archivedTrees = useMemo(
-    () => (threadProject?.trees ?? []).filter((t) => !!t.archivedAt).map((t) => ({ id: t.id, name: t.name || nodesSnapshot[t.rootNodeId]?.title || 'Untitled' })),
+    () => (threadProject?.trees ?? []).filter((t) => !!t.archivedAt).map((t) => ({ id: t.id, name: threadDisplayTitle(t, nodesSnapshot[t.rootNodeId], 'Untitled') })),
     [threadProject, nodesSnapshot],
   );
+
+  // Recent: the latest threads across the user's workspaces, less the one on
+  // screen (opening it again changes nothing).
+  const shownTreeId = activePage === 'dashboard' ? threadProject?.activeTreeId ?? null : null;
+  const recentThreads = useMemo(
+    () => selectRecentThreads(userProjects.filter((p) => !hiddenWorkspaceIds.has(p.id)), nodesSnapshot, {
+      exclude: threadProject && shownTreeId ? { projectId: threadProject.id, treeId: shownTreeId } : null,
+    }),
+    [userProjects, hiddenWorkspaceIds, nodesSnapshot, threadProject, shownTreeId],
+  );
+  // As the sidebar opens a thread: its workspace first, then the thread with
+  // the panes it last had.
+  const activeProjectId = activeProject?.id ?? null;
+  const openThread = useCallback((projectId: string, treeId: string) => {
+    if (projectId !== activeProjectId) selectProject(projectId);
+    activateTree(treeId, projectId);
+    setPage('dashboard');
+    onClose();
+  }, [activeProjectId, selectProject, activateTree, setPage, onClose]);
 
   const cmds = useMemo<Command[]>(
     () =>
@@ -334,17 +410,19 @@ export default function CommandPalette({
           requestDigest(activeProject.id, ids);
           onClose();
         },
+        digestEnabled,
         exportSelection: () => {
-          window.dispatchEvent(new CustomEvent('michi:toggle-export-panel'));
+          exportPanelEvent.dispatch({});
           onClose();
         },
         clearSelection: () => { clearSelection(); onClose(); },
         openChat: (id) => {
-          navigateToNode(navDeps, id);
-          setPage('dashboard');
+          revealNode(id);
           onClose();
         },
         createThread: () => { setPage('home'); onClose(); },
+        recentThreads,
+        openThread,
         activateTree: (treeId) => { activateTree(treeId); onClose(); },
         archiveTree: (treeId) => { archiveTree(treeId); onClose(); },
         unarchiveTree: (treeId) => { unarchiveTree(treeId); onClose(); },
@@ -352,31 +430,36 @@ export default function CommandPalette({
         liveTrees,
         archivedTrees,
         customAgentsEnabled: agentStatus?.customAgentsEnabled === true,
-        openAssistant,
         openAllTasks: () => { requestAllTasks(); onClose(); },
+        companion,
       }),
-    [activePage, selection, allChats, navDeps, selectProject, activeProject, threadProject?.activeTreeId, agentStatus?.customAgentsEnabled, setPage, onClose, clearSelection, createDigest, openPane, createMergedChat, createThread, activateTree, archiveTree, unarchiveTree, liveTrees, archivedTrees, workspaces, switchWorkspace, openAssistant],
+    [activePage, selection, allChats, revealNode, selectProject, activeProject, threadProject?.activeTreeId, agentStatus?.customAgentsEnabled, setPage, onClose, clearSelection, createDigest, digestEnabled, openPane, createMergedChat, createThread, recentThreads, openThread, activateTree, archiveTree, unarchiveTree, liveTrees, archivedTrees, workspaces, switchWorkspace, companion],
   );
+  // In the order the rows show, section by section: the highlight, ↑/↓, the
+  // ⌘1–9 numbers and Enter all index this list.
   const visible = useMemo(() => {
     const q = query.trim();
     const base = q ? filterCommands(cmds, query) : cmds;
-    return base.filter((c) => {
+    const shown = base.filter((c) => {
       // Suppress "Switch to thread ▸ …" rows — they overlap visually with chat rows
       // whose titles match the tree name. Tree navigation already lives in the sidebar.
       if (c.id.startsWith('thread.switch.')) return false;
-      // Workspace jumps are search-only: the empty/recents view stays focused on
-      // nav + chats; typing surfaces the WORKSPACE group (filtered by the query).
-      if (!q && c.group === 'workspace') return false;
+      // The empty view is Recent, then Navigate and Actions. Workspace jumps
+      // and chats are search-only: typing surfaces them (filtered by the
+      // query) and the Chats rows then cover what Recent listed.
+      if (!q && (c.group === 'workspace' || c.group === 'chat')) return false;
+      if (q && c.group === 'recent') return false;
       return true;
     });
+    return SECTIONS.flatMap(([group]) => shown.filter((c) => c.group === group));
   }, [cmds, query]);
   const showRecents = !query.trim();
 
   const totalRows = visible.length + (showRecents ? 0 : nodeResults.length);
   const prefetchTree = React.useContext(TreePrefetchContext);
   const activeCommand = visible[active];
-  const prefetchNodeId = activeCommand?.group === 'chat'
-    ? activeCommand.id.slice('chat.'.length)
+  const prefetchNodeId = activeCommand
+    ? activeCommand.prefetchNodeId ?? (activeCommand.group === 'chat' ? activeCommand.id.slice('chat.'.length) : undefined)
     : !showRecents && active >= visible.length ? nodeResults[active - visible.length]?.nodeId : undefined;
   useEffect(() => {
     if (!prefetchNodeId) return;
@@ -392,9 +475,16 @@ export default function CommandPalette({
   // `visible` a new identity many times a second, and resetting on each one
   // put the highlight (and the list's scroll) back on the first row.
   const workspaceIdx = useMemo(() => visible.findIndex((c) => c.group === 'workspace'), [visible]);
+  // The empty palette opens on the newest Recent thread; with none, on Open
+  // Agent Library or Ask <name>, as it did when they came first in the
+  // list. Any other row starts at the top.
+  const openingIdx = useMemo(
+    () => (showRecents && visible[0]?.group !== 'recent' ? Math.max(0, visible.findIndex((c) => OPENING_ROWS.has(c.id))) : 0),
+    [showRecents, visible],
+  );
   useEffect(() => {
-    setActive(workspaceIdx >= 0 ? workspaceIdx : 0);
-  }, [query, workspaceIdx]);
+    setActive(workspaceIdx >= 0 ? workspaceIdx : openingIdx);
+  }, [query, workspaceIdx, openingIdx]);
 
   useEffect(() => {
     if (active >= totalRows) setActive(0);
@@ -447,6 +537,7 @@ export default function CommandPalette({
   }, [runRowAtIndex, active]);
 
   const onKey = (e: React.KeyboardEvent<HTMLInputElement>) => {
+    if (isImeComposing(e)) return;
     const isModifier = e.metaKey || e.ctrlKey;
     if (!showRecents && isModifier && !e.shiftKey && !e.altKey && e.key >= '1' && e.key <= '9') {
       e.preventDefault();
@@ -469,25 +560,18 @@ export default function CommandPalette({
       kbdNavAt.current = Date.now();
       setActive((i) => Math.max(0, i - 1));
     } else if (e.key === 'Enter') {
-      if (e.nativeEvent.isComposing) return;
       e.preventDefault();
       runActiveRow();
     }
   };
 
-  const groups: Array<['nav' | 'action' | 'workspace' | 'chat' | 'search-result', string]> = [
-    ['nav', 'Navigate'],
-    ['action', 'Actions'],
-    ['workspace', 'Workspaces'],
-    ['chat', 'Chats'],
-  ];
-
   return (
+    // No title bar or close button: Esc and a click on the scrim close it.
+    // The name stays for assistive tech (and the E2E specs that find it).
     <ModalShell
       open
       onClose={onClose}
-      title="Command palette"
-      titleGlyph="▸"
+      aria-label="Command palette"
       width={620}
       anchor="top"
       motion="enter"
@@ -512,7 +596,7 @@ export default function CommandPalette({
           className="hide-sb michi-menu-scope"
           data-menu="palette"
         >
-          {groups.map(([g, label]) => {
+          {SECTIONS.map(([g, label]) => {
             const rows = visible.filter((c) => c.group === g);
             if (rows.length === 0) return null;
             return (
@@ -522,6 +606,8 @@ export default function CommandPalette({
                   const idx = visible.indexOf(c);
                   const quickKey = !showRecents && idx < 9 ? kbd('mod', String(idx + 1)) : null;
                   const keys = quickKey ?? c.keys;
+                  // A recent thread names its workspace at the row's end.
+                  const where = g === 'recent' ? c.meta : undefined;
                   return (
                     <MenuItem
                       key={c.id}
@@ -532,8 +618,9 @@ export default function CommandPalette({
                       <span className="michi-menu-glyph" aria-hidden="true"><CommandIconGlyph name={c.icon} /></span>
                       <span className="michi-menu-label">
                         {c.label}
-                        {c.meta ? <span className="michi-menu-caption michi-menu-sublabel">{c.meta}</span> : null}
+                        {c.meta && !where ? <span className="michi-menu-caption michi-menu-sublabel">{c.meta}</span> : null}
                       </span>
+                      {where ? <span className="michi-menu-caption michi-menu-where">{where}</span> : null}
                       {keys ? <span className="michi-menu-keys">{keys}</span> : null}
                     </MenuItem>
                   );
@@ -543,7 +630,10 @@ export default function CommandPalette({
           })}
           {visible.length === 0 && nodeResults.length === 0 && (
             <div className="michi-menu-caption" style={{ padding: 'var(--m-rowY) var(--m-rowX)' }}>
-              {showRecents ? 'No commands available' : 'No matches'}
+              {showRecents ? 'No commands available'
+                // Messages are searched once typing pauses; until they answer, nothing is known not to match.
+                : debouncedQuery !== query || nodeSearch.status === 'loading' ? 'Searching…'
+                  : nodeSearch.status === 'error' ? 'Couldn’t search messages' : 'No matches'}
             </div>
           )}
           {/* Node-grouped search results — deduped by node, time-sorted, with breadcrumbs */}
@@ -609,6 +699,14 @@ export default function CommandPalette({
               })}
             </ul>
           )}
+        </div>
+        <div className="palette-hints" style={HINT_ROW}>
+          {PALETTE_HINTS.map(([keys, label]) => (
+            <span key={label}>
+              {keys.map((k) => <kbd key={k} style={HINT_KEY}>{k}</kbd>)}
+              {label}
+            </span>
+          ))}
         </div>
     </ModalShell>
   );

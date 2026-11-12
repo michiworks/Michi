@@ -11,7 +11,7 @@ import React, { useEffect } from 'react';
 import { act, render, screen, cleanup, fireEvent, waitFor } from '@testing-library/react';
 import WorkspaceRow from './WorkspaceRow';
 import WorkspaceTree from './WorkspaceTree';
-import { ChatProvider, useChatStore } from '../../state/chatStore';
+import { ChatProvider, useChatNode, useChatStore } from '../../state/chatStore';
 import { PrefsProvider } from '../../state/prefs';
 import type { ChatNodeState, Project } from '../../state/chatTypes';
 
@@ -20,7 +20,6 @@ vi.mock('../../services/api', async (importOriginal) => {
   return {
     ...actual,
     listAgentModes: vi.fn().mockResolvedValue({ availableModes: [], defaultModeId: null }),
-    fetchAllWorkspaces: vi.fn().mockResolvedValue([]),
     fetchAllWorkspacesMeta: vi.fn().mockResolvedValue([]),
     fetchTreeMessages: vi.fn().mockResolvedValue([]),
     fetchWorkspaces: vi.fn().mockResolvedValue([]),
@@ -60,9 +59,13 @@ const NOOP_ACTIONS = {
   deleteProject: vi.fn(),
   selectBranch: vi.fn(),
   branchContextMenu: vi.fn(),
-  selectThreadRoot: vi.fn(),
-  selectThread: vi.fn(),
+  clickThreadRow: vi.fn(),
 };
+
+/** Renders once the seeded node is in the store, so an assertion can't pass on an empty one. */
+function HydratedProbe({ nodeId }: { nodeId: string }) {
+  return useChatNode(nodeId) ? <span data-testid="hydrated" /> : null;
+}
 
 // ---------------------------------------------------------------------------
 // Helper: a wrapper that enables unreadFilterOn after mount
@@ -115,17 +118,18 @@ describe('WorkspaceRow unread ring', () => {
     },
   };
 
-  function renderHeader(workspaceExpanded: boolean) {
+  function renderHeader(workspaceExpanded: boolean, seeded: { project: Project; nodes: Record<string, ChatNodeState> } = { project, nodes }) {
     localStorage.setItem(
       'michi:v1:state',
-      JSON.stringify({ version: 2, projects: [project], nodes, activeProjectId: 'p1' }),
+      JSON.stringify({ version: 2, projects: [seeded.project], nodes: seeded.nodes, activeProjectId: 'p1' }),
     );
     localStorage.setItem('michi:migrated', '1');
     return render(
       <PrefsProvider>
         <ChatProvider>
+          <HydratedProbe nodeId="r1" />
           <WorkspaceRow
-            project={project}
+            project={seeded.project}
             workspaceExpanded={workspaceExpanded}
             activeProjectId={project.id}
             activeTreeId={project.activeTreeId}
@@ -134,8 +138,8 @@ describe('WorkspaceRow unread ring', () => {
             isBranchExpanded={() => false}
             isBranchSelected={() => false}
             isNodeAlive={() => true}
-            sortedTrees={project.trees}
-            edges={project.edges}
+            sortedTrees={seeded.project.trees}
+            edges={seeded.project.edges}
             actions={NOOP_ACTIONS}
           />
         </ChatProvider>
@@ -149,6 +153,19 @@ describe('WorkspaceRow unread ring', () => {
   it('rings a collapsed workspace that holds an unread thread', async () => {
     renderHeader(false);
     await waitFor(() => expect(headerDot()?.dataset.unread).toBe('within'));
+  });
+
+  // Expanded, the workspace would list no row with a dot: nothing to open.
+  it.each([
+    ['archived', { archivedAt: BEFORE }, {}],
+    ['in Trash', {}, { deletedAt: BEFORE, deletionGroupId: 'del-r1' }],
+  ])('rings no collapsed workspace whose only unread thread is %s', async (_label, treeExtra, nodeExtra) => {
+    renderHeader(false, {
+      project: { ...project, trees: [{ ...project.trees[0], ...treeExtra }] },
+      nodes: { r1: { ...nodes.r1, ...nodeExtra } },
+    });
+    await screen.findByTestId('hydrated');
+    expect(headerDot()?.dataset.unread).toBe('none');
   });
 
   it('drops the ring once the workspace is open and its threads show their own dots', async () => {

@@ -44,7 +44,7 @@ test('automatic maintenance has one system entry and global controls independent
   await expect(page.locator('.sched-row')).toHaveCount(1);
   await expect(page.getByText('Checks every 60 s · AI only for pending work', { exact: true })).toBeVisible();
   await expect(page.locator('.sched-row[data-system]')).toContainText('Checked');
-  await page.getByRole('button', { name: 'Open Meta agent · maintain Pages', exact: true }).click();
+  await page.getByRole('button', { name: 'Open Michi · Pages upkeep', exact: true }).click();
   await expect(page.getByText('One background check every 60 seconds finds pending work across workspaces. AI runs only when there is work to process.')).toBeVisible();
   await expect(page.getByText('Paused in this workspace', { exact: true })).toBeVisible();
   await page.getByRole('button', { name: 'Pause background updates', exact: true }).click();

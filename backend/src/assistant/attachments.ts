@@ -3,6 +3,7 @@ import path from 'node:path';
 import { TextDecoder } from 'node:util';
 import type { AgentTurnInput } from '../agents/types';
 import { imageMimeType } from '../agents/attachments';
+import { isWithinRoot } from '../agents/tools/pathSandbox';
 
 const MAX_TEXT_BYTES = 512 * 1024;
 
@@ -22,8 +23,7 @@ export function prepareAssistantAttachments(text: string, attachments: AgentTurn
     const name = attachment.name.slice(0, 200);
     try {
       const file = fs.realpathSync(attachment.absPath);
-      const relative = path.relative(root, file);
-      if (!relative || relative.startsWith(`..${path.sep}`) || relative === '..' || path.isAbsolute(relative)) throw new Error('outside attachment folder');
+      if (file === root || !isWithinRoot(file, root)) throw new Error('outside attachment folder');
       const descriptor = fs.openSync(file, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW | fs.constants.O_NONBLOCK);
       try {
         const stat = fs.fstatSync(descriptor);

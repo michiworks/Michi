@@ -1,11 +1,11 @@
 import { useEffect, useRef } from 'react';
+import { SSE_HEARTBEAT_MS, sseSilenceTimeoutMs } from 'michi-shared';
 import { artifactWatchStreamUrl, postArtifactWatchPaths } from '../services/api';
-import { fetchStream } from '../services/api/streamTransport';
-import { readSseStream } from '../services/api/sseParser';
+import { openSseFeed } from '../services/api/sseFeed';
 
 /**
  * useArtifactWatch — subscribe to a workspace's artifact-change notifications so
- * an open ArtifactPane can show a "Changed on disk · refresh" badge when its file changes
+ * an open FilePane can show a "Changed on disk · refresh" badge when its file changes
  * on disk (from any source: agent Edit/Write, an external editor, git checkout).
  *
  * This independent, persistent feed shares the gateway's WebSocket with chat
@@ -53,45 +53,30 @@ export function useArtifactWatch(opts: {
     // Preserve the test/SSR opt-out used by store tests without a watch server.
     if (typeof EventSource === 'undefined') return;
     let stopped = false;
-    let controller: AbortController | undefined;
+    let stopFeed: (() => void) | undefined;
     let retry: ReturnType<typeof setTimeout> | undefined;
-    let watchdog: ReturnType<typeof setTimeout> | undefined;
-    const declare = () => {
-      void postArtifactWatchPaths(workspaceId, pathsRef.current).catch(() => {});
-    };
-    const connect = async () => {
-      controller = new AbortController();
-      const armWatchdog = () => {
-        clearTimeout(watchdog);
-        watchdog = setTimeout(() => controller?.abort(), 60_000);
-      };
-      try {
-        armWatchdog();
-        const response = await fetchStream(artifactWatchStreamUrl(workspaceId), { signal: controller.signal });
-        if (!response.ok || !response.body) throw new Error('File watch unavailable');
-        if (stopped) { await response.body.cancel(); return; }
-        declare();
-        await readSseStream(response.body.getReader(), (event, raw) => {
+    const connect = () => {
+      stopFeed = openSseFeed(artifactWatchStreamUrl(workspaceId), {
+        label: 'File watch',
+        silenceMs: sseSilenceTimeoutMs(SSE_HEARTBEAT_MS.artifactWatch),
+        onOpen: () => { void postArtifactWatchPaths(workspaceId, pathsRef.current).catch(() => {}); },
+        onFrame: (event, raw) => {
           try {
             const data = JSON.parse(raw) as { filePath?: string };
             if (typeof data.filePath !== 'string') return;
             if (event === 'artifact_changed') onChangedRef.current(data.filePath);
             else if (event === 'artifact_removed') onRemovedRef.current(data.filePath);
           } catch { /* malformed frame */ }
-        }, { onRead: armWatchdog, shouldStop: () => stopped });
-      } catch {
+        },
         // Watching is best-effort; reconnect and re-declare the complete set.
-      } finally {
-        clearTimeout(watchdog);
-        if (!stopped) retry = setTimeout(() => void connect(), 3_000);
-      }
+        onDisconnect: () => { if (!stopped) retry = setTimeout(connect, 3_000); },
+      });
     };
-    void connect();
+    connect();
     return () => {
       stopped = true;
       clearTimeout(retry);
-      clearTimeout(watchdog);
-      controller?.abort();
+      stopFeed?.();
     };
   }, [workspaceId, enabled]);
 

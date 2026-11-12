@@ -1,3 +1,14 @@
+import { artifactNameKey } from 'michi-shared';
+
+/** `name`, else the first of `name-2`, `name-3`, … that no `existing` name takes. */
+export function uniqueContextName(name: string, existing: readonly string[]): string {
+  const taken = new Set(existing.map(artifactNameKey));
+  if (!taken.has(artifactNameKey(name))) return name;
+  let suffix = 2;
+  while (taken.has(artifactNameKey(`${name}-${suffix}`))) suffix++;
+  return `${name}-${suffix}`;
+}
+
 /**
  * Renderer-side sanitizer for context names. Output rules: keep
  * Unicode letters/numbers (\p{L}\p{N}), underscore, and hyphen; replace
@@ -18,11 +29,5 @@ export function sanitizeContextName(rawName: string, existing: string[]): string
     .replace(/-+/g, '-')
     .replace(/^-|-$/g, '');
   if (cleaned.length === 0) cleaned = 'context';
-
-  const lower = new Set(existing.map((n) => n.toLowerCase()));
-  if (!lower.has(cleaned.toLowerCase())) return cleaned;
-
-  let suffix = 2;
-  while (lower.has(`${cleaned}-${suffix}`.toLowerCase())) suffix++;
-  return `${cleaned}-${suffix}`;
+  return uniqueContextName(cleaned, existing);
 }

@@ -97,6 +97,17 @@ it('follows the running update when a duplicate request is rejected, without rep
   expect(refreshed).toHaveBeenCalledOnce();
 });
 
+it('leaves an unreachable machine’s failed version check to the caller, and checks again once it is reachable', async () => {
+  mocks.check.mockRejectedValueOnce(new Error('WSSH Proxy returned an error'));
+  const { rerender } = render(<RemoteUpdateNotice connectionId="box" name="Build box" unreachable />);
+  await vi.waitFor(() => expect(mocks.check).toHaveBeenCalledOnce());
+  expect(screen.queryByRole('alert')).toBeNull();
+  expect(screen.queryByRole('button', { name: 'Check version again' })).toBeNull();
+  rerender(<RemoteUpdateNotice connectionId="box" name="Build box" unreachable={false} />);
+  expect(await screen.findByText('Remote Michi is older than this app')).toBeTruthy();
+  expect(mocks.check).toHaveBeenCalledTimes(2);
+});
+
 it('shows manual guidance for direct connections and hides the action for current or different versions', async () => {
   mocks.check.mockResolvedValueOnce({ ...older, canUpdate: false, message: 'Connect over SSH to update.' });
   const { rerender } = render(<RemoteUpdateNotice connectionId="direct" name="Direct" />);

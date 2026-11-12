@@ -44,8 +44,11 @@ test('remote history opens at the recent page, loads older messages, and survive
   await expect(remote).toBeVisible();
   await remote.getByText('Long conversation', { exact: true }).click();
   await expect(page.getByText('History item 119', { exact: true })).toBeVisible();
-  expect(reads.every(url => url.searchParams.get('limit') === '50')).toBe(true);
+  // The first page over a tunnel is short (the last screenful); older pages are full size.
+  expect(reads.length).toBeGreaterThan(0);
+  expect(reads.every(url => url.searchParams.get('limit') === '15' && !url.searchParams.has('nodeId'))).toBe(true);
   await expect(page.getByText('History item 0', { exact: true })).toHaveCount(0);
+  await expect(page.getByText('History item 104', { exact: true })).toHaveCount(0);
   const older = page.getByRole('button', { name: 'Load older messages', exact: true });
   const transcript = page.locator('.terminal-pane__transcript').first();
   // Real reader input cancels an in-progress restore. Programmatic scrolling
@@ -55,20 +58,21 @@ test('remote history opens at the recent page, loads older messages, and survive
     await page.mouse.wheel(0, -100_000);
     await expect.poll(() => transcript.evaluate(el => el.scrollTop)).toBe(0);
   };
-  await scrollToHistoryStart();
-  const anchor = page.getByText('History item 70', { exact: true });
-  const anchorTop = (await anchor.boundingBox())!.y;
-  await older.click();
-  await expect(page.getByText('History item 20', { exact: true })).toBeAttached();
-  await expect.poll(async () => Math.abs((await anchor.boundingBox())!.y - anchorTop)).toBeLessThan(3);
-  expect(reads.at(-1)?.searchParams.get('beforeSeq')).toBe('70');
-  expect(reads.at(-1)?.searchParams.get('nodeId')).toBe('node');
-  await scrollToHistoryStart();
-  const secondAnchor = page.getByText('History item 20', { exact: true });
-  const secondTop = (await secondAnchor.boundingBox())!.y;
-  await older.click();
-  await expect(page.getByText('History item 0', { exact: true })).toBeAttached();
-  await expect.poll(async () => Math.abs((await secondAnchor.boundingBox())!.y - secondTop)).toBeLessThan(3);
+  // Each older page keeps the reader's place: what was first stays put.
+  const loadOlder = async (firstShown: number, firstLoaded: number) => {
+    await scrollToHistoryStart();
+    const anchor = page.getByText(`History item ${firstShown}`, { exact: true });
+    const anchorTop = (await anchor.boundingBox())!.y;
+    await older.click();
+    await expect(page.getByText(`History item ${firstLoaded}`, { exact: true })).toBeAttached();
+    await expect.poll(async () => Math.abs((await anchor.boundingBox())!.y - anchorTop)).toBeLessThan(3);
+    expect(reads.at(-1)?.searchParams.get('beforeSeq')).toBe(String(firstShown));
+    expect(reads.at(-1)?.searchParams.get('nodeId')).toBe('node');
+    expect(reads.at(-1)?.searchParams.get('limit')).toBe('50');
+  };
+  await loadOlder(105, 55);
+  await loadOlder(55, 5);
+  await loadOlder(5, 0);
   await expect(older).toHaveCount(0);
   const composer = page.locator(COMPOSER_EDITOR).first();
   await composer.fill('Keep this unsent draft');

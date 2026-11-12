@@ -40,6 +40,8 @@ class FakeExecutor implements ScheduledJobExecutor {
   readonly started: StartedRun[] = [];
   failStart: Error | null = null;
   autoResolve: ScheduledRunOutcome | null = null;
+  /** False: cancel() only records the request, like an agent that stops late. */
+  settleOnCancel = true;
 
   async start(job: ScheduledJobRecord, run: ScheduledJobRunRecord, hooks: ScheduledRunHooks): Promise<ScheduledRunHandle> {
     if (this.failStart) throw this.failStart;
@@ -61,7 +63,7 @@ class FakeExecutor implements ScheduledJobExecutor {
       done,
       cancel: () => {
         entry.cancelled = true;
-        resolve({ status: 'cancelled', summary: null, error: null });
+        if (this.settleOnCancel) resolve({ status: 'cancelled', summary: null, error: null });
       },
     };
   }
@@ -355,6 +357,32 @@ describe('ScheduledJobScheduler', () => {
     assert.equal(scheduler.getJob(job.id).nextRunAt, now + 60_000);
   });
 
+  test('does not run a job while its workspace is archived, and runs it again once unarchived', async () => {
+    let archived = false;
+    const scheduler = makeScheduler({ workspaceArchived: (id) => archived && id === 'ws-a' });
+    const job = scheduler.createJob(baseJob);
+    scheduler.start();
+    await scheduler.tick();
+    archived = true;
+    now += 3_600_000;
+    await scheduler.tick();
+    await settle();
+    assert.equal(executor.started.length, 0, 'the due run is skipped');
+    const skipped = scheduler.getJob(job.id);
+    assert.equal(skipped.nextRunAt, now + 3_600_000, 'the schedule keeps moving');
+    assert.equal(skipped.lastError, 'Skipped: the workspace is archived');
+    assert.equal(skipped.enabled, true);
+    await assert.rejects(() => scheduler.runNow(job.id), /The workspace for this job is archived/);
+    assert.equal(scheduler.listRuns(job.id).length, 0);
+    assert.equal(scheduler.updateJob(job.id, { name: 'Renamed' }).name, 'Renamed', 'the job can still be edited');
+
+    archived = false;
+    now += 3_600_000;
+    await scheduler.tick();
+    await settle();
+    assert.equal(executor.started.length, 1);
+  });
+
   test('times out a run, cancels it and counts a failure', async () => {
     const scheduler = makeScheduler();
     const job = scheduler.createJob({ ...baseJob, timeoutSeconds: 60 });
@@ -425,6 +453,23 @@ describe('ScheduledJobScheduler', () => {
     const [run] = scheduler.listRuns(job.id);
     assert.equal(run.status, 'cancelled');
     assert.equal(run.trigger, 'manual');
+    assert.equal(scheduler.getJob(job.id).consecutiveFailures, 0, 'a user cancel is not a failure');
+  });
+
+  test('a cancel stays the outcome when the time limit passes before the run stops', async () => {
+    const scheduler = makeScheduler();
+    executor.settleOnCancel = false;
+    const job = scheduler.createJob(baseJob);
+    new ScheduledJobsRepository().updateJob(job.id, { timeoutSeconds: 0.01 });
+    await scheduler.runNow(job.id);
+    await settle();
+    assert.equal(scheduler.cancelActiveRun(job.id), true);
+    await new Promise(resolve => setTimeout(resolve, 40));
+    executor.started[0].resolve({ status: 'cancelled', summary: null, error: null });
+    await settle();
+    const [run] = scheduler.listRuns(job.id);
+    assert.equal(run.status, 'cancelled');
+    assert.equal(run.error, 'Cancelled');
     assert.equal(scheduler.getJob(job.id).consecutiveFailures, 0, 'a user cancel is not a failure');
   });
 
@@ -502,6 +547,73 @@ describe('ScheduledJobScheduler', () => {
     await scheduler.runNow(job.id);
     await settle();
     assert.equal(wakes, 0);
+  });
+
+  test('a notification inside the notifier grace wakes the app once the grace is up, if still nobody took it (H-review #2)', async () => {
+    const timers: Array<{ at: number; run: () => void; cancelled: boolean }> = [];
+    const setTimer = (run: () => void, delayMs: number) => {
+      const timer = { at: now + delayMs, run, cancelled: false };
+      timers.push(timer);
+      return () => { timer.cancelled = true; };
+    };
+    const advance = (ms: number) => {
+      now += ms;
+      for (const timer of [...timers]) if (!timer.cancelled && timer.at <= now) { timer.cancelled = true; timer.run(); }
+    };
+    const live = () => timers.filter((timer) => !timer.cancelled).length;
+    // The notifier just went away (the user quit Michi): its grace starts now.
+    events.subscribe({ notifier: true, send: () => {} })();
+    const scheduler = makeScheduler({ notifierGraceMs: 30_000, setTimer });
+    executor.autoResolve = { status: 'succeeded', summary: 'Done.', error: null };
+    const job = scheduler.createJob(baseJob);
+    advance(10_000);
+    const first = await scheduler.runNow(job.id);
+    await settle();
+    assert.equal(wakes, 0, 'inside the grace the notifier may be reconnecting');
+    assert.deepEqual(timers.map((timer) => timer.at - now), [20_000], 'one look again, for the time left');
+
+    // A second notification inside the grace arms nothing more.
+    await scheduler.runNow(job.id);
+    await settle();
+    assert.equal(live(), 1);
+    advance(19_999);
+    assert.equal(wakes, 0);
+    advance(1);
+    assert.equal(wakes, 1, 'nobody came back and the notifications still wait: the app is woken');
+    assert.equal(live(), 0);
+
+    // A notifier that came back and took the notification: nothing wakes.
+    events.subscribe({ notifier: true, send: () => {} })();
+    await scheduler.runNow(job.id);
+    await settle();
+    for (const event of scheduler.pendingNotifications()) scheduler.acknowledgeNotification(event.runId);
+    advance(30_000);
+    assert.equal(wakes, 1, 'no notification waits any more');
+
+    // One connected when the timer fires: nothing wakes, and nothing is armed again.
+    const unsubscribe = events.subscribe({ notifier: true, send: () => {} });
+    unsubscribe();
+    await scheduler.runNow(job.id);
+    await settle();
+    const connected = events.subscribe({ notifier: true, send: () => {} });
+    advance(30_000);
+    assert.equal(wakes, 1);
+    assert.equal(live(), 0);
+    connected();
+
+    // A notifier that came and went meanwhile restarts the grace; stop() cancels the look again.
+    await scheduler.runNow(job.id);
+    await settle();
+    advance(20_000);
+    events.subscribe({ notifier: true, send: () => {} })();
+    advance(10_000);
+    assert.equal(wakes, 1, 'its grace started over 10 s ago');
+    assert.equal(live(), 1);
+    await scheduler.stop();
+    assert.equal(live(), 0);
+    advance(30_000);
+    assert.equal(wakes, 1);
+    assert.ok(scheduler.getRun(first.id));
   });
 
   test('changing the agent profile starts a new persistent thread', async () => {

@@ -14,8 +14,9 @@ export function blockShowsTaskBoard(block: Record<string, unknown>): boolean {
  */
 import type { MichiDbCellValue, MichiDbColumnOption } from '../databaseModel';
 import { parsePageBlockInput, type PageBlock, type PageBlockInput } from './blocks';
+import { pageChildBlockLists } from './containers';
 import type { PageDatabase, PageDatabaseColumn, PageDatabaseRole, PageDatabaseRow, PageDatabaseView } from './database';
-import type { PageChangeDto } from './types';
+import type { CompanionActor, PageChangeDto } from './types';
 
 export const TASK_DATABASE_ROLE: PageDatabaseRole = 'tasks';
 export const TASK_DATABASE_TITLE = 'Tasks';
@@ -25,7 +26,6 @@ export const TASK_COLUMN = { task: 'task', status: 'status', threads: 'threads',
 
 /** The four statuses every task database keeps; options a person adds count as not done, and agents leave them alone. */
 export const TASK_STATUSES = ['todo', 'doing', 'waiting', 'done'] as const;
-export type TaskStatus = typeof TASK_STATUSES[number];
 
 /** The default views' fixed ids. */
 export const TASK_VIEW = { board: 'tasks-board', table: 'tasks-table', needsYou: 'tasks-needs-you' } as const;
@@ -94,16 +94,7 @@ export function conversationWaitsOnYou(state: string | null | undefined): boolea
 
 /** Whether a page shows the task board anywhere, inside containers too. */
 export function containsTaskView(blocks: ReadonlyArray<PageBlock | PageBlockInput>): boolean {
-  return blocks.some((block) => {
-    switch (block.type) {
-      case 'task-view': return true;
-      case 'toggle': return containsTaskView(block.blocks);
-      case 'columns': return block.columns.some((column) => containsTaskView(column));
-      case 'tabs': return block.tabs.some((tab) => containsTaskView(tab.blocks));
-      case 'grid': return block.regions.some((region) => containsTaskView(region.blocks));
-      default: return false;
-    }
-  });
+  return blocks.some((block) => block.type === 'task-view' || pageChildBlockLists(block).some(containsTaskView));
 }
 
 export const isTaskDb = (db: { role?: string | null }): boolean => db.role === TASK_DATABASE_ROLE;
@@ -229,9 +220,10 @@ export interface TaskActivity {
   latestUpkeep: TaskUpkeep | null;
 }
 
-/** Who made a task: the person, the Meta agent (its upkeep or the Pages Assistant), or an agent in a chat. */
+/** Who made a task: the person, the user's own agent (its upkeep or one of its conversations), or an agent in a chat. */
 export interface TaskOrigin {
-  by: 'you' | 'meta-agent' | 'agent';
+  /** The user's own agent is a CompanionActor ("Created by <name>", DESIGN-v2 §2.7). */
+  by: 'you' | 'agent' | CompanionActor;
   /** The conversations it linked when it was made; for upkeep that linked none, the ones it read. */
   conversations: number;
   at: number;

@@ -151,7 +151,8 @@ test('allows owner login-return navigation but rejects cross-site fetches, frame
 
 test('proxies same-origin API calls, strips credentials/forwarding headers and blocks management even in proxy paths', async t => {
   const f = await fixture(t); const cookie = '__Host-michi-mobile=stale';
-  const headers = { ...f.headers, cookie, authorization: 'Bearer malicious-client-value', 'x-forwarded-host': 'evil.example', 'content-type': 'application/json' };
+  const headers = { ...f.headers, cookie, authorization: 'Bearer malicious-client-value', 'x-forwarded-host': 'evil.example', 'content-type': 'application/json',
+    'x-michi-via': 'desktop-proxy' };
   const response = await fetch(f.base + '/api/workspaces', { method: 'POST', headers, body: '{"name":"Phone"}' });
   assert.equal(response.status, 200);
   assert.equal((await response.json() as { ok: boolean }).ok, true);
@@ -159,8 +160,10 @@ test('proxies same-origin API calls, strips credentials/forwarding headers and b
   assert.deepEqual(f.calls[0].body, { name: 'Phone' });
   assert.equal(f.calls[0].headers.origin, f.target);
   assert.equal(f.calls[0].headers.authorization, 'Bearer fixture-backend-token');
-  for (const name of ['cookie', 'x-forwarded-host', 'tailscale-user-login']) assert.equal(f.calls[0].headers[name], undefined);
-  for (const path of ['/api/mobile-access/link', '/api/MOBILE-ACCESS', '/api/backend-connections/id/proxy/mobile-access/start', '/api/%6dobile-access']) {
+  for (const name of ['cookie', 'x-forwarded-host', 'x-amzn-tunnel-user']) assert.equal(f.calls[0].headers[name], undefined);
+  // The access-log label is the gateway's own, never the phone's.
+  assert.equal(f.calls[0].headers['x-michi-via'], 'phone');
+  for (const path of ['/api/mobile-access/link', '/api/mobile-access/terminal', '/api/MOBILE-ACCESS', '/api/backend-connections/id/proxy/mobile-access/start', '/api/backend-connections/id/proxy/mobile-access/terminal', '/api/%6dobile-access']) {
     assert.equal((await fetch(f.base + path, { headers })).status, 403);
   }
   assert.equal((await fetch(f.base + '/api/workspaces', { method: 'POST', headers: { cookie, 'tailscale-user-login': 'owner' } })).status, 403);
@@ -212,6 +215,7 @@ test(`${identityHeader}: real multiplexed WS tickets work through the ingress, r
   socket.send(JSON.stringify({ type: 'open', id: 'stream', path: '/api/chats/node/stream', method: 'GET' }));
   await until(() => frames.some(f => f.type === 'data'));
   assert.ok(frames.some(f => f.type === 'data' && f.text.includes('中文😀')));
+  assert.equal(f.calls.find(call => call.path === '/api/chats/node/stream')?.headers['x-michi-via'], 'phone');
   socket.send(JSON.stringify({ type: 'open', id: 'forbidden', path: '/api/mobile-access/link', method: 'POST' }));
   await until(() => frames.some(f => f.type === 'error' && f.id === 'forbidden'));
   const replay = new WebSocket(url, { headers: f.headers });

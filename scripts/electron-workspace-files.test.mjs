@@ -33,3 +33,21 @@ test('workspace directory listing is shallow, sorted, and root constrained', asy
   ]);
   await assert.rejects(() => resolveAllowedDirectory(outside, [root]), /outside this workspace/);
 });
+
+test('a child whose name starts with .. is inside the workspace', async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'michi-files-root-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  await fs.mkdir(path.join(root, '..cache'));
+  await fs.writeFile(path.join(root, '..cache', 'entry.txt'), 'x');
+  await fs.mkdir(path.join(root, 'src'));
+  let linked = true;
+  try {
+    await fs.symlink(path.join(root, '..cache'), path.join(root, 'src', 'cache-link'));
+  } catch {
+    linked = false; // Windows without Developer Mode cannot create directory symlinks.
+  }
+
+  assert.deepEqual((await listWorkspaceDirectory(path.join(root, '..cache'), [root])).map((entry) => entry.name), ['entry.txt']);
+  assert.deepEqual((await listWorkspaceDirectory(path.join(root, 'src'), [root])).map((entry) => entry.name), linked ? ['cache-link'] : []);
+  await assert.rejects(() => resolveAllowedDirectory(path.join(root, 'src', '..', '..'), [root]), /outside this workspace/);
+});

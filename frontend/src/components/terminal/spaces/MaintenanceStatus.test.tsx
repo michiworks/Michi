@@ -2,6 +2,7 @@ import React from 'react';
 import { fireEvent, render, screen } from '@testing-library/react';
 import { describe, expect, it, vi } from 'vitest';
 import { MaintenanceEnrollmentCheckbox, MaintenanceStatus } from './MaintenanceStatus';
+import { useZhCnDefaultLocale } from '../../../test/zhCnLocale';
 
 const state = vi.hoisted(() => ({
   maintenance: {
@@ -50,7 +51,7 @@ describe('MaintenanceStatus', () => {
     expect((screen.getByRole('button', { name: 'Run now' }) as HTMLButtonElement).disabled).toBe(true);
   });
 
-  it('names the Meta agent runtime maintenance runs on and links to its settings', () => {
+  it('names the Pages upkeep runtime maintenance runs on and links to its settings', () => {
     state.maintenance.value = {
       config: { workspaceId: 'w1', ownerUserId: 'u1', jobId: 'j1', enabled: true, paused: false, revision: 4, completionCursor: 5, runtimeId: null, providerId: null, modelId: null, reasoning: null, updatedAt: 1 },
       status: null,
@@ -67,16 +68,17 @@ describe('MaintenanceStatus', () => {
     window.addEventListener('michi:nav-page', onPage);
     try {
       const { unmount } = render(<MaintenanceStatus backendConnectionId="local" workspaceId="w1" />);
-      expect(screen.getByText(/Runs on the Meta agent: Claude · claude-opus-5.5 \(follows global\)/)).toBeTruthy();
+      // Worded as Scheduled › Pages upkeep words it (metaAgentResolvedText).
+      expect(screen.getByText(/Runs on Pages upkeep’s runtime: Claude · claude-opus-5.5 · reasoning high \(follows global\)/)).toBeTruthy();
       expect(screen.queryByText('Runtime profile')).toBeNull();
       expect(screen.queryByRole('textbox', { name: 'Runtime' })).toBeNull();
-      fireEvent.click(screen.getByRole('button', { name: 'Change in Settings › Meta agent' }));
+      fireEvent.click(screen.getByRole('button', { name: 'Change in Settings › Michi › Pages upkeep' }));
       expect(sections).toEqual(['meta-agent']);
       expect(pages).toEqual(['settings']);
       unmount();
       render(<MaintenanceStatus backendConnectionId="remote-a" workspaceId="w1" />);
-      expect(screen.queryByRole('button', { name: 'Change in Settings › Meta agent' })).toBeNull();
-      expect(screen.getByText(/set in Settings › Meta agent on that machine/)).toBeTruthy();
+      expect(screen.queryByRole('button', { name: 'Change in Settings › Michi › Pages upkeep' })).toBeNull();
+      expect(screen.getByText(/set in Pages upkeep’s settings on that machine/)).toBeTruthy();
     } finally {
       window.removeEventListener('michi:open-settings-section', onSection);
       window.removeEventListener('michi:nav-page', onPage);
@@ -110,6 +112,21 @@ describe('MaintenanceStatus', () => {
     expect(screen.getByText(/Newly completed conversations are waiting to be read/)).toBeTruthy();
     expect(screen.getByText('3 suggestions waiting for review')).toBeTruthy();
     expect(screen.getByText(/Last run succeeded/)).toBeTruthy();
+  });
+
+  it('writes the last run’s time in English whatever the browser locale', () => {
+    useZhCnDefaultLocale();
+    try {
+      state.maintenance.value = {
+        config: { workspaceId: 'w1', ownerUserId: 'u1', jobId: 'j1', enabled: true, paused: false, revision: 2, completionCursor: 5, runtimeId: 'claude', providerId: null, modelId: null, reasoning: null, updatedAt: 1 },
+        status: { completionCounter: 5, lastRun: null, pendingSources: 0, attentionSources: 0 },
+        backlog: { plans: [], pendingSources: 0, attentionSources: 0 },
+        job: { id: 'j1', enabled: true, autoPaused: false, activeRunId: null, lastStatus: 'succeeded', lastRunAt: new Date(2026, 9, 31, 14, 30).getTime() },
+        scheduler: 'available', excludedSpaceIds: [],
+      };
+      render(<MaintenanceStatus backendConnectionId="local" workspaceId="w1" pendingProposals={0} />);
+      expect(screen.getByText('Last run succeeded · Oct 31, 14:30')).toBeTruthy();
+    } finally { vi.restoreAllMocks(); }
   });
 
   it('surfaces source attention and offers explicit reconsideration', () => {
@@ -159,7 +176,7 @@ describe('MaintenanceStatus', () => {
     };
     render(<MaintenanceStatus backendConnectionId="local" workspaceId="w1" />);
     expect(screen.getByRole('heading', { name: 'Updating' })).toBeTruthy();
-    expect(screen.getByText('The Meta agent is running the watch “Sev-2 tickets”.')).toBeTruthy();
+    expect(screen.getByText('Michi is running the watch “Sev-2 tickets”.')).toBeTruthy();
     expect(screen.getByText(/^Checking now/)).toBeTruthy();
   });
 });

@@ -1,6 +1,6 @@
 import React from 'react';
 import { Button } from '../../ui/controls';
-import { AgentDefinitionStatus, AgentRunStatus } from 'michi-shared';
+import { AgentDefinitionStatus, isAgentRunTerminal } from 'michi-shared';
 import type { AgentDefinitionDtoV1, AgentRunDtoV1 } from 'michi-shared';
 import type { AgentResourceIdentity, LocatedAgentResource } from '../../../state/agentIdentity';
 
@@ -18,12 +18,10 @@ interface Props {
   onDelete: (identity: AgentResourceIdentity) => void;
 }
 
-const activeStatuses = new Set<AgentRunStatus>([AgentRunStatus.Queued, AgentRunStatus.Preparing, AgentRunStatus.Running, AgentRunStatus.Waiting, AgentRunStatus.Recovering]);
-
 export default function AgentLibraryPage({ definitions, runs = [], workspaceId = null, loading = false, error, onCreate, onEdit, onEnable, onDisable, onDuplicate, onDelete }: Props) {
   const workspace = definitions.filter((resource) => resource.value.scope === 'workspace' && (!workspaceId || resource.value.workspaceId === workspaceId));
   const global = definitions.filter((resource) => resource.value.scope === 'global');
-  const activeCount = (resource: LocatedAgentResource<AgentDefinitionDtoV1>) => runs.filter((run) => run.backendConnectionId === resource.backendConnectionId && run.value.definitionId === resource.value.id && activeStatuses.has(run.value.status)).length;
+  const activeCount = (resource: LocatedAgentResource<AgentDefinitionDtoV1>) => runs.filter((run) => run.backendConnectionId === resource.backendConnectionId && run.value.definitionId === resource.value.id && !isAgentRunTerminal(run.value.status)).length;
   return (
     <div style={{ flex: 1, minHeight: 0, overflowY: 'auto', background: 'var(--term-page-bg, var(--term-bg))', color: 'var(--term-fg)', padding: '28px 56px 72px' }}>
       <header style={{ display: 'flex', alignItems: 'flex-end', justifyContent: 'space-between', gap: 20, marginBottom: 28 }}>
@@ -66,7 +64,7 @@ function AgentRow({ resource, activeRuns, onEdit, onEnable, onDisable, onDuplica
       <button type="button" onClick={() => onEdit(resource)} aria-label={`Edit ${definition.name} ${definition.scope} Agent`} style={{ border: 0, padding: 0, background: 'transparent', textAlign: 'left', cursor: 'pointer', minWidth: 0 }}><span style={{ display: 'flex', alignItems: 'center', gap: 8, color: 'var(--term-fg)', fontFamily: 'var(--ui-font)', fontSize: 'var(--fs-xl)', fontWeight: 600 }}><ScopeBadge scope={definition.scope} />{definition.name}</span><span style={{ display: 'block', marginTop: 4, color: 'var(--term-muted)', fontFamily: 'var(--ui-font)', fontSize: 'var(--fs-sm)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{definition.description}</span></button>
       <span style={{ color: 'var(--term-muted)', fontFamily: 'var(--font-mono)', fontSize: 'var(--fs-xs)' }}>{profile || 'runtime not configured'}</span>
       <StatusBadge status={definition.status} />
-      <span style={{ color: activeRuns > 0 ? 'var(--term-select, var(--accent))' : 'var(--term-muted)', fontFamily: 'var(--font-mono)', fontSize: 'var(--fs-xs)' }}>{activeRuns} active</span>
+      <span style={{ color: activeRuns > 0 ? 'var(--term-run)' : 'var(--term-muted)', fontFamily: 'var(--font-mono)', fontSize: 'var(--fs-xs)' }}>{activeRuns} active</span>
       <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 5 }}>
         {definition.status === AgentDefinitionStatus.Enabled ? <RowAction label="Disable" name={definition.name} onClick={() => onDisable(identity)} /> : <RowAction label="Enable" name={definition.name} onClick={() => onEnable(identity)} />}
         <RowAction label="Duplicate" name={definition.name} onClick={() => onDuplicate(identity)} />

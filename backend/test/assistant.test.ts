@@ -19,7 +19,7 @@ import http from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
 import type { AddressInfo } from 'node:net';
-import { MICHI_ASSISTANT_MARKER, parseEffectiveAgentDefinitionV1, type MichiAssistantInfo } from 'michi-shared';
+import { MICHI_ASSISTANT_MARKER, checkinNodeId, parseEffectiveAgentDefinitionV1, type MichiAssistantInfo } from 'michi-shared';
 import type { AgentRuntime, AgentSession, NewAgentSessionOptions } from '../src/agents/types';
 import { registerRuntime } from '../src/agents/registry';
 import { clearAllSessions } from '../src/agents/sessionRegistry';
@@ -37,14 +37,17 @@ import { setupAssistantRoutes } from '../src/routes/assistant';
 import { createLocalOriginGuard } from '../src/routes/middleware/localControl';
 import { setupBackupRoutes } from '../src/routes/backup';
 import {
-  activateAssistantConversation, assistantCwd, assistantCwdFor, assistantPurposeOf, ensureAssistant, ensureAssistantFor, isAssistantNode, isAssistantWorkspace,
+  activateAssistantConversation, assistantCwd, assistantCwdFor, assistantPurposeOf, ensureAssistant, isAssistantNode, isAssistantWorkspace,
   resetAssistant, updateAssistantSettings,
 } from '../src/assistant/store';
-import { ASSISTANT_ALLOWED_TOOL_NAMES, ASSISTANT_INSTRUCTIONS, SCHEDULE_ASSISTANT_INSTRUCTIONS } from '../src/assistant/policy';
+import { assistantPurposeKey } from '../src/assistant/identity';
+import { MAIN_TOOL_NAMES, assistantInstructionsFor } from '../src/assistant/policy';
+import { makeCheckinNode } from './helpers/checkinNodes';
 import { createHash } from 'node:crypto';
 import { ChatHub, chatHub } from '../src/agents/chatHub';
 
 let captured: Array<NewAgentSessionOptions & { runtimeId: string }> = [];
+const MAIN_INSTRUCTIONS = assistantInstructionsFor('main');
 
 function fakeRuntime(id: string, providerModels = false): AgentRuntime {
   const runtime: AgentRuntime = {
@@ -174,7 +177,7 @@ describe('Michi assistant', () => {
   });
 
   test('opens every conversation with the marker Michi filtering relies on', () => {
-    assert.ok(ASSISTANT_INSTRUCTIONS.startsWith(MICHI_ASSISTANT_MARKER));
+    assert.ok(MAIN_INSTRUCTIONS.startsWith(MICHI_ASSISTANT_MARKER));
     // Michi titles a Codex conversation by its first line, cut to 96 characters.
     assert.ok(MICHI_ASSISTANT_MARKER.length <= 96 && !MICHI_ASSISTANT_MARKER.includes('\n'));
   });
@@ -189,6 +192,8 @@ describe('Michi assistant', () => {
     assert.deepEqual(info.conversation, info.settings, 'and so does one with no pick of its own');
     assert.equal(info.conversationFollowsGlobal, true);
     assert.deepEqual(info.runtimeSwitches, []);
+    assert.equal((first.body as { hadMessagesBeforeMerge?: unknown }).hadMessagesBeforeMerge, false,
+      'D7: the backend decides the upgrade note; a new install never wrote before the merge');
 
     const workspace = getWorkspace(info.workspaceId)!;
     assert.equal(workspace.name, 'Michi assistant');
@@ -254,8 +259,9 @@ describe('Michi assistant', () => {
     assert.equal(model.body.conversationFollowsGlobal, false);
 
     const switched = await raw('PUT', '/api/assistant/settings', { runtimeId: 'codex' });
-    assert.deepEqual(switched.body.conversation, { runtimeId: 'codex', providerId: null, modelId: null, reasoning: 'xhigh' },
-      'Codex\'s own global settings, not Claude\'s model or reasoning');
+    // Codex's global reasoning is xhigh; the agent's level is the lower of it and high (DESIGN-v2 §6).
+    assert.deepEqual(switched.body.conversation, { runtimeId: 'codex', providerId: null, modelId: null, reasoning: 'high' },
+      'Codex\'s own global settings at the agent\'s level, not Claude\'s model or reasoning');
     assert.deepEqual((await get()).body.conversation, switched.body.conversation);
 
     // Global changes reach new conversations, never a picked one.
@@ -372,77 +378,42 @@ describe('Michi assistant', () => {
     }
   });
 
-  test('the Scheduled window has its own conversation: own pointer, reset, instructions and hash, never in Spaces history', async () => {
-    const spaces = (await get()).body as MichiAssistantInfo;
-    const activeTree = getWorkspace(spaces.workspaceId)!.active_tree_id;
-    const opened = await raw('GET', '/api/assistant/schedule');
-    assert.equal(opened.status, 200);
-    const first = opened.body as MichiAssistantInfo;
-    assert.equal(first.workspaceId, spaces.workspaceId, 'one hidden workspace: Pages Home keeps its home');
-    assert.equal(assistantWorkspaces().length, 1);
-    assert.notEqual(first.nodeId, spaces.nodeId);
-    assert.deepEqual((await raw('GET', '/api/assistant/schedule')).body, first, 'idempotent');
-    assert.equal((await get()).body.nodeId, spaces.nodeId, 'the Spaces conversation stays current');
-    assert.equal(getWorkspace(spaces.workspaceId)!.active_tree_id, activeTree, 'the active tree stays the Spaces one');
-    assert.equal(assistantPurposeOf(first.nodeId), 'schedule');
-    assert.equal(assistantPurposeOf(spaces.nodeId), 'spaces');
-    assert.ok(isAssistantNode(first.nodeId), 'it runs as the assistant, never as a worker');
-
+  test('one conversation for every area (DESIGN-v2 §1.1): V binds main on the v3 hash, and the Scheduled window\'s routes are gone', async () => {
+    const v = (await get()).body as MichiAssistantInfo;
+    assert.equal(assistantPurposeOf(v.nodeId), 'main');
+    assert.equal((await fetch(`${base}/api/assistant/schedule`)).status, 404);
+    assert.equal((await fetch(`${base}/api/assistant/schedule/reset`, {
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ nodeId: v.nodeId }),
+    })).status, 404);
     const manager = new ChatManager(undefined, tmpDir);
-    const bindingOf = async (nodeId: string) => (await manager.resolvePrimaryAgentBinding({ ownerUserId: LOCAL_AGENT_OWNER_ID, workspaceId: first.workspaceId, nodeId }))!;
-    const scheduleBinding = await bindingOf(first.nodeId);
-    const spacesBinding = await bindingOf(spaces.nodeId);
-    assert.equal(primaryAgentSessionOptions(scheduleBinding).bootstrapInstructions, SCHEDULE_ASSISTANT_INSTRUCTIONS);
-    assert.ok(SCHEDULE_ASSISTANT_INSTRUCTIONS.startsWith(MICHI_ASSISTANT_MARKER), 'opens with the marker Michi filtering relies on');
-    assert.equal(primaryAgentSessionOptions(spacesBinding).bootstrapInstructions, ASSISTANT_INSTRUCTIONS);
-    assert.notEqual(scheduleBinding.profileHash, spacesBinding.profileHash, 'its sessions are its own');
-    assert.equal(spacesBinding.profileHash, createHash('sha256').update(JSON.stringify({
-      assistant: 2, instructions: ASSISTANT_INSTRUCTIONS, tools: ASSISTANT_ALLOWED_TOOL_NAMES,
-      runtimeProfile: spacesBinding.effectiveDefinition.runtimeProfile,
-    })).digest('hex'), 'the Spaces hash is unchanged, so its live sessions are kept');
-
-    // A composer pick in the Scheduled window answers with that window's conversation.
-    const picked = await raw('PUT', '/api/assistant/settings', { nodeId: first.nodeId, runtimeId: 'pi' });
-    assert.equal(picked.status, 200, JSON.stringify(picked.body));
-    assert.equal(picked.body.nodeId, first.nodeId);
-    assert.equal(picked.body.conversation.runtimeId, 'pi');
-    assert.equal((await get()).body.conversation.runtimeId, 'claude');
-
-    // Starting over touches only its own window.
-    saveMessage({ id: 'schedule-q', node_id: first.nodeId, role: 'user', content: 'Every weekday at nine', seq: 0, created_at: 50 });
-    saveMessage({ id: 'spaces-q', node_id: spaces.nodeId, role: 'user', content: 'What changed today', seq: 0, created_at: 40 });
-    const stale = await raw('POST', '/api/assistant/schedule/reset', { nodeId: spaces.nodeId });
-    assert.equal(stale.status, 409);
-    assert.equal(stale.body.code, 'assistant_changed');
-    assert.equal(stale.body.current.nodeId, first.nodeId);
-    const reset = await raw('POST', '/api/assistant/schedule/reset', { nodeId: first.nodeId });
-    assert.equal(reset.status, 200);
-    const second = reset.body as MichiAssistantInfo;
-    assert.notEqual(second.nodeId, first.nodeId);
-    assert.equal(assistantPurposeOf(second.nodeId), 'schedule');
-    assert.ok((getDb().prepare('SELECT archived_at FROM trees WHERE id = ?').get(first.treeId) as any).archived_at);
-    assert.equal((await get()).body.nodeId, spaces.nodeId);
-    const spacesReset = await raw('POST', '/api/assistant/reset', { nodeId: spaces.nodeId });
-    assert.equal(spacesReset.status, 200);
-    assert.equal((await raw('GET', '/api/assistant/schedule')).body.nodeId, second.nodeId);
-
-    // History and switching belong to the Spaces window.
-    const history = (await raw('GET', '/api/assistant/conversations?limit=50')).body.items.map((item: any) => item.nodeId);
-    assert.deepEqual(history, [spaces.nodeId]);
-    const refused = await raw('POST', `/api/assistant/conversations/${first.nodeId}/activate`, { currentNodeId: spacesReset.body.nodeId });
-    assert.equal(refused.status, 400);
-    assert.equal((await get()).body.nodeId, spacesReset.body.nodeId);
+    const binding = (await manager.resolvePrimaryAgentBinding({ ownerUserId: LOCAL_AGENT_OWNER_ID, workspaceId: v.workspaceId, nodeId: v.nodeId }))!;
+    assert.equal(primaryAgentSessionOptions(binding).bootstrapInstructions, MAIN_INSTRUCTIONS);
+    assert.equal(binding.profileHash, createHash('sha256').update(JSON.stringify({
+      assistant: 3, purpose: 'main', restricted: false, instructions: MAIN_INSTRUCTIONS, tools: MAIN_TOOL_NAMES,
+      runtimeProfile: binding.effectiveDefinition.runtimeProfile,
+    })).digest('hex'), 'a new hash: a session from before the merge starts over once');
   });
 
-  test('a Scheduled conversation made first leaves the Spaces one its own pointer and active tree', () => {
-    const schedule = ensureAssistantFor('schedule');
-    const spaces = ensureAssistant();
-    assert.equal(spaces.workspaceId, schedule.workspaceId);
-    assert.notEqual(spaces.nodeId, schedule.nodeId);
-    assert.equal(ensureAssistantFor('schedule').nodeId, schedule.nodeId);
-    assert.equal(ensureAssistant().nodeId, spaces.nodeId);
-    assert.equal(getWorkspace(spaces.workspaceId)!.active_tree_id, spaces.treeId);
-    assert.equal(assistantWorkspaces().length, 1);
+  test('a check-in\'s node is never the user\'s to pick for, switch to or start over (DESIGN-v2 §2.5)', async () => {
+    const v = (await raw('PUT', '/api/assistant/settings', { modelId: 'opus' })).body as MichiAssistantInfo;
+    const s = makeCheckinNode(v.workspaceId);
+    // The MVP's Companion conversation: no prefix, its purpose meta 'companion'.
+    getDb().prepare(`INSERT INTO nodes (id,workspace_id,kind,status,minimized,spawned_by_agent,created_at)
+      VALUES ('n-mvp-companion',?,'chat','idle',0,0,1)`).run(v.workspaceId);
+    getDb().prepare('INSERT INTO meta (key, value) VALUES (?, ?)').run(assistantPurposeKey('n-mvp-companion'), 'companion');
+    for (const nodeId of [s, checkinNodeId('never-made'), 'n-mvp-companion']) {
+      const picked = await raw('PUT', '/api/assistant/settings', { nodeId, runtimeId: 'pi' });
+      assert.equal(picked.status, 409, nodeId);
+      assert.equal(picked.body.code, 'checkin_node');
+      const switched = await raw('POST', `/api/assistant/conversations/${nodeId}/activate`, { currentNodeId: v.nodeId });
+      assert.equal(switched.status, 409, nodeId);
+      assert.equal(switched.body.code, 'checkin_node');
+      const reset = await raw('POST', '/api/assistant/reset', { nodeId });
+      assert.equal(reset.status, 409, nodeId);
+      assert.equal(reset.body.code, 'assistant_changed');
+    }
+    assert.deepEqual((await get()).body, v, 'V, its pick and its tree as they were');
+    assert.throws(() => updateAssistantSettings({ nodeId: s, runtimeId: 'pi' }), /Assistant conversation not found/, 'the store refuses it too');
   });
 
   test('ChatHub hands uploaded text and native images to the assistant without changing ordinary chat attachments', async () => {
@@ -623,7 +594,7 @@ describe('Michi assistant', () => {
     parseEffectiveAgentDefinitionV1(binding.effectiveDefinition);
     assert.equal(binding.effectiveDefinition.runtimeProfile.runtimeId, 'claude');
     const options = primaryAgentSessionOptions(binding);
-    assert.equal(options.bootstrapInstructions, ASSISTANT_INSTRUCTIONS);
+    assert.equal(options.bootstrapInstructions, MAIN_INSTRUCTIONS);
     assert.equal(options.toolProfile?.restricted, undefined);
     assert.deepEqual(options.toolProfile?.allowedToolNames, undefined);
     assert.equal(options.profileHash, binding.profileHash);
@@ -642,7 +613,7 @@ describe('Michi assistant', () => {
     assert.equal(captured.length, 1);
     assert.equal(captured[0].runtimeId, 'claude');
     assert.equal(captured[0].toolProfile?.restricted, undefined);
-    assert.equal(captured[0].bootstrapInstructions, ASSISTANT_INSTRUCTIONS);
+    assert.equal(captured[0].bootstrapInstructions, MAIN_INSTRUCTIONS);
     assert.equal(captured[0].cwd, assistantDir, 'the assistant never runs in the folder a client names');
 
     // Reloading the session cannot move it to another runtime or model either.
@@ -719,7 +690,8 @@ describe('Michi assistant', () => {
     setGlobal('codex');
     // A composer whose chips still showed Claude picks Codex, the runtime it already resolves to.
     const picked = updateAssistantSettings({ runtimeId: 'codex', providerId: null, modelId: null, reasoning: null });
-    assert.deepEqual(picked.conversation, { runtimeId: 'codex', providerId: null, modelId: null, reasoning: 'xhigh' });
+    // No level picked: the agent's, the lower of Codex's xhigh and high (DESIGN-v2 §6).
+    assert.deepEqual(picked.conversation, { runtimeId: 'codex', providerId: null, modelId: null, reasoning: 'high' });
     assert.equal(picked.conversationFollowsGlobal, false);
   });
 
@@ -729,6 +701,8 @@ describe('Michi assistant', () => {
     const openai = updateAssistantSettings({ providerId: 'openai', modelId: null });
     assert.equal(openai.conversation.providerId, 'openai');
     assert.equal(openai.conversation.modelId, 'gpt-5.5', 'not the global provider\'s model');
+    assert.equal(updateAssistantSettings({ providerId: 'deepseek', modelId: null }).conversation.modelId, 'deepseek-chat',
+      'the provider\'s floating default, as everywhere else');
     const back = updateAssistantSettings({ providerId: 'anthropic' });
     assert.equal(back.conversation.modelId, resolveModel('pi'), 'the global provider brings back the global model');
     assert.equal(updateAssistantSettings({ providerId: 'openai', modelId: 'gpt-x' }).conversation.modelId, 'gpt-x');
@@ -742,7 +716,7 @@ describe('Michi assistant', () => {
     assert.equal(second.conversation.runtimeId, 'claude');
     const reopened = activateAssistantConversation(first.nodeId);
     assert.equal(reopened.nodeId, first.nodeId);
-    assert.deepEqual(reopened.conversation, { runtimeId: 'codex', providerId: null, modelId: 'gpt-x', reasoning: 'xhigh' });
+    assert.deepEqual(reopened.conversation, { runtimeId: 'codex', providerId: null, modelId: 'gpt-x', reasoning: 'high' });
   });
 
   test('a runtime change continues the conversation in a new native session that carries its history', async () => {

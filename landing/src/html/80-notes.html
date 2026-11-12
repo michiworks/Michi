@@ -1,0 +1,35 @@
+<section class="sec sec--s notes-sec" id="notes" aria-labelledby="notes-title">
+  <div class="wrap">
+    <h2 class="h2" id="notes-title"><span class="claim">Questions people ask first.</span></h2>
+    <div class="notes">
+      <div class="note" id="note-orchestrator">
+        <h3 class="note-q">Is this another multi-agent orchestrator?</h3>
+        <p class="note-a">No. Orchestrators split one task across agents that report back and end. In Michi you open each branch yourself, keep talking to it for as many rounds as it needs, and decide what comes back. It can run on the same agents.</p>
+      </div>
+      <div class="note" id="note-git">
+        <h3 class="note-q">Does a branch create a git branch or a worktree?</h3>
+        <p class="note-a">No. A branch is a conversation, not a checkout. Every branch works in the same project folder, so Michi doesn’t isolate code changes.</p>
+      </div>
+      <div class="note" id="note-knows">
+        <h3 class="note-q">What does a branch know?</h3>
+        <p class="note-a">Everything above the sentence you branched from, plus anything you <span class="nowrap">@-mention</span>. Nothing leaks back up until you merge it or @ it.</p>
+      </div>
+      <div class="note" id="note-merge">
+        <h3 class="note-q">Does merging change the branches?</h3>
+        <p class="note-a">No. Merge starts a new thread from the branches you picked. The originals stay exactly as they were.</p>
+      </div>
+      <div class="note" id="note-data">
+        <h3 class="note-q">Where does my data live?</h3>
+        <p class="note-a">In a SQLite database on your Mac. You don’t need a Michi account to run it locally. Each agent still talks to its own provider.</p>
+      </div>
+      <div class="note" id="note-tmux">
+        <h3 class="note-q">Why not a new chat, or tmux?</h3>
+        <p class="note-a">A new chat starts from nothing, and a tmux split is another terminal. A branch starts with the exact context it came from, and Michi keeps the whole tree.</p>
+      </div>
+      <div class="note" id="note-memory">
+        <h3 class="note-q">What does Memory keep?</h3>
+        <p class="note-a">Only the notes you ask for or approve: preferences, facts, decisions and conventions, for every workspace or just one. They’re stored with your chats on your machine, every agent reads them, and you can change or delete any of them in Settings.</p>
+      </div>
+    </div>
+  </div>
+</section>

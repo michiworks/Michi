@@ -1,4 +1,3 @@
-import React from 'react';
 import MarkdownContent from './MarkdownContent';
 import { DrawerShell } from './ui/DrawerShell';
 import { Button } from './ui/controls';
@@ -58,7 +57,7 @@ export default function ExportPanel({ open, state, onClose, onSave }: ExportPane
               style={{
                 fontSize: 'var(--fs-md)',
                 fontWeight: 600,
-                color: 'var(--term-danger)',
+                color: 'var(--term-danger-text)',
                 marginBottom: 8,
               }}
             >

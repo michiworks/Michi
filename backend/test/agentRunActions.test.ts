@@ -11,9 +11,11 @@ import {
   AgentRunCompletionMode,
   AgentRunEventType,
   AgentRunInvocationMode,
+  edgeRowId,
   type EffectiveAgentDefinitionV1,
 } from 'michi-shared';
 import { closeDb, getDb, initDb } from '../src/services/db';
+import { applyWorkspaceCommands } from '../src/services/domainCommands';
 import { AgentRunActionError, AgentRunActionsService } from '../src/services/agentRunActions';
 import { AgentRunsRepository, type CreateAgentRunInput } from '../src/services/agentRunsRepository';
 import { mountAgentRunActionRoutes } from '../src/routes/agentRunActions';
@@ -144,6 +146,30 @@ describe('AgentRunActionsService', () => {
     assert.equal((getDb().prepare('SELECT COUNT(*) AS count FROM agent_runs').get() as any).count, 1);
   });
 
+  test('names the child Branch edge as every edge writer does, so a window can delete it', () => {
+    const repository = runs();
+    const run = repository.createRun(runInput('spawn-edge', 'parent-node'));
+    const branch = actions(repository).continueAsBranch('owner-a', run.id, continueRequest(), 'continue-edge');
+    const id = edgeRowId('branch', 'parent-node', branch.nodeId);
+    const edgeIds = () => getDb().prepare('SELECT id FROM edges WHERE target_node_id = ?').all(branch.nodeId).map((row: any) => row.id);
+    assert.deepEqual(edgeIds(), [id]);
+    applyWorkspaceCommands('ws-a', { operationId: 'delete-edge', ownerUserId: 'owner-a', commands: [{ type: 'edge.delete', payload: { id } }] });
+    assert.deepEqual(edgeIds(), []);
+  });
+
+  test('a Branch of a Scheduled-only or maintenance parent keeps its restriction, as every branch does', () => {
+    getDb().prepare("UPDATE nodes SET scheduled_only_job_id = 'job-s', maintenance_job_id = 'job-m' WHERE id = 'parent-node'").run();
+    const repository = runs();
+    const run = repository.createRun(runInput('spawn-restricted', 'parent-node'));
+    const branch = actions(repository).continueAsBranch('owner-a', run.id, continueRequest(), 'continue-restricted');
+    assert.deepEqual(
+      { ...(getDb().prepare('SELECT scheduled_only_job_id, maintenance_job_id FROM nodes WHERE id = ?').get(branch.nodeId) as Record<string, unknown>) },
+      { scheduled_only_job_id: 'job-s', maintenance_job_id: 'job-m' },
+    );
+    assert.equal((getDb().prepare('SELECT fork_boundary_message_id FROM edges WHERE target_node_id = ?').get(branch.nodeId) as any).fork_boundary_message_id,
+      'message-parent');
+  });
+
   test('offers an actionable missing-Parent error and idempotently creates a new-thread fallback', () => {
     const repository = runs();
     const run = repository.createRun(runInput('spawn-missing-parent', 'parent-node'));
@@ -190,10 +216,7 @@ describe('AgentRunActionsService', () => {
     );
   });
 
-  test('HTTP actions hide wrong-owner and cross-Workspace references behind 404', async () => {
-    const repository = runs();
-    const run = repository.createRun(runInput('spawn-route-scope', 'parent-node'));
-    const actionService = actions(repository);
+  async function serveActions(actionService: AgentRunActionsService): Promise<string> {
     const app = express();
     app.use(express.json());
     app.use((req: any, _res, next) => { req.user = { id: req.header('x-test-owner') }; next(); });
@@ -201,7 +224,13 @@ describe('AgentRunActionsService', () => {
     mountAgentRunActionRoutes(router, { actions: actionService, operationId: (req) => req.header('x-idempotency-key') ?? 'route-op' });
     app.use('/api', router);
     server = app.listen(0, '127.0.0.1'); await once(server, 'listening');
-    const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}/api`;
+    return `http://127.0.0.1:${(server.address() as AddressInfo).port}/api`;
+  }
+
+  test('HTTP actions hide wrong-owner and cross-Workspace references behind 404', async () => {
+    const repository = runs();
+    const run = repository.createRun(runInput('spawn-route-scope', 'parent-node'));
+    const base = await serveActions(actions(repository));
     const post = (owner: string, workspaceId: string) => fetch(`${base}/agent-runs/${run.id}/continue-as-branch`, {
       method: 'POST',
       headers: { 'content-type': 'application/json', 'x-test-owner': owner, 'x-idempotency-key': `${owner}-${workspaceId}` },
@@ -210,5 +239,39 @@ describe('AgentRunActionsService', () => {
 
     assert.equal((await post('owner-b', 'ws-a')).status, 404);
     assert.equal((await post('owner-a', 'ws-b')).status, 404);
+  });
+
+  test('HTTP actions answer an error code with the reason, and hide internal failures', async () => {
+    const repository = runs();
+    const run = repository.createRun(runInput('spawn-route-errors', 'parent-node'));
+    const base = await serveActions(actions(repository));
+    const post = async (action: string, body: unknown, operationId: string) => {
+      const response = await fetch(`${base}/agent-runs/${run.id}/${action}`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', 'x-test-owner': 'owner-a', 'x-idempotency-key': operationId },
+        body: JSON.stringify(body),
+      });
+      return { status: response.status, body: await response.json() };
+    };
+
+    assert.equal((await post('continue-as-branch', continueRequest(), 'continue-once')).status, 201);
+    const reused = await post('continue-as-branch', { ...continueRequest(), includeTranscript: false }, 'continue-once');
+    assert.equal(reused.status, 409);
+    const conflict = reused.body as { error: string; message: string };
+    assert.equal(conflict.error, 'conflict');
+    assert.match(conflict.message, /reused with a different payload/);
+    assert.deepEqual(await post('save-as-agent', { version: 1 }, 'save-invalid'),
+      { status: 400, body: { error: 'invalid_request', message: 'invalid Save request' } });
+
+    await new Promise<void>((resolve) => server!.close(() => resolve()));
+    const failing = await serveActions({
+      continueAsBranch() { throw Object.assign(new Error('no such table: nodes'), { code: 'ERR_SQLITE_ERROR' }); },
+    } as unknown as AgentRunActionsService);
+    const response = await fetch(`${failing}/agent-runs/${run.id}/continue-as-branch`, {
+      method: 'POST', headers: { 'content-type': 'application/json', 'x-test-owner': 'owner-a' },
+      body: JSON.stringify(continueRequest()),
+    });
+    assert.equal(response.status, 500);
+    assert.deepEqual(await response.json(), { error: 'internal_error', message: 'Internal server error' });
   });
 });

@@ -10,7 +10,9 @@ import { MIN_NODE_VERSION, readMinimumNodeVersion } from './remote-control.mjs';
 
 // Michi's minimum Node version has one source, engines.node in the root
 // package.json. bin/lib/node-select.sh (install.sh, bin/michi),
-// scripts/remote-control.mjs and crew-app/launch.py read it.
+// scripts/remote-control.mjs and crew-app/launch.py read it, and the desktop
+// app's remote scripts (backend/src/services/remoteDesktopSetup.ts) use the
+// node-select.sh of the checkout they run.
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const read = (file) => readFileSync(resolve(repoRoot, file), 'utf8');
@@ -108,4 +110,8 @@ test('install.sh and bin/michi use the shared selection without their own minimu
 test('the Crew launcher and the remote launcher hold no version literal', () => {
   assert.doesNotMatch(read('crew-app/launch.py'), /22, ?19|22\.19/);
   assert.doesNotMatch(read('scripts/remote-control.mjs'), /\[22, ?19|22\.19/);
+});
+
+test("the desktop app's remote install, update and recovery scripts hold no version literal", () => {
+  assert.doesNotMatch(read('backend/src/services/remoteDesktopSetup.ts'), /22\.19|b>=19|a===22|latest-v\d/);
 });

@@ -2,11 +2,12 @@ import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore
 import type { PageChangeDto, TaskActivity, TaskMark } from 'michi-shared';
 import { fetchTaskActivity } from '../../../services/api/taskDatabase';
 import { subscribePageChanges } from '../../../state/pages/pageEvents';
+import { useVisiblePoll } from '../../../state/visiblePoll';
 
 /** Tasks opened since the Meta agent changed them, on this computer: a mark goes once its task is opened. */
 const SEEN_KEY = 'michi.task-marks-seen.v1';
 const SEEN_KEEP_MS = 48 * 60 * 60 * 1000;
-/** How often an open board reads the Meta agent's upkeep again; focusing the window and a page change read it too. */
+/** How often an open, visible board reads the Meta agent's upkeep again; focusing the window and a page change read it too. */
 const REFRESH_MS = 60_000;
 const NONE: readonly PageChangeDto[] = [];
 
@@ -58,7 +59,10 @@ function markOpened(key: string, at: number, now: number): void {
   emit();
 }
 
-/** Forgets what this window has loaded, so the next read starts from storage. For tests. */
+/**
+ * Forgets what this window has loaded, so the next read starts from storage. For tests.
+ * @testonly
+ */
 export function resetOpenedTasks(): void {
   opened = null;
   emit();
@@ -108,15 +112,9 @@ export function useTaskUpkeep({ connectionId, workspaceId, databaseId, revision,
 
   useEffect(() => {
     if (!enabled) return undefined;
-    const stop = subscribePageChanges({ backendConnectionId: connectionId, workspaceId, databaseId }, refresh);
-    const timer = window.setInterval(refresh, REFRESH_MS);
-    window.addEventListener('focus', refresh);
-    return () => {
-      stop();
-      window.clearInterval(timer);
-      window.removeEventListener('focus', refresh);
-    };
+    return subscribePageChanges({ backendConnectionId: connectionId, workspaceId, databaseId }, refresh);
   }, [enabled, connectionId, workspaceId, databaseId, refresh]);
+  useVisiblePoll(refresh, { intervalMs: REFRESH_MS, enabled });
 
   const marks = useMemo(() => new Map((activity?.marks ?? []).map((mark) => [mark.rowId, mark])), [activity]);
   const suggestions = useMemo(() => {

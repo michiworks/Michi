@@ -1,6 +1,6 @@
 import { beforeEach, afterEach, describe, expect, it, vi } from 'vitest';
 import { CHAT_STREAM_EVENTS, encodeChatStreamEvent } from 'michi-shared';
-import { streamMessage, subscribeBackground } from './api';
+import { reattachTurnReplay, streamMessage, subscribeBackground, type TurnReplayReattach } from './api';
 
 function sseResponse(frames: string[]) {
   const encoder = new TextEncoder();
@@ -48,6 +48,22 @@ describe('background SSE', () => {
     expect(onTurnStart).not.toHaveBeenCalled();
   });
 
+  it.each([408, 429, 503])('retries a %i subscribe answer, a busy channel or gateway', async (status) => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response('{}', { status })));
+    const onDisconnect = vi.fn();
+    subscribeBackground(() => ({}), { onDisconnect });
+    await vi.waitFor(() => expect(onDisconnect).toHaveBeenCalledTimes(1));
+    expect(onDisconnect.mock.calls[0][0].retryable).toBe(true);
+  });
+
+  it.each([401, 403, 404])('stops on a %i subscribe answer', async (status) => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response('{}', { status })));
+    const onDisconnect = vi.fn();
+    subscribeBackground(() => ({}), { onDisconnect });
+    await vi.waitFor(() => expect(onDisconnect).toHaveBeenCalledTimes(1));
+    expect(onDisconnect.mock.calls[0][0].retryable).toBe(false);
+  });
+
   it('treats replay-gap reconciliation as a delivery barrier', async () => {
     let releaseGap!: () => void;
     const gapBarrier = new Promise<void>((resolve) => { releaseGap = resolve; });
@@ -73,6 +89,93 @@ describe('background SSE', () => {
 
     releaseGap();
     await vi.waitFor(() => expect(chunk).toHaveBeenCalledTimes(1));
+  });
+
+  it('holds the silence watchdog while a replay gap reconciles, then restarts it', async () => {
+    vi.useFakeTimers();
+    try {
+      const encoder = new TextEncoder();
+      const gapFrame = `event: background_sync_required\ndata: ${JSON.stringify({
+        chatId: 'chat-gap', nodeId: 'node-gap', turnId: 'turn-durable', seq: 12,
+      })}\n\n`;
+      // A live feed: the gap arrives and the connection stays open.
+      const body = new ReadableStream<Uint8Array>({ start(controller) { controller.enqueue(encoder.encode(gapFrame)); } });
+      vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(body, { status: 200, headers: { 'Content-Type': 'text/event-stream' } })));
+      let release!: () => void;
+      let gapSignal: AbortSignal | undefined;
+      const onReplayGap = vi.fn((_gap: unknown, signal: AbortSignal) => {
+        gapSignal = signal;
+        return new Promise<void>((resolve) => { release = resolve; });
+      });
+      const stop = subscribeBackground(() => ({}), { onReplayGap });
+      for (let i = 0; i < 20 && !gapSignal; i += 1) await vi.advanceTimersByTimeAsync(0);
+      expect(onReplayGap).toHaveBeenCalledTimes(1);
+      // Far past the 30 s silence limit: the reconcile's reads are not cut off.
+      await vi.advanceTimersByTimeAsync(90_000);
+      expect(gapSignal!.aborted).toBe(false);
+      release();
+      await vi.advanceTimersByTimeAsync(29_000);
+      expect(gapSignal!.aborted).toBe(false);
+      // Silence after the barrier lifts still ends a dead feed.
+      await vi.advanceTimersByTimeAsync(1_500);
+      expect(gapSignal!.aborted).toBe(true);
+      stop();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('after installing past the gap, drops the ended gap turn and keeps permission prompts the cursor skips', async () => {
+    const envelope = { chatId: 'chat-gap', nodeId: 'node-gap' };
+    const frames = [
+      `event: background_sync_required\ndata: ${JSON.stringify({ ...envelope, turnId: 'turn-old', seq: 12 })}\n\n`,
+      // Replay of the gap's turn, which ended while the snapshot was read.
+      encodeChatStreamEvent({ event: CHAT_STREAM_EVENTS.chunk, data: { ...envelope, turnId: 'turn-old', seq: 13, assistantId: 'a-old', text: 'old tail' } }),
+      encodeChatStreamEvent({ event: CHAT_STREAM_EVENTS.done, data: { ...envelope, turnId: 'turn-old', seq: 14, assistantId: 'a-old', stopReason: 'end_turn', persisted: true } }),
+      // The installed turn: a prompt its body cannot hold, then output it does.
+      encodeChatStreamEvent({ event: CHAT_STREAM_EVENTS.permissionRequest, data: {
+        ...envelope, turnId: 'turn-new', seq: 2, assistantId: 'a-new', requestId: 7, title: 'Run tests', options: [],
+      } }),
+      encodeChatStreamEvent({ event: CHAT_STREAM_EVENTS.chunk, data: { ...envelope, turnId: 'turn-new', seq: 3, assistantId: 'a-new', text: 'in the body' } }),
+      encodeChatStreamEvent({ event: CHAT_STREAM_EVENTS.chunk, data: { ...envelope, turnId: 'turn-new', seq: 6, assistantId: 'a-new', text: 'new output' } }),
+      // Another chat is not affected by this chat's gap.
+      encodeChatStreamEvent({ event: CHAT_STREAM_EVENTS.chunk, data: { chatId: 'other', nodeId: 'other', turnId: 'turn-old', seq: 1, assistantId: 'a-x', text: 'other' } }),
+    ];
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(sseResponse([frames.join('')])));
+    const envelopes: Array<{ chatId?: string; turnId?: string; seq?: number }> = [];
+    const permission = vi.fn();
+    const onDisconnect = vi.fn();
+    subscribeBackground(() => ({
+      onEnvelope: (data) => { envelopes.push({ chatId: data.chatId, turnId: data.turnId, seq: data.seq }); },
+      onPermissionRequest: permission,
+    }), { onReplayGap: async () => ({ turnId: 'turn-new', seq: 5 }), onDisconnect });
+    await vi.waitFor(() => expect(onDisconnect).toHaveBeenCalledTimes(1));
+    expect(envelopes).toEqual([
+      // Unsequenced, as the server's own recovery frames: it leaves the cursor alone.
+      { chatId: 'chat-gap', turnId: 'turn-new', seq: undefined },
+      // Sequenced output reaches the sequence gate, which drops what the body holds.
+      { chatId: 'chat-gap', turnId: 'turn-new', seq: 3 },
+      { chatId: 'chat-gap', turnId: 'turn-new', seq: 6 },
+      { chatId: 'other', turnId: 'turn-old', seq: 1 },
+    ]);
+    expect(permission).toHaveBeenCalledWith(expect.objectContaining({ requestId: 7, title: 'Run tests' }));
+  });
+
+  it('delivers the gap turn when the snapshot installed that same turn', async () => {
+    const envelope = { chatId: 'chat-gap', nodeId: 'node-gap', turnId: 'turn-a', assistantId: 'a' };
+    const frames = [
+      `event: background_sync_required\ndata: ${JSON.stringify({ chatId: 'chat-gap', nodeId: 'node-gap', turnId: 'turn-a', seq: 12 })}\n\n`,
+      encodeChatStreamEvent({ event: CHAT_STREAM_EVENTS.chunk, data: { ...envelope, seq: 13, text: 'held by the body' } }),
+      encodeChatStreamEvent({ event: CHAT_STREAM_EVENTS.permissionResolved, data: { ...envelope, seq: 15, requestId: 7 } }),
+      encodeChatStreamEvent({ event: CHAT_STREAM_EVENTS.chunk, data: { ...envelope, seq: 21, text: 'new' } }),
+    ];
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(sseResponse([frames.join('')])));
+    const seqs: Array<number | undefined> = [];
+    const onDisconnect = vi.fn();
+    subscribeBackground(() => ({ onEnvelope: (data) => { seqs.push(data.seq); } }),
+      { onReplayGap: async () => ({ turnId: 'turn-a', seq: 20 }), onDisconnect });
+    await vi.waitFor(() => expect(onDisconnect).toHaveBeenCalledTimes(1));
+    expect(seqs).toEqual([13, undefined, 21]);
   });
 
   it('delivers scheduled run control frames without blocking chat events', async () => {
@@ -254,6 +357,23 @@ describe('foreground send while the previous turn finishes', () => {
     expect(fetchMock.mock.calls.every(([url]) => String(url).endsWith('/message'))).toBe(true);
   });
 
+  it('waits 250 ms, then twice as long each time up to 2 s, for as long as the turn is busy', async () => {
+    const fetchMock = vi.fn().mockImplementation(async () => busy());
+    vi.stubGlobal('fetch', fetchMock);
+    const onError = vi.fn();
+    const cancel = streamMessage('n-busy', 'next', { onError });
+    await vi.advanceTimersByTimeAsync(0);
+    for (const wait of [250, 500, 1_000, 2_000, 2_000, 2_000]) {
+      const calls = fetchMock.mock.calls.length;
+      await vi.advanceTimersByTimeAsync(wait - 1);
+      expect(fetchMock).toHaveBeenCalledTimes(calls);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(fetchMock).toHaveBeenCalledTimes(calls + 1);
+    }
+    expect(onError).not.toHaveBeenCalled();
+    cancel();
+  });
+
   it('withdraws the waiting send without cancelling the previous turn or leaving a retry timer', async () => {
     const fetchMock = vi.fn().mockImplementation(async () => busy());
     vi.stubGlobal('fetch', fetchMock);
@@ -279,5 +399,77 @@ describe('foreground send while the previous turn finishes', () => {
     await vi.advanceTimersByTimeAsync(250);
     expect(onError).toHaveBeenCalledExactlyOnceWith('Identity changed', undefined, undefined, 'IDENTITY_MISMATCH');
     expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe('reattaching a turn to its replay', () => {
+  beforeEach(() => vi.useFakeTimers());
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.useRealTimers();
+  });
+
+  const refusal = (status: number, body: Record<string, unknown>) => () => new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } });
+  function reattach(responses: Array<() => Response>, options: Partial<TurnReplayReattach> = {}) {
+    const fetchMock = vi.fn(async (_url: string) => (responses.shift() ?? refusal(503, {}))());
+    vi.stubGlobal('fetch', fetchMock);
+    const callbacks = { onStale: vi.fn(), onBackgroundOwned: vi.fn(), onReplayGone: vi.fn(), onUnavailable: vi.fn() };
+    let seq = 4;
+    const stop = reattachTurnReplay('chat-r', {
+      turnId: 'turn-r', nextSeq: () => seq++, handlers: {}, isCurrent: () => true, ...callbacks, ...options,
+    });
+    const urls = () => fetchMock.mock.calls.map(([url]) => String(url));
+    return { fetchMock, callbacks, stop, urls };
+  }
+
+  it.each([
+    ['the replay is gone', refusal(410, { code: 'turn_replay_unavailable', error: 'gone' }), 'onReplayGone', ['gone', 'turn_replay_unavailable']],
+    ['the backend restarted', refusal(410, { code: 'backend_restarted', error: 'restarted' }), 'onReplayGone', ['restarted', 'backend_restarted']],
+    ['a 410 names no reason', refusal(410, { error: 'gone' }), 'onReplayGone', ['gone', 'turn_replay_unavailable']],
+    ['the background feed owns the turn', refusal(410, { code: 'turn_background_owned', error: 'background' }), 'onBackgroundOwned', ['background']],
+    ['a 410 names another reason', refusal(410, { code: 'turn_outcome_unknown', error: 'unknown' }), 'onUnavailable', ['unknown', 'turn_outcome_unknown']],
+    ['the chat is not found', refusal(404, { error: 'not_found' }), 'onUnavailable', ['not_found', 'turn_outcome_unknown']],
+    ['another refusal names its own code', refusal(409, { code: 'turn_active', error: 'busy' }), 'onUnavailable', ['busy', 'turn_outcome_unknown']],
+  ] as const)('ends once when %s, and never as a code that would send the prompt again', async (_name, response, callback, args) => {
+    const { callbacks, fetchMock } = reattach([response]);
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(callbacks[callback]).toHaveBeenCalledExactlyOnceWith(...args);
+    for (const [name, fn] of Object.entries(callbacks)) if (name !== callback) expect(fn).not.toHaveBeenCalled();
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('reconnects from the next seq after 250 ms doubling to 5 s, from 250 ms again once a reconnect opens', async () => {
+    const down = refusal(503, {});
+    const { urls } = reattach([down, down, down, down, down, down, down, () => sseResponse([]), down]);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(urls()).toHaveLength(1);
+    expect(urls()[0]).toContain('fromSeq=4');
+    expect(urls()[0]).toContain('fromTurnId=turn-r');
+    const delays = [250, 500, 1_000, 2_000, 4_000, 5_000, 5_000, 250];
+    for (const [index, delay] of delays.entries()) {
+      await vi.advanceTimersByTimeAsync(delay - 1);
+      expect(urls()).toHaveLength(index + 1);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(urls()).toHaveLength(index + 2);
+    }
+    expect(urls()[1]).toContain('fromSeq=5');
+  });
+
+  it('ends without reconnecting once the turn is no longer current, or once stopped', async () => {
+    let current = true;
+    const stale = reattach([refusal(503, {})], { isCurrent: () => current });
+    await vi.advanceTimersByTimeAsync(0);
+    current = false;
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(stale.fetchMock).toHaveBeenCalledTimes(1);
+    expect(stale.callbacks.onStale).toHaveBeenCalledOnce();
+
+    const stopped = reattach([refusal(503, {})]);
+    await vi.advanceTimersByTimeAsync(0);
+    stopped.stop();
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(stopped.fetchMock).toHaveBeenCalledTimes(1);
+    expect(vi.getTimerCount()).toBe(0);
+    expect(Object.values(stopped.callbacks).every((fn) => fn.mock.calls.length === 0)).toBe(true);
   });
 });

@@ -35,13 +35,13 @@ vi.mock('../services/api', () => ({
   ),
   streamMessage: vi.fn(() => () => {}),
   syncWorkspace: () => Promise.resolve({ ok: true }),
-  fetchAllWorkspaces: () => Promise.resolve([]),
 }));
 
 vi.mock('../services/notifications', () => ({ notify: vi.fn() }));
 
 import { ChatProvider, useChatStore, useChatNodesSnapshot } from './chatStore';
 import { PrefsProvider } from './prefs';
+import { serializeNodeRow } from './workspacePersistence';
 
 function useStoreAndNodes() {
   const store = useChatStore();
@@ -133,5 +133,24 @@ describe('trimNode (single-node trim)', () => {
     // resolved target), so it gets re-stolen back under X.
     expect(result.current.nodes[xId].parentNodeId).toBe(gId);
     expect(result.current.nodes[cId].parentNodeId).toBe(xId);
+  });
+
+  it('a trimmed branch is written in its parent\'s tree, as the backend requires', async () => {
+    const { result } = renderHook(() => useStoreAndNodes(), { wrapper });
+    await act(async () => { await result.current.store.createProject('test', undefined); });
+    await waitFor(() => expect(result.current.store.activeProject).toBeTruthy());
+
+    let rootId = '';
+    await act(async () => { rootId = (await result.current.store.createThread()) ?? ''; });
+    let xId = '';
+    await act(async () => { xId = await result.current.store.createBlankChild(rootId); });
+    const treeId = result.current.store.activeProject!.trees.find((t) => t.rootNodeId === rootId)!.id;
+
+    act(() => { result.current.store.trimNode(xId); });
+
+    const row = serializeNodeRow(result.current.store.activeProject!, result.current.nodes, xId)!;
+    expect(row.deleted_at).toBeTruthy();
+    expect(row.parent_node_id).toBe(rootId);
+    expect(row.tree_id).toBe(treeId);
   });
 });

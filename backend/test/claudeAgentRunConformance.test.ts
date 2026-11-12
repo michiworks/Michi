@@ -72,6 +72,8 @@ function createClaudeHarness() {
   const harness: ConformanceHarness = {
     runtimeLabel: 'Claude Session + SDK transport fixture', adapter: new ClaudeRunAdapter(),
     async createRunSession(opts) { const session = await create(opts); return { session, nativeSessionId: session.nativeSessionId }; },
+    acquireSession: (opts) => manager.createSession({ id: opts.sessionId, owner: opts.owner, cwd: '/tmp',
+      ownerUserId: opts.ownerUserId, profileHash: opts.profileHash, toolProfile: makeConformanceToolProfile(), enableFollowUps: false }),
     async resumeRunSession(opts) {
       const session = await manager.loadSession({ id: attemptIdOf(opts.owner), owner: opts.owner,
         cwd: '/tmp', externalSessionId: opts.nativeResumeToken, profileHash: opts.profileHash,
@@ -203,8 +205,8 @@ test('real Claude Session concurrent acquire joins and wrong owner/profile is re
     const opts = { id: CONFORMANCE_ATTEMPT_ID, owner: RUN_OWNER, cwd: '/tmp', profileHash: 'profile' };
     const a = harness.manager.createSession(opts);
     const b = harness.manager.createSession(opts);
-    // Another Attempt of the same Run: the Attempt id alone names the owner.
-    const wrong = assert.rejects(harness.manager.createSession({ ...opts, owner: runOwner(CONFORMANCE_RUN_ID, 'other-attempt') }), /Owner mismatch/);
+    // Another Attempt of the same Run: its session opens under its own Attempt id only.
+    const wrong = assert.rejects(harness.manager.createSession({ ...opts, owner: runOwner(CONFORMANCE_RUN_ID, 'other-attempt') }), /must equal attemptId/);
     const wrongProfile = assert.rejects(harness.manager.createSession({ ...opts, profileHash: 'different' }), /profile hash mismatch/);
     const [first, second] = await Promise.all([a, b]);
     await Promise.all([wrong, wrongProfile]);

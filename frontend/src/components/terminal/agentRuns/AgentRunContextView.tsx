@@ -1,4 +1,3 @@
-import React from 'react';
 import type { AgentRunContextManifestV1 } from 'michi-shared';
 
 function entryTitle(entry: AgentRunContextManifestV1['entries'][number]): string {

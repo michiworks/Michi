@@ -1,5 +1,7 @@
 import { extractToolUsePurpose, type SubagentInfo } from 'michi-shared';
 import { NormalizedEvent } from '../../contract/events';
+import { omitInlineImages, truncateToolPayload } from '../../contract/toolPayload';
+import { contextFillPercentage } from '../../contract/usage';
 import { ClaudeEnvelope } from './claudeEnvelopeParser';
 import { getClaudeModelEntry } from './claudeModelCatalog';
 import { createClaudeSubagentTracker } from './claudeSubagentTracker';
@@ -22,7 +24,7 @@ function computeContextPct(usage: UsageShape, modelName: string, contextWindow?:
     (usage.cache_read_input_tokens ?? 0) +
     (usage.cache_creation_input_tokens ?? 0) +
     (usage.output_tokens ?? 0);
-  return Math.min(100, (used / (contextWindow ?? entry.contextWindow)) * 100);
+  return contextFillPercentage(used, contextWindow ?? entry.contextWindow) ?? 0;
 }
 
 /** A message's usage is one API call; result.usage sums every call in the turn. */
@@ -114,18 +116,15 @@ export interface ClaudeCompaction {
   error?: string;
 }
 
-function stringifyContent(content: unknown): string {
+/** The text blocks of a local command's output message. */
+function localCommandText(content: unknown): string {
   if (typeof content === 'string') return content;
-  return JSON.stringify(content);
-}
-
-const MAX_TOOL_PAYLOAD = 16 * 1024;
-
-function truncatePayload(value: unknown): string | undefined {
-  if (value == null) return undefined;
-  const str = typeof value === 'string' ? value : JSON.stringify(value);
-  if (!str) return undefined;
-  return str.length > MAX_TOOL_PAYLOAD ? str.slice(0, MAX_TOOL_PAYLOAD) : str;
+  if (!Array.isArray(content)) return '';
+  return content
+    .flatMap((block) => (block && typeof block === 'object' && (block as Record<string, unknown>).type === 'text'
+      && typeof (block as Record<string, unknown>).text === 'string' ? [(block as Record<string, unknown>).text as string] : []))
+    .filter(Boolean)
+    .join('\n\n');
 }
 
 export interface TranslatorHandle {
@@ -373,6 +372,15 @@ export function createTranslator(emit: (ev: NormalizedEvent) => void, options: T
         forkAnchor = typeof env['uuid'] === 'string' && env['uuid'] ? env['uuid'] : null;
       }
 
+      // What a command the CLI ran itself printed (/cost, or its refusal of
+      // a skill only the model may use): no model call, so no deltas stream
+      // its text, and its model and usage are placeholders.
+      if (typeof env['local_command_source'] === 'string' || env['local_command_run'] !== undefined) {
+        const text = localCommandText(message['content']);
+        if (text) emit({ kind: 'chunk', text });
+        return;
+      }
+
       // capture model name for cost/context calculations
       if (typeof message['model'] === 'string') {
         modelName = message['model'];
@@ -401,7 +409,7 @@ export function createTranslator(emit: (ev: NormalizedEvent) => void, options: T
           const input = (b['input'] ?? {}) as Record<string, unknown>;
           const detail = extractToolUsePurpose(input)
             ?? Array.from(JSON.stringify(input)).slice(0, 200).join('');
-          const inputJson = truncatePayload(input);
+          const inputJson = truncateToolPayload(input);
 
           // A parent-level `Task` (newer CLI: `Agent`) spawns a subagent. Seed
           // the roster from its input (subagent_type / description / prompt) so
@@ -564,7 +572,8 @@ export function createTranslator(emit: (ev: NormalizedEvent) => void, options: T
             title: '',
             status: b['is_error'] ? 'failed' : 'completed',
             kindType: 'tool',
-            output: truncatePayload(resultContent),
+            // The model already has this result from the CLI; only the chip's copy drops its images.
+            output: truncateToolPayload(omitInlineImages(resultContent)),
           });
 
           // Parent-level tool_result for an Agent call = its hand-back.

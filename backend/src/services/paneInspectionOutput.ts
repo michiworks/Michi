@@ -18,11 +18,10 @@
 
 import { randomBytes } from 'node:crypto';
 import {
-  AgentRunEventType,
+  AGENT_ATTEMPT_TERMINAL_STATUSES,
   PANE_INSPECTION_LIMITS,
   PaneInspectionError,
   stripTurnMetadataSentinels,
-  type AgentRunEventV1,
   type ExecutionRef,
   type ExecutionSelection,
   type OutputKind,
@@ -30,10 +29,12 @@ import {
 } from 'michi-shared';
 import { authorizeCaller, resolvePaneTarget, type PaneInspectionCaller } from './paneInspection';
 import { chatHub } from '../agents/chatHub';
-import { getDb } from './db';
-import { listMessages, type MessageRow, type TurnRow } from './dbRepository';
+import { getLatestTurn, getSavedTurn, listMessages, type MessageRow, type TurnRow } from './dbRepository';
 import { AgentRunsRepository } from './agentRunsRepository';
 import { compactResultHandoff } from '../agents/runs/resultBundle';
+import { isTerminalRunStatus } from '../agents/runs/agentRunStateMachine';
+import { outputRevisionFor } from './paneInspectionProjection.chat';
+import { assistantTextForAttempt, selectedAttempt } from './paneInspectionProjection.run';
 import { readRunEventsThrough } from './paneInspectionSources';
 
 // ---------------------------------------------------------------------------
@@ -168,16 +169,6 @@ function sliceCodePointPage(
   return { pageText, nextIndex: endIndex, hasMore: endIndex < codePoints.length };
 }
 
-/** Opaque revision token for a resolved output body — changes whenever the underlying text or its
- *  associated updatedAt changes, distinct from the observation cursor (design §7.3/§8). Mirrors
- *  paneInspectionProjection.chat.ts's own outputRevisionFor so the same content maps to the same
- *  revision whether observed via inspect's preview or readOutput's full body. */
-function outputRevisionFor(text: string, updatedAt: number | null): string {
-  let h = 0;
-  for (let i = 0; i < text.length; i += 1) h = (h * 31 + text.charCodeAt(i)) | 0;
-  return `${updatedAt ?? 'null'}:${text.length}:${(h >>> 0).toString(36)}`;
-}
-
 // ---------------------------------------------------------------------------
 // Resolved-content shape — the full (unbounded) text plus its identity, before pagination.
 // ---------------------------------------------------------------------------
@@ -307,8 +298,8 @@ function resolveNodeOutput(
       outputRevision: outputRevisionFor(text, message.created_at), partial: false };
   }
   if (outputId?.startsWith('chat_turn:')) {
-    const turn = fetchTurnById(outputId.slice('chat_turn:'.length), caller.ownerUserId);
-    if (!turn || turn.node_id !== nodeId || (executionRef && (executionRef.kind !== 'chat_turn'
+    const turn = getSavedTurn(nodeId, outputId.slice('chat_turn:'.length), caller.ownerUserId)?.turn;
+    if (!turn || (executionRef && (executionRef.kind !== 'chat_turn'
       || executionRef.nodeId !== nodeId || executionRef.turnId !== turn.turn_id))
       || (selection === 'last_completed' && turn.status !== 'completed')) {
       throw new PaneInspectionError('OUTPUT_UNAVAILABLE', 'outputId', 'the requested output is not available for this target');
@@ -323,10 +314,11 @@ function resolveNodeOutput(
     if (executionRef.nodeId !== nodeId) {
       throw new PaneInspectionError('INVALID_ARGUMENT', 'executionRef', 'executionRef does not belong to the target object');
     }
-    const turn = fetchTurnById(executionRef.turnId, caller.ownerUserId);
-    if (!turn || turn.node_id !== nodeId) {
+    const saved = getSavedTurn(nodeId, executionRef.turnId, caller.ownerUserId);
+    if (!saved) {
       throw new PaneInspectionError('INVALID_ARGUMENT', 'executionRef', 'executionRef does not identify a known turn on this node');
     }
+    const { turn } = saved;
     // execution mode reaches a failed/cancelled turn's partial output too — read from the live
     // ChatHub observation when this process still has it (covers "failed but never finalized to
     // a persisted message" cases), else fall back to the persisted message body.
@@ -334,31 +326,31 @@ function resolveNodeOutput(
     if (observation && observation.turnId === turn.turn_id) {
       return resolvedFromObservationAnswer(observation, turn);
     }
-    return resolvedFromPersistedTurn(caller, turn);
+    return resolvedFromPersistedTurn(saved);
   }
 
   const observation = chatHub.getSnapshot(nodeId);
 
   if (selection === 'latest') {
     if (observation) return resolvedFromObservationAnswer(observation, null);
-    const latestTurn = fetchLatestTurnForNode(nodeId, caller.ownerUserId);
+    const latestTurn = getLatestTurn(nodeId, caller.ownerUserId);
     if (!latestTurn) {
       const previous = listMessages(nodeId, caller.ownerUserId).reverse().find((message) => message.role === 'assistant' && message.content);
       return previous ? resolveNodeOutput(caller, nodeId, selection, undefined, `chat-message:${previous.id}`) : emptyResolved(null);
     }
-    return resolvedFromPersistedTurn(caller, latestTurn);
+    return resolvedFromSavedTurn(caller, latestTurn);
   }
 
   // selection === 'last_completed': only a target execution that both COMMITTED and SUCCEEDED.
   // A failed or cancelled execution's partial output is not reachable this way (design §7.3).
-  const lastCompleted = fetchLastCompletedTurnForNode(nodeId, caller.ownerUserId);
+  const lastCompleted = getLatestTurn(nodeId, caller.ownerUserId, 'completed');
   if (!lastCompleted) return emptyResolved(null);
   // If ChatHub happens to still hold this exact completed turn in memory, prefer its live answer
   // text (identical content, but avoids a second DB round trip); otherwise read the persisted row.
   if (observation && observation.turnId === lastCompleted.turn_id && observation.durableStatus === 'completed') {
     return resolvedFromObservationAnswer(observation, lastCompleted);
   }
-  return resolvedFromPersistedTurn(caller, lastCompleted);
+  return resolvedFromSavedTurn(caller, lastCompleted);
 }
 
 function emptyResolved(execution: ExecutionRef | null): ResolvedOutput {
@@ -396,34 +388,12 @@ function resolvedFromObservationAnswer(
  * `messages` row for that turn's assistant_message_id. `MessageRow.content` is written by
  * `finalizeTurnContent` at commit time (shared/src/turnProjection.ts's `done`/`error` event
  * handling assigns `assistantMessage.content = finalizeTurnContent(rawAnswer)`), i.e. it is
- * ALREADY the sentinel-stripped, title/follow-up-stripped visible answer text — the exact same
- * derivation the chat projection module applies to a live snapshot's blocks, just already
- * computed and stored rather than re-derived from a live block list P1-6b's paneInspection.ts
- * does not fetch. This module fetches the message row itself (see report: no existing
- * dbRepository export returns "one message row by id", only per-node lists) rather than
- * duplicating finalizeTurnContent's parsing logic on raw blocks that no longer exist here.
+ * ALREADY the sentinel-stripped, title/follow-up-stripped visible answer text. A failed turn's
+ * row holds whatever streamed before the failure; it is reported as an answer too, never as success.
  */
-function resolvedFromPersistedTurn(caller: PaneInspectionCaller, turn: TurnRow): ResolvedOutput {
-  const message = fetchMessageById(turn.node_id, turn.assistant_message_id, caller.ownerUserId);
+function resolvedFromPersistedTurn({ turn, message }: { turn: TurnRow; message: MessageRow | null }): ResolvedOutput {
   const ref: ExecutionRef = { kind: 'chat_turn', nodeId: turn.node_id, turnId: turn.turn_id };
   const updatedAt = turn.completed_at ?? turn.checkpoint_at ?? turn.started_at;
-
-  if (turn.status === 'error') {
-    // A turn that never committed a persistence-successful output can still have SOME visible
-    // text (whatever streamed before the failure) — report it via kind 'answer', but never invent
-    // success: this branch is only reachable via `execution` mode's explicit request (§7.3), and
-    // `last_completed` already excludes non-completed turns before reaching here.
-    const text = message?.content ?? '';
-    return {
-      outputId: `chat_turn:${turn.turn_id}`,
-      execution: ref,
-      kind: 'answer',
-      fullText: text,
-      outputRevision: outputRevisionFor(text, updatedAt),
-      partial: false,
-    };
-  }
-
   const text = message?.content ?? '';
   return {
     outputId: `chat_turn:${turn.turn_id}`,
@@ -433,6 +403,10 @@ function resolvedFromPersistedTurn(caller: PaneInspectionCaller, turn: TurnRow):
     outputRevision: outputRevisionFor(text, updatedAt),
     partial: false,
   };
+}
+
+function resolvedFromSavedTurn(caller: PaneInspectionCaller, turn: TurnRow): ResolvedOutput {
+  return resolvedFromPersistedTurn(getSavedTurn(turn.node_id, turn.turn_id, caller.ownerUserId) ?? { turn, message: null });
 }
 
 // ---------------------------------------------------------------------------
@@ -482,7 +456,7 @@ function resolveRunLatestOrExecution(
   outputId?: string,
 ): ResolvedOutput {
   const ref: ExecutionRef = { kind: 'agent_run', runId: run.id };
-  const terminal = run.status === 'completed' || run.status === 'failed' || run.status === 'cancelled';
+  const terminal = isTerminalRunStatus(run.status);
 
   if (terminal && run.resultBundle && !outputId?.startsWith('run-attempt:')) {
     const text = compactResultHandoff(run.resultBundle);
@@ -499,17 +473,11 @@ function resolveRunLatestOrExecution(
   const attempts = runsRepository.listAttempts(caller.ownerUserId, run.id);
   const attempt = outputId?.startsWith('run-attempt:')
     ? attempts.find((a) => `run-attempt:${a.id}` === outputId) ?? null
-    : run.activeAttemptId
-    ? attempts.find((a) => a.id === run.activeAttemptId) ?? null
-    : (attempts.length > 0 ? attempts.reduce((latest, a) => (a.attemptIndex > latest.attemptIndex ? a : latest)) : null);
+    : selectedAttempt(run, attempts);
 
   if (!attempt) return emptyResolved(ref);
 
-  // §6.4/§10: aggregate assistant text WITHIN ONE ATTEMPT ONLY, filtered by attemptId and
-  // concatenated in seq order — Assistant event payloads are `{ version: 1, text: string }`
-  // DELTAS stamped with attemptId by the coordinator (runtimeRunExecutor.ts:150), per P1-3.
-  // listEvents already returns rows ordered by seq (agent_run_events PK is (run_id, seq) and the
-  // repository selects in that order) — re-sorting defensively rather than trusting call order.
+  // §6.4/§10: assistant text WITHIN ONE ATTEMPT ONLY, in seq order (listEvents reads by seq).
   const allEvents = readRunEventsThrough(runsRepository, caller.ownerUserId, run.id, run.latestEventSeq);
   const text = assistantTextForAttempt(allEvents, attempt.id);
 
@@ -519,81 +487,8 @@ function resolveRunLatestOrExecution(
     kind: 'answer',
     fullText: text,
     outputRevision: `${attempt.id}:${run.latestEventSeq}`,
-    partial: !terminal && !['completed', 'failed', 'cancelled'].includes(attempt.status),
+    partial: !terminal && !AGENT_ATTEMPT_TERMINAL_STATUSES.has(attempt.status),
   };
-}
-
-/** Filters to ONE attemptId and concatenates deltas in seq order — never a cross-attempt merged
- *  transcript (P1-3 / COMMON.md). Mirrors paneInspectionProjection.run.ts's own
- *  `assistantTextForAttempt`, kept duplicated here rather than imported: that module is a PURE
- *  projection with no repository access and this module needs the unbounded (non-preview-capped)
- *  text, so importing it would not save the filter/concat logic itself — see the report for the
- *  extraction recommendation. */
-function assistantTextForAttempt(events: readonly AgentRunEventV1[], attemptId: string): string {
-  return events
-    .filter((event) => event.type === AgentRunEventType.Assistant && event.attemptId === attemptId)
-    .slice()
-    .sort((a, b) => a.seq - b.seq)
-    .map((event) => {
-      const payload = event.payload;
-      if (payload && typeof payload === 'object' && !Array.isArray(payload) && typeof (payload as { text?: unknown }).text === 'string') {
-        return (payload as { text: string }).text;
-      }
-      return '';
-    })
-    .join('');
-}
-
-// ---------------------------------------------------------------------------
-// DB fetch helpers — mirrors paneInspection.ts's own owner-scoping convention exactly
-// (dbRepository.getMessageCount's `process.env.MICHI_CLOUD === '1' && userId` branch), rather
-// than inventing a new one (COMMON.md decision 5). No existing dbRepository export returns "the
-// latest turn for a node", "the last completed turn for a node", "a turn by id", or "a single
-// message row by id with owner scoping" — this module owns those, same division of labour as
-// paneInspection.ts's own turn-fetch helpers.
-// ---------------------------------------------------------------------------
-
-function fetchLatestTurnForNode(nodeId: string, userId?: string): TurnRow | null {
-  const cloudScoped = process.env.MICHI_CLOUD === '1' && userId;
-  const row = cloudScoped
-    ? getDb().prepare(
-        `SELECT t.* FROM turns t
-         JOIN nodes n ON t.node_id = n.id
-         JOIN workspaces w ON n.workspace_id = w.id
-         WHERE t.node_id = ? AND w.owner_user_id = ?
-         ORDER BY t.started_at DESC LIMIT 1`,
-      ).get(nodeId, userId)
-    : getDb().prepare('SELECT * FROM turns WHERE node_id = ? ORDER BY started_at DESC LIMIT 1').get(nodeId);
-  return (row as TurnRow | undefined) ?? null;
-}
-
-function fetchLastCompletedTurnForNode(nodeId: string, userId?: string): TurnRow | null {
-  const cloudScoped = process.env.MICHI_CLOUD === '1' && userId;
-  const row = cloudScoped
-    ? getDb().prepare(
-        `SELECT t.* FROM turns t
-         JOIN nodes n ON t.node_id = n.id
-         JOIN workspaces w ON n.workspace_id = w.id
-         WHERE t.node_id = ? AND w.owner_user_id = ? AND t.status = 'completed'
-         ORDER BY t.started_at DESC LIMIT 1`,
-      ).get(nodeId, userId)
-    : getDb().prepare(
-        `SELECT * FROM turns WHERE node_id = ? AND status = 'completed' ORDER BY started_at DESC LIMIT 1`,
-      ).get(nodeId);
-  return (row as TurnRow | undefined) ?? null;
-}
-
-function fetchTurnById(turnId: string, userId?: string): TurnRow | null {
-  const cloudScoped = process.env.MICHI_CLOUD === '1' && userId;
-  const row = cloudScoped
-    ? getDb().prepare(
-        `SELECT t.* FROM turns t
-         JOIN nodes n ON t.node_id = n.id
-         JOIN workspaces w ON n.workspace_id = w.id
-         WHERE t.turn_id = ? AND w.owner_user_id = ?`,
-      ).get(turnId, userId)
-    : getDb().prepare('SELECT * FROM turns WHERE turn_id = ?').get(turnId);
-  return (row as TurnRow | undefined) ?? null;
 }
 
 /** Single message-row-by-id fetch, owner-scoped like every other read in this module. Falls back

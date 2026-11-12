@@ -9,7 +9,8 @@ import { buildMessagesByNode } from './chatHydration';
 import { reduceNodes } from './chatReducers';
 import { visibleMessageText } from './assistantBlocks';
 import { staleSources } from './digest';
-import type { ChatNodeState } from './chatTypes';
+import type { ChatAction, ChatNodeState } from './chatTypes';
+import { installTreeMessagePage } from './treeMessageInstall';
 function placeholderNode(overrides: Partial<ChatNodeState> = {}): ChatNodeState {
   return {
     nodeId: 'n1', projectId: 'ws-1', kind: 'chat', chatId: null,
@@ -50,6 +51,46 @@ describe('messages-loaded install', () => {
     expect(next.n1.messagesLoaded).toBe(true);
     expect(next.n1.messages.map((m) => m.id)).toEqual(['m1', 'm2']);
     expect(next.n1.messageCount).toBe(2);
+  });
+});
+
+describe('installing a tree read', () => {
+  function target(nodes: Record<string, ChatNodeState>) {
+    const nodesRef = { current: nodes };
+    return { nodesRef, dispatch: (action: ChatAction) => { nodesRef.current = reduceNodes(nodesRef.current, action); } };
+  }
+
+  it('never empties a node with history the response does not account for', () => {
+    const start = { n1: placeholderNode(), n2: placeholderNode({ nodeId: 'n2' }), n3: placeholderNode({ nodeId: 'n3', messageCount: 0 }) };
+    const install = target(start);
+    const result = installTreeMessagePage(install, { messages: [
+      { id: 'm1', node_id: 'n1', role: 'user', content: 'kept', seq: 0, created_at: 1 },
+    ] }, ['n1', 'n2', 'n3'], new Map(Object.entries(start)));
+    expect(result).toEqual({ installed: ['n1', 'n3'], changed: [], missing: ['n2'] });
+    expect(install.nodesRef.current.n2).toBe(start.n2);
+    expect(install.nodesRef.current.n3.messagesLoaded).toBe(true);
+  });
+
+  it('installs an empty thread only when the server reports a total of zero', () => {
+    const start = { n1: placeholderNode(), n2: placeholderNode({ nodeId: 'n2' }) };
+    const install = target(start);
+    const result = installTreeMessagePage(install, { messages: [], pages: [
+      { nodeId: 'n1', total: 0, before: null }, { nodeId: 'n2', total: 5, before: null },
+    ] }, ['n1', 'n2'], new Map(Object.entries(start)));
+    expect(result).toEqual({ installed: ['n1'], changed: [], missing: ['n2'] });
+    expect(install.nodesRef.current.n1).toMatchObject({ messagesLoaded: true, messageCount: 0 });
+  });
+
+  it('skips a node that changed while the read was in flight', () => {
+    const start = { n1: placeholderNode() };
+    const install = target({ n1: placeholderNode({ status: 'streaming', messages: [
+      { id: 'live', role: 'assistant', text: 'live', toolCalls: [], createdAt: 1 },
+    ] }) });
+    const result = installTreeMessagePage(install, { messages: [
+      { id: 'm1', node_id: 'n1', role: 'assistant', content: 'stale', seq: 0, created_at: 1 },
+    ] }, ['n1'], new Map(Object.entries(start)));
+    expect(result.changed).toEqual(['n1']);
+    expect(install.nodesRef.current.n1.messages[0].text).toBe('live');
   });
 });
 

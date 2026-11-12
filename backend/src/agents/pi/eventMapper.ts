@@ -1,4 +1,6 @@
 import { extractToolUsePurpose } from "michi-shared";
+import { omitInlineImages, truncateToolPayload } from "michi-runtime/internal/contract/toolPayload";
+import { contextFillPercentage } from "michi-runtime/internal/contract/usage";
 import type { NormalizedEvent } from "../../services/chatEvents";
 import type { SpawnedBranch } from "../toolBridge";
 import { PI_TODO_TOOL_NAME, todoPlanFromResult } from "./piTodoTool";
@@ -16,7 +18,7 @@ import { parseMcpToolName } from "./mcpToolBridge";
  * michi expects:
  *   chunk / thought (assistant text/reasoning streamed)
  *   tool_call / tool_call_update (chips for tool calls)
- *   host events spawn_branches / artifact_saved / artifact_updated (tool side effects with payload)
+ *   host events spawn_branches / artifact_saved / artifact_updated / artifact_deleted (tool side effects with payload)
  *   plan (the todo tool's list after each change)
  *   context_usage / usage_summary (one-shot at run end)
  *   turn_end (closes SSE)
@@ -26,15 +28,6 @@ import { parseMcpToolName } from "./mcpToolBridge";
  * do NOT come through tool calls. This mapper only cares about the two
  * side-effect tools (spawn_branches, save_artifact, update_artifact).
  */
-const MAX_TOOL_PAYLOAD = 16 * 1024;
-
-function truncatePayload(value: unknown): string | undefined {
-    if (value == null) return undefined;
-    const str = typeof value === "string" ? value : JSON.stringify(value);
-    if (!str) return undefined;
-    return str.length > MAX_TOOL_PAYLOAD ? str.slice(0, MAX_TOOL_PAYLOAD) : str;
-}
-
 /**
  * A Pi tool's identity for host policy: every Pi tool is Michi's own
  * (buildPiTools), except a bridged MCP tool, `mcp__<server>__<tool>`.
@@ -70,6 +63,8 @@ function addUsage(cumulative: MappedTurnUsage, usage: { input?: number; cacheRea
 export interface MapperContext {
     /** Mutated as turns accumulate within one Agent run. */
     cumulative: MappedTurnUsage;
+    /** The context the next call sends: the latest call's prompt and output, or the compacted size. */
+    contextTokens?: number;
     /** Provided by the caller; used for the run-end context_usage event. */
     contextWindow?: number;
     /** Wall-clock ms of when prompt() began. Set by the caller. */
@@ -96,6 +91,9 @@ export function* mapAgentEvent(event: any, ctx: MapperContext): Iterable<Normali
             const m = event.message;
             if (m?.role === "assistant" && m.usage) {
                 addUsage(ctx.cumulative, m.usage);
+                const prompt = (m.usage.input ?? 0) + (m.usage.cacheRead ?? 0) + (m.usage.cacheWrite ?? 0);
+                // A failed call reports no prompt; the context it would have sent is unchanged.
+                if (prompt > 0) ctx.contextTokens = prompt + (m.usage.output ?? 0);
             }
             if (m?.role === "assistant" && m.stopReason !== "error") ctx.terminalError = undefined;
             if (m?.role === "assistant" && m.stopReason === "error") {
@@ -114,7 +112,7 @@ export function* mapAgentEvent(event: any, ctx: MapperContext): Iterable<Normali
                 detail: purpose,
                 status: "pending",
                 kindType: "execute",
-                inputJson: truncatePayload(args),
+                inputJson: truncateToolPayload(args),
                 ...toolIdentity(event.toolName),
             };
             return;
@@ -157,6 +155,18 @@ export function* mapAgentEvent(event: any, ctx: MapperContext): Iterable<Normali
                         },
                     };
                 }
+            } else if (name === "delete_artifact" && !isError) {
+                const d = result?.details?.deleted;
+                if (typeof d?.name === "string" && d.name) {
+                    yield {
+                        kind: "host_event",
+                        type: "artifact_deleted",
+                        payload: {
+                            contextId: typeof d.contextId === "string" ? d.contextId : undefined,
+                            name: d.name,
+                        },
+                    };
+                }
             } else if (name === PI_TODO_TOOL_NAME && !isError) {
                 // The whole list after the change, like ACP's session/update plan.
                 const entries = todoPlanFromResult(result);
@@ -169,7 +179,8 @@ export function* mapAgentEvent(event: any, ctx: MapperContext): Iterable<Normali
                 title: name,
                 status: isError ? "failed" : "completed",
                 detail: isError ? extractErrorText(result) : undefined,
-                output: truncatePayload(result),
+                // The agent loop keeps the original result for the model; the chip's copy drops its images.
+                output: truncateToolPayload(omitInlineImages(result)),
                 ...toolIdentity(name),
             };
             return;
@@ -177,9 +188,7 @@ export function* mapAgentEvent(event: any, ctx: MapperContext): Iterable<Normali
 
         case "agent_end": {
             // One-shot end-of-run summary, then the SSE-closing turn_end.
-            const ctxPct = ctx.contextWindow
-                ? ((ctx.cumulative.inputTokens + ctx.cumulative.outputTokens) / ctx.contextWindow) * 100
-                : 0;
+            const ctxPct = contextFillPercentage(ctx.contextTokens ?? 0, ctx.contextWindow) ?? 0;
             yield { kind: "context_usage", contextUsagePercentage: ctxPct };
             yield {
                 kind: "usage_summary",
@@ -227,7 +236,7 @@ export function* mapAgentEvent(event: any, ctx: MapperContext): Iterable<Normali
                 title: event.toolName ?? "",
                 status: "in_progress",
                 kindType: "execute",
-                output: truncatePayload(event.args ?? event.partialResult ?? event.result),
+                output: truncateToolPayload(omitInlineImages(event.args ?? event.partialResult ?? event.result)),
                 ...toolIdentity(event.toolName),
             };
             return;
@@ -240,6 +249,7 @@ export function* mapAgentEvent(event: any, ctx: MapperContext): Iterable<Normali
         case "compaction_end":
         case "session_compaction_end":
             if (event.result?.usage) addUsage(ctx.cumulative, event.result.usage);
+            if (typeof event.result?.estimatedTokensAfter === "number") ctx.contextTokens = event.result.estimatedTokensAfter;
             yield { kind: "compaction_end", detail: typeof event.detail === "string" ? event.detail : event.type };
             return;
 

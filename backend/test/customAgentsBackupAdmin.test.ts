@@ -2,7 +2,6 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { DatabaseSync } from 'node:sqlite';
 import { once } from 'node:events';
 import type { AddressInfo } from 'node:net';
 import { afterEach, beforeEach, describe, test } from 'node:test';
@@ -11,6 +10,7 @@ import {
   AgentRunCompletionMode,
   AgentRunEventType,
   AgentRunStatus,
+  edgeRowId,
   type CreateAgentDefinitionRequestV1,
   type EffectiveAgentDefinitionV1,
 } from 'michi-shared';
@@ -20,6 +20,7 @@ import { AgentDefinitionsRepository } from '../src/services/agentDefinitionsRepo
 import { AgentRunAdministrativeLifecycle } from '../src/services/agentRunAdministrativeLifecycle';
 import { AgentRunsRepository } from '../src/services/agentRunsRepository';
 import { closeAuditDb, closeDb, getAuditDb, getDb, initDb } from '../src/services/db';
+import { createAuthUser } from './helpers/authUsers';
 
 const hash = 'b'.repeat(64);
 let dataDir: string;
@@ -53,17 +54,6 @@ function effective(): EffectiveAgentDefinitionV1 {
     contextPolicy: { version: 1, includeWorkspaceInstructions: true, allowMessageContext: true,
       allowFileContext: true, allowArtifactContext: true, maxEstimatedChars: 10_000 },
   };
-}
-
-function createAuthUser(id: string): void {
-  const db = new DatabaseSync(path.join(dataDir, 'auth.sqlite'));
-  db.exec(`
-    CREATE TABLE "user" (id TEXT PRIMARY KEY, email TEXT NOT NULL, name TEXT NOT NULL, created_at INTEGER NOT NULL);
-    CREATE TABLE "session" (id TEXT PRIMARY KEY, "userId" TEXT NOT NULL);
-    CREATE TABLE "account" (id TEXT PRIMARY KEY, "userId" TEXT NOT NULL);
-  `);
-  db.prepare('INSERT INTO "user" (id,email,name,created_at) VALUES (?,?,?,1)').run(id, `${id}@example.com`, id);
-  db.close();
 }
 
 function seedOwner(ownerUserId = 'owner-a'): { runId: string } {
@@ -291,6 +281,8 @@ describe('Custom Agent backup and administration routes', () => {
     assert.equal(child.follow_ups_source_message_id, message.id);
     assert.equal(edge.source_node_id, root.id);
     assert.equal(edge.target_node_id, child.id);
+    // The id a window derives from the edge, so its edge.delete finds the row.
+    assert.equal(edge.id, edgeRowId('branch', root.id, child.id));
     assert.equal(edge.anchor_message_id, message.id);
     assert.equal(context.origin_node_id, root.id);
     assert.equal(context.origin_message_id, message.id);
@@ -334,8 +326,13 @@ describe('Custom Agent backup and administration routes', () => {
   });
 
   test('admin export includes sanitized Agents and delete quiesces then reports retryable cleanup failures', async () => {
-    createAuthUser('owner-a');
+    createAuthUser(dataDir, 'owner-a');
     const { runId } = seedOwner();
+    for (const [id, url] of [['context-local', 'file:///Users/source/private.txt'],
+      ['context-login', 'https://user:login-password@example.com/page']]) {
+      getDb().prepare(`INSERT INTO contexts (id, workspace_id, name, file_path, auto_inject, source, url, created_at, updated_at)
+        VALUES (?, 'ws-a', ?, '', 0, 'user', ?, 1, 1)`).run(id, id, url);
+    }
     const quiesced: string[] = [];
     const lifecycle = new AgentRunAdministrativeLifecycle({
       quiesceRun: async (_owner, id) => {
@@ -349,6 +346,9 @@ describe('Custom Agent backup and administration routes', () => {
       },
     });
     await startApp(lifecycle);
+    const receipts = () => (getDb().prepare('SELECT workspace_id FROM command_receipts ORDER BY workspace_id').all() as Array<{ workspace_id: string }>)
+      .map((row) => row.workspace_id);
+    assert.deepEqual(receipts(), ['__agent_global__:owner-a', 'ws-a', 'ws-a']);
 
     const exported = await request('POST', '/api/admin/users/owner-a/export');
     assert.equal(exported.response.status, 200);
@@ -357,9 +357,13 @@ describe('Custom Agent backup and administration routes', () => {
     assert.equal(containsHostAbsolutePath(exported.body), false);
     const adminEncoded = JSON.stringify(exported.body);
     for (const forbidden of ['lease-secret', 'workspace-session-secret', 'message-auth-secret',
-      'message-token-secret', 'sessionToken', 'authToken']) {
+      'message-token-secret', 'signed-secret', '#private', 'login-password', 'file:', 'sessionToken', 'authToken']) {
       assert.equal(adminEncoded.includes(forbidden), false, `${forbidden} must not appear in admin export`);
     }
+    const backup = await request('GET', '/api/backup/export');
+    const urls = (contexts: Array<{ id: string; url: string | null }>) =>
+      Object.fromEntries(contexts.map((context) => [context.id, context.url]));
+    assert.deepEqual(urls(exported.body.contexts), urls(backup.body.workspaces[0].contexts));
 
     const deleted = await request('DELETE', '/api/admin/users/owner-a');
     assert.equal(deleted.response.status, 200);
@@ -368,6 +372,7 @@ describe('Custom Agent backup and administration routes', () => {
     assert.deepEqual(deleted.body.cleanupFailures, [{ runId, message: 'worktree busy', retryable: true }]);
     assert.equal((getDb().prepare('SELECT COUNT(*) AS count FROM agent_runs').get() as { count: number }).count, 0);
     assert.equal((getDb().prepare('SELECT COUNT(*) AS count FROM agent_definitions').get() as { count: number }).count, 0);
+    assert.deepEqual(receipts(), [], 'receipts keep task text and instructions, so they go with the owner');
     const audit = getAuditDb().prepare("SELECT metadata_json FROM audit_log WHERE action = 'admin.user.delete' ORDER BY id DESC LIMIT 1")
       .get() as { metadata_json: string };
     assert.deepEqual(JSON.parse(audit.metadata_json).agentCleanupFailures,
@@ -375,7 +380,7 @@ describe('Custom Agent backup and administration routes', () => {
   });
 
   test('admin deletion refuses Agent rows without an injected lifecycle', async () => {
-    createAuthUser('owner-a');
+    createAuthUser(dataDir, 'owner-a');
     seedOwner();
     await startApp();
     const deleted = await request('DELETE', '/api/admin/users/owner-a');

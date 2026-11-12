@@ -1,14 +1,13 @@
 import type { Locator, Page } from '@playwright/test';
 
 /**
- * The conversation composers' editors. The Spaces assistant window stays
- * mounted (hidden) outside Spaces so it keeps its draft; its editor is not one
- * of these.
+ * The conversation composers' editors: not the agent's panel's (one panel in
+ * every area, DESIGN-v2 §1.2; `.meta-chat-panel` is the retired Spaces window).
  */
-export const COMPOSER_EDITOR = '[contenteditable="true"]:not(.meta-chat-panel *)';
+export const COMPOSER_EDITOR = '[contenteditable="true"]:not(.meta-chat-panel *):not(.companion-panel *)';
 
-/** A conversation composer (Home, a pane, Digest), not the Spaces assistant window's. */
-export const CONVERSATION_COMPOSER = '.terminal-composer:not(.meta-chat-panel *)';
+/** A conversation composer (Home, a pane, Digest), not the agent's panel's. */
+export const CONVERSATION_COMPOSER = '.terminal-composer:not(.meta-chat-panel *):not(.companion-panel *)';
 
 export function composerEditor(scope: Page | Locator): Locator {
   return scope.locator(COMPOSER_EDITOR);
@@ -31,9 +30,9 @@ export async function openArea(page: Page, area: ShellArea): Promise<void> {
 }
 
 /** A Settings page, or one of the older sections whose names specs still use. */
-export type SettingsSection = 'General' | 'Runtime (global)' | 'Meta agent' | 'Memory' | 'Components' | 'Appearance' | 'Data & backup'
-  | 'Runtime & model' | 'Machines' | 'Notifications' | 'Links' | 'Backup & restore'
-  | 'Scheduled jobs' | 'Keyboard shortcuts' | 'Account';
+export type SettingsSection = 'General' | 'Runtime (global)' | 'Memory' | 'Components' | 'Appearance' | 'Data & backup'
+  | 'Runtime & model' | 'Machines' | 'Notifications' | 'Links' | 'Trash' | 'Archived' | 'Backup & restore'
+  | 'Scheduled jobs' | 'Usage reporting' | 'Keyboard shortcuts' | 'Account' | 'Michi';
 
 /** The global Settings (a window, or a drawer on a phone), separate from a Space's own settings. */
 export function settingsMain(page: Page): Locator {
@@ -47,8 +46,9 @@ function settingsHeaderButton(page: Page, name: 'Close' | 'Back'): Locator {
 
 /**
  * The page that holds what an older section is opened for: General's
- * machines, the global runtime, and backup. Pages named like their section
- * need no entry.
+ * machines, the global runtime and backup. Pages named like their section
+ * need no entry (Pages upkeep's settings are Settings › <name>: 'Michi'
+ * in these mocks).
  */
 const PAGE_FOR_SECTION: Partial<Record<SettingsSection, SettingsSection>> = {
   General: 'Machines',

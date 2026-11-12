@@ -1,12 +1,12 @@
 # Custom Agents, Runs and watches (experimental)
 
-Applies to: backends started with `MICHI_CUSTOM_AGENTS=1`. Disabled by default. Source checked: 2026-10-16 against the feature gate, definition editor, Run UI and recovery code. This is a source-reviewed experimental guide, not a new live-provider certification.
+Applies to: backends started with `MICHI_CUSTOM_AGENTS=1`. Disabled by default. Source checked: 2026-11-08 against the feature gate, definition editor, Run UI and recovery code. This is a source-reviewed experimental guide, not a new live-provider certification.
 
 ## Why is there no Agents page?
 
 The backend reads `MICHI_CUSTOM_AGENTS=1` at startup. Without exactly that value, the Agents entry, definitions, Runs and related tools are unavailable. Existing definitions/history remain in the database. There is no Settings switch or API to enable the feature, and old `customAgents.enabled` config values are ignored.
 
-Enable the flag only on the backend you intend to use, then restart that backend. Local and remote backends are separate. A renderer reload alone does not change the startup gate. Restarting can interrupt active work, so finish or stop it first.
+Set `MICHI_CUSTOM_AGENTS=1` only in the environment of the backend you intend to use (its shell, `backend/.env`, or `~/.michi/.env` for the packaged app; see `configuration` for precedence), then restart that backend. Local and remote backends are separate. A renderer reload alone does not change the startup gate. Restarting can interrupt active work, so finish or stop it first.
 
 ## Branch, subagent, definition or Run?
 
@@ -24,17 +24,17 @@ Definitions describe method and allowed capabilities. A Run supplies a concrete 
 
 1. Open Agent Library and choose + workspace agent or + global agent.
 2. Set a name and description explaining when the worker should be used.
-3. Choose an available runtime/provider/model profile on that backend.
+3. Choose an available runtime/provider/model profile on that backend. Agent Runs support only Pi, Claude, Kiro and Codex; other runtimes, such as Crew and Antigravity, cannot be enabled as a primary or fallback profile.
 4. Put stable methods in System instructions, such as “Use primary sources and cite uncertainty.” Leave the one-off task for each Run.
-5. Select Tools, Skills & MCP from the capability catalog. This is the worker's whole selected surface; parent capabilities are not automatically inherited. Include `michi_docs` when the worker needs product help.
+5. Select tools from the capability catalog under Tools, Skills & MCP. This is the worker's whole selected surface; parent capabilities are not automatically inherited. Include `michi_docs` when the worker needs product help. The catalog lists only Michi tools: skill refs and MCP server refs are never resolved and block Enable. A Pi or Codex run sees the whole skill library through its runtime; a Kiro run does not, and a Claude run starts in Claude's bare mode, which is not meant to load it natively. Select the `michi_skills` tool to let a Claude or Kiro run list and read library skills.
 6. Choose allowed context: workspace instructions, messages, files and Artifacts, plus the estimated character limit.
-7. Set permission preset and execution limits. Save the definition and enable it before using it.
+7. Set permission preset and execution limits. Choose Enable before using it: Enable saves the definition and then enables it, while Save Draft only saves it.
 
 Success check: the definition is enabled, its profile is available, and selected capabilities are ready rather than unresolved references. Provider secrets stay in backend bindings, not in the description or instructions.
 
 ## Permissions and environments
 
-Research is a read/search-oriented preset. Build is designed for isolated worktree write/exec. Custom lets you choose decisions for read, search, browse, Artifact write, filesystem write, shell execution, external action and delegation.
+Research allows read, search, browse and Artifact write and denies the rest. Build allows every category except external action and spawn agent, which ask; by default a write-capable Run gets its own Git worktree and fails without a Git repository. Custom lets you choose allow, ask or deny for each category (read, search, browse, artifact write, filesystem write, shell exec, external action, spawn agent); unset categories are denied.
 
 A definition is a ceiling: parent restrictions can reduce it. Ordinary chat Trust does not bypass a Run's independent effective policy or capability allowlist. Execution environment and tool policy are distinct; inspect the Run's environment before relying on file isolation.
 
@@ -59,7 +59,7 @@ Queue input sends additional guidance without cancelling active work. Stop & red
 
 Configured fallback profiles are considered after classified failures and within attempt limits. Recovery may wait when a side effect cannot be safely replayed. Do not force repeated external actions just because an attempt failed.
 
-Watches can notify or wake a parent when their configured Run condition is satisfied. They require an eligible parent/permission configuration. They are not arbitrary time-based scheduling and do not automatically subscribe to every native Crew background job.
+Watches notify or wake a parent when their condition is met: all, any or a quorum of the watched Runs finished (a failed or cancelled Run settles all/quorum early), or a deadline timestamp has passed. A deadline is checked only when an Agent Run changes, a wait runs, or the backend starts; there is no timer. Wake needs a parent target; a parent chat that has meanwhile been archived or put in the trash, or whose workspace has, is not woken. A watch is a one-shot subscription over Runs, not recurring or time-based scheduling, and it does not subscribe to native Crew background jobs.
 
 Durable records survive a UI disconnect. Backend restart may trigger recovery, which is not a promise of uninterrupted execution or exactly-once external actions. Inspect attempts and resources after recovery.
 

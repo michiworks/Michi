@@ -1,6 +1,9 @@
 // backend/test/piTools.test.ts
 import { describe, test, afterEach } from "node:test";
 import assert from "node:assert/strict";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import { configureRuntimeDeps, __resetRuntimeDeps } from "../src/agents/runtimeDeps";
 import { buildPiTools, piToolResultErrorOverride } from "../src/agents/pi/piTools";
 import { SUBMIT_AGENT_RESULT_TOOL } from "../src/agents/runs/runWorkerTools";
@@ -61,7 +64,7 @@ describe("buildPiTools send_to_thread", () => {
     const tool = buildPiTools({
       ...opts(),
       owner: chatOwner("n-a"),
-      requestThreadMessageApproval: async () => { asked += 1; return { approved: true }; },
+      requestUserInput: async () => { asked += 1; return []; },
     } as any).find((t: any) => t.name === "send_to_thread");
     const result = await tool.execute("call-1", { nodeId: "n-b", text: "hi" });
     assert.equal(result.isError, true);
@@ -128,6 +131,38 @@ describe("Pi task tools", () => {
     assert.equal(open.executionMode, "sequential");
     assert.equal(list.executionMode, undefined);
   });
+});
+
+test('Pi file tools read skill folders outside the workspace but never write them', async (t) => {
+  configureRuntimeDeps({ historyStore: store as any, agentConfig: baseCfg, dataDir: '/tmp/agent-runtime-test' });
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'pi-skill-roots-'));
+  t.after(() => { __resetRuntimeDeps(); fs.rmSync(tmp, { recursive: true, force: true }); });
+  const workspace = path.join(tmp, 'workspace');
+  const library = path.join(tmp, 'skills');
+  const skillFile = path.join(library, 'notes', 'SKILL.md');
+  fs.mkdirSync(workspace, { recursive: true });
+  fs.mkdirSync(path.dirname(skillFile), { recursive: true });
+  fs.writeFileSync(skillFile, '---\nname: notes\ndescription: Notes\n---\nKEEP-NOTES-4512\n');
+  fs.writeFileSync(path.join(tmp, 'secret.txt'), 'SECRET');
+  fs.writeFileSync(path.join(workspace, 'own.md'), 'own');
+  const seenPaths = new Set<string>();
+  const tools = buildPiTools({ ...opts(), cwd: workspace, seenPaths, skillReadRoots: () => [library] });
+  const run = (name: string, args: object) => tools.find((tool: any) => tool.name === name).execute(`${name}-call`, args);
+
+  assert.match((await run('read', { path: skillFile })).content[0].text, /KEEP-NOTES-4512/);
+  assert.equal(seenPaths.size, 0, 'a skill file read unlocks no write');
+  assert.match((await run('ls', { path: path.dirname(skillFile) })).content[0].text, /SKILL\.md/);
+  assert.match((await run('grep', { pattern: 'KEEP-NOTES', path: library })).content[0].text, /^notes\/SKILL\.md:5:KEEP-NOTES-4512/);
+  assert.match((await run('find', { pattern: '**/SKILL.md', path: library })).content[0].text, /^notes\/SKILL\.md$/);
+  await run('read', { path: 'own.md' });
+  assert.deepEqual([...seenPaths], [path.join(workspace, 'own.md')], 'workspace reads behave as before');
+
+  for (const outside of [path.join(tmp, 'secret.txt'), `${library}/notes/../../secret.txt`]) {
+    assert.match((await run('read', { path: outside })).content[0].text, /outside the workspace/);
+  }
+  assert.match((await run('write', { path: skillFile, content: 'replaced' })).content[0].text, /outside the workspace/);
+  assert.match((await run('edit', { path: skillFile, old_string: 'KEEP', new_string: 'LOSE' })).content[0].text, /outside the workspace/);
+  assert.match(fs.readFileSync(skillFile, 'utf8'), /KEEP-NOTES-4512/);
 });
 
 test('Pi forwards arbitrary artifact paths to the bridge', async (t) => {

@@ -1,30 +1,27 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useChatStore, useChatNodesSnapshot, useChatNode, chatLabel } from '../../../state/chatStore';
-import { liveDigestSources, parseDigestStructure, staleSources } from '../../../state/digest';
+import { liveDigestSources, parseDigestStructure, staleSources, visibleDigestMarkdown } from '../../../state/digest';
 import { findTreeIdForNode, descendants } from '../../../state/tree';
+import { threadDisplayTitle } from '../../../state/displayTitle';
+import { nodeMessageCount } from '../../../state/nodeMessageCount';
+import { clearRequestedDigest, useRequestedDigest } from '../../../state/digestFocus';
 import MarkdownContent from '../../MarkdownContent';
 import DigestGenerationStatus from '../DigestGenerationStatus';
 import { Dot, Tag } from '../primitives';
 import type { PageId } from '../../../state/commands';
 import ManageComposer from '../manage/ManageComposer';
 import { Button } from '../../ui/controls';
+import { exportPanelEvent } from '../../../state/appEvents';
+import { isImeComposing } from '../../../lib/ime';
+import { smoothScrollBehavior } from '../../../hooks/useReducedMotion';
+import { formatDigestAge } from '../content/michiFormat';
+import { kbd } from '../../../lib/platform';
 
 /** Wash behind the outline's current item. Accent, like every other "current"
  *  marker and the page's buttons — this page carries no digest-hued chrome. */
 const OUTLINE_ACTIVE_FILL = 'color-mix(in srgb, var(--term-accent) 8%, transparent)';
 
 const DIGEST_PROSE ='prose prose-sm max-w-none wrap-break-word [&>*:first-child]:mt-0 [&>*:last-child]:mb-0 [&_h1]:text-(--term-fg) [&_h2]:text-(--term-fg) [&_h3]:text-(--term-fg) [&_h4]:text-(--term-fg) [&_p]:text-(--term-mid) [&_li]:text-(--term-mid) [&_strong]:text-(--term-fg) [&_a]:text-(--term-accent)';
-
-function formatRelative(ts: number): string {
-  if (!ts) return '—';
-  const diff = Math.max(0, Date.now() - ts);
-  const m = Math.floor(diff / 60000);
-  if (m < 1) return 'just now';
-  if (m < 60) return `${m}m ago`;
-  const h = Math.floor(m / 60);
-  if (h < 24) return `${h}h ago`;
-  return `${Math.floor(h / 24)}d ago`;
-}
 
 export default function TerminalDigest({
   onNav,
@@ -37,10 +34,14 @@ export default function TerminalDigest({
     refreshDigest,
     setDigestPrompt,
     markDigestViewed,
-    openPane,
+    revealNode,
     createChildChat,
   } = useChatStore();
   const nodesSnapshot = useChatNodesSnapshot();
+  // A pane opened while this page is up stays out of sight: go to the Dashboard.
+  const openSource = (nodeId: string) => {
+    if (revealNode(nodeId, { workspaceId: activeProject?.id })) onNav('dashboard');
+  };
 
   const [requestedDigestId, setRequestedDigestId] = useState<string | null>(null);
   const [createPrompt, setCreatePrompt] = useState('');
@@ -85,7 +86,7 @@ export default function TerminalDigest({
       digestId,
       messageCount: chatIds.reduce((sum, id) => {
         const node = nodesSnapshot[id];
-        return sum + (node?.messageCount ?? node?.messages.length ?? 0);
+        return sum + (node ? nodeMessageCount(node) : 0);
       }, 0),
     };
   }, [activeProject, activeTree, nodesSnapshot]);
@@ -100,6 +101,13 @@ export default function TerminalDigest({
     setCreatePrompt('');
     setCreating(false);
   }, [activeProject?.id, activeProject?.activeTreeId]);
+  // Declared after the reset above, so on mount the picked digest wins.
+  const pickedDigestId = useRequestedDigest();
+  useEffect(() => {
+    if (!pickedDigestId) return;
+    setRequestedDigestId(pickedDigestId);
+    clearRequestedDigest();
+  }, [pickedDigestId]);
 
   // Clear unread state once the user has the detail view open and the digest
   // has finished generating. We wait for `idle` so a streaming digest the user
@@ -120,7 +128,11 @@ export default function TerminalDigest({
       ? focusedDigestNode
       : null;
 
-  const content = digestNode?.digest?.content;
+  const savedContent = digestNode?.digest?.content;
+  const content = useMemo(
+    () => (savedContent !== undefined ? visibleDigestMarkdown(savedContent) : undefined),
+    [savedContent],
+  );
   const parsed = useMemo(
     () => (content !== undefined ? parseDigestStructure(content) : null),
     [content],
@@ -167,10 +179,10 @@ export default function TerminalDigest({
     if (!container) return;
     if (idx === -1) {
       const el = container.querySelector<HTMLElement>('[data-digest-tldr]');
-      if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      if (el) el.scrollIntoView({ behavior: smoothScrollBehavior(), block: 'start' });
     } else {
       const els = container.querySelectorAll<HTMLElement>('[data-digest-section]');
-      if (els[idx]) els[idx].scrollIntoView({ behavior: 'smooth', block: 'start' });
+      if (els[idx]) els[idx].scrollIntoView({ behavior: smoothScrollBehavior(), block: 'start' });
     }
   }, []);
 
@@ -230,9 +242,7 @@ export default function TerminalDigest({
   }
 
   if (!digestNode) {
-    const threadTitle = activeTree.name?.trim()
-      || nodesSnapshot[activeTree.rootNodeId]?.title
-      || 'Untitled thread';
+    const threadTitle = threadDisplayTitle(activeTree, nodesSnapshot[activeTree.rootNodeId], 'Untitled thread');
     return (
       <div
         style={{
@@ -323,7 +333,7 @@ export default function TerminalDigest({
                 value={createPrompt}
                 onChange={(event) => setCreatePrompt(event.target.value)}
                 onKeyDown={(event) => {
-                  if (event.nativeEvent.isComposing) return;
+                  if (isImeComposing(event)) return;
                   if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) {
                     event.preventDefault();
                     void createCurrentDigest();
@@ -348,7 +358,7 @@ export default function TerminalDigest({
               />
             </div>
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: 12 }}>
-              <span style={{ color: 'var(--term-muted)', fontSize: 'var(--fs-sm)', fontFamily: 'var(--font-mono, ui-monospace, monospace)' }}>⌘↵ to create</span>
+              <span style={{ color: 'var(--term-muted)', fontSize: 'var(--fs-sm)', fontFamily: 'var(--font-mono, ui-monospace, monospace)' }}>{kbd('mod', 'enter')} to create</span>
               <Button
                 variant="primary"
                 onClick={() => void createCurrentDigest()}
@@ -427,7 +437,7 @@ export default function TerminalDigest({
               <span style={{ color: 'var(--term-mid)' }}>updated</span>{' '}
               {d.status === 'streaming'
                 ? 'streaming…'
-                : formatRelative(d.generatedAt)}
+                : formatDigestAge(d.generatedAt)}
             </span>
             <span><span style={{ color: 'var(--term-mid)' }}>tokens</span> —</span>
           </div>
@@ -564,20 +574,21 @@ export default function TerminalDigest({
                     {isStale && <Tag color="var(--term-select)">stale — source changed</Tag>}
                     <div style={{ flex: 1 }} />
                     {s.sourceId && (
-                      <span
-                        onClick={() => openPane(s.sourceId!)}
+                      <button
+                        type="button"
+                        className="t-hover-accent"
+                        onClick={() => openSource(s.sourceId!)}
                         style={{
                           fontSize: 'var(--fs-sm)',
-                          color: 'var(--term-muted)',
                           fontFamily: 'var(--ui-font)',
+                          background: 'none',
+                          border: 0,
+                          padding: 0,
                           cursor: 'pointer',
-                          transition: 'color var(--t-soft)',
                         }}
-                        onMouseEnter={(e) => { e.currentTarget.style.color = 'var(--term-accent)'; }}
-                        onMouseLeave={(e) => { e.currentTarget.style.color = 'var(--term-muted)'; }}
                       >
                         source ↗
-                      </span>
+                      </button>
                     )}
                   </div>
                   <div
@@ -605,8 +616,8 @@ export default function TerminalDigest({
               lineHeight: 1.65,
             }}
           >
-            {d.content ? (
-              <MarkdownContent text={d.content} className={DIGEST_PROSE} />
+            {content ? (
+              <MarkdownContent text={content} className={DIGEST_PROSE} />
             ) : d.status === 'idle' ? (
               <span>— digest is empty —</span>
             ) : null}
@@ -818,7 +829,7 @@ export default function TerminalDigest({
               return (
                 <div
                   key={id}
-                  onClick={() => openPane(id)}
+                  onClick={() => openSource(id)}
                   style={{
                     padding: '10px 14px',
                     borderBottom: '1px solid var(--term-line)',
@@ -854,7 +865,7 @@ export default function TerminalDigest({
                       {n.title || chatLabel(n) || id}
                     </div>
                     <div style={{ fontSize: 'var(--fs-xs)', color: 'var(--term-muted)', fontFamily: 'var(--font-mono, ui-monospace, monospace)' }}>
-                      {n.messageCount ?? n.messages.length} msgs · in sync
+                      {nodeMessageCount(n)} msgs · in sync
                     </div>
                   </div>
                   {isNew ? (
@@ -890,7 +901,7 @@ export default function TerminalDigest({
             DIGEST
           </div>
           <div style={{ fontSize: 'var(--fs-sm)', color: 'var(--term-muted)', marginBottom: 12, fontFamily: 'var(--font-mono, ui-monospace, monospace)' }}>
-            scope thread · updated {d.status === 'streaming' ? 'streaming…' : formatRelative(d.generatedAt)}
+            scope thread · updated {d.status === 'streaming' ? 'streaming…' : formatDigestAge(d.generatedAt)}
           </div>
           <div style={{ display: 'flex', gap: 8 }}>
             <Button
@@ -903,11 +914,7 @@ export default function TerminalDigest({
             </Button>
             <Button
               onClick={() =>
-                window.dispatchEvent(
-                  new CustomEvent('michi:toggle-export-panel', {
-                    detail: { mode: 'export', digestNodeId: digestNode.nodeId },
-                  }),
-                )
+                exportPanelEvent.dispatch({ digestNodeId: digestNode.nodeId })
               }
               style={{ flex: 1, padding: '7px 12px' }}
             >

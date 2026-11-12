@@ -2,6 +2,7 @@ import type { HomeSectionKey, PageLayoutRule } from 'michi-shared';
 import type { ChatMessage, ToolCallState } from '../chatTypes';
 import { normalizeToolResultEnvelope, normalizeTurnToolName, parseTurnPageReceipt } from '../../lib/turnPageReceipt';
 import { pageCardStands } from './pageCardStates';
+import { LOCAL_BACKEND_CONNECTION_ID } from '../../config/backendConnections';
 
 /** The section limit a layout-rule suggestion asks for. */
 export interface MetaChatRuleAsk {
@@ -54,7 +55,7 @@ function addedLayoutRule(tool: ToolCallState): boolean {
 function replyWroteStanding(reply: ChatMessage): boolean {
   return reply.toolCalls.some((tool) => {
     if (addedLayoutRule(tool)) return true;
-    const receipt = parseTurnPageReceipt(tool, 'local');
+    const receipt = parseTurnPageReceipt(tool, LOCAL_BACKEND_CONNECTION_ID);
     if (!receipt) return false;
     if (receipt.created) return pageCardStands(tool.id, { kind: 'created', removed: false });
     if (receipt.appliedCount > 0) return pageCardStands(tool.id, { kind: 'applied', undone: false });

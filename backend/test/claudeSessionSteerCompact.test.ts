@@ -209,7 +209,7 @@ describe('ClaudeSession compact', () => {
       child.send({ type: 'system', subtype: 'compact_boundary', compact_metadata: { trigger: 'manual', pre_tokens: 19_107, post_tokens: 4_174 } });
       child.send({ type: 'user', message: { role: 'user', content: 'This session is being continued…' }, isReplay: true });
       child.result('success', { input_tokens: 0, output_tokens: 0 });
-      assert.deepEqual(await pending, { started: true, completed: true, detail: 'Compacted 19.1k → 4.2k tokens.' });
+      assert.deepEqual(await pending, { started: true, completed: true, detail: 'Compacted 19k → 4.2k tokens.' });
       assert.equal(session.getState(), 'idle');
       assert.deepEqual(session.getHistory().map((m) => m.content), ['first'], 'compaction adds nothing to the transcript');
     } finally { await session.dispose(); }

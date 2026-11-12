@@ -27,7 +27,8 @@ import type {
 import { backendApiBase } from '../../config/backendConnections';
 import { backendEntityId, serverEntityId } from '../../config/backendIdentity';
 import { mapPageIdentity } from '../../state/pages/identity';
-import { PageApiError, pagesFetch, readPagesJson } from './pages';
+import { pageApiError, pagesFetch, readPagesJson } from './pages';
+import { activityWriterFrom } from './legacyActor';
 
 // Like the Pages API, these responses carry opaque block and change ids, so
 // each DTO maps only its entity references instead of backendFetch's generic
@@ -43,16 +44,7 @@ async function request<T>(url: string, options: { method?: string; body?: unknow
     ...(options.signal ? { signal: options.signal } : {}),
     ...(options.body === undefined ? {} : { headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(options.body) }),
   });
-  if (!response.ok) {
-    const payload: unknown = await readPagesJson(response).catch(() => null);
-    const envelope = payload && typeof payload === 'object' ? (payload as { error?: unknown }).error : undefined;
-    const error = envelope && typeof envelope === 'object' ? envelope as { code?: unknown; message?: unknown } : {};
-    throw new PageApiError(
-      response.status,
-      typeof error.code === 'string' ? error.code : 'spaces_home_request_failed',
-      typeof error.message === 'string' ? error.message : `Pages Home request failed (${response.status})`,
-    );
-  }
+  if (!response.ok) throw await pageApiError(response, 'spaces_home_request_failed', 'Pages Home');
   return await readPagesJson(response) as T;
 }
 
@@ -92,6 +84,7 @@ function mapActivity(item: SpaceActivityItem, connectionId: string): SpaceActivi
   if (item.kind === 'page-change') {
     return {
       ...item,
+      ...(item.detail ? { detail: { ...item.detail, by: activityWriterFrom(item.detail.by) } } : {}),
       pageId: toRenderer(connectionId, item.pageId),
       workspaceId: toRenderer(connectionId, item.workspaceId),
       sourceNodeId: toRendererOrNull(connectionId, item.sourceNodeId),
@@ -214,11 +207,6 @@ export async function fetchSpaceActivity(connectionId: string, options: { limit?
 
 export async function fetchProgressCards(connectionId: string, signal?: AbortSignal): Promise<ProgressCardDto[]> {
   const answer = await request<{ items?: ProgressCardDto[] }>(`${base(connectionId)}/spaces-home/progress-cards`, { signal });
-  return (answer.items ?? []).map((card) => mapProgressCard(card, connectionId));
-}
-
-export async function fetchPageProgressCards(pageId: string, connectionId: string, signal?: AbortSignal): Promise<ProgressCardDto[]> {
-  const answer = await request<{ items?: ProgressCardDto[] }>(`${base(connectionId)}/pages/${pathId(pageId, connectionId)}/progress-cards`, { signal });
   return (answer.items ?? []).map((card) => mapProgressCard(card, connectionId));
 }
 

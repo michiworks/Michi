@@ -30,10 +30,10 @@ describe('visible shell navigation', () => {
     h.visit(chat('b', 'w2'));
     expect(h.step('onBack')).toEqual(home);
     expect(h.step('onBack')).toEqual(chat('a'));
-    expect(navigateToNode).toHaveBeenLastCalledWith(h.deps, 'a', 'w1');
+    expect(navigateToNode).toHaveBeenLastCalledWith(h.deps, 'a', 'w1', 'a');
     expect(h.step('onForward')).toEqual(home);
     expect(h.step('onForward')).toEqual(chat('b', 'w2'));
-    expect(navigateToNode).toHaveBeenLastCalledWith(h.deps, 'b', 'w2');
+    expect(navigateToNode).toHaveBeenLastCalledWith(h.deps, 'b', 'w2', 'b');
     h.step('onBack');
     h.visit(chat('c'));
     expect(h.result.current.canForward).toBe(false);

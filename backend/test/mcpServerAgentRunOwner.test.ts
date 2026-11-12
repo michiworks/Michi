@@ -38,7 +38,7 @@ import {
 import type { RuntimeSessionOwner } from '../src/agents/types';
 import { chatOwner, runOwner } from './helpers/owners';
 
-import { buildRunMcpSlotCallbacks } from '../src/agents/runs/runMcpSlot';
+import { buildRunMcpSlotCallbacks } from 'michi-runtime/internal/core/runMcpSlot';
 
 // ---------------------------------------------------------------------------
 // Helpers

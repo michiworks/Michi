@@ -1,4 +1,3 @@
-import React from 'react';
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { AnimatePresence } from 'motion/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -26,6 +25,18 @@ describe('ContextMenu confirmation', () => {
     if (dismiss === 'filter') fireEvent.change(screen.getByRole('textbox'), { target: { value: 'new query' } });
     act(() => { vi.advanceTimersByTime(200); });
     expect(run).not.toHaveBeenCalled();
+  });
+
+  it.each([{ isComposing: true }, { keyCode: 229 }])('keeps its filter on the Esc or Enter that ends an IME composition (%o)', (ime) => {
+    const { run, onClose } = open(true);
+    const filter = screen.getByRole('textbox');
+    fireEvent.change(filter, { target: { value: 'kai' } });
+    fireEvent.keyDown(filter, { key: 'Escape', ...ime });
+    fireEvent.keyDown(filter, { key: 'Enter', ...ime });
+    expect(onClose).not.toHaveBeenCalled();
+    expect(run).not.toHaveBeenCalled();
+    fireEvent.keyDown(filter, { key: 'Escape' });
+    expect(onClose).toHaveBeenCalledOnce();
   });
 
   it('fades out inside AnimatePresence without taking keys, clicks or a pending confirmation', async () => {
@@ -102,6 +113,23 @@ describe('ContextMenu toolbar anchoring', () => {
     return { top: parseFloat(menu.style.top), maxHeight: parseFloat(menu.style.maxHeight) };
   };
   afterEach(() => { vi.restoreAllMocks(); });
+
+  it('opens a menu that fits only above there, as the model picker does, when it would prefer below', () => {
+    // A Home composer trigger on a 390 × 844 phone: 436px above, 352px below;
+    // the agents menu is a 320px list under a 52px filter.
+    vi.stubGlobal('innerHeight', 844);
+    vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockImplementation(function (this: HTMLElement) {
+      return rect(this.classList.contains('michi-menu-list') ? 320 : 372);
+    });
+    vi.spyOn(HTMLElement.prototype, 'scrollHeight', 'get').mockImplementation(function (this: HTMLElement) {
+      return this.classList.contains('michi-menu-list') ? 320 : 0;
+    });
+    render(<ContextMenu x={100} y={484} anchorBottom={444} preferBelow menuKind="agents" searchable onClose={() => {}}
+      sections={[{ items: Array.from({ length: 12 }, (_, i) => ({ id: `agent-${i}`, label: `Agent ${i}`, run: () => {} })) }]} />);
+    const menu = screen.getByRole('menu');
+    expect(parseFloat(menu.style.top)).toBe(72);
+    expect(parseFloat(menu.style.maxHeight)).toBe(436);
+  });
 
   it('caps a tall list to the space above instead of sliding over the trigger', () => {
     const { top, maxHeight } = openAnchored(900, 506, 530, 700);

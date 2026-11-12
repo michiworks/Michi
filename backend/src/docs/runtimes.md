@@ -1,8 +1,8 @@
 # Choose and configure a runtime
 
-Applies to: registered ordinary-chat runtimes on the selected backend. Source checked: 2026-10-16. Prerequisites are source/documentation reviewed; successful provider authentication must be checked on your installation.
+Applies to: registered ordinary-chat runtimes on the selected backend. Source checked: 2026-11-08. Prerequisites are source/documentation reviewed; successful provider authentication must be checked on your installation.
 
-Open Settings → Model for the backend you are using. Select a runtime, model and supported reasoning level. A new chat's composer also exposes runtime-specific choices. A model's availability depends on installed software, authentication, provider access and that backend's configuration.
+Open Settings → Runtime & model for the backend you are using. Select a runtime, model and supported reasoning level. A new chat's composer also exposes runtime-specific choices. A model's availability depends on installed software, authentication, provider access and that backend's configuration.
 
 ## Choose a starting point
 
@@ -13,6 +13,7 @@ Open Settings → Model for the backend you are using. Select a runtime, model a
 | Direct multi-provider API use without an agent CLI | Pi |
 | Claude Code's native tools/session | Claude CLI integration |
 | Codex's app-server session/sandbox | Codex integration |
+| Google's Antigravity CLI (`agy`) | Antigravity, after opting in |
 
 Use `runtime-capabilities` for the detailed comparison. Changing the Settings default Runtime affects new chats; existing chats keep their runtime. Native provider features may not all be exposed in Michi.
 
@@ -20,7 +21,9 @@ Use `runtime-capabilities` for the detailed comparison. Changing the Settings de
 
 Install and authenticate `kiro-cli`, or configure `KIRO_CLI_BIN`. Michi connects over ACP and starts the V3 engine by default; set `MICHI_KIRO_ENGINE=v2` before starting the backend to keep V2. Kiro engines have their own capabilities; do not assume a Crew session follows the selected Kiro CLI engine. The Kiro composer offers Ask / Approve for me / Trust on V3 and Ask / Trust on V2. See `permissions` for Approve for me.
 
-Kiro V3 can preload Michi's own tool schemas; external MCP tools remain deferred. Tool exposure is independent from approval policy. If a tool is missing, confirm the runtime and tool configuration before changing permissions.
+Kiro preloads Michi's own tool schemas (V3 on kiro-cli 2.30+, V2 on 2.34+); external MCP tools remain deferred. Set `MICHI_KIRO_PRELOAD_TOOLS=false` to turn this off. Tool exposure is independent from approval policy. If a tool is missing, confirm the runtime and tool configuration before changing permissions.
+
+An idle Kiro chat gives back its live session after 15 minutes (`MICHI_KIRO_SESSION_IDLE_TTL_MS`; `0` keeps them all), and the next message resumes it natively. It keeps the session while a turn, wake, compaction or approval is open, while a workflow it launched is running or paused, and when Native Resume is off. A workflow quiet for two hours, or open six hours after the chat's last use, is stopped first.
 
 ## Kiro Crew
 
@@ -57,11 +60,19 @@ A provider that manages its own credentials, such as Amazon Bedrock, needs no `c
 
 The agent menu lists Codex's collaboration modes, Default and Plan. Plan explores without changing files and ends with a proposed plan, which appears in the answer. A chosen mode applies from the next message and stays until you choose another; a conversation resumed in Plan stays in Plan. Codex goals are off in Michi conversations: Codex would pursue a goal in turns it starts on its own, which Michi does not show.
 
-Michi conversations do not run the MCP servers configured in your Codex `config.toml`: each Codex thread disables them by name and keeps only Michi's own server. If one still runs (for example a server a plugin adds), Michi logs a warning and the conversation continues. The Pages Assistant and Meta agent refuse such a session instead.
+Michi conversations do not run the MCP servers configured in your Codex `config.toml`: each Codex thread disables them by name and keeps only Michi's own server. If one still runs (for example a server a plugin adds), Michi logs a warning and the conversation continues. Pages upkeep and automatic memory sessions refuse such a session instead.
 
 Codex supports Ask / Trust / YOLO. Ask uses a read-only sandbox with approvals; Trust permits workspace writes within the native sandbox; YOLO requests full native access.
 
-By default, Codex has no fixed session-count limit. `MICHI_CODEX_MAX_CONCURRENT` can impose a positive limit. Unset or zero means unlimited. Idle chat sessions are released after five minutes, checked once per minute, and resume their persisted native thread on the next message. Active turns and Executor-owned Agent Runs are preserved.
+By default, Codex has no fixed session-count limit. `MICHI_CODEX_MAX_CONCURRENT` can impose a positive limit. Unset or zero means unlimited. Idle chat sessions are released after five minutes, checked once per minute, and resume their persisted native thread on the next message. Active turns and Executor-owned Agent Runs are preserved. A chat whose background sub-agents are still running, or whose results have not been reported yet, is kept until they have been quiet for two hours, and at most six hours after the chat's last use.
+
+## Antigravity
+
+Antigravity is off by default. Set `MICHI_ENABLE_ANTIGRAVITY=1`, or list `antigravity` in `MICHI_ENABLED_RUNTIMES`, before starting the backend. Install Google's Antigravity CLI, run `agy` once in a terminal and sign in with Google. While it is signed out, a new chat fails with a sign-in message. Michi looks for `agy` on PATH, then in `~/.local/bin`; set `MICHI_ANTIGRAVITY_BIN` to an executable to override that (a bad value is reported, not skipped).
+
+Michi launches `agy acp` and speaks standard ACP to it, with the engine pinned to V2 (one `agy` process per working directory) whatever `MICHI_KIRO_ENGINE` says. The model comes from the session's model option; reasoning offers low, medium and high. Michi's tools are reached over HTTP MCP. Its composer offers Ask / Trust; agy itself does not ask before reads inside the workspace or MCP tool calls.
+
+Known limits: no same-turn steer (a busy message waits for the next turn); `/compact` answers that it is not supported, and agy compacts on its own; no plan or accept-edits modes; forks replay Michi's history; images are sent as links to their files; a subagent agy starts finishes as a tool call and its report arrives at the next turn. Antigravity runs no Agent Runs, Pages upkeep or automatic memory sessions.
 
 ## Local and remote requirements
 

@@ -1,8 +1,11 @@
 /**
- * The assistant's MCP slot (the Meta agent's chat window): exactly its own
- * tools, cross-workspace reads for the assistant only, no sending into
- * existing conversations, and ordinary chat slots unchanged. Temp SQLite per
- * test; thread delivery is an injected fake.
+ * The assistant's MCP slot for V, the user's conversation with the agent
+ * (DESIGN-v2 §2.3): exactly V's catalog (⌘J's tools, the scheduled-job tools,
+ * Memory, the agent's own but nothing_to_do), cross-workspace reads for the
+ * assistant only, no sending into existing conversations, and ordinary chat
+ * slots unchanged. A check-in's catalog per runtime:
+ * companionToolsCatalog.test.ts. Temp SQLite per test; thread delivery is an
+ * injected fake.
  */
 
 import { afterEach, beforeEach, describe, test } from 'node:test';
@@ -16,14 +19,19 @@ import { McpSlotRegistry, buildMcpServerForSlot, type McpSlot } from '../src/ser
 import { configureThreadMessaging, type ThreadMessagingDeps } from '../src/agents/threadMessageTool';
 import type { StartRequestedSelfTurnArgs, StartedRequestedSelfTurn } from '../src/agents/chatHub';
 import type { AgentSession } from '../src/agents/types';
-import { ensureAssistant, ensureAssistantFor } from '../src/assistant/store';
+import { ensureAssistant } from '../src/assistant/store';
 import {
-  ASSISTANT_TOOL_NAMES, LAYOUT_RULES_TOOL, META_AGENT_CHAT_TOOL_NAMES, SCHEDULE_ASSISTANT_TOOL_NAMES, START_CONVERSATION_TOOL, TURN_METADATA_TOOL_NAMES,
+  ASSISTANT_TOOL_NAMES, CHECKIN_TOOL_NAMES, COMPANION_OWN_TOOL_NAMES, LAYOUT_RULES_TOOL, MAIN_TOOL_NAMES, META_AGENT_CHAT_TOOL_NAMES, START_CONVERSATION_TOOL,
+  TURN_METADATA_TOOL_NAMES,
 } from '../src/assistant/policy';
+import { activeTurnRow, makeCheckinNode } from './helpers/checkinNodes';
+import { noteAssistantScheduleTurn } from '../src/assistant/identity';
 import { PAGE_TOOL_NAMES } from '../src/agents/pageToolNames';
 import { SCHEDULED_JOB_TOOL_NAMES, isScheduledJobToolName } from '../src/agents/scheduledJobToolNames';
+import { MEMORY_TOOL_NAMES, isMemoryToolName } from '../src/agents/memoryToolNames';
 import { configureScheduledJobTools } from '../src/agents/scheduledJobTools';
 import { ScheduledJobNotFoundError } from '../src/services/scheduledJobs/scheduler';
+import { urlOpenRequests } from '../src/services/urlOpenRequests';
 import type { ScheduledJobDto } from 'michi-shared';
 import { runOwner } from './helpers/owners';
 
@@ -55,13 +63,14 @@ function slotFor(nodeId: string, workspaceId: string, extra: Record<string, unkn
   } as never, { nodeId, workspaceId });
 }
 
-/** A slot as an assistant-profile session creates it (Claude, Codex). */
+/** V's slot as its open profile makes it (Claude, Codex): no allow-list; the conversation's purpose picks the catalog. */
 function assistantSlotFor(nodeId: string, workspaceId: string, extra: Record<string, unknown> = {}, onAskUser?: AskUser): McpSlot {
-  return slotFor(nodeId, workspaceId, {
-    restricted: true,
-    exposedToolNames: new Set(META_AGENT_CHAT_TOOL_NAMES),
-    ...extra,
-  }, onAskUser);
+  return slotFor(nodeId, workspaceId, extra, onAskUser);
+}
+
+/** A slot as a closed assistant profile makes it: a check-in's, restricted to its allow-list. */
+function closedSlotFor(nodeId: string, workspaceId: string, extra: Record<string, unknown> = {}, onAskUser?: AskUser): McpSlot {
+  return slotFor(nodeId, workspaceId, { restricted: true, exposedToolNames: new Set(CHECKIN_TOOL_NAMES), ...extra }, onAskUser);
 }
 
 function tools(slot: McpSlot): Record<string, { handler: (args: unknown, extra: unknown) => Promise<{ content: Array<{ text: string }>; isError?: boolean }> }> {
@@ -123,43 +132,89 @@ describe('Michi assistant MCP tools', () => {
     fs.rmSync(tmpDir, { recursive: true, force: true });
   });
 
-  test('the assistant slot exposes exactly the chat-window toolset, without send_to_thread', () => {
-    const chatTools = META_AGENT_CHAT_TOOL_NAMES.filter((name) => !(TURN_METADATA_TOOL_NAMES as readonly string[]).includes(name));
+  test('V\'s slot exposes exactly its catalog, without send_to_thread', () => {
+    const v = MAIN_TOOL_NAMES.filter((name) => !(TURN_METADATA_TOOL_NAMES as readonly string[]).includes(name));
     const slot = assistantSlotFor(assistant.nodeId, assistant.workspaceId, {}, async () => null);
-    assert.deepEqual(Object.keys(tools(slot)).sort(), [...chatTools].sort());
+    assert.deepEqual(Object.keys(tools(slot)).sort(), [...v].sort());
     assert.ok(!Object.keys(tools(slot)).includes('send_to_thread'));
 
-    // Runtime callbacks cannot widen the assistant profile's tool allow-list.
+    // Runtime callbacks add the turn metadata tools, as on any open slot, and nothing else.
     const withMetadata = assistantSlotFor(assistant.nodeId, assistant.workspaceId, {
-      onSetFollowUps: () => {}, onSetBranchOverview: () => {}, onValidateFollowUps: () => ({}),
+      onSetFollowUps: () => {}, onSetBranchOverview: () => {},
     }, async () => null);
     const names = Object.keys(tools(withMetadata));
-    assert.deepEqual([...names].sort(), [...META_AGENT_CHAT_TOOL_NAMES].sort(), 'the whole catalog is the closed allow-list');
+    assert.deepEqual([...names].sort(), [...MAIN_TOOL_NAMES, ...TURN_METADATA_TOOL_NAMES].sort(), 'the whole catalog');
+    assert.deepEqual(names.filter((n) => !(META_AGENT_CHAT_TOOL_NAMES as readonly string[]).includes(n)
+      && !(TURN_METADATA_TOOL_NAMES as readonly string[]).includes(n)).sort(),
+      [...SCHEDULED_JOB_TOOL_NAMES, ...MEMORY_TOOL_NAMES, ...COMPANION_OWN_TOOL_NAMES.filter((name) => name !== 'nothing_to_do')].sort(),
+      'beyond ⌘J\'s: the scheduled-job tools, Memory and the agent\'s own, but nothing_to_do (DESIGN-v2 §2.3)');
     assert.deepEqual(names.filter((n) => !(ASSISTANT_TOOL_NAMES as readonly string[]).includes(n)
-      && !(PAGE_TOOL_NAMES as readonly string[]).includes(n)).sort(),
-    ['ask_user', 'read_conversation_updates', LAYOUT_RULES_TOOL, START_CONVERSATION_TOOL].sort());
-    for (const name of TURN_METADATA_TOOL_NAMES) assert.ok(!names.includes(name), `${name} belongs to ordinary chats`);
+      && !(PAGE_TOOL_NAMES as readonly string[]).includes(n) && !isScheduledJobToolName(n) && !isMemoryToolName(n)
+      && !(COMPANION_OWN_TOOL_NAMES as readonly string[]).includes(n)).sort(),
+    ['ask_user', 'read_conversation_updates', LAYOUT_RULES_TOOL, START_CONVERSATION_TOOL, ...TURN_METADATA_TOOL_NAMES].sort());
     assert.ok(!Object.keys(tools(assistantSlotFor(assistant.nodeId, assistant.workspaceId))).includes('ask_user'),
       'a slot without a question callback cannot advertise ask_user');
-    for (const writer of ['save_artifact', 'update_artifact', 'spawn_branches', 'show_image', 'open_url', 'spawn_agent']) {
-      assert.ok(!names.includes(writer), `${writer} is not offered to the assistant`);
+    for (const writer of ['save_artifact', 'update_artifact', 'spawn_branches', 'spawn_agent', 'nothing_to_do']) {
+      assert.ok(!names.includes(writer), `${writer} is not offered to V`);
     }
+    for (const name of ['michi_skills', 'open_url', 'show_image']) assert.ok(names.includes(name), `${name} is V's too`);
     assert.deepEqual(names.filter((name) => name.startsWith('desk_')), [], 'nothing reads or writes Agent Desk');
   });
 
-  test('the assistant workspace retains its catalog without restricting native tools', () => {
-    const channels = ['ask_user'];
-    // A session not set up as the assistant (say, a runtime that ignored the profile) in its home: nothing but the channels.
-    const unmarked = Object.keys(tools(slotFor(assistant.nodeId, assistant.workspaceId, {}, async () => null))).sort();
-    assert.deepEqual(unmarked, [...META_AGENT_CHAT_TOOL_NAMES].sort());
-    // An assistant-profile slot anywhere else: the same.
-    const elsewhere = Object.keys(tools(assistantSlotFor('n-a1', 'ws-a', {}, async () => null))).sort();
-    assert.deepEqual(elsewhere, channels);
-    // An Agent Run owner never gets it, even bound to the assistant's node.
+  test('V reads skills, opens links in its own conversation and shows images, through its host', async () => {
+    const reports: Array<{ type: string; payload?: unknown }> = [];
+    const sink = { emit: (event: { type: string; payload?: unknown }) => { reports.push(event); } };
+    const slot = assistantSlotFor(assistant.nodeId, assistant.workspaceId, {
+      onShowImage: (inputPath: string, _caption?: string) => inputPath === 'missing.png'
+        ? { error: 'no such file' } : { relPath: inputPath, mimeType: 'image/png', size: 16 },
+    }, async () => null);
+    const show = async (args: Record<string, unknown>) => {
+      const result = await tools(slot).show_image.handler(args, { sink });
+      return { text: result.content.map((part) => part.text).join(''), isError: result.isError === true };
+    };
+    assert.deepEqual(await show({ path: 'chart.png', caption: 'Chart' }), { text: 'Displayed chart.png to the user.', isError: false });
+    assert.deepEqual(await show({ path: 'missing.png' }), { text: 'show_image failed: no such file', isError: true });
+    assert.deepEqual(reports, [{ type: 'image', payload: { path: 'chart.png', caption: 'Chart', mimeType: 'image/png', size: 16 } }],
+      'only the image the host found is shown');
+
+    const opened = await call(slot, 'open_url', { url: 'https://example.com/a' });
+    assert.equal(opened.isError, false);
+    assert.equal(urlOpenRequests.claim({ workspaceId: assistant.workspaceId, treeId: assistant.treeId, ownerUserId: null })?.url,
+      'https://example.com/a', "the link waits for the assistant's own conversation");
+
+    const skills = await call(slot, 'michi_skills', {});
+    assert.equal(skills.isError, false);
+    assert.ok(Array.isArray(JSON.parse(skills.text).skills));
+
+    const withoutImages = assistantSlotFor(assistant.nodeId, assistant.workspaceId, { onShowImage: undefined }, async () => null);
+    assert.ok(!Object.keys(tools(withoutImages)).includes('show_image'), 'a host without an image callback offers no show_image');
+    process.env.MICHI_CLOUD = '1';
+    try {
+      assert.ok(!Object.keys(tools(slot)).includes('michi_skills'), 'cloud mode keeps no skill library');
+    } finally {
+      delete process.env.MICHI_CLOUD;
+    }
+  });
+
+  test('the assistant workspace keeps its catalogs by purpose; a closed slot elsewhere gets none of them', () => {
+    // V and a check-in, in the assistant's home: each its own catalog.
+    const s = makeCheckinNode(assistant.workspaceId);
+    const checkin = Object.keys(tools(closedSlotFor(s, assistant.workspaceId, {}, async () => null))).sort();
+    assert.deepEqual(checkin, [...CHECKIN_TOOL_NAMES].sort());
+    // A check-in's node in an unmarked session still gets the check-in catalog alone: never V's,
+    // nor the shared ask_user and turn metadata channels (its hidden turn has no user to ask).
+    const unmarkedCheckin = Object.keys(tools(slotFor(s, assistant.workspaceId, {
+      onSetFollowUps: () => {}, onSetBranchOverview: () => {},
+    }, async () => null)));
+    assert.deepEqual([...unmarkedCheckin].sort(), [...CHECKIN_TOOL_NAMES].sort());
+    // A closed slot anywhere else: none of the assistant's tools.
+    const elsewhere = Object.keys(tools(closedSlotFor('n-a1', 'ws-a', {}, async () => null)));
+    for (const name of [...ASSISTANT_TOOL_NAMES, ...COMPANION_OWN_TOOL_NAMES]) assert.ok(!elsewhere.includes(name), name);
+    // An Agent Run owner never gets them, even bound to V's node.
     const run = Object.keys(tools(assistantSlotFor(assistant.nodeId, assistant.workspaceId, {
       owner: runOwner('r-1', 'a-1'),
     }, async () => null)));
-    assert.ok(!run.includes('list_workspaces') && !run.includes(START_CONVERSATION_TOOL));
+    assert.ok(!run.includes('list_workspaces') && !run.includes(START_CONVERSATION_TOOL) && !run.includes('companion_rename'));
   });
 
   test('ordinary chat slots keep their tools and never see the assistant ones', () => {
@@ -190,32 +245,19 @@ describe('Michi assistant MCP tools', () => {
     assert.ok(JSON.parse(listed.text));
   });
 
-  test('scheduled-job tools are for ordinary chats: never the assistant, nor a fenced slot', () => {
+  test('scheduled-job tools: ordinary chats and V, never a check-in nor a closed slot elsewhere', () => {
     const scheduling = (slot: McpSlot) => Object.keys(tools(slot)).filter((name) => isScheduledJobToolName(name)).sort();
     assert.deepEqual(scheduling(slotFor('n-a1', 'ws-a', {}, async () => null)), [...SCHEDULED_JOB_TOOL_NAMES].sort(),
       'ordinary chats keep them');
-    assert.deepEqual(scheduling(assistantSlotFor(assistant.nodeId, assistant.workspaceId, {}, async () => null)), [],
-      'the assistant is not a worker');
-    assert.deepEqual(scheduling(slotFor(assistant.nodeId, assistant.workspaceId, {}, async () => null)), [],
-      "an unmarked session in the assistant's workspace");
-    assert.deepEqual(scheduling(assistantSlotFor('n-a1', 'ws-a', {}, async () => null)), [],
-      'an assistant-profile session elsewhere');
+    assert.deepEqual(scheduling(assistantSlotFor(assistant.nodeId, assistant.workspaceId, {}, async () => null)), [...SCHEDULED_JOB_TOOL_NAMES].sort(),
+      'V has them: the Scheduled page\'s "Create with agent" opens V (DESIGN-v2 §1.1)');
+    const s = makeCheckinNode(assistant.workspaceId);
+    assert.deepEqual(scheduling(closedSlotFor(s, assistant.workspaceId, {}, async () => null)), [], 'a check-in');
+    assert.deepEqual(scheduling(slotFor(s, assistant.workspaceId, {}, async () => null)), [], 'a check-in\'s node in an unmarked session');
+    assert.deepEqual(scheduling(closedSlotFor('n-a1', 'ws-a', {}, async () => null)), [], 'a closed slot elsewhere');
   });
 
-  test('the Scheduled window\'s conversation gets its own catalog: conversation reads and scheduled jobs, no Pages', () => {
-    const schedule = ensureAssistantFor('schedule');
-    const names = Object.keys(tools(slotFor(schedule.nodeId, schedule.workspaceId, {}, async () => null))).sort();
-    assert.deepEqual(names, [...SCHEDULE_ASSISTANT_TOOL_NAMES].sort());
-    for (const name of [...PAGE_TOOL_NAMES, START_CONVERSATION_TOOL, LAYOUT_RULES_TOOL, 'send_to_thread', 'read_conversation_updates', 'save_artifact']) {
-      assert.ok(!names.includes(name), `${name} is not the Scheduled window's`);
-    }
-    // The Spaces conversation in the same workspace keeps its own catalog, without scheduled jobs.
-    const spaces = Object.keys(tools(slotFor(assistant.nodeId, assistant.workspaceId, {}, async () => null)));
-    assert.deepEqual([...spaces].sort(), [...META_AGENT_CHAT_TOOL_NAMES].sort());
-    assert.ok(!spaces.some((name) => isScheduledJobToolName(name)));
-  });
-
-  test('the Scheduled window schedules only where the user lets it, and the approval names the workspace', async () => {
+  test('V schedules only where the user lets it, the approval names the workspace, and only a job made in a turn sent from Scheduled marks V (jobCreated)', async () => {
     const jobs: ScheduledJobDto[] = [];
     configureScheduledJobTools({
       scheduler: {
@@ -242,7 +284,7 @@ describe('Michi assistant MCP tools', () => {
     getDb().prepare('UPDATE workspaces SET archived_at = 9 WHERE id = ?').run('ws-arch');
     setAiGlobalContext('ws-b', false);
     const questions: string[] = [];
-    const schedule = ensureAssistantFor('schedule');
+    const schedule = ensureAssistant();
     const slot = slotFor(schedule.nodeId, schedule.workspaceId, {}, async (qs) => { questions.push(qs[0].question); return { [qs[0].question]: 'Create' }; });
     const job = { name: 'Digest', prompt: 'Summarize overnight changes.', schedule: { kind: 'every', everySeconds: 3600 } };
 
@@ -258,14 +300,30 @@ describe('Michi assistant MCP tools', () => {
     }
     assert.equal(questions.length, 0, 'the user is asked only about a job that can be created');
     assert.equal(jobs.length, 0);
+    assert.equal(ensureAssistant().jobCreated, false, 'a refused job leaves the conversation open');
 
+    // D6: a job made in a turn the user sent from Pages or the conversation area leaves V where it is.
+    activeTurnRow(schedule.nodeId, 'turn-chat', 'a-turn-chat');
     const created = await call(slot, 'create_scheduled_job', { ...job, workspaceId: 'ws-a' });
     assert.equal(created.isError, false, created.text);
     assert.equal(JSON.parse(created.text).status, 'created');
+    assert.equal(ensureAssistant().jobCreated, false, 'a job made outside the Scheduled area does not move V to History');
     assert.equal(questions.length, 1);
     assert.match(questions[0], /^Create scheduled job “Digest”\?\nWorkspace: Project ws-a\n/);
     assert.equal(jobs[0].workspaceId, 'ws-a');
-    assert.deepEqual(JSON.parse((await call(slot, 'list_scheduled_jobs')).text).jobs.map((each: any) => each.workspace), [{ id: 'ws-a', name: 'Project ws-a' }]);
+
+    // A Scheduled-area turn that is not the running one does not count either.
+    noteAssistantScheduleTurn(schedule.nodeId, 'turn-earlier');
+    assert.equal((await call(slot, 'create_scheduled_job', { ...job, name: 'Digest 2', workspaceId: 'ws-a' })).isError, false);
+    assert.equal(ensureAssistant().jobCreated, false, 'only the turn the job is made in decides');
+
+    getDb().prepare("UPDATE turns SET status = 'completed' WHERE turn_id = 'turn-chat'").run();
+    activeTurnRow(schedule.nodeId, 'turn-sched', 'a-turn-sched');
+    noteAssistantScheduleTurn(schedule.nodeId, 'turn-sched');
+    assert.equal((await call(slot, 'create_scheduled_job', { ...job, name: 'Digest 3', workspaceId: 'ws-a' })).isError, false);
+    assert.equal(ensureAssistant().jobCreated, true, 'the next "Create with agent" starts a new conversation (DESIGN-v2 Q5)');
+    assert.deepEqual(JSON.parse((await call(slot, 'list_scheduled_jobs')).text).jobs.map((each: any) => each.workspace),
+      [1, 2, 3].map(() => ({ id: 'ws-a', name: 'Project ws-a' })));
   });
 
   test('ordinary chats still cannot message or inspect another workspace', async () => {
@@ -295,7 +353,7 @@ describe('Michi assistant MCP tools', () => {
     configureThreadMessaging(h.deps);
     let asked = 0;
     const slot = assistantSlotFor(assistant.nodeId, assistant.workspaceId, {
-      exposedToolNames: new Set([...META_AGENT_CHAT_TOOL_NAMES, 'send_to_thread']),
+      restricted: true, exposedToolNames: new Set([...MAIN_TOOL_NAMES, 'send_to_thread']),
     }, async (qs) => { asked += 1; return { [qs[0].question]: 'Send' }; });
     assert.equal(tools(slot).send_to_thread, undefined);
     assert.equal(asked, 0);
@@ -373,6 +431,31 @@ describe('Michi assistant MCP tools', () => {
         assert.match(refused.text, new RegExp(`node not found: ${nodeId}`));
       }
     }
+  });
+
+  test('the pane tools refuse deleted and system workspaces as read_node does', async () => {
+    saveMessage({ id: 'm-q', node_id: assistant.nodeId, role: 'assistant', content: 'my own answer', seq: 1, created_at: 1 });
+    saveMessage({ id: 'm-a1', node_id: 'n-a1', role: 'assistant', content: 'an answer in ws-a', seq: 1, created_at: 1 });
+    const slot = assistantSlotFor(assistant.nodeId, assistant.workspaceId);
+    const hidden = await call(slot, 'list_panes', { workspaceId: assistant.workspaceId, scope: 'all' });
+    assert.ok(hidden.isError, hidden.text);
+    assert.match(hidden.text, /^NOT_FOUND: list: workspace not found/);
+
+    getDb().prepare('UPDATE workspaces SET deleted_at = 5 WHERE id = ?').run('ws-a');
+    for (const nodeId of [assistant.nodeId, 'n-a1']) {
+      for (const [name, args] of [
+        ['inspect_pane', { nodeId }],
+        ['read_pane_output', { nodeId }],
+        ['wait_pane', { nodeId, until: 'terminal', executionRef: { kind: 'chat_turn', nodeId, turnId: 't-1' }, timeoutMs: 1 }],
+      ] as const) {
+        const refused = await call(slot, name, args);
+        assert.ok(refused.isError, `${name} ${nodeId}: ${refused.text}`);
+        assert.match(refused.text, /^NOT_FOUND/, `${name} ${nodeId}`);
+        assert.doesNotMatch(refused.text, /my own answer|an answer in ws-a/, `${name} ${nodeId}`);
+      }
+    }
+    const deleted = await call(slot, 'list_panes', { workspaceId: 'ws-a', scope: 'all' });
+    assert.match(deleted.text, /^NOT_FOUND: list: workspace not found/);
   });
 
   test('list_workspaces, list_threads and list_panes name the workspace explicitly', async () => {

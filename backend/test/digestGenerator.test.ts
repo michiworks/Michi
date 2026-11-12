@@ -45,6 +45,19 @@ describe('streamDigestGeneration', () => {
     assert.match(fake.prompt(), /# Previous digest/);
   });
 
+  it('keeps the reply\'s metadata markers out of the final document, but not quoted ones', async () => {
+    const fake = manager([
+      { kind: 'chunk', text: '[TITLE: Internal]\n# Result\n\nEnd replies with `[BRANCH-OVERVIEW: one line]`.\n\n' },
+      { kind: 'chunk', text: '[FOLLOW-UP 1/3: Next?]\n[BRANCH-OVERVIEW: Summarized the threads]' },
+      { kind: 'turn_end' },
+    ]);
+    let finalMarkdown = '';
+    for await (const event of streamDigestGeneration(fake.chatManager, request)) {
+      if (event.kind === 'done') finalMarkdown = event.finalMarkdown;
+    }
+    assert.equal(finalMarkdown, '# Result\n\nEnd replies with `[BRANCH-OVERVIEW: one line]`.');
+  });
+
   it('propagates runtime errors instead of finishing with an empty digest', async () => {
     const fake = manager([{ kind: 'thought', text: 'Thinking' }, { kind: 'runtime_error', error: 'Runtime unavailable' }]);
     await assert.rejects(async () => {

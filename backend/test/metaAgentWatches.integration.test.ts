@@ -70,8 +70,14 @@ class FakeModel implements ScheduledJobExecutor {
   processExitStopsExecution = true;
   started: ModelRun[] = [];
   script: Script = () => {};
+  /** Runs before the session opens, as the real executor's setup does; it then checks the run is still current. */
+  setup: (() => Promise<void>) | null = null;
 
   async start(job: ScheduledJobRecord, run: ScheduledJobRunRecord, hooks: ScheduledRunHooks): Promise<ScheduledRunHandle> {
+    if (this.setup) {
+      await this.setup();
+      if (hooks.isCurrent && !hooks.isCurrent()) throw new Error('Scheduled execution was cancelled or lost scheduler ownership');
+    }
     const index = this.started.length + 1;
     const nodeId = `maintenance-node-${index}`;
     const turnId = `maintenance-turn-${index}`;
@@ -201,6 +207,8 @@ test('a due watch runs as its own check: one final decision per resource, and th
       assert.equal(added.applied.length, 1);
       // An exact retry replays the decision; anything else is refused once it is final.
       assert.deepEqual(run.call('maintenance_write_database', { sourceTurnId: id, databaseId: tasks.id, ops: row }), added);
+      const reordered = [{ values: { next: 'Triage with the owner', status: 'todo', task: 'T-1: login errors' }, op: 'row.add' }];
+      assert.deepEqual(run.call('maintenance_write_database', { sourceTurnId: id, databaseId: tasks.id, ops: reordered }), added);
       assert.match(run.refused('maintenance_write_database', { sourceTurnId: id, databaseId: tasks.id,
         ops: [{ op: 'row.add', values: { task: 'T-2' } }] }), /final decision/);
       const read = run.call('maintenance_read_page', { sourceTurnId: id, pageId: page.id });
@@ -249,7 +257,7 @@ test('a check that records no decision fails, and three in a row pause the watch
     for (let attempt = 1; attempt <= 3; attempt += 1) {
       await runOnce(sched, model, jobId);
       assert.equal(sched.listRuns(jobId)[0]!.status, 'failed');
-      assert.match(sched.listRuns(jobId)[0]!.error ?? '', /finished watch “Tasks” without recording a decision/);
+      assert.match(sched.listRuns(jobId)[0]!.error ?? '', /^Pages upkeep finished watch “Tasks” without recording a decision/);
       now += 15 * MINUTE;
     }
     const [paused] = listWatches('ws', OWNER);
@@ -264,6 +272,36 @@ test('a check that records no decision fails, and three in a row pause the watch
     await sched.stop();
   }
 });
+
+for (const stop of ['Michi stops', 'the scheduler loses its lease'] as const) {
+  test(`a check stopped while it is still starting because ${stop} is not counted as a failure`, async () => {
+    const model = new FakeModel();
+    const sched = scheduler(model);
+    let entered!: () => void;
+    const entering = new Promise<void>((resolve) => { entered = resolve; });
+    let release!: () => void;
+    model.setup = () => { entered(); return new Promise<void>((resolve) => { release = resolve; }); };
+    try {
+      const jobId = enable(sched);
+      createWatch({ workspaceId: 'ws', ownerUserId: OWNER, title: 'Tickets', instructions: 'Check tickets', intervalMinutes: 15, now });
+      assert.ok('run' in sched.startNow(jobId));
+      await entering;
+      if (stop === 'Michi stops') await sched.stop();
+      else getDb().prepare("UPDATE scheduler_lease SET holder='another-instance'").run();
+      release();
+      const claims = () => (getDb().prepare('SELECT COUNT(*) AS n FROM scheduler_execution_claims').get() as { n: number }).n;
+      await until(() => claims() === 0, 'the stopped setup to end');
+      const [watch] = listWatches('ws', OWNER);
+      assert.equal(watch!.enabled, true);
+      assert.equal(watch!.lastRun?.state, 'interrupted');
+      const row = getDb().prepare('SELECT consecutive_failures FROM meta_agent_watches').get() as { consecutive_failures: number };
+      assert.equal(row.consecutive_failures, 0);
+    } finally {
+      release?.();
+      await sched.stop();
+    }
+  });
+}
 
 test('a due watch goes before conversation work, which then carries the workspace instructions; excluded pages stay out of reach', async () => {
   const excluded = createPage({ workspaceId: 'ws', ownerUserId: OWNER, title: 'Private notes', now });

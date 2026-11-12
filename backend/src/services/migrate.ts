@@ -10,7 +10,7 @@ import path from 'node:path';
  * - Skips files whose basename (without .sql) is already in the ledger.
  * - Runs each new migration inside a transaction, statement by statement;
  *   throws on the first non-benign failure (see isBenign).
- * - Does NOT depend on drizzle at runtime — pure node:fs + node:sqlite.
+ * - Pure node:fs + node:sqlite with no ORM: the SQL files are the only schema source.
  */
 export function runMigrations(
   db: DatabaseSync,
@@ -25,26 +25,8 @@ export function runMigrations(
     )
   `);
 
-  // Read migration files sorted lexicographically. Throw on missing dir —
-  // a silent no-op here once shipped a half-migrated prod (P1.5 table absent,
-  // P1.3 column absent) because esbuild didn't copy *.sql into dist/. Better
-  // a loud boot failure than a quietly broken cloud install.
-  const files = fs
-    .readdirSync(dir)
-    .filter((f) => f.endsWith('.sql'))
-    .sort();
-
-  // Collect already-applied versions
-  const applied = new Set(
-    (db.prepare(`SELECT version FROM ${ledgerTable}`).all() as Array<{ version: string }>)
-      .map((r) => r.version)
-  );
-
-  for (const file of files) {
-    const version = file.replace(/\.sql$/, '');
-    if (applied.has(version)) continue;
-
-    const sql = fs.readFileSync(path.join(dir, file), 'utf8');
+  for (const version of pendingMigrations(db, dir, ledgerTable)) {
+    const sql = fs.readFileSync(path.join(dir, `${version}.sql`), 'utf8');
 
     db.exec('BEGIN');
     try {
@@ -66,6 +48,37 @@ export function runMigrations(
       throw new Error(`Migration "${version}" failed: ${(err as Error).message}`);
     }
   }
+}
+
+/**
+ * Versions in `dir` that the ledger does not list yet, in the order
+ * runMigrations applies them. Read-only: a missing ledger means nothing has
+ * been applied, and it is not created here.
+ */
+export function pendingMigrations(
+  db: DatabaseSync,
+  dir: string,
+  ledgerTable = 'schema_migrations'
+): string[] {
+  // Read migration files sorted lexicographically. Throw on missing dir —
+  // a silent no-op here once shipped a half-migrated prod (P1.5 table absent,
+  // P1.3 column absent) because esbuild didn't copy *.sql into dist/. Better
+  // a loud boot failure than a quietly broken cloud install.
+  const versions = fs
+    .readdirSync(dir)
+    .filter((f) => f.endsWith('.sql'))
+    .sort()
+    .map((f) => f.replace(/\.sql$/, ''));
+
+  const hasLedger = db
+    .prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?")
+    .get(ledgerTable);
+  if (!hasLedger) return versions;
+  const applied = new Set(
+    (db.prepare(`SELECT version FROM ${ledgerTable}`).all() as Array<{ version: string }>)
+      .map((r) => r.version)
+  );
+  return versions.filter((version) => !applied.has(version));
 }
 
 /**

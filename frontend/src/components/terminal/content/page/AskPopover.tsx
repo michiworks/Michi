@@ -1,8 +1,11 @@
-import React, { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { ArrowUp } from 'lucide-react';
 import { PopoverSurface } from '../../../ui/Popover';
+import { useBackLayer } from '../../../../lib/backStack';
+import { placeBelowAnchor } from '../../../ui/useAnchoredPosition';
 import { BranchIcon } from '../../icons';
 import { BorderBtn } from '../../primitives';
+import { isImeComposing } from '../../../../lib/ime';
 import './michiPage.css';
 
 const WIDTH = 360;
@@ -11,7 +14,6 @@ const PAD = 8;
 const FOCUSABLE = 'button:not([disabled]), input:not([disabled]), [tabindex]:not([tabindex="-1"])';
 
 export const BLOCK_SUGGESTIONS = ['Why is this late?', 'Re-plan by week', 'Explain this block'] as const;
-export const PAGE_SUGGESTIONS = ["These aren't one project", 'A conversation is missing', 'Add background'] as const;
 
 /**
  * Ask about one part of the workspace document. The question opens as a new
@@ -42,13 +44,8 @@ export function AskPopover({
 
   // Right-aligned under the anchor; above it when the viewport runs out.
   const place = useCallback(() => {
-    const rect = anchor.getBoundingClientRect();
     const box = surfaceRef.current?.getBoundingClientRect();
-    const width = box?.width || WIDTH;
-    const height = box?.height || 0;
-    const left = Math.max(PAD, Math.min(window.innerWidth - width - PAD, rect.right - width));
-    let top = rect.bottom + GAP;
-    if (top + height > window.innerHeight - PAD && rect.top - GAP - height >= PAD) top = rect.top - GAP - height;
+    const { left, top } = placeBelowAnchor(anchor.getBoundingClientRect(), { width: box?.width || WIDTH, height: box?.height || 0 }, { align: 'end', gap: GAP, pad: PAD });
     setPosition((prev) => (prev && prev.left === left && prev.top === top ? prev : { left, top }));
   }, [anchor]);
 
@@ -62,10 +59,11 @@ export function AskPopover({
     anchor.focus({ preventScroll: true });
     onCloseRef.current();
   }, [anchor]);
+  useBackLayer(true, { back: close });
 
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
-      if (event.isComposing) return;
+      if (isImeComposing(event)) return;
       if (event.key === 'Escape') {
         event.preventDefault();
         event.stopPropagation();
@@ -120,6 +118,7 @@ export function AskPopover({
       ref={surfaceRef}
       role="dialog"
       aria-label={`Ask about ${label}`}
+      escapeLayer="over"
       width={WIDTH}
       maxWidth={`calc(100vw - ${PAD * 2}px)`}
       left={position?.left ?? 0}

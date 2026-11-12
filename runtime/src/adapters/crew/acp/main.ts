@@ -12,12 +12,10 @@
  * - `MICHI_CREW_AGENT`  explicit agent for new slots (otherwise prefer installed michi-crew)
  * - `MICHI_CREW_MEMORY_MODE` persistent (default), incognito, or temporary for new slots only
  */
-import os from 'os';
-import path from 'path';
 import { runCrewAcpServer } from './acpServer';
 import { createCrewGateway } from './gatewayClient';
 import type { CrewGatewayConfig, CrewMemoryMode } from './gatewayTypes';
-import { DEFAULT_CREW_APP } from '../crewLaunch';
+import { DEFAULT_CREW_APP, crewAppName, crewHomeDir } from '../crewLaunch';
 
 export { DEFAULT_CREW_APP };
 
@@ -50,8 +48,8 @@ export function parseCrewAcpConfig(argv: readonly string[], env: NodeJS.ProcessE
     return {
         gateway: {
             baseUrl: env.CREW_GATEWAY_URL?.trim() || `http://127.0.0.1:${port}`,
-            appName: env.MICHI_CREW_APP?.trim() || DEFAULT_CREW_APP,
-            kirocrewHome: env.KIROCREW_HOME?.trim() || path.join(os.homedir(), '.kiro', 'crew'),
+            appName: crewAppName({ appName: env.MICHI_CREW_APP }),
+            kirocrewHome: crewHomeDir({ kirocrewHome: env.KIROCREW_HOME }),
             ...(agent ? { agent } : {}),
         },
         ...(defaultModel ? { defaultModel } : {}),

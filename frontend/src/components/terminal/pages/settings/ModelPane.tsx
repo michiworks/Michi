@@ -18,7 +18,6 @@ import {
   type AgentProviderInfo,
   type AgentReasoning,
   type AgentStatus,
-  type VerifyProviderKeyResult,
   type WebSearchProviderInfo,
 } from '../../../../services/api';
 import { Button, Switch } from '../../../ui/controls';
@@ -28,14 +27,19 @@ import {
   providerOptionSuffix,
   providerRequiresUserKey,
   shouldPromptForProviderKey,
+  verifyModelFor,
 } from '../../../../lib/providerCapabilities';
 import { useAgentModelCatalog } from '../../../../hooks/useAgentModelCatalog';
+import { useKeyEditor } from '../../../../hooks/useKeyEditor';
 import { filterVisibleRuntimes } from '../../../../lib/runtimeVisibility';
 import { BedrockConfigPanel } from './BedrockConfigPanel';
 import { approveForMeRuntimeIds, supportsChatYolo } from '../../../../lib/chatPermissionModes';
 import { chatPermissionChoiceParts, type ChatPermissionChoice } from 'michi-shared';
 import { SettingsRow, SettingsSection } from './SettingsSection';
 import { ModelCombobox } from './ModelCombobox';
+import { isImeComposing } from '../../../../lib/ime';
+import { SEGMENTED_MAX, Segmented } from './controls';
+import { REASONING_LABELS } from '../../PaneComposerToolbarLeft';
 
 export function ModelPane({
   activeProjectId,
@@ -386,27 +390,35 @@ function ReasoningPicker({
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const selectId = useId();
+  const levels = status.capabilities.supportedReasoningLevels ?? [];
+  const value = status.reasoning ?? 'xhigh';
+  const save = async (reasoning: AgentReasoning) => {
+    setSaving(true);
+    setError(null);
+    const result = await saveAgentOptions({ reasoning, expectedRuntime: status.runtime });
+    setSaving(false);
+    if (!result.ok) setError(result.error);
+    onChanged();
+  };
+  // A few levels read side by side; a longer list stays a select.
+  const segmented = levels.length > 0 && levels.length <= SEGMENTED_MAX;
   return (
-    <SettingsRow label="Reasoning effort" labelFor={selectId}
+    <SettingsRow label="Reasoning effort" labelFor={segmented ? undefined : selectId}
       description="Models that support it receive this preference; some providers ignore it."
-      control={<select
-        id={selectId}
-        className="ui-select settings-row__select"
-        value={status.reasoning ?? 'xhigh'}
-        disabled={saving}
-        onChange={async (e) => {
-          setSaving(true);
-          setError(null);
-          const result = await saveAgentOptions({ reasoning: e.target.value as AgentReasoning, expectedRuntime: status.runtime });
-          setSaving(false);
-          if (!result.ok) setError(result.error);
-          onChanged();
-        }}
-      >
-        {(status.capabilities.supportedReasoningLevels ?? []).map((id) => (
-          <option key={id} value={id}>{id}</option>
-        ))}
-      </select>}>
+      control={segmented
+        ? <Segmented label="Reasoning effort" value={value} disabled={saving} onChange={(level) => void save(level)}
+          opts={levels.map((level) => ({ value: level, label: REASONING_LABELS[level] ?? level }))} />
+        : <select
+          id={selectId}
+          className="ui-select settings-row__select"
+          value={value}
+          disabled={saving}
+          onChange={(e) => void save(e.target.value as AgentReasoning)}
+        >
+          {levels.map((level) => (
+            <option key={level} value={level}>{REASONING_LABELS[level] ?? level}</option>
+          ))}
+        </select>}>
       {error && <p role="alert" className="settings-row__note">{error}</p>}
     </SettingsRow>
   );
@@ -477,30 +489,13 @@ function WebSearchKeyControls({
   provider: WebSearchProviderInfo;
   onChanged: () => void;
 }) {
-  const [keyDraft, setKeyDraft] = useState('');
-  const [error, setError] = useState<string | null>(null);
-  const [saving, setSaving] = useState(false);
+  const editor = useKeyEditor({
+    save: (key) => saveWebSearchKey(provider.id, key),
+    clear: () => clearWebSearchKey(provider.id),
+    onChanged,
+  });
+  const { draft: keyDraft, saving, error } = editor;
   const hasKey = provider.hasKey;
-
-  const saveKey = async () => {
-    const key = keyDraft.trim();
-    if (!key || saving) return;
-    setSaving(true);
-    setError(null);
-    try {
-      const result = await saveWebSearchKey(provider.id, key);
-      if (!result.ok) {
-        setError(result.error);
-        return;
-      }
-      setKeyDraft('');
-      onChanged();
-    } catch (saveError: any) {
-      setError(saveError?.message ?? 'Unable to save API key');
-    } finally {
-      setSaving(false);
-    }
-  };
 
   const clearKey = async () => {
     if (!hasKey) return;
@@ -509,12 +504,7 @@ function WebSearchKeyControls({
       message: `Clear the saved ${provider.label} API key?`,
       confirmLabel: 'Clear',
     }))) return;
-    const result = await clearWebSearchKey(provider.id);
-    if (!result.ok) {
-      setError(result.error);
-      return;
-    }
-    onChanged();
+    await editor.clear();
   };
 
   return (
@@ -522,41 +512,18 @@ function WebSearchKeyControls({
       <div style={{ fontSize: 'var(--fs-sm)', color: 'var(--term-muted)', marginBottom: 4 }}>
         {provider.label} {hasKey ? '(saved)' : '(missing)'}
       </div>
-      <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
-        <input
+      <div className="settings-key-editor">
+        <KeyField
           aria-label={`${provider.label} API key`}
-          type="password"
           value={keyDraft}
-          onChange={(event) => {
-            setKeyDraft(event.target.value);
-            setError(null);
-          }}
           placeholder={provider.keyLabel}
-          style={{
-            fontFamily: 'var(--ui-font)',
-            fontSize: 'var(--fs-md)',
-            padding: '6px 8px',
-            border: '1px solid var(--term-line)',
-            background: 'var(--term-surface-glass)',
-            color: 'var(--term-fg)',
-            minWidth: 320,
-            outline: 'none',
-          }}
+          onChange={(event) => editor.setDraft(event.target.value)}
+          onSave={() => void editor.save()}
         />
-        <button
-          onClick={() => void saveKey()}
-          disabled={!keyDraft.trim() || saving}
-          style={keyButtonStyle(!keyDraft.trim() || saving)}
-        >
-          {saving ? 'Saving...' : 'Save key'}
-        </button>
-        <button
-          onClick={() => void clearKey()}
-          disabled={!hasKey}
-          style={{ ...keyButtonStyle(!hasKey), color: 'var(--term-mid)' }}
-        >
-          Clear
-        </button>
+        <Button variant="primary" disabled={!keyDraft.trim() || saving} onClick={() => void editor.save()}>
+          {saving ? 'Saving…' : 'Save key'}
+        </Button>
+        <Button variant="ghost" disabled={!hasKey} onClick={() => void clearKey()}>Clear</Button>
       </div>
       <div style={{ fontSize: 'var(--fs-sm)', color: 'var(--term-muted)', marginTop: 7, maxWidth: 500, lineHeight: 1.5 }}>
         {provider.description}
@@ -569,22 +536,28 @@ function WebSearchKeyControls({
       >
         Open {provider.label} key console
       </a>
-      {error && <div style={{ fontSize: 'var(--fs-sm)', color: 'var(--term-danger)', marginTop: 6 }}>{error}</div>}
+      {error && <p role="alert" className="settings-row__note">{error}</p>}
     </div>
   );
 }
 
-function keyButtonStyle(disabled: boolean): React.CSSProperties {
-  return {
-    fontFamily: 'var(--ui-font)',
-    fontSize: 'var(--fs-md)',
-    padding: '6px 12px',
-    border: '1px solid var(--term-line)',
-    background: 'var(--term-surface-glass)',
-    color: 'var(--term-fg)',
-    cursor: disabled ? 'default' : 'pointer',
-    opacity: disabled ? 0.55 : 1,
-  };
+/** An API key field; Enter saves. */
+function KeyField({ onSave, ...props }: Omit<React.ComponentProps<'input'>, 'type' | 'className'> & { onSave: () => void }) {
+  return (
+    <input
+      {...props}
+      className="ui-input"
+      type="password"
+      autoComplete="off"
+      spellCheck={false}
+      onKeyDown={(e) => {
+        if (e.key === 'Enter' && !isImeComposing(e)) {
+          e.preventDefault();
+          onSave();
+        }
+      }}
+    />
+  );
 }
 
 function ProviderKeyControls({
@@ -596,11 +569,12 @@ function ProviderKeyControls({
   status: AgentStatus;
   onChanged: () => void;
 }) {
-  const [keyDraft, setKeyDraft] = useState('');
-  const [keyError, setKeyError] = useState<string | null>(null);
-  const [keySaving, setKeySaving] = useState(false);
-  const [keyVerifying, setKeyVerifying] = useState(false);
-  const [verifyResult, setVerifyResult] = useState<VerifyProviderKeyResult | null>(null);
+  const editor = useKeyEditor({
+    save: (key) => saveProviderKey(provider.id, key),
+    clear: () => clearProviderKey(provider.id),
+    verify: (key) => verifyProviderKey(provider.id, { key, model: verifyModelFor(provider, status) }),
+    onChanged,
+  });
   const [replacing, setReplacing] = useState(false);
   const inputId = useId();
   const inputRef = useRef<HTMLInputElement>(null);
@@ -608,60 +582,18 @@ function ProviderKeyControls({
   const hasKey = !!provider.hasKey;
   // A saved key is a status; the field appears only to add or replace one.
   const editing = !hasKey || replacing;
-  const canVerifyKey = hasKey || !!keyDraft.trim();
+  const canVerifyKey = hasKey || !!editor.draft.trim();
 
   useEffect(() => {
     if (replacing) inputRef.current?.focus();
   }, [replacing]);
 
-  const resetDraft = () => {
-    setKeyDraft('');
-    setKeyError(null);
-    setVerifyResult(null);
-  };
-
   const saveKey = async () => {
-    const key = keyDraft.trim();
-    if (!key || keySaving) return;
-    setKeySaving(true);
-    setKeyError(null);
-    try {
-      const result = await saveProviderKey(provider.id, key);
-      if (!result.ok) {
-        setKeyError(result.error);
-      } else {
-        setKeyDraft('');
-        setVerifyResult(null);
-        setReplacing(false);
-        onChanged();
-      }
-    } catch (err: any) {
-      setKeyError(err?.message ?? 'Unable to save API key');
-    } finally {
-      setKeySaving(false);
-    }
+    if (await editor.save()) setReplacing(false);
   };
 
-  const verifyKey = async () => {
-    if (!canVerifyKey || keyVerifying) return;
-    setKeyVerifying(true);
-    setKeyError(null);
-    setVerifyResult(null);
-    try {
-      // When verifying the active provider, use whatever model is currently
-      // selected so we don't surprise the user. Otherwise verify against the
-      // provider's default.
-      const isActive = provider.id === status.provider;
-      const result = await verifyProviderKey(provider.id, {
-        key: keyDraft.trim() || undefined,
-        model: isActive ? status.model : provider.defaultModel,
-      });
-      setVerifyResult(result);
-    } catch (err: any) {
-      setVerifyResult({ ok: false, error: err?.message ?? 'Unable to verify API key' });
-    } finally {
-      setKeyVerifying(false);
-    }
+  const verifyKey = () => {
+    if (canVerifyKey) void editor.verify();
   };
 
   const clearKey = async () => {
@@ -671,15 +603,7 @@ function ProviderKeyControls({
       message: `Clear the saved ${provider.label} API key?`,
       confirmLabel: 'Clear',
     }))) return;
-    setKeyError(null);
-    setVerifyResult(null);
-    try {
-      const result = await clearProviderKey(provider.id);
-      if (!result.ok) setKeyError(result.error);
-    } catch (err: any) {
-      setKeyError(err?.message ?? 'Unable to clear API key');
-    }
-    onChanged();
+    await editor.clear();
   };
 
   const keyConsole = provider.keyUrl ? (
@@ -687,7 +611,8 @@ function ProviderKeyControls({
       Open {provider.label} key console
     </a>
   ) : null;
-  const verifyLabel = keyVerifying ? 'Verifying…' : 'Verify';
+  const verifyLabel = editor.verifying ? 'Verifying…' : 'Verify';
+  const { verifyResult } = editor;
 
   return (
     <SettingsRow label={`${provider.label} API key`} labelFor={editing ? inputId : undefined}
@@ -699,40 +624,27 @@ function ProviderKeyControls({
           {hasKey ? 'Key saved' : 'Key required'}
         </span>
         {hasKey && !replacing && <>
-          <Button disabled={keyVerifying} onClick={() => void verifyKey()}>{verifyLabel}</Button>
-          <Button onClick={() => { resetDraft(); setReplacing(true); }}>Replace…</Button>
+          <Button disabled={editor.verifying} onClick={verifyKey}>{verifyLabel}</Button>
+          <Button onClick={() => { editor.reset(); setReplacing(true); }}>Replace…</Button>
           <Button variant="ghost" onClick={() => void clearKey()}>Clear</Button>
         </>}
         {hasKey && replacing && (
-          <Button variant="ghost" disabled={keySaving} onClick={() => { resetDraft(); setReplacing(false); }}>Cancel</Button>
+          <Button variant="ghost" disabled={editor.saving} onClick={() => { editor.reset(); setReplacing(false); }}>Cancel</Button>
         )}
       </>}>
       {editing && (
         <div className="settings-key-editor">
-          <input
+          <KeyField
             ref={inputRef}
             id={inputId}
-            className="ui-input"
-            type="password"
-            autoComplete="off"
-            spellCheck={false}
-            value={keyDraft}
+            value={editor.draft}
             placeholder={provider.keyLabel || 'API key'}
-            onChange={(e) => {
-              setKeyDraft(e.target.value);
-              setKeyError(null);
-              setVerifyResult(null);
-            }}
-            onKeyDown={(e) => {
-              if (e.key === 'Enter' && !e.nativeEvent.isComposing) {
-                e.preventDefault();
-                void saveKey();
-              }
-            }}
+            onChange={(e) => editor.setDraft(e.target.value)}
+            onSave={() => void saveKey()}
           />
-          <Button disabled={!keyDraft.trim() || keyVerifying} onClick={() => void verifyKey()}>{verifyLabel}</Button>
-          <Button variant="primary" disabled={!keyDraft.trim() || keySaving} onClick={() => void saveKey()}>
-            {keySaving ? 'Saving…' : 'Save key'}
+          <Button disabled={!editor.draft.trim() || editor.verifying} onClick={verifyKey}>{verifyLabel}</Button>
+          <Button variant="primary" disabled={!editor.draft.trim() || editor.saving} onClick={() => void saveKey()}>
+            {editor.saving ? 'Saving…' : 'Save key'}
           </Button>
         </div>
       )}
@@ -743,7 +655,7 @@ function ProviderKeyControls({
             : verifyResult.error ?? 'Verification failed.'}
         </p>
       )}
-      {keyError && <p role="alert" className="settings-row__note">{keyError}</p>}
+      {editor.error && <p role="alert" className="settings-row__note">{editor.error}</p>}
     </SettingsRow>
   );
 }

@@ -1,3 +1,5 @@
+import { readApiError } from 'michi-shared';
+
 /** Preserve the response status so background callers can distinguish invalid
  * configuration from a Backend that is still starting. */
 export class HttpResponseError extends Error {
@@ -8,13 +10,14 @@ export class HttpResponseError extends Error {
 }
 
 export async function responseError(response: Response, operation: string): Promise<HttpResponseError> {
-  const payload: unknown = await response.json().catch(() => null);
-  const body = payload && typeof payload === 'object' ? payload as Record<string, unknown> : null;
-  return new HttpResponseError(
-    typeof body?.error === 'string' ? body.error : `${operation} failed: ${response.status}`,
-    response.status,
-    typeof body?.code === 'string' ? body.code : undefined,
-  );
+  const { message, code } = readApiError(await response.json().catch(() => null));
+  return new HttpResponseError(message ?? `${operation} failed: ${response.status}`, response.status, code);
+}
+
+/** The response's JSON body (null when unreadable); its error message (or the status) as an HttpResponseError when not ok. */
+export async function jsonResponse(response: Response, operation: string): Promise<unknown> {
+  if (!response.ok) throw await responseError(response, operation);
+  return response.json().catch(() => null);
 }
 
 export function shouldRetryRequest(error: unknown): boolean {

@@ -87,6 +87,19 @@ describe('weaveToolCalls — tool grouping', () => {
     expect(toolIdsByGroup(segs)).toEqual([['a', 'b', 'c']]);
   });
 
+  it('keeps tools separated only by blank text in one group', () => {
+    const smooth = 'before\n\n\n\nafter';
+    const segs = weaveToolCalls(
+      smooth,
+      smooth.length,
+      [tool('a', 6), tool('b', 10)],
+      identity,
+      { forceFinal: true },
+    );
+    expect(toolIdsByGroup(segs)).toEqual([['a', 'b']]);
+    expect(texts(segs)).toEqual(['before\n\n', 'after']);
+  });
+
   it('forceFinal: undefined-offset tools coalesce with a trailing group', () => {
     const smooth = 'tail';
     const segs = weaveToolCalls(

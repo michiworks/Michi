@@ -280,7 +280,8 @@
           "availableModels": [
             {
               "id": "m1",
-              "label": "Model one"
+              "label": "Model one",
+              "supportsReasoning": false
             },
             {
               "id": "m2",
@@ -295,28 +296,44 @@
           ],
           "commands": [
             {
-              "name": "clear"
+              "name": "clear",
+              "kind": "command",
+              "description": "Start Kiro on a fresh context; the messages stay in Michi"
             },
             {
-              "name": "tools"
+              "name": "tools",
+              "kind": "command",
+              "description": "Show the tools this chat has"
             },
             {
-              "name": "mcp"
+              "name": "mcp",
+              "kind": "command",
+              "description": "Show the MCP servers and their status"
             },
             {
-              "name": "effort"
+              "name": "effort",
+              "kind": "command",
+              "description": "Show the reasoning effort, or set it",
+              "argumentHint": "[level]"
             },
             {
-              "name": "compact"
+              "name": "compact",
+              "kind": "command"
             },
             {
-              "name": "context"
+              "name": "context",
+              "kind": "command",
+              "description": "Show what fills the context window"
             },
             {
-              "name": "history"
+              "name": "history",
+              "kind": "command",
+              "description": "Show the history Kiro keeps for this chat"
             },
             {
-              "name": "usage"
+              "name": "usage",
+              "kind": "command",
+              "description": "Show your Kiro usage"
             }
           ],
           "nativeEngine": "v3"
@@ -417,7 +434,8 @@
           "availableModels": [
             {
               "id": "m1",
-              "label": "Model one"
+              "label": "Model one",
+              "supportsReasoning": false
             },
             {
               "id": "m2",
@@ -432,28 +450,44 @@
           ],
           "commands": [
             {
-              "name": "clear"
+              "name": "clear",
+              "kind": "command",
+              "description": "Start Kiro on a fresh context; the messages stay in Michi"
             },
             {
-              "name": "tools"
+              "name": "tools",
+              "kind": "command",
+              "description": "Show the tools this chat has"
             },
             {
-              "name": "mcp"
+              "name": "mcp",
+              "kind": "command",
+              "description": "Show the MCP servers and their status"
             },
             {
-              "name": "effort"
+              "name": "effort",
+              "kind": "command",
+              "description": "Show the reasoning effort, or set it",
+              "argumentHint": "[level]"
             },
             {
-              "name": "compact"
+              "name": "compact",
+              "kind": "command"
             },
             {
-              "name": "context"
+              "name": "context",
+              "kind": "command",
+              "description": "Show what fills the context window"
             },
             {
-              "name": "history"
+              "name": "history",
+              "kind": "command",
+              "description": "Show the history Kiro keeps for this chat"
             },
             {
-              "name": "usage"
+              "name": "usage",
+              "kind": "command",
+              "description": "Show your Kiro usage"
             }
           ],
           "nativeEngine": "v3"
@@ -545,7 +579,8 @@
           "availableModels": [
             {
               "id": "m1",
-              "label": "Model one"
+              "label": "Model one",
+              "supportsReasoning": false
             },
             {
               "id": "m2",
@@ -560,28 +595,44 @@
           ],
           "commands": [
             {
-              "name": "clear"
+              "name": "clear",
+              "kind": "command",
+              "description": "Start Kiro on a fresh context; the messages stay in Michi"
             },
             {
-              "name": "tools"
+              "name": "tools",
+              "kind": "command",
+              "description": "Show the tools this chat has"
             },
             {
-              "name": "mcp"
+              "name": "mcp",
+              "kind": "command",
+              "description": "Show the MCP servers and their status"
             },
             {
-              "name": "effort"
+              "name": "effort",
+              "kind": "command",
+              "description": "Show the reasoning effort, or set it",
+              "argumentHint": "[level]"
             },
             {
-              "name": "compact"
+              "name": "compact",
+              "kind": "command"
             },
             {
-              "name": "context"
+              "name": "context",
+              "kind": "command",
+              "description": "Show what fills the context window"
             },
             {
-              "name": "history"
+              "name": "history",
+              "kind": "command",
+              "description": "Show the history Kiro keeps for this chat"
             },
             {
-              "name": "usage"
+              "name": "usage",
+              "kind": "command",
+              "description": "Show your Kiro usage"
             }
           ],
           "nativeEngine": "v3"
@@ -860,7 +911,8 @@
           "availableModels": [
             {
               "id": "m1",
-              "label": "Model one"
+              "label": "Model one",
+              "supportsReasoning": false
             },
             {
               "id": "m2",
@@ -875,28 +927,44 @@
           ],
           "commands": [
             {
-              "name": "clear"
+              "name": "clear",
+              "kind": "command",
+              "description": "Start Kiro on a fresh context; the messages stay in Michi"
             },
             {
-              "name": "tools"
+              "name": "tools",
+              "kind": "command",
+              "description": "Show the tools this chat has"
             },
             {
-              "name": "mcp"
+              "name": "mcp",
+              "kind": "command",
+              "description": "Show the MCP servers and their status"
             },
             {
-              "name": "effort"
+              "name": "effort",
+              "kind": "command",
+              "description": "Show the reasoning effort, or set it",
+              "argumentHint": "[level]"
             },
             {
-              "name": "compact"
+              "name": "compact",
+              "kind": "command"
             },
             {
-              "name": "context"
+              "name": "context",
+              "kind": "command",
+              "description": "Show what fills the context window"
             },
             {
-              "name": "history"
+              "name": "history",
+              "kind": "command",
+              "description": "Show the history Kiro keeps for this chat"
             },
             {
-              "name": "usage"
+              "name": "usage",
+              "kind": "command",
+              "description": "Show your Kiro usage"
             }
           ],
           "nativeEngine": "v3"
@@ -928,7 +996,8 @@
           "availableModels": [
             {
               "id": "m1",
-              "label": "Model one"
+              "label": "Model one",
+              "supportsReasoning": false
             },
             {
               "id": "m2",
@@ -943,28 +1012,44 @@
           ],
           "commands": [
             {
-              "name": "clear"
+              "name": "clear",
+              "kind": "command",
+              "description": "Start Kiro on a fresh context; the messages stay in Michi"
             },
             {
-              "name": "tools"
+              "name": "tools",
+              "kind": "command",
+              "description": "Show the tools this chat has"
             },
             {
-              "name": "mcp"
+              "name": "mcp",
+              "kind": "command",
+              "description": "Show the MCP servers and their status"
             },
             {
-              "name": "effort"
+              "name": "effort",
+              "kind": "command",
+              "description": "Show the reasoning effort, or set it",
+              "argumentHint": "[level]"
             },
             {
-              "name": "compact"
+              "name": "compact",
+              "kind": "command"
             },
             {
-              "name": "context"
+              "name": "context",
+              "kind": "command",
+              "description": "Show what fills the context window"
             },
             {
-              "name": "history"
+              "name": "history",
+              "kind": "command",
+              "description": "Show the history Kiro keeps for this chat"
             },
             {
-              "name": "usage"
+              "name": "usage",
+              "kind": "command",
+              "description": "Show your Kiro usage"
             }
           ],
           "nativeEngine": "v3"

@@ -250,6 +250,17 @@ describe('ToolCallGroup — auto-collapse', () => {
     expect(getByText('Read a')).toBeTruthy();
   });
 
+  it('holdOpen defers the end-of-batch collapse until it lifts', () => {
+    const running = [tool('1', 'Read a', 'running', 'read'), tool('2', 'Read b', 'running', 'read')];
+    const done = [tool('1', 'Read a', 'completed', 'read'), tool('2', 'Read b', 'completed', 'read')];
+    const { rerender, container } = render(<ToolCallGroup tools={running} defaultExpanded holdOpen />);
+    rerender(<ToolCallGroup tools={done} defaultExpanded holdOpen />);
+    const header = () => container.querySelector('button[data-toolgroup-header]') as HTMLElement;
+    expect(header().textContent).toContain('▾');
+    rerender(<ToolCallGroup tools={done} defaultExpanded holdOpen={false} />);
+    expect(header().textContent).toContain('▸');
+  });
+
   it('a lone failed SubAgent without a roster says failed once', () => {
     const agent = { ...tool('agent-1', 'Agent', 'failed', 'agent'), detail: JSON.stringify({ subagent_type: 'Explore', description: 'Scan' }) };
     const { container } = render(<ToolCallGroup tools={[agent]} defaultExpanded={false} />);

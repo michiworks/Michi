@@ -13,8 +13,8 @@ import {
   type OpenBackgroundWorkDetail,
 } from '../backgroundWork/backgroundWorkEvents';
 import { SubagentDetail } from './SubagentDetail';
-import { MessageSubagents } from './SubagentRoster';
-import { delegationStatus, firstPlainLine, subagentSummary, unclaimedSubagents, withConversationTone, withDelegationStatus } from './subagentPresentation';
+import { MessageSubagents, SubagentRow } from './SubagentRoster';
+import { delegationStatus, firstPlainLine, subagentRowTitle, subagentSummary, unclaimedSubagents, withConversationTone, withDelegationStatus } from './subagentPresentation';
 
 const cleanups: Array<() => void> = [];
 afterEach(() => { while (cleanups.length) cleanups.pop()!(); });
@@ -80,7 +80,8 @@ describe('SubagentDetail', () => {
     const rows = getAllByTestId('subagent-activity-row');
     expect(rows.map((row) => row.getAttribute('data-activity-kind'))).toEqual(['tool', 'message']);
     expect(getByTestId('subagent-result').querySelector('strong')?.textContent).toBe('Three readers');
-    expect(getByTestId('subagent-meta').textContent).toBe('haiku·12k tokens·1 tool·4.2s·claude');
+    // Its length is on its row, not repeated here.
+    expect(getByTestId('subagent-meta').textContent).toBe('haiku·12k tokens·1 tool·claude');
 
     // Tool output stays folded until the row is opened.
     expect(queryByText('export function readCookie() {}')).toBeNull();
@@ -101,8 +102,9 @@ describe('SubagentDetail', () => {
     fireEvent.click(getByText('Show full task'));
     expect(getByTestId('subagent-task').textContent).toHaveLength(900);
     expect(getByText('4 earlier steps not kept')).toBeTruthy();
-    expect(getByText(/activity · 5/)).toBeTruthy();
-    expect(getByText('now ❯ Bash')).toBeTruthy();
+    expect(getByText('Steps')).toBeTruthy();
+    // The step at work says "now", in no run colour.
+    expect(getByText('now').getAttribute('style')).not.toContain('var(--term-run)');
   });
 
   it('gives a stopped agent\'s reason a neutral label and keeps a failure red under error', () => {
@@ -113,18 +115,18 @@ describe('SubagentDetail', () => {
     expect(reason.getAttribute('data-error-tone')).toBe('stopped');
     expect(reason.getAttribute('style')).toContain('var(--term-mid)');
     expect(reason.getAttribute('style')).not.toContain('var(--term-danger)');
-    const label = getByText('why it stopped').parentElement!;
+    const label = getByText('Why it stopped');
     expect(label.getAttribute('style')).toContain('var(--term-muted)');
-    expect(queryByText('error')).toBeNull();
+    expect(queryByText('Error')).toBeNull();
     unmount();
 
     const failed = subagent({ sessionId: 'f', status: 'terminated', outcome: 'failed', error: 'boom' });
     const view = render(<SubagentDetail subagent={failed} />);
     const error = view.getByTestId('subagent-error');
     expect(error.getAttribute('data-error-tone')).toBe('error');
-    expect(error.getAttribute('style')).toContain('var(--term-danger)');
-    expect(view.getByText('error').parentElement!.getAttribute('style')).toContain('var(--term-danger)');
-    expect(view.queryByText('why it stopped')).toBeNull();
+    expect(error.getAttribute('style')).toContain('var(--term-danger-text)');
+    expect(view.getByText('Error').getAttribute('style')).toContain('var(--term-danger-text)');
+    expect(view.queryByText('Why it stopped')).toBeNull();
   });
 });
 
@@ -282,6 +284,16 @@ describe('subagent summaries', () => {
     expect(subagentSummary(undefined, { running: true })).toBeUndefined();
   });
 
+  it('titles a drawer row by its task, with the agent type as its label', () => {
+    expect(subagentRowTitle(subagent({ sessionId: 's', agentName: 'general-purpose', description: 'Triage failing E2E group C' })))
+      .toEqual({ title: 'Triage failing E2E group C', kind: 'general-purpose' });
+    // A plugin agent's name drops its plugin; a placeholder name is no type.
+    expect(subagentRowTitle(subagent({ sessionId: 's', agentName: 'Builder:pipeline-assistant', description: 'Diagnose the deploy' })).kind).toBe('pipeline-assistant');
+    expect(subagentRowTitle(subagent({ sessionId: 's', agentName: 'subagent', description: 'Diagnose the deploy' }))).toEqual({ title: 'Diagnose the deploy' });
+    // No task: the name is the title, said once.
+    expect(subagentRowTitle(subagent({ sessionId: 's', agentName: 'Explore' }))).toEqual({ title: 'Explore' });
+  });
+
   it('strips markdown from a first line', () => {
     expect(firstPlainLine('\n## **Summary**\nrest')).toBe('Summary');
     expect(firstPlainLine('- `a.ts` changed')).toBe('a.ts changed');
@@ -331,7 +343,7 @@ describe('background agents', () => {
     // The workflow-runs feed, which also says which background agents a live process tracks.
     const feeds: Array<Parameters<WorkflowDomainApi['subscribe']>[1]> = [];
     const api: WorkflowDomainApi = {
-      list: vi.fn(), get: vi.fn(), act: vi.fn(), answer: vi.fn(),
+      get: vi.fn(), act: vi.fn(), answer: vi.fn(),
       subscribe: vi.fn((_workspaceId, options) => { feeds.push(options); return () => {}; }),
     };
     function Subscribe() {
@@ -491,9 +503,9 @@ describe('background agents', () => {
 
     /** The spinner, shimmer or running dot a group shows while it runs. */
     const spinner = (header: HTMLElement) => header.querySelector('.agent-spinner, .term-shimmer, .term-dot-i--run');
-    /** Header text in the danger color (the failure fragment). */
+    /** Header text in the danger text color (the failure fragment). */
     const dangerText = (header: HTMLElement) => [header, ...header.querySelectorAll('[style]')]
-      .filter((el) => el.getAttribute('style')?.includes('var(--term-danger)'))
+      .filter((el) => el.getAttribute('style')?.includes('var(--term-danger-text)'))
       .map((el) => el.textContent);
     const failedWords = (header: HTMLElement) => header.textContent?.match(/failed/g)?.length ?? 0;
 
@@ -596,7 +608,7 @@ describe('background agents', () => {
 
   it('names Codex children by thread id when they have no nickname', () => {
     const child = subagent({ sessionId: '01a13922-817a', source: 'codex', status: 'terminated', outcome: 'completed' });
-    const { getByTestId } = render(<MessageSubagents subagents={[child]} />);
+    const { getByTestId } = render(<SubagentRow subagent={child} />);
     expect(getByTestId('subagent-row').textContent).toContain('Codex 01a13922');
   });
 });
@@ -608,9 +620,35 @@ describe('message-level roster', () => {
     const unclaimed = unclaimedSubagents(roster, [agentTool('toolu_1', 'completed')]);
     expect(unclaimed.map((entry) => entry.sessionId)).toEqual(['crew-1']);
 
-    const { getByTestId, getAllByTestId } = render(<MessageSubagents subagents={unclaimed} />);
-    expect(getByTestId('message-subagents').textContent).toContain('1 working');
-    expect(getAllByTestId('subagent-row')).toHaveLength(1);
+    const { getByTestId } = render(<MessageSubagents subagents={unclaimed} />);
+    expect(getByTestId('message-subagents').textContent).toBe('subagents1 working');
+  });
+
+  it('counts the agents by state on one line, without their results', () => {
+    const roster = [
+      subagent({ sessionId: 'run-1', agentName: 'researcher', status: 'working' }),
+      subagent({ sessionId: 'bg-1', agentName: 'Explore', status: 'terminated', background: true }),
+      finished,
+      subagent({ sessionId: 'fail-1', agentName: 'Explore', status: 'terminated', outcome: 'failed', error: 'Tool crashed' }),
+      subagent({ sessionId: 'stop-1', agentName: 'Explore', status: 'terminated', outcome: 'cancelled', error: SUBAGENT_UNTRACKED_ERROR }),
+    ];
+    const { getByTestId, queryAllByTestId, getByRole } = render(<MessageSubagents subagents={roster} />);
+    // An agent in background still works; an interrupted one reads stopped.
+    expect(getByTestId('message-subagents').textContent).toBe('subagents2 working·1 done·1 failed·1 stopped');
+    expect(queryAllByTestId('subagent-row')).toHaveLength(0);
+    expect(getByRole('region', { name: '5 subagents' })).toBeTruthy();
+    // Outside a conversation there is no drawer to open.
+    expect(getByTestId('message-subagents').tagName).toBe('SECTION');
+  });
+
+  it('opens the background work drawer from the line', () => {
+    const { getByTestId, requests } = inConversation(<MessageSubagents subagents={[finished]} />);
+    const line = getByTestId('message-subagents');
+    expect(line.tagName).toBe('BUTTON');
+    expect(line.textContent).toContain('1 done');
+    expect(hintOf(line)).toBe('Show in background work');
+    fireEvent.click(line);
+    expect(requests).toEqual([{ nodeId: 'node-1' }]);
   });
 
   it('renders nothing when every agent is claimed', () => {

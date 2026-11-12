@@ -173,6 +173,25 @@ describe('panePresenceTransport.keepalive (POST /api/panes/presence/keepalive, v
     await expect(panePresenceTransport.keepalive(LOCAL, WORKSPACE, { rendererLeaseId: 'lease-1' }))
       .rejects.toThrow(/presenceKeepalive: malformed response body/);
   });
+
+  it('sends what a closing page reports as a fetch keepalive, which outlives the page and its socket', async () => {
+    const fetchMock = vi.fn(async () => jsonResponse(200, { ok: true, renewedViews: 1 }));
+    vi.stubGlobal('fetch', fetchMock);
+    try {
+      await panePresenceTransport.keepalive(LOCAL, WORKSPACE, { rendererLeaseId: 'lease-1', windowFocused: false }, { unloading: true });
+      fetchMock.mockImplementation(async () => jsonResponse(200, { ok: true, removed: 1 }));
+      await panePresenceTransport.remove(LOCAL, WORKSPACE, { rendererLeaseId: 'lease-1' }, { unloading: true });
+      expect(streamMock).not.toHaveBeenCalled();
+      const calls = fetchMock.mock.calls as unknown as Array<[string, RequestInit]>;
+      expect(calls.map(([url, init]) => [url, init.method, init.keepalive])).toEqual([
+        [`${API_BASE_URL}/panes/presence/keepalive`, 'POST', true],
+        [`${API_BASE_URL}/panes/presence`, 'DELETE', true],
+      ]);
+      expect(JSON.parse(calls[0][1].body as string)).toEqual({ rendererLeaseId: 'lease-1', windowFocused: false, workspaceId: WORKSPACE });
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
 });
 
 describe('allocateSurfaceRegistration (POST /api/panes/presence/allocate)', () => {

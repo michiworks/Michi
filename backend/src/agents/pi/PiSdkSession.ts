@@ -3,6 +3,8 @@ import { isRunOwner } from "../ownerMapping";
 import type { AgentSession, CompactResult } from "../types";
 import { PiSession, type PiSessionDeps } from "./PiSession";
 import { createPiSdkHarness, invalidatePiSdkTranscript, type PiSdkFeatures } from './piSdkHarness';
+import { sessionReplayRows, type ReplayRow, type TimedReplayEntry } from '../sessionReplayView';
+import { getCompanionSettings } from '../../services/companion/settings';
 
 export type PiSessionKind = "sdk" | "agent-core";
 /** The old engine remains available for operational rollback. */
@@ -12,6 +14,19 @@ export function selectPiSessionKind(env: NodeJS.ProcessEnv = process.env): PiSes
 
 /** Michi branches always own an independent transcript. */
 export function shouldNavigatePiTreeOnMichiBranch(): false { return false; }
+
+/**
+ * A node's stored history as Pi rebuilds and settles against it: the session
+ * replay view (posted check-ins as one-line facts, never their text, and no
+ * two assistant entries in a row; DESIGN-v2 §2.8 T2, §9 risk 11). Restore
+ * (PiRuntime) and the settled-turn checkpoint below both read it, so the
+ * native transcript is resumed only against the same view. A post written
+ * after a checkpoint changes that view, so the transcript is retired and
+ * rebuilt from it rather than carrying the post in as text.
+ */
+export function piHostHistory(rows: readonly ReplayRow[]): TimedReplayEntry[] {
+  return sessionReplayRows(rows, { name: () => getCompanionSettings().displayName });
+}
 
 export class PiSdkSession extends PiSession {
   private sdkHarness: any;
@@ -31,9 +46,7 @@ export class PiSdkSession extends PiSession {
     if (!isRunOwner(this.owner)) {
       const store = getRuntimeDeps().historyStore;
       if (store.getNode(this.id)) {
-        this.sdkHarness.checkpoint(store.listMessages(this.id).filter(message =>
-          (message.role === 'user' || message.role === 'assistant') && !!message.content,
-        ).map(message => ({ role: message.role as 'user' | 'assistant', content: message.content ?? '' })));
+        this.sdkHarness.checkpoint(piHostHistory(store.listMessages(this.id)));
         return;
       }
     }

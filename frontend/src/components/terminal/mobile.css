@@ -6,19 +6,28 @@
 .mobile-pane-trigger { position: relative; min-width: 44px !important; min-height: 44px !important; }
 /* The landing ring; pulseBranchTarget animates it. */
 .mobile-pane-trigger::after { content: ''; position: absolute; inset: 4px; border: 2px solid var(--term-accent); border-radius: 50%; opacity: 0; pointer-events: none; }
-.mobile-pane-title { min-width: 0; flex: 1; align-self: center; margin-left: 88px; margin-right: 100px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; text-align: center; font-size: var(--fs-md); font-weight: 500; color: var(--term-fg); }
+/* A branch it holds is working: the icon's short middle line turns accent and
+   breathes (Michi's running glyph), after the landing ring, until the work is
+   done. A corner dot would read as an unread badge. */
+.mobile-pane-trigger__live { transition: stroke var(--t-exit) ease-in; }
+.mobile-pane-trigger[data-working='true'] .mobile-pane-trigger__live { stroke: var(--term-run); animation: termBreathe var(--t-loop) ease-in-out 300ms infinite; transition: stroke var(--t-enter) ease-out 300ms; }
+/* Left-aligned after the left cluster; the right cluster is in flow on a
+   phone, so the title gets exactly the space between them. */
+.mobile-pane-title { min-width: 0; flex: 1; align-self: center; margin-left: 88px; margin-right: 8px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; text-align: left; font-size: var(--pt-title, var(--fs-md)); font-weight: 600; letter-spacing: var(--ls-tight); color: var(--term-fg); }
 .mobile-pane-list { padding: 7px; overflow: auto; overscroll-behavior: contain; }
 .mobile-pane-item { display: flex; align-items: center; border-radius: var(--ui-radius); }
 .mobile-pane-item[data-current] { background: var(--term-accent-f); }
 .mobile-pane-item:not([data-current]):hover { background: var(--term-hover-bg, var(--term-alt)); }
-.mobile-pane-row { display: flex; align-items: center; gap: 8px; flex: 1; min-width: 0; min-height: 44px; padding: 10px 12px 10px calc(12px + var(--pane-depth) * 16px); border: 0; border-radius: var(--ui-radius); background: transparent; color: var(--term-fg); font: inherit; font-size: var(--fs-md); text-align: left; cursor: pointer; }
+.mobile-pane-row { display: flex; align-items: center; gap: 8px; flex: 1; min-width: 0; min-height: 44px; padding: 10px 12px 10px calc(12px + var(--pane-depth) * 22px); border: 0; border-radius: var(--ui-radius); background: transparent; color: var(--term-fg); font: inherit; font-size: var(--fs-md); text-align: left; cursor: pointer; }
 .mobile-pane-row > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .mobile-pane-row[aria-current] { color: var(--term-accent); font-weight: 550; }
 .mobile-pane-close { display: inline-flex; align-items: center; justify-content: center; flex: none; width: 44px; height: 44px; padding: 0; border: 0; border-radius: var(--ui-radius); background: transparent; color: var(--term-muted); cursor: pointer; }
 .mobile-pane-close:hover { color: var(--term-fg); }
-.mobile-pane-row:focus-visible, .mobile-pane-close:focus-visible { outline: 2px solid var(--term-accent); outline-offset: -2px; }
-.mobile-pane-status { width: 6px; height: 6px; flex: none; border-radius: 50%; background: var(--term-accent); }
-.mobile-pane-status[data-status='error'] { background: var(--term-danger); }
+.mobile-pane-row:focus-visible, .mobile-pane-close:focus-visible { outline: var(--focus-ring); outline-offset: -2px; }
+/* Running breathes like every other running dot; a still dot would read as unread. */
+.mobile-pane-status { width: 6px; height: 6px; flex: none; border-radius: 50%; background: var(--term-run); animation: termBreathe var(--t-loop) ease-in-out infinite; }
+.mobile-pane-status[data-status='error'] { background: var(--term-danger); animation: none; }
+@media (prefers-reduced-motion: reduce) { .mobile-pane-status, .mobile-pane-trigger__live { animation: none !important; transition: none !important; } }
 /* Placed and moved by branchMotion.ts; invisible until its animation starts. */
 .mobile-branch-flight { position: fixed; left: -16px; top: -16px; z-index: var(--z-toast); display: flex; align-items: center; justify-content: center; width: 32px; height: 32px; border-radius: 50%; background: var(--term-accent); color: var(--term-surface); box-shadow: var(--term-float-shadow); opacity: 0; pointer-events: none; }
 
@@ -33,24 +42,53 @@
   to { opacity: 0; transform: translateY(9px); }
 }
 
-@media (max-width: 700px) {
+@media (max-width: 700px), (pointer: coarse) and (max-height: 500px) {
   .terminal-topbar-controls { width: auto !important; padding-left: 8px !important; gap: 0 !important; }
   .terminal-topbar-controls > button { min-height: 44px !important; min-width: 40px !important; }
   .terminal-topbar-controls [aria-label='Go home'],
   .terminal-topbar-controls [aria-label='Search'],
-  .terminal-topbar-controls [aria-label='Switch to activity view'],
-  .terminal-topbar-controls [aria-label='Switch to structure view'],
   .terminal-topbar-controls [aria-label='Navigate back'],
   .terminal-topbar-controls [aria-label='Navigate forward'] { display: none !important; }
-  .terminal-topbar-right { padding: 0 8px !important; gap: 0 !important; }
+  /* In flow: phones draw no caption cells for it to stay aligned with, and
+     the title then ends where the cluster starts, whatever it holds. */
+  .terminal-topbar-right { position: relative !important; flex: none; padding: 0 8px !important; gap: 0 !important; transition: opacity var(--t-enter) var(--t-ease); }
   .terminal-topbar-main { margin-right: 0 !important; }
-  /* Clear the right cluster (two 40px buttons); long crumbs ellipsize. */
-  .terminal-topbar-breadcrumb { margin-left: 88px !important; padding-right: 100px !important; overflow: hidden; }
+  .terminal-topbar { --topbar-title-size: var(--pt-title); }
+  /* Long crumbs ellipsize before the in-flow right cluster. */
+  .terminal-topbar-breadcrumb { margin-left: 88px !important; padding-right: 8px !important; overflow: hidden; }
+  /* The drawer overlays the shell: the title stays, the right cluster steps
+     back and can't open menus over it. */
+  .terminal-topbar[data-drawer-open] .terminal-topbar-right { opacity: .4; pointer-events: none; }
+  .terminal-topbar[data-drawer-open] .t-sidebar-toggle { color: var(--term-fg) !important; }
+  /* One glyph size, stroke and colour across the bar; ≥ 40×44 targets. */
+  .terminal-topbar-controls > button { color: var(--term-mid) !important; }
+  .terminal-topbar-controls > button svg,
+  .workspace-toolbar .workspace-toolbar__trigger svg { width: var(--pt-icon); height: var(--pt-icon); }
+  .terminal-topbar svg :is(path, line, rect, circle, polyline) { vector-effect: non-scaling-stroke; }
+  .terminal-topbar .workspace-toolbar__trigger { color: var(--term-mid); }
+  .mobile-pane-trigger { color: var(--term-mid); }
+  .mobile-pane-trigger svg { width: var(--pt-switch); height: var(--pt-switch); }
+  [data-testid='topbar-background-work'] { --bgw-height: 44px; --bgw-min-width: 40px; --bgw-count-size: var(--fs-md); --bgw-glyph-size: var(--fs-sm); }
+  /* ≡ ‹ + : the left cluster holds a third button while there is a page to go back to. */
+  .terminal-topbar[data-phone-back] .terminal-topbar-breadcrumb { margin-left: 128px !important; }
+  .terminal-topbar[data-phone-back] .mobile-pane-title { margin-left: 128px; }
+/* The composer, the workflow cards (chat and drawer, multi-model ones
+   included) and the chat's fold of finished runs, the drawer's subagent card
+   and the user bubble share one corner radius: square on desktop, rounded on
+   the phone. The bubble rounds only its left corners, so its accent right
+   rule stays straight (index.css). */
+.terminal-composer,
+.workflow-run-card,
+.mm-card,
+.workflow-fold,
+.background-workflow-card,
+.background-subagent-card,
+.terminal-message-user { --term-composer-radius: calc(var(--ui-radius) * 2); }
 .terminal-composer {
   --workspace-shadow-ink: color-mix(in srgb, var(--term-bg) 20%, black);
   --composer-input-padding: 14px 16px 6px;
+  --composer-att-row-padding: 14px 16px 0;
   --composer-toolbar-padding: 4px 12px 10px;
-  --term-composer-radius: calc(var(--ui-radius) * 2);
   --term-composer-border: 1px solid color-mix(in srgb, var(--term-line) 65%, transparent);
   --term-composer-border-focus: 1px solid color-mix(in srgb, var(--term-accent) 48%, var(--term-line));
   --term-composer-shadow-muted:
@@ -69,7 +107,7 @@
 .mention-editor-placeholder { display: none; position: absolute; inset: 0; pointer-events: none; color: var(--term-muted); font-size: var(--composer-body-size, var(--message-body-size)); line-height: var(--message-body-leading); }
 .mention-editor-host[data-empty='true'] > .mention-editor-placeholder { display: block; }
   .workspace-toolbar { display: flex; align-items: center; position: relative; -webkit-app-region: no-drag; }
-  .workspace-toolbar .workspace-toolbar__trigger { display: inline-flex; min-width: 36px; min-height: 36px; }
+  .workspace-toolbar .workspace-toolbar__trigger { display: inline-flex; min-width: 40px; min-height: 44px; }
   .workspace-toolbar__actions { display: none; }
   .workspace-toolbar:is([data-open], [data-leaving]) .workspace-toolbar__actions {
     display: flex;
@@ -114,7 +152,7 @@
   .michi-home__headline { margin: 0; font-family: var(--ui-font); font-size: clamp(28px, 6.5cqi, 38px); font-weight: 500; line-height: 1.18; letter-spacing: -.045em; text-wrap: balance; }
   .michi-home__headline em { color: var(--term-accent); font-family: 'Source Serif 4', ui-serif, Georgia, serif; font-weight: 400; letter-spacing: -.025em; }
   .michi-home__description { margin: 18px 0 0; max-width: 28ch; color: var(--term-muted); font-size: var(--fs-xl); line-height: 1.65; text-wrap: pretty; }
-  .michi-home .terminal-composer { --composer-input-padding: 16px 14px 8px; --composer-toolbar-padding: 6px 10px 10px; --term-composer-radius: calc(var(--ui-radius) * 3); }
+  .michi-home .terminal-composer { --composer-input-padding: 16px 14px 8px; --composer-att-row-padding: 16px 14px 0; --composer-toolbar-padding: 6px 10px 10px; --term-composer-radius: calc(var(--ui-radius) * 3); }
   .michi-home__section-heading { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; padding: 0 2px 12px; }
   .michi-home__section-heading h2 { margin: 0; font-size: var(--fs-md); font-weight: 500; color: var(--term-muted); }
   .michi-home__section-heading > span { color: var(--term-muted); font-size: var(--fs-xs); font-family: var(--font-mono); font-variant-numeric: tabular-nums; }
@@ -123,7 +161,7 @@
   .home-continue-row__workspace { grid-column: 2; grid-row: 2; }
   .home-continue-row__branches { grid-column: 3; grid-row: 1 / 3; }
   .home-continue-row__age { grid-column: 4; grid-row: 1 / 3; }
-  .home-continue-row:focus-visible { outline: 2px solid var(--term-accent); outline-offset: -2px; }
+  .home-continue-row:focus-visible { outline: var(--focus-ring); outline-offset: -2px; }
   .michi-home .desk-home-headline { font-size: clamp(24px, 3.8cqi, 34px); line-height: 1.3; letter-spacing: -.025em; max-width: 30ch; }
   .michi-home .desk-home-eyebrow { white-space: normal; line-height: 1.6; }
   .michi-home .desk-home-row { padding-block: 13px; border-bottom-color: color-mix(in srgb, var(--term-line) 55%, transparent); }
@@ -131,7 +169,7 @@
   .michi-home .desk-home-section { margin-top: 26px; }
   .michi-home .desk-home-section__head { padding-bottom: 12px; border-bottom-color: color-mix(in srgb, var(--term-line) 65%, transparent); }
 }
-@media (max-width: 700px) and (pointer: coarse) {
+@media (max-width: 700px) and (pointer: coarse), (pointer: coarse) and (max-height: 500px) {
   .terminal-composer .t-toolbar-chip, .terminal-composer .t-action-btn { min-height: 40px; }
   .terminal-composer .t-action-btn, .terminal-composer .t-toolbar-chip.is-icon-only { min-width: 40px; }
   /* Send/Stop paint a 32px plate in their 40px hit square (index.css). */
@@ -160,6 +198,16 @@ html[data-reduce-motion='on'] .terminal-composer .t-action-btn:active:not(:disab
   .terminal-pane__transcript { --att-thumb-size: 56px; padding-left: 14px !important; padding-right: 14px !important; }
   .terminal-pane__transcript :is(.terminal-message-user, .terminal-message-user-editing) { max-width: 80%; }
   .terminal-pane__transcript .terminal-message-user-editing { width: 80%; }
+  /* Lists keep the desktop's proportion of the column, not its pixels:
+     1.5em (ul) / 1.625em (ol, room for "10.") instead of 2.5em. */
+  .terminal-pane__transcript :is(.terminal-message-assistant, .terminal-message-user) .prose :where(ul) { padding-inline-start: 1.125em; }
+  .terminal-pane__transcript :is(.terminal-message-assistant, .terminal-message-user) .prose :where(ol) { padding-inline-start: 1.25em; }
+  .terminal-pane__transcript :is(.terminal-message-assistant, .terminal-message-user) .prose :where(li) { padding-inline-start: 0.375em; }
+  /* Inline code: no vertical padding, so chips on consecutive lines don't
+     nearly touch; a wrapped chip closes and reopens on each line. File links
+     already read as links (chip, accent, ▧), so they drop the underline. */
+  .terminal-pane__transcript :is(.terminal-message-assistant, .terminal-message-user) .prose :not(pre) > code { padding-block: 0; -webkit-box-decoration-break: clone; box-decoration-break: clone; }
+  .terminal-pane__transcript .prose code > a[data-file-link] { text-decoration: none; }
 }
 @media (max-width: 370px) {
   .terminal-dashboard .terminal-composer { --composer-chip-height: 26px; }
@@ -179,9 +227,11 @@ html[data-reduce-motion='on'] .terminal-composer .t-action-btn:active:not(:disab
    engagement), so it takes no gap before +, which then sits where the open
    toolbar has it. */
 .terminal-composer[data-collapsed] > .composer-pre-blocks-scroll { display: none; }
-/* A draft at rest after the keyboard goes down shows one line of itself. */
+/* A draft at rest after the keyboard goes down shows one line of itself, in
+   the field's own size: touch screens keep it at 16px or more (index.css),
+   so the composer size setting alone would clip the line and lower it. */
 .terminal-composer[data-collapsed] .mention-editor-host .ProseMirror {
-  max-height: calc(var(--composer-body-size, var(--message-body-size)) * var(--message-body-leading));
+  max-height: calc(1em * var(--message-body-leading));
   overflow: hidden;
 }
 .terminal-composer[data-collapsed] .terminal-composer__prompt,
@@ -241,9 +291,10 @@ html[data-reduce-motion='on'] .terminal-composer .t-action-btn:active:not(:disab
    frame's left, right and bottom edges, so opening only grows the frame
    upward and moves the text; the first line also starts 14px below the top
    in both. ComposerShell animates the change. */
-@media (max-width: 700px) {
+@media (max-width: 700px), (pointer: coarse) and (max-height: 500px) {
   .terminal-dashboard .terminal-composer {
     --composer-input-padding: 14px 16px 4px;
+    --composer-att-row-padding: 14px 16px 0;
     --composer-toolbar-padding: 4px 6px 6px;
   }
   .terminal-dashboard .terminal-composer__toolbar { gap: 0 !important; }
@@ -276,4 +327,89 @@ html[data-reduce-motion='on'] .terminal-composer .t-action-btn:active:not(:disab
   font-size: var(--fs-2xs);
   line-height: 1;
   color: var(--term-accent);
+}
+
+/* Phone text size (Settings → Appearance → Text size: 小 / 中 / 大).
+   prefs.tsx writes html[data-phone-text]; no attribute means 's', the
+   default, so the first frame is already right. On a phone these replace the
+   desktop's Message size, Composer size and sidebar text sizes. 'm' and 'l'
+   also step up the chrome type scale, so every phone page grows with them. */
+@media (max-width: 700px), (pointer: coarse) and (max-height: 500px) {
+  html {
+    --pt-body: 15px; --pt-composer: 16px; --pt-title: 15px; --pt-row: 15px;
+    --pt-sub: 11px; --pt-tab: 10px; --pt-icon: 17px; --pt-switch: 19px;
+  }
+  html[data-phone-text='m'] {
+    --pt-body: 16px; --pt-composer: 16px; --pt-title: 16px; --pt-row: 16px;
+    --pt-sub: 12px; --pt-tab: 11px; --pt-icon: 18px; --pt-switch: 20px;
+    --fs-2xs: 10px; --fs-xs: 11px; --fs-sm: 12px; --fs-md: 13px;
+    --fs-lg: 14px; --fs-xl: 15px; --fs-2xl: 17px; --fs-3xl: 19px;
+  }
+  html[data-phone-text='l'] {
+    --pt-body: 18px; --pt-composer: 18px; --pt-title: 17px; --pt-row: 17px;
+    --pt-sub: 13px; --pt-tab: 12px; --pt-icon: 20px; --pt-switch: 22px;
+    --fs-2xs: 11px; --fs-xs: 12px; --fs-sm: 13px; --fs-md: 14px;
+    --fs-lg: 15px; --fs-xl: 16px; --fs-2xl: 18px; --fs-3xl: 20px;
+  }
+  /* A drawer fills the phone and is read at arm's length, so its body reads a
+     step above the preset: +2px for 2xs to sm, +3px for md to xl. 2xl and up
+     stay the preset's own. DrawerShell marks its panel data-phone. The header
+     keeps the preset's sizes, so its title has room beside its badge and
+     controls. So does a Pages view: it is a document with px headings of its
+     own, and reads as the same page does inline. A custom property cannot
+     refer to itself, hence one block per preset. */
+  .drawer-shell-panel[data-phone] > :not(.ui-overlay-header, .page-view-content) {
+    --fs-2xs: 11px; --fs-xs: 12px; --fs-sm: 13px; --fs-md: 15px; --fs-lg: 16px; --fs-xl: 17px;
+  }
+  html[data-phone-text='m'] .drawer-shell-panel[data-phone] > :not(.ui-overlay-header, .page-view-content) {
+    --fs-2xs: 12px; --fs-xs: 13px; --fs-sm: 14px; --fs-md: 16px; --fs-lg: 17px; --fs-xl: 18px;
+  }
+  html[data-phone-text='l'] .drawer-shell-panel[data-phone] > :not(.ui-overlay-header, .page-view-content) {
+    --fs-2xs: 13px; --fs-xs: 14px; --fs-sm: 15px; --fs-md: 17px; --fs-lg: 18px; --fs-xl: 19px;
+  }
+  /* <html> carries the desktop sizes inline (prefs.tsx), so the phone sizes
+     go one level down; both message variables, because --message-body-size
+     is resolved where it is declared. */
+  body {
+    --message-body-size-base: var(--pt-body);
+    --message-body-size: var(--pt-body);
+    --composer-body-size: var(--pt-composer);
+    --msg-meta-size: var(--pt-sub);
+  }
+  /* Drawer: row titles and their labels follow the preset (not the desktop
+     sidebar density); every row is a full touch target. */
+  .terminal-shell[data-sidebar-layout='overlay'] .terminal-sidebar-content {
+    --sb-fs: var(--pt-row); --sb-ts-fs: var(--pt-sub);
+    --sb-caret-fs: var(--fs-xl); --sb-caret-w: 12px; --sb-caret-color: var(--term-mid);
+  }
+}
+@media (max-width: 700px) and (pointer: coarse), (pointer: coarse) and (max-height: 500px) {
+  .terminal-shell[data-sidebar-layout='overlay'] .terminal-sidebar .t-row-hover { min-height: 44px; }
+}
+
+/* The root shows above and below the app (iOS status-bar band, overscroll):
+   paint it the top bar's colour (useThemeColorSync), not the darker --term-bg. */
+@media (max-width: 700px), (pointer: coarse) and (max-height: 500px) {
+  /* :root outranks index.css's own html/body rules whatever the load order. */
+  :root, :root body { background: var(--term-topbar-paint, var(--term-bg, var(--michi-boot-bg, #f3f4f6))); }
+}
+
+/* The notice corner (ShellNotices, index.css) in the phone layout: inset from
+   both edges like sonner's phone toasts, and touch-sized controls, the
+   topbar's 44px rows and 40px buttons, with room between Resume and ×. */
+@media (max-width: 700px), (pointer: coarse) and (max-height: 500px) {
+  .shell-notices { right: 8px; width: calc(100vw - 16px); }
+  .shell-notice,
+  .shell-notice-tab {
+    border-right-width: 1px;
+    border-radius: var(--term-composer-radius);
+  }
+  .shell-notice { width: 100%; }
+  .shell-notice .ui-btn { min-height: 40px; padding-inline: 14px; }
+  .shell-notice .shell-notice-icon { min-width: 40px; min-height: 40px; }
+  .shell-notice-head .shell-notice-icon { margin: -8px -10px -8px 0; }
+  .shell-notice-tab { height: 44px; padding: 0 14px; }
+  .interrupted-notice-item { min-height: 44px; gap: 12px; padding-block: 6px; }
+  .interrupted-notice-item-title { min-height: 24px; }
+  .interrupted-notice-item-meta { white-space: normal; }
 }

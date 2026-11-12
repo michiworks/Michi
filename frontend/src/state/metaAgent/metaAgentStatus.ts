@@ -29,7 +29,7 @@ export interface MetaAgentStatus {
   stop: MetaAgentStop | null;
   /** With kind `guard-failed`: the failed restriction checks, empty until the runtime they ran on is known. */
   guardFailures: MetaAgentGuardStatus[];
-  /** Settings › Meta agent can fix it: the rail's Settings dot. */
+  /** Settings › <name> › Pages upkeep can fix it: the rail's Settings dot. */
   settingsAlert: boolean;
 }
 
@@ -47,17 +47,30 @@ export interface MetaAgentStatusInput {
 }
 
 export const SCHEDULER_OFF_REASON = 'Scheduled jobs are off on this backend';
-export const NO_META_AGENT_REASON = 'This Michi backend has no Meta agent yet';
+export const NO_META_AGENT_REASON = 'This Michi backend doesn’t run Pages upkeep yet';
 export const GUARD_FAILED_REASON = 'Its tool check failed';
 
-/** The words every surface leads with for each state that is not a progress or an ordinary line. */
-export const META_AGENT_HEADLINE: Record<Exclude<MetaAgentStatusKind, 'first-run' | 'just-read' | 'normal'>, string> = {
+/**
+ * The words every surface leads with for each state that is not a progress
+ * or an ordinary line. The background maintenance is the agent's Pages
+ * upkeep (DESIGN-v2 §1.5), so they name it, never a "Meta agent".
+ */
+export const UPKEEP_HEADLINE: Record<Exclude<MetaAgentStatusKind, 'first-run' | 'just-read' | 'normal'>, string> = {
   offline: 'Backend not connected',
-  'guard-failed': 'Meta agent stopped',
-  'not-running': 'Meta agent is not running',
-  unsupported: 'Meta agent is not running',
-  stopped: 'Meta agent stopped',
-  paused: 'Meta agent is paused',
+  'guard-failed': 'Pages upkeep stopped',
+  'not-running': 'Pages upkeep isn’t running',
+  unsupported: 'Pages upkeep isn’t running',
+  stopped: 'Pages upkeep stopped',
+  paused: 'Pages upkeep is paused',
+};
+
+/** The word a Scheduled row shows in place of its ordinary line, in the list and in its sidebar alike. */
+export const META_AGENT_ROW_WORD: Partial<Record<MetaAgentStatusKind, { text: string; tone?: 'danger' }>> = {
+  'guard-failed': { text: 'Error', tone: 'danger' },
+  stopped: { text: 'Error', tone: 'danger' },
+  'not-running': { text: 'Not running' },
+  unsupported: { text: 'Not running' },
+  paused: { text: 'Paused' },
 };
 
 const SETTINGS_FIXES: ReadonlySet<MetaAgentStatusKind> = new Set(['guard-failed', 'unsupported', 'stopped']);
@@ -92,7 +105,7 @@ export function metaAgentStatus(input: MetaAgentStatusInput): MetaAgentStatus {
 
   if (info && !info.availability.available) {
     const label = input.runtimeLabel?.(info.resolved.runtimeId) ?? info.resolved.runtimeId;
-    return status('unsupported', { reason: info.availability.reason ?? `The Meta agent cannot run on ${label}` });
+    return status('unsupported', { reason: info.availability.reason ?? `Pages upkeep cannot run on ${label}` });
   }
   if (stop?.reason === 'runtime-unsupported') return status('unsupported', { reason: stop.message });
   if (stop) return status('stopped', { reason: stop.message, stop });

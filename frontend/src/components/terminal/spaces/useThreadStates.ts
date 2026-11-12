@@ -3,8 +3,9 @@ import type { ThreadCardItem } from 'michi-shared';
 import { THREAD_STATE_LIMITS } from 'michi-shared';
 import { serverEntityId } from '../../../config/backendIdentity';
 import { fetchThreadStates } from '../../../services/api/spacesHome';
+import { startVisiblePoll } from '../../../state/visiblePoll';
 
-/** How often an open task board re-reads its conversations; focusing the window reads them too. */
+/** How often an open, visible task board re-reads its conversations; focusing the window reads them too. */
 const REFRESH_MS = 60_000;
 const NONE: ReadonlyMap<string, ThreadCardItem> = new Map();
 
@@ -56,13 +57,11 @@ export function useThreadStates(connectionId: string, nodeIds: readonly string[]
       );
     };
     load();
-    const timer = window.setInterval(load, REFRESH_MS);
-    window.addEventListener('focus', load);
+    const stopPolling = startVisiblePoll(load, { intervalMs: REFRESH_MS });
     return () => {
       live = false;
       controller.abort();
-      window.clearInterval(timer);
-      window.removeEventListener('focus', load);
+      stopPolling();
     };
   }, [enabled, key]);
   return useMemo(() => ({ byNode: state.byNode, loaded: state.key === key, failed: state.failed }), [state, key]);

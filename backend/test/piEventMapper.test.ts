@@ -123,6 +123,41 @@ test('usage counts cache reads and writes as input, like the Claude adapter', ()
   assert.ok(Math.abs((summary.charge?.amount ?? 0) - 0.0035) < 1e-9);
 });
 
+describe('Pi context fill', () => {
+  const call = (input: number, cacheRead: number, output: number) => ({
+    type: 'message_end',
+    message: { role: 'assistant', stopReason: 'toolUse', content: [], usage: { input, cacheRead, cacheWrite: 0, output, cost: { total: 0 } } },
+  });
+  const fill = (ctx: MapperContext) => {
+    const events = [...mapAgentEvent({ type: 'agent_end' }, ctx)];
+    const usage = events.find(event => event.kind === 'context_usage');
+    const summary = events.find(event => event.kind === 'usage_summary');
+    assert.ok(usage?.kind === 'context_usage' && summary?.kind === 'usage_summary');
+    assert.equal(summary.contextUsagePercentage, usage.contextUsagePercentage);
+    return usage.contextUsagePercentage;
+  };
+
+  test('is the latest call\'s share of the window, not the sum of every call in the run', () => {
+    const ctx = { ...context(), contextWindow: 100_000 };
+    [...mapAgentEvent(call(1_000, 59_000, 500), ctx)];
+    [...mapAgentEvent(call(1_500, 60_500, 500), ctx)];
+    assert.equal(fill(ctx), 62.5);
+  });
+
+  test('never exceeds 100%', () => {
+    const ctx = { ...context(), contextWindow: 100_000 };
+    [...mapAgentEvent(call(1_000, 120_000, 500), ctx)];
+    assert.equal(fill(ctx), 100);
+  });
+
+  test('a compaction lowers it to the compacted size, and its summarisation call does not count', () => {
+    const ctx = { ...context(), contextWindow: 100_000 };
+    [...mapAgentEvent(call(1_000, 79_000, 500), ctx)];
+    [...mapAgentEvent({ type: 'compaction_end', result: { tokensBefore: 80_500, estimatedTokensAfter: 12_000, usage: { input: 80_000, output: 2_000, cost: { total: 0 } } } }, ctx)];
+    assert.equal(fill(ctx), 12);
+  });
+});
+
 test('a run without cache hits reports no cachedInputTokens', () => {
   const ctx = context();
   [...mapAgentEvent({ type: 'message_end', message: { role: 'assistant', stopReason: 'stop', content: [], usage: { input: 10, cacheRead: 0, cacheWrite: 0, output: 5, totalTokens: 15, cost: { total: 0 } } } }, ctx)];
@@ -139,4 +174,25 @@ test('successful SDK recovery clears a previous overflow error at the final dura
   const events = [...mapAgentEvent({ type: 'agent_end' }, ctx)];
   assert.equal(events.some(event => event.kind === 'runtime_error'), false);
   assert.deepEqual(events.at(-1), { kind: 'turn_end' });
+});
+
+test('a tool result image reaches the chip as a placeholder; the agent loop keeps its result', () => {
+  const data = Buffer.concat([Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]), Buffer.alloc(30_000, 2)]).toString('base64');
+  const result = { content: [{ type: 'text', text: 'Read shot.png' }, { type: 'image', data, mimeType: 'image/png' }], details: {} };
+  const before = structuredClone(result);
+  const events = [...mapAgentEvent({ type: 'tool_execution_end', toolCallId: 'read-1', toolName: 'read', result, isError: false }, context())];
+  assert.deepEqual(result, before);
+  const update = events.find(event => event.kind === 'tool_call_update');
+  assert.ok(update?.kind === 'tool_call_update');
+  assert.deepEqual(JSON.parse(update.output!), {
+    content: [{ type: 'text', text: 'Read shot.png' }, { type: 'image', data: '[image image/png 29 KB omitted]', mimeType: 'image/png' }],
+    details: {},
+  });
+});
+
+describe("Pi event mapper tool payloads", () => {
+  test("shows a tool call whose arguments JSON cannot encode", () => {
+    const [event] = Array.from(mapAgentEvent({ type: "tool_execution_start", toolCallId: "t1", toolName: "count", args: { n: 10n } }, context()));
+    assert.equal(event.kind === "tool_call" && event.inputJson, "[object Object]");
+  });
 });

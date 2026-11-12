@@ -1,5 +1,6 @@
 import type { MichiPageBlock } from 'michi-shared';
-import { pageBlockText, parsePageBlockInput } from 'michi-shared';
+import { dayAt, dayIndex, localDayIndex, pageBlockText, parsePageBlockInput } from 'michi-shared';
+import { formatDay } from '../michiFormat';
 
 // Defensive presentation helpers for native Page blocks. Every field read
 // here may be missing or malformed; an individual block must not break its page.
@@ -75,7 +76,7 @@ const NAMES = ['title', 'question', 'label', 'name', 'caption', 'alt', 'text'];
 /** Fields that say nothing to a person about what the block is. */
 const NOT_NAMES = new Set([
   'id', 'type', 'sources', 'edit', 'staleFor', 'url', 'image', 'avatar', 'before', 'after', 'code',
-  'databaseId', 'viewId', 'threadId', 'component', 'componentId', 'lang', 'interaction', 'visibility', 'blockIds', 'action',
+  'databaseId', 'viewId', 'threadId', 'pageId', 'component', 'componentId', 'lang', 'interaction', 'visibility', 'blockIds', 'action',
 ]);
 
 /** What to call a block no one wrote a handle for: its title, question, label or name, else its first words; '' when it has none. */
@@ -103,7 +104,7 @@ const TYPE_LABELS = new Map<string, string>([
   ['image', 'Image'], ['gallery', 'Gallery'], ['before-after', 'Before and after'], ['carousel', 'Carousel'],
   ['video', 'Video'], ['audio', 'Audio'], ['embed', 'Embedded page'], ['link', 'Link'], ['file', 'File'],
   ['thread-card', 'Thread'], ['threads', 'Threads'], ['person', 'Person'], ['place', 'Place'], ['actions', 'Actions'],
-  ['form', 'Form'], ['poll', 'Poll'], ['database', 'Table'], ['database-ref', 'Database'], ['home-section', 'Attention list'], ['task-view', 'Task board'], ['custom', 'Widget'],
+  ['form', 'Form'], ['poll', 'Poll'], ['database', 'Table'], ['database-ref', 'Database'], ['page-link', 'Linked page'], ['home-section', 'Attention list'], ['task-view', 'Task board'], ['custom', 'Widget'],
   ['criteria', 'Success criteria'], ['conflict', 'Conflict'], ['forgot', 'You may have forgotten'], ['component', 'Component'],
 ]);
 
@@ -185,26 +186,6 @@ export interface PlanActualModel {
 
 const frac = (n: number, scale: number) => (scale > 0 ? Math.min(1, Math.max(0, n / scale)) : 0);
 
-const DAY_MS = 86_400_000;
-
-/** A YYYY-MM-DD day as a count of days since 1970, or null. */
-export function dayNumber(value: unknown): number | null {
-  if (typeof value !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(value)) return null;
-  const [year, month, day] = value.split('-').map(Number);
-  const ms = Date.UTC(year, month - 1, day);
-  return Number.isFinite(ms) ? Math.round(ms / DAY_MS) : null;
-}
-
-/** The local calendar day `now` falls on, as a day count. */
-export function localDayNumber(now: number): number {
-  const date = new Date(now);
-  return Math.round(Date.UTC(date.getFullYear(), date.getMonth(), date.getDate()) / DAY_MS);
-}
-
-const DAY_LABEL = new Intl.DateTimeFormat('en-US', { month: 'short', day: 'numeric', timeZone: 'UTC' });
-/** `Oct 10`. */
-export const dayLabel = (day: number) => DAY_LABEL.format(new Date(day * DAY_MS));
-
 /** A bar's place on the shared track, as fractions of it. */
 export interface TrackSpan { start: number; width: number }
 
@@ -244,19 +225,20 @@ export function isPlanSchedule(block: MichiPageBlock): boolean {
  * calendar track with today as a line. Days count both ends.
  */
 export function planScheduleModel(block: MichiPageBlock, now: number): PlanScheduleModel {
-  const today = localDayNumber(now);
+  const today = localDayIndex(now);
+  const dayLabel = (day: number) => formatDay(dayAt(day), new Date(now));
   const phases = objects(block.items).flatMap((it) => {
     const label = str(it.label).trim();
-    const ps = dayNumber(it.planStart);
-    const pe = dayNumber(it.planEnd);
+    const ps = dayIndex(it.planStart);
+    const pe = dayIndex(it.planEnd);
     if (!label || ps === null || pe === null || pe < ps) return [];
-    const as = dayNumber(it.actualStart);
-    const ae = dayNumber(it.actualEnd);
-    const fe = dayNumber(it.forecastEnd);
+    const as = dayIndex(it.actualStart);
+    const ae = dayIndex(it.actualEnd);
+    const fe = dayIndex(it.forecastEnd);
     // A start still ahead of today has not begun; an end given is the end, whatever today is.
     const started = as !== null && (ae !== null ? ae >= as : as <= today);
     const actualEnd = started ? ae ?? today : null;
-    const forecastStart = fe === null ? null : dayNumber(it.forecastStart) ?? (started && ae === null ? today + 1 : ps);
+    const forecastStart = fe === null ? null : dayIndex(it.forecastStart) ?? (started && ae === null ? today + 1 : ps);
     const forecast = fe !== null && forecastStart !== null && fe >= forecastStart ? { from: forecastStart, to: fe } : null;
     return [{ label, ps, pe, as: started ? as : null, actualEnd, ended: ae !== null, forecast }];
   });
@@ -292,7 +274,9 @@ export function planScheduleModel(block: MichiPageBlock, now: number): PlanSched
     ...(planEnd < hi ? [{ at: (planEnd - lo + 1) / days, text: 'plan end', kind: 'plan-end' as const }] : []),
   ];
   const axis: PlanScheduleModel['axis'] = [];
-  for (const label of candidates) if (axis.every((placed) => Math.abs(placed.at - label.at) >= 0.14)) axis.push(label);
+  // A gap of 0.14 fits labels up to `plan end`'s length; one that says its year needs more.
+  const room = (a: string, b: string) => (0.14 * Math.max(8, a.length, b.length)) / 8;
+  for (const label of candidates) if (axis.every((placed) => Math.abs(placed.at - label.at) >= room(placed.text, label.text))) axis.push(label);
   return {
     rows,
     today: todayAt,
@@ -349,7 +333,7 @@ export function planActualModel(block: MichiPageBlock): PlanActualModel {
 }
 const SUMMARY_DEPTH = 3;
 
-/** A block's whole text, as Copy puts it on the clipboard: what blockSummary says, never cut short. */
+/** A block's whole text, as Copy puts it on the clipboard, its label first. */
 export function blockFullText(block: MichiPageBlock): string {
   return summaryLines(block, 0).filter((l) => l.trim()).join('\n');
 }
@@ -467,74 +451,4 @@ export function cellText(v: unknown): string {
     return start && end ? `${start} → ${end}` : start;
   }
   return str(v);
-}
-
-const MINUTE = 60_000;
-const HOUR = 60 * MINUTE;
-const DAY = 24 * HOUR;
-
-const plural = (n: number, word: string) => `${n} ${word}${n === 1 ? '' : 's'}`;
-
-
-
-function clipChars(s: string, n: number): string {
-  const chars = [...s];
-  return chars.length <= n ? s : `${chars.slice(0, n - 1).join('').trimEnd()}…`;
-}
-
-
-
-/** The outline entry for a top-level block; '' when the block carries no title of its own. */
-export function outlineTitle(b: MichiPageBlock): string {
-  const title = b.type === 'heading' ? str(b.text)
-    : b.type === 'markdown' ? markdownHeading(str(b.text))
-    : str(b.title) || str(b.question) || str(b.label) || str(b.name);
-  return clipWords(title.trim(), 60);
-}
-
-
-
-export interface OutlineBlock {
-  /** The block's place among the page's top-level blocks. */
-  index: number;
-  title: string;
-  /** 1 for a section; 2 for a titled block under the section heading before it. */
-  depth: 1 | 2;
-}
-
-
-
-/**
- * The page's own outline: headings (and Markdown that opens with one) are
- * sections; a titled block nests under the section before it. An agent's
- * note about another block is not a section.
- */
-export function outlineBlocks(blocks: readonly MichiPageBlock[]): OutlineBlock[] {
-  const out: OutlineBlock[] = [];
-  let underHeading = false;
-  blocks.forEach((b, index) => {
-    if (typeof b.staleFor === 'string' && b.staleFor) return;
-    const title = outlineTitle(b);
-    if (!title) return;
-    const heading = b.type === 'heading' || b.type === 'markdown';
-    if (heading && !(b.type === 'heading' && b.level === 3 && underHeading)) {
-      out.push({ index, title, depth: 1 });
-      underHeading = true;
-      return;
-    }
-    out.push({ index, title, depth: underHeading ? 2 : 1 });
-  });
-  return out;
-}
-
-
-
-/** The most a block's quote carries into a Michi thread. */
-export const BLOCK_SUMMARY_MAX = 1500;
-
-
-
-/** A block as compact plain text, its label first: what Ask and Branch quote into the new thread. */
-export function blockSummary(block: MichiPageBlock): string {
-  return clipChars(summaryLines(block, 0).filter((l) => l.trim()).join('\n'), BLOCK_SUMMARY_MAX);
 }

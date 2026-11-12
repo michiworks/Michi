@@ -1,4 +1,6 @@
+import { isRecord } from '../guards';
 import type { PageBlock, PageBlockInput } from './blocks';
+import { pageChildBlockLists } from './containers';
 
 export const PAGE_VIEW_PRESENTATIONS = ['inline', 'drawer', 'modal'] as const;
 export type PageViewPresentation = typeof PAGE_VIEW_PRESENTATIONS[number];
@@ -7,15 +9,14 @@ export interface PageViewInteraction { label: string; action: PageViewAction }
 export interface PageViewBlock { type: 'view'; viewId: string; title: string; blockIds: string[] }
 export interface PageViewLinkBlock { type: 'view-link'; label: string; action: PageViewAction }
 
-const record = (v: unknown): v is Record<string, unknown> => !!v && typeof v === 'object' && !Array.isArray(v);
 export const isPageViewId = (v: unknown): v is string => typeof v === 'string' && /^[a-zA-Z][a-zA-Z0-9_-]{0,79}$/.test(v);
 export function parsePageViewAction(value: unknown): PageViewAction | null {
-  if (!record(value) || Object.keys(value).some(k => !['type', 'viewId', 'presentation'].includes(k)) || value.type !== 'open-view' || !isPageViewId(value.viewId) ||
+  if (!isRecord(value) || Object.keys(value).some(k => !['type', 'viewId', 'presentation'].includes(k)) || value.type !== 'open-view' || !isPageViewId(value.viewId) ||
     (value.presentation !== undefined && !PAGE_VIEW_PRESENTATIONS.includes(value.presentation as PageViewPresentation))) return null;
   return { type: 'open-view', viewId: value.viewId, ...(value.presentation ? { presentation: value.presentation as PageViewPresentation } : {}) };
 }
 export function parsePageViewInteraction(value: unknown): PageViewInteraction | null {
-  if (!record(value) || Object.keys(value).some(k => !['label', 'action'].includes(k)) || typeof value.label !== 'string' || !value.label.trim() || value.label.length > 200) return null;
+  if (!isRecord(value) || Object.keys(value).some(k => !['label', 'action'].includes(k)) || typeof value.label !== 'string' || !value.label.trim() || value.label.length > 200) return null;
   const action = parsePageViewAction(value.action);
   return action ? { label: value.label, action } : null;
 }
@@ -33,11 +34,7 @@ export function pageViewIndex(blocks: readonly PageBlock[]) {
 }
 
 function children(block: PageBlockInput): PageBlockInput[] {
-  if (block.type === 'toggle') return block.blocks;
-  if (block.type === 'columns') return block.columns.flat();
-  if (block.type === 'tabs') return block.tabs.flatMap(tab => tab.blocks);
-  if (block.type === 'grid') return block.regions.flatMap(region => region.blocks);
-  return [];
+  return pageChildBlockLists(block).flat();
 }
 
 /** References remain page-local and reuse the original top-level block's ownership/history. */

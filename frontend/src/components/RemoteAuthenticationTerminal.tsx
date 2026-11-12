@@ -2,8 +2,9 @@ import { useEffect, useRef, useState } from 'react';
 import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import '@xterm/xterm/css/xterm.css';
-import { REMOTE_CREDENTIALS, remoteSignInCommand } from 'michi-shared';
+import { randomUuid, REMOTE_CREDENTIALS, remoteSignInCommand } from 'michi-shared';
 import { getElectron } from '../lib/electronBridge';
+import { copyText } from '../lib/clipboard';
 import { usePrefs } from '../state/prefs';
 import { terminalTheme } from './terminal/terminalTheme';
 import { closeRemoteAuthentication, completeRemoteAuthentication, type RemoteAuthenticationRequest } from '../state/remoteAuthentication';
@@ -46,7 +47,7 @@ export default function AuthenticationTerminal({ request }: { request: RemoteAut
     const electron = getElectron();
     if (!element || !electron?.remoteAuthCreate) return;
     let disposed = false, completed = false;
-    const surface = 'remote-auth-' + crypto.randomUUID();
+    const surface = 'remote-auth-' + randomUuid();
     const controller = new AbortController();
     const terminal = new Terminal({ cursorBlink: true, fontFamily: 'ui-monospace, SFMono-Regular, monospace',
       // eslint-disable-next-line no-restricted-syntax -- xterm requires numeric pixel sizes
@@ -113,7 +114,7 @@ export default function AuthenticationTerminal({ request }: { request: RemoteAut
     </> : <>
       {command && <><p>Use the Michi desktop app for the embedded terminal, or run this command in Terminal:</p>
       <pre>{command}</pre></>}
-      <div className="remote-auth__actions">{command && <Button onClick={() => { void navigator.clipboard.writeText(command).then(() => setCopied(true)).catch(() => setStatus('Select the command above to copy it.')); }}>{copied ? 'Copied' : 'Copy command'}</Button>}
+      <div className="remote-auth__actions">{command && <Button onClick={() => { void copyText(command).then((ok) => { if (ok) setCopied(true); else setStatus('Select the command above to copy it.'); }); }}>{copied ? 'Copied' : 'Copy command'}</Button>}
         <Button variant="secondary" disabled={reconnecting} onClick={() => { void reconnect(); }}>{reconnecting ? 'Reconnecting…' : 'I signed in — reconnect'}</Button></div>
       <p role="status">{status}</p>
     </>}

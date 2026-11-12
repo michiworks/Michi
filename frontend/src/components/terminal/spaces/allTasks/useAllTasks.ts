@@ -2,8 +2,10 @@ import { useCallback, useEffect, useState } from 'react';
 import type { AllTasksDto } from 'michi-shared';
 import { fetchAllTasks } from '../../../../services/api/taskDatabase';
 import { subscribePageChanges } from '../../../../state/pages/pageEvents';
+import { LOCAL_BACKEND_CONNECTION_ID } from '../../../../config/backendConnections';
+import { useVisiblePoll } from '../../../../state/visiblePoll';
 
-/** How often All tasks reads every task database again; focusing the window and a database change read them too. */
+/** How often a visible All tasks reads every task database again; focusing the window and a database change read them too. */
 const REFRESH_MS = 60_000;
 
 export interface AllTasksState {
@@ -38,15 +40,9 @@ export function useAllTasks(): AllTasksState {
   }, [reads]);
   useEffect(() => {
     // Any database may be a task database; a change to a page's own blocks is not.
-    const stop = subscribePageChanges({ backendConnectionId: 'local' }, (changed) => { if (changed.databaseId) refresh(); });
-    const timer = window.setInterval(refresh, REFRESH_MS);
-    window.addEventListener('focus', refresh);
-    return () => {
-      stop();
-      window.clearInterval(timer);
-      window.removeEventListener('focus', refresh);
-    };
+    return subscribePageChanges({ backendConnectionId: LOCAL_BACKEND_CONNECTION_ID }, (changed) => { if (changed.databaseId) refresh(); });
   }, [refresh]);
+  useVisiblePoll(refresh, { intervalMs: REFRESH_MS });
   const replace = useCallback((update: (dto: AllTasksDto) => AllTasksDto) => setDto((current) => (current ? update(current) : current)), []);
   return { dto, error, refresh, replace };
 }

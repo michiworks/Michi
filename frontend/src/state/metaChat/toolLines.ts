@@ -1,6 +1,7 @@
-import { taskDatabaseColumns, TASK_COLUMN } from 'michi-shared';
+import { META_AGENT_HELD_WRITE_TOOLS, plural, taskDatabaseColumns, TASK_COLUMN } from 'michi-shared';
 import type { ToolCallState } from '../chatTypes';
 import { normalizeToolResultEnvelope, normalizeTurnToolName, parseTurnPageReceipt, type TaskWriteCounts } from '../../lib/turnPageReceipt';
+import { LOCAL_BACKEND_CONNECTION_ID } from '../../config/backendConnections';
 
 /** Names the window knows for ids it sees in tool arguments. */
 export interface ToolLineNames {
@@ -9,7 +10,7 @@ export interface ToolLineNames {
 }
 
 const TOOLS = [
-  'list_pages', 'read_page', 'edit_page', 'create_page', 'create_database', 'configure_database', 'read_database', 'edit_database', 'configure_database_view',
+  'read_home', 'edit_home', 'list_pages', 'read_page', 'preview_page', 'edit_page', 'create_page', 'create_database', 'configure_database', 'read_database', 'edit_database', 'configure_database_view',
   'open_task_database', 'list_tasks',
   'list_page_components', 'read_page_component', 'save_page_component', 'layout_rules',
   'read_conversation_updates', 'start_conversation', 'list_workspaces', 'list_threads', 'search_messages',
@@ -31,7 +32,6 @@ function parse(text: string | undefined): Record<string, unknown> {
 
 const str = (value: unknown): string | null => (typeof value === 'string' && value.trim() ? value.trim() : null);
 const clip = (text: string, max = 32): string => (text.length > max ? `${text.slice(0, max - 1)}…` : text);
-const plural = (n: number, one: string, many = `${one}s`) => `${n} ${n === 1 ? one : many}`;
 
 /** The tool's own answer: the last object in its result envelope that has `key`, skipping runtime wrappers. */
 function answer(tool: ToolCallState, keys: readonly string[]): Record<string, unknown> | null {
@@ -69,14 +69,18 @@ function taskStepCounts(tasks: TaskWriteCounts): string | null {
   return parts.length ? parts.join(', ') : null;
 }
 
-/** The backend's refusal of a page write while the first run still writes (firstRunHold.ts). */
-const HELD = "HELD: the Meta agent's first-time generation";
-const WRITE_TOOLS: ReadonlySet<Tool> = new Set(['edit_page', 'edit_database', 'configure_database', 'configure_database_view', 'create_page', 'create_database', 'save_page_component', 'layout_rules', 'open_task_database']);
+/**
+ * The backend's refusal of a page write while the first run still writes
+ * (firstRunHold.ts): "HELD: Pages upkeep's first-time generation …", and the
+ * older wording stored tool results and older backends still carry.
+ */
+const HELD = /HELD: [^\n]{0,40}first-time generation/;
+const HELD_WRITE_TOOLS: ReadonlySet<string> = new Set(META_AGENT_HELD_WRITE_TOOLS);
 
 /** A page write the first run made wait: it runs once the first run finishes. */
 export function isHeldForFirstRun(tool: ToolCallState): boolean {
   const name = normalizeTurnToolName(tool.title, TOOLS) as Tool | null;
-  return !!name && WRITE_TOOLS.has(name) && !!tool.output?.includes(HELD);
+  return !!name && HELD_WRITE_TOOLS.has(name) && HELD.test(tool.output ?? '');
 }
 
 /**
@@ -101,11 +105,15 @@ export function metaAgentToolLine(tool: ToolCallState, names: ToolLineNames): st
     const what = name === 'create_database' ? `Create ${clip(str(input.title) ?? 'a database')}`
       : name === 'create_page' ? `Create ${clip(str(input.title) ?? 'a page')}`
       : name === 'save_page_component' ? 'Save component'
+      : name === 'edit_home' ? 'Customize Home'
         : name === 'open_task_database' ? join('Open the task database', workspace())
           : `Write ${clip(pageTitle())}`;
     return join(what, 'held until the first run finishes');
   }
   switch (name) {
+    case 'read_home': return 'Read Home';
+    case 'edit_home': return 'Customize Home';
+    case 'preview_page': return `Preview ${clip(pageTitle())}`;
     case 'list_pages': return join('List pages', workspace(), done && count(tool, ['items']) !== null && plural(count(tool, ['items'])!, 'page'));
     case 'read_page': {
       const blocks = done ? count(tool, ['blocks']) : null;
@@ -116,7 +124,7 @@ export function metaAgentToolLine(tool: ToolCallState, names: ToolLineNames): st
     case 'edit_database':
     case 'configure_database':
     case 'configure_database_view': {
-      const receipt = done ? parseTurnPageReceipt(tool, 'local') : null;
+      const receipt = done ? parseTurnPageReceipt(tool, LOCAL_BACKEND_CONNECTION_ID) : null;
       const title = clip(receipt?.title ?? pageTitle());
       if (!receipt) return `Write ${title}`;
       const tasks = receipt.tasks ? taskStepCounts(receipt.tasks) : null;

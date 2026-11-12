@@ -1,8 +1,8 @@
 /**
  * Characterization of chat and Agent Run permission decisions per runtime.
  *
- * Each cell drives a real session (Kiro, Codex, Claude, Pi) through its own
- * native permission entry point, with only the transport stubbed:
+ * Each cell drives a real session (Kiro, Crew, Codex, Claude, Pi) through its
+ * own native permission entry point, with only the transport stubbed:
  *
  *   {chat, run} x {ask, trust, yolo} x tool x runtime
  *
@@ -36,11 +36,12 @@ import {
 } from 'michi-shared';
 import { configureRuntimeDeps, __resetRuntimeDeps } from '../src/agents/runtimeDeps';
 import { RuntimeRunExecutor } from '../src/agents/runs/runtimeRunExecutor';
-import { intersectPermissionPolicies } from '../src/agents/runs/effectivePermissionPolicy';
-import { DEFAULT_PLATFORM_POLICY } from '../src/agents/agentRunAssembly';
+import { DEFAULT_PLATFORM_POLICY, intersectPermissionPolicies } from '../src/agents/runs/effectivePermissionPolicy';
 import type { AgentRunSpec } from '../src/agents/runs/ports';
 import { AcpAgentSession } from 'michi-runtime/internal/adapters/kiro/AcpAgentSession';
 import type { AcpAgentRuntime } from 'michi-runtime/internal/adapters/kiro/AcpAgentRuntime';
+import type { AcpAgentFlavor } from 'michi-runtime/internal/adapters/kiro/acpAgentFlavor';
+import { CREW_KIRO_FLAVOR } from 'michi-runtime/internal/adapters/crew/crewFlavor';
 import { CodexRuntime } from 'michi-runtime/internal/adapters/codex/CodexRuntime';
 import type { CodexSession } from 'michi-runtime/internal/adapters/codex/CodexSession';
 import { CODEX_SERVER_REQUESTS } from 'michi-runtime/internal/adapters/codex/codexProtocol';
@@ -197,17 +198,29 @@ function drainPrompts(session: AgentSession, text: string, prompts: Map<number, 
 // `toolCallMeta:<name>` (toolCall._meta.toolName). Prose titles carry no name.
 // `v2wire:` and `v3wire:` rows are the request shapes kiro-cli 2.34.0 sends
 // (recorded with kiroPermissionRequest.live.test.ts), ids and paths replaced;
-// a v2 request follows the tool_call update that names its tool.
+// a v2 request follows the tool_call update that names its tool. The
+// `wire:@michi/` rows are kiro-cli 3.1.0's requests for a tool of Michi's MCP
+// server (recorded 2026-11-07 against a stub server). `v2:` and `v3:` rows
+// follow those shapes for calls the recordings did not make.
 const KIRO_TOOLS = [
   'meta:read', 'meta:edit', 'meta:write', 'meta:bash',
   'title:Read', 'title:Edit', 'title:Write', 'title:Bash',
   'title:fs_read', 'title:fs_write', 'title:execute_bash', 'title:use_aws',
   'meta:execute_bash', 'toolCallMeta:fs_write',
   'meta:@github/create_issue', 'title:@michi/send_to_thread',
+  'title:@michi/list_ready_models', 'title:@michi/propose_multi_model_plan',
+  'title:@michi/set_branch_overview', 'title:@michi/set_follow_ups',
+  // Michi's own tools: turn metadata and reads run without a prompt, a page edit asks.
+  'v3wire:@michi/set_branch_overview', 'v2wire:@michi/set_branch_overview',
+  'title:@michi/search_messages', 'title:@michi/edit_page', 'v3:@github/create_issue',
+  // Michi's delete_artifact asks through its own card; another server's tool of that name asks as any tool.
+  'title:@michi/delete_artifact', 'meta:@github/delete_artifact', 'meta:delete_artifact',
   'meta:frobnicate', 'title:Running: rm -rf build',
   'v2wire:shell', 'v2wire:write', 'v3wire:run_command', 'v3wire:fs_write',
   // v3 shell requests are titled with the command itself, which can be a built-in name.
   'v3wire:run_command=write', 'v3wire:run_command=fs_write', 'v3wire:run_command=Read',
+  // ...or a Michi tool's: kiro-cli names the call a shell call, so it is one.
+  'v3wire:run_command=@michi/memory_save', 'v2:shell=@michi/memory_save',
 ];
 const KIRO_NATIVE_OPTIONS = [
   { optionId: 'native-once', kind: 'allow_once', name: 'Yes' },
@@ -240,7 +253,21 @@ const KIRO_V2_TOOL_CALLS: Record<string, Record<string, unknown>> = {
   'v2wire:write': { sessionUpdate: 'tool_call', toolCallId: 'toolu_write', title: 'Creating probe.txt', kind: 'edit',
     content: [{ type: 'diff', path: '/tmp/probe.txt', oldText: null, newText: 'hi' }], locations: [{ path: 'probe.txt', line: 1 }],
     rawInput: { __tool_use_purpose: 'Create', command: 'create', path: 'probe.txt', content: 'hi' }, _meta: { kiro: { toolName: 'write' } } },
+  'v2:shell=@michi/memory_save': { sessionUpdate: 'tool_call', toolCallId: 'toolu_shell_titled', title: '@michi/memory_save', kind: 'execute',
+    rawInput: { command: 'echo hi' }, _meta: { kiro: { toolName: 'shell' } } },
+  'v2wire:@michi/set_branch_overview': { sessionUpdate: 'tool_call', toolCallId: 'toolu_michi_v2', title: 'Running: @michi/set_branch_overview',
+    rawInput: { overview: 'probe' }, _meta: { kiro: { toolName: 'set_branch_overview', mcpServerName: 'michi' } } },
 };
+const MCP_ANNOTATIONS = { readOnlyHint: false, destructiveHint: false, openWorldHint: false };
+function v3McpRequest(server: string, tool: string): Record<string, unknown> {
+  return {
+    toolCall: { toolCallId: `toolu_${server}_v3`, status: 'pending', title: `@${server}/${tool}` },
+    options: KIRO_V3_OPTIONS,
+    _meta: { kiro: { toolId: `mcp_${server}_${tool}`, agentManagesTrust: true,
+      consent: { capability: 'mcp', resource: `${server}/${tool}`, askType: 'implicit', workspaceRoot: '/tmp' }, consentRound: 1,
+      mcpTool: { version: 1, identity: { serverName: server, toolName: tool }, annotations: MCP_ANNOTATIONS } } },
+  };
+}
 const KIRO_WIRE: Record<string, Record<string, unknown>> = {
   'v2wire:shell': {
     toolCall: { toolCallId: 'toolu_shell', title: 'Running: echo hi', rawInput: { command: 'echo hi', __tool_use_purpose: 'Print' } },
@@ -257,11 +284,24 @@ const KIRO_WIRE: Record<string, Record<string, unknown>> = {
   'v3wire:run_command=write': v3ShellRequest('write'),
   'v3wire:run_command=fs_write': v3ShellRequest('fs_write'),
   'v3wire:run_command=Read': v3ShellRequest('Read'),
+  'v3wire:run_command=@michi/memory_save': v3ShellRequest('@michi/memory_save'),
   'v3wire:fs_write': {
     toolCall: { toolCallId: 'toolu_fs_write', status: 'pending', title: 'Write File' },
     options: KIRO_V3_OPTIONS,
     _meta: { kiro: { toolId: 'fs_write', consentRound: 1, consent: {
       capability: 'fs_write', resource: 'probe.txt', askType: 'implicit', workspaceRoot: '/tmp' } } },
+  },
+  'v3wire:@michi/set_branch_overview': v3McpRequest('michi', 'set_branch_overview'),
+  'v2wire:@michi/set_branch_overview': {
+    toolCall: { toolCallId: 'toolu_michi_v2', title: 'Running: @michi/set_branch_overview', rawInput: { overview: 'probe' } },
+    options: KIRO_V2_OPTIONS,
+    _meta: { mcpToolIdentity: { serverName: 'michi', toolName: 'set_branch_overview' }, mcpAnnotations: MCP_ANNOTATIONS },
+  },
+  'v3:@github/create_issue': v3McpRequest('github', 'create_issue'),
+  'v2:shell=@michi/memory_save': {
+    toolCall: { toolCallId: 'toolu_shell_titled', title: '@michi/memory_save', rawInput: { command: 'echo hi' } },
+    options: KIRO_V2_OPTIONS,
+    _meta: { trustOptions: [{ label: 'Full command', display: 'echo hi', setting_key: 'allowedCommands', patterns: ['echo hi'] }] },
   },
 };
 
@@ -274,7 +314,38 @@ function kiroRequest(tool: string): Record<string, unknown> {
   return { toolCall: { toolCallId: `tc-${name}`, title: 'Using a tool', _meta: { toolName: name } } };
 }
 
-async function kiroDriver({ owner, id }: DriverInput): Promise<Driver> {
+// Crew: the same AcpAgentSession under Crew's flavor, given requests the way
+// its ACP adapter forwards a Gateway approval (acp/acpServer.ts): the stable
+// tool name in _meta, the Gateway's title, and its tool input as the raw input.
+// `relay:<tool>` calls a Michi tool through Michi's relay (michi_call_tool).
+const CREW_TOOLS = [
+  'relay:read_node', 'relay:set_branch_overview', 'relay:edit_page', 'relay-list',
+  'relay-cut-off:read_node', 'relay-other-server:read_node', 'shell',
+];
+const CREW_OPTIONS = [
+  { optionId: 'allow_once', kind: 'allow_once', name: 'Allow once' },
+  { optionId: 'reject_once', kind: 'reject_once', name: 'Deny' },
+];
+function crewApproval(toolName: string, title: string, input: string): Record<string, unknown> {
+  return {
+    toolCall: { toolCallId: `crew-${toolName}`, title, rawInput: input, content: [{ type: 'content', content: { type: 'text', text: input } }] },
+    options: CREW_OPTIONS, _meta: { toolName },
+  };
+}
+function crewRequest(tool: string): Record<string, unknown> {
+  const [kind, name] = tool.split(':');
+  const call = JSON.stringify({ tool: name, arguments: {} });
+  if (kind === 'relay') return crewApproval('michi_call_tool', '@michi-crew-runtime:michi/michi_call_tool', call);
+  if (kind === 'relay-list') return crewApproval('michi_list_tools', '@michi-crew-runtime:michi/michi_list_tools', '{}');
+  if (kind === 'relay-cut-off') return crewApproval('michi_call_tool', '@michi-crew-runtime:michi/michi_call_tool', call.slice(0, -4));
+  if (kind === 'relay-other-server') return crewApproval('michi_call_tool', '@michi-crew-runtime:github/michi_call_tool', call);
+  return crewApproval(tool, 'Running: echo hi', 'echo hi');
+}
+
+const kiroDriver = (input: DriverInput) => acpDriver(input, kiroRequest);
+const crewDriver = (input: DriverInput) => acpDriver(input, crewRequest, CREW_KIRO_FLAVOR);
+
+async function acpDriver({ owner, id }: DriverInput, requestFor: (tool: string) => Record<string, unknown>, flavor?: AcpAgentFlavor): Promise<Driver> {
   const updates = new Channel<Record<string, unknown>>();
   const answers = new Map<number, string>();
   const client = {
@@ -290,6 +361,7 @@ async function kiroDriver({ owner, id }: DriverInput): Promise<Driver> {
   } as unknown as AcpAgentRuntime;
   const session = new AcpAgentSession(id, `native-${id}`, runtime, '/tmp', {
     owner, ownerUserId: 'alice', workspaceId: 'ws', ...(isRunOwner(owner) ? { permissionBroker: recordingBroker } : {}),
+    ...(flavor ? { flavor } : {}),
   });
   const prompts = new Map<number, Prompt>();
   const turn = drainPrompts(session, 'go', prompts);
@@ -298,7 +370,7 @@ async function kiroDriver({ owner, id }: DriverInput): Promise<Driver> {
     async request(tool) {
       const requestId = ++nextId;
       if (KIRO_V2_TOOL_CALLS[tool]) updates.push(KIRO_V2_TOOL_CALLS[tool]);
-      updates.push({ sessionUpdate: 'permission_request', requestId, options: KIRO_NATIVE_OPTIONS, ...kiroRequest(tool) });
+      updates.push({ sessionUpdate: 'permission_request', requestId, options: KIRO_NATIVE_OPTIONS, ...requestFor(tool) });
       const answered = (async () => { await until(() => answers.has(requestId), `Kiro answer ${requestId}`); return answers.get(requestId)!; })();
       return attempt(answered, () => prompts.get(requestId), `Kiro request ${tool}`);
     },
@@ -407,6 +479,10 @@ const CLAUDE_TOOLS = [
   'mcp____michi_internal____read_node', 'mcp____michi_internal____search_messages', 'mcp____michi_internal____web_search',
   'mcp____michi_internal____save_artifact', 'mcp____michi_internal____spawn_agent', 'mcp____michi_internal____send_to_thread',
   'mcp____michi_internal____set_follow_ups', 'mcp____michi_internal____submit_agent_result',
+  'mcp____michi_internal____set_branch_overview', 'mcp____michi_internal____list_panes', 'mcp____michi_internal____ask_user',
+  'mcp____michi_internal____open_url',
+  'mcp____michi_internal____list_ready_models', 'mcp____michi_internal____propose_multi_model_plan',
+  'mcp____michi_internal____delete_artifact', 'mcp__github__delete_artifact',
   'mcp__github__create_issue', 'fs_read', 'execute_bash', 'frobnicate',
 ];
 
@@ -479,8 +555,9 @@ async function claudeDriver({ owner, id }: DriverInput): Promise<Driver> {
 // Pi: PiSession with a stub pi-agent-core Agent. A tool is the Pi tool name,
 // checked by the Agent's beforeToolCall hook.
 const PI_TOOLS = [
-  'read', 'ls', 'grep', 'find', 'bash', 'edit', 'write', 'web_search', 'read_node', 'save_artifact',
-  'spawn_agent', 'send_to_thread', 'open_url', 'mcp__github__create_issue', 'fs_read', 'frobnicate',
+  'read', 'ls', 'grep', 'find', 'bash', 'edit', 'write', 'web_search', 'read_node', 'list_panes', 'save_artifact',
+  'spawn_agent', 'send_to_thread', 'open_url', 'delete_artifact', 'mcp__github__delete_artifact',
+  'mcp__github__create_issue', 'fs_read', 'frobnicate',
 ];
 
 type BeforeToolCall = (context: { toolCall: { name: string }; args: unknown }) => Promise<{ block: boolean; reason?: string } | undefined>;
@@ -540,6 +617,7 @@ async function piDriver({ owner, id }: DriverInput): Promise<Driver> {
 
 const RUNTIMES: Array<{ id: string; tools: string[]; driver: (input: DriverInput) => Promise<Driver> }> = [
   { id: 'kiro', tools: KIRO_TOOLS, driver: kiroDriver },
+  { id: 'crew', tools: CREW_TOOLS, driver: crewDriver },
   { id: 'codex', tools: CODEX_TOOLS, driver: codexDriver },
   { id: 'claude', tools: CLAUDE_TOOLS, driver: claudeDriver },
   { id: 'pi', tools: PI_TOOLS, driver: piDriver },

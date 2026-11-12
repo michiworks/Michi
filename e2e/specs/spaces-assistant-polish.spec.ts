@@ -27,7 +27,7 @@ const blocks: PageBlock[] = [
   { id: 'review', rev: 1, type: 'markdown', text: 'The assistant and Spaces now share a calmer layout. Review the page at full width and check the focused conversation before publishing.', sources: source },
 ];
 
-for (const palette of ['bone', 'monokai']) test(`Spaces and Michi assistant stay focused in ${palette}`, async ({ page }) => {
+for (const palette of ['bone', 'monokai']) test(`Pages and the Michi panel stay focused in ${palette}`, async ({ page }) => {
   mkdirSync(evidence, { recursive: true });
   const errors: string[] = [];
   page.on('pageerror', error => errors.push(error.message));
@@ -72,12 +72,8 @@ for (const palette of ['bone', 'monokai']) test(`Spaces and Michi assistant stay
   await sidebar.getByRole('button', { name: /^Release work/ }).click();
   const home = page.getByRole('main', { name: 'Release work', exact: true });
   await expect(home.getByText('The release is ready for review. Desktop acceptance checks and release notes are the next steps.')).toBeVisible();
-  const panel = page.getByRole('region', { name: 'Assistant', exact: true });
-  const launcher = page.locator('button.meta-chat-pill');
-  await panel.or(launcher).first().waitFor();
-  if (await panel.isVisible()) await panel.getByRole('button', { name: 'Minimize', exact: true }).click();
-  await expect(launcher).toHaveAccessibleName('Ask assistant');
-  await expect(launcher).toHaveText('');
+  // Pages has no launcher or window of its own (DESIGN-v2 §1.4): the page keeps the full width.
+  await expect(page.locator('.meta-chat-area, button.meta-chat-pill')).toHaveCount(0);
   await expect(home.getByText('Agent updated', { exact: true })).toHaveCount(0);
   await expect(home.getByText('Agent maintained', { exact: true })).toHaveCount(0);
   const column = home.locator('.area-settings__doc');
@@ -86,15 +82,18 @@ for (const palette of ['bone', 'monokai']) test(`Spaces and Michi assistant stay
   expect(columnBox!.width).toBeGreaterThan(homeBox!.width * 0.9);
   await page.screenshot({ animations: 'disabled', path: resolve(evidence, `workspace-${palette}.png`) });
 
-  await launcher.click();
-  await expect(panel).toContainText('Viewing: Release work');
-  await expect(panel.locator('.meta-chat-panel__badge')).toHaveCount(0);
+  // ⌘J opens the one panel beside the page, on the one conversation, under the agent's name.
+  await page.keyboard.press('ControlOrMeta+j');
+  const panel = page.getByRole('complementary', { name: 'Michi', exact: true });
+  await expect(panel).toBeVisible();
   await expect(panel.getByText('The release is ready for review. Start with the desktop acceptance checks, then confirm the release notes.')).toBeVisible();
   await expect(panel.getByText('Michi', { exact: true }).first()).toBeVisible();
   await expect(panel.getByRole('button', { name: 'What is the biggest risk right now?' })).toHaveCount(0);
   await expect(panel.getByRole('button', { name: 'Summarize this page in 3 lines' })).toHaveCount(0);
+  await expect(home).toBeVisible();
   await page.screenshot({ animations: 'disabled', path: resolve(evidence, `assistant-${palette}.png`) });
-  await panel.getByRole('button', { name: 'Minimize', exact: true }).click();
+  await panel.getByRole('button', { name: 'Close Michi', exact: true }).click();
+  await expect(panel).toHaveCount(0);
   await page.setViewportSize({ width: 940, height: 850 });
   expect(await home.evaluate(element => element.scrollWidth <= element.clientWidth)).toBe(true);
   await page.screenshot({ animations: 'disabled', path: resolve(evidence, `workspace-narrow-${palette}.png`) });

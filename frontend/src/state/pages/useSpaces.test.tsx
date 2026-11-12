@@ -29,4 +29,28 @@ describe('useSpaces invalidation', () => {
     await waitFor(() => expect(api.fetchSpaces).toHaveBeenCalledTimes(2));
     expect(result.current.status).toBe('ready');
   });
+
+  it('polls a connection once per interval however many views read it', async () => {
+    vi.useFakeTimers();
+    try {
+      api.fetchSpaces.mockResolvedValue([]);
+      const first = renderHook(() => useSpaces('spaces-shared-poll'));
+      const second = renderHook(() => useSpaces('spaces-shared-poll'));
+      expect(api.fetchSpaces).toHaveBeenCalledTimes(2);
+
+      await act(async () => { await vi.advanceTimersByTimeAsync(15_000); });
+      expect(api.fetchSpaces).toHaveBeenCalledTimes(3);
+      act(() => { window.dispatchEvent(new Event('focus')); });
+      expect(api.fetchSpaces).toHaveBeenCalledTimes(4);
+
+      first.unmount();
+      await act(async () => { await vi.advanceTimersByTimeAsync(15_000); });
+      expect(api.fetchSpaces).toHaveBeenCalledTimes(5);
+      second.unmount();
+      await act(async () => { await vi.advanceTimersByTimeAsync(15_000); });
+      expect(api.fetchSpaces).toHaveBeenCalledTimes(5);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });

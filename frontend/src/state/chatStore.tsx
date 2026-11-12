@@ -1,25 +1,29 @@
-import { artifactTypeForPath } from 'michi-shared';
+import { approvalAttentionCopy, artifactNameKey, artifactTypeForPath, completionAttentionCopy, deriveConversationTitle, parseSlashInvocation, questionAttentionCopy } from 'michi-shared';
 import { formatQuotedSelectionContext } from '../lib/quoteFormat';
 import { isFileFeedbackTargetValid, type FileFeedbackTarget } from './fileFeedback';
 import type { QuoteSource } from '../lib/quoteFormat';
 import { backendFetch } from '../services/api/backendRequest';
-import { parseChatCommand, nextQueuedBatch, executeComposerCommand } from './chatCommands';
-import { chatPermissionChoiceParts, type ScheduledJobRunEvent, type SteerMessageOptions } from 'michi-shared';
+import { nextQueuedBatch, executeComposerCommand } from './chatCommands';
+import { buildSlashEntries, liveSlashCommands, pickedSlashEntry, recordedSlashSkill, resolveSlashRun, type SlashEntry } from './slashEntries';
+import { invalidateSkillCatalog, readSkillCatalog, rememberRuntimeLabels, settleSkillCatalog } from './skillCatalog';
+import { chatPermissionChoiceParts, NO_APPLIED_TURN_CURSOR, parseSessionState, randomUuid, type ScheduledJobRunEvent, type SteerMessageOptions } from 'michi-shared';
+import { createBackgroundCatchUp, type BackgroundCatchUpActions } from './backgroundCatchUp';
 import React, { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
-import { allocateNodeIdsLocal, ensureSession, fetchAgentStatus, fetchNodeWorkspace, fetchReady, fetchWorkspace, listAgentModels, setChatMode, respondToPermission, cancelPermission, respondToUserInput, skipUserInput, cancelChatAndObserve, steerChat, subscribeChat } from '../services/api';
-import { bindPendingPrimaryAgent, type AgentStatus } from '../services/api';
-import { activeTreeRootNodeId, findTreeIdForNode, descendants } from './tree';
+import { allocateNodeIdsLocal, ensureSession, fetchAgentStatus, fetchAgentStatusAfterFirstPaint, fetchBackgroundCursors, fetchNodeWorkspace, fetchReady, fetchTreeMessagePage, fetchWorkspaceStructure, listAgentModels, setChatMode, respondToPermission, cancelPermission, respondToUserInput, skipUserInput, cancelChatAndObserve, reattachTurnReplay, steerChat } from '../services/api';
+import { bindPendingPrimaryAgent, type AgentStatus, type TreeMessagePage } from '../services/api';
+import { activeTreeRootNodeId, findTreeIdForNode, descendants, resolveBranchParent, isBranchEdge } from './tree';
 import { useMessageHistory, type MessageHistoryActions } from './useMessageHistory';
 export { activeTreeRootNodeId } from './tree';
 import { usePrefs } from './prefs';
 import { DARK_PALETTES } from '../components/terminal/tokens';
 import { resolveAtMentions, resolveAtNodeMentions, buildNodeTranscriptBlock, stripNodeMentionTokens, rewriteNodeMentionsForDisplay } from './contextBudget';
+import { artifactManifestForBackend, deletedArtifactId, knownArtifactManifest } from './agentArtifacts';
 import { runChatStream, type TurnEndReason } from './chatStreamRunner';
 import { inspectOriginalTurn, turnErrorAction } from './turnErrorRecovery';
-import { buildResumePrompt } from './turnInterruption';
+import { buildResumePrompt, interruptionCauseOfKind } from './turnInterruption';
 import { createBackgroundTurnBinding } from './observeChatStream';
 import { createBackgroundTurnTransport } from './backgroundTurnTransport';
-import { compactChat } from '../services/api/stream';
+import type { ReplayGapInstall } from '../services/api/stream';
 import { visibleMessageText } from './assistantBlocks';
 import * as perf from '../services/perf';
 import { startupMarkOnce } from '../services/startupTrace';
@@ -29,57 +33,88 @@ import { expandMentions } from '../components/mentions';
 import { appendAttachmentsSentinel } from '../lib/composerAttachments';
 import { formatCommentsBlock, joinMessageParts, joinMessageQuotes } from '../lib/commentFormat';
 import { useDigestOrchestration } from './digestOrchestration';
+import { visibleDigestMarkdown } from './digest';
 import { buildSubtreeContextBlocks } from './mergePreamble';
-import { usePaneState } from './paneState';
+import { paneAfterClose, usePaneState } from './paneState';
 import { WINDOW_ID } from '../config/windowIdentity';
 export { WINDOW_ID } from '../config/windowIdentity';
+import { useFocusedNodeSeen, useShownNodesSeen } from './useCompletionSeen';
 import { usePanePresenceIntegration } from './usePanePresenceIntegration';
-import { agentRunPaneId, pagePaneId, normalizeBrowserUrl, parseSourceLocation, singletonPaneId, uniquePaneId, type PaneItem, type PaneLauncherChoice } from './paneItems';
+import { agentRunPaneId, DEFAULT_BROWSER_URL, pagePaneId, normalizeBrowserUrl, parseSourceLocation, singletonPaneId, uniquePaneId, type PaneItem, type PaneLauncherChoice } from './paneItems';
 import type { AgentResourceIdentity } from './agentIdentity';
+import { knownAgentRunName } from './agentRunNotifications';
 import { getElectron } from '../lib/electronBridge';
-import { useNavHistory, type NavEntry } from './navHistory';
+import { closeTerminal } from '../services/api/terminals';
+import { TERMINAL_CLIENT_ID, terminalPaneFields, terminalTargetForPane, terminalTargetForWorkspace } from './terminalTarget';
+import { isAbsoluteFilePath } from '../lib/workspaceFilePath';
 import { navigateToNode } from './navigateToNode';
 import { useAgentModeCatalog } from '../hooks/useAgentModeCatalog';
 import { useWorkspacePrewarm } from '../hooks/useWorkspacePrewarm';
 import { useArtifactWatch } from '../hooks/useArtifactWatch';
 import { NODE_ACTIVITY_ACTIONS, reduceNodes, reduceProject } from './chatReducers';
+import { prependToDraft } from './composerDraft';
 import {
   LEGACY_STATE_KEY,
   buildStateKey,
+  durableNodePrerequisite,
   readActiveProjectId,
   readInitialHydrated,
   useWorkspacePersistence,
   writeActiveProjectId,
+  type BackendInstalledEntities,
 } from './workspacePersistence';
+import type { StructureAdoption } from './structureAdoption';
 import { useLazyTreeMessages } from './useLazyTreeMessages';
+import { TreeMessageRequests } from './treeMessageRequests';
+import { backendConnectionProvisional, whenBackendConnectionConfirmed } from '../config/backendConnectionState';
+import { NodeMessagesContext } from './nodeMessagesSelfHeal';
+import { useStructureSync } from './useStructureSync';
 import { backendInstalledEntities, mergeWorkspaceSnapshot } from './assistant/workspaceSnapshot';
 import { isSystemWorkspace } from './assistant/systemWorkspace';
-import { isVisibleConversationNode } from './conversationVisibility';
+import { isListedThread, isVisibleConversationNode } from './conversationVisibility';
 import { rememberUserWorkspace, userWorkspaceToReturnTo } from './assistant/userWorkspace';
-import { isShownInAssistantPanel, openAssistantPanel } from './assistant/assistantStore';
-import { revealScheduleAssistant } from './assistant/scheduleAssistantStore';
+import { isNodeShownInWindow, isPaneShownInWindow } from './attention/targetVisibility';
+import { isServerAttentionActive, subscribeServerAttention, type AttentionIntent as ServerAttentionIntent } from '../services/serverAttention';
+import { activeServerAttentionRecord } from '../services/serverAttentionStore';
+import { getCompanionAssistant, isCompanionNodeId, noteCompanionTurnEnded } from './companion/companionStore';
+import { openCompanionPanel, useCompanionPanelShownNodeIds } from './companion/companionPanel';
+import { companionNameNow } from './companion/companionName';
+import { companionPostRunId, isCheckinNodeId } from 'michi-shared';
+import { captureMetaAgentTurnContext, mergeMetaAgentTurnContexts, withCarriedRefs } from '../services/api/assistant';
+import { takeSourceJumpInto } from './sourceNav/sourceNav';
+import { refreshMetaAgent } from './metaAgent/useMetaAgent';
 import { quoteSourceOf } from './assistant/assistantContext';
 import { useContextActions } from './contextActions';
 import { useProjectActions, useTreeActions } from './projectTreeActions';
 import { useExtractNodeTree } from './extractNodeTree';
 import { useTrashActions } from './trashActions';
-import { notify } from '../services/notifications';
+import { attentionTargetKey, dismissAttention, presentAttention, type AttentionIntent } from '../services/attention/policy';
 import {
   indexBackendProjects,
   backendConnectionIdForWorkspace,
   LOCAL_BACKEND_CONNECTION_ID,
   nodeBackendApiBase,
+  projectConnectionId,
   setActiveBackendConnectionId,
 } from '../config/backendConnections';
 import { toast } from 'sonner';
-import type { ChatAction, ChatActionsValue, ChatContextValue, ChatNodeState, ChatPaneValue, ChatProjectsValue, ComposerDraft, MessageAttachment, PendingQueuedMessage, Project, ProjectEdge, SendBindingMeta, Theme, UserSendMeta } from './chatTypes';
+import type { ChatAction, ChatActionsValue, ChatContextValue, ChatMessage, ChatNodeState, ChatPaneValue, ChatProjectsValue, ComposerDraft, MessageAttachment, PendingQueuedMessage, Project, ProjectEdge, SendBindingMeta, Theme, UserSendMeta } from './chatTypes';
 import { computeSurvivingMessageIds, cleanupOrphanedAnchors } from './branchAnchors';
-import { sleep } from '../utils/sleep';
-import { installBackendWorkspaceNode, reconcileBackgroundWorkspaceSnapshot } from './backgroundGapReconcile';
-import { describeScheduledRunNotice, latestTurnIsScheduled } from './scheduledRunNotice';
+import { abortableDelay, sleep } from '../utils/sleep';
+import {
+  BackgroundGapRetries,
+  backgroundReplayCursor,
+  installBackendWorkspaceNode,
+  readAndInstallNode,
+  reconcileBackgroundWorkspaceSnapshot,
+  type BackgroundReplayGap,
+} from './backgroundGapReconcile';
+import { SCHEDULED_JOB_RUN_WINDOW_EVENT, SCHEDULED_JOBS_CHANGED_WINDOW_EVENT, latestTurnIsScheduled } from './scheduledRunNotice';
 import type { StreamHandlers } from '../services/chatStreamEvents';
 import type { CreateChildChatOptions } from './chatTypes';
-import { backendEntityId, serverEntityId, remoteEntityIdentity } from '../config/backendIdentity';
+import { backendEntityId, remoteEntityIdentity } from '../config/backendIdentity';
+import { navPageEvent } from './appEvents';
+import { requestMessageJump } from './sourceNav/sourceNav';
 
 /**
  * Construct a branch edge with provenance fields stamped at fork time.
@@ -102,64 +137,35 @@ export function makeBranchEdge(params: {
   };
 }
 
-export function durableNodePrerequisite(project: Project, node: ChatNodeState): Record<string, unknown> {
-  const directTreeId = findTreeIdForNode(node.nodeId, project);
-  const parentTreeId = node.parentNodeId ? findTreeIdForNode(node.parentNodeId, project) : null;
-  const treeId = directTreeId ?? parentTreeId;
-  const tree = treeId ? project.trees.find((candidate) => candidate.id === treeId) : undefined;
-  const existingEdges = project.edges.filter((edge) => edge.target === node.nodeId);
-  const graphEdges: ProjectEdge[] = existingEdges.length > 0
-    ? existingEdges
-    : node.parentNodeId
-      ? [{ source: node.parentNodeId, target: node.nodeId, kind: 'branch' as const }]
-      : (node.mergeSources ?? []).map((source) => ({ source, target: node.nodeId, kind: 'merge' as const }));
-  return {
-    workspace: {
-      id: project.id,
-      name: project.name,
-      cwd: project.cwd ?? null,
-      createdAt: project.createdAt ?? Date.now(),
-      activeTreeId: project.activeTreeId ?? treeId ?? null,
-      settings: {
-        ...(project.instructions ? { instructions: project.instructions } : {}),
-        ...(project.aiGlobalContext === false ? { aiGlobalContext: false } : {}),
-        ...(project.system ? { system: project.system } : {}),
-      },
-    },
-    ...(tree ? {
-      tree: {
-        id: tree.id,
-        rootNodeId: tree.rootNodeId,
-        name: tree.name ?? null,
-        archivedAt: tree.archivedAt ?? null,
-        pinnedAt: tree.pinnedAt ?? null,
-        lastActiveAt: tree.lastActiveAt,
-        createdAt: tree.createdAt,
-      },
-    } : {}),
-    node: {
-      id: node.nodeId,
-      treeId: treeId ?? null,
-      parentNodeId: node.parentNodeId ?? null,
-      kind: node.kind,
-      title: node.title ?? null,
-      spawnedByAgent: node.spawnedByAgent ?? false,
-      currentModeId: node.currentModeId ?? null,
-      createdAt: node.messages[0]?.createdAt ?? project.createdAt ?? Date.now(),
-    },
-    edges: graphEdges.map((edge) => ({
-      id: `${edge.kind || 'branch'}-${serverEntityId(edge.source)}-${serverEntityId(edge.target)}`,
-      sourceNodeId: edge.source,
-      targetNodeId: edge.target,
-      kind: edge.kind || 'branch',
-      anchorMessageId: edge.anchorMessageId ?? null,
-      createdAt: edge.createdAt ?? null,
-    })),
-  };
+/** The / entries a send on `node` resolves against; its pane's menu lists the same (TPane). */
+function sendSlashEntries(node: ChatNodeState, project: Project | undefined, runtimeId: string | undefined): SlashEntry[] {
+  return buildSlashEntries({
+    agentCommands: liveSlashCommands(node, runtimeId),
+    catalog: readSkillCatalog(node.projectId, runtimeId),
+    // The assistant's conversations run no skills; the backend refuses them there.
+    skills: !isSystemWorkspace(project),
+    runtimeId,
+  });
+}
+
+/** How long a typed `/name` waits for what its runtime's catalog still lacks (settleSkillCatalog). */
+const SLASH_CATALOG_WAIT_MS = 2500;
+
+/**
+ * A skill send's wire text: what the user wrote after the command, framed
+ * the way the composer framed the whole message (comments, quote, attached
+ * files), so the runtime gets its usual context along with the skill. The
+ * arguments come last (SkillInvocationRequest.args), so the attached-files
+ * line goes first.
+ */
+function skillWireText(args: string, meta: UserSendMeta | undefined): string {
+  if (meta?.displayText === undefined) return args;
+  const attached = appendAttachmentsSentinel('', meta.attachments ?? []).trim();
+  const framed = joinMessageParts(meta.comments?.length ? formatCommentsBlock(meta.comments) : null, meta.quotedText ?? null, args, meta.quoteSource);
+  return [attached, framed].filter(Boolean).join('\n\n');
 }
 
 export { hydrateBackendWorkspaces, hydrateSavedState, STATE_SCHEMA_VERSION } from './chatHydration';
-export { parseTitle } from './assistantParsing';
 export { reduceProject } from './chatReducers';
 export type {
   ChatAction,
@@ -190,6 +196,80 @@ export const CHATS_WORKSPACE_ID = 'chats-default';
 
 /** How long a chat the backend could not place is left alone before asking again. */
 const BACKEND_CHAT_DISCOVERY_RETRY_MS = 10_000;
+// A background replay gap holds every chat's frames on its feed while it reads
+// one node: bounded reads, a bounded wait for a foreground turn on that node,
+// and a few rereads when local edits race them.
+const BACKGROUND_GAP_ATTEMPTS = 4;
+const GAP_FOREGROUND_WAIT_MS = 10_000;
+const GAP_READ_TIMEOUT_MS = 30_000;
+// A backend-created thread installs off the feed, so it may reread more often.
+const BACKEND_NODE_INSTALL_ATTEMPTS = 6;
+
+/**
+ * The agent's own conversation, V (DESIGN-v2 §0.2), or another node of the
+ * assistant's hidden workspace (History, a check-in's scratch node): it shows
+ * in the <name> panel, never as a pane of that workspace. V counts by its id
+ * before its workspace has loaded here.
+ */
+export function isAssistantConversation(projects: ReadonlyArray<Pick<Project, 'system' | 'chatIds'>>, nodeId: string): boolean {
+  if (!nodeId) return false;
+  return isCheckinNodeId(nodeId) || isCompanionNodeId(nodeId)
+    || projects.some((project) => isSystemWorkspace(project) && project.chatIds.includes(nodeId));
+}
+
+/**
+ * Notifications, the "agent is asking" bar and source links that point into
+ * the assistant's workspace open the panel on Chat, the one reveal for all of
+ * them (DESIGN-v2 §1.2). False for any other node: the caller opens its pane.
+ */
+export function revealInCompanionPanel(projects: ReadonlyArray<Pick<Project, 'system' | 'chatIds'>>, nodeId: string): boolean {
+  if (!isAssistantConversation(projects, nodeId)) return false;
+  // A jump from Pages' source popover lands in the panel, not the conversation area: it leaves
+  // no "Back to <page>" bar behind (F1b-review #6); the panel shows the cited message instead.
+  const jump = takeSourceJumpInto(nodeId);
+  const messageId = jump?.messageId && getCompanionAssistant().info?.nodeId === nodeId ? jump.messageId : null;
+  openCompanionPanel({
+    tab: 'chat',
+    ...(messageId ? { focusMessageId: messageId } : {}),
+    ...(jump ? { focusComposer: jump.focus === 'composer' } : {}),
+  });
+  return true;
+}
+
+/** First-run narration's message ids (backend services/metaAgent/firstRunNarration.ts). */
+const NARRATION_ID_PREFIX = 'mna-';
+
+/**
+ * The agent speaking on its own in V: a check-in's post (`cmp-post-<runId>`,
+ * §3.3, the shared post-id contract) or first-run narration (`mna-…`). Their
+ * notices come from the agent's own gate by its level, never as chat
+ * notifications. Narration's live frames carry no metadata, so its id is
+ * what tells.
+ */
+export function isCompanionSelfMessage(message: Pick<ChatMessage, 'id' | 'role' | 'companionPost'> | undefined): boolean {
+  if (!message || message.role !== 'assistant') return false;
+  return !!message.companionPost || companionPostRunId(message.id) !== null || message.id.startsWith(NARRATION_ID_PREFIX);
+}
+
+/**
+ * A retry or an edit of a message to the agent (F1a-review #1): it carries
+ * what the original carried (its context while this window remembers it,
+ * else the area now) plus every reference it was sent with, which a reload
+ * keeps (companionRefs). Nothing is taken that the next send of the user's
+ * own is about to carry. Undefined for any other chat.
+ */
+function resendTurnContext(nodeId: string, source: ChatMessage | undefined) {
+  const base = source?.role === 'user' && source.metaAgentContext !== undefined
+    ? source.metaAgentContext
+    : captureMetaAgentTurnContext(nodeId, { consume: false });
+  return withCarriedRefs(base, source?.role === 'user' ? source.companionRefs : undefined);
+}
+
+/** The titles of V's chat notifications carry the agent's name (§1.5). */
+function companionNoticeTitle(kind: 'approval' | 'question' | 'reply'): string {
+  const name = companionNameNow();
+  return kind === 'approval' ? `${name}: needs your approval` : kind === 'question' ? `${name}: has a question` : `${name} replied`;
+}
 
 /**
  * High-frequency action types that throttle React renders to one per animation
@@ -207,6 +287,12 @@ export const HIGH_FREQ_ACTIONS: ReadonlySet<ChatAction['type']> = new Set([
 interface AgentRunPaneActions {
   openAgentRunPane: (identity: AgentResourceIdentity, workspaceId: string, title?: string) => string;
   openPagePane: (page: { pageId: string; workspaceId: string; backendConnectionId: string; title?: string }) => string;
+  /**
+   * Show a node where it lives: its workspace and thread, on the Dashboard,
+   * scrolled to `messageId` when given. The assistant's conversation shows in
+   * its ⌘J panel. False when no workspace holds the node.
+   */
+  revealNode: (nodeId: string, opts?: { workspaceId?: string; messageId?: string }) => boolean;
   /** Open a thread the backend created (scheduled run); false if it cannot be found. */
   revealBackendNode: (workspaceId: string, nodeId: string) => Promise<boolean>;
 }
@@ -223,7 +309,8 @@ interface WorkspaceSnapshotActions {
 }
 
 type ExtendedChatContextValue = ChatContextValue & AgentRunPaneActions;
-type ExtendedChatActionsValue = ChatActionsValue & AgentRunPaneActions & WorkspaceSnapshotActions & MessageHistoryActions;
+type ExtendedChatActionsValue = ChatActionsValue & AgentRunPaneActions & WorkspaceSnapshotActions & MessageHistoryActions
+  & BackgroundCatchUpActions;
 
 const ChatContext = createContext<ExtendedChatContextValue | null>(null);
 
@@ -272,7 +359,7 @@ function buildMergeContextBlock(source: ChatNodeState | undefined): string | nul
 function buildDigestContextBlock(source: ChatNodeState | undefined): string | null {
   if (!source || source.kind !== 'digest' || !source.digest) return null;
   const title = source.title || 'Workspace digest';
-  const content = source.digest.content?.trim();
+  const content = visibleDigestMarkdown(source.digest.content ?? '');
   if (!content) return null;
   return `=== Digest: ${title} ===\n${content}`;
 }
@@ -314,8 +401,7 @@ export function ChatProvider({ children, userId }: { children: React.ReactNode; 
   const activeProjectBaseKey = userId ? buildStateKey(userId) : LEGACY_STATE_KEY;
   // Seed from localStorage so the most-recently-active workspace is restored on
   // boot. Backend hydration runs async; without this seed, `initialActiveProjectIdRef`
-  // captures `null` and falls back to `projects[0]`, which can land on a deleted
-  // or archived row and leave the UI on "No workspace" until the user clicks one.
+  // captures `null` and boot opens the first live workspace instead.
   const [activeProjectId, setActiveProjectId] = useState<string | null>(
     () => readActiveProjectId(
       userId ? buildStateKey(userId) : LEGACY_STATE_KEY,
@@ -329,23 +415,26 @@ export function ChatProvider({ children, userId }: { children: React.ReactNode; 
   const { prefs, setPref } = usePrefs();
   const {
     openPanes,
+    slotPanes,
     tabPanes,
     pagePane,
     focusedPane,
+    zoomedPane,
     focusNonce,
     paneItems,
     viewMode,
     openPanesMap,
     setOpenPanes,
     setFocusedPane,
-    openPane,
+    openPane: openPaneState,
     registerPaneItem,
     updatePaneItem,
     replacePaneItem,
     removePaneItem,
     setPaneItemWidth,
     closePane: closePaneState,
-    focusPane,
+    focusPane: focusPaneState,
+    zoomPane: zoomPaneState,
     reorderPane,
     setViewMode,
     retainProjectPaneKeys,
@@ -355,20 +444,10 @@ export function ChatProvider({ children, userId }: { children: React.ReactNode; 
     appendPaneInTree,
     prunePaneIds,
   } = usePaneState({ projects, activeProjectId, singlePage: prefs.singlePageMode });
-  // Latest active workspace id, read synchronously by the back/forward nav
-  // callbacks (which must stay referentially stable for the actions context).
+  // Latest active workspace id, read synchronously by callbacks that must
+  // stay referentially stable for the actions context.
   const activeProjectIdRef = useRef(activeProjectId);
   activeProjectIdRef.current = activeProjectId;
-  // Back/forward navigation history (per-window, in-memory only — reload clears
-  // it). Wired to the focused-location observer + navBack/navForward below.
-  const {
-    record: recordNav,
-    back: navHistoryBack,
-    forward: navHistoryForward,
-    prune: pruneNav,
-    canBack: canNavBack,
-    canForward: canNavForward,
-  } = useNavHistory();
   // Agent runtime descriptors, fetched on mount and refreshed on the
   // `michi:reload-agent-status` window event (dispatched by chatStreamRunner on
   // auth errors and by Settings when keys change). Not persisted.
@@ -385,12 +464,16 @@ export function ChatProvider({ children, userId }: { children: React.ReactNode; 
   const { availableModes, defaultModeId, agentModesLoading, agentModesError, retryAgentModes } =
     useAgentModeCatalog(activeProjectId, activeBackendConnectionId, agentStatus, activeWarmProject?.cwd);
   const [warmFailedError, setWarmFailedError] = useState<string | null>(null);
+  const [agentStatusUnreachable, setAgentStatusUnreachable] = useState(false);
   useEffect(() => {
     let cancelled = false;
     setAgentStatus(null);
     setWarmFailedError(null);
+    setAgentStatusUnreachable(false);
     let statusLoaded = false;
     let statusRequestSeq = 0;
+    let statusLoads = 0;
+    let retryRun = 0;
 
     // Track backend warmup for the cold-start error banner, but don't gate
     // /agent/status on it. Status is intentionally fast and lets the composer
@@ -434,10 +517,14 @@ export function ChatProvider({ children, userId }: { children: React.ReactNode; 
     const load = async (): Promise<boolean> => {
       const seq = ++statusRequestSeq;
       try {
-        const status = await fetchAgentStatus();
+        // The first read of a remote waits (bounded) for its conversation to paint; refreshes do not.
+        const status = statusLoaded ? await fetchAgentStatus() : await fetchAgentStatusAfterFirstPaint(undefined);
         if (cancelled || seq !== statusRequestSeq) return false;
         statusLoaded = true;
+        statusLoads += 1;
+        rememberRuntimeLabels(activeBackendConnectionId, status.availableRuntimes);
         setAgentStatus(status);
+        setAgentStatusUnreachable(false);
         refreshSanitizedModel(status, seq);
         return true;
       } catch {
@@ -447,13 +534,19 @@ export function ChatProvider({ children, userId }: { children: React.ReactNode; 
     };
 
     // Status retries independently of the workspace mode catalog and warmup.
+    // Boot and every reload get the same bounded retry; a newer run replaces
+    // an older one, and only a run that ends without any status reports the
+    // backend unreachable.
     const loadUntilLoaded = async () => {
+      const run = ++retryRun;
+      const loadsBefore = statusLoads;
+      setAgentStatusUnreachable(false);
       const t0 = Date.now();
-      while (!cancelled && !statusLoaded && Date.now() - t0 < POLL_TIMEOUT_MS) {
-        if (!statusLoaded) await load();
-        if (statusLoaded) return;
+      while (!cancelled && run === retryRun && statusLoads === loadsBefore && Date.now() - t0 < POLL_TIMEOUT_MS) {
+        if (await load()) return;
         await new Promise((r) => setTimeout(r, POLL_INTERVAL_MS));
       }
+      if (!cancelled && run === retryRun && statusLoads === loadsBefore) setAgentStatusUnreachable(true);
     };
 
     const watchReady = async () => {
@@ -468,7 +561,7 @@ export function ChatProvider({ children, userId }: { children: React.ReactNode; 
 
     void loadUntilLoaded();
     void watchReady();
-    const handler = () => { void load(); };
+    const handler = () => { void loadUntilLoaded(); };
     window.addEventListener('michi:reload-agent-status', handler);
     return () => {
       cancelled = true;
@@ -544,14 +637,19 @@ export function ChatProvider({ children, userId }: { children: React.ReactNode; 
     setTreeSelection(new Set());
   }, []);
 
+  const selectTrees = useCallback((treeIds: Iterable<string>) => {
+    setTreeSelection(new Set(treeIds));
+  }, []);
+
+  // The sidebar's thread rows of the active workspace; merge chats have a
+  // section of their own. A surface that lists other rows passes its own ids.
   const selectAllTrees = useCallback(() => {
     const proj = projects.find((p) => p.id === activeProjectId);
     if (!proj) return;
-    const liveTreeIds = proj.trees
-      .filter((t) => !t.archivedAt && !nodesRef.current[t.rootNodeId]?.deletedAt)
-      .map((t) => t.id);
-    setTreeSelection(new Set(liveTreeIds));
-  }, [projects, activeProjectId]);
+    selectTrees(proj.trees
+      .filter((t) => t.kind !== 'merge' && isListedThread(t, nodesRef.current[t.rootNodeId]))
+      .map((t) => t.id));
+  }, [projects, activeProjectId, selectTrees]);
 
   useEffect(() => {
     setSelectionState(new Set());
@@ -568,9 +666,9 @@ export function ChatProvider({ children, userId }: { children: React.ReactNode; 
   // The derived key is stable across renders (sorted trashed-id join), so the
   // EFFECT only re-fires when the trashed set actually changes; `prunePaneIds`
   // is additionally a no-op (no setState) when none of those ids are open.
-  // The scan itself can't gate on the structural-version channel: the trash
-  // mutators call setNodes directly (not dispatch), so they don't bump
-  // structureVersion — gating there would miss deletions entirely. It runs in
+  // The scan itself can't gate on the structural-version channel: not every
+  // setNodes writer (hydration among them) bumps structureVersion,
+  // so gating there could miss deletions. It runs in
   // ChatProvider's render (which already commits per RAF frame while
   // streaming), adding only an allocation-free O(nodeCount) read loop — not the
   // channel-mutating per-chunk work the structural fast-path guards against.
@@ -591,36 +689,42 @@ export function ChatProvider({ children, userId }: { children: React.ReactNode; 
   // registered (i.e. during ensureSession await / pre-SSE window). When
   // startStream finally registers a cancelFn for a node in this set, it
   // invokes it immediately.
-  const pendingCancels = useRef<Set<string>>(new Set());
   const assistantTextBufs = useRef<Record<string, string>>({});
   /** Nodes ensured in this renderer. Follow-ups still validate with the backend,
    *  but can use its durable history instead of uploading the transcript again. */
   const boundSessionsRef = useRef<Set<string>>(new Set());
+  /** Blank branches of a digest: the digest their first session takes as context. */
+  const branchContextFromRef = useRef(new Map<string, string>());
   const backgroundTransportRef = useRef<Map<string, ReturnType<typeof createBackgroundTurnTransport>>>(new Map());
   // Direct replay streams installed after a renderer reload. Kept separate
   // from normal prompt cancel fns so re-rendering cannot open duplicate SSE
   // consumers for the same hydrated foreground turn.
-  const recoveredForegroundReplayRef = useRef<Map<string, { cancel: () => void; retry?: ReturnType<typeof setTimeout> }>>(new Map());
+  const recoveredForegroundReplayRef = useRef<Map<string, { cancel: () => void; inspect?: () => void }>>(new Map());
   // Stable handle to the current recover() closure so the lazy-loader can ask a
   // just-loaded streaming placeholder to reattach without re-running (and thus
   // tearing down) the whole foreground-replay effect.
   const reconnectStreamingNodeRef = useRef<(nodeId: string) => void>(() => {});
-  const backgroundGapReconciliationsRef = useRef<Map<string, Promise<void>>>(new Map());
+  const backgroundGapReconciliationsRef = useRef(new Map<string, { promise: Promise<ReplayGapInstall | undefined>; signal: AbortSignal }>());
+  const backgroundGapRetriesRef = useRef(new BackgroundGapRetries());
   const sharedStreamHandlersRef = useRef<(nodeId: string) => Omit<Partial<StreamHandlers>, 'onEnvelope' | 'onTurnStart' | 'onDone' | 'onError' | 'onErrorPayload'>>(() => ({}));
   const turnEndHandlerRef = useRef<(reason: TurnEndReason, nodeId: string) => void>(() => {});
   const streamCompleteHandlerRef = useRef<(nodeId: string) => void>(() => {});
   // Navigates to a node's pane (switching workspace / thread when needed) and
   // lands on the Dashboard. Assigned below, once the nav actions exist; held in
   // a ref because the stream handlers are built earlier in this component.
-  const revealNodeRef = useRef<(nodeId: string) => void>(() => {});
+  const revealNodeRef = useRef<(nodeId: string) => boolean>(() => false);
+  const openAgentRunPaneRef = useRef<(identity: AgentResourceIdentity, workspaceId: string, title?: string) => string>(() => '');
   // Threads created by scheduled runs. In the desktop app their notifications
   // come from Electron main (with click-to-open), so per-turn renderer
   // notifications for them are suppressed to avoid duplicates.
   const scheduledNodeIdsRef = useRef(new Set<string>());
   const scheduledJobRunHandlerRef = useRef<(event: ScheduledJobRunEvent) => void>(() => {});
   const backendNodeInstallsRef = useRef(new Map<string, Promise<boolean>>());
-  const backendNodeInstallRequestsRef = useRef(new Map<string, symbol>());
-  useEffect(() => () => { backendNodeInstallRequestsRef.current.clear(); }, []);
+  const backendNodeInstallRequestsRef = useRef(new Map<string, AbortController>());
+  useEffect(() => () => {
+    for (const request of backendNodeInstallRequestsRef.current.values()) request.abort();
+    backendNodeInstallRequestsRef.current.clear();
+  }, []);
   // Background frames for a chat this window has never seen (a conversation
   // started on a phone or another machine): handlers for it, while it installs.
   const unknownBackendChatRef = useRef<(connectionId: string, chatId: string, nodeId?: string) => StreamHandlers>(() => ({}));
@@ -747,20 +851,29 @@ export function ChatProvider({ children, userId }: { children: React.ReactNode; 
     }
   }, [hydrated, projects, removePaneItem]);
 
+  // Every switch of the focused pane (Ctrl+Tab, captions, tabs, the phone
+  // switcher, zoom, a click, a close, a new branch) moves the viewed chat with
+  // it: a chat pane is viewed, so its replies count as read; any other pane
+  // leaves none.
+  const viewPane = useCallback((paneId: string | null) => {
+    setFocusedNodeIdState(paneId && nodesRef.current[paneId] ? paneId : null);
+  }, []);
+
   const closePane = useCallback((paneId: string) => {
     const item = paneItemsRef.current[paneId];
-    if (item?.kind === 'terminal') getElectron()?.terminalDestroy?.(item.surfaceId);
+    if (item?.kind === 'terminal') {
+      const target = terminalTargetForPane(item);
+      if (target.transport === 'native') getElectron()?.terminalDestroy?.(item.surfaceId);
+      // Ends the shell unless another window still shows it.
+      else void closeTerminal(target.connectionId, item.surfaceId, TERMINAL_CLIENT_ID).catch(() => {});
+    }
     if (item?.kind === 'browser') getElectron()?.browserDestroy?.(item.surfaceId);
     if (item) removePaneItem(paneId);
 
     const remaining = openPanes.filter((id) => id !== paneId);
-    const nextFocusedPane = focusedPane === paneId
-      ? remaining[remaining.length - 1] ?? null
-      : focusedPane;
     closePaneState(paneId);
-    if (focusedNodeId === paneId) {
-      setFocusedNodeIdState(nextFocusedPane && nodesRef.current[nextFocusedPane] ? nextFocusedPane : null);
-    }
+    if (focusedPane === paneId) viewPane(paneAfterClose(slotPanes ?? [], paneId));
+    else if (focusedNodeId === paneId) viewPane(focusedPane);
     // The assistant's hidden workspace is active only while its conversation
     // is open as a pane: closing that pane (×, ⌘W, ⌘J back to the panel)
     // returns to the user's workspace rather than leaving an empty one no
@@ -772,7 +885,20 @@ export function ChatProvider({ children, userId }: { children: React.ReactNode; 
         if (back) setActiveProjectId(back);
       }
     }
-  }, [closePaneState, focusedNodeId, focusedPane, openPanes, removePaneItem]);
+  }, [closePaneState, focusedNodeId, focusedPane, openPanes, removePaneItem, slotPanes, viewPane]);
+
+  const openPane = useCallback((paneId: string) => {
+    openPaneState(paneId);
+    viewPane(paneId);
+  }, [openPaneState, viewPane]);
+  const focusPane = useCallback((paneId: string) => {
+    focusPaneState(paneId);
+    viewPane(paneId);
+  }, [focusPaneState, viewPane]);
+  const zoomPane = useCallback((paneId: string | null) => {
+    zoomPaneState(paneId);
+    if (paneId !== null) viewPane(paneId);
+  }, [zoomPaneState, viewPane]);
 
   // `dispatch` keeps nodesRef.current up-to-date synchronously for the
   // reducer path, and structural setNodes callers must do the same before
@@ -805,7 +931,18 @@ export function ChatProvider({ children, userId }: { children: React.ReactNode; 
     }
   }, [nodes, notifyChangedNodeSubscribers]);
 
-  const { runWorkspaceMutation, noteBackendInstalled, pendingBackendDeletes } = useWorkspacePersistence({
+  // One tree read pool for the provider: hydration hands it the visible remote
+  // thread's boot read, the lazy loader and self-heal read through it, and every
+  // remote first page it reads is kept for the next boot.
+  const remoteTreePageSinkRef = useRef<(project: Project, treeId: string, page: TreeMessagePage) => void>(() => {});
+  const treeMessageRequestsRef = useRef<TreeMessageRequests | null>(null);
+  treeMessageRequestsRef.current ??= new TreeMessageRequests({
+    onRemotePage: (project, treeId, page) => remoteTreePageSinkRef.current(project, treeId, page),
+  });
+  const {
+    runWorkspaceMutation, noteRemoteTreePage, noteBackendInstalled, pendingBackendDeletes, noteArtifactNamed, probeArtifacts,
+    noteConnectionRecovered, adoptBackendStructure, structureGuards, workspacesBusy, whenWorkspacesSettled,
+  } = useWorkspacePersistence({
     projects,
     activeProjectId,
     nodes,
@@ -820,7 +957,26 @@ export function ChatProvider({ children, userId }: { children: React.ReactNode; 
     windowId: WINDOW_ID,
     syncPausedRef,
     dirtyDraftNodeIdsRef,
+    treeMessageRequests: treeMessageRequestsRef.current,
   });
+  remoteTreePageSinkRef.current = noteRemoteTreePage;
+
+  // Structure changes made elsewhere (workspace_structure_changed on the
+  // background feed): re-read the workspaces they name and merge them in.
+  const structureFeedHandler = useStructureSync({
+    hydrated,
+    projectsRef,
+    nodesRef,
+    activeProjectIdRef,
+    setProjects,
+    setNodes,
+    setActiveProjectId,
+    structureVersionRef,
+    prunePaneIds,
+    persistence: { adoptBackendStructure, structureGuards, workspacesBusy, whenWorkspacesSettled },
+  });
+  const structureFeedHandlerRef = useRef(structureFeedHandler);
+  structureFeedHandlerRef.current = structureFeedHandler;
 
   // Pane Presence — reports every open pane slot for the ACTIVE project (across all its trees,
   // not just the visible one) to the backend presence registry (design §9; W13 brief). Mounted
@@ -836,6 +992,9 @@ export function ChatProvider({ children, userId }: { children: React.ReactNode; 
     activeBackendConnectionId,
     openPanesMap,
     paneItems,
+    // What the active tree's layout displays (one page in single-page mode): of these, the
+    // panes on screen are reported visible.
+    displayedPanes: openPanes,
   });
 
   useEffect(() => {
@@ -899,19 +1058,96 @@ export function ChatProvider({ children, userId }: { children: React.ReactNode; 
   // Lazy-load: fetch the active tree's message bodies on demand when it's a
   // placeholder (hydration only eager-loads the initially-active tree).
   // Mounted after `dispatch` is defined so it can dispatch `messages-loaded`.
-  const prefetchTreeForNode = useLazyTreeMessages({ hydrated, activeProjectId, projects, nodesRef, dispatch, reconnectStreamingRef: reconnectStreamingNodeRef });
-  const { loadOlderMessages, ensureCompleteHistory } = useMessageHistory(nodesRef, projectsRef, dispatch);
-  const preparingHistory = useRef(new Set<string>());
+  const { prefetchNode: prefetchTreeForNode, ensureNodeMessages } = useLazyTreeMessages({ hydrated, activeProjectId, projects, nodesRef, dispatch, reconnectStreamingRef: reconnectStreamingNodeRef, requests: treeMessageRequestsRef.current });
+  const { loadOlderMessages, ensureCompleteHistory } = useMessageHistory(nodesRef, projectsRef, dispatch, reconnectStreamingNodeRef);
+  // Sends waiting on their thread's history, their runtime's / catalog, or a
+  // remote shown from the local cache.
+  const preparingSends = useRef(new Set<string>());
 
-  const reconcileBackgroundGap = useCallback(async (gap: {
-    chatId: string;
-    nodeId?: string;
-    turnId: string;
-    seq: number;
-  }, signal: AbortSignal = new AbortController().signal): Promise<void> => {
+  /** A foreground turn or host command owns the node's live state. */
+  const nodeBusy = useCallback((nodeId: string) => !!cancelFns.current[nodeId] || commandsInFlightRef.current.has(nodeId), []);
+
+  /** Put what a backend read brings in into the store: it is already durable, so never written back. */
+  const commitBackendInstall = useCallback((result: {
+    projects: Project[];
+    nodes: Record<string, ChatNodeState>;
+    adoptions?: readonly StructureAdoption[];
+    installed?: BackendInstalledEntities | null;
+    artifactProbes?: { projectId: string; contextIds: string[] };
+  }) => {
+    // Before the store changes: the scan that renders it takes it as durable.
+    for (const adoption of result.adoptions ?? []) adoptBackendStructure(adoption);
+    if (result.installed) noteBackendInstalled(result.installed);
+    if (result.projects !== projectsRef.current) setProjects(result.projects);
+    if (result.artifactProbes) probeArtifacts(result.artifactProbes.projectId, result.artifactProbes.contextIds);
+    if (result.nodes !== nodesRef.current) {
+      nodesRef.current = result.nodes;
+      structureVersionRef.current += 1;
+      setNodes(result.nodes);
+    }
+  }, [adoptBackendStructure, noteBackendInstalled, probeArtifacts, setProjects]);
+
+  const reconcileBackgroundGap = useCallback(async (
+    gap: BackgroundReplayGap,
+    signal: AbortSignal = new AbortController().signal,
+  ): Promise<ReplayGapInstall | undefined> => {
     const existing = backgroundGapReconciliationsRef.current.get(gap.chatId);
-    if (existing) return existing;
-    const reconciliation = (async () => {
+    // A reconnect re-sends the gap; a read tied to a feed that has closed since
+    // is about to abort and is no answer for the new feed.
+    if (existing && !existing.signal.aborted) return existing.promise;
+
+    /**
+     * Read the workspace's structure and the gap node's latest page, never the
+     * workspace's bodies, and install them. Resolves the background cursor the
+     * node now holds, or undefined when there is nothing to install: the node
+     * is gone, moved to another thread, or this window's foreground stream
+     * still owns its turn.
+     */
+    const install = async (nodeId: string, workspaceId: string): Promise<ReplayGapInstall | undefined> => {
+      const foregroundDeadline = Date.now() + GAP_FOREGROUND_WAIT_MS;
+      const read = await readAndInstallNode({
+        workspaceId,
+        nodeId,
+        attempts: BACKGROUND_GAP_ATTEMPTS,
+        signal,
+        readTimeoutMs: GAP_READ_TIMEOUT_MS,
+        project: () => projectsRef.current.find((candidate) => candidate.id === workspaceId),
+        node: () => nodesRef.current[nodeId],
+        nodeHeld: true,
+        busy: () => nodeBusy(nodeId),
+        // A foreground stream owns the node's live turn, and this window's
+        // own turn frames never come through this feed. Hold the feed only so
+        // long; the turn's own stream keeps the node current.
+        idle: async () => {
+          while (nodeBusy(nodeId)) {
+            if (Date.now() >= foregroundDeadline) return false;
+            await abortableDelay(50, signal);
+          }
+          return true;
+        },
+        fetchStructure: fetchWorkspaceStructure,
+        fetchPage: fetchTreeMessagePage,
+        install: ({ structure, page, readStartedAt }) => {
+          const result = reconcileBackgroundWorkspaceSnapshot({
+            currentProjects: projectsRef.current,
+            currentNodes: nodesRef.current,
+            rawWorkspace: structure,
+            page,
+            readStartedAt,
+            guards: structureGuards,
+            gap: { ...gap, nodeId },
+          });
+          if (!result) throw new Error(`Durable workspace snapshot omitted ${gap.chatId}`);
+          commitBackendInstall(result);
+          return result.cursor;
+        },
+      });
+      if (read === 'exhausted') throw new Error(`The conversation kept changing while its replay gap was read: ${gap.chatId}`);
+      return read === 'gone' ? undefined : read.installed;
+    };
+
+    const retries = backgroundGapRetriesRef.current;
+    const reconciliation = (async (): Promise<ReplayGapInstall | undefined> => {
       const nodeId = gap.nodeId
         ?? Object.values(nodesRef.current).find((candidate) => candidate.chatId === gap.chatId)?.nodeId;
       const node = nodeId ? nodesRef.current[nodeId] : undefined;
@@ -921,59 +1157,24 @@ export function ChatProvider({ children, userId }: { children: React.ReactNode; 
       if (!nodeId || !node || !project) {
         throw new Error(`Cannot reconcile background gap for unknown chat ${gap.chatId}`);
       }
-
-      const waitForForegroundIdle = async () => {
-        while (cancelFns.current[nodeId]) {
-          if (signal.aborted) throw new DOMException('Aborted', 'AbortError');
-          await new Promise<void>((resolve, reject) => {
-            const onAbort = () => {
-              clearTimeout(timer);
-              reject(new DOMException('Aborted', 'AbortError'));
-            };
-            const timer = setTimeout(() => {
-              signal.removeEventListener('abort', onAbort);
-              resolve();
-            }, 50);
-            signal.addEventListener('abort', onAbort, { once: true });
-          });
-        }
-      };
-
-      // A local rename/delete/context edit can happen while the snapshot is in
-      // flight. Treat object identity as a lightweight revision barrier and
-      // refetch until the request spans a stable local state.
-      while (true) {
-        await waitForForegroundIdle();
-        const projectsBefore = projectsRef.current;
-        const nodesBefore = nodesRef.current;
-        const projectBefore = projectsBefore.find((candidate) => candidate.id === project.id);
-        const rawWorkspace = await fetchWorkspace(project.id, signal);
-        if (signal.aborted) throw new DOMException('Aborted', 'AbortError');
-        if (cancelFns.current[nodeId]) continue;
-        const projectAfter = projectsRef.current.find((candidate) => candidate.id === project.id);
-        if (nodesRef.current !== nodesBefore || projectAfter !== projectBefore) continue;
-
-        const result = reconcileBackgroundWorkspaceSnapshot({
-          currentProjects: projectsRef.current,
-          currentNodes: nodesRef.current,
-          rawWorkspace,
-          gap,
-        });
-        if (!result) throw new Error(`Durable workspace snapshot omitted ${gap.chatId}`);
-        setProjects(result.projects);
-        nodesRef.current = result.nodes;
-        structureVersionRef.current += 1;
-        setNodes(result.nodes);
-        return;
+      // The same gap comes back on every reconnect until it reconciles.
+      await abortableDelay(retries.delay(gap), signal);
+      try {
+        const installed = await install(nodeId, project.id);
+        retries.settled(gap);
+        return installed;
+      } catch (error) {
+        if (!signal.aborted) retries.failed(gap);
+        throw error;
       }
     })().finally(() => {
-      if (backgroundGapReconciliationsRef.current.get(gap.chatId) === reconciliation) {
+      if (backgroundGapReconciliationsRef.current.get(gap.chatId)?.promise === reconciliation) {
         backgroundGapReconciliationsRef.current.delete(gap.chatId);
       }
     });
-    backgroundGapReconciliationsRef.current.set(gap.chatId, reconciliation);
+    backgroundGapReconciliationsRef.current.set(gap.chatId, { promise: reconciliation, signal });
     return reconciliation;
-  }, [setProjects]);
+  }, [commitBackendInstall, nodeBusy, structureGuards]);
 
   const installWorkspaceSnapshot = useCallback((rawWorkspace: unknown, readStartedAt?: number): boolean => {
     // A snapshot read before one of this window's removals reached the
@@ -983,22 +1184,18 @@ export function ChatProvider({ children, userId }: { children: React.ReactNode; 
       readStartedAt,
     });
     if (!merged) return false;
-    // The backend already holds what the snapshot brings in: never written back.
-    const installed = backendInstalledEntities(projectsRef.current, nodesRef.current, merged);
-    if (installed) noteBackendInstalled(installed);
-    if (merged.projects !== projectsRef.current) setProjects(merged.projects);
-    if (merged.nodes !== nodesRef.current) {
-      nodesRef.current = merged.nodes;
-      structureVersionRef.current += 1;
-      setNodes(merged.nodes);
-    }
+    commitBackendInstall({ ...merged, installed: backendInstalledEntities(projectsRef.current, nodesRef.current, merged) });
     return true;
-  }, [noteBackendInstalled, pendingBackendDeletes, setProjects]);
+  }, [commitBackendInstall, pendingBackendDeletes]);
 
+  // A remote shown from the local cache opens its feed once its own metadata
+  // replaced the copy (that install changes `projects`): the feed's opening
+  // cursor is then checked against a real hydration read, as at any boot.
   const backgroundConnectionIdsKey = useMemo(
     () => Array.from(new Set([
       LOCAL_BACKEND_CONNECTION_ID,
-      ...projects.map((project) => project.backendConnectionId ?? LOCAL_BACKEND_CONNECTION_ID),
+      ...projects.map(projectConnectionId)
+        .filter((connectionId) => !backendConnectionProvisional(connectionId)),
     ])).sort().join('|'),
     [projects],
   );
@@ -1010,7 +1207,7 @@ export function ChatProvider({ children, userId }: { children: React.ReactNode; 
       const bindings = new Map<string, { nodeId: string; handlers: StreamHandlers }>();
       const belongsToConnection = (node: ChatNodeState): boolean => {
         const project = projectsRef.current.find((candidate) => candidate.id === node.projectId);
-        return (project?.backendConnectionId ?? LOCAL_BACKEND_CONNECTION_ID) === connectionId;
+        return (project ? projectConnectionId(project) : LOCAL_BACKEND_CONNECTION_ID) === connectionId;
       };
       const transport = createBackgroundTurnTransport({
         connectionId,
@@ -1018,10 +1215,10 @@ export function ChatProvider({ children, userId }: { children: React.ReactNode; 
           const cursors: Record<string, { turnId: string; seq: number }> = {};
           for (const node of Object.values(nodesRef.current)) {
             if (!belongsToConnection(node)) continue;
-            const turnId = node.lastAppliedBackgroundTurnId ?? node.lastAppliedTurnId;
-            const seq = node.lastAppliedBackgroundTurnId ? node.lastAppliedBackgroundSeq : node.lastAppliedSeq;
-            if (!node.chatId || !turnId || typeof seq !== 'number') continue;
-            cursors[node.chatId] = { turnId, seq };
+            // A bound chat's id is its node id. A chat with no applied turn
+            // still names itself, so its first turn can come back as a gap.
+            cursors[node.chatId ?? node.nodeId] = backgroundReplayCursor(node, !!cancelFns.current[node.nodeId])
+              ?? NO_APPLIED_TURN_CURSOR;
           }
           return cursors;
         },
@@ -1030,10 +1227,14 @@ export function ChatProvider({ children, userId }: { children: React.ReactNode; 
         onScheduledJobRun: connectionId === LOCAL_BACKEND_CONNECTION_ID
           ? (event) => scheduledJobRunHandlerRef.current(event)
           : undefined,
-        // The Scheduled page refreshes on this (see scheduledNav.ts).
+        // The Scheduled page refreshes on this.
         onScheduledJobsChanged: connectionId === LOCAL_BACKEND_CONNECTION_ID
-          ? (event) => window.dispatchEvent(new CustomEvent('michi:scheduled-jobs-changed', { detail: event }))
+          ? (event) => window.dispatchEvent(new CustomEvent(SCHEDULED_JOBS_CHANGED_WINDOW_EVENT, { detail: event }))
           : undefined,
+        onWorkspaceStructureChanged: (event) => structureFeedHandlerRef.current(connectionId, event),
+        // Back after a disconnect, the backend may be another build: what it
+        // advertised is read again before it is relied on (workspacePersistence).
+        onReconnect: () => noteConnectionRecovered(connectionId),
         handlersForChat: (chatId, envelopeNodeId) => {
           const byEnvelope = envelopeNodeId ? nodesRef.current[envelopeNodeId] : undefined;
           const node = byEnvelope && (byEnvelope.chatId === chatId || byEnvelope.nodeId === chatId) && belongsToConnection(byEnvelope)
@@ -1063,6 +1264,7 @@ export function ChatProvider({ children, userId }: { children: React.ReactNode; 
               set current(_value: number) {},
             },
             extraHandlers: sharedStreamHandlersRef.current(nodeId),
+            workspaceId: () => nodesRef.current[nodeId]?.projectId,
             onTurnEnd: (reason, endedNodeId) => {
               turnEndHandlerRef.current(reason, endedNodeId);
               discoveredTurnEndRef.current(endedNodeId);
@@ -1082,15 +1284,56 @@ export function ChatProvider({ children, userId }: { children: React.ReactNode; 
         backgroundTransportRef.current.delete(connectionId);
       }
     };
-  }, [backgroundConnectionIdsKey, dispatch, hydrated, reconcileBackgroundGap]);
+  }, [backgroundConnectionIdsKey, dispatch, hydrated, noteConnectionRecovered, reconcileBackgroundGap]);
 
-  // A reload can happen while a user-owned foreground turn is still active.
-  // Reattach to its per-chat replay stream exactly once. A 410 is deliberately
-  // left live: runtime self-turns are only authoritatively recovered by the
-  // shared background feed, and marking this node done/error would hide it.
+  // Back in the foreground, or with a pane opened, the window checks itself
+  // against SQLite: a feed that is down or missed a turn delays it, no more.
+  const backgroundCatchUpRef = useRef<ReturnType<typeof createBackgroundCatchUp> | null>(null);
   useEffect(() => {
     if (!hydrated) return;
-    const recover = (nodeId: string, attempt = 0) => {
+    const connectionOf = (node: ChatNodeState): string => (
+      projectsRef.current.find((candidate) => candidate.id === node.projectId)?.backendConnectionId ?? LOCAL_BACKEND_CONNECTION_ID
+    );
+    const catchUp = createBackgroundCatchUp({
+      connectionIds: () => (backgroundConnectionIdsKey ? backgroundConnectionIdsKey.split('|') : []),
+      // The workspace on screen; another one's panes check themselves as they open.
+      nodesFor: (connectionId) => Object.values(nodesRef.current).filter((node) => (
+        node.projectId === activeProjectIdRef.current && connectionOf(node) === connectionId
+      )),
+      node: (nodeId) => nodesRef.current[nodeId],
+      nodeConnection: (nodeId) => {
+        const node = nodesRef.current[nodeId];
+        return node ? connectionOf(node) : undefined;
+      },
+      foregroundActive: (nodeId) => !!cancelFns.current[nodeId],
+      fetchCursors: (chatIds, connectionId, signal) => fetchBackgroundCursors(chatIds, connectionId, signal),
+      reconcile: (gap) => reconcileBackgroundGap(gap),
+    });
+    backgroundCatchUpRef.current = catchUp;
+    const onForeground = () => {
+      if (document.visibilityState === 'visible') catchUp.requestAll();
+    };
+    document.addEventListener('visibilitychange', onForeground);
+    window.addEventListener('focus', onForeground);
+    return () => {
+      document.removeEventListener('visibilitychange', onForeground);
+      window.removeEventListener('focus', onForeground);
+      catchUp.dispose();
+      if (backgroundCatchUpRef.current === catchUp) backgroundCatchUpRef.current = null;
+    };
+  }, [backgroundConnectionIdsKey, hydrated, reconcileBackgroundGap]);
+  const catchUpNodes = useCallback((nodeIds: readonly string[]) => {
+    backgroundCatchUpRef.current?.request(nodeIds);
+  }, []);
+
+  // A reload can happen while a turn is still active. Reattach to its per-chat
+  // replay stream exactly once, as the sending window does (reattachTurnReplay).
+  // A runtime self-turn is refused there (turn_background_owned) and is left
+  // live: the shared background feed delivers it, and marking this node
+  // done/error would hide it. When the live replay is gone, the saved turn decides.
+  useEffect(() => {
+    if (!hydrated) return;
+    const recover = (nodeId: string) => {
       const node = nodesRef.current[nodeId];
       if (
         !node
@@ -1102,14 +1345,21 @@ export function ChatProvider({ children, userId }: { children: React.ReactNode; 
       ) return;
       const assistantId = [...node.messages].reverse().find((message) => message.role === 'assistant')?.id;
       if (!assistantId) return;
+      const chatId = node.chatId;
+      const turnId = node.lastAppliedTurnId;
       let stopped = false;
       const finish = () => {
         const entry = recoveredForegroundReplayRef.current.get(nodeId);
         if (entry?.cancel === cancel) recoveredForegroundReplayRef.current.delete(nodeId);
         if (cancelFns.current[nodeId] === stop) delete cancelFns.current[nodeId];
       };
+      // The turn may still be running or already saved: Retry inspects it, never re-sends its prompt.
+      const fail = (message: string, errorKind: string) => {
+        dispatch({ type: 'error', nodeId, assistantId, message, errorKind, turnId });
+        finish();
+      };
       const binding = createBackgroundTurnBinding({
-        chatId: node.chatId,
+        chatId,
         nodeId,
         dispatch,
         cursor: 'foreground',
@@ -1122,39 +1372,55 @@ export function ChatProvider({ children, userId }: { children: React.ReactNode; 
           set current(_value: number) {},
         },
         extraHandlers: sharedStreamHandlersRef.current(nodeId),
+        workspaceId: () => nodesRef.current[nodeId]?.projectId,
         onTurnEnd: (reason, endedNodeId) => turnEndHandlerRef.current(reason, endedNodeId),
         onStreamComplete: () => streamCompleteHandlerRef.current(nodeId),
         onTerminal: finish,
       }).createHandlers();
-      const cancel = subscribeChat(node.chatId, binding, {
-        turnId: node.lastAppliedTurnId,
-        seq: node.lastAppliedSeq,
-      }, {
-        onDisconnect: ({ retryable, error }) => {
+      // The entry stays while the replay waits to reconnect, so Stop and
+      // cleanup can end it. It replays only this turn into this assistant
+      // message: once another turn owns the node, it ends instead.
+      const cancel = reattachTurnReplay(chatId, {
+        turnId,
+        nextSeq: () => (nodesRef.current[nodeId]?.lastAppliedSeq ?? -1) + 1,
+        handlers: binding,
+        isCurrent: () => {
+          const current = nodesRef.current[nodeId];
+          return !stopped && recoveredForegroundReplayRef.current.get(nodeId)?.cancel === cancel
+            && current?.status === 'streaming' && current.lastAppliedTurnId === turnId
+            && current.messages.findLast((message) => message.role === 'assistant')?.id === assistantId;
+        },
+        onStale: finish,
+        onBackgroundOwned: finish,
+        onUnavailable: fail,
+        onReplayGone: (message, errorKind) => {
           const entry = recoveredForegroundReplayRef.current.get(nodeId);
-          if (!entry || entry.cancel !== cancel || stopped) return;
-          // A replay ring miss can be a self-initiated runtime turn. The
-          // background feed owns that recovery path and will reconcile it.
-          if (error?.message.endsWith(': 410')) {
-            finish();
-            return;
-          }
-          if (!retryable) {
-            dispatch({ type: 'error', nodeId, assistantId, message: error?.message ?? 'turn replay disconnected' });
-            finish();
-            return;
-          }
-          recoveredForegroundReplayRef.current.delete(nodeId);
-          entry.retry = setTimeout(() => recover(nodeId, attempt + 1), Math.min(10_000, 500 * (2 ** attempt)));
+          if (!entry) return;
+          entry.inspect = inspectOriginalTurn({
+            chatId,
+            turnId,
+            onResult: ({ persisted, assistant, lastSeq, completedAt, stopReason }) => {
+              const current = nodesRef.current[nodeId];
+              if (stopped || current?.status !== 'streaming' || current.lastAppliedTurnId !== turnId) {
+                finish();
+                return;
+              }
+              if (!persisted || !assistant || typeof lastSeq !== 'number') {
+                fail(message, errorKind);
+                return;
+              }
+              dispatch({ type: 'recover-original-result', nodeId, turnId, assistantId, assistant, lastSeq, cursor: 'foreground' });
+              binding.onDone?.(stopReason, assistant.id, turnId, true, completedAt);
+            },
+          });
         },
       });
       const stop = () => {
         stopped = true;
-        const entry = recoveredForegroundReplayRef.current.get(nodeId);
-        if (entry?.retry) clearTimeout(entry.retry);
+        recoveredForegroundReplayRef.current.get(nodeId)?.inspect?.();
         cancel();
         dispatch({ type: 'done', nodeId, assistantId, aborted: true });
-        cancelChatAndObserve(node.chatId!, node.lastAppliedTurnId, (status) => {
+        cancelChatAndObserve(chatId, turnId, (status) => {
           dispatch({ type: 'cancel-recovery', nodeId, assistantId, ...status });
         });
         finish();
@@ -1170,7 +1436,7 @@ export function ChatProvider({ children, userId }: { children: React.ReactNode; 
     for (const node of Object.values(nodesRef.current)) recover(node.nodeId);
     return () => {
       for (const entry of recoveredForegroundReplayRef.current.values()) {
-        if (entry.retry) clearTimeout(entry.retry);
+        entry.inspect?.();
         entry.cancel();
       }
       recoveredForegroundReplayRef.current.clear();
@@ -1192,6 +1458,12 @@ export function ChatProvider({ children, userId }: { children: React.ReactNode; 
       }
     };
   }, [focusedNodeId, dispatch]);
+  // Server completion facts: the focused node's completions are seen only while this window is in front.
+  const focusedNodeFacts = focusedNodeId !== null ? nodes[focusedNodeId] : undefined;
+  useFocusedNodeSeen(focusedNodeId, focusedNodeFacts?.completionSeq, focusedNodeFacts?.seenCompletionSeq, dispatch);
+  // So are those of the conversation the panel shows (V, open on Chat).
+  const assistantShownNodeIds = useCompanionPanelShownNodeIds();
+  useShownNodesSeen(assistantShownNodeIds, nodes, dispatch);
 
   // Bulk close of the read loop — used by the unread filter's "Read all"
   // action to clear every unread chat thread at once.
@@ -1204,8 +1476,12 @@ export function ChatProvider({ children, userId }: { children: React.ReactNode; 
       const trimmed = title.trim();
       if (!trimmed) return;
       dispatch({ type: 'rename-node', nodeId, title: trimmed });
+      // A thread's name is its root's title: a legacy name stored apart would still show.
+      if (projectsRef.current.some((p) => p.trees.some((t) => t.rootNodeId === nodeId && t.name !== undefined))) {
+        setProjects((prev) => prev.map((p) => reduceProject(p, { type: 'clear-thread-name', rootNodeId: nodeId })));
+      }
     },
-    [dispatch],
+    [dispatch, setProjects],
   );
 
   const pinNode = useCallback(
@@ -1224,13 +1500,92 @@ export function ChatProvider({ children, userId }: { children: React.ReactNode; 
 
   const newNodeId = useCallback(
     (projectId = activeProjectIdRef.current) => backendEntityId(
-      projectId ? remoteEntityIdentity(projectId)?.connectionId
-        ?? projectsRef.current.find(project => project.id === projectId)?.backendConnectionId ?? LOCAL_BACKEND_CONNECTION_ID
-        : LOCAL_BACKEND_CONNECTION_ID,
+      projectId ? backendConnectionIdForWorkspace(projectId) : LOCAL_BACKEND_CONNECTION_ID,
       allocateNodeIdsLocal(1)[0],
     ),
     [],
   );
+
+  // Notices about a node go through the attention policy
+  // (services/attention/policy.ts), which stays quiet only while this window
+  // shows the node and has the user's attention.
+  const presentNodeAttention = useCallback((
+    nodeId: string,
+    notice: Pick<AttentionIntent, 'kind' | 'title' | 'body' | 'isStillCurrent'>,
+  ) => {
+    const node = nodesRef.current[nodeId];
+    const project = node ? projectsRef.current.find((candidate) => candidate.id === node.projectId) : undefined;
+    const target = {
+      type: 'node' as const,
+      nodeId,
+      workspaceId: node?.projectId,
+      backendConnectionId: project?.backendConnectionId ?? LOCAL_BACKEND_CONNECTION_ID,
+    };
+    // That backend decides and announces this itself (attention_* frames,
+    // presented below): a local notice would say it twice.
+    if (isServerAttentionActive(target.backendConnectionId)) return;
+    presentAttention({
+      ...notice,
+      key: attentionTargetKey(target),
+      target,
+      isTargetVisible: () => isNodeShownInWindow(nodeId, openPanesRef.current),
+      onOpen: () => revealNodeRef.current(nodeId),
+    });
+  }, []);
+  // Notices the backend decided (services/serverAttention.ts) go through the
+  // same policy. Ids in the records are the backend's; this window's node and
+  // workspace ids are scoped per connection. The policy's own delay re-reads
+  // the record, so one resolved meanwhile (answered, seen) never shows.
+  useEffect(() => {
+    const localTarget = (target: ServerAttentionIntent['target']) => {
+      const conn = target.backendConnectionId;
+      const workspaceId = backendEntityId(conn, target.workspaceId);
+      return target.type === 'node'
+        ? { type: 'node' as const, nodeId: backendEntityId(conn, target.nodeId), workspaceId, backendConnectionId: conn }
+        : { type: 'agent_run' as const, runId: target.runId, workspaceId, backendConnectionId: conn };
+    };
+    const inView = (target: ReturnType<typeof localTarget>) => (target.type === 'node'
+      ? isNodeShownInWindow(target.nodeId, openPanesRef.current)
+      : isPaneShownInWindow(agentRunPaneId(target.backendConnectionId, target.runId), openPanesRef.current));
+    return subscribeServerAttention((intent, presentation) => {
+      const target = localTarget(intent.target);
+      const key = attentionTargetKey(target);
+      presentAttention({
+        key,
+        kind: intent.kind,
+        title: intent.title,
+        body: intent.body,
+        target,
+        source: 'server',
+        // Another window holds the claim: it alone raises the OS notification.
+        osNotification: presentation.claimed ? 'auto' : 'never',
+        isTargetVisible: () => inView(target),
+        isStillCurrent: () => activeServerAttentionRecord(target.backendConnectionId, intent.serverId) !== undefined,
+        onOpen: () => {
+          try {
+            if (target.type === 'node') {
+              revealNodeRef.current(target.nodeId);
+              return;
+            }
+            // The pane is named for its agent (the notice's title says what happened), else the default.
+            const run = { backendConnectionId: target.backendConnectionId, id: target.runId };
+            openAgentRunPaneRef.current(run, target.workspaceId, knownAgentRunName(run));
+          } catch (error) {
+            // Its workspace is not loaded in this window (openAgentRunPane selects a loaded one itself).
+            console.warn('[attention] could not open the notice target', error);
+          }
+        },
+      });
+      return () => dismissAttention(key, intent.kind);
+    }, { isTargetInView: (intent) => inView(localTarget(intent.target)) });
+  }, []);
+  // An approval or question answered (here, elsewhere or automatically): its
+  // "needs input" notice is moot once nothing on the node waits for the user.
+  const dismissAnsweredAttention = useCallback((nodeId: string) => {
+    const node = nodesRef.current[nodeId];
+    if (node?.pendingPermission || (node?.pendingUserInput && !node.pendingUserInput.resolved)) return;
+    dismissAttention(attentionTargetKey({ type: 'node', nodeId }), 'needs_input');
+  }, []);
 
   /** Feature side effects shared by foreground and runtime self-turn streams. */
   const createSharedStreamHandlers = useCallback((nodeId: string): Omit<Partial<StreamHandlers>, 'onEnvelope' | 'onTurnStart' | 'onDone' | 'onError' | 'onErrorPayload'> => ({
@@ -1239,7 +1594,7 @@ export function ChatProvider({ children, userId }: { children: React.ReactNode; 
       if (!projectId) return;
       setProjects((prev) => prev.map((project) => {
         if (project.id !== projectId) return project;
-        const existing = (project.artifacts ?? []).find((context) => context.name.toLowerCase() === name.toLowerCase());
+        const existing = (project.artifacts ?? []).find((context) => artifactNameKey(context.name) === artifactNameKey(name));
         return reduceProject(project, {
           type: 'upsert-context',
           projectId,
@@ -1257,6 +1612,18 @@ export function ChatProvider({ children, userId }: { children: React.ReactNode; 
             context: { id: contextId, name, filePath, size, type: artifactTypeForPath(filePath), kind: 'embedded', source: 'agent' },
           })
         : project));
+    },
+    // The backend already removed the row; dropping it here keeps this
+    // window's persistence from writing it back. A replay of an artifact
+    // already gone changes nothing.
+    onArtifactDeleted: (name, contextId) => {
+      const projectId = nodesRef.current[nodeId]?.projectId;
+      if (!projectId) return;
+      setProjects((prev) => prev.map((project) => {
+        if (project.id !== projectId) return project;
+        const id = deletedArtifactId(project.artifacts, { name, contextId });
+        return id ? reduceProject(project, { type: 'delete-context', projectId, contextId: id }) : project;
+      }));
     },
     onSpawnBranches: (topics) => {
       if (topics.length === 0) return;
@@ -1286,7 +1653,7 @@ export function ChatProvider({ children, userId }: { children: React.ReactNode; 
               ...project.edges,
               ...spawned
                 .filter((child) => !project.edges.some((edge) =>
-                  edge.source === nodeId && edge.target === child.nodeId && (edge.kind ?? 'branch') === 'branch'))
+                  edge.source === nodeId && edge.target === child.nodeId && isBranchEdge(edge)))
                 .map((child) => makeBranchEdge({
                 source: nodeId,
                 target: child.nodeId,
@@ -1301,12 +1668,20 @@ export function ChatProvider({ children, userId }: { children: React.ReactNode; 
         for (const child of spawned) appendPaneInTree(projectId, treeId, child.nodeId);
       }
     },
-    onPermissionResolved: (data) => dispatch({ type: 'permission-resolved', nodeId, requestId: data.requestId }),
+    onPermissionResolved: (data) => {
+      dispatch({ type: 'permission-resolved', nodeId, requestId: data.requestId });
+      dismissAnsweredAttention(nodeId);
+    },
     onPermissionRequest: (data) => {
       dispatch({ type: 'permission-request', nodeId, permission: data });
-      if (prefsRef.current.notifications !== 'off' && !document.hasFocus() && !desktopOwnsScheduledNotice(nodeId)) {
-        notify({ title: 'Tool approval needed', body: data.title });
-      }
+      if (desktopOwnsScheduledNotice(nodeId)) return;
+      // The agent's conversation V notifies like any other, under its name (DESIGN-v2 §1.5).
+      presentNodeAttention(nodeId, {
+        kind: 'needs_input',
+        ...approvalAttentionCopy(data.title),
+        ...(isAssistantConversation(projectsRef.current, nodeId) ? { title: companionNoticeTitle('approval') } : {}),
+        isStillCurrent: () => nodesRef.current[nodeId]?.pendingPermission?.requestId === data.requestId,
+      });
     },
     onUserInputRequest: (data) => {
       dispatch({
@@ -1315,27 +1690,28 @@ export function ChatProvider({ children, userId }: { children: React.ReactNode; 
         assistantId: data.assistantId,
         userInput: { requestId: data.requestId, interactionId: data.interactionId, questions: data.questions, answers: [] },
       });
-      // Unlike stream-complete / tool-approval, this notifies even while the
-      // window is focused: the ask card renders inline in ONE pane's
-      // transcript, which is invisible when that pane is closed, lives in
-      // another thread, or is scrolled above the fold. The single quiet case
-      // is the one where the card is already in front of the user — window
-      // focused AND that pane focused. (`notify` keeps the OS-level
-      // notification unfocused-only, so a focused window only gets a toast;
-      // the AskUserAlertBar carries the reminder from then on.)
-      // The ⌘J panel showing this conversation counts as in front of the user.
-      const alreadyInView = document.hasFocus()
-        && (focusedPaneRef.current === nodeId || isShownInAssistantPanel(nodeId));
-      if (prefsRef.current.notifications !== 'off' && !alreadyInView && !desktopOwnsScheduledNotice(nodeId)) {
-        notify({
-          title: 'Agent needs your input',
-          body: data.questions[0]?.question ?? 'Please answer',
-          onClick: () => revealNodeRef.current(nodeId),
-        });
-      }
+      // The ask card renders inline in one pane's transcript, invisible when
+      // that pane is closed or in another thread; the policy speaks unless
+      // the node is in front of the user (the panel showing V counts, see
+      // targetVisibility.ts). The AskUserNotice carries the reminder from
+      // then on. V's ask carries the agent's name (DESIGN-v2 §1.5).
+      if (desktopOwnsScheduledNotice(nodeId)) return;
+      presentNodeAttention(nodeId, {
+        kind: 'needs_input',
+        ...questionAttentionCopy(data.questions[0]?.question),
+        ...(isAssistantConversation(projectsRef.current, nodeId) ? { title: companionNoticeTitle('question') } : {}),
+        isStillCurrent: () => {
+          const pending = nodesRef.current[nodeId]?.pendingUserInput;
+          return !!nodesRef.current[nodeId]
+            && !(pending?.requestId === data.requestId && (pending.resolved || pending.interrupted));
+        },
+      });
     },
-    onUserInputResolved: (data) => dispatch({ type: 'user-input-resolved', nodeId, requestId: data.requestId, interactionId: data.interactionId, answers: data.answers, outcome: data.outcome }),
-  }), [dispatch, openPaneInTree, setProjects]);
+    onUserInputResolved: (data) => {
+      dispatch({ type: 'user-input-resolved', nodeId, requestId: data.requestId, interactionId: data.interactionId, answers: data.answers, outcome: data.outcome });
+      dismissAnsweredAttention(nodeId);
+    },
+  }), [dismissAnsweredAttention, dispatch, openPaneInTree, presentNodeAttention, setProjects]);
   sharedStreamHandlersRef.current = createSharedStreamHandlers;
 
   const handleTurnEnd = useCallback((reason: TurnEndReason, endedNodeId: string) => {
@@ -1347,16 +1723,26 @@ export function ChatProvider({ children, userId }: { children: React.ReactNode; 
     if (reason === 'error') {
       boundSessionsRef.current.delete(endedNodeId);
     }
-    const queue = nextQueuedBatch((ended.pendingQueued ?? []).filter((entry) => !entry.steering), ended.runtimeId ?? agentStatusRef.current?.runtime, ended.sessionState?.nativeEngine);
+    // A turn in the agent's conversation ended: what it changed (a runtime switch, layout rules,
+    // the Pages upkeep's state) is read again, whether or not the panel shows it (F1a-review #7).
+    if (isCompanionNodeId(endedNodeId)) {
+      noteCompanionTurnEnded(endedNodeId);
+      void refreshMetaAgent();
+    }
+    const queueRuntimeId = ended.runtimeId ?? agentStatusRef.current?.runtime;
+    const queue = nextQueuedBatch((ended.pendingQueued ?? []).filter((entry) => !entry.steering),
+      sendSlashEntries(ended, projectsRef.current.find((project) => project.id === ended.projectId), queueRuntimeId));
     if (queue.length === 0) return;
     if (reason === 'error') {
       dispatch({ type: 'mark-queue-errored', nodeId: endedNodeId });
       return;
     }
+    // A queue an error paused waits for the user ("paused, review and send
+    // manually"), whatever turn ends next.
+    if (ended.queueErrored) return;
 
     const payload = buildFlushPayload(queue);
     if (!payload) return;
-    for (const entry of queue) dispatch({ type: 'dequeue-message', nodeId: endedNodeId, messageId: entry.id });
     const commentBlocks = queue
       .map((entry) => entry.commentBlock)
       .filter((block): block is string => !!block);
@@ -1376,8 +1762,7 @@ export function ChatProvider({ children, userId }: { children: React.ReactNode; 
     const restoredQuotePrefix = restoredBlocks.length ? restoredBlocks.join('\n\n') + '\n\n' : '';
     const meta: UserSendMeta = {
       rejectedDraft: {
-        value: restoredQuotePrefix + payload.value,
-        mentions: payload.mentions.map(mention => ({ ...mention, start: mention.start + restoredQuotePrefix.length, end: mention.end + restoredQuotePrefix.length })),
+        ...prependToDraft(restoredQuotePrefix, { value: payload.value, mentions: payload.mentions }),
         ...(quotes.length === 1 ? { quotedText: quotes[0].text, quoteSource: quotes[0].source } : {}),
       },
       // A single quote has one structured source. Multiple independently
@@ -1395,8 +1780,21 @@ export function ChatProvider({ children, userId }: { children: React.ReactNode; 
       // A queued send left the composer when it was queued; what the user
       // has typed since stays.
       keepDraft: true,
+      // A picked command or skill drains alone (nextQueuedBatch).
+      ...(queue.length === 1 && queue[0].slash ? { slash: queue[0].slash } : {}),
+      // Each queued send's context was read when the user sent it; combined sends carry all their refs.
+      metaAgentContext: mergeMetaAgentTurnContexts(queue.map((entry) => entry.metaAgentContext)),
     };
-    setTimeout(() => sendMessageRef.current(endedNodeId, expandedText, meta), 0);
+    // The batch leaves the queue only when it is sent. A turn that started
+    // in between (a background turn) keeps it queued for its own end, and a
+    // second turn-end callback finds it gone.
+    setTimeout(() => {
+      const node = nodesRef.current[endedNodeId];
+      const queued = new Set((node?.pendingQueued ?? []).map((entry) => entry.id));
+      if (!node || node.status === 'streaming' || !queue.every((entry) => queued.has(entry.id))) return;
+      for (const entry of queue) dispatch({ type: 'dequeue-message', nodeId: endedNodeId, messageId: entry.id });
+      sendMessageRef.current(endedNodeId, expandedText, meta);
+    }, 0);
   }, [dispatch]);
   turnEndHandlerRef.current = handleTurnEnd;
 
@@ -1413,11 +1811,32 @@ export function ChatProvider({ children, userId }: { children: React.ReactNode; 
       startupMarkOnce('first_message_send', { nodeId, textLen: text.length });
       let n = nodesRef.current[nodeId];
       if (!n) return;
-      if (commandsInFlightRef.current.has(nodeId) || preparingHistory.current.has(nodeId)) {
+      // The agent's conversation: what this message carries is read now, as the user sends it, and
+      // goes with it however long the waits below and ensureSession take (F1a-review #1). Undefined
+      // for other chats.
+      const metaAgentContext = meta?.metaAgentContext !== undefined ? meta.metaAgentContext : captureMetaAgentTurnContext(nodeId);
+      const rejectSend = () => {
         dispatch({ type: 'set-composer-draft', nodeId,
           draft: meta?.rejectedDraft ?? { value: text, mentions: [] }, preserveExisting: true });
         meta?.onRejected?.();
+      };
+      if (commandsInFlightRef.current.has(nodeId) || preparingSends.current.has(nodeId)) {
+        rejectSend();
         return;
+      }
+      // Shown from the local cache: the send waits (bounded) for the remote's
+      // own data, so it lands on the conversation as the remote has it.
+      const sendConnection = backendConnectionIdForWorkspace(n.projectId);
+      if (backendConnectionProvisional(sendConnection)) {
+        preparingSends.current.add(nodeId);
+        try { await whenBackendConnectionConfirmed(sendConnection); }
+        finally { preparingSends.current.delete(nodeId); }
+        n = nodesRef.current[nodeId];
+        if (!n) return;
+        if (n.status === 'streaming') {
+          rejectSend();
+          return;
+        }
       }
       const contextProject = projectsRef.current.find(project => project.id === n.projectId);
       const contextNodes = new Set([nodeId, ...linkedPeersOf(nodeId, contextProject?.edges ?? []),
@@ -1428,18 +1847,60 @@ export function ChatProvider({ children, userId }: { children: React.ReactNode; 
         for (const id of descendants(source, contextProject?.edges ?? [])) contextNodes.add(id);
       }
       if ([...contextNodes].some(id => nodesRef.current[id]?.messagesLoaded === false)) {
-        preparingHistory.current.add(nodeId);
+        preparingSends.current.add(nodeId);
         try { await ensureCompleteHistory([...contextNodes]); }
         catch (error) {
-          dispatch({ type: 'set-composer-draft', nodeId, draft: meta?.rejectedDraft ?? { value: text, mentions: [] }, preserveExisting: true });
-          meta?.onRejected?.();
+          rejectSend();
           toast.error((error as Error).message);
           return;
-        } finally { preparingHistory.current.delete(nodeId); }
+        } finally { preparingSends.current.delete(nodeId); }
         n = nodesRef.current[nodeId];
-        if (!n || n.status === 'streaming') return;
+        if (!n) return;
+        if (n.status === 'streaming') {
+          rejectSend();
+          return;
+        }
       }
-      const command = parseChatCommand(text, meta?.runtimeId ?? n.runtimeId ?? agentStatusRef.current?.runtime, n.sessionState?.nativeEngine);
+      const sendRuntimeId = meta?.runtimeId ?? n.runtimeId ?? agentStatusRef.current?.runtime;
+      const slashRuntimeId = meta?.slashRuntimeId ?? sendRuntimeId;
+      // `/name args` runs the / entry picked for it, or the name's first: a
+      // skill as a turn whose text is the arguments (the bubble keeps what was
+      // typed), a command on the command path. Any other `/word` is a message.
+      // A repeated message runs the skill it ran, which a cold or changed
+      // catalog would not find by name.
+      const slashText = meta?.displayText ?? text;
+      const picked = pickedSlashEntry(meta?.slash, slashRuntimeId);
+      const resolveSlash = (node: ChatNodeState) => recordedSlashSkill(meta?.skill, slashText) ?? resolveSlashRun(slashText,
+        sendSlashEntries(node, projectsRef.current.find((project) => project.id === node.projectId), slashRuntimeId), picked);
+      let slashRun = resolveSlash(n);
+      // A typed `/name` first waits briefly for what its runtime's catalog
+      // still lacks. Before any answer a chat knows only its live session's
+      // commands and skills: a name they run as a runtime skill may be a
+      // library skill's, which wins. A name nothing runs yet may be a command
+      // of a chat without a session, or a skill the runtime is still listing
+      // where the chat runs skills at all.
+      const typedName = parseSlashInvocation(slashText.trim())?.name;
+      const typed = !!typedName && !meta?.skill && picked?.name !== typedName;
+      const catalogNeed = !typed ? null
+        : !slashRun ? (isSystemWorkspace(contextProject) ? 'answer' as const : 'skills' as const)
+          : slashRun.kind === 'skill' && slashRun.skill.origin === 'runtime' ? 'answer' as const : null;
+      const catalogWait = catalogNeed && slashRuntimeId
+        ? settleSkillCatalog(n.projectId, slashRuntimeId, SLASH_CATALOG_WAIT_MS, catalogNeed) : null;
+      if (catalogWait) {
+        preparingSends.current.add(nodeId);
+        try { await catalogWait; } finally { preparingSends.current.delete(nodeId); }
+        n = nodesRef.current[nodeId];
+        if (!n) return;
+        if (n.status === 'streaming') {
+          rejectSend();
+          return;
+        }
+        slashRun = resolveSlash(n);
+      }
+      const skillSend = slashRun?.kind === 'skill' ? slashRun : null;
+      // A command is the whole message: with a quote, comments or files it is prose.
+      const command = slashRun?.kind === 'command' && text.trim() === slashText.trim() ? slashRun : null;
+      const wireText = skillSend ? skillWireText(skillSend.args, meta) : text;
       const priorMessagesForResume = n.chatId && boundSessionsRef.current.has(nodeId)
         ? undefined
         : n.messages
@@ -1463,9 +1924,10 @@ export function ChatProvider({ children, userId }: { children: React.ReactNode; 
       const parentNode = n.parentNodeId ? nodesRef.current[n.parentNodeId] : undefined;
       // Digest parents have no chatId — create a fresh/compatible session and
       // inject the digest content as a preamble block instead. When the caller
-      // re-anchored the branch edge (e.g. createChildChat from a digest
-      // re-parents to the originating tree's root), it passes the digest's
-      // nodeId via opts.contextFromNodeId so we can still build the preamble.
+      // re-anchored the branch edge (a branch of a digest hangs under the
+      // originating tree's root), it passes the digest's nodeId via
+      // opts.contextFromNodeId, or a blank branch keeps it until its first
+      // session, so we can still build the preamble.
       const parentChatId = parentNode && parentNode.kind !== 'digest'
         ? parentNode.chatId ?? undefined
         : undefined;
@@ -1476,8 +1938,10 @@ export function ChatProvider({ children, userId }: { children: React.ReactNode; 
         owningProject?.edges ?? [],
         (id) => !nodesRef.current[id]?.deletedAt,
       );
-      const digestSourceNode = opts?.contextFromNodeId
-        ? nodesRef.current[opts.contextFromNodeId]
+      if (n.chatId) branchContextFromRef.current.delete(nodeId);
+      const contextFromNodeId = opts?.contextFromNodeId ?? branchContextFromRef.current.get(nodeId);
+      const digestSourceNode = contextFromNodeId
+        ? nodesRef.current[contextFromNodeId]
         : parentNode;
       const digestParentBlock = buildDigestContextBlock(digestSourceNode);
       // Both merge sources and fresh link peers feed the same preamble slot;
@@ -1490,21 +1954,27 @@ export function ChatProvider({ children, userId }: { children: React.ReactNode; 
 
       // Resolve reusable artifacts to inject. `extraContexts` is what actually
       // gets injected this turn — ONLY explicit @mentions (auto-inject was
-      // removed). `contextManifest` lists EVERY artifact on the shelf so the
-      // agent knows what it can @mention / read — links carry a url and no
-      // filePath, so pass both and let the backend pick per type.
+      // removed). `contextManifest` names only the PINNED artifacts, with
+      // `artifactCount` for the rest, which the agent finds with
+      // list_artifacts / search_artifacts; a backend without those tools gets
+      // the list itself, at most 50 (artifactManifestForBackend) — links
+      // carry a url and no filePath, so pass both and let the backend pick
+      // per type.
       const mentionCtxs = resolveAtMentions(text, owningProject?.artifacts ?? []);
 
       const extraContexts = mentionCtxs.length > 0
         ? mentionCtxs.map(c => ({ name: c.name, filePath: c.filePath, url: c.url, size: c.size, kind: c.kind }))
         : undefined;
 
-      const contextManifest = (owningProject?.artifacts ?? []).length > 0
-        ? (owningProject!.artifacts!).map(c => ({ name: c.name, filePath: c.filePath, url: c.url, kind: c.kind }))
-        : undefined;
+      // Asked now so the capability probe, when one is needed, runs alongside
+      // the rest of the send. When none is (no artifacts, a fresh answer),
+      // ensure-session starts in this tick, without waiting a microtask.
+      const knownManifest = knownArtifactManifest(sendConnection, owningProject?.artifacts);
+      const artifactManifest = knownManifest ?? artifactManifestForBackend(sendConnection, owningProject?.artifacts);
 
       const ensureRuntimeSession = async (signal?: AbortSignal) => {
         if (!owningProject) throw new Error('workspace not found for node');
+        const { contextManifest, artifactCount } = knownManifest ?? await artifactManifest;
         return ensureSession({
           nodeId,
           chatId: n.chatId,
@@ -1515,6 +1985,7 @@ export function ChatProvider({ children, userId }: { children: React.ReactNode; 
           extraContexts,
           enableFollowUps: prefsRef.current.enableFollowUps,
           contextManifest,
+          artifactCount,
           priorMessages: priorMessagesForResume,
           runtimeId: meta?.runtimeId ?? n.runtimeId,
           providerId: meta?.providerId ?? n.providerId,
@@ -1527,7 +1998,7 @@ export function ChatProvider({ children, userId }: { children: React.ReactNode; 
           approveForMe: meta?.permissionMode ? meta.approveForMe === true : n.permissionApproveForMe === true,
           crewMemoryMode: meta?.crewMemoryMode,
           modeId: n.chatId ? undefined : n.currentModeId ?? undefined,
-          graphPrerequisite: durableNodePrerequisite(owningProject, nodesRef.current[nodeId] ?? n),
+          graphPrerequisite: durableNodePrerequisite(owningProject, nodesRef.current, nodesRef.current[nodeId] ?? n),
           signal,
         });
       };
@@ -1536,18 +2007,16 @@ export function ChatProvider({ children, userId }: { children: React.ReactNode; 
         commandsInFlightRef.current.add(nodeId);
         dispatch({ type: 'command-result', nodeId, result: { command: command.name, status: 'running', message: 'Running…' } });
         void (async () => {
-          // Host commands may be the first action after startup, or the first
+          // A command may be the first action after startup, or the first
           // action in an anchored blank branch. Resolve the same durable
-          // session as a prompt before asking the SDK for its command result.
-          if ((meta?.runtimeId ?? n.runtimeId ?? agentStatusRef.current?.runtime) === 'claude') {
-            const ensured = await ensureRuntimeSession();
-            dispatch({ type: 'bind-chat', nodeId, currentModeId: ensured.currentModeId,
-              runtimeId: ensured.runtimeId, providerId: ensured.providerId,
-              modelId: ensured.modelId, reasoning: ensured.reasoning });
-            if (ensured.sessionState) dispatch({ type: 'session-state', nodeId, state: ensured.sessionState });
-            boundSessionsRef.current.add(nodeId);
-            if (ensured.lastUsedUpdated) refreshAgentStatus();
-          }
+          // session as a prompt before the runtime runs it.
+          const ensured = await ensureRuntimeSession();
+          dispatch({ type: 'bind-chat', nodeId, currentModeId: ensured.currentModeId,
+            runtimeId: ensured.runtimeId, providerId: ensured.providerId,
+            modelId: ensured.modelId, reasoning: ensured.reasoning });
+          if (ensured.sessionState) dispatch({ type: 'session-state', nodeId, state: ensured.sessionState });
+          boundSessionsRef.current.add(nodeId);
+          if (ensured.lastUsedUpdated) refreshAgentStatus();
           return executeComposerCommand(nodeId, command);
         })().then((result) => {
           if (result.sessionState) dispatch({ type: 'session-state', nodeId, state: result.sessionState });
@@ -1563,6 +2032,10 @@ export function ChatProvider({ children, userId }: { children: React.ReactNode; 
         });
         return;
       }
+      // A prompt moves the conversation on; a finished command's result goes.
+      if (n.commandResult && n.commandResult.status !== 'running') {
+        dispatch({ type: 'command-result', nodeId, result: null });
+      }
       // Create assistant message synchronously first so status flips to 'streaming'
       // immediately, blocking concurrent submits on the same node.
       const assistantId = `a-${nodeId}-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
@@ -1571,6 +2044,10 @@ export function ChatProvider({ children, userId }: { children: React.ReactNode; 
       // injected as context into the outgoing prompt.
       const baseDisplay = meta?.displayText ?? text;
       const displayText = rewriteNodeMentionsForDisplay(baseDisplay, nodesRef.current);
+      // The arguments as the wire text carries them, where the runtime finds
+      // them (SkillInvocationRequest.args): chat mentions leave the text and
+      // come along as context instead.
+      const skillArgs = skillSend ? stripNodeMentionTokens(skillSend.args).trim() : '';
       dispatch({
         type: 'user-send',
         nodeId,
@@ -1582,11 +2059,16 @@ export function ChatProvider({ children, userId }: { children: React.ReactNode; 
         mentions: meta?.mentions,
         ...(meta?.keepDraft ? { keepDraft: true } : {}),
         ...(meta?.quoteSource ? { quoteSource: meta.quoteSource } : {}),
+        ...(skillSend ? { skill: {
+          id: skillSend.skill.id, name: skillSend.skill.name, origin: skillSend.skill.origin,
+          ...(skillSend.skill.runtimeId ? { runtimeId: skillSend.skill.runtimeId } : {}), args: skillArgs,
+        } } : {}),
+        ...(metaAgentContext !== undefined ? { metaAgentContext } : {}),
       });
       assistantTextBufs.current[assistantId] = '';
 
       let chatId = n.chatId;
-      let outgoingText = text;
+      let outgoingText = wireText;
       const tEnsureStart = perf.now();
       // The empty assistant's loading dots cover session setup as well.
       const setupController = new AbortController();
@@ -1597,7 +2079,6 @@ export function ChatProvider({ children, userId }: { children: React.ReactNode; 
         setupController.abort();
         delete assistantTextBufs.current[assistantId];
         if (cancelFns.current[nodeId] === cancelSetup) delete cancelFns.current[nodeId];
-        pendingCancels.current.delete(nodeId);
         dispatch({ type: 'done', nodeId, assistantId, aborted: true });
         handleTurnEnd('cancel', nodeId);
       };
@@ -1637,7 +2118,7 @@ export function ChatProvider({ children, userId }: { children: React.ReactNode; 
           outgoingText =
             `The user linked a peer thread. Use the following as additional context:\n\n` +
             peerBlocks.join('\n\n') +
-            `\n\n---\n\n${text}`;
+            `\n\n---\n\n${wireText}`;
         }
       } catch (err) {
         if (setupCancelled) {
@@ -1659,7 +2140,6 @@ export function ChatProvider({ children, userId }: { children: React.ReactNode; 
             : (err as Error).message || 'failed to ensure chat session'),
         });
         delete assistantTextBufs.current[assistantId];
-        pendingCancels.current.delete(nodeId);
         return;
       } finally {
         if (cancelFns.current[nodeId] === cancelSetup) delete cancelFns.current[nodeId];
@@ -1673,7 +2153,6 @@ export function ChatProvider({ children, userId }: { children: React.ReactNode; 
       if (!chatId) {
         dispatch({ type: 'error', nodeId, assistantId, message: 'failed to bind chat session' });
         delete assistantTextBufs.current[assistantId];
-        pendingCancels.current.delete(nodeId);
         return;
       }
 
@@ -1711,16 +2190,18 @@ export function ChatProvider({ children, userId }: { children: React.ReactNode; 
           quoteSource: meta?.quoteSource,
           attachments: meta?.attachments,
           comments: meta?.comments as Array<Record<string, unknown>> | undefined,
+          ...(metaAgentContext?.refs?.length ? { companionRefs: metaAgentContext.refs } : {}),
         },
+        ...(skillSend ? { skill: { id: skillSend.skill.id, name: skillSend.skill.name, args: skillArgs } } : {}),
+        ...(skillSend && slashRuntimeId ? {
+          onSkillRejected: () => invalidateSkillCatalog(n.projectId, slashRuntimeId, skillSend.skill.id),
+        } : {}),
+        metaAgentContext,
         onTurnEnd: handleTurnEnd,
         extraHandlers: createSharedStreamHandlers(nodeId),
         onStreamComplete: () => streamCompleteHandlerRef.current(nodeId),
       });
       cancelFns.current[nodeId] = cancel;
-      if (pendingCancels.current.has(nodeId)) {
-        pendingCancels.current.delete(nodeId);
-        cancel();
-      }
     },
     [createSharedStreamHandlers, dispatch, handleTurnEnd, refreshAgentStatus, ensureCompleteHistory],
   );
@@ -1781,25 +2262,9 @@ export function ChatProvider({ children, userId }: { children: React.ReactNode; 
       const parent = nodesRef.current[parentNodeId];
       if (!parent) throw new Error('unknown parent node');
       const projectId = parent.projectId;
-      // Digests are free-floating (not part of any tree). Re-anchor child
-      // chats to the originating tree's root so they show up in the sidebar
-      // tree under the thread the digest summarized. The digest content is
-      // still injected as a preamble in startStream.
-      let branchParentNodeId = parentNodeId;
-      if (parent.kind === 'digest' && parent.digest) {
-        const project = projects.find((p) => p.id === projectId);
-        const liveSourceId = parent.digest.sources.find((sid) => {
-          const s = nodesRef.current[sid];
-          return !!s && !s.deletedAt;
-        });
-        const treeId = project && liveSourceId
-          ? findTreeIdForNode(liveSourceId, project)
-          : null;
-        const tree = project?.trees.find((t) => t.id === treeId);
-        if (tree && nodesRef.current[tree.rootNodeId]) {
-          branchParentNodeId = tree.rootNodeId;
-        }
-      }
+      const branch = resolveBranchParent(parentNodeId, projectsRef.current.find((p) => p.id === projectId), nodesRef.current);
+      if (!branch) throw new Error('No chat to branch from');
+      const { branchParentNodeId, contextFromNodeId } = branch;
       const nodeId = newNodeId(projectId);
       if (opts?.primaryAgent) {
         bindPendingPrimaryAgent(nodeId, { workspaceId: projectId, ...opts.primaryAgent });
@@ -1835,18 +2300,18 @@ export function ChatProvider({ children, userId }: { children: React.ReactNode; 
       setOpenPanes((prev) => (prev.includes(nodeId) ? prev : [...prev, nodeId]));
       if (opts?.focus !== false) {
         setFocusedPane(nodeId);
+        viewPane(nodeId);
       }
-      // Pass the original digest parent through to startStream so the digest
-      // content lands as a preamble even though we re-anchored the branch edge.
-      void startStream(
-        nodeId,
-        firstMessage,
-        { contextFromNodeId: parent.kind === 'digest' ? parentNodeId : undefined },
-        meta,
-      );
+      // A branch runs on its parent's runtime and model unless the caller
+      // names a runtime or an agent definition brings its own; the backend
+      // would otherwise start it on the global default.
+      const childMeta = meta?.runtimeId || opts?.primaryAgent || !parent.runtimeId ? meta : {
+        ...meta, runtimeId: parent.runtimeId, providerId: parent.providerId ?? undefined, modelId: parent.modelId ?? undefined, reasoning: parent.reasoning,
+      };
+      void startStream(nodeId, firstMessage, { contextFromNodeId }, childMeta);
       return nodeId;
     },
-    [dispatch, newNodeId, projects, setFocusedPane, setOpenPanes, startStream],
+    [dispatch, newNodeId, setFocusedPane, setOpenPanes, startStream, viewPane],
   );
 
   const createBlankChild = useCallback(
@@ -1854,8 +2319,12 @@ export function ChatProvider({ children, userId }: { children: React.ReactNode; 
       const parent = nodesRef.current[parentNodeId];
       if (!parent) throw new Error('unknown parent node');
       const projectId = parent.projectId;
+      const branch = resolveBranchParent(parentNodeId, projectsRef.current.find((p) => p.id === projectId), nodesRef.current);
+      if (!branch) throw new Error('No chat to branch from');
+      const { branchParentNodeId, contextFromNodeId } = branch;
       const nodeId = newNodeId(projectId);
-      dispatch({ type: 'create', nodeId, projectId, parentNodeId });
+      if (contextFromNodeId) branchContextFromRef.current.set(nodeId, contextFromNodeId);
+      dispatch({ type: 'create', nodeId, projectId, parentNodeId: branchParentNodeId });
       const createdAt = Date.now();
       setProjects((prev) =>
         prev.map((p) =>
@@ -1866,7 +2335,7 @@ export function ChatProvider({ children, userId }: { children: React.ReactNode; 
                 edges: [
                   ...p.edges,
                   makeBranchEdge({
-                    source: parentNodeId,
+                    source: branchParentNodeId,
                     target: nodeId,
                     anchorMessageId: opts?.anchorMessageId,
                     createdAt,
@@ -1878,9 +2347,10 @@ export function ChatProvider({ children, userId }: { children: React.ReactNode; 
       );
       setOpenPanes((prev) => (prev.includes(nodeId) ? prev : [...prev, nodeId]));
       setFocusedPane(nodeId);
+      viewPane(nodeId);
       return nodeId;
     },
-    [dispatch, newNodeId, setFocusedPane, setOpenPanes],
+    [dispatch, newNodeId, setFocusedPane, setOpenPanes, viewPane],
   );
 
   const sameTree = useCallback(
@@ -1985,6 +2455,36 @@ export function ChatProvider({ children, userId }: { children: React.ReactNode; 
     turnInspections.current.clear();
   }, []);
 
+  // Reruns need the whole transcript of a partly loaded thread. The message a
+  // rerun starts from is found again by id once older pages are in front of
+  // it. Null when there is nothing left to rerun.
+  const completeNodeHistory = useCallback(
+    async (nodeId: string, fromIndex?: number): Promise<{ node: ChatNodeState; fromIndex?: number } | null> => {
+      const anchor = fromIndex === undefined ? undefined : nodesRef.current[nodeId]?.messages[fromIndex]?.id;
+      try { await ensureCompleteHistory([nodeId]); }
+      catch (error) { toast.error((error as Error).message); return null; }
+      const node = nodesRef.current[nodeId];
+      if (!node || node.status === 'streaming') return null;
+      if (fromIndex === undefined) return { node };
+      const found = node.messages.findIndex(message => message.id === anchor);
+      return found < 0 ? null : { node, fromIndex: found };
+    },
+    [ensureCompleteHistory],
+  );
+
+  // Drops what a rerun replaces, and the branch anchors on those messages.
+  const trimForRerun = useCallback((nodeId: string, node: ChatNodeState, fromIndex: number | undefined) => {
+    const survivingIds = computeSurvivingMessageIds(node.messages, fromIndex);
+    dispatch({ type: 'retry-trim', nodeId, fromIndex });
+    setProjects((prev) =>
+      prev.map((p) => {
+        if (p.id !== node.projectId) return p;
+        const edges = cleanupOrphanedAnchors(p.edges, nodeId, survivingIds);
+        return edges === p.edges ? p : { ...p, edges };
+      }),
+    );
+  }, [dispatch, setProjects]);
+
   // A restart cut the last turn short. Its request and partial output are
   // already in the transcript, so the agent is asked to carry on from there;
   // the original request is never sent again (a second run would repeat the
@@ -1994,19 +2494,18 @@ export function ChatProvider({ children, userId }: { children: React.ReactNode; 
       let n = nodesRef.current[nodeId];
       if (!n || n.status === 'streaming') return;
       if (n.messagesLoaded === false) {
-        try { await ensureCompleteHistory([nodeId]); }
-        catch (error) { toast.error((error as Error).message); return; }
-        n = nodesRef.current[nodeId];
-        if (!n || n.status === 'streaming') return;
+        const completed = await completeNodeHistory(nodeId);
+        if (!completed) return;
+        n = completed.node;
       }
-      const prompt = buildResumePrompt(n.messages);
+      const prompt = buildResumePrompt(n.messages, interruptionCauseOfKind(n.errorKind) ?? 'restart');
       if (!prompt) return;
       turnInspections.current.get(nodeId)?.();
       turnInspections.current.delete(nodeId);
       cancelFns.current[nodeId]?.();
       void startStream(nodeId, prompt.text, undefined, { displayText: prompt.displayText, ...binding });
     },
-    [startStream, ensureCompleteHistory],
+    [startStream, completeNodeHistory],
   );
 
   const retryLastTurn = useCallback(
@@ -2014,15 +2513,9 @@ export function ChatProvider({ children, userId }: { children: React.ReactNode; 
       let n = nodesRef.current[nodeId];
       if (!n || n.status === 'streaming') return;
       if (n.messagesLoaded === false) {
-        const anchor = fromIndex === undefined ? undefined : n.messages[fromIndex]?.id;
-        try { await ensureCompleteHistory([nodeId]); }
-        catch (error) { toast.error((error as Error).message); return; }
-        n = nodesRef.current[nodeId];
-        if (!n || n.status === 'streaming') return;
-        if (fromIndex !== undefined) {
-          fromIndex = n.messages.findIndex(message => message.id === anchor);
-          if (fromIndex < 0) return;
-        }
+        const completed = await completeNodeHistory(nodeId, fromIndex);
+        if (!completed) return;
+        ({ node: n, fromIndex } = completed);
       }
       const action = turnErrorAction(n.errorKind);
       if (action === 'resume-turn' && !explicitRerun) {
@@ -2044,7 +2537,7 @@ export function ChatProvider({ children, userId }: { children: React.ReactNode; 
         const detach = inspectOriginalTurn({
           chatId: n.chatId,
           turnId,
-          onResult: ({ persisted, completedAt, assistant, lastSeq }) => {
+          onResult: ({ persisted, completedAt, assistant, lastSeq, stopReason }) => {
             turnInspections.current.delete(nodeId);
             const current = nodesRef.current[nodeId];
             // An old read must never finish or overwrite a newer execution.
@@ -2052,7 +2545,8 @@ export function ChatProvider({ children, userId }: { children: React.ReactNode; 
             dispatch({ type: 'error-recovery', nodeId, state: persisted ? undefined : 'unavailable' });
             if (persisted && assistant && typeof lastSeq === 'number') {
               dispatch({ type: 'recover-original-result', nodeId, turnId, assistantId, assistant, lastSeq, cursor: n.lastAppliedBackgroundTurnId === turnId && n.lastAppliedTurnId !== turnId ? 'background' : 'foreground' });
-              dispatch({ type: 'done', nodeId, assistantId: assistant.id, completedAt });
+              // Named, so the completion counts once; a cancelled turn is not one.
+              dispatch({ type: 'done', nodeId, assistantId: assistant.id, completedAt, turnId, ...(stopReason === 'cancelled' ? { aborted: true } : {}) });
             }
           },
         });
@@ -2072,19 +2566,7 @@ export function ChatProvider({ children, userId }: { children: React.ReactNode; 
       }
       if (!sourceMsg) return;
       cancelFns.current[nodeId]?.();
-      // Compute surviving ids BEFORE dispatch — deterministic mirror of the
-      // reducer's trim logic so we know which anchors become orphaned.
-      const survivingIds = computeSurvivingMessageIds(n.messages, fromIndex);
-      if (!(uncertain && explicitRerun)) {
-        dispatch({ type: 'retry-trim', nodeId, fromIndex });
-        setProjects((prev) =>
-          prev.map((p) => {
-            if (p.id !== n.projectId) return p;
-            const edges = cleanupOrphanedAnchors(p.edges, nodeId, survivingIds);
-            return edges === p.edges ? p : { ...p, edges };
-          }),
-        );
-      }
+      if (!(uncertain && explicitRerun)) trimForRerun(nodeId, n, fromIndex);
       // For retries, the stored text is already the wire-flattened payload
       // (quote prefix + attachment sentinel are baked in for old messages).
       // For new messages with structured fields, m.text is bare prose, so we
@@ -2102,18 +2584,22 @@ export function ChatProvider({ children, userId }: { children: React.ReactNode; 
       const flattened = appendAttachmentsSentinel(
         joinMessageParts(formatCommentsBlock(reComments ?? []), reQuote ?? null, reText, reSource), reAttach,
       );
+      const resent = resendTurnContext(nodeId, sourceMsg);
+      // The skill it ran runs again; where it is gone, the backend says so.
       void startStream(nodeId, flattened, undefined, {
         quotedText: reQuote,
         ...(reQuote && reSource ? { quoteSource: reSource } : {}),
         attachments: reAttach.length > 0 ? reAttach.map(a => ({ ...a })) : undefined,
         comments: reComments,
         displayText: reText,
+        ...(sourceMsg.skill ? { skill: sourceMsg.skill } : {}),
         // A model/effort picked after the failure applies to the retry,
         // the same way it would to a fresh send.
         ...binding,
+        ...(resent !== undefined ? { metaAgentContext: resent } : {}),
       });
     },
-    [dispatch, resumeLastTurn, setProjects, startStream, ensureCompleteHistory],
+    [dispatch, resumeLastTurn, startStream, completeNodeHistory, trimForRerun],
   );
 
   // An explicit rerun of an uncertain execution appends a new attempt, keeping
@@ -2124,31 +2610,33 @@ export function ChatProvider({ children, userId }: { children: React.ReactNode; 
   );
 
   const editAndResend = useCallback(
-    async (nodeId: string, fromIndex: number, newText: string) => {
+    async (nodeId: string, fromIndex: number, newText: string, binding?: SendBindingMeta) => {
       let n = nodesRef.current[nodeId];
       if (!n) return;
       if (n.messagesLoaded === false) {
-        const anchor = n.messages[fromIndex]?.id;
-        try { await ensureCompleteHistory([nodeId]); }
-        catch (error) { toast.error((error as Error).message); return; }
-        n = nodesRef.current[nodeId];
-        if (!n || n.status === 'streaming') return;
-        fromIndex = n.messages.findIndex(message => message.id === anchor);
-        if (fromIndex < 0) return;
+        const completed = await completeNodeHistory(nodeId, fromIndex);
+        if (!completed) return;
+        n = completed.node;
+        fromIndex = completed.fromIndex!;
       }
       cancelFns.current[nodeId]?.();
-      const survivingIds = computeSurvivingMessageIds(n.messages, fromIndex);
-      dispatch({ type: 'retry-trim', nodeId, fromIndex });
-      setProjects((prev) =>
-        prev.map((p) => {
-          if (p.id !== n.projectId) return p;
-          const edges = cleanupOrphanedAnchors(p.edges, nodeId, survivingIds);
-          return edges === p.edges ? p : { ...p, edges };
-        }),
-      );
-      void startStream(nodeId, newText);
+      // An edit that keeps the /name the message ran a skill with runs that
+      // skill again; any other edit is read like a new message.
+      const edited = n.messages[fromIndex];
+      const slashName = (value: string) => parseSlashInvocation(value.trim())?.name.toLowerCase();
+      const skill = edited?.skill && slashName(newText) !== undefined && slashName(newText) === slashName(edited.text)
+        ? edited.skill : undefined;
+      // The edited message keeps what it referred to (a post it replied to, handed-over rows).
+      const resent = resendTurnContext(nodeId, n.messages[fromIndex]);
+      trimForRerun(nodeId, n, fromIndex);
+      // A model/effort picked since applies, as it does to a retry.
+      void startStream(nodeId, newText, undefined, {
+        ...(skill ? { skill } : {}),
+        ...binding,
+        ...(resent !== undefined ? { metaAgentContext: resent } : {}),
+      });
     },
-    [dispatch, setProjects, startStream, ensureCompleteHistory],
+    [startStream, completeNodeHistory, trimForRerun],
   );
 
   const cancelStream = useCallback((nodeId: string) => {
@@ -2169,14 +2657,15 @@ export function ChatProvider({ children, userId }: { children: React.ReactNode; 
       // cleanup; it never interrupts a different window's newer turn.
       dispatch({ type: 'optimistic-cancel', nodeId });
     }
+    // A send of this window registers its cancel in the tick it marks the
+    // node streaming, so a Stop always finds it. Without one, only a turn id
+    // lets the backend stop the turn; with neither, nothing here runs it and
+    // the optimistic cancel above is all a Stop can do. Remembering the Stop
+    // instead would cancel the user's next message.
     if (fn) {
       fn();
     } else if (node?.chatId && activeTurnId) {
       observeCancellation();
-    } else {
-      // Stop was pressed before streamMessage registered its cancel fn.
-      // Mark it so startStream aborts as soon as cancel is available.
-      pendingCancels.current.add(nodeId);
     }
   }, []);
 
@@ -2208,12 +2697,32 @@ export function ChatProvider({ children, userId }: { children: React.ReactNode; 
     const { mode, approveForMe } = chatPermissionChoiceParts(choice);
     const res = await backendFetch(`${nodeBackendApiBase(nodeId)}/nodes/${encodeURIComponent(nodeId)}/permissions`, {
       method: 'PUT', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ mode, approveForMe, graphPrerequisite: durableNodePrerequisite(project, node) }),
+      body: JSON.stringify({ mode, approveForMe, graphPrerequisite: durableNodePrerequisite(project, nodesRef.current, node) }),
     });
     if (!res.ok) throw new Error('Failed to save chat permissions');
     // An older Backend ignores approveForMe: show what it saved.
     const saved = await res.json().catch(() => null) as { approveForMe?: unknown } | null;
     dispatch({ type: 'set-permission-mode', nodeId, mode, approveForMe: approveForMe && saved?.approveForMe === true });
+  }, [dispatch]);
+
+  const setChatUltracode = useCallback(async (nodeId: string, enabled: boolean) => {
+    const node = nodesRef.current[nodeId];
+    const project = projectsRef.current.find((candidate) => candidate.id === node?.projectId);
+    if (!node || !project) throw new Error('Chat not found');
+    const res = await backendFetch(`${nodeBackendApiBase(nodeId)}/nodes/${encodeURIComponent(nodeId)}/ultracode`, {
+      method: 'PUT', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ enabled, graphPrerequisite: durableNodePrerequisite(project, nodesRef.current, node) }),
+    });
+    if (!res.ok) {
+      const failure = await res.json().catch(() => null) as { error?: unknown } | null;
+      throw new Error(typeof failure?.error === 'string' && res.status < 500 ? failure.error : 'Failed to save Ultracode');
+    }
+    const saved = await res.json().catch(() => null) as { enabled?: unknown; sessionState?: unknown } | null;
+    dispatch({ type: 'set-ultracode', nodeId, enabled: saved?.enabled === true });
+    // The live session's report of what took effect (model, workflows).
+    if (saved?.sessionState && typeof saved.sessionState === 'object') {
+      dispatch({ type: 'session-state', nodeId, state: parseSessionState({ ...(saved.sessionState as Record<string, unknown>) }) });
+    }
   }, [dispatch]);
 
   const resolvePermission = useCallback((nodeId: string, optionId: string) => {
@@ -2290,10 +2799,7 @@ export function ChatProvider({ children, userId }: { children: React.ReactNode; 
         type: 'add-comment',
         nodeId,
         comment: {
-          id:
-            typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
-              ? crypto.randomUUID()
-              : `c-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+          id: randomUuid(),
           quotedText: trimmedQuote,
           body: trimmedBody,
           createdAt: Date.now(),
@@ -2330,8 +2836,10 @@ export function ChatProvider({ children, userId }: { children: React.ReactNode; 
     const node = nodesRef.current[nodeId];
     if (!node?.chatId) return false;
     if (options?.queueId) dispatch({ type: 'queue-steering', nodeId, queueId: options.queueId, steering: true });
+    // A queued message to the agent carries what it was sent with into the running turn (§2.8 T4).
+    const queued = options?.queueId ? node.pendingQueued?.find((entry) => entry.id === options.queueId) : undefined;
     try {
-      const result = await steerChat(node.chatId, text, options);
+      const result = await steerChat(node.chatId, text, options, queued?.metaAgentContext);
       if (result.accepted && result.message) dispatch({ type: 'steer-accepted', nodeId, data: result.message });
       return result.accepted;
     } finally {
@@ -2339,15 +2847,12 @@ export function ChatProvider({ children, userId }: { children: React.ReactNode; 
     }
   }, [dispatch]);
 
-  const compactContext = useCallback(async (nodeId: string, instructions?: string) => {
-    const node = nodesRef.current[nodeId];
-    if (!node?.chatId) return { started: false, detail: 'No live session' };
-    return compactChat(node.chatId, instructions);
-  }, []);
-
   const queueMessage = useCallback(
     (nodeId: string, message: PendingQueuedMessage) => {
-      dispatch({ type: 'queue-message', nodeId, message });
+      // A message to the agent queued while it answers keeps what it carried when the user sent it
+      // (its chips, the post it replies to, the area), for when it goes out (F1a-review #1).
+      const metaAgentContext = message.metaAgentContext !== undefined ? message.metaAgentContext : captureMetaAgentTurnContext(nodeId);
+      dispatch({ type: 'queue-message', nodeId, message: metaAgentContext !== undefined ? { ...message, metaAgentContext } : message });
     },
     [dispatch],
   );
@@ -2455,12 +2960,15 @@ export function ChatProvider({ children, userId }: { children: React.ReactNode; 
       const parent = nodesRef.current[parentNodeId];
       if (!parent) throw new Error('unknown parent node');
       const projectId = parent.projectId;
+      const branch = resolveBranchParent(parentNodeId, projectsRef.current.find((p) => p.id === projectId), nodesRef.current);
+      if (!branch) throw new Error('No chat to branch from');
+      const { branchParentNodeId, contextFromNodeId } = branch;
 
       // Pre-generate ids locally, add all structural updates in one pass so
       // views see the new nodes appear together. No network round-trip needed.
       const newIds = cleaned.map(() => newNodeId(projectId));
       newIds.forEach((nid) => {
-        dispatch({ type: 'create', nodeId: nid, projectId, parentNodeId });
+        dispatch({ type: 'create', nodeId: nid, projectId, parentNodeId: branchParentNodeId });
       });
       const createdAt = Date.now();
       setProjects((prev) =>
@@ -2473,7 +2981,7 @@ export function ChatProvider({ children, userId }: { children: React.ReactNode; 
                   ...p.edges,
                   ...newIds.map((nid) =>
                     makeBranchEdge({
-                      source: parentNodeId,
+                      source: branchParentNodeId,
                       target: nid,
                       kind: 'branch',
                       anchorMessageId: opts?.anchorMessageId,
@@ -2488,13 +2996,14 @@ export function ChatProvider({ children, userId }: { children: React.ReactNode; 
       // Auto-open in panes so the new siblings are visible in the dashboard.
       setOpenPanes((prev) => [...prev, ...newIds.filter((id) => !prev.includes(id))]);
       setFocusedPane(newIds[0]);
+      viewPane(newIds[0]);
       // Fire streams in parallel — each opens its own ACP session lazily.
       cleaned.forEach((topic, i) => {
-        void startStream(newIds[i], topic);
+        void startStream(newIds[i], topic, { contextFromNodeId });
       });
       return newIds;
     },
-    [dispatch, newNodeId, setFocusedPane, setOpenPanes, startStream],
+    [dispatch, newNodeId, setFocusedPane, setOpenPanes, startStream, viewPane],
   );
 
   const { createDigest, refreshDigest, setDigestPrompt, markDigestViewed, deleteDigest } = useDigestOrchestration({
@@ -2508,13 +3017,21 @@ export function ChatProvider({ children, userId }: { children: React.ReactNode; 
     ensureCompleteHistory,
   });
 
-  const revealPane = useCallback((item: PaneItem): string => {
-    registerPaneItem(item);
-    openPane(item.id);
+  /** Open and focus a non-chat pane (a new item, or a registered one by id) in
+   *  `slot`, else the item's own, then show the Dashboard. The slot is explicit
+   *  because a workspace switch earlier in this tick has not rendered yet. */
+  const revealPane = useCallback((
+    itemOrId: PaneItem | string,
+    slot?: { projectId: string; treeId: string | null },
+  ): string => {
+    const item = typeof itemOrId === 'string' ? paneItemsRef.current[itemOrId] : itemOrId;
+    if (!item) throw new Error('Pane is no longer available');
+    if (item === itemOrId) registerPaneItem(item);
+    openPaneInTree(slot?.projectId ?? item.projectId, slot ? slot.treeId : item.treeId, item.id);
     setFocusedNodeIdState(null);
-    window.dispatchEvent(new CustomEvent('michi:nav-page', { detail: { page: 'dashboard' } }));
+    navPageEvent.dispatch({ page: 'dashboard' });
     return item.id;
-  }, [openPane, registerPaneItem]);
+  }, [openPaneInTree, registerPaneItem]);
 
   const openAgentRunPane = useCallback((
     identity: AgentResourceIdentity,
@@ -2535,13 +3052,9 @@ export function ChatProvider({ children, userId }: { children: React.ReactNode; 
       backendConnectionId: identity.backendConnectionId,
       runId: identity.id,
     };
-    registerPaneItem(item);
-    const treeId = project.activeTreeId;
-    openPaneInTree(workspaceId, treeId, id);
-    setFocusedNodeIdState(null);
-    window.dispatchEvent(new CustomEvent('michi:nav-page', { detail: { page: 'dashboard' } }));
-    return id;
-  }, [openPaneInTree, registerPaneItem, selectProject]);
+    return revealPane(item, { projectId: workspaceId, treeId: project.activeTreeId });
+  }, [revealPane, selectProject]);
+  openAgentRunPaneRef.current = openAgentRunPane;
 
   const openPagePane = useCallback((page: { pageId: string; workspaceId: string; backendConnectionId: string; title?: string }): string => {
     const host = projectsRef.current.find((candidate) => candidate.id === activeProjectIdRef.current && !candidate.deletedAt);
@@ -2558,12 +3071,8 @@ export function ChatProvider({ children, userId }: { children: React.ReactNode; 
       workspaceId: page.workspaceId,
       pageId: page.pageId,
     };
-    registerPaneItem(item);
-    openPaneInTree(host.id, host.activeTreeId, id);
-    setFocusedNodeIdState(null);
-    window.dispatchEvent(new CustomEvent('michi:nav-page', { detail: { page: 'dashboard' } }));
-    return id;
-  }, [openPaneInTree, registerPaneItem]);
+    return revealPane(item);
+  }, [revealPane]);
 
   const openFilePane = useCallback((filePath: string, options?: { parseSourceLocation?: boolean }): string => {
     if (!activeProjectId) throw new Error('No active project');
@@ -2598,9 +3107,7 @@ export function ChatProvider({ children, userId }: { children: React.ReactNode; 
         sourceReferencePath,
         ...(sourceLocation && isMarkdown ? { viewMode: 'source' as const } : {}),
       });
-      openPane(existing.id);
-      window.dispatchEvent(new CustomEvent('michi:nav-page', { detail: { page: 'dashboard' } }));
-      return existing.id;
+      return revealPane(existing.id);
     }
     const title = cleanPath.split(/[\\/]/).filter(Boolean).pop() ?? cleanPath;
     return revealPane({
@@ -2616,56 +3123,11 @@ export function ChatProvider({ children, userId }: { children: React.ReactNode; 
       sourceLocation,
       sourceReferencePath,
     });
-  }, [activeProjectId, focusedNodeId, openPane, revealPane, updatePaneItem]);
+  }, [activeProjectId, focusedNodeId, revealPane, updatePaneItem]);
 
-  const openDiffPane = useCallback((filePath: string): string => {
+  const openBrowserPane = useCallback((url = DEFAULT_BROWSER_URL): string => {
     if (!activeProjectId) throw new Error('No active project');
-    const normalized = filePath.trim();
-    if (!normalized) throw new Error('No file path provided');
-    const activeTreeId = projectsRef.current.find((project) => project.id === activeProjectId)?.activeTreeId ?? 'none';
-    const id = singletonPaneId('diff', `${activeProjectId}:${activeTreeId}`, normalized);
-    const existing = paneItemsRef.current[id];
-    if (existing) {
-      openPane(id);
-      window.dispatchEvent(new CustomEvent('michi:nav-page', { detail: { page: 'dashboard' } }));
-      return id;
-    }
-    const basename = normalized.split('/').filter(Boolean).pop() ?? normalized;
-    return revealPane({
-      id,
-      kind: 'diff',
-      projectId: activeProjectId,
-      treeId: activeTreeId === 'none' ? null : activeTreeId,
-      title: `${basename} (diff)`,
-      createdAt: Date.now(),
-      filePath: normalized,
-    });
-  }, [activeProjectId, openPane, revealPane]);
-
-  const openTerminalPane = useCallback((cwd?: string): string => {
-    if (!activeProjectId) throw new Error('No active project');
-    const project = projectsRef.current.find((candidate) => candidate.id === activeProjectId);
-    if (project?.backendConnectionId) {
-      throw new Error('The native terminal runs locally and is unavailable for remote workspaces. Use the remote agent shell tools instead.');
-    }
-    const id = uniquePaneId('terminal');
-    const surfaceId = id.slice('pane:terminal:'.length);
-    const treeId = projectsRef.current.find((project) => project.id === activeProjectId)?.activeTreeId ?? null;
-    return revealPane({
-      id,
-      kind: 'terminal',
-      projectId: activeProjectId,
-      treeId,
-      title: 'Terminal',
-      createdAt: Date.now(),
-      surfaceId,
-      cwd: cwd?.trim() || projectsRef.current.find((project) => project.id === activeProjectId)?.cwd || '',
-    });
-  }, [activeProjectId, revealPane]);
-
-  const openBrowserPane = useCallback((url = 'https://www.google.com/'): string => {
-    if (!activeProjectId) throw new Error('No active project');
-    const normalized = normalizeBrowserUrl(url) ?? 'https://www.google.com/';
+    const normalized = normalizeBrowserUrl(url) ?? DEFAULT_BROWSER_URL;
     const id = uniquePaneId('browser');
     const surfaceId = id.slice('pane:browser:'.length);
     const treeId = projectsRef.current.find((project) => project.id === activeProjectId)?.activeTreeId ?? null;
@@ -2725,9 +3187,6 @@ export function ChatProvider({ children, userId }: { children: React.ReactNode; 
       return paneId;
     }
     if (choice === 'terminal') {
-      if (project.backendConnectionId) {
-        throw new Error('The native terminal is local-only. Use the remote agent shell tools for this workspace.');
-      }
       const runtimeId = uniquePaneId('terminal');
       replacePaneItem(paneId, {
         ...base,
@@ -2736,6 +3195,7 @@ export function ChatProvider({ children, userId }: { children: React.ReactNode; 
         title: 'Terminal',
         surfaceId: runtimeId.slice('pane:terminal:'.length),
         cwd: project.cwd ?? project.folders?.[0]?.path ?? '',
+        ...terminalPaneFields(terminalTargetForWorkspace(project)),
       });
       return paneId;
     }
@@ -2746,12 +3206,12 @@ export function ChatProvider({ children, userId }: { children: React.ReactNode; 
         kind: 'browser',
         title: 'Browser',
         surfaceId: runtimeId.slice('pane:browser:'.length),
-        url: 'https://www.google.com/',
+        url: DEFAULT_BROWSER_URL,
       });
       return paneId;
     }
 
-    const anchorNodeId = launcher.anchorNodeId && nodesRef.current[launcher.anchorNodeId]
+    const anchorNodeId = launcher.anchorNodeId && resolveBranchParent(launcher.anchorNodeId, project, nodesRef.current)
       ? launcher.anchorNodeId
       : activeTreeRootNodeId(project);
     if (!anchorNodeId) throw new Error('No chat is available to branch from');
@@ -2787,19 +3247,39 @@ export function ChatProvider({ children, userId }: { children: React.ReactNode; 
     removePaneItem(launcherPaneId);
   }, [removePaneItem, setFocusedPane, setOpenPanes, updatePaneItem]);
 
-  // Compatibility name retained for artifact shelf/link callers. New opens
-  // are layout-only PaneItems and no longer pollute the conversation graph;
-  // persisted legacy artifact nodes remain renderable in Dashboard.
+  /** Show a terminal a backend already runs (another window's, or one this window closed earlier) in a launcher slot. */
+  const adoptBackendTerminal = useCallback((launcherPaneId: string, terminal: { terminalId: string; cwd: string }, connectionId: string) => {
+    const launcher = paneItemsRef.current[launcherPaneId];
+    if (!launcher || launcher.kind !== 'launcher') return;
+    replacePaneItem(launcherPaneId, {
+      id: launcherPaneId,
+      projectId: launcher.projectId,
+      treeId: null, // Terminal is window-scoped, not tree-scoped
+      createdAt: launcher.createdAt,
+      width: launcher.width,
+      kind: 'terminal',
+      title: 'Terminal',
+      surfaceId: terminal.terminalId,
+      cwd: terminal.cwd,
+      ...terminalPaneFields({ transport: 'backend', connectionId }),
+    });
+  }, [replacePaneItem]);
+
+  // Compatibility name retained for artifact shelf/link callers: artifacts
+  // open as layout-only file PaneItems, not conversation-graph nodes.
   const openArtifactPane = useCallback(
     async (filePath: string, options?: { parseSourceLocation?: boolean }): Promise<string> => openFilePane(filePath, options),
     [openFilePane],
   );
 
+  const bumpStructureVersion = useCallback(() => { structureVersionRef.current += 1; }, []);
   const {
+    deleteSubtree,
     deleteNode,
     trimNode,
     archiveNode,
     restoreDeletion,
+    moveDeletionGroupLane,
     purgeDeletion,
     purgeDeletionAsync,
     restoreLastDeletion,
@@ -2818,7 +3298,7 @@ export function ChatProvider({ children, userId }: { children: React.ReactNode; 
     trashTTLDays: prefs.trashTTLDays,
     activeTreeRootNodeId,
     syncPausedRef,
-    bumpStructureVersion: useCallback(() => { structureVersionRef.current += 1; }, []),
+    bumpStructureVersion,
   });
 
   const setSidebarExpandedPref = useCallback(
@@ -2832,7 +3312,7 @@ export function ChatProvider({ children, userId }: { children: React.ReactNode; 
     projectsRef, activeProjectIdRef, nodesRef, commandsInFlightRef, boundSessionsRef,
     setProjects, setNodes, runWorkspaceMutation, prunePaneIds, setPaneSlot, selectProject,
     setFocusedNodeId: setFocusedNodeIdState, setSelection: setSelectionState,
-    bumpStructureVersion: useCallback(() => { structureVersionRef.current += 1; }, []),
+    bumpStructureVersion,
   });
 
   const {
@@ -2854,22 +3334,23 @@ export function ChatProvider({ children, userId }: { children: React.ReactNode; 
     projects,
     activeProjectId,
     nodesRef,
-    cancelFns,
     dispatch,
+    renameNode,
     newNodeId,
     setProjects,
     setNodes,
-    setOpenPanes,
-    setFocusedPane,
     setPaneSlot,
     ensurePaneSlot,
     setFocusedNodeId: setFocusedNodeIdState,
     selectProject,
-    setSelection: setSelectionState,
+    deleteSubtree,
     treeSelection,
     setTreeSelection,
     sidebarExpanded: prefs.sidebarExpanded,
     setSidebarExpanded: setSidebarExpandedPref,
+    runWorkspaceMutation,
+    adoptBackendStructure,
+    bumpStructureVersion,
   });
 
   // The user's workspace to come back to while the assistant's hidden one is
@@ -2879,16 +3360,17 @@ export function ChatProvider({ children, userId }: { children: React.ReactNode; 
   }, [activeProjectId, projects]);
 
   /** Focus the window, open `nodeId`'s pane wherever it lives, land on the
-   *  Dashboard. Shared by every notification whose click should take the user
-   *  to the node that produced it. */
-  const revealNode = useCallback((nodeId: string) => {
+   *  Dashboard. Shared by notifications and every in-app link or button whose
+   *  click should take the user to a node. */
+  const revealNode = useCallback((nodeId: string, opts?: { workspaceId?: string; messageId?: string }): boolean => {
     window.focus();
-    // The assistant's conversation lives in its hidden workspace: it shows in
-    // the ⌘J panel (the Scheduled window's, on the Scheduled page), never by
-    // switching to that workspace.
-    if (revealScheduleAssistant(nodeId)) return;
-    const owner = projectsRef.current.find((p) => p.chatIds.includes(nodeId));
-    if (isSystemWorkspace(owner) && openAssistantPanel()) return;
+    // The assistant's conversations live in its hidden workspace: they show
+    // in the panel, never by switching to that workspace.
+    if (revealInCompanionPanel(projectsRef.current, nodeId)) return true;
+    const owner = (opts?.workspaceId
+      ? projectsRef.current.find((p) => p.id === opts.workspaceId && p.chatIds.includes(nodeId))
+      : undefined) ?? projectsRef.current.find((p) => p.chatIds.includes(nodeId));
+    if (!owner) return false;
     navigateToNode(
       {
         projects: projectsRef.current,
@@ -2900,25 +3382,74 @@ export function ChatProvider({ children, userId }: { children: React.ReactNode; 
         setFocusedNodeId,
       },
       nodeId,
+      owner.id,
     );
-    window.dispatchEvent(new CustomEvent('michi:nav-page', { detail: { page: 'dashboard' } }));
+    navPageEvent.dispatch({ page: 'dashboard' });
+    // The pane carries the jump out once it shows the message, even when it mounts later.
+    if (opts?.messageId) requestMessageJump(nodeId, opts.messageId);
+    return true;
   }, [activateTree, openPane, openPaneInTree, selectProject, setFocusedNodeId]);
   revealNodeRef.current = revealNode;
 
+  // A multi-model run's branches next to the chat that started it. Defined
+  // after the tree actions (activateTree), unlike fanoutBranches.
+  const openPanesSideBySide = useCallback((callerNodeId: string, childNodeIds: readonly string[], opts?: { focusNodeId?: string }) => {
+    const caller = nodesRef.current[callerNodeId];
+    const project = caller ? projectsRef.current.find((p) => p.id === caller.projectId && !p.deletedAt) : undefined;
+    const treeId = project ? findTreeIdForNode(callerNodeId, project) : null;
+    if (!project || !treeId) return;
+    const children = [...new Set(childNodeIds)].filter((id) => {
+      const node = nodesRef.current[id];
+      return id !== callerNodeId && !!node && !node.deletedAt && node.projectId === project.id && findTreeIdForNode(id, project) === treeId;
+    });
+    const group = [callerNodeId, ...children];
+    const focusId = opts?.focusNodeId && group.includes(opts.focusNodeId) ? opts.focusNodeId : children[0] ?? callerNodeId;
+    if (project.id === activeProjectIdRef.current && treeId === project.activeTreeId) {
+      // The branches sit right after the chat, even with unrelated panes open around it.
+      setOpenPanes((prev) => {
+        const rest = prev.filter((id) => !group.includes(id));
+        const callerIndex = prev.indexOf(callerNodeId);
+        if (callerIndex < 0) return [...rest, ...group];
+        const at = prev.slice(0, callerIndex).filter((id) => !group.includes(id)).length;
+        return [...rest.slice(0, at), ...group, ...rest.slice(at)];
+      });
+      setFocusedPane(focusId);
+    } else {
+      // Seed the destination slot before switching to it (navigateToNode explains why).
+      if (project.id !== activeProjectIdRef.current) selectProject(project.id);
+      for (const id of [...group.filter((id) => id !== focusId), focusId]) openPaneInTree(project.id, treeId, id);
+      activateTree(treeId, project.id);
+    }
+    viewPane(focusId);
+    navPageEvent.dispatch({ page: 'dashboard' });
+  }, [activateTree, openPaneInTree, selectProject, setFocusedPane, setOpenPanes, viewPane]);
+
   const handleStreamComplete = useCallback((nodeId: string) => {
-    if (prefsRef.current.notifications !== 'all') return;
-    if (focusedPaneRef.current === nodeId) return;
-    if (document.hasFocus() && isShownInAssistantPanel(nodeId)) return;
     // A scheduled run reports its own completion (with the job's name).
     if (scheduledNodeIdsRef.current.has(nodeId)) return;
     const node = nodesRef.current[nodeId];
     if (latestTurnIsScheduled(node?.messages)) return;
-    notify({
-      title: node?.title ?? 'Branch complete',
-      body: 'Streaming finished',
-      onClick: () => revealNode(nodeId),
+    // A check-in's post and first-run narration: the Companion's own notices
+    // carry them, by its level (DESIGN-v2 §3.3). A reply in V does notify,
+    // under the agent's name (the panel showing V counts as in view).
+    const last = node?.messages[node.messages.length - 1];
+    if (isCompanionSelfMessage(last)) return;
+    const companion = isAssistantConversation(projectsRef.current, nodeId);
+    // A renamed thread's root goes by the thread's name, as in the sidebar.
+    const threadName = projectsRef.current.find((project) => project.id === node?.projectId)
+      ?.trees.find((tree) => tree.rootNodeId === nodeId)?.name?.trim();
+    // Even the focused pane: with the window in the background, nobody sees it finish.
+    presentNodeAttention(nodeId, {
+      kind: 'finished',
+      ...completionAttentionCopy(threadName || node?.title),
+      ...(companion ? { title: companionNoticeTitle('reply') } : {}),
+      // A queued follow-up that already started makes "finished" untrue.
+      isStillCurrent: () => {
+        const current = nodesRef.current[nodeId];
+        return !!current && current.status !== 'streaming' && !current.deletedAt;
+      },
     });
-  }, [revealNode]);
+  }, [presentNodeAttention]);
   streamCompleteHandlerRef.current = handleStreamComplete;
 
   /**
@@ -2935,54 +3466,57 @@ export function ChatProvider({ children, userId }: { children: React.ReactNode; 
     const pending = backendNodeInstallsRef.current.get(key);
     if (pending) return pending;
     const requestKey = `${workspaceId}\u0000${nodeId}`;
-    const request = Symbol();
+    // A newer request for the node supersedes this one: its reads stop.
+    backendNodeInstallRequestsRef.current.get(requestKey)?.abort();
+    const request = new AbortController();
     backendNodeInstallRequestsRef.current.set(requestKey, request);
-    const isCurrentRequest = () => backendNodeInstallRequestsRef.current.get(requestKey) === request;
+    const { signal } = request;
     const work = (async () => {
       if (nodesRef.current[nodeId] && !refresh) return true;
-      while (isCurrentRequest()) {
-        const projectBefore = projectsRef.current.find((candidate) => candidate.id === workspaceId && !candidate.deletedAt);
-        if (!projectBefore) return false;
-        // A foreground turn or host command owns its live state. Wait rather
-        // than dropping the final refresh while that operation is pending.
-        if (cancelFns.current[nodeId] || commandsInFlightRef.current.has(nodeId)) {
-          await sleep(50);
-          continue;
-        }
-        const nodeBefore = nodesRef.current[nodeId];
-        const rawWorkspace = await fetchWorkspace(workspaceId);
-        // A finished notification supersedes its earlier start fetch even if
-        // that older response arrives last. A local change during this fetch
-        // needs a fresh snapshot, as in background replay-gap reconciliation.
-        if (!isCurrentRequest()) return false;
-        if (cancelFns.current[nodeId] || commandsInFlightRef.current.has(nodeId)
-          || nodesRef.current[nodeId] !== nodeBefore
-          || projectsRef.current.find((candidate) => candidate.id === workspaceId) !== projectBefore) continue;
-        const result = installBackendWorkspaceNode({
-          currentProjects: projectsRef.current,
-          currentNodes: nodesRef.current,
-          rawWorkspace,
-          nodeId,
-          connectionId: projectBefore.backendConnectionId ?? LOCAL_BACKEND_CONNECTION_ID,
-        });
-        if (!result) return false;
-        // Already durable on the backend: the dirty tracker must not write it back.
-        const installed = backendInstalledEntities(projectsRef.current, nodesRef.current, result);
-        if (installed) noteBackendInstalled(installed);
-        setProjects(result.projects);
-        nodesRef.current = result.nodes;
-        structureVersionRef.current += 1;
-        setNodes(result.nodes);
-        return true;
-      }
-      return false;
-    })().finally(() => {
+      const read = await readAndInstallNode({
+        workspaceId,
+        nodeId,
+        attempts: BACKEND_NODE_INSTALL_ATTEMPTS,
+        signal,
+        readTimeoutMs: GAP_READ_TIMEOUT_MS,
+        project: () => projectsRef.current.find((candidate) => candidate.id === workspaceId && !candidate.deletedAt),
+        node: () => nodesRef.current[nodeId],
+        nodeHeld: false,
+        busy: () => nodeBusy(nodeId),
+        // Off the feed: wait as long as the turn or command runs, rather
+        // than dropping the final refresh.
+        idle: async () => {
+          while (nodeBusy(nodeId) && !signal.aborted) await sleep(50);
+          return !signal.aborted;
+        },
+        fetchStructure: fetchWorkspaceStructure,
+        fetchPage: fetchTreeMessagePage,
+        install: ({ structure, page, readStartedAt, connectionId }) => {
+          const result = installBackendWorkspaceNode({
+            currentProjects: projectsRef.current,
+            currentNodes: nodesRef.current,
+            rawWorkspace: structure,
+            page,
+            readStartedAt,
+            guards: structureGuards,
+            nodeId,
+            connectionId,
+          });
+          if (result) commitBackendInstall(result);
+          return !!result;
+        },
+      });
+      return typeof read === 'object' && read.installed;
+    })().catch((error: unknown) => {
+      if (signal.aborted) return false;
+      throw error;
+    }).finally(() => {
       if (backendNodeInstallsRef.current.get(key) === work) backendNodeInstallsRef.current.delete(key);
-      if (isCurrentRequest()) backendNodeInstallRequestsRef.current.delete(requestKey);
+      if (backendNodeInstallRequestsRef.current.get(requestKey) === request) backendNodeInstallRequestsRef.current.delete(requestKey);
     });
     backendNodeInstallsRef.current.set(key, work);
     return work;
-  }, [noteBackendInstalled, setProjects]);
+  }, [commitBackendInstall, nodeBusy, structureGuards]);
 
   /** Open a backend-created thread (from a notification), installing it first if needed. */
   const revealBackendNode = useCallback(async (workspaceId: string, nodeId: string): Promise<boolean> => {
@@ -2990,8 +3524,7 @@ export function ChatProvider({ children, userId }: { children: React.ReactNode; 
       const installed = await installBackendNode(workspaceId, nodeId, false).catch(() => false);
       if (!installed || !nodesRef.current[nodeId]) return false;
     }
-    revealNode(nodeId);
-    return true;
+    return revealNode(nodeId, { workspaceId });
   }, [installBackendNode, revealNode]);
 
   // Per node: a discovery in flight (did its turn end meanwhile?), or when a
@@ -3044,7 +3577,9 @@ export function ChatProvider({ children, userId }: { children: React.ReactNode; 
       // arrive with that connection's own load.
       if (connectionId !== LOCAL_BACKEND_CONNECTION_ID) return false;
       const readStartedAt = Date.now();
-      const raw = await fetchWorkspace(where.workspaceId);
+      // Structure only: its threads arrive as placeholders that load when
+      // opened, and this one's turn end installs its transcript.
+      const raw = await fetchWorkspaceStructure(where.workspaceId);
       return installWorkspaceSnapshot(raw, readStartedAt) && !!nodesRef.current[nodeId];
     })().then(settle, () => settle(false));
     return handlers;
@@ -3059,23 +3594,14 @@ export function ChatProvider({ children, userId }: { children: React.ReactNode; 
 
   const handleScheduledJobRun = useCallback((event: ScheduledJobRunEvent) => {
     if (event.nodeId) scheduledNodeIdsRef.current.add(event.nodeId);
-    // The Scheduled page listens to refresh its list (see scheduledNav.ts).
-    window.dispatchEvent(new CustomEvent('michi:scheduled-job-run', { detail: event }));
+    // The Scheduled page refreshes its list on this, and in a browser
+    // useScheduledRunOpening raises the run's notice from it.
+    window.dispatchEvent(new CustomEvent(SCHEDULED_JOB_RUN_WINDOW_EVENT, { detail: event }));
     if (!event.nodeId) return;
-    const nodeId = event.nodeId;
     // Install on start so the run streams live; refresh on finish so the
     // final transcript is exact even if early frames arrived before install.
-    void installBackendNode(event.workspaceId, nodeId, event.phase === 'finished').catch(() => {});
-    // Without Electron main (browser), this window is the notifier.
-    if (getElectron()?.onScheduledNotice || prefsRef.current.notifications === 'off') return;
-    const notice = describeScheduledRunNotice(event);
-    if (!notice) return;
-    notify({
-      title: `${notice.title} · ${notice.subtitle}`,
-      body: notice.body,
-      onClick: () => { void revealBackendNode(event.workspaceId, nodeId); },
-    });
-  }, [installBackendNode, revealBackendNode]);
+    void installBackendNode(event.workspaceId, event.nodeId, event.phase === 'finished').catch(() => {});
+  }, [installBackendNode]);
   scheduledJobRunHandlerRef.current = handleScheduledJobRun;
 
   const {
@@ -3087,6 +3613,7 @@ export function ChatProvider({ children, userId }: { children: React.ReactNode; 
     projects,
     activeProjectId,
     setProjects,
+    onArtifactNamed: noteArtifactNamed,
   });
 
   // Auto-open the root pane when (and only when) the active workspace
@@ -3137,9 +3664,9 @@ export function ChatProvider({ children, userId }: { children: React.ReactNode; 
 
   // ── Artifact live-refresh watch ────────────────────────────────────────────
   // Subscribe to disk changes for the active workspace's artifacts so an open
-  // ArtifactPane can show a "Changed on disk · refresh" badge. The watch set is the union
+  // FilePane can show a "Changed on disk · refresh" badge. The watch set is the union
   // of (a) registry artifacts with a real filePath — pre-arms a watcher before
-  // the pane is even opened — and (b) any currently-open artifact pane's path,
+  // the pane is even opened — and (b) any currently-open file pane's path,
   // which covers panes opened from a markdown link (not necessarily in the
   // registry). Link artifacts (empty filePath) and abs paths outside the cwd
   // are dropped server-side; that's a graceful no-badge downgrade, not an error.
@@ -3148,118 +3675,36 @@ export function ChatProvider({ children, userId }: { children: React.ReactNode; 
     for (const a of activeProject?.artifacts ?? []) {
       if (a.filePath && a.filePath.trim()) set.add(a.filePath);
     }
-    for (const id in nodes) {
-      const n = nodes[id];
-      if (
-        n?.kind === 'artifact' &&
-        n.projectId === activeProjectId &&
-        !n.deletedAt &&
-        n.artifact?.filePath
-      ) {
-        set.add(n.artifact.filePath);
-      }
-    }
     for (const item of Object.values(paneItems)) {
-      if (item.kind === 'file' && item.projectId === activeProjectId && !item.filePath.startsWith('/')) {
+      if (item.kind === 'file' && item.projectId === activeProjectId && !isAbsoluteFilePath(item.filePath)) {
         set.add(item.filePath);
       }
     }
     return Array.from(set);
-  }, [activeProject, nodes, activeProjectId, paneItems]);
+  }, [activeProject, activeProjectId, paneItems]);
 
-  // Stable dispatcher: on a disk change/removal, flip every matching open
-  // artifact node in the active workspace. Reads refs so identity never churns
-  // the EventSource lifecycle. `artifact-mark-*` is idempotent + a no-op on
-  // non-artifact/missing nodes, so a fan-out over all nodes is safe and cheap.
-  const markArtifactNodes = useCallback(
+  // Stable dispatcher: on a disk change/removal, flag every matching open
+  // file pane in the active workspace. Reads refs so identity never churns
+  // the EventSource lifecycle.
+  const markArtifactPanes = useCallback(
     (filePath: string, removed: boolean) => {
       const pid = activeProjectIdRef.current;
-      for (const id in nodesRef.current) {
-        const n = nodesRef.current[id];
-        if (
-          n?.kind === 'artifact' &&
-          n.projectId === pid &&
-          !n.deletedAt &&
-          n.artifact?.filePath === filePath
-        ) {
-          dispatch({ type: removed ? 'artifact-mark-removed' : 'artifact-mark-stale', nodeId: id });
-        }
-      }
       for (const item of Object.values(paneItemsRef.current)) {
         if (item.kind === 'file' && item.projectId === pid && item.filePath === filePath) {
           updatePaneItem(item.id, { diskState: removed ? 'removed' : 'changed' });
         }
       }
     },
-    [dispatch, updatePaneItem],
+    [updatePaneItem],
   );
 
   useArtifactWatch({
     workspaceId: activeProjectId ?? undefined,
     enabled: !!activeProjectId && artifactWatchPaths.length > 0,
     paths: artifactWatchPaths,
-    onChanged: (fp) => markArtifactNodes(fp, false),
-    onRemoved: (fp) => markArtifactNodes(fp, true),
+    onChanged: (fp) => markArtifactPanes(fp, false),
+    onRemoved: (fp) => markArtifactPanes(fp, true),
   });
-
-  // ── Back/forward navigation ──────────────────────────────────────────────
-  // A nav entry is live only if its workspace and node still exist and aren't
-  // soft-deleted; back/forward skip dead ones (like a browser skipping a closed
-  // tab). Reads refs so the callbacks stay stable across chunk-driven renders.
-  const isNavEntryLive = useCallback((entry: NavEntry): boolean => {
-    const proj = projectsRef.current.find((p) => p.id === entry.projectId);
-    if (!proj || proj.deletedAt) return false;
-    if (!proj.chatIds.includes(entry.nodeId)) return false;
-    if (nodesRef.current[entry.nodeId]?.deletedAt) return false;
-    return true;
-  }, []);
-
-  // All cross-boundary movement goes through navigateToNode so back/forward
-  // inherit its stale-slot fix (seed the destination pane before switching
-  // workspace/tree). navBack/navForward arm the history's suppression window so
-  // the focus change they cause isn't re-recorded as a new location.
-  const runNavTo = useCallback(
-    (entry: NavEntry | null) => {
-      if (!entry) return;
-      navigateToNode(
-        {
-          projects: projectsRef.current,
-          activeProjectId: activeProjectIdRef.current,
-          selectProject,
-          openPane,
-          openPaneInTree,
-          activateTree,
-          setFocusedNodeId,
-        },
-        entry.nodeId,
-        entry.projectId,
-      );
-    },
-    [selectProject, openPane, openPaneInTree, activateTree, setFocusedNodeId],
-  );
-
-  const navBack = useCallback(() => {
-    runNavTo(navHistoryBack(isNavEntryLive));
-  }, [runNavTo, navHistoryBack, isNavEntryLive]);
-
-  const navForward = useCallback(() => {
-    runNavTo(navHistoryForward(isNavEntryLive));
-  }, [runNavTo, navHistoryForward, isNavEntryLive]);
-
-  // Observe the focused-location triple (workspace, active tree, focused pane)
-  // and record a nav entry whenever it lands somewhere new. Gated on `hydrated`
-  // so boot-time workspace churn (seed → hydrated) doesn't seed a bogus entry.
-  const activeTreeIdForNav = activeProject?.activeTreeId ?? null;
-  useEffect(() => {
-    if (!hydrated || !activeProjectId || !activeTreeIdForNav || !focusedPane || !nodesRef.current[focusedPane]) return;
-    recordNav({ nodeId: focusedPane, projectId: activeProjectId, treeId: activeTreeIdForNav });
-  }, [hydrated, activeProjectId, activeTreeIdForNav, focusedPane, recordNav]);
-
-  // Drop nav entries whose node was deleted (reuses the trashed-id signal).
-  useEffect(() => {
-    if (!deletedIdsKey) return;
-    pruneNav(isNavEntryLive);
-  }, [deletedIdsKey, pruneNav, isNavEntryLive]);
 
   const projectsValue = useMemo<ChatProjectsValue>(
     () => ({
@@ -3280,6 +3725,7 @@ export function ChatProvider({ children, userId }: { children: React.ReactNode; 
       agentModesError,
       retryAgentModes,
       agentStatus,
+      agentStatusUnreachable,
       warmFailedError,
       refreshAgentStatus,
       focusedNodeId,
@@ -3288,8 +3734,6 @@ export function ChatProvider({ children, userId }: { children: React.ReactNode; 
       treeSelection,
       searchHighlightTerm,
       unreadFilterOn,
-      canNavBack,
-      canNavForward,
     }),
     [
       projects,
@@ -3302,6 +3746,7 @@ export function ChatProvider({ children, userId }: { children: React.ReactNode; 
       agentModesError,
       retryAgentModes,
       agentStatus,
+      agentStatusUnreachable,
       warmFailedError,
       refreshAgentStatus,
       focusedNodeId,
@@ -3310,8 +3755,6 @@ export function ChatProvider({ children, userId }: { children: React.ReactNode; 
       treeSelection,
       searchHighlightTerm,
       unreadFilterOn,
-      canNavBack,
-      canNavForward,
     ],
   );
 
@@ -3322,10 +3765,11 @@ export function ChatProvider({ children, userId }: { children: React.ReactNode; 
       pagePane,
       paneItems,
       focusedPane,
+      zoomedPane,
       focusNonce,
       viewMode,
     }),
-    [openPanes, tabPanes, pagePane, paneItems, focusedPane, focusNonce, viewMode],
+    [openPanes, tabPanes, pagePane, paneItems, focusedPane, zoomedPane, focusNonce, viewMode],
   );
 
   const value = useMemo<ExtendedChatContextValue>(
@@ -3358,6 +3802,7 @@ export function ChatProvider({ children, userId }: { children: React.ReactNode; 
       selectProject,
       sendMessage,
       setChatPermissionMode,
+      setChatUltracode,
       retryLastTurn,
       rerunLastTurn,
       resumeLastTurn,
@@ -3372,6 +3817,7 @@ export function ChatProvider({ children, userId }: { children: React.ReactNode; 
       agentModesError,
       retryAgentModes,
       agentStatus,
+      agentStatusUnreachable,
       warmFailedError,
       refreshAgentStatus,
       switchAgent,
@@ -3381,6 +3827,7 @@ export function ChatProvider({ children, userId }: { children: React.ReactNode; 
       archiveNode,
       restoreLastDeletion,
       restoreDeletion,
+      moveDeletionGroupLane,
       purgeDeletion,
       purgeDeletionAsync,
       emptyTrash,
@@ -3390,6 +3837,7 @@ export function ChatProvider({ children, userId }: { children: React.ReactNode; 
       setNodePosition,
       resetLayout,
       fanoutBranches,
+      openPanesSideBySide,
       linkNodes,
       unlinkNodes,
       createDigest,
@@ -3402,12 +3850,12 @@ export function ChatProvider({ children, userId }: { children: React.ReactNode; 
       openLauncherPane,
       activateLauncherPane,
       adoptTerminalPane,
+      adoptBackendTerminal,
       openFilePane,
-      openDiffPane,
-      openTerminalPane,
       openBrowserPane,
       openAgentRunPane,
       openPagePane,
+      revealNode,
       revealBackendNode,
       updatePaneItem,
       paneItems,
@@ -3421,6 +3869,7 @@ export function ChatProvider({ children, userId }: { children: React.ReactNode; 
       openPaneInTree,
       closePane,
       focusPane,
+      zoomPane,
       reorderPane,
       setViewMode,
       selection,
@@ -3450,6 +3899,7 @@ export function ChatProvider({ children, userId }: { children: React.ReactNode; 
       toggleTreeSelection,
       clearTreeSelection,
       selectAllTrees,
+      selectTrees,
       bulkArchiveTrees,
       bulkDeleteTrees,
       bulkUnarchiveTrees,
@@ -3460,7 +3910,6 @@ export function ChatProvider({ children, userId }: { children: React.ReactNode; 
       removePendingComment,
       clearPendingComments,
       steerMessage,
-      compactContext,
       queueMessage,
       dequeueMessage,
       flushQueue,
@@ -3471,10 +3920,6 @@ export function ChatProvider({ children, userId }: { children: React.ReactNode; 
       renameNode,
       pinNode,
       unpinNode,
-      navBack,
-      navForward,
-      canNavBack,
-      canNavForward,
     }),
     [
       projects,
@@ -3498,6 +3943,7 @@ export function ChatProvider({ children, userId }: { children: React.ReactNode; 
       selectProject,
       sendMessage,
       setChatPermissionMode,
+      setChatUltracode,
       retryLastTurn,
       rerunLastTurn,
       resumeLastTurn,
@@ -3512,6 +3958,7 @@ export function ChatProvider({ children, userId }: { children: React.ReactNode; 
       agentModesError,
       retryAgentModes,
       agentStatus,
+      agentStatusUnreachable,
       warmFailedError,
       refreshAgentStatus,
       switchAgent,
@@ -3521,6 +3968,7 @@ export function ChatProvider({ children, userId }: { children: React.ReactNode; 
       archiveNode,
       restoreLastDeletion,
       restoreDeletion,
+      moveDeletionGroupLane,
       purgeDeletion,
       purgeDeletionAsync,
       emptyTrash,
@@ -3530,6 +3978,7 @@ export function ChatProvider({ children, userId }: { children: React.ReactNode; 
       setNodePosition,
       resetLayout,
       fanoutBranches,
+      openPanesSideBySide,
       linkNodes,
       unlinkNodes,
       createDigest,
@@ -3542,12 +3991,12 @@ export function ChatProvider({ children, userId }: { children: React.ReactNode; 
       openLauncherPane,
       activateLauncherPane,
       adoptTerminalPane,
+      adoptBackendTerminal,
       openFilePane,
-      openDiffPane,
-      openTerminalPane,
       openBrowserPane,
       openAgentRunPane,
       openPagePane,
+      revealNode,
       revealBackendNode,
       updatePaneItem,
       paneItems,
@@ -3561,6 +4010,7 @@ export function ChatProvider({ children, userId }: { children: React.ReactNode; 
       openPaneInTree,
       closePane,
       focusPane,
+      zoomPane,
       reorderPane,
       setViewMode,
       selection,
@@ -3590,6 +4040,7 @@ export function ChatProvider({ children, userId }: { children: React.ReactNode; 
       toggleTreeSelection,
       clearTreeSelection,
       selectAllTrees,
+      selectTrees,
       bulkArchiveTrees,
       bulkDeleteTrees,
       bulkUnarchiveTrees,
@@ -3600,7 +4051,6 @@ export function ChatProvider({ children, userId }: { children: React.ReactNode; 
       removePendingComment,
       clearPendingComments,
       steerMessage,
-      compactContext,
       queueMessage,
       dequeueMessage,
       flushQueue,
@@ -3611,10 +4061,6 @@ export function ChatProvider({ children, userId }: { children: React.ReactNode; 
       renameNode,
       pinNode,
       unpinNode,
-      navBack,
-      navForward,
-      canNavBack,
-      canNavForward,
     ],
   );
 
@@ -3622,6 +4068,7 @@ export function ChatProvider({ children, userId }: { children: React.ReactNode; 
     () => ({
       loadOlderMessages,
       ensureCompleteHistory,
+      catchUpNodes,
       createProject,
       enterChatsWorkspace,
       selectProject,
@@ -3631,6 +4078,7 @@ export function ChatProvider({ children, userId }: { children: React.ReactNode; 
       deleteProject,
       sendMessage,
       setChatPermissionMode,
+      setChatUltracode,
       retryLastTurn,
       rerunLastTurn,
       resumeLastTurn,
@@ -3639,6 +4087,7 @@ export function ChatProvider({ children, userId }: { children: React.ReactNode; 
       createBlankChild,
       createMergedChat,
       fanoutBranches,
+      openPanesSideBySide,
       switchAgent,
       cancelStream,
       deleteNode,
@@ -3651,6 +4100,7 @@ export function ChatProvider({ children, userId }: { children: React.ReactNode; 
       openPaneInTree,
       closePane,
       focusPane,
+      zoomPane,
       toggleSelection,
       clearSelection,
       restoreLastDeletion,
@@ -3668,6 +4118,7 @@ export function ChatProvider({ children, userId }: { children: React.ReactNode; 
       toggleTreeSelection,
       clearTreeSelection,
       selectAllTrees,
+      selectTrees,
       bulkArchiveTrees,
       bulkDeleteTrees,
       setFocusedNodeId,
@@ -3681,7 +4132,6 @@ export function ChatProvider({ children, userId }: { children: React.ReactNode; 
       removePendingComment,
       clearPendingComments,
       steerMessage,
-      compactContext,
       queueMessage,
       dequeueMessage,
       setComposerDraft,
@@ -3691,12 +4141,12 @@ export function ChatProvider({ children, userId }: { children: React.ReactNode; 
       openLauncherPane,
       activateLauncherPane,
       adoptTerminalPane,
+      adoptBackendTerminal,
       openFilePane,
-      openDiffPane,
-      openTerminalPane,
       openBrowserPane,
       openAgentRunPane,
       openPagePane,
+      revealNode,
       revealBackendNode,
       updatePaneItem,
       setUnreadFilterOn,
@@ -3704,14 +4154,13 @@ export function ChatProvider({ children, userId }: { children: React.ReactNode; 
       renameNode,
       pinNode,
       unpinNode,
-      navBack,
-      navForward,
       dispatch,
       installWorkspaceSnapshot,
     }),
     [
       loadOlderMessages,
       ensureCompleteHistory,
+      catchUpNodes,
       installWorkspaceSnapshot,
       createProject,
       enterChatsWorkspace,
@@ -3722,6 +4171,7 @@ export function ChatProvider({ children, userId }: { children: React.ReactNode; 
       deleteProject,
       sendMessage,
       setChatPermissionMode,
+      setChatUltracode,
       retryLastTurn,
       rerunLastTurn,
       resumeLastTurn,
@@ -3730,6 +4180,7 @@ export function ChatProvider({ children, userId }: { children: React.ReactNode; 
       createBlankChild,
       createMergedChat,
       fanoutBranches,
+      openPanesSideBySide,
       switchAgent,
       cancelStream,
       deleteNode,
@@ -3742,6 +4193,7 @@ export function ChatProvider({ children, userId }: { children: React.ReactNode; 
       openPaneInTree,
       closePane,
       focusPane,
+      zoomPane,
       toggleSelection,
       clearSelection,
       restoreLastDeletion,
@@ -3759,6 +4211,7 @@ export function ChatProvider({ children, userId }: { children: React.ReactNode; 
       toggleTreeSelection,
       clearTreeSelection,
       selectAllTrees,
+      selectTrees,
       bulkArchiveTrees,
       bulkDeleteTrees,
       setFocusedNodeId,
@@ -3772,7 +4225,6 @@ export function ChatProvider({ children, userId }: { children: React.ReactNode; 
       removePendingComment,
       clearPendingComments,
       steerMessage,
-      compactContext,
       queueMessage,
       dequeueMessage,
       setComposerDraft,
@@ -3782,12 +4234,12 @@ export function ChatProvider({ children, userId }: { children: React.ReactNode; 
       openLauncherPane,
       activateLauncherPane,
       adoptTerminalPane,
+      adoptBackendTerminal,
       openFilePane,
-      openDiffPane,
-      openTerminalPane,
       openBrowserPane,
       openAgentRunPane,
       openPagePane,
+      revealNode,
       revealBackendNode,
       updatePaneItem,
       setUnreadFilterOn,
@@ -3795,8 +4247,6 @@ export function ChatProvider({ children, userId }: { children: React.ReactNode; 
       renameNode,
       pinNode,
       unpinNode,
-      navBack,
-      navForward,
       dispatch,
     ],
   );
@@ -3807,7 +4257,9 @@ export function ChatProvider({ children, userId }: { children: React.ReactNode; 
         <ChatPaneContext.Provider value={paneValue}>
           <ChatActionsContext.Provider value={hotActions}>
             <TreePrefetchContext.Provider value={prefetchTreeForNode}>
-              <ChatContext.Provider value={value}>{children}</ChatContext.Provider>
+              <NodeMessagesContext.Provider value={ensureNodeMessages}>
+                <ChatContext.Provider value={value}>{children}</ChatContext.Provider>
+              </NodeMessagesContext.Provider>
             </TreePrefetchContext.Provider>
           </ChatActionsContext.Provider>
         </ChatPaneContext.Provider>
@@ -4030,8 +4482,7 @@ export function chatLabel(chat: ChatNodeState | undefined): string {
   if (!chat) return 'new thread';
   const first = chat.messages.find((m) => m.role === 'user');
   if (!first) return 'New thread';
-  const txt = first.text.replace(/^>.*$/gm, '').replace(/\s+/g, ' ').trim();
-  return txt.length > 50 ? txt.slice(0, 50) + '…' : txt;
+  return deriveConversationTitle(first.text) ?? '';
 }
 
 /** Cross-project chat enumeration entry — used by the ⌘K palette and global search. */

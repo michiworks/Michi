@@ -72,6 +72,17 @@ describe('extract node menu', () => {
   });
 });
 
+describe('buildTreeContextMenu — rename', () => {
+  it('offers Rename only to a surface that can rename inline', () => {
+    const build = (actions: TreeMenuActions) => buildTreeContextMenu({ targetId: 'b1', project: makeProject(),
+      nodes: { r1: makeNode('r1'), b1: makeNode('b1') }, selection: new Set(), actions });
+    expect(itemIds(build(makeActions()))).not.toContain('rename');
+    const beginInlineRename = vi.fn();
+    build(makeActions({ beginInlineRename }))[0].items.find((i) => i.id === 'rename')!.run();
+    expect(beginInlineRename).toHaveBeenCalledWith('b1');
+  });
+});
+
 describe('buildTreeContextMenu — node pin', () => {
   it('offers Pin on an unpinned branch node and dispatches pinNode', () => {
     const pinNode = vi.fn();
@@ -80,7 +91,7 @@ describe('buildTreeContextMenu — node pin', () => {
       project: makeProject(),
       nodes: { r1: makeNode('r1'), b1: makeNode('b1') },
       selection: new Set(),
-      actions: makeActions({ pinNode, unpinNode: vi.fn() }),
+      actions: makeActions({ pinNode, unpinNode: vi.fn(), beginInlineRename: vi.fn() }),
     });
     const ids = itemIds(sections);
     expect(ids).toContain('pin');
@@ -121,6 +132,20 @@ describe('buildTreeContextMenu — node pin', () => {
   });
 });
 
+it('offers Digest in the multi-select menu only while Settings › Digest is on', () => {
+  const build = (digestEnabled?: boolean) => itemIds(buildTreeContextMenu({
+    targetId: 'b1',
+    project: makeProject(),
+    nodes: { r1: makeNode('r1'), b1: makeNode('b1'), b2: makeNode('b2') },
+    selection: new Set(['b1', 'b2']),
+    actions: makeActions(),
+    digestEnabled,
+  }));
+  expect(build()).not.toContain('digest');
+  expect(build()).toEqual(expect.arrayContaining(['weave', 'export']));
+  expect(build(true)).toContain('digest');
+});
+
 it('protects roots from inactive trees in single and mixed selection menus', () => {
   const project = makeProject();
   project.trees.push({ id: 't2', rootNodeId: 'r2', createdAt: 1, lastActiveAt: 1 });
@@ -132,4 +157,49 @@ it('protects roots from inactive trees in single and mixed selection menus', () 
   const mixed = buildTreeContextMenu({ targetId: 'r2', project, nodes, selection: new Set(['r2', 'b1']), actions });
   mixed.flatMap((section) => section.items).find((item) => item.id === 'delete')?.run();
   expect(actions.deleteNode).toHaveBeenCalledExactlyOnceWith('b1');
+});
+
+describe('buildTreeContextMenu — multi-select rules', () => {
+  const twoThreads = () => {
+    const project = makeProject();
+    project.chatIds.push('r2', 'b2');
+    project.edges.push({ source: 'r2', target: 'b2' });
+    project.trees.push({ id: 't2', rootNodeId: 'r2', createdAt: 1, lastActiveAt: 1 });
+    return project;
+  };
+  const nodes = { r1: makeNode('r1'), b1: makeNode('b1', { status: 'streaming' }), r2: makeNode('r2'), b2: makeNode('b2') };
+  const item = (sections: ReturnType<typeof buildTreeContextMenu>, id: string) =>
+    sections.flatMap((s) => s.items).find((i) => i.id === id)!;
+
+  it('keeps the store rules by default, so the sidebar can weave a streaming, cross-thread selection', () => {
+    const sections = buildTreeContextMenu({ targetId: 'b1', project: twoThreads(), nodes,
+      selection: new Set(['b1', 'b2']), actions: makeActions(), digestEnabled: true });
+    expect(item(sections, 'weave').disabled).toBe(false);
+    expect(item(sections, 'weave').sublabel).toBeUndefined();
+    expect(item(sections, 'digest').disabled).toBe(false);
+  });
+
+  it('refuses Weave and Digest while a selected chat streams, then across threads, when asked to', () => {
+    const rules = { requireIdle: true, requireSingleThread: true };
+    const streaming = buildTreeContextMenu({ targetId: 'b1', project: twoThreads(), nodes,
+      selection: new Set(['b1', 'b2']), actions: makeActions(), rules, digestEnabled: true });
+    expect(item(streaming, 'weave')).toMatchObject({ disabled: true, sublabel: 'Wait for streaming to finish before merging.' });
+    expect(item(streaming, 'digest')).toMatchObject({
+      disabled: true, sublabel: 'Wait for streaming to finish before creating a digest.',
+    });
+
+    const idle = { ...nodes, b1: makeNode('b1') };
+    const crossThread = buildTreeContextMenu({ targetId: 'b1', project: twoThreads(), nodes: idle,
+      selection: new Set(['b1', 'b2']), actions: makeActions(), rules, digestEnabled: true });
+    expect(item(crossThread, 'weave')).toMatchObject({ disabled: true, sublabel: 'Merge requires nodes from a single thread.' });
+    expect(item(crossThread, 'digest')).toMatchObject({ disabled: true, sublabel: 'Digest requires nodes from a single thread.' });
+  });
+
+  it('exports the nodes it acts on', () => {
+    const actions = makeActions();
+    const sections = buildTreeContextMenu({ targetId: 'b1', project: twoThreads(), nodes,
+      selection: new Set(['b1', 'b2']), actions });
+    item(sections, 'export').run();
+    expect(actions.openExportPanel).toHaveBeenCalledWith(['b1', 'b2']);
+  });
 });

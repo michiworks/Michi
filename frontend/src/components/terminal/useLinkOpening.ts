@@ -5,6 +5,8 @@ import { getElectron } from '../../lib/electronBridge';
 import { webUrl, openExternalUrl } from '../../services/openUrl';
 import { workspaceBackendApiBase } from '../../config/backendConnections';
 import { backendFetch } from '../../services/api/backendRequest';
+import { connectionIdFromApiUrl } from '../../config/backendIdentity';
+import { remoteFirstPainted, whenRemoteFirstPaint } from '../../state/remoteFirstPaint';
 
 export function useLinkOpening() {
   const { activeProject } = useChatProjects();
@@ -28,7 +30,8 @@ export function useLinkOpening() {
     const onClick = (event: MouseEvent) => {
       if (event.defaultPrevented || (event.type === 'click' ? event.button !== 0 : event.button !== 1)) return;
       const anchor = (event.target as Element)?.closest?.('a[href]') as HTMLAnchorElement | null;
-      if (!anchor || anchor.hasAttribute('download')) return;
+      // A surface marked data-handles-links opens its own (the composer: Cmd/Ctrl+click only).
+      if (!anchor || anchor.hasAttribute('download') || anchor.closest('[data-handles-links]')) return;
       const raw = anchor.getAttribute('href') ?? '';
       // Relative links, fragments and application navigation keep their existing handlers.
       if (!/^https?:\/\//i.test(raw)) return;
@@ -75,7 +78,10 @@ export function useLinkOpening() {
       } catch { /* A disconnected backend must not trigger an external launch or retry a consumed request. */ }
       if (!controller.signal.aborted) timer = setTimeout(poll, 2000);
     };
-    void poll();
+    // A remote's claim poll starts once its conversation has painted; the barrier is bounded.
+    const claimConnection = connectionIdFromApiUrl(workspaceBackendApiBase(id));
+    if (remoteFirstPainted(claimConnection)) void poll();
+    else void whenRemoteFirstPaint(claimConnection).then(() => { if (!controller.signal.aborted) void poll(); });
     return () => { controller.abort(); clearTimeout(timer); };
   }, [projectId, treeId, connectionId]);
 }

@@ -30,3 +30,17 @@ transportModule.createClaudeSdkTransport = async (args: ClaudeSdkTransportOption
     close: () => { closed = true; },
   };
 };
+
+/**
+ * Waits until `spawned()` says the fixture process a test expects exists. A
+ * session reads its skill library before it spawns, so a spawn lands some
+ * event-loop turns after the send or warm-up that asks for it. Checked every
+ * turn rather than on a timer: the cancel tests mock setTimeout.
+ */
+export async function untilSpawned(spawned: () => boolean): Promise<void> {
+  const deadline = Date.now() + 2000;
+  while (!spawned()) {
+    if (Date.now() > deadline) throw new Error('timed out waiting for the Claude fixture process to spawn');
+    await new Promise<void>((resolve) => setImmediate(resolve));
+  }
+}

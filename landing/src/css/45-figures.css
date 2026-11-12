@@ -1,0 +1,101 @@
+/* ==========================================================================
+   45-figures.css (owner: figures): the page-native drawings, #why (brief
+   §5.11.1) and #inherit (§5.11.2). SVG colours and strokes are presentation
+   attributes in the markup; this file holds layout and motion only.
+   Figures render at design size (1:1) wherever they fit, so 13 px labels and
+   1.4 / 1.5 px strokes stay exact:
+     #why      >= 1280 side by side, 560 variant · 768-1279 side by side, 360
+               variant · < 768 stacked, 360 variant (fluid, max 360)
+     #inherit  >= 1280 text cols 1-5, figure cols 7-12 · below that stacked,
+               figure max 760 · < 768 the branch question moves under row 3
+   ========================================================================== */
+
+/* #why */
+.why-figs { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); column-gap: var(--gutter); margin-top: var(--sp-body-fig); }
+.why-fig { min-width: 0; }
+/* The viewBoxes keep 24 / 16 px of air at the sides: pull the drawings out
+   by it, so their lines and labels start on the text column. */
+.why-svg { display: block; width: calc(100% + 48px); max-width: 560px; height: auto; margin-left: -24px; overflow: visible; }
+.why-n { display: none; width: calc(100% + 32px); max-width: 360px; margin-left: -16px; }
+.why-cap { margin-top: var(--sp-fig-bar); }
+@media (max-width: 1279px) {
+  .why-w { display: none; }
+  .why-n { display: block; }
+}
+/* Stacked: A's drawing sits low in its box and B's high; close up the bands. */
+@media (max-width: 767px) {
+  .why-figs { grid-template-columns: minmax(0, 1fr); row-gap: 28px; }
+  .why-fig:first-of-type .why-svg { margin-top: -56px; }
+  .why-fig + .why-fig .why-svg { margin-bottom: -60px; }
+}
+.why-stmt { margin-top: 64px; text-wrap: balance; }
+.why-body, .inh-body { margin-top: var(--sp-head-body); }
+
+/* Motion (W1-W3). Strokes draw via .draw (durations inline as --d-ms); the
+   chip and the node / square pops scale about their own box; the chip label
+   crossfades; the errand settles at .14 and its return node stays lit. */
+.why-chip, .why-pop { transform-box: fill-box; transform-origin: 50% 50%; }
+.why-pop.is-off { scale: .6; }
+.why-ct { --e-in: var(--t-soft); --e-out: var(--t-soft); --e-ease: var(--ease); --e-ease-out: var(--ease); }
+.why-ret { transition: stroke var(--t-enter) var(--ease); }
+.why-ret.why-lit { stroke: var(--ink-2); }
+.why-errand { transition: opacity var(--t-slow) var(--ease); }
+.why-errand.why-faded { opacity: .14; }
+
+/* #inherit */
+.inh-fig { max-width: 760px; margin-top: var(--sp-body-fig); }
+@media (min-width: 1280px) {
+  .inh-in { display: grid; grid-template-columns: repeat(12, minmax(0, 1fr)); column-gap: var(--gutter); align-items: start; }
+  .inh-copy { grid-column: 1 / 6; }
+  .inh-fig { grid-column: 7 / 13; margin-top: 8px; }
+}
+/* Main column (rows) and side column (bracket label, branch question). */
+.inh-chart { display: grid; grid-template-columns: minmax(0, 1fr) 172px; gap: 16px 24px; align-items: start; }
+.inh-group { position: relative; display: grid; gap: 16px; }
+.inh-row { position: relative; display: grid; grid-template-columns: 16px 44px minmax(0, 1fr); column-gap: 10px; align-items: baseline; }
+/* The main line: a segment per row, through the gap below; row 4 runs on
+   24 px into three dots. The hollow nodes sit on top. */
+.inh-row::before, .inh-branch::before { content: ""; position: absolute; left: 8px; top: 0; bottom: -16px; border-left: 1.4px solid var(--edge); }
+.inh-group > :first-child::before { top: 11px; }
+.inh-branch::before { content: none; }
+.inh-row4::before { bottom: -24px; }
+.inh-row4::after { content: ""; position: absolute; left: 7px; top: calc(100% + 28px); width: 3px; height: 17px;
+  background: radial-gradient(circle closest-side, var(--edge) 92%, transparent) 0 0 / 3px 7px repeat-y; }
+.inh-node { position: relative; align-self: start; width: 9px; height: 9px; margin: 7px 0 0 4px; border: 1.4px solid var(--edge); border-radius: 50%; background: var(--ground); }
+.inh-who { font: 11px/1 var(--mono); color: var(--ink-3); }
+.inh-text, .inh-q { font-size: 15px; line-height: 1.5; color: var(--ink-2); text-wrap: pretty; }
+.inh-text b { font-weight: 600; color: var(--ink); }
+.inh-blabel { grid-column: 2; grid-row: 1; align-self: center; }
+.inh-row4 { grid-column: 1; grid-row: 2; transition: opacity var(--t-enter) var(--ease); }
+.inh-row4.inh-dim { opacity: .45; }
+.inh-r4label { grid-column: 1; grid-row: 3; margin: -10px 0 0 80px; --e-ease: var(--ease); }
+/* The bracket: a "]" on the group's right edge, scaled in from the top (I1).
+   The elbow leaves its lower tick, right 24 then down to row 4's first line,
+   and ends in an 8 px hollow square before the question (I2, I3). */
+.inh-bracket { position: absolute; top: 5px; bottom: 5px; right: -12px; width: 8px; border: 1.4px solid var(--ink-2); border-left: 0;
+  transform-origin: 50% 0; transition: scale var(--t-decay) var(--ease-out); }
+.inh-bracket.is-off { scale: 1 0; visibility: hidden; }
+.inh-branch { grid-column: 2; grid-row: 2; position: relative; }
+.inh-elbow { position: absolute; top: -22px; left: -13px; width: 26px; height: 30px; border: 0 solid var(--ink-2); border-width: 1.4px 1.4px 0 0;
+  clip-path: inset(0); transition: clip-path 280ms var(--ease-out); }
+.inh-elbow.is-off { clip-path: inset(0 100% 0 0); }
+.inh-q { position: relative; padding-left: 26px; font-weight: 600; color: var(--ink); }
+.inh-sq { position: absolute; left: 8px; top: 7.25px; width: 8px; height: 8px; border: 1.4px solid var(--ink-2); background: var(--ground); }
+
+/* Phone: one column. The label sits on the bracket's top tick, the question
+   hangs under row 3 inside the elbow, row 4 follows. */
+@media (max-width: 767px) {
+  .inh-chart { grid-template-columns: minmax(0, 1fr); }
+  .inh-blabel { grid-column: 1; grid-row: 1; justify-self: end; margin-bottom: -8px; }
+  .inh-group { grid-row: 2; padding-right: 20px; }
+  /* The lower tick drops into the row gap, so the elbow's run passes under row 3, not through it. */
+  .inh-bracket { right: 0; bottom: -8px; }
+  .inh-branch { grid-column: 1; grid-row: 3; }
+  .inh-branch::before { content: ""; }
+  .inh-row4 { grid-row: 4; }
+  .inh-r4label { grid-row: 5; }
+  .inh-elbow { top: -9px; left: 83px; right: 0; width: auto; height: 17px; border-width: 1.4px 0 0 1.4px; }
+  .inh-elbow.is-off { clip-path: inset(0 0 0 100%); }
+  .inh-q { padding-left: 100px; }
+  .inh-sq { left: 80px; }
+}

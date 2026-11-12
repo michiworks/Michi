@@ -27,14 +27,3 @@ export function buildPageChangeIndex(changes: readonly PageChangeDto[]): PageCha
   }
   return { byTarget, byBatch };
 }
-
-/** Only the newest ledger entry can own the current target head. Hiding older
- * rows avoids offering Undo for an entry that a later user/agent write replaced. */
-export function latestPageChangesForTarget(changes: readonly PageChangeDto[], target: { kind: 'block'; pageId: string; blockId: string } | { kind: 'row'; databaseId: string; rowId: string } | { kind: 'database'; databaseId: string }): PageChangeDto[] {
-  const indexed = buildPageChangeIndex(changes);
-  const key = target.kind === 'block' ? `block:${target.pageId}:${target.blockId}`
-    : target.kind === 'row' ? `row:${target.databaseId}:${target.rowId}` : `database:${target.databaseId}`;
-  const items = indexed.byTarget.get(key) ?? [];
-  if (!items.length) return [];
-  return [items.reduce((latest, item) => item.seq > latest.seq ? item : latest)];
-}

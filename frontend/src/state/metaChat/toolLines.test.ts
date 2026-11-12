@@ -1,10 +1,11 @@
 import { describe, expect, it } from 'vitest';
+import { META_AGENT_HELD_WRITE_TOOLS } from 'michi-shared';
 import type { ToolCallState } from '../chatTypes';
-import { metaAgentToolLine } from './toolLines';
+import { isHeldForFirstRun, metaAgentToolLine } from './toolLines';
 
 const names = {
-  workspace: (id: string) => ({ 'ws-r': 'rabbitholes' } as Record<string, string>)[id] ?? null,
-  page: (id: string) => ({ 'pg-home': 'Home', 'pg-r': 'rabbitholes' } as Record<string, string>)[id] ?? null,
+  workspace: (id: string) => ({ 'ws-r': 'sample-project' } as Record<string, string>)[id] ?? null,
+  page: (id: string) => ({ 'pg-home': 'Home', 'pg-r': 'sample-project' } as Record<string, string>)[id] ?? null,
 };
 
 const kiro = (value: unknown) => JSON.stringify({ items: [{ Json: { content: [{ type: 'text', text: JSON.stringify(value) }] } }] });
@@ -14,7 +15,7 @@ const tool = (title: string, input: unknown, output?: unknown, status = 'complet
 
 describe('metaAgentToolLine', () => {
   it('names custom database creation and keeps configuration proposals distinct from applied writes', () => {
-    expect(metaAgentToolLine(tool('create_database', { title: 'Tickets', workspaceId: 'ws-r' }), names)).toBe('Create Tickets · rabbitholes');
+    expect(metaAgentToolLine(tool('create_database', { title: 'Tickets', workspaceId: 'ws-r' }), names)).toBe('Create Tickets · sample-project');
     expect(metaAgentToolLine(tool('configure_database', { databaseId: 'db' }, { michiPageWrite: {
       kind: 'michiPageWrite', resourceKind: 'database', resourceId: 'db', title: 'Tickets', appliedCount: 0, proposedCount: 1, affectedTargetIds: ['db'],
     } }), names)).toBe('Suggest Tickets · 1 suggestion');
@@ -30,29 +31,41 @@ describe('metaAgentToolLine', () => {
   it('says what a write changed, and calls a proposal-only write a suggestion', () => {
     const write = (applied: unknown[], proposed: unknown[]) => ({
       result: { resource: { kind: 'page', id: 'pg-r' }, applied, proposed, rejected: [] },
-      michiPageWrite: { kind: 'michiPageWrite', resourceKind: 'page', resourceId: 'pg-r', title: 'rabbitholes', workspaceId: 'ws-r', appliedCount: applied.length, proposedCount: proposed.length, affectedTargetIds: ['b1'] },
+      michiPageWrite: { kind: 'michiPageWrite', resourceKind: 'page', resourceId: 'pg-r', title: 'sample-project', workspaceId: 'ws-r', appliedCount: applied.length, proposedCount: proposed.length, affectedTargetIds: ['b1'] },
     });
     const block = (id: string, title: string) => ({ id, seq: 3, after: { kind: 'block', exists: true, block: { type: 'callout', title, text: 'x' } } });
     expect(metaAgentToolLine(tool('Running: @michi/edit_page', { pageId: 'pg-r' }, write([block('c1', '进展')], [])), names))
-      .toBe('Write rabbitholes · 进展');
+      .toBe('Write sample-project · 进展');
     expect(metaAgentToolLine(tool('edit_page', { pageId: 'pg-r' }, write([], [block('c2', '我写的')])), names))
-      .toBe('Suggest rabbitholes · 我写的 · 1 suggestion');
+      .toBe('Suggest sample-project · 我写的 · 1 suggestion');
   });
 
   it('reads workspace names from the arguments and counts conversations', () => {
     expect(metaAgentToolLine(tool('Running: @michi/read_conversation_updates', { workspaceId: 'ws-r' }, { updates: [{}, {}, {}] }), names))
-      .toBe('Read new conversations · rabbitholes · 3 conversations');
+      .toBe('Read new conversations · sample-project · 3 conversations');
     expect(metaAgentToolLine(tool('start_conversation', { workspaceId: 'ws-r', text: 'go' }, undefined, 'in_progress'), names))
-      .toBe('New conversation · rabbitholes · your settings');
+      .toBe('New conversation · sample-project · your settings');
     expect(metaAgentToolLine(tool('search_messages', { query: 'notarize' }, { results: [{}] }), names)).toBe('Search “notarize” · 1 match');
   });
 
   it('says a page write waits for the first run', () => {
     const held = (title: string, input: unknown) => ({ id: title, title, status: 'failed', kind: 'other', inputJson: JSON.stringify(input),
-      output: kiro("HELD: the Meta agent's first-time generation is still writing (2 of 5 workspace homes written, then the Spaces Home).") } as ToolCallState);
-    expect(metaAgentToolLine(held('Running: @michi/edit_page', { pageId: 'pg-r' }), names)).toBe('Write rabbitholes · held until the first run finishes');
+      output: kiro("HELD: Pages upkeep's first-time generation is still writing (2 of 5 workspace homes written, then the Spaces Home).") } as ToolCallState);
+    expect(metaAgentToolLine(held('Running: @michi/edit_page', { pageId: 'pg-r' }), names)).toBe('Write sample-project · held until the first run finishes');
     expect(metaAgentToolLine(held('create_page', { title: '性能', workspaceId: 'ws-r' }), names)).toBe('Create 性能 · held until the first run finishes');
-    expect(metaAgentToolLine(held('read_page', { pageId: 'pg-r' }), names)).toBe('Read rabbitholes');
+    expect(metaAgentToolLine(held('read_page', { pageId: 'pg-r' }), names)).toBe('Read sample-project');
+    expect(metaAgentToolLine(held('edit_home', { expectedRevision: 3 }), names)).toBe('Customize Home · held until the first run finishes');
+    for (const name of META_AGENT_HELD_WRITE_TOOLS) {
+      const line = metaAgentToolLine(held(name, { pageId: 'pg-r', action: 'add' }), names);
+      expect(line, name).toMatch(/ · held until the first run finishes$/);
+      expect(isHeldForFirstRun(held(name, {})), name).toBe(true);
+    }
+  });
+
+  it('names the chat Home and page preview calls', () => {
+    expect(metaAgentToolLine(tool('read_home', {}), names)).toBe('Read Home');
+    expect(metaAgentToolLine(tool('edit_home', { expectedRevision: 3, cardsMode: 'hidden' }), names)).toBe('Customize Home');
+    expect(metaAgentToolLine(tool('preview_page', { pageId: 'pg-r' }), names)).toBe('Preview sample-project');
   });
 
   it('says what a layout rule call read or wrote, and that a write waits for the first run', () => {
@@ -61,39 +74,40 @@ describe('metaAgentToolLine', () => {
       .toBe('Write Home · 1 layout rule');
     expect(metaAgentToolLine(tool('mcp__michi-tools__layout_rules', { action: 'list', pageId: 'pg-new' }, answer), names)).toBe('Read Home · 1 layout rule');
     expect(metaAgentToolLine(tool('layout_rules', { action: 'remove', pageId: 'pg-r', ruleId: 'r1' }, { ...answer, layoutRules: [] }), names))
-      .toBe('Write rabbitholes · layout rule removed');
+      .toBe('Write sample-project · layout rule removed');
     expect(metaAgentToolLine(tool('layout_rules', { action: 'list', pageId: 'pg-x' }, undefined, 'in_progress'), names)).toBe('Read a page');
     const held = { id: 'h', title: 'layout_rules', status: 'failed', kind: 'other', inputJson: JSON.stringify({ action: 'add', pageId: 'pg-home' }),
-      output: kiro("HELD: the Meta agent's first-time generation is still writing (2 of 5 workspace homes written, then the Spaces Home).") } as ToolCallState;
+      output: kiro("HELD: Pages upkeep's first-time generation is still writing (2 of 5 workspace homes written, then the Spaces Home).") } as ToolCallState;
     expect(metaAgentToolLine(held, names)).toBe('Write Home · held until the first run finishes');
   });
 
   it('names the task tools and counts what a task write did', () => {
     expect(metaAgentToolLine(tool('Running: @michi/open_task_database', { workspaceId: 'ws-r' }, { kind: 'taskDatabase', created: true, databaseId: 'db-t' }), names))
-      .toBe('Create the task database · rabbitholes');
+      .toBe('Create the task database · sample-project');
     expect(metaAgentToolLine(tool('open_task_database', { workspaceId: 'ws-r' }, { kind: 'taskDatabase', created: false, databaseId: 'db-t' }), names))
-      .toBe('Open the task database · rabbitholes');
+      .toBe('Open the task database · sample-project');
     expect(metaAgentToolLine(tool('mcp__michi-tools__list_tasks', { workspaceIds: ['ws-r', 'ws-x'], needsYou: true }, { items: [{}, {}, {}], nextCursor: null, skippedWorkspaces: [] }), names))
       .toBe('List tasks · 2 workspaces · waiting on you · 3 tasks');
     expect(metaAgentToolLine(tool('list_tasks', { workspaceIds: ['ws-r'], statuses: ['todo', 'doing'], query: 'release' }, undefined, 'in_progress'), names))
-      .toBe('List tasks · rabbitholes · To do, In progress · “release”');
+      .toBe('List tasks · sample-project · To do, In progress · “release”');
     const write = {
       result: { resource: { kind: 'database', id: 'db-t' }, applied: [], proposed: [], rejected: [] },
       michiPageWrite: { kind: 'michiPageWrite', resourceKind: 'database', resourceId: 'db-t', title: 'Tasks', workspaceId: 'ws-r', appliedCount: 3, proposedCount: 1, affectedTargetIds: [], tasks: { added: 2, updated: 1, removed: 0 } },
     };
     expect(metaAgentToolLine(tool('edit_database', { databaseId: 'db-t' }, write), names)).toBe('Write Tasks · 2 new, 1 updated · 1 suggestion');
+    // A result stored before the rename (or from an older backend) still reads as held.
     const held = { id: 'h', title: 'open_task_database', status: 'failed', kind: 'other', inputJson: JSON.stringify({ workspaceId: 'ws-r' }),
       output: kiro("HELD: the Meta agent's first-time generation is still writing (2 of 5 workspace homes written, then the Spaces Home).") } as ToolCallState;
-    expect(metaAgentToolLine(held, names)).toBe('Open the task database · rabbitholes · held until the first run finishes');
+    expect(metaAgentToolLine(held, names)).toBe('Open the task database · sample-project · held until the first run finishes');
   });
 
   it('names the scheduled job tools and says when the user did not approve a change', () => {
-    expect(metaAgentToolLine(tool('list_scheduled_jobs', { workspaceId: 'ws-r' }, { count: 2, jobs: [{}, {}] }), names)).toBe('List scheduled jobs · rabbitholes · 2 jobs');
+    expect(metaAgentToolLine(tool('list_scheduled_jobs', { workspaceId: 'ws-r' }, { count: 2, jobs: [{}, {}] }), names)).toBe('List scheduled jobs · sample-project · 2 jobs');
     expect(metaAgentToolLine(tool('list_scheduled_jobs', { jobId: 'job-1' }), names)).toBe('Read a scheduled job');
     expect(metaAgentToolLine(tool('mcp__michi-tools__create_scheduled_job', { name: 'Morning digest', workspaceId: 'ws-r' }, { status: 'created' }), names))
-      .toBe('Schedule Morning digest · rabbitholes');
+      .toBe('Schedule Morning digest · sample-project');
     expect(metaAgentToolLine(tool('create_scheduled_job', { name: 'Morning digest', workspaceId: 'ws-r' }, { status: 'declined' }), names))
-      .toBe('Schedule Morning digest · rabbitholes · not approved');
+      .toBe('Schedule Morning digest · sample-project · not approved');
     expect(metaAgentToolLine(tool('update_scheduled_job', { jobId: 'job-1', enabled: false }), names)).toBe('Pause a scheduled job');
     expect(metaAgentToolLine(tool('update_scheduled_job', { jobId: 'job-1', enabled: true, prompt: 'x' }), names)).toBe('Change a scheduled job');
     expect(metaAgentToolLine(tool('run_scheduled_job', { jobId: 'job-1' }, { status: 'declined' }), names)).toBe('Run a scheduled job now · not approved');

@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import type { ChatNodeState, Project } from './chatTypes';
 import { installBackendWorkspaceNode } from './backgroundGapReconcile';
 import { visibleMessageText } from './assistantBlocks';
+import { quietStructureGuards as quiet, quietStructureRead as read } from '../test/structureGuardsStub';
 
 const localProject: Project = {
   id: 'ws-1',
@@ -52,6 +53,7 @@ function workspace(scheduledStatus: 'idle' | 'streaming', assistantText: string)
 describe('installBackendWorkspaceNode', () => {
   it('adds a backend-created thread without moving the active thread', () => {
     const result = installBackendWorkspaceNode({
+      ...read,
       currentProjects: [localProject],
       currentNodes: { existing: existingNode },
       rawWorkspace: workspace('streaming', 'partial'),
@@ -73,8 +75,48 @@ describe('installBackendWorkspaceNode', () => {
     expect(result!.nodes.existing.composerDraft).toEqual({ value: 'unsent text', mentions: [] });
   });
 
+  it("never brings back an artifact this window removed before the backend confirmed it", () => {
+    const raw = {
+      ...workspace('idle', 'final answer'),
+      artifacts: [{
+        id: 'ctx-1', workspace_id: 'ws-1', name: 'notes', file_path: '.contexts/notes.md',
+        source: 'agent', type: 'doc', created_at: 2, updated_at: 3,
+      }],
+    };
+    // Deleted here, then a new "notes" made; neither landed yet.
+    const fresh = { id: 'ctx-new', name: 'notes', filePath: '.contexts/notes-new.md', source: 'user' as const, createdAt: 9, updatedAt: 9 };
+    const result = installBackendWorkspaceNode({
+      ...read,
+      currentProjects: [{ ...localProject, artifacts: [fresh] }],
+      currentNodes: { existing: existingNode },
+      rawWorkspace: raw,
+      nodeId: 'sched',
+      guards: quiet({ pendingDeletes: () => ({ treeIds: new Set(), edgeIds: new Set(), contextIds: new Set(['ctx-1']) }) }),
+    });
+    expect(result!.projects[0].artifacts?.map((artifact) => artifact.id)).toEqual(['ctx-new']);
+    expect(result!.artifactProbes).toBeUndefined();
+  });
+
+  it("names an artifact kept beside the backend's under its exact name, for the window to ask about", () => {
+    const raw = {
+      ...workspace('idle', 'final answer'),
+      artifacts: [{ id: 'ctx-1', workspace_id: 'ws-1', name: 'notes', file_path: '.contexts/notes.md', source: 'agent', type: 'doc', created_at: 2, updated_at: 3 }],
+    };
+    const stale = { id: 'ctx-old', name: 'notes', filePath: '.contexts/notes-old.md', source: 'user' as const, createdAt: 1, updatedAt: 1 };
+    const result = installBackendWorkspaceNode({
+      ...read,
+      currentProjects: [{ ...localProject, artifacts: [stale] }],
+      currentNodes: { existing: existingNode },
+      rawWorkspace: raw,
+      nodeId: 'sched',
+    });
+    expect(result!.projects[0].artifacts?.map((artifact) => artifact.id)).toEqual(['ctx-1', 'ctx-old']);
+    expect(result!.artifactProbes).toEqual({ projectId: 'ws-1', contextIds: ['ctx-old'] });
+  });
+
   it('refreshes a known thread with the final transcript and keeps local drafts', () => {
     const first = installBackendWorkspaceNode({
+      ...read,
       currentProjects: [localProject],
       currentNodes: { existing: existingNode },
       rawWorkspace: workspace('streaming', 'partial'),
@@ -82,6 +124,7 @@ describe('installBackendWorkspaceNode', () => {
     })!;
     const withDraft = { ...first.nodes, sched: { ...first.nodes.sched, composerDraft: { value: 'follow-up', mentions: [] } } };
     const refreshed = installBackendWorkspaceNode({
+      ...read,
       currentProjects: first.projects,
       currentNodes: withDraft,
       rawWorkspace: workspace('idle', 'final answer'),
@@ -93,11 +136,44 @@ describe('installBackendWorkspaceNode', () => {
     expect(node.composerDraft).toEqual({ value: 'follow-up', mentions: [] });
   });
 
+  it('installs it from the structure and one page of it, with the turn row read alongside', () => {
+    const full = workspace('streaming', 'partial');
+    const structure = {
+      ...full,
+      nodes: full.nodes.map((row) => ({ ...row, message_count: row.id === 'sched' ? 2 : 0 })),
+      messages: [],
+    };
+    const result = installBackendWorkspaceNode({
+      ...read,
+      currentProjects: [localProject],
+      currentNodes: { existing: existingNode },
+      rawWorkspace: structure,
+      page: {
+        messages: full.messages,
+        pages: [{ nodeId: 'sched', total: 2, before: null }],
+        turns: [{ node_id: 'sched', turn_id: 'turn-1', status: 'active', last_seq: 11, error: null, completed_at: null }],
+      },
+      nodeId: 'sched',
+    })!;
+    const node = result.nodes.sched;
+    expect(node).toMatchObject({
+      status: 'streaming', activeTurnId: 'turn-1', messagesLoaded: true, messageCount: 2,
+      // The node row's cursor (7) is older than the bodies; the turn row's is theirs.
+      lastAppliedBackgroundTurnId: 'turn-1', lastAppliedBackgroundSeq: 11,
+      lastAppliedTurnId: 'turn-1', lastAppliedSeq: 11,
+    });
+    expect(visibleMessageText(node.messages.at(-1)!)).toContain('partial');
+    // The window's own node keeps its body and draft.
+    expect(result.nodes.existing).toBe(existingNode);
+  });
+
   it('returns null when the workspace or node is not known locally', () => {
     expect(installBackendWorkspaceNode({
+      ...read,
       currentProjects: [], currentNodes: {}, rawWorkspace: workspace('idle', 'x'), nodeId: 'sched',
     })).toBeNull();
     expect(installBackendWorkspaceNode({
+      ...read,
       currentProjects: [localProject], currentNodes: {}, rawWorkspace: workspace('idle', 'x'), nodeId: 'missing',
     })).toBeNull();
   });

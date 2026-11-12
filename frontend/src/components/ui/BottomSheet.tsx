@@ -3,6 +3,9 @@ import { createPortal } from 'react-dom';
 import { AnimatePresence, motion, useIsPresent, type Transition } from 'motion/react';
 import { DUR, EASE } from '../../motion/tokens';
 import { useOverlayFocus } from './useOverlayFocus';
+import { useBackLayer } from '../../lib/backStack';
+import { isImeComposing } from '../../lib/ime';
+import { keyboardInsetOf } from '../../hooks/useKeyboardInset';
 import './BottomSheet.css';
 
 export interface BottomSheetProps {
@@ -14,7 +17,7 @@ export interface BottomSheetProps {
   children: React.ReactNode;
 }
 
-interface KeyboardInset { bottom: number; maxHeight: number }
+interface KeyboardFit { bottom: number; maxHeight: number }
 
 // Rises like it always has (--t-enter on --t-ease) and drops back a little
 // faster on the panel curve; the scrim clears just ahead of it.
@@ -28,8 +31,8 @@ const SCRIM_OUT: Transition = { duration: DUR.scrimExit, ease: EASE.out };
  * bottom: the on-screen keyboard on iOS, which overlays fixed elements instead
  * of resizing the page. Null while nothing covers the bottom edge.
  */
-function useKeyboardInset(active: boolean): KeyboardInset | null {
-  const [inset, setInset] = React.useState<KeyboardInset | null>(null);
+function useSheetKeyboardFit(active: boolean): KeyboardFit | null {
+  const [inset, setInset] = React.useState<KeyboardFit | null>(null);
   React.useEffect(() => {
     const viewport = window.visualViewport;
     if (!active || !viewport) {
@@ -37,7 +40,7 @@ function useKeyboardInset(active: boolean): KeyboardInset | null {
       return;
     }
     const update = () => {
-      const bottom = Math.max(0, Math.round(window.innerHeight - viewport.height - viewport.offsetTop));
+      const bottom = keyboardInsetOf(viewport);
       const next = bottom > 0 ? { bottom, maxHeight: Math.round(viewport.height - 12) } : null;
       setInset((previous) => (previous?.bottom === next?.bottom && previous?.maxHeight === next?.maxHeight ? previous : next));
     };
@@ -61,9 +64,10 @@ function useKeyboardInset(active: boolean): KeyboardInset | null {
 export function BottomSheet({ open, onClose, labelledBy, children, ...rest }: BottomSheetProps) {
   const panelRef = React.useRef<HTMLDivElement>(null);
   useOverlayFocus({ open, panelRef, initialFocus: 'panel', restore: 'always' });
-  const keyboard = useKeyboardInset(open);
+  const keyboard = useSheetKeyboardFit(open);
   const onCloseRef = React.useRef(onClose);
   onCloseRef.current = onClose;
+  useBackLayer(open, { back: () => onCloseRef.current() });
   // A sheet opened by a long press appears under the finger that is still
   // down; the click its release produces may land on the new scrim. Only a
   // tap that also started on the scrim closes the sheet.
@@ -73,7 +77,7 @@ export function BottomSheet({ open, onClose, labelledBy, children, ...rest }: Bo
   React.useEffect(() => {
     if (!open) return;
     const onKey = (event: KeyboardEvent) => {
-      if (event.key !== 'Escape') return;
+      if (event.key !== 'Escape' || isImeComposing(event)) return;
       event.preventDefault();
       // The shell binds Escape on the same window (leave a page, clear a
       // selection); the sheet is what Escape closes while it is open.
@@ -112,7 +116,7 @@ function SheetLayers({ panelRef, pressedScrim, onClose, labelledBy, ariaLabel, k
   onClose: () => void;
   labelledBy?: string;
   ariaLabel?: string;
-  keyboard: KeyboardInset | null;
+  keyboard: KeyboardFit | null;
   children: React.ReactNode;
 }) {
   // A sheet on its way out is no longer a layer: hidden from assistive tech and

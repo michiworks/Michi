@@ -2,17 +2,9 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import React from 'react';
 import { render, fireEvent, act, screen } from '@testing-library/react';
 import TPane from './TPane';
+import { paneFileDropTarget } from './paneFileDropTargets';
 import type { ChatNodeState } from '../../state/chatTypes';
-import type { MentionRecord } from '../mentions';
-
-// jsdom doesn't expose CSS.highlights; polyfill so the PaneFind cleanup
-// effect in TPane doesn't throw on unmount.
-if (typeof CSS === 'undefined') {
-  (globalThis as any).CSS = {};
-}
-if (!(CSS as any).highlights) {
-  (CSS as any).highlights = new Map();
-}
+import type { MentionRecord } from '../../lib/mentions';
 
 const mockNode: ChatNodeState = {
   nodeId: 'n1', chatId: null, projectId: 'p1', kind: 'chat',
@@ -24,6 +16,15 @@ const mockProject = {
   trees: [{ id: 'tr1', rootNodeId: 'n1', createdAt: 0, lastActiveAt: 0 }],
   activeTreeId: 'tr1', artifacts: [], createdAt: 0,
 };
+
+// The embedded assistant's hidden workspace, beside the shell's active p1.
+const assistantProject: typeof mockProject & { system?: 'assistant' } = { ...mockProject, id: 'ws-assistant', cwd: '/data/assistant/.michi', chatIds: [] };
+
+const importUploadFn = vi.hoisted(() => vi.fn());
+vi.mock('../../services/api', async () => ({
+  ...await vi.importActual<any>('../../services/api'),
+  importWorkspaceFileUpload: importUploadFn,
+}));
 
 const createContextFn = vi.fn();
 const focusPaneFn = vi.fn();
@@ -63,6 +64,7 @@ vi.mock('../../state/chatStore', async () => {
   });
   const projects = () => ({
     activeProject: mockProject,
+    projects: [mockProject, assistantProject],
     availableModes: [],
     agentStatus: mockCanSteer ? { capabilities: { modes: false }, capabilityDescriptor: { steer: { availability: 'native', confidence: 'native' } } } : null,
     refreshAgentStatus: () => {},
@@ -155,8 +157,10 @@ beforeEach(() => {
   cancelStreamFn.mockReset();
   steerMessageFn.mockReset().mockResolvedValue(true);
   addPendingCommentFn.mockReset();
+  importUploadFn.mockReset().mockRejectedValue(new Error('offline'));
   mockCanSteer = false;
   mockEditorMentions = [];
+  mockNode.projectId = 'p1';
   mockNode.status = 'idle';
   delete mockNode.composerDraft;
   delete mockNode.pendingQueued;
@@ -225,6 +229,50 @@ describe('TPane drag-and-drop', () => {
       successSpy.mockRestore();
       delete (window as any).electron;
     }
+  });
+
+  it('takes files the Dashboard forwards, and focuses itself', async () => {
+    importUploadFn.mockResolvedValue({ name: 'a', filePath: '.attachments/a.md', displayName: 'a.md', size: 1 });
+    render(<TPane nodeId="n1" />);
+    let accepted = false;
+    await act(async () => { accepted = await paneFileDropTarget('n1')!([new File(['x'], 'a.md')]); });
+    expect(accepted).toBe(true);
+    expect(focusPaneFn).toHaveBeenCalledWith('n1');
+    expect(importUploadFn).toHaveBeenCalledWith('p1', '/tmp/p1', expect.any(File), expect.objectContaining({ subdir: '.attachments' }));
+    expect(screen.getByTitle('/tmp/p1/.attachments/a.md').textContent).toContain('a.md');
+  });
+
+  it('declines forwarded files in the assistant\'s own workspace, which takes none', async () => {
+    mockNode.projectId = 'ws-assistant';
+    assistantProject.system = 'assistant';
+    try {
+      render(<TPane nodeId="n1" />);
+      let accepted = true;
+      await act(async () => { accepted = await paneFileDropTarget('n1')!([new File(['x'], 'a.md')]); });
+      expect(accepted).toBe(false);
+      expect(importUploadFn).not.toHaveBeenCalled();
+    } finally {
+      delete assistantProject.system;
+    }
+  });
+
+  it('removes its web file picker when it unmounts', async () => {
+    const view = render(<TPane nodeId="n1" />);
+    await act(async () => { fireEvent.click(screen.getByTitle('Attach file')); });
+    expect(document.querySelector('input[type="file"]')).not.toBeNull();
+    view.unmount();
+    expect(document.querySelector('input[type="file"]')).toBeNull();
+  });
+
+  it('shows an embedded assistant\'s pending image from the assistant\'s workspace', async () => {
+    mockNode.projectId = 'ws-assistant';
+    importUploadFn.mockResolvedValue({ name: 'diagram', filePath: '.attachments/diagram.png', displayName: 'diagram.png', size: 1 });
+    const { container } = render(<TPane nodeId="n1" embedded spacesAssistant />);
+    await act(async () => {
+      fireEvent(container.firstChild as HTMLElement, dragEvent('drop', [new File(['x'], 'diagram.png', { type: 'image/png' })]));
+    });
+    expect(importUploadFn).toHaveBeenCalledWith('ws-assistant', '/data/assistant/.michi', expect.any(File), expect.objectContaining({ subdir: '.attachments' }));
+    expect(screen.getByRole('img', { name: 'diagram.png' }).getAttribute('src')).toContain('/files/ws-assistant/.attachments/diagram.png');
   });
 });
 
@@ -333,6 +381,43 @@ describe('TPane composer draft freshness', () => {
       expect(draft.value).toBe('legacy file context\n\n@Thread');
       expect(draft.mentions[0].start).toBe('legacy file context\n\n'.length);
     }
+  });
+
+  it('keeps a dequeued attachment\'s workspace path when it is sent again', async () => {
+    const shot = { name: 'shot.png', absPath: '/tmp/p1/.attachments/shot.png', relPath: '.attachments/shot.png' };
+    mockNode.pendingQueued = [{ id: 'q1', value: 'look', mentions: [], attachments: [shot], queuedAt: 1 }];
+    render(<TPane nodeId="n1" />);
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Dequeue message' })); });
+    delete mockNode.pendingQueued;
+    await act(async () => { fireEvent.click(screen.getByTestId('editor-submit')); });
+    expect(sendMessageFn.mock.calls[0][2].attachments).toEqual([shot]);
+  });
+
+  it('puts a dequeued message in front of what was typed since, keeping its quote and attachments', async () => {
+    mockNode.status = 'streaming';
+    mockNode.composerDraft = {
+      value: 'B @Doc', mentions: [{ start: 2, end: 6, kind: 'context', refId: 'c1', label: 'Doc' }], quotedText: 'B quote',
+    };
+    mockNode.pendingQueued = [{
+      id: 'q1', value: 'A @Thread', mentions: [{ start: 2, end: 9, kind: 'node', refId: 'n2', label: 'Thread' }],
+      attachments: [{ name: 'a.txt', absPath: '/tmp/p1/.attachments/a.txt' }], queuedAt: 1,
+    }];
+    importUploadFn.mockResolvedValue({ filePath: '.attachments/b.txt', displayName: 'b.txt' });
+    const { container } = render(<TPane nodeId="n1" />);
+    await act(async () => {
+      fireEvent(container.firstChild as HTMLElement, dragEvent('drop', [new File(['x'], 'b.txt')]));
+    });
+    expect([...container.querySelectorAll('.t-att-pending-file')].map((el) => el.getAttribute('title')))
+      .toEqual(['/tmp/p1/.attachments/b.txt']);
+
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Dequeue message' })); });
+
+    const draft = setComposerDraftFn.mock.calls.at(-1)![1];
+    expect(draft.value).toBe('A @Thread\n\nB @Doc');
+    expect(draft.mentions.map((m: MentionRecord) => draft.value.slice(m.start, m.end))).toEqual(['@Thread', '@Doc']);
+    expect(draft.quotedText).toBe('B quote');
+    expect([...container.querySelectorAll('.t-att-pending-file')].map((el) => el.getAttribute('title')))
+      .toEqual(['/tmp/p1/.attachments/a.txt', '/tmp/p1/.attachments/b.txt']);
   });
 
   it('does not let an unrelated rerender roll back an uncommitted editor change', async () => {

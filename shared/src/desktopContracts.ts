@@ -17,6 +17,7 @@ export interface AppUpdateState {
   error?: string;
 }
 
+import type { CompanionNotice, CompanionTarget } from './companion';
 import type { RemoteAuthenticationTarget } from './remoteDiagnostics';
 
 /** Public desktop payloads contain no Electron, DOM, Node, or process objects. */
@@ -37,7 +38,22 @@ export interface SaveMarkdownResult {
 }
 
 /** macOS NSVisualEffectView materials Michi exposes, lightest → densest frost. */
-export type VibrancyMaterial = 'under-window' | 'sidebar' | 'menu' | 'hud';
+export const VIBRANCY_MATERIALS = ['under-window', 'sidebar', 'menu', 'hud'] as const;
+export type VibrancyMaterial = typeof VIBRANCY_MATERIALS[number];
+
+/** URL query params Electron main gives a window; its preload reads them once. */
+export type DesktopBootstrapParam =
+  | 'michiWindowId' | 'michiPackaged' | 'michiVibrancy' | 'michiGlass'
+  | 'michiOpenRun' | 'michiOpenJob' | 'michiOpenWorkspace' | 'michiOpenNode';
+
+/** A shell chord pressed in a focused Browser pane, as Electron saw it, for the renderer to replay. */
+export interface BrowserShellChord {
+  key: string;
+  meta: boolean;
+  control: boolean;
+  shift: boolean;
+  alt: boolean;
+}
 
 export interface BrowserSurfaceState {
   surfaceId: string;
@@ -97,6 +113,39 @@ export interface DesktopLifetimeStatus {
   canStartHidden: boolean;
 }
 
+/** One residency switch: whether this install can offer it, and whether it is on. */
+export interface DesktopResidencySetting {
+  supported: boolean;
+  enabled: boolean;
+}
+
+/**
+ * How Michi stays around when its windows are closed (DESIGN-v2 §5.1;
+ * Settings › Notifications › "When Michi's windows are closed", W2-F2).
+ * Electron main owns it: `tray` and `hideDock` live in
+ * `userData/desktop-settings.json` (`{tray:{enabled, hideDockWhenNoWindows}}`),
+ * `openAtLogin` is read from the OS each time. "Keep Michi running after you
+ * quit" is the background service (BackgroundServiceStatus), not part of it.
+ * W1-D implements `desktop:getResidency` / `desktop:setResidency`.
+ */
+export interface DesktopResidency {
+  /** Keep Michi in the menu bar (macOS) or notification area (Windows): closing the last window keeps it running. Default on. */
+  tray: DesktopResidencySetting;
+  /** macOS only: hide the Dock icon while no Michi window is open (needs `tray`). Default off. */
+  hideDock: DesktopResidencySetting;
+  /** Windows only, packaged builds: open Michi at login, straight into the notification area. */
+  openAtLogin: DesktopResidencySetting;
+  /** Why something is unsupported on this install (a dev build, the platform), for the settings row. */
+  reason?: string;
+}
+
+/** `desktop:setResidency`: the switches to change; the answer is the residency after the change. */
+export interface DesktopResidencyPatch {
+  tray?: boolean;
+  hideDock?: boolean;
+  openAtLogin?: boolean;
+}
+
 /** Thread a scheduled-run notification points at. */
 export interface ScheduledRunTarget {
   runId: string;
@@ -112,6 +161,18 @@ export interface ScheduledNotice {
   target: ScheduledRunTarget;
 }
 
+/**
+ * Where a renderer-raised OS notification leads. Clicking it focuses the
+ * window that raised it and reports `key` back to that window
+ * ('app:attentionNotificationClicked'); a newer notification with the same
+ * key from the same window replaces the older one.
+ */
+export interface DesktopNotificationTarget {
+  key: string;
+  /** Leave the OS notification sound off; the renderer plays its own. */
+  silent?: boolean;
+}
+
 export interface DesktopBridge {
   openExternal(url: string): void;
   /** Background service controls. Absent in browsers and older builds. */
@@ -121,17 +182,28 @@ export interface DesktopBridge {
   getDesktopLifetimeStatus(): Promise<DesktopLifetimeStatus>;
   setKeepInBackground(enabled: boolean): Promise<DesktopLifetimeStatus>;
   setOpenAtLogin(enabled: boolean): Promise<DesktopLifetimeStatus>;
+  /** Menu bar / tray residency (DesktopResidency, DESIGN-v2 §5.1). Absent in browsers and older builds. */
+  getResidency?(): Promise<DesktopResidency>;
+  /** Changes residency switches; resolves to the residency after the change. Absent in browsers and older builds. */
+  setResidency?(patch: DesktopResidencyPatch): Promise<DesktopResidency>;
   /** Set when this window was opened by clicking a scheduled-run notification. */
   initialScheduledRun: ScheduledRunTarget | null;
   onScheduledRunOpen(handler: (target: ScheduledRunTarget) => void): () => void;
   /** Scheduled-run notices delivered while this window is focused (shown as toasts). */
   onScheduledNotice(handler: (notice: ScheduledNotice) => void): () => void;
+  /** Set when this window was opened by clicking a Companion notification. Absent in older builds. */
+  initialCompanionTarget?: CompanionTarget | null;
+  /** Clicking a Companion notification: open the Companion panel at this target. Absent in older builds. */
+  onCompanionOpen?(handler: (target: CompanionTarget) => void): () => void;
+  /** Companion notices delivered while this window is focused (shown as toasts). Absent in older builds. */
+  onCompanionNotice?(handler: (notice: CompanionNotice) => void): () => void;
   onOpenUrl(handler: (url: string) => void): () => void;
   /** True only in `electron-builder` packaged builds. Absent in older builds — treat as false. */
   isPackaged: boolean;
   /** Stable id injected by Electron main for per-window renderer state. */
   michiWindowId: string;
-  /** True when the window uses native macOS vibrancy (see-through). Absent in older builds / web. */
+  /** True when the window can use native macOS vibrancy (see-through), which
+   *  setWindowGlass turns on and off. Absent in older builds / web. */
   hasVibrancy: boolean;
   chooseFolder(): Promise<ChooseFolderResult>;
   /** Open a multi-select folder picker, returns array of paths. Optional — absent in older builds. */
@@ -141,12 +213,18 @@ export interface DesktopBridge {
   saveMarkdown(suggestedName: string, content: string): Promise<SaveMarkdownResult>;
   /** Open an absolute path with the OS default app. Optional — absent in older builds. */
   openPath(absPath: string): Promise<{ ok: boolean; error?: string }>;
-  /** Send an OS-level notification via Electron. Optional — absent in older builds. */
-  showNotification(title: string, body: string): void;
+  /** Send an OS-level notification via Electron. Optional — absent in older builds.
+   *  Older builds ignore `target`: a click then only focuses a window. */
+  showNotification(title: string, body: string, target?: DesktopNotificationTarget): void;
+  /** A notification raised with a target was clicked; main has already focused this window. Absent in older builds. */
+  onAttentionNotificationClick(handler: (key: string) => void): () => void;
   /** Sync native chrome and Browser panes to the active palette. Absent in older builds / web. */
   setDarkMaterial(dark: boolean, backgroundColor?: string): void;
   /** Switch the sidebar's native vibrancy material (desktop see-through density). Absent in older builds / web. */
   setVibrancy(material: VibrancyMaterial): void;
+  /** Turn native vibrancy on or off in every window, live, and keep the choice
+   *  for the next launch. No-op without hasVibrancy. Absent in older builds / web. */
+  setWindowGlass(enabled: boolean): void;
   /** The window's current pixels in `rect` (CSS px) as a downscaled PNG data URL, or null.
    *  Frozen glass blurs it once instead of a live backdrop-filter. Absent in older builds / web. */
   captureBackdrop(rect: BackdropRect): Promise<string | null>;
@@ -159,8 +237,6 @@ export interface DesktopBridge {
   onAppUpdate(listener: (state: AppUpdateState) => void): () => void;
   /** Open a multi-select OS file picker, returns absolute paths. Optional — absent in older builds. */
   chooseFiles(): Promise<{ canceled: boolean; paths?: string[] }>;
-  /** Read a file by absolute path (bypasses backend sandbox). Returns null on failure. Optional — absent in older builds. */
-  readFile(absPath: string): Promise<{ content: string; size: number; modifiedAt: number } | null>;
   /** Stat a file by absolute path (size check without reading). Returns null on failure. Optional — absent in older builds. */
   statFile(absPath: string): Promise<{ size: number; modifiedAt: number } | null>;
   /** List one directory level after constraining the request to registered workspace roots. */
@@ -174,7 +250,6 @@ export interface DesktopBridge {
   terminalWrite(surfaceId: string, data: string): void;
   terminalResize(surfaceId: string, cols: number, rows: number): void;
   terminalDestroy(surfaceId: string): void;
-  terminalListActive(): Promise<Array<{ surfaceId: string }>>;
   onTerminalData(handler: (surfaceId: string, data: string) => void): () => void;
   onTerminalExit(handler: (surfaceId: string, exitCode: number) => void): () => void;
   browserCreate(surfaceId: string, projectId: string, url: string): Promise<BrowserSurfaceState>;
@@ -188,6 +263,8 @@ export interface DesktopBridge {
   onBrowserState(handler: (state: BrowserSurfaceState) => void): () => void;
   onBrowserFocus(handler: (surfaceId: string) => void): () => void;
   onBrowserCloseRequest(handler: (surfaceId: string) => void): () => void;
+  /** A shell chord a focused Browser pane passed on. Absent in older builds. */
+  onBrowserShortcut(handler: (surfaceId: string, chord: BrowserShellChord) => void): () => void;
 }
 
 /** Existing desktop builds guarantee only these original methods. */
@@ -214,15 +291,16 @@ export interface DesktopInvokeContract {
   'lifetime:getStatus': { args: []; result: DesktopLifetimeStatus };
   'lifetime:setKeepInBackground': { args: [enabled: boolean]; result: DesktopLifetimeStatus };
   'lifetime:setOpenAtLogin': { args: [enabled: boolean]; result: DesktopLifetimeStatus };
+  /** DESIGN-v2 §5.1 (W1-D): read and change the menu bar / tray residency. */
+  'desktop:getResidency': { args: []; result: DesktopResidency };
+  'desktop:setResidency': { args: [patch: DesktopResidencyPatch]; result: DesktopResidency };
   'app:chooseFiles': { args: []; result: { canceled: boolean; paths?: string[] } };
-  'app:readFile': { args: [absPath: string]; result: { content: string; size: number; modifiedAt: number } | null };
   'app:statFile': { args: [absPath: string]; result: { size: number; modifiedAt: number } | null };
   'app:listDirectory': { args: [absPath: string, allowedRoots: string[]]; result: FileTreeEntry[] };
   'app:readFilePreview': { args: [absPath: string]; result: FilePreviewResult | null };
   'app:listGitChanges': { args: [cwd: string, allowedRoots: string[]]; result: GitChangeEntry[] };
   'terminal:create': { args: [surfaceId: string, cwd: string, cols: number, rows: number]; result: TerminalSurfaceSnapshot };
   'remote-auth:create': { args: [surfaceId: string, target: RemoteAuthenticationTarget, cols: number, rows: number]; result: TerminalSurfaceSnapshot };
-  'terminal:listActive': { args: []; result: Array<{ surfaceId: string }> };
   'browser:create': { args: [surfaceId: string, projectId: string, url: string]; result: BrowserSurfaceState };
   'browser:navigate': { args: [surfaceId: string, url: string]; result: BrowserSurfaceState };
 }
@@ -232,9 +310,10 @@ export type DesktopInvokeResult<K extends keyof DesktopInvokeContract> = Desktop
 
 export interface DesktopCommandContract {
   'app:openExternal': [url: string];
-  'app:showNotification': [title: string, body: string];
+  'app:showNotification': [title: string, body: string, target?: DesktopNotificationTarget];
   'app:setDarkMaterial': [dark: boolean, backgroundColor?: string];
   'app:setVibrancy': [material: VibrancyMaterial];
+  'app:setWindowGlass': [enabled: boolean];
   'app:relaunch': [];
   'terminal:write': [surfaceId: string, data: string];
   'terminal:resize': [surfaceId: string, cols: number, rows: number];
@@ -250,11 +329,15 @@ export interface DesktopCommandContract {
 export interface DesktopEventContract {
   'app:update-state': [state: AppUpdateState];
   'app:openUrl': [url: string];
+  'app:attentionNotificationClicked': [key: string];
   'scheduled:open-run': [target: ScheduledRunTarget];
   'scheduled:notice': [notice: ScheduledNotice];
+  'companion:open': [target: CompanionTarget];
+  'companion:notice': [notice: CompanionNotice];
   'terminal:data': [surfaceId: string, data: string];
   'terminal:exit': [surfaceId: string, exitCode: number];
   'browser:state': [state: BrowserSurfaceState];
   'browser:focus': [surfaceId: string];
   'browser:close-request': [surfaceId: string];
+  'browser:shortcut': [surfaceId: string, chord: BrowserShellChord];
 }

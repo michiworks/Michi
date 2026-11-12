@@ -1,7 +1,6 @@
 import React from 'react';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
-vi.mock('./AssistantHistory', () => ({ AssistantHistory: () => <nav aria-label="Assistant conversations" /> }));
 
 const data = vi.hoisted(() => ({
   firstRun: null as unknown,
@@ -12,7 +11,6 @@ const data = vi.hoisted(() => ({
   setHidden: vi.fn(async (..._args: unknown[]) => ({})),
   refreshFirstRun: vi.fn(async () => {}),
   info: null as unknown,
-  overview: null as unknown,
   sections: null as unknown,
   sectionReads: [] as string[],
   spaceReads: [] as string[],
@@ -36,7 +34,7 @@ const LOCAL_PROJECTS = [
 const projects = vi.hoisted(() => ({ list: [] as Array<{ id: string; name: string; system?: boolean }> }));
 vi.mock('../../../state/chatStore', () => ({ useChatProjects: () => ({ projects: projects.list }) }));
 vi.mock('../../../state/prefs', () => ({ usePrefs: () => ({ prefs: { workspaceOrder: [] } }) }));
-vi.mock('../../../config/backendConnections', () => ({ backendConnectionIdForWorkspace: (id: string) => (id.startsWith('remote:') ? 'box' : 'local') }));
+vi.mock('../../../config/backendConnections', () => ({ LOCAL_BACKEND_CONNECTION_ID: 'local', backendConnectionIdForWorkspace: (id: string) => (id.startsWith('remote:') ? 'box' : 'local') }));
 vi.mock('../../../state/pages/useSpaces', () => ({ useSpaces: (connectionId: string) => { data.spaceReads.push(connectionId); return { spaces: data.spaces, status: 'ready', error: null, refresh: vi.fn() }; } }));
 vi.mock('../../../state/pages/useSpaceTree', () => ({ useSpaceTree: () => ({ pages: data.pages, status: data.treeStatus, error: null, refresh: vi.fn() }) }));
 vi.mock('../../../state/pages/pageEvents', () => ({ subscribePageChanges: () => () => {} }));
@@ -59,7 +57,6 @@ vi.mock('../../../state/metaAgent/useMetaAgent', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../../../state/metaAgent/useMetaAgent')>()),
   useMetaAgent: () => ({ status: 'ready', info: data.info, error: null }),
 }));
-vi.mock('../../../state/metaAgent/useMetaAgentOverview', () => ({ useMetaAgentOverview: () => ({ status: 'ready', overview: data.overview, error: null }) }));
 
 import { SpacesSidebar } from './SpacesSidebar';
 import { markWorkspaceHomeOpened, resetSpacesFirstRunStore } from '../../../state/metaAgent/spacesFirstRun';
@@ -86,7 +83,7 @@ const status = (alpha: ReturnType<typeof run>, beta: ReturnType<typeof run>, sum
 function renderSidebar(overrides: Partial<React.ComponentProps<typeof SpacesSidebar>> = {}) {
   const props = {
     current: { kind: 'home' as const }, waitingCount: 3, onOpenHome: vi.fn(), onOpenWorkspace: vi.fn(), onOpenPage: vi.fn(),
-    onOpenAssistant: vi.fn(), onNewSpace: vi.fn(), ...overrides,
+    onNewSpace: vi.fn(), ...overrides,
   };
   render(<SpacesSidebar {...props} />);
   return props;
@@ -101,7 +98,8 @@ describe('SpacesSidebar', () => {
     expect(settings.getAttribute('aria-current')).toBe('page');
     fireEvent.click(settings);
     expect(props.onOpenSettings).toHaveBeenCalledOnce();
-    expect(screen.getByRole('navigation', { name: 'Assistant conversations' })).toBeTruthy();
+    // The agent's History lives in its panel's menu now (DESIGN-v2 §1.4).
+    expect(screen.queryByRole('navigation', { name: 'Assistant conversations' })).toBeNull();
   });
   beforeEach(() => {
     localStorage.removeItem('michi.spaces-sidebar.expanded');
@@ -113,7 +111,6 @@ describe('SpacesSidebar', () => {
     data.homesError = null;
     data.refreshHomes.mockClear();
     data.info = INFO;
-    data.overview = null;
     data.spaces = [{ id: 'space-1', workspaceId: 'ws-a', parentId: null, position: 0, title: 'Release', pendingProposals: 1 }];
     data.setHidden.mockClear();
     data.refreshFirstRun.mockClear();
@@ -126,23 +123,28 @@ describe('SpacesSidebar', () => {
     projects.list = LOCAL_PROJECTS;
   });
 
-  it('omits remote placeholder workspaces and reads nothing from their connection', async () => {
+  it('lists a remote connection\'s pages from that connection, but not its databases', async () => {
     projects.list = [...LOCAL_PROJECTS, { id: 'remote:box:ws-r', name: 'Far away' }];
-    renderSidebar();
+    data.spaces = [...data.spaces, { id: 'space-r', workspaceId: 'remote:box:ws-r', parentId: null, position: 0, title: 'Remote notes', pendingProposals: 0 }];
+    const props = renderSidebar();
     await act(async () => { for (let i = 0; i < 4; i++) await Promise.resolve(); });
-    expect(screen.queryByText('Far away')).toBeNull();
-    expect(data.spaceReads).not.toContain('box');
+    expect(data.spaceReads).toContain('box');
+    fireEvent.click(screen.getByText('Far away'));
+    expect(props.onOpenWorkspace).toHaveBeenCalledWith({ workspaceId: 'remote:box:ws-r', backendConnectionId: 'box' });
     expect(data.sectionReads).not.toContain('box');
     expect(data.databaseReads).not.toContain('remote:box:ws-r');
+    expect(screen.queryAllByText('No pages yet.')).toHaveLength(0);
   });
 
-  it('starts with Home and Assistant, then Spaces and Databases, with no All threads or search box', async () => {
+  it('starts with Home, then Spaces and Databases, with no Assistant row, All threads or search box', async () => {
     renderSidebar();
     const home = screen.getByRole('button', { name: /^Home/ });
     expect(home.getAttribute('aria-current')).toBe('page');
     expect(home.textContent).toBe('Home');
     expect(screen.queryByRole('button', { name: /All threads/ })).toBeNull();
-    expect(screen.getByRole('button', { name: 'Assistant' })).toBeTruthy();
+    // The agent is the shell's one panel, not a Pages row (DESIGN-v2 §1.4).
+    expect(screen.queryByRole('button', { name: 'Assistant' })).toBeNull();
+    expect(screen.queryByText('Assistant')).toBeNull();
     expect(screen.getByText('Pages')).toBeTruthy();
     expect(screen.getByText('Databases')).toBeTruthy();
     expect(screen.queryByRole('searchbox')).toBeNull();
@@ -199,6 +201,19 @@ describe('SpacesSidebar', () => {
     expect(props.onOpenPage).not.toHaveBeenCalled();
   });
 
+  it('closes a page menu and a workspace menu on a second press of their ⋯', () => {
+    renderSidebar();
+    fireEvent.click(screen.getByRole('button', { name: 'Expand Alpha' }));
+    for (const name of ['Actions for Risks', 'Actions for Alpha']) {
+      const kebab = screen.getByRole('button', { name });
+      fireEvent.click(kebab);
+      expect(screen.getByRole('menu')).toBeTruthy();
+      fireEvent.mouseDown(kebab);
+      fireEvent.click(kebab);
+      expect(screen.queryByRole('menu')).toBeNull();
+    }
+  });
+
   it('disables page mutations when only a stale sidebar tree is available', () => {
     data.treeStatus = 'error';
     renderSidebar();
@@ -209,9 +224,9 @@ describe('SpacesSidebar', () => {
     }
   });
 
-  it('omits the Meta agent reminder beneath settings', () => {
+  it('omits the Pages upkeep reminder beneath settings', () => {
     renderSidebar();
-    expect(screen.queryByText('Meta agent · Claude · checks new conversations every 60 s')).toBeNull();
+    expect(screen.queryByText(/checks new conversations every 60 s/)).toBeNull();
   });
 
   it('shows the first read on the rows: a spinner on Home, n/m while reading, Queued after it, and the total below', () => {
@@ -220,25 +235,27 @@ describe('SpacesSidebar', () => {
     renderSidebar();
     const home = screen.getByRole('button', { name: /^Home/ });
     expect(home.querySelector('.agent-spinner')).not.toBeNull();
+    // Named after the agent, never "Meta agent" (DESIGN-v2 §1.5).
+    expect(home.querySelector('.agent-spinner')!.getAttribute('aria-label')).toBe('Michi is reading');
     expect(home.textContent).not.toContain('3');
     expect(screen.getByLabelText('Reading 12 of 21').textContent).toBe('12/21');
     const beta = document.querySelector('[data-workspace="ws-b"]')!;
     expect(beta.getAttribute('data-first-run')).toBe('queued');
     expect(beta.textContent).toContain('Queued');
     expect(beta.querySelector('[data-tone="pending"]')).not.toBeNull();
-    expect(screen.queryByText('Meta agent is reading 12/38')).toBeNull();
+    expect(screen.queryByText(/is reading 12\/38/)).toBeNull();
   });
 
   it('after the first run, a later Spaces Home summary leaves Home and the bottom row ordinary', () => {
     for (const summary of ['due', 'running']) {
       data.firstRun = { ...status(run('ws-a', 'done', 21, 21), run('ws-b', 'done', 17, 17), summary), closed: true };
       const view = render(<SpacesSidebar current={{ kind: 'home' }} waitingCount={3} onOpenHome={vi.fn()} onOpenWorkspace={vi.fn()} onOpenPage={vi.fn()}
-        onOpenAssistant={vi.fn()} onNewSpace={vi.fn()} />);
+ onNewSpace={vi.fn()} />);
       const home = screen.getByRole('button', { name: /^Home/ });
       expect(home.querySelector('.agent-spinner')).toBeNull();
       expect(screen.queryByLabelText('3 waiting')).toBeNull();
-      expect(screen.queryByText('Meta agent · Claude · checks new conversations every 60 s')).toBeNull();
-      expect(screen.queryByText(/Meta agent is reading/)).toBeNull();
+      expect(screen.queryByText(/checks new conversations every 60 s/)).toBeNull();
+      expect(screen.queryByText(/Pages upkeep is reading/)).toBeNull();
       view.unmount();
     }
   });

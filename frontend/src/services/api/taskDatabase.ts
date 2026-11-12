@@ -1,8 +1,9 @@
 import type { AllTasksDto, PageDatabase, PageDatabaseEditOp, PageDatabaseView, TaskActivity, TaskOrigin } from 'michi-shared';
-import { backendApiBase } from '../../config/backendConnections';
+import { backendApiBase, LOCAL_BACKEND_CONNECTION_ID } from '../../config/backendConnections';
 import { backendEntityId, serverEntityId } from '../../config/backendIdentity';
 import { mapDatabaseIdentity, mapPageChangeIdentity } from '../../state/pages/identity';
-import { PageApiError, pagesFetch, readPagesJson, type PageApiOptions } from './pages';
+import { pageApiError, pagesFetch, readPagesJson, type PageApiOptions } from './pages';
+import { taskCreatorFrom } from './legacyActor';
 
 // A workspace's task database: its id to draw a task board with, and the one
 // call that makes it the first time. Kept apart from pages.ts so the page
@@ -12,16 +13,7 @@ const path = (options: PageApiOptions) =>
   `${backendApiBase(options.backendConnectionId)}/workspaces/${encodeURIComponent(serverEntityId(options.workspaceId, options.backendConnectionId))}/task-database`;
 
 async function answer<T>(response: Response): Promise<T> {
-  if (!response.ok) {
-    const payload: unknown = await readPagesJson(response).catch(() => null);
-    const envelope = payload && typeof payload === 'object' ? (payload as { error?: unknown }).error : undefined;
-    const error = envelope && typeof envelope === 'object' ? envelope as { code?: unknown; message?: unknown } : {};
-    throw new PageApiError(
-      response.status,
-      typeof error.code === 'string' ? error.code : 'task_database_request_failed',
-      typeof error.message === 'string' ? error.message : `Task database request failed (${response.status})`,
-    );
-  }
+  if (!response.ok) throw await pageApiError(response, 'task_database_request_failed', 'Task database');
   return await readPagesJson(response) as T;
 }
 
@@ -66,17 +58,17 @@ export async function fetchTaskActivity(options: PageApiOptions & { databaseId: 
 export async function fetchTaskOrigin(options: PageApiOptions & { databaseId: string; rowId: string }): Promise<TaskOrigin | null> {
   const body = await answer<{ origin?: TaskOrigin | null }>(await pagesFetch(
     `${databasePath(options, options.databaseId)}/rows/${encodeURIComponent(options.rowId)}/origin`, init(options.signal)));
-  return body.origin ?? null;
+  return body.origin ? { ...body.origin, by: taskCreatorFrom(body.origin.by) } : null;
 }
 
 /** Every task database on this computer, for All tasks. */
 export async function fetchAllTasks(signal?: AbortSignal): Promise<AllTasksDto> {
-  return answer<AllTasksDto>(await pagesFetch(`${backendApiBase('local')}/spaces-home/all-tasks`, init(signal)));
+  return answer<AllTasksDto>(await pagesFetch(`${backendApiBase(LOCAL_BACKEND_CONNECTION_ID)}/spaces-home/all-tasks`, init(signal)));
 }
 
 /** Saves a change to the person's All tasks views; refused (409) when they changed since `revision`. */
 export async function saveAllTasksViews(input: { revision: number; ops: PageDatabaseEditOp[] }, signal?: AbortSignal): Promise<{ views: PageDatabaseView[]; viewsRevision: number }> {
-  return answer(await pagesFetch(`${backendApiBase('local')}/spaces-home/all-tasks/views`, {
+  return answer(await pagesFetch(`${backendApiBase(LOCAL_BACKEND_CONNECTION_ID)}/spaces-home/all-tasks/views`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(input),

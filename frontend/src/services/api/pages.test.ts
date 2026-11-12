@@ -9,12 +9,14 @@ describe('Pages API', () => {
   it('follows every Spaces cursor', async () => {
     const fetchMock = vi.fn()
       .mockResolvedValueOnce(response({ items: [{ id: 'space-1', workspaceId: 'workspace-1', parentId: null, contributorNodeIds: [] }], nextCursor: 'next page' }))
-      .mockResolvedValueOnce(response({ items: [{ id: 'space-2', workspaceId: 'workspace-2', parentId: null, contributorNodeIds: [] }], nextCursor: null }));
+      .mockResolvedValueOnce(response({ items: [{ id: 'space-2', workspaceId: 'workspace-2', parentId: null, contributorNodeIds: [], createdBy: 'meta-agent' }], nextCursor: null }));
     vi.stubGlobal('fetch', fetchMock);
 
     const spaces = await fetchSpaces('remote');
 
     expect(spaces.map(({ id }) => id)).toEqual(['remote:remote:space-1', 'remote:remote:space-2']);
+    // An older backend's 'meta-agent' creator reads as the agent's Pages upkeep (legacyActor.ts).
+    expect(spaces.map(({ createdBy }) => createdBy)).toEqual([undefined, { kind: 'companion', via: 'upkeep' }]);
     expect(fetchMock).toHaveBeenCalledTimes(2);
     expect(String(fetchMock.mock.calls[1][0])).toContain('cursor=next+page');
   });

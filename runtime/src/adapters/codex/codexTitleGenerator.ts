@@ -1,9 +1,8 @@
 import type { CodexAppServerClient } from './CodexAppServerClient';
 import { abortable } from '../../core/runtimeLifecycle';
+import { cleanGeneratedTitle, fallbackTitleFromUserText, MAX_TITLE_INPUT_CHARS, truncateChars } from '../../core/titles';
 
 const DEFAULT_TITLE_TIMEOUT_MS = 10_000;
-const MAX_TITLE_INPUT_CHARS = 4_000;
-const MAX_TITLE_CHARS = 80;
 
 const TITLE_OUTPUT_SCHEMA = {
   type: 'object',
@@ -20,7 +19,10 @@ export interface GenerateCodexTitleOptions {
   model: string | null;
   /** Developer instructions of the title thread (CodexAdapterOptions.hostText.titleInstructions). */
   instructions: string;
+  /** The user's message, the fallback title's source. */
   userText: string;
+  /** The title turn's text, already bounded. Default: userText, cut to MAX_TITLE_INPUT_CHARS. */
+  input?: string;
   timeoutMs?: number;
   /** The title thread's config (the session's: user MCP servers disabled, goals off). */
   config?: Record<string, unknown>;
@@ -35,36 +37,8 @@ function threadIdFrom(result: Record<string, unknown>): string | null {
     ?? (typeof result['threadId'] === 'string' ? result['threadId'] : null);
 }
 
-function truncateChars(value: string, maxChars: number): string {
-  const chars = Array.from(value);
-  return chars.length <= maxChars ? value : chars.slice(0, maxChars).join('');
-}
-
-function cleanTitle(value: string): string {
-  let title = value.trim();
-  const sentinel = /^\[TITLE:\s*([^\]]+)\]$/i.exec(title);
-  if (sentinel) title = sentinel[1];
-  title = title
-    .replace(/^```(?:json)?\s*/i, '')
-    .replace(/\s*```$/i, '')
-    .replace(/^#{1,6}\s*/, '')
-    .replace(/^["'“”‘’`]+|["'“”‘’`]+$/g, '')
-    .replace(/[\r\n\t]+/g, ' ')
-    .replace(/\s+/g, ' ')
-    .trim();
-  return truncateChars(title, MAX_TITLE_CHARS).replace(/[\s:：,，;；.!?。！？-]+$/u, '').trim();
-}
-
 export function fallbackCodexTitle(userText: string): string {
-  const plain = userText
-    .replace(/^\s*\/(?:btw|branch)\s+/i, '')
-    .replace(/```[\s\S]*?```/g, ' ')
-    .replace(/[`*_>#\[\]()]/g, ' ')
-    .replace(/https?:\/\/\S+/g, ' ')
-    .replace(/\s+/g, ' ')
-    .trim();
-  const firstPhrase = plain.split(/(?<=[。！？.!?])\s*/u)[0] ?? plain;
-  return cleanTitle(truncateChars(firstPhrase, 48)) || 'New Codex Request';
+  return fallbackTitleFromUserText(userText) || 'New Codex Request';
 }
 
 export function parseGeneratedCodexTitle(raw: string, userText: string): string {
@@ -77,11 +51,11 @@ export function parseGeneratedCodexTitle(raw: string, userText: string): string 
     try {
       const parsed = JSON.parse(candidate) as Record<string, unknown>;
       if (typeof parsed.title === 'string') {
-        const title = cleanTitle(parsed.title);
+        const title = cleanGeneratedTitle(parsed.title);
         if (title) return title;
       }
     } catch {
-      const title = cleanTitle(candidate);
+      const title = cleanGeneratedTitle(candidate);
       if (title && !title.startsWith('{')) return title;
     }
   }
@@ -147,7 +121,7 @@ export async function generateCodexTitle(opts: GenerateCodexTitleOptions): Promi
     const [, rawTitle] = await Promise.all([
       opts.client.request('turn/start', {
         threadId,
-        input: [{ type: 'text', text: truncateChars(opts.userText, MAX_TITLE_INPUT_CHARS) }],
+        input: [{ type: 'text', text: opts.input ?? truncateChars(opts.userText, MAX_TITLE_INPUT_CHARS) }],
         effort: 'low',
         summary: 'none',
         outputSchema: TITLE_OUTPUT_SCHEMA,

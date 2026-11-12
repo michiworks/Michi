@@ -1,24 +1,24 @@
 import { streamMessage } from '../services/api';
 import type { StreamHandlers } from '../services/api';
-import {
-  parseInlineFollowUpSentinel,
-  parseInlineFollowUpsSentinel,
-} from './assistantParsing';
+import { parseFollowUpSentinelLine } from 'michi-shared';
+import { withMetaAgentTurnContext } from '../services/api/assistant';
+import { parseInlineFollowUpsSentinel } from './assistantParsing';
 import type { ChatAction } from './chatTypes';
 import { subagentActivityAction, subagentListAction } from './subagentStreamActions';
-import { reportRemoteCredentialError, reportRemoteRuntimeReady } from './remoteAuthentication';
-import { backendConnectionIdForWorkspace } from '../config/backendConnections';
-import { invalidateTurnPageReceipt, parseTurnPageInvalidation } from '../lib/turnPageReceipt';
+import { createTurnStreamEffects, doneOutcome } from './turnStreamEffects';
 import { savedTurnResult } from './turnErrorRecovery';
 
 type Ref<T> = { current: T };
 
 export type TurnEndReason = 'done' | 'cancel' | 'error';
 
-// Sentinel prefixes the inline metadata side-effect dispatcher recognises.
-// Used both here (for completed-sentinel detection during streaming) and in
-// assistantParsing.ts's stripSentinelsStreamingSafe (visible projection).
-const SENTINEL_PREFIXES = ['[TITLE:', '[FOLLOW-UP'];
+// Sentinel prefixes the inline metadata side-effect dispatcher holds. Visible
+// stripping is separate (shared's scanTurnMetadataSentinels), but this list
+// must match shared's even though only titles and follow-ups dispatch here,
+// so a sentinel quoted inside a branch overview is not dispatched on its own.
+// sentinelParity.test.ts keeps the two lists equal.
+const SENTINEL_PREFIXES = ['[TITLE:', '[BRANCH-OVERVIEW:', '[FOLLOW-UP'];
+const FOLLOW_UP_ITEM_PREFIX_RE = /^\[FOLLOW-UP\s+[1-3]/i;
 
 function couldStillBeSentinel(buf: string): boolean {
   const upper = buf.toUpperCase();
@@ -47,7 +47,19 @@ interface RunChatStreamOptions {
     quoteSource?: import('../lib/quoteFormat').AnyQuoteSource;
     attachments?: Array<{ name: string; absPath: string }>;
     comments?: Array<Record<string, unknown>>;
+    /** What a message to the agent referred to, kept on the stored row so a retry after a reload still sends it. */
+    companionRefs?: import('michi-shared').CompanionTurnRef[];
   };
+  /** The skill this message runs; see streamMessage. */
+  skill?: import('michi-shared').SkillInvocationRequest;
+  /** The backend would not run `skill`: it has no such skill for this chat (skill_not_found), or runs none (skills_unavailable). */
+  onSkillRejected?: () => void;
+  /**
+   * The agent's conversation: the metaAgentContext captured when the user sent
+   * this message (UserSendMeta.metaAgentContext). The request carries it, not
+   * what the screen shows now; undefined leaves it to the registered provider.
+   */
+  metaAgentContext?: import('michi-shared').MetaAgentChatTurnContext | null;
   extraHandlers?: Omit<Partial<StreamHandlers>, 'onTurnStart' | 'onDone' | 'onAborted' | 'onError' | 'onErrorPayload' | 'onSavedTurn'>;
   /** Fires after finishAsDone completes — safe place for side-effects like notifications. */
   onStreamComplete?: () => void;
@@ -72,6 +84,9 @@ export function runChatStream({
   onRejected,
   enableKiroSidecarTitle,
   userMetadata,
+  skill,
+  onSkillRejected,
+  metaAgentContext,
   extraHandlers,
   onStreamComplete,
   onTurnEnd,
@@ -89,6 +104,11 @@ export function runChatStream({
   // sentinel completes. We do NOT modify or hide the raw text here; visible
   // projection (sentinel stripping) is render-time work.
   let bracketHold = '';
+  // A follow-up stays held until its line ends, so a `]` inside the question
+  // only updates it; each `]` re-reads the line.
+  let followUpLine = false;
+  let openTicks = 0; // backtick run that opened the current inline code span
+  let tickRun = 0; // backticks seen since the last other character
   let titleDispatched = false;
   let visibleResponseCompleteDispatched = false;
   let currentAssistantId = assistantId;
@@ -96,24 +116,11 @@ export function runChatStream({
   let lastAcceptedTurnId = '';
   let lastAcceptedSeq = -1;
   let streamCancel: (() => void) | null = null;
-  let credentialFailed = false;
   const streamedFollowUps: string[] = [];
   const MAX_BRACKET_HOLD = 4096; // safety cap for malformed / unclosed brackets
-  const pageToolStates = new Map<string, { title?: string; status?: string; output?: string }>();
-  const observePageTool = (tool: { toolCallId: string; title?: string; status?: string; output?: string; turnId?: string }) => {
-    if (!workspaceId) return;
-    const turnId = tool.turnId || currentTurnId || currentAssistantId;
-    const key = JSON.stringify([turnId, tool.toolCallId]);
-    const previous = pageToolStates.get(key) ?? {};
-    const complete = { ...previous,
-      ...(tool.title ? { title: tool.title } : {}),
-      ...(tool.status ? { status: tool.status } : {}),
-      ...(tool.output !== undefined ? { output: tool.output } : {}),
-    };
-    pageToolStates.set(key, complete);
-    const backendConnectionId = backendConnectionIdForWorkspace(workspaceId);
-    const receipt = parseTurnPageInvalidation(complete, backendConnectionId);
-    if (receipt) invalidateTurnPageReceipt(receipt, { backendConnectionId, workspaceId, nodeId, turnId }, tool.toolCallId);
+  const effects = createTurnStreamEffects({ nodeId, workspaceId: () => workspaceId });
+  const observePageTool = (tool: Parameters<typeof effects.tool>[0] & { turnId?: string }) => {
+    effects.tool(tool, tool.turnId || currentTurnId || currentAssistantId);
   };
 
   const dispatchFollowUps = () => {
@@ -149,17 +156,18 @@ export function runChatStream({
       }
       return;
     }
-    const single = parseInlineFollowUpSentinel(segment);
-    if (single) {
-      streamedFollowUps[single.index] = single.followUp;
-      dispatchFollowUps();
-      return;
-    }
     const legacy = parseInlineFollowUpsSentinel(segment);
     if (legacy.length > 0) {
       streamedFollowUps.splice(0, streamedFollowUps.length, ...legacy);
       dispatchFollowUps();
     }
+  };
+
+  const handleFollowUpLine = (held: string): void => {
+    const items = parseFollowUpSentinelLine(held);
+    if (items.length === 0) return;
+    for (const item of items) streamedFollowUps[item.index] = item.followUp;
+    dispatchFollowUps();
   };
 
   const cleanup = () => {
@@ -199,6 +207,16 @@ export function runChatStream({
       // this frame. It is now safe to ack a recovered agent-spawn outbox item.
       dispatch({ type: 'spawn-prompt-started', nodeId });
       dispatch({ type: 'active-turn', nodeId, assistantId: currentAssistantId, turnId: data.turnId });
+      // What the route decided about this message (DESIGN-v2 §1.3) reaches the sender on its turn_start too.
+      if (data.userMetadata || data.assistantMetadata) {
+        dispatch({
+          type: 'turn-start-metadata',
+          nodeId,
+          assistantId: currentAssistantId,
+          ...(data.userMetadata ? { userMetadata: data.userMetadata } : {}),
+          ...(data.assistantMetadata ? { assistantMetadata: data.assistantMetadata } : {}),
+        });
+      }
       trackSeq(env.seq, data.turnId);
     },
     onChunk: (text, seq, _assistantId, turnId, observedAt) => {
@@ -210,13 +228,33 @@ export function runChatStream({
       // text itself is already on its way to the reducer; nothing here
       // affects what gets stored or rendered.
       for (const ch of text) {
-        if (bracketHold || ch === '[') {
+        // Track inline code as shared's scanner does: a `[` inside a backtick
+        // span on its line is quoted prose, never a sentinel.
+        if (ch === '`') {
+          tickRun += 1;
+        } else if (tickRun > 0) {
+          if (openTicks === 0) openTicks = tickRun;
+          else if (tickRun === openTicks) openTicks = 0;
+          tickRun = 0;
+        }
+        if (ch === '\n' || ch === '\r') openTicks = 0;
+        if (bracketHold || (ch === '[' && openTicks === 0)) {
           bracketHold += ch;
-          if (ch === ']') {
+          if (followUpLine) {
+            if (ch === '\n' || ch === '\r' || bracketHold.length > MAX_BRACKET_HOLD) {
+              bracketHold = '';
+              followUpLine = false;
+            } else if (ch === ']') {
+              handleFollowUpLine(bracketHold);
+            }
+          } else if (ch === ']' && FOLLOW_UP_ITEM_PREFIX_RE.test(bracketHold)) {
+            followUpLine = true;
+            handleFollowUpLine(bracketHold);
+          } else if (ch === ']') {
             const buf = bracketHold;
             bracketHold = '';
             handleSentinelCompletion(buf);
-          } else if (!couldStillBeSentinel(bracketHold) || bracketHold.length > MAX_BRACKET_HOLD) {
+          } else if (ch === '\n' || ch === '\r' || !couldStillBeSentinel(bracketHold) || bracketHold.length > MAX_BRACKET_HOLD) {
             // Prefix can't grow into a sentinel, or runaway bracket — abandon
             // the hold. The text is already in reducer state from the dispatch above;
             // we just stop treating it as a sentinel candidate.
@@ -332,45 +370,32 @@ export function runChatStream({
     onRetryEnd: () => dispatch({ type: 'runtime-activity', nodeId, assistantId: currentAssistantId }),
     onWarning: (data) => {
       dispatch({ type: 'warning', nodeId, assistantId: currentAssistantId, warning: data });
-      credentialFailed = reportRemoteCredentialError(nodeId, data.message) || credentialFailed;
+      effects.runtimeMessage(data.message);
     },
     onMcpServerError: (data) => {
       dispatch({ type: 'mcp-server-error', nodeId, serverName: data.serverName, error: data.error });
-      credentialFailed = reportRemoteCredentialError(nodeId, data.error) || credentialFailed;
+      effects.runtimeMessage(data.error);
     },
-    onDone: (stopReason, _assistantId, turnId, persisted, completedAt) => {
+    onDone: (stopReason, _assistantId, turnId, persisted, completedAt, completion) => {
       if (turnId) currentTurnId = turnId;
-      if (persisted === false) {
-        dispatch({
-          type: 'error',
-          nodeId,
-          assistantId: currentAssistantId,
-          message: 'The turn finished but the backend did not confirm durable persistence.',
-          errorKind: 'turn_persistence_failed', turnId: currentTurnId,
-        });
-        cleanup();
-        onTurnEnd?.('error', nodeId);
-        return;
-      }
-      if (stopReason === 'error') {
-        dispatch({
-          type: 'error',
-          nodeId,
-          assistantId: currentAssistantId,
-          message: 'Agent process exited before completing the turn.',
-          errorKind: 'turn_outcome_unknown', turnId: currentTurnId,
-        });
+      const { error, aborted } = doneOutcome(stopReason, persisted);
+      if (error) {
+        dispatch({ type: 'error', nodeId, assistantId: currentAssistantId, ...error, turnId: currentTurnId });
         cleanup();
         onTurnEnd?.('error', nodeId);
         return;
       }
       // Reducer extracts metadata from assistant answer blocks.
-      const aborted = stopReason === 'cancel' || stopReason === 'cancelled' || undefined;
-      if (!aborted && !credentialFailed) reportRemoteRuntimeReady(nodeId);
-      dispatch({ type: 'done', nodeId, assistantId: currentAssistantId, completedAt, aborted });
+      effects.end(!aborted);
+      dispatch({
+        type: 'done', nodeId, assistantId: currentAssistantId, completedAt, aborted,
+        ...(currentTurnId ? { turnId: currentTurnId } : {}),
+        ...(completion ? { completion } : {}),
+      });
       cleanup();
       onTurnEnd?.('done', nodeId);
-      onStreamComplete?.();
+      // A turn cancelled elsewhere (another window, the phone) did not finish; like onAborted below.
+      if (!aborted) onStreamComplete?.();
     },
     onAborted: () => {
       dispatch({ type: 'done', nodeId, assistantId: currentAssistantId, aborted: true });
@@ -406,9 +431,12 @@ export function runChatStream({
   };
 
   function handleError(message: string, turnId?: string, code?: string, recoverable?: boolean, completedAt?: number) {
-      credentialFailed = reportRemoteCredentialError(nodeId, message) || credentialFailed;
+      effects.runtimeMessage(message);
+      if (skill && (code === 'skill_not_found' || code === 'skills_unavailable')) onSkillRejected?.();
       if (turnId) currentTurnId = turnId;
       dispatch({ type: 'error', nodeId, assistantId: currentAssistantId, message, errorKind: code, recoverable, completedAt, turnId: currentTurnId || undefined });
+      // Not reached through streamMessage, which waits out a 409 turn_active
+      // and resends instead of reporting it (stream.ts).
       if (code === 'turn_active' && rejectedDraft) {
         dispatch({ type: 'set-composer-draft', nodeId, draft: rejectedDraft, preserveExisting: true });
         onRejected?.();
@@ -417,11 +445,13 @@ export function runChatStream({
       onTurnEnd?.('error', nodeId);
   }
 
-  const cancelTransport = streamMessage(nodeId, prompt, handlers, {
+  // streamMessage builds its request synchronously: it reads the captured context here.
+  const cancelTransport = withMetaAgentTurnContext(nodeId, metaAgentContext, () => streamMessage(nodeId, prompt, handlers, {
     displayText,
     enableKiroSidecarTitle,
     userMetadata,
-  });
+    ...(skill ? { skill } : {}),
+  }));
   streamCancel = cancelTransport;
   return streamCancel;
 }

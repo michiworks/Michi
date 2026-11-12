@@ -23,7 +23,7 @@ const SPAWN_PROMPT = 'Use your spawn_agent tool to start exactly one sub-agent w
 test('real Codex: MCP isolation in ordinary chats and no sub-agents in restricted sessions', { skip: !enabled, timeout: 420_000 }, async () => {
   const directory = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'michi-codex-isolation-live-')));
   const priorEnv = { ...process.env };
-  Object.assign(process.env, { MICHI_DATA_DIR: directory, MICHI_TITLE_MODEL_CODEX: 'off', MICHI_CODEX_FOLLOW_UPS_HOOK_POC: '0' });
+  Object.assign(process.env, { MICHI_DATA_DIR: directory, MICHI_TITLE_MODEL_CODEX: 'off' });
   delete process.env.MICHI_CLOUD;
   const { closeDb, getDb, initDb } = require('../src/services/db') as typeof import('../src/services/db');
   const repo = require('../src/services/dbRepository') as typeof import('../src/services/dbRepository');

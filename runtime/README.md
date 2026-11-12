@@ -69,6 +69,12 @@ when you build:
     open session. `runtime.listModes(sessionId)` lists the modes a session can
     switch to: Kiro agents, Crew templates, and Default and Plan on Codex and
     Claude Code.
+- **Skills.**
+  - A runtime lists the skills it loads for a folder (`listSkills`) and the
+    commands a chat runs before it has a session (`hostCommands`).
+  - A turn runs one with `AgentTurnInput.skill`: as the agent's own command
+    where it has one, else as the skill's instructions. That turn ends with
+    `PromptPolicyPort.skillTurnNote` instead of the host's metadata reminders.
 - **Unattended runs.** `startHeadlessSession` drives a session without a user.
   - It answers approvals and questions through your callbacks, or pauses on
     them.
@@ -130,7 +136,7 @@ negotiated them.
 | Reasoning levels | low – max | low – max | low – xhigh | low – max |
 | Warm sessions | ✓ | — | — | ✓ |
 | Host tools | ✓ MCP over HTTP; v3 chats share one endpoint per directory | ✓ through the App's stdio relay, which needs a Michi installation | ✓ MCP over HTTP; the user's own configured MCP servers are turned off | ✓ MCP over HTTP |
-| Titles | from a side session the user turns on | from the Gateway | generated beside the first turn | — |
+| Titles | from a side session the user turns on | from the Gateway | generated beside the first turn | from a minimal CLI on the host's title model, beside the first turn; with the warm pool on, one is kept started |
 | Turns the agent starts itself | v3: when a workflow it launched finishes | — | — (goals are off) | ✓ when a background task completes |
 | Unattended runs (`startHeadlessSession`) | ✓ steering queued natively | — | ✓ steering through `turn/steer` | ✓ allowlisted tools, steering on the next turn |
 
@@ -248,7 +254,15 @@ const status = crew.checkAvailability?.();              // { available, detail }
   MCP servers and keeps the host's.
 - **Claude Code.** Install the optional SDK peer. `claudeAdapterOptions` fills
   in the limits and CLI flags; pass `restrictedToolApproval` for the host tools
-  a restricted session may call. Plan mode is offered in chats only.
+  a restricted session may call, and `requireHostApproval` to send a tool call
+  of an unrestricted session through the host's approval even where the user's
+  own settings or permission mode would allow it (the adapter's PreToolUse hook
+  answers `ask`; SDK hooks are off in bare mode). Plan mode is offered in chats only. A host
+  skill library is an additional folder of every session
+  (`skillLibraryDir`): sessions that load the user's settings run its skills
+  under their own names, and the session state leaves them to the host's
+  listing. `subscribeSkillLibraryChanges` lets live sessions reload it, and
+  `listSkills` asks the installed CLI which skills a folder gets.
 - **Modes.** `await runtime.listModes?.(sessionId)` returns a session's modes
   (`{ id, label, description }`), and `session.setMode?.(id)` switches to one.
   Check `runtime.capabilities.modes` first.
@@ -383,7 +397,7 @@ owns (`ports`):
 Each adapter asserts at construction the ports it reads, and throws a
 `RuntimeHostConfigError` naming every one missing:
 
-- Claude: eleven, all twelve but `title`;
+- Claude: all twelve;
 - Codex: ten, all but `backgroundTurns` and `workflows`;
 - Kiro: ten, all but `workflows` and `backgroundSubagents`, and `workflows`
   too on engine v3;
@@ -459,8 +473,8 @@ sign-in; the MCP routes stay loopback-only.
 
 | Runtime | Processes | Host tools | MCP entry | Child environment | User directories |
 |---|---|---|---|---|---|
-| Kiro | one `kiro-cli` per cwd, sessions multiplexed; warm sessions per cwd | v2: one slot per session; v3 chat sessions: a session group | `michi` | `spawnEnv`, else this process's environment; with `launch`, always this process's environment | kiro-cli's own (its sessions under `~/.kiro`) |
-| Crew | one Crew ACP adapter per cwd, through the Kiro Crew Gateway | the adapter writes a lease for the session's slot to `MICHI_CREW_MCP_DIR` (default `~/.michi/crew-mcp`); the App's stdio relay reads it and calls `/api/mcp/<slot>` | `michi` | always this process's environment; `spawnEnv` does not apply | `~/.michi/crew-mcp` (each lease is removed when its session ends; a small pointer file stays), and Kiro Crew's own |
+| Kiro | one `kiro-cli` per cwd, sessions multiplexed; warm sessions per cwd | v2: one slot per session; v3 chat sessions: a session group | `michi` | `spawnEnv`, else this process's environment; with `launch`, the launch's `env`, else this process's environment | kiro-cli's own (its sessions under `~/.kiro`) |
+| Crew | one Crew ACP adapter per cwd, through the Kiro Crew Gateway | the adapter writes a lease for the session's slot to `MICHI_CREW_MCP_DIR` (default `~/.michi/crew-mcp`); the App's stdio relay reads it and calls `/api/mcp/<slot>` | `michi` | `spawnEnv`, which the preset passes as its launch's `env`; else this process's environment | `~/.michi/crew-mcp` (each lease is removed when its session ends; a small pointer file stays), and Kiro Crew's own |
 | Codex | one `codex app-server` for the runtime | one slot per session | `mcp_servers.__michi_internal__` | only what `spawnEnv` returns: without it, an empty environment | `~/.codex` (`codexHome`), its sessions included |
 | Claude | one `claude` process per session, and warm ones per (cwd, model) unless `limits.pool.disabled` | one slot per session, through `--mcp-config` | `__michi_internal__` | `spawnEnv` | `~/.claude` (`configDir`) |
 
@@ -473,9 +487,7 @@ passes a filtered copy.
 Agent CLIs, the Crew App and Michi's installed files depend on these, so they
 do not change with the package:
 
-- URL shapes `/api/mcp/<slotId>` and `/api/mcp-session/<groupId>`, and Michi's
-  Codex Stop-hook route `/api/codex-hooks/<slotId>/stop` (a standalone host's
-  default is `<basePath>-hooks/<slotId>/stop`);
+- URL shapes `/api/mcp/<slotId>` and `/api/mcp-session/<groupId>`;
 - `headers: []` in every endpoint;
 - the MCP server names `michi` (Kiro, Crew) and `__michi_internal__` (Codex,
   Claude);
@@ -494,8 +506,8 @@ do not change with the package:
 
 In this process the adapters read the environment only to find their CLIs
 and start them: `PATH`, and on Windows `LOCALAPPDATA`, `APPDATA` and `ComSpec`.
-The Crew adapter process, which inherits this process's environment, takes
-its Gateway, App and lease settings from it (`CREW_GATEWAY_URL`,
+The Crew adapter process, which gets `spawnEnv` (else this process's
+environment), takes its Gateway, App and lease settings from it (`CREW_GATEWAY_URL`,
 `KIROCREW_PORT`, `KIROCREW_HOME`, `MICHI_CREW_APP`, `MICHI_CREW_AGENT`,
 `MICHI_CREW_MEMORY_MODE`, `MICHI_CREW_MCP_DIR`). From the environment
 `spawnEnv` returns, the Claude adapter reads `CLAUDE_CONFIG_DIR` when
@@ -511,8 +523,8 @@ environment. The host passes everything else:
 |---|---|---|---|
 | Kiro | engine v2, at most 20 `kiro-cli` processes (`processCap`), an idle one stopped after 5 min, 3 warm sessions per cwd, 100 bound sessions, `ask_user` waits 5 min, custom agents off, ACP idle timeout 180 s, `kiro-cli` looked up in its fixed locations; without `spawnEnv`, or with `launch`, the child inherits this process's environment | `host`, `bridge`; `mcpSlots` for the host's tools | where else to look for `kiro-cli` (`kiroCli`), and every other setting |
 | Crew (`createCrewRuntime`) | engine v2, id `crew`, label `Kiro Crew`, Crew's flavor, descriptor and capabilities, no sidecar titles, the bundled adapter resolved at each spawn, Crew's offline availability check | `host`, `bridge`; `mcpSlots` for the host's tools | `crew`: where the adapter and App are (default: the bundled adapter, `~/.kiro/crew`, App `michi-crew-runtime`), a function to read it at each spawn |
-| Codex | requests and initialize 30 s, approvals 5 min, titles 10 s, no concurrency cap, `codexHome` `~/.codex`, the CLI found on PATH or in its standard locations, no Stop hook | `host`, `bridge`, `mcpSlots`, and `spawnEnv`: without it the child gets an empty environment, no PATH or HOME | |
-| Claude (`claudeAdapterOptions`) | `DEFAULT_CLAUDE_LIMITS` (15 processes; pool on, 2 per cwd, waits for warm; init 60 s; approvals 5 min; dispose 2 s, then 1 s after SIGKILL), `DEFAULT_CLAUDE_CLI_FLAGS` (bare off, strict MCP off, subagent text and human origin on), Stop hook off, the CLI found on PATH or in its standard locations | `host`, `spawnEnv`; then `bridge`, `mcpSlots` | `configDir`, `stderrWarning`, `restrictedToolApproval`, `hostText`, `modelCatalog` |
+| Codex | requests and initialize 30 s, approvals 5 min, titles 10 s, no concurrency cap, `codexHome` `~/.codex`, the CLI found on PATH or in its standard locations | `host`, `bridge`, `mcpSlots`, and `spawnEnv`: without it the child gets an empty environment, no PATH or HOME | |
+| Claude (`claudeAdapterOptions`) | `DEFAULT_CLAUDE_LIMITS` (15 processes; pool on, 2 per cwd, waits for warm; init 60 s; approvals 5 min; dispose 2 s, then 1 s after SIGKILL), `DEFAULT_CLAUDE_CLI_FLAGS` (bare off, strict MCP off, subagent text and human origin on), the CLI found on PATH or in its standard locations | `host`, `spawnEnv`; then `bridge`, `mcpSlots` | `configDir`, `stderrWarning`, `restrictedToolApproval`, `requireHostApproval`, `hostText`, `modelCatalog`, `skillLibraryDir`, `subscribeSkillLibraryChanges`, `advertiseSkills` |
 
 ## Restricted sessions
 
@@ -523,7 +535,9 @@ only the host's own tools:
 
 - Claude runs it without built-in tools, user settings or other MCP servers,
   and allows a host tool call only when `ClaudeAdapterOptions.restrictedToolApproval`
-  says so (default: deny every call).
+  says so (default: deny every call). The adapter passes that callback the
+  session's own tool profile, so a host can allow only what that profile
+  allows.
 - Codex runs it read-only and offline, with its shell, plugins and every MCP
   server but the host's turned off, and declines every approval. Under
   `createDefaultHost` such a session now runs locked down; before contract v1
@@ -551,6 +565,53 @@ A host that restricts sessions should serve their slots only
 `allowedToolNames`, and pass `restrictedToolApproval` for the tools a Claude
 session may call.
 
+## Ephemeral sessions
+
+A host that opens a session for one job and throws it away (Michi: a
+Companion check-in) passes `NewAgentSessionOptions.ephemeral: true`. The
+session keeps no native transcript the runtime can avoid keeping, is never
+resumed or forked, and fails its turn when its process dies instead of being
+restored. After `releaseSession`, the host calls the optional
+`AgentRuntime.discardNativeSession({ sessionId, owner, nativeSessionId, cwd,
+profileHash?, ownerUserId? })`, which removes what the runtime still stored
+for it and answers:
+- `discarded` (removed) or `absent` (nothing was stored, or it is already
+  gone; Kiro answers `absent` only when its check-in store recorded the
+  session and holds nothing of it any more);
+- `deferred`: not yet; the session is still live or opening, or (Kiro) a
+  check-in kiro-cli process still runs (live, or stopping) and could not
+  delete it: files are never removed under a running kiro-cli. Retry at the
+  next cleanup; do not record it as discarded;
+- `unsupported`: it will not remove it; the native id or the path it would
+  delete is not one it can vouch for (Kiro: also a session its check-in store
+  has no trace of, such as one kept in `~/.kiro`). Retrying does not help.
+
+`RuntimeTopology.ephemeralSessions` says whether and how a runtime honors
+them; a host opens ephemeral sessions only where it is set:
+
+| Runtime | `ephemeralSessions` | Native record | `discardNativeSession` removes |
+|---|---|---|---|
+| Claude | `native` | none: the SDK's `persistSession: false`; the CLI also starts without `OTEL_*` and `CLAUDE_CODE_ENABLE_TELEMETRY`, with non-essential traffic off. Never from the warm pool | under the cwd's project directory only `<id>.jsonl` and `<id>/`, and `<config>/session-env/<id>/`; `unsupported` for a native id that is not a UUID or a path outside those directories |
+| Codex | `native` | none: an `ephemeral` thread on an `app-server` of its own, on a new Codex home under `CodexAdapterOptions.ephemeralHomeRoot` (default `<data dir>/codex-ephemeral-homes`) that holds only a link to `auth.json` and the model and provider keys of the user's effective config; notify, hooks, memories, plugins, shell snapshots (which run the user's login shell and rc files), history and telemetry are off; a `thread/start` answer without `ephemeral: true` fails the session, and any failure after its app-server started stops it | that home; without one, a persisted native id through `thread/delete` |
+| Pi (Michi's host) | `native` | none: an SDK session in memory | the session's scope directory, if an earlier session left one |
+| Kiro CLI | `discard-after-release`, on v3 with the host's `restrictedAgent.ephemeral` only | Kiro's own, under the `KIRO_HOME` the host gives the check-in worker (`restrictedAgent.ephemeral.homeDir`); the session opens straight in the restricted agent (`session/new` with its `modeId`), and a session Kiro did not store there fails with a guard error and is deleted before any prompt; the worker's `initialize` asks for no agent telemetry | `session/delete` through a live check-in kiro-cli when Kiro advertised it; with none running, what `session/delete` would remove (the session directory, its entry in the bucket's `.index/index.json`, a remove op in `session-index/<hash>.jsonl`), once its `session.json` names one of the host's agent directories |
+| Kiro Crew, Antigravity, Kiro v2 | absent | — | — |
+
+Kiro's ephemeral sessions are restricted sessions: they need
+`KiroAdapterOptions.restrictedAgent` with its `ephemeral` member, whose
+`clientOptions(engine, agentName, { kiroHome })` gives the worker its
+`KIRO_HOME`. kiro-cli 3.0 then reads none of `~/.kiro` (the user's MCP
+configuration, hook files, agents, steering) and reads its settings from
+`<KIRO_HOME>/settings/cli.json`, which the host writes. Signed in through
+a CLI wrapper, that is where Kiro stores the session, its
+index and its logs (no prompt text in the logs); its model calls (the turn,
+and the session title) are the only channels that carry the turn's content,
+with content collection off
+(Michi's probe P1b, kiro-cli 3.0.0). Its
+OpenTelemetry export ignores `telemetry.enabled: false`, so the check-in
+worker sends `clientCapabilities._meta.kiro.telemetryEnabled: false`
+(`AcpProcessOptions.telemetryOff`).
+
 ## Capability flags and the tool bridge
 
 `AgentRuntime.capabilities.spawnBranches` and `.saveContext` say that an
@@ -570,12 +631,7 @@ such mark: `CodexRuntime`'s test seams are `@internal`, and `AcpAgentRuntime`'s
 members beyond `AgentRuntime` are named here only.
 
 - `RuntimeHost.interaction` (`InteractionBroker`): no adapter calls it yet.
-- The follow-ups Stop-hook POC: `McpSlot.onValidateFollowUps`,
-  `McpSlotProvider.hookEndpoint`, `McpSlotProviderOptions.hookEndpoint`,
-  `CodexAdapterOptions.followUpsHook`, `ClaudeAdapterOptions.followUpsHookPoc`,
-  the `followUpsHookPocInstruction` members of `ClaudeHostText` and
-  `CodexHostText`, the `'hook-tool'` value of `FollowUpsExperimentMode` and
-  the `hookPocEnabled` argument of `PromptPolicyPort.followUpsMetadataOutputMode`
+- The `overviewTool` argument of `PromptPolicyPort.followUpsMetadataOutputMode`
   and `PromptPolicyPort.followUpsTurnReminder`.
 - `CodexRuntime`'s test seams: an internal second constructor argument, left
   out of the generated validation declarations.
@@ -641,8 +697,7 @@ The private local validation artifact:
   `dist/vendor/michi-shared/`.
 - carries Crew's ACP adapter and MCP relay as self-contained CommonJS bundles
   in `dist/adapters/crew/` (`crewAcp.js`, `crewMcp.js`, `crewMcpHost.js`),
-  where the Crew adapter looks for them, and the Codex Stop hook runner in
-  `dist/adapters/codex/assets/`.
+  where the Crew adapter looks for them.
 - needs Node.js 22 or later (`engines.node`).
 - does not export `package.json`; a host checks the contract it was built
   against with `RUNTIME_CONTRACT_VERSION`.
@@ -675,8 +730,7 @@ npm run typecheck -w michi-runtime
 
 `test/` holds the tests that need only this package, adapter tests included.
 Tests that use Michi's host, backend code or crew-app packaging stay in
-`backend/test/`; a few package-only ACP tests (acpDualEngine, acpErrors) have
-not moved yet.
+`backend/test/`.
 
 Tests use `node --test` through ts-node. The package depends on Michi's shared
 package (`shared/` in this repository), whose entry is its built `dist/`, so

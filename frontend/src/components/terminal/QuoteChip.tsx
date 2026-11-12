@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import { useState } from 'react';
 import type { AnyQuoteSource } from '../../lib/quoteFormat';
 import { attachedQuoteHasSelection, quoteSourceOf } from '../../state/assistant/assistantContext';
 import { useInAssistantScope } from './assistant/assistantScope';

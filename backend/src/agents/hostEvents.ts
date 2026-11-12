@@ -4,14 +4,14 @@ import { log } from "../services/logger";
 
 /**
  * Michi's product events: what Michi's tools (spawn_branches, save_artifact,
- * update_artifact, show_image, set_branch_overview, set_follow_ups) report
- * through a runtime session. The runtime contract carries them as host
- * events; `type` is the SSE event name the client reads and `payload` is
- * that event's data, field for field.
+ * update_artifact, delete_artifact, show_image, set_branch_overview,
+ * set_follow_ups) report through a runtime session. The runtime contract
+ * carries them as host events; `type` is the SSE event name the client reads
+ * and `payload` is that event's data, field for field.
  *
  * Michi's tool handlers (services/mcpServer.ts) report spawn_branches,
- * artifact_saved, artifact_updated and image through the slot's session
- * sink (the Claude, Codex and Kiro adapters give every slot one). For the
+ * artifact_saved, artifact_updated, artifact_deleted and image through the
+ * slot's session sink (the Claude, Codex and Kiro adapters give every slot one). For the
  * turn metadata, and for Pi's in-process tools, the adapter builds the host
  * event itself (the runtime layer cannot import this module). Michi decodes
  * them here.
@@ -23,6 +23,7 @@ export const MICHI_HOST_EVENT_TYPES = [
     "follow_ups_status",
     "artifact_saved",
     "artifact_updated",
+    "artifact_deleted",
     "image",
 ] as const;
 
@@ -59,6 +60,11 @@ function artifact(p: Fields): ChatStreamPayloads["artifact_saved"] | null {
     return { contextId: p.contextId as string | undefined, name: p.name, filePath: p.filePath, size: p.size as number | undefined };
 }
 
+function deletedArtifact(p: Fields): ChatStreamPayloads["artifact_deleted"] | null {
+    if (typeof p.name !== "string" || !p.name || !isOptional(p.contextId, "string")) return null;
+    return { contextId: p.contextId as string | undefined, name: p.name };
+}
+
 /** One warning per problem and type (as logged), for at most this many distinct problems. */
 const MAX_WARNINGS = 32;
 const warned = new Set<string>();
@@ -76,7 +82,10 @@ function warnOnce(problem: Problem, type: string): void {
     log.warn("chat", problem, { type: logged });
 }
 
-/** Test-only: forget which problems were already logged. */
+/**
+ * Test-only: forget which problems were already logged.
+ * @testonly
+ */
 export function __resetHostEventWarnings(): void {
     warned.clear();
 }
@@ -112,6 +121,7 @@ const PAYLOADS: { [T in MichiHostEventType]: (p: Fields) => ChatStreamPayloads[T
         : null,
     artifact_saved: artifact,
     artifact_updated: artifact,
+    artifact_deleted: deletedArtifact,
     image: (p) => typeof p.path === "string" && isOptional(p.caption, "string")
         && typeof p.mimeType === "string" && typeof p.size === "number"
         ? { path: p.path, caption: p.caption as string | undefined, mimeType: p.mimeType, size: p.size }

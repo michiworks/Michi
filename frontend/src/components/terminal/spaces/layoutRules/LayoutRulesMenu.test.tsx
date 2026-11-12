@@ -2,7 +2,8 @@ import React from 'react';
 import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { PageLayoutRule } from 'michi-shared';
-import { adoptAssistantInfo, resetAssistantStoreForTests } from '../../../../state/assistant/assistantStore';
+import { noteCompanionTurnEnded, resetCompanionStoreForTests } from '../../../../state/companion/companionStore';
+import { subscribePageChanges, type PageEventIdentity } from '../../../../state/pages/pageEvents';
 
 const mocks = vi.hoisted(() => ({ fetch: vi.fn(), remove: vi.fn() }));
 vi.mock('../../../../services/api/spacesHome', () => ({ fetchLayoutRules: mocks.fetch, deleteLayoutRule: mocks.remove, fetchLayoutPreferences: vi.fn().mockResolvedValue({ text: '', revision: 0, updatedAt: null, updatedBy: null }), saveLayoutPreferences: vi.fn() }));
@@ -24,20 +25,20 @@ function openList() {
 }
 
 describe('Layout rules in the ⋯ menu', () => {
-  let changed: Array<{ backendConnectionId: string; pageId?: string }>;
-  const onChanged = (event: Event) => changed.push((event as CustomEvent).detail);
+  let changed: PageEventIdentity[];
+  let stopChanges = () => {};
 
   beforeEach(() => {
     vi.useFakeTimers({ toFake: ['Date'] });
     vi.setSystemTime(NOW);
-    resetAssistantStoreForTests();
+    resetCompanionStoreForTests();
     mocks.fetch.mockReset().mockResolvedValue([stalled, lead]);
     mocks.remove.mockReset().mockImplementation(async () => { mocks.fetch.mockResolvedValue([lead]); return [lead]; });
     changed = [];
-    window.addEventListener('michi:page-changed', onChanged);
+    stopChanges = subscribePageChanges({ backendConnectionId: 'local' }, (identity) => changed.push(identity));
   });
   afterEach(() => {
-    window.removeEventListener('michi:page-changed', onChanged);
+    stopChanges();
     vi.useRealTimers();
   });
 
@@ -52,7 +53,7 @@ describe('Layout rules in the ⋯ menu', () => {
     const rows = within(list).getAllByTestId('layout-rule');
     expect(rows.map((row) => row.querySelector('.michi-doc-menu__title')?.textContent)).toEqual(['Stalled: only the last 3 days', 'Lead with the release']);
     expect(rows[0].textContent).toContain('Stalled · applied by Michi · from your message to the assistant · 2h ago');
-    expect(rows[1].textContent).toContain('followed by the Meta agent · added by you · 3d ago');
+    expect(rows[1].textContent).toContain('followed by Michi · added by you · 3d ago');
     expect(document.activeElement).toBe(within(rows[0]).getByRole('button', { name: 'Delete rule: Stalled: only the last 3 days' }));
   });
 
@@ -88,7 +89,7 @@ describe('Layout rules in the ⋯ menu', () => {
     mocks.fetch.mockResolvedValue([]);
     render(<LayoutRulesMenuButton pageId="pg-home" backendConnectionId="local" />);
     const list = openList();
-    await waitFor(() => expect(list.textContent).toContain('No layout rules yet. Ask the Meta agent, for example “Stalled: only the last 3 days”.'));
+    await waitFor(() => expect(list.textContent).toContain('No layout rules yet. Ask Michi, for example “Stalled: only the last 3 days”.'));
   });
 
   it('keeps the editable document open and retains its draft when the window resizes', async () => {
@@ -101,11 +102,26 @@ describe('Layout rules in the ⋯ menu', () => {
     expect(input).toHaveProperty('value', 'Keep risks first');
   });
 
-  it('reads the rules again after a window turn and re-lays out the page when they changed', async () => {
+  it('stays under its ⋯ button while the page scrolls', async () => {
+    render(<LayoutRulesMenuButton pageId="pg-home" backendConnectionId="local" />);
+    const button = screen.getByRole('button', { name: 'Page actions' });
+    let top = 100;
+    vi.spyOn(button, 'getBoundingClientRect').mockImplementation(() => ({ left: 600, right: 628, top, bottom: top + 28, width: 28, height: 28, x: 600, y: top, toJSON() {} }));
+    const list = openList();
+    expect(list.style.top).toBe('132px');
+    top = 40;
+    fireEvent.scroll(window);
+    expect(screen.getByRole('dialog', { name: 'Layout preferences' })).toBe(list);
+    expect(list.style.top).toBe('72px');
+  });
+
+  it('reads the rules again after a turn of the agent’s conversation and re-lays out the page when they changed', async () => {
     mocks.fetch.mockResolvedValueOnce([]);
+    resetCompanionStoreForTests({ assistant: { status: 'ready', error: null, info: { workspaceId: 'w', nodeId: 'n', treeId: 't', settings: { runtimeId: 'claude', modelId: null, reasoning: null }, supportedRuntimes: ['claude'] } } });
     render(<LayoutRulesMenuButton pageId="pg-home" backendConnectionId="local" />);
     await waitFor(() => expect(mocks.fetch).toHaveBeenCalledTimes(1));
-    const turnEnded = () => adoptAssistantInfo({ workspaceId: 'w', nodeId: 'n', settings: { runtimeId: 'claude' }, supportedRuntimes: ['claude'] });
+    // What the chat store calls when a turn in V ends (F1a-review #7), panel shown or not.
+    const turnEnded = () => noteCompanionTurnEnded('n');
     await act(async () => { turnEnded(); });
     await waitFor(() => expect(changed).toEqual([{ backendConnectionId: 'local', pageId: 'pg-home' }]));
     const reads = mocks.fetch.mock.calls.length;
@@ -116,6 +132,6 @@ describe('Layout rules in the ⋯ menu', () => {
   });
 
   it('describes a user rule with no time', () => {
-    expect(layoutRuleMeta({ ...lead, createdAt: NOW }, NOW)).toBe('followed by the Meta agent · added by you · just now');
+    expect(layoutRuleMeta({ ...lead, createdAt: NOW }, 'Robin', NOW)).toBe('followed by Robin · added by you · just now');
   });
 });

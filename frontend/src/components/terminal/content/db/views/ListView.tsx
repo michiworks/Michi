@@ -1,4 +1,4 @@
-import React, { useMemo } from 'react';
+import { useMemo } from 'react';
 import type { MichiDatabase, MichiDbColumn, MichiDbRow, DatabaseRowStatus } from 'michi-shared';
 import { ThreadStateDot } from '../../ThreadStateDot';
 import { threadItemProps, type ThreadItemHandlers } from '../../threads/threadItem';

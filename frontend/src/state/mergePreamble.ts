@@ -1,3 +1,4 @@
+import { estimateTokens } from 'michi-shared';
 import type { ChatNodeState } from './chatTypes';
 import { visibleMessageText } from './assistantBlocks';
 import { descendants, type NodeAlive, type TreeEdge } from './tree';
@@ -19,11 +20,10 @@ function renderTranscript(node: ChatNodeState): string {
 }
 
 /**
- * Expand each source node into [source, ...branch descendants], deduplicate,
- * and render each as a transcript block. Merge edges are not traversed
- * (matches tree.ts:descendants behavior).
+ * Expand each source node into [source, ...branch descendants], deduplicated.
+ * Merge edges are not traversed (matches tree.ts:descendants behavior).
  */
-export function buildSubtreeContextBlocks(
+export function mergeContextNodeIds(
   sourceIds: readonly string[],
   nodes: Readonly<Record<string, ChatNodeState>>,
   edges: readonly TreeEdge[],
@@ -36,7 +36,17 @@ export function buildSubtreeContextBlocks(
     ids.add(sid);
     for (const did of descendants(sid, edges, isAlive)) ids.add(did);
   }
-  return Array.from(ids)
+  return Array.from(ids);
+}
+
+/** Render each node mergeContextNodeIds names as a transcript block. */
+export function buildSubtreeContextBlocks(
+  sourceIds: readonly string[],
+  nodes: Readonly<Record<string, ChatNodeState>>,
+  edges: readonly TreeEdge[],
+  isAlive?: NodeAlive,
+): string[] {
+  return mergeContextNodeIds(sourceIds, nodes, edges, isAlive)
     .map((id) => nodes[id])
     .filter((n): n is ChatNodeState => !!n)
     .map(renderTranscript);
@@ -49,5 +59,5 @@ export function estimateMergePreambleTokens(
   isAlive?: NodeAlive,
 ): number {
   const blocks = buildSubtreeContextBlocks(sourceIds, nodes, edges, isAlive);
-  return Math.ceil(blocks.join('').length / 4);
+  return estimateTokens(blocks.join(''));
 }

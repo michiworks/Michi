@@ -1,7 +1,7 @@
 import React from 'react';
 import type { ScheduledJobDto, ScheduledJobsSchedulerStatus } from 'michi-shared';
 import { listScheduledJobs } from '../../../services/api/scheduledJobs';
-import { SCHEDULED_JOB_RUN_WINDOW_EVENT, SCHEDULED_JOBS_CHANGED_WINDOW_EVENT } from './scheduledNav';
+import { SCHEDULED_JOB_RUN_WINDOW_EVENT, SCHEDULED_JOBS_CHANGED_WINDOW_EVENT } from '../../../state/scheduledRunNotice';
 
 const POLL_MS = 15_000;
 
@@ -104,6 +104,7 @@ export function useScheduledJobs() {
   return { ...snapshot, refresh, upsert, remove };
 }
 
+/** @testonly */
 export function resetScheduledJobsStore(): void {
   generation++;
   state = INITIAL;

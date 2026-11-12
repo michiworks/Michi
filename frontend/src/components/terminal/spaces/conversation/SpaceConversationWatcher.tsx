@@ -8,5 +8,3 @@ export function SpaceConversationWatcher({ page }: { page: PageId }) {
   useSpaceConversationWatcher({ page, onOpen: (card) => { void open(card); } });
   return null;
 }
-
-export default SpaceConversationWatcher;

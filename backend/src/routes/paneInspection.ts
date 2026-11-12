@@ -1,24 +1,21 @@
-import { createSseObserver } from '../services/httpSse';
 /**
- * Pane Inspection API — HTTP route layer (design §7, §11; brief P1-8).
+ * Pane Presence — HTTP route layer.
  *
- * Thin on purpose: this file validates input with the shared parsers, builds a server-derived
- * caller context, calls the service, and maps the result/error to an HTTP response. No business
- * logic, no database access, no projection lives here — that is P1-6 (`inspect`), P1-7
- * (`readOutput`) and P2-1 (`PanePresenceRegistry`).
+ * Thin on purpose: this file validates input, builds a server-derived caller context, calls the
+ * presence registry, and maps the result/error to an HTTP response. No business logic, no
+ * database access beyond the workspace ownership check, no projection lives here.
  *
  * Mounted now:
- *   GET    /api/panes/inspect    -> paneInspection.ts's `inspect`                        (P1-8)
- *   GET    /api/panes/output     -> paneInspectionOutput.ts's `readOutput`                (P1-8)
- *   PUT    /api/panes/presence   -> PanePresenceRegistry.submitPresence                   (P1-8)
- *   DELETE /api/panes/presence   -> PanePresenceRegistry.removePresence                   (P1-8)
- *   GET    /api/panes            -> paneInspectionList.ts's `list`                        (P2-4)
- *   GET    /api/panes/subscribe  -> paneInspectionSubscribe.ts's `PaneFeed`               (P3-2)
- *   POST   /api/panes/wait       -> paneInspectionWait.ts's `waitPane`                    (P3-5b)
- *   POST   /api/panes/presence/keepalive -> PanePresenceRegistry.keepalive               (W11)
- *   POST   /api/panes/presence/allocate  -> PanePresenceRegistry.allocateSurfaceRegistration (W11)
+ *   PUT    /api/panes/presence            -> PanePresenceRegistry.submitPresence
+ *   DELETE /api/panes/presence            -> PanePresenceRegistry.removePresence
+ *   POST   /api/panes/presence/keepalive  -> PanePresenceRegistry.keepalive
+ *   POST   /api/panes/presence/allocate   -> PanePresenceRegistry.allocateSurfaceRegistration
  *
- * `presence_keepalive` is design §9's independent semantic heartbeat (deliberately NOT the same
+ * The agent tools (inspect_pane, read_pane_output, wait_pane, list_panes) read panes through the
+ * pane-inspection services in-process (backend/src/agents/paneInspectionTools.ts); they have no
+ * HTTP routes.
+ *
+ * `presence_keepalive` is an independent semantic heartbeat (deliberately NOT the same
  * thing as a native WebSocket ping/pong — a browser cannot observe those frames at the JS layer,
  * so a keepalive that only renewed a lease on ping/pong would silently never renew from the
  * client side at all). It is an ordinary authenticated HTTP route mounted in THIS file, not a
@@ -38,51 +35,35 @@ import { createSseObserver } from '../services/httpSse';
  * `streamTransport.ts`'s allowlist, matching `PUT`/`DELETE /panes/presence` above (allocation is a
  * one-shot mutation with an immediate response, not a long-lived stream).
  *
- * Caller identity is ALWAYS server-derived (brief: "never from query parameters"). A locator
- * (paneId | nodeId | runId) carries no workspaceId, so this router resolves the target's real
- * owning workspace through the service's `resolveCallerForTarget` (node, agent run and surface
- * targets, all owner-scoped; the assistant's tools scope the same way) rather than trusting a
- * client-supplied workspaceId. A request cannot use its own query string to widen its access:
- * `getWorkspace(id, ownerUserId)` returns null the moment the resolved workspace is not owned by
- * the caller, which is what actually enforces the boundary; the value handed to the service as
- * `caller.workspaceId` is only ever the value resolved from the target itself.
+ * Caller identity is ALWAYS server-derived, never taken from query parameters or the body. The
+ * workspaceId a presence request names in its body is only a claim: `getWorkspace(id,
+ * ownerUserId)` returns null the moment that workspace is not owned by the caller, which is what
+ * actually enforces the boundary (see resolvePresenceWorkspaceId).
  */
 
 import express, { type Request, type Response } from 'express';
 import {
-  parseInspectPaneRequestV1,
-  parseListPanesRequestV1,
-  parseReadPaneOutputRequestV1,
-  parseSubscribePanesRequestV1,
-  parseWaitPaneRequestV1,
   PaneInspectionError,
   type PaneInspectionErrorCode,
+  type PresenceKeepaliveRequest,
+  type RemovePresenceRequest,
+  type SubmitPresenceRequest,
+  type SurfacePaneKind,
 } from 'michi-shared';
-import { inspect, resolveCallerForTarget, type PaneInspectionCaller } from '../services/paneInspection';
-import { readOutput } from '../services/paneInspectionOutput';
-import { PaneFeed, systemPaneSubscribeClock, type PaneSubscribeClock } from '../services/paneInspectionSubscribe';
-import { PaneInspectionRing, paneInspectionRing } from '../services/paneInspectionRing';
-import type { AgentRunEventBus } from '../agents/runs/agentRunEventBus';
-import { list } from '../services/paneInspectionList';
-import { waitPane } from '../services/paneInspectionWait';
 import {
   PanePresenceRegistry,
   panePresenceRegistry,
-  resolvePresenceOwnerUserId,
   type PresenceCaller,
-  type RemovePresenceRequest,
-  type SubmitPresenceRequest,
-  type PresenceKeepaliveRequest,
 } from '../services/panePresence';
-import { SURFACE_PANE_KINDS, type SurfacePaneKind } from '../services/paneInspectionProjection.surface';
+import { SURFACE_PANE_KINDS } from '../services/paneInspectionProjection.surface';
 import { getWorkspace } from '../services/dbRepository';
-import { LOCAL_AGENT_OWNER_ID } from '../services/agentOwner';
+import { requestAgentOwner } from '../services/agentOwner';
 
 // ---------------------------------------------------------------------------
 // The single shared registry instance now lives in panePresence.ts, the module that owns the
 // class — a service importing a singleton from routes/ would invert the dependency direction.
 // Re-exported here under the same name so existing importers of this module keep working (used
-// by both presence routes below and the `presence/keepalive` route added in W11).
+// by the presence routes below).
 //
 // This replaces a real end-to-end break: this file and paneInspection.ts each constructed their
 // own registry, so views submitted through PUT /api/panes/presence landed in one instance while
@@ -92,66 +73,33 @@ import { LOCAL_AGENT_OWNER_ID } from '../services/agentOwner';
 
 export { panePresenceRegistry };
 
-// The single shared PaneInspectionRing instance lives in paneInspectionRing.ts, the module that
-// owns the class — same rationale as panePresenceRegistry above, and the same real bug it would
-// otherwise repeat: P3-3's `inspect()` boundary and this file's `subscribePanes` route BOTH mint
-// and resolve cursors, and a cursor minted against one `PaneInspectionRing` instance's
-// objects/cursors maps is invisible to another. Re-exported here under the same name so existing
-// importers of this module (route tests, defaultDeps below) keep working.
-export { paneInspectionRing };
-
 /**
- * Injectable dependencies, defaulting to the real service/registry/repository singletons.
- * Exists so `backend/test/paneInspectionRoutes.test.ts` can stub `inspect`/`readOutput`/the
- * presence registry and assert on the exact `PaneInspectionCaller`/`PresenceCaller` this router
- * built, without needing a real ChatHub/AgentRun/DB fixture for every case in the acceptance
- * table — the same DI shape `setupAgentRunRoutes`/`setupFilesRoutes` already use in this
- * codebase (backend/src/routes/agentRuns.ts, backend/src/routes/files.ts).
- *
- * `ring`/`clock`/`agentRunEvents` are additive (P3-2): `agentRunEvents` is optional because
- * AgentRun support itself is conditional on `agentRunAssembly.enabled` at boot — a caller that
- * does not have one (AgentRun feature disabled) simply gets the coarser poll-only path for
- * AgentRun targets, which `PaneFeed` already handles (see its own doc comment).
+ * Injectable dependencies, defaulting to the real registry/repository singletons.
+ * Exists so `backend/test/paneInspectionRoutes.test.ts` can stub the presence registry and assert
+ * on the exact `PresenceCaller` this router built — the same DI shape
+ * `setupAgentRunRoutes`/`setupFilesRoutes` already use in this codebase
+ * (backend/src/routes/agentRuns.ts, backend/src/routes/files.ts).
  */
 export interface PaneInspectionRouteDeps {
-  inspect: typeof inspect;
-  readOutput: typeof readOutput;
-  list: typeof list;
-  waitPane: typeof waitPane;
   presenceRegistry: PanePresenceRegistry;
   getWorkspace: typeof getWorkspace;
-  ring: PaneInspectionRing;
-  clock: PaneSubscribeClock;
-  agentRunEvents?: AgentRunEventBus;
 }
 
 const defaultDeps: PaneInspectionRouteDeps = {
-  inspect,
-  readOutput,
-  list,
-  waitPane,
   presenceRegistry: panePresenceRegistry,
   getWorkspace,
-  ring: paneInspectionRing,
-  clock: systemPaneSubscribeClock,
 };
 
 // ---------------------------------------------------------------------------
-// Error mapping — one helper, shared by every route (brief: "map them once, in one helper").
+// Error mapping — one helper, shared by every route.
 // ---------------------------------------------------------------------------
 
 const ERROR_STATUS: Record<PaneInspectionErrorCode, number> = {
   INVALID_ARGUMENT: 400,
   NOT_FOUND: 404,
   NAVIGATION_DISABLED: 403,
-  // UNSUPPORTED: chosen as 400 rather than 501. 501 (Not Implemented) is a statement about the
-  // SERVER — this route/method isn't implemented anywhere. That is false here: the route exists,
-  // is fully implemented, and answers deterministically that a given caller-supplied locator
-  // resolves to a pane kind whose readOutput capability is `unsupported` (design §5.1 — e.g.
-  // surface panes, Digest, Artifact). That is a fact about the REQUEST's target, which is what
-  // 400 means. Consistency requirement (brief): both PaneInspectionError('UNSUPPORTED', ...)
-  // throw sites (paneInspectionOutput.ts) map through this same table, so every UNSUPPORTED
-  // response is 400 everywhere, never a mix of 400 and 501.
+  // UNSUPPORTED: 400 rather than 501. 501 says the server does not implement the method; an
+  // UNSUPPORTED PaneInspectionError is a fact about the request's target, which is what 400 means.
   UNSUPPORTED: 400,
   OUTPUT_CHANGED: 409,
   OUTPUT_UNAVAILABLE: 410,
@@ -160,8 +108,8 @@ const ERROR_STATUS: Record<PaneInspectionErrorCode, number> = {
 };
 
 /** Response body shape for every PaneInspectionError and for the unexpected-error fallback.
- *  `code` is the machine-readable discriminator (design §11: HTTP and the agent tools share
- *  error codes; callers must not parse natural language). `message` is human-readable detail for
+ *  `code` is the machine-readable discriminator (the agent tools use the same error codes;
+ *  callers must not parse natural language). `message` is human-readable detail for
  *  the KNOWN PaneInspectionError case only — the unexpected-error fallback below never places
  *  internal detail (no stack, no SQL, no filesystem path) into this field. */
 interface PaneInspectionErrorBody {
@@ -176,7 +124,7 @@ interface PaneInspectionErrorBody {
  *  nothing derived from the caught value at all, so nothing internal (SQL, a filesystem path, a
  *  stack frame) can leak through this path by accident.
  *
- * `NOT_FOUND` byte-identity requirement (brief / P1-11): every `PaneInspectionError('NOT_FOUND',
+ * `NOT_FOUND` byte-identity requirement: every `PaneInspectionError('NOT_FOUND',
  * path, 'target not found')` throw site in the service layer already uses the exact same message
  * literal ('target not found') regardless of *why* — wrong owner, wrong workspace, truly absent
  * row, or an unresolvable surface registration. This handler does not special-case any of them:
@@ -195,53 +143,23 @@ function sendError(res: Response, err: unknown): void {
 }
 
 // ---------------------------------------------------------------------------
-// Caller resolution — server-derived only, shared by inspect/output/presence.
+// Caller resolution — server-derived only.
 // ---------------------------------------------------------------------------
 
-/** Cloud mode: `req.user.id`. Desktop mode: the fixed local identity — matches every other route
- *  in this codebase (`process.env.MICHI_CLOUD === '1' ? req.user?.id : undefined` /
- *  `LOCAL_AGENT_OWNER_ID`), rather than inventing a third convention here. */
 function resolveOwnerUserId(req: Request): string {
-  if (process.env.MICHI_CLOUD === '1') return req.user?.id ?? '';
-  return LOCAL_AGENT_OWNER_ID;
+  return requestAgentOwner(req.user?.id);
 }
 
-/**
- * The session-bound caller for a locator's target, scoped to the workspace that target lives in
- * by the service's `resolveCallerForTarget` (node, agent run and surface targets alike, the same
- * scoping the assistant's tools use). Nothing from the request beyond the locator is trusted.
- * Returns null when the target cannot be resolved to a workspace this caller owns; each route
- * maps that to NOT_FOUND. `backendConnectionId` is 'local' for the reason given on
- * `buildInspectionCaller` below.
- */
-function callerForTarget(
-  ownerUserId: string,
-  locator: { paneId: string } | { nodeId: string } | { runId: string },
-): PaneInspectionCaller | null {
-  return resolveCallerForTarget({ ownerUserId, backendConnectionId: 'local' }, locator);
-}
-
-/** Builds the session-bound PaneInspectionCaller for list. `backendConnectionId`
- *  is always 'local' here: these routes are only ever reached directly (this process's own
- *  Express app), never through the `/backend-connections/:id/proxy` remote-connection path — a
- *  remote caller reaching this route already went through that proxy's own request rewriting
- *  upstream, so by the time a request lands in this handler it is always local from this
- *  process's point of view. `runOwner` is left unset: these HTTP routes are the RENDERER'S own
- *  session, not an agent-run-bound tool caller (COMMON.md decision 7 applies to the agent tools
- *  layer, P1-9, not here). */
-function buildInspectionCaller(ownerUserId: string, workspaceId: string): PaneInspectionCaller {
-  return { ownerUserId, workspaceId, backendConnectionId: 'local' };
-}
-
-/** Builds the session-bound PresenceCaller for the two presence routes (panePresence.ts's own
+/** Builds the session-bound PresenceCaller for the presence routes (panePresence.ts's own
  *  `PresenceCaller` shape — a smaller, presence-specific type, not `PaneInspectionCaller`).
- *  `connectionId` is 'local' for the same reason as `backendConnectionId` above. Uses
- *  panePresence.ts's own `resolvePresenceOwnerUserId` rather than `resolveOwnerUserId` above so
- *  presence's desktop/cloud identity resolution stays byte-identical to what that module's doc
- *  comment specifies, even though the two helpers currently compute the same value. */
+ *  `connectionId` is always 'local': these routes are only ever reached directly (this process's
+ *  own Express app), never through the `/backend-connections/:id/proxy` remote-connection path —
+ *  a remote caller reaching this route already went through that proxy's own request rewriting
+ *  upstream, so by the time a request lands in this handler it is always local from this
+ *  process's point of view. */
 function buildPresenceCaller(req: Request, workspaceId: string): PresenceCaller {
   return {
-    ownerUserId: resolvePresenceOwnerUserId(process.env.MICHI_CLOUD === '1' ? req.user?.id : undefined),
+    ownerUserId: resolveOwnerUserId(req),
     workspaceId,
     connectionId: 'local',
   };
@@ -267,253 +185,19 @@ function resolvePresenceWorkspaceId(deps: PaneInspectionRouteDeps, req: Request,
   return workspace ? workspace.id : null;
 }
 
-/** Query-string convention for a structured (non-flat) parameter, matching the existing
- *  `agentRunSse.ts::parseCursors` pattern in this codebase: the client JSON-encodes the object
- *  and sends it as a single query param value (`URLSearchParams.set('executionRef',
- *  JSON.stringify(ref))`), rather than relying on Express's non-standard bracket-notation nested
- *  query parsing (`executionRef[kind]=...`), which the brief's "URLSearchParams semantics"
- *  requirement does not guarantee round-trips identically across query-parsing configurations.
- *  Returns `undefined` when the param is absent so the shared parsers' own
- *  `raw.executionRef !== undefined` checks behave exactly as they do for a JSON request body. */
-/** Only the locator keys of a query string; the request parsers validate their values. */
-function locatorQuery(query: Request['query']): { paneId?: unknown; nodeId?: unknown; runId?: unknown } {
-  return { paneId: query.paneId, nodeId: query.nodeId, runId: query.runId };
-}
-
-function parseJsonQueryParam(value: unknown, path: string): unknown {
-  if (value === undefined) return undefined;
-  if (typeof value !== 'string' || !value) {
-    throw new PaneInspectionError('INVALID_ARGUMENT', path, 'must be a JSON-encoded string');
-  }
-  try {
-    return JSON.parse(value);
-  } catch {
-    throw new PaneInspectionError('INVALID_ARGUMENT', path, 'must be valid JSON');
-  }
-}
-
 // ---------------------------------------------------------------------------
 // Router
 // ---------------------------------------------------------------------------
 
-export function setupPaneInspectionRoutes(overrides: Partial<PaneInspectionRouteDeps> = {}): express.Router {
+/** `agentRunEvents` is accepted and ignored: only the removed subscribe and wait routes read it,
+ *  and server.ts still passes it. Drop it here and at that call site together. */
+export function setupPaneInspectionRoutes(
+  overrides: Partial<PaneInspectionRouteDeps> & { agentRunEvents?: unknown } = {},
+): express.Router {
   const deps: PaneInspectionRouteDeps = { ...defaultDeps, ...overrides };
   const router = express.Router();
 
-  // GET /api/panes/inspect — design §7.2. Query params: paneId | nodeId | runId (exactly one),
-  // and an optional executionRef (JSON-encoded — see parseJsonQueryParam).
-  router.get('/panes/inspect', (req, res) => {
-    try {
-      const ownerUserId = resolveOwnerUserId(req);
-      const executionRef = parseJsonQueryParam(req.query.executionRef, 'request.executionRef');
-      // parseInspectPaneRequestV1 takes the locator fields FLAT (query params are flat) and
-      // RETURNS them nested under `locator`. Passing an already-nested { locator } made it see
-      // zero of paneId/nodeId/runId and reject every otherwise-valid request as INVALID_ARGUMENT.
-      // Parsing first (rather than parsePaneLocator alone) lets an executionRef supply the
-      // locator, exactly as the inspect_pane tool accepts it.
-      const parsed = parseInspectPaneRequestV1({ ...locatorQuery(req.query), executionRef });
-      const caller = callerForTarget(ownerUserId, parsed.locator);
-      if (caller === null) {
-        // Mirrors the service's own NOT_FOUND message/shape exactly (see sendError's doc
-        // comment) — this is the same "does not exist or is not owned by this caller" case
-        // `authorizeCaller` would reach if it could resolve any workspace at all to compare
-        // against; returning it here (rather than calling into inspect() with a workspaceId of
-        // null) avoids passing a non-string into PaneInspectionCaller.
-        throw new PaneInspectionError('NOT_FOUND', 'inspect', 'target not found');
-      }
-      const descriptor = deps.inspect(caller, { locator: parsed.locator, executionRef: parsed.executionRef });
-      res.status(200).json(descriptor);
-    } catch (err) {
-      sendError(res, err);
-    }
-  });
-
-  // GET /api/panes/output — design §7.3. Query params: same locator, plus selection
-  // (latest|last_completed|execution), optional executionRef (JSON-encoded)/outputId/pageCursor,
-  // limitBytes.
-  router.get('/panes/output', (req, res) => {
-    try {
-      const ownerUserId = resolveOwnerUserId(req);
-      const executionRef = parseJsonQueryParam(req.query.executionRef, 'request.executionRef');
-      const parsed = parseReadPaneOutputRequestV1({
-        ...locatorQuery(req.query),
-        executionRef,
-        selection: req.query.selection,
-        outputId: req.query.outputId,
-        pageCursor: req.query.pageCursor,
-        limitBytes: req.query.limitBytes,
-      });
-      const caller = callerForTarget(ownerUserId, parsed.locator);
-      if (caller === null) {
-        throw new PaneInspectionError('NOT_FOUND', 'output', 'target not found');
-      }
-      const result = deps.readOutput(caller, {
-        locator: parsed.locator,
-        selection: parsed.selection,
-        executionRef: parsed.executionRef,
-        outputId: parsed.outputId,
-        pageCursor: parsed.pageCursor,
-        limitBytes: parsed.limitBytes,
-      });
-      res.status(200).json(result);
-    } catch (err) {
-      sendError(res, err);
-    }
-  });
-
-  // GET /api/panes/subscribe — design §8, §11; brief P3-2. Query params: paneIds (JSON-encoded
-  // string array, max 32 — see parseSubscribePanesRequestV1), cursors (JSON-encoded object,
-  // paneId -> last-received observation cursor). SSE response: one `PaneFeedEventV1` per `data:`
-  // frame. This block is self-contained (own handler, own helpers below) so P2-4's parallel
-  // `GET /api/panes` addition to this file does not collide with it.
-  router.get('/panes/subscribe', (req, res) => {
-    let parsed: ReturnType<typeof parseSubscribePanesRequestV1>;
-    try {
-      const paneIds = parseJsonQueryParam(req.query.paneIds, 'request.paneIds');
-      const cursors = parseJsonQueryParam(req.query.cursors, 'request.cursors');
-      parsed = parseSubscribePanesRequestV1({ paneIds, cursors });
-    } catch (err) {
-      sendError(res, err);
-      return;
-    }
-
-    const ownerUserId = resolveOwnerUserId(req);
-    // Each paneId may resolve to a different workspace in principle (design §8 scopes
-    // subscribePanes to "同一 backend/workspace 内最多 32 个 paneId" — same backend, same
-    // workspace). This router resolves and authorises EVERY paneId's owning workspace up front,
-    // exactly like inspect/output above, and requires them all to agree before opening the
-    // stream — a request spanning two workspaces is rejected rather than silently scoped to
-    // whichever workspace happened to resolve first.
-    let caller: PaneInspectionCaller | null = null;
-    for (const paneId of parsed.paneIds) {
-      let resolved: PaneInspectionCaller | null;
-      try {
-        resolved = callerForTarget(ownerUserId, { paneId });
-      } catch (err) {
-        sendError(res, err);
-        return;
-      }
-      if (resolved === null) {
-        sendError(res, new PaneInspectionError('NOT_FOUND', 'subscribe', 'target not found'));
-        return;
-      }
-      if (caller === null) caller = resolved;
-      else if (caller.workspaceId !== resolved.workspaceId) {
-        sendError(res, new PaneInspectionError('INVALID_ARGUMENT', 'request.paneIds', 'must all belong to the same workspace'));
-        return;
-      }
-    }
-    if (caller === null) {
-      // Unreachable in practice (parseSubscribePanesRequestV1 already rejects an empty
-      // paneIds array), kept as a defensive guard rather than asserting.
-      sendError(res, new PaneInspectionError('INVALID_ARGUMENT', 'request.paneIds', 'must not be empty'));
-      return;
-    }
-
-    res.status(200);
-    res.setHeader('Content-Type', 'text/event-stream');
-    res.setHeader('Cache-Control', 'no-cache, no-transform');
-    res.setHeader('Connection', 'keep-alive');
-    res.flushHeaders?.();
-
-    const feed = new PaneFeed({ clock: deps.clock, ring: deps.ring, agentRunEvents: deps.agentRunEvents });
-    const observer = createSseObserver(res);
-    observer.addCleanup(() => feed.stop());
-    const emitter = {
-      emit(event: import('michi-shared').PaneFeedEventV1) {
-        observer.write(`event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`);
-      },
-    };
-    for (const paneId of parsed.paneIds) {
-      if (observer.closed) break;
-      feed.subscribe(caller, paneId, parsed.cursors[paneId], emitter);
-    }
-    // Response close/error releases observers and never cancels a turn or Run.
-  });
-
-  // POST /api/panes/wait — design §7.4; brief P3-5b. Body: locator fields (flat) + until +
-  // cursor/executionRef + timeoutMs, matching parseWaitPaneRequestV1's shape (same
-  // flat-locator/nested-result convention as parseInspectPaneRequestV1 above). Caller identity is
-  // server-derived exactly like inspect/output/subscribe: never taken from the body. A client
-  // disconnect aborts only this observer's wait and releases its listeners and owner slot;
-  // it never cancels the underlying chat turn or Run.
-  router.post('/panes/wait', (req, res) => {
-    const controller = new AbortController();
-    const onClose = () => controller.abort();
-    res.on('close', onClose);
-    void (async () => {
-      try {
-        const ownerUserId = resolveOwnerUserId(req);
-        // parseWaitPaneRequestV1 takes the locator fields FLAT (mirrors parseInspectPaneRequestV1
-        // above — see that handler's comment) and returns them nested under `locator`; an
-        // executionRef alone also supplies the locator.
-        const parsed = parseWaitPaneRequestV1(req.body);
-        const caller = callerForTarget(ownerUserId, parsed.locator);
-        if (caller === null) {
-          throw new PaneInspectionError('NOT_FOUND', 'wait', 'target not found');
-        }
-        const outcome = await deps.waitPane(caller, {
-          locator: parsed.locator,
-          until: parsed.until,
-          cursor: parsed.cursor,
-          executionRef: parsed.executionRef,
-          timeoutMs: parsed.timeoutMs,
-          signal: controller.signal,
-        }, { clock: deps.clock, agentRunEvents: deps.agentRunEvents });
-        if (res.writableEnded || res.destroyed) return;
-        res.status(200).json(outcome);
-      } catch (err) {
-        if (res.writableEnded || res.destroyed) return;
-        sendError(res, err);
-      } finally {
-        res.off('close', onClose);
-      }
-    })();
-  });
-
-
-  // GET /api/panes — design §7.1 (brief P2-4). Query params: workspaceId (required — never
-  // defaults to a locator-resolved workspace like inspect/output above, because list has no
-  // locator to resolve one from; the caller names its OWN workspace directly), optional
-  // treeId/kind/parentNodeId, scope (open|all, default open), includeArchived (default false),
-  // limit (default 20, max 100), cursor. Caller identity is server-derived exactly like the
-  // routes above; workspaceId is still validated against that identity via getWorkspace before
-  // being handed to the service, so a query string cannot widen access to another owner's
-  // workspace by naming it directly (COMMON.md decision 9: NOT_FOUND, not a scoped 403, for a
-  // workspace the caller does not own — indistinguishable from one that does not exist).
-  //
-  // Self-contained block — P3-2 (GET /api/panes/subscribe) is added elsewhere in this same file;
-  // nothing above or below this block is touched for that task to land without a merge conflict.
-  router.get('/panes', (req, res) => {
-    try {
-      const ownerUserId = resolveOwnerUserId(req);
-      const rawWorkspaceId = typeof req.query.workspaceId === 'string' ? req.query.workspaceId : undefined;
-      if (!rawWorkspaceId) {
-        throw new PaneInspectionError('INVALID_ARGUMENT', 'request.workspaceId', 'is required');
-      }
-      const workspace = deps.getWorkspace(rawWorkspaceId, process.env.MICHI_CLOUD === '1' ? ownerUserId : undefined);
-      if (!workspace) {
-        throw new PaneInspectionError('NOT_FOUND', 'list', 'target not found');
-      }
-      const parsed = parseListPanesRequestV1({
-        workspaceId: workspace.id,
-        treeId: req.query.treeId,
-        kind: req.query.kind,
-        parentNodeId: req.query.parentNodeId,
-        scope: req.query.scope,
-        includeArchived: req.query.includeArchived === undefined ? undefined : req.query.includeArchived === 'true',
-        limit: req.query.limit,
-        cursor: req.query.cursor,
-      });
-      const caller = buildInspectionCaller(ownerUserId, workspace.id);
-      const result = deps.list(caller, parsed);
-      res.status(200).json(result);
-    } catch (err) {
-      sendError(res, err);
-    }
-  });
-
-  // PUT /api/panes/presence — design §9. Renderer-only; never exposed to the agent tools layer.
+  // PUT /api/panes/presence — renderer-only; never exposed to the agent tools layer.
   // Body: SubmitPresenceRequest & { workspaceId: string }. workspaceId travels in the body (see
   // resolvePresenceWorkspaceId's doc comment) and is validated server-side against the session's
   // ownerUserId before anything is handed to the registry — never trusted verbatim.
@@ -544,7 +228,7 @@ export function setupPaneInspectionRoutes(overrides: Partial<PaneInspectionRoute
     }
   });
 
-  // DELETE /api/panes/presence — design §9. Body: RemovePresenceRequest & { workspaceId: string }.
+  // DELETE /api/panes/presence — Body: RemovePresenceRequest & { workspaceId: string }.
   router.delete('/panes/presence', (req, res) => {
     try {
       const body = req.body as RemovePresenceRequest | undefined;
@@ -568,13 +252,13 @@ export function setupPaneInspectionRoutes(overrides: Partial<PaneInspectionRoute
     }
   });
 
-  // POST /api/panes/presence/keepalive — design §9's independent semantic heartbeat (see this
+  // POST /api/panes/presence/keepalive — the independent semantic heartbeat (see this
   // file's own header comment for why it is HTTP, tunneled through streamTransport.ts's allowlist,
   // rather than a WebSocket message type). Body: PresenceKeepaliveRequest & { workspaceId: string
   // }. Caller identity is server-derived exactly like PUT/DELETE presence above — never trusted
   // from the body beyond the workspaceId used to resolve+authorise the target workspace.
   //
-  // NOT_FOUND without leaking ownership (brief requirement): `PanePresenceRegistry.keepalive`
+  // NOT_FOUND without leaking ownership: `PanePresenceRegistry.keepalive`
   // already folds "no such lease" and "lease exists but belongs to a different
   // owner/workspace/connection" into the exact same `{ ok: false, code: 'NOT_FOUND' }` shape (see
   // that method's own guard) — this handler does not add a distinguishing branch on top of it, so
@@ -601,7 +285,7 @@ export function setupPaneInspectionRoutes(overrides: Partial<PaneInspectionRoute
     }
   });
 
-  // POST /api/panes/presence/allocate — allocates a surface pane registration (design §9's
+  // POST /api/panes/presence/allocate — allocates a surface pane registration (the registry's
   // `allocateSurfaceRegistration`). Body: { workspaceId: string; kind: string }. Ordinary HTTP
   // only — not added to streamTransport.ts's allowlist (see this file's header comment): a
   // one-shot allocation with an immediate response has no reason to ride the long-lived stream

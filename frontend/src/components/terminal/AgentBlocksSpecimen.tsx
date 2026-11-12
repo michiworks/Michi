@@ -263,12 +263,18 @@ function VariantRow({ variant, tag, title, desc }: { variant: AgentBlockStyle; t
 export default function AgentBlocksSpecimen() {
   useEffect(() => {
     const s = document.documentElement.style;
-    s.setProperty('--ui-font', "'Geist', system-ui, -apple-system, sans-serif, var(--ui-cjk-font)");
-    s.setProperty('--font-mono', "'Geist Mono', 'IBM Plex Mono', Menlo, ui-monospace, monospace");
+    s.setProperty('--ui-font', "'Geist', var(--cjk-alias), system-ui, -apple-system, sans-serif, var(--ui-cjk-font)");
+    s.setProperty('--font-mono', "'Geist Mono', var(--cjk-alias), 'IBM Plex Mono', Menlo, ui-monospace, monospace");
     document.body.style.background = '#e3e0d8';
   }, []);
   return (
     <div style={{ padding: '44px 48px 80px', display: 'flex', flexDirection: 'column', gap: 56, alignItems: 'flex-start' }}>
+      <VariantRow
+        variant="line"
+        tag="W2"
+        title="结论先行 Outcome-first — implementation (default)"
+        desc="AgentLineBlocks.tsx LineToolGroup / LineRun: one 28px disclosure line per run, the outcome first, rendered with the app's real components."
+      />
       <VariantRow
         variant="card"
         tag="1b"

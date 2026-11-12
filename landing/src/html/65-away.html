@@ -1,0 +1,313 @@
+<!-- 65-away.html (owner: away). "Step away" (#away), ADDENDUM-AWAY.md; product strings from
+     features/{meta-agent,memory,scheduled,remote}.md. Four tabs drive one 1180 x 560 replica: one
+     window (top row and area rail never fade) whose main area swaps between four scenes, plus a phone
+     frame in front of it for tab 4. The HTML is the settled frame tB of tab 1 (no JS, reduced motion);
+     scenes 2-4 carry their own settled frames and declare their start frames with data-ta*.
+     Scenes: .away-s1 Pages home, .away-s2 Memory (.away-m1 Tokyo deployment, .away-m2 new chat),
+     .away-s3 Scheduled, .away-s4 the desktop conversation behind .away-phone. -->
+<section class="sec sec--l away" id="away" aria-labelledby="away-title">
+  <div class="wrap">
+    <h2 class="h2 away-h" id="away-title"><span class="claim">Step away. The workspace keeps up.</span> <span class="consequence" data-live-for="away">It writes its home page, keeps the notes you give it, runs prompts on a schedule, and opens on your <span class="nowrap">phone.<span class="live-caret" aria-hidden="true"></span></span></span></h2>
+    <div class="away-grid" data-take="away">
+      <div class="away-tabs">
+        <div class="away-tab is-on" id="away-tab-1">
+          <h3 class="away-tab-t" id="away-tab-1-t">A home page that writes itself.</h3>
+          <p class="away-tab-l" id="away-tab-1-l">The Meta agent reads each conversation you finish and keeps the workspace’s page current. Each item links back to the message it came from, and if you edited a block, it asks before changing it.</p>
+          <i class="away-prog is-full" aria-hidden="true"></i>
+        </div>
+        <div class="away-tab" id="away-tab-2">
+          <h3 class="away-tab-t" id="away-tab-2-t">Tell it once. Every agent knows.</h3>
+          <p class="away-tab-l" id="away-tab-2-l">Michi keeps the note and hands it to whichever agent you pick next: Claude Code, Codex, Kiro or Pi. Every note is listed in Settings, where you can change or delete it.</p>
+          <i class="away-prog" aria-hidden="true"></i>
+        </div>
+        <div class="away-tab" id="away-tab-3">
+          <h3 class="away-tab-t" id="away-tab-3-t">Prompts on a schedule.</h3>
+          <p class="away-tab-l" id="away-tab-3-l">Ask the Meta agent for a weekday check and approve the job it drafts. Each run lands in a thread you can pick up, and Michi tells you when it’s done.</p>
+          <i class="away-prog" aria-hidden="true"></i>
+        </div>
+        <div class="away-tab" id="away-tab-4">
+          <h3 class="away-tab-t" id="away-tab-4-t">Pick it up on your phone.</h3>
+          <p class="away-tab-l" id="away-tab-4-l">Point a workspace at a machine you run, and its turns keep going after you close the laptop. The same machine can serve your threads to your phone.</p>
+          <i class="away-prog" aria-hidden="true"></i>
+        </div>
+      </div>
+      <div class="away-panel" id="away-panel">
+        <div class="mk-fit away-fit" data-w="1180" data-h="560" data-take-observe>
+          <div class="mk mk-canvas" aria-hidden="true">
+            <div class="away-stage">
+              <div class="mk-window away-win">
+                <div class="mk-top">
+                  <div class="mk-top-l">
+                    <span class="mk-top-tile mk-tile"><svg viewBox="0 0 1078 1080"><rect width="1078" height="1080" fill="#000"/><path fill="#F7F6EF" d="M307.0 1073.2 C280.7 1060.0 262.3 1046.4 238.5 1022.5 C217.0 1001.0 204.1 984.8 189.0 959.9 C156.0 905.4 136.7 841.3 131.0 767.1 C129.7 749.9 129.7 703.7 131.0 685.5 C139.0 573.9 173.9 457.8 229.6 357.2 C259.4 303.5 295.9 252.8 336.7 208.5 C379.1 162.4 412.3 139.7 449.2 131.4 C454.2 130.2 461.0 129.7 471.0 129.7 C483.4 129.7 487.0 130.1 495.5 132.4 C532.7 142.1 555.7 167.9 561.7 206.5 C566.2 236.2 557.5 274.9 538.7 308.5 C530.8 322.5 524.3 332.4 503.4 361.5 C481.0 392.9 470.2 409.8 462.6 425.4 C432.4 487.1 440.4 550.4 481.7 576.8 C496.3 586.1 510.6 589.5 531.4 588.7 C548.8 588.0 559.8 585.3 575.6 577.5 C589.3 570.9 600.0 562.9 611.2 551.1 C636.2 524.9 653.6 492.5 676.2 430.5 C687.3 399.7 692.0 388.4 700.6 371.0 C726.6 318.7 753.9 298.2 789.8 304.0 C811.7 307.6 828.4 317.7 839.4 334.3 C854.2 356.6 857.3 365.8 862.5 404.2 C867.7 442.7 867.7 471.8 862.8 539.0 C860.2 574.6 859.7 633.0 861.8 650.0 C865.4 678.7 872.1 701.8 883.6 725.0 C900.2 758.5 924.4 787.9 952.4 808.8 C976.9 827.0 1035.3 857.2 1074.4 872.0 C1077.2 873.0 1077.3 873.2 1076.6 878.3 C1076.3 881.1 1076.0 927.7 1076.0 981.8 L1076.0 1080.0 L698.2 1080.0 L320.4 1080.0 L307.0 1073.2 Z"/><g fill="#000"><circle cx="377.5" cy="703.5" r="24.5"/><circle cx="637" cy="703.5" r="24.5"/><rect x="479" y="724" width="58" height="14"/><rect x="501" y="738" width="14" height="43"/></g></svg></span>
+                    <span class="mk-top-name">Michi</span>
+                    <span class="mk-top-icons">
+                      <svg class="i" width="15" height="15" viewBox="0 0 24 24" stroke-width="1.75"><rect width="18" height="18" x="3" y="3" rx="2"/><path d="M9 3v18"/></svg>
+                      <svg class="i" width="15" height="15" viewBox="0 0 16 16" stroke-width="1.6"><path d="M8 3v10M3 8h10"/></svg>
+                      <svg class="i" width="15" height="15" viewBox="0 0 24 24" stroke-width="1.75"><path d="m21 21-4.34-4.34"/><circle cx="11" cy="11" r="8"/></svg>
+                    </span>
+                  </div>
+                  <div class="mk-top-r"></div>
+                </div>
+                <div class="mk-winbody">
+                  <div class="mk-rail away-rail">
+                    <span class="mk-rail-btn" data-area="conv"><svg class="i" width="17" height="17" viewBox="0 0 24 24" stroke-width="1.5"><path d="M22 17a2 2 0 0 1-2 2H6.828a2 2 0 0 0-1.414.586l-2.202 2.202A.71.71 0 0 1 2 21.286V5a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2z"/></svg></span>
+                    <span class="mk-rail-btn is-on" data-area="pages"><svg class="i" width="17" height="17" viewBox="0 0 24 24" stroke-width="1.5"><path d="M12.83 2.18a2 2 0 0 0-1.66 0L2.6 6.08a1 1 0 0 0 0 1.83l8.58 3.91a2 2 0 0 0 1.66 0l8.58-3.9a1 1 0 0 0 0-1.83z"/><path d="M2 12a1 1 0 0 0 .58.91l8.6 3.91a2 2 0 0 0 1.65 0l8.58-3.9A1 1 0 0 0 22 12"/><path d="M2 17a1 1 0 0 0 .58.91l8.6 3.91a2 2 0 0 0 1.65 0l8.58-3.9A1 1 0 0 0 22 17"/></svg></span>
+                    <span class="mk-rail-btn" data-area="sched"><svg class="i" width="17" height="17" viewBox="0 0 24 24" stroke-width="1.5"><circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/></svg><i class="away-rdot e e-pop is-off"></i></span>
+                    <span class="mk-rail-spacer"></span>
+                    <span class="mk-rail-btn" data-area="settings"><svg class="i" width="17" height="17" viewBox="0 0 24 24" stroke-width="1.5"><path d="M9.671 4.136a2.34 2.34 0 0 1 4.659 0 2.34 2.34 0 0 0 3.319 1.915 2.34 2.34 0 0 1 2.33 4.033 2.34 2.34 0 0 0 0 3.831 2.34 2.34 0 0 1-2.33 4.033 2.34 2.34 0 0 0-3.319 1.915 2.34 2.34 0 0 1-4.659 0 2.34 2.34 0 0 0-3.32-1.915 2.34 2.34 0 0 1-2.33-4.033 2.34 2.34 0 0 0 0-3.831A2.34 2.34 0 0 1 6.35 6.051a2.34 2.34 0 0 0 3.319-1.915"/><circle cx="12" cy="12" r="3"/></svg></span>
+                  </div>
+                  <div class="away-main">
+
+                    <!-- 1. Pages: the tokyo-rollout home (WorkspaceHome.tsx, MetaAgentStatusLine.tsx, SourcePopover.tsx). -->
+                    <div class="away-scene e-scene away-s1">
+                      <div class="away-doc">
+                        <p class="away-st"><span class="xf away-st-ic"><i class="away-st-dot"></i><i class="mk-spin away-st-spin is-off"></i></span><span>Meta agent checks new conversations every 60 s</span><span class="away-sep">·</span><span class="xf away-st-t"><span class="is-off" data-ta-cls="-is-off">wrote <b>tokyo-rollout</b> 12m</span><span class="is-off">reading new conversations in 1 workspace…</span><span data-ta-cls="+is-off">wrote <b>tokyo-rollout</b> now</span></span></p>
+                        <div class="away-head">
+                          <p class="away-kick">tokyo-rollout · workspace home</p>
+                          <p class="away-h1">tokyo-rollout</p>
+                          <p class="away-upd" data-ta-text="Updated 12m">Updated now</p>
+                        </div>
+                        <div class="away-call"><p class="away-cap">Where it stands</p><p>Rollout paused. A fix is proposed; validation is pending.</p></div>
+                        <p class="away-from"><svg class="i" width="12" height="12" viewBox="0 0 24 24" stroke-width="2"><path d="M9.937 15.5A2 2 0 0 0 8.5 14.063l-6.135-1.582a.5.5 0 0 1 0-.962L8.5 9.936A2 2 0 0 0 9.937 8.5l1.582-6.135a.5.5 0 0 1 .963 0L14.063 8.5A2 2 0 0 0 15.5 9.937l6.135 1.581a.5.5 0 0 1 0 .964L15.5 14.063a2 2 0 0 0-1.437 1.437l-1.582 6.135a.5.5 0 0 1-.963 0z"/><path d="M20 3v4"/><path d="M22 5h-4"/></svg>From 4 conversations</p>
+                        <div class="away-cause-w">
+                          <div class="grow away-cause" data-ta="off"><div><div class="away-blk">
+                            <p class="away-blk-h e e-up6 away-cin" data-ta="off">Cause</p>
+                            <ul class="away-items e e-up6 away-cin" data-ta="off"><li class="away-item is-hover" data-ta-cls="-is-hover">The permissions policy runs before bootstrap creates the task runner role.<span class="away-src e press" data-ta="off"><svg class="i" width="14" height="14" viewBox="0 0 24 24" stroke-width="1.8"><path d="M3 21c3 0 7-1 7-8V5c0-1.25-.756-2.017-2-2H4c-1.25 0-2 .75-2 1.972V11c0 1.25.75 2 2 2 1 0 1 0 1 1v1c0 1-1 2-2 2s-1 .008-1 1.031V20c0 1 0 1 1 1z"/><path d="M15 21c3 0 7-1 7-8V5c0-1.25-.757-2.017-2-2h-4c-1.25 0-2 .75-2 1.972V11c0 1.25.75 2 2 2h.75c0 2.25.25 4-2.75 4v3c0 1 0 1 1 1z"/></svg></span></li></ul>
+                          </div></div></div>
+                          <div class="away-pop e e-pop" data-ta="off">
+                            <div class="away-pop-h"><svg class="i" width="13" height="13" viewBox="0 0 24 24" stroke-width="2"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg><span>Source</span><b class="away-pop-t">Tokyo deployment RCA</b><span class="away-tag">Claude</span><svg class="i away-pop-x" width="13" height="13" viewBox="0 0 24 24" stroke-width="2"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg></div>
+                            <p class="away-pop-q">Cause: the permissions policy runs before bootstrap creates the task runner role, so the role doesn’t exist yet when the policy checks it. Fix proposed: create the role in Tokyo before the policy runs. Validation pending.</p>
+                            <div class="away-pop-b"><span class="away-btn is-primary">Continue this chat ›</span><span class="away-btn">Open full chat</span></div>
+                            <p class="away-pop-hint">Both open the conversation page, which has “Back to page”.</p>
+                          </div>
+                        </div>
+                        <div class="away-blk">
+                          <p class="away-blk-h">Next</p>
+                          <ul class="away-items"><li class="away-item">Create the task runner role in Tokyo before the policy runs.</li><li class="away-item">Change Tokyo only, and keep every existing permission.</li></ul>
+                        </div>
+                        <div class="away-blk">
+                          <p class="away-blk-h">Threads</p>
+                          <p class="away-thr"><span>Tokyo deployment</span><span class="away-sep">·</span><span>Identity check</span><span class="away-sep">·</span><span>Why Tokyo only?</span><span class="away-sep">·</span><span>Tokyo deployment RCA</span></p>
+                        </div>
+                      </div>
+                    </div>
+
+                    <!-- 2. Memory: save in Tokyo deployment, then a new chat on another agent (memoryNotifications.ts toast). -->
+                    <div class="away-scene e-scene is-off away-s2">
+                      <div class="mk-strip">
+                        <div class="mk-pane is-focused e-scene is-off away-pn away-m1" data-ta="on">
+                          <div class="mk-head"><i class="mk-dot"></i><span class="mk-head-title">Tokyo deployment</span><span class="mk-head-icons"><span class="mk-hplus">+</span><svg class="i" width="14" height="14" viewBox="0 0 16 16" stroke-width="1.6"><path d="M4 3.5V12.5"/><path d="M7 4h5M7 8h4M7 12h5"/><circle cx="4" cy="4" r="1.2" fill="currentColor" stroke="none"/><circle cx="4" cy="8" r="1.2" fill="currentColor" stroke="none"/><circle cx="4" cy="12" r="1.2" fill="currentColor" stroke="none"/></svg><svg class="i" width="14" height="14" viewBox="0 0 16 16" stroke-width="1.6"><circle cx="8" cy="3.4" r="1.5"/><circle cx="4" cy="12.6" r="1.5"/><circle cx="12" cy="12.6" r="1.5"/><path d="M8 4.9V7.4"/><path d="M8 7.4H4V11.1"/><path d="M8 7.4H12V11.1"/></svg><svg class="i" width="14" height="14" viewBox="0 0 16 16" stroke-width="1.6"><path d="M4 2.5h5.4l2.6 2.6v8.4H4z"/><path d="M9.4 2.5v2.6h2.6"/><path d="M6 8.2h4M6 10.4h2.6"/></svg><svg class="i" width="14" height="14" viewBox="0 0 16 16" stroke-width="1.6"><path d="M8 2l6 3-6 3-6-3 6-3z"/><path d="M2 8l6 3 6-3"/><path d="M2 11l6 3 6-3"/></svg><span class="mk-hmore"><svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor"><circle cx="5" cy="12" r="1.5"/><circle cx="12" cy="12" r="1.5"/><circle cx="19" cy="12" r="1.5"/></svg></span></span></div>
+                          <div class="mk-view"><div class="mk-list" data-follow><div class="mk-col">
+                            <div class="mk-user"><span class="mk-over">You · 14:17</span>Update <span class="mk-mention">@post-deploy-checks</span> with what <span class="mk-mention">@Identity check</span> found.</div>
+                            <div class="mk-msg">
+                              <div class="mk-label">&gt; michi</div>
+                              <div class="mk-tool"><div class="mk-tool-row"><span class="mk-tool-ic"><svg class="i" width="13" height="13" viewBox="0 0 14 14" stroke-width="1.2"><path d="M2.5 4l3 3-3 3"/><path d="M7.5 10.5h4"/></svg></span><span class="mk-tool-main"><span class="mk-tool-title">Update the checks</span><span class="mk-tool-sub">update_artifact post-deploy-checks</span></span><span class="mk-tool-dur">0.1s</span><span class="mk-tool-st"><i class="mk-spin"></i><svg class="mk-check" width="10" height="10" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M2.5 7.5l3 3 6-6.5"/></svg></span></div></div>
+                              <div class="mk-prose" data-tail><p>Added two checks:</p><ol start="4"><li>Confirm the task runner role exists in Tokyo before the policy runs.</li><li>Change Tokyo only, and keep every existing permission.</li></ol><p>Saved to <b>@post-deploy-checks</b>.</p></div>
+                            </div>
+                            <div class="mk-user e e-up6 away-u1" data-ta="off"><span class="mk-over">You · 14:22</span>Remember for this project: change Tokyo only and keep every existing permission.</div>
+                            <div class="mk-msg">
+                              <div class="mk-label e e-up away-l1" data-ta="off">&gt; michi</div>
+                              <div class="mk-group is-open e e-up away-g1" data-ta="off">
+                                <div class="mk-group-head"><span class="mk-group-ic"><svg class="i" width="13" height="13" viewBox="0 0 14 14" stroke-width="1.2"><path d="M2.5 4l3 3-3 3"/><path d="M7.5 10.5h4"/></svg><i class="mk-spin"></i></span><span class="mk-group-label">2 tool calls</span><span class="mk-group-meta away-gm1" data-ta-text="0/2">0.2s</span><span class="mk-chev">▾</span></div>
+                                <div class="mk-group-rows">
+                                  <div class="grow away-r1" data-ta="off"><div><div class="mk-tool-row is-line"><span class="mk-tool-name">memory_search</span><span class="mk-tool-detail">Tokyo permissions</span><span class="mk-tool-st"><i class="mk-spin"></i><svg class="mk-check" width="10" height="10" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M2.5 7.5l3 3 6-6.5"/></svg></span></div></div></div>
+                                  <div class="grow away-r2" data-ta="off"><div><div class="mk-tool-row is-line"><span class="mk-tool-name">memory_save</span><span class="mk-tool-detail">tokyo-rollout</span><span class="mk-tool-st"><i class="mk-spin"></i><svg class="mk-check" width="10" height="10" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M2.5 7.5l3 3 6-6.5"/></svg></span></div></div></div>
+                                </div>
+                              </div>
+                              <div class="mk-prose away-p1" data-stream data-ta="hide"><p>Saved for tokyo-rollout.</p></div>
+                            </div>
+                          </div></div></div>
+                          <div class="mk-composer is-focused">
+                            <div class="mk-cin"><span class="mk-prompt">›_</span><div class="mk-input"><span class="away-draft is-sent away-d1" data-type data-ta="hide" data-ta-cls="-is-sent">Remember for this project: change Tokyo only and keep every existing permission.</span></div></div>
+                            <div class="mk-tools"><span class="mk-tchip is-icon"><svg class="i" width="16" height="16" viewBox="0 0 24 24" stroke-width="2.4"><path d="M5 12h14"/><path d="M12 5v14"/></svg></span><span class="mk-tchip is-icon"><svg class="i" width="16" height="16" viewBox="0 0 24 24" stroke-width="2.4"><circle cx="12" cy="12" r="4"/><path d="M16 8v5a3 3 0 0 0 6 0v-1a10 10 0 1 0-4 8"/></svg></span><span class="mk-tools-gap"></span><span class="mk-tchip is-perm"><svg class="i" width="14" height="14" viewBox="0 0 16 16" stroke-width="1.6"><path d="M8 1.8l5 2v4.1c0 3-2.1 5.1-5 6.3-2.9-1.2-5-3.3-5-6.3V3.8z"/><path d="M5.8 8.1l1.6 1.6 3-3.1"/></svg><span>Ask</span></span><span class="mk-tchip is-model">Opus 5<span class="mk-tchip-effort">High</span><svg class="i i-r90 away-chev" width="12" height="12" viewBox="0 0 16 16" stroke-width="1.6"><path d="M6 3l5 5-5 5"/></svg></span><span class="mk-tbranch"><svg class="i i-r90" width="16" height="16" viewBox="0 0 24 24" stroke-width="2.4"><path d="M16 3h5v5"/><path d="M8 3H3v5"/><path d="M12 22v-8.3a4 4 0 0 0-1.172-2.872L3 3"/><path d="m15 9 6-6"/></svg></span><span class="mk-send is-empty away-sa" data-ta-cls="+is-empty -is-stop"><svg class="i when-send" width="14" height="14" viewBox="0 0 16 16" stroke-width="1.8"><path d="M8 13V3"/><path d="M3.5 7.5L8 3l4.5 4.5"/></svg><svg class="i fill when-stop" width="14" height="14" viewBox="0 0 16 16"><rect x="3" y="3" width="10" height="10" rx="1.5"/></svg></span></div>
+                          </div>
+                        </div>
+                        <div class="mk-pane is-focused e-scene away-pn away-m2" data-ta="off">
+                          <div class="mk-head"><i class="mk-dot"></i><span class="mk-head-title away-t2" data-ta-text="New chat">Draft the Tokyo fix.</span><span class="mk-head-icons"><span class="mk-hplus">+</span><svg class="i" width="14" height="14" viewBox="0 0 16 16" stroke-width="1.6"><path d="M4 3.5V12.5"/><path d="M7 4h5M7 8h4M7 12h5"/><circle cx="4" cy="4" r="1.2" fill="currentColor" stroke="none"/><circle cx="4" cy="8" r="1.2" fill="currentColor" stroke="none"/><circle cx="4" cy="12" r="1.2" fill="currentColor" stroke="none"/></svg><svg class="i" width="14" height="14" viewBox="0 0 16 16" stroke-width="1.6"><circle cx="8" cy="3.4" r="1.5"/><circle cx="4" cy="12.6" r="1.5"/><circle cx="12" cy="12.6" r="1.5"/><path d="M8 4.9V7.4"/><path d="M8 7.4H4V11.1"/><path d="M8 7.4H12V11.1"/></svg><svg class="i" width="14" height="14" viewBox="0 0 16 16" stroke-width="1.6"><path d="M4 2.5h5.4l2.6 2.6v8.4H4z"/><path d="M9.4 2.5v2.6h2.6"/><path d="M6 8.2h4M6 10.4h2.6"/></svg><svg class="i" width="14" height="14" viewBox="0 0 16 16" stroke-width="1.6"><path d="M8 2l6 3-6 3-6-3 6-3z"/><path d="M2 8l6 3 6-3"/><path d="M2 11l6 3 6-3"/></svg><span class="mk-hmore"><svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor"><circle cx="5" cy="12" r="1.5"/><circle cx="12" cy="12" r="1.5"/><circle cx="19" cy="12" r="1.5"/></svg></span></span></div>
+                          <div class="mk-view away-top"><div class="mk-list"><div class="mk-col">
+                            <div class="mk-user e e-up6 away-u2" data-ta="off"><span class="mk-over">You · 14:30</span>Draft the Tokyo fix.</div>
+                            <div class="mk-msg">
+                              <div class="mk-label e e-up away-l2" data-ta="off">&gt; michi</div>
+                              <div class="mk-prose away-p2" data-stream data-ta="hide"><p>Tokyo only, keeping every existing permission:</p><ol><li>Create the task runner role in Tokyo before the policy runs.</li><li>Leave the other regions unchanged.</li></ol></div>
+                            </div>
+                          </div></div></div>
+                          <div class="mk-composer is-focused">
+                            <div class="mk-cin"><span class="mk-prompt">›_</span><div class="mk-input"><span class="away-draft is-sent away-d2" data-type data-ta="hide" data-ta-cls="-is-sent">Draft the Tokyo fix.</span></div></div>
+                            <div class="mk-tools"><span class="mk-tchip is-icon"><svg class="i" width="16" height="16" viewBox="0 0 24 24" stroke-width="2.4"><path d="M5 12h14"/><path d="M12 5v14"/></svg></span><span class="mk-tchip is-icon"><svg class="i" width="16" height="16" viewBox="0 0 24 24" stroke-width="2.4"><circle cx="12" cy="12" r="4"/><path d="M16 8v5a3 3 0 0 0 6 0v-1a10 10 0 1 0-4 8"/></svg></span><span class="mk-tools-gap"></span><span class="mk-tchip is-perm"><svg class="i" width="14" height="14" viewBox="0 0 16 16" stroke-width="1.6"><path d="M8 1.8l5 2v4.1c0 3-2.1 5.1-5 6.3-2.9-1.2-5-3.3-5-6.3V3.8z"/><path d="M5.8 8.1l1.6 1.6 3-3.1"/></svg><span>Ask</span></span><span class="mk-tchip is-model">Codex<span class="mk-tchip-effort">High</span><svg class="i i-r90 away-chev" width="12" height="12" viewBox="0 0 16 16" stroke-width="1.6"><path d="M6 3l5 5-5 5"/></svg></span><span class="mk-tbranch"><svg class="i i-r90" width="16" height="16" viewBox="0 0 24 24" stroke-width="2.4"><path d="M16 3h5v5"/><path d="M8 3H3v5"/><path d="M12 22v-8.3a4 4 0 0 0-1.172-2.872L3 3"/><path d="m15 9 6-6"/></svg></span><span class="mk-send is-empty away-sb" data-ta-cls="+is-empty -is-stop"><svg class="i when-send" width="14" height="14" viewBox="0 0 16 16" stroke-width="1.8"><path d="M8 13V3"/><path d="M3.5 7.5L8 3l4.5 4.5"/></svg><svg class="i fill when-stop" width="14" height="14" viewBox="0 0 16 16"><rect x="3" y="3" width="10" height="10" rx="1.5"/></svg></span></div>
+                          </div>
+                        </div>
+                      </div>
+                      <div class="away-toast e e-slide is-off"><span class="away-toast-t">Remembered: Change Tokyo only and keep every existing permission.</span><span class="away-undo">Undo</span></div>
+                    </div>
+
+                    <!-- 3. Scheduled: one job runs and finishes (pages/Scheduled.tsx; electron/scheduledNotifications.ts). -->
+                    <div class="away-scene e-scene is-off away-s3">
+                      <div class="away-sched">
+                        <div class="away-sh">
+                          <p class="away-sh-t">Scheduled<span class="away-sh-n">1</span></p>
+                          <span class="away-btn is-primary away-new"><svg class="i" width="14" height="14" viewBox="0 0 24 24" stroke-width="2"><path d="M5 12h14"/><path d="M12 5v14"/></svg>New job</span>
+                        </div>
+                        <p class="away-sh-sub"><svg class="i" width="13" height="13" viewBox="0 0 24 24" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M12 6v6h4.5"/></svg>Runs in the background, even when Michi is closed</p>
+                        <p class="away-search"><svg class="i" width="13" height="13" viewBox="0 0 24 24" stroke-width="2"><path d="m21 21-4.34-4.34"/><circle cx="11" cy="11" r="8"/></svg>Search jobs...</p>
+                        <p class="away-grp"><svg class="i" width="15" height="15" viewBox="0 0 16 16" stroke-width="1.6" style="--c:#2f6b4e"><path d="M2 4.5a1 1 0 0 1 1-1h3.2a1 1 0 0 1 .7.3l1 1a1 1 0 0 0 .7.3H13a1 1 0 0 1 1 1V12a1 1 0 0 1-1 1H3a1 1 0 0 1-1-1V4.5Z"/></svg>tokyo-rollout<span class="away-grp-n">1</span></p>
+                        <div class="away-job">
+                          <div class="away-j-l">
+                            <span class="xf away-j-ic"><svg class="i" width="16" height="16" viewBox="0 0 24 24" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M12 6v6h4.5"/></svg><svg class="i away-j-spin is-off" width="16" height="16" viewBox="0 0 24 24" stroke-width="2"><path d="M21 12a9 9 0 1 1-6.219-8.56"/></svg></span>
+                            <span class="away-j-txt"><span class="away-j-t">Tokyo deploy check</span><span class="away-j-m">Weekdays at 09:00<span class="away-j-dsep"> · </span><span class="xf away-j-next"><span class="is-off" data-ta-cls="-is-off">Due now</span><span class="is-off is-act">Running now</span><span data-ta-cls="+is-off">Next in 1 day</span></span></span></span>
+                          </div>
+                          <div class="away-j-c">
+                            <span class="away-j-st xf"><span><i class="mk-dot away-sdot is-ok"></i>Succeeded</span><span class="is-off"><i class="mk-dot away-sdot is-act away-j-dot"></i>Running</span></span>
+                            <span class="away-j-when xf"><span class="is-off" data-ta-cls="-is-off">1 day ago</span><span data-ta-cls="+is-off">just now</span></span>
+                          </div>
+                          <div class="away-j-acts">
+                            <span class="away-ib xf away-j-run"><svg class="i" width="15" height="15" viewBox="0 0 24 24" stroke-width="2"><path d="M5 5a2 2 0 0 1 3.008-1.728l11.997 6.998a2 2 0 0 1 .003 3.458l-12 7A2 2 0 0 1 5 19z"/></svg><svg class="i is-off" width="15" height="15" viewBox="0 0 24 24" stroke-width="2"><rect width="18" height="18" x="3" y="3" rx="2"/></svg></span>
+                            <span class="away-sw-t"><i></i></span>
+                            <span class="away-ib"><svg class="i" width="16" height="16" viewBox="0 0 24 24" stroke-width="2"><circle cx="12" cy="12" r="1"/><circle cx="19" cy="12" r="1"/><circle cx="5" cy="12" r="1"/></svg></span>
+                          </div>
+                        </div>
+                        <p class="away-grp"><svg class="i away-grp-sys" width="15" height="15" viewBox="0 0 16 16" stroke-width="1.6"><path d="M2 4.5a1 1 0 0 1 1-1h3.2a1 1 0 0 1 .7.3l1 1a1 1 0 0 0 .7.3H13a1 1 0 0 1 1 1V12a1 1 0 0 1-1 1H3a1 1 0 0 1-1-1V4.5Z"/></svg>All workspaces<span class="away-grp-n">1</span></p>
+                        <div class="away-job">
+                          <div class="away-j-l">
+                            <span class="away-j-ic"><svg class="i" width="16" height="16" viewBox="0 0 24 24" stroke-width="2"><path d="M9.937 15.5A2 2 0 0 0 8.5 14.063l-6.135-1.582a.5.5 0 0 1 0-.962L8.5 9.936A2 2 0 0 0 9.937 8.5l1.582-6.135a.5.5 0 0 1 .963 0L14.063 8.5A2 2 0 0 0 15.5 9.937l6.135 1.581a.5.5 0 0 1 0 .964L15.5 14.063a2 2 0 0 0-1.437 1.437l-1.582 6.135a.5.5 0 0 1-.963 0z"/><path d="M20 3v4"/><path d="M22 5h-4"/></svg></span>
+                            <span class="away-j-txt"><span class="away-j-t">Meta agent · maintain Pages<span class="away-sys">System</span></span><span class="away-j-m">Checks every 60 s · AI only for pending work</span></span>
+                          </div>
+                          <div class="away-j-c"></div>
+                          <div class="away-j-acts"><span class="away-ib is-gap"></span><span class="away-sw-t"><i></i></span><span class="away-ib"><svg class="i" width="16" height="16" viewBox="0 0 24 24" stroke-width="2"><circle cx="12" cy="12" r="1"/><circle cx="19" cy="12" r="1"/><circle cx="5" cy="12" r="1"/></svg></span></div>
+                        </div>
+                      </div>
+                      <div class="away-note e e-slide" data-ta="off">
+                        <span class="away-note-tile mk-tile"><svg viewBox="0 0 1078 1080"><rect width="1078" height="1080" fill="#000"/><path fill="#F7F6EF" d="M307.0 1073.2 C280.7 1060.0 262.3 1046.4 238.5 1022.5 C217.0 1001.0 204.1 984.8 189.0 959.9 C156.0 905.4 136.7 841.3 131.0 767.1 C129.7 749.9 129.7 703.7 131.0 685.5 C139.0 573.9 173.9 457.8 229.6 357.2 C259.4 303.5 295.9 252.8 336.7 208.5 C379.1 162.4 412.3 139.7 449.2 131.4 C454.2 130.2 461.0 129.7 471.0 129.7 C483.4 129.7 487.0 130.1 495.5 132.4 C532.7 142.1 555.7 167.9 561.7 206.5 C566.2 236.2 557.5 274.9 538.7 308.5 C530.8 322.5 524.3 332.4 503.4 361.5 C481.0 392.9 470.2 409.8 462.6 425.4 C432.4 487.1 440.4 550.4 481.7 576.8 C496.3 586.1 510.6 589.5 531.4 588.7 C548.8 588.0 559.8 585.3 575.6 577.5 C589.3 570.9 600.0 562.9 611.2 551.1 C636.2 524.9 653.6 492.5 676.2 430.5 C687.3 399.7 692.0 388.4 700.6 371.0 C726.6 318.7 753.9 298.2 789.8 304.0 C811.7 307.6 828.4 317.7 839.4 334.3 C854.2 356.6 857.3 365.8 862.5 404.2 C867.7 442.7 867.7 471.8 862.8 539.0 C860.2 574.6 859.7 633.0 861.8 650.0 C865.4 678.7 872.1 701.8 883.6 725.0 C900.2 758.5 924.4 787.9 952.4 808.8 C976.9 827.0 1035.3 857.2 1074.4 872.0 C1077.2 873.0 1077.3 873.2 1076.6 878.3 C1076.3 881.1 1076.0 927.7 1076.0 981.8 L1076.0 1080.0 L698.2 1080.0 L320.4 1080.0 L307.0 1073.2 Z"/><g fill="#000"><circle cx="377.5" cy="703.5" r="24.5"/><circle cx="637" cy="703.5" r="24.5"/><rect x="479" y="724" width="58" height="14"/><rect x="501" y="738" width="14" height="43"/></g></svg></span>
+                        <div class="away-note-b">
+                          <p class="away-note-h"><b>Tokyo deploy check</b><span>now</span></p>
+                          <p class="away-note-s">Scheduled job finished</p>
+                          <p class="away-note-p">Check 4 failed: the task runner role is still missing in Tokyo. Rollout stays paused.</p>
+                        </div>
+                      </div>
+                    </div>
+
+                    <!-- 4. The desktop at 14:09, a remote workspace (WorkspaceRow.tsx REMOTE badge). -->
+                    <div class="away-scene e-scene is-off away-s4">
+                      <div class="mk-side">
+                        <div class="mk-side-label">Projects</div>
+                        <div class="mk-srow is-project" style="--c:#2f6b4e"><span class="mk-srow-t">tokyo-rollout</span><span class="away-remote">REMOTE</span></div>
+                        <div class="mk-srow is-thread is-sel"><span class="mk-srow-t">Tokyo deployment</span><span class="mk-srow-caret">▾</span><i class="mk-srow-rail"></i></div>
+                        <div class="mk-srow is-child"><span class="mk-srow-t">Task runner role</span></div>
+                        <div class="mk-srow is-child"><span class="mk-srow-t">Identity check</span></div>
+                        <div class="mk-srow is-child"><span class="mk-srow-t">Why Tokyo only?</span></div>
+                        <div class="mk-srow is-thread"><span class="mk-srow-t">RCA template</span></div>
+                        <div class="mk-side-gap"></div>
+                        <div class="mk-srow is-project" style="--c:#8aa2c8"><span class="mk-srow-t">design-system</span></div>
+                        <div class="mk-srow is-project" style="--c:#8fbf9f"><span class="mk-srow-t">search-ranking</span></div>
+                        <div class="mk-srow is-project" style="--c:#c5b3e6"><span class="mk-srow-t">mobile-app</span></div>
+                        <div class="mk-side-foot">
+                          <div class="mk-sfoot"><svg class="i" width="15" height="15" viewBox="0 0 16 16" stroke-width="1.6"><path d="M2.5 8 L8 3 L13.5 8"/><path d="M4 7.4 V13 H12 V7.4"/><path d="M6.8 13 V9.8 H9.2 V13"/></svg>Home</div>
+                          <div class="mk-sfoot"><svg class="i" width="15" height="15" viewBox="0 0 16 16" stroke-width="1.6"><rect x="2.5" y="3" width="11" height="10" rx="1.5"/></svg>Workspaces</div>
+                        </div>
+                      </div>
+                      <div class="mk-strip">
+                        <div class="mk-pane is-focused away-pn">
+                          <div class="mk-head"><i class="mk-dot"></i><span class="mk-head-title">Tokyo deployment</span><span class="mk-head-icons"><span class="mk-hplus">+</span><svg class="i" width="14" height="14" viewBox="0 0 16 16" stroke-width="1.6"><path d="M4 3.5V12.5"/><path d="M7 4h5M7 8h4M7 12h5"/><circle cx="4" cy="4" r="1.2" fill="currentColor" stroke="none"/><circle cx="4" cy="8" r="1.2" fill="currentColor" stroke="none"/><circle cx="4" cy="12" r="1.2" fill="currentColor" stroke="none"/></svg><svg class="i" width="14" height="14" viewBox="0 0 16 16" stroke-width="1.6"><circle cx="8" cy="3.4" r="1.5"/><circle cx="4" cy="12.6" r="1.5"/><circle cx="12" cy="12.6" r="1.5"/><path d="M8 4.9V7.4"/><path d="M8 7.4H4V11.1"/><path d="M8 7.4H12V11.1"/></svg><svg class="i" width="14" height="14" viewBox="0 0 16 16" stroke-width="1.6"><path d="M4 2.5h5.4l2.6 2.6v8.4H4z"/><path d="M9.4 2.5v2.6h2.6"/><path d="M6 8.2h4M6 10.4h2.6"/></svg><svg class="i" width="14" height="14" viewBox="0 0 16 16" stroke-width="1.6"><path d="M8 2l6 3-6 3-6-3 6-3z"/><path d="M2 8l6 3 6-3"/><path d="M2 11l6 3 6-3"/></svg><span class="mk-hmore"><svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor"><circle cx="5" cy="12" r="1.5"/><circle cx="12" cy="12" r="1.5"/><circle cx="19" cy="12" r="1.5"/></svg></span></span></div>
+                          <div class="mk-view"><div class="mk-list" data-follow><div class="mk-col">
+                            <div class="mk-msg">
+                              <div class="mk-label">&gt; michi</div>
+                              <div class="mk-prose"><p>After the fix:</p><ol><li>Confirm the Tokyo deploy completes.</li><li>Start the service from a clean state.</li><li>Run a health check before opening traffic.</li></ol><p>The rollout stays paused until the identity issue is fixed.</p></div>
+                            </div>
+                            <div class="mk-user"><span class="mk-over">You · 14:09</span>Branch both leads. My guess is a stale account.</div>
+                            <div class="mk-msg">
+                              <div class="mk-label">&gt; michi</div>
+                              <div class="mk-group"><div class="mk-group-head"><span class="mk-group-ic"><svg class="i" width="13" height="13" viewBox="0 0 14 14" stroke-width="1.2"><path d="M2.5 4l3 3-3 3"/><path d="M7.5 10.5h4"/></svg><i class="mk-spin"></i></span><span class="mk-group-label">used 2 tools</span><span class="mk-group-meta">0.1s</span><span class="mk-chev">▸</span></div></div>
+                              <div class="mk-prose"><p>Both are running: <b>Identity check</b> and <b>Why Tokyo only?</b></p></div>
+                              <div class="mk-blist" data-tail>
+                                <div class="mk-blist-h">Branches <span>2</span></div>
+                                <div class="mk-brow"><span class="mk-brow-glyph"><svg class="i i-r90" width="18" height="18" viewBox="0 0 24 24" stroke-width="2.4"><path d="M16 3h5v5"/><path d="M8 3H3v5"/><path d="M12 22v-8.3a4 4 0 0 0-1.172-2.872L3 3"/><path d="m15 9 6-6"/></svg></span><span class="mk-brow-name">Identity check</span><span class="mk-brow-meta"><span class="mk-bstat xf away-d-bs1"><span class="is-running is-off" data-ta-cls="-is-off"><svg class="i" width="13" height="13" viewBox="0 0 24 24" stroke-width="2"><path d="M21 12a9 9 0 1 1-6.219-8.56"/></svg>Running</span><span data-ta-cls="+is-off"><svg class="i" width="13" height="13" viewBox="0 0 24 24" stroke-width="2"><circle cx="12" cy="12" r="10"/></svg>Idle</span></span><span class="mk-bdetails"><span>2 messages</span><span>·</span><span>now</span></span></span></div>
+                                <div class="mk-brow"><span class="mk-brow-glyph"><svg class="i i-r90" width="18" height="18" viewBox="0 0 24 24" stroke-width="2.4"><path d="M16 3h5v5"/><path d="M8 3H3v5"/><path d="M12 22v-8.3a4 4 0 0 0-1.172-2.872L3 3"/><path d="m15 9 6-6"/></svg></span><span class="mk-brow-name">Why Tokyo only?</span><span class="mk-brow-meta"><span class="mk-bstat"><span class="is-running"><svg class="i" width="13" height="13" viewBox="0 0 24 24" stroke-width="2"><path d="M21 12a9 9 0 1 1-6.219-8.56"/></svg>Running</span></span><span class="mk-bdetails"><span>2 messages</span><span>·</span><span>now</span></span></span></div>
+                              </div>
+                            </div>
+                          </div></div></div>
+                          <div class="mk-composer">
+                            <div class="mk-cin"><span class="mk-prompt">›_</span><div class="mk-input"></div></div>
+                            <div class="mk-tools"><span class="mk-tchip is-icon"><svg class="i" width="16" height="16" viewBox="0 0 24 24" stroke-width="2.4"><path d="M5 12h14"/><path d="M12 5v14"/></svg></span><span class="mk-tchip is-icon"><svg class="i" width="16" height="16" viewBox="0 0 24 24" stroke-width="2.4"><circle cx="12" cy="12" r="4"/><path d="M16 8v5a3 3 0 0 0 6 0v-1a10 10 0 1 0-4 8"/></svg></span><span class="mk-tools-gap"></span><span class="mk-tchip is-perm"><svg class="i" width="14" height="14" viewBox="0 0 16 16" stroke-width="1.6"><path d="M8 1.8l5 2v4.1c0 3-2.1 5.1-5 6.3-2.9-1.2-5-3.3-5-6.3V3.8z"/><path d="M5.8 8.1l1.6 1.6 3-3.1"/></svg><span>Ask</span></span><span class="mk-tchip is-model">Opus 5<span class="mk-tchip-effort">High</span><svg class="i i-r90 away-chev" width="12" height="12" viewBox="0 0 16 16" stroke-width="1.6"><path d="M6 3l5 5-5 5"/></svg></span><span class="mk-send is-empty"><svg class="i when-send" width="14" height="14" viewBox="0 0 16 16" stroke-width="1.8"><path d="M8 13V3"/><path d="M3.5 7.5L8 3l4.5 4.5"/></svg></span></div>
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+
+                  </div>
+                </div>
+              </div>
+
+              <!-- The phone (mobile.css, MobilePaneSwitcher.tsx): the same machine's Michi in a phone browser. -->
+              <div class="away-phone e away-rise is-off">
+                <div class="away-ph-top"><span class="away-ph-t" data-ta-text="Tokyo deployment">Identity check</span><span class="away-tap away-tap1"><svg class="i" width="23" height="23" viewBox="0 0 24 24" stroke-width="1.6"><path d="M4 6h16M9 12h11M4 18h16"/></svg></span></div>
+                <div class="away-ph-body">
+                  <div class="mk-pane e-scene is-off away-ph-pane away-ph-a" data-ta="on">
+                    <div class="mk-view"><div class="mk-list" data-follow><div class="mk-col">
+                      <div class="mk-msg">
+                        <div class="mk-label">&gt; michi</div>
+                        <div class="mk-prose"><p>The rollout stays paused until the identity issue is fixed.</p></div>
+                      </div>
+                      <div class="mk-user"><span class="mk-over">You · 14:09</span>Branch both leads. My guess is a stale account.</div>
+                      <div class="mk-msg">
+                        <div class="mk-label">&gt; michi</div>
+                        <div class="mk-group"><div class="mk-group-head"><span class="mk-group-ic"><svg class="i" width="13" height="13" viewBox="0 0 14 14" stroke-width="1.2"><path d="M2.5 4l3 3-3 3"/><path d="M7.5 10.5h4"/></svg><i class="mk-spin"></i></span><span class="mk-group-label">used 2 tools</span><span class="mk-group-meta">0.1s</span><span class="mk-chev">▸</span></div></div>
+                        <div class="mk-prose"><p>Both are running: <b>Identity check</b> and <b>Why Tokyo only?</b></p></div>
+                        <div class="mk-blist" data-tail>
+                          <div class="mk-blist-h">Branches <span>2</span></div>
+                          <div class="mk-brow"><span class="mk-brow-glyph"><svg class="i i-r90" width="18" height="18" viewBox="0 0 24 24" stroke-width="2.4"><path d="M16 3h5v5"/><path d="M8 3H3v5"/><path d="M12 22v-8.3a4 4 0 0 0-1.172-2.872L3 3"/><path d="m15 9 6-6"/></svg></span><span class="mk-brow-name">Identity check</span><span class="mk-brow-meta"><span class="mk-bstat"><span class="is-running"><svg class="i" width="13" height="13" viewBox="0 0 24 24" stroke-width="2"><path d="M21 12a9 9 0 1 1-6.219-8.56"/></svg>Running</span></span><span class="mk-bdetails"><span>2 messages</span><span>·</span><span>now</span></span></span></div>
+                          <div class="mk-brow"><span class="mk-brow-glyph"><svg class="i i-r90" width="18" height="18" viewBox="0 0 24 24" stroke-width="2.4"><path d="M16 3h5v5"/><path d="M8 3H3v5"/><path d="M12 22v-8.3a4 4 0 0 0-1.172-2.872L3 3"/><path d="m15 9 6-6"/></svg></span><span class="mk-brow-name">Why Tokyo only?</span><span class="mk-brow-meta"><span class="mk-bstat"><span class="is-running"><svg class="i" width="13" height="13" viewBox="0 0 24 24" stroke-width="2"><path d="M21 12a9 9 0 1 1-6.219-8.56"/></svg>Running</span></span><span class="mk-bdetails"><span>2 messages</span><span>·</span><span>now</span></span></span></div>
+                        </div>
+                      </div>
+                    </div></div></div>
+                    <div class="mk-composer">
+                      <div class="mk-cin"><span class="mk-prompt">›_</span><div class="mk-input"></div></div>
+                      <div class="mk-tools"><span class="mk-tchip is-icon"><svg class="i" width="16" height="16" viewBox="0 0 24 24" stroke-width="2.4"><path d="M5 12h14"/><path d="M12 5v14"/></svg></span><span class="mk-tools-gap"></span><span class="mk-tchip is-perm"><svg class="i" width="14" height="14" viewBox="0 0 16 16" stroke-width="1.6"><path d="M8 1.8l5 2v4.1c0 3-2.1 5.1-5 6.3-2.9-1.2-5-3.3-5-6.3V3.8z"/><path d="M5.8 8.1l1.6 1.6 3-3.1"/></svg><span>Ask</span></span><span class="mk-tchip is-model">Opus 5<span class="mk-tchip-effort">High</span><svg class="i i-r90 away-chev" width="12" height="12" viewBox="0 0 16 16" stroke-width="1.6"><path d="M6 3l5 5-5 5"/></svg></span><span class="mk-send is-empty"><svg class="i when-send" width="14" height="14" viewBox="0 0 16 16" stroke-width="1.8"><path d="M8 13V3"/><path d="M3.5 7.5L8 3l4.5 4.5"/></svg></span></div>
+                    </div>
+                  </div>
+                  <div class="mk-pane e-scene away-ph-pane away-ph-b" data-ta="off">
+                    <div class="mk-view"><div class="mk-list" data-follow><div class="mk-col">
+                      <div class="mk-msg">
+                        <div class="mk-label">&gt; michi</div>
+                        <div class="mk-tool"><div class="mk-tool-row"><span class="mk-tool-ic"><svg class="i" width="13" height="13" viewBox="0 0 14 14" stroke-width="1.2"><path d="M2.5 4l3 3-3 3"/><path d="M7.5 10.5h4"/></svg></span><span class="mk-tool-main"><span class="mk-tool-title">Resolve every identity</span><span class="mk-tool-sub">12 principals in policy.json</span></span><span class="mk-tool-dur">0.6s</span><span class="mk-tool-st"><i class="mk-spin"></i><svg class="mk-check" width="10" height="10" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M2.5 7.5l3 3 6-6.5"/></svg></span></div></div>
+                        <div class="mk-prose" data-tail>
+                          <ul><li>✓ dev-account-09</li><li>✓ dev-account-10</li><li>✓ dev-account-11</li><li>✗ task-runner role: not found</li></ul>
+                          <p><b>All 11 developer accounts are valid.</b> The task runner role is missing in Tokyo, so the stale-account guess is ruled out. The quickest fix is to drop the role from the policy. Before I change anything:</p>
+                          <ol><li>Which existing permissions must stay?</li><li>Can this change affect other regions?</li><li>What should count as a successful retry?</li></ol>
+                        </div>
+                      </div>
+                    </div></div></div>
+                    <div class="mk-composer">
+                      <div class="mk-cin"><span class="mk-prompt">›_</span><div class="mk-input"></div></div>
+                      <div class="mk-tools"><span class="mk-tchip is-icon"><svg class="i" width="16" height="16" viewBox="0 0 24 24" stroke-width="2.4"><path d="M5 12h14"/><path d="M12 5v14"/></svg></span><span class="mk-tools-gap"></span><span class="mk-tchip is-perm"><svg class="i" width="14" height="14" viewBox="0 0 16 16" stroke-width="1.6"><path d="M8 1.8l5 2v4.1c0 3-2.1 5.1-5 6.3-2.9-1.2-5-3.3-5-6.3V3.8z"/><path d="M5.8 8.1l1.6 1.6 3-3.1"/></svg><span>Ask</span></span><span class="mk-tchip is-model">Opus 5<span class="mk-tchip-effort">High</span><svg class="i i-r90 away-chev" width="12" height="12" viewBox="0 0 16 16" stroke-width="1.6"><path d="M6 3l5 5-5 5"/></svg></span><span class="mk-send is-empty"><svg class="i when-send" width="14" height="14" viewBox="0 0 16 16" stroke-width="1.8"><path d="M8 13V3"/><path d="M3.5 7.5L8 3l4.5 4.5"/></svg></span></div>
+                    </div>
+                  </div>
+                </div>
+                <div class="away-sw e e-pop is-off">
+                  <div class="away-sw-r is-cur"><span class="away-sw-n">Tokyo deployment</span><svg class="i away-sw-x" width="14" height="14" viewBox="0 0 24 24" stroke-width="1.6"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg></div>
+                  <div class="away-sw-r" style="--d:1"><span class="away-sw-n">Task runner role</span></div>
+                  <div class="away-sw-r away-tap away-sw-r3" style="--d:1"><span class="away-sw-n">Identity check</span><i class="away-wdot"></i></div>
+                  <div class="away-sw-r" style="--d:1"><span class="away-sw-n">Why Tokyo only?</span><i class="away-wdot"></i></div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+        <div class="away-narr">
+          <p class="sr-only">Animated example in four parts.</p>
+          <p class="sr-only" data-away-narr="1">First, the tokyo-rollout home page in Pages. The Meta agent reads a conversation that just finished and adds a Cause block: the permissions policy runs before bootstrap creates the task runner role. The block’s Sources button opens the message it came from, in Tokyo deployment RCA, with Continue this chat. The rollout is still paused, with validation pending.</p>
+          <p class="sr-only" data-away-narr="2">Second, in Tokyo deployment, they type “Remember for this project: change Tokyo only and keep every existing permission.” The agent searches its memory, saves the note and replies “Saved for tokyo-rollout.”, and Michi shows “Remembered” with Undo. Then, in a new chat with Codex, they ask “Draft the Tokyo fix.” With no memory tool call, the answer keeps to Tokyo and every existing permission: create the task runner role in Tokyo before the policy runs, and leave the other regions unchanged.</p>
+          <p class="sr-only" data-away-narr="3">Third, on the Scheduled page, the weekday job Tokyo deploy check is due and runs. When it finishes, its next run is a day away and a desktop notification says: Check 4 failed: the task runner role is still missing in Tokyo. Rollout stays paused.</p>
+          <p class="sr-only" data-away-narr="4">Fourth, the tokyo-rollout workspace runs on a remote machine. The desktop dims and a phone opens the Tokyo deployment thread, with both branches still working. They open the pane list and pick Identity check, which has finished its first round: all 11 developer accounts are valid, and the task runner role is missing in Tokyo.</p>
+        </div>
+        <div class="take-bar">
+          <div class="take-end">
+            <div class="take-ctls">
+              <button type="button" class="take-ctl" data-take-control="pause" aria-label="Pause the four examples" aria-pressed="false" hidden>Pause</button>
+              <button type="button" class="take-ctl" data-take-control="replay" aria-label="Replay the four examples" hidden>Replay</button>
+              <button type="button" class="take-ctl" data-take-control="play" aria-label="Play the example as steps" hidden>Play</button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>

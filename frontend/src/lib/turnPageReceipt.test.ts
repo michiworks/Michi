@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it } from 'vitest';
 import {
-  invalidateTurnPageReceipt, parseTurnPageInvalidation, parseTurnPageReceipt, resetTurnPageReceiptInvalidationForTests, taskBoardPageId, taskWriteLine,
+  invalidateTurnPageReceipt, michiToolCall, parseTurnPageInvalidation, parseTurnPageReceipt, resetTurnPageReceiptInvalidationForTests, taskBoardPageId,
+  taskWriteLine,
 } from './turnPageReceipt';
 import { subscribePageChanges, type PageEventIdentity } from '../state/pages/pageEvents';
 
@@ -303,6 +304,16 @@ describe('task receipts', () => {
     expect(parseTurnPageReceipt(pageTool({ ...receipt }, 'edit_database'), 'local')!.tasks).toBeUndefined();
   });
 
+  it('names any database row by the column the write says titles it', () => {
+    const output = JSON.stringify({
+      result: { resource: { kind: 'database', id: 'db-trip' }, proposed: [], rejected: [], applied: [
+        { id: 'c1', seq: 5, batchId: 'batch-d', after: { kind: 'row', exists: true, row: { id: 'r1', values: { pri: 'High', name: 'Book the hotel' } } } },
+      ] },
+      michiPageWrite: { ...receipt, resourceId: 'db-trip', title: 'Trip', originatingPageIds: [], titleColumnId: 'name' },
+    });
+    expect(parseTurnPageReceipt({ title: 'edit_database', status: 'completed', output }, 'local')!.changes[0]!.label).toBe('Book the hotel');
+  });
+
   it('marks a page write that inserts a task board, inside a grid too, and finds the page it went on', () => {
     const change = (id: string, op: string, block: unknown) => ({ id, seq: 2, batchId: 'batch-1', op, after: { kind: 'block', exists: true, block } });
     const output = JSON.stringify({
@@ -402,5 +413,48 @@ describe('a task board added into an existing container', () => {
     });
     const parsed = parseTurnPageReceipt({ title: 'edit_page', status: 'completed', output }, 'local')!;
     expect(parsed.changes.map((item) => item.taskBoard ?? false)).toEqual([true, false]);
+  });
+});
+
+describe('michiToolCall', () => {
+  it('names a call by its own tool, unwrapping Crew\'s michi_call_tool', () => {
+    expect(michiToolCall({ title: 'mcp____michi_internal____list_ready_models', inputJson: '{}' })).toEqual({ name: 'mcp____michi_internal____list_ready_models', input: {} });
+    expect(michiToolCall({ title: 'michi_call_tool', inputJson: JSON.stringify({ tool: 'propose_multi_model_plan', arguments: { title: 'T' } }) }))
+      .toEqual({ name: 'propose_multi_model_plan', input: { title: 'T' } });
+    expect(michiToolCall({ title: 'mcp:michi-crew-runtime:michi_call_tool', inputJson: JSON.stringify({ tool: 'list_threads', arguments: '{"limit":3}' }) }))
+      .toEqual({ name: 'list_threads', input: { limit: 3 } });
+    expect(michiToolCall({ title: '  ' })).toBeNull();
+  });
+
+  it('keeps the name of a Crew call whose input was cut, without an input', () => {
+    const cut = `{"tool":"propose_multi_model_plan","arguments":{"threads":[{"prompt":"${'x'.repeat(100)}`;
+    expect(michiToolCall({ title: 'michi_call_tool', inputJson: cut })).toEqual({ name: 'propose_multi_model_plan', input: null });
+    expect(michiToolCall({ title: 'michi_call_tool', inputJson: '{"argu' })).toEqual({ name: 'michi_call_tool', input: null });
+    expect(michiToolCall({ title: 'edit_page', inputJson: '{"pageId":' })).toEqual({ name: 'edit_page', input: null });
+  });
+});
+
+describe("Crew's michi_call_tool", () => {
+  const crew = (name: string, output: unknown, title = 'mcp:michi-crew-runtime:michi_call_tool') => ({
+    title, status: 'completed', inputJson: JSON.stringify({ tool: name, arguments: { pageId: 'page-1' } }), output: JSON.stringify(output),
+  });
+  const write = { michiPageWrite: { ...receipt, resourceKind: 'page', resourceId: 'page-1' } };
+
+  it('gives a wrapped page write its receipt and refresh', () => {
+    expect(parseTurnPageReceipt(crew('edit_page', write), 'local')).toMatchObject({ tool: 'edit_page', resourceId: 'page-1', appliedCount: 2 });
+    expect(parseTurnPageReceipt(crew('edit_page', write, 'michi_call_tool'), 'local')?.tool).toBe('edit_page');
+    expect(parseTurnPageInvalidation(crew('edit_page', write), 'local')).toMatchObject({ resourceKind: 'page', resourceId: 'page-1' });
+  });
+
+  it('refreshes for a wrapped component save and a new task database', () => {
+    const component = { michiPageWrite: { kind: 'michiPageWrite', resourceKind: 'component', resourceId: 'component-1' } };
+    expect(parseTurnPageInvalidation(crew('save_page_component', component), 'local')).toMatchObject({ resourceKind: 'component', resourceId: 'component-1' });
+    const opened = { kind: 'taskDatabase', created: true, databaseId: 'db-t', workspaceId: 'ws-real' };
+    expect(parseTurnPageInvalidation(crew('open_task_database', opened), 'local')).toMatchObject({ resourceKind: 'database', resourceId: 'db-t', workspaceId: 'ws-real' });
+  });
+
+  it('reads nothing from a wrapper that names another tool', () => {
+    expect(parseTurnPageReceipt(crew('read_page', write), 'local')).toBeNull();
+    expect(parseTurnPageInvalidation(crew('read_page', write), 'local')).toBeNull();
   });
 });

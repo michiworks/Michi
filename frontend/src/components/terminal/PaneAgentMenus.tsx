@@ -1,10 +1,10 @@
-import React, { useEffect } from 'react';
+import { useEffect } from 'react';
 import { AnimatePresence } from 'motion/react';
 import type { AgentCapabilities, AgentModelInfo, AgentProviderInfo, AgentReasoning, AgentStatus, SessionMode } from '../../services/api';
 import type { ResolvedNodeBinding } from '../../state/nodeBindingResolution';
 import ContextMenu, { menuOpenKey, type MenuSection } from '../ContextMenu';
 import type { PaneMenuAnchor } from './PaneComposerToolbarLeft';
-import { ComposerModelPicker } from './ComposerModelPicker';
+import { ComposerModelPicker, type ComposerUltracode } from './ComposerModelPicker';
 
 interface PaneAgentMenusProps {
   agentMenu: PaneMenuAnchor | null;
@@ -29,6 +29,9 @@ interface PaneAgentMenusProps {
   onSaveModel: (modelId: string) => void | Promise<void>;
   onRetryModels: () => void;
   onSaveReasoning: (reasoning: AgentReasoning) => void | Promise<void>;
+  /** The chat's Ultracode switch; omitted where a chat cannot have one. */
+  ultracode?: ComposerUltracode;
+  onSaveUltracode?: (enabled: boolean) => void | Promise<void>;
   onCloseAgentMenu: () => void;
   onCloseModelMenu: () => void;
   primaryAgents?: readonly PrimaryAgentMenuOption[];
@@ -73,6 +76,8 @@ export function PaneAgentMenus({
   onSaveModel,
   onRetryModels,
   onSaveReasoning,
+  ultracode,
+  onSaveUltracode,
   onCloseAgentMenu,
   onCloseModelMenu,
   primaryAgents = [],
@@ -187,6 +192,8 @@ export function PaneAgentMenus({
           onSaveModel={onSaveModel}
           onRetryModels={onRetryModels}
           onSaveReasoning={onSaveReasoning}
+          ultracode={ultracode}
+          onSaveUltracode={onSaveUltracode}
           onClose={onCloseModelMenu}
         />
       )}</AnimatePresence>

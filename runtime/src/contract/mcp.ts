@@ -86,7 +86,14 @@ export interface McpSlot {
    */
   restricted?: boolean;
   maintenance?: boolean;
-  getActivePageTurnAttribution?: () => { turnId: string; assistantId: string } | null;
+  /**
+   * The chat turn the slot's session runs now, or null. `approveForMe`: the
+   * session may approve the turn's later tools without asking the host (Kiro's
+   * Approve for me, which only reopening the session takes away), so a host
+   * must keep material that should make the turn ask out of what it hands
+   * that turn. Pass the getter on as it is: a rebuilt object would drop the flag.
+   */
+  getActivePageTurnAttribution?: () => { turnId: string; assistantId: string; approveForMe?: true } | null;
   getActiveMaintenanceExecutionContext?: () => import('./types').MaintenanceExecutionContext | null;
   /**
    * Whether this slot may run tools right now. Read on every call; while it
@@ -118,12 +125,6 @@ export interface McpSlot {
    * prompt-injection defenses. The owning runtime strips it before
    * exposing assistant text. Host tool extension (turn-metadata protocol). */
   metadataDoneSentinel?: string;
-  /**
-   * Host tool extension (turn-metadata protocol): validates the turn's
-   * metadata for the Stop hook.
-   * @experimental Follow-ups Stop-hook POC; outside the v1 compatibility guarantee.
-   */
-  onValidateFollowUps?: () => Record<string, unknown>;
   /** Host tool extension: ask_user is offered only when it is present. */
   onAskUser?: (questions: Array<{
     question: string;
@@ -168,7 +169,8 @@ export interface McpSlotCallbacks {
   /** See McpSlot.restricted. */
   restricted?: boolean;
   maintenance?: boolean;
-  getActivePageTurnAttribution?: () => { turnId: string; assistantId: string } | null;
+  /** See McpSlot.getActivePageTurnAttribution. */
+  getActivePageTurnAttribution?: McpSlot['getActivePageTurnAttribution'];
   getActiveMaintenanceExecutionContext?: () => import('./types').MaintenanceExecutionContext | null;
   /** See McpSlot.isServing. */
   isServing?: McpSlot['isServing'];
@@ -180,6 +182,14 @@ export interface McpSlotCallbacks {
    * it. Absent, the reports are dropped.
    */
   sink?: McpSlotEventSink;
+  /**
+   * The tool `_meta` this agent's client reads as "load this tool up front"
+   * instead of holding it back for a tool search (Claude Code: its
+   * alwaysLoad key). The host puts it on the tools it marks so in the slot's
+   * tools/list (Michi: the memory tools, whose descriptions say when to call
+   * them). Not copied onto the slot; a session group's catalog has none.
+   */
+  upFrontToolMeta?: Readonly<Record<string, unknown>>;
   onSpawnBranches?: McpSlot['onSpawnBranches'];
   onSaveArtifact?: McpSlot['onSaveArtifact'];
   onUpdateArtifact?: McpSlot['onUpdateArtifact'];
@@ -187,8 +197,6 @@ export interface McpSlotCallbacks {
   onSetFollowUps?: McpSlot['onSetFollowUps'];
   onSetBranchOverview?: McpSlot['onSetBranchOverview'];
   metadataDoneSentinel?: McpSlot['metadataDoneSentinel'];
-  /** @experimental See McpSlot.onValidateFollowUps. */
-  onValidateFollowUps?: McpSlot['onValidateFollowUps'];
   onAskUser?: McpSlot['onAskUser'];
   agentRuns?: AgentRunToolInvoker;
   agentRunToolNames?: readonly AgentRunToolName[];
@@ -257,23 +265,13 @@ export interface McpSlotProvider {
   /**
    * The slot's HTTP MCP server for the agent's MCP config. The URL shape is
    * an external contract: the agent CLIs receive it as is, and Crew's relay
-   * accepts only `http://127.0.0.1:<port>/api/mcp/<slotId>` with empty
-   * headers. Computed from the id alone, as the adapters' URLs always were:
-   * an unknown or disposed slot's URL answers 404.
+   * accepts only `http://127.0.0.1:<port>/api/mcp/<slotId>` (or `[::1]`)
+   * with empty headers. Computed from the id alone, as the adapters' URLs
+   * always were: an unknown or disposed slot's URL answers 404.
    */
   endpoint(slotId: string): McpHttpEndpoint;
   /** The session group's HTTP MCP server (`.../mcp-session/<groupId>`). Computed from the id alone, like endpoint(). */
   sessionEndpoint(groupId: string): McpHttpEndpoint;
-  /**
-   * URL the agent's `hook` hook posts to (Codex's Stop hook). Computed from
-   * the id alone. Through the package's MCP host (`/mcp-hooks/<slotId>/<hook>`)
-   * an unknown or disposed slot answers 404; the bundled Stop-hook runner
-   * fails open on any non-2xx answer, so the turn ends unrepaired either way.
-   * A host may serve its own route instead and answer such a slot with `{}`
-   * (Michi does, at `.../codex-hooks/<slotId>/stop`).
-   * @experimental Follow-ups Stop-hook POC; outside the v1 compatibility guarantee.
-   */
-  hookEndpoint(slotId: string, hook: 'stop'): string;
   /**
    * Assigns the patch's fields on the slot's binding, the same object get()
    * returns, so tool calls see them from the next call on. Absent keys are

@@ -13,6 +13,12 @@
   outline: none;
 }
 
+/* A dragged drawer stops short of covering the whole window (DrawerShell.tsx
+   clamps the drag to the same share). */
+.ui-drawer-panel.drawer-shell-panel[data-resizable] {
+  max-width: 75vw;
+}
+
 .drawer-shell-panel[data-state='closed'] {
   transform: translateX(100%);
   pointer-events: none;

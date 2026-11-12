@@ -1,7 +1,7 @@
 import { API_BASE_URL } from './env';
-import { remoteEntityIdentity } from './backendIdentity';
+import { isLocalConnectionId, LOCAL_BACKEND_CONNECTION_ID, remoteEntityIdentity } from './backendIdentity';
 
-export const LOCAL_BACKEND_CONNECTION_ID = 'local';
+export { isLocalConnectionId, LOCAL_BACKEND_CONNECTION_ID };
 
 export type BackendConnectionTransport = 'direct' | 'ssh';
 
@@ -70,7 +70,7 @@ export function indexBackendProjects(
     if (identity && project.backendConnectionId && identity.connectionId !== project.backendConnectionId) {
       throw new Error('Workspace belongs to a different backend connection');
     }
-    const connectionId = identity?.connectionId ?? project.backendConnectionId ?? LOCAL_BACKEND_CONNECTION_ID;
+    const connectionId = projectConnectionId(project);
     workspaceConnections.set(project.id, connectionId);
     for (const nodeId of project.chatIds) {
       const nodeIdentity = remoteEntityIdentity(nodeId);
@@ -78,6 +78,20 @@ export function indexBackendProjects(
       nodeConnections.set(nodeId, connectionId);
     }
   }
+}
+
+/** The workspace's connection: its id's prefix first, so losing the field never turns a remote workspace Local. */
+export function projectConnectionId(project: { id: string; backendConnectionId?: string }): string {
+  return remoteEntityIdentity(project.id)?.connectionId ?? project.backendConnectionId ?? LOCAL_BACKEND_CONNECTION_ID;
+}
+
+/** Whether two workspaces live on the same backend connection (a thread can move only between those). */
+export function sameBackendConnection(a: { id: string; backendConnectionId?: string }, b: { id: string; backendConnectionId?: string }): boolean {
+  return projectConnectionId(a) === projectConnectionId(b);
+}
+
+export function isLocalProject(project: { id: string; backendConnectionId?: string }): boolean {
+  return isLocalConnectionId(projectConnectionId(project));
 }
 
 export function backendConnectionIdForWorkspace(workspaceId: string): string {
@@ -89,7 +103,7 @@ export function backendConnectionIdForNode(nodeId: string): string {
 }
 
 export function backendApiBase(connectionId = LOCAL_BACKEND_CONNECTION_ID): string {
-  if (!connectionId || connectionId === LOCAL_BACKEND_CONNECTION_ID) return API_BASE_URL;
+  if (isLocalConnectionId(connectionId)) return API_BASE_URL;
   return `${API_BASE_URL}/backend-connections/${encodeURIComponent(connectionId)}/proxy`;
 }
 

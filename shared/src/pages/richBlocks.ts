@@ -2,6 +2,7 @@
  * fields instead of clipping or dropping them as a display adapter may do. */
 import { z } from 'zod';
 import { zodToJsonSchema } from 'zod-to-json-schema';
+import { isCalendarDay } from '../calendarDay';
 
 const text = z.string().max(2_000);
 const title = z.string().max(200);
@@ -14,9 +15,7 @@ const url = z.string().max(2_000).refine((v) => {
   if (v.trim() !== v) return false;
   try { const u = new URL(v); return u.protocol === 'https:' && !!u.hostname && !u.username && !u.password; } catch { return false; }
 }, 'must be an https address').describe('https URL');
-const day = z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'must be a date YYYY-MM-DD').refine((v) => {
-  const d = new Date(`${v}T00:00:00Z`); return Number.isFinite(d.getTime()) && d.toISOString().slice(0, 10) === v;
-}, 'must be a real date YYYY-MM-DD').describe('YYYY-MM-DD');
+const day = z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'must be a date YYYY-MM-DD').refine(isCalendarDay, 'must be a real date YYYY-MM-DD').describe('YYYY-MM-DD');
 const instant = z.string().max(40).regex(/^\d{4}-\d{2}-\d{2}(?:T\d{2}:\d{2}(?::\d{2}(?:\.\d{1,3})?)?(?:Z|[+-]\d{2}:\d{2})?)?$/, 'must be an ISO 8601 date or date-time')
   .refine((v) => day.safeParse(v.slice(0, 10)).success && Number.isFinite(Date.parse(v)), 'must be a real ISO 8601 date or date-time')
   .describe('ISO 8601 date or date-time');

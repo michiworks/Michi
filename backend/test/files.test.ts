@@ -51,6 +51,25 @@ describe('GET /api/files/:workspaceId/*', () => {
         });
     });
 
+    test('serves the shared image formats from subfolders and refuses SVG', async () => {
+        const root = tmpRoot();
+        fs.mkdirSync(path.join(root, 'docs'));
+        const expected: Record<string, string> = {
+            'a.png': 'image/png', 'a.jpg': 'image/jpeg', 'a.JPEG': 'image/jpeg', 'a.gif': 'image/gif', 'a.webp': 'image/webp',
+        };
+        for (const name of [...Object.keys(expected), 'a.svg']) fs.writeFileSync(path.join(root, 'docs', name), 'x');
+        await withServer(appWithRoot(root), async (port) => {
+            for (const [name, mime] of Object.entries(expected)) {
+                const res = await fetch(`http://127.0.0.1:${port}/api/files/ws1/docs/${name}`);
+                assert.equal(res.headers.get('content-type'), mime, name);
+                await res.arrayBuffer();
+            }
+            const svg = await fetch(`http://127.0.0.1:${port}/api/files/ws1/docs/a.svg`);
+            assert.equal(svg.status, 404);
+            await svg.arrayBuffer();
+        });
+    });
+
     test('404 on bad workspaceId', async () => {
         const root = tmpRoot();
         fs.writeFileSync(path.join(root, 'a.png'), Buffer.from([0x89, 0x50, 0x4e, 0x47]));

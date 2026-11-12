@@ -1,7 +1,7 @@
-import React from 'react';
 import { AgentRunStatus } from 'michi-shared';
 import type { AgentRunAttemptDtoV1, AgentRunEventV1 } from 'michi-shared';
 import type { AgentResourceIdentity } from '../../../state/agentIdentity';
+import { useNow } from '../../../hooks/useNow';
 import { FadeOnChange, RevealOnShow } from '../agentBlockMotion';
 import {
   compactRunHandoff,
@@ -13,7 +13,7 @@ import {
 } from './agentRunSelectors';
 
 const STATUS_COLOR: Record<AgentRunStatus, string> = {
-  queued: 'var(--term-muted)', preparing: 'var(--term-select)', running: 'var(--term-accent)',
+  queued: 'var(--term-muted)', preparing: 'var(--term-select)', running: 'var(--term-run)',
   waiting: 'var(--term-select)', recovering: 'var(--term-mauve)', completed: 'var(--term-digest)',
   failed: 'var(--term-danger)', cancelled: 'var(--term-muted)',
 };
@@ -28,6 +28,7 @@ export interface AgentRunCardProps {
 
 export function AgentRunCard({ run: resource, attempts = [], events = [], now, onOpen }: AgentRunCardProps) {
   const run = resource.value;
+  const clock = useNow(1_000, now === undefined && run.completedAt === null);
   const identity = runIdentity(resource);
   const handoff = compactRunHandoff(run);
   const recovered = hasRecoveredAttempt(attempts, events);
@@ -64,7 +65,7 @@ export function AgentRunCard({ run: resource, attempts = [], events = [], now, o
         <span aria-hidden>·</span>
         <span>{environment}</span>
         <span aria-hidden>·</span>
-        <span>{elapsedRunLabel(run, now)}</span>
+        <span>{elapsedRunLabel(run, now ?? clock)}</span>
         <FadeOnChange k={recovered ? 'recovered' : null} style={{ color: 'var(--term-mauve)' }}>Recovered automatically</FadeOnChange>
         <button
           type="button"

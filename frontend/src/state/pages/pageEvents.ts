@@ -13,9 +13,17 @@ const listeners = new Set<PageListener>();
 
 export function notifyPageChanged(identity: PageEventIdentity): void {
   for (const listener of listeners) listener(identity);
-  if (typeof window !== 'undefined') {
-    window.dispatchEvent(new CustomEvent<PageEventIdentity>('michi:page-changed', { detail: identity }));
-  }
+}
+
+/**
+ * Inbound only: a `michi:page-changed` window event dispatched from outside
+ * the app's modules (E2E tests drive conflicts with one) reaches the
+ * subscribers. Subscribe with subscribePageChanges, never to the window event.
+ */
+const WINDOW_EVENT = 'michi:page-changed';
+function onWindowEvent(event: Event): void {
+  const detail = (event as CustomEvent<unknown>).detail as Partial<PageEventIdentity> | null;
+  if (detail && typeof detail === 'object' && typeof detail.backendConnectionId === 'string') notifyPageChanged(detail as PageEventIdentity);
 }
 
 export function subscribePageChanges(identity: PageEventIdentity, listener: PageListener): () => void {
@@ -30,6 +38,10 @@ export function subscribePageChanges(identity: PageEventIdentity, listener: Page
     if (identity.databaseId && changed.pageId && !changed.databaseId) return;
     listener(changed);
   };
+  if (listeners.size === 0 && typeof window !== 'undefined') window.addEventListener(WINDOW_EVENT, onWindowEvent);
   listeners.add(scoped);
-  return () => listeners.delete(scoped);
+  return () => {
+    listeners.delete(scoped);
+    if (listeners.size === 0 && typeof window !== 'undefined') window.removeEventListener(WINDOW_EVENT, onWindowEvent);
+  };
 }

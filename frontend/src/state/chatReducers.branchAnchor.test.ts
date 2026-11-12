@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { reduceNodes } from './chatReducers';
+import { computeSurvivingMessageIds } from './branchAnchors';
 import type { ChatMessage, ChatNodeState } from './chatTypes';
 
 const msg = (id: string, role: 'user' | 'assistant' = 'assistant', text = ''): ChatMessage =>
@@ -29,5 +30,19 @@ describe('retry-trim clears followUpsSourceMessageId when its target is trimmed'
     };
     const next = reduceNodes(nodes, { type: 'retry-trim', nodeId: 'n', fromIndex: 2 });
     expect(next.n.followUpsSourceMessageId).toBe('a1');
+  });
+});
+
+describe('computeSurvivingMessageIds keeps exactly what retry-trim keeps', () => {
+  const cases: Array<[string, ChatMessage[], number | undefined]> = [
+    ['fromIndex', [msg('u1', 'user'), msg('a1'), msg('u2', 'user'), msg('a2')], 2],
+    ['user + assistant tail', [msg('u1', 'user'), msg('a1'), msg('u2', 'user'), msg('a2')], undefined],
+    ['lone assistant tail', [msg('u1', 'user'), msg('a1'), msg('a2')], undefined],
+    ['trailing user', [msg('u1', 'user'), msg('a1'), msg('u2', 'user')], undefined],
+    ['empty', [], undefined],
+  ];
+  it.each(cases)('%s', (_label, messages, fromIndex) => {
+    const next = reduceNodes({ n: baseNode(messages) }, { type: 'retry-trim', nodeId: 'n', fromIndex });
+    expect(computeSurvivingMessageIds(messages, fromIndex)).toEqual(new Set(next.n.messages.map((m) => m.id)));
   });
 });

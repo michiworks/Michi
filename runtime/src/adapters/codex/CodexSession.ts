@@ -1,7 +1,6 @@
 import { ApprovalCoordinator, chatApprovalOptions } from '../../core/approvals';
+import { assertPermissionAnswer, nextInteractionRequestId } from '../../core/pendingInteractions';
 import { randomUUID } from 'node:crypto';
-import fs from 'node:fs';
-import path from 'node:path';
 import type {
   AgentSession,
   AgentTurnInput,
@@ -13,42 +12,66 @@ import type {
   RuntimePermissionDecision,
   RuntimeSessionOwner,
   RuntimeToolProfile,
+  SkillTurnInvocation,
   SteerResult,
 } from '../../contract/types';
-import type { NormalizedEvent, PermissionOption, UserInputAnswer, UserInputQuestion } from '../../contract/events';
+import type { NormalizedEvent, UserInputAnswer, UserInputQuestion } from '../../contract/events';
 import {
-  clampSubagentText,
+  isTurnMetadataToolTitle,
   mergeSubagentEntry,
   subagentEndOf,
   SUBAGENT_LIMITS,
   SUBAGENT_SESSION_ENDED_ERROR,
   type SubagentEnd,
   type SubagentInfo,
-  type SubagentPatch,
 } from 'michi-shared';
 import type { McpSlotProvider } from '../../contract/mcp';
 import {
   ownerMode,
-  type BackgroundSubagentContext, type BackgroundSubagentSink, type FollowUpsExperimentMode, type RuntimeHost,
+  type BackgroundSubagentContext, type BackgroundSubagentSink, type RuntimeHost,
   type TurnMetadataTracker,
 } from '../../contract/host';
 import { assertHostPorts } from '../../core/defaultHost';
 import type { AgentToolBridge } from '../../contract/tools';
-import type { CodexAppServerClient } from './CodexAppServerClient';
+import { CodexRpcError, type CodexAppServerClient } from './CodexAppServerClient';
 import { EventQueue } from '../../core/eventQueue';
 import { abortable } from '../../core/runtimeLifecycle';
 import { createCodexTranslator } from './codexEventTranslator';
 import { resolveShowImage } from '../../core/showImage';
 import { hostEventSink } from '../../core/hostEventSink';
 import { prepareAttachments } from '../../core/attachments';
+import { formElicitationContent, formElicitationFields } from '../../core/formElicitation';
 import { codexChatTurnPolicy } from './codexTurnPolicy';
 import { CODEX_RESTRICTED_TURN_POLICY } from './codexRestrictedProfile';
-import { buildCodexCollaborationMode, CODEX_THREAD_FEATURES_OFF, codexDisableMcpServers, isCodexModeKind } from './codexProtocol';
+import { CODEX_MEMORIES_OFF, CODEX_THREAD_FEATURES_OFF, codexDisableMcpServers, isCodexModeKind } from './codexProtocol';
 import { codexSpawnSignal } from './codexCollab';
 import type { CodexHostText } from './CodexRuntime';
 import { fallbackCodexTitle, generateCodexTitle } from './codexTitleGenerator';
 import { buildRunMcpSlotCallbacks } from '../../core/runMcpSlot';
 import { interactiveOwner } from '../../contract/types';
+import { expandSkillPrompt, skillHistoryText } from '../../core/skills';
+import { turnContextPrefix } from '../../core/turnText';
+import { sessionOwnerContext } from '../../core/ownerContext';
+import { bindMaintenanceTurn, pageAttributionFor } from '../../core/maintenanceTurn';
+import { codexSkillMention, type CodexSkillInput } from './codexSkills';
+import {
+  canonicalToolNameFromMethod,
+  codexBrokerDecision,
+  codexGrantToolName,
+  codexPermissionRequest,
+  codexRunAskOptions,
+  codexUserInputQuestions,
+} from './codexApprovalMapping';
+import { codexStartedTurnId, codexTitleText, codexTurnInput, codexTurnStartParams } from './codexTurnRequest';
+import {
+  codexChildNarration,
+  codexChildThreadInfo,
+  codexChildToolActivity,
+  codexChildTurnEndPatch,
+  isCodexChildThreadClosed,
+} from './codexChildThreads';
+
+export { canonicalToolNameFromMethod } from './codexApprovalMapping';
 
 const APPROVE_TIMEOUT_MS = 300_000;
 
@@ -58,25 +81,6 @@ const APPROVE_TIMEOUT_MS = 300_000;
  */
 export const CODEX_RESTRICTED_SUBAGENT_ERROR =
   'The Michi assistant cannot use sub-agents. Codex started one, so Michi stopped this turn and the sub-agent.';
-
-const INTERNAL_METADATA_TOOLS = new Set([
-  'set_branch_overview',
-  'set_title',
-  'set_follow_ups',
-  'validate_follow_ups',
-  'validate_turn_metadata',
-]);
-
-function isInternalMetadataToolTitle(title: string): boolean {
-  const normalized = title.trim().toLowerCase();
-  if (INTERNAL_METADATA_TOOLS.has(normalized)) return true;
-  for (const tool of INTERNAL_METADATA_TOOLS) {
-    if (!normalized.endsWith(tool)) continue;
-    const prefix = normalized.slice(0, -tool.length);
-    if (/(?:[/.:]|_{2,})$/.test(prefix)) return true;
-  }
-  return false;
-}
 
 type SessionState = 'idle' | 'in_turn' | 'crashed' | 'disposed';
 
@@ -101,8 +105,6 @@ export interface CodexSessionDeps {
    * null/undefined the title thread uses the session's own model.
    */
   titleModel?: string | null;
-  followUpsHookPocEnabled?: boolean;
-  followUpsExperimentMode?: FollowUpsExperimentMode;
   /** Default true. When false, the per-turn follow-up reminder is suppressed. */
   enableFollowUps?: boolean;
   /** Explicit product owner. When omitted, the interactive owner of nodeId (the session's id). */
@@ -123,6 +125,11 @@ export interface CodexSessionDeps {
   backgroundSubagents?: BackgroundSubagentSink;
   /** The host's wording (CodexAdapterOptions.hostText); none when absent. */
   hostText?: CodexHostText;
+  /**
+   * The skill input that runs a turn's skill natively in `cwd` (CodexRuntime
+   * checks app-server's listing), or null to send the skill as text.
+   */
+  skillInput?: (skill: SkillTurnInvocation, cwd: string) => Promise<CodexSkillInput | null>;
 }
 
 export class CodexSession implements AgentSession {
@@ -164,8 +171,6 @@ export class CodexSession implements AgentSession {
   private readonly ownerUserId: string | null;
   private readonly generateTitleOnFirstTurn: boolean;
   private readonly titleModel: string | null;
-  private readonly followUpsHookPocEnabled: boolean;
-  private readonly followUpsExperimentMode: FollowUpsExperimentMode;
   public readonly enableFollowUps: boolean;
   /** Tool profile for Agent Runs. Undefined for chat sessions. */
   private readonly toolProfile: RuntimeToolProfile | undefined;
@@ -245,6 +250,7 @@ export class CodexSession implements AgentSession {
   private readonly approveTimeoutMs: number;
   private readonly titleTimeoutMs: (() => number) | undefined;
   private readonly hostText: CodexHostText | undefined;
+  private readonly skillInput: CodexSessionDeps['skillInput'];
   public requiresRestart = false;
   /** Native thread/fork id only — never becomes a Michi node id. */
   private alignedForkThreadId: string | null = null;
@@ -259,8 +265,7 @@ export class CodexSession implements AgentSession {
   private turnLock: Promise<void> | null = null;
   private turnLockRelease: (() => void) | null = null;
 
-  // Permission state — session-local numeric ids (NOT JSON-RPC ids)
-  private nextRequestId = 0;
+  // Permission state — Michi request ids (NOT JSON-RPC ids)
   /** Exposed for test inspection (security contract tests). Do not mutate externally. */
   public readonly pendingPermissions = new Map<
     number,
@@ -303,11 +308,7 @@ export class CodexSession implements AgentSession {
     this.generateTitleOnFirstTurn = deps.generateTitleOnFirstTurn ?? false;
     this.titleModel = deps.titleModel ?? null;
     this.enableFollowUps = deps.enableFollowUps !== false && !this.host.profile.isRestricted(deps.toolProfile) && !deps.toolProfile?.assistant;
-    this.followUpsHookPocEnabled = (deps.followUpsHookPocEnabled ?? false) && !this.host.profile.isRestricted(deps.toolProfile) && !deps.toolProfile?.assistant;
-    this.followUpsExperimentMode = this.followUpsHookPocEnabled
-      ? deps.followUpsExperimentMode ?? this.host.prompt.followUpsExperimentMode()
-      : 'sentinel';
-    this.turnMetadata = this.host.prompt.turnMetadata(this.followUpsExperimentMode);
+    this.turnMetadata = this.host.prompt.turnMetadata('sentinel');
     this.firstTurnPrefix = deps.firstTurnPrefix ?? '';
     this.effort = deps.effort ?? null;
     this.currentModelId = deps.model ?? null;
@@ -324,6 +325,7 @@ export class CodexSession implements AgentSession {
     this.approveTimeoutMs = deps.approveTimeoutMs ?? APPROVE_TIMEOUT_MS;
     this.titleTimeoutMs = deps.titleTimeoutMs;
     this.hostText = deps.hostText;
+    this.skillInput = deps.skillInput;
 
     this.queue = new EventQueue((idleMs) => {
       if (this.state === 'in_turn') {
@@ -335,6 +337,11 @@ export class CodexSession implements AgentSession {
   // ---- Public AgentSession interface ----------------------------------------
 
   getOwnerUserId(): string | null { return this.ownerUserId; }
+
+  /** Whether this session's threads may read and write Codex's own memories (RuntimeConfigPort.features.nativeMemory). */
+  keepsNativeMemory(): boolean {
+    return this.host.config.features.nativeMemory?.(this.runtimeId, this.ownerUserId) !== false;
+  }
 
   getHistory(): ChatMessage[] {
     return this.history;
@@ -353,20 +360,23 @@ export class CodexSession implements AgentSession {
   }
 
   private maintenanceContextForSend(input?: AgentTurnInput): MaintenanceExecutionContext | null {
-    if (!this.isMaintenance) {
-      if (input?.maintenanceContext) throw new Error('Maintenance context supplied to a non-maintenance Codex session');
-      return null;
-    }
-    const context = input?.maintenanceContext;
-    if (!context || this.owner.mode !== 'interactive' || !input?.turnId || !input.assistantMessageId
-      || context.workspaceId !== this.workspaceId
-      || context.ownerUserId !== (this.ownerUserId ?? 'local-user')
-      || !context.jobId || !context.runId || !context.claimedBy || !context.planId
-      || !Number.isSafeInteger(context.configRevision) || context.configRevision < 1
-      || !Array.isArray(context.sources)) {
-      throw new Error('Maintenance Codex send is missing a valid owner, workspace, or canonical turn binding');
-    }
-    return { ...context, execution: { nodeId: this.owner.key, turnId: input.turnId, assistantId: input.assistantMessageId, runId: context.runId } };
+    return bindMaintenanceTurn(input, {
+      maintenance: this.isMaintenance, owner: this.owner, workspaceId: this.workspaceId,
+      expectedOwnerUserId: this.host.principal.resolve(this.ownerUserId), runtimeLabel: 'Codex',
+    });
+  }
+
+  /**
+   * A skill turn's own text, and the skill input when Codex can run the skill
+   * itself: then `$name` goes before what the user wrote and app-server
+   * injects the SKILL.md. Otherwise the skill is expanded into the text.
+   */
+  private async buildSkillTurn(skill: SkillTurnInvocation, text: string, signal: AbortSignal): Promise<{ text: string; input: CodexSkillInput | null }> {
+    const input = this.skillInput ? await abortable(this.skillInput(skill, this.cwd), signal) : null;
+    if (!input) return { text: expandSkillPrompt(skill, text), input: null };
+    const mention = codexSkillMention(input.name);
+    if (!mention) return { text, input };
+    return { text: text ? `${mention} ${text}` : mention, input };
   }
 
   async *send(text: string, input?: AgentTurnInput): AsyncIterableIterator<NormalizedEvent> {
@@ -378,8 +388,7 @@ export class CodexSession implements AgentSession {
     await this.acquireTurnLock();
     const controller = new AbortController();
     this.turnAbort = controller;
-    const pageTurnAttribution = this.owner.mode === 'interactive' && input?.turnId && input.assistantMessageId
-      ? { turnId: input.turnId, assistantId: input.assistantMessageId } : null;
+    const pageTurnAttribution = pageAttributionFor(input, this.owner);
     const turnEventGate = { acceptTitle: true };
     try {
       this.activePageTurnAttribution = pageTurnAttribution;
@@ -393,35 +402,24 @@ export class CodexSession implements AgentSession {
         yield { kind: 'retry_end' };
       }
       controller.signal.throwIfAborted();
-      const outgoingText =
-        this.firstTurnPrefixConsumed || !this.firstTurnPrefix
-          ? text
-          : `${this.firstTurnPrefix}\n\n---\n\n${text}`;
+      const skillTurn = input?.skill ? await this.buildSkillTurn(input.skill, text, controller.signal) : null;
+      const turnPrefix = this.firstTurnPrefixConsumed || !this.firstTurnPrefix ? '' : `${this.firstTurnPrefix}\n\n---\n\n`;
+      const outgoingText = turnPrefix + (skillTurn?.text ?? text);
       this.firstTurnPrefixConsumed = true;
 
       // Append follow-up reminder for the model only — history stays clean.
       const userTurnCount = this.history.filter(m => m.role === 'user').length + 1;
-      const reminder = this.host.prompt.followUpsTurnReminder(
-        userTurnCount,
-        this.interactive || this.followUpsHookPocEnabled,
-        this.followUpsExperimentMode,
-        this.enableFollowUps,
-      );
+      const reminder = this.host.prompt.followUpsTurnReminder(userTurnCount, this.interactive, 'sentinel', this.enableFollowUps);
       // `localImage` is the only attachment input variant Michi sends, so
       // non-image attachments are named by path instead of dropped silently.
-      const { images: imageAttachments, promptNote } = prepareAttachments(input?.attachments);
-      // Spaces chat and maintenance do not participate in ordinary chat metadata.
-      const textForModel = (this.host.profile.maintenancePromptPrefix?.(maintenanceContext) ?? '')
-        + (input?.memoryContext ? `${input.memoryContext}\n\n---\n\n` : '')
-        + (input?.pageContext ? `${input.pageContext}\n\n---\n\n` : '')
+      const { images: imageAttachments, promptNote } = prepareAttachments(input?.attachments, outgoingText);
+      // Spaces chat and maintenance do not participate in ordinary chat
+      // metadata, and a skill turn follows the skill's own output rules.
+      const textForModel = turnContextPrefix(this.host.profile.maintenancePromptPrefix?.(maintenanceContext) ?? '', input)
         + outgoingText
         + promptNote
-        + (this.isMetaAgent || maintenanceContext ? '' : (reminder || '')
-        + (this.followUpsHookPocEnabled
-          ? (this.hostText?.followUpsHookPocInstruction?.(this.followUpsExperimentMode, this.enableFollowUps) ?? '')
-          : this.interactive
-            ? (this.hostText?.turnMetadataInstruction?.(this.followUpsExperimentMode, this.enableFollowUps) ?? '')
-            : ''));
+        + (this.isMetaAgent || maintenanceContext ? '' : input?.skill ? (this.host.prompt.skillTurnNote?.() ?? '') : (reminder || '')
+        + (this.interactive ? (this.hostText?.turnMetadataInstruction?.('sentinel', this.enableFollowUps) ?? '') : ''));
 
       this.state = 'in_turn';
       this.interactionAbort = new AbortController();
@@ -433,14 +431,19 @@ export class CodexSession implements AgentSession {
       if (shouldGenerateTitle) {
         this.titleGenerationAttempted = true;
         let titleThreadId: string | null = null;
+        const source = input?.skill ? undefined : input?.titleSource;
+        const titleText = source?.text ?? codexTitleText(input?.skill, text);
         titlePromise = generateCodexTitle({
           client: this.client,
           cwd: this.cwd,
           model: this.titleModel ?? this.currentModelId,
           instructions: this.hostText?.titleInstructions?.() ?? '',
-          userText: text,
+          userText: titleText,
+          ...(source && this.hostText?.titleInput ? { input: this.hostText.titleInput(source.text, source.context) } : {}),
           timeoutMs: this.titleTimeoutMs?.(),
-          config: codexDisableMcpServers({ features: { ...CODEX_THREAD_FEATURES_OFF } }, this.userMcpServers),
+          config: codexDisableMcpServers({
+            features: { ...CODEX_THREAD_FEATURES_OFF }, ...(this.keepsNativeMemory() ? {} : { memories: { ...CODEX_MEMORIES_OFF } }),
+          }, this.userMcpServers),
           onThreadStarted: (threadId) => {
             titleThreadId = threadId;
             if (this.turnAbort === controller && !controller.signal.aborted) {
@@ -464,20 +467,17 @@ export class CodexSession implements AgentSession {
               error: (err as Error).message,
             });
           }
-          return fallbackCodexTitle(text);
+          return fallbackCodexTitle(titleText);
         }).finally(() => {
           if (titleThreadId) this.activeTurnThreadIds.delete(titleThreadId);
         });
       }
 
-      if (!this.isMetaAgent) this.armTurnMetadata(userTurnCount);
-      this.history.push({ role: 'user', content: outgoingText });
+      if (!this.isMetaAgent && !input?.skill) this.armTurnMetadata(userTurnCount);
+      this.history.push({ role: 'user', content: input?.skill ? turnPrefix + skillHistoryText(input.skill, text) : outgoingText });
       this.markTranslatorTurnStart?.();
 
-      const turnInput: Array<Record<string, unknown>> = [
-        { type: 'text', text: textForModel },
-        ...imageAttachments.map((img) => ({ type: 'localImage', path: img.absPath })),
-      ];
+      const turnInput = codexTurnInput(textForModel, skillTurn?.input, imageAttachments);
 
       // Start the real turn immediately. Title and response events share the
       // queue and are delivered in whichever order they actually complete.
@@ -489,21 +489,18 @@ export class CodexSession implements AgentSession {
         this.settleNativeTurn = () => resolve({ ok: true });
       });
       if (this.interactive) this.permissionModeForTurn = this.host.permissions.mode(this.owner, this.ownerUserId);
-      const mainTurnStart = this.client.request('turn/start', {
+      const mainTurnStart = this.client.request('turn/start', codexTurnStartParams({
         // The Michi assistant runs read-only and offline whatever the chat's mode.
-        ...(this.isAssistant ? CODEX_RESTRICTED_TURN_POLICY
-          : this.interactive ? codexChatTurnPolicy(this.permissionModeForTurn!, this.cwd) : {}),
+        policy: this.isAssistant ? CODEX_RESTRICTED_TURN_POLICY
+          : this.interactive ? codexChatTurnPolicy(this.permissionModeForTurn!, this.cwd) : {},
         threadId: this.threadId,
         input: turnInput,
-        ...(this.effort ? { effort: this.effort } : {}),
-        ...(isCodexModeKind(this.currentModeId) && this.currentModelId
-          ? { collaborationMode: buildCodexCollaborationMode(this.currentModeId, this.currentModelId, this.effort) }
-          : {}),
-        summary: 'detailed',
-      }).then(
+        effort: this.effort,
+        modeId: this.currentModeId,
+        modelId: this.currentModelId,
+      })).then(
         (result) => {
-          const payload = result as { turn?: { id?: string }; turnId?: string } | null;
-          const turnId = payload?.turn?.id ?? payload?.turnId;
+          const turnId = codexStartedTurnId(result);
           if (turnId && this.turnAbort === controller && !this.nativeSettled) {
             this.activeNativeTurnId = turnId;
             this.nativeTurnIds.set(this.threadId, turnId);
@@ -530,6 +527,10 @@ export class CodexSession implements AgentSession {
       }
       if (!mainStartResult.ok) {
         turnEventGate.acceptTitle = false;
+        // The app-server answered: it refused the turn, so no native turn
+        // runs and there is nothing to stop or recover. A timeout or a dead
+        // connection leaves that unknown, and the session restarts as before.
+        if (mainStartResult.error instanceof CodexRpcError) this.nativeSettled = true;
         await Promise.all(
           [...this.activeTurnThreadIds]
             .filter((threadId) => threadId !== this.threadId)
@@ -763,8 +764,7 @@ export class CodexSession implements AgentSession {
   }
 
   respondToPermission(requestId: number, optionId: string): void {
-    if (!this.interactive && optionId === 'allow_session') throw new Error('Invalid permission option');
-    if (optionId !== 'allow_once' && optionId !== 'allow_always' && optionId !== 'allow_session' && optionId !== 'reject_once') throw new Error('Invalid permission option');
+    assertPermissionAnswer(this.owner, optionId);
     const entry = this.pendingPermissions.get(requestId);
     if (!entry) return;
     clearTimeout(entry.timer);
@@ -804,30 +804,17 @@ export class CodexSession implements AgentSession {
     const currentTurn = this.controlIsCurrent(params);
     const isCurrent = () => currentTurn() && !signal?.aborted;
     if (!isCurrent()) { respond({ answers: {} }); return; }
-    const questions: Record<string, unknown>[] = Array.isArray(params.questions) ? params.questions : [];
-    // The generic question UI persists answers and is not a secret-input surface.
-    // Do not downgrade a secret prompt to a normal text field.
-    if (questions.some((q) => !q || typeof q.id !== 'string' || q.isSecret === true)
-      || new Set(questions.map((q) => q.id)).size !== questions.length) {
+    const parsedQuestions = codexUserInputQuestions(params);
+    if (!parsedQuestions) {
       respond({ answers: {} });
       return;
     }
-    const parsedQuestions: UserInputQuestion[] = questions.map((q: Record<string, unknown>) => ({
-      id: q.id as string,
-      question: String(q.question ?? ''),
-      header: typeof q.header === 'string' ? q.header : undefined,
-      options: Array.isArray(q.options)
-        ? (q.options as Array<Record<string, unknown>>).map((o) => ({
-            label: String(o.label ?? ''),
-            description: typeof o.description === 'string' ? o.description : undefined,
-          }))
-        : [],
-      multiSelect: false,
-    }));
 
     const answers = await this.requestUserInput(parsedQuestions, signal);
 
     if (answers && isCurrent()) {
+      // Keep this matching in CodexSession.ts: the Codex contract mutation hook
+      // (backend/test/contracts/codex/mutation-hook.cjs) mutates it in this file.
       const responseObj: Record<string, { answers: string[] }> = Object.create(null);
       for (const a of answers) {
         if (!a || typeof a.answer !== 'string') continue;
@@ -848,7 +835,7 @@ export class CodexSession implements AgentSession {
   ): Promise<UserInputAnswer[] | null> {
     const isCurrent = this.controlIsCurrent();
     if (!isCurrent()) return null;
-    const requestId = ++this.nextRequestId;
+    const requestId = nextInteractionRequestId();
     this.queue.push({ kind: 'user_input_request', requestId, questions });
 
     const answers = await new Promise<UserInputAnswer[] | null>((resolve) => {
@@ -871,15 +858,27 @@ export class CodexSession implements AgentSession {
     return answers;
   }
 
+  /**
+   * A typed form from one of the user's MCP servers, in a chat, is asked on
+   * Michi's user-input card under the server's name; the answers are kept
+   * like any other card's. URL and verification flows, untyped forms and
+   * Runs are declined.
+   */
   async askMcpElicitation(
     params: Record<string, unknown>,
     respond: (result: unknown) => void,
+    signal?: AbortSignal,
   ): Promise<void> {
-    const isCurrent = this.controlIsCurrent(params);
+    const currentTurn = this.controlIsCurrent(params);
+    const isCurrent = () => currentTurn() && !signal?.aborted;
     if (!isCurrent()) { respond({ action: 'cancel', content: null, _meta: null }); return; }
-    // A binary approval cannot collect requestedSchema or complete URL verification.
-    // Fail closed until a mode-specific interaction surface is implemented.
-    respond({ action: 'decline', content: null, _meta: null });
+    const fields = this.interactive && !this.isMetaAgent && params.mode === 'form' ? formElicitationFields(params) : [];
+    if (!fields.length) { respond({ action: 'decline', content: null, _meta: null }); return; }
+    const serverName = typeof params.serverName === 'string' && params.serverName ? params.serverName : undefined;
+    const answers = await this.requestUserInput(fields.map((field) => ({ ...field.question, ...(serverName ? { header: serverName } : {}) })), signal);
+    respond(answers && isCurrent()
+      ? { action: 'accept', content: formElicitationContent(fields, answers), _meta: null }
+      : { action: 'cancel', content: null, _meta: null });
   }
 
   // ---- Approval handling (called by CodexRuntime) ---------------------------
@@ -919,46 +918,25 @@ export class CodexSession implements AgentSession {
       }
       if (!isCurrent()) { respond({ decision: 'decline' }); return; }
 
-      switch (decision) {
-        case 'allow_once':
-          respond({ decision: 'accept' });
-          return;
-        case 'allow_always':
-          // Attempt-scoped allow → acceptForSession; no grant is persisted.
-          respond({ decision: 'acceptForSession' });
-          return;
-        case 'deny':
-          respond({ decision: 'decline' });
-          return;
-        case 'ask':
-        default: {
-          // Broker said "ask" → present as a user-facing permission request
-          // using the standard approval flow (which routes through Run
-          // interactions), but still never persist a grant.
-          const requestId = ++this.nextRequestId;
-          const options: PermissionOption[] = [
-            { optionId: 'allow_once', name: 'Allow once', kind: 'allow_once' },
-            { optionId: 'reject_once', name: 'Deny', kind: 'reject_once' },
-          ];
-          this.queue.push({
-            kind: 'permission_request',
-            requestId,
-            title: `Approve ${toolName}?`,
-            detail: formatCodexPermissionDetail(method, params),
-            options,
-            source: 'codex_approval',
-          });
-          const result = await this.awaitPermission(requestId, signal);
-          if (!isCurrent()) { respond({ decision: 'decline' }); return; }
-          // As for Claude and Pi, allow_always approves only this request.
-          if (result === 'allow_once' || result === 'allow_always') {
-            respond({ decision: 'accept' });
-            return;
-          }
-          respond({ decision: 'decline' });
-          return;
-        }
+      const brokered = codexBrokerDecision(decision);
+      if (brokered) {
+        respond({ decision: brokered });
+        return;
       }
+      // Broker said "ask" → present as a user-facing permission request
+      // using the standard approval flow (which routes through Run
+      // interactions), but still never persist a grant.
+      const requestId = nextInteractionRequestId();
+      this.queue.push(codexPermissionRequest(requestId, method, params, toolName, codexRunAskOptions()));
+      const result = await this.awaitPermission(requestId, signal);
+      if (!isCurrent()) { respond({ decision: 'decline' }); return; }
+      // As for Claude and Pi, allow_always approves only this request.
+      if (result === 'allow_once' || result === 'allow_always') {
+        respond({ decision: 'accept' });
+        return;
+      }
+      respond({ decision: 'decline' });
+      return;
     }
 
     // The one chat decision for this request, with this session's own user:
@@ -974,18 +952,9 @@ export class CodexSession implements AgentSession {
     }
 
     // Chat session: existing user-facing permission request flow.
-    const requestId = ++this.nextRequestId;
+    const requestId = nextInteractionRequestId();
 
-    const options = chatApprovalOptions(toolName);
-
-    this.queue.push({
-      kind: 'permission_request',
-      requestId,
-      title: `Approve ${toolName}?`,
-      detail: formatCodexPermissionDetail(method, params),
-      options,
-      source: 'codex_approval',
-    });
+    this.queue.push(codexPermissionRequest(requestId, method, params, toolName, chatApprovalOptions(toolName)));
 
     const result = await this.awaitPermission(requestId, signal, toolName);
 
@@ -1002,6 +971,8 @@ export class CodexSession implements AgentSession {
   }
 
   private awaitPermission(requestId: number, signal?: AbortSignal, toolName?: string): Promise<string | null> {
+    // The queue the request was pushed on, so the resolution reaches its turn.
+    const queue = this.queue;
     return new Promise<string | null>((resolve) => {
       const onAbort = () => this.cancelPermission(requestId);
       const finish = (value: string | null) => {
@@ -1010,6 +981,9 @@ export class CodexSession implements AgentSession {
       };
       const timer = setTimeout(() => {
         this.pendingPermissions.delete(requestId);
+        // Unanswered: the request is declined. Say so, as ACP does, so the
+        // host clears the pending request and no late answer is offered.
+        queue.push({ kind: 'permission_resolved', requestId });
         finish(null);
       }, this.approveTimeoutMs);
       this.pendingPermissions.set(requestId, { resolve: finish, timer, toolName });
@@ -1116,63 +1090,22 @@ export class CodexSession implements AgentSession {
     });
   }
 
-  private followUpsHookCallbacks(): {
-    onSetFollowUps?: (followUps: string[]) => void;
-    onValidateFollowUps: () => Record<string, unknown>;
-  } {
-    return {
-      ...(this.turnMetadata.acceptsFollowUps(this.enableFollowUps) ? {
-        onSetFollowUps: (followUps: string[]) => {
-          const cleaned = this.turnMetadata.setFollowUps(followUps, this.enableFollowUps);
-          if (!cleaned) return;
-          this.host.observability.log('debug', 'mcp', 'codex follow-ups hook poc set_follow_ups received', {
-            nodeId: this.id,
-            threadId: this.threadId,
-            count: cleaned.length,
-            validationActive: this.turnMetadata.validationActive,
-          });
-          this.queue.push({ kind: 'host_event', type: 'follow_ups_status', payload: { status: 'in_progress' } });
-          this.queue.push({ kind: 'host_event', type: 'follow_ups', payload: { followUps: cleaned } });
-        },
-      } : {}),
-      onValidateFollowUps: () => {
-        const result = this.turnMetadata.validate(this.enableFollowUps);
-        const context = { nodeId: this.id, threadId: this.threadId };
-        switch (result.status) {
-          case 'inactive':
-            this.host.observability.log('debug', 'mcp', 'codex follow-ups hook poc validator skipped', { ...context, reason: 'non-user-turn' });
-            break;
-          case 'complete':
-            this.host.observability.log('debug', 'mcp', 'codex follow-ups hook poc validator passed', context);
-            break;
-          case 'repair':
-            this.host.observability.log('warn', 'mcp', 'codex follow-ups hook poc blocked stop', { ...context, attempt: 1 });
-            break;
-          case 'fail_open':
-            this.host.observability.log('warn', 'mcp', 'codex follow-ups hook poc fail-open', {
-              ...context, reason: `${result.missingTools.join(', ')} still missing after one continuation`,
-            });
-            break;
-        }
-        return result.response;
-      },
-    };
-  }
-
   private suppressFollowUpsInternalEvent(ev: NormalizedEvent): boolean {
     return this.turnMetadata.suppressOutput(ev.kind);
   }
 
+  /** Michi's turn-metadata calls; a tool of another MCP server is never one, whatever its name. */
   private suppressInternalMetadataToolEvent(ev: NormalizedEvent): boolean {
+    if ((ev.kind === 'tool_call' || ev.kind === 'tool_call_update') && ev.hostTool === false) return false;
     if (ev.kind === 'tool_call') {
-      if (!isInternalMetadataToolTitle(ev.title)) return false;
+      if (!isTurnMetadataToolTitle(ev.title)) return false;
       if (ev.toolCallId) this.hiddenInternalToolCallIds.add(ev.toolCallId);
       return true;
     }
     if (ev.kind !== 'tool_call_update') return false;
     if (
       !this.hiddenInternalToolCallIds.has(ev.toolCallId)
-      && !isInternalMetadataToolTitle(ev.title)
+      && !isTurnMetadataToolTitle(ev.title)
     ) return false;
     if (ev.toolCallId) this.hiddenInternalToolCallIds.add(ev.toolCallId);
     return true;
@@ -1181,16 +1114,6 @@ export class CodexSession implements AgentSession {
   private observeFollowUpsSentinelEvent(ev: NormalizedEvent): void {
     if (ev.kind !== 'chunk') return;
     this.turnMetadata.observeChunk(ev.text, this.enableFollowUps);
-  }
-
-  private completeFollowUpsOutputBoundary(reason: 'agent-message-completed' | 'turn-completed'): void {
-    if (!this.turnMetadata.completeOutputBoundary()) return;
-    this.host.observability.log('debug', 'chat', 'codex follow-ups visible output boundary completed', {
-      nodeId: this.id,
-      threadId: this.threadId,
-      reason,
-    });
-    this.queue.push({ kind: 'host_event', type: 'follow_ups_status', payload: { status: 'completed' } });
   }
 
   private finishTurnMetadata(): void {
@@ -1260,7 +1183,7 @@ export class CodexSession implements AgentSession {
         }
         return result;
       },
-      ...(!this.isMetaAgent && (this.interactive || this.followUpsHookPocEnabled) ? {
+      ...(!this.isMetaAgent && this.interactive ? {
         onSetBranchOverview: (overview: string) => {
           const result = this.turnMetadata.setOverview(overview);
           if (!result) return;
@@ -1273,7 +1196,6 @@ export class CodexSession implements AgentSession {
           this.queue.push({ kind: 'host_event', type: 'branch_overview', payload: { overview: cleaned } });
         },
       } : {}),
-      ...(this.followUpsHookPocEnabled ? this.followUpsHookCallbacks() : {}),
     };
 
     // Agent Run owner: use the Run MCP slot factory with owner metadata,
@@ -1361,16 +1283,9 @@ export class CodexSession implements AgentSession {
           if (this.cancelTimer) clearTimeout(this.cancelTimer);
           this.cancelTimer = undefined;
           this.clearInteractions();
-          this.completeFollowUpsOutputBoundary('turn-completed');
         }
         translator.feed(method, params);
         if (method === 'turn/started' && this.cancelRequested) void this.interruptThread(this.threadId);
-        if (method === 'item/completed') {
-          const item = (params['item'] ?? params) as Record<string, unknown>;
-          if (item['type'] === 'agentMessage') {
-            this.completeFollowUpsOutputBoundary('agent-message-completed');
-          }
-        }
       },
     );
 
@@ -1454,38 +1369,7 @@ export class CodexSession implements AgentSession {
     if (this.isAssistant && childId) this.blockRestrictedSubagent(childId);
     if (!childId || this.childThreadInfos.has(childId)) return; // Already tracked
 
-    // Extract agent identity from Thread object
-    const agentNickname = typeof thread['agentNickname'] === 'string' ? thread['agentNickname'] : '';
-    const agentRole = typeof thread['agentRole'] === 'string' ? thread['agentRole'] : '';
-    const preview = typeof thread['preview'] === 'string' ? thread['preview'] : '';
-
-    // Dig into SubAgentSource for richer metadata
-    let spawnNickname = '';
-    let spawnRole = '';
-    const source = thread['source'];
-    if (source && typeof source === 'object' && !Array.isArray(source)) {
-      const subAgent = (source as Record<string, unknown>)['subAgent'];
-      if (subAgent && typeof subAgent === 'object' && !Array.isArray(subAgent)) {
-        const spawn = (subAgent as Record<string, unknown>)['thread_spawn'];
-        if (spawn && typeof spawn === 'object' && !Array.isArray(spawn)) {
-          const s = spawn as Record<string, unknown>;
-          spawnNickname = typeof s['agent_nickname'] === 'string' ? s['agent_nickname'] : '';
-          spawnRole = typeof s['agent_role'] === 'string' ? s['agent_role'] : '';
-        }
-      }
-    }
-
-    const name = agentNickname || spawnNickname || agentRole || spawnRole || childId.slice(0, 8);
-    this.trackChildThread(childId, {
-      sessionId: childId,
-      sessionName: name,
-      agentName: agentNickname || spawnNickname || 'codex',
-      initialQuery: preview,
-      status: 'working',
-      group: '',
-      dependsOn: [],
-      source: 'codex',
-    }, true);
+    this.trackChildThread(childId, codexChildThreadInfo(thread, childId), true);
   }
 
   /**
@@ -1540,15 +1424,10 @@ export class CodexSession implements AgentSession {
     this.backgroundSubagents.report(context, this.backgroundSubagentSource, ids);
   }
 
-  /** Chat sessions only. A cloud session without a user has no owner to show them to. */
+  /** Chat sessions only. */
   private backgroundSubagentContext(): BackgroundSubagentContext | null {
     if (!this.interactive) return null;
-    if (!this.ownerUserId && this.host.principal.enforceUserOwnership()) return null;
-    return {
-      ownerUserId: this.host.principal.resolve(this.ownerUserId),
-      workspaceId: this.workspaceId,
-      owner: this.owner,
-    };
+    return sessionOwnerContext(this.host.principal, this.ownerUserId, this.workspaceId, this.owner);
   }
 
   /**
@@ -1657,41 +1536,17 @@ export class CodexSession implements AgentSession {
       answer = '';
       if (!text) return;
       narrationSeq += 1;
-      pushChild({
-        kind: 'subagent_tool_activity',
-        subagentSessionId: childId,
-        toolCallId: `${childId}:m:${narrationSeq}`,
-        title: clampSubagentText(text, SUBAGENT_LIMITS.title) ?? '',
-        status: '',
-        activityKind: 'message',
-      });
+      pushChild(codexChildNarration(childId, narrationSeq, text));
     };
     const childTranslator = createCodexTranslator((ev) => {
       if (ev.kind === 'tool_call' || ev.kind === 'tool_call_update') {
-        pushChild({
-          kind: 'subagent_tool_activity',
-          subagentSessionId: childId,
-          title: ev.title,
-          status: ev.status ?? '',
-          ...(ev.toolCallId ? { toolCallId: ev.toolCallId } : {}),
-          ...(ev.kindType ? { toolKind: ev.kindType } : {}),
-          ...(ev.kind === 'tool_call' && ev.detail ? { detail: ev.detail } : {}),
-          ...(ev.kind === 'tool_call_update' && ev.output ? { output: ev.output } : {}),
-        });
+        pushChild(codexChildToolActivity(childId, ev));
       } else if (ev.kind === 'chunk') {
         if (answer.length < SUBAGENT_LIMITS.result) answer += ev.text;
       } else if (ev.kind === 'runtime_error') {
         childError = ev.error;
       } else if (ev.kind === 'turn_end') {
-        const failed = ev.stopReason === 'error' || !!childError;
-        const cancelled = ev.stopReason === 'cancelled';
-        const patch: SubagentPatch = {
-          sessionId: childId,
-          status: 'terminated',
-          outcome: failed ? 'failed' : cancelled ? 'cancelled' : 'completed',
-          ...(answer.trim() ? { result: clampSubagentText(answer.trim(), SUBAGENT_LIMITS.result) } : {}),
-          ...(childError ? { error: clampSubagentText(childError, SUBAGENT_LIMITS.error) } : {}),
-        };
+        const patch = codexChildTurnEndPatch(childId, ev.stopReason, answer, childError);
         this.childThreadInfos.set(childId, mergeSubagentEntry(tracked(), patch));
         pushChild({ kind: 'subagent_list_update', subagents: [patch] });
         answer = '';
@@ -1719,18 +1574,13 @@ export class CodexSession implements AgentSession {
     const info = this.childThreadInfos.get(threadId);
     if (!info) return;
 
-    if (method === 'thread/closed' || method === 'thread/status/changed') {
-      const status = params['status'];
-      const isClosed = method === 'thread/closed'
-        || (typeof status === 'object' && status !== null && (status as Record<string, unknown>)['type'] === 'idle');
-      if (isClosed && info.status !== 'terminated') {
-        this.childThreadInfos.set(threadId, { ...info, status: 'terminated' });
-        this.host.observability.log('debug', 'chat', 'codex child subagent thread terminated', {
-          nodeId: this.id,
-          childThreadId: threadId,
-        });
-        this.pushChild(threadId, { kind: 'subagent_list_update', subagents: [{ sessionId: threadId, status: 'terminated' }] });
-      }
+    if (isCodexChildThreadClosed(method, params) && info.status !== 'terminated') {
+      this.childThreadInfos.set(threadId, { ...info, status: 'terminated' });
+      this.host.observability.log('debug', 'chat', 'codex child subagent thread terminated', {
+        nodeId: this.id,
+        childThreadId: threadId,
+      });
+      this.pushChild(threadId, { kind: 'subagent_list_update', subagents: [{ sessionId: threadId, status: 'terminated' }] });
     }
   }
 
@@ -1806,53 +1656,4 @@ export class CodexSession implements AgentSession {
       r();
     }
   }
-}
-
-// ---- Helpers -----------------------------------------------------------------
-
-/**
- * Codex's canonical permission tool name for an approval method, used for
- * display, chat grants and the Run permission broker. Command and file
- * approvals are the only methods routed here; they map onto bash and edit.
- */
-export function canonicalToolNameFromMethod(method: string): string {
-  if (method === 'item/commandExecution/requestApproval') return 'bash';
-  if (method === 'item/fileChange/requestApproval') return 'edit';
-  // Unknown methods — use the last segment
-  const parts = method.split('/');
-  return parts[parts.length - 1] ?? method;
-}
-
-/**
- * The canonical form under which one chat approval covers another request
- * (ApprovalCoordinator.covers). The names canonicalToolNameFromMethod gives
- * the routed approvals, bash and edit, are already the host's grant keys.
- */
-function codexGrantToolName(toolName: string): string {
-  return toolName;
-}
-
-function formatCodexPermissionDetail(
-  method: string,
-  params: Record<string, unknown>,
-): string | undefined {
-  if (method === 'item/commandExecution/requestApproval') {
-    const cmd =
-      typeof params['command'] === 'string'
-        ? params['command']
-        : typeof params['cmd'] === 'string'
-          ? params['cmd']
-          : undefined;
-    if (cmd) return `Command: ${cmd.slice(0, 600)}`;
-  }
-  if (method === 'item/fileChange/requestApproval') {
-    const fp =
-      typeof params['file_path'] === 'string'
-        ? params['file_path']
-        : typeof params['path'] === 'string'
-          ? params['path']
-          : undefined;
-    if (fp) return `File: ${fp.slice(0, 320)}`;
-  }
-  return undefined;
 }

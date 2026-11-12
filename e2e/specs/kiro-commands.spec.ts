@@ -45,10 +45,11 @@ test('Kiro V3 commands render results and queued commands never become model pro
   await expect.poll(() => commands).toEqual(['context', 'tools']);
   await expect(page.getByText('Available tools: read, write.', { exact: true })).toBeVisible();
   expect(prompts).toHaveLength(2);
+  // A word Kiro does not run as a command is an ordinary message.
   await editor.fill('/unknown');
   await page.getByRole('button', { name: /Send \(Enter\)/ }).click();
-  await expect(page.getByText('This command is unavailable.', { exact: false })).toBeVisible();
-  expect(prompts).toHaveLength(2);
+  await expect.poll(() => prompts.length).toBe(3);
+  expect(commands).toEqual(['context', 'tools']);
 });
 
 test('sending during a command preserves the draft and does not send a second request', async ({ page }) => {

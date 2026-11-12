@@ -54,6 +54,12 @@ describe('FilesPane helpers', () => {
     });
   });
 
+  it('keeps a Windows reference path as it is', () => {
+    expect(resolveArtifactSelection(artifact({ filePath: 'C:\\Users\\me\\a.md', kind: 'reference' }), project())).toMatchObject({
+      absolutePath: 'C:\\Users\\me\\a.md',
+    });
+  });
+
   it('omits link-only artifacts from the file tree', () => {
     expect(resolveArtifactSelection(artifact({ type: 'link', filePath: '', url: 'https://example.com' }), project())).toBeNull();
   });

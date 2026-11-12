@@ -58,7 +58,8 @@ test('gateway recovery restores a saved remote workspace without restarting the 
       await route.fulfill({ json: { recoveries: [{ connectionId: connection.id, phase: online ? 'ready' : 'starting', message: online ? 'Remote Michi is ready.' : 'Starting remote Michi…' }] } }); return true;
     }
     if (path.endsWith('/proxy/workspaces/all')) {
-      await route.fulfill(online ? { json: { workspaces: [{ ...localWorkspace, workspace: { id: 'remote-ws', name: 'Recovered remotely', cwd: '/home/u', created_at: 2 } }] } }
+      // Created today: a workspace idle for a month would fold into the sidebar's Earlier group.
+      await route.fulfill(online ? { json: { workspaces: [{ ...localWorkspace, workspace: { id: 'remote-ws', name: 'Recovered remotely', cwd: '/home/u', created_at: Date.now() } }] } }
         : { status: 502, json: { error: 'Starting remote Michi…' } }); return true;
     }
     return false;

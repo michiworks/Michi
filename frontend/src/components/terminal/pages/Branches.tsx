@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import MarkdownContent from '../../MarkdownContent';
+import { MESSAGE_PROSE_STYLE, TERM_PROSE_CLASS } from '../../markdownProse';
 import {
   activeTreeRootNodeId,
   chatLabel,
@@ -23,10 +24,8 @@ const OUTLINE_REVEAL_PADDING = 24;
 
 const branchAnchorId = (nodeId: string) => `branch-${nodeId}`;
 const branchAnchorElement = (nodeId: string) => document.getElementById(branchAnchorId(nodeId));
-const PROSE_CLASS =
-  'prose prose-sm max-w-none wrap-break-word [&>*:first-child]:mt-0 [&>*:last-child]:mb-0 ' +
-  '[&_p]:text-(--term-mid) [&_li]:text-(--term-mid) [&_strong]:text-(--term-fg) ' +
-  '[&_a]:text-(--term-accent) [&_code]:text-(--term-fg)';
+const BRANCH_PROSE_STYLE: React.CSSProperties = { ...MESSAGE_PROSE_STYLE, maxWidth: '68ch' };
+const ROOT_PROSE_STYLE: React.CSSProperties = { ...BRANCH_PROSE_STYLE, fontSize: 'var(--fs-xl)', lineHeight: 1.75 };
 
 export interface BranchDocumentRow {
   nodeId: string;
@@ -321,7 +320,7 @@ function BranchDirectory({
               }}
             >
               {row.title}
-              {row.streaming && <span aria-label=" active" className="map-card__live-dot" style={{ color: 'var(--term-accent)' }}> ●</span>}
+              {row.streaming && <span aria-label=" active" className="map-card__live-dot" style={{ color: 'var(--term-run)' }}> ●</span>}
             </button>
           );
         })}
@@ -410,7 +409,8 @@ function BranchHeading({
         <span
           aria-label="Branch is active"
           title="Branch is active"
-          style={{ color: 'var(--term-accent)', fontSize: 'var(--fs-md)', animation: 'pulse var(--t-loop) ease-in-out infinite' }}
+          className="map-card__live-dot"
+          style={{ color: 'var(--term-run)', fontSize: 'var(--fs-md)' }}
         >
           ●
         </span>
@@ -455,14 +455,8 @@ function OverviewText({ text, generated, root = false }: { text: string; generat
       <MarkdownContent
         text={text}
         size={root ? 'base' : 'sm'}
-        className={PROSE_CLASS}
-        style={{
-          color: 'var(--term-mid)',
-          fontFamily: 'var(--message-latin-font), var(--message-cjk-font)',
-          fontSize: root ? 'var(--fs-xl)' : 'var(--fs-lg)',
-          lineHeight: root ? 1.75 : 1.68,
-          maxWidth: '68ch',
-        }}
+        className={TERM_PROSE_CLASS}
+        style={root ? ROOT_PROSE_STYLE : BRANCH_PROSE_STYLE}
       />
     </div>
   );

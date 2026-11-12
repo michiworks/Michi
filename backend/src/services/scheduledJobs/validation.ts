@@ -1,9 +1,11 @@
 import {
+  SCHEDULED_JOB_DEFAULTS,
   SCHEDULED_JOB_LIMITS,
   isChatPermissionMode,
   type ChatPermissionMode,
   type ScheduledJobSchedule,
   type ScheduledJobSessionMode,
+  type ScheduledJobVisibility,
 } from 'michi-shared';
 import { parseSchedule, ScheduleValidationError } from './schedule';
 
@@ -28,6 +30,7 @@ export interface ParsedJobFields {
   reasoning: string | null;
   permissionMode: ChatPermissionMode;
   sessionMode: ScheduledJobSessionMode;
+  visibility: ScheduledJobVisibility;
   notify: boolean;
   enabled: boolean;
   timeoutSeconds: number;
@@ -39,11 +42,8 @@ export const DEFAULT_JOB_FIELDS = {
   providerId: null,
   modelId: null,
   reasoning: null,
-  permissionMode: 'trust' as ChatPermissionMode,
-  sessionMode: 'persistent' as ScheduledJobSessionMode,
-  notify: true,
+  ...SCHEDULED_JOB_DEFAULTS,
   enabled: true,
-  timeoutSeconds: SCHEDULED_JOB_LIMITS.defaultTimeoutSeconds,
   conversationUpdates: false,
 };
 
@@ -100,6 +100,10 @@ const PARSERS: { [K in keyof ParsedJobFields]: FieldParser } = {
   },
   sessionMode: (value) => {
     if (value !== 'fresh' && value !== 'persistent') throw new JobValidationError('Thread mode must be fresh or persistent');
+    return value;
+  },
+  visibility: (value) => {
+    if (value !== 'workspace' && value !== 'scheduled') throw new JobValidationError('Visibility must be workspace or scheduled');
     return value;
   },
   notify: (value) => bool(value, 'Notify'),

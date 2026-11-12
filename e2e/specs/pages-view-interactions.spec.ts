@@ -43,8 +43,6 @@ test('optional page entries open native content, retain navigation state and do 
   await openArea(page, 'spaces');
   await page.locator('.spaces-side').getByRole('button', { name: 'Release work', exact: true }).click();
   await page.locator('.spaces-home-space-card').filter({ hasText: 'Live release' }).click();
-  const assistant = page.getByRole('region', { name: 'Assistant', exact: true });
-  if (await assistant.isVisible()) await assistant.getByRole('button', { name: 'Minimize', exact: true }).click();
   const main = page.getByRole('main', { name: 'Live release', exact: true });
   await expect(main.getByText('Earlier feedback', { exact: true })).toHaveCount(0);
 
@@ -106,10 +104,10 @@ test('optional page entries open native content, retain navigation state and do 
   await expect(compare).toBeFocused();
   await expect(modal).toHaveCount(0);
 
-  // The same native content fits narrow panes; close remains visible and reachable.
+  // The same native content fits narrow panes; close (Back on a phone) remains visible and reachable.
   await page.setViewportSize({ width: 390, height: 844 });
   await trigger.click();
-  await expect(drawer.getByRole('button', { name: 'Close', exact: true })).toBeInViewport();
+  await expect(drawer.getByRole('button', { name: 'Back', exact: true })).toBeInViewport();
   const narrowBox = await drawer.boundingBox();
   expect(narrowBox!.x).toBeGreaterThanOrEqual(-1);
   expect(narrowBox!.width).toBeLessThanOrEqual(391);

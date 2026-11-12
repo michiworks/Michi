@@ -1,6 +1,7 @@
-import { backendFetch, backendRequestOptions } from './backendRequest';
+import { backendFetch, backendRequestOptions, beforeBackendWrite } from './backendRequest';
+import { confirmBackendConnectionUnavailable } from './backendReachability';
 import { backendRequestUrl, connectionIdFromApiUrl, mapBackendPayload } from '../../config/backendIdentity';
-import { backendConnectionGeneration, backendConnectionUnavailable, markBackendConnectionUnavailable } from '../../config/backendConnectionState';
+import { backendConnectionGeneration } from '../../config/backendConnectionState';
 import { workspaceBackendApiBase, backendConnectionIdForWorkspace, LOCAL_BACKEND_CONNECTION_ID } from '../../config/backendConnections';
 
 export type UploadPhase = 'preparing' | 'uploading' | 'copying';
@@ -86,8 +87,6 @@ function postJsonWithUploadProgress<T>(
 ): Promise<T> {
   const url = `${workspaceBackendApiBase(workspaceId)}${path}`;
   const connectionId = connectionIdFromApiUrl(url);
-  const generation = backendConnectionGeneration(connectionId);
-  if (backendConnectionUnavailable(connectionId)) return Promise.reject(new Error('Remote connection is unavailable'));
   const body = backendRequestOptions(url, { body: JSON.stringify(payload) }).body as string;
   if (!options?.onProgress) {
     return backendFetch(url, {
@@ -103,7 +102,9 @@ function postJsonWithUploadProgress<T>(
     });
   }
 
-  return new Promise((resolve, reject) => {
+  // XMLHttpRequest reports upload progress; backendFetch cannot, so this applies its write and outage checks.
+  return beforeBackendWrite(connectionId).then(() => new Promise<T>((resolve, reject) => {
+    const generation = backendConnectionGeneration(connectionId);
     const xhr = new XMLHttpRequest();
     xhr.open('POST', backendRequestUrl(url));
     xhr.setRequestHeader('Content-Type', 'application/json');
@@ -116,10 +117,12 @@ function postJsonWithUploadProgress<T>(
         percent: total ? clampPercent((event.loaded / total) * 100) : null,
       });
     };
-    xhr.onerror = () => { markBackendConnectionUnavailable(connectionId); reject(new Error('upload failed')); };
+    xhr.onerror = () => {
+      void confirmBackendConnectionUnavailable(connectionId, null, generation).then(() => reject(new Error('upload failed')));
+    };
     xhr.onabort = () => reject(new Error('upload cancelled'));
-    xhr.onload = () => {
-      if ([502, 503, 504].includes(xhr.status)) markBackendConnectionUnavailable(connectionId);
+    xhr.onload = async () => {
+      if ([502, 503, 504].includes(xhr.status)) await confirmBackendConnectionUnavailable(connectionId, null, generation);
       if (generation !== backendConnectionGeneration(connectionId)) {
         reject(new DOMException('Remote connection changed while uploading', 'AbortError'));
         return;
@@ -150,7 +153,7 @@ function postJsonWithUploadProgress<T>(
       percent: 0,
     });
     xhr.send(body);
-  });
+  }));
 }
 
 const webCwdCache = new Map<string, string>();

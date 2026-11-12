@@ -1,4 +1,5 @@
-import { configValues, type AcpSessionInfo } from './kiroProtocol';
+import type { AgentCommand } from 'michi-shared';
+import { configValues, type AcpSessionInfo, type KiroEngine } from './kiroProtocol';
 
 export const V3_COMMAND_METHODS: Readonly<Record<string, string>> = {
     compact: '_kiro/session/compact', context: '_kiro/session/context',
@@ -28,4 +29,38 @@ export function effortSelection(info: AcpSessionInfo | undefined, value: unknown
         message: `Current effort: ${effort.currentValue ?? 'unknown'}. Available: ${values.join(', ') || 'none'}.`,
     };
     return { value };
+}
+
+const KIRO_COMMAND_INFO: Readonly<Record<string, Omit<AgentCommand, 'name' | 'kind'>>> = {
+    clear: { description: 'Start Kiro on a fresh context; the messages stay in Michi' },
+    tools: { description: 'Show the tools this chat has' },
+    mcp: { description: 'Show the MCP servers and their status' },
+    effort: { description: 'Show the reasoning effort, or set it', argumentHint: '[level]' },
+    context: { description: 'Show what fills the context window' },
+    history: { description: 'Show the history Kiro keeps for this chat' },
+    export: { description: 'Export this chat from Kiro' },
+    code: { description: 'Show the code intelligence status' },
+    usage: { description: 'Show your Kiro usage' },
+};
+
+/** A command Michi's Kiro command interface runs (executeCommand), described. */
+export function kiroCommand(name: string): AgentCommand {
+    return { name, kind: 'command', ...KIRO_COMMAND_INFO[name] };
+}
+
+/**
+ * The commands a Kiro chat runs before it has a session
+ * (AgentRuntime.hostCommands). V2: its command RPC's. V3: every one Michi's
+ * command interface runs, since a chat without live state (a new one, any
+ * after a reload) would send the others to Kiro as a prompt. /effort needs
+ * a session that exposes effortLevel and /context, /history, /export,
+ * /code and /usage an extension the kiro-cli advertises: the session's
+ * state (v3CommandNames) names the ones it runs, and running another
+ * answers that this Kiro does not support it. `/compact` is the host's own.
+ */
+export function kiroHostCommands(engine: KiroEngine): AgentCommand[] {
+    const names = engine === 'v3'
+        ? ['clear', 'tools', 'mcp', 'effort', ...Object.keys(V3_COMMAND_METHODS).filter((name) => name !== 'compact')]
+        : ['clear', 'tools', 'context', 'effort'];
+    return names.map(kiroCommand);
 }

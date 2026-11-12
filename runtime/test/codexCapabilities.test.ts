@@ -13,7 +13,7 @@ import type { CodexSession } from '../src/adapters/codex/CodexSession';
 import { CodexAuthMissingError, resetCodexBinaryCacheForTest } from '../src/adapters/codex/codexBinary';
 import { createCodexTranslator } from '../src/adapters/codex/codexEventTranslator';
 import {
-  buildCodexCollaborationMode, CODEX_HOST_MCP_SERVER, CODEX_THREAD_FEATURES_OFF, codexAccountLoginMissing,
+  buildCodexCollaborationMode, CODEX_HOST_MCP_SERVER, CODEX_MEMORIES_OFF, CODEX_THREAD_FEATURES_OFF, codexAccountLoginMissing,
 } from '../src/adapters/codex/codexProtocol';
 import { CODEX_RESTRICTED_FEATURES_OFF } from '../src/adapters/codex/codexRestrictedProfile';
 
@@ -100,7 +100,6 @@ function slotProvider(): McpSlotProvider {
       ({ slotId: `slot-${++slots}`, parentChatId, cwd, ownerUserId, nodeId: null, workspaceId: null, ...cbs }) as McpSlot,
     dispose: async () => {},
     endpoint: (slotId: string) => ({ type: 'http', url: `http://127.0.0.1:1/api/mcp/${slotId}`, headers: [] }),
-    hookEndpoint: (slotId: string) => `http://127.0.0.1:1/mcp-hooks/${slotId}/stop`,
   } as unknown as McpSlotProvider;
 }
 
@@ -127,7 +126,7 @@ function codexRuntime(t: TestContext, options: FakeOptions & { host?: RuntimeHos
   const server = fakeAppServer(options);
   const runtime = new CodexRuntime(
     { host: options.host ?? createDefaultHost({ logLevel: 'silent' }), bridge, mcpSlots: slotProvider(), binaryPath: fakeCodexBinary(t) },
-    { client: server.client, followUpsHookPocEnabled: false, ...(options.authFileMissing ? { authFileMissing: options.authFileMissing } : {}) },
+    { client: server.client, ...(options.authFileMissing ? { authFileMissing: options.authFileMissing } : {}) },
   );
   t.after(() => runtime.shutdown());
   return { server, runtime };
@@ -261,6 +260,18 @@ describe('Codex collaboration modes', () => {
     }) as CodexSession;
     assert.equal(child.currentModeId, 'plan');
   });
+
+  it('names the parent of a native fork, and only of a fork, to the first-turn prompt', async (t) => {
+    const host = createDefaultHost({ logLevel: 'silent' });
+    const prefix = t.mock.method(host.prompt, 'firstTurnPrefix');
+    const { runtime } = codexRuntime(t, { host });
+    const parent = await runtime.newSession({ sessionId: 'chat-parent', cwd: os.tmpdir(), model: 'test-model' }) as CodexSession;
+    await runtime.newSession({ sessionId: 'chat-text', cwd: os.tmpdir(), model: 'test-model', parentChatId: 'chat-parent' });
+    await runtime.forkSession({
+      sessionId: 'chat-child', cwd: os.tmpdir(), model: 'test-model', parentChatId: 'chat-parent', sourceNativeSessionId: parent.threadId,
+    });
+    assert.deepEqual(prefix.mock.calls.map((call) => call.arguments[0].nativeForkParentNodeId), [undefined, undefined, 'chat-parent']);
+  });
 });
 
 describe('Codex goals stay off in every Michi thread', () => {
@@ -277,16 +288,49 @@ describe('Codex goals stay off in every Michi thread', () => {
     assert.deepEqual(server.requests.find((r) => r.method === 'thread/start')!.params.config.features, CODEX_THREAD_FEATURES_OFF);
     assert.equal(CODEX_RESTRICTED_FEATURES_OFF.goals, false);
   });
+});
 
-  it('keeps the follow-ups hook feature next to goals off', async (t) => {
-    const server = fakeAppServer();
-    const runtime = new CodexRuntime(
-      { host: createDefaultHost({ logLevel: 'silent' }), bridge, mcpSlots: slotProvider() },
-      { client: server.client, followUpsHookPocEnabled: true },
-    );
-    t.after(() => runtime.shutdown());
-    await runtime.newSession({ sessionId: 'chat-a', cwd: os.tmpdir(), model: 'test-model' });
-    assert.deepEqual(server.requests.find((r) => r.method === 'thread/start')!.params.config.features, { hooks: true, goals: false });
+describe('Codex memories in the sessions of a host that keeps memory itself', () => {
+  const oldChat = { id: 'chat-old', workspace_id: '', kind: 'chat', status: 'idle', runtime_id: 'codex', external_session_id: 'thread-old' };
+  const opened = async (t: TestContext, host: RuntimeHost) => {
+    const { server, runtime } = codexRuntime(t, { host });
+    const parent = await runtime.newSession({ sessionId: 'chat-a', cwd: os.tmpdir(), model: 'test-model' }) as CodexSession;
+    await runtime.forkSession({ sessionId: 'chat-b', cwd: os.tmpdir(), model: 'test-model', parentChatId: 'chat-a', sourceNativeSessionId: parent.threadId });
+    await runtime.loadSession({ sessionId: 'chat-old', cwd: os.tmpdir(), model: 'test-model' });
+    return server;
+  };
+
+  it('reads and writes none: memories off in every thread config, and a resumed thread\'s stored mode set off', async (t) => {
+    const nativeMemory = t.mock.fn((_runtimeId: string, _userId?: string | null) => false);
+    const host = createDefaultHost({ logLevel: 'silent', nodes: [oldChat], ports: { config: { features: { workflows: () => false, nativeMemory } } } });
+    const server = await opened(t, host);
+    for (const method of ['thread/start', 'thread/fork', 'thread/resume']) {
+      assert.deepEqual(server.requests.find((r) => r.method === method)!.params.config.memories, CODEX_MEMORIES_OFF, method);
+    }
+    // New and forked threads take their memory mode from the config; a resumed one keeps the mode it started with.
+    assert.deepEqual(server.requests.filter((r) => r.method === 'thread/memoryMode/set').map((r) => r.params), [{ threadId: 'thread-old', mode: 'disabled' }]);
+    assert.ok(nativeMemory.mock.calls.length > 0 && nativeMemory.mock.calls.every((call) => call.arguments[0] === 'codex'));
+  });
+
+  it('opens a resumed thread when the app-server lacks thread/memoryMode/set', async (t) => {
+    const host = createDefaultHost({ logLevel: 'silent', nodes: [oldChat], ports: { config: { features: { workflows: () => false, nativeMemory: () => false } } } });
+    const { server, runtime } = codexRuntime(t, { host });
+    const client = server.client as unknown as { request: (method: string, params: unknown, timeoutMs?: number) => Promise<unknown> };
+    const request = client.request;
+    client.request = async (method, params, timeoutMs) => {
+      if (method === 'thread/memoryMode/set') throw new Error('method not found: thread/memoryMode/set');
+      return request(method, params, timeoutMs);
+    };
+    const session = await runtime.loadSession({ sessionId: 'chat-old', cwd: os.tmpdir(), model: 'test-model' }) as CodexSession;
+    assert.equal(session.threadId, 'thread-old');
+  });
+
+  it('leaves Codex memories as configured for a host without the port', async (t) => {
+    const server = await opened(t, createDefaultHost({ logLevel: 'silent', nodes: [oldChat] }));
+    for (const method of ['thread/start', 'thread/fork', 'thread/resume']) {
+      assert.equal(server.requests.find((r) => r.method === method)!.params.config.memories, undefined, method);
+    }
+    assert.equal(server.count('thread/memoryMode/set'), 0);
   });
 });
 

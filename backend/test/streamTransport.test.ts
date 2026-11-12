@@ -246,3 +246,51 @@ test('forwards the memory change feed as GET, and nothing else under memories', 
   await until(() => frames.filter((frame) => frame.type === 'error').length === rejected.length);
   assert.equal(f.requests.length, 1);
 });
+
+// The Companion's renderer feed (routes/companion.ts): only its exact path is allowlisted, and
+// the route keeps its own local-only guard. The notifications stream is read by the Electron
+// main process over plain HTTP, so it is deliberately not reachable through the multiplexer.
+test('forwards the Companion\'s events feed as GET, and nothing else under companion', async (t) => {
+  const f = await fixture(t);
+  const { socket, frames } = await f.connect();
+  socket.send(JSON.stringify({ type: 'open', id: 'events', path: '/api/companion/events', method: 'GET' }));
+  await until(() => frames.some((frame) => frame.type === 'data' && frame.id === 'events'));
+  assert.deepEqual(frames.filter((frame) => frame.type === 'headers').map((frame) => frame.id), ['events']);
+  assert.deepEqual(f.requests.map((request) => request.path), ['/api/companion/events']);
+  const rejected = [
+    { path: '/api/companion/notifications/stream', method: 'GET' },
+    { path: '/api/companion/events', method: 'POST' },
+    { path: '/api/companion/notifications/stream', method: 'POST' },
+    { path: '/api/companion', method: 'GET' },
+    { path: '/api/companion/view', method: 'POST' },
+    { path: '/api/companion/notifications/cmn-1/ack', method: 'POST' },
+    { path: '/api/companion/events/extra', method: 'GET' },
+  ];
+  rejected.forEach((open, i) => socket.send(JSON.stringify({ type: 'open', id: `no-${i}`, ...open })));
+  await until(() => frames.filter((frame) => frame.type === 'error').length === rejected.length);
+  assert.equal(f.requests.length, 1);
+});
+
+// Terminal output streams as GET; keystrokes and resizes ride the socket as POST.
+test('forwards terminal streams, input and resize with their own methods only', async (t) => {
+  const f = await fixture(t);
+  const { socket, frames } = await f.connect();
+  const allowed = [
+    { path: '/api/terminals/abc-1/stream?after=12&clientId=w1', method: 'GET' },
+    { path: '/api/terminals/abc-1/input', method: 'POST', body: '{"clientId":"w1","data":"ls\\r"}' },
+    { path: '/api/backend-connections/remote/proxy/terminals/abc-1/resize', method: 'POST', body: '{}' },
+  ];
+  allowed.forEach((open, i) => socket.send(JSON.stringify({ type: 'open', id: `ok-${i}`, ...open })));
+  await until(() => allowed.every((_, i) => frames.some((frame) => frame.type === 'headers' && frame.id === `ok-${i}`)));
+  assert.deepEqual(f.requests.map((r) => r.path), allowed.map((open) => open.path));
+  const rejected = [
+    { path: '/api/terminals/abc-1/stream', method: 'POST' },
+    { path: '/api/terminals/abc-1/input', method: 'GET' },
+    { path: '/api/terminals', method: 'GET' },
+    { path: '/api/terminals/abc-1/restart', method: 'POST' },
+    { path: '/api/terminals/abc_1/input', method: 'POST' },
+  ];
+  rejected.forEach((open, i) => socket.send(JSON.stringify({ type: 'open', id: `no-${i}`, ...open })));
+  await until(() => frames.filter((frame) => frame.type === 'error').length === rejected.length);
+  assert.equal(f.requests.length, allowed.length);
+});

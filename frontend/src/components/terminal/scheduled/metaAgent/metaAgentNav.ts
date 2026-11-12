@@ -1,7 +1,8 @@
 import { openScheduledHome, setScheduledRoute, useScheduledRoute } from '../scheduledNav';
+import { navPageEvent } from '../../../../state/appEvents';
 
-/** The detail page's title, also its crumb in the top bar. */
-export const META_AGENT_PAGE_TITLE = 'Meta agent · Maintain Pages';
+// The detail page, its row and its crumb are titled pagesUpkeepTitle(name)
+// ("<name> · Pages upkeep", metaAgentCopy.ts).
 
 export function openMetaAgentDetail(): void { setScheduledRoute({ kind: 'meta-agent' }); }
 export function closeMetaAgentDetail(): void { openScheduledHome(); }
@@ -10,7 +11,8 @@ export function useMetaAgentDetailOpen(): boolean { return useScheduledRoute().k
 /** Asks the shell to show Settings › <section>; `michi:nav-page` alone opens the global drawer. */
 export const OPEN_SETTINGS_SECTION_EVENT = 'michi:open-settings-section';
 
+/** Opens Settings › <name> at its Pages upkeep part (the old `meta-agent` section redirects there). */
 export function requestMetaAgentSettings(): void {
   window.dispatchEvent(new CustomEvent(OPEN_SETTINGS_SECTION_EVENT, { detail: { section: 'meta-agent' } }));
-  window.dispatchEvent(new CustomEvent('michi:nav-page', { detail: { page: 'settings' } }));
+  navPageEvent.dispatch({ page: 'settings' });
 }

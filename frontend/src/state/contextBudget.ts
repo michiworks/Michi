@@ -1,3 +1,4 @@
+import { artifactNameKey } from 'michi-shared';
 import { backendConnectionIdForNode } from '../config/backendConnections';
 import { remoteEntityIdentity, serverEntityId } from '../config/backendIdentity';
 import type { ChatNodeState, ArtifactEntry } from './chatTypes';
@@ -24,8 +25,8 @@ export function resolveAtMentions(
     const result: ArtifactEntry[] = [];
     let m: RegExpExecArray | null;
     while ((m = re.exec(text)) !== null) {
-        const name = m[1].toLowerCase();
-        const entry = artifacts.find(c => c.name.toLowerCase() === name);
+        const name = artifactNameKey(m[1]);
+        const entry = artifacts.find(c => artifactNameKey(c.name) === name);
         if (entry && !seen.has(entry.id)) {
             seen.add(entry.id);
             result.push(entry);

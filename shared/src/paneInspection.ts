@@ -40,11 +40,6 @@ export type ExecutionStatus =
   | 'queued' | 'preparing' | 'running' | 'waiting'
   | 'recovering' | 'cancelling' | 'completed' | 'failed' | 'cancelled';
 
-export const EXECUTION_STATUSES: readonly ExecutionStatus[] = [
-  'queued', 'preparing', 'running', 'waiting',
-  'recovering', 'cancelling', 'completed', 'failed', 'cancelled',
-];
-
 export type CommitState = 'pending' | 'committed' | 'failed' | 'unknown';
 
 export interface ExecutionSnapshot {
@@ -83,18 +78,21 @@ export type PaneActivity =
   | 'waiting' | 'recovering' | 'cancelling' | 'idle'
   | 'unknown' | 'not_applicable';
 
-export const PANE_ACTIVITIES: readonly PaneActivity[] = [
-  'unstarted', 'queued', 'preparing', 'running',
-  'waiting', 'recovering', 'cancelling', 'idle',
-  'unknown', 'not_applicable',
-];
-
 export type ObservationFreshness = 'live' | 'persisted' | 'stale';
 
+/** One window's view of a pane: the pane is open there, in some tree's layout. */
 export interface PaneViewV1 {
   windowId: string;
   uiPaneId: string;
   treeId: string | null;
+  /**
+   * On screen in that window's layout right now: its Dashboard page is up and the pane is
+   * painted in the pane strip, at least 60% of it in view. False for a pane open in another
+   * tree, a single-page tab in the background, a pane scrolled out of the strip, or any pane
+   * while another page is up — open, but not in front of the user. Whether the window itself is
+   * focused is separate (server attention reads both). It changes as the user scrolls or
+   * switches, settling a moment after the strip does.
+   */
   visible: boolean;
   openedAtClient: number | null;
   registeredAt: number;
@@ -312,8 +310,6 @@ export type ExecutionSelection = 'latest' | 'last_completed' | 'execution';
 export type WaitUntil = 'changed' | 'terminal';
 export type WaitReason = 'changed' | 'terminal' | 'timed_out' | 'unavailable';
 
-export const WAIT_REASONS: readonly WaitReason[] = ['changed', 'terminal', 'timed_out', 'unavailable'];
-
 /** Exactly one of paneId | nodeId | runId identifies the target object (design §7.2/§7.3/§7.4). */
 export type PaneLocator =
   | { paneId: string }
@@ -381,10 +377,6 @@ export interface PaneSummaryV1 {
 // §8 Feed event union
 // ---------------------------------------------------------------------------
 
-export type PaneFeedEventType =
-  | 'snapshot' | 'changed' | 'output_changed' | 'execution_settled'
-  | 'removed' | 'access_revoked' | 'resync_required' | 'heartbeat';
-
 interface PaneFeedEventBase {
   version: 1;
   paneId: string;
@@ -410,6 +402,69 @@ export interface WaitPaneResultV1 {
   outcome: ExecutionStatus | null;
   cursor: string;
 }
+
+// ---------------------------------------------------------------------------
+// §9 Presence wire format: /api/panes/presence (backend/src/services/panePresence.ts)
+// ---------------------------------------------------------------------------
+
+/** The seven pane kinds with no persistent backing object. A renderer allocates a `surface:`
+ *  registration for one (POST /api/panes/presence/allocate) before it can report its view. */
+export type SurfacePaneKind = 'launcher' | 'files' | 'review' | 'file' | 'diff' | 'terminal' | 'browser';
+
+/** One reported view, as the renderer sees it. `paneId` is the opaque public id (see
+ *  encodePaneId/decodePaneId); the server decodes it to validate node/run ownership and to
+ *  derive the PaneTarget for storage. */
+export interface PresenceViewInput {
+  paneId: string;
+  windowId: string;
+  uiPaneId: string;
+  treeId: string | null;
+  visible: boolean;
+  openedAtClient: number | null;
+  /** Renderer-supplied surface title (for `surface:` targets only). Stored verbatim as
+   *  renderer-provided data — never treated as fact, never executed or interpolated. */
+  surfaceTitle?: string | null;
+}
+
+/** PUT /api/panes/presence body, after the route layer's JSON/auth extraction. */
+export interface SubmitPresenceRequest {
+  /** Absent on the very first submission from a renderer instance; the registry allocates one
+   *  and returns it. Present on every subsequent submission. */
+  rendererLeaseId?: string;
+  /** Monotonically increasing per rendererLeaseId. The first submission (no rendererLeaseId yet)
+   *  may pass any value; the registry seeds its counter from it. */
+  viewRevision: number;
+  windowId: string;
+  views: PresenceViewInput[];
+  /** Whether the reporting window is focused and visible right now. Optional: absent (an older
+   *  renderer) means unknown, which never counts as focused. Stored per window, apart from the
+   *  views, so a focus change never alters a pane's presence section or its revision. */
+  windowFocused?: boolean;
+}
+
+/** DELETE /api/panes/presence body. Removes specific views (or, if `paneIds` is omitted, the
+ *  whole lease — e.g. window close). Never touches chat/run execution state. */
+export interface RemovePresenceRequest {
+  rendererLeaseId: string;
+  paneIds?: string[];
+}
+
+export type RemovePresenceResult =
+  | { ok: true; removed: number }
+  | { ok: false; code: 'WRONG_WINDOW' }
+  | { ok: false; code: 'NOT_FOUND' };
+
+/** Body for the independent presence keepalive POST; unrelated to native ping/pong frames. */
+export interface PresenceKeepaliveRequest {
+  rendererLeaseId: string;
+  /** See SubmitPresenceRequest.windowFocused. A renderer also sends a keepalive when its focus
+   *  changes, so this is the usual carrier of the window's focus. */
+  windowFocused?: boolean;
+}
+
+export type PresenceKeepaliveResult =
+  | { ok: true; renewedViews: number }
+  | { ok: false; code: 'NOT_FOUND' };
 
 // ---------------------------------------------------------------------------
 // Parsers for untrusted input (renderer, model, HTTP query string) — §2/§3 of the P1-1 brief.

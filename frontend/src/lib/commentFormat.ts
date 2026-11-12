@@ -1,6 +1,5 @@
 import { formatFileSnapshotContext } from '../state/fileFeedback';
 import type { PendingComment } from '../state/chatTypes';
-import type { TextSelector } from './textSelector';
 import { formatQuoteBlock, formatQuotedSelectionContext, type AnyQuoteSource } from './quoteFormat';
 
 /**

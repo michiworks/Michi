@@ -2,6 +2,7 @@ import { execFile, spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
+import { writeFileAtomicSync } from 'michi-runtime/internal/core/atomicFile';
 import {
   SELF_UPDATE_COMMIT_LIMIT,
   type MichiBuildInfo, type SelfUpdateCheck, type SelfUpdateCommit, type SelfUpdateJob, type SelfUpdateStatus,
@@ -255,9 +256,7 @@ export class SelfUpdater {
         : update;
       const pid = this.launch(command, args, logFile, env);
       const record: JobRecord = { id, from: check.current.revision, target: check.latest, logFile, pid, startedAt: this.now().toISOString() };
-      const temporary = `${this.recordFile}.tmp-${process.pid}`;
-      fs.writeFileSync(temporary, `${JSON.stringify(record)}\n`, { mode: 0o600 });
-      fs.renameSync(temporary, this.recordFile);
+      writeFileAtomicSync(this.recordFile, `${JSON.stringify(record)}\n`);
       return this.readJob()!;
     } finally {
       this.starting = false;

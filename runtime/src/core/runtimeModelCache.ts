@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
+import { writeFileAtomicSync } from './atomicFile';
 import type { AgentProviderInfo, ModelInfo, RuntimeId } from '../contract/types';
 import { isReasoningLevel, sanitizeReasoningLevels } from 'michi-shared';
 
@@ -176,15 +177,11 @@ export class FileRuntimeCatalogCache implements RuntimeCatalogCache {
     }
 
     const target = this.cachePath(runtimeId, provider);
-    const temporary = `${target}.${process.pid}.tmp`;
-
     try {
       fs.mkdirSync(this.cacheDir, { recursive: true });
-      fs.writeFileSync(temporary, JSON.stringify(snapshot, null, 2), { mode: 0o600 });
-      fs.renameSync(temporary, target);
+      writeFileAtomicSync(target, JSON.stringify(snapshot, null, 2));
       return { written: true, snapshot };
     } catch (err) {
-      try { fs.rmSync(temporary, { force: true }); } catch { /* best effort */ }
       console.warn(`[runtimeCatalogCache] Failed to persist ${runtimeId} catalog:`, (err as Error).message);
       return { written: false, snapshot };
     }

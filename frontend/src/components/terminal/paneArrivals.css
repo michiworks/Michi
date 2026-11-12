@@ -71,9 +71,9 @@
 }
 .pane-arrival__title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .pane-arrival__status { flex: none; color: var(--term-muted); font-size: var(--fs-xs); }
-.pane-arrival__status--error { color: var(--term-danger-text, var(--term-danger)); }
+.pane-arrival__status--error { color: var(--term-danger-text); }
 .pane-arrival--more { color: var(--term-muted); font-size: var(--fs-sm); }
-.pane-arrival:focus-visible { outline: 2px solid var(--term-accent); outline-offset: -2px; }
+.pane-arrival:focus-visible { outline: var(--focus-ring); outline-offset: -2px; }
 @media (hover: hover) and (pointer: fine) {
   .pane-arrival:hover { background: var(--term-hover-bg, var(--term-alt)); color: var(--term-fg); }
 }

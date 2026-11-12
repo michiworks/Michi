@@ -1,8 +1,8 @@
 import { Router } from 'express';
-import type { NextFunction, Request, Response } from 'express';
-import { HOME_CONVERSATION_LIST_LIMITS, PAGE_BLOCK_LIMITS, THREAD_STATE_LIMITS, type HomeSectionKey } from 'michi-shared';
+import type { Request } from 'express';
+import { HOME_CONVERSATION_LIST_LIMITS, HOME_SECTION_KEYS, PAGE_BLOCK_LIMITS, THREAD_STATE_LIMITS, type HomeSectionKey } from 'michi-shared';
 import { LOCAL_AGENT_OWNER_ID } from '../services/agentOwner';
-import { PageWriteError, assertPageRequestSize } from '../services/pages/core';
+import { PageWriteError } from '../services/pages/core';
 import {
   getSpacesHome, getWorkspaceHome, listWorkspaceHomes, setWorkspaceHomeHidden,
 } from '../services/pages/homePages';
@@ -16,37 +16,14 @@ import { addLayoutRule, deleteLayoutRule, getLayoutPreferences, listLayoutRules,
 import {
   createProgressCard, dismissProgressCard, listHomeProgressCards, listPageProgressCards, markProgressCardSeen,
 } from '../services/pages/progressCards';
+import { pageBody as body, pageErrors, pageId as id, pageQuery as query, route } from './pageRouteKit';
 
-type Obj = Record<string, unknown>;
-const isObject = (value: unknown): value is Obj => typeof value === 'object' && value !== null && !Array.isArray(value);
 const owner = (req: Request): string => (req as Request & { user?: { id?: string } }).user?.id ?? LOCAL_AGENT_OWNER_ID;
-const id = (value: unknown, name: string): string => {
-  if (typeof value !== 'string' || !value || value.length > 200) throw new PageWriteError(400, 'invalid', `Invalid ${name}`);
-  return value;
-};
 const integer = (value: unknown, name: string): number => {
   const n = typeof value === 'string' && /^\d+$/.test(value) ? Number(value) : NaN;
   if (!Number.isSafeInteger(n)) throw new PageWriteError(400, 'invalid', `Invalid ${name}`);
   return n;
 };
-function body(req: Request, keys: readonly string[]): Obj {
-  if (req.body === undefined && keys.length === 0) return {};
-  if (!isObject(req.body) || !Object.keys(req.body).every((key) => keys.includes(key))) throw new PageWriteError(400, 'invalid', 'Invalid request body');
-  assertPageRequestSize(req.body);
-  return req.body;
-}
-function query(req: Request, allowed: readonly string[]): void {
-  if (!Object.keys(req.query).every((key) => allowed.includes(key))) throw new PageWriteError(400, 'invalid', 'Unknown query parameter');
-}
-function route(fn: (req: Request, res: Response) => unknown) {
-  return (req: Request, res: Response, next: NextFunction) => {
-    Promise.resolve().then(() => fn(req, res)).catch(next);
-  };
-}
-function errors(error: unknown, _req: Request, res: Response, _next: NextFunction): void {
-  if (error instanceof PageWriteError) { res.status(error.status).json({ error: { code: error.code, message: error.message } }); return; }
-  res.status(500).json({ error: { code: 'internal_error', message: 'Unable to complete Spaces Home request' } });
-}
 
 export interface SpacesHomeRouteDeps {
   /** What a running conversation waits for (ChatHub's pending approval or question); none without it. */
@@ -71,10 +48,9 @@ const stateIdList = (value: unknown): string[] => {
   return ids;
 };
 
-const SECTION_KEYS = new Set(['waiting', 'stalled', 'done']);
 const sectionKey = (value: unknown): HomeSectionKey | null => {
   if (value === undefined) return null;
-  if (typeof value !== 'string' || !SECTION_KEYS.has(value)) throw new PageWriteError(400, 'invalid', 'Invalid state');
+  if (typeof value !== 'string' || !HOME_SECTION_KEYS.includes(value as HomeSectionKey)) throw new PageWriteError(400, 'invalid', 'Invalid state');
   return value as HomeSectionKey;
 };
 
@@ -211,6 +187,6 @@ export function setupSpacesHomeRoutes(deps: SpacesHomeRouteDeps = {}): Router {
     res.json(dismissProgressCard(owner(req), id(req.params.threadNodeId, 'threadNodeId'), now()));
   }));
 
-  router.use(errors);
+  router.use(pageErrors('Unable to complete Spaces Home request'));
   return router;
 }

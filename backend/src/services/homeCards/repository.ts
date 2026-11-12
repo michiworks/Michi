@@ -1,9 +1,10 @@
 import { getPage } from '../pages/repository';
 import { PageWriteError } from '../pages/core';
+import { checkinSourceResolver, presentPage, type CheckinSourceResolver } from '../pages/checkinSources';
 import {
-  HOME_CARD_KINDS, HOME_CARD_LIMITS,
+  HOME_CARD_KINDS, HOME_CARD_LIMITS, isCheckinNodeId,
   type HomeCard, type HomeCardKind, type HomeCardSet, type HomeCardSource, type HomeCardUsedDto, type HomeCardsDto,
-  type HomeCardsWrite, type HomeGreeting,
+  type HomeCardsWrite, type HomeGreeting, type PageDto,
 } from 'michi-shared';
 import { getDb, runInTransaction } from '../db';
 
@@ -143,7 +144,7 @@ export function writeHomeCards(ownerUserId: string, write: HomeCardsWrite, now =
 export function markHomeCardUsed(ownerUserId: string, cardId: string, now = Date.now()): HomeCardUsedDto {
   return runInTransaction(() => {
     const stored = row(ownerUserId);
-    const custom = readHomeCustomization(ownerUserId).preferences.sets ?? [];
+    const custom = storedHomeCustomization(ownerUserId).preferences.sets ?? [];
     if (![...(stored ? storedSets(stored) : []), ...custom].some((set) => set.cards.some((entry) => entry.id === cardId))) {
       throw new HomeCardsError(404, 'not_found', 'Card not found');
     }
@@ -163,32 +164,71 @@ type HomeCustomization = {
   sets?: HomeCardSet[];
 };
 
-export function readHomeCustomization(ownerUserId: string): { revision: number; preferences: HomeCustomization } {
+/** The preferences as stored: what this module reads and writes back. */
+function storedHomeCustomization(ownerUserId: string): { revision: number; preferences: HomeCustomization } {
   const stored = db().prepare('SELECT revision,preferences FROM home_customization WHERE owner_user_id=?')
     .get(ownerUserId) as { revision: number; preferences: string } | undefined;
   return stored ? { revision: stored.revision, preferences: JSON.parse(stored.preferences) as HomeCustomization }
     : { revision: 0, preferences: {} };
 }
 
-/** Generated content continues updating underneath user-directed overrides. */
+/**
+ * The preferences as an agent is shown them (read_home, and edit_home's
+ * answer): the cards the person chose are presented as readHomeCards sends
+ * them (shownCard), so a card on a check-in's conversation reads the same in
+ * `preferences.sets` as in `content.sets` (C2-review #3). Storage keeps what
+ * was written; never write this form back.
+ */
+export function readHomeCustomization(ownerUserId: string): { revision: number; preferences: HomeCustomization } {
+  const stored = storedHomeCustomization(ownerUserId);
+  if (!stored.preferences.sets?.some((set) => set.cards.some((card) => !!card.source.threadNodeId && isCheckinNodeId(card.source.threadNodeId)))) return stored;
+  const resolver = checkinSourceResolver(ownerUserId);
+  return {
+    revision: stored.revision,
+    preferences: { ...stored.preferences, sets: stored.preferences.sets.map((set) => ({ ...set, cards: set.cards.map((card) => shownCard(card, resolver)) })) },
+  };
+}
+
+/**
+ * A card's conversation as shown: a check-in's node is purged after its run,
+ * so its card opens the conversation the run posted in (checkinSources.ts),
+ * or no conversation when there is none to open.
+ */
+function shownCard(card: HomeCard, resolver: CheckinSourceResolver): HomeCard {
+  const nodeId = card.source.threadNodeId;
+  if (!nodeId || !isCheckinNodeId(nodeId)) return card;
+  const source: HomeCardSource = { ...card.source };
+  delete source.threadNodeId;
+  const target = resolver.target(nodeId);
+  if (target) source.threadNodeId = target.nodeId;
+  return { ...card, source };
+}
+
+/**
+ * Generated content continues updating underneath user-directed overrides.
+ * This is what GET/PUT /home/cards and read_home send, so the content page and
+ * the cards are presented: nothing names a purged check-in node.
+ */
 export function readHomeCards(ownerUserId: string): HomeCardsDto {
   const generated = readGeneratedHomeCards(ownerUserId);
-  const { preferences } = readHomeCustomization(ownerUserId);
+  const { preferences } = storedHomeCustomization(ownerUserId);
   const used = usedIds(ownerUserId);
-  let contentPage: import('michi-shared').PageDto | null = null;
+  const resolver = checkinSourceResolver(ownerUserId);
+  let contentPage: PageDto | null = null;
   if (preferences.contentMode === 'page' && preferences.pageId) {
-    try { contentPage = getPage(preferences.pageId, ownerUserId); }
+    try { contentPage = presentPage(getPage(preferences.pageId, ownerUserId), ownerUserId, resolver); }
     catch (error) { if (!(error instanceof PageWriteError && error.status === 404)) throw error; }
   }
+  const sets = preferences.cardsMode === 'hidden' ? []
+    : preferences.cardsMode === 'custom' ? preferences.sets!.map(set => ({ cards: set.cards.filter(card => !used.has(card.id)) })).filter(set => set.cards.length > 0)
+      : generated.sets;
   return {
     ...(preferences.contentMode ? { contentMode: preferences.contentMode, contentPage } : {}),
     ...generated,
     ...(preferences.cardsMode && preferences.cardsMode !== 'auto' ? { cardsCustomized: true } : {}),
     greeting: preferences.greetingMode === 'hidden' ? null
       : preferences.greetingMode === 'custom' ? preferences.greeting! : generated.greeting,
-    sets: preferences.cardsMode === 'hidden' ? []
-      : preferences.cardsMode === 'custom' ? preferences.sets!.map(set => ({ cards: set.cards.filter(card => !used.has(card.id)) })).filter(set => set.cards.length > 0)
-        : generated.sets,
+    sets: sets.map((set) => ({ cards: set.cards.map((card) => shownCard(card, resolver)) })),
   };
 }
 
@@ -205,7 +245,7 @@ export function editHomeCustomization(ownerUserId: string, args: Obj) {
   if ((args.greetingText !== undefined || args.greetingDetail !== undefined) && args.greetingMode !== 'custom') throw invalid('Greeting text requires greetingMode custom');
   if (args.setsJson !== undefined && args.cardsMode !== 'custom') throw invalid('setsJson requires cardsMode custom');
   return runInTransaction(() => {
-    const current = readHomeCustomization(ownerUserId);
+    const current = storedHomeCustomization(ownerUserId);
     if (current.revision !== args.expectedRevision) throw new HomeCardsError(409, 'conflict', 'Home changed; read_home and retry');
     const next = { ...current.preferences };
     if (args.contentMode !== undefined) {

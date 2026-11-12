@@ -1,4 +1,5 @@
 import type { ChildProcessWithoutNullStreams } from 'node:child_process';
+import { createKeyedListenerSets } from 'michi-shared';
 import { spawnAgentProcess, killProcessTree } from '../../core/processTree';
 import { withDeadline } from '../../core/runtimeLifecycle';
 import { findCodexBinary, invalidateCodexBinaryCache, warnIfCodexVersionBelowMinimum } from './codexBinary';
@@ -49,6 +50,8 @@ export interface CodexAppServerClientDeps {
   initTimeoutMs?: number;
   /** The host's Codex CLI override (findCodexBinary). */
   binaryPath?: string;
+  /** More `app-server` arguments after `-c mcp_servers={}` (an ephemeral session's config overrides). */
+  extraArgs?: readonly string[];
 }
 
 interface Pending {
@@ -75,11 +78,15 @@ export class CodexAppServerClient {
   private starting: Promise<void> | null = null;
   private nextId = 1;
   private readonly pending = new Map<number, Pending>();
-  private readonly threadHandlers = new Map<string, Set<NotificationHandler>>();
+  // A handler's throw would otherwise escape the stdout listener and end the process.
+  private readonly threadHandlers = createKeyedListenerSets<string, Parameters<NotificationHandler>>({
+    onError: (err) => console.warn('[CodexAppServerClient] notification handler failed:', err),
+  });
   private readonly globalNotificationHandlers = new Set<NotificationHandler>();
   private serverRequestHandler: ServerRequestHandler | null = null;
   private readonly serverRequests = new Map<CodexRpcId, { threadId?: string; cancel: () => void }>();
   private readonly exitHandlers = new Set<() => void>();
+  private readonly startHandlers = new Set<() => Promise<void>>();
   private lineBuf = '';
   private readonly rpcTimeoutMs: number;
   private readonly initTimeoutMs: number;
@@ -93,11 +100,12 @@ export class CodexAppServerClient {
     this.rpcTimeoutMs = deps.rpcTimeoutMs ?? RPC_TIMEOUT_MS;
     this.initTimeoutMs = deps.initTimeoutMs ?? INIT_TIMEOUT_MS;
     const spawnEnv = { ...deps.spawnEnv };
+    const args = ['app-server', '-c', 'mcp_servers={}', ...(deps.extraArgs ?? [])];
     this.spawnFn =
       deps.spawnFn ??
       (() => {
         warnIfCodexVersionBelowMinimum(deps.binaryPath);
-        return spawnAgentProcess(findCodexBinary(deps.binaryPath), ['app-server', '-c', 'mcp_servers={}'], {
+        return spawnAgentProcess(findCodexBinary(deps.binaryPath), args, {
           env: spawnEnv,
         });
       });
@@ -168,6 +176,14 @@ export class CodexAppServerClient {
 
     // Send 'initialized' notification (no id) per protocol handshake
     this.writeLine({ jsonrpc: '2.0', method: 'initialized' });
+    for (const handler of [...this.startHandlers]) {
+      if (this.child !== child) return;
+      try {
+        await handler();
+      } catch (err) {
+        console.warn('[CodexAppServerClient] start handler failed:', err);
+      }
+    }
   }
 
   private onStdout(text: string): void {
@@ -265,7 +281,7 @@ export class CodexAppServerClient {
       const threadId =
         typeof params['threadId'] === 'string' ? (params['threadId'] as string) : null;
       if (threadId) {
-        for (const h of this.threadHandlers.get(threadId) ?? []) h(obj.method, params);
+        this.threadHandlers.emit(threadId, obj.method, params);
       }
       // Notifications without threadId (account/*, warnings) are intentionally dropped.
     }
@@ -325,16 +341,7 @@ export class CodexAppServerClient {
   }
 
   onNotification(threadId: string, handler: NotificationHandler): () => void {
-    let set = this.threadHandlers.get(threadId);
-    if (!set) {
-      set = new Set();
-      this.threadHandlers.set(threadId, set);
-    }
-    set.add(handler);
-    return () => {
-      set!.delete(handler);
-      if (set!.size === 0) this.threadHandlers.delete(threadId);
-    };
+    return this.threadHandlers.subscribe(threadId, handler);
   }
 
   /**
@@ -357,6 +364,17 @@ export class CodexAppServerClient {
   onExit(cb: () => void): () => void {
     this.exitHandlers.add(cb);
     return () => this.exitHandlers.delete(cb);
+  }
+
+  /**
+   * Runs `handler` after each app-server's initialize handshake, before
+   * ensureStarted resolves, for process-wide settings a new app-server
+   * starts without (CodexRuntime's skill roots): they are in place before
+   * any thread opens. A handler that fails is logged; the start succeeds.
+   */
+  onStarted(handler: () => Promise<void>): () => void {
+    this.startHandlers.add(handler);
+    return () => { this.startHandlers.delete(handler); };
   }
 
   private onExited(code: number | null): void {

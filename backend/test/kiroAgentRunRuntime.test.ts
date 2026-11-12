@@ -69,7 +69,7 @@ describe('AcpAgentRuntime Agent Run loadSession', () => {
         });
 
         const session = await runtime.loadSession!({
-            sessionId: 'attempt-resume',
+            sessionId: RUN_ATTEMPT,
             cwd: '/tmp/cwd',
             owner: RUN_OWNER,
             nativeResumeToken: 'acp-original-sid',
@@ -138,11 +138,43 @@ describe('AcpAgentRuntime Agent Run loadSession', () => {
 
         await assert.rejects(
             () => runtime.loadSession!({
-                sessionId: 'attempt-bad',
+                sessionId: RUN_ATTEMPT,
                 cwd: '/tmp/cwd',
                 owner: RUN_OWNER,
             }),
             /nativeResumeToken/,
         );
+        await assert.rejects(
+            () => runtime.loadSession!({ sessionId: 'attempt-other', cwd: '/tmp/cwd', owner: RUN_OWNER, nativeResumeToken: 'acp-sid' }),
+            /must equal attemptId/,
+        );
+    });
+});
+
+// ---------------------------------------------------------------------------
+// A chat's first message names only the tools its profile has
+// ---------------------------------------------------------------------------
+
+describe('AcpAgentRuntime chat preamble and tool profile', () => {
+    test("a primary Agent's allow-list reaches the preamble; an ordinary chat names the artifact tools", async () => {
+        const runtime = new AcpAgentRuntime({ bridge, defaultCwd: '/tmp/default', host: michiTestHost(), engine: 'v2' });
+        let next = 0;
+        (runtime as any).ensureClient = async () => ({
+            newSession: async () => ({ sessionId: `acp-chat-${++next}`, modes: {}, models: {} }),
+        });
+        const preambleOf = (session: unknown) => (session as { firstMessagePreamble: string | null }).firstMessagePreamble ?? '';
+        try {
+            const primary = await runtime.newSession({
+                sessionId: 'node-primary', cwd: '/tmp/cwd', toolProfile: { allowedToolNames: ['read', 'list_threads'] },
+            });
+            const ordinary = await runtime.newSession({ sessionId: 'node-ordinary', cwd: '/tmp/cwd' });
+            assert.match(preambleOf(primary), /save_artifact/);
+            assert.doesNotMatch(preambleOf(primary), /list_artifacts|search_artifacts|delete_artifact/);
+            for (const tool of ['list_artifacts', 'search_artifacts', 'delete_artifact']) {
+                assert.match(preambleOf(ordinary), new RegExp(tool));
+            }
+        } finally {
+            await runtime.shutdown();
+        }
     });
 });

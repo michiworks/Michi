@@ -1,6 +1,8 @@
 import { randomUUID } from 'node:crypto';
 import { getDb } from '../db';
 
+export const HOME_RUN_ID_PREFIX = 'mhr-';
+
 export type HomeRunKind = 'first-run' | 'home-summary';
 export type HomeRunState = 'active' | 'written' | 'no_change' | 'failed' | 'superseded';
 
@@ -101,7 +103,7 @@ export interface CreateHomeRunInput {
 export function createHomeRun(input: CreateHomeRunInput): HomeRunRecord | null {
   supersedeStale(input.kind, input.ownerUserId, input.workspaceId, input.now);
   if (liveHomeRun(input.kind, input.ownerUserId, input.kind === 'first-run' ? input.workspaceId : undefined)) return null;
-  const id = `mhr-${randomUUID()}`;
+  const id = `${HOME_RUN_ID_PREFIX}${randomUUID()}`;
   db().prepare(`INSERT INTO meta_agent_home_runs(id,kind,owner_user_id,workspace_id,job_id,run_id,target_page_id,fingerprint,state,created_at,updated_at)
     VALUES(?,?,?,?,?,?,?,?,'active',?,?)`).run(id, input.kind, input.ownerUserId, input.workspaceId, input.jobId, input.runId,
     input.targetPageId, input.fingerprint, input.now, input.now);

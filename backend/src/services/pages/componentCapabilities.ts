@@ -4,11 +4,9 @@ import { remoteServerId } from '../remoteAccess';
 import { PageWriteError, requirePagesWorkspace } from './core';
 import { getDatabase, getPage } from './repository';
 import { pageComponents } from './components';
-import { PAGE_COMPONENT_LIMITS, isComponentRecord, type ComponentSandboxMethod } from 'michi-shared';
+import { canonicalJson } from './canonicalJson';
+import { PAGE_COMPONENT_LIMITS, isComponentRecord, type ComponentHost, type ComponentSandboxMethod } from 'michi-shared';
 
-export type ComponentHost =
-  | { kind: 'page_block'; pageId: string; blockId: string }
-  | { kind: 'database_view'; databaseId: string; viewId: string };
 export interface MintComponentCapabilityInput {
   workspaceId: string; ownerUserId: string; componentId: string; version: number; host: ComponentHost; props?: unknown;
 }
@@ -24,15 +22,6 @@ const MAX_LIVE_CAPABILITIES = 2_000;
 const db = () => getDb();
 function bad(message: string, status: 400 | 404 | 409 = 400): never {
   throw new PageWriteError(status, status === 404 ? 'not_found' : status === 409 ? 'stale_revision' : 'invalid', message);
-}
-
-function canonicalJson(value: unknown): string {
-  const normalize = (item: unknown): unknown => {
-    if (Array.isArray(item)) return item.map(normalize);
-    if (!item || typeof item !== 'object') return item;
-    return Object.fromEntries(Object.entries(item as Record<string, unknown>).sort(([a], [b]) => a.localeCompare(b)).map(([key, entry]) => [key, normalize(entry)]));
-  };
-  return JSON.stringify(normalize(value));
 }
 
 function getBoundReference(input: MintComponentCapabilityInput): { hostFingerprint: string; pinnedVersion: number | null; protected: boolean; props: Record<string, unknown> } {
@@ -205,7 +194,7 @@ export function callPageComponentCapability(token: string, callerUserId: string,
       if (!Array.isArray(ops) || ops.length > 200) bad('Invalid row write batch');
       // Adapter is deliberately loaded only after authority and shape checks. It enforces row-only
       // operations, human ownership/proposal rules, and component provenance transactionally.
-      const { applyComponentDbEdits } = require('./databaseWrites') as typeof import('./databaseWrites');
+      const { applyComponentDbEdits }: typeof import('./databaseWrites') = require('./databaseWrites');
       if (cap.host.kind !== 'database_view') bad('This component host cannot write database rows');
       return applyComponentDbEdits({
         databaseId: resourceId, workspaceId: cap.workspaceId, ownerUserId: cap.ownerUserId,
@@ -216,7 +205,10 @@ export function callPageComponentCapability(token: string, callerUserId: string,
   }
 }
 
-/** Test-only lifecycle helper; production revocation also follows library epoch and host checks. */
+/**
+ * Test-only lifecycle helper; production revocation also follows library epoch and host checks.
+ * @testonly
+ */
 export function clearPageComponentCapabilitiesForTests(): void { capabilities.clear(); }
 export function revokePageComponentCapability(token: string, callerUserId: string): void {
   const cap = capabilities.get(token);

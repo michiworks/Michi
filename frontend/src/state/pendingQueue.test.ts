@@ -53,6 +53,15 @@ describe('dequeue-message reducer', () => {
     expect(next.n1.pendingQueued).toEqual([m2]);
   });
 
+  it('ends the pause when the last paused entry is removed', () => {
+    const nodes = { n1: baseNode({ pendingQueued: [queued('q1'), queued('q2')], queueErrored: true }) };
+    const one = reduceNodes(nodes, { type: 'dequeue-message', nodeId: 'n1', messageId: 'q1' });
+    expect(one.n1.queueErrored).toBe(true);
+    const none = reduceNodes(one, { type: 'dequeue-message', nodeId: 'n1', messageId: 'q2' });
+    expect(none.n1.pendingQueued).toBeUndefined();
+    expect(none.n1.queueErrored).toBeUndefined();
+  });
+
   it('drops the field when last entry is removed', () => {
     const m1 = queued('q1');
     const state = { n1: baseNode({ pendingQueued: [m1] }) };

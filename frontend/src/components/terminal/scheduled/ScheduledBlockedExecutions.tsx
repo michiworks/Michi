@@ -4,7 +4,7 @@ import type { ScheduledJobBlockedExecution, ScheduledJobDto } from 'michi-shared
 import { confirmScheduledExecutionStopped } from '../../../services/api/scheduledJobs';
 import { confirmDialog } from '../../ui/ConfirmDialog';
 import { Button } from '../../ui/controls';
-import { relativePastTime } from './scheduleModel';
+import { formatDateTime, relativePastTime } from './scheduleModel';
 
 /** Recovery is global: the earlier job may already have been deleted. */
 export function ScheduledBlockedExecutions({ executions, jobs, workspaceName, now, onReleased }: {
@@ -51,13 +51,18 @@ export function ScheduledBlockedExecutions({ executions, jobs, workspaceName, no
   };
 
   if (!executions.length) return null;
+  // Admission resumes once every listed execution is released. Older backends send no release time.
+  const releaseTimes = executions.map((execution) => execution.releasesAt);
+  const resumesAt = releaseTimes.every((at): at is number => at !== undefined) ? Math.max(...releaseTimes) : null;
   return (
     <section className="sched-banner sched-blocked" role="alert" aria-labelledby={titleId}>
       <div className="sched-blocked-heading">
         <AlertTriangle size={16} aria-hidden="true" />
         <div>
           <h2 id={titleId}>Scheduled runs need attention</h2>
-          <p>All new scheduled runs are paused until an earlier execution is confirmed stopped. Stop the previous Michi process and its agent before confirming.</p>
+          {resumesAt === null
+            ? <p>All new scheduled runs are paused until an earlier execution is confirmed stopped. Stop the previous Michi process and its agent before confirming.</p>
+            : <p>New scheduled runs are paused. They resume automatically {resumesAt > now ? `at ${formatDateTime(resumesAt, now)}` : 'in a moment'}, or as soon as you confirm the earlier execution has stopped. Stop the previous Michi process and its agent before confirming.</p>}
         </div>
       </div>
       <ul className="sched-blocked-list">

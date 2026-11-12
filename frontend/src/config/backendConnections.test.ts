@@ -1,5 +1,8 @@
 import { beforeEach, describe, expect, it } from 'vitest';
-import { indexBackendProjects, getKnownBackendConnections, setKnownBackendConnections, setActiveBackendConnectionId } from './backendConnections';
+import {
+  indexBackendProjects, getKnownBackendConnections, setKnownBackendConnections, setActiveBackendConnectionId,
+  isLocalProject, projectConnectionId,
+} from './backendConnections';
 
 describe('backend connection routing', () => {
   beforeEach(() => {
@@ -36,5 +39,33 @@ describe('backend connection routing', () => {
       ['direct-1', 'direct'],
       ['ssh-1', 'ssh'],
     ]);
+  });
+});
+
+describe('projectConnectionId', () => {
+  it('reads the connection from the id first, then the field', () => {
+    expect(projectConnectionId({ id: 'remote:c1:p1' })).toBe('c1');
+    expect(projectConnectionId({ id: 'p1', backendConnectionId: 'c1' })).toBe('c1');
+    expect(projectConnectionId({ id: 'remote:c1:p1', backendConnectionId: 'c1' })).toBe('c1');
+    expect(projectConnectionId({ id: 'p1' })).toBe('local');
+    expect(projectConnectionId({ id: 'p1', backendConnectionId: 'local' })).toBe('local');
+  });
+
+  it('never turns a remote id Local when the field disagrees or is lost', () => {
+    expect(projectConnectionId({ id: 'remote:c1:p1', backendConnectionId: 'local' })).toBe('c1');
+    expect(isLocalProject({ id: 'remote:c1:p1' })).toBe(false);
+    expect(() => indexBackendProjects([{ id: 'remote:c1:p1', backendConnectionId: 'c2', chatIds: [] }])).toThrow();
+  });
+
+  it('throws on a malformed remote id', () => {
+    expect(() => projectConnectionId({ id: 'remote:x' })).toThrow();
+  });
+});
+
+describe('isLocalProject', () => {
+  it('is Local only without a remote id or field', () => {
+    expect(isLocalProject({ id: 'p1' })).toBe(true);
+    expect(isLocalProject({ id: 'p1', backendConnectionId: 'local' })).toBe(true);
+    expect(isLocalProject({ id: 'p1', backendConnectionId: 'c1' })).toBe(false);
   });
 });

@@ -1,3 +1,42 @@
+import { randomUUID } from 'node:crypto';
+import { assertOwner, interactiveOwner, ownerMode, type AgentSession, type RuntimeSessionOwner } from '../contract/types';
+
+/**
+ * The owner and public id a new or loaded session opens under: a headless
+ * owner's key, which a requested id must equal, else the requested id, else
+ * the owner's key. No owner stands for the interactive owner of that id.
+ */
+export function sessionIdentity(owner: RuntimeSessionOwner | undefined, requestedId: string | undefined): { owner: RuntimeSessionOwner; id: string } {
+  if (!owner) {
+    const id = requestedId ?? randomUUID();
+    return { owner: interactiveOwner(id), id };
+  }
+  if (ownerMode(owner) === 'headless') {
+    if (requestedId && requestedId !== owner.key) throw new Error('Agent Run public session id must equal attemptId');
+    return { owner, id: owner.key };
+  }
+  return { owner, id: requestedId ?? owner.key };
+}
+
+/**
+ * Whether a caller may reuse a live or pending session: the same owner, user
+ * and runtime profile. `userOf` is the session's user; undefined (unknown)
+ * never matches. A reused session's idle retention restarts.
+ */
+export function assertSessionReusable<T extends AgentSession>(
+  session: T,
+  expected: { owner: RuntimeSessionOwner; ownerUserId?: string | null; profileHash?: string | null },
+  userOf: (session: T) => string | null | undefined,
+): T {
+  assertOwner(session.owner ?? interactiveOwner(session.id), expected.owner);
+  if (userOf(session) !== (expected.ownerUserId ?? null)) throw new Error('session user owner mismatch');
+  if ((session.runtimeProfileHash ?? null) !== (expected.profileHash ?? null)) {
+    throw new Error(`session ${session.id} runtime profile hash mismatch`);
+  }
+  session.touch?.();
+  return session;
+}
+
 /**
  * A public session id has one in-flight acquisition. Compatible callers join
  * its result; each caller validates the returned owner/profile before use.

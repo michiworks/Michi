@@ -51,9 +51,10 @@ export interface DefaultModelChangedEvent {
 
 export interface TitleModelConfig {
   /**
-   * Model id for the cheap one-shot title prompt. Null means no title model:
-   * Kiro then generates no sidecar titles, while Codex runs its title thread
-   * on the session's own model. TitlePolicy.enabled turns titles off.
+   * Model id for the cheap one-shot title prompt; Claude also takes a tier
+   * name such as `haiku`. Null means no title model: Kiro and Claude then
+   * generate no sidecar titles, while Codex runs its title thread on the
+   * session's own model. TitlePolicy.enabled turns titles off.
    */
   model: string | null;
   timeoutMs: number;
@@ -73,6 +74,23 @@ export interface RuntimeConfigPort {
   /** Per-user runtime feature flags. */
   features: {
     workflows(runtimeId: string, userId?: string | null): boolean;
+    /**
+     * The chat's Ultracode choice (AgentCapabilities.ultracode): standing
+     * multi-agent orchestration for every substantive task. Read at each spawn
+     * and turn; only chats take it. Absent: off.
+     */
+    ultracode?(owner: RuntimeSessionOwner | undefined, ownerUserId?: string | null): boolean;
+    /**
+     * Whether a session may keep the runtime's own memory: Claude Code's auto
+     * memory, Codex memories. False keeps it out of the session both ways,
+     * nothing read into it and nothing written from it, for a host that keeps
+     * memory itself as the one store. Instruction files (CLAUDE.md, AGENTS.md,
+     * rules) load as before. Read at each spawn and thread open. Absent: true.
+     * Kiro's own memory (its KAS engine only) follows kiro-cli's memory.mode
+     * setting, which `kiro-cli acp` cannot set per launch, so Kiro and Crew
+     * sessions do not read this; Crew's memory is the chat's Crew memory mode.
+     */
+    nativeMemory?(runtimeId: string, userId?: string | null): boolean;
   };
   /** Base directory for runtime-owned files. Callers create their subdirectories. */
   dataDir(): string;
@@ -80,33 +98,53 @@ export interface RuntimeConfigPort {
 
 // ---- Prompts ---------------------------------------------------------------
 
-/** How a turn reports follow-ups and the branch overview. */
+/**
+ * How a turn reports follow-ups and the branch overview. `'structured-tool'`
+ * is deprecated: no adapter asks for it since the follow-ups Stop-hook POC
+ * was removed, and it stays only so 1.x hosts that name it still compile.
+ */
 export type MetadataOutputMode =
   | 'sentinel'
   | 'sentinel-followups-tool-overview'
   | 'structured-tool';
 
-/**
- * Which follow-up protocol the native runtimes run. The `'hook-tool'` value
- * belongs to the follow-ups Stop-hook POC: experimental, outside the v1
- * compatibility guarantee.
- */
-export type FollowUpsExperimentMode = 'sentinel' | 'hook-tool';
+/** Which follow-up protocol the native runtimes run: sentinel lines, the only one. */
+export type FollowUpsExperimentMode = 'sentinel';
 
 export interface FirstTurnPrefixInput {
   cwd: string;
   /** Additional registered folders of the workspace. */
   folders?: Array<{ path: string; label?: string }>;
   contextManifest?: ExtraContext[];
+  /** NewAgentSessionOptions.artifactCount, passed on as given. */
+  artifactCount?: number;
   extraContexts?: ExtraContext[];
   /** Oldest-first ancestor chain; each entry contributes its history and pending answer. */
   ancestors?: AgentSession[];
   mergeContexts?: string[];
   workspaceInstructions?: string | null;
+  /**
+   * The parent chat whose native history this session copied (a native
+   * fork). The copied turns read as the session's own, so the host says the
+   * session is a new branch of that chat; a host without prompts ignores it.
+   */
+  nativeForkParentNodeId?: string;
+  /**
+   * NewAgentSessionOptions.toolProfile, passed on as given, so the host's
+   * text names only tools the session has. Absent for a session without one.
+   */
+  toolProfile?: RuntimeToolProfile;
+  /**
+   * Set for an ordinary chat that has the host's skills tool: whether the
+   * session lists the host's library skills itself (a mount). The host then
+   * names, ahead of the first message, the skills it may load that the
+   * session does not list. Absent: none are named (Agent Runs, the
+   * assistant, maintenance).
+   */
+  hostSkills?: { librarySkillsLoaded: boolean };
 }
 
 export interface PreambleInput extends FirstTurnPrefixInput {
-  toolProfile?: RuntimeToolProfile;
   enableFollowUps: boolean;
 }
 
@@ -124,14 +162,19 @@ export interface TurnMetadataValidation {
  * A host without the protocol returns an inert tracker.
  */
 export interface TurnMetadataTracker {
+  /** @deprecated No adapter reads it since the follow-ups Stop-hook POC was removed. */
   readonly validationActive: boolean;
+  /** @deprecated No adapter calls it since the follow-ups Stop-hook POC was removed. */
   acceptsFollowUps(enabled: boolean): boolean;
   begin(): void;
+  /** @deprecated No adapter calls it since the follow-ups Stop-hook POC was removed. */
   setFollowUps(values: readonly string[], enabled: boolean): string[] | null;
   setOverview(value: string): { overview: string; beforeSentinelsComplete: boolean } | null;
+  /** @deprecated No adapter calls it since the follow-ups Stop-hook POC was removed. */
   validate(enableFollowUps: boolean): TurnMetadataValidation;
   observeChunk(text: string, enableFollowUps: boolean): void;
   suppressOutput(kind: string): boolean;
+  /** @deprecated No adapter calls it since the follow-ups Stop-hook POC was removed. */
   completeOutputBoundary(): boolean;
   finish(): { chunks: number; thoughts: number };
 }
@@ -181,19 +224,29 @@ export interface PromptPolicyPort {
    * turn-metadata protocol: a host without one returns ''.
    */
   turnSuffix(input: TurnSuffixInput): string;
+  /**
+   * Text that ends a turn running a skill (AgentTurnInput.skill). Such a
+   * turn follows the skill's own instructions for its output, so adapters
+   * send this instead of the host's per-turn metadata text (turnSuffix,
+   * followUpsTurnReminder, an adapter's metadata instruction) and do not
+   * hold the turn for missing metadata. Absent: nothing.
+   */
+  skillTurnNote?(): string;
   followUpsExperimentMode(): FollowUpsExperimentMode;
   /**
-   * The `hookPocEnabled` argument belongs to the follow-ups Stop-hook POC:
+   * `overviewTool`: the session reports its branch overview through the
+   * host's tool, its follow-ups as sentinel lines. The adapters pass false;
    * experimental, outside the v1 compatibility guarantee.
    */
-  followUpsMetadataOutputMode(hookPocEnabled: boolean, mode: FollowUpsExperimentMode): MetadataOutputMode;
+  followUpsMetadataOutputMode(overviewTool: boolean, mode: FollowUpsExperimentMode): MetadataOutputMode;
   /**
-   * The `hookPocEnabled` argument belongs to the follow-ups Stop-hook POC:
-   * experimental, outside the v1 compatibility guarantee.
+   * `overviewTool`: as for followUpsMetadataOutputMode; the Codex adapter
+   * passes true for an interactive session. Experimental, outside the v1
+   * compatibility guarantee.
    */
   followUpsTurnReminder(
     userTurnCount: number,
-    hookPocEnabled: boolean,
+    overviewTool: boolean,
     mode: FollowUpsExperimentMode,
     enableFollowUps?: boolean,
   ): string;
@@ -201,9 +254,10 @@ export interface PromptPolicyPort {
    * Text that ends a turn whose session shares one MCP endpoint with others
    * and names itself in every call (descriptor tool delivery
    * 'mcp-http-grouped'; Kiro v3 session anchors): the native session id to
-   * pass. Absent: none.
+   * pass. `turn.skill`: the turn runs a skill (see skillTurnNote), so the
+   * text asks for no reply metadata. Absent: none.
    */
-  mcpSessionReminder?(nativeSessionId: string): string;
+  mcpSessionReminder?(nativeSessionId: string, turn?: { skill?: boolean }): string;
   /**
    * A tool result as the session shows it, where the host's tool result
    * carries text for the agent that the user's tool chip leaves out (Michi:
@@ -432,6 +486,13 @@ export interface PermissionDecisionRequest {
   nativeRequest?: boolean;
   /** The mode already resolved for this turn; resolved from `mode()` when absent. */
   mode?: ChatPermissionMode;
+  /**
+   * The adapter knows the tool is one of the host's own: it took the name
+   * from the host's MCP server and passes it without that server's prefix
+   * (Claude). Default false: a name without a server prefix may then be any
+   * tool's.
+   */
+  hostTool?: boolean;
 }
 
 /** The host's chat permission policy: modes, always-allow grants and their revocation. */
@@ -446,6 +507,13 @@ export interface PermissionPolicyPort {
   resolveOwnerUserId(owner: RuntimeSessionOwner, ownerUserId?: string | null): string | null | undefined;
   decide(request: PermissionDecisionRequest): HostPermissionDecision;
   grant(request: { owner: RuntimeSessionOwner; ownerUserId?: string | null; toolName: string }): void;
+  /**
+   * The user approved this one call of `toolName` (Allow once, always or for
+   * the session) through an adapter's ApprovalCoordinator. Lets the host's
+   * own tools tell a call its approval prompt already asked about from one
+   * that reached them without it. Absent: nothing is told. Must not throw.
+   */
+  approved?(request: { owner: RuntimeSessionOwner; ownerUserId?: string | null; toolName: string }): void;
   /** Changes on explicit permission updates, revoking temporary session trust. */
   resetToken?(owner: RuntimeSessionOwner, ownerUserId?: string | null): string | undefined;
   /**
@@ -557,7 +625,10 @@ export interface WorkflowRunContext {
 
 export type WorkflowControl = () => Promise<void>;
 export type WorkflowControls = Partial<Record<WorkflowAction, WorkflowControl>>;
-/** Called once per approval: the chosen option, or null when it lapsed. */
+/**
+ * Called once per approval: the chosen option, or null when it lapsed.
+ * `endedAs` is the run's terminal status when the run ending lapsed it.
+ */
 export type WorkflowApprovalResolver = (optionId: string | null, endedAs?: WorkflowRunStatus) => void;
 
 /** Where adapters fold native workflow events and register a run's controls and approvals. */
@@ -588,13 +659,8 @@ export interface WorkflowRunSink {
 
 // ---- Background subagents ------------------------------------------------------
 
-export interface BackgroundSubagentContext {
-  ownerUserId: string;
-  /** Null when the session has not learned its workspace; the host's for the owner is used. */
-  workspaceId: string | null;
-  /** The interactive owner of the reporting session; the host maps it to its chat. */
-  owner: RuntimeSessionOwner;
-}
+/** Where a session's background subagents are shown: its owner is always interactive, mapped by the host to its chat. */
+export type BackgroundSubagentContext = WorkflowRunContext;
 
 /** Background subagents a live session still tracks, reported per session source. */
 export interface BackgroundSubagentSink {
@@ -608,7 +674,7 @@ export interface BackgroundSubagentSink {
 
 /**
  * Product half of thread titles a runtime generates beside the main turn
- * (Kiro's sidecar prompt, Codex's title thread): whether to generate them and
+ * (Kiro's and Claude's sidecar prompt, Codex's title thread): whether to generate them and
  * the instruction text. The model and its deadline come from
  * RuntimeConfigPort.titleModel. Racing the deadline and cleaning the model's
  * output are runtime mechanism and stay in the package.
@@ -616,7 +682,7 @@ export interface BackgroundSubagentSink {
 export interface TitlePolicy {
   /** Whether the runtime generates titles at all; false leaves titling to the host. */
   enabled(runtimeId: string): boolean;
-  /** The one-shot prompt a sidecar title model gets (Kiro): the instructions with the user's message. */
+  /** The one-shot prompt a sidecar title model gets (Kiro, Claude): the instructions with the user's message. */
   prompt(userText: string, contextText?: string): string;
 }
 

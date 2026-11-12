@@ -1,4 +1,3 @@
-import React from 'react';
 import { describe, expect, it, vi } from 'vitest';
 import { render, screen, fireEvent } from '@testing-library/react';
 import { ContextRing } from './ContextRing';
@@ -38,10 +37,10 @@ describe('ContextRing', () => {
     const meter = screen.getByRole('meter');
     fireEvent.mouseEnter(meter);
     const tooltip = screen.getByRole('tooltip');
-    expect(tooltip.textContent).toContain('79.5K tokens');
-    expect(tooltip.textContent).toContain('in 60.0K');
-    expect(tooltip.textContent).toContain('out 19.5K');
-    expect(tooltip.textContent).toContain('cached 12.0K');
+    expect(tooltip.textContent).toContain('79.5k tokens');
+    expect(tooltip.textContent).toContain('in 60.0k');
+    expect(tooltip.textContent).toContain('out 19.5k');
+    expect(tooltip.textContent).toContain('cached 12.0k');
   });
 
   it('shows no token details for Kiro (percentage only)', () => {

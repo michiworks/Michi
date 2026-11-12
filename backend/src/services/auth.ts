@@ -3,9 +3,10 @@ import { DatabaseSync } from "node:sqlite";
 import { betterAuth, type BetterAuthOptions } from "better-auth";
 import { getMigrations } from "better-auth/db/migration";
 import { getMichiDataDir } from "./dataDir";
+import { normalizeOrigin, parseOriginList } from "./localOrigins";
 
 // Standard Auth instance type — we re-derive it via `Auth` so the
-// lazy-init proxy and `getAuth()` share the same return shape and
+// per-host instances share the same return shape and
 // don't widen to `Auth<typeof opts>`.
 type Auth = ReturnType<typeof betterAuth>;
 
@@ -68,9 +69,8 @@ function requireEnv(name: string): string {
 // rows live in one place, only the per-request cookie + redirect URL
 // differ.
 //
-// Callers read via getAuth(host) / getAuthForHost(host); the legacy
-// `auth` proxy and `getAuth()` (no-arg) still resolve to the fallback
-// instance keyed off BETTER_AUTH_URL.
+// Callers read via getAuthForHost(host); a missing host resolves to the
+// fallback instance keyed off BETTER_AUTH_URL.
 
 const authInstances = new Map<string, Auth>();
 let authDbPath: string | null = null;
@@ -116,29 +116,17 @@ function buildAuthForBaseURL(baseURL: string): Auth {
     return betterAuth(opts);
 }
 
-function normalizeOrigin(originOrUrl: string): string {
-    // Strip path/query and trailing slash so "https://x/" and "https://x" key the same.
-    try {
-        const u = new URL(originOrUrl);
-        return `${u.protocol}//${u.host}`;
-    } catch {
-        return originOrUrl.replace(/\/+$/, "");
-    }
-}
-
 /**
  * Returns the Auth instance whose baseURL matches `host` (the value of
  * the incoming Host header). Falls back to BETTER_AUTH_URL when host is
  * absent or doesn't match any configured origin — that fallback is what
  * preserves single-domain deployments and CLI/script callers that never
- * see a request.
+ * see a request. MICHI_CORS_ORIGINS is read as auth mode's CORS reads it.
  */
 export function getAuthForHost(host: string | undefined): Auth {
     const fallbackBase = normalizeOrigin(requireEnv("BETTER_AUTH_URL"));
-    const allowed = (process.env.MICHI_CORS_ORIGINS || fallbackBase)
-        .split(",")
-        .map((s) => normalizeOrigin(s.trim()))
-        .filter(Boolean);
+    const corsOrigins = process.env.MICHI_CORS_ORIGINS;
+    const allowed = corsOrigins ? parseOriginList(corsOrigins) : [fallbackBase];
     let chosen = fallbackBase;
     if (host) {
         const match = allowed.find((origin) => {
@@ -154,8 +142,72 @@ export function getAuthForHost(host: string | undefined): Auth {
     return inst;
 }
 
-export function getAuth(): Auth {
-    return getAuthForHost(undefined);
+export interface AuthUser { id: string; email: string; name: string; createdAt: unknown }
+
+/** The admin routes' access to Better Auth's user, session and account rows. */
+export interface AuthUserStore {
+    listUsers(): AuthUser[];
+    getUser(id: string): AuthUser | undefined;
+    emailsById(ids: readonly string[]): Map<string, string>;
+    /** The user with its sessions and accounts, in one transaction. */
+    deleteUser(id: string): void;
+    close(): void;
+}
+
+function schemaColumn(db: DatabaseSync, table: string, candidates: readonly string[]): string {
+    const names = new Set((db.prepare(`PRAGMA table_info("${table}")`).all() as Array<{ name: string }>)
+        .map((column) => column.name));
+    const found = candidates.find((name) => names.has(name));
+    if (!found) throw new Error(`auth.sqlite table "${table}" has none of the columns ${candidates.join(", ")}`);
+    return found;
+}
+
+/**
+ * Better Auth's migrations name columns in camelCase; older deployments used
+ * snake_case. The column names are read from the schema when the store opens,
+ * so a schema it cannot handle fails before a caller changes anything.
+ */
+export function openAuthUserStore(): AuthUserStore {
+    const db = new DatabaseSync(resolveAuthDbPath());
+    let columns: { createdAt: string; sessionUserId: string; accountUserId: string };
+    try {
+        db.exec("PRAGMA journal_mode = WAL");
+        db.exec("PRAGMA busy_timeout = 15000");
+        columns = {
+            createdAt: schemaColumn(db, "user", ["createdAt", "created_at"]),
+            sessionUserId: schemaColumn(db, "session", ["userId", "user_id"]),
+            accountUserId: schemaColumn(db, "account", ["userId", "user_id"]),
+        };
+    } catch (err) {
+        db.close();
+        throw err;
+    }
+    const userColumns = `id, email, name, "${columns.createdAt}" AS createdAt`;
+    return {
+        listUsers: () => db.prepare(`SELECT ${userColumns} FROM "user" ORDER BY "${columns.createdAt}" DESC`)
+            .all() as unknown as AuthUser[],
+        getUser: (id) => db.prepare(`SELECT ${userColumns} FROM "user" WHERE id = ?`)
+            .get(id) as AuthUser | undefined,
+        emailsById: (ids) => {
+            if (!ids.length) return new Map();
+            const rows = db.prepare(`SELECT id, email FROM "user" WHERE id IN (${ids.map(() => "?").join(",")})`)
+                .all(...ids) as Array<{ id: string; email: string }>;
+            return new Map(rows.map((row) => [row.id, row.email]));
+        },
+        deleteUser: (id) => {
+            db.exec("BEGIN");
+            try {
+                db.prepare(`DELETE FROM "session" WHERE "${columns.sessionUserId}" = ?`).run(id);
+                db.prepare(`DELETE FROM "account" WHERE "${columns.accountUserId}" = ?`).run(id);
+                db.prepare('DELETE FROM "user" WHERE id = ?').run(id);
+                db.exec("COMMIT");
+            } catch (err) {
+                db.exec("ROLLBACK");
+                throw err;
+            }
+        },
+        close: () => db.close(),
+    };
 }
 
 /**

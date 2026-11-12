@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import { useState } from 'react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { fireEvent, render, screen, within } from '@testing-library/react';
 import type { MichiDatabase, MichiDbEditOp, MichiDbRow, ThreadCardItem } from 'michi-shared';

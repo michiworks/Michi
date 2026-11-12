@@ -1,23 +1,49 @@
 import { matchSlashContext, buildSlashItems, buildAgentItems } from './slashItems';
+import { buildSlashEntries } from '../state/slashEntries';
 import type { AgentCommand, SessionMode } from '../services/api';
 
 describe('buildSlashItems', () => {
+  const summary = { description: 'A skill', userInvocable: true, modelInvocable: true, enabled: true };
+
   it("drops an agent command whose name collides with a local (local wins)", () => {
     const agent: AgentCommand[] = [
       { name: 'branch', description: 'This would shadow /branch' },
       { name: 'kiro-only', description: 'unique' },
     ];
-    const items = buildSlashItems(agent, '');
+    const items = buildSlashItems(buildSlashEntries({ agentCommands: agent }), '');
     const branches = items.filter((i) => i.name === 'branch');
     expect(branches).toHaveLength(1);
     expect(branches[0].source).toBe('local');
     expect(items.find((i) => i.name === 'kiro-only')?.source).toBe('runtime');
   });
+
+  it('puts exact names first, then commands before skills, each with prefix before substring matches', () => {
+    const entries = buildSlashEntries({
+      runtimeId: 'claude',
+      catalog: { commands: [{ name: 'review' }, { name: 'preview' }, { name: 'reviewers' }], skills: [
+        { ...summary, id: 'library:review-pr', name: 'review-pr', origin: 'library' },
+        { ...summary, id: 'library:exp', name: 'exp', origin: 'library' },
+        { ...summary, id: 'runtime:claude:user:review', name: 'review', origin: 'runtime', runtimeId: 'claude' },
+        { ...summary, id: 'runtime:claude:plugin:core:packagebuild', name: 'packagebuild', nativeName: 'core:packagebuild', origin: 'runtime', runtimeId: 'claude' },
+      ] },
+    });
+    expect(buildSlashItems(entries, 'Review').map((item) => [item.name, item.source])).toEqual([
+      ['review', 'runtime'], ['review', 'skill'], ['reviewers', 'runtime'], ['preview', 'runtime'], ['review-pr', 'skill'],
+    ]);
+    expect(buildSlashItems(entries, 'exp').map((item) => item.name)).toEqual(['exp', 'explore']);
+    expect(buildSlashItems(entries, 'core:p').map((item) => item.name)).toEqual(['core:packagebuild']);
+    expect(buildSlashItems(undefined, 'br').map((item) => item.name)).toEqual(['branch']);
+  });
 });
 
-describe('matchSlashContext agent sub-picker', () => {
+describe('matchSlashContext', () => {
   it('matches /agent with trailing space (empty query)', () => {
     expect(matchSlashContext('/agent ', 7)).toEqual({ query: '', command: 'agent' });
+  });
+
+  it('keeps the menu open through a qualified name, and closes it at the arguments', () => {
+    expect(matchSlashContext('/core:bra', 9)).toEqual({ query: 'core:bra' });
+    expect(matchSlashContext('/plugin:skill args', 18)).toBeNull();
   });
 });
 

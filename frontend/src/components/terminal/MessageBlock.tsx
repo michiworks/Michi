@@ -1,15 +1,28 @@
-import type { DurableUserInput, UsageCharge } from 'michi-shared';
+import { ASSISTANT_THREAD_MESSAGE_TITLE, closesFence, formatTokenCount, isCheckinNodeId, openingFence, type DurableUserInput, type MarkdownFence, type ThreadMessagePlanSource, type ThreadMessageSource, type UsageCharge } from 'michi-shared';
 import React, { createContext, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
-import { AnimatePresence, PresenceContext, animate, motion, useIsPresent, useReducedMotionConfig, type Variants } from 'motion/react';
-import { DUR, EASE, SPRING, TRANSITION } from '../../motion/tokens';
+import { AnimatePresence, PresenceContext, animate, motion, useIsPresent, useReducedMotionConfig } from 'motion/react';
+import { DUR, EASE, SPRING } from '../../motion/tokens';
 import { AssistantBlock, ChatMessage, ToolCallState, SubagentInfo, UserInputRequest } from '../../state/chatTypes';
 import { turnErrorAction } from '../../state/turnErrorRecovery';
-import { isRunningStatus, isHiddenInternalTool, formatDurationMs, toolSpanMs, summarizeWork } from './toolCallGrouping';
+import { interruptionCauseOfKind } from '../../state/turnInterruption';
+import { useRuntimeLabel } from '../../state/skillCatalog';
+import { skillSourceLabel } from '../../state/slashEntries';
+import { isSubagentActive } from '../../state/backgroundWork';
+import { isRunningStatus, isHiddenInternalTool, formatDurationMs, toolSpanMs, summarizeWork, failedToolCount } from './toolCallGrouping';
+import { AgentTurnContext, LineRun, LineWorkFold, useAgentTurnInfo, type LineRunItem } from './AgentLineBlocks';
+import { splitFinishedTurn } from './workFold';
+import { ownGroupTools, visibleGroupTools } from './subagents/subagentPresentation';
 import { activityWindow, activityWindowMs } from './agentBlockTiming';
 import { ToolCallGroup } from './ToolCallGroup';
-import { PageReceipt } from './PageReceipt';
+import { useHoldHeightWhileLive } from './useHoldHeightWhileLive';
+import { TurnReceipts } from './TurnReceipts';
+import { MultiModelReceipt } from './multiModel/MultiModelReceipt';
+import { MessageWorkflowRuns } from './workflows/MessageWorkflowRuns';
+import type { WorkflowPlacement } from '../../state/workflowDomain';
+import type { AgentResourceIdentity } from '../../state/agentIdentity';
 import { type TerminalDensity, useAgentBlockStyle } from '../../state/prefs';
 import { CardSpinner, SparkleIcon, LiveTimerLabel } from './AgentBlockVariants';
+import { GlyphSwap, LabelSwap, Reveal } from './agentBlockMotion';
 import type { PlanEntry } from '../../services/api';
 import MarkdownContent from '../MarkdownContent';
 import { QuoteChip } from './QuoteChip';
@@ -37,9 +50,19 @@ import { SteeringReports } from './SteeringReports';
 import { streamingMarkdownBlocksEnabled } from './streamingMarkdownBlocksFlag';
 import UserInputBanner, { ResolvedUserInput } from './UserInputBanner';
 import { useChatActions } from '../../state/chatStore';
-import { BranchIcon, CheckIcon, CopyIcon, EditIcon, RetryIcon } from './icons';
+import { useIsCompanionNodeId } from '../../state/companion/companionStore';
+import { openCompanionPanel } from '../../state/companion/companionPanel';
+import { useCompanionName } from '../../state/companion/companionName';
+import { BranchIcon, CheckIcon, CopyIcon, EditIcon, ForkIcon, RetryIcon } from './icons';
 import { useMetaChatDecorations } from '../../state/metaChat/metaChatDecorations';
-import { playFlight } from './messageFlight';
+import { formatMessageTime } from '../../lib/messageTime';
+import { useCopyFeedback } from '../../hooks/useCopyFeedback';
+import { isImeComposing } from '../../lib/ime';
+import { kbd } from '../../lib/platform';
+import { lastInputWasTouch } from '../../lib/inputModality';
+import type { MultiModelBranchControls } from './multiModelBranch';
+import { ReplyMemorySources } from './ReplyMemorySources';
+import { MarkdownLinkRendererContext } from '../markdownLinkRenderer';
 
 const StreamingMarkdownContent = React.lazy(() => import('./StreamingMarkdownContent'));
 
@@ -75,20 +98,6 @@ function ActiveUserInputSegment({ userInput, nodeId }: { userInput: UserInputReq
     onSkip={() => skipUserInputRequest(nodeId)} />;
 }
 
-function formatMessageTime(ms: number | undefined): string {
-  if (!ms) return '';
-  const d = new Date(ms);
-  const hh = String(d.getHours()).padStart(2, '0');
-  const mm = String(d.getMinutes()).padStart(2, '0');
-  const now = new Date();
-  const isToday =
-    d.getFullYear() === now.getFullYear() &&
-    d.getMonth() === now.getMonth() &&
-    d.getDate() === now.getDate();
-  if (isToday) return `${hh}:${mm}`;
-  return `${d.getMonth() + 1}/${d.getDate()} ${hh}:${mm}`;
-}
-
 export interface TurnUsageInfo {
   durationMs?: number;
   credits?: number;
@@ -102,33 +111,19 @@ export interface TurnUsageInfo {
   contextUsagePercentage?: number;
 }
 
-function formatTokenCount(value: number): string {
-  if (value < 1_000) return Math.round(value).toLocaleString('en-US');
-  if (value < 1_000_000) {
-    const compact = value / 1_000;
-    const label = compact >= 10 ? compact.toFixed(0) : compact.toFixed(1).replace(/\.0$/, '');
-    if (label === '1000') return '1m';
-    return `${label}k`;
-  }
-  const compact = value / 1_000_000;
-  return `${compact >= 10 ? compact.toFixed(0) : compact.toFixed(1).replace(/\.0$/, '')}m`;
-}
-
-function usageLabel(usage: TurnUsageInfo): string {
-  const duration = usage.durationMs === undefined ? '' : ` · ${(usage.durationMs / 1000).toFixed(1)}s`;
-  if (usage.unverifiable) return `usage unverifiable${duration}`;
-  if (usage.totalTokens !== undefined) {
-    const breakdown = usage.inputTokens !== undefined || usage.outputTokens !== undefined
-      ? ` (${formatTokenCount(usage.inputTokens ?? 0)} in / ${formatTokenCount(usage.outputTokens ?? 0)} out)`
-      : '';
-    return `usage ${formatTokenCount(usage.totalTokens)} tokens${breakdown}${duration}`;
-  }
+/**
+ * The usage part of an answer's meta line: its tokens, else its cost. The
+ * in/out breakdown, the duration and the context share are in usageTitle.
+ */
+function usageMetaText(usage: TurnUsageInfo): string | null {
+  if (usage.unverifiable) return 'usage unverifiable';
+  if (usage.totalTokens !== undefined) return `${formatTokenCount(usage.totalTokens)} tokens`;
   if (usage.charge) {
     const estimate = usage.charge.provenance === 'sdk_estimate' || usage.charge.provenance === 'catalog_estimate' ? 'estimated ' : '';
-    return `usage ${estimate}${usage.charge.amount.toFixed(usage.charge.unit === 'USD' ? 4 : 2)} ${usage.charge.unit}${duration}`;
+    return `${estimate}${usage.charge.amount.toFixed(usage.charge.unit === 'USD' ? 4 : 2)} ${usage.charge.unit}`;
   }
-  if (usage.credits !== undefined) return `usage ${usage.credits.toFixed(2)} credits${duration}`;
-  return `usage${duration}`;
+  if (usage.credits !== undefined) return `${usage.credits.toFixed(2)} credits`;
+  return null;
 }
 
 function usageTitle(usage: TurnUsageInfo): string {
@@ -149,42 +144,58 @@ function usageTitle(usage: TurnUsageInfo): string {
   return details.join(', ');
 }
 
+/**
+ * What a tap inside a message acts on by itself. On a touch screen the tap's
+ * hover must not reveal the message's actions when it lands on one: WebKit
+ * drops a tap whose mouseover makes something visible, so the control would
+ * only take the second tap. index.css's run-part hover rule repeats this list.
+ */
+const TAP_CONTROL = 'a[href], button, input, select, textarea, summary, [role="button"], [data-mention], [data-tap-target]';
+
+/**
+ * A message's action row. Under a user message: copy, retry, edit, branch
+ * and the time, on hover. Under an answer it is the answer's meta line
+ * (`answer`): copy, retry and branch, then "time · tokens" at the chrome's
+ * 12px, all of it shown together. Shown while `visible`, and while focus is
+ * in the answer or on the row's own buttons (index.css), so a keyboard
+ * reaches them visibly.
+ */
 function MessageActions({
   visible,
+  restVisible = false,
+  answer = false,
   time,
-  onCopy,
+  copyText,
   onRetry,
   onEdit,
   onBranch,
   usageInfo,
 }: {
   visible: boolean;
+  /** Touch screens show this row without a tap (index.css). */
+  restVisible?: boolean;
+  answer?: boolean;
   time: string;
-  onCopy: () => void;
+  /** The words Copy puts on the clipboard, read at the press. */
+  copyText: () => string;
   onRetry?: () => void;
   onEdit?: () => void;
   onBranch?: () => void;
   usageInfo?: TurnUsageInfo | null;
 }) {
-  const [copied, setCopied] = useState(false);
-  const handleCopy = () => {
-    onCopy();
-    setCopied(true);
-    setTimeout(() => setCopied(false), 1200);
-  };
+  const { result: copyResult, status: copyStatus, copy } = useCopyFeedback();
   const btnStyle: React.CSSProperties = {
     color: 'var(--term-muted)',
   };
-  const hasUsage = !!usageInfo;
+  const iconSize = answer ? 14 : 13;
+  const usageText = answer && usageInfo ? usageMetaText(usageInfo) : null;
+  const usageDetails = answer && usageInfo ? usageTitle(usageInfo) : '';
   return (
     <div
-      style={{
-        display: 'flex',
-        alignItems: 'center',
-        justifyContent: 'space-between',
-        marginTop: 4,
-        paddingLeft: 0,
-      }}
+      data-msg-actions={restVisible ? 'rest' : undefined}
+      data-find-skip
+      className={answer ? 't-answer-meta' : undefined}
+      style={answer ? undefined : { display: 'flex', alignItems: 'center', marginTop: 4, paddingLeft: 0 }}
     >
       <div
         className="t-msg-actions"
@@ -192,6 +203,7 @@ function MessageActions({
           display: 'flex',
           alignItems: 'center',
           gap: 2,
+          minWidth: 0,
           opacity: visible ? 1 : 0,
           transition: 'opacity var(--t-soft) ease-out',
           pointerEvents: visible ? 'auto' : 'none',
@@ -199,14 +211,16 @@ function MessageActions({
       >
         <button
           type="button"
-          onClick={(e) => { e.stopPropagation(); handleCopy(); }}
+          onClick={(e) => { e.stopPropagation(); void copy(copyText()); }}
           className="t-icon-btn"
           style={btnStyle}
           title="copy message"
           aria-label="copy message"
         >
-          {copied ? <CheckIcon size={13} /> : <CopyIcon size={13} />}
+          {copyResult === 'copied' ? <CheckIcon size={iconSize} /> : <CopyIcon size={iconSize} />}
         </button>
+        {/* Only while there is a result: a transcript would otherwise hold a live region per message. */}
+        {copyStatus && <span className="sr-only" role="status">{copyStatus}</span>}
         {onRetry && (
           <button
             type="button"
@@ -216,7 +230,7 @@ function MessageActions({
             title="retry this turn"
             aria-label="retry this turn"
           >
-            <RetryIcon size={13} />
+            <RetryIcon size={iconSize} />
           </button>
         )}
         {onEdit && (
@@ -228,7 +242,7 @@ function MessageActions({
             title="edit and resend"
             aria-label="edit and resend"
           >
-            <EditIcon size={13} />
+            <EditIcon size={iconSize} />
           </button>
         )}
         {onBranch && (
@@ -240,26 +254,27 @@ function MessageActions({
             title="branch from here"
             aria-label="branch from here"
           >
-            <BranchIcon size={13} />
+            <BranchIcon size={iconSize} />
           </button>
         )}
-        {time && (
+        {answer ? (
+          (time || usageText) && (
+            // Parts are joined by a CSS "·" (index.css), so a surface that
+            // hides the usage part (the Meta agent window) leaves no stray dot.
+            <span className="t-answer-meta__text" title={usageDetails || undefined}>
+              {time && <span className="t-answer-meta__part">{time}</span>}
+              {usageText && <span className="t-answer-meta__part" data-testid="turn-usage">{usageText}</span>}
+            </span>
+          )
+        ) : time && (
           <span
-            style={{ fontSize: 'var(--fs-xs)', fontFamily: 'var(--ui-font)', color: 'var(--term-muted)', marginLeft: 4 }}
+            className="t-msg-meta"
+            style={{ fontSize: 'var(--msg-meta-size, var(--fs-xs))', fontFamily: 'var(--ui-font)', color: 'var(--term-muted)', marginLeft: 4 }}
           >
             {time}
           </span>
         )}
       </div>
-      {hasUsage && (
-        <span
-          data-testid="turn-usage"
-          title={usageTitle(usageInfo)}
-          style={{ fontSize: 'var(--fs-xs)', color: 'var(--term-muted)', fontFamily: 'var(--ui-font)' }}
-        >
-          {usageLabel(usageInfo)}
-        </span>
-      )}
     </div>
   );
 }
@@ -311,65 +326,6 @@ function useBlockEntrance(live: boolean | undefined): number | null {
   return from;
 }
 
-const ICON_SWAP: Variants = {
-  enter: { opacity: 0, scale: 0.5 },
-  shown: { opacity: 1, scale: 1, transition: SPRING.snappy },
-  leave: { opacity: 0, scale: 0.5, transition: { duration: 0.1 } },
-};
-
-const LABEL_SWAP: Variants = {
-  enter: { opacity: 0, y: 4 },
-  shown: { opacity: 1, y: 0, transition: { duration: 0.18, delay: 0.03, ease: EASE.out } },
-  leave: { opacity: 0, y: -4, transition: { duration: 0.12, ease: EASE.out } },
-};
-
-/** One state of a SwapSlot. A leaving state is no longer announced or clickable. */
-function SwapItem({ variants, as, style, children }: {
-  variants: Variants;
-  as: 'span' | 'div';
-  style?: React.CSSProperties;
-  children: React.ReactNode;
-}) {
-  const present = useIsPresent();
-  const itemStyle: React.CSSProperties = {
-    gridArea: '1 / 1',
-    minWidth: 0,
-    pointerEvents: present ? undefined : 'none',
-    ...style,
-  };
-  return as === 'div' ? (
-    <motion.div variants={variants} initial="enter" animate="shown" exit="leave" aria-hidden={present ? undefined : true} style={itemStyle}>
-      {children}
-    </motion.div>
-  ) : (
-    <motion.span variants={variants} initial="enter" animate="shown" exit="leave" aria-hidden={present ? undefined : true} style={itemStyle}>
-      {children}
-    </motion.span>
-  );
-}
-
-/**
- * Shows one of several states in a single grid cell, so a new `swapKey`
- * cross-fades in place: the old state leaves while the new one arrives.
- * Present on the first render, a state appears settled.
- */
-function SwapSlot({ swapKey, variants, as = 'span', style, children }: {
-  swapKey: string;
-  variants: Variants;
-  as?: 'span' | 'div';
-  style?: React.CSSProperties;
-  children: React.ReactNode;
-}) {
-  const content = (
-    <AnimatePresence initial={false}>
-      <SwapItem key={swapKey} variants={variants} as={as}>{children}</SwapItem>
-    </AnimatePresence>
-  );
-  return as === 'div'
-    ? <div style={{ display: 'grid', gridTemplateColumns: 'minmax(0, 1fr)', ...style }}>{content}</div>
-    : <span style={{ display: 'inline-grid', ...style }}>{content}</span>;
-}
-
 /** Disclosure chevron: one ▸ that turns to point down while open. */
 function Chevron({ open, style }: { open: boolean; style?: React.CSSProperties }) {
   return (
@@ -385,43 +341,8 @@ function Chevron({ open, style }: { open: boolean; style?: React.CSSProperties }
   );
 }
 
-/** Why a thought body hides: the block finishing, or the user collapsing it. */
-type ThoughtBodyExit = 'finish' | 'collapse';
-
-const THOUGHT_BODY_REVEAL: Variants = {
-  // Clip only while the height moves: a settled body (also one present at
-  // mount, which skips straight to here) keeps its focus ring.
-  open: { height: 'auto', opacity: 1, transition: TRANSITION.expand, transitionEnd: { overflow: 'visible' } },
-  closed: (exit: ThoughtBodyExit) => ({
-    height: 0,
-    opacity: 0,
-    overflow: 'hidden',
-    transition: exit === 'finish' ? { duration: 0.22, ease: EASE.drawer } : TRANSITION.collapse,
-  }),
-};
-
-// From 1px, not 0: a click that opens the body changes the transcript height
-// in the click's own frame, which is how TPane leaves follow mode.
-const THOUGHT_BODY_FROM = { height: 1, opacity: 0, overflow: 'hidden' } as const;
-
-/** A thought block's body: opens and closes by height, reversing in place
- *  when toggled mid-way. Rendered settled when present with its block. While
- *  it leaves it is out of the accessibility tree and inert. */
-function ThoughtBodyReveal({ children }: { children: React.ReactNode }) {
-  const present = useIsPresent();
-  return (
-    <motion.div
-      variants={THOUGHT_BODY_REVEAL}
-      initial={THOUGHT_BODY_FROM}
-      animate="open"
-      exit="closed"
-      aria-hidden={present ? undefined : true}
-      inert={!present}
-    >
-      {children}
-    </motion.div>
-  );
-}
+/** A thought body closing because its block finished, not because the user collapsed it. */
+const THOUGHT_FINISH = { duration: 0.22, ease: EASE.drawer } as const;
 
 const BLOCK_GROW = { duration: 0.2, ease: EASE.out } as const;
 const BLOCK_FADE = { duration: 0.12, ease: 'linear' } as const;
@@ -506,10 +427,10 @@ const CardThoughtHeader = React.memo(function CardThoughtHeader({
         color: 'var(--term-muted)',
       }}
     >
-      <SwapSlot swapKey={streaming ? 'spinner' : 'sparkle'} variants={ICON_SWAP} style={{ flexShrink: 0, placeItems: 'center' }}>
+      <GlyphSwap glyph={streaming ? 'spinner' : 'sparkle'} justify="center">
         {streaming ? <CardSpinner /> : <SparkleIcon size={13} color="var(--term-muted)" />}
-      </SwapSlot>
-      <SwapSlot as="div" swapKey={streaming ? 'live' : 'done'} variants={LABEL_SWAP} style={{ flex: 1, minWidth: 0 }}>
+      </GlyphSwap>
+      <LabelSwap as="div" k={streaming ? 'live' : 'done'} style={{ flex: 1 }}>
         {streaming ? (
           <span style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
             <span className="term-shimmer" style={{ fontSize: 'var(--fs-md)', fontWeight: 500 }}>
@@ -526,7 +447,7 @@ const CardThoughtHeader = React.memo(function CardThoughtHeader({
               {workText}
             </span>
             {!!workFailed && (
-              <span style={{ fontSize: 'var(--fs-xs)', color: 'var(--term-danger)', flexShrink: 0 }}>
+              <span style={{ fontSize: 'var(--fs-xs)', color: 'var(--term-danger-text)', flexShrink: 0 }}>
                 · {workFailed} failed
               </span>
             )}
@@ -542,7 +463,7 @@ const CardThoughtHeader = React.memo(function CardThoughtHeader({
             <Chevron open={open} style={{ marginLeft: 'auto' }} />
           </span>
         )}
-      </SwapSlot>
+      </LabelSwap>
     </div>
   );
 });
@@ -551,7 +472,7 @@ const TerminalThoughtHeader = React.memo(function TerminalThoughtHeader({
   streaming, phase, open, onToggle, hasTools, rightMeta,
 }: ThoughtHeaderBase & { hasTools?: boolean; rightMeta?: string }) {
   return (
-    <SwapSlot as="div" swapKey={streaming ? 'live' : 'done'} variants={LABEL_SWAP}>
+    <LabelSwap as="div" k={streaming ? 'live' : 'done'}>
       {streaming ? (
         <div
           onClick={onToggle}
@@ -577,7 +498,7 @@ const TerminalThoughtHeader = React.memo(function TerminalThoughtHeader({
           )}
         </div>
       )}
-    </SwapSlot>
+    </LabelSwap>
   );
 });
 
@@ -602,11 +523,7 @@ const PlainThoughtHeader = React.memo(function PlainThoughtHeader({
       }}
       className="t-hover-fg"
     >
-      <SwapSlot
-        swapKey={liveDot ? 'dot' : 'chevron'}
-        variants={ICON_SWAP}
-        style={{ width: 8, flexShrink: 0, alignSelf: liveDot ? 'center' : undefined }}
-      >
+      <GlyphSwap glyph={liveDot ? 'dot' : 'chevron'} style={{ width: 8, alignSelf: liveDot ? 'center' : undefined }}>
         {liveDot ? (
           <span aria-hidden style={{ display: 'inline-flex' }}>
             <span className="term-dot-i term-dot-i--run" />
@@ -614,12 +531,12 @@ const PlainThoughtHeader = React.memo(function PlainThoughtHeader({
         ) : (
           <Chevron open={open} />
         )}
-      </SwapSlot>
-      <SwapSlot swapKey={streaming ? 'live' : 'done'} variants={LABEL_SWAP}>
+      </GlyphSwap>
+      <LabelSwap k={streaming ? 'live' : 'done'}>
         {streaming
           ? <span className="term-shimmer">{phase === 'working' ? 'working' : 'thinking'}</span>
           : <span>{doneLabel}</span>}
-      </SwapSlot>
+      </LabelSwap>
     </div>
   );
 });
@@ -739,6 +656,7 @@ export function TermThoughtBlock({
   const [expandedScrollable, setExpandedScrollable] = useState(false);
   const liveElapsed = useThinkingTimer(streaming);
   const variant = useAgentBlockStyle();
+  const workLine = useMetaChatDecorations()?.workLine;
   const contentRef = useRef<HTMLDivElement | null>(null);
   const rootRef = useRef<HTMLDivElement | null>(null);
   const hasContent = !!(text || children || segments?.length);
@@ -761,7 +679,7 @@ export function TermThoughtBlock({
   useLayoutEffect(() => {
     if (showBody) shownModeRef.current = mode;
   });
-  const bodyExit: ThoughtBodyExit = shownModeRef.current === 'tail' ? 'finish' : 'collapse';
+  const finishing = shownModeRef.current === 'tail';
 
   // Stable while chunks stream (mode and streaming change rarely), so the
   // memoized headers skip them.
@@ -848,8 +766,40 @@ export function TermThoughtBlock({
       />
     );
 
+  // ── line chrome (W2): one disclosure line, the same box live and settled.
+  if (variant === 'line') {
+    const items: LineRunItem[] = segments
+      ? segments.flatMap((seg): LineRunItem[] => (seg.kind === 'text'
+        ? [{ kind: 'text', key: seg.key, text: seg.text }]
+        : visibleGroupTools(seg.tools, subagents).map((tool) => ({ kind: 'tool', key: tool.id, tool }))))
+      : text ? [{ kind: 'text', key: 'thought', text }] : [];
+    // Only hidden plumbing tools and no thought: nothing to say once settled.
+    if (!streaming && items.length === 0 && !(children && !segments)) return null;
+    return (
+      <LineRun
+        items={items}
+        live={!!streaming}
+        phase={phase}
+        startedAt={startedAt}
+        durationMs={dur}
+        subagents={subagents}
+        renderProse={thoughtProse}
+        extraBody={segments ? undefined : children}
+        initialOpen={initialMode === 'expanded'}
+        enter={enterFrom !== null}
+        kind="thought"
+      />
+    );
+  }
+
   const lastTextSegKey = segments
     ? [...segments].reverse().find((s) => s.kind === 'text')?.key
+    : undefined;
+  // The newest tool group stays open while the block is live: folding it the
+  // moment its tools finish shrank the card before the answer had arrived.
+  // It folds with the rest of the body when the block finishes.
+  const lastToolSegKey = segments
+    ? [...segments].reverse().find((s) => s.kind === 'tools')?.key
     : undefined;
 
   const bodyContent = segments ? (
@@ -861,6 +811,7 @@ export function TermThoughtBlock({
           key={seg.key}
           tools={seg.tools}
           defaultExpanded={seg.tools.some((t) => isRunningStatus(t.status))}
+          holdOpen={!!streaming && seg.key === lastToolSegKey}
           subagents={subagents}
           receipts={false}
         />
@@ -923,9 +874,9 @@ export function TermThoughtBlock({
     );
   };
   const bodySlot = (chrome?: React.CSSProperties) => (
-    <AnimatePresence initial={false} custom={bodyExit}>
-      {showBody && <ThoughtBodyReveal key="body">{body(bodyRef, mode === 'tail', chrome)}</ThoughtBodyReveal>}
-    </AnimatePresence>
+    <Reveal show={showBody} exitTransition={finishing ? THOUGHT_FINISH : undefined}>
+      {body(bodyRef, mode === 'tail', chrome)}
+    </Reveal>
   );
 
   // ── 1b · card chrome: hairline square-corner card, spinner/sparkle header,
@@ -941,9 +892,15 @@ export function TermThoughtBlock({
         : '';
     // Finished blocks with tools lead with what they did; the duration moves
     // to the right edge. Computed only once done, never per streamed token.
-    const work = !streaming && hasTools
-      ? summarizeWork(tools ?? segments?.flatMap((s) => (s.kind === 'tools' ? s.tools : [])) ?? [], subagents)
+    // A window that words its own tools (the Companion's workLine) shows its
+    // line without the duration: next to one tool's name, the block's span
+    // (the reasoning before and after the call) reads as that tool's time.
+    const blockTools = !streaming && hasTools
+      ? ownGroupTools(tools ?? segments?.flatMap((s) => (s.kind === 'tools' ? s.tools : [])) ?? [], subagents)
       : null;
+    const ownWork = blockTools && workLine ? workLine(blockTools) : null;
+    const work = ownWork ? { text: ownWork, failed: failedToolCount(blockTools ?? []) }
+      : blockTools ? summarizeWork(blockTools) : null;
     return root(
         <div style={{ border: '1px solid var(--term-line)', background: 'var(--term-surface)' }}>
           <CardThoughtHeader
@@ -955,7 +912,7 @@ export function TermThoughtBlock({
             clockKey={clockKey}
             workText={work?.text || undefined}
             workFailed={work?.failed}
-            durText={work?.text && dur != null ? formatDurationMs(dur) : undefined}
+            durText={!ownWork && work?.text && dur != null ? formatDurationMs(dur) : undefined}
             base={live ? undefined : cardBase}
             suffix={live ? undefined : cardSuffix}
           />
@@ -1081,6 +1038,75 @@ const PendingIndicatorSlot = React.memo(function PendingIndicatorSlot({ show }: 
 });
 
 /**
+ * Under a user message of an ordinary chat whose live session read
+ * check-in material on an earlier turn (the route's companionTurn.carriedTaint,
+ * w3-fix D17): why its tools ask. The agent's own conversation draws its
+ * route lines itself (CompanionChatTab's afterMessage decoration).
+ */
+function CarriedTaintNote({ message }: { message: Pick<ChatMessage, 'role' | 'companionTurn'> }) {
+  const turn = message.role === 'user' ? message.companionTurn : undefined;
+  if (!turn?.carriedTaint || turn.startTaint) return null;
+  return (
+    <p
+      role="note"
+      className="terminal-message-turn-note"
+      style={{ margin: '-4px 0 8px', textAlign: 'right', fontFamily: 'var(--ui-font)', fontSize: 'var(--fs-sm)', color: 'var(--term-muted)' }}
+    >
+      Tools ask before running this turn: this conversation read check-in material earlier.
+    </p>
+  );
+}
+
+/**
+ * A relayed user message's source line. A follow-up the agent sent
+ * (DESIGN-v2 §4: `companionSend`, or any message from its conversation, a
+ * check-in, or an earlier assistant conversation: ⌘J's or Scheduled's,
+ * which send as ASSISTANT_THREAD_MESSAGE_TITLE) reads "From <name>", says
+ * "Sent by <name>", and opens the panel: those conversations live in the
+ * hidden workspace, never opened as a pane there. The store is subscribed,
+ * so a message drawn before /assistant answered follows once it does
+ * (W3-F3-review #6). Any other thread's message names that thread and opens
+ * it (ThreadSourceCaption: a reply, a multi-model plan step).
+ */
+function ThreadMessageSourceLine({ message, freshContext, onMentionClick }: {
+  message: Pick<ChatMessage, 'threadMessage' | 'companionSend'>;
+  freshContext?: boolean;
+  onMentionClick?: (name: string, kind: string, nodeId?: string) => void;
+}) {
+  const source = message.threadMessage;
+  const fromNodeId = source?.fromNodeId ?? '';
+  const fromCompanion = useIsCompanionNodeId(fromNodeId);
+  if (message.companionSend || isCheckinNodeId(fromNodeId) || fromCompanion
+    || source?.fromTitle === ASSISTANT_THREAD_MESSAGE_TITLE) return <CompanionSendSourceLine source={source} />;
+  if (!source) return null;
+  return <ThreadSourceCaption source={source} freshContext={freshContext} onMentionClick={onMentionClick} />;
+}
+
+/** "From <name>", in ThreadSourceCaption's words for a reply or a plan step. */
+function CompanionSendSourceLine({ source }: { source?: ThreadMessageSource }) {
+  const name = useCompanionName();
+  const plan = source?.plan;
+  return (
+    <div className="terminal-message-thread-source" data-companion-send="" title={plan ? PLAN_SOURCE_TITLE : `Sent by ${name}`}>
+      {plan && <span className="mm-plan-caption-icon"><ForkIcon /></span>}
+      {source?.kind === 'reply' && !plan ? 'Reply from' : 'From'}{' '}
+      <button
+        type="button"
+        className="terminal-message-thread-link"
+        onClick={(event) => {
+          // Not a mention: the bubble's own handler would open the hidden conversation as a pane.
+          event.stopPropagation();
+          openCompanionPanel({ tab: 'chat' });
+        }}
+      >
+        {name}
+      </button>
+      {plan && planStepCaption(plan)}
+    </div>
+  );
+}
+
+/**
  * Wrap `@name` tokens inside `text` in `<span class="mention-chip">` tags
  * so they render as styled clickable chips. Matches known context names greedily
  * (longest first) so names with spaces resolve correctly.
@@ -1137,14 +1163,15 @@ export function highlightMentions(
  */
 export function userTextToMarkdown(text: string): string {
   const lines = text.split('\n');
-  let inFence = false;
+  let fence: MarkdownFence | null = null;
   return lines
     .map((line, i) => {
-      if (/^\s*(```|~~~)/.test(line)) {
-        inFence = !inFence;
+      if (fence) {
+        if (closesFence(line, fence)) fence = null;
         return line;
       }
-      if (inFence || i === lines.length - 1 || line.trim() === '') return line;
+      fence = openingFence(line.trimStart());
+      if (fence || i === lines.length - 1 || line.trim() === '') return line;
       // A break before a blank line is meaningless (the blank line already
       // ends the paragraph) — keep those lines byte-identical.
       if (lines[i + 1].trim() === '') return line;
@@ -1183,7 +1210,11 @@ function renderSegments(
   segments: ReturnType<typeof useVisibleStream>['segments'],
   isDark: boolean,
   subagents?: readonly SubagentInfo[],
-  opts?: { streamingMarkdownBlocks?: boolean },
+  opts?: {
+    streamingMarkdownBlocks?: boolean;
+    /** The last segment is the newest content of a streaming turn. */
+    liveTail?: boolean;
+  },
 ) {
   let chipIdx = 0;
   const lastTextIndex = opts?.streamingMarkdownBlocks
@@ -1243,6 +1274,7 @@ function renderSegments(
         tools={seg.tools}
         defaultExpanded={defaultExpanded}
         subagents={subagents}
+        live={!!opts?.liveTail && segmentIndex === segments.length - 1}
       />
     );
   });
@@ -1287,6 +1319,8 @@ interface AnswerRunViewProps {
   subagents?: readonly SubagentInfo[];
   runtimeId?: string | null;
   onSmoothingChange?: (isSmoothing: boolean) => void;
+  /** This run is the newest content of a streaming turn (ToolCallGroup `live`). */
+  liveTail?: boolean;
 }
 
 function AnswerRunViewInner({
@@ -1297,6 +1331,7 @@ function AnswerRunViewInner({
   subagents,
   runtimeId,
   onSmoothingChange,
+  liveTail,
 }: AnswerRunViewProps) {
   const toolsById = useMemo(() => toolMap(tools), [tools]);
   const { segments, isSmoothing } = useAnswerRunStream(blocks, toolsById, incomingCarry, runtimeId);
@@ -1308,7 +1343,7 @@ function AnswerRunViewInner({
   }, [isSmoothing, onSmoothingChange]);
   return (
     <>
-      {renderSegments(segments, isDark, subagents, { streamingMarkdownBlocks: streaming || isSmoothing })}
+      {renderSegments(segments, isDark, subagents, { streamingMarkdownBlocks: streaming || isSmoothing, liveTail })}
     </>
   );
 }
@@ -1320,7 +1355,8 @@ const AnswerRunView = React.memo(AnswerRunViewInner, (prev, next) =>
   prev.isDark === next.isDark &&
   prev.subagents === next.subagents &&
   prev.runtimeId === next.runtimeId &&
-  prev.onSmoothingChange === next.onSmoothingChange,
+  prev.onSmoothingChange === next.onSmoothingChange &&
+  prev.liveTail === next.liveTail,
 );
 
 interface ThinkingRunViewProps {
@@ -1341,13 +1377,13 @@ function ThinkingRunViewInner({
   const toolsById = useMemo(() => toolMap(tools), [tools]);
   const text = useMemo(() => thinkingRunRawText(blocks), [blocks]);
   const groups = useMemo(() => thinkingToolGroups(blocks, toolsById), [blocks, toolsById]);
-  const toolCount = useMemo(() => groups.reduce((n, g) => n + g.length, 0), [groups]);
+  const groupedTools = useMemo(() => groups.flat(), [groups]);
+  const toolCount = useMemo(() => ownGroupTools(groupedTools, subagents).length, [groupedTools, subagents]);
   const toolsActive = tools.some((t) => isRunningStatus(t.status));
   // Hydrated turns have no live thinking timer; the run's tool-call span is
   // the best available duration approximation. Keep the block live while
   // tools still run so the timer covers thinking + tool work, not thought only.
   const spanMs = useMemo(() => toolSpanMs(tools), [tools]);
-  const groupedTools = useMemo(() => groups.flat(), [groups]);
   return (
     <>
       <TermThoughtBlock
@@ -1554,7 +1590,7 @@ function AgentClusterViewInner({
         segments={segments}
         streaming={streaming}
         phase={phase}
-        toolCount={tools.length}
+        toolCount={ownGroupTools(tools, subagents).length}
         runtimeId={runtimeId}
         durationMs={spanMs}
         startedAt={startedAt}
@@ -1612,15 +1648,7 @@ function LegacyAssistantBody({
   );
 }
 
-function BlockAssistantBody({
-  m,
-  isDark,
-  showThoughts,
-  subagents,
-  runtimeId,
-  onSmoothingChange,
-  hidePendingIndicator,
-}: {
+interface BlockAssistantRunsProps {
   m: ChatMessage;
   isDark: boolean;
   showThoughts: boolean;
@@ -1628,7 +1656,62 @@ function BlockAssistantBody({
   runtimeId?: string | null;
   onSmoothingChange?: (isSmoothing: boolean) => void;
   hidePendingIndicator?: boolean;
+}
+
+/**
+ * The assistant body. In the line chrome a finished turn folds its work into
+ * one LineWorkFold row above the final answer (workFold.splitFinishedTurn):
+ * once the turn is over, not just its visible answer (`turnActive`), the answer
+ * has finished revealing and no background agent it started still runs.
+ */
+function BlockAssistantBody({ turnActive, turnDurationMs, ...props }: BlockAssistantRunsProps & {
+  turnActive: boolean;
+  /** The turn's duration from its usage summary, when known. */
+  turnDurationMs?: number;
 }) {
+  const { m, showThoughts, subagents, onSmoothingChange } = props;
+  const variant = useAgentBlockStyle();
+  const [smoothing, setSmoothing] = useState(false);
+  const reportSmoothing = useCallback((isSmoothing: boolean) => {
+    setSmoothing(isSmoothing);
+    onSmoothingChange?.(isSmoothing);
+  }, [onSmoothingChange]);
+  const settled = variant === 'line' && !turnActive && !smoothing && !subagents?.some(isSubagentActive);
+  const split = useMemo(
+    () => (settled ? splitFinishedTurn(m.blocks, m.toolCalls, showThoughts) : null),
+    [settled, m.blocks, m.toolCalls, showThoughts],
+  );
+  const parts = useMemo(() => split && {
+    work: { ...m, blocks: split.work },
+    lifted: { ...m, blocks: split.lifted },
+    final: { ...m, blocks: split.final },
+  }, [m, split]);
+  const durationMs = useMemo(() => {
+    if (!split || turnDurationMs != null) return turnDurationMs;
+    const span = activityWindow(m.blocks ?? [], toolMap(m.toolCalls));
+    return activityWindowMs(span.startedAt, span.endedAt);
+  }, [split, turnDurationMs, m.blocks, m.toolCalls]);
+  if (!split || !parts) return <BlockAssistantRuns {...props} onSmoothingChange={reportSmoothing} />;
+  return (
+    <>
+      <LineWorkFold tools={split.tools} notes={split.notes} durationMs={durationMs} subagents={subagents}>
+        <BlockAssistantRuns {...props} m={parts.work} onSmoothingChange={undefined} />
+      </LineWorkFold>
+      {split.lifted.length > 0 && <BlockAssistantRuns {...props} m={parts.lifted} onSmoothingChange={undefined} />}
+      <BlockAssistantRuns {...props} m={parts.final} onSmoothingChange={reportSmoothing} />
+    </>
+  );
+}
+
+function BlockAssistantRuns({
+  m,
+  isDark,
+  showThoughts,
+  subagents,
+  runtimeId,
+  onSmoothingChange,
+  hidePendingIndicator,
+}: BlockAssistantRunsProps) {
   const runs = useMemo(() => splitAssistantRuns(m.blocks), [m.blocks]);
   const byId = useMemo(() => toolMap(m.toolCalls), [m.toolCalls]);
   const variant = useAgentBlockStyle();
@@ -1677,6 +1760,7 @@ function BlockAssistantBody({
           if (!showThoughts) {
             // Thought prose is hidden, but tool activity from answer-section
             // runs stays visible — parity with the un-clustered rendering.
+            const lastRun = cluster.runs[cluster.runs.length - 1];
             return cluster.runs.filter(isClusterableAnswerRun).map((run) => (
               <AnswerRunView
                 key={run.id}
@@ -1686,6 +1770,7 @@ function BlockAssistantBody({
                 isDark={isDark}
                 subagents={subagents}
                 runtimeId={runtimeId}
+                liveTail={!!m.streaming && clusterIndex === clusters.length - 1 && run === lastRun}
               />
             ));
           }
@@ -1758,6 +1843,7 @@ function BlockAssistantBody({
             subagents={subagents}
             runtimeId={runtimeId}
             onSmoothingChange={run.id === tailAnswerRunId ? onSmoothingChange : undefined}
+            liveTail={!!m.streaming && clusterIndex === clusters.length - 1}
           />
         );
       })}
@@ -1770,10 +1856,22 @@ function BlockAssistantBody({
 // line-height so it tracks the (slider-driven) message font size.
 const USER_COLLAPSE_MAX_LINES = 8;
 
-// The user bubble's paper-card background — kept in sync with the color-mix
-// in `.terminal-message-user` (index.css) so the collapse gradient fades into
-// the bubble instead of a flat neutral.
-const USER_BUBBLE_BG = 'color-mix(in srgb, var(--term-accent) 4%, var(--term-surface))';
+// The user bubble's background — kept in sync with `.terminal-message-user`
+// (index.css) so the collapse gradient fades into the bubble instead of a
+// flat neutral.
+const USER_BUBBLE_BG = 'var(--term-user-bubble-bg)';
+
+/** "Show more" under a long user message, and the plan messages' Show toggles. */
+const USER_TEXT_TOGGLE_STYLE: React.CSSProperties = {
+  marginTop: 4,
+  padding: 0,
+  border: 'none',
+  background: 'transparent',
+  cursor: 'pointer',
+  fontFamily: 'var(--ui-font)',
+  fontSize: 'var(--fs-md)',
+  letterSpacing: 'var(--ls-wide)',
+};
 
 /**
  * Clamps long user message bodies to USER_COLLAPSE_MAX_LINES with a bottom
@@ -1914,16 +2012,7 @@ function CollapsibleUserText({
           className="t-hover-fg t-user-text-toggle"
           aria-expanded={expanded}
           aria-controls={contentId}
-          style={{
-            marginTop: 4,
-            padding: 0,
-            border: 'none',
-            background: 'transparent',
-            cursor: 'pointer',
-            fontFamily: 'var(--ui-font)',
-            fontSize: 'var(--fs-md)',
-            letterSpacing: 'var(--ls-wide)',
-          }}
+          style={USER_TEXT_TOGGLE_STYLE}
         >
           {expanded ? 'Show less' : 'Show more'}
         </button>
@@ -1952,6 +2041,7 @@ function ErrorTail({
   onRetry,
   onRunAgain,
   onTestConnection,
+  planStep,
 }: {
   errorMessage?: string;
   errorKind?: string;
@@ -1959,6 +2049,8 @@ function ErrorTail({
   onRetry?: () => void;
   onRunAgain?: () => void;
   onTestConnection?: () => Promise<{ ok: boolean; detail?: string }>;
+  /** The turn was a multi-model plan step: its run retries it, or the plan is where to go. */
+  planStep?: MultiModelBranchControls;
 }) {
   const [testState, setTestState] = useState<'idle' | 'testing' | 'ok' | 'fail'>('idle');
   const [testDetail, setTestDetail] = useState<string | undefined>();
@@ -1975,30 +2067,25 @@ function ErrorTail({
 
   const btnStyle: React.CSSProperties = {
     border: '1px solid var(--term-danger)',
-    color: 'var(--term-danger)',
+    color: 'var(--term-danger-text)',
     padding: '3px 10px',
     font: '600 var(--fs-sm) var(--ui-font)',
     letterSpacing: 'var(--ls-wide)',
-    background: 'transparent',
     cursor: 'pointer',
-  };
-  const onHoverIn = (e: React.MouseEvent<HTMLButtonElement>) => {
-    (e.currentTarget as HTMLButtonElement).style.background = 'var(--term-danger-f)';
-  };
-  const onHoverOut = (e: React.MouseEvent<HTMLButtonElement>) => {
-    (e.currentTarget as HTMLButtonElement).style.background = 'transparent';
   };
 
   const isConnection = errorKind === 'connection';
   const isAuth = errorKind === 'auth';
-  const action = turnErrorAction(errorKind);
+  // A plan step's turn is the run's: no resume, inspection or rerun in the pane.
+  const action = planStep ? undefined : turnErrorAction(errorKind);
   const inspectOriginal = action === 'inspect-existing-turn';
   const resumable = action === 'resume-turn';
+  const credentialsExpired = resumable && interruptionCauseOfKind(errorKind) === 'credentials';
   const checking = errorRecovery === 'checking';
 
   // Headline scaled to the class. Connection: we already retried once, so say so.
   const headline = resumable
-    ? 'Turn interrupted'
+    ? credentialsExpired ? 'Credentials expired · sign in again , then resume' : 'Turn interrupted'
     : inspectOriginal
     ? errorKind === 'turn_persistence_failed' ? 'Result could not be saved' : 'Original result is not confirmed'
     : isConnection
@@ -2015,27 +2102,52 @@ function ErrorTail({
             fontFamily: 'var(--ui-font)',
             fontSize: 'var(--fs-sm)',
             letterSpacing: 'var(--ls-wide)',
-            color: 'var(--term-danger)',
+            color: 'var(--term-danger-text)',
           }}
         >
           {headline}
         </span>
         <span style={{ color: 'var(--term-faint)' }}>·</span>
-        {!isAuth && onRetry && (
+        {planStep && (planStep.retrying ? (
+          <button type="button" data-testid="error-tail-retry" disabled style={{ ...btnStyle, cursor: 'default', opacity: 0.6 }}>
+            Retrying…
+          </button>
+        ) : planStep.retry && !isAuth ? (
+          <button
+            type="button"
+            data-testid="error-tail-retry"
+            disabled={planStep.busy}
+            onClick={(e) => { e.stopPropagation(); planStep.retry?.(); }}
+            className="t-danger-outline-btn"
+            style={btnStyle}
+          >
+            ↻ retry
+          </button>
+        ) : (
+          <button
+            type="button"
+            data-testid="error-tail-open-plan"
+            onClick={(e) => { e.stopPropagation(); planStep.openPlan(); }}
+            className="t-danger-outline-btn"
+            style={btnStyle}
+          >
+            Open plan
+          </button>
+        ))}
+        {!planStep && (resumable || !isAuth) && onRetry && (
           <button
             type="button"
             data-testid="error-tail-retry"
             disabled={checking}
             onClick={(e) => { e.stopPropagation(); setConfirmRerun(false); onRetry(); }}
+            className="t-danger-outline-btn"
             style={btnStyle}
-            onMouseEnter={onHoverIn}
-            onMouseLeave={onHoverOut}
           >
             {resumable ? '▶ Resume' : inspectOriginal ? checking ? 'Checking original turn…' : 'Check original turn' : '↻ retry'}
           </button>
         )}
         {inspectOriginal && onRunAgain && (
-          <button type="button" disabled={checking} style={btnStyle}
+          <button type="button" disabled={checking} className="t-danger-outline-btn" style={btnStyle}
             onClick={(e) => { e.stopPropagation(); setConfirmRerun(true); }}>
             Run again
           </button>
@@ -2046,9 +2158,8 @@ function ErrorTail({
             data-testid="error-tail-test-connection"
             onClick={(e) => { e.stopPropagation(); void runTest(); }}
             disabled={testState === 'testing'}
+            className="t-danger-outline-btn"
             style={{ ...btnStyle, cursor: testState === 'testing' ? 'default' : 'pointer', opacity: testState === 'testing' ? 0.6 : 1 }}
-            onMouseEnter={testState === 'testing' ? undefined : onHoverIn}
-            onMouseLeave={testState === 'testing' ? undefined : onHoverOut}
           >
             {testState === 'testing' ? 'Testing…' : '⚙ Test Connection'}
           </button>
@@ -2056,7 +2167,9 @@ function ErrorTail({
       </div>
       {resumable && (
         <div role="status" style={{ marginTop: 6, maxWidth: 720, color: 'var(--term-muted)', font: 'var(--fs-sm) var(--ui-font)', lineHeight: 1.45 }}>
-          Michi restarted while this task was running. The output above is kept and its tool calls may already have taken effect. Resume carries on from here; typing a new message works too.
+          {credentialsExpired
+            ? 'The agent\'s credentials expired while this task was running. Sign in again first (for example refresh your credentials), then Resume carries on from here. The output above is kept and its tool calls may already have taken effect.'
+            : 'Michi restarted while this task was running. The output above is kept and its tool calls may already have taken effect. Resume carries on from here; typing a new message works too.'}
         </div>
       )}
       {inspectOriginal && (
@@ -2071,19 +2184,24 @@ function ErrorTail({
       {inspectOriginal && confirmRerun && !checking && onRunAgain && (
         <div role="group" aria-label="Confirm running again" style={{ marginTop: 8, font: 'var(--fs-sm) var(--ui-font)', color: 'var(--term-fg)' }}>
           <p style={{ margin: '0 0 8px' }}>This sends the same request again and may repeat file changes or other actions. The previous output will stay in this conversation.</p>
-          <button type="button" style={btnStyle} onClick={(e) => { e.stopPropagation(); setConfirmRerun(false); onRunAgain(); }}>Run again anyway</button>
+          <button type="button" className="t-danger-outline-btn" style={btnStyle} onClick={(e) => { e.stopPropagation(); setConfirmRerun(false); onRunAgain(); }}>Run again anyway</button>
           {' '}
-          <button type="button" style={btnStyle} onClick={(e) => { e.stopPropagation(); setConfirmRerun(false); }}>Keep current result</button>
+          <button type="button" className="t-danger-outline-btn" style={btnStyle} onClick={(e) => { e.stopPropagation(); setConfirmRerun(false); }}>Keep current result</button>
+        </div>
+      )}
+      {planStep?.error && (
+        <div role="status" style={{ marginTop: 6, maxWidth: 720, color: 'var(--term-muted)', font: 'var(--fs-sm) var(--ui-font)', lineHeight: 1.45, overflowWrap: 'anywhere' }}>
+          Retry failed: {planStep.error}
         </div>
       )}
       {testState === 'ok' && (
         <div style={{ marginTop: 6, color: 'var(--term-digest)', font: 'var(--fs-sm) var(--ui-font)' }}>
-          Connection restored — click retry to resend.
+          {resumable ? 'Connection restored — press Resume to carry on.' : 'Connection restored — click retry to resend.'}
         </div>
       )}
       {testState === 'fail' && (
-        <div style={{ marginTop: 6, maxWidth: 720, color: 'var(--term-danger)', font: 'var(--fs-sm) var(--ui-font)', lineHeight: 1.45, overflowWrap: 'anywhere' }}>
-          Kiro is still unreachable{testDetail ? `: ${testDetail}` : '. Check your network or re-authenticate, then retry.'}
+        <div style={{ marginTop: 6, maxWidth: 720, color: 'var(--term-danger-text)', font: 'var(--fs-sm) var(--ui-font)', lineHeight: 1.45, overflowWrap: 'anywhere' }}>
+          Kiro is still unreachable{testDetail ? `: ${testDetail}` : '. Check your network or refresh your credentials, then retry.'}
         </div>
       )}
       {errorMessage && !resumable && testState !== 'ok' && (
@@ -2091,7 +2209,7 @@ function ErrorTail({
           style={{
             marginTop: 6,
             maxWidth: 720,
-            color: 'var(--term-danger)',
+            color: 'var(--term-danger-text)',
             font: 'var(--fs-sm) var(--ui-font)',
             lineHeight: 1.45,
             overflowWrap: 'anywhere',
@@ -2114,7 +2232,7 @@ interface MessageBlockProps {
   onEdit?: () => void;
   /** Fork a new blank child branch anchored at this message. */
   onBranch?: () => void;
-  onCopy: () => void;
+  copyText: () => string;
   showThoughts: boolean;
   fontFamily: string;
   density: TerminalDensity;
@@ -2128,6 +2246,10 @@ interface MessageBlockProps {
   /** Probe backend connectivity ("Test Connection"). Present only when the
    * error is connection/auth class and a cwd/workspace is resolvable. */
   onTestConnection?: () => Promise<{ ok: boolean; detail?: string }>;
+  /** Error tail of a failed multi-model plan step: Retry goes through the run (or points to the plan). */
+  planStep?: MultiModelBranchControls;
+  /** The branch got no history (the node's fresh_context): a plan prompt's caption says Fresh, whatever it asked. */
+  freshContext?: boolean;
   subagents?: readonly SubagentInfo[];
   runtimeId?: string | null;
   editing?: boolean;
@@ -2149,6 +2271,14 @@ interface MessageBlockProps {
    * closer to the message content than the action chrome.
    */
   turnAnchors?: ChildAnchor[];
+  /**
+   * Workflow runs this reply launched. Their cards sit under the body and
+   * above the MessageActions row, inside the message's own spacing, so the
+   * next message keeps its distance and the row's arrival at the end of the
+   * turn does not push them down.
+   */
+  workflowRuns?: readonly WorkflowPlacement[];
+  onOpenWorkflowRun?: (identity: AgentResourceIdentity, name: string) => void;
   /** Called when user clicks a turn marker title or a quote-underline anchor. */
   onOpenBranch?: (childNodeId: string) => void;
   /** Lowercased context names for highlighting @mentions in user messages. */
@@ -2162,6 +2292,19 @@ interface MessageBlockProps {
    *  UI when the node is still streaming after hydration (m.streaming is
    *  false but the turn has not finished). */
   hideActions?: boolean;
+  /** The latest answer, complete: its meta line (copy/retry/branch, time ·
+   *  tokens) stays shown instead of waiting for a hover. Earlier answers show
+   *  theirs on hover or focus. The Meta agent window keeps every row on hover. */
+  pinned?: boolean;
+  /** A reply directly before this one, with no user message between them,
+   *  reads as the same message: no speaker label of its own (the Meta agent
+   *  window's decorations label replies). */
+  continuesRun?: boolean;
+  /** A reply follows this one in the same run, so the run's actions and
+   *  usage show under that last part instead of here. */
+  runContinues?: boolean;
+  /** The pane's latest reply: on touch its actions show without a tap. */
+  actionsAtRest?: boolean;
   /** Hide the in-bubble pending dots because the pane's activity row already
    *  shows a labelled status (e.g. "Restoring original Claude session"). */
   hidePendingIndicator?: boolean;
@@ -2171,9 +2314,77 @@ interface MessageBlockProps {
   /** Play the entrance on mount: the message was just created (PaneMessageList
    *  decides). Read on the first render only, so it is not memoized. */
   fresh?: boolean;
-  /** Viewport box this user bubble flies in from (a queued block, a picked
-   *  follow-up; messageFlight) instead of rising. Read on mount only. */
-  flightFrom?: DOMRectReadOnly;
+  /** A Scheduled-only transcript (TPane readOnly): receipts under the reply
+   *  drop their run controls; approvals can still be answered. */
+  readOnly?: boolean;
+}
+
+const PLAN_SOURCE_TITLE = 'Sent by the multi-model plan you started';
+
+/** A finished reply with nothing to show: no answer, thought, plan, tool call or block. */
+function isEmptyReply(m: ChatMessage): boolean {
+  return !m.text.trim() && !m.thought && !m.plan?.length && m.toolCalls.length === 0 && !m.blocks?.length;
+}
+
+/** "Results from 3 branches" (the synthesis wake), "Late result from 1 branch" (an addendum). */
+function planResultCaption(plan: ThreadMessagePlanSource): string {
+  const count = plan.branches ?? 0;
+  const branches = `${count} ${count === 1 ? 'branch' : 'branches'}`;
+  return plan.step === 'synthesis' ? `Results from ${branches}` : `Late result${count === 1 ? '' : 's'} from ${branches}`;
+}
+
+/**
+ * " · Plan step 1 · Fork", " · Plan step 3 · Review 2/2": what a branch's
+ * relayed prompt is, numbered as the card numbers its steps (the answer is
+ * step 1, review round r is step r + 1). A fork branch that got no history
+ * (`freshContext`) says Fresh.
+ */
+function planStepCaption(plan: ThreadMessagePlanSource, freshContext?: boolean): string {
+  if (plan.step === 'answer') {
+    const context = freshContext ? 'fresh' : plan.context;
+    return ` · Plan step 1${context ? ` · ${context === 'fresh' ? 'Fresh' : 'Fork'}` : ''}`;
+  }
+  const round = plan.round ?? 1;
+  return ` · Plan step ${round + 1} · Review${plan.rounds === 2 ? ` ${round}/${plan.rounds}` : ''}`;
+}
+
+/**
+ * Who sent a relayed message: another thread's agent, a reply, or a
+ * multi-model plan step (captioned with the caller's runtime, "From Claude
+ * Code · Plan step 1 · Fork"). The sender links to its thread.
+ */
+function ThreadSourceCaption({ source, freshContext, onMentionClick }: {
+  source: ThreadMessageSource;
+  freshContext?: boolean;
+  onMentionClick?: (name: string, kind: string, nodeId?: string) => void;
+}) {
+  const plan = source.plan;
+  const name = source.fromTitle ?? 'another thread';
+  const label = plan?.fromLabel ?? name;
+  return (
+    <div
+      className="terminal-message-thread-source"
+      title={plan ? PLAN_SOURCE_TITLE
+        : source.kind === 'reply'
+          ? "Another thread's answer to a message this thread sent it, written by that thread's agent"
+          : 'Written by the agent in another thread and delivered with your approval'}
+    >
+      {plan && <span className="mm-plan-caption-icon"><ForkIcon /></span>}
+      {source.kind === 'reply' && !plan ? 'Reply from' : 'From'}{' '}
+      {onMentionClick ? (
+        <button
+          type="button"
+          className="terminal-message-thread-link"
+          data-mention={name}
+          data-mention-kind="node"
+          data-node-id={source.fromNodeId}
+        >
+          {label}
+        </button>
+      ) : label}
+      {plan && planStepCaption(plan, freshContext)}
+    </div>
+  );
 }
 
 /**
@@ -2194,18 +2405,19 @@ function BranchAnchorsSection({ anchors, onOpenBranch }: {
   const section = (
     <section className="t-branch-anchors" aria-label="Branches from this reply">
       <h3 className="t-branch-anchors-heading">Branches <span>{anchors.length}</span></h3>
-      {anchors.map((a, i) => (
-        <BranchAnchorRow
-          key={`anchor-${a.childNodeId}`}
-          title={a.title}
-          messageCount={a.messageCount ?? 0}
-          createdAt={a.createdAt}
-          status={a.status}
-          onOpen={() => onOpenBranch?.(a.childNodeId)}
-          enter={mountedRef.current && isFresh(a.createdAt)}
-          last={i === anchors.length - 1}
-        />
-      ))}
+      <div className="t-branch-anchors-list">
+        {anchors.map((a) => (
+          <BranchAnchorRow
+            key={`anchor-${a.childNodeId}`}
+            title={a.title}
+            messageCount={a.messageCount ?? 0}
+            createdAt={a.createdAt}
+            status={a.status}
+            onOpen={() => onOpenBranch?.(a.childNodeId)}
+            enter={mountedRef.current && isFresh(a.createdAt)}
+          />
+        ))}
+      </div>
     </section>
   );
   if (!grows) return section;
@@ -2216,19 +2428,27 @@ function BranchAnchorsSection({ anchors, onOpenBranch }: {
   );
 }
 
+/** Which skill a user message ran, and who provides it: Michi for the library, Built-in for Michi's own, else the runtime's label. */
+function SkillCaption({ skill, workspaceId }: { skill: NonNullable<ChatMessage['skill']>; workspaceId?: string }) {
+  const runtime = useRuntimeLabel(workspaceId, skill.origin === 'runtime' ? skill.runtimeId : undefined);
+  const source = skillSourceLabel(skill.origin, runtime ?? '');
+  return <div className="terminal-message-skill" title={`Ran the ${skill.name} skill`}>Skill{source ? ` · ${source}` : ''}</div>;
+}
+
 /** A highlighted message's frame, its mark first; any other message as it is. */
 function MessageHighlight({ mark, children }: { mark: React.ReactNode; children: React.ReactNode }) {
   if (mark == null || mark === false) return <>{children}</>;
   return <div className="terminal-message-highlight">{mark}{children}</div>;
 }
 
-// A sent bubble rises from the composer, from its bottom-right corner; the
-// reply placeholder only fades in under it.
+// A sent bubble only fades in: the transcript's send glide (sendScroll.ts)
+// carries it up from behind the composer with the thread, so it needs no
+// travel or growth of its own. The reply placeholder fades in under it.
 const USER_ENTRANCE = {
-  initial: { opacity: 0, y: 12, scale: 0.97 },
-  animate: { opacity: 1, y: 0, scale: 1 },
-  transition: SPRING.snappy,
-};
+  initial: { opacity: 0 },
+  animate: { opacity: 1 },
+  transition: { duration: 0.32, delay: 0.04, ease: [0.25, 0.8, 0.25, 1] },
+} as const;
 const ASSISTANT_ENTRANCE = {
   initial: { opacity: 0 },
   animate: { opacity: 1 },
@@ -2244,7 +2464,7 @@ function MessageBlockInner({
   onRetry,
   onEdit,
   onBranch,
-  onCopy,
+  copyText,
   showThoughts,
   fontFamily,
   density,
@@ -2255,10 +2475,14 @@ function MessageBlockInner({
   errorRecovery,
   onRunAgain,
   onTestConnection,
+  planStep,
+  freshContext,
   subagents,
   runtimeId,
   quoteAnchors,
   turnAnchors,
+  workflowRuns,
+  onOpenWorkflowRun,
   onOpenBranch,
   contextNames,
   onMentionClick,
@@ -2267,34 +2491,35 @@ function MessageBlockInner({
   onEditSave,
   onEditCancel,
   hideActions,
+  pinned,
+  continuesRun,
+  runContinues,
+  actionsAtRest,
   hidePendingIndicator,
   highlight,
   fresh,
-  flightFrom,
+  readOnly,
 }: MessageBlockProps) {
   const [hover, setHover] = useState(false);
+  // A plan's review prompt shows its instruction line, a synthesis or addendum wake its caption, until opened.
+  const [planBodyOpen, setPlanBodyOpen] = useState(false);
   const [editText, setEditText] = useState(m.text);
   const editAreaRef = useRef<HTMLTextAreaElement>(null);
-  const bubbleRef = useRef<HTMLDivElement>(null);
+  const assistantRef = useRef<HTMLDivElement>(null);
   const isUser = m.role === 'user';
   const decorations = useMetaChatDecorations();
   const reduceMotion = useReducedMotionConfig() ?? false;
+  useHoldHeightWhileLive(assistantRef, !isUser && !!m.streaming, reduceMotion);
+  // Line-chrome tool rows read recoveries across the whole turn and its clock.
+  const agentTurn = useAgentTurnInfo(m.toolCalls, m.id);
   // Decided once: hydrated, lazily loaded and remounted messages render
-  // settled. A bubble with somewhere to fly in from does that instead of
-  // rising (one entrance, not two).
-  const [flight] = useState(() => (isUser ? flightFrom ?? null : null));
-  const [entrance] = useState(() => (fresh && !flight ? (isUser ? USER_ENTRANCE : ASSISTANT_ENTRANCE) : null));
+  // settled. Every new user bubble fades in where it lands, whether it was
+  // typed, drained from the queue, steered or picked from the follow-ups.
+  const [entrance] = useState(() => (fresh ? (isUser ? USER_ENTRANCE : ASSISTANT_ENTRANCE) : null));
   const [motionScope] = useState<MessageMotionScope>(() => ({ mounted: { current: false }, pendingHeight: { current: null } }));
   useLayoutEffect(() => {
     motionScope.mounted.current = true;
   }, [motionScope]);
-  useLayoutEffect(() => {
-    const el = bubbleRef.current;
-    if (!flight || !el) return;
-    return playFlight(el, flight, reduceMotion);
-    // Mount only: the flight is decided once.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
 
   useEffect(() => {
     if (editing) {
@@ -2305,26 +2530,41 @@ function MessageBlockInner({
       });
     }
   }, [editing, m.text]);
-  const dMarginBottom = density === 'dense' ? 6 : density === 'compact' ? 10 : 16;
-  const dLabelFontSize = density === 'dense' ? 9 : density === 'compact' ? 10 : 10.5;
-  const dLabelMarginBottom = density === 'dense' ? 2 : density === 'compact' ? 3 : 4;
-  // Assistant-only inline vertical padding. The user bubble's padding lives in
-  // index.css (paper-card recipe) and scales via the [data-density] attribute.
-  const dPadV = density === 'dense' ? 4 : density === 'compact' ? 5 : 6;
+  const userMarkdown = (text: string) => userTextToMarkdown(
+    highlightMentions(
+      text,
+      contextNames ?? new Set(),
+      m.mentions?.filter(x => x.kind === 'node').map(x => ({ label: x.label, nodeId: x.refId })),
+    ),
+  );
+  const plan = isUser ? m.threadMessage?.plan : undefined;
+  // A synthesis or addendum wake reads as one line in the caller, not a bubble.
+  const planResult = plan?.step === 'synthesis' || plan?.step === 'addendum' ? plan : undefined;
+  // A review prompt opens with its instruction paragraph; the peers' answers follow behind Show all.
+  const reviewParagraphs = plan?.step === 'review' ? m.text.trim().split(/\n\s*\n/) : [];
+  const reviewHead = reviewParagraphs.length > 1 ? reviewParagraphs[0] : undefined;
+  // A turn that failed before it wrote anything: the error tail stands alone,
+  // without a "> michi" label over an empty body.
+  const emptyFailedReply = !isUser && !!isErrorTail && !m.streaming && isEmptyReply(m) && !subagents?.length;
   const contents = (
     <>
       <BranchQuoteMarks anchors={quoteAnchors} onOpenBranch={onOpenBranch}>
       <MessageHighlight mark={highlight}>
-      {!isUser && (
+      {/* A pane's answers carry no speaker line: every answer in a thread is
+          its agent's, and the meta line under it says the rest. Its space
+          under the user message stays (--answer-lead, index.css). The Meta
+          agent window still labels its replies. */}
+      {!isUser && !continuesRun && !emptyFailedReply && decorations?.assistantLabel != null && (
         <div
+          data-find-skip
           style={{
             color: 'var(--term-muted)',
-            fontSize: dLabelFontSize,
-            marginBottom: dLabelMarginBottom,
+            fontSize: 'var(--msg-label-size)',
+            marginBottom: 'var(--msg-label-gap)',
             textAlign: 'left',
           }}
         >
-          {decorations?.assistantLabel ?? '> michi'}
+          {decorations.assistantLabelFor?.(m) ?? decorations.assistantLabel}
         </div>
       )}
       {isUser ? (
@@ -2337,6 +2577,7 @@ function MessageBlockInner({
                 value={editText}
                 onChange={(e) => setEditText(e.target.value)}
                 onKeyDown={(e) => {
+                  if (isImeComposing(e)) return;
                   if (e.key === 'Escape') { e.preventDefault(); onEditCancel?.(); }
                   if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
                     e.preventDefault();
@@ -2360,15 +2601,39 @@ function MessageBlockInner({
                     else onEditCancel?.();
                   }}
                 >
-                  Save <kbd>↵</kbd>
+                  Save <kbd>{kbd('mod', 'enter')}</kbd>
                 </button>
               </div>
             </div>
           </div>
+        ) : planResult ? (
+          <div className="mm-plan-result" title={PLAN_SOURCE_TITLE}>
+            <div className="mm-plan-result__line">
+              <span className="ic"><ForkIcon /></span>
+              {planResultCaption(planResult)}
+              <button
+                type="button"
+                className="t-hover-fg t-user-text-toggle"
+                aria-expanded={planBodyOpen}
+                onClick={() => setPlanBodyOpen((open) => !open)}
+                style={{ ...USER_TEXT_TOGGLE_STYLE, marginTop: 0 }}
+              >
+                {planBodyOpen ? 'Hide' : 'Show'}
+              </button>
+            </div>
+            {planBodyOpen && (
+              <div
+                className="terminal-message terminal-message-user"
+                data-density={density}
+                style={{ fontFamily: 'var(--ui-font)', lineHeight: 'var(--message-body-leading)', letterSpacing: 0, color: 'var(--term-fg)', wordBreak: 'break-word' }}
+              >
+                <MarkdownContent text={userMarkdown(m.text)} size="sm" className={isDark ? 'prose-invert' : ''} style={proseVars} />
+              </div>
+            )}
+          </div>
         ) : (
         <div style={{ display: 'flex', justifyContent: 'flex-end' }}>
           <div
-            ref={bubbleRef}
             className="terminal-message terminal-message-user"
             data-density={density}
             onClick={onMentionClick ? (e) => {
@@ -2389,54 +2654,43 @@ function MessageBlockInner({
               wordBreak: 'break-word',
             }}
           >
-            {m.threadMessage && (
-              <div
-                className="terminal-message-thread-source"
-                title="Written by the agent in another thread and delivered with your approval"
-              >
-                From{' '}
-                {onMentionClick ? (
-                  <button
-                    type="button"
-                    className="terminal-message-thread-link"
-                    data-mention={m.threadMessage.fromTitle ?? 'another thread'}
-                    data-mention-kind="node"
-                    data-node-id={m.threadMessage.fromNodeId}
-                  >
-                    {m.threadMessage.fromTitle ?? 'another thread'}
-                  </button>
-                ) : (m.threadMessage.fromTitle ?? 'another thread')}
-              </div>
-            )}
+            {(m.threadMessage || m.companionSend) && <ThreadMessageSourceLine message={m} freshContext={freshContext} onMentionClick={onMentionClick} />}
             {m.steered && <div className="terminal-message-steered" title="Sent to the active turn">Steered</div>}
+            {m.skill && <SkillCaption skill={m.skill} workspaceId={workspaceId} />}
             {m.comments && m.comments.length > 0 && <CommentChips comments={m.comments} />}
             {m.quotedText && <QuoteChip text={m.quotedText} source={m.quoteSource} />}
             {m.attachments && m.attachments.length > 0 && (
-              <AttachmentPills items={m.attachments} />
+              <AttachmentPills items={m.attachments} workspaceId={workspaceId} />
             )}
             {m.streaming ? (
               <MarkdownContent
-                text={userTextToMarkdown(
-                  highlightMentions(
-                    m.text,
-                    contextNames ?? new Set(),
-                    m.mentions?.filter(x => x.kind === 'node').map(x => ({ label: x.label, nodeId: x.refId })),
-                  ),
-                )}
+                text={userMarkdown(m.text)}
                 size="sm"
                 className={isDark ? 'prose-invert' : ''}
                 style={proseVars}
               />
+            ) : reviewHead !== undefined ? (
+              <>
+                <MarkdownContent
+                  text={userMarkdown(planBodyOpen ? m.text : reviewHead)}
+                  size="sm"
+                  className={isDark ? 'prose-invert' : ''}
+                  style={proseVars}
+                />
+                <button
+                  type="button"
+                  className="t-hover-fg t-user-text-toggle"
+                  aria-expanded={planBodyOpen}
+                  onClick={(e) => { e.stopPropagation(); setPlanBodyOpen((open) => !open); }}
+                  style={USER_TEXT_TOGGLE_STYLE}
+                >
+                  {planBodyOpen ? 'Show less' : 'Show all'}
+                </button>
+              </>
             ) : (
               <CollapsibleUserText contentKey={m.text}>
                 <MarkdownContent
-                  text={userTextToMarkdown(
-                    highlightMentions(
-                      m.text,
-                      contextNames ?? new Set(),
-                      m.mentions?.filter(x => x.kind === 'node').map(x => ({ label: x.label, nodeId: x.refId })),
-                    ),
-                  )}
+                  text={userMarkdown(m.text)}
                   size="sm"
                   className={isDark ? 'prose-invert' : ''}
                   style={proseVars}
@@ -2459,13 +2713,15 @@ function MessageBlockInner({
           </div>
         </div>
         )
-      ) : (
+      ) : emptyFailedReply ? null : (
         <div
+          ref={assistantRef}
           className="terminal-message terminal-message-assistant"
           data-density={density}
           style={{
-            paddingTop: dPadV,
-            paddingBottom: dPadV,
+            // The pane's density scale (index.css); the user bubble's padding is CSS too.
+            paddingTop: 'var(--msg-assistant-pad)',
+            paddingBottom: 'var(--msg-assistant-pad)',
             // AI is flush left; user bubble floats independently on the right.
             paddingLeft: 0,
             paddingRight: 0,
@@ -2477,6 +2733,7 @@ function MessageBlockInner({
             fontFamily,
           }}
         >
+          <AgentTurnContext.Provider value={agentTurn}>
           {showThoughts && m.plan && m.plan.length > 0 && (
             <TermPlanBlock entries={m.plan} />
           )}
@@ -2495,6 +2752,8 @@ function MessageBlockInner({
               runtimeId={runtimeId}
               onSmoothingChange={onVisibleSmoothingChange}
               hidePendingIndicator={hidePendingIndicator}
+              turnActive={!!m.streaming || !!hideActions}
+              turnDurationMs={usageInfo?.durationMs}
             />
           ) : (
             <LegacyAssistantBody
@@ -2505,10 +2764,17 @@ function MessageBlockInner({
               onSmoothingChange={onVisibleSmoothingChange}
             />
           )}
+          </AgentTurnContext.Provider>
         </div>
       )}
       {!isUser && <SteeringReports reports={m.steeringReports} />}
-      {!isUser && workspaceId && backendConnectionId && <PageReceipt tools={m.toolCalls} workspaceId={workspaceId} backendConnectionId={backendConnectionId} variant="conversation" />}
+      {!isUser && <TurnReceipts tools={m.toolCalls} workspaceId={workspaceId} backendConnectionId={backendConnectionId} />}
+      {!isUser && <MultiModelReceipt tools={m.toolCalls} backendConnectionId={backendConnectionId} readOnly={readOnly} />}
+      {/* What the reply was based on: it reads its own store (only where PaneMessageList offers it), so this block's props stay as they are. */}
+      {!isUser && !(m.streaming || hideActions) && <ReplyMemorySources messageId={m.id} settled />}
+      {!isUser && workflowRuns && workflowRuns.length > 0 && (
+        <MessageWorkflowRuns runs={workflowRuns} onOpen={onOpenWorkflowRun} />
+      )}
       {!isUser && !m.streaming && isErrorTail && (
         <ErrorTail
           errorMessage={errorMessage}
@@ -2517,6 +2783,7 @@ function MessageBlockInner({
           onRetry={onRetry}
           onRunAgain={onRunAgain}
           onTestConnection={onTestConnection}
+          planStep={planStep}
         />
       )}
       {turnAnchors && turnAnchors.length > 0 && (
@@ -2524,13 +2791,20 @@ function MessageBlockInner({
       )}
       </MessageHighlight>
       </BranchQuoteMarks>
-      {!(m.streaming || hideActions) && (
+      {!(m.streaming || hideActions || runContinues) && (
         isUser ? (
-          <div style={{ display: 'flex', justifyContent: 'flex-end' }}>
+          // In a pane transcript the row floats under the bubble, over the
+          // next line, instead of holding space (.t-user-msg-actions in
+          // index.css). It takes pointers only while its buttons show, so its
+          // box never swallows a click or tap meant for that line.
+          <div
+            className="t-user-msg-actions"
+            style={{ display: 'flex', justifyContent: 'flex-end', pointerEvents: hover ? undefined : 'none' }}
+          >
             <MessageActions
               visible={hover}
               time={formatMessageTime(m.createdAt)}
-              onCopy={onCopy}
+              copyText={copyText}
               onRetry={onRetry}
               onEdit={onEdit}
               onBranch={onBranch}
@@ -2538,42 +2812,60 @@ function MessageBlockInner({
             />
           </div>
         ) : (
+          // The answer's meta line. Edit belongs to the user's message.
           <MessageActions
-            visible={hover}
+            answer
+            visible={hover || (!!pinned && !decorations)}
+            restVisible={actionsAtRest}
             time={formatMessageTime(m.createdAt)}
-            onCopy={onCopy}
+            copyText={copyText}
             onRetry={isErrorTail && turnErrorAction(errorKind) === 'inspect-existing-turn' ? undefined : onRetry}
-            onEdit={onEdit}
             onBranch={onBranch}
             usageInfo={usageInfo}
           />
         )
       )}
-      {decorations?.afterMessage?.(m)}
+      {decorations?.afterMessage ? decorations.afterMessage(m) : <CarriedTaintNote message={m} />}
     </>
   );
-  const onMouseEnter = () => setHover(true);
+  // mouseover rather than mouseenter: after a tap on a control, a tap on the
+  // text lands inside the message already, where no mouseenter fires.
+  const onMouseOver = (e: React.MouseEvent<HTMLElement>) => {
+    if (hover) return;
+    const control = e.target instanceof Element ? e.target.closest(TAP_CONTROL) : null;
+    if (control && lastInputWasTouch() && e.currentTarget.contains(control)) return;
+    setHover(true);
+  };
   const onMouseLeave = () => setHover(false);
+  // A user message is the containing block of its floating action row.
+  const rootStyle: React.CSSProperties = isUser
+    ? { marginBottom: 'var(--msg-gap)', position: 'relative' }
+    : { marginBottom: 'var(--msg-gap)' };
   // `entrance` never changes, so neither does the root's element type: a
   // settled message keeps a plain div. The null PresenceContext lets the
   // message decide its own entrances: inside an AnimatePresence child that
   // was there on first render, motion would otherwise skip the entrance of
   // everything mounting later (this bubble, arriving thought blocks).
+  // One message's own link policy (a posted check-in's allow-list, DESIGN-v2 §2.8).
+  const messageLinks = !isUser ? decorations?.linkRendererFor?.(m) : undefined;
+  const body = messageLinks
+    ? <MarkdownLinkRendererContext.Provider value={messageLinks}>{contents}</MarkdownLinkRendererContext.Provider>
+    : contents;
   return (
     <PresenceContext.Provider value={null}>
     <MessageMotionContext.Provider value={motionScope}>
       {entrance ? (
         <motion.div
-          onMouseEnter={onMouseEnter}
+          onMouseOver={onMouseOver}
           onMouseLeave={onMouseLeave}
           {...entrance}
-          style={{ marginBottom: dMarginBottom, ...(isUser ? { originX: 1, originY: 1 } : null) }}
+          style={rootStyle}
         >
-          {contents}
+          {body}
         </motion.div>
       ) : (
-        <div onMouseEnter={onMouseEnter} onMouseLeave={onMouseLeave} style={{ marginBottom: dMarginBottom }}>
-          {contents}
+        <div onMouseOver={onMouseOver} onMouseLeave={onMouseLeave} style={rootStyle}>
+          {body}
         </div>
       )}
     </MessageMotionContext.Provider>
@@ -2596,6 +2888,13 @@ function usageEqual(
     && a.outputTokens === b.outputTokens
     && a.reasoningOutputTokens === b.reasoningOutputTokens
     && a.contextUsagePercentage === b.contextUsagePercentage;
+}
+
+/** The list regroups each chunk; its placements keep their identity. */
+function sameItems<T>(a: readonly T[] | undefined, b: readonly T[] | undefined): boolean {
+  if (a === b) return true;
+  if (!a || !b) return !a?.length && !b?.length;
+  return a.length === b.length && a.every((item, i) => item === b[i]);
 }
 
 function childAnchorsEqual(
@@ -2643,15 +2942,26 @@ const MessageBlock = React.memo(MessageBlockInner, (prev, next) =>
   prev.errorRecovery === next.errorRecovery &&
   prev.onRunAgain === next.onRunAgain &&
   prev.onTestConnection === next.onTestConnection &&
+  prev.planStep === next.planStep &&
+  !!prev.freshContext === !!next.freshContext &&
   prev.subagents === next.subagents &&
   prev.runtimeId === next.runtimeId &&
   childAnchorsEqual(prev.quoteAnchors, next.quoteAnchors) &&
   childAnchorsEqual(prev.turnAnchors, next.turnAnchors) &&
+  sameItems(prev.workflowRuns, next.workflowRuns) &&
+  prev.onOpenWorkflowRun === next.onOpenWorkflowRun &&
   prev.onOpenBranch === next.onOpenBranch &&
   prev.contextNames === next.contextNames &&
   prev.onMentionClick === next.onMentionClick &&
   prev.onVisibleSmoothingChange === next.onVisibleSmoothingChange &&
   !!prev.hidePendingIndicator === !!next.hidePendingIndicator &&
+  !!prev.hideActions === !!next.hideActions &&
+  !!prev.pinned === !!next.pinned &&
+  !!prev.continuesRun === !!next.continuesRun &&
+  !!prev.runContinues === !!next.runContinues &&
+  !!prev.readOnly === !!next.readOnly &&
+  // A new reply moves "latest" off the previous one, whose `m` is unchanged.
+  !!prev.actionsAtRest === !!next.actionsAtRest &&
   prev.highlight === next.highlight,
   // `fresh` is left out on purpose: it is read on mount only and turns false
   // a second later, which must not re-render every recent message.

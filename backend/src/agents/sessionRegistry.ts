@@ -61,7 +61,10 @@ export function getRuntimeManager(): RuntimeManager {
     return manager ??= createMichiRuntimeManager(() => process.env.MICHI_CLOUD === '1');
 }
 
-/** Test helper: drops the manager and its sessions; the next use or configureRuntimeManager builds a new one. */
+/**
+ * Test helper: drops the manager and its sessions; the next use or configureRuntimeManager builds a new one.
+ * @testonly
+ */
 export function __resetRuntimeManager(): void {
     manager?.sessions.clear();
     manager = undefined;
@@ -101,6 +104,37 @@ class HistoryStubSession implements AgentSession {
     cancel(): void {}
 }
 
+/** A stored message as a history stub reads it (the runtime deps' historyStore rows). */
+type StubRow = { role: string; content: string | null; created_at: number };
+
+/** How a history stub turns a node's stored rows into its history. */
+export type HistoryStubView = (rows: readonly StubRow[]) => ChatMessage[];
+
+/** Every user and assistant message with text, as stored. */
+function storedHistory(rows: readonly StubRow[]): ChatMessage[] {
+    const history: ChatMessage[] = [];
+    for (const row of rows) {
+        if (row.role !== "user" && row.role !== "assistant") continue;
+        const text = row.content ?? "";
+        if (text.length === 0) continue;
+        history.push({ role: row.role, content: text });
+    }
+    return history;
+}
+
+let stubView: HistoryStubView = storedHistory;
+
+/**
+ * The host's view of stored rows for history stubs. Michi's chatManager sets
+ * the session replay view (agents/sessionReplayView: posted check-ins as
+ * facts, DESIGN-v2 §2.8 T2) when it loads, so an ancestor stub never carries
+ * a post's text into a branch's preamble. null restores the stored rows.
+ * Injected rather than imported: this file is part of the runtime layer.
+ */
+export function configureHistoryStubView(view: HistoryStubView | null): void {
+    stubView = view ?? storedHistory;
+}
+
 /**
  * Walk a chatId's parent chain, loading any session missing from the in-memory
  * registry from SQLite as a read-only stub. This ensures ancestor preamble
@@ -125,15 +159,9 @@ export function ensureAncestorChainLoaded(chatId: string): void {
             const store = getRuntimeDeps().historyStore;
             const node = store.getNode(cursor);
             if (!node) break;
-            const rows = store.listMessages(cursor);
-            const history: ChatMessage[] = [];
-            for (const row of rows) {
-                if (row.role !== "user" && row.role !== "assistant") continue;
-                const text = row.content ?? "";
-                if (text.length === 0) continue;
-                history.push({ role: row.role, content: text });
-            }
-            const parentChatId = node.parent_node_id ?? undefined;
+            const history = stubView(store.listMessages(cursor));
+            // A fresh multi-model branch never had its parent's conversation: the chain ends at it.
+            const parentChatId = node.fresh_context === 1 ? undefined : node.parent_node_id ?? undefined;
             sessions().insertStub(new HistoryStubSession(cursor, history, parentChatId), interactiveOwner(cursor));
             cursor = parentChatId;
         } catch (err) {
@@ -195,6 +223,19 @@ export function sessionMatchesOwner(sessionId: string, owner: RuntimeSessionOwne
 
 export function dropSession(chatId: string): void {
     sessions().drop(chatId);
+}
+
+/** Live sessions with their owners, without refreshing their idle retention (getSession does). */
+export function listLiveSessions(): Array<{ session: AgentSession; ownerUserId: string | null; owner: RuntimeSessionOwner }> {
+    return sessions().entries()
+        .filter((entry) => entry.kind === "live")
+        .map(({ session, ownerUserId, owner }) => ({ session, ownerUserId, owner }));
+}
+
+/** The live session registered under an id, without refreshing its idle retention. */
+export function peekLiveSession(chatId: string): AgentSession | undefined {
+    const entry = sessions().peek(chatId);
+    return entry?.kind === "live" ? entry.session : undefined;
 }
 
 export function dropSessionForOwner(sessionId: string, owner: RuntimeSessionOwner): boolean {

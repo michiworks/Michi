@@ -1,14 +1,18 @@
 import { randomUUID } from 'node:crypto';
 import path from 'node:path';
 import {
+  AGENT_ATTEMPT_TERMINAL_STATUSES,
   AgentRunEventType,
   AgentRunStatus,
+  isAgentRunTerminal,
+  isSecretFieldName,
   parseAgentDefinitionDtoV1,
   parseAgentRunAttemptDtoV1,
   parseAgentRunBackupFragmentV2,
   parseAgentRunEventV1,
   parseAgentRunInteractionDtoV1,
   parseAgentRunWatchDtoV1,
+  snakeCaseFieldName,
   type AgentDefinitionDtoV1,
   type AgentRunBackupFragmentV2,
   type AgentRunDtoV1,
@@ -17,16 +21,12 @@ import {
   type JsonValue,
   type ParentDeliveryDtoV1,
   type PortableContextEntryV1,
+  type ResultBundleV1,
   type StructuredRunErrorV1,
 } from 'michi-shared';
 import { getDb, runInTransaction } from './db';
-import { AgentDefinitionsRepository } from './agentDefinitionsRepository';
-import { AgentRunsRepository } from './agentRunsRepository';
-
-const SECRET_KEY = /(?:^|_)(?:token|auth|api_key|access_token|refresh_token|bearer_token|session_token|auth_token|authorization|password|secret|provider_key|native_resume_token|credential|credentials|private_key)(?:$|_)/i;
-function normalizedKey(key: string): string {
-  return key.replace(/[A-Z]/g, (letter) => `_${letter.toLowerCase()}`).replace(/[-\s]+/g, '_');
-}
+import { AgentDefinitionsRepository, encodeList } from './agentDefinitionsRepository';
+import { AgentRunsRepository, handoffSearchText, normalizeAgentRunSearchText } from './agentRunsRepository';
 
 function isHostAbsolutePath(value: string): boolean {
   return path.isAbsolute(value) || /^[A-Za-z]:[\\/]/.test(value) || /^\\\\/.test(value)
@@ -46,7 +46,7 @@ export function portableBackupRelativePath(value: string): string {
 
 function portableJson(value: unknown, key = ''): JsonValue {
   if (value === null || typeof value === 'boolean' || typeof value === 'number' || typeof value === 'string') {
-    const normalized = normalizedKey(key);
+    const normalized = snakeCaseFieldName(key);
     if (typeof value === 'string' && isHostAbsolutePath(value)) {
       if (normalized === 'cwd') return null;
       if (normalized.endsWith('_files') || normalized.endsWith('_paths') || normalized === 'workspace_path') {
@@ -60,8 +60,7 @@ function portableJson(value: unknown, key = ''): JsonValue {
   if (!value || typeof value !== 'object') return String(value);
   const out: Record<string, JsonValue> = {};
   for (const [childKey, child] of Object.entries(value as Record<string, unknown>)) {
-    const normalized = normalizedKey(childKey);
-    if (SECRET_KEY.test(normalized) || childKey === 'snapshotPath' || childKey === 'startupBinding') continue;
+    if (isSecretFieldName(childKey) || childKey === 'snapshotPath' || childKey === 'startupBinding') continue;
     if (childKey === 'cwd') { out[childKey] = null; continue; }
     out[childKey] = portableJson(child, childKey);
   }
@@ -70,6 +69,47 @@ function portableJson(value: unknown, key = ''): JsonValue {
 
 export function sanitizePortableBackupJson(value: unknown): JsonValue {
   return portableJson(value);
+}
+
+/** A JSON-encoded column for export; null when it is empty or not JSON. */
+export function portableEncodedJson(encoded: unknown): string | null {
+  if (typeof encoded !== 'string' || !encoded) return null;
+  try { return JSON.stringify(portableJson(JSON.parse(encoded))); }
+  catch { return null; }
+}
+
+export function portableUrl(value: string | null | undefined): string | null {
+  if (!value || /^file:/i.test(value)) return null;
+  const sanitized = portableJson({ url: value }) as { url?: unknown };
+  if (typeof sanitized.url !== 'string' || sanitized.url === 'not-exported') return null;
+  try {
+    const url = new URL(sanitized.url);
+    url.username = '';
+    url.password = '';
+    url.search = '';
+    url.hash = '';
+    return url.toString();
+  } catch {
+    return sanitized.url;
+  }
+}
+
+/** A contexts row for export: its file as a relative path, its link without credentials or query. */
+export function portableContextRow<T extends { file_path?: unknown; url?: unknown }>(row: T): T {
+  return {
+    ...row,
+    file_path: portableBackupRelativePath(typeof row.file_path === 'string' ? row.file_path : ''),
+    url: portableUrl(typeof row.url === 'string' ? row.url : null),
+  };
+}
+
+export function portableMessageRow<T extends { blocks?: unknown; tool_calls?: unknown; metadata?: unknown }>(row: T): T {
+  return {
+    ...row,
+    blocks: portableEncodedJson(row.blocks),
+    tool_calls: portableEncodedJson(row.tool_calls),
+    metadata: portableEncodedJson(row.metadata),
+  };
 }
 
 function assertPortableJson(value: unknown, location: string): void {
@@ -84,9 +124,8 @@ function assertPortableJson(value: unknown, location: string): void {
   }
   if (!value || typeof value !== 'object') throw new Error(`${location} is not portable JSON`);
   for (const [key, child] of Object.entries(value as Record<string, unknown>)) {
-    const normalized = normalizedKey(key);
     const allowedEmptyBindings = key === 'credentialBindingIds' && Array.isArray(child) && child.length === 0;
-    if (!allowedEmptyBindings && SECRET_KEY.test(normalized)) {
+    if (!allowedEmptyBindings && isSecretFieldName(key)) {
       throw new Error(`${location}.${key} contains secret-bearing data`);
     }
     if (key === 'snapshotPath' || key === 'startupBinding') {
@@ -287,6 +326,7 @@ export function exportAgentRunBackup(ownerUserId: string, workspaceId: string | 
     runs: runDtos.map(portableRun),
     attempts: attempts.map((attempt) => ({
       ...attempt,
+      runtimeProfile: portableJson(attempt.runtimeProfile) as unknown as typeof attempt.runtimeProfile,
       recoveryEnvelope: attempt.recoveryEnvelope === null
         ? null
         : portableJson(attempt.recoveryEnvelope) as unknown as typeof attempt.recoveryEnvelope,
@@ -331,8 +371,6 @@ const importInterrupted = (now: number): StructuredRunErrorV1 => ({
   retryable: false,
 });
 
-function encodeRefs(values: string[]): string { return JSON.stringify({ version: 1, values }); }
-
 export function importAgentRunBackup(options: ImportAgentRunBackupOptions): ImportAgentRunBackupResult {
   const fragment = parseAgentRunBackupFragmentV2(options.fragment);
   const now = options.now ?? Date.now();
@@ -355,7 +393,7 @@ export function importAgentRunBackup(options: ImportAgentRunBackupOptions): Impo
   const watchIds = new Map(fragment.watches.map((watch) => [watch.id, createId('watch')]));
   const sourceRuns = new Map(fragment.runs.map((run) => [run.id, run]));
   const importedNonTerminal = new Set(fragment.runs
-    .filter((run) => ![AgentRunStatus.Completed, AgentRunStatus.Failed, AgentRunStatus.Cancelled].includes(run.status))
+    .filter((run) => !isAgentRunTerminal(run.status))
     .map((run) => run.id));
   const error = importInterrupted(now);
 
@@ -385,7 +423,7 @@ export function importAgentRunBackup(options: ImportAgentRunBackupOptions): Impo
         .run(definitionId, options.ownerUserId, definition.scope, workspaceId,
           definition.name, definition.description, definition.instructions,
           JSON.stringify(definition.runtimeProfile), JSON.stringify({ version: 1, profiles: definition.fallbackChain }),
-          encodeRefs(definition.toolRefs), encodeRefs(definition.skillRefs), encodeRefs(definition.mcpServerRefs),
+          encodeList(definition.toolRefs), encodeList(definition.skillRefs), encodeList(definition.mcpServerRefs),
           definition.permissionPolicy ? JSON.stringify(definition.permissionPolicy) : null,
           JSON.stringify(definition.contextPolicy), definition.defaultRunTtlMs, now, now);
     }
@@ -439,11 +477,9 @@ export function importAgentRunBackup(options: ImportAgentRunBackupOptions): Impo
         .run(importedRunId, options.ownerUserId, workspaceId, definitionId,
           definitionId ? run.definitionRevision : null, JSON.stringify(effective), run.invocationMode,
           run.completionMode, null, parentNodeId,
-          portableText(run.task), portableText(run.task).normalize('NFKC').toLowerCase(),
-          effective.name.normalize('NFKC').toLowerCase(),
-          result && typeof result === 'object' && !Array.isArray(result)
-            && result.handoff && typeof result.handoff === 'object' && !Array.isArray(result.handoff)
-            && typeof result.handoff.conclusion === 'string' ? result.handoff.conclusion : '',
+          portableText(run.task), normalizeAgentRunSearchText(portableText(run.task)),
+          normalizeAgentRunSearchText(effective.name),
+          normalizeAgentRunSearchText(handoffSearchText(result as unknown as ResultBundleV1 | null)),
           JSON.stringify(contextManifest),
           expectedResult ? JSON.stringify(expectedResult) : null, JSON.stringify(environment), status,
           result ? JSON.stringify(result) : null, run.createdAt, now, run.startedAt, completedAt, archivedAt, run.expiresAt);
@@ -455,7 +491,7 @@ export function importAgentRunBackup(options: ImportAgentRunBackupOptions): Impo
       const attempt = parseAgentRunAttemptDtoV1(raw);
       const attemptId = requiredId(attemptIds, attempt.id, 'Attempt');
       const importedRunId = requiredId(runIds, attempt.runId, 'Run');
-      const converted = importedNonTerminal.has(attempt.runId) && !['completed', 'failed', 'cancelled'].includes(attempt.status);
+      const converted = importedNonTerminal.has(attempt.runId) && !AGENT_ATTEMPT_TERMINAL_STATUSES.has(attempt.status);
       db.prepare(`INSERT INTO agent_run_attempts (
         id, run_id, attempt_index, profile_index, runtime_profile, status, public_session_id,
         native_resume_token, recovery_envelope, started_at, checkpoint_at, completed_at, error

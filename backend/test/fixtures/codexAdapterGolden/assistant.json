@@ -51,7 +51,7 @@
       "params": {
         "model": "gpt-golden",
         "cwd": "/tmp/michi-codex-golden",
-        "developerInstructions": "You are Michi, the assistant for the user's Spaces.\nHelp the user understand their work and keep their pages useful. Ground answers in the page or conversations relevant to their request, and make only the page changes they asked for.\nReply directly in the user's language with concise, natural prose. Let the request determine the answer's shape; do not add routine closing questions or describe internal bookkeeping.\n\nCapabilities — your tools are the Michi assistant's own, described in this conversation's opening instructions.\nYou also have the selected runtime's native tools and configured MCP tools. Use the available tool schemas and follow the user's permission settings.\n\nTool override — AskUserQuestion:\nDo NOT use the built-in AskUserQuestion tool. It does not work in this environment.\nInstead, use the MCP tool ____michi_internal____ask_user to ask the user structured\nquestions with selectable options. The schema is identical: questions[] with question,\nheader, options[{label, description}], and multiSelect. The tool blocks until the user\nresponds in the UI.",
+        "developerInstructions": "You are Michi, the user's own assistant across their workspaces: their conversations, Pages, tasks and scheduled jobs, and the check-ins you make for them. The name the user calls you comes with each of their messages.\nHelp the user understand their work and keep their pages useful. Ground answers in the page or conversations relevant to their request, and make only the page changes they asked for.\nReply directly in the user's language with concise, natural prose. Let the request determine the answer's shape; do not add routine closing questions or describe internal bookkeeping.\n\nCapabilities — your tools are the Michi assistant's own, described in this conversation's opening instructions.\nYou also have the selected runtime's native tools and configured MCP tools. Use the available tool schemas and follow the user's permission settings.\n\nTool override — AskUserQuestion:\nDo NOT use the built-in AskUserQuestion tool. It does not work in this environment.\nInstead, use the MCP tool ____michi_internal____ask_user to ask the user structured\nquestions with selectable options. The schema is identical: questions[] with question,\nheader, options[{label, description}], and multiSelect. The tool blocks until the user\nresponds in the UI.",
         "approvalPolicy": "on-request",
         "approvalsReviewer": "user",
         "sandbox": "read-only",
@@ -83,13 +83,37 @@
             "computer_use": false,
             "in_app_browser": false,
             "image_generation": false,
+            "view_image": false,
             "multi_agent": false,
             "multi_agent_v2": {
               "enabled": false,
               "max_concurrent_threads_per_session": 1
             },
             "tool_suggest": false,
-            "skill_mcp_dependency_install": false
+            "skill_mcp_dependency_install": false,
+            "default_mode_request_user_input": false,
+            "request_permissions_tool": false,
+            "send_message_to_user_async": false,
+            "deferred_executor": false,
+            "token_budget": false,
+            "current_time_reminder": false,
+            "sleep_tool": false,
+            "multi_env_copy_file": false,
+            "executor_capability_discovery_v2": false,
+            "shell_snapshot": false,
+            "shell_snapshot_v2": false
+          },
+          "memories": {
+            "generate_memories": false,
+            "use_memories": false
+          },
+          "tools": {
+            "experimental_request_user_input": {
+              "enabled": false
+            },
+            "update_plan": {
+              "enabled": false
+            }
           },
           "web_search": "disabled"
         },

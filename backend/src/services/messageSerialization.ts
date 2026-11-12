@@ -1,79 +1,7 @@
-import { extractKiroSteering } from 'michi-shared';
-
-const SENTINEL_PREFIXES = ["[TITLE:", "[BRANCH-OVERVIEW:", "[FOLLOW-UP"] as const;
-
-const BRANCH_OVERVIEW_RE = /\[BRANCH-OVERVIEW:\s*([^\]\n\r]+)\]/gi;
-
-/**
- * Extract the final per-branch summary from an agent reply. The preamble
- * requires this to be a single line; choosing the last completed marker is
- * defensive when an agent quotes an earlier marker while explaining format.
- */
-export function extractBranchOverview(raw: string): string | null {
-    BRANCH_OVERVIEW_RE.lastIndex = 0;
-    const matches = [...raw.matchAll(BRANCH_OVERVIEW_RE)];
-    const overview = matches.at(-1)?.[1]?.trim() ?? "";
-    return overview.length > 0 ? overview : null;
-}
-
-function couldStillBeSentinel(buf: string): boolean {
-    const upper = buf.toUpperCase();
-    return SENTINEL_PREFIXES.some((p) => (upper.length <= p.length ? p.startsWith(upper) : upper.startsWith(p)));
-}
-
-function isCompletedSentinel(buf: string): boolean {
-    if (!buf.endsWith("]")) return false;
-    const upper = buf.toUpperCase();
-    return SENTINEL_PREFIXES.some((p) => upper.startsWith(p));
-}
+import { extractKiroSteering, finalizeTurnContent, stripTurnMetadataSentinels } from 'michi-shared';
 
 export function stripSentinelsStreamingSafe(raw: string): string {
-    raw = extractKiroSteering(raw).text;
-    type Cut = { start: number; end: number };
-    const cuts: Cut[] = [];
-    let i = 0;
-    let holdStart = -1;
-    while (i < raw.length) {
-        const ch = raw[i];
-        if (holdStart < 0 && ch !== "[") {
-            i++;
-            continue;
-        }
-        if (holdStart < 0 && ch === "[") {
-            holdStart = i;
-            i++;
-            continue;
-        }
-        const buf = raw.slice(holdStart, i + 1);
-        if (ch === "]") {
-            if (isCompletedSentinel(buf)) {
-                let end = i + 1;
-                while (end < raw.length && /\s/.test(raw[end])) end++;
-                cuts.push({ start: holdStart, end });
-                i = end;
-            } else {
-                i++;
-            }
-            holdStart = -1;
-            continue;
-        }
-        if (!couldStillBeSentinel(buf)) {
-            holdStart = -1;
-            i++;
-            continue;
-        }
-        i++;
-    }
-    if (holdStart >= 0) cuts.push({ start: holdStart, end: raw.length });
-
-    let visible = "";
-    let cursor = 0;
-    for (const c of cuts) {
-        if (c.start > cursor) visible += raw.slice(cursor, c.start);
-        cursor = c.end;
-    }
-    if (cursor < raw.length) visible += raw.slice(cursor);
-    return visible;
+    return stripTurnMetadataSentinels(extractKiroSteering(raw).text);
 }
 
 export function normalizeJsonField(value: unknown): string | null {
@@ -110,7 +38,8 @@ export function deriveAssistantContentFromBlocks(blocks: unknown): string | null
             return block.kind === "answer" && typeof block.rawText === "string" ? block.rawText : "";
         })
         .join("");
-    return stripSentinelsStreamingSafe(raw);
+    // The content a finished turn stores, so a restored row reads and searches like the original.
+    return finalizeTurnContent(raw);
 }
 
 export function contentFromIncomingMessage(message: Record<string, unknown>): string {

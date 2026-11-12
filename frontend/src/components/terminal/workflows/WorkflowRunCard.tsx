@@ -1,37 +1,33 @@
-import React, { useEffect, useState } from 'react';
-import { isWorkflowRunTerminal, workflowProgress, type WorkflowAction, type WorkflowRunDtoV1 } from 'michi-shared';
+import React from 'react';
+import { isWorkflowRunTerminal, isWorkflowWorkNode, workflowProgress, type WorkflowAction, type WorkflowRunDtoV1 } from 'michi-shared';
 import {
   ACTION_LABEL,
   NODE_STATUS_COLOR,
   RUNTIME_LABEL,
-  WORKFLOW_STATUS_COLOR,
+  RUN_NOUN,
+  WORKFLOW_CHIP,
+  WORKFLOW_NEEDS_YOU_CHIP,
   WORKFLOW_STATUS_LABEL,
   formatWorkflowTokens,
   workflowElapsedLabel,
-  workflowNowLine,
+  workflowNow,
 } from './workflowPresentation';
 import { WorkflowApprovals } from './WorkflowApprovals';
+import type { WorkflowPendingKind } from '../../../state/workflowDomain';
 import { FadeOnChange, RevealOnShow } from '../agentBlockMotion';
+import { useNow } from '../../../hooks/useNow';
+import { cardClickOpens } from '../../../lib/cardClick';
+import './runChip.css';
+import './WorkflowRunCard.css';
 
 /**
  * A workflow launched by this message, under the chip that launched it.
- * Same hairline card vocabulary as AgentRunCard: name + uppercase status,
- * a progress strip of the run's agents/steps, the live "now" line, and a
- * meta row with controls and "Open →".
+ * Same rounded card and status chip as the drawer's run card: a WORKFLOW
+ * eyebrow with the status and elapsed time, the name on its own lines, a
+ * progress strip of the run's agents/steps, the live "now" strip, and a
+ * footer. The card carries no run controls (they live in the run's detail);
+ * a click anywhere on it opens the run, and its › is the keyboard target.
  */
-
-const MONO = 'var(--font-mono)';
-
-/** Re-render every second while a run is live (elapsed time). */
-export function useLiveNow(active: boolean): number {
-  const [now, setNow] = useState(() => Date.now());
-  useEffect(() => {
-    if (!active) return;
-    const id = setInterval(() => setNow(Date.now()), 1_000);
-    return () => clearInterval(id);
-  }, [active]);
-  return now;
-}
 
 const textButton: React.CSSProperties = {
   border: 0,
@@ -44,7 +40,7 @@ const textButton: React.CSSProperties = {
 
 export function WorkflowActions({ run, pending, onAction }: {
   run: WorkflowRunDtoV1;
-  pending?: WorkflowAction | 'answer';
+  pending?: WorkflowPendingKind;
   onAction?: (action: WorkflowAction) => void;
 }) {
   if (!onAction || run.actions.length === 0) return null;
@@ -68,108 +64,100 @@ export function WorkflowActions({ run, pending, onAction }: {
 }
 
 /** One cell per agent/step, colored by status (a change eases in); hover names it. */
-function ProgressStrip({ run }: { run: WorkflowRunDtoV1 }) {
-  const leaves = run.nodes.filter((node) => node.kind === 'agent' || node.kind === 'step');
+function ProgressRow({ run }: { run: WorkflowRunDtoV1 }) {
+  const leaves = run.nodes.filter(isWorkflowWorkNode);
   if (leaves.length === 0) return null;
+  const progress = workflowProgress(run);
   return (
-    <div aria-hidden style={{ display: 'flex', gap: 2, marginTop: 8 }}>
-      {leaves.slice(0, 48).map((node) => (
-        <span
-          key={node.id}
-          title={`${node.title} · ${node.status}`}
-          className={node.status === 'running' ? 'term-dot-i--run' : undefined}
-          style={{
-            flex: 1,
-            maxWidth: 28,
-            height: 3,
-            background: node.status === 'queued' || node.status === 'skipped' ? 'var(--term-line)' : NODE_STATUS_COLOR[node.status],
-            opacity: node.status === 'completed' ? 0.55 : 1,
-            transition: 'background-color var(--t-enter) ease-out, opacity var(--t-enter) ease-out',
-          }}
-        />
-      ))}
+    <div className="workflow-run-card__progress">
+      <div aria-hidden className="workflow-run-card__segments">
+        {leaves.slice(0, 48).map((node) => (
+          <span
+            key={node.id}
+            title={`${node.title} · ${node.status}`}
+            className={node.status === 'running' ? 'workflow-run-card__segment term-dot-i--run' : 'workflow-run-card__segment'}
+            style={{
+              background: node.status === 'queued' || node.status === 'skipped' ? 'var(--term-line)' : NODE_STATUS_COLOR[node.status],
+              opacity: node.status === 'completed' ? 0.55 : 1,
+            }}
+          />
+        ))}
+      </div>
+      <span className="workflow-run-card__count">
+        <b>{progress.done}</b>/{progress.total} {RUN_NOUN[run.runtime]}
+        {progress.failed > 0 && <span style={{ color: 'var(--term-danger-text)' }}> · {progress.failed} failed</span>}
+      </span>
     </div>
   );
 }
 
-export function WorkflowRunCard({ run, pending, error, onOpen, onAction, onAnswer }: {
+export function WorkflowRunCard({ run, pending, error, onOpen, onAnswer }: {
   run: WorkflowRunDtoV1;
-  pending?: WorkflowAction | 'answer';
+  pending?: WorkflowPendingKind;
   error?: string;
   onOpen?: () => void;
-  onAction?: (action: WorkflowAction) => void;
   onAnswer?: (approvalId: string, optionId: string) => void;
 }) {
   const live = !isWorkflowRunTerminal(run.status);
-  const now = useLiveNow(live);
-  const progress = workflowProgress(run);
-  const nowLine = workflowNowLine(run);
-  const color = WORKFLOW_STATUS_COLOR[run.status];
+  const now = useNow(1_000, live);
+  const doing = workflowNow(run);
+  const needsYou = !!run.approvals?.length;
+  const chip = needsYou ? WORKFLOW_NEEDS_YOU_CHIP : WORKFLOW_CHIP[run.status];
   const tokens = formatWorkflowTokens(run.usage?.totalTokens);
   return (
     <article
       data-testid="workflow-run-card"
-      aria-label={`Workflow ${run.name}, ${WORKFLOW_STATUS_LABEL[run.status]}`}
-      style={{ border: '1px solid var(--term-line)', background: 'var(--term-surface)', padding: '10px 12px', fontFamily: 'var(--ui-font)', minWidth: 0 }}
+      aria-label={`Workflow ${run.name}, ${needsYou ? 'needs approval' : WORKFLOW_STATUS_LABEL[run.status]}`}
+      className={onOpen ? 'workflow-run-card workflow-run-card--opens' : 'workflow-run-card'}
+      // A tap here opens the run; it does not reveal the message's actions (MessageBlock's TAP_CONTROL).
+      data-tap-target={onOpen ? 'true' : undefined}
+      onClick={onOpen ? (event) => { if (cardClickOpens(event)) onOpen(); } : undefined}
     >
-      <div style={{ display: 'flex', alignItems: 'baseline', gap: 8, minWidth: 0 }}>
-        <span aria-hidden style={{ color: 'var(--term-mauve)', fontSize: 'var(--fs-xs)', flexShrink: 0 }}>⧉</span>
-        <strong style={{ color: 'var(--term-fg)', fontSize: 'var(--fs-md)', minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-          {run.name}
-        </strong>
-        <span style={{ fontSize: 'var(--fs-2xs)', letterSpacing: 'var(--ls-caps)', textTransform: 'uppercase', color: 'var(--term-muted)', border: '1px solid var(--term-line-s)', padding: '1px 5px', flexShrink: 0 }}>
-          workflow
+      <div className="workflow-run-card__top">
+        <span className="workflow-run-card__eyebrow">
+          <span aria-hidden className="workflow-run-card__icon">⧉</span>
+          Workflow
         </span>
         {/* A new status fades in in its colour; sections that appear later grow in. */}
         <FadeOnChange
-          k={run.status}
-          style={{ marginLeft: 'auto', display: 'inline-flex', alignItems: 'center', gap: 6, color, fontSize: 'var(--fs-xs)', fontWeight: 700, letterSpacing: 'var(--ls-wide)', textTransform: 'uppercase', flexShrink: 0 }}
+          k={needsYou ? 'needs-you' : run.status}
+          className="run-chip"
+          style={{ color: chip.color, background: chip.fill }}
         >
-          {live ? <span className={run.status === 'running' ? 'term-dot-i term-dot-i--run' : 'term-dot-i'} aria-hidden /> : null}
-          {WORKFLOW_STATUS_LABEL[run.status]}
+          {live ? <span className={run.status === 'running' && !needsYou ? 'term-dot-i term-dot-i--run' : 'term-dot-i'} aria-hidden /> : null}
+          {chip.label}
+          <span className="run-chip__time">{workflowElapsedLabel(run, now)}</span>
         </FadeOnChange>
       </div>
+      <h3 className="workflow-run-card__title">{run.name}</h3>
       {run.description && run.description !== run.name && (
-        <div style={{ color: 'var(--term-mid)', fontSize: 'var(--fs-sm)', lineHeight: 1.45, marginTop: 4 }}>{run.description}</div>
+        <p className="workflow-run-card__description">{run.description}</p>
       )}
-      <ProgressStrip run={run} />
-      <RevealOnShow show={!!nowLine}>
-        <div data-testid="workflow-now" style={{ marginTop: 6, fontFamily: MONO, fontSize: 'var(--fs-xs)', minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-          <span style={{ color: 'var(--term-muted)' }}>now ❯ </span>
-          <span style={{ color: run.status === 'paused' ? 'var(--term-select)' : 'var(--term-accent)' }}>{nowLine}</span>
+      <ProgressRow run={run} />
+      <RevealOnShow show={!!doing}>
+        <div data-testid="workflow-now" className="workflow-run-card__now">
+          <span aria-hidden className="workflow-run-card__caret">❯</span>
+          {doing?.step && <span data-testid="workflow-now-step" className="workflow-run-card__step">{doing.step}</span>}
+          <span className="workflow-run-card__doing" style={run.status === 'paused' ? { color: 'var(--term-select)' } : undefined}>{doing?.detail}</span>
         </div>
       </RevealOnShow>
-      <RevealOnShow show={!!run.approvals?.length}>
-        <div style={{ marginTop: 8 }}><WorkflowApprovals run={run} busy={pending === 'answer'} onAnswer={onAnswer} /></div>
+      <RevealOnShow show={needsYou}>
+        <div data-card-click="ignore" style={{ marginTop: 10 }}><WorkflowApprovals run={run} busy={pending === 'answer'} onAnswer={onAnswer} /></div>
       </RevealOnShow>
       <RevealOnShow show={!live && !!run.statusDetail && run.status !== 'completed'}>
-        <div style={{ marginTop: 6, fontSize: 'var(--fs-sm)', color: run.status === 'failed' ? 'var(--term-danger)' : 'var(--term-muted)' }}>{run.statusDetail}</div>
+        <p className="workflow-run-card__detail" style={{ color: run.status === 'failed' ? 'var(--term-danger-text)' : 'var(--term-muted)' }}>{run.statusDetail}</p>
       </RevealOnShow>
       <RevealOnShow show={!!error}>
-        <div role="alert" style={{ marginTop: 6, fontSize: 'var(--fs-xs)', color: 'var(--term-danger)' }}>{error}</div>
+        <div role="alert" className="workflow-run-card__detail" style={{ fontSize: 'var(--fs-xs)', color: 'var(--term-danger-text)' }}>{error}</div>
       </RevealOnShow>
-      <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 8, color: 'var(--term-muted)', fontSize: 'var(--fs-xs)', minWidth: 0 }}>
+      <div className="workflow-run-card__foot">
         <span>{RUNTIME_LABEL[run.runtime]}</span>
-        {progress.total > 0 && (
-          <>
-            <span aria-hidden>·</span>
-            <span style={{ fontFamily: MONO }}>
-              {progress.done}/{progress.total} {run.runtime === 'claude' ? 'agents' : 'steps'}
-              {progress.failed > 0 && <span style={{ color: 'var(--term-danger)' }}> · {progress.failed} failed</span>}
-            </span>
-          </>
+        {tokens && (<><span aria-hidden className="workflow-run-card__sep">·</span><span className="workflow-run-card__mono">{tokens}</span></>)}
+        {onOpen && (
+          <button type="button" onClick={onOpen} aria-label={`Open workflow ${run.name}`} className="workflow-run-card__open">
+            <span aria-hidden>›</span>
+          </button>
         )}
-        {tokens && (<><span aria-hidden>·</span><span style={{ fontFamily: MONO }}>{tokens}</span></>)}
-        <span aria-hidden>·</span>
-        <span style={{ fontFamily: MONO }}>{workflowElapsedLabel(run, now)}</span>
-        <span style={{ marginLeft: 'auto', display: 'inline-flex', alignItems: 'center', gap: 12 }}>
-          <WorkflowActions run={run} pending={pending} onAction={onAction} />
-          {onOpen && (
-            <button type="button" onClick={onOpen} aria-label={`Open workflow ${run.name}`} style={{ ...textButton, color: 'var(--term-accent)' }}>
-              Open →
-            </button>
-          )}
-        </span>
       </div>
     </article>
   );

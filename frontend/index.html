@@ -6,10 +6,10 @@
     <style>@layer theme, base, mantine, components, utilities;</style>
     <link rel="icon" type="image/png" href="/favicon.png" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <!-- Match the browser chrome to the active theme: parchment (light) is the
-         default, night (dark) for users on a dark palette / OS preference. -->
-    <meta name="theme-color" content="#f5f2ee" media="(prefers-color-scheme: light)" />
-    <meta name="theme-color" content="#080808" media="(prefers-color-scheme: dark)" />
+    <!-- Browser chrome / status bar colour. The boot script below sets it to the
+         saved palette's background; the Topbar then keeps it equal to its own
+         colour (useThemeColorSync), so the band above the app is seamless. -->
+    <meta name="theme-color" content="#f3f4f6" />
 
     <!-- Primary Meta Tags -->
     <title>Michi — every conversation is a tree</title>
@@ -23,7 +23,7 @@
     <meta name="apple-mobile-web-app-capable" content="yes">
     <meta name="apple-mobile-web-app-status-bar-style" content="default">
     <meta name="mobile-web-app-capable" content="yes">
-    <meta name="msapplication-TileColor" content="#f5f2ee">
+    <meta name="msapplication-TileColor" content="#f3f4f6">
     <meta name="msapplication-tap-highlight" content="no">
     <meta name="format-detection" content="telephone=no">
 
@@ -70,6 +70,8 @@
         // index.css paints html with var(--term-bg, var(--michi-boot-bg)), so the
         // palette TerminalShell mirrors onto <html> replaces this once it mounts.
         document.documentElement.style.setProperty('--michi-boot-bg', BG[palette]);
+        var themeColor = document.querySelector && document.querySelector('meta[name="theme-color"]');
+        if (themeColor) themeColor.setAttribute('content', BG[palette]);
         document.documentElement.lang = navigator.language || 'en';
       })();
     </script>

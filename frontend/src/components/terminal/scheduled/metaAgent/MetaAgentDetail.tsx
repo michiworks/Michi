@@ -5,16 +5,19 @@ import type { MetaAgentCursorRow, MetaAgentOverview, MetaAgentRecentRun } from '
 import { Button } from '../../../ui/controls';
 import { useChatActions } from '../../../../state/chatStore';
 import {
-  cursorStateLabel, firstRunText, lastSeen, quietText, readRange, readSteps, restrictionText, runTime, runTitle, runtimeText, summaryText,
+  UPKEEP_HEADLINE, cursorStateLabel, firstRunText, lastSeen, pagesUpkeepTitle, quietText, readRange, readSteps, restrictionText, runTime, runTitle,
+  runtimeText, summaryText,
 } from './metaAgentCopy';
-import { META_AGENT_PAGE_TITLE, requestMetaAgentSettings } from './metaAgentNav';
-import { pauseMetaAgentMaintenance, refreshMetaAgentOverview, useMetaAgentOverview } from './useMetaAgentOverview';
-import { refreshMetaAgent, useMetaAgent } from '../../../../state/metaAgent/useMetaAgent';
-import { META_AGENT_HEADLINE, metaAgentStatus, type MetaAgentStatus } from '../../../../state/metaAgent/metaAgentStatus';
+import { requestMetaAgentSettings } from './metaAgentNav';
+import { META_AGENT_PAGE_POLL_MS, pauseMetaAgentMaintenance, refreshMetaAgentOverview, useMetaAgentOverview } from '../../../../state/metaAgent/useMetaAgentOverview';
+import { useMetaAgent } from '../../../../state/metaAgent/useMetaAgent';
+import { metaAgentStatus, type MetaAgentStatus } from '../../../../state/metaAgent/metaAgentStatus';
+import { useCompanionName } from '../../../../state/companion/companionName';
 import { metaAgentRuntimeLabel } from '../../settings/metaAgent/runtimeCopy';
-import { runMetaAgentUpdate } from '../../../../state/metaAgent/metaAgentUpdate';
+import { retryStoppedMetaAgent } from '../../../../state/metaAgent/metaAgentUpdate';
 import '../../pages/Scheduled.css';
 import './metaAgent.css';
+import { LOCAL_BACKEND_CONNECTION_ID } from '../../../../config/backendConnections';
 
 const STATE_LABELS: Record<MetaAgentOverview['state'], string> = { running: 'Running', paused: 'Paused', error: 'Error' };
 
@@ -38,7 +41,7 @@ function tone(row: MetaAgentRecentRun): string {
 }
 
 function dotTone(state: MetaAgentCursorRow['state']): string | undefined {
-  return state === 'next' ? 'waiting' : state === 'error' ? 'error' : undefined;
+  return state === 'next' ? 'next' : state === 'error' ? 'error' : undefined;
 }
 
 /** A run that read in its own conversation, which background maintenance keeps out of the conversation lists. */
@@ -72,7 +75,7 @@ function RunItem({ row, now, onOpenRun }: { row: MetaAgentRecentRun; now: number
   );
 }
 
-/** Scheduled › Meta agent: what the background maintenance is doing and where each workspace's cursor stands. */
+/** Scheduled › <name> · Pages upkeep: what the background maintenance is doing and where each workspace's cursor stands. */
 export function MetaAgentDetail({ overview, status: given, now, busy, onTogglePause, onOpenSettings, onRetry, onOpenRun }: {
   overview: MetaAgentOverview;
   /** The shared Meta agent status; read from the overview alone when not given. */
@@ -86,6 +89,8 @@ export function MetaAgentDetail({ overview, status: given, now, busy, onTogglePa
   /** Opens a recent run's conversation; rows that name none (merged checks, the first read) stay plain. */
   onOpenRun?: (target: MetaAgentRunTarget) => void;
 }) {
+  const name = useCompanionName();
+  const settingsLink = `Open Settings › ${name} › Pages upkeep`;
   const { runtime, today, cursors, recentRuns } = overview;
   const status = given ?? metaAgentStatus({ overview });
   const tag = metaAgentStateTag(status, overview);
@@ -106,29 +111,29 @@ export function MetaAgentDetail({ overview, status: given, now, busy, onTogglePa
               {paused ? <Play size={12} aria-hidden="true" /> : <Pause size={12} aria-hidden="true" />}{paused ? 'Resume' : 'Pause'}
             </Button>
           )}
-          <h1 id="meta-sched-title" className="area-settings__title meta-sched__title">{META_AGENT_PAGE_TITLE}</h1>
+          <h1 id="meta-sched-title" className="area-settings__title meta-sched__title">{pagesUpkeepTitle(name)}</h1>
           <p className="meta-sched__line">One background check every 60 seconds finds pending work across workspaces. AI runs only when there is work to process.</p>
           {overview.lastCheckedAt != null && <p className="meta-sched__line">Last checked {lastSeen(overview.lastCheckedAt, now)} · no AI used for checks</p>}
           {stopped && (
             <p className="meta-sched__status" role="alert">
-              {META_AGENT_HEADLINE.stopped}: {status.reason ?? 'reason unknown'}
+              {UPKEEP_HEADLINE.stopped}: {status.reason ?? 'reason unknown'}
               {onRetry && <> · <button type="button" className="meta-sched__link" disabled={busy} onClick={onRetry}>Retry</button></>}
-              {' · '}<button type="button" className="meta-sched__link" onClick={onOpenSettings}>Open Settings › Meta agent</button>
+              {' · '}<button type="button" className="meta-sched__link" onClick={onOpenSettings}>{settingsLink}</button>
               {stop?.detail && <span className="meta-sched__status-detail">{stop.detail}</span>}
             </p>
           )}
           {status.kind === 'unsupported' && (
             <p className="meta-sched__status" role="alert">
-              {META_AGENT_HEADLINE.unsupported}: {status.reason}
-              {' · '}<button type="button" className="meta-sched__link" onClick={onOpenSettings}>Open Settings › Meta agent</button>
+              {UPKEEP_HEADLINE.unsupported}: {status.reason}
+              {' · '}<button type="button" className="meta-sched__link" onClick={onOpenSettings}>{settingsLink}</button>
             </p>
           )}
-          {status.kind === 'not-running' && <p className="meta-sched__status" data-state="off" role="status">{META_AGENT_HEADLINE['not-running']}: {status.reason}</p>}
-          {paused && status.kind === 'paused' && <p className="meta-sched__status" data-state="paused">Background updates are paused: new conversations aren’t read and pages aren’t updated. The chat window in Pages still works.</p>}
+          {status.kind === 'not-running' && <p className="meta-sched__status" data-state="off" role="status">{UPKEEP_HEADLINE['not-running']}: {status.reason}</p>}
+          {paused && status.kind === 'paused' && <p className="meta-sched__status" data-state="paused">Background updates are paused: new conversations aren’t read and pages aren’t updated. Your conversation with {name} still works.</p>}
           <div className="meta-sched__src">
             <GitBranch size={12} aria-hidden="true" />
             <span>{runtimeText(runtime)} · </span>
-            <button type="button" className="meta-sched__link" onClick={onOpenSettings} aria-label="Change the Meta agent’s AI service">Change</button>
+            <button type="button" className="meta-sched__link" onClick={onOpenSettings} aria-label="Change the AI service Pages upkeep runs on">Change</button>
           </div>
           <div className="meta-sched__src"><Shield size={12} aria-hidden="true" /><span>Limits: {restrictionText(runtime.runtimeId)}</span></div>
         </header>
@@ -180,9 +185,11 @@ export function MetaAgentDetail({ overview, status: given, now, busy, onTogglePa
   );
 }
 
-/** The Scheduled area's main column while the Meta agent row is selected. */
+/** The Scheduled area's main column while the Pages upkeep row is selected. */
 export default function MetaAgentScheduledPage({ onOpenSettings = requestMetaAgentSettings }: { onOpenSettings?: () => void } = {}) {
-  const load = useMetaAgentOverview();
+  const name = useCompanionName();
+  const title = pagesUpkeepTitle(name);
+  const load = useMetaAgentOverview(META_AGENT_PAGE_POLL_MS);
   const agent = useMetaAgent();
   const [busy, setBusy] = React.useState(false);
   const { revealBackendNode } = useChatActions();
@@ -200,26 +207,24 @@ export default function MetaAgentScheduledPage({ onOpenSettings = requestMetaAge
       .finally(() => setBusy(false));
   };
 
-  // Resuming restarts what stopped after failures; the round then runs through Update's path, guard retry included.
   const retry = () => {
     setBusy(true);
-    pauseMetaAgentMaintenance(false)
-      .then(() => refreshMetaAgent())
-      .then(() => runMetaAgentUpdate('local'))
-      .catch((reason: unknown) => { toast.error(reason instanceof Error ? reason.message : 'Could not retry the Meta agent'); })
-      .finally(() => { setBusy(false); void refreshMetaAgentOverview(); });
+    retryStoppedMetaAgent(LOCAL_BACKEND_CONNECTION_ID)
+      .catch((reason: unknown) => { toast.error(reason instanceof Error ? reason.message : 'Could not retry Pages upkeep'); })
+      .finally(() => setBusy(false));
   };
 
   if (load.kind !== 'ready') {
     return (
-      <main className="area-settings meta-sched term-scrollbar" aria-label="Meta agent · Maintain Pages">
+      <main className="area-settings meta-sched term-scrollbar" aria-label={title}>
         <div className="area-settings__doc meta-sched__doc">
           <p className="area-settings__kicker meta-sched__kicker">Scheduled · System</p>
-          <h1 className="area-settings__title meta-sched__title">{META_AGENT_PAGE_TITLE}</h1>
-          {load.kind === 'loading' && <div className="sched-loading" role="status" aria-label="Loading the Meta agent’s status"><span /><span /></div>}
-          {load.kind === 'unavailable' && <p className="meta-sched__note">This Michi backend does not report the Meta agent’s maintenance yet.</p>}
+          <h1 className="area-settings__title meta-sched__title">{title}</h1>
+          {load.kind === 'loading' && <div className="sched-loading" role="status" aria-label="Loading the Pages upkeep status"><span /><span /></div>}
+          {load.kind === 'unavailable' && <p className="meta-sched__note">This Michi backend does not report Pages upkeep yet.</p>}
+          {load.kind === 'refused' && <p className="meta-sched__note">{load.message}</p>}
           {load.kind === 'failed' && (
-            <p className="meta-sched__status" role="alert">Could not read the Meta agent’s status: {load.message} · <button type="button" className="meta-sched__link" onClick={() => { void refreshMetaAgentOverview(); }}>Retry</button></p>
+            <p className="meta-sched__status" role="alert">Could not read the Pages upkeep status: {load.message} · <button type="button" className="meta-sched__link" onClick={() => { void refreshMetaAgentOverview(); }}>Retry</button></p>
           )}
         </div>
       </main>

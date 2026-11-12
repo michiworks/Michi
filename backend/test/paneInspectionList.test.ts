@@ -203,12 +203,16 @@ describe('paneInspectionList.list', () => {
   test('4. includeArchived false excludes archived nodes, true includes them', () => {
     seedNode('normal-node');
     seedNode('archived-node', { status: 'archived' });
+    seedNode('archived-thread');
+    seedTree('tree-archived', 'archived-thread');
+    getDb().prepare('UPDATE nodes SET tree_id = ? WHERE id = ?').run('tree-archived', 'archived-thread');
+    getDb().prepare('UPDATE trees SET archived_at = 5 WHERE id = ?').run('tree-archived');
 
     const excluded = list(caller(), baseRequest({ includeArchived: false }));
     assert.deepEqual(excluded.summaries.map((s) => s.ref.paneId).sort(), ['node:normal-node']);
 
     const included = list(caller(), baseRequest({ includeArchived: true }));
-    assert.deepEqual(included.summaries.map((s) => s.ref.paneId).sort(), ['node:archived-node', 'node:normal-node']);
+    assert.deepEqual(included.summaries.map((s) => s.ref.paneId).sort(), ['node:archived-node', 'node:archived-thread', 'node:normal-node']);
   });
 
   test('6. kind, treeId, and parentNodeId filters each narrow correctly and compose', () => {

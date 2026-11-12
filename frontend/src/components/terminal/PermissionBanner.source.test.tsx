@@ -56,6 +56,34 @@ describe('PermissionBanner source label', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Trust this tool' }));
     expect(onRespond).not.toHaveBeenCalled();
   });
+  it('names the answers of Michi\'s own prompts (Pi\'s follow-up approval), and keeps a runtime\'s by kind', () => {
+    const onRespond = vi.fn();
+    const { unmount } = render(<PermissionBanner permission={{ requestId: 5, title: 'Send a message to "Worker"?', source: 'michi_policy', options: [
+      { optionId: 'reject_once', kind: 'reject_once', name: "Don't send" },
+      { optionId: 'allow_once', kind: 'allow_once', name: 'Send' },
+      { optionId: 'allow_always', kind: 'allow_always', name: 'Send, and stop asking for this conversation' },
+    ] }} onRespond={onRespond} />);
+    expect(screen.getAllByRole('button').map((button) => button.textContent)).toEqual(["Don't send", 'Send', 'Send, and stop asking for this conversation']);
+    fireEvent.click(screen.getByRole('button', { name: 'Send, and stop asking for this conversation' }));
+    expect(onRespond).toHaveBeenLastCalledWith('allow_always');
+    unmount();
+
+    // Michi's ordinary tool approval: a name that is only the kind's label in other case reads as the label.
+    const ordinary = render(<PermissionBanner permission={{ requestId: 6, title: 'shell', source: 'michi_policy', options: [
+      { optionId: 'reject_once', kind: 'reject_once', name: 'Deny' },
+      { optionId: 'allow_once', kind: 'allow_once', name: 'Allow once' },
+    ] }} onRespond={vi.fn()} />);
+    expect(screen.getAllByRole('button').map((button) => button.textContent)).toEqual(['Deny', 'Allow Once']);
+    ordinary.unmount();
+
+    // A runtime's own names stay by kind.
+    render(<PermissionBanner permission={{ requestId: 7, title: 'Approve bash?', source: 'codex_approval', options: [
+      { optionId: 'no', kind: 'reject_once', name: 'No, and tell Codex what to do differently' },
+      { optionId: 'yes', kind: 'allow_once', name: 'Yes' },
+    ] }} onRespond={vi.fn()} />);
+    expect(screen.getAllByRole('button').map((button) => button.textContent)).toEqual(['Deny', 'Allow Once']);
+  });
+
   it('renders Codex approval source', () => {
     render(
       <PermissionBanner

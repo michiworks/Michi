@@ -1,8 +1,9 @@
 import React, { useEffect, useState } from 'react';
 import { describe, expect, it, vi } from 'vitest';
-import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import type { PageBlock, PageDto, PageViewPresentation } from 'michi-shared';
-import { NativePageDocument } from './NativePageDocument';
+import NativePageDocument from './NativePageDocument';
+import { backTarget } from '../../../lib/backStack';
 
 const action = (viewId = 'evidence', presentation: PageViewPresentation = 'drawer') => ({ type: 'open-view' as const, viewId, presentation });
 const base = (presentation: PageViewPresentation = 'drawer'): PageDto => ({
@@ -61,6 +62,16 @@ describe('native page views', () => {
     expect(screen.getByRole('dialog').textContent).toContain('Updated evidence.');
     expect((screen.getByRole('textbox', { name: 'Local note' }) as HTMLInputElement).value).toBe('Keep this');
     expect(mounted).toHaveBeenCalledTimes(1);
+  });
+
+  it('steps Back one view, then closes the drawer', async () => {
+    render(document(base()));
+    fireEvent.click(screen.getByRole('link', { name: 'Why A?' }));
+    fireEvent.click(screen.getByRole('link', { name: 'More' }));
+    act(() => backTarget()?.back());
+    expect(screen.getByRole('dialog', { name: 'Evidence' })).toBeTruthy();
+    act(() => backTarget()?.back());
+    await waitFor(() => expect(screen.queryByText('Research supports A.')).toBeNull());
   });
 
   it('opens Markdown, metric and arbitrary block entries and leaves static content valid', () => {

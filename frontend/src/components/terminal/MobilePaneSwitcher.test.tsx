@@ -42,6 +42,19 @@ it('lists indented titles from the active tree, ignores links and deleted branch
   expect(document.activeElement).toBe(screen.getByRole('button', { name: 'Switch pane' }));
 });
 
+it('keeps a working dot on the trigger while a pane other than the focused one streams', () => {
+  const { rerender } = render(<MobilePaneSwitcher />);
+  const trigger = screen.getByRole('button', { name: 'Switch pane' });
+  expect(trigger.dataset.working).toBeUndefined();
+  state.nodes = { ...state.nodes, child: { ...state.nodes.child, status: 'streaming' } };
+  rerender(<MobilePaneSwitcher />);
+  expect(trigger.dataset.working).toBe('true');
+  // The focused pane streaming is already on screen: no dot for it.
+  state.nodes = { ...state.nodes, child: { ...state.nodes.child, status: 'idle' }, root: { ...state.nodes.root, status: 'streaming' } };
+  rerender(<MobilePaneSwitcher />);
+  expect(trigger.dataset.working).toBeUndefined();
+});
+
 it('focuses existing panes, supports keyboard navigation and dismisses outside', () => {
   render(<MobilePaneSwitcher />);
   const trigger = screen.getByRole('button', { name: 'Switch pane' });

@@ -2,9 +2,10 @@ import { useSyncExternalStore } from 'react';
 import type { MetaAgentRunNowWorkspace } from 'michi-shared';
 import { fetchMetaAgentRound, runMetaAgentRoundNow } from '../../services/api/pageMaintenance';
 import { notifyPageChanged } from '../pages/pageEvents';
-import { metaAgentGuardFailures, readMetaAgent, retryMetaAgentGuard } from './useMetaAgent';
+import { metaAgentGuardFailures, readMetaAgent, refreshMetaAgent, retryMetaAgentGuard } from './useMetaAgent';
 import { firstRunActive, readSpacesFirstRun, startSpacesFirstRunVisit } from './spacesFirstRun';
-import { refreshMetaAgentOverview, resumeMetaAgent } from './useMetaAgentOverview';
+import { pauseMetaAgentMaintenance, refreshMetaAgentOverview } from './useMetaAgentOverview';
+import { LOCAL_BACKEND_CONNECTION_ID } from '../../config/backendConnections';
 
 /**
  * The Spaces Home's Update button: one Meta agent round now instead of on
@@ -47,7 +48,7 @@ const wait = (ms: number) => new Promise<void>((resolve) => { window.setTimeout(
 function quietResult(rows: readonly MetaAgentRunNowWorkspace[]): MetaAgentUpdateState | null {
   if (rows.length > 0 && rows.every((row) => row.skip === 'paused')) return null;
   const blocked = rows.find((row) => row.outcome === 'skipped' && row.skip !== 'paused');
-  if (blocked) return { phase: 'failed', workspaces: 0, error: blocked.reason ?? 'The Meta agent could not start' };
+  if (blocked) return { phase: 'failed', workspaces: 0, error: blocked.reason ?? 'Pages upkeep could not start' };
   return { phase: 'no-new', workspaces: 0, error: null };
 }
 
@@ -55,7 +56,7 @@ export async function runMetaAgentUpdate(connectionId: string): Promise<void> {
   const mine = ++round;
   if (noteTimer !== null) { window.clearTimeout(noteTimer); noteTimer = null; }
   const refreshPages = () => notifyPageChanged({ backendConnectionId: connectionId });
-  const refreshLocalOverview = () => { if (connectionId === 'local') void refreshMetaAgentOverview(); };
+  const refreshLocalOverview = () => { if (connectionId === LOCAL_BACKEND_CONNECTION_ID) void refreshMetaAgentOverview(); };
   try {
     if (firstRunActive(readSpacesFirstRun(connectionId).data)) {
       await startSpacesFirstRunVisit(connectionId);
@@ -63,7 +64,7 @@ export async function runMetaAgentUpdate(connectionId: string): Promise<void> {
       return;
     }
     // These checks belong to this computer's Meta agent; a remote backend reports its own hold in the round's answer.
-    if (connectionId === 'local' && metaAgentGuardFailures(readMetaAgent().info).some((failure) => failure.toolset === 'maintenance')) {
+    if (connectionId === LOCAL_BACKEND_CONNECTION_ID && metaAgentGuardFailures(readMetaAgent().info).some((failure) => failure.toolset === 'maintenance')) {
       set({ phase: 'running', workspaces: 0, error: null });
       await retryMetaAgentGuard();
       if (mine === round) set(IDLE);
@@ -107,11 +108,20 @@ export function readMetaAgentUpdate(): MetaAgentUpdateState {
 /**
  * Retry once the Meta agent stopped after repeated failures: resuming
  * restarts the stopped workspaces (this computer's backend only), then one
- * round runs now through Update's own path.
+ * round runs now through Update's own path, restriction-check retry included.
+ * Every Retry button uses this.
  */
 export async function retryStoppedMetaAgent(connectionId: string): Promise<void> {
-  if (connectionId === 'local') await resumeMetaAgent();
-  await runMetaAgentUpdate(connectionId);
+  const local = connectionId === LOCAL_BACKEND_CONNECTION_ID;
+  try {
+    if (local) {
+      await pauseMetaAgentMaintenance(false);
+      await refreshMetaAgent();
+    }
+    await runMetaAgentUpdate(connectionId);
+  } finally {
+    if (local) void refreshMetaAgentOverview();
+  }
 }
 
 export function useMetaAgentUpdate(): MetaAgentUpdateState {
@@ -122,6 +132,7 @@ export function useMetaAgentUpdate(): MetaAgentUpdateState {
   );
 }
 
+/** @testonly */
 export function resetMetaAgentUpdate(): void {
   round += 1;
   if (noteTimer !== null) window.clearTimeout(noteTimer);

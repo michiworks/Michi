@@ -1,7 +1,17 @@
 import type { RuntimeWarning } from 'michi-shared';
-import type { FollowUpsExperimentMode, RuntimeHost } from '../../contract/host';
-import type { ModelInfo } from '../../contract/types';
+import type { RuntimeHost } from '../../contract/host';
+import type { ModelInfo, RuntimeSessionOwner, RuntimeToolProfile } from '../../contract/types';
 import type { RuntimeModelCache } from '../../core/runtimeModelCache';
+
+/** A tool call of an unrestricted session, as ClaudeAdapterOptions.requireHostApproval sees it. */
+export interface ClaudeHostApprovalRequest {
+  owner: RuntimeSessionOwner;
+  ownerUserId: string | null;
+  /** The name Claude reports: `Bash`, `mcp__<server>__<tool>`, a host tool's `mcp____michi_internal____<tool>`. */
+  toolName: string;
+  /** The bare name of a host tool, or null for any other tool. */
+  hostToolName: string | null;
+}
 
 /**
  * Lists the models the current account can use. Declared here rather than
@@ -55,14 +65,12 @@ export interface ClaudeCliFlags {
   humanOrigin: boolean;
 }
 
-/** Wording the Claude adapter adds for the host. Each absent member adds nothing. */
-export interface ClaudeHostText {
-  /**
-   * Turn-metadata rules appended to the system prompt under the Stop-hook POC.
-   * @experimental Follow-ups Stop-hook POC; outside the v1 compatibility guarantee.
-   */
-  followUpsHookPocInstruction?(mode: FollowUpsExperimentMode): string;
-}
+/**
+ * Wording the Claude adapter adds for the host. It has no members since the
+ * follow-ups Stop-hook POC, whose instruction was its only one, was removed;
+ * the adapter reads nothing from it.
+ */
+export interface ClaudeHostText {}
 
 /** What the Claude adapter takes from the application that embeds it. */
 export interface ClaudeAdapterOptions {
@@ -96,11 +104,6 @@ export interface ClaudeAdapterOptions {
   limits: ClaudeLimits;
   cli: () => ClaudeCliFlags;
   /**
-   * Run the Stop-hook POC for turn metadata. Read when the session manager and each session are created.
-   * @experimental Follow-ups Stop-hook POC; outside the v1 compatibility guarantee.
-   */
-  followUpsHookPoc: () => boolean;
-  /**
    * A warning for what a claude process wrote to stderr, or undefined. A
    * session shows each warning message once.
    */
@@ -109,9 +112,61 @@ export interface ClaudeAdapterOptions {
    * Verdict on a tool call of a restricted session (SessionProfilePort.isRestricted);
    * `hostToolName` is the bare name of a host tool, or null for any other tool.
    * Default: deny every call.
+   *
+   * `profile` is the calling session's own tool profile (its
+   * NewAgentSessionOptions.toolProfile): a host should allow only what that
+   * profile allows (`allowedToolNames`), never the union of every restricted
+   * profile it has (DESIGN-v2 §2.5). Absent when the session has none, and
+   * from adapters that predate it: deny what cannot be placed. W1-A makes
+   * ClaudeSession pass it at both call sites; W2-E's Michi host narrows to it.
    */
-  restrictedToolApproval?: (hostToolName: string | null) => 'allow' | 'deny';
+  restrictedToolApproval?: (hostToolName: string | null, profile?: RuntimeToolProfile) => 'allow' | 'deny';
+  /**
+   * Whether a tool call of an unrestricted session must be answered by the
+   * host's approval (canUseTool, where the permission port decides) whatever
+   * the CLI would decide first. Such a session loads the user's, project's
+   * and local settings: their allow rules, and a PreToolUse hook of the
+   * user's that allows, approve a call before canUseTool is asked, as
+   * bypassPermissions (YOLO) approves every call. true: the session's
+   * PreToolUse hook answers `ask`, so the CLI skips its allow rules, the
+   * permission mode and other hooks' allow, and asks canUseTool; its deny
+   * and ask rules still apply. Read at every call; a callback that throws
+   * counts as true. Absent, or false: the CLI's own permission flow, as
+   * before. Restricted, maintenance and Run-broker sessions are decided in
+   * the hook already and never consult it. Michi: true while the chat's turn
+   * holds check-in material (DESIGN-v2 §2.8, D4), except for read-only
+   * built-ins and the Michi tools such a turn may run.
+   */
+  requireHostApproval?: (request: ClaudeHostApprovalRequest) => boolean;
   hostText?: ClaudeHostText;
+  /**
+   * The host's skill library as a folder with `.claude/skills/<name>`, an
+   * additional directory of every session (the SDK's
+   * `additionalDirectories`), or null for none. Read at each spawn. Sessions
+   * that load the user's settings load its skills under their own names; one
+   * whose name a personal or project skill already has is
+   * `<folder name>:<skill>`. Isolated and bare sessions do not load them.
+   * A session's state leaves them out: the host lists its library itself.
+   * A skill there hides a legacy command of its name, so the folder should
+   * not carry one named like a personal command (`<config>/commands`); a
+   * runtime skill whose row the library's took is sent as its text. The
+   * path should not change between calls, so warm processes keep identical
+   * spawn arguments. Default: no library.
+   */
+  skillLibraryDir?: () => string | null;
+  /**
+   * Calls `listener` after the library's skills change; returns what stops
+   * that. Live sessions then reload their skills (the CLI does not notice
+   * the library's links change). Default: never.
+   */
+  subscribeSkillLibraryChanges?: (listener: () => void) => () => void;
+  /**
+   * Whether a session's state names the skills, plugin commands and MCP
+   * prompts the CLI loaded (its / menu), read at each state report. A host
+   * that shows no skills of its machine (Michi's cloud mode) says false.
+   * Default: true.
+   */
+  advertiseSkills?: () => boolean;
 }
 
 /** The limits claudeAdapterOptions gives a host that sets none, Michi's own. Frozen, pool included. */
@@ -146,7 +201,7 @@ export type ClaudeAdapterOptionsInput =
  * `new ClaudeRuntime({ ...claudeAdapterOptions({ host, spawnEnv }), bridge, mcpSlots })`.
  * A required member left out or given as undefined takes its default: limits
  * a copy of DEFAULT_CLAUDE_LIMITS, cli a copy of DEFAULT_CLAUDE_CLI_FLAGS at
- * each call, no explicit binary, the Stop-hook POC off. An optional member
+ * each call, no explicit binary. An optional member
  * left out or given as undefined stays absent, so the adapter's own default
  * applies. spawnEnv is passed on as given: it decides which credentials the
  * agent sees.
@@ -159,10 +214,13 @@ export function claudeAdapterOptions(input: ClaudeAdapterOptionsInput): ClaudeAd
     binaryPath: input.binaryPath ?? (() => undefined),
     limits: input.limits ?? { ...DEFAULT_CLAUDE_LIMITS, pool: { ...DEFAULT_CLAUDE_LIMITS.pool } },
     cli: input.cli ?? (() => ({ ...DEFAULT_CLAUDE_CLI_FLAGS })),
-    followUpsHookPoc: input.followUpsHookPoc ?? (() => false),
     ...(input.stderrWarning !== undefined ? { stderrWarning: input.stderrWarning } : {}),
     ...(input.configDir !== undefined ? { configDir: input.configDir } : {}),
     ...(input.restrictedToolApproval !== undefined ? { restrictedToolApproval: input.restrictedToolApproval } : {}),
+    ...(input.requireHostApproval !== undefined ? { requireHostApproval: input.requireHostApproval } : {}),
     ...(input.hostText !== undefined ? { hostText: input.hostText } : {}),
+    ...(input.skillLibraryDir !== undefined ? { skillLibraryDir: input.skillLibraryDir } : {}),
+    ...(input.subscribeSkillLibraryChanges !== undefined ? { subscribeSkillLibraryChanges: input.subscribeSkillLibraryChanges } : {}),
+    ...(input.advertiseSkills !== undefined ? { advertiseSkills: input.advertiseSkills } : {}),
   };
 }

@@ -1,9 +1,15 @@
 import type { KiroAdapterOptions } from "michi-runtime/internal/adapters/kiro/AcpAgentRuntime";
 import type { CrewAdapterOptions } from "michi-runtime/internal/adapters/crew/crewLaunch";
+import type { AntigravityAdapterOptions } from "michi-runtime/internal/adapters/antigravity/antigravityLaunch";
+import { skillMountRoot } from "../services/skills/mounts";
+import { skillsAvailable } from "../services/skills/paths";
+import { agentSpawnEnv } from "./agentSpawnEnv";
+import { approveTimeoutMs } from "./approveTimeout";
 
-// Michi's environment settings for the Kiro and Crew adapters, read here so
-// the adapters read none themselves, each when the adapter used to read it.
-// Type imports only: loading this module loads no adapter.
+// Michi's environment settings for the Kiro, Crew and Antigravity adapters,
+// read here so the adapters read none themselves, each when the adapter used
+// to read it.
+// Adapter imports are type-only: loading this module loads no adapter.
 
 // These four were module constants of AcpAgentRuntime and AcpClient, read when
 // those modules loaded, before server.ts loads backend/.env. They stay module
@@ -35,12 +41,39 @@ export function kiroEnvOptions(): Omit<KiroAdapterOptions, "host" | "engine"> {
         warmPoolSize: KIRO_WARM_POOL_SIZE,
         acpIdleTimeoutMs: KIRO_ACP_IDLE_TIMEOUT_MS,
         concurrencyCap: parseInt(process.env.MICHI_KIRO_MAX_CONCURRENT ?? "100", 10),
-        approveTimeoutMs: () => parseInt(process.env.MICHI_APPROVE_TIMEOUT_MS ?? "300000", 10),
+        sessionIdleTtlMs: kiroSessionIdleTtlMs(),
+        approveTimeoutMs: () => approveTimeoutMs(),
         customAgents: () => process.env.MICHI_CUSTOM_AGENTS === "1",
         kiroCli: () => ({ kiroCliBin: process.env.KIRO_CLI_BIN, localAppData: process.env.LOCALAPPDATA }),
-        spawnEnv: () => process.env,
+        // The live environment less the backend's own; Crew's adapter and agy get it too.
+        spawnEnv: () => agentSpawnEnv(),
         preloadTools: () => process.env.MICHI_KIRO_PRELOAD_TOOLS !== "false",
+        // Cloud mode shows no skills of this machine, so no chat's state names them.
+        advertiseSkills: () => skillsAvailable(),
     };
+}
+
+/**
+ * How long an idle Kiro chat keeps its live session (MICHI_KIRO_SESSION_IDLE_TTL_MS,
+ * default 15 minutes; 0 keeps them all). Read when the runtime is created.
+ */
+function kiroSessionIdleTtlMs(): number {
+    const raw = process.env.MICHI_KIRO_SESSION_IDLE_TTL_MS;
+    const n = raw === undefined || raw.trim() === "" ? NaN : Number(raw);
+    return Number.isFinite(n) && n >= 0 ? n : 900_000;
+}
+
+/**
+ * The Michi skill library as Kiro sees it: the kiro-workspace skill mount,
+ * which each V3 chat session opens as an additional directory. Kiro's runtime
+ * only: neither Crew nor Antigravity opens a folder Michi gives it. Prepared
+ * when the runtime is created and kept in step with the library from then on;
+ * none in cloud mode, or when the mount cannot be prepared.
+ */
+export function kiroSkillOptions(): Pick<KiroAdapterOptions, "skillLibraryWorkspace" | "prepareSkillLibraryWorkspace"> {
+    const root = skillMountRoot("kiro", "kiro-workspace");
+    // Each session start syncs the mount again, removing anything planted in it since.
+    return root ? { skillLibraryWorkspace: root, prepareSkillLibraryWorkspace: () => { skillMountRoot("kiro", "kiro-workspace"); } } : {};
 }
 
 /**

@@ -21,6 +21,7 @@ import { normalizeResultBundle } from './resultBundle';
 import { deriveRunExpiresAt } from './agentRunRetention';
 import { isTerminalRunStatus } from './agentRunStateMachine';
 import { planAgentRunRecovery } from './agentRunRecovery';
+import { withDeadline } from '../runtimeLifecycle';
 import type {
   AgentRunCoordinatorPorts,
   AgentRunExecutionOutcome,
@@ -106,7 +107,15 @@ export class AgentRunCoordinator {
           type: AgentRunEventType.RunStatusChanged,
           payload: { version: 1, from: null, to: AgentRunStatus.Queued },
         },
+        spawnRequest: input,
       });
+      const persisted = run.executionEnvironment;
+      if (persisted.cwd !== environment.snapshot.cwd || persisted.createdAt !== environment.snapshot.createdAt) {
+        // A repeated spawn got the Run its first request created, which keeps
+        // the environment and context snapshot prepared back then.
+        await environment.cleanup(input.operationId).catch(() => undefined);
+        return run;
+      }
       this.prepared.set(run.id, { environment, cleanupOwnerId: input.operationId });
       return run;
     } catch (error) {
@@ -193,6 +202,7 @@ export class AgentRunCoordinator {
     profileIndex: number, recoveryEnvelope: Parameters<typeof planAgentRunRecovery>[0]['recoveryEnvelope'],
     nativeResumeToken: JsonValue | null = null): Promise<AgentRunDtoV1> {
     let run = this.requireRun(ownerUserId, runId);
+    const claimedSeq = run.latestEventSeq;
     const profile = runtimeProfileAt(run, profileIndex);
     const attempt = this.ports.repository.createAttempt({
       operationId: `${runId}:attempt:${this.nextId('operation')}`,
@@ -237,12 +247,20 @@ export class AgentRunCoordinator {
       recoveryEnvelope,
     };
     run = this.requireRun(ownerUserId, runId);
+    if (isTerminalRunStatus(run.status)) {
+      // The Run ended while its runtime started (its lease had expired): stop what started.
+      await handle.cancel('Run ended before its runtime started').catch(() => undefined);
+      return run;
+    }
     const runningEvent = this.ports.repository.appendEventAndProject(ownerUserId, runId, run.latestEventSeq, {
       type: AgentRunEventType.RunStatusChanged, attemptId: attempt.id,
       payload: { version: 1, from: run.status, to: AgentRunStatus.Running },
     }, { status: AgentRunStatus.Running, activeAttemptId: attempt.id, startedAt: run.startedAt ?? this.clock.now() });
     this.live.set(runId, live);
     this.events.publishCommitted(runningEvent);
+    // A cancel requested while the runtime started had no handle to stop.
+    const requested = this.cancellationRequestedSince(ownerUserId, runId, claimedSeq);
+    if (requested !== undefined) await handle.cancel(requested);
     const outcome = await handle.completion;
     return this.settleOutcome(runId, outcome, profileIndex, recoveryEnvelope, ownerUserId);
   }
@@ -418,7 +436,7 @@ export class AgentRunCoordinator {
 
   async cancel(ownerUserId: string, runId: string, reason: string | null,
     expectedAttemptId: string | null = null, operationId = this.nextId('operation')): Promise<boolean> {
-    let run = this.ports.repository.getRun(ownerUserId, runId);
+    const run = this.ports.repository.getRun(ownerUserId, runId);
     if (!run) return false;
     if (isTerminalRunStatus(run.status)) return true;
     const live = this.live.get(runId);
@@ -436,17 +454,43 @@ export class AgentRunCoordinator {
     this.events.publishCommitted(requested);
     if (live && live.ownerUserId === ownerUserId) {
       await live.handle.cancel(reason);
+      // A Run waiting for an answer has no completion left to report the
+      // cancel: its handle already settled as waiting. It ends here.
+      if (this.live.get(runId) === live && this.requireRun(ownerUserId, runId).status === AgentRunStatus.Waiting) {
+        this.cancelWaitingRun(ownerUserId, runId, live, reason, operationId);
+      }
       return true;
     }
-    run = this.requireRun(ownerUserId, runId);
-    if (run.status === AgentRunStatus.Queued) {
-      const settled = this.ports.repository.appendEventAndProject(ownerUserId, runId, run.latestEventSeq, {
-        type: AgentRunEventType.RunStatusChanged,
-        payload: { version: 1, from: AgentRunStatus.Queued, to: AgentRunStatus.Cancelled },
-      }, { status: AgentRunStatus.Cancelled, completedAt: this.clock.now() });
-      this.events.publishCommitted(settled);
-    }
+    // No handle here owns the Run: a queued Run, one waiting after a restart
+    // or for an unsafe recovery, one between Attempts, or one whose owner's
+    // lease expired ends now. One a live owner holds keeps the request, which
+    // executeClaimed honors once its runtime has started.
+    const cancelled = this.ports.repository.cancelRunWithoutHandle(ownerUserId, runId, reason);
+    if (cancelled) this.events.publishCommitted(cancelled);
     return true;
+  }
+
+  /** The reason of the first cancel requested after `afterSeq`; undefined when none was. */
+  private cancellationRequestedSince(ownerUserId: string, runId: string, afterSeq: number): string | null | undefined {
+    const event = this.ports.repository.listEvents(ownerUserId, runId, afterSeq, 1_000)
+      .find((candidate) => candidate.type === AgentRunEventType.CancellationRequested);
+    if (!event) return undefined;
+    const payload = event.payload;
+    return payload && typeof payload === 'object' && !Array.isArray(payload) && typeof payload.reason === 'string'
+      ? payload.reason : null;
+  }
+
+  /** Ends a live Run that waits for an answer: its open questions, its Attempt and the Run. */
+  private cancelWaitingRun(ownerUserId: string, runId: string, live: LiveAttempt,
+    reason: string | null, operationId: string): void {
+    this.live.delete(runId);
+    for (const interaction of this.ports.repository.listInteractions?.(ownerUserId, runId) ?? []) {
+      if (interaction.status !== 'pending') continue;
+      this.ports.repository.resolveInteraction(ownerUserId, interaction.id, 'cancelled',
+        { version: 1, reason }, `${operationId}:interaction:${interaction.id}`);
+    }
+    this.finalize(ownerUserId, this.requireRun(ownerUserId, runId), live.attemptId, live.leaseToken,
+      'cancelled', AgentRunStatus.Cancelled, null, structuredError('cancelled', 'Run was cancelled', false));
   }
 
   /** Quiesce one Run for destructive owner administration.
@@ -463,7 +507,7 @@ export class AgentRunCoordinator {
     if (live && live.ownerUserId === ownerUserId) {
       this.administrativeQuiescing.add(runId);
       try {
-        await withTimeout(
+        await withDeadline(
           live.handle.cancel('administrative owner deletion'),
           5_000,
           'Run runtime did not acknowledge administrative cancellation',
@@ -513,19 +557,6 @@ function runtimeProfileAt(run: AgentRunDtoV1, profileIndex: number): RuntimeProf
 
 function structuredError(code: string, message: string, retryable: boolean): StructuredRunErrorV1 {
   return { version: 1, code, category: 'terminal', message, retryable };
-}
-
-async function withTimeout<T>(promise: Promise<T>, timeoutMs: number, message: string): Promise<T> {
-  let timer: NodeJS.Timeout | undefined;
-  const timeout = new Promise<never>((_resolve, reject) => {
-    timer = setTimeout(() => reject(new Error(message)), timeoutMs);
-    timer.unref?.();
-  });
-  try {
-    return await Promise.race([promise, timeout]);
-  } finally {
-    if (timer) clearTimeout(timer);
-  }
 }
 
 function interactionResponseText(response: JsonValue): string {

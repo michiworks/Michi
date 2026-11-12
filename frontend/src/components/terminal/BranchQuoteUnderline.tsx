@@ -8,6 +8,7 @@ import { EASE } from '../../motion/tokens';
 import type { ChatNodeState } from '../../state/chatTypes';
 import { BranchStatusLabel } from './BranchAnchorRow';
 import { BranchIcon } from './icons';
+import { isImeComposing } from '../../lib/ime';
 
 export interface BranchQuoteAnchor {
   childNodeId: string;
@@ -170,7 +171,7 @@ export function BranchQuoteUnderline({ anchors, children }: BranchQuoteUnderline
     for (const id of drawFor) drawnBranches.add(id);
     const span = spanRef.current;
     if (!span || typeof span.animate !== 'function') return undefined;
-    if (prefersReducedMotion(document.documentElement.dataset.reduceMotion === 'on')) return undefined;
+    if (prefersReducedMotion()) return undefined;
     return drawUnderline(span);
   }, [drawFor]);
 
@@ -242,7 +243,7 @@ export function BranchQuoteUnderline({ anchors, children }: BranchQuoteUnderline
     };
     const onKeyDown = (event: KeyboardEvent) => {
       // The card is an Esc layer ("over"), so the page's own Esc yields to it.
-      if (event.key !== 'Escape' || event.defaultPrevented || event.isComposing) return;
+      if (event.key !== 'Escape' || event.defaultPrevented || isImeComposing(event)) return;
       const focusInCard = !!cardRef.current?.contains(document.activeElement);
       hide();
       if (focusInCard && spanRef.current) {

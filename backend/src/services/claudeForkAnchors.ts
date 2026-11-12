@@ -1,15 +1,6 @@
+import type { SaveClaudeForkAnchorInput } from 'michi-runtime';
 import { getDb } from './db';
 import { LOCAL_AGENT_OWNER_ID, workspaceOwnerMatches } from './agentOwner';
-
-export interface SaveClaudeForkAnchorInput {
-  nodeId: string;
-  nativeSessionId: string;
-  assistantMessageId: string;
-  nativeMessageId: string;
-  userMessageId?: string;
-  /** The UUID supplied on the SDK's original user envelope, never a tool result. */
-  nativeUserMessageId?: string;
-}
 
 /** Save only identities owned by the current server-side node binding. A user
  * cut ends at the prompt itself; aliasing it to the assistant would copy the

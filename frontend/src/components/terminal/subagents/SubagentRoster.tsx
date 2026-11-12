@@ -2,8 +2,9 @@ import React, { useId } from 'react';
 import type { SubagentInfo } from '../../../state/chatTypes';
 import { formatDurationMs, isFailedStatus, isRunningStatus, subagentStatusLabel } from '../toolCallGrouping';
 import { openBackgroundWork, useBackgroundWorkNodeId } from '../backgroundWork/backgroundWorkEvents';
-import { useConversationSubagent } from '../backgroundWork/useConversationSubagent';
-import { FadeOnChange, GlyphSwap, RevealList } from '../agentBlockMotion';
+import { useConversationSubagent, useSubagentToneCounts } from '../backgroundWork/useConversationSubagent';
+import { usePhoneLayout } from '../../../hooks/usePhoneLayout';
+import { FadeOnChange, GlyphSwap } from '../agentBlockMotion';
 import {
   SUBAGENT_TONE_COLOR,
   SUBAGENT_TONE_LABEL,
@@ -15,6 +16,7 @@ import {
   subagentToolStatus,
   subagentTone,
   type SubagentSummaryTone,
+  type SubagentTone,
 } from './subagentPresentation';
 
 const MONO = 'var(--font-mono)';
@@ -45,13 +47,13 @@ export function SubagentStatusGlyph({ status }: { status: string | undefined }) 
  * its own. `active` is the conversation's view (subagentTone). A new word,
  * and the duration once it appears, fade in.
  */
-export function SubagentToneLabel({ subagent, active }: { subagent: SubagentInfo; active?: boolean }) {
+export function SubagentToneLabel({ subagent, active, fontSize = 'var(--fs-xs)' }: { subagent: SubagentInfo; active?: boolean; fontSize?: string }) {
   const tone = subagentTone(subagent, active);
   const duration = tone === 'running' || tone === 'background'
     ? undefined
     : active === undefined ? subagentDurationMs(subagent) : subagentShownDurationMs(subagent, active, Date.now());
   return (
-    <span style={{ display: 'inline-flex', alignItems: 'baseline', gap: 6, flexShrink: 0, fontSize: 'var(--fs-xs)' }}>
+    <span style={{ display: 'inline-flex', alignItems: 'baseline', gap: 6, flexShrink: 0, fontSize }}>
       <FadeOnChange k={tone} style={{ color: SUBAGENT_TONE_COLOR[tone] }}>{SUBAGENT_TONE_LABEL[tone]}</FadeOnChange>
       <FadeOnChange k={duration !== undefined ? 'duration' : null} style={{ fontFamily: MONO, color: 'var(--term-muted)' }}>
         {duration !== undefined && formatDurationMs(duration)}
@@ -68,20 +70,34 @@ const SUMMARY_COLOR: Record<SubagentSummaryTone, string> = {
   mission: 'var(--term-muted)',
 };
 
+/** The 'line' agent-block chrome's type scale: 14px words, 12px mono, error text in --term-danger-text. */
+const LINE_SUMMARY_COLOR: Record<SubagentSummaryTone, string> = { ...SUMMARY_COLOR, error: 'var(--term-danger-text)' };
+
 /** "now ❯ Read src/a.ts", the status line, the result's first line or the mission. */
-export function SubagentSummaryText({ summary }: { summary: { tone: SubagentSummaryTone; text: string } }) {
+export function SubagentSummaryText({ summary, scale = 'chrome' }: { summary: { tone: SubagentSummaryTone; text: string }; scale?: SubagentLineScale }) {
+  const now = summary.tone === 'now';
+  const line = scale === 'line';
   return (
     <span
       data-testid="subagent-summary-text"
       data-summary-tone={summary.tone}
-      style={{ ...ellipsis, flex: 1, fontSize: summary.tone === 'now' ? 'var(--fs-xs)' : 'var(--fs-sm)', fontFamily: summary.tone === 'now' ? MONO : undefined }}
+      // Mono tool detail is verbatim: no ligatures ("--count", "...").
+      className={now ? 'agent-verbatim' : undefined}
+      style={{
+        ...ellipsis,
+        flex: 1,
+        fontSize: line ? (now ? 'var(--fs-md)' : 'var(--fs-xl)') : now ? 'var(--fs-xs)' : 'var(--fs-sm)',
+        fontFamily: now ? MONO : undefined,
+      }}
     >
       {/* The ornament stays out of the transcript line's accessible name; "now" reads. */}
-      {summary.tone === 'now' && <span style={{ color: 'var(--term-muted)' }}>now <span aria-hidden="true">❯</span> </span>}
-      <span style={{ color: SUMMARY_COLOR[summary.tone] }}>{summary.text}</span>
+      {now && <span style={{ color: 'var(--term-muted)' }}>now <span aria-hidden="true">❯</span> </span>}
+      <span style={{ color: (line ? LINE_SUMMARY_COLOR : SUMMARY_COLOR)[summary.tone] }}>{summary.text}</span>
     </span>
   );
 }
+
+export type SubagentLineScale = 'chrome' | 'line';
 
 const lineStyle: React.CSSProperties = {
   display: 'flex',
@@ -121,6 +137,8 @@ export function SubagentSummaryLine({
   glyph,
   nameStyle,
   style,
+  scale = 'chrome',
+  className,
 }: {
   /** The roster entry. Without one there is nothing to open. */
   subagent?: SubagentInfo;
@@ -133,6 +151,9 @@ export function SubagentSummaryLine({
   glyph?: React.ReactNode;
   nameStyle?: React.CSSProperties;
   style?: React.CSSProperties;
+  /** 'line': the line chrome's 14px scale; status words and error text use their text tokens. */
+  scale?: SubagentLineScale;
+  className?: string;
 }) {
   const nodeId = useBackgroundWorkNodeId();
   const hintId = useId();
@@ -146,26 +167,32 @@ export function SubagentSummaryLine({
   const running = isRunningStatus(status);
   const failed = isFailedStatus(status);
   const summary = subagentSummary(subagent, { running, fallback });
-  const statusColor = failed ? 'var(--term-danger)' : running ? 'var(--term-accent)' : 'var(--term-muted)';
+  const line = scale === 'line';
+  const statusColor = failed ? (line ? 'var(--term-danger-text)' : 'var(--term-danger)') : running ? 'var(--term-run)' : 'var(--term-muted)';
   const statusLabel = subagentStatusLabel(status);
+  const statusSize = line ? 'var(--fs-md)' : 'var(--fs-xs)';
+  const nameLook: React.CSSProperties = line
+    ? { fontSize: 'var(--fs-xl)', fontWeight: 500, color: failed ? 'var(--term-danger-text)' : 'var(--term-mid)' }
+    : { fontSize: 'var(--fs-sm)', fontWeight: 600, color: failed ? 'var(--term-danger-text)' : 'var(--term-fg)' };
   const content = (
     <>
       {glyph ?? <SubagentStatusGlyph status={status} />}
-      <span style={{ ...ellipsis, flexShrink: 0, maxWidth: '45%', fontSize: 'var(--fs-sm)', fontWeight: 600, color: failed ? 'var(--term-danger)' : 'var(--term-fg)', ...nameStyle }}>
+      <span data-subagent-name="" style={{ ...ellipsis, flexShrink: 0, maxWidth: '45%', ...nameLook, ...nameStyle }}>
         {name}
       </span>
-      {summary ? <SubagentSummaryText summary={summary} /> : <span style={{ flex: 1 }} />}
+      {summary ? <SubagentSummaryText summary={summary} scale={scale} /> : <span style={{ flex: 1 }} />}
       <span style={{ flexShrink: 0, paddingLeft: 8, display: 'inline-flex', alignItems: 'center', gap: 5 }}>
         {/* A custom leading glyph names the kind; the dot still says the state. */}
         {glyph && <SubagentStatusGlyph status={status} />}
         {subagent && status === subagentToolStatus(subagent, active)
-          ? <SubagentToneLabel subagent={subagent} active={active} />
-          : <FadeOnChange k={statusLabel} style={{ fontSize: 'var(--fs-xs)', color: statusColor }}>{statusLabel}</FadeOnChange>}
+          ? <SubagentToneLabel subagent={subagent} active={active} fontSize={statusSize} />
+          : <FadeOnChange k={statusLabel} style={{ fontSize: statusSize, color: statusColor }}>{statusLabel}</FadeOnChange>}
       </span>
     </>
   );
+  const look: React.CSSProperties = line ? { ...lineStyle, alignItems: 'center', gap: 8 } : lineStyle;
   if (!subagent || !nodeId) {
-    return <div data-testid="subagent-summary" style={{ ...lineStyle, ...style }}>{content}</div>;
+    return <div data-testid="subagent-summary" className={className} style={{ ...look, ...style }}>{content}</div>;
   }
   return (
     <button
@@ -175,9 +202,9 @@ export function SubagentSummaryLine({
       aria-haspopup="dialog"
       aria-describedby={hintId}
       title="Show in background work"
-      className="t-hover-bg-alt"
+      className={className ?? 't-hover-bg-alt'}
       onClick={() => openBackgroundWork({ nodeId, focus: { kind: 'subagent', sessionId: subagent.sessionId } })}
-      style={{ ...buttonReset, ...lineStyle, ...style }}
+      style={{ ...buttonReset, ...look, ...style }}
     >
       {/* The line's content is its name (what the agent does or returned); the hint is its description. */}
       {content}
@@ -203,28 +230,102 @@ export function SubagentRow({ subagent }: { subagent: SubagentInfo }) {
   );
 }
 
-/** Subagents in a message that no tool chip claims. */
+/** The count line's groups, in order: each tone the line counts under one word. */
+const COUNT_GROUPS: ReadonlyArray<{ label: string; tones: readonly SubagentTone[]; color?: string }> = [
+  // `in background` still runs: its turn ended, its outcome has not landed.
+  { label: 'working', tones: ['running', 'background'], color: 'var(--term-run)' },
+  { label: 'done', tones: ['completed', 'ended'] },
+  { label: 'failed', tones: ['failed'], color: 'var(--term-danger-text)' },
+  // Cancelled, or interrupted: no live process tracks it any more.
+  { label: 'stopped', tones: ['cancelled'] },
+];
+
+/** "1 working", "6 done", "2 stopped": the groups that hold any agent. */
+function subagentCountParts(counts: Readonly<Record<SubagentTone, number>>) {
+  return COUNT_GROUPS
+    .map((group) => ({ ...group, count: group.tones.reduce((sum, tone) => sum + counts[tone], 0) }))
+    .filter((group) => group.count > 0);
+}
+
+const countLineStyle: React.CSSProperties = {
+  display: 'flex',
+  alignItems: 'center',
+  gap: 10,
+  // The hover fill bleeds past the text column, so the label stays on it.
+  width: 'calc(100% + 12px)',
+  minHeight: 28,
+  margin: '10px -6px 6px',
+  padding: '3px 6px',
+  boxSizing: 'border-box',
+  borderRadius: 'var(--ui-radius)',
+  fontFamily: 'var(--ui-font)',
+  fontSize: 'var(--fs-sm)',
+  color: 'var(--term-mid)',
+  textAlign: 'left',
+};
+
+/**
+ * Subagents in a message that no tool chip claims, as one line of counts:
+ * "SUBAGENTS ● 1 working · 6 done · 2 stopped  Details ›". The line opens
+ * the Background work drawer, which lists each agent; the transcript does
+ * not repeat their results.
+ */
 export function MessageSubagents({ subagents }: { subagents: readonly SubagentInfo[] }) {
+  const nodeId = useBackgroundWorkNodeId();
+  const hintId = useId();
+  const phone = usePhoneLayout();
+  // Counted as the drawer's rows show them, not by each copy's own status.
+  const counts = useSubagentToneCounts(nodeId, subagents);
   if (subagents.length === 0) return null;
-  const working = subagents.filter((subagent) => subagent.status === 'working').length;
-  // The counter fades to its new value; an agent joining the roster grows in.
-  const counter = working > 0 ? `${working} working` : `${subagents.length} done`;
+  const parts = subagentCountParts(counts);
+  const content = (
+    <>
+      <span style={{ flexShrink: 0, fontSize: 'var(--fs-2xs)', letterSpacing: 'var(--ls-caps-wide)', textTransform: 'uppercase', color: 'var(--term-muted)', fontWeight: 500 }}>
+        subagents
+      </span>
+      {/* A count that changes fades to its new value. */}
+      <span style={{ ...ellipsis, flex: '0 1 auto' }}>
+        {parts.map((part, index) => (
+          <React.Fragment key={part.label}>
+            {index > 0 && <span aria-hidden style={{ margin: '0 8px', color: 'var(--term-faint)' }}>·</span>}
+            <FadeOnChange
+              k={`${part.label}:${part.count}`}
+              style={{ display: 'inline-flex', alignItems: 'baseline', gap: 6, color: part.color }}
+            >
+              {part.label === 'working' && <span aria-hidden className="term-dot-i term-dot-i--run" style={{ alignSelf: 'center' }} />}
+              <span style={{ fontFamily: MONO }}>{part.count}</span> {part.label}
+            </FadeOnChange>
+          </React.Fragment>
+        ))}
+      </span>
+    </>
+  );
+  if (!nodeId) {
+    return (
+      <section aria-label={`${subagents.length} subagents`} data-testid="message-subagents" style={countLineStyle}>
+        {content}
+      </section>
+    );
+  }
   return (
-    <section
-      aria-label={`${subagents.length} subagents`}
-      data-testid="message-subagents"
-      style={{ margin: '10px 0 6px', fontFamily: 'var(--ui-font)' }}
-    >
-      <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 6 }}>
-        <span style={{ fontSize: 'var(--fs-2xs)', letterSpacing: 'var(--ls-caps-wide)', textTransform: 'uppercase', color: 'var(--term-muted)', fontWeight: 500 }}>
-          subagents
+    <section aria-label={`${subagents.length} subagents`}>
+      <button
+        type="button"
+        data-testid="message-subagents"
+        aria-haspopup="dialog"
+        aria-describedby={hintId}
+        title="Show in background work"
+        className="t-hover-bg-alt"
+        onClick={() => openBackgroundWork({ nodeId })}
+        // No inline background: Tailwind's preflight leaves buttons transparent, and the class fills it on hover.
+        style={{ border: 0, color: 'inherit', font: 'inherit', cursor: 'pointer', ...countLineStyle }}
+      >
+        {content}
+        <span aria-hidden style={{ flexShrink: 0, marginLeft: 'auto', fontSize: 'var(--fs-xs)', color: 'var(--term-muted)' }}>
+          {phone ? '›' : 'Details ›'}
         </span>
-        <span aria-hidden style={{ flex: 1, borderTop: '1px solid var(--term-line)' }} />
-        <FadeOnChange k={counter} style={{ fontFamily: MONO, fontSize: 'var(--fs-xs)', color: working > 0 ? 'var(--term-accent)' : 'var(--term-muted)' }}>
-          {counter}
-        </FadeOnChange>
-      </div>
-      <RevealList gap={4} rows={subagents.map((subagent) => ({ key: subagent.sessionId, node: <SubagentRow subagent={subagent} /> }))} />
+        <span id={hintId} hidden>Show in background work</span>
+      </button>
     </section>
   );
 }

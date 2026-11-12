@@ -14,10 +14,10 @@ import { formatMichiAge } from '../../michiFormat';
 import { michiOneLine, michiSameText } from '../../michiPlainText';
 import { threadItemProps, type ThreadItemHandlers } from '../../threads/threadItem';
 import { AppTag } from '../CellView';
-import { composing } from '../CellEditor';
 import { applyView, cellEditable, cellOf, isDateValue, isThreadsDb, shownColumns, startValues, titleColumn, type CellValue, type DbGroup } from '../dbModel';
 import { groupName, optionName, viewName } from '../dbLabels';
 import { linkedConversationWaits, useLiveThreads } from '../liveThreads';
+import { isImeComposing } from '../../../../../lib/ime';
 import { addRowOp, boardColumnTakes, boardDropOps, boardDropRefusal, boardKeyValue, boardReorderOps, cellEditLabel, rowMoveBackOp } from '../dbOps';
 import { TaskCardBody, taskCardDescribedBy } from './TaskCard';
 import { GroupHeading, groupSums, RowFacts, rowTitle, useReportDrawn } from './RowBits';
@@ -552,10 +552,11 @@ function NewCardField({ label, onDone }: { label: string; onDone: (text: string 
       onKeyDown={(event) => {
         // The page's keys (Esc leaving it, ↑/↓ moving the peek) stay out of the field.
         event.stopPropagation();
+        if (isImeComposing(event)) return;
         if (event.key === 'Escape') {
           event.preventDefault();
           finish(false, true);
-        } else if (event.key === 'Enter' && !composing(event)) {
+        } else if (event.key === 'Enter') {
           event.preventDefault();
           finish(true, true);
         }

@@ -76,11 +76,6 @@ function copyAssets() {
   writeFileSync(resolve(dist, "crew-node.json"), JSON.stringify({ schemaVersion: 1, node: process.execPath, nodeVersion: process.versions.node }) + "\n");
   copyTree(resolve(root, "src/db/migrations"), resolve(dist, "db/migrations"));
   copyTree(resolve(root, "src/db/auditMigrations"), resolve(dist, "db/auditMigrations"));
-  // The Codex adapter finds its runner beside the bundle (codexFollowUpsHookPoc).
-  copyTree(
-    resolve(root, "../runtime/src/adapters/codex/assets/codexStopHookRunner.cjs"),
-    resolve(dist, "codexStopHookRunner.cjs"),
-  );
 }
 copyAssets();
 
@@ -99,6 +94,8 @@ const baseOptions = {
   },
   external: [
     "node:*",
+    // Native and optional: terminalHost.ts loads it at run time.
+    "node-pty",
   ],
 };
 
@@ -299,20 +296,12 @@ function escapeRegExp(value) {
 
 // Runtime package boundary ratchet (scripts/runtimeBoundary.cjs; see AGENTS.md).
 // New runtime-layer imports of app code, process.env reads in runtime files, or
-// runtime-id comparisons outside adapter directories fail a normal build; the
-// --watch dev loop only warns so a work-in-progress edit never blocks it.
+// runtime-id comparisons outside adapter directories fail a normal build; stale
+// baseline entries never do. The --watch dev loop only warns. buildGate owns the
+// decision so backend/test/runtimeBoundary.test.ts can pin it.
 function checkRuntimeBoundary({ watch }) {
-  const { runCheck } = createRequire(import.meta.url)("./runtimeBoundary.cjs");
-  const result = runCheck();
-  if (!result.hasAdded) {
-    console.log(`[backend] ${result.summary}`);
-    return;
-  }
-  if (watch) {
-    const rule = "!".repeat(78);
-    console.warn(`\n${rule}\n[backend] WARNING: new runtime boundary entries; \`npm run build\` will fail on these.\n\n${result.failure}\n${rule}\n`);
-    return;
-  }
-  console.error(`[backend] ${result.summary}\n\n${result.failure}`);
-  process.exit(1);
+  const { runCheck, buildGate } = createRequire(import.meta.url)("./runtimeBoundary.cjs");
+  const gate = buildGate(runCheck(), { watch });
+  console[gate.level](gate.message);
+  if (gate.exitCode !== 0) process.exit(gate.exitCode);
 }

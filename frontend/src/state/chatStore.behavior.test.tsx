@@ -33,11 +33,16 @@ vi.mock('../services/api', () => ({
   subscribeChat: vi.fn(() => () => {}),
   subscribeChats: vi.fn(() => () => {}),
   subscribeBackground: vi.fn(() => () => {}),
+  reattachTurnReplay: vi.fn(() => () => {}),
   cancelChat: () => Promise.resolve(),
   cancelChatAndObserve: vi.fn(() => () => {}),
+  getSavedTurn: vi.fn(async () => null),
   postArtifactWatchPaths: async () => ({ ok: true }),
   fetchAllWorkspacesMeta: vi.fn(async () => []),
   fetchWorkspace: vi.fn(),
+  fetchWorkspaceStructure: vi.fn(),
+  fetchTreeMessagePage: vi.fn(),
+  fetchTreeMessageSnapshot: vi.fn(),
   fetchNodeWorkspace: vi.fn(async () => null),
   fetchTreeMessages: vi.fn(async () => []),
   listBackendConnections: async () => [],
@@ -49,6 +54,11 @@ vi.mock('../services/api', () => ({
 }));
 
 vi.mock('../services/notifications', () => ({ notify: vi.fn() }));
+vi.mock('../services/attention/policy', async (importOriginal) => ({
+  ...await importOriginal<typeof import('../services/attention/policy')>(),
+  presentAttention: vi.fn(),
+  dismissAttention: vi.fn(),
+}));
 vi.mock('../services/api/sessions', async (importOriginal) => ({
   ...await importOriginal<typeof import('../services/api/sessions')>(),
   executeChatCommand: vi.fn(),
@@ -56,14 +66,40 @@ vi.mock('../services/api/sessions', async (importOriginal) => ({
 vi.mock('../services/digestApi', () => ({
   streamDigest: vi.fn(async () => '# Decisions\n\nKeep the source thread context.'),
 }));
+vi.mock('../services/api/skills', async (importOriginal) => ({
+  ...await importOriginal<typeof import('../services/api/skills')>(),
+  fetchSkillCatalog: vi.fn(),
+}));
+// The history reader (useMessageHistory) reads pages here, not through ../services/api.
+vi.mock('../services/api/persistence', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../services/api/persistence')>();
+  return { ...actual, fetchTreeMessagePage: vi.fn(actual.fetchTreeMessagePage) };
+});
 
 import * as api from '../services/api';
+import * as persistence from '../services/api/persistence';
 import { notify } from '../services/notifications';
+import { dismissAttention, presentAttention, type AttentionIntent } from '../services/attention/policy';
+import { setPanePresenceDashboardVisible } from './panePresenceVisibility';
 import { ChatProvider, useChatStore, useChatNode, useChatNodesSnapshot } from './chatStore';
 import { PrefsProvider } from './prefs';
 import type { ChatNodeState } from './chatTypes';
 import { dispatchChatStreamEvent } from '../services/chatStreamEvents';
 import { ensureSession as ensureSessionRequest, executeChatCommand } from '../services/api/sessions';
+import { turnErrorAction } from './turnErrorRecovery';
+import { receiveServerAttentionFrame, resetServerAttentionStore } from '../services/serverAttentionStore';
+import { agentRunPaneId } from './paneItems';
+import { fetchSkillCatalog } from '../services/api/skills';
+import { loadSkillCatalog, readSkillCatalog, resetSkillCatalogs } from './skillCatalog';
+import { joinMessageParts } from '../lib/commentFormat';
+import { appendAttachmentsSentinel } from '../lib/composerAttachments';
+import { encodeNodeMentionToken } from '../lib/nodeMentionTokens';
+import { getSourceNavState, resetSourceNavForTests } from './sourceNav/sourceNav';
+import type { SkillCatalogResponse } from 'michi-shared';
+
+/** What GET /skills/catalog lists for Claude: the commands its SDK bridge runs. */
+const CLAUDE_COMMANDS = [{ name: 'status' }, { name: 'model', argumentHint: '<model>' }];
+const loadClaudeCommands = () => act(async () => { await loadSkillCatalog('cancel-ws', 'claude'); });
 
 function useStoreAndNodes() {
   const store = useChatStore();
@@ -74,6 +110,22 @@ function useStoreAndNodes() {
 const mockEnsureSession = api.ensureSession as ReturnType<typeof vi.fn>;
 const mockStreamMessage = api.streamMessage as ReturnType<typeof vi.fn>;
 const mockNotify = notify as ReturnType<typeof vi.fn>;
+const mockPresentAttention = vi.mocked(presentAttention);
+
+/** The intents of one kind handed to the attention policy, oldest first. */
+function attentionIntents(kind: AttentionIntent['kind']): AttentionIntent[] {
+  return mockPresentAttention.mock.calls.map(([intent]) => intent).filter((intent) => intent.kind === kind);
+}
+
+/** Whether the intent reports its node visible while this window shows the Dashboard. */
+function visibleOnDashboard(intent: AttentionIntent): boolean {
+  setPanePresenceDashboardVisible(true);
+  try {
+    return intent.isTargetVisible!();
+  } finally {
+    setPanePresenceDashboardVisible(false);
+  }
+}
 
 // Stub matchMedia — jsdom lacks it and some hooks probe for it.
 Object.defineProperty(window, 'matchMedia', {
@@ -112,11 +164,17 @@ describe('auto-branch behavior (real provider)', () => {
     mockStreamMessage.mockReset();
     vi.mocked(api.steerChat).mockReset();
     mockNotify.mockReset();
+    mockPresentAttention.mockReset();
+    vi.mocked(dismissAttention).mockReset();
     vi.mocked(api.cancelChatAndObserve).mockReset().mockImplementation(() => () => {});
     vi.mocked(api.subscribeChat).mockReset().mockImplementation(() => () => {});
+    vi.mocked(api.reattachTurnReplay).mockReset().mockImplementation(() => () => {});
     vi.mocked(api.subscribeBackground).mockReset().mockImplementation(() => () => {});
     vi.mocked(api.fetchAllWorkspacesMeta).mockReset().mockResolvedValue([]);
     vi.mocked(api.fetchWorkspace).mockReset();
+    vi.mocked(api.fetchWorkspaceStructure).mockReset().mockResolvedValue(null);
+    vi.mocked(api.fetchTreeMessagePage).mockReset().mockResolvedValue({ messages: [] });
+    vi.mocked(api.fetchTreeMessageSnapshot).mockReset().mockRejectedValue(new Error('No tree snapshot in this test'));
     vi.mocked(api.fetchNodeWorkspace).mockReset().mockResolvedValue(null);
     vi.mocked(api.fetchTreeMessages).mockReset().mockResolvedValue([]);
     vi.mocked(api.bindPendingPrimaryAgent).mockReset();
@@ -125,6 +183,8 @@ describe('auto-branch behavior (real provider)', () => {
     // Real streamMessage returns a cancel fn AND starts an async stream. For
     // our guard test we only need it to be callable and return a no-op cancel.
     mockStreamMessage.mockImplementation(() => () => {});
+    resetSkillCatalogs();
+    vi.mocked(fetchSkillCatalog).mockReset().mockResolvedValue({ skills: [], errors: [], libraryAvailable: true, commands: CLAUDE_COMMANDS });
     localStorage.clear();
   });
 
@@ -302,6 +362,157 @@ describe('auto-branch behavior (real provider)', () => {
 
     expect(result.current.store.focusedPane).toBeNull();
     expect(result.current.store.focusedNodeId).toBeNull();
+  });
+
+  it('views the pane that takes the focus of a closed pane, not the last one open', async () => {
+    const { result } = renderHook(() => useStoreAndNodes(), { wrapper });
+    await act(async () => { await result.current.store.createProject('test', undefined); });
+    let rootId = '';
+    await act(async () => { rootId = await result.current.store.createThread() ?? ''; });
+    let firstId = '';
+    let secondId = '';
+    await act(async () => { firstId = await result.current.store.createBlankChild(rootId); });
+    await act(async () => { secondId = await result.current.store.createBlankChild(rootId); });
+    let fileId = '';
+    act(() => { fileId = result.current.store.openFilePane('src/a.ts'); });
+    expect(result.current.store.openPanes).toEqual([rootId, firstId, secondId, fileId]);
+
+    act(() => { result.current.store.focusPane(secondId); });
+    act(() => result.current.store.closePane(secondId));
+    expect(result.current.store.focusedPane).toBe(firstId);
+    expect(result.current.store.focusedNodeId).toBe(firstId);
+
+    act(() => { result.current.store.focusPane(fileId); });
+    act(() => result.current.store.closePane(fileId));
+    expect(result.current.store.focusedPane).toBe(firstId);
+    expect(result.current.store.focusedNodeId).toBe(firstId);
+  });
+
+  it('reveals a node in its own thread, scrolled to a message, and refuses an id no workspace holds', async () => {
+    vi.spyOn(window, 'focus').mockImplementation(() => {});
+    const { result } = renderHook(() => useStoreAndNodes(), { wrapper });
+    await act(async () => { await result.current.store.createProject('test', undefined); });
+    let firstRoot = '';
+    await act(async () => { firstRoot = result.current.store.createThread()!; });
+    const firstTree = result.current.store.activeProject!.activeTreeId;
+    await act(async () => { result.current.store.createThread(); });
+    expect(result.current.store.activeProject!.activeTreeId).not.toBe(firstTree);
+    resetSourceNavForTests();
+    let revealed = false;
+    act(() => { revealed = result.current.store.revealNode(firstRoot, { messageId: 'm1' }); });
+    expect(revealed).toBe(true);
+    expect(result.current.store.activeProject!.activeTreeId).toBe(firstTree);
+    expect(result.current.store.focusedPane).toBe(firstRoot);
+    expect(getSourceNavState().jump).toMatchObject({ nodeId: firstRoot, messageId: 'm1' });
+
+    act(() => { revealed = result.current.store.revealNode('missing'); });
+    expect(revealed).toBe(false);
+    expect(result.current.store.openPanes).not.toContain('missing');
+  });
+
+  it('reveals a restored thread in its own slot, not in the thread shown after the delete', async () => {
+    vi.spyOn(window, 'focus').mockImplementation(() => {});
+    const { result } = renderHook(() => useStoreAndNodes(), { wrapper });
+    await act(async () => { await result.current.store.createProject('test', undefined); });
+    let deletedRoot = '';
+    await act(async () => { deletedRoot = result.current.store.createThread()!; });
+    const deletedTree = result.current.store.activeProject!.activeTreeId!;
+    let shownRoot = '';
+    await act(async () => { shownRoot = result.current.store.createThread()!; });
+    const shownTree = result.current.store.activeProject!.activeTreeId!;
+    act(() => { result.current.store.activateTree(deletedTree); });
+    act(() => { result.current.store.deleteTree(deletedTree); });
+    expect(result.current.store.activeProject!.activeTreeId).toBe(shownTree);
+
+    let restored: string | null = null;
+    act(() => { restored = result.current.store.restoreLastDeletion(); });
+    expect(restored).toBe(deletedRoot);
+    act(() => { result.current.store.revealNode(deletedRoot); });
+
+    expect(result.current.store.activeProject!.activeTreeId).toBe(deletedTree);
+    expect(result.current.store.openPanes).toContain(deletedRoot);
+    expect(result.current.store.focusedPane).toBe(deletedRoot);
+    act(() => { result.current.store.activateTree(shownTree); });
+    expect(result.current.store.openPanes).toEqual([shownRoot]);
+  });
+
+  it('stops treating the chat as viewed when a link re-opens its already open file pane', async () => {
+    const { result } = renderHook(() => useStoreAndNodes(), { wrapper });
+    await act(async () => { await result.current.store.createProject('test', undefined); });
+    let rootId = '';
+    await act(async () => { rootId = await result.current.store.createThread() ?? ''; });
+    let firstPaneId = '';
+    act(() => { result.current.store.setFocusedNodeId(rootId); });
+    act(() => { firstPaneId = result.current.store.openFilePane('src/a.ts:10', { parseSourceLocation: true }); });
+    expect(result.current.store.focusedNodeId).toBeNull();
+
+    // The second link's mousedown lands on the chat pane first.
+    act(() => { result.current.store.setFocusedNodeId(rootId); });
+    let secondPaneId = '';
+    act(() => { secondPaneId = result.current.store.openFilePane('src/a.ts:50', { parseSourceLocation: true }); });
+
+    expect(secondPaneId).toBe(firstPaneId);
+    expect(result.current.store.focusedPane).toBe(firstPaneId);
+    expect(result.current.store.focusedNodeId).toBeNull();
+  });
+
+  // Ctrl+Tab, a caption or tab, the phone switcher and a caption's zoom all
+  // switch panes this way: the chat switched to is the one being viewed.
+  it('views the chat a pane switch lands on, and no chat after a switch to another pane', async () => {
+    const { result } = renderHook(() => useStoreAndNodes(), { wrapper });
+    await act(async () => { await result.current.store.createProject('test', undefined); });
+    let rootId = '';
+    await act(async () => { rootId = await result.current.store.createThread() ?? ''; });
+    let childId = '';
+    await act(async () => { childId = await result.current.store.createBlankChild(rootId); });
+    let fileId = '';
+    act(() => { fileId = result.current.store.openFilePane('src/a.ts'); });
+    expect(result.current.store.focusedNodeId).toBeNull();
+
+    act(() => { result.current.store.focusPane(rootId); });
+    expect(result.current.store.focusedNodeId).toBe(rootId);
+
+    act(() => { result.current.store.focusPane(fileId); });
+    expect(result.current.store.focusedPane).toBe(fileId);
+    expect(result.current.store.focusedNodeId).toBeNull();
+
+    act(() => { result.current.store.closePane(childId); });
+    act(() => { result.current.store.openPane(childId); });
+    expect(result.current.store.focusedNodeId).toBe(childId);
+
+    act(() => { result.current.store.zoomPane(fileId); });
+    expect(result.current.store.focusedNodeId).toBeNull();
+    act(() => { result.current.store.zoomPane(rootId); });
+    expect(result.current.store.focusedPane).toBe(rootId);
+    expect(result.current.store.focusedNodeId).toBe(rootId);
+  });
+
+  it('views the new branch a branch gesture moves the focus to, and keeps the chat a background branch leaves', async () => {
+    const { result } = renderHook(() => useStoreAndNodes(), { wrapper });
+    await act(async () => { await result.current.store.createProject('test', undefined); });
+    let rootId = '';
+    await act(async () => { rootId = await result.current.store.createThread() ?? ''; });
+    expect(result.current.store.focusedNodeId).toBe(rootId);
+
+    let blankId = '';
+    await act(async () => { blankId = await result.current.store.createBlankChild(rootId); });
+    expect(result.current.store.focusedPane).toBe(blankId);
+    expect(result.current.store.focusedNodeId).toBe(blankId);
+
+    let childId = '';
+    await act(async () => { childId = await result.current.store.createChildChat(rootId, 'branch off'); });
+    expect(result.current.store.focusedPane).toBe(childId);
+    expect(result.current.store.focusedNodeId).toBe(childId);
+
+    let tangentId = '';
+    await act(async () => { tangentId = await result.current.store.createChildChat(rootId, 'tangent', undefined, { focus: false }); });
+    expect(result.current.store.openPanes).toContain(tangentId);
+    expect(result.current.store.focusedNodeId).toBe(childId);
+
+    let fanned: string[] = [];
+    await act(async () => { fanned = await result.current.store.fanoutBranches(rootId, ['a', 'b']); });
+    expect(result.current.store.focusedPane).toBe(fanned[0]);
+    expect(result.current.store.focusedNodeId).toBe(fanned[0]);
   });
 
   it('sendMessage on a streaming node does NOT call streamMessage (guard fires)', async () => {
@@ -566,6 +777,25 @@ describe('auto-branch behavior (real provider)', () => {
     };
   }
 
+  type Snapshot = ReturnType<typeof scheduledSnapshot>;
+  // A node read is its workspace's structure, then one page of the node. Each
+  // page here comes from the snapshot the latest structure read returned.
+  let servedSnapshot: Snapshot | undefined;
+  function serveNodeReads(reads: Array<Snapshot | Promise<unknown>>, otherwise?: Snapshot) {
+    const structure = vi.mocked(api.fetchWorkspaceStructure);
+    if (otherwise) structure.mockImplementation(async () => { servedSnapshot = otherwise; return otherwise; });
+    for (const read of reads) {
+      structure.mockImplementationOnce(async () => {
+        const snapshot = await read as Snapshot;
+        servedSnapshot = snapshot;
+        return snapshot;
+      });
+    }
+    vi.mocked(api.fetchTreeMessagePage).mockImplementation(async (_workspaceId, _treeId, _connectionId, _signal, page) => ({
+      messages: (servedSnapshot?.messages ?? []).filter((row) => row.node_id === page?.nodeId),
+    }));
+  }
+
   function scheduledEvent(nodeId: string, phase: 'started' | 'finished') {
     const options = vi.mocked(api.subscribeBackground).mock.calls.at(-1)![1]!;
     options.onScheduledJobRun?.({ phase, runId: 'scheduled-run', jobId: 'scheduled-job', jobName: 'Scheduled job',
@@ -578,13 +808,14 @@ describe('auto-branch behavior (real provider)', () => {
     await waitFor(() => expect(result.current.node?.messages).toHaveLength(2));
     let finishStart!: (value: unknown) => void;
     let finishFinal!: (value: unknown) => void;
-    vi.mocked(api.fetchWorkspace)
-      .mockImplementationOnce(() => new Promise(resolve => { finishStart = resolve; }))
-      .mockImplementationOnce(() => new Promise(resolve => { finishFinal = resolve; }));
+    serveNodeReads([
+      new Promise(resolve => { finishStart = resolve; }),
+      new Promise(resolve => { finishFinal = resolve; }),
+    ]);
     act(() => { scheduledEvent('scheduled-node', 'started'); });
-    expect(api.fetchWorkspace).toHaveBeenCalledTimes(1);
+    expect(api.fetchWorkspaceStructure).toHaveBeenCalledTimes(1);
     act(() => { scheduledEvent('scheduled-node', 'finished'); });
-    expect(api.fetchWorkspace).toHaveBeenCalledTimes(2);
+    expect(api.fetchWorkspaceStructure).toHaveBeenCalledTimes(2);
     let opened!: Promise<boolean>;
     const focus = vi.spyOn(window, 'focus').mockImplementation(() => {});
     try {
@@ -599,6 +830,24 @@ describe('auto-branch behavior (real provider)', () => {
     expect(scheduled.status).toBe('idle');
     expect(assistantAnswerRaw(scheduled)).toBe('final answer');
     expect(scheduled.lastAppliedBackgroundSeq).toBe(8);
+    // The superseded start read never asked for the node's page.
+    expect(api.fetchTreeMessagePage).toHaveBeenCalledTimes(1);
+    expect(api.fetchTreeMessagePage).toHaveBeenCalledWith('cancel-ws', 'scheduled-tree', undefined, expect.any(AbortSignal), { nodeId: 'scheduled-node', limit: 50 });
+    expect(api.fetchWorkspace).not.toHaveBeenCalled();
+  });
+
+  it('cancels a scheduled run\'s read once its finish supersedes it, or the window goes', async () => {
+    const { result, unmount } = hydratedCancellationNode('idle');
+    await waitFor(() => expect(result.current.node?.messages).toHaveLength(2));
+    serveNodeReads([new Promise(() => {}), new Promise(() => {})]);
+    const readSignal = (call: number) => vi.mocked(api.fetchWorkspaceStructure).mock.calls[call][1]!;
+    act(() => { scheduledEvent('scheduled-node', 'started'); });
+    expect(readSignal(0).aborted).toBe(false);
+    act(() => { scheduledEvent('scheduled-node', 'finished'); });
+    expect(readSignal(0).aborted).toBe(true);
+    expect(readSignal(1).aborted).toBe(false);
+    unmount();
+    expect(readSignal(1).aborted).toBe(true);
   });
 
   describe('a conversation another device started after this window loaded', () => {
@@ -614,9 +863,10 @@ describe('auto-branch behavior (real provider)', () => {
       const { result } = hydratedCancellationNode('idle');
       await waitFor(() => expect(result.current.node?.messages).toHaveLength(2));
       vi.mocked(api.fetchNodeWorkspace).mockResolvedValue({ workspaceId: 'cancel-ws', treeId: 'scheduled-tree' });
-      vi.mocked(api.fetchWorkspace)
-        .mockResolvedValueOnce(scheduledSnapshot('phone-node', 'streaming', 'partial', 1))
-        .mockResolvedValueOnce(scheduledSnapshot('phone-node', 'idle', 'final phone answer', 8));
+      serveNodeReads([
+        scheduledSnapshot('phone-node', 'streaming', 'partial', 1),
+        scheduledSnapshot('phone-node', 'idle', 'final phone answer', 8),
+      ]);
       act(() => { frame(start); frame({ event: 'chunk', data: { ...envelope, seq: 1, text: 'partial' } }); });
       await waitFor(() => expect(result.current.nodes['phone-node']?.status).toBe('streaming'));
       expect(api.fetchNodeWorkspace).toHaveBeenCalledTimes(1);
@@ -625,7 +875,7 @@ describe('auto-branch behavior (real provider)', () => {
       expect(workspace?.trees.map(tree => tree.id)).toContain('scheduled-tree');
       act(() => { frame({ event: 'chunk', data: { ...envelope, seq: 2, text: ' more' } }); frame(done); });
       await waitFor(() => expect(assistantAnswerRaw(result.current.nodes['phone-node'])).toBe('final phone answer'));
-      expect(api.fetchWorkspace).toHaveBeenCalledTimes(2);
+      expect(api.fetchWorkspaceStructure).toHaveBeenCalledTimes(2);
       expect(result.current.nodes['phone-node'].status).toBe('idle');
       expect(result.current.nodes['phone-node'].lastAppliedBackgroundSeq).toBe(8);
     });
@@ -635,15 +885,16 @@ describe('auto-branch behavior (real provider)', () => {
       await waitFor(() => expect(result.current.node?.messages).toHaveLength(2));
       let finishFirst!: (value: unknown) => void;
       vi.mocked(api.fetchNodeWorkspace).mockResolvedValue({ workspaceId: 'cancel-ws', treeId: 'scheduled-tree' });
-      vi.mocked(api.fetchWorkspace)
-        .mockImplementationOnce(() => new Promise(resolve => { finishFirst = resolve; }))
-        .mockResolvedValueOnce(scheduledSnapshot('phone-node', 'idle', 'final phone answer', 8));
+      serveNodeReads([
+        new Promise(resolve => { finishFirst = resolve; }),
+        scheduledSnapshot('phone-node', 'idle', 'final phone answer', 8),
+      ]);
       act(() => { frame(start); });
-      await waitFor(() => expect(api.fetchWorkspace).toHaveBeenCalledTimes(1));
+      await waitFor(() => expect(api.fetchWorkspaceStructure).toHaveBeenCalledTimes(1));
       act(() => { frame(done); });
       await act(async () => { finishFirst(scheduledSnapshot('phone-node', 'streaming', 'partial', 1)); });
       await waitFor(() => expect(result.current.nodes['phone-node']?.status).toBe('idle'));
-      expect(api.fetchWorkspace).toHaveBeenCalledTimes(2);
+      expect(api.fetchWorkspaceStructure).toHaveBeenCalledTimes(2);
       expect(assistantAnswerRaw(result.current.nodes['phone-node'])).toBe('final phone answer');
     });
 
@@ -655,7 +906,7 @@ describe('auto-branch behavior (real provider)', () => {
       act(() => { frame({ event: 'chunk', data: { ...envelope, seq: 2, text: 'y' } }); frame(done); });
       await act(async () => {});
       expect(api.fetchNodeWorkspace).toHaveBeenCalledTimes(1);
-      expect(api.fetchWorkspace).not.toHaveBeenCalled();
+      expect(api.fetchWorkspaceStructure).not.toHaveBeenCalled();
       expect(result.current.nodes['phone-node']).toBeUndefined();
     });
   });
@@ -663,11 +914,11 @@ describe('auto-branch behavior (real provider)', () => {
   it('preserves a cold command and its SDK state while a scheduled refresh converges', async () => {
     const { result } = hydratedCancellationNode('idle');
     await waitFor(() => expect(result.current.node?.messages).toHaveLength(2));
+    await loadClaudeCommands();
     let finishSnapshot!: (value: unknown) => void;
     let finishCommand!: (value: Awaited<ReturnType<typeof executeChatCommand>>) => void;
-    vi.mocked(api.fetchWorkspace)
-      .mockImplementationOnce(() => new Promise(resolve => { finishSnapshot = resolve; }))
-      .mockResolvedValue(scheduledSnapshot('cancel-node', 'idle', 'final answer', 8, 'opus'));
+    serveNodeReads([new Promise(resolve => { finishSnapshot = resolve; })],
+      scheduledSnapshot('cancel-node', 'idle', 'final answer', 8, 'opus'));
     vi.mocked(executeChatCommand).mockImplementationOnce(() => new Promise(resolve => { finishCommand = resolve; }));
     mockEnsureSession.mockResolvedValueOnce({ chatId: 'cancel-node', currentModeId: null, resumeStrategy: 'exact',
       runtimeId: 'claude', modelId: 'opus', sessionState: { runtimeId: 'claude', nativeEngine: 'agent-sdk', modelId: 'opus' } });
@@ -689,9 +940,8 @@ describe('auto-branch behavior (real provider)', () => {
     const { result } = hydratedCancellationNode('idle');
     await waitFor(() => expect(result.current.node?.messages).toHaveLength(2));
     let finishSnapshot!: (value: unknown) => void;
-    vi.mocked(api.fetchWorkspace)
-      .mockImplementationOnce(() => new Promise(resolve => { finishSnapshot = resolve; }))
-      .mockResolvedValue(scheduledSnapshot('cancel-node', 'idle', 'final background answer', 8));
+    serveNodeReads([new Promise(resolve => { finishSnapshot = resolve; })],
+      scheduledSnapshot('cancel-node', 'idle', 'final background answer', 8));
     act(() => { scheduledEvent('cancel-node', 'finished'); });
     const handlers = backgroundForCancellationNode();
     act(() => {
@@ -706,15 +956,134 @@ describe('auto-branch behavior (real provider)', () => {
       } }, handlers);
     });
     await act(async () => { finishSnapshot(scheduledSnapshot('cancel-node', 'streaming', 'stale partial', 2)); });
-    await waitFor(() => expect(api.fetchWorkspace).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(api.fetchWorkspaceStructure).toHaveBeenCalledTimes(2));
     expect(result.current.node?.status).toBe('idle');
     expect(result.current.node?.lastAppliedBackgroundSeq).toBe(8);
     expect(assistantAnswerRaw(result.current.node)).toBe('final background answer');
   });
 
+  describe('a background replay gap', () => {
+    const structureRow = (id: string, treeId = 'cancel-tree') => ({
+      id, tree_id: treeId, status: 'idle', acp_session_id: 'native', runtime_id: 'claude',
+      last_applied_turn_id: 'old-foreground', last_applied_seq: 1, message_count: 2,
+    });
+    const structure = (rows = [structureRow('cancel-node'), structureRow('sibling-node')]) => ({
+      workspace: { id: 'cancel-ws', name: 'Cancellation', created_at: 1, active_tree_id: 'cancel-tree' },
+      trees: [{ id: 'cancel-tree', root_node_id: 'cancel-node', created_at: 1, last_active_at: 1 }],
+      nodes: rows, edges: [], messages: [], contexts: [],
+    });
+    const gap = { chatId: 'cancel-node', nodeId: 'cancel-node', turnId: 'gap-turn', seq: 4 };
+
+    function hydratedPair() {
+      vi.mocked(api.fetchAllWorkspacesMeta).mockResolvedValue([{
+        ...structure(),
+        messages: ['cancel-node', 'sibling-node'].flatMap((id) => [
+          { id: `${id}-u`, node_id: id, role: 'user', content: 'earlier prompt', seq: 0 },
+          { id: `${id}-a`, node_id: id, role: 'assistant', content: 'partial', seq: 1 },
+        ]),
+      }]);
+      return renderHook(() => ({ store: useChatStore(), node: useChatNode('cancel-node'), nodes: useChatNodesSnapshot() }), { wrapper });
+    }
+    const options = () => vi.mocked(api.subscribeBackground).mock.calls.at(-1)![1]!;
+
+    it('installs from the structure and one page of the node, and output elsewhere does not restart the read', async () => {
+      const { result } = hydratedPair();
+      await waitFor(() => expect(result.current.nodes['sibling-node']?.messages).toHaveLength(2));
+      let finishStructure!: (value: unknown) => void;
+      vi.mocked(api.fetchWorkspaceStructure).mockImplementationOnce(() => new Promise(resolve => { finishStructure = resolve; }));
+      vi.mocked(api.fetchTreeMessagePage).mockResolvedValueOnce({
+        messages: [
+          { id: 'cancel-node-u', node_id: 'cancel-node', role: 'user', content: 'earlier prompt', seq: 0 },
+          { id: 'cancel-node-a', node_id: 'cancel-node', role: 'assistant', content: 'durable answer', seq: 1 },
+        ],
+        pages: [{ nodeId: 'cancel-node', total: 2, before: null }],
+        turns: [{ node_id: 'cancel-node', turn_id: 'gap-turn', status: 'completed', last_seq: 9, error: null, completed_at: 5 }],
+      });
+      const controller = new AbortController();
+      let installed!: Promise<unknown>;
+      act(() => { installed = Promise.resolve(options().onReplayGap!(gap, controller.signal)); });
+      await waitFor(() => expect(api.fetchWorkspaceStructure).toHaveBeenCalledTimes(1));
+      // Another node streams while the structure read is in flight.
+      const sibling = vi.mocked(api.subscribeBackground).mock.calls.at(-1)![0]('sibling-node', 'sibling-node');
+      const envelope = { chatId: 'sibling-node', nodeId: 'sibling-node', turnId: 'sibling-turn', assistantId: 'sibling-a' };
+      act(() => {
+        dispatchChatStreamEvent({ event: 'turn_start', data: { ...envelope, seq: 0, userText: 'go' } }, sibling);
+        dispatchChatStreamEvent({ event: 'chunk', data: { ...envelope, seq: 1, text: 'streaming elsewhere' } }, sibling);
+      });
+      await act(async () => {
+        finishStructure(structure());
+        await expect(installed).resolves.toEqual({ turnId: 'gap-turn', seq: 9 });
+      });
+      expect(api.fetchWorkspaceStructure).toHaveBeenCalledTimes(1);
+      expect(api.fetchTreeMessagePage).toHaveBeenCalledTimes(1);
+      expect(api.fetchTreeMessagePage).toHaveBeenCalledWith('cancel-ws', 'cancel-tree', undefined, controller.signal,
+        { nodeId: 'cancel-node', limit: 50 });
+      expect(api.fetchWorkspace).not.toHaveBeenCalled();
+      expect(assistantAnswerRaw(result.current.node)).toBe('durable answer');
+      expect(result.current.node).toMatchObject({ status: 'idle', lastAppliedBackgroundTurnId: 'gap-turn', lastAppliedBackgroundSeq: 9 });
+      expect(result.current.nodes['sibling-node'].status).toBe('streaming');
+    });
+
+    it('installs nothing for a node its workspace no longer lists', async () => {
+      const { result } = hydratedPair();
+      await waitFor(() => expect(result.current.node?.messages).toHaveLength(2));
+      const before = result.current.node;
+      vi.mocked(api.fetchWorkspaceStructure).mockResolvedValueOnce(structure([structureRow('sibling-node')]));
+      await act(async () => {
+        await expect(options().onReplayGap!(gap, new AbortController().signal)).resolves.toBeUndefined();
+      });
+      expect(api.fetchTreeMessagePage).not.toHaveBeenCalled();
+      expect(result.current.node).toBe(before);
+    });
+
+    it('waits for a host command on the node before reading, as a scheduled run\'s install does', async () => {
+      const { result } = hydratedCancellationNode('idle');
+      await waitFor(() => expect(result.current.node?.messages).toHaveLength(2));
+      await loadClaudeCommands();
+      let finishCommand!: (value: Awaited<ReturnType<typeof executeChatCommand>>) => void;
+      vi.mocked(executeChatCommand).mockImplementationOnce(() => new Promise(resolve => { finishCommand = resolve; }));
+      mockEnsureSession.mockResolvedValueOnce({ chatId: 'cancel-node', currentModeId: null, resumeStrategy: 'exact', runtimeId: 'claude' });
+      await act(async () => { result.current.store.sendMessage('cancel-node', '/model opus'); });
+      expect(result.current.node?.commandResult?.status).toBe('running');
+      vi.mocked(api.fetchWorkspaceStructure).mockResolvedValue(structure());
+      vi.mocked(api.fetchTreeMessagePage).mockResolvedValue({
+        messages: [
+          { id: 'old-user', node_id: 'cancel-node', role: 'user', content: 'earlier prompt', seq: 0 },
+          { id: 'old-a', node_id: 'cancel-node', role: 'assistant', content: 'durable answer', seq: 1 },
+        ],
+        pages: [{ nodeId: 'cancel-node', total: 2, before: null }],
+      });
+      let installed!: Promise<unknown>;
+      act(() => { installed = Promise.resolve(options().onReplayGap!(gap, new AbortController().signal)); });
+      await act(async () => { await new Promise((resolve) => setTimeout(resolve, 120)); });
+      expect(api.fetchWorkspaceStructure).not.toHaveBeenCalled();
+      await act(async () => { finishCommand({ success: true, message: 'Model changed.' }); });
+      await act(async () => { await installed; });
+      expect(api.fetchWorkspaceStructure).toHaveBeenCalledTimes(1);
+      expect(result.current.node?.commandResult).toMatchObject({ status: 'completed', message: 'Model changed.' });
+    });
+
+    it('reads the structure again when the page lacks the node, and stops once it moved threads', async () => {
+      const { result } = hydratedPair();
+      await waitFor(() => expect(result.current.node?.messages).toHaveLength(2));
+      const before = result.current.node;
+      vi.mocked(api.fetchWorkspaceStructure)
+        .mockResolvedValueOnce(structure())
+        .mockResolvedValueOnce(structure([structureRow('cancel-node', 'extracted-tree'), structureRow('sibling-node')]));
+      vi.mocked(api.fetchTreeMessagePage).mockResolvedValueOnce({ messages: [], pages: [], turns: [] });
+      await act(async () => {
+        await expect(options().onReplayGap!(gap, new AbortController().signal)).resolves.toBeUndefined();
+      });
+      expect(api.fetchWorkspaceStructure).toHaveBeenCalledTimes(2);
+      expect(api.fetchTreeMessagePage).toHaveBeenCalledTimes(1);
+      expect(result.current.node).toBe(before);
+    });
+  });
+
   it('restores a cold Claude session before a host command without adding transcript messages', async () => {
     const { result } = hydratedCancellationNode('idle');
     await waitFor(() => expect(result.current.node?.messages).toHaveLength(2));
+    await loadClaudeCommands();
     let finish!: (value: api.EnsureSessionResult) => void;
     mockEnsureSession.mockImplementationOnce(() => new Promise(resolve => { finish = resolve; }));
     act(() => { result.current.store.sendMessage('cancel-node', '/status'); });
@@ -733,6 +1102,7 @@ describe('auto-branch behavior (real provider)', () => {
   it('initializes a never-sent anchored child through the durable graph before a Claude command', async () => {
     const { result } = hydratedCancellationNode('idle');
     await waitFor(() => expect(result.current.node?.messages).toHaveLength(2));
+    await loadClaudeCommands();
     let childId = '';
     await act(async () => { childId = await result.current.store.createBlankChild('cancel-node', { anchorMessageId: 'old-a' }); });
     await act(async () => { result.current.store.sendMessage(childId, '/model claude-sonnet-4-6', { runtimeId: 'claude' }); });
@@ -747,15 +1117,247 @@ describe('auto-branch behavior (real provider)', () => {
     expect(mockStreamMessage).not.toHaveBeenCalled();
   });
 
+  it('runs a cold chat’s command once its runtime’s catalog first answers, sent before that answer', async () => {
+    const { result } = hydratedCancellationNode('idle');
+    await waitFor(() => expect(result.current.node?.messages).toHaveLength(2));
+    let respond!: (value: SkillCatalogResponse) => void;
+    vi.mocked(fetchSkillCatalog).mockReturnValueOnce(new Promise((resolve) => { respond = resolve; }));
+    act(() => { result.current.store.sendMessage('cancel-node', '/status'); });
+    expect(mockEnsureSession).not.toHaveBeenCalled();
+    // The commands come at once, while Claude is still listing its skills.
+    await act(async () => { respond({ skills: [], errors: [], libraryAvailable: true, commands: CLAUDE_COMMANDS, pending: ['claude'] }); });
+    await waitFor(() => expect(executeChatCommand).toHaveBeenCalledWith('cancel-node', 'status', undefined));
+    expect(mockStreamMessage).not.toHaveBeenCalled();
+    expect(result.current.node?.messages).toHaveLength(2);
+  });
+
+  it('sends a /word in the assistant’s conversation at once while its runtime is still listing skills, which run nowhere there', async () => {
+    vi.mocked(api.fetchAllWorkspacesMeta).mockResolvedValue([{
+      workspace: { id: 'cancel-ws', name: 'Assistant', created_at: 1, active_tree_id: 'cancel-tree', settings: JSON.stringify({ system: 'assistant' }) },
+      trees: [{ id: 'cancel-tree', root_node_id: 'cancel-node', created_at: 1, last_active_at: 1 }],
+      nodes: [{ id: 'cancel-node', status: 'idle', acp_session_id: 'native-session', runtime_id: 'claude' }],
+      messages: [],
+    }]);
+    const { result } = renderHook(() => ({ store: useChatStore(), node: useChatNode('cancel-node') }), { wrapper });
+    await waitFor(() => expect(result.current.node).toBeDefined());
+    vi.mocked(fetchSkillCatalog).mockResolvedValueOnce({ skills: [], errors: [], libraryAvailable: true, commands: CLAUDE_COMMANDS, pending: ['claude'] });
+    await loadClaudeCommands();
+    vi.mocked(fetchSkillCatalog).mockReturnValue(new Promise(() => {}));
+    await act(async () => { result.current.store.sendMessage('cancel-node', '/plan the week'); });
+    await waitFor(() => expect(mockStreamMessage).toHaveBeenCalledTimes(1));
+    expect(mockStreamMessage.mock.calls[0][1]).toBe('/plan the week');
+    expect(fetchSkillCatalog).toHaveBeenCalledTimes(1);
+  });
+
   it('does not execute a Claude command after its session restore fails', async () => {
     const { result } = hydratedCancellationNode('idle');
     await waitFor(() => expect(result.current.node?.messages).toHaveLength(2));
+    await loadClaudeCommands();
     mockEnsureSession.mockRejectedValueOnce(new Error('Native restore failed'));
     await act(async () => { result.current.store.sendMessage('cancel-node', '/status'); });
     await waitFor(() => expect(result.current.node?.commandResult).toMatchObject({ status: 'error', message: 'Native restore failed' }));
     expect(executeChatCommand).not.toHaveBeenCalled();
     expect(mockStreamMessage).not.toHaveBeenCalled();
     expect(result.current.node?.messages).toHaveLength(2);
+    act(() => { result.current.store.sendMessage('cancel-node', 'next prompt'); });
+    expect(result.current.node?.commandResult).toBeUndefined();
+  });
+
+  describe('a message that names a skill', () => {
+    const review = { id: 'library:review', name: 'review', description: 'Review a change', origin: 'library' as const,
+      userInvocable: true, modelInvocable: true, enabled: true };
+
+    async function kiroThread() {
+      vi.mocked(fetchSkillCatalog).mockReset().mockResolvedValue({ skills: [review], errors: [], libraryAvailable: true, commands: [{ name: 'context' }] });
+      mockEnsureSession.mockImplementation(() => Promise.resolve({ chatId: 'fake-chat', currentModeId: null, resumeStrategy: 'fresh', runtimeId: 'kiro' }));
+      const { result } = renderHook(() => useStoreAndNodes(), { wrapper });
+      await act(async () => { await result.current.store.createProject('skills'); });
+      let nodeId = '';
+      await act(async () => { nodeId = result.current.store.createThread()!; });
+      await act(async () => { await loadSkillCatalog(result.current.store.activeProject!.id, 'kiro'); });
+      return { result, nodeId };
+    }
+
+    it('runs it as a turn with the arguments as its text, and a /word nothing runs as a message', async () => {
+      const { result, nodeId } = await kiroThread();
+      await act(async () => {
+        result.current.store.sendMessage(nodeId, joinMessageParts(null, 'old code', '/review src/app.ts'),
+          { displayText: '/review src/app.ts', quotedText: 'old code', runtimeId: 'kiro' });
+      });
+      await waitFor(() => expect(mockStreamMessage).toHaveBeenCalledTimes(1));
+      const [, text, handlers, options] = mockStreamMessage.mock.calls[0];
+      expect(text).toBe(joinMessageParts(null, 'old code', 'src/app.ts'));
+      expect(options).toMatchObject({ displayText: '/review src/app.ts', userMetadata: { quotedText: 'old code' } });
+      expect(options.skill).toEqual({ id: 'library:review', name: 'review', args: 'src/app.ts' });
+      expect(executeChatCommand).not.toHaveBeenCalled();
+      expect(result.current.nodes[nodeId].messages.find((message) => message.role === 'user')).toMatchObject({
+        text: '/review src/app.ts', quotedText: 'old code',
+        skill: { id: 'library:review', name: 'review', origin: 'library', args: 'src/app.ts' },
+      });
+
+      act(() => { handlers.onDone?.(); });
+      await act(async () => { result.current.store.sendMessage(nodeId, '/unknown', { runtimeId: 'kiro' }); });
+      await waitFor(() => expect(mockStreamMessage).toHaveBeenCalledTimes(2));
+      expect(mockStreamMessage.mock.calls[1][1]).toBe('/unknown');
+      expect(mockStreamMessage.mock.calls[1][3].skill).toBeUndefined();
+      act(() => { mockStreamMessage.mock.calls[1][2].onDone?.(); });
+      await act(async () => { result.current.store.sendMessage(nodeId, '/context', { runtimeId: 'kiro' }); });
+      await waitFor(() => expect(executeChatCommand).toHaveBeenCalledWith(nodeId, 'context', undefined));
+      expect(mockStreamMessage).toHaveBeenCalledTimes(2);
+    });
+
+    it('waits for a first catalog answer before running a typed name the live session runs as its own skill, so the library skill wins', async () => {
+      mockEnsureSession.mockImplementation(() => Promise.resolve({ chatId: 'fake-chat', currentModeId: null, resumeStrategy: 'fresh', runtimeId: 'kiro',
+        sessionState: { runtimeId: 'kiro', commands: [{ name: 'review', kind: 'skill' }] } }));
+      const { result } = renderHook(() => useStoreAndNodes(), { wrapper });
+      await act(async () => { await result.current.store.createProject('skills'); });
+      let nodeId = '';
+      await act(async () => { nodeId = result.current.store.createThread()!; });
+      await act(async () => { result.current.store.sendMessage(nodeId, 'first', { runtimeId: 'kiro' }); });
+      await waitFor(() => expect(result.current.nodes[nodeId].agentCommands).toEqual([{ name: 'review', kind: 'skill' }]));
+      act(() => { mockStreamMessage.mock.calls[0][2].onDone?.(); });
+
+      let respond!: (value: SkillCatalogResponse) => void;
+      vi.mocked(fetchSkillCatalog).mockReturnValueOnce(new Promise((resolve) => { respond = resolve; }));
+      await act(async () => { result.current.store.sendMessage(nodeId, '/review 1', { runtimeId: 'kiro' }); });
+      expect(mockStreamMessage).toHaveBeenCalledTimes(1);
+      await act(async () => { respond({ skills: [review], errors: [], libraryAvailable: true, commands: [], pending: ['kiro'] }); });
+      await waitFor(() => expect(mockStreamMessage).toHaveBeenCalledTimes(2));
+      expect(mockStreamMessage.mock.calls[1][3].skill).toEqual({ id: 'library:review', name: 'review', args: '1' });
+    });
+
+    it('resolves a /name against the runtime whose menu the composer showed', async () => {
+      const { result, nodeId } = await kiroThread();
+      vi.mocked(fetchSkillCatalog).mockResolvedValueOnce({ skills: [], errors: [], libraryAvailable: true, commands: CLAUDE_COMMANDS });
+      await act(async () => { await loadSkillCatalog(result.current.store.activeProject!.id, 'claude'); });
+      await act(async () => { result.current.store.sendMessage(nodeId, '/status', { slashRuntimeId: 'claude' }); });
+      await waitFor(() => expect(executeChatCommand).toHaveBeenCalledWith(nodeId, 'status', undefined));
+      expect(mockStreamMessage).not.toHaveBeenCalled();
+    });
+
+    it('runs the skill row picked for a name a command also has', async () => {
+      const { result, nodeId } = await kiroThread();
+      const contextSkill = { ...review, id: 'library:context', name: 'context' };
+      const entry = { name: 'context', source: 'skill' as const, takesArgs: true,
+        skill: { id: contextSkill.id, name: 'context', origin: 'library' as const } };
+      await act(async () => {
+        result.current.store.sendMessage(nodeId, '/context the plan', { runtimeId: 'kiro', slash: { entry, runtimeId: 'kiro' } });
+      });
+      await waitFor(() => expect(mockStreamMessage).toHaveBeenCalledTimes(1));
+      expect(mockStreamMessage.mock.calls[0][3].skill).toEqual({ id: 'library:context', name: 'context', args: 'the plan' });
+      expect(executeChatCommand).not.toHaveBeenCalled();
+    });
+
+    it('drains a queued skill as its own turn, not merged with the message after it', async () => {
+      const { result, nodeId } = await kiroThread();
+      await act(async () => { result.current.store.sendMessage(nodeId, 'first', { runtimeId: 'kiro' }); });
+      await waitFor(() => expect(mockStreamMessage).toHaveBeenCalledTimes(1));
+      act(() => {
+        result.current.store.queueMessage(nodeId, { id: 'q1', value: '/review', mentions: [], attachments: [], queuedAt: 1 });
+        result.current.store.queueMessage(nodeId, { id: 'q2', value: 'and then this', mentions: [], attachments: [], queuedAt: 2 });
+        mockStreamMessage.mock.calls[0][2].onDone?.();
+      });
+      await waitFor(() => expect(mockStreamMessage).toHaveBeenCalledTimes(2));
+      expect(mockStreamMessage.mock.calls[1][1]).toBe('');
+      expect(mockStreamMessage.mock.calls[1][3]).toMatchObject({ displayText: '/review', skill: { id: 'library:review', args: '' } });
+      act(() => { mockStreamMessage.mock.calls[1][2].onDone?.(); });
+      await waitFor(() => expect(mockStreamMessage).toHaveBeenCalledTimes(3));
+      expect(mockStreamMessage.mock.calls[2][1]).toBe('and then this');
+      expect(mockStreamMessage.mock.calls[2][3].skill).toBeUndefined();
+      expect(executeChatCommand).not.toHaveBeenCalled();
+    });
+
+    it('ends the wire text with the arguments the request carries, attached files and mentioned chats going first', async () => {
+      const { result, nodeId } = await kiroThread();
+      let otherId = '';
+      await act(async () => { otherId = result.current.store.createThread()!; });
+      const typed = `/review ${encodeNodeMentionToken(otherId)} check png`;
+      const attachments = [{ name: 'shot.png', absPath: '/ws/shot.png' }];
+      await act(async () => {
+        result.current.store.sendMessage(nodeId, appendAttachmentsSentinel(typed, attachments), { displayText: typed, attachments, runtimeId: 'kiro' });
+      });
+      await waitFor(() => expect(mockStreamMessage).toHaveBeenCalledTimes(1));
+      const [, text, , options] = mockStreamMessage.mock.calls[0];
+      expect(options.skill).toEqual({ id: 'library:review', name: 'review', args: 'check png' });
+      expect(text).toMatch(/^The user referenced the following chat nodes\./);
+      expect(text).toMatch(/\n\n\[Attached files: shot\.png — \/ws\/shot\.png\]\n\ncheck png$/);
+    });
+
+    function hydratedSkillMessage() {
+      vi.mocked(api.fetchAllWorkspacesMeta).mockResolvedValue([{
+        workspace: { id: 'skill-ws', name: 'Skills', created_at: 1, active_tree_id: 'skill-tree' },
+        trees: [{ id: 'skill-tree', root_node_id: 'skill-node', created_at: 1, last_active_at: 1 }],
+        nodes: [{ id: 'skill-node', status: 'idle', acp_session_id: 'native-session', runtime_id: 'kiro' }],
+        messages: [
+          // A Kiro power skill: only the live session that ran it listed it.
+          { id: 'skill-user', node_id: 'skill-node', role: 'user', content: '/power-skill draft it', seq: 0,
+            metadata: { skill: { id: 'live:kiro:power-skill', name: 'power-skill', origin: 'runtime', runtimeId: 'kiro', args: 'draft it' } } },
+          { id: 'skill-answer', node_id: 'skill-node', role: 'assistant', content: 'partial', seq: 1 },
+        ],
+      }]);
+      mockEnsureSession.mockImplementation(() => Promise.resolve({ chatId: 'skill-node', currentModeId: null, resumeStrategy: 'fresh', runtimeId: 'kiro' }));
+      return renderHook(() => ({ store: useChatStore(), node: useChatNode('skill-node') }), { wrapper });
+    }
+
+    it('retries a skill message by the skill it ran, after a reload left no catalog or session command to find it by', async () => {
+      const { result } = hydratedSkillMessage();
+      await waitFor(() => expect(result.current.node?.messages[0]?.skill?.id).toBe('live:kiro:power-skill'));
+      await act(async () => { result.current.store.retryLastTurn('skill-node'); });
+      await waitFor(() => expect(mockStreamMessage).toHaveBeenCalledTimes(1));
+      const [, text, , options] = mockStreamMessage.mock.calls[0];
+      expect(text).toBe('draft it');
+      expect(options).toMatchObject({ displayText: '/power-skill draft it' });
+      expect(options.skill).toEqual({ id: 'live:kiro:power-skill', name: 'power-skill', args: 'draft it' });
+      expect(executeChatCommand).not.toHaveBeenCalled();
+    });
+
+    it('runs an edit that keeps the /name by the skill the message ran, and an edit to another name as typed', async () => {
+      const { result } = hydratedSkillMessage();
+      await waitFor(() => expect(result.current.node?.messages[0]?.skill?.id).toBe('live:kiro:power-skill'));
+      await act(async () => { result.current.store.editAndResend('skill-node', 0, '/power-skill draft it twice'); });
+      await waitFor(() => expect(mockStreamMessage).toHaveBeenCalledTimes(1));
+      expect(mockStreamMessage.mock.calls[0][3].skill).toEqual({ id: 'live:kiro:power-skill', name: 'power-skill', args: 'draft it twice' });
+
+      act(() => { mockStreamMessage.mock.calls[0][2].onDone?.(); });
+      await act(async () => { result.current.store.editAndResend('skill-node', 0, '/other thing'); });
+      await waitFor(() => expect(mockStreamMessage).toHaveBeenCalledTimes(2));
+      expect(mockStreamMessage.mock.calls[1][3].skill).toBeUndefined();
+      expect(executeChatCommand).not.toHaveBeenCalled();
+    });
+
+    it('resends an edit on the binding the composer passes, keeping the skill it ran', async () => {
+      const { result } = hydratedSkillMessage();
+      await waitFor(() => expect(result.current.node?.messages[0]?.skill?.id).toBe('live:kiro:power-skill'));
+      mockEnsureSession.mockClear();
+      await act(async () => {
+        result.current.store.editAndResend('skill-node', 0, '/power-skill draft it twice', { runtimeId: 'kiro', modelId: 'opus', reasoning: 'high' });
+      });
+      await waitFor(() => expect(mockStreamMessage).toHaveBeenCalledTimes(1));
+      expect(mockEnsureSession).toHaveBeenCalledWith(expect.objectContaining({ nodeId: 'skill-node', runtimeId: 'kiro', modelId: 'opus', reasoning: 'high' }));
+      expect(mockStreamMessage.mock.calls[0][3].skill).toMatchObject({ id: 'live:kiro:power-skill' });
+    });
+
+    it('says why a refused skill did not run, stops offering it, and a retry asks for that skill again rather than anything else', async () => {
+      const { result, nodeId } = await kiroThread();
+      const workspaceId = result.current.store.activeProject!.id;
+      await act(async () => { result.current.store.sendMessage(nodeId, '/review 1', { displayText: '/review 1', runtimeId: 'kiro' }); });
+      await waitFor(() => expect(mockStreamMessage).toHaveBeenCalledTimes(1));
+      let respond!: (value: SkillCatalogResponse) => void;
+      vi.mocked(fetchSkillCatalog).mockReturnValueOnce(new Promise<SkillCatalogResponse>((resolve) => { respond = resolve; }));
+      act(() => {
+        mockStreamMessage.mock.calls[0][2].onErrorPayload({ message: 'Couldn’t run /review: it’s turned off in Settings › Skills.', code: 'skill_not_found' });
+      });
+      expect(result.current.nodes[nodeId].error).toBe('Couldn’t run /review: it’s turned off in Settings › Skills.');
+      expect(readSkillCatalog(workspaceId, 'kiro')?.skills).toEqual([]);
+      expect(fetchSkillCatalog).toHaveBeenCalledTimes(2);
+
+      const moved = { ...review, id: 'runtime:kiro:user:review', origin: 'runtime' as const, runtimeId: 'kiro', scope: 'user' };
+      await act(async () => { respond({ skills: [moved], errors: [], libraryAvailable: true, commands: [{ name: 'review' }] }); });
+      await act(async () => { result.current.store.retryLastTurn(nodeId); });
+      await waitFor(() => expect(mockStreamMessage).toHaveBeenCalledTimes(2));
+      expect(mockStreamMessage.mock.calls[1][3].skill).toEqual({ id: 'library:review', name: 'review', args: '1' });
+      expect(executeChatCommand).not.toHaveBeenCalled();
+    });
   });
 
   it('fallback Stop targets the active background turn after a completed foreground turn', async () => {
@@ -794,11 +1396,11 @@ describe('auto-branch behavior (real provider)', () => {
 
   it('recovered Stop finalizes the captured assistant and delivers cleanup status through useChatNode', async () => {
     const detach = vi.fn();
-    vi.mocked(api.subscribeChat).mockImplementation(() => detach);
+    vi.mocked(api.reattachTurnReplay).mockImplementation(() => detach);
     const { result } = hydratedCancellationNode('streaming');
-    await waitFor(() => expect(api.subscribeChat).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(api.reattachTurnReplay).toHaveBeenCalledTimes(1));
     expect(result.current.node?.activeTurnId).toBe('old-foreground');
-    const replay = vi.mocked(api.subscribeChat).mock.calls[0][1];
+    const replay = vi.mocked(api.reattachTurnReplay).mock.calls[0][1].handlers;
     act(() => {
       dispatchChatStreamEvent({ event: 'chunk', data: {
         turnId: 'old-foreground', assistantId: 'old-a', seq: 2, text: ' still streaming',
@@ -835,16 +1437,17 @@ describe('auto-branch behavior (real provider)', () => {
     act(() => { (mockStreamMessage.mock.calls[0][2] as api.StreamHandlers).onDone?.(); });
   });
 
-  it('recovered replay 410 drops the stale Stop callback while background retains the live node', async () => {
+  it('a recovered self-turn refused by replay drops the stale Stop callback while background retains the live node', async () => {
     const detach = vi.fn();
-    vi.mocked(api.subscribeChat).mockImplementation(() => detach);
+    vi.mocked(api.reattachTurnReplay).mockImplementation(() => detach);
     const { result } = hydratedCancellationNode('streaming');
-    await waitFor(() => expect(api.subscribeChat).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(api.reattachTurnReplay).toHaveBeenCalledTimes(1));
     await act(async () => { result.current.store.openPane('cancel-node'); });
     await waitFor(() => expect(api.subscribeBackground).toHaveBeenCalledTimes(1));
-    const disconnect = vi.mocked(api.subscribeChat).mock.calls[0][3]!.onDisconnect!;
-    act(() => { disconnect({ retryable: false, error: new Error('subscribe failed: 410') }); });
+    const replay = vi.mocked(api.reattachTurnReplay).mock.calls[0][1];
+    act(() => { replay.onBackgroundOwned('This reply arrives on the background feed.'); });
     expect(result.current.node?.status).toBe('streaming');
+    expect(result.current.node?.error).toBeUndefined();
     const background = backgroundForCancellationNode();
     act(() => {
       dispatchChatStreamEvent({ event: 'turn_start', data: {
@@ -857,6 +1460,250 @@ describe('auto-branch behavior (real provider)', () => {
     );
     expect(result.current.node?.status).toBe('idle');
     expect(detach).not.toHaveBeenCalled();
+  });
+
+  const REPLAY_GONE = 'The live reply is no longer available. Reopen the conversation to check its saved state before retrying.';
+
+  it('a recovered turn whose live replay is gone finishes from its saved row', async () => {
+    vi.mocked(api.getSavedTurn).mockResolvedValueOnce({
+      turnId: 'old-foreground', assistantId: 'old-a', status: 'completed', stopReason: 'end_turn', completedAt: 5, lastSeq: 9,
+      message: { id: 'old-a', node_id: 'cancel-node', role: 'assistant', content: 'saved answer', seq: 1 },
+    });
+    const { result } = hydratedCancellationNode('streaming');
+    await waitFor(() => expect(api.reattachTurnReplay).toHaveBeenCalledTimes(1));
+    const replay = vi.mocked(api.reattachTurnReplay).mock.calls[0][1];
+    act(() => { replay.onReplayGone(REPLAY_GONE, 'turn_replay_unavailable'); });
+    await waitFor(() => expect(result.current.node?.status).toBe('idle'));
+    expect(api.getSavedTurn).toHaveBeenCalledWith('cancel-node', 'old-foreground', expect.any(AbortSignal));
+    expect(result.current.node?.messages.at(-1)?.blocks?.filter(block => block.kind === 'answer').map(block => block.rawText).join('')).toBe('saved answer');
+    expect(result.current.node?.error).toBeUndefined();
+  });
+
+  it('a recovered turn that is gone and unfinished fails so Retry inspects it instead of re-sending', async () => {
+    const { result } = hydratedCancellationNode('streaming');
+    await waitFor(() => expect(api.reattachTurnReplay).toHaveBeenCalledTimes(1));
+    const replay = vi.mocked(api.reattachTurnReplay).mock.calls[0][1];
+    act(() => { replay.onReplayGone(REPLAY_GONE, 'turn_replay_unavailable'); });
+    await waitFor(() => expect(result.current.node?.status).toBe('error'));
+    expect(result.current.node).toMatchObject({ errorKind: 'turn_replay_unavailable', errorTurnId: 'old-foreground' });
+    expect(turnErrorAction(result.current.node?.errorKind)).toBe('inspect-existing-turn');
+  });
+
+  it('a recovered turn reattaches as the sending window does, from the seq after the one it applied', async () => {
+    const { result } = hydratedCancellationNode('streaming');
+    await waitFor(() => expect(api.reattachTurnReplay).toHaveBeenCalledTimes(1));
+    const [chatId, replay] = vi.mocked(api.reattachTurnReplay).mock.calls[0];
+    expect(chatId).toBe('cancel-node');
+    expect(replay.turnId).toBe('old-foreground');
+    expect(replay.nextSeq()).toBe(2);
+    expect(replay.isCurrent()).toBe(true);
+    act(() => {
+      dispatchChatStreamEvent({ event: 'chunk', data: { turnId: 'old-foreground', assistantId: 'old-a', seq: 2, text: ' more' } }, replay.handlers);
+    });
+    expect(replay.nextSeq()).toBe(3);
+    act(() => { replay.onUnavailable('subscribe failed: 404', 'turn_outcome_unknown'); });
+    expect(result.current.node).toMatchObject({ status: 'error', errorKind: 'turn_outcome_unknown', errorTurnId: 'old-foreground' });
+    expect(turnErrorAction(result.current.node?.errorKind)).toBe('inspect-existing-turn');
+  });
+
+  it('a Stop while a recovered replay waits to reconnect also stops the reconnect, and a later send keeps its own Stop', async () => {
+    const stopReplay = vi.fn();
+    vi.mocked(api.reattachTurnReplay).mockImplementation(() => stopReplay);
+    const { result } = hydratedCancellationNode('streaming');
+    await waitFor(() => expect(api.reattachTurnReplay).toHaveBeenCalledTimes(1));
+    const replay = vi.mocked(api.reattachTurnReplay).mock.calls[0][1];
+    const cancelNew = vi.fn();
+    mockStreamMessage.mockImplementationOnce(() => cancelNew);
+    act(() => { result.current.store.cancelStream('cancel-node'); });
+    expect(stopReplay).toHaveBeenCalledOnce();
+    expect(replay.isCurrent()).toBe(false);
+    expect(api.cancelChatAndObserve).toHaveBeenCalledExactlyOnceWith('cancel-node', 'old-foreground', expect.any(Function));
+    await act(async () => { result.current.store.sendMessage('cancel-node', 'new foreground'); });
+    expect(mockStreamMessage).toHaveBeenCalledTimes(1);
+    expect(api.reattachTurnReplay).toHaveBeenCalledTimes(1);
+    act(() => { result.current.store.cancelStream('cancel-node'); });
+    expect(cancelNew).toHaveBeenCalledTimes(1);
+    expect(api.cancelChatAndObserve).toHaveBeenCalledTimes(1);
+  });
+
+  it('a queued message waits for the next turn end when another turn starts before it is sent', async () => {
+    const { result } = hydratedCancellationNode('idle');
+    await waitFor(() => expect(result.current.node?.messages.length).toBe(2));
+    await act(async () => { result.current.store.openPane('cancel-node'); });
+    await waitFor(() => expect(api.subscribeBackground).toHaveBeenCalledTimes(1));
+    await act(async () => { result.current.store.sendMessage('cancel-node', 'first'); });
+    expect(mockStreamMessage).toHaveBeenCalledTimes(1);
+    act(() => {
+      result.current.store.queueMessage('cancel-node', { id: 'q-1', value: 'queued while busy', mentions: [], attachments: [], queuedAt: 1 });
+    });
+    const background = backgroundForCancellationNode();
+    const self = { nodeId: 'cancel-node', turnId: 'self-turn', assistantId: 'self-a' };
+    act(() => {
+      (mockStreamMessage.mock.calls[0][2] as api.StreamHandlers).onDone?.();
+      dispatchChatStreamEvent({ event: 'turn_start', data: { ...self, seq: 0, userText: '', selfInitiated: true } }, background);
+    });
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)); });
+    expect(result.current.node?.pendingQueued?.map((entry) => entry.id)).toEqual(['q-1']);
+    expect(mockStreamMessage).toHaveBeenCalledTimes(1);
+
+    act(() => {
+      dispatchChatStreamEvent({ event: 'done', data: { ...self, seq: 1, stopReason: 'end_turn', persisted: true } }, background);
+    });
+    await waitFor(() => expect(mockStreamMessage).toHaveBeenCalledTimes(2));
+    expect(mockStreamMessage.mock.calls[1][1]).toContain('queued while busy');
+    expect(result.current.node?.pendingQueued).toBeUndefined();
+  });
+
+  it('a send that waited for a mentioned chat’s history goes back to the composer when another turn started meanwhile', async () => {
+    vi.mocked(api.fetchAllWorkspacesMeta).mockResolvedValue([{
+      workspace: { id: 'cancel-ws', name: 'Cancellation', created_at: 1, active_tree_id: 'cancel-tree' },
+      trees: [
+        { id: 'cancel-tree', root_node_id: 'cancel-node', created_at: 1, last_active_at: 1 },
+        { id: 'lazy-tree', root_node_id: 'lazy-node', created_at: 2, last_active_at: 2 },
+      ],
+      nodes: [
+        { id: 'cancel-node', tree_id: 'cancel-tree', status: 'idle', acp_session_id: 'native-session', runtime_id: 'claude',
+          last_applied_turn_id: 'old-foreground', last_applied_seq: 1 },
+        { id: 'lazy-node', tree_id: 'lazy-tree', status: 'idle', runtime_id: 'claude', message_count: 2 },
+      ],
+      messages: [
+        { id: 'old-user', node_id: 'cancel-node', role: 'user', content: 'earlier prompt', seq: 0 },
+        { id: 'old-a', node_id: 'cancel-node', role: 'assistant', content: 'partial', seq: 1 },
+      ],
+    }]);
+    vi.mocked(api.fetchTreeMessagePage).mockReturnValue(new Promise(() => {}));
+    const actual = await vi.importActual<typeof import('../services/api/persistence')>('../services/api/persistence');
+    let answerPage!: () => void;
+    vi.mocked(persistence.fetchTreeMessagePage).mockImplementationOnce(() => new Promise((resolve) => {
+      answerPage = () => resolve({ messages: [
+        { id: 'lazy-u', node_id: 'lazy-node', role: 'user', content: 'lazy question', seq: 0 },
+        { id: 'lazy-a', node_id: 'lazy-node', role: 'assistant', content: 'lazy answer', seq: 1 },
+      ] });
+    }));
+    try {
+      const { result } = renderHook(() => ({ store: useChatStore(), node: useChatNode('cancel-node'), lazy: useChatNode('lazy-node') }), { wrapper });
+      await waitFor(() => expect(result.current.lazy?.messagesLoaded).toBe(false));
+      await act(async () => { result.current.store.openPane('cancel-node'); });
+      await waitFor(() => expect(api.subscribeBackground).toHaveBeenCalledTimes(1));
+      const text = `compare with ${encodeNodeMentionToken('lazy-node')}`;
+      act(() => { result.current.store.sendMessage('cancel-node', text); });
+      await waitFor(() => expect(persistence.fetchTreeMessagePage).toHaveBeenCalled());
+      act(() => {
+        dispatchChatStreamEvent({ event: 'turn_start', data: {
+          nodeId: 'cancel-node', turnId: 'self-turn', assistantId: 'self-a', seq: 0, userText: '', selfInitiated: true,
+        } }, backgroundForCancellationNode());
+      });
+      expect(result.current.node?.status).toBe('streaming');
+      await act(async () => { answerPage(); });
+      await waitFor(() => expect(result.current.lazy?.messagesLoaded).toBe(true));
+      await waitFor(() => expect(result.current.node?.composerDraft?.value).toBe(text));
+      expect(mockStreamMessage).not.toHaveBeenCalled();
+    } finally {
+      vi.mocked(persistence.fetchTreeMessagePage).mockImplementation(actual.fetchTreeMessagePage);
+    }
+  });
+
+  it('a send that waits for a mentioned chat’s history goes through when that chat is renamed meanwhile', async () => {
+    vi.mocked(api.fetchAllWorkspacesMeta).mockResolvedValue([{
+      workspace: { id: 'cancel-ws', name: 'Cancellation', created_at: 1, active_tree_id: 'cancel-tree' },
+      trees: [
+        { id: 'cancel-tree', root_node_id: 'cancel-node', created_at: 1, last_active_at: 1 },
+        { id: 'lazy-tree', root_node_id: 'lazy-node', created_at: 2, last_active_at: 2 },
+      ],
+      nodes: [
+        { id: 'cancel-node', tree_id: 'cancel-tree', status: 'idle', acp_session_id: 'native-session', runtime_id: 'claude' },
+        { id: 'lazy-node', tree_id: 'lazy-tree', status: 'idle', runtime_id: 'claude', message_count: 2 },
+      ],
+      messages: [],
+    }]);
+    vi.mocked(api.fetchTreeMessagePage).mockReturnValue(new Promise(() => {}));
+    const actual = await vi.importActual<typeof import('../services/api/persistence')>('../services/api/persistence');
+    let answerPage!: () => void;
+    vi.mocked(persistence.fetchTreeMessagePage).mockImplementationOnce(() => new Promise((resolve) => {
+      answerPage = () => resolve({ messages: [
+        { id: 'lazy-u', node_id: 'lazy-node', role: 'user', content: 'lazy question', seq: 0 },
+        { id: 'lazy-a', node_id: 'lazy-node', role: 'assistant', content: 'lazy answer', seq: 1 },
+      ], pages: [{ nodeId: 'lazy-node', total: 2, before: null }] });
+    }));
+    try {
+      const { result } = renderHook(() => ({ store: useChatStore(), lazy: useChatNode('lazy-node') }), { wrapper });
+      await waitFor(() => expect(result.current.lazy?.messagesLoaded).toBe(false));
+      act(() => { result.current.store.sendMessage('cancel-node', `compare with ${encodeNodeMentionToken('lazy-node')}`); });
+      await waitFor(() => expect(persistence.fetchTreeMessagePage).toHaveBeenCalled());
+      act(() => { result.current.store.renameNode('lazy-node', 'Renamed meanwhile'); });
+      await act(async () => { answerPage(); });
+      await waitFor(() => expect(mockStreamMessage).toHaveBeenCalledTimes(1));
+      expect(result.current.lazy).toMatchObject({ messagesLoaded: true, title: 'Renamed meanwhile' });
+    } finally {
+      vi.mocked(persistence.fetchTreeMessagePage).mockImplementation(actual.fetchTreeMessagePage);
+    }
+  });
+
+  it('a Stop on a running chat Michi has no handle for does not stop the next message', async () => {
+    vi.mocked(api.fetchAllWorkspacesMeta).mockResolvedValue([{
+      workspace: { id: 'cancel-ws', name: 'Cancellation', created_at: 1, active_tree_id: 'cancel-tree' },
+      trees: [{ id: 'cancel-tree', root_node_id: 'cancel-node', created_at: 1, last_active_at: 1 }],
+      // Running, with no turn this window could replay or cancel.
+      nodes: [{ id: 'cancel-node', status: 'streaming', acp_session_id: 'native-session', runtime_id: 'claude' }],
+      messages: [
+        { id: 'old-user', node_id: 'cancel-node', role: 'user', content: 'earlier prompt', seq: 0 },
+        { id: 'old-a', node_id: 'cancel-node', role: 'assistant', content: 'partial', seq: 1 },
+      ],
+    }]);
+    const { result } = renderHook(() => ({ store: useChatStore(), node: useChatNode('cancel-node') }), { wrapper });
+    await waitFor(() => expect(result.current.node?.status).toBe('streaming'));
+    act(() => { result.current.store.cancelStream('cancel-node'); });
+    expect(result.current.node?.status).toBe('idle');
+    const cancelNext = vi.fn();
+    mockStreamMessage.mockImplementationOnce(() => cancelNext);
+    await act(async () => { result.current.store.sendMessage('cancel-node', 'next message'); });
+    await waitFor(() => expect(mockStreamMessage).toHaveBeenCalledTimes(1));
+    expect(cancelNext).not.toHaveBeenCalled();
+    expect(result.current.node?.status).toBe('streaming');
+  });
+
+  it('a queue an error paused stays queued after the next turn ends', async () => {
+    const { result } = hydratedCancellationNode('idle');
+    await waitFor(() => expect(result.current.node?.messages.length).toBe(2));
+    await act(async () => { result.current.store.sendMessage('cancel-node', 'first'); });
+    act(() => {
+      result.current.store.queueMessage('cancel-node', { id: 'q-1', value: 'queued while busy', mentions: [], attachments: [], queuedAt: 1 });
+    });
+    act(() => { (mockStreamMessage.mock.calls[0][2] as api.StreamHandlers).onError?.('model unavailable'); });
+    expect(result.current.node?.status).toBe('error');
+    expect(result.current.node?.queueErrored).toBe(true);
+
+    await act(async () => { result.current.store.sendMessage('cancel-node', 'sent by hand'); });
+    expect(mockStreamMessage).toHaveBeenCalledTimes(2);
+    act(() => { (mockStreamMessage.mock.calls[1][2] as api.StreamHandlers).onDone?.(); });
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)); });
+    expect(mockStreamMessage).toHaveBeenCalledTimes(2);
+    expect(result.current.node?.pendingQueued?.map((entry) => entry.id)).toEqual(['q-1']);
+    expect(result.current.node?.queueErrored).toBe(true);
+  });
+
+  it('a recovered replay whose turn ended elsewhere while it waited to reconnect does not take over the next turn', async () => {
+    const { result } = hydratedCancellationNode('streaming');
+    await waitFor(() => expect(api.reattachTurnReplay).toHaveBeenCalledTimes(1));
+    await act(async () => { result.current.store.openPane('cancel-node'); });
+    await waitFor(() => expect(api.subscribeBackground).toHaveBeenCalledTimes(1));
+    const replay = vi.mocked(api.reattachTurnReplay).mock.calls[0][1];
+    const cancelNew = vi.fn();
+    mockStreamMessage.mockImplementationOnce(() => cancelNew);
+    act(() => {
+      dispatchChatStreamEvent({ event: 'done', data: {
+        nodeId: 'cancel-node', turnId: 'old-foreground', assistantId: 'old-a', seq: 3, stopReason: 'end_turn', persisted: true,
+      } }, backgroundForCancellationNode());
+    });
+    expect(result.current.node?.status).toBe('idle');
+    // Waiting to reconnect, the replay finds it no longer owns the node.
+    expect(replay.isCurrent()).toBe(false);
+    act(() => { replay.onStale?.(); });
+    await act(async () => { result.current.store.sendMessage('cancel-node', 'new foreground'); });
+    expect(api.reattachTurnReplay).toHaveBeenCalledTimes(1);
+    act(() => { result.current.store.cancelStream('cancel-node'); });
+    expect(cancelNew).toHaveBeenCalledTimes(1);
+    expect(api.cancelChatAndObserve).not.toHaveBeenCalled();
   });
 
   it('createChildChat from a streaming parent starts an independent new stream', async () => {
@@ -892,6 +1739,33 @@ describe('auto-branch behavior (real provider)', () => {
     expect(mockStreamMessage).toHaveBeenCalledTimes(1);
     // Parent node remains streaming; child gets its own turn.
     expect(result.current.nodes[rootId].status).toBe('streaming');
+  });
+
+  it('starts a branch on the parent runtime and model unless the caller names a runtime', async () => {
+    mockEnsureSession.mockImplementation(() => Promise.resolve({
+      chatId: 'fake-chat', currentModeId: null, resumeStrategy: 'fresh', runtimeId: 'codex', providerId: 'openai', modelId: 'gpt-x', reasoning: 'high',
+    }));
+    const { result } = renderHook(() => useStoreAndNodes(), { wrapper });
+    await act(async () => { await result.current.store.createProject('test', undefined); });
+    let rootId = '';
+    await act(async () => { rootId = (await result.current.store.createThread()) ?? ''; });
+    await act(async () => { result.current.store.sendMessage(rootId, 'parent turn'); });
+    await waitFor(() => expect(result.current.nodes[rootId].runtimeId).toBe('codex'));
+
+    const ensuredFor = async (meta?: Parameters<typeof result.current.store.createChildChat>[2], opts?: Parameters<typeof result.current.store.createChildChat>[3]) => {
+      mockEnsureSession.mockClear();
+      let childId = '';
+      await act(async () => { childId = await result.current.store.createChildChat(rootId, 'branch off', meta, opts); });
+      await waitFor(() => expect(mockEnsureSession).toHaveBeenCalledWith(expect.objectContaining({ nodeId: childId })));
+      return mockEnsureSession.mock.calls.find(([input]) => input.nodeId === childId)![0];
+    };
+    expect(await ensuredFor()).toMatchObject({ runtimeId: 'codex', providerId: 'openai', modelId: 'gpt-x', reasoning: 'high' });
+    expect(await ensuredFor({ displayText: 'branch off' })).toMatchObject({ runtimeId: 'codex', modelId: 'gpt-x' });
+    const named = await ensuredFor({ runtimeId: 'claude' });
+    expect(named).toMatchObject({ runtimeId: 'claude' });
+    expect(named.modelId).toBeUndefined();
+    const agent = await ensuredFor(undefined, { primaryAgent: { backendConnectionId: 'local', definitionId: 'implementer' } });
+    expect(agent.runtimeId).toBeUndefined();
   });
 
   it.each(['mode', 'primary'] as const)('starts a digest follow-up with its selected %s Agent and source context', async (selection) => {
@@ -937,95 +1811,164 @@ describe('auto-branch behavior (real provider)', () => {
     }
   });
 
-  it('does not notify when the focused pane finishes streaming while the window is focused', async () => {
-    vi.spyOn(document, 'hasFocus').mockReturnValue(true);
+  it.each(['blank child', 'launcher side chat'] as const)('puts a %s of a digest in its source thread, with the digest as first-send context', async (entry) => {
     const { result } = renderHook(() => useStoreAndNodes(), { wrapper });
-
-    await act(async () => {
-      await result.current.store.createProject('test', undefined);
-    });
-    await waitFor(() => expect(result.current.store.activeProject).toBeTruthy());
+    await act(async () => { await result.current.store.createProject('test', undefined); });
     let rootId = '';
-    await act(async () => {
-      rootId = (await result.current.store.createThread()) ?? '';
-    });
-    await waitFor(() => expect(result.current.store.focusedPane).toBe(rootId));
+    await act(async () => { rootId = result.current.store.createThread()!; });
+    const projectId = result.current.store.activeProject!.id;
+    const treeId = result.current.store.activeProject!.activeTreeId;
+    let digestId = '';
+    await act(async () => { digestId = await result.current.store.createDigest(projectId, [rootId]); });
+    await waitFor(() => expect(result.current.nodes[digestId].digest?.status).toBe('idle'));
 
-    await act(async () => {
-      result.current.store.sendMessage(rootId, 'hello');
-    });
-    await waitFor(() => expect(mockStreamMessage).toHaveBeenCalledTimes(1));
+    let childId = '';
+    if (entry === 'blank child') {
+      await act(async () => { childId = await result.current.store.createBlankChild(digestId); });
+    } else {
+      act(() => { result.current.store.focusPane(digestId); });
+      let launcherId = '';
+      act(() => { launcherId = result.current.store.openLauncherPane(); });
+      await act(async () => { childId = await result.current.store.activateLauncherPane(launcherId, 'side-chat'); });
+    }
 
-    const handlers = mockStreamMessage.mock.calls[0][2] as { onDone?: () => void };
-    act(() => {
-      handlers.onDone?.();
-    });
+    expect(result.current.nodes[childId].parentNodeId).toBe(rootId);
+    expect(result.current.store.activeProject!.edges).toContainEqual(expect.objectContaining({ source: rootId, target: childId }));
+    expect(result.current.store.focusedPane).toBe(childId);
 
-    expect(mockNotify).not.toHaveBeenCalled();
-  });
-
-  it('still notifies when an unfocused pane finishes while the window is focused', async () => {
-    vi.spyOn(document, 'hasFocus').mockReturnValue(true);
-    const { result } = renderHook(() => useStoreAndNodes(), { wrapper });
-
-    await act(async () => {
-      await result.current.store.createProject('test', undefined);
-    });
-    await waitFor(() => expect(result.current.store.activeProject).toBeTruthy());
-    let firstRootId = '';
-    let secondRootId = '';
-    await act(async () => {
-      firstRootId = (await result.current.store.createThread()) ?? '';
-    });
-    await act(async () => {
-      secondRootId = (await result.current.store.createThread()) ?? '';
-    });
-    await waitFor(() => expect(result.current.store.focusedPane).toBe(secondRootId));
-
-    await act(async () => {
-      result.current.store.sendMessage(firstRootId, 'background work');
-    });
-    await waitFor(() => expect(mockStreamMessage).toHaveBeenCalledTimes(1));
-
-    const handlers = mockStreamMessage.mock.calls[0][2] as { onDone?: () => void };
-    act(() => {
-      handlers.onDone?.();
-    });
-
-    // The notification fires (intent of this test) and now carries the
-    // thread's derived title instead of the generic 'Branch complete' fallback
-    // — the first turn's title is derived from the first user message ('background
-    // work') at turn-end, so node.title is set by the time the notification builds.
-    expect(mockNotify).toHaveBeenCalledWith(expect.objectContaining({
-      title: 'background work',
-      body: 'Streaming finished',
+    await act(async () => { result.current.store.sendMessage(childId, 'What was decided?'); });
+    await waitFor(() => expect(mockEnsureSession).toHaveBeenCalledOnce());
+    expect(mockEnsureSession).toHaveBeenCalledWith(expect.objectContaining({
+      nodeId: childId,
+      mergeContexts: [expect.stringContaining('Keep the source thread context.')],
+      graphPrerequisite: expect.objectContaining({
+        node: expect.objectContaining({ id: childId, treeId }),
+      }),
     }));
   });
 
-  it('notifies about an Ask User request in a background pane while the window is focused', async () => {
+  /** A project with threads; the last one created holds pane focus. */
+  async function threadsInFocusedWindow(count: number) {
     vi.spyOn(document, 'hasFocus').mockReturnValue(true);
-    const { result } = renderHook(() => useStoreAndNodes(), { wrapper });
-
+    const view = renderHook(() => useStoreAndNodes(), { wrapper });
     await act(async () => {
-      await result.current.store.createProject('test', undefined);
+      await view.result.current.store.createProject('test', undefined);
     });
-    await waitFor(() => expect(result.current.store.activeProject).toBeTruthy());
-    let askingId = '';
-    await act(async () => {
-      askingId = (await result.current.store.createThread()) ?? '';
-      // A second thread takes pane focus, so the asking pane is in the background.
-      await result.current.store.createThread();
-    });
+    await waitFor(() => expect(view.result.current.store.activeProject).toBeTruthy());
+    const ids: string[] = [];
+    for (let index = 0; index < count; index += 1) {
+      await act(async () => {
+        ids.push((await view.result.current.store.createThread()) ?? '');
+      });
+    }
+    await waitFor(() => expect(view.result.current.store.focusedPane).toBe(ids.at(-1)));
+    return { ...view, ids };
+  }
 
+  async function streamingHandlers(result: Awaited<ReturnType<typeof threadsInFocusedWindow>>['result'], nodeId: string, text: string) {
     await act(async () => {
-      result.current.store.sendMessage(askingId, 'background work');
+      result.current.store.sendMessage(nodeId, text);
     });
-    await waitFor(() => expect(mockStreamMessage).toHaveBeenCalledTimes(1));
-    mockNotify.mockClear();
-
-    const handlers = mockStreamMessage.mock.calls[0][2] as {
+    await waitFor(() => expect(mockStreamMessage).toHaveBeenCalled());
+    mockPresentAttention.mockClear();
+    return mockStreamMessage.mock.calls.at(-1)![2] as {
+      onDone?: () => void;
+      onPermissionRequest?: (data: unknown) => void;
+      onPermissionResolved?: (data: unknown) => void;
       onUserInputRequest?: (data: unknown) => void;
+      onUserInputResolved?: (data: unknown) => void;
     };
+  }
+
+  it('hands a finished turn in the focused pane to the attention policy too', async () => {
+    const { result, ids: [rootId] } = await threadsInFocusedWindow(1);
+    const handlers = await streamingHandlers(result, rootId, 'hello');
+    act(() => {
+      handlers.onDone?.();
+    });
+
+    // No early return for the focused pane: with the window in the
+    // background nobody sees it finish. The policy keeps quiet while this
+    // window shows the pane and has focus.
+    const [finished] = attentionIntents('finished');
+    expect(finished).toMatchObject({
+      key: `node:${rootId}`, body: 'Streaming finished',
+      target: { type: 'node', nodeId: rootId, workspaceId: result.current.store.activeProject!.id, backendConnectionId: 'local' },
+    });
+    expect(visibleOnDashboard(finished)).toBe(true);
+    expect(finished.isTargetVisible!()).toBe(false);
+    expect(finished.isStillCurrent!()).toBe(true);
+    expect(mockNotify).not.toHaveBeenCalled();
+  });
+
+  it('reports a finished turn in another thread as not visible', async () => {
+    const { result, ids: [firstRootId] } = await threadsInFocusedWindow(2);
+    const handlers = await streamingHandlers(result, firstRootId, 'background work');
+    act(() => {
+      handlers.onDone?.();
+    });
+
+    // The notification carries the thread's derived title instead of the
+    // generic 'Branch complete' fallback — the first turn's title is derived
+    // from the first user message ('background work') at turn-end, so
+    // node.title is set by the time the notification builds.
+    const [finished] = attentionIntents('finished');
+    expect(finished).toMatchObject({ title: 'background work', body: 'Streaming finished' });
+    expect(visibleOnDashboard(finished)).toBe(false);
+  });
+
+  it('renames a thread by renaming its root, and announces its finish by that name', async () => {
+    const { result, ids: [firstRootId] } = await threadsInFocusedWindow(2);
+    const tree = result.current.store.activeProject!.trees.find((candidate) => candidate.rootNodeId === firstRootId)!;
+    act(() => {
+      result.current.store.renameTree(tree.id, 'Memory workflow');
+    });
+    // One name: the root's title, saved like any rename; no thread name beside it.
+    expect(result.current.nodes[firstRootId]).toMatchObject({ title: 'Memory workflow', titleNeedsPersistence: true });
+    expect(result.current.store.activeProject!.trees.find((candidate) => candidate.id === tree.id)).not.toHaveProperty('name');
+    const handlers = await streamingHandlers(result, firstRootId, 'background work');
+    act(() => {
+      handlers.onDone?.();
+    });
+    const [finished] = attentionIntents('finished');
+    expect(finished).toMatchObject({ title: 'Memory workflow', body: 'Streaming finished' });
+  });
+
+  it('drops a finish once a queued follow-up has started', async () => {
+    const { result, ids: [rootId] } = await threadsInFocusedWindow(1);
+    const handlers = await streamingHandlers(result, rootId, 'first');
+    act(() => {
+      result.current.store.queueMessage(rootId, { id: 'q1', value: 'and then', mentions: [], attachments: [], queuedAt: 1 });
+      handlers.onDone?.();
+    });
+    await waitFor(() => expect(mockStreamMessage).toHaveBeenCalledTimes(2));
+    const [finished] = attentionIntents('finished');
+    expect(finished.isStillCurrent!()).toBe(false);
+  });
+
+  it('raises a tool approval in a background pane while the window is focused, until it is answered', async () => {
+    const { result, ids: [approvingId] } = await threadsInFocusedWindow(2);
+    const handlers = await streamingHandlers(result, approvingId, 'background work');
+    act(() => {
+      handlers.onPermissionRequest?.({ requestId: 7, title: 'Run npm test', options: [] });
+    });
+
+    // Pre-fix this was gated on `!document.hasFocus()`: silent in a focused window.
+    const [approval] = attentionIntents('needs_input');
+    expect(approval).toMatchObject({ key: `node:${approvingId}`, title: 'Tool approval needed', body: 'Run npm test' });
+    expect(visibleOnDashboard(approval)).toBe(false);
+    expect(approval.isStillCurrent!()).toBe(true);
+
+    act(() => {
+      handlers.onPermissionResolved?.({ requestId: 7 });
+    });
+    expect(approval.isStillCurrent!()).toBe(false);
+    expect(dismissAttention).toHaveBeenCalledWith(`node:${approvingId}`, 'needs_input');
+  });
+
+  it('raises an Ask User request in a background pane while the window is focused, until it is answered', async () => {
+    const { result, ids: [askingId] } = await threadsInFocusedWindow(2);
+    const handlers = await streamingHandlers(result, askingId, 'background work');
     act(() => {
       handlers.onUserInputRequest?.({
         requestId: 3,
@@ -1033,38 +1976,22 @@ describe('auto-branch behavior (real provider)', () => {
       });
     });
 
-    // Pre-fix this was gated on `!document.hasFocus()`, so an ask landing in a
-    // background pane of a focused window was silent.
-    expect(mockNotify).toHaveBeenCalledWith(expect.objectContaining({
-      title: 'Agent needs your input',
-      body: 'Which database?',
-    }));
+    const [ask] = attentionIntents('needs_input');
+    expect(ask).toMatchObject({ key: `node:${askingId}`, title: 'Agent needs your input', body: 'Which database?' });
+    expect(visibleOnDashboard(ask)).toBe(false);
+    expect(ask.isStillCurrent!()).toBe(true);
     expect(result.current.nodes[askingId].pendingUserInput?.requestId).toBe(3);
+
+    act(() => {
+      handlers.onUserInputResolved?.({ requestId: 3, answers: [] });
+    });
+    expect(ask.isStillCurrent!()).toBe(false);
+    expect(dismissAttention).toHaveBeenCalledWith(`node:${askingId}`, 'needs_input');
   });
 
-  it('stays quiet for an Ask User request on the focused pane of a focused window', async () => {
-    vi.spyOn(document, 'hasFocus').mockReturnValue(true);
-    const { result } = renderHook(() => useStoreAndNodes(), { wrapper });
-
-    await act(async () => {
-      await result.current.store.createProject('test', undefined);
-    });
-    await waitFor(() => expect(result.current.store.activeProject).toBeTruthy());
-    let rootId = '';
-    await act(async () => {
-      rootId = (await result.current.store.createThread()) ?? '';
-    });
-    await waitFor(() => expect(result.current.store.focusedPane).toBe(rootId));
-
-    await act(async () => {
-      result.current.store.sendMessage(rootId, 'hello');
-    });
-    await waitFor(() => expect(mockStreamMessage).toHaveBeenCalledTimes(1));
-    mockNotify.mockClear();
-
-    const handlers = mockStreamMessage.mock.calls[0][2] as {
-      onUserInputRequest?: (data: unknown) => void;
-    };
+  it('reports an Ask User request on the focused pane as visible, so a focused window stays quiet', async () => {
+    const { result, ids: [rootId] } = await threadsInFocusedWindow(1);
+    const handlers = await streamingHandlers(result, rootId, 'hello');
     act(() => {
       handlers.onUserInputRequest?.({
         requestId: 1,
@@ -1074,7 +2001,8 @@ describe('auto-branch behavior (real provider)', () => {
 
     // The inline ask card is already on screen — the pending state (and the
     // global alert bar it drives) is reminder enough.
-    expect(mockNotify).not.toHaveBeenCalled();
+    const [ask] = attentionIntents('needs_input');
+    expect(visibleOnDashboard(ask)).toBe(true);
     expect(result.current.nodes[rootId].pendingUserInput?.requestId).toBe(1);
   });
 
@@ -1201,6 +2129,17 @@ describe('auto-branch behavior (real provider)', () => {
       });
       (globalThis as any).requestAnimationFrame = originalGlobalRaf;
     }
+  });
+
+  it('refuses a Windows folder nested in one the workspace has', async () => {
+    const { result } = renderHook(() => useStoreAndNodes(), { wrapper });
+    await act(async () => { await result.current.store.createProject('test'); });
+    const projectId = result.current.store.activeProject!.id;
+    act(() => {
+      result.current.store.addFolder(projectId, 'C:\\Users\\me\\proj');
+      result.current.store.addFolder(projectId, 'C:\\Users\\me\\proj\\sub');
+    });
+    expect(result.current.store.activeProject?.folders?.map((folder) => folder.path)).toEqual(['C:\\Users\\me\\proj']);
   });
 
   it('uses the first added folder for fresh sessions and protects it when removing folders', async () => {
@@ -1348,6 +2287,132 @@ describe('auto-branch behavior (real provider)', () => {
       expect(api.cancelChatAndObserve).not.toHaveBeenCalled();
       expect(result.current.nodes[nodeId].error).toBeUndefined();
       expect(result.current.nodes[nodeId].messages.find((message) => message.id === firstAssistant.id)).toEqual(firstAssistant);
+    });
+  });
+
+  describe('a rerun of a thread whose older history is not loaded yet', () => {
+    const olderPage = {
+      messages: [
+        { id: 'u1', node_id: 'part-node', role: 'user', content: 'first question', seq: 0 },
+        { id: 'a1', node_id: 'part-node', role: 'assistant', content: 'first answer', seq: 1 },
+      ],
+      pages: [{ nodeId: 'part-node', total: 4, before: null }],
+    };
+
+    async function partlyLoadedThread() {
+      vi.mocked(api.fetchAllWorkspacesMeta).mockResolvedValue([{
+        workspace: { id: 'part-ws', name: 'Partial', created_at: 1, active_tree_id: 'part-tree' },
+        trees: [{ id: 'part-tree', root_node_id: 'part-node', created_at: 1, last_active_at: 1 }],
+        nodes: [{ id: 'part-node', tree_id: 'part-tree', status: 'idle', runtime_id: 'claude', message_count: 4 }],
+        messages: [],
+      }]);
+      // The first page carries the latest two messages; the older two page in on demand.
+      vi.mocked(api.fetchTreeMessageSnapshot).mockResolvedValue({
+        messages: [
+          { id: 'u2', node_id: 'part-node', role: 'user', content: 'second question', seq: 2 },
+          { id: 'a2', node_id: 'part-node', role: 'assistant', content: 'second answer', seq: 3 },
+        ],
+        pages: [{ nodeId: 'part-node', total: 4, before: { seq: 2, id: 'u2' } }],
+      });
+      const hook = renderHook(() => ({ store: useChatStore(), node: useChatNode('part-node') }), { wrapper });
+      await waitFor(() => expect(hook.result.current.node?.messages.map((m) => m.id)).toEqual(['u2', 'a2']));
+      expect(hook.result.current.node?.messagesLoaded).toBe(false);
+      return hook;
+    }
+
+    afterEach(async () => {
+      const actual = await vi.importActual<typeof import('../services/api/persistence')>('../services/api/persistence');
+      vi.mocked(persistence.fetchTreeMessagePage).mockImplementation(actual.fetchTreeMessagePage);
+    });
+
+    it('an edit completes the history and resends from the same message, now further down', async () => {
+      const { result } = await partlyLoadedThread();
+      vi.mocked(persistence.fetchTreeMessagePage).mockResolvedValueOnce(olderPage);
+      await act(async () => { await result.current.store.editAndResend('part-node', 0, 'second question, edited'); });
+      await waitFor(() => expect(mockStreamMessage).toHaveBeenCalledTimes(1));
+      expect(mockStreamMessage.mock.calls[0][1]).toBe('second question, edited');
+      expect(result.current.node?.messages.slice(0, 2).map((m) => m.id)).toEqual(['u1', 'a1']);
+      expect(result.current.node?.messages.some((m) => m.id === 'u2' || m.id === 'a2')).toBe(false);
+    });
+
+    it('a retry from a message completes the history and reruns that message', async () => {
+      const { result } = await partlyLoadedThread();
+      vi.mocked(persistence.fetchTreeMessagePage).mockResolvedValueOnce(olderPage);
+      await act(async () => { await result.current.store.retryLastTurn('part-node', 0); });
+      await waitFor(() => expect(mockStreamMessage).toHaveBeenCalledTimes(1));
+      expect(mockStreamMessage.mock.calls[0][1]).toBe('second question');
+      expect(result.current.node?.messages.slice(0, 2).map((m) => m.id)).toEqual(['u1', 'a1']);
+    });
+
+    it('a failed history read sends nothing and trims nothing', async () => {
+      const { result } = await partlyLoadedThread();
+      vi.mocked(persistence.fetchTreeMessagePage).mockRejectedValue(new Error('history read failed'));
+      await act(async () => { await result.current.store.editAndResend('part-node', 0, 'edited'); });
+      await act(async () => { await result.current.store.retryLastTurn('part-node', 0); });
+      expect(mockStreamMessage).not.toHaveBeenCalled();
+      expect(result.current.node?.messages.map((m) => m.id)).toEqual(['u2', 'a2']);
+    });
+
+    it('a thread that started a turn during the read is left alone', async () => {
+      const { result } = await partlyLoadedThread();
+      await act(async () => { result.current.store.openPane('part-node'); });
+      await waitFor(() => expect(api.subscribeBackground).toHaveBeenCalled());
+      let answer!: () => void;
+      vi.mocked(persistence.fetchTreeMessagePage).mockImplementationOnce(() => new Promise((resolve) => { answer = () => resolve(olderPage); }));
+      let edit!: Promise<void>;
+      act(() => { edit = Promise.resolve(result.current.store.editAndResend('part-node', 0, 'edited')); });
+      await waitFor(() => expect(persistence.fetchTreeMessagePage).toHaveBeenCalled());
+      act(() => {
+        const handlers = vi.mocked(api.subscribeBackground).mock.calls.at(-1)![0]('part-node', 'part-node');
+        dispatchChatStreamEvent({ event: 'turn_start', data: {
+          nodeId: 'part-node', turnId: 'self-turn', assistantId: 'self-a', seq: 0, userText: '', selfInitiated: true,
+        } }, handlers);
+      });
+      expect(result.current.node?.status).toBe('streaming');
+      await act(async () => { answer(); await edit; });
+      expect(mockStreamMessage).not.toHaveBeenCalled();
+      expect(result.current.node?.status).toBe('streaming');
+    });
+  });
+
+  describe('a server notice opened from its toast or OS notification', () => {
+    afterEach(() => {
+      resetServerAttentionStore();
+      vi.unstubAllGlobals();
+      vi.restoreAllMocks();
+    });
+
+    const runNotice = (id: string, workspaceId: string) => ({
+      id, key: `agent_run:${id}`, kind: 'finished', reason: 'run_completed', title: 'Reviewer completed', body: 'All checks pass',
+      target: { type: 'agent_run', runId: `run-${id}`, workspaceId }, createdAt: Date.now(), claimedByWindowId: null, claimedAt: null,
+    });
+
+    async function presented(record: ReturnType<typeof runNotice>): Promise<AttentionIntent> {
+      receiveServerAttentionFrame('local', 'attention_notification', JSON.stringify(record));
+      await waitFor(() => expect(mockPresentAttention.mock.calls.some(([intent]) => intent.target.type === 'agent_run'
+        && intent.target.runId === record.target.runId)).toBe(true));
+      return mockPresentAttention.mock.calls.map(([intent]) => intent)
+        .find((intent) => intent.target.type === 'agent_run' && intent.target.runId === record.target.runId)!;
+    }
+
+    it('opens the Agent Run pane under the default title, not the notice title, and survives a workspace this window lacks', async () => {
+      vi.spyOn(document, 'hasFocus').mockReturnValue(true);
+      // Every claim is answered "unknown record": a focused window still shows its toast.
+      vi.stubGlobal('fetch', vi.fn(async () => new Response('{}', { status: 404 })));
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      const { result } = renderHook(() => useStoreAndNodes(), { wrapper });
+      await act(async () => { await result.current.store.createProject('runs'); });
+      const workspaceId = result.current.store.activeProject!.id;
+
+      const intent = await presented(runNotice('a1', workspaceId));
+      act(() => { intent.onOpen!(); });
+      // Not in agent domain state here (no provider), so the default: the notice's title names an outcome.
+      expect(result.current.store.paneItems[agentRunPaneId('local', 'run-a1')]).toMatchObject({ kind: 'agent-run', title: 'Agent Run' });
+
+      const elsewhere = await presented(runNotice('a2', 'workspace-not-loaded'));
+      expect(() => act(() => { elsewhere.onOpen!(); })).not.toThrow();
+      expect(warn).toHaveBeenCalledWith('[attention] could not open the notice target', expect.any(Error));
+      expect(result.current.store.paneItems[agentRunPaneId('local', 'run-a2')]).toBeUndefined();
     });
   });
 });

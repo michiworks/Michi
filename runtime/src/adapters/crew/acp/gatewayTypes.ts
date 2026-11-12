@@ -4,9 +4,10 @@
  *   Gateway's HTTP/SSE API, authenticated as an installed Crew app.
  * - `acpServer.ts` speaks ACP to Michi and drives a {@link CrewGateway}.
  *
- * Error messages produced on either side must never contain "timed out",
- * "response stream", "connection reset" or "ECONNRESET": Michi classifies
- * those as process death and respawns the shared adapter process.
+ * Error messages produced on either side must never contain a Kiro
+ * connection marker (kiro/kiroErrorMarkers.ts): Michi classifies those as
+ * process death and respawns the shared adapter process. crewFrames'
+ * sanitizeErrorMessage rewrites them.
  */
 
 export interface CrewGatewayConfig {

@@ -1,0 +1,45 @@
+/* Michi's look: the Slate tokens with the violet accent override
+   (frontend/src/state/tokens.ts SLATE, index.css, and the landing brief §5.2
+   and §7.1, which list the shipped values). Geist and Geist Mono are the
+   app's own families (fonts.css in the playground, the page's own on the
+   landing page). */
+
+.mh .ss-stage {
+  /* Surfaces: the app chrome is gray-100, panes are white, the sidebar #fafafb */
+  --ss-canvas: #f3f4f6;
+  --ss-chrome: #f3f4f6;
+  --ss-surface: #ffffff;
+  --ss-well: transparent;
+  --ss-raised: #ffffff;
+  --ss-line: #e5e7eb;
+  --ss-line-faint: #eef0f2;
+  /* Text: fg, fg-2, muted */
+  --ss-text-strong: #111827;
+  --ss-text: #4b5563;
+  --ss-text-faint: #7d8491;
+  --ss-icon: #616876;
+  --ss-icon-faint: #9ca3af;
+  /* The violet accent override; amber is Michi's streaming/selection hue */
+  --ss-accent: #6d4aa8;
+  --ss-accent-2: #5b408e;
+  --ss-accent-soft: #ede9f5;
+  --ss-accent-text: #6d4aa8;
+  --ss-warning: #c48300;
+  /* Cool placeholder inks, the same gray family as the chrome */
+  --ss-ink-1: rgba(17, 24, 39, 0.04);
+  --ss-ink-2: rgba(17, 24, 39, 0.07);
+  --ss-ink-3: rgba(17, 24, 39, 0.09);
+  --ss-ink-4: rgba(17, 24, 39, 0.11);
+  --ss-ink-5: rgba(17, 24, 39, 0.16);
+  --ss-font: 'Geist', ui-sans-serif, system-ui, -apple-system, sans-serif;
+  --ss-mono: 'Geist Mono', ui-monospace, SFMono-Regular, Menlo, monospace;
+  /* Michi's shapes are square: radius 4 for controls, 10 for the OS frame */
+  --ss-radius-sm: 2px;
+  --ss-radius-md: 4px;
+  --ss-radius-lg: 8px;
+  --ss-radius-window: 10px;
+  /* The window shadow the landing page uses for every replica */
+  --ss-shadow-hero: 0 0 0 1px rgba(17, 24, 39, 0.09), 0 1px 2px rgba(17, 24, 39, 0.04), 0 24px 64px -32px rgba(17, 24, 39, 0.3);
+  --mh-pane: cubic-bezier(0.45, 0, 0.1, 1);
+  --mh-out: cubic-bezier(0.25, 0.8, 0.25, 1);
+}

@@ -1,6 +1,6 @@
 import { test, expect } from '@playwright/test';
 import { bootWithWorkspace, installMockApi } from '../fixtures/mockApi';
-import { KIRO_DESCRIPTOR } from '../../backend/src/agents/capabilityDescriptors';
+import { KIRO_HARNESS } from '../../runtime/src/adapters/kiro/kiroDescriptor';
 import { COMPOSER_EDITOR } from '../fixtures/shell';
 
 for (const accepted of [true, false]) {
@@ -13,7 +13,7 @@ for (const accepted of [true, false]) {
       if (url.pathname.endsWith('/agent/status')) {
         await route.fulfill({ json: { runtime: 'kiro', label: 'Kiro', hasRequiredKey: true,
           capabilities: { modes: false, permissions: true, models: false, reasoning: false },
-          capabilityDescriptor: KIRO_DESCRIPTOR, availableRuntimes: [{ id: 'kiro', label: 'Kiro', available: true }],
+          capabilityDescriptor: KIRO_HARNESS, availableRuntimes: [{ id: 'kiro', label: 'Kiro', available: true }],
         } });
         return true;
       }

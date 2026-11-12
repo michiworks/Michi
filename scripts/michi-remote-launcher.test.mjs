@@ -68,7 +68,7 @@ async function installation() {
     cwd: old, env: { ...env, MICHI_REMOTE_TOKEN: 'launcher-test-token-0123456789' }, encoding: 'utf8',
   });
   assert.equal(launched.status, 0, launched.stderr);
-  return { root, home, work, old, first, michi, cleanup: () => { michi('stop'); rmSync(root, { recursive: true, force: true }); } };
+  return { root, home, work, old, first, env, michi, cleanup: () => { michi('stop'); rmSync(root, { recursive: true, force: true }); } };
 }
 
 test('michi update builds the new revision beside the running backend and switches to it', { skip: process.platform !== 'linux' }, async () => {
@@ -87,6 +87,29 @@ test('michi update builds the new revision beside the running backend and switch
     const record = JSON.parse(readFileSync(path.join(fixture.home, '.michi/remote-installation.json'), 'utf8'));
     assert.equal(record.serverPath, path.join(path.dirname(path.dirname(link)), 'backend/dist/server.js'));
     assert.match(fixture.michi('update').stdout, /already at dev/);
+  } finally {
+    fixture.cleanup();
+  }
+});
+
+test('michi update chooses Node for the new build from its engines.node', { skip: process.platform !== 'linux' }, async () => {
+  const fixture = await installation();
+  try {
+    // The Node that remote setup downloaded meets only the running build's minimum.
+    const { engines } = JSON.parse(readFileSync(path.join(REPO, 'package.json'), 'utf8'));
+    const remoteNode = path.join(fixture.home, '.local/share/michi/devdesktop/node/bin/node');
+    mkdirSync(path.dirname(remoteNode), { recursive: true });
+    writeFileSync(path.join(fixture.root, 'old-node.cjs'), `Object.defineProperty(process.versions, 'node', { value: ${JSON.stringify(engines.node.slice(2))} });\n`);
+    writeFileSync(remoteNode, `#!/bin/sh\nexec '${process.execPath}' --require '${path.join(fixture.root, 'old-node.cjs')}' "$@"\n`);
+    chmodSync(remoteNode, 0o755);
+    writeFileSync(path.join(fixture.work, 'package.json'), JSON.stringify({ name: 'fake-michi', version: '1.0.0', private: true,
+      engines: { node: `>=${process.versions.node}` }, scripts: { 'remote:setup': 'node -e ""' } }));
+    const second = commit(fixture.work, SERVER, 'raise the Node minimum');
+
+    fixture.env.PATH = `${path.dirname(process.execPath)}:${fixture.env.PATH}`;
+    const updated = fixture.michi('update');
+    assert.equal(updated.status, 0, updated.stderr);
+    assert.match(fixture.michi('status').stdout, new RegExp(`revision: ${second}`));
   } finally {
     fixture.cleanup();
   }

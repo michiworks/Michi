@@ -2,6 +2,7 @@ import React, { useEffect, useMemo, useRef, useState } from 'react';
 import type { ToolCallState, SubagentInfo } from '../../state/chatTypes';
 import { useAgentBlockStyle } from '../../state/prefs';
 import { CardToolGroup, CollapsedToolSummary, TermToolGroup } from './AgentBlockVariants';
+import { LineToolGroup } from './AgentLineBlocks';
 import { useMetaChatDecorations } from '../../state/metaChat/metaChatDecorations';
 import {
   failedToolCount,
@@ -14,9 +15,7 @@ import {
   isRunningStatus,
   subagentStatusLabel,
   delegationToolInfo,
-  filterSubagentRelayedTools,
   toolDisplayTitle,
-  isHiddenInternalTool,
   toolPurpose,
   toolRowDetail,
   type SubagentToolInfo,
@@ -26,8 +25,8 @@ import {
   delegationHeading,
   delegationStatus,
   subagentsForTool,
+  visibleGroupTools,
   withConversationTone,
-  withDelegationStatus,
 } from './subagents/subagentPresentation';
 import { useDelegationStatusLabel } from './subagents/useDelegationStatusLabel';
 import { FadeOnChange, FailFlash, GlyphSwap, LabelSwap, Reveal, RevealList, ScrollingRevealList } from './agentBlockMotion';
@@ -38,6 +37,14 @@ interface Props {
   subagents?: readonly SubagentInfo[];
   /** false: the caller shows Michi receipts itself (a collapsible thought block keeps them outside). */
   receipts?: boolean;
+  /** Defers the end-of-batch auto-collapse while true: the newest group in a
+   *  live thought block stays open until the block itself folds, so the card
+   *  does not shrink before the answer arrives. */
+  holdOpen?: boolean;
+  /** The group is the newest content of a streaming turn. The 'line' chrome
+   *  keeps it live between its calls ("Working…") instead of settling; the
+   *  other chromes ignore it. */
+  live?: boolean;
 }
 
 const FAIL_COLOR = 'var(--term-danger)';
@@ -132,13 +139,13 @@ function PayloadBlock({ inputJson, output }: { inputJson?: string; output?: stri
       {inputJson && (
         <>
           <div style={labelStyle}><span>in</span><span style={ruleStyle} /></div>
-          <pre style={preStyle}>{formatToolPayload(inputJson)}</pre>
+          <pre className="agent-verbatim" style={preStyle}>{formatToolPayload(inputJson)}</pre>
         </>
       )}
       {output && (
         <>
           <div style={labelStyle}><span>out</span><span style={ruleStyle} /></div>
-          <pre style={preStyle}>{formatToolPayload(output)}</pre>
+          <pre className="agent-verbatim" style={preStyle}>{formatToolPayload(output)}</pre>
         </>
       )}
     </div>
@@ -177,7 +184,7 @@ function SubagentSpineRow({
           </span>
           <FadeOnChange
             k={label}
-            style={{ marginLeft: 'auto', flexShrink: 0, fontSize: 'var(--fs-xs)', paddingLeft: 8, color: failed ? FAIL_COLOR : running ? 'var(--term-accent)' : 'var(--term-muted)' }}
+            style={{ marginLeft: 'auto', flexShrink: 0, fontSize: 'var(--fs-xs)', paddingLeft: 8, color: failed ? FAIL_COLOR : running ? 'var(--term-run)' : 'var(--term-muted)' }}
           >
             {label}
           </FadeOnChange>
@@ -248,6 +255,7 @@ const ToolRow = React.memo(function ToolRow({ t, subagents, label }: { t: ToolCa
               <span>{purpose}</span>
               {failed && ' · failed'}
               <span
+                className="agent-verbatim"
                 style={{
                   display: 'block',
                   fontSize: 'var(--fs-xs)',
@@ -280,14 +288,8 @@ const ToolRow = React.memo(function ToolRow({ t, subagents, label }: { t: ToolCa
 /** The header's label + right-hand meta, one cross-faded layer per mode. */
 const HEADER_LAYER: React.CSSProperties = { display: 'flex', alignItems: 'baseline', gap: 7 };
 
-function ToolCallGroupInner({ tools, defaultExpanded, subagents }: Props) {
-  const ownTools = useMemo(
-    () => withDelegationStatus(
-      filterSubagentRelayedTools(tools, subagents).filter((t) => !isHiddenInternalTool(t.title)),
-      subagents,
-    ),
-    [tools, subagents],
-  );
+function ToolCallGroupInner({ tools, defaultExpanded, subagents, holdOpen = false, live = false }: Props) {
+  const ownTools = useMemo(() => visibleGroupTools(tools, subagents), [tools, subagents]);
   // A lone delegation's status as its conversation presents the agent: the
   // collapsed label's word, and the chrome (spinner, counter, failure,
   // auto-collapse) agrees with it.
@@ -301,16 +303,18 @@ function ToolCallGroupInner({ tools, defaultExpanded, subagents }: Props) {
   const hadRunningRef = useRef(!allTerminal(visibleTools));
 
   // The end-of-batch auto-collapse; the body animates closed in 160ms (Reveal).
+  // Deferred while `holdOpen`, then runs as soon as the hold lifts.
   useEffect(() => {
     if (!allTerminal(visibleTools)) {
       hadRunningRef.current = true;
       return;
     }
+    if (holdOpen) return;
     if (userInteractedRef.current) return;
     if (!startedExpandedRef.current) return;
     if (!hadRunningRef.current) return;
     setExpanded(false);
-  }, [visibleTools]);
+  }, [visibleTools, holdOpen]);
 
   const variant = useAgentBlockStyle();
   const toolLine = useMetaChatDecorations()?.toolLine;
@@ -330,6 +334,9 @@ function ToolCallGroupInner({ tools, defaultExpanded, subagents }: Props) {
     setExpanded((e) => !e);
   };
 
+  if (variant === 'line') {
+    return <LineToolGroup tools={visibleTools} subagents={subagents} live={live} />;
+  }
   if (variant === 'card') {
     return <CardToolGroup tools={visibleTools} expanded={expanded} onToggle={onToggle} subagents={subagents} subagentStatus={subagentStatus} />;
   }
@@ -443,6 +450,8 @@ function ToolCallGroupWithReceipts({ receipts = true, ...props }: Props) {
 export const ToolCallGroup = React.memo(ToolCallGroupWithReceipts, (prev, next) =>
   prev.defaultExpanded === next.defaultExpanded &&
   prev.receipts === next.receipts &&
+  prev.holdOpen === next.holdOpen &&
+  prev.live === next.live &&
   sameTools(prev.tools, next.tools) &&
   prev.subagents === next.subagents,
 );

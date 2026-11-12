@@ -14,6 +14,8 @@ async function bootDigest(page: Page) {
     availableRuntimes: [{ id: 'mock', label: 'Mock Runtime', available: true }],
   };
   await installMockApi(page, {
+    // Digest is off by default (Settings switch); these specs exercise it.
+    prefs: { digestEnabled: true },
     custom: async (route) => {
       const request = route.request();
       const path = new URL(request.url()).pathname.replace(/^.*\/api/, '');
@@ -126,7 +128,8 @@ test('Digest drafts remain separate from Home and the composer stays usable in a
   await page.getByRole('button', { name: 'Go home', exact: true }).click();
   await expect(editor).toHaveText('');
   await editor.fill('Home-only draft');
-  await page.getByRole('button', { name: 'Digest', exact: true }).click();
+  // Home has no Digest button; Back returns to the digest.
+  await page.getByRole('button', { name: 'Navigate back', exact: true }).click();
   await expect(editor).toHaveText('Digest-only draft');
 
   await page.setViewportSize({ width: 390, height: 844 });

@@ -1,0 +1,55 @@
+/* ==========================================================================
+   2. Page tokens (owner: shell). Brief §7.1, verbatim. Motion tokens are
+   Michi's own (index.css L1109-1118, motion/tokens.ts, paneMotion.ts) and drop
+   to 0 ms under reduced motion. The replica scope (.mk) lives in 30-kit.css.
+
+   Palette contract: every colour on the page is a custom property, here, in
+   the .mk scope (30-kit.css) or on .map-band (55-map.css). Rules never carry
+   a colour literal (exceptions: the rabbit mark, mask luminance, forced
+   colours). The values below are Slate (index.html); a palette overrides them
+   under html[data-palette="…"] (95-monokai.css, monokai.html).
+   ========================================================================== */
+
+:root {
+  /* Page: Michi slate with one violet. Ground is near-white, never cream. */
+  --ground:      #fbfbfc;  /* page */
+  --surface:     #ffffff;  /* windows, cards, tables */
+  --ink:         #111827;  /* headlines, claims, primary button fill */
+  --ink-2:       #4b5563;  /* body, sub, figure ink */
+  --ink-3:       #616876;  /* meta, captions, hints, table keys */
+  --ink-60:      #6f737c;  /* two-tone consequence (60 % ink on --ground) */
+  --ink-4:       #7d8491;  /* decoration only, >= 18 px */
+  --rule:        #e5e7eb;  /* table, notes and footer rules; nav hairline */
+  --line:        #d1d5db;  /* outlines, secondary button, keycaps, chips */
+  --line-s:      #9ca3af;  /* the errand's temporary line */
+  --edge:        #c0c2c7;  /* fg 25 %: figure base lines, connectors */
+  --violet:      #6d4aa8;  /* the one accent: live heading, focus, link hover, open footnote, progress */
+  --violet-ink:  #5b408e;  /* violet text below 14 px */
+  --violet-wash: #ebe6f3;  /* violet 14 % on white: open footnote, arrival flash */
+  --violet-f:    #ede9fe;
+  --btn-hover:   #1f2937;
+  --keycap-fill: #f3f4f6;
+  --ink-on:      #fff;                       /* text on an --ink fill: skip link, primary button */
+  --ink-on-line: rgba(255, 255, 255, 0.35);  /* the primary button's keycap outline */
+  --ink-30:      rgba(17, 24, 39, 0.3);      /* text-link underline, ink 30 % */
+  --selection:   rgba(109, 74, 168, 0.26);   /* ::selection, the app's accent 26 % */
+
+  --font: "Geist", "Geist Fallback", system-ui, -apple-system, sans-serif;
+  --mono: "Geist Mono", "Geist Mono Fallback", ui-monospace, Menlo, monospace;
+
+  --margin: clamp(16px, 5vw, 72px);
+  --max: 1296px;
+  --gutter: 24px;
+
+  --t-quick: 60ms; --t-soft: 100ms; --t-enter: 180ms; --t-exit: 110ms;
+  --t-pane: 220ms; --t-pane-exit: 160ms; --t-expand: 260ms; --t-decay: 360ms; --t-slow: 600ms;
+  --t-loop-fast: 1s; --t-loop: 1.4s; --t-loop-slow: 2.4s;
+  --ease: cubic-bezier(.2, 0, .6, 1);
+  --ease-out: cubic-bezier(.23, 1, .32, 1);
+  --ease-pane: cubic-bezier(.32, .72, 0, 1);
+  --ease-dip: cubic-bezier(.55, 0, 1, .45);
+}
+@media (prefers-reduced-motion: reduce) {
+  :root { --t-quick: 0ms; --t-soft: 0ms; --t-enter: 0ms; --t-exit: 0ms; --t-pane: 0ms; --t-pane-exit: 0ms;
+          --t-expand: 0ms; --t-decay: 0ms; --t-slow: 0ms; }
+}

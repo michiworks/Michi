@@ -1,5 +1,7 @@
 # Optional interactions in Michi Pages
 
+Applies to: native Pages in this backend source. Source checked: 2026-11-08.
+
 Pages can support research, comparison, reading, visualization or tasks. Use interaction capabilities when they help the person's current activity. Static pages are valid: there is no requirement to make every number clickable or to add a task table.
 
 ## Entry, content and presentation

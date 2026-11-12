@@ -17,7 +17,6 @@
  */
 
 import { promises as fs } from "node:fs";
-import path from "node:path";
 import { resolveWithinCwd, PathSandboxError } from "./pathSandbox";
 import {
     truncateHead,
@@ -26,17 +25,10 @@ import {
     type TruncationDetails,
 } from "./truncate";
 import { errorResult, type ToolResult, type ToolContent } from "./types";
+import { imageMimeType } from "../attachments";
+import { SHOW_IMAGE_MAX_BYTES } from "michi-runtime/internal/core/showImage";
 
-export const SINGLE_IMAGE_MAX_BYTES = 5 * 1024 * 1024;
 export const DEFAULT_TURN_IMAGE_QUOTA_BYTES = 15 * 1024 * 1024;
-
-const IMAGE_MIME_BY_EXT: Record<string, string> = {
-    ".png": "image/png",
-    ".jpg": "image/jpeg",
-    ".jpeg": "image/jpeg",
-    ".gif": "image/gif",
-    ".webp": "image/webp",
-};
 
 /** Mutable counter shared across all read calls within a single turn. */
 export interface TurnImageQuota {
@@ -89,8 +81,7 @@ export async function executeRead(
     }
     if (!stat.isFile()) return errorResult(`not a file: ${args.path}`);
 
-    const ext = path.extname(absolutePath).toLowerCase();
-    const imageMime = IMAGE_MIME_BY_EXT[ext];
+    const imageMime = imageMimeType(absolutePath);
     const result = imageMime
         ? await readImage(absolutePath, args.path, imageMime, stat.size, quota)
         : await readText(absolutePath, args.path, args.offset, args.limit);
@@ -172,9 +163,9 @@ async function readImage(
     fileSize: number,
     quota: TurnImageQuota,
 ): Promise<ToolResult<ReadDetails>> {
-    if (fileSize > SINGLE_IMAGE_MAX_BYTES) {
+    if (fileSize > SHOW_IMAGE_MAX_BYTES) {
         return errorResult(
-            `image ${displayPath} is ${formatSize(fileSize)}, exceeds the ${formatSize(SINGLE_IMAGE_MAX_BYTES)} per-image limit`,
+            `image ${displayPath} is ${formatSize(fileSize)}, exceeds the ${formatSize(SHOW_IMAGE_MAX_BYTES)} per-image limit`,
         );
     }
     if (quota.usedBytes + fileSize > quota.maxBytes) {

@@ -10,6 +10,7 @@ export function registerScheduledWorkspacePurge(handler: (workspaceId: string) =
 
 /** Permanently remove scheduled work before a workspace purge; safe when no scheduler is running. */
 export function purgeScheduledJobsForWorkspace(workspaceId: string): void {
+  // Not createListenerSet: a scheduler that failed to cancel must stop the DELETE.
   for (const handler of [...handlers]) handler(workspaceId);
   getDb().prepare('DELETE FROM scheduled_jobs WHERE workspace_id=?').run(workspaceId);
 }

@@ -1,11 +1,12 @@
 import { agentPageOpProblem, applyPageOps, parseAgentPageOps, parseUserPageOps, pageViewProblem } from 'michi-shared';
 import { blockLocation } from 'michi-shared';
-import { parseChangeSource } from 'michi-shared';
-import type { AgentPageEditOp, BlockLocation, BlockSource, ChangeSource, MaintenanceResourceRef, PageChangeDto, PageDto, PageWriteResult, TargetMutation, TargetSnapshot } from 'michi-shared';
-import { assertPageRequestSize, invalidatePages, newPageId, PageWriteError, pagesTransaction, requireChatChangeSource, type ChatChangeSource } from './core';
-import { assertNoNewTaskBoardOnHome, getPage, pageConversationIds, savePageContent, validateConversationReferences, validatePageReferences } from './repository';
+import { PAGE_LIMITS, parseChangeSource } from 'michi-shared';
+import type { AgentPageEditOp, BlockLocation, BlockSource, ChangeSource, MaintenanceResourceRef, PageBlock, PageChangeDto, PageDto, PageWriteCommitStatus, PageWriteResult, TargetMutation } from 'michi-shared';
+import { assertPageRequestSize, invalidatePages, newPageId, pageTimestamp, PageWriteError, pagesTransaction, requireChatChangeSource, type ChatChangeSource } from './core';
+import { assertNoNewTaskBoardOnHome, getPage, isHomePage, pageConversationIds, savePageContent, validateConversationReferences, validatePageReferences } from './repository';
 import { pinHumanPageComponentBlocks } from './componentReferences';
-import { canonical } from './canonicalJson';
+import { canonical, sameCanonical } from './canonicalJson';
+import { blockSnapshot, type BlockSnapshot } from './changeSnapshots';
 import { dismissPendingProposals, getTargetHead, insertChange, setTargetHead } from './historyRepository';
 import {
   assertMaintenanceAuthority, assertMaintenanceResourceCurrent, getMaintenancePlan, getMaintenanceReceipt,
@@ -18,11 +19,9 @@ import { acquirePageEditLease, chatBusyError, livePageEditLease, maintenanceBusy
 export { PageWriteError, pagesTransaction, newPageId, invalidatePages, assertPageRequestSize, requireChatChangeSource };
 export type { ChatChangeSource };
 
-const MAX_BLOCKS = 40;
-const MAX_OPS = 50;
-type BlockSnapshot = Extract<TargetSnapshot, { kind: 'block' }>;
+const MAX_BLOCKS = PAGE_LIMITS.blocks;
+const MAX_OPS = PAGE_LIMITS.opsPerEdit;
 const same = (a: unknown, b: unknown): boolean => JSON.stringify(a) === JSON.stringify(b);
-const sameCanonical = (a: unknown, b: unknown): boolean => JSON.stringify(canonical(a)) === JSON.stringify(canonical(b));
 
 export interface ApplyMaintenancePageSetInput {
   workspaceId: string;
@@ -43,20 +42,8 @@ export interface ApplyMaintenancePageSetInput {
   now: number;
 }
 
-function safeNow(value?: number): number {
-  const now = value ?? Date.now();
-  if (!Number.isSafeInteger(now) || now < 0) throw new PageWriteError(400, 'invalid', 'Invalid timestamp');
-  return now;
-}
-
 function pageSnapshot(page: PageDto, blocks: PageDto['blocks'], revision: number): PageDto {
   return { ...page, blocks, revision };
-}
-
-function blockSnapshot(block: PageDto['blocks'][number] | undefined, location: BlockLocation | null, id: string): BlockSnapshot {
-  return block && location
-    ? { kind: 'block', exists: true, block, location }
-    : { kind: 'block', exists: false, id, location: null };
 }
 
 function currentLocation(blocks: PageDto['blocks'], id: string): BlockLocation | null {
@@ -126,9 +113,8 @@ export function writeChanges(args: {
         ? Math.max((priorHead?.targetRevision ?? currentRevision) + 1, record.after.block.rev)
         : Math.max((priorHead?.targetRevision ?? currentRevision) + 1, args.appliedRev);
       setTargetHead(args.page.workspaceId, target, { headId: change.id, targetRevision: nextRevision });
-      if (record.after.kind === 'block' && !record.after.exists) {
-        dismissPendingProposals(args.page.workspaceId, target, args.now);
-      }
+      // The block's revision moved on, so a suggestion waiting on it can never be accepted.
+      dismissPendingProposals(args.page.workspaceId, target, args.now);
     }
   }
   return written;
@@ -142,6 +128,25 @@ function result(page: PageDto, changes: PageChangeDto[], rejected: PageWriteResu
   };
 }
 
+/**
+ * A home checklist the agent rewrites drops the items that were already ticked
+ * before this write, so finished items do not linger; an item ticked in this
+ * write stays until the next one. A list that would be left empty is kept whole.
+ */
+function withoutTickedItems(before: PageBlock | undefined, after: PageBlock): PageBlock {
+  if (before?.type !== 'checklist' || after.type !== 'checklist') return after;
+  // Counted per text, so of two same-named items only as many go as were ticked before.
+  const ticked = new Map<string, number>();
+  for (const item of before.items) if (item.done) ticked.set(item.text.trim(), (ticked.get(item.text.trim()) ?? 0) + 1);
+  if (!ticked.size) return after;
+  const items = after.items.filter((item) => {
+    const left = item.done ? ticked.get(item.text.trim()) ?? 0 : 0;
+    if (left) ticked.set(item.text.trim(), left - 1);
+    return !left;
+  });
+  return items.length && items.length < after.items.length ? { ...after, items } : after;
+}
+
 export type AgentEditPlan = {
   working: PageDto['blocks'];
   /** `index` is the operation that made the record. */
@@ -153,7 +158,7 @@ export type AgentEditPlan = {
 export interface AgentPageWriteResult extends PageWriteResult {
   viewVersion: number;
   atomic: boolean;
-  commitStatus: 'committed' | 'partial' | 'proposed' | 'rejected' | 'unchanged';
+  commitStatus: PageWriteCommitStatus;
 }
 
 function agentResult(page: PageDto, changes: PageChangeDto[], rejected: PageWriteResult['rejected'], atomic: boolean): AgentPageWriteResult {
@@ -177,6 +182,7 @@ export function planAgentEdits(args: {
     return op && (op.op === 'insert' || op.op === 'update') ? [op.block] : [];
   });
   validateSegmentSourceReferences(args.page.workspaceId, args.ownerUserId, inputs, args.page.blocks);
+  const home = isHomePage(args.page.id);
   let working = args.page.blocks;
   const rejected: PageWriteResult['rejected'] = [];
   const records: AgentEditPlan['records'] = [];
@@ -207,7 +213,7 @@ export function planAgentEdits(args: {
     }
     const failure = candidate.rejected[0];
     if (failure) { reject(index, failure.reason, failure.message); return; }
-    if (candidate.blocks.length > MAX_BLOCKS) { reject(index, 'invalid', 'A page may contain at most 40 blocks'); return; }
+    if (candidate.blocks.length > MAX_BLOCKS) { reject(index, 'invalid', `A page may contain at most ${MAX_BLOCKS} blocks`); return; }
     // Hard error, not a soft rejection: a proposal that adds a board could never be accepted.
     assertNoNewTaskBoardOnHome(args.page.workspaceId, args.ownerUserId, candidate.blocks, working);
     try {
@@ -222,16 +228,21 @@ export function planAgentEdits(args: {
     }
     const touched = candidate.touched[0];
     if (!touched) return;
+    const beforeBlock = working.find((block) => block.id === touched.id);
+    // The Meta agent keeps a home current: a block an agent wrote there stays the agent's
+    // after a person ticks or edits it. A block the person added is still theirs, until
+    // they accept a suggestion on it, which brings its agent sources along.
+    const agentHomeBlock = home && !!beforeBlock?.sources?.length;
     const touchedBlock = candidate.blocks.find((block) => block.id === touched.id);
     if (touchedBlock) {
-      const normalized = pinHumanPageComponentBlocks([touchedBlock], args.page.workspaceId, args.ownerUserId)[0]!;
+      let normalized = pinHumanPageComponentBlocks([touchedBlock], args.page.workspaceId, args.ownerUserId)[0]!;
+      if (agentHomeBlock && touched.op === 'update') normalized = withoutTickedItems(beforeBlock, normalized);
       if (normalized !== touchedBlock) candidate = { ...candidate, blocks: candidate.blocks.map((block) => block.id === touched.id ? normalized : block) };
     }
-    const beforeBlock = working.find((block) => block.id === touched.id);
     const afterBlock = candidate.blocks.find((block) => block.id === touched.id);
     const before = blockSnapshot(beforeBlock, touched.before.location, touched.id);
     const after = blockSnapshot(afterBlock, currentLocation(candidate.blocks, touched.id), touched.id);
-    const proposal = !!beforeBlock?.edit;
+    const proposal = !agentHomeBlock && !!beforeBlock?.edit;
     records.push({ id: touched.id, index, before, after, proposal });
     if (!proposal) working = candidate.blocks;
   });
@@ -247,7 +258,7 @@ export function planAgentEdits(args: {
 
 function userEdit(args: { pageId: string; ownerUserId: string; revision: number; ops: unknown; now?: number }): PageWriteResult {
   assertPageRequestSize(args.ops);
-  const now = safeNow(args.now);
+  const now = pageTimestamp(args.now);
   if (!Number.isSafeInteger(args.revision) || args.revision < 1) throw new PageWriteError(400, 'invalid', 'Invalid page revision');
   const ops = parseUserPageOps(args.ops);
   if (!ops) throw new PageWriteError(400, 'invalid', 'Invalid page edit operations');
@@ -268,7 +279,7 @@ function userEdit(args: { pageId: string; ownerUserId: string; revision: number;
       if (error instanceof PageWriteError) throw error;
       throw new PageWriteError(400, 'invalid', error instanceof Error ? error.message : 'Invalid page operation');
     }
-    if (changed.blocks.length > MAX_BLOCKS) throw new PageWriteError(400, 'invalid', 'A page may contain at most 40 blocks');
+    if (changed.blocks.length > MAX_BLOCKS) throw new PageWriteError(400, 'invalid', `A page may contain at most ${MAX_BLOCKS} blocks`);
     if (!changed.touched.length) return result(page, [], []);
     validatePageReferences(page.workspaceId, args.ownerUserId, changed.blocks);
     const touchedIds = new Set(changed.touched.map((entry) => entry.id));
@@ -309,7 +320,7 @@ export function applyAgentPageEdits(args: {
   atomic?: boolean;
 }): AgentPageWriteResult {
   assertPageRequestSize(args.ops);
-  const now = safeNow(args.now);
+  const now = pageTimestamp(args.now);
   if (!Array.isArray(args.ops) || args.ops.length > MAX_OPS) throw new PageWriteError(400, 'invalid', 'Invalid page edit operations');
   return pagesTransaction(() => {
     const page = getPage(args.pageId, args.ownerUserId, { write: true });
@@ -352,13 +363,13 @@ export function applyAgentPageEdits(args: {
 /** Applies a frozen maintenance page edit set and commits its receipt in the same savepoint. */
 export function applyMaintenancePageSet(args: ApplyMaintenancePageSetInput): PageWriteResult {
   assertPageRequestSize(args.ops);
-  const now = safeNow(args.now);
+  const now = pageTimestamp(args.now);
   if (!Number.isSafeInteger(args.expectedRevision) || args.expectedRevision < 1 ||
       !Number.isSafeInteger(args.generation) || args.generation < 1) {
     throw new PageWriteError(400, 'invalid', 'Invalid maintenance page revision or generation');
   }
   if (!Array.isArray(args.ops) || args.ops.length < 1 || args.ops.length > MAX_OPS) {
-    throw new PageWriteError(400, 'invalid', 'Maintenance operation set must contain 1-50 operations');
+    throw new PageWriteError(400, 'invalid', `Maintenance operation set must contain 1-${MAX_OPS} operations`);
   }
   const parsedOps = parseAgentPageOps(args.ops);
   if (!parsedOps || !sameCanonical(parsedOps, args.ops)) throw new PageWriteError(400, 'invalid', 'Maintenance operations must be normalized agent page operations');

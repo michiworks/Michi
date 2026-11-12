@@ -1,25 +1,25 @@
-import { openPreferredUrl } from '../../services/openUrl';
 import { sessionModeCatalog } from '../../state/sessionModeCatalog';
 import { turnErrorAction } from '../../state/turnErrorRecovery';
 import { ChatCommandResult } from './ChatCommandResult';
-import { usePermissionPreferences } from '../../hooks/usePermissionPreferences';
-import { backendConnectionIdForWorkspace, workspaceBackendApiBase } from '../../config/backendConnections';
+import { effectiveChatPermissionChoice, usePermissionPreferences } from '../../hooks/usePermissionPreferences';
+import { backendConnectionIdForWorkspace, LOCAL_BACKEND_CONNECTION_ID, workspaceBackendApiBase } from '../../config/backendConnections';
 import { ComposerPermissionControl } from './ComposerPermissionControl';
-import { chatPermissionChoice } from 'michi-shared';
+import { ConversationMemoryControl } from './ConversationMemoryControl';
 import { approveForMeRuntimeIds } from '../../lib/chatPermissionModes';
 import { mergeContextQuote } from '../../state/assistant/assistantContext';
 import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { AnimatePresence, motion, useIsPresent } from 'motion/react';
-import { DUR, EASE } from '../../motion/tokens';
+import { DUR, EASE, KEYBOARD_MOVE } from '../../motion/tokens';
 import { useChatActions, useChatNode, useChatPanes, useChatProjects, useStructuralSelector, shallowArrayEqual, chatLabel } from '../../state/chatStore';
 import type { ChatNodeState, ArtifactEntry, ProjectEdge } from '../../state/chatStore';
 import { usePrefs } from '../../state/prefs';
 import { usePaneShellStyle } from '../../hooks/usePaneShellStyle';
 import { stripBranchPrefix, parseFanoutCommand, shouldBranchOnSubmit } from '../nodes/chatNodeUtils';
-import SelectionActions from '../SelectionActions';
+import SelectionActions, { findMessageIdForRange } from '../SelectionActions';
 import { DOCK_ROOM_VAR } from '../selectionDockRoom';
 import type { MentionEditorHandle } from '../MentionEditor';
-const MentionEditor = React.lazy(() => import('../MentionEditor'));
+import LazyMentionEditor from '../LazyMentionEditor';
+import { spaceBeforeMention } from '../mentionSpacing';
 import type { MentionRecord } from '../mentions';
 import { expandMentions } from '../mentions';
 import { findTreeIdForNode } from '../../state/tree';
@@ -28,24 +28,34 @@ import { ATTACHED_QUOTE_SOURCE, formatQuotedMessage, type AnyQuoteSource } from 
 import { buildAnchorMap, type ChildAnchor } from '../../state/branchAnchors';
 import { formatCommentsBlock, joinMessageParts } from '../../lib/commentFormat';
 import { getElectron } from '../../lib/electronBridge';
-import { getWebUploadCwd, importWorkspaceFile, importWorkspaceFileUpload, copyWorkspaceFile, type UploadProgress } from '../../services/api';
+import { useComposerAttachments } from './useComposerAttachments';
+import { registerPaneFileDropTarget } from './paneFileDropTargets';
+import { isFileDrag, useFileDropZone } from './useFileDropZone';
+import { openArtifact, showArtifactInDrawer } from './artifacts/artifactOpen';
 import { toast } from 'sonner';
 import { fetchAssistant, updateAssistantSettings, type AssistantSettingsPatch } from '../../services/api/assistant';
-import { adoptAssistantInfo, getAssistantSnapshot } from '../../state/assistant/assistantStore';
+import { adoptCompanionAssistant, getCompanionAssistant } from '../../state/companion/companionStore';
 import { appendAttachmentsSentinel } from '../../lib/composerAttachments';
 import { checkRuntimeHealth } from '../../services/api';
-import { shouldSteerInsteadOfQueue } from 'michi-shared';
+import { companionPostRunId, shouldSteerInsteadOfQueue } from 'michi-shared';
 import { useRuntimeCatalog } from '../../hooks/useRuntimeCatalog';
 import { resolveNodeBinding, type PendingNodeBindingOverride } from '../../state/nodeBindingResolution';
-import type { SendBindingMeta } from '../../state/chatTypes';
-import UploadProgressBar, { type UploadProgressViewState } from '../UploadProgressBar';
+import { useRuntimeLabel, useSkillCatalog } from '../../state/skillCatalog';
+import { buildSlashEntries, keepsSlashPick, liveSlashCommands, pickedSlashEntry, resolveSlashRun, type SlashPick } from '../../state/slashEntries';
+import type { CreateChildChatOptions, PendingComment, SendBindingMeta, UserSendMeta } from '../../state/chatTypes';
+import { appendComposerLine, mergeComposerDraft, prependToDraft } from '../../state/composerDraft';
+import UploadProgressBar from '../UploadProgressBar';
 import PermissionBanner from './PermissionBanner';
 import MergeBanner from './MergeBanner';
 import PaneFind from './PaneFind';
+import { flashMatchOverlay } from './paneFindMatches';
 import { ComposerShell, type ComposerShellHandle } from './ComposerShell';
 import { usePhoneLayout } from '../../hooks/usePhoneLayout';
 import { useHoldScrollOnKeyboard } from '../../hooks/useHoldScrollOnKeyboard';
+import { blurWithin, useDismissKeyboardOnDrag } from '../../hooks/useDismissKeyboardOnDrag';
 import { PaneMessageList } from './PaneMessageList';
+import { failedPlanStep, useMultiModelBranch } from './multiModelBranch';
+import { TranscriptScrubber } from './TranscriptScrubber';
 import { PaneComposerPreBlocks, type PanePendingAttachment } from './PaneComposerPreBlocks';
 import { PaneComposerActions, type PaneComposerSendMode } from './PaneComposerActions';
 import { PaneComposerToolbarLeft, type PaneMenuAnchor } from './PaneComposerToolbarLeft';
@@ -54,9 +64,12 @@ import { resolveComposerReasoning } from './composerReasoning';
 import { PaneAgentMenus } from './PaneAgentMenus';
 import { FileDropOverlay, PaneDropIndicator } from './PaneDragOverlays';
 import { nextFollowScrollTop } from './scrollPinning';
+import { glideToTail } from './sendScroll';
+import { prefersReducedMotion } from '../../hooks/useReducedMotion';
 import { claimSourceJump, useSourceJump } from '../../state/sourceNav/sourceNav';
 import { useRunningClaudeWorkflow } from '../../state/workflowDomain';
 import { DARK_PALETTES } from './tokens';
+import { focusIsTaken } from './escapeLayers';
 import {
   noteAssistantContextSent,
   pendingAssistantContext,
@@ -65,9 +78,9 @@ import {
 } from '../../state/assistant/assistantComposer';
 import { isSystemWorkspace } from '../../state/assistant/systemWorkspace';
 import { assistantComposerBinding } from '../../state/assistant/assistantBinding';
-import { useAssistantInfo } from '../../state/assistant/assistantStore';
+import { useCompanionAssistantInfo } from '../../state/companion/companionStore';
+import { noteCompanionPostReply } from '../../state/companion/companionReply';
 import type { AssistantConversationSource } from '../../state/assistant/assistantSource';
-import { navigateToNode } from '../../state/navigateToNode';
 import * as perf from '../../services/perf';
 
 // Shared module-level flag flipped by the Sidebar's `michi:sidebar-animating`
@@ -78,8 +91,14 @@ const sidebarAnimatingRef = { current: false };
 const animationEndCallbacks = new Set<() => void>();
 const PROGRAMMATIC_SCROLL_WINDOW_MS = 800;
 const USER_SCROLL_INTENT_WINDOW_MS = 1200;
+/** How close to the top of the loaded page, in viewport heights, the next older page loads. */
+const OLDER_PREFETCH_VIEWPORTS = 1.5;
+/** A send's message lands within this of the send; a glide later than that is not the keyboard send's. */
+const KEYBOARD_SEND_WINDOW_MS = 1000;
 /** How long a click in the transcript may still turn out to open or close something. */
 const USER_CLICK_LAYOUT_WINDOW_MS = 300;
+/** How long tail-following outlasts a stream, while the finished answer settles. */
+const TAIL_SETTLE_MS = 400;
 
 /** The transcript and the clicked message as they were when a click landed. */
 interface UserClickLayout {
@@ -145,8 +164,8 @@ export interface PaneScrollEntry {
 
 /**
  * Where the first unseen message sits after an unread restore, as a fraction
- * of the viewport height from the top — upper-middle, matching the 30% anchor
- * used when a freshly-sent user message is scrolled into view.
+ * of the viewport height from the top — upper-middle, so what the reader
+ * missed starts high enough to read on from.
  */
 const UNSEEN_TOP_FRACTION = 0.3;
 
@@ -236,10 +255,13 @@ const PANE_PERF_SLOW_COMMIT_MS = 16;
 const COMPOSER_BOTTOM_INSET = 12;
 // Breathing room between the last line of transcript content and the top edge
 // of the composer card. The transcript reserves the card height plus the inset
-// plus this gap, and tail-following plus the tail spacer use the same sum, so
+// plus this gap, and tail-following uses the same sum, so
 // the last line always comes to rest clear of the card instead of hugging it.
 const COMPOSER_TAIL_GAP = 28;
 const COMPOSER_CLEARANCE = COMPOSER_BOTTOM_INSET + COMPOSER_TAIL_GAP;
+// Phone: the opaque strip under the card fades out this far above its top.
+// Kept below COMPOSER_TAIL_GAP so content at rest at the end is never dimmed.
+const COMPOSER_TOP_FADE = 24;
 const EMPTY_CONTEXTS: ArtifactEntry[] = [];
 const EMPTY_EDGES: readonly ProjectEdge[] = [];
 const EMPTY_SAME_TREE_NODES: ChatNodeState[] = [];
@@ -285,73 +307,6 @@ if (typeof window !== 'undefined') {
   });
 }
 
-// Walk `el`'s text nodes and build a DOM Range for each occurrence of `q`
-// (already lowercased), in document order, left-to-right.
-function rangesInElement(el: Element, q: string): Range[] {
-  const ranges: Range[] = [];
-  const walker = document.createTreeWalker(el, NodeFilter.SHOW_TEXT);
-  let textNode: Text | null;
-  while ((textNode = walker.nextNode() as Text | null)) {
-    const lower = textNode.data.toLowerCase();
-    let idx = 0;
-    while (idx < lower.length) {
-      const found = lower.indexOf(q, idx);
-      if (found === -1) break;
-      const r = document.createRange();
-      r.setStart(textNode, found);
-      r.setEnd(textNode, found + q.length);
-      ranges.push(r);
-      idx = found + q.length;
-    }
-  }
-  return ranges;
-}
-
-// Every occurrence of `q` across all messages under `root` (persistent overlay).
-function collectFindRanges(root: Element, q: string): Range[] {
-  const ranges: Range[] = [];
-  for (const msgEl of Array.from(root.querySelectorAll('[data-msg-id]'))) {
-    ranges.push(...rangesInElement(msgEl, q));
-  }
-  return ranges;
-}
-
-// Briefly flash a DOM Range by overlaying an absolutely-positioned, fading box
-// on top of it. Uses a real stylesheet animation (index.css .t-find-flash) and a
-// rAF loop to keep the box glued to the text while a smooth scroll is in flight,
-// so it works regardless of CSS Custom Highlight API support. Returns a cancel fn.
-function flashMatchOverlay(range: Range): () => void {
-  if (typeof document === 'undefined' || typeof requestAnimationFrame === 'undefined') {
-    return () => {};
-  }
-  const overlay = document.createElement('div');
-  overlay.className = 't-find-flash';
-  document.body.appendChild(overlay);
-  const startedAt = performance.now();
-  let raf = 0;
-  let done = false;
-  const cleanup = () => {
-    if (done) return;
-    done = true;
-    if (raf) cancelAnimationFrame(raf);
-    overlay.remove();
-  };
-  const position = (now: number) => {
-    const rect = range.getBoundingClientRect();
-    overlay.style.left = `${rect.left}px`;
-    overlay.style.top = `${rect.top}px`;
-    overlay.style.width = `${rect.width}px`;
-    overlay.style.height = `${rect.height}px`;
-    if (now - startedAt < 650) {
-      raf = requestAnimationFrame(position);
-    } else {
-      cleanup();
-    }
-  };
-  raf = requestAnimationFrame(position);
-  return cleanup;
-}
-
 type ComposerDraftState = { value: string; mentions: MentionRecord[] };
 
 const EMPTY_COMPOSER_DRAFT: ComposerDraftState = { value: '', mentions: [] };
@@ -376,27 +331,14 @@ function messageRenderStats(node: ChatNodeState | undefined) {
   };
 }
 
-export interface SelectedPageBlockContext {
-  pageId: string;
-  pageTitle: string;
-  blockId: string;
-  title: string;
-  content: string;
-}
-
-function TPane({ nodeId, contentMaxWidth, embedded = false, allowEmbeddedAttachments = false, selectedPageContext = null, draftRequest = null, onDraftRequestApplied, composerPreBlocks, composerFocusToken = 0, composerDisabled = false, spacesAssistant = false, assistantSource }: {
+function TPane({ nodeId, contentMaxWidth, embedded = false, draftRequest = null, composerPreBlocks, composerFocusToken = 0, composerDisabled = false, spacesAssistant = false, assistantSource, readOnly = false, permissionControl = true }: {
   nodeId: string;
   contentMaxWidth?: number | null;
   /** Rendered outside the pane grid (the ⌘J assistant panel): clicks and
    *  drops must not open or focus the node as a pane in the current slot. */
   embedded?: boolean;
-  /** Page Helpers may upload files into their owning workspace while the global assistant remains attachment-free. */
-  allowEmbeddedAttachments?: boolean;
-  /** Chosen native page block, appended as structured context to the wire text while displayText stays the user's prose. */
-  selectedPageContext?: SelectedPageBlockContext | null;
   /** Explicit user-authorized draft request; populates the composer without submitting. */
   draftRequest?: { id: number; text: string } | null;
-  onDraftRequestApplied?: (requestId: number) => void;
   composerPreBlocks?: React.ReactNode | ((draftHasText: boolean) => React.ReactNode);
   composerFocusToken?: number;
   composerDisabled?: boolean;
@@ -407,6 +349,17 @@ function TPane({ nodeId, contentMaxWidth, embedded = false, allowEmbeddedAttachm
    * the global assistant store when absent (Spaces, the ⌘J panel).
    */
   assistantSource?: AssistantConversationSource;
+  /**
+   * A transcript to read, not continue (a Scheduled-only run on the Scheduled
+   * page): no composer, selection actions or message actions. A pending
+   * approval and an ask_user question can still be answered.
+   */
+  readOnly?: boolean;
+  /**
+   * false: the composer has no permission chip, for a conversation whose
+   * every tool runs without an approval (the Companion's closed toolset).
+   */
+  permissionControl?: boolean;
 }) {
   const renderStartedAt = perf.enabled() ? perf.now() : 0;
   const {
@@ -418,6 +371,7 @@ function TPane({ nodeId, contentMaxWidth, embedded = false, allowEmbeddedAttachm
     editAndResend,
     cancelStream,
     setChatPermissionMode,
+    setChatUltracode,
     createChildChat,
     createBlankChild,
     fanoutBranches,
@@ -434,12 +388,15 @@ function TPane({ nodeId, contentMaxWidth, embedded = false, allowEmbeddedAttachm
     setComposerDraft,
     reorderPane,
     openArtifactPane,
-    selectProject,
-    openPane,
-    openPaneInTree,
-    activateTree,
+    revealNode,
     loadOlderMessages,
+    catchUpNodes,
+    dispatch,
   } = useChatActions();
+  // An opened pane checks its thread against SQLite once (chatStore's catch-up).
+  useEffect(() => {
+    catchUpNodes?.([nodeId]);
+  }, [catchUpNodes, nodeId]);
   const {
     availableModes: defaultAvailableModes,
     defaultModeId,
@@ -453,7 +410,8 @@ function TPane({ nodeId, contentMaxWidth, embedded = false, allowEmbeddedAttachm
   } = useChatProjects();
   const { focusedPane } = useChatPanes();
   const { prefs } = usePrefs();
-  const paneShellStyle = usePaneShellStyle(nodeId);
+  // Never dimmed as an unfocused pane when embedded: it isn't one of the grid's panes.
+  const paneShellStyle = usePaneShellStyle(nodeId, { dim: !embedded });
   const n = useChatNode(nodeId);
   const activeProject = embedded && n
     ? projects?.find((project) => project.id === n.projectId) ?? shellActiveProject
@@ -464,17 +422,13 @@ function TPane({ nodeId, contentMaxWidth, embedded = false, allowEmbeddedAttachm
   // Branch and fan-out sends go to the conversation itself.
   const nodeProjectId = n?.projectId;
   const isAssistantConversation = useMemo(
-    // The existing global assistant keeps its narrower composer capabilities;
-    // page helpers opt into workspace attachments with allowEmbeddedAttachments.
-    () => (embedded && !allowEmbeddedAttachments) || isSystemWorkspace(projects?.find((p) => p.id === nodeProjectId)),
-    [allowEmbeddedAttachments, embedded, nodeProjectId, projects],
+    () => embedded || isSystemWorkspace(projects?.find((p) => p.id === nodeProjectId)),
+    [embedded, nodeProjectId, projects],
   );
-  const branchesOff = embedded || isAssistantConversation;
-  const attachmentRestricted = (isAssistantConversation && !spacesAssistant) || (embedded && !allowEmbeddedAttachments && !spacesAssistant);
-  const selectedPageBlockQuote = useMemo(() => selectedPageContext
-    ? `Selected page block: ${selectedPageContext.title}\nPage: ${selectedPageContext.pageTitle} (pageId: ${selectedPageContext.pageId})\nBlock ID: ${selectedPageContext.blockId}\n\n${selectedPageContext.content}`
-    : null, [selectedPageContext]);
-  const globalAssistantInfo = useAssistantInfo();
+  const branchesOff = isAssistantConversation;
+  // The assistant's conversation has no attachments in a pane; the <name> panel's composer (spacesAssistant) has them.
+  const attachmentRestricted = isAssistantConversation && !spacesAssistant;
+  const globalAssistantInfo = useCompanionAssistantInfo();
   const assistantInfo = assistantSource ? assistantSource.info : globalAssistantInfo;
   const assistantSourceRef = useRef(assistantSource);
   assistantSourceRef.current = assistantSource;
@@ -545,11 +499,18 @@ function TPane({ nodeId, contentMaxWidth, embedded = false, allowEmbeddedAttachm
     },
     [nodeId, setComposerDraft],
   );
+  // The / menu row the draft's `/name` was picked from (MentionEditor's
+  // onSlashPick), or the pick a restored or rejected message brought back.
+  // An edit that leaves the text without that `/name` drops it, so a name
+  // typed again by hand runs by the typed-name rules.
+  const slashPickRef = useRef<SlashPick | null>(null);
   const setDraft = useCallback(
     (nextOrUpdater: ComposerDraftState | ((prev: ComposerDraftState) => ComposerDraftState)) => {
       const next = typeof nextOrUpdater === 'function'
         ? nextOrUpdater(latestDraftRef.current)
         : nextOrUpdater;
+      const pick = slashPickRef.current;
+      if (pick && !keepsSlashPick(next.value, pick.entry.name)) slashPickRef.current = null;
       persistComposerDraft(next, latestQuotedTextRef.current);
     },
     [persistComposerDraft],
@@ -560,12 +521,8 @@ function TPane({ nodeId, contentMaxWidth, embedded = false, allowEmbeddedAttachm
     appliedDraftRequest.current = draftRequest.id;
     const requested = draftRequest.text.trim();
     if (!requested) return;
-    setDraft((previous) => ({
-      value: previous.value.trim() ? `${previous.value.trimEnd()}\n${requested}` : requested,
-      mentions: previous.mentions,
-    }));
-    onDraftRequestApplied?.(draftRequest.id);
-  }, [draftRequest, onDraftRequestApplied, setDraft]);
+    setDraft((previous) => appendComposerLine(previous, requested));
+  }, [draftRequest, setDraft]);
   const setQuotedText = useCallback(
     (next: string | null) => persistComposerDraft(latestDraftRef.current, next, null),
     [persistComposerDraft],
@@ -602,7 +559,7 @@ function TPane({ nodeId, contentMaxWidth, embedded = false, allowEmbeddedAttachm
       const info = await updateAssistantSettings({ ...patch, nodeId });
       const source = assistantSourceRef.current;
       if (source) { if (source.current()?.nodeId === info.nodeId) source.adopt(info); }
-      else if (getAssistantSnapshot().info?.nodeId === info.nodeId) adoptAssistantInfo(info);
+      else if (getCompanionAssistant().info?.nodeId === info.nodeId) adoptCompanionAssistant(info);
     } catch (cause) { toast.error(cause instanceof Error ? cause.message : 'Could not update the assistant model'); }
     finally { assistantModelSave.current = false; setSavingAssistantModel(false); }
   };
@@ -619,7 +576,7 @@ function TPane({ nodeId, contentMaxWidth, embedded = false, allowEmbeddedAttachm
     (source ? source.refetch() : fetchAssistant()).then((info) => {
       if (!live) return;
       if (source) { if (source.current()?.nodeId === info.nodeId) source.adopt(info); }
-      else if (getAssistantSnapshot().info?.nodeId === info.nodeId) adoptAssistantInfo(info);
+      else if (getCompanionAssistant().info?.nodeId === info.nodeId) adoptCompanionAssistant(info);
     }, () => {});
     return () => { live = false; };
   }, [assistantFollowsGlobal, agentStatus, assistantNodeStatus, modelMenuOpen]);
@@ -647,6 +604,18 @@ function TPane({ nodeId, contentMaxWidth, embedded = false, allowEmbeddedAttachm
     catalogProviders.length > 0 ? catalogProviders : undefined);
   const providerModels = requestedBinding.runtime === n?.runtimeId && n?.sessionState?.availableModels?.length
     ? n.sessionState.availableModels : catalogModels;
+  // Ultracode is an ordinary chat's: never the assistant's or a maintenance
+  // transcript's, nor a custom agent's (its live session reports none). The
+  // picker offers it only on a runtime that has it (capabilities.ultracode).
+  const liveSessionState = n?.sessionState?.runtimeId === resolvedBinding.runtime ? n.sessionState : undefined;
+  const ultracode = n && !isAssistantConversation && !n.maintenanceJobId && !(liveSessionState && !liveSessionState.ultracode)
+    ? { enabled: n.ultracode === true, available: liveSessionState?.ultracode?.available } : undefined;
+  // Memory learns only from the user's own chats, never the assistant's, a
+  // page's, a Meta agent run's or a Scheduled-only run's, so those (and an
+  // embedded helper) offer no memory setting.
+  // TODO(companion-memory): V (the 'main' assistant conversation) and check-ins fall under "the assistant's" here; decide what V offers and learns.
+  const memorySetting = !!n && !embedded && !isAssistantConversation && n.kind === 'chat'
+    && !n.pageId && !n.maintenanceJobId && !n.scheduledOnlyJobId;
   const composerEffort = resolveComposerReasoning(resolvedBinding, agentStatus, catalogCapabilities, providerModels, catalogProviders);
   // Snapshot the composer's runtime/model/effort for a send or retry, and
   // clear the pending chip override that this call consumes.
@@ -665,15 +634,44 @@ function TPane({ nodeId, contentMaxWidth, embedded = false, allowEmbeddedAttachm
   // Memoized message-list callbacks read the latest binding through this ref.
   const consumeBindingMetaRef = useRef(consumeBindingMeta);
   consumeBindingMetaRef.current = consumeBindingMeta;
+  // The / menu: the runtime's commands and the skills of this workspace for
+  // the runtime the next message runs on, asked for while the pane has focus
+  // so the first send can resolve one. A send resolves against the same
+  // entries (chatStore), and runs the row picked for its `/name`.
+  // The assistant's conversations run no skills, only commands.
+  const slashRuntimeId = resolvedBinding.runtime || undefined;
+  const { catalog: skillCatalog, load: loadSlashCatalog } = useSkillCatalog(
+    n && !readOnly ? n.projectId : undefined, slashRuntimeId, focusedPane === nodeId);
+  const slashRuntimeLabel = useRuntimeLabel(n?.projectId, slashRuntimeId);
+  const liveCommands = liveSlashCommands(n, slashRuntimeId);
+  const slashEntries = useMemo(
+    () => buildSlashEntries({ agentCommands: liveCommands, catalog: skillCatalog, skills: !isAssistantConversation,
+      runtimeId: slashRuntimeId, runtimeLabel: slashRuntimeLabel }),
+    [liveCommands, skillCatalog, isAssistantConversation, slashRuntimeId, slashRuntimeLabel],
+  );
   // NB: do NOT call this `pending` — `onSubmit` already has a local
   // `const pending = n.pendingComments ?? []`.
-  const [pendingAttachments, setPendingAttachments] = useState<PanePendingAttachment[]>([]);
-  const [uploadProgress, setUploadProgress] = useState<UploadProgressViewState | null>(null);
+  const {
+    pending: pendingAttachments,
+    setPending: setPendingAttachments,
+    removePending: removePendingAttachment,
+    uploadProgress,
+    attachFiles,
+    handlePaste,
+    pickFiles: onPickFile,
+  } = useComposerAttachments(activeProject, { restricted: attachmentRestricted });
   const [dragHover, setDragHover] = useState(false);
 
-  const dragDepthRef = useRef(0);
-  const [dropzoneVisible, setDropzoneVisible] = useState(false);
-  const [droppedFileCount, setDroppedFileCount] = useState(0);
+  // The assistant takes no files, in the ⌘J panel or as a pane (they would
+  // land in a workspace folder, and it has no tool to read them).
+  const {
+    visible: dropzoneVisible,
+    fileCount: droppedFileCount,
+    onDragEnter: handleDragEnter,
+    onDragOver: handleDragOver,
+    onDragLeave: handleDragLeave,
+    endDrag,
+  } = useFileDropZone({ enabled: !attachmentRestricted });
 
   // inputRef is hoisted here so insertContextMention (used by handleDrop) can
   // close over it — both are declared before handleDrop to avoid TDZ.
@@ -681,9 +679,6 @@ function TPane({ nodeId, contentMaxWidth, embedded = false, allowEmbeddedAttachm
   useEffect(() => {
     if (composerFocusToken) inputRef.current?.focus();
   }, [composerFocusToken, nodeId]);
-
-  const isFileDrag = (e: React.DragEvent) =>
-    Array.from(e.dataTransfer.types).includes('Files');
 
   const insertContextMention = useCallback((label: string) => {
     // Insert an atomic context-mention chip at the editor caret (drop handler).
@@ -697,65 +692,6 @@ function TPane({ nodeId, contentMaxWidth, embedded = false, allowEmbeddedAttachm
       .run();
   }, []);
 
-  const handleDragEnter = useCallback((e: React.DragEvent) => {
-    if (!isFileDrag(e)) return;
-    e.preventDefault();
-    // The assistant takes no files, in the ⌘J panel or as a pane (they would
-    // land in a workspace folder, and it has no tool to read them).
-    if (attachmentRestricted) return;
-    dragDepthRef.current += 1;
-    if (dragDepthRef.current === 1) {
-      setDropzoneVisible(true);
-      setDroppedFileCount(e.dataTransfer.items.length);
-    }
-  }, [attachmentRestricted]);
-
-  const handleDragOver = useCallback((e: React.DragEvent) => {
-    if (!isFileDrag(e)) return;
-    e.preventDefault();
-    e.dataTransfer.dropEffect = 'copy';
-  }, []);
-
-  const handleDragLeave = useCallback((e: React.DragEvent) => {
-    if (!isFileDrag(e)) return;
-    dragDepthRef.current = Math.max(0, dragDepthRef.current - 1);
-    if (dragDepthRef.current === 0) setDropzoneVisible(false);
-  }, []);
-
-  const addPendingPaths = useCallback((items: ReadonlyArray<string | { abs: string; displayName?: string; relPath?: string }>) => {
-    if (items.length === 0) return;
-    setPendingAttachments(prev => {
-      const have = new Set(prev.map(p => p.absPath));
-      const next = [...prev];
-      for (const item of items) {
-        const abs = typeof item === 'string' ? item : item.abs;
-        const override = typeof item === 'string' ? undefined : item.displayName;
-        const relPath = typeof item === 'string' ? undefined : item.relPath;
-        if (have.has(abs)) continue;
-        const name = override || abs.split('/').pop() || abs;
-        next.push({
-          id: `att-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
-          name,
-          absPath: abs,
-          relPath,
-        });
-        have.add(abs);
-      }
-      return next;
-    });
-  }, []);
-
-  // Resolve the cwd to import attachments into. Electron projects with a
-  // user-picked folder use that. Web mode (no electron, or workspace
-  // without a cwd) falls back to a backend-allocated upload directory
-  // under /shared/michi/files/<workspaceId> (or os.tmpdir() when /shared
-  // is absent). Returns null if no workspace is active.
-  const resolveAttachCwd = useCallback(async (): Promise<string | null> => {
-    if (activeProject?.cwd) return activeProject.cwd;
-    if (!activeProject?.id) return null;
-    return getWebUploadCwd(activeProject.id);
-  }, [activeProject?.cwd, activeProject?.id]);
-
   // "Test Connection" for the connection/auth error tail: force-respawn the
   // runtime and probe reachability. Desktop sends the workspace cwd; cloud
   // sends the workspaceId (backend derives the sandbox cwd).
@@ -765,259 +701,28 @@ function TPane({ nodeId, contentMaxWidth, embedded = false, allowEmbeddedAttachm
     return { ok: false, detail: 'no active workspace' };
   }, [activeProject?.cwd, activeProject?.id]);
 
-  const progressForFile = useCallback(
-    (fileName: string, fileIndex: number, fileCount: number) =>
-      (progress: UploadProgress) => {
-        setUploadProgress({
-          fileName,
-          fileIndex,
-          fileCount,
-          phase: progress.phase,
-          percent: progress.percent,
-        });
-      },
-    [],
-  );
-
   const handleDrop = useCallback(async (e: React.DragEvent) => {
     if (!isFileDrag(e)) return;
     e.preventDefault();
-    dragDepthRef.current = 0;
-    setDropzoneVisible(false);
-    // The assistant takes no files (see handleDragEnter).
+    endDrag();
+    // The assistant takes no files (see useFileDropZone above).
     if (attachmentRestricted) return;
 
     const files = Array.from(e.dataTransfer.files);
     if (files.length === 0) return;
 
     if (!embedded) focusPane(nodeId);
-
-    const items: Array<string | { abs: string; displayName: string; relPath?: string }> = [];
-    const errors: string[] = [];
-
-    for (const [fileIndex, file] of files.entries()) {
-      try {
-        const cwd = await resolveAttachCwd();
-        if (!cwd || !activeProject?.id) {
-          errors.push(`${file.name}: no workspace folder`);
-          continue;
-        }
-        const result = await importWorkspaceFileUpload(activeProject.id, cwd, file, {
-          onProgress: progressForFile(file.name, fileIndex, files.length),
-          subdir: '.attachments',
-        });
-        const abs = result.filePath.startsWith('/')
-          ? result.filePath
-          : `${cwd.replace(/\/$/, '')}/${result.filePath}`;
-        items.push({ abs, displayName: result.displayName || file.name, relPath: result.filePath });
-      } catch (err) {
-        errors.push(`${file.name}: ${(err as Error).message}`);
-      }
-    }
-    setUploadProgress(null);
-
-    if (items.length > 0) addPendingPaths(items);
-
-    if (errors.length > 0) {
-      toast.error(
-        `${errors.length} file${errors.length === 1 ? '' : 's'} failed`,
-        { description: errors.join('\n'), style: { whiteSpace: 'pre-line' } },
-      );
-    }
-  }, [activeProject, addPendingPaths, attachmentRestricted, focusPane, nodeId, progressForFile, resolveAttachCwd]);
-
-  // Paste-to-attach: scan clipboardData for file items (typically images
-  // copied from screenshots / browsers) and pipe them through the same
-  const PASTE_AS_FILE_THRESHOLD = 10_000;
-
-  // import path as drag-and-drop. Text pastes fall through to the textarea.
-  const handlePaste = useCallback(async (e: React.ClipboardEvent<HTMLTextAreaElement>) => {
-    const dt = e.clipboardData;
-    // In the assistant a paste is only text: no files, no long-text attachments.
-    if (!dt || attachmentRestricted) return;
-
-    // Long text paste → save as .txt file attachment instead of inline.
-    const plainText = dt.getData('text/plain');
-    if (plainText && plainText.length >= PASTE_AS_FILE_THRESHOLD) {
-      const hasFiles = Array.from(dt.items).some(i => i.kind === 'file');
-      if (!hasFiles) {
-        e.preventDefault();
-        try {
-          const cwd = await resolveAttachCwd();
-          if (!cwd || !activeProject?.id) {
-            toast.error('No workspace folder for text attachment');
-            return;
-          }
-          const ts = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
-          const fileName = `pasted-text-${ts}.txt`;
-          const result = await importWorkspaceFile(activeProject.id, cwd, fileName, plainText, {
-            subdir: '.attachments',
-          });
-          const abs = result.filePath.startsWith('/')
-            ? result.filePath
-            : `${cwd.replace(/\/$/, '')}/${result.filePath}`;
-          addPendingPaths([{ abs, displayName: fileName, relPath: result.filePath }]);
-        } catch (err) {
-          toast.error('Failed to save pasted text as file', {
-            description: (err as Error).message,
-          });
-        }
-        return;
-      }
-    }
-
-    const items: File[] = [];
-    for (const item of Array.from(dt.items)) {
-      if (item.kind !== 'file') continue;
-      const f = item.getAsFile();
-      if (f) items.push(f);
-    }
-    if (items.length === 0) return;
-    e.preventDefault();
-
-    const pendingItems: Array<string | { abs: string; displayName: string; relPath?: string }> = [];
-    const errors: string[] = [];
-
-    for (const [fileIndex, file] of items.entries()) {
-      try {
-        const cwd = await resolveAttachCwd();
-        if (!cwd || !activeProject?.id) {
-          errors.push(`${file.name || 'pasted file'}: no workspace folder`);
-          continue;
-        }
-        // Pasted images often arrive with a generic name like "image.png"
-        // or no extension — derive an extension from the MIME type and a
-        // unique stem so multiple pastes don't collide.
-        const nameExtMatch = file.name && file.name.match(/\.[a-zA-Z0-9]{1,8}$/);
-        const ext = nameExtMatch
-          ? nameExtMatch[0]
-          : (file.type && file.type.startsWith('image/')
-              ? `.${file.type.slice('image/'.length).split(';')[0] || 'png'}`
-              : '');
-        const stem = (file.name && file.name.replace(/\.[a-zA-Z0-9]{1,8}$/, '')) || 'pasted';
-        const ts = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
-        const fileName = `${stem}-${ts}${ext}`;
-        const result = await importWorkspaceFileUpload(activeProject.id, cwd, file, {
-          originalName: fileName,
-          onProgress: progressForFile(fileName, fileIndex, items.length),
-          subdir: '.attachments',
-        });
-        const abs = result.filePath.startsWith('/')
-          ? result.filePath
-          : `${cwd.replace(/\/$/, '')}/${result.filePath}`;
-        pendingItems.push({ abs, displayName: result.displayName || fileName, relPath: result.filePath });
-      } catch (err) {
-        errors.push(`${file.name || 'pasted file'}: ${(err as Error).message}`);
-      }
-    }
-    setUploadProgress(null);
-
-    if (pendingItems.length > 0) addPendingPaths(pendingItems);
-    if (errors.length > 0) {
-      toast.error(
-        `${errors.length} paste${errors.length === 1 ? '' : 's'} failed`,
-        { description: errors.join('\n'), style: { whiteSpace: 'pre-line' } },
-      );
-    }
-  }, [activeProject, addPendingPaths, attachmentRestricted, progressForFile, resolveAttachCwd]);
-
-  const removePendingAttachment = useCallback((id: string) => {
-    setPendingAttachments(prev => prev.filter(x => x.id !== id));
-  }, []);
-
-  const webFileInputRef = useRef<HTMLInputElement | null>(null);
-
-  const onPickFile = useCallback(async () => {
-    const electron = getElectron();
-    if (electron?.chooseFiles && !activeProject?.backendConnectionId) {
-      const res = await electron.chooseFiles();
-      if (res.canceled || !res.paths?.length) return;
-      const cwd = await resolveAttachCwd();
-      if (!cwd || !activeProject?.id) {
-        toast.error('No workspace folder for file attachment');
-        return;
-      }
-      const items: Array<{ abs: string; displayName: string; relPath: string }> = [];
-      const errors: string[] = [];
-      for (const sourcePath of res.paths) {
-        try {
-          const result = await copyWorkspaceFile(activeProject.id, cwd, sourcePath, {
-            subdir: '.attachments',
-          });
-          const abs = result.filePath.startsWith('/')
-            ? result.filePath
-            : `${cwd.replace(/\/$/, '')}/${result.filePath}`;
-          items.push({
-            abs,
-            displayName: result.displayName || sourcePath.split('/').pop() || sourcePath,
-            relPath: result.filePath,
-          });
-        } catch (err) {
-          const name = sourcePath.split('/').pop() || sourcePath;
-          errors.push(`${name}: ${(err as Error).message}`);
-        }
-      }
-      if (items.length > 0) addPendingPaths(items);
-      if (errors.length > 0) {
-        toast.error(
-          `${errors.length} file${errors.length === 1 ? '' : 's'} failed`,
-          { description: errors.join('\n'), style: { whiteSpace: 'pre-line' } },
-        );
-      }
-      return;
-    }
-    // Web: open a hidden <input type="file"> picker. Files are imported
-    // through the same /workspaces/import-file pipeline as drag-and-drop.
-    if (!webFileInputRef.current) {
-      const input = document.createElement('input');
-      input.type = 'file';
-      input.multiple = true;
-      input.style.display = 'none';
-      input.addEventListener('change', async () => {
-        const files = Array.from(input.files ?? []);
-        input.value = '';
-        if (files.length === 0) return;
-        const items: Array<{ abs: string; displayName: string; relPath?: string }> = [];
-        const errors: string[] = [];
-        for (const [fileIndex, file] of files.entries()) {
-          try {
-            const cwd = await resolveAttachCwd();
-            if (!cwd || !activeProject?.id) {
-              errors.push(`${file.name}: no workspace folder`);
-              continue;
-            }
-            const result = await importWorkspaceFileUpload(activeProject.id, cwd, file, {
-              onProgress: progressForFile(file.name, fileIndex, files.length),
-              subdir: '.attachments',
-            });
-            const abs = result.filePath.startsWith('/')
-              ? result.filePath
-              : `${cwd.replace(/\/$/, '')}/${result.filePath}`;
-            items.push({ abs, displayName: result.displayName || file.name, relPath: result.filePath });
-          } catch (err) {
-            errors.push(`${file.name}: ${(err as Error).message}`);
-          }
-        }
-        setUploadProgress(null);
-        if (items.length > 0) addPendingPaths(items);
-        if (errors.length > 0) {
-          toast.error(
-            `${errors.length} file${errors.length === 1 ? '' : 's'} failed`,
-            { description: errors.join('\n'), style: { whiteSpace: 'pre-line' } },
-          );
-        }
-      });
-      document.body.appendChild(input);
-      webFileInputRef.current = input;
-    }
-    webFileInputRef.current.click();
-  }, [activeProject?.id, activeProject?.backendConnectionId, addPendingPaths, progressForFile, resolveAttachCwd]);
+    await attachFiles(files);
+  }, [attachFiles, attachmentRestricted, embedded, endDrag, focusPane, nodeId]);
 
   const scrollRef = useRef<HTMLDivElement>(null);
   const [loadingOlder, setLoadingOlder] = useState(false);
   const olderAnchorRef = useRef<{ id: string; top: number } | null>(null);
+  // Scroll events arrive faster than the loading state re-renders.
+  const loadingOlderRef = useRef(false);
   const loadOlder = useCallback(async () => {
-    if (loadingOlder) return;
+    if (loadingOlder || loadingOlderRef.current) return;
+    loadingOlderRef.current = true;
     cancelScrollRestoreRef.current?.();
     followRef.current = false;
     const el = scrollRef.current;
@@ -1026,7 +731,7 @@ function TPane({ nodeId, contentMaxWidth, embedded = false, allowEmbeddedAttachm
     setLoadingOlder(true);
     try { await loadOlderMessages(nodeId); }
     catch (error) { olderAnchorRef.current = null; toast.error((error as Error).message); }
-    finally { setLoadingOlder(false); }
+    finally { loadingOlderRef.current = false; setLoadingOlder(false); }
   }, [loadOlderMessages, loadingOlder, nodeId]);
   useLayoutEffect(() => {
     const anchor = olderAnchorRef.current;
@@ -1075,7 +780,7 @@ function TPane({ nodeId, contentMaxWidth, embedded = false, allowEmbeddedAttachm
   const prevScrollTopRef = useRef<number>(0);
   // ID of the last user message we've already auto-scrolled for. Used to
   // detect a *new* user send (vs. a re-render of the same message) so we
-  // only fire the "scroll user message to top 30%" animation once per send.
+  // only fire the send glide (sendScroll.ts) once per send.
   // Initialise to the current latest user message so a freshly-mounted
   // (reopened) pane doesn't mistake existing history for a new send.
   // Compared by sentMessageKey: realign-assistant-id renames a sent message
@@ -1089,23 +794,28 @@ function TPane({ nodeId, contentMaxWidth, embedded = false, allowEmbeddedAttachm
     return null;
   })());
   // performance.now() timestamp until which follow-mode auto-pinning is
-  // suppressed. Set when a user message lands so the smooth-scroll-to-30%
-  // animation can complete before the assistant's first streamed token
-  // would otherwise yank the viewport back to the bottom.
+  // suppressed. Set when a user message lands so the send glide owns the
+  // scroll until it lands; it clears this itself when it ends.
   const userMsgPinUntilRef = useRef<number>(0);
+  // Cancels the send glide in progress (sendScroll.ts), if any.
+  const sendGlideRef = useRef<(() => void) | null>(null);
+  useEffect(() => () => sendGlideRef.current?.(), []);
+  // Until when the next send glide rides the keyboard (KEYBOARD_MOVE): the
+  // composer's send lowered it. The message lands a commit or two later.
+  const keyboardSendUntilRef = useRef<number>(0);
   // Programmatic smooth-scroll emits ordinary scroll events. Without this
   // guard, the first in-between frame can look like an upward user scroll and
   // incorrectly disable follow mode for the rest of the streaming turn.
   const programmaticScrollUntilRef = useRef<number>(0);
   const cancelScrollRestoreRef = useRef<(() => void) | null>(null);
   // Layout reflow during a long stream can move scrollTop upward by itself
-  // (markdown blocks forming, spacer removal, browser scroll anchoring). Only
+  // (markdown blocks forming, browser scroll anchoring). Only
   // leave follow mode when that upward scroll is tied to recent user input.
   const userScrollIntentUntilRef = useRef<number>(0);
   // A click in the transcript that changes its height (Show more on a long
   // user message, opening a thinking or tool card) is the reader asking to
   // see that content, not new output to tail. Follow mode used to pin the
-  // grown transcript to its tail, so expanding a message near the 30% anchor
+  // grown transcript to its tail, so expanding a message above the reply
   // threw the viewport to the bottom. The click records the transcript
   // height; the first pin that finds it changed by the clicked message
   // (clickChangedLayout) leaves follow mode. The record lasts
@@ -1122,6 +832,10 @@ function TPane({ nodeId, contentMaxWidth, embedded = false, allowEmbeddedAttachm
   // ResizeObserver/animation-end pin can run the same anchor-vs-tail
   // logic without recapturing message state in its `[]` deps closure.
   const pinFnRef = useRef<(() => void) | null>(null);
+  // Whether the last follow pass saw the node streaming, and until when the
+  // answer that stream left may still settle (TAIL_SETTLE_MS).
+  const followSawStreamingRef = useRef(false);
+  const tailSettleUntilRef = useRef(0);
 
   // ── Scroll persistence ─────────────────────────────────────────────────
   // True while the mount-time restore below is still positioning the
@@ -1351,7 +1065,7 @@ function TPane({ nodeId, contentMaxWidth, embedded = false, allowEmbeddedAttachm
   const [composerAttached, setComposerAttached] = useState<boolean | null>(null);
   const composerGuessRef = useRef<boolean | null>(null);
   if (composerGuessRef.current === null && n) composerGuessRef.current = !n.pendingPermission;
-  const composerMounted = composerAttached ?? composerGuessRef.current ?? true;
+  const composerMounted = readOnly ? false : composerAttached ?? composerGuessRef.current ?? true;
   const composerHandleRef = useCallback((handle: ComposerShellHandle | null) => {
     composerHandle.current = handle;
     setComposerAttached(handle !== null);
@@ -1385,11 +1099,6 @@ function TPane({ nodeId, contentMaxWidth, embedded = false, allowEmbeddedAttachm
   // bottom padding so the last message can scroll above the card instead of
   // being trapped behind it.
   const [composerHeight, setComposerHeight] = useState(96);
-  // Measured clientHeight of the scroll viewport. Drives the tail spacer
-  // size so the freshly-sent user message can sit at ~30% from the top
-  // even on short replies. Falls back to 600 before first measurement so
-  // we don't render a 0-height spacer on the very first paint.
-  const [viewportH, setViewportH] = useState(600);
   // Width-driven compaction tier for the toolbar:
   // 0 = full labels, 1 = compact model settings and agent glyph,
   // 2 = hide the agent chip; model settings remain reachable.
@@ -1403,6 +1112,19 @@ function TPane({ nodeId, contentMaxWidth, embedded = false, allowEmbeddedAttachm
   const markUserScrollIntent = useCallback(() => {
     userScrollIntentUntilRef.current = performance.now() + USER_SCROLL_INTENT_WINDOW_MS;
   }, []);
+  // The phone scrubber moves the transcript for the reader: stop tailing the
+  // reply and any glide or restore still running. Dragging back to the
+  // bottom resumes following through the ordinary scroll handler. Like a
+  // drag on the transcript, it lowers the keyboard.
+  const handleScrub = useCallback((phase: 'start' | 'move') => {
+    if (phase === 'start') {
+      blurWithin(composerHandle.current?.el);
+      cancelScrollRestoreRef.current?.();
+      sendGlideRef.current?.();
+      followRef.current = false;
+    }
+    markUserScrollIntent();
+  }, [markUserScrollIntent]);
   const markUserScrollIntentFromKey = useCallback((e: React.KeyboardEvent<HTMLDivElement>) => {
     if (
       e.key === 'ArrowUp' ||
@@ -1433,17 +1155,16 @@ function TPane({ nodeId, contentMaxWidth, embedded = false, allowEmbeddedAttachm
     if (!isFocused && findOpen) setFindOpen(false);
   }, [isFocused, findOpen]);
 
-  // Forward dashboard drop events to this pane's composer when focused.
+  // Files the Dashboard receives outside any chat pane reach this composer
+  // when it is the pane under the cursor or the focused one.
   useEffect(() => {
-    if (focusedPane !== nodeId) return;
-    const onAttach = (e: Event) => {
-      const detail = (e as CustomEvent).detail as { paths?: string[] };
-      if (!detail?.paths || detail.paths.length === 0) return;
-      addPendingPaths(detail.paths);
-    };
-    window.addEventListener('michi:attach-paths', onAttach as EventListener);
-    return () => window.removeEventListener('michi:attach-paths', onAttach as EventListener);
-  }, [focusedPane, nodeId, addPendingPaths]);
+    if (embedded) return;
+    return registerPaneFileDropTarget(nodeId, async (files) => {
+      if (attachmentRestricted) return false;
+      focusPane(nodeId);
+      return attachFiles(files);
+    });
+  }, [attachFiles, attachmentRestricted, embedded, focusPane, nodeId]);
 
   // Intercept internal-link clicks from MarkdownContent anchors and open them
   // as artifact panes (prevents white-screen navigation for relative URLs).
@@ -1460,109 +1181,6 @@ function TPane({ nodeId, contentMaxWidth, embedded = false, allowEmbeddedAttachm
     return () => el.removeEventListener('michi:internal-link', onInternalLink);
   }, [openArtifactPane]);
 
-  // Scroll a specific message into view + brief flash, dispatched by the
-  // Command Palette's message results and PaneFind navigation.
-  useEffect(() => {
-    let cancelFlash: (() => void) | null = null;
-    let retryRaf = 0;
-    const onScroll = (e: Event) => {
-      const detail = (e as CustomEvent).detail as {
-        nodeId?: string;
-        messageId?: string;
-        flash?: boolean;
-        query?: string;
-        occurrence?: number;
-      };
-      if (detail?.nodeId !== nodeId) return;
-      if (!detail.messageId) return;
-      const messageId = detail.messageId;
-      const el = document.querySelector(`[data-msg-id="${messageId}"]`) as HTMLElement | null;
-      // Opening a search result can target a tree whose message bodies are
-      // still lazy-loading, so the message DOM may not exist yet. Retry across
-      // a few frames (~1s), re-dispatching the same handler once it renders.
-      if (!el) {
-        let tries = 0;
-        const retry = () => {
-          if (document.querySelector(`[data-msg-id="${messageId}"]`)) { onScroll(e); return; }
-          if (++tries < 60) retryRaf = window.requestAnimationFrame(retry);
-        };
-        retryRaf = window.requestAnimationFrame(retry);
-        return;
-      }
-
-      // In-pane find (flash: false): scroll to the specific match within this
-      // message and flash ONLY that match's text — not the whole message. We
-      // locate the match by re-searching this message's DOM for the query and
-      // picking the Nth occurrence (occurrence index supplied by PaneFind).
-      const q = (detail.query ?? '').trim().toLowerCase();
-      if (detail.flash === false && q && typeof detail.occurrence === 'number') {
-        const ranges = rangesInElement(el, q);
-        const range = ranges[detail.occurrence] ?? ranges[ranges.length - 1];
-        if (range) {
-          const anchor = range.startContainer.parentElement ?? el;
-          anchor.scrollIntoView({ block: 'center', behavior: 'smooth' });
-          cancelFlash?.();
-          cancelFlash = flashMatchOverlay(range);
-          return;
-        }
-        // No DOM match found (rare): fall through to a plain scroll, no flash.
-        el.scrollIntoView({ block: 'center', behavior: 'smooth' });
-        return;
-      }
-
-      el.scrollIntoView({ block: 'center', behavior: 'smooth' });
-      // Whole-message flash only for cross-context jumps (global search).
-      if (detail.flash !== false) {
-        el.classList.add('t-msg-flash');
-        setTimeout(() => el.classList.remove('t-msg-flash'), 600);
-      }
-    };
-    window.addEventListener('michi:scroll-to-message', onScroll as EventListener);
-    return () => {
-      window.removeEventListener('michi:scroll-to-message', onScroll as EventListener);
-      cancelFlash?.();
-      if (retryRaf) window.cancelAnimationFrame(retryRaf);
-    };
-  }, [nodeId]);
-
-  // PaneFind highlights: walk DOM text nodes inside this pane's messages,
-  // build Ranges for every occurrence, and apply via CSS Custom Highlight API.
-  // Decouples highlighting from React render so streaming and markdown don't fight.
-  // Single shared 'pane-find' highlight name — if two panes simultaneously have
-  // find open, the most recent update wins. Acceptable since users rarely run
-  // two finds at once.
-  useEffect(() => {
-    const HIGHLIGHT_NAME = 'pane-find';
-    const onUpdate = (e: Event) => {
-      const detail = (e as CustomEvent).detail as { nodeId?: string; query?: string };
-      if (detail?.nodeId !== nodeId) return;
-      const q = (detail.query ?? '').trim().toLowerCase();
-      const css = (CSS as unknown as { highlights?: Map<string, Highlight> }).highlights;
-      if (!css || typeof Highlight === 'undefined') return;
-      if (!q) {
-        css.delete(HIGHLIGHT_NAME);
-        return;
-      }
-      const paneEl = document.querySelector(`[data-node-id="${nodeId}"]`);
-      if (!paneEl) {
-        css.delete(HIGHLIGHT_NAME);
-        return;
-      }
-      const ranges = collectFindRanges(paneEl, q);
-      if (ranges.length === 0) {
-        css.delete(HIGHLIGHT_NAME);
-      } else {
-        css.set(HIGHLIGHT_NAME, new Highlight(...ranges));
-      }
-    };
-    window.addEventListener('michi:pane-find-update', onUpdate as EventListener);
-    return () => {
-      window.removeEventListener('michi:pane-find-update', onUpdate as EventListener);
-      const css = (CSS as unknown as { highlights?: Map<string, Highlight> }).highlights;
-      css?.delete(HIGHLIGHT_NAME);
-    };
-  }, [nodeId]);
-
   // Auto-grow now lives inside MentionEditor (its contenteditable owns the
   // min/max-height sizing).
 
@@ -1574,12 +1192,14 @@ function TPane({ nodeId, contentMaxWidth, embedded = false, allowEmbeddedAttachm
     composerRef.current = el ?? null;
     if (!el || typeof ResizeObserver === 'undefined') return;
     const measure = () => setComposerHeight(Math.ceil(el.offsetHeight));
+    // Border box: the card's padding and border are part of what the
+    // transcript must clear (contentRect left the resting phone card 14px short).
     const ro = new ResizeObserver((entries) => {
       if (sidebarAnimatingRef.current) return;
-      const h = entries[0]?.contentRect.height ?? el.offsetHeight;
+      const h = entries[0]?.borderBoxSize?.[0]?.blockSize ?? el.offsetHeight;
       setComposerHeight(Math.ceil(h));
     });
-    ro.observe(el);
+    ro.observe(el, { box: 'border-box' });
     animationEndCallbacks.add(measure);
     return () => {
       ro.disconnect();
@@ -1614,8 +1234,9 @@ function TPane({ nodeId, contentMaxWidth, embedded = false, allowEmbeddedAttachm
   // agent / model chips drop their text labels (glyph-only); below ~260px
   // they are hidden entirely. The action buttons on the right never shrink,
   // and individual chip labels also clip with an ellipsis on the way down,
-  // so the transition between tiers stays smooth.
-  useEffect(() => {
+  // so the transition between tiers stays smooth. Measured before paint, so
+  // a narrow pane never shows the full toolbar first.
+  useLayoutEffect(() => {
     const el = composerToolbarRef.current;
     if (!el || typeof ResizeObserver === 'undefined') return;
     const tierFor = (w: number): 0 | 1 | 2 => (w < 260 ? 2 : w < 360 ? 1 : 0);
@@ -1635,6 +1256,7 @@ function TPane({ nodeId, contentMaxWidth, embedded = false, allowEmbeddedAttachm
       const next = tierFor(width);
       setToolbarTier((prev) => (prev === next ? prev : next));
     };
+    measure();
     const ro = new ResizeObserver(() => {
       if (sidebarAnimatingRef.current) return;
       measure();
@@ -1662,6 +1284,10 @@ function TPane({ nodeId, contentMaxWidth, embedded = false, allowEmbeddedAttachm
       return parentId ? nodesMap[parentId]?.title : undefined;
     }, [nodeId]),
   );
+  // A multi-model branch: the banner opens its plan, a failed step retries through the run.
+  const multiModelBranch = useMultiModelBranch({
+    nodeId, workspaceId: n?.projectId, runId: n?.multiModelRunId, parentNodeId: n?.parentNodeId,
+  });
 
   // Compute same-tree nodes for @mention popup at structural cadence. Streaming
   // chunks do not change titles, deletion, kind, tree placement, or message
@@ -1686,7 +1312,7 @@ function TPane({ nodeId, contentMaxWidth, embedded = false, allowEmbeddedAttachm
   // ordering/cap rules (shared with the Home composer).
   const crossTreeNodes = useStructuralSelector(useCallback((nodesMap) => {
     if (spacesAssistant) {
-      const groups = projects.filter(project => !project.system && !project.deletedAt && !project.archivedAt && backendConnectionIdForWorkspace(project.id) === 'local')
+      const groups = projects.filter(project => !project.system && !project.deletedAt && !project.archivedAt && backendConnectionIdForWorkspace(project.id) === LOCAL_BACKEND_CONNECTION_ID)
         .flatMap(project => collectCrossTreeGroups(nodesMap, project, null).map(group => ({ ...group, treeTitle: `${project.name} · ${group.treeTitle}` })));
       let count = 0;
       return groups.flatMap(group => {
@@ -1742,8 +1368,8 @@ function TPane({ nodeId, contentMaxWidth, embedded = false, allowEmbeddedAttachm
   const subagentSig = n?.subagents
     ?.map((s) => `${s.sessionId}:${s.status}:${s.currentTool?.length ?? 0}:${s.statusMessage?.length ?? 0}`)
     .join('|');
-  // Streaming assistant content lands in `blocks` (via appendAnswerBlockText
-  // / appendThinkingBlockText), NOT in `m.text`. So the effect below has to
+  // Streaming assistant content lands in `blocks` (via
+  // projectAssistantStreamEvent), NOT in `m.text`. So the effect below has to
   // depend on a block-derived signature, not just text length, otherwise it
   // never re-runs while the agent is streaming.
   const lastBlockSig = lastMsg?.blocks
@@ -1761,10 +1387,10 @@ function TPane({ nodeId, contentMaxWidth, embedded = false, allowEmbeddedAttachm
     const el = scrollRef.current;
     if (!el) return;
     // Two distinct behaviours:
-    //   1. Just-sent user message → smooth-scroll so the bubble sits ~30%
-    //      from the top of the viewport, leaving ~70% for the agent reply
-    //      to grow into. Re-engages follow mode so streaming output that
-    //      arrives next will keep tailing the bottom.
+    //   1. Just-sent user message → glide the thread up by what the send
+    //      added, so the message and the reply's placeholder rest just above
+    //      the composer (sendScroll.ts). Re-engages follow mode so streaming
+    //      output that arrives next keeps tailing the bottom.
     //   2. Streaming assistant content → if follow mode is on, schedule a
     //      pinFollow via rAF. The ResizeObserver below handles keeping
     //      scroll pinned as content height grows (line breaks).
@@ -1782,31 +1408,42 @@ function TPane({ nodeId, contentMaxWidth, embedded = false, allowEmbeddedAttachm
     if (latestUser && sentMessageKey(latestUser) !== prevSentMsgIdRef.current) {
       prevSentMsgIdRef.current = sentMessageKey(latestUser);
       followRef.current = true;
-      userMsgPinUntilRef.current = performance.now() + 700;
-      programmaticScrollUntilRef.current = performance.now() + PROGRAMMATIC_SCROLL_WINDOW_MS;
-      // Defer to next frame so the tail spacer (rendered while the agent
-      // hasn't produced content yet) has a chance to land in the DOM and
-      // bump scrollHeight — otherwise scrollTop is clamped to
-      // (scrollHeight - clientHeight) and the message lands lower than 30%.
-      requestAnimationFrame(() => {
-        const msgEl = el.querySelector(`[data-msg-id="${latestUser.id}"]`) as HTMLElement | null;
-        const targetTop = msgEl
-          ? Math.max(0, msgEl.offsetTop - el.clientHeight * 0.30)
-          : el.scrollHeight;
-        programmaticScrollUntilRef.current = performance.now() + PROGRAMMATIC_SCROLL_WINDOW_MS;
-        el.scrollTo({ top: targetTop, behavior: 'smooth' });
+      sendGlideRef.current?.();
+      // Follow-pinning waits for the glide; the cap only matters if the glide
+      // never ends (a background tab pauses its frames).
+      userMsgPinUntilRef.current = performance.now() + 1500;
+      const release = () => {
+        sendGlideRef.current = null;
+        userMsgPinUntilRef.current = 0;
+      };
+      // A phone send that lowered the keyboard: Safari carries the page down
+      // as it leaves, so the thread rises on the keyboard's curve, not its own.
+      const withKeyboard = performance.now() < keyboardSendUntilRef.current;
+      keyboardSendUntilRef.current = 0;
+      sendGlideRef.current = glideToTail(el, {
+        target: () => Math.max(0, el.scrollHeight - el.clientHeight),
+        reduce: prefersReducedMotion(),
+        timing: withKeyboard ? KEYBOARD_MOVE : undefined,
+        onFrame: () => {
+          programmaticScrollUntilRef.current = performance.now() + PROGRAMMATIC_SCROLL_WINDOW_MS;
+          prevScrollTopRef.current = el.scrollTop;
+        },
+        onDone: () => {
+          release();
+          pinFnRef.current?.();
+        },
+        onInterrupt: () => {
+          // The reader took the scroll mid-glide: leave it with them, and let
+          // their next scroll events count as theirs.
+          release();
+          followRef.current = false;
+          programmaticScrollUntilRef.current = 0;
+        },
       });
       return;
     }
-    // Two-stage follow:
-    //   stage A (early reply) — keep the latest user message at the
-    //     30%-from-top anchor.
-    //   stage B (long reply) — track the reply's tail so its bottom
-    //     edge sits just above the floating composer card.
-    // Math.max picks whichever stage is "later" in scroll terms, so
-    // the transition is automatic: the moment the reply gets long
-    // enough that tracking its tail would scroll past the user
-    // anchor, tail-tracking takes over.
+    // Follow: track the reply's tail so its bottom edge sits just above the
+    // floating composer card, as the send glide left it.
     const pinFollow = () => {
       if (!followRef.current) return;
       const click = userClickLayoutRef.current;
@@ -1816,14 +1453,11 @@ function TPane({ nodeId, contentMaxWidth, embedded = false, allowEmbeddedAttachm
         return;
       }
       if (performance.now() < userMsgPinUntilRef.current) return;
-      const lu = latestUser
-        ? (el.querySelector(`[data-msg-id="${latestUser.id}"]`) as HTMLElement | null)
-        : null;
       // Tail anchor uses the bottom of the *last visible content child*
       // — not just the last assistant message — so newly-rendered
       // siblings (follow-ups placeholder, mcp errors, subagent banner)
-      // get tracked too. Skip the spacer (aria-hidden) so its height
-      // doesn't push the tail past the real content.
+      // get tracked too. Skip aria-hidden children so decoration doesn't
+      // push the tail past the real content.
       const inner = el.firstElementChild;
       let contentBottom = 0;
       if (inner) {
@@ -1837,9 +1471,6 @@ function TPane({ nodeId, contentMaxWidth, embedded = false, allowEmbeddedAttachm
       const tail = contentBottom > 0
         ? contentBottom - el.clientHeight + composerClearance
         : el.scrollHeight - el.clientHeight;
-      const anchor = lu
-        ? Math.max(0, lu.offsetTop - el.clientHeight * 0.30)
-        : 0;
       const maxScroll = el.scrollHeight - el.clientHeight;
       // Streaming markdown can briefly shrink/reflow as blocks become lists,
       // code fences, or headings. While follow-mode is active, avoid chasing
@@ -1847,7 +1478,6 @@ function TPane({ nodeId, contentMaxWidth, embedded = false, allowEmbeddedAttachm
       const nextScrollTop = nextFollowScrollTop({
         currentScrollTop: el.scrollTop,
         maxScroll,
-        anchor,
         tail,
       });
       if (nextScrollTop !== el.scrollTop) {
@@ -1859,11 +1489,23 @@ function TPane({ nodeId, contentMaxWidth, embedded = false, allowEmbeddedAttachm
     // follow-up tool often lands after text streaming has already flipped
     // the node back to idle; if we stop pinning at that boundary, the final
     // question can render underneath the floating composer.
-    const shouldPinTail =
-      n?.status === 'streaming' ||
-      !!n?.followUpsGenerating ||
-      (n?.followUps.length ?? 0) > 0;
-    pinFnRef.current = shouldPinTail ? pinFollow : null;
+    const streaming = n?.status === 'streaming';
+    // The answer itself can reach its full height a frame or two after the
+    // node goes idle (a stream whose last chunk and end arrive together), so
+    // following outlasts the stream by TAIL_SETTLE_MS. Without it the end of
+    // a long answer stays below the fold (send-scroll.spec.ts).
+    if (followSawStreamingRef.current && !streaming) tailSettleUntilRef.current = performance.now() + TAIL_SETTLE_MS;
+    followSawStreamingRef.current = streaming;
+    const pinsLive = streaming || !!n?.followUpsGenerating || (n?.followUps.length ?? 0) > 0;
+    const settling = !pinsLive && performance.now() < tailSettleUntilRef.current;
+    const shouldPinTail = pinsLive || settling;
+    // The settling pin checks its window when the ResizeObserver runs it, so it
+    // lapses without this effect running again.
+    pinFnRef.current = pinsLive
+      ? pinFollow
+      : settling
+        ? () => { if (performance.now() < tailSettleUntilRef.current) pinFollow(); }
+        : null;
     if (followRef.current && lastMsg?.role === 'assistant' && shouldPinTail) {
       if (performance.now() < userMsgPinUntilRef.current) return;
       requestAnimationFrame(pinFollow);
@@ -1914,11 +1556,9 @@ function TPane({ nodeId, contentMaxWidth, embedded = false, allowEmbeddedAttachm
       });
     };
     const ro = new ResizeObserver(() => {
-      setViewportH(el.clientHeight);
       if (sidebarAnimatingRef.current) return;
       pin();
     });
-    setViewportH(el.clientHeight);
     ro.observe(el);
     if (el.firstElementChild) ro.observe(el.firstElementChild);
     animationEndCallbacks.add(pinDeferred);
@@ -1950,15 +1590,15 @@ function TPane({ nodeId, contentMaxWidth, embedded = false, allowEmbeddedAttachm
   }, [streaming]);
 
   // A send that isn't the composer's — a prompt a caller asked the ⌘J
-  // assistant to send, or a reply to a selection where branches are off —
-  // goes out like one: the pending assistant context as its quote (framed as
+  // assistant to send, a follow-up, or a reply to a selection where branches
+  // are off — goes out like one: the pending assistant context as its quote (framed as
   // attached context), the pane's runtime binding, queued while the node
   // answers. The user's draft and quote stay as they are.
   const sendBesideComposer = (prompt: string, selectionQuote: string | null, queue = false): void => {
     const text = prompt.trim();
     if (!text) return;
     const context = pendingAssistantContext(nodeId);
-    const quote = mergeContextQuote(context, mergeContextQuote(selectionQuote, selectedPageBlockQuote));
+    const quote = mergeContextQuote(context, selectionQuote?.trim() || null);
     const quoteSource = context ? ATTACHED_QUOTE_SOURCE : undefined;
     noteAssistantContextSent(nodeId);
     if (queue || nLatestRef.current?.status === 'streaming') {
@@ -1984,17 +1624,15 @@ function TPane({ nodeId, contentMaxWidth, embedded = false, allowEmbeddedAttachm
   };
   const sendBesideComposerRef = useRef(sendBesideComposer);
   sendBesideComposerRef.current = sendBesideComposer;
-
-  useEffect(() => {
-    if (!embedded || !selectedPageContext) return undefined;
-    const onFocusHelper = (event: Event) => {
-      const detail = (event as CustomEvent).detail as { pageId?: string; question?: string } | undefined;
-      if (detail?.pageId !== selectedPageContext.pageId || !detail.question?.trim()) return;
-      sendBesideComposerRef.current(detail.question, null);
-    };
-    window.addEventListener('michi:focus-page-helper', onFocusHelper);
-    return () => window.removeEventListener('michi:focus-page-helper', onFocusHelper);
-  }, [embedded, selectedPageContext?.pageId]);
+  // A branch that isn't the composer's (a follow-up's, a selection's) runs
+  // on the composer's runtime binding, as its Branch button's does, and
+  // leaves the user on this pane.
+  const branchBesideComposer = (firstMessage: string, meta: UserSendMeta | undefined, opts: CreateChildChatOptions): void => {
+    prepareBranchScroll();
+    void createChildChat(nodeId, firstMessage, { ...meta, ...consumeBindingMeta() }, { ...opts, focus: false }).catch(() => {});
+  };
+  const branchBesideComposerRef = useRef(branchBesideComposer);
+  branchBesideComposerRef.current = branchBesideComposer;
 
   // Sends requested through the assistant's composer store (openMichiAssistant
   // with send): taken once, the first sent and any further ones queued behind it.
@@ -2013,6 +1651,7 @@ function TPane({ nodeId, contentMaxWidth, embedded = false, allowEmbeddedAttachm
   useHoldScrollOnKeyboard(scrollRef, phone, () => {
     programmaticScrollUntilRef.current = performance.now() + PROGRAMMATIC_SCROLL_WINDOW_MS;
   });
+  useDismissKeyboardOnDrag(scrollRef, phone, () => composerHandle.current?.el);
   // A focus pull that lands while the permission banner still holds the slot
   // (a turn that ends as its request is withdrawn) waits for the composer.
   const composerFocusPendingRef = useRef(false);
@@ -2033,9 +1672,8 @@ function TPane({ nodeId, contentMaxWidth, embedded = false, allowEmbeddedAttachm
     // a new quote, which the user is about to answer, still focuses it.
     if (phone && !quoteJustAdded) return;
 
-    // Don't steal focus if the user is already in any editable (incl. our
-    // contenteditable composer).
-    if (editableHasFocus()) return;
+    // Don't steal focus from a control or an open dialog (our composer counts).
+    if (focusIsTaken(scrollRef.current)) return;
     if (!composerMountedRef.current) {
       composerFocusPendingRef.current = true;
       return;
@@ -2049,19 +1687,66 @@ function TPane({ nodeId, contentMaxWidth, embedded = false, allowEmbeddedAttachm
     if (!isFocused) { composerFocusPendingRef.current = false; return; }
     if (!composerMounted) return;
     composerFocusPendingRef.current = false;
-    if (editableHasFocus()) return;
+    if (focusIsTaken(scrollRef.current)) return;
     const frame = requestAnimationFrame(() => inputRef.current?.editor?.commands.focus(undefined, { scrollIntoView: false }));
     return () => cancelAnimationFrame(frame);
   }, [composerMounted, isFocused]);
 
-  // A jump from a page's source: scroll to the cited message once, then put the
-  // cursor in the composer (Continue) or keep it out (Open full chat).
+  // The pane's one way to scroll to a message. The message may still be
+  // loading, so it is looked for over a few seconds. The mount restore and
+  // follow mode stand down, or they would pull the view back to the tail.
+  // Frames above it render at their real height as they come into view; hold
+  // the message (or the matched text) in the middle until its position settles.
+  const jumpToMessage = useCallback((messageId: string | null, options: {
+    /** 'message', or the find bar's match: PaneFind's own Range, so it lands on what the counter counts. */
+    flash?: 'message' | { range: Range };
+    onDone?: () => void;
+  } = {}): (() => void) => {
+    let frame = 0;
+    let tries = 0;
+    let cancelFlash: (() => void) | null = null;
+    const done = () => options.onDone?.();
+    const step = () => {
+      const target = messageId ? scrollRef.current?.querySelector<HTMLElement>(`[data-msg-id="${messageId.replace(/["\\]/g, '\\$&')}"]`) : null;
+      if (messageId && !target && ++tries < 300) { frame = requestAnimationFrame(step); return; }
+      if (!target) { frame = requestAnimationFrame(() => { frame = requestAnimationFrame(done); }); return; }
+      cancelScrollRestoreRef.current?.();
+      followRef.current = false;
+      let anchor = target;
+      const flash = options.flash;
+      if (flash === 'message') {
+        target.classList.add('t-msg-flash');
+        window.setTimeout(() => target.classList.remove('t-msg-flash'), 600);
+      } else if (flash) {
+        // Find flashes only its match.
+        anchor = flash.range.startContainer.parentElement ?? target;
+        cancelFlash = flashMatchOverlay(flash.range);
+      }
+      let last = Number.NaN;
+      let stable = 0;
+      let settle = 0;
+      const hold = () => {
+        programmaticScrollUntilRef.current = performance.now() + 200;
+        anchor.scrollIntoView({ block: 'center' });
+        const top = anchor.getBoundingClientRect().top;
+        stable = Math.abs(top - last) < 1 ? stable + 1 : 0;
+        last = top;
+        frame = requestAnimationFrame(stable < 3 && ++settle < 60 ? hold : done);
+      };
+      hold();
+    };
+    frame = requestAnimationFrame(step);
+    return () => { cancelAnimationFrame(frame); cancelFlash?.(); };
+  }, []);
+
+  // A jump asked for from outside the pane (a page's source, search, the ask
+  // bar): scroll to the message once, then put the cursor in the composer
+  // (Continue), keep it out (Open full chat) or leave focus where it is.
   const sourceJump = useSourceJump(nodeId);
   useEffect(() => {
     if (!sourceJump) return;
-    const { token, messageId, focus } = sourceJump;
+    const { token, messageId, focus, flash } = sourceJump;
     let frame = 0;
-    let tries = 0;
     let composerTries = 0;
     const finish = () => {
       const editor = inputRef.current?.editor;
@@ -2075,37 +1760,13 @@ function TPane({ nodeId, contentMaxWidth, embedded = false, allowEmbeddedAttachm
       claimSourceJump(token);
       const composer = composerHandle.current?.el;
       if (focus === 'composer') editor?.commands.focus('end', { scrollIntoView: false });
-      else if (composer && document.activeElement instanceof HTMLElement && composer.contains(document.activeElement)) document.activeElement.blur();
+      else if (focus === 'message' && composer && document.activeElement instanceof HTMLElement && composer.contains(document.activeElement)) document.activeElement.blur();
     };
-    const step = () => {
-      const target = messageId ? scrollRef.current?.querySelector<HTMLElement>(`[data-msg-id="${messageId.replace(/["\\]/g, '\\$&')}"]`) : null;
-      if (messageId && !target && ++tries < 300) { frame = requestAnimationFrame(step); return; }
-      if (!target) { frame = requestAnimationFrame(() => { frame = requestAnimationFrame(finish); }); return; }
-      cancelScrollRestoreRef.current?.();
-      followRef.current = false;
-      // Frames above it render at their real height as they come into view; hold the
-      // message in the middle until its position settles.
-      let last = Number.NaN;
-      let stable = 0;
-      let settle = 0;
-      const hold = () => {
-        programmaticScrollUntilRef.current = performance.now() + 200;
-        target.scrollIntoView({ block: 'center' });
-        const top = target.getBoundingClientRect().top;
-        stable = Math.abs(top - last) < 1 ? stable + 1 : 0;
-        last = top;
-        frame = requestAnimationFrame(stable < 3 && ++settle < 60 ? hold : finish);
-      };
-      hold();
-    };
-    frame = requestAnimationFrame(step);
-    return () => cancelAnimationFrame(frame);
-  }, [sourceJump]);
+    const cancel = jumpToMessage(messageId, { flash: flash ? 'message' : undefined, onDone: finish });
+    return () => { cancel(); cancelAnimationFrame(frame); };
+  }, [sourceJump, jumpToMessage]);
 
-  const insertMentionTrigger = useCallback(() => {
-    // Type an `@` at the caret; MentionEditor's suggestion opens on it.
-    inputRef.current?.editor?.chain().focus().insertContent('@').run();
-  }, []);
+  const insertMentionTrigger = useCallback(() => inputRef.current?.startMention(), []);
 
   // "Cite" from the Artifacts drawer: append `@name ` as plain text at the
   // caret. resolveAtMentions parses the wire token on send, so no formal chip
@@ -2116,10 +1777,8 @@ function TPane({ nodeId, contentMaxWidth, embedded = false, allowEmbeddedAttachm
       if (!detail || detail.nodeId !== nodeId || !detail.name) return;
       const ed = inputRef.current?.editor;
       if (!ed) return;
-      // Insert a leading space when the composer isn't empty / doesn't already
-      // end in whitespace, so the @token stays a standalone mention.
-      const endsWithSpace = /\s$/.test(ed.getText());
-      ed.chain().focus().insertContent(`${endsWithSpace ? '' : ' '}@${detail.name} `).run();
+      ed.commands.focus();
+      ed.commands.insertContent(`${spaceBeforeMention(ed)}@${detail.name} `);
     };
     window.addEventListener('michi:cite-artifact', onCite);
     return () => window.removeEventListener('michi:cite-artifact', onCite);
@@ -2137,19 +1796,15 @@ function TPane({ nodeId, contentMaxWidth, embedded = false, allowEmbeddedAttachm
     setAgentMenu((current) => current ? null : anchor);
   }, []);
 
-  // Outside the grid (the ⌘J panel) a node opens wherever it lives, never in
-  // the current pane slot.
+  // A node of the shown thread opens beside this pane. Any other node, or any
+  // node from the ⌘J panel, opens wherever it lives, never in this slot.
   const openNodePane = useCallback((targetNodeId: string) => {
-    if (!embedded) {
+    if (!embedded && activeProject && findTreeIdForNode(targetNodeId, activeProject) === activeProject.activeTreeId) {
       focusPane(targetNodeId);
       return;
     }
-    navigateToNode(
-      { projects, activeProjectId: activeProject?.id ?? null, selectProject, openPane, openPaneInTree, activateTree, setFocusedNodeId },
-      targetNodeId,
-    );
-    window.dispatchEvent(new CustomEvent('michi:nav-page', { detail: { page: 'dashboard' } }));
-  }, [embedded, focusPane, projects, activeProject?.id, selectProject, openPane, openPaneInTree, activateTree, setFocusedNodeId]);
+    revealNode(targetNodeId);
+  }, [embedded, focusPane, activeProject, revealNode]);
 
   const handleOpenBranch = useCallback((childNodeId: string) => {
     openNodePane(childNodeId);
@@ -2160,17 +1815,20 @@ function TPane({ nodeId, contentMaxWidth, embedded = false, allowEmbeddedAttachm
       // Open the referenced conversation node as a pane
       openNodePane(mentionNodeId);
     } else {
-      // Context/artifact mention — find the artifact by name and open it
+      // Context/artifact mention — find the artifact by name and open it as the drawer would.
       const artifact = mentionContexts.find(
         a => a.name.toLowerCase() === name.toLowerCase(),
       );
-      if (artifact?.filePath) {
-        void openArtifactPane(artifact.filePath);
-      } else if (artifact?.url) {
-        openPreferredUrl(artifact.url);
-      }
+      if (!artifact) return;
+      void openArtifact(artifact, {
+        project: activeProject,
+        openArtifactPane,
+        onLightbox: () => showArtifactInDrawer(artifact.id),
+        onPreview: () => showArtifactInDrawer(artifact.id),
+        onError: (message) => toast.error(`Could not open ${artifact.name}: ${message}`),
+      });
     }
-  }, [openNodePane, mentionContexts, openArtifactPane]);
+  }, [openNodePane, mentionContexts, activeProject, openArtifactPane]);
 
   const handleRetryTurn = useCallback((userIdx: number) => {
     retryLastTurn(nodeId, userIdx, consumeBindingMetaRef.current());
@@ -2200,24 +1858,54 @@ function TPane({ nodeId, contentMaxWidth, embedded = false, allowEmbeddedAttachm
 
   const handleEditSave = useCallback((messageIndex: number, newText: string) => {
     setEditingMessageId(null);
-    editAndResend(nodeId, messageIndex, newText);
+    editAndResend(nodeId, messageIndex, newText, consumeBindingMetaRef.current());
   }, [nodeId, editAndResend]);
 
-  const handleContinueFollowUp = useCallback((question: string) => {
-    void sendMessage(nodeId, question);
-  }, [nodeId, sendMessage]);
+  // DESIGN-v2 §2.8 T3: chips a check-in's post offered are check-in material. One only fills the
+  // composer for the user to read and send (never sends, never branches), and the message then
+  // says it replies to that post (metaAgentContext.refs), so its turn starts in Ask (T4).
+  const followUpsPostId = useMemo(() => {
+    const source = n?.followUpsSourceMessageId;
+    if (source) {
+      if (companionPostRunId(source)) return source;
+      return n?.messages.find((m) => m.id === source)?.companionPost ? source : null;
+    }
+    const lastAssistant = n?.messages.findLast((m) => m.role === 'assistant');
+    return lastAssistant && (lastAssistant.companionPost || companionPostRunId(lastAssistant.id)) ? lastAssistant.id : null;
+  }, [n?.followUpsSourceMessageId, n?.messages]);
+  const fillFromPostChip = useCallback((question: string, postId: string) => {
+    persistComposerDraft({ value: question, mentions: [] }, latestQuotedTextRef.current);
+    noteCompanionPostReply(nodeId, postId);
+    inputRef.current?.focus();
+  }, [nodeId, persistComposerDraft]);
+  // DESIGN-v2 D8: quoting, commenting on or replying to a selection inside a post carries its text,
+  // check-in material, so the message that sends it replies to that post (refs `post`, §2.8 T4).
+  const notePostSelection = (range?: Range, anchorMessageId?: string): void => {
+    const messageId = anchorMessageId ?? (range ? findMessageIdForRange(range) : undefined);
+    if (!messageId) return;
+    const message = nLatestRef.current?.messages.find((m) => m.id === messageId);
+    if (message?.role === 'assistant' && (message.companionPost || companionPostRunId(message.id))) noteCompanionPostReply(nodeId, message.id);
+  };
 
-  const handleBranchFollowUp = useCallback((question: string) => {
-    if (branchesOff) {
-      void sendMessage(nodeId, question);
+  const handleContinueFollowUp = useCallback((question: string) => {
+    if (followUpsPostId) {
+      fillFromPostChip(question, followUpsPostId);
       return;
     }
-    prepareBranchScroll();
-    void createChildChat(nodeId, question, undefined, {
-      anchorMessageId: n?.followUpsSourceMessageId,
-      focus: false,
-    }).catch(() => {});
-  }, [branchesOff, createChildChat, n?.followUpsSourceMessageId, nodeId, sendMessage, prepareBranchScroll]);
+    sendBesideComposerRef.current(question, null);
+  }, [followUpsPostId, fillFromPostChip]);
+
+  const handleBranchFollowUp = useCallback((question: string) => {
+    if (followUpsPostId) {
+      fillFromPostChip(question, followUpsPostId);
+      return;
+    }
+    if (branchesOff) {
+      sendBesideComposerRef.current(question, null);
+      return;
+    }
+    branchBesideComposerRef.current(question, undefined, { anchorMessageId: n?.followUpsSourceMessageId });
+  }, [branchesOff, n?.followUpsSourceMessageId, followUpsPostId, fillFromPostChip]);
 
   // Not offered at all when branches are off (see onBranchFromMessage below).
   const handleBranchFromMessage = useCallback((messageId: string) => {
@@ -2284,7 +1972,6 @@ function TPane({ nodeId, contentMaxWidth, embedded = false, allowEmbeddedAttachm
     );
   }
 
-  const title = n.title || chatLabel(n) || 'thread';
   const currentMode = n.currentModeId
     ? availableModes.find((m) => m.id === n.currentModeId)
     : undefined;
@@ -2321,6 +2008,17 @@ function TPane({ nodeId, contentMaxWidth, embedded = false, allowEmbeddedAttachm
     }
   };
 
+  // An unsent message back in the composer (a rejected send, a dequeued one)
+  // brings its attachments, comments and / pick, in front of the draft's own.
+  const restoreUnsentExtras = (unsent: { attachments: PanePendingAttachment[]; comments?: readonly PendingComment[]; slash?: SlashPick }) => {
+    if (unsent.slash) slashPickRef.current = unsent.slash;
+    setPendingAttachments((current) => [
+      ...unsent.attachments,
+      ...current.filter((attachment) => !unsent.attachments.some((restored) => restored.absPath === attachment.absPath)),
+    ]);
+    for (const comment of unsent.comments ?? []) addPendingComment(nodeId, comment.quotedText, comment.body, comment.source);
+  };
+
   const onSubmit = async (branchRequested = false) => {
     if (savingAssistantModel || composerDisabled) return;
     // The assistant's conversation sends a branch request to itself.
@@ -2331,7 +2029,7 @@ function TPane({ nodeId, contentMaxWidth, embedded = false, allowEmbeddedAttachm
     // wire as attached context rather than a selection from a reply.
     const assistantContext = pendingAssistantContext(nodeId);
     const submitQuoteSource = assistantContext ? ATTACHED_QUOTE_SOURCE : latestQuoteSourceRef.current;
-    const submitQuotedText = mergeContextQuote(assistantContext, mergeContextQuote(latestQuotedTextRef.current, selectedPageBlockQuote));
+    const submitQuotedText = mergeContextQuote(assistantContext, latestQuotedTextRef.current?.trim() || null);
     // Expand mention chips back to wire-format tokens (`@node:<id>` for nodes,
     // `@<name>` for artifacts) before any downstream parsing — fanout, branch
     // prefix stripping, etc. all see the wire string, not the chip-display.
@@ -2341,11 +2039,18 @@ function TPane({ nodeId, contentMaxWidth, embedded = false, allowEmbeddedAttachm
     // at least one pending comment to flush. Attachment-only sends are also
     // allowed.
     if (!raw && pending.length === 0 && pendingAttachments.length === 0) return;
+    const slashPick = slashPickRef.current ?? undefined;
+    slashPickRef.current = null;
+    // A skill row picked for the name of one of Michi's own commands (/explore,
+    // /branch) runs the skill, so neither command reads the text.
+    const skillPicked = resolveSlashRun(raw, [], pickedSlashEntry(slashPick, slashRuntimeId))?.kind === 'skill';
     clearComposerDraft();
     // A phone composer rests as one row again once the message is on its way;
     // a desktop one lets its height settle to the emptied field. The field
     // empties a frame later (the draft store commits on the next frame).
-    composerHandle.current?.settle();
+    // Leaving a phone field lowers the keyboard; the send glide then rides it.
+    const loweredKeyboard = composerHandle.current?.settle() ?? false;
+    keyboardSendUntilRef.current = loweredKeyboard ? performance.now() + KEYBOARD_SEND_WINDOW_MS : 0;
     const attachmentsForSend = pendingAttachments.map(p => ({ name: p.name, absPath: p.absPath, relPath: p.relPath }));
     // Attachments stay scoped to this turn — the agent reads them via the
     // [Attached files: …] sentinel appended below. We deliberately do NOT
@@ -2358,7 +2063,7 @@ function TPane({ nodeId, contentMaxWidth, embedded = false, allowEmbeddedAttachm
     // Fanout commands (`/fan topic1, topic2`) bypass the normal pipeline. The
     // parser requires text so it short-circuits on comment-only sends
     // automatically; we still guard explicitly so the intent is readable.
-    if (raw && !branchesOff) {
+    if (raw && !branchesOff && !skillPicked) {
       const fanout = parseFanoutCommand(raw);
       if (fanout) {
         const lastAssistantId = [...(n.messages ?? [])].reverse().find((m) => m.role === 'assistant')?.id;
@@ -2367,9 +2072,9 @@ function TPane({ nodeId, contentMaxWidth, embedded = false, allowEmbeddedAttachm
       }
     }
 
-    const { branched: slashRequested, text } = raw
+    const { branched: slashRequested, text } = raw && !skillPicked
       ? stripBranchPrefix(raw)
-      : { branched: false, text: '' };
+      : { branched: false, text: raw };
     const slashBranched = slashRequested && !branchesOff;
 
     // With comment-only enabled, `text` can legitimately be empty. Only bail
@@ -2408,6 +2113,7 @@ function TPane({ nodeId, contentMaxWidth, embedded = false, allowEmbeddedAttachm
         ...(queuedQuote && submitQuoteSource ? { quoteSource: submitQuoteSource } : {}),
         commentBlock: commentBlock ?? undefined,
         ...(pending.length ? { comments: pending.map(comment => ({ ...comment })) } : {}),
+        ...(slashPick ? { slash: slashPick } : {}),
         queuedAt: Date.now(),
       });
       // Comments were folded into the queue entry — clear them off the node
@@ -2424,14 +2130,9 @@ function TPane({ nodeId, contentMaxWidth, embedded = false, allowEmbeddedAttachm
     // The optimistic user message renders only the bare prose plus structured
     // quotedText / attachments / comments, so the bubble can show them as modules.
     const meta = {
+      // The store puts the rejected text back in front of the draft.
       rejectedDraft: { ...submitDraft, quotedText: submitQuotedText ?? undefined, ...(submitQuoteSource ? { quoteSource: submitQuoteSource } : {}) },
-      onRejected: () => {
-        setPendingAttachments((current) => [
-          ...pendingAttachments,
-          ...current.filter((attachment) => !pendingAttachments.some((sent) => sent.absPath === attachment.absPath)),
-        ]);
-        for (const comment of pending) addPendingComment(nodeId, comment.quotedText, comment.body, comment.source);
-      },
+      onRejected: () => restoreUnsentExtras({ attachments: pendingAttachments, comments: pending, slash: slashPick }),
       quotedText: submitQuotedText ?? undefined,
       ...(submitQuotedText && submitQuoteSource ? { quoteSource: submitQuoteSource } : {}),
       attachments: attachmentsForSend.length > 0 ? attachmentsForSend.map(a => ({ ...a })) : undefined,
@@ -2440,6 +2141,8 @@ function TPane({ nodeId, contentMaxWidth, embedded = false, allowEmbeddedAttachm
       mentions: submitDraft.mentions.length > 0
         ? submitDraft.mentions.map(m => ({ kind: m.kind, refId: m.refId, label: m.label }))
         : undefined,
+      ...(slashPick ? { slash: slashPick } : {}),
+      ...(slashRuntimeId ? { slashRuntimeId } : {}),
       // Per-node runtime binding: pass resolved binding to ensureSession
       // so it uses the right runtime/model/effort instead of the global config.
       ...consumeBindingMeta(),
@@ -2467,6 +2170,7 @@ function TPane({ nodeId, contentMaxWidth, embedded = false, allowEmbeddedAttachm
   const sendDisabled = sendDisabledBase || savingAssistantModel || composerDisabled;
 
   const isError = n.status === 'error';
+  const planStep = multiModelBranch && failedPlanStep(n) ? multiModelBranch : undefined;
   // composerEmpty mirrors the same predicate used in the onSubmit early-return above.
   const composerEmpty = sendDisabledBase;
   const sendMode: PaneComposerSendMode =
@@ -2503,6 +2207,7 @@ function TPane({ nodeId, contentMaxWidth, embedded = false, allowEmbeddedAttachm
     <div
       data-node-id={nodeId}
       className="terminal-pane"
+      data-density={prefs.terminalDensity}
       onMouseDown={embedded ? undefined : () => {
         focusPane(nodeId);
         setFocusedNodeId(nodeId);
@@ -2532,11 +2237,11 @@ function TPane({ nodeId, contentMaxWidth, embedded = false, allowEmbeddedAttachm
         }
         void handleDrop(e);
       }}
-      // Never dimmed as an unfocused pane: it isn't one of the grid's panes.
-      style={embedded ? { ...paneShellStyle, filter: 'none' } : paneShellStyle}
+      style={paneShellStyle}
     >
-      {n.spawnedByAgent && (
+      {(n.spawnedByAgent || n.multiModelRunId) && (
         <div
+          data-testid="pane-spawn-banner"
           style={{
             padding: '6px 14px',
             background: 'var(--term-mauve-f)',
@@ -2550,33 +2255,60 @@ function TPane({ nodeId, contentMaxWidth, embedded = false, allowEmbeddedAttachm
           }}
         >
           <span style={{ fontWeight: 700 }}>⎇</span>
-          <span style={{ letterSpacing: 'var(--ls-wide)' }}>
-            spawned by agent{parentTitle ? ` · inherits ${parentTitle}` : ''}
+          <span style={{ letterSpacing: 'var(--ls-wide)', flex: 1, minWidth: 0 }}>
+            {n.multiModelRunId
+              ? n.freshContext ? 'multi-model branch · fresh context, prompt only' : `multi-model branch${parentTitle ? ` · inherits ${parentTitle}` : ''}`
+              : `spawned by agent${parentTitle ? ` · inherits ${parentTitle}` : ''}`}
           </span>
+          {n.multiModelRunId && multiModelBranch && (
+            <button
+              type="button"
+              className="t-hover-fg"
+              data-testid="pane-open-plan"
+              onClick={multiModelBranch.openPlan}
+              style={{
+                flexShrink: 0,
+                // A larger target on a phone, without a taller banner.
+                padding: phone ? '8px 10px' : '2px 6px',
+                margin: phone ? '-8px -10px' : '-2px -6px',
+                border: 'none',
+                background: 'none',
+                color: 'var(--term-mauve)',
+                font: 'inherit',
+                fontWeight: 600,
+                letterSpacing: 'var(--ls-wide)',
+                cursor: 'pointer',
+                whiteSpace: 'nowrap',
+              }}
+            >
+              Open plan
+            </button>
+          )}
         </div>
       )}
 
       <div style={{ position: 'relative', flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column' }}>
-        <SelectionActions
+        {!readOnly && <SelectionActions
           containerRef={scrollRef}
-          onQuote={(q) => setQuotedText(q)}
-          onBranch={(q, p, anchorMessageId) => {
+          onQuote={(q, range) => {
+            notePostSelection(range);
+            setQuotedText(q);
+          }}
+          onBranch={(q, p, anchorMessageId, range) => {
             if (branchesOff) {
               // A reply here, quoting the selection, instead of a branch
               // (queued while the assistant is still answering).
+              notePostSelection(range, anchorMessageId);
               sendBesideComposer(p, q);
               return;
             }
-            prepareBranchScroll();
-            void createChildChat(
-              nodeId,
-              formatQuotedMessage(q, p),
-              { quotedText: q, displayText: p },
-              { anchorMessageId, focus: false },
-            ).catch(() => {});
+            branchBesideComposer(formatQuotedMessage(q, p), { quotedText: q, displayText: p }, { anchorMessageId });
           }}
-          onComment={(q, body) => addPendingComment(nodeId, q, body)}
-        />
+          onComment={(q, body, range) => {
+            notePostSelection(range);
+            addPendingComment(nodeId, q, body);
+          }}
+        />}
       <div
         aria-hidden
         style={{
@@ -2633,26 +2365,30 @@ function TPane({ nodeId, contentMaxWidth, embedded = false, allowEmbeddedAttachm
           } else if (distFromBottom < 24) {
             followRef.current = true;
           }
+          // Reading upward toward the start of the loaded page fetches the
+          // previous one before the reader reaches it. Only the reader's own
+          // scrolling counts: mount positioning starts at the top for a frame.
+          if (userInitiated && cur < prev && cur < el.clientHeight * OLDER_PREFETCH_VIEWPORTS
+            && nLatestRef.current?.historyBefore) {
+            void loadOlder();
+          }
           prevScrollTopRef.current = cur;
         }}
         className="term-scrollbar terminal-pane__transcript"
+        data-density={prefs.terminalDensity}
         style={{
           flex: 1,
           overflowY: 'auto',
           overflowAnchor: 'none',
-          // Sides + top scale with density; bottom always reserves clearance for
+          // Sides + top scale with density (index.css); bottom always reserves clearance for
           // the floating composer (~card height + 12px gutter on each side, plus a
           // bit extra for the optional quote bar) so the last message can scroll
           // above the card instead of being trapped behind it.
           // The top also clears the pane-top fade overlay, so the first
           // message is not drawn under it while the pane is scrolled to top.
-          paddingTop:
-            (prefs.paneTopFadeHeight || 0) +
-            (prefs.terminalDensity === 'dense' ? 8 : prefs.terminalDensity === 'compact' ? 12 : 16),
-          paddingLeft:
-            prefs.terminalDensity === 'dense' ? 22 : prefs.terminalDensity === 'compact' ? 24 : 32,
-          paddingRight:
-            prefs.terminalDensity === 'dense' ? 22 : prefs.terminalDensity === 'compact' ? 24 : 32,
+          paddingTop: `calc(${prefs.paneTopFadeHeight || 0}px + var(--pane-pad-top))`,
+          paddingLeft: 'var(--pane-gutter)',
+          paddingRight: 'var(--pane-gutter)',
           // Reserve clearance equal to the measured composer height + the
           // card's bottom inset + the tail gap, so the last line of content
           // scrolls clear of the card rather than resting against it.
@@ -2662,18 +2398,8 @@ function TPane({ nodeId, contentMaxWidth, embedded = false, allowEmbeddedAttachm
               ? composerHeight + COMPOSER_CLEARANCE
               : COMPOSER_BOTTOM_INSET
           }px + var(${DOCK_ROOM_VAR}, 0px))`,
-          fontSize:
-            prefs.terminalDensity === 'dense'
-              ? 11
-              : prefs.terminalDensity === 'compact'
-              ? 12
-              : 13,
-          lineHeight:
-            prefs.terminalDensity === 'dense'
-              ? 1.45
-              : prefs.terminalDensity === 'compact'
-              ? 1.6
-              : 1.75,
+          fontSize: 'var(--pane-font-size)',
+          lineHeight: 'var(--pane-leading)',
           color: 'var(--term-fg)',
         }}
       >
@@ -2685,8 +2411,6 @@ function TPane({ nodeId, contentMaxWidth, embedded = false, allowEmbeddedAttachm
           prefs={prefs}
           contentStyle={innerWrap}
           streaming={streaming}
-          viewportHeight={viewportH}
-          bottomClearance={composerMounted ? composerHeight + COMPOSER_CLEARANCE : COMPOSER_BOTTOM_INSET}
           onRetryTurn={handleRetryTurn}
           onRunAgain={handleRunAgain}
           onEditUserMessage={handleEditUserMessage}
@@ -2703,8 +2427,21 @@ function TPane({ nodeId, contentMaxWidth, embedded = false, allowEmbeddedAttachm
           onEditSave={handleEditSave}
           onEditCancel={handleEditCancel}
           onTestConnection={handleTestConnection}
+          readOnly={readOnly}
+          planStep={planStep}
+          replySources={memorySetting}
         />
       </div>
+      {phone && (
+        <TranscriptScrubber
+          scrollRef={scrollRef}
+          messages={n.messages}
+          hasOlder={Boolean(n.historyBefore)}
+          top={(prefs.paneTopFadeHeight || 0) + 6}
+          bottom={(composerMounted ? composerHeight + COMPOSER_CLEARANCE : COMPOSER_BOTTOM_INSET) + 8}
+          onScrub={handleScrub}
+        />
+      )}
       <MergeBanner nodeId={nodeId} />
       <AnimatePresence initial={false} mode="wait">
       {n.pendingPermission ? (
@@ -2714,7 +2451,7 @@ function TPane({ nodeId, contentMaxWidth, embedded = false, allowEmbeddedAttachm
             onRespond={(optionId) => resolvePermission(nodeId, optionId)}
           />
         </PermissionSlot>
-      ) : (
+      ) : readOnly ? null : (
       <ComposerSlot key="composer">
       <div
         aria-hidden
@@ -2723,8 +2460,15 @@ function TPane({ nodeId, contentMaxWidth, embedded = false, allowEmbeddedAttachm
           left: 0,
           right: 0,
           bottom: 0,
-          height: 12,
+          // On a phone the strip also runs under the card and fades out 24px
+          // above it (below COMPOSER_TAIL_GAP, so settled text is never dimmed),
+          // softening text that scrolls under the card's top edge.
+          height: phone ? COMPOSER_BOTTOM_INSET + composerHeight + COMPOSER_TOP_FADE : 12,
           background: 'var(--term-pane-bg, var(--term-surface))',
+          ...(phone ? {
+            maskImage: `linear-gradient(to top, black calc(100% - ${COMPOSER_TOP_FADE}px), transparent)`,
+            WebkitMaskImage: `linear-gradient(to top, black calc(100% - ${COMPOSER_TOP_FADE}px), transparent)`,
+          } : null),
           zIndex: 1,
           pointerEvents: 'none',
         }}
@@ -2732,7 +2476,6 @@ function TPane({ nodeId, contentMaxWidth, embedded = false, allowEmbeddedAttachm
       <ComposerShell
         ref={composerHandleRef}
         position="absolute"
-        density={prefs.terminalDensity}
         contentMaxWidth={contentMaxWidth ?? null}
         dragHover={dragHover}
         toolbarRef={composerToolbarRef}
@@ -2770,40 +2513,42 @@ function TPane({ nodeId, contentMaxWidth, embedded = false, allowEmbeddedAttachm
         preBlocks={
           <>
             {typeof composerPreBlocks === 'function' ? composerPreBlocks(draftHasText) : composerPreBlocks}
-            {n.commandResult && <ChatCommandResult result={n.commandResult} />}
+            {n.commandResult && <ChatCommandResult result={n.commandResult} onDismiss={() => dispatch({ type: 'command-result', nodeId, result: null })} />}
             <UploadProgressBar progress={uploadProgress} />
             <PaneComposerPreBlocks
               node={n}
               quoteMaxLines={prefs.quoteMaxLines}
               quotedText={quotedText}
               pendingAttachments={pendingAttachments}
+              workspaceId={activeProject?.id}
               canSteerQueued={streaming && shouldSteerInsteadOfQueue(agentStatus?.capabilityDescriptor)}
+              slashEntries={slashEntries}
               steeringQueueId={steeringQueueId}
               onSteerQueued={(queueId) => { void steerQueuedEntry(queueId); }}
               onRestoreQueued={(queueId) => {
                 // Restore the entry to the composer so the user can edit or
-                // branch it. Order: read entry, splice from queue, populate draft.
+                // branch it, in front of what was typed since, as a rejected
+                // send comes back. Order: read entry, splice from queue, populate draft.
                 const entry = (n.pendingQueued ?? []).find((x) => x.id === queueId);
                 if (!entry) return;
                 dequeueMessage(nodeId, queueId);
                 const legacyCommentPrefix = !entry.comments?.length && entry.commentBlock ? entry.commentBlock + '\n\n' : '';
-                persistComposerDraft({
-                  value: legacyCommentPrefix + entry.value,
-                  mentions: entry.mentions.map(mention => ({ ...mention,
-                    start: mention.start + legacyCommentPrefix.length, end: mention.end + legacyCommentPrefix.length,
-                  })),
-                }, entry.quotedText ?? null, entry.quoteSource ?? null);
-                for (const comment of entry.comments ?? []) {
-                  addPendingComment(nodeId, comment.quotedText, comment.body, comment.source);
-                }
-                setPendingAttachments(
-                  entry.attachments.map((a, idx) => ({
+                const restored = mergeComposerDraft(
+                  { ...prependToDraft(legacyCommentPrefix, { value: entry.value, mentions: entry.mentions }),
+                    quotedText: entry.quotedText, quoteSource: entry.quoteSource },
+                  { ...latestDraftRef.current, quotedText: latestQuotedTextRef.current ?? undefined, quoteSource: latestQuoteSourceRef.current },
+                );
+                if (restored) persistComposerDraft(restored, restored.quotedText ?? null, restored.quoteSource ?? null);
+                restoreUnsentExtras({
+                  attachments: entry.attachments.map((a, idx) => ({
                     id: `att-restored-${Date.now()}-${idx}`,
                     name: a.name,
                     absPath: a.absPath,
-                    createdHere: false,
+                    relPath: a.relPath,
                   })),
-                );
+                  comments: entry.comments,
+                  slash: entry.slash,
+                });
                 requestAnimationFrame(() => inputRef.current?.focus());
               }}
               onEditPendingComment={(commentId, body) => editPendingComment(nodeId, commentId, body)}
@@ -2815,8 +2560,7 @@ function TPane({ nodeId, contentMaxWidth, embedded = false, allowEmbeddedAttachm
         }
         input={
           <div style={{ position: 'relative', flex: 1, minWidth: 0, display: 'flex' }}>
-            <React.Suspense fallback={<div className="composer-loading-stub" />}>
-            <MentionEditor
+            <LazyMentionEditor
               ref={inputRef}
               value={draft.value}
               mentions={draft.mentions}
@@ -2826,14 +2570,15 @@ function TPane({ nodeId, contentMaxWidth, embedded = false, allowEmbeddedAttachm
               sameTreeNodes={sameTreeNodes}
               crossTreeNodes={crossTreeNodes}
               currentNodeId={nodeId}
-              agentCommands={n.agentCommands}
+              slashEntries={slashEntries}
+              onSlashOpen={loadSlashCatalog}
+              onSlashPick={(entry) => { slashPickRef.current = entry ? { entry, runtimeId: slashRuntimeId } : null; }}
               availableModes={availableModes}
               currentModeId={n.currentModeId}
               onSwitchAgent={(modeId) => switchAgent(nodeId, modeId).catch(() => {})}
               onSubmit={({ branch }) => void onSubmit(branch)}
               onPaste={(e) => { void handlePaste(e as unknown as React.ClipboardEvent<HTMLTextAreaElement>); }}
             />
-            </React.Suspense>
           </div>
         }
         toolbarLeft={
@@ -2855,8 +2600,11 @@ function TPane({ nodeId, contentMaxWidth, embedded = false, allowEmbeddedAttachm
         }
         toolbarRight={
           <>
-          {!permissionPreferences.global && <ComposerPermissionControl apiBase={workspaceBackendApiBase(n.projectId)}
-            mode={chatPermissionChoice(n.permissionMode ?? 'ask', n.permissionApproveForMe)}
+          {memorySetting && (
+            <ConversationMemoryControl apiBase={workspaceBackendApiBase(n.projectId)} nodeId={nodeId} toolbarTier={toolbarTier} disabled={streaming} />
+          )}
+          {permissionControl && !permissionPreferences.global && <ComposerPermissionControl apiBase={workspaceBackendApiBase(n.projectId)}
+            mode={effectiveChatPermissionChoice(permissionPreferences, n)}
             runtimeIds={[resolvedBinding.runtime]} approveForMeRuntimeIds={approveForMeRuntimeIds(agentStatus)}
             compact={toolbarTier > 0} disabled={streaming || permissionPreferences.loading}
             yoloRestartHint={claudeWorkflowRunning ? 'Claude restarts on your next message, which stops the running workflow.' : undefined}
@@ -2873,6 +2621,7 @@ function TPane({ nodeId, contentMaxWidth, embedded = false, allowEmbeddedAttachm
             modelMenuOpen={!!modelMenu && !streaming}
             onOpenModelMenu={openModelMenu}
             switchHint={claudeWorkflowRunning ? 'Switching the model also stops the running workflow.' : undefined}
+            ultracode={ultracode}
           />
           <PaneComposerActions
             allowBranch={!branchesOff}
@@ -2883,10 +2632,13 @@ function TPane({ nodeId, contentMaxWidth, embedded = false, allowEmbeddedAttachm
             onBranch={() => void onSubmit(true)}
             onSend={() => void onSubmit()}
             onStop={() => cancelStream(nodeId)}
-            onRetry={() => retryLastTurn(nodeId, undefined, consumeBindingMeta())}
-            inspectOriginal={turnErrorAction(n.errorKind) === 'inspect-existing-turn'}
-            checkingOriginal={n.errorRecovery === 'checking'}
-            resumeTurn={turnErrorAction(n.errorKind) === 'resume-turn'}
+            // A failed plan step is the run's to retry (or the plan's to show), as in its error tail.
+            onRetry={planStep
+              ? planStep.retry ?? planStep.openPlan
+              : () => retryLastTurn(nodeId, undefined, consumeBindingMeta())}
+            inspectOriginal={!planStep && turnErrorAction(n.errorKind) === 'inspect-existing-turn'}
+            checkingOriginal={!planStep && n.errorRecovery === 'checking'}
+            resumeTurn={!planStep && turnErrorAction(n.errorKind) === 'resume-turn'}
             contextUsagePercentage={n.contextUsagePercentage}
             usageSummary={n.usageSummary}
             stopHint={claudeWorkflowRunning ? 'Also stops the running workflow.' : undefined}
@@ -2899,23 +2651,13 @@ function TPane({ nodeId, contentMaxWidth, embedded = false, allowEmbeddedAttachm
       </AnimatePresence>
       <PaneFind
         open={findOpen}
-        node={n}
+        rootRef={scrollRef}
         focusNonce={findFocusNonce}
         onClose={() => setFindOpen(false)}
-        onScrollToMatch={(match, occurrence, query) => {
-          window.dispatchEvent(
-            new CustomEvent('michi:scroll-to-message', {
-              detail: {
-                nodeId,
-                messageId: match.messageId,
-                messageIdx: match.messageIdx,
-                flash: false,
-                query,
-                occurrence,
-              },
-            }),
-          );
-        }}
+        onVisitMatch={(range) => jumpToMessage(
+          range.startContainer.parentElement?.closest('[data-msg-id]')?.getAttribute('data-msg-id') ?? null,
+          { flash: { range } },
+        )}
       />
       </div>
 
@@ -2958,6 +2700,8 @@ function TPane({ nodeId, contentMaxWidth, embedded = false, allowEmbeddedAttachm
           if (currentAssistant) return saveAssistantModel({ reasoning });
           setPendingBindingOverride((prev) => ({ ...prev, reasoning }));
         }}
+        ultracode={ultracode}
+        onSaveUltracode={ultracode ? (enabled) => setChatUltracode(nodeId, enabled) : undefined}
         onRetryModels={retryModels}
         onCloseAgentMenu={() => setAgentMenu(null)}
         onCloseModelMenu={() => setModelMenu(null)}
@@ -2967,14 +2711,6 @@ function TPane({ nodeId, contentMaxWidth, embedded = false, allowEmbeddedAttachm
       <FileDropOverlay visible={dropzoneVisible} fileCount={droppedFileCount} />
     </div>
   );
-}
-
-/** The user is typing somewhere (an input, a textarea, our composer). */
-function editableHasFocus(): boolean {
-  const active = document.activeElement as HTMLElement | null;
-  if (!active) return false;
-  const tag = active.tagName;
-  return tag === 'INPUT' || tag === 'TEXTAREA' || active.isContentEditable;
 }
 
 /*

@@ -8,7 +8,10 @@ import { createDefaultHost } from '../src/core/defaultHost';
 
 const host = createDefaultHost({ logLevel: 'silent' });
 const spawnEnv = (): NodeJS.ProcessEnv => ({ PATH: '/bin' });
-const OPTIONAL = ['modelCatalog', 'configDir', 'stderrWarning', 'restrictedToolApproval', 'hostText'] as const;
+const OPTIONAL = [
+  'modelCatalog', 'configDir', 'stderrWarning', 'restrictedToolApproval', 'hostText', 'skillLibraryDir',
+  'subscribeSkillLibraryChanges',
+] as const;
 
 describe('Claude adapter defaults', () => {
   it('pins the default limits and CLI switches', () => {
@@ -35,7 +38,6 @@ describe('Claude adapter defaults', () => {
     assert.deepEqual(options.limits, DEFAULT_CLAUDE_LIMITS);
     assert.deepEqual(options.cli(), DEFAULT_CLAUDE_CLI_FLAGS);
     assert.equal(options.binaryPath(), undefined);
-    assert.equal(options.followUpsHookPoc(), false);
   });
 
   it('hands out copies of the defaults, so changing them leaves the constants alone', () => {
@@ -56,12 +58,11 @@ describe('Claude adapter defaults', () => {
 
   it('gives a required member set to undefined its default', () => {
     const options = claudeAdapterOptions({
-      host, spawnEnv, limits: undefined, cli: undefined, binaryPath: undefined, followUpsHookPoc: undefined,
+      host, spawnEnv, limits: undefined, cli: undefined, binaryPath: undefined,
     });
     assert.deepEqual(options.limits, DEFAULT_CLAUDE_LIMITS);
     assert.deepEqual(options.cli(), DEFAULT_CLAUDE_CLI_FLAGS);
     assert.equal(options.binaryPath(), undefined);
-    assert.equal(options.followUpsHookPoc(), false);
   });
 
   it('leaves out each optional member not given, or given as undefined', () => {
@@ -69,7 +70,8 @@ describe('Claude adapter defaults', () => {
       claudeAdapterOptions({ host, spawnEnv }),
       claudeAdapterOptions({
         host, spawnEnv, modelCatalog: undefined, configDir: undefined, stderrWarning: undefined,
-        restrictedToolApproval: undefined, hostText: undefined,
+        restrictedToolApproval: undefined, hostText: undefined, skillLibraryDir: undefined,
+        subscribeSkillLibraryChanges: undefined,
       }),
     ]) {
       for (const key of OPTIONAL) assert.equal(Object.hasOwn(options, key), false, key);
@@ -87,10 +89,11 @@ describe('Claude adapter defaults', () => {
       configDir: () => 'claude-profile',
       binaryPath: () => 'claude-bin',
       cli: () => ({ bare: true, strictMcp: true, forwardSubagentText: false, humanOrigin: false }),
-      followUpsHookPoc: () => true,
       stderrWarning: () => undefined,
       restrictedToolApproval: () => 'allow',
       hostText: {},
+      skillLibraryDir: () => '/skills/library',
+      subscribeSkillLibraryChanges: () => () => {},
     };
     const options = claudeAdapterOptions(given);
     assert.deepEqual(Object.keys(options).sort(), Object.keys(given).sort());

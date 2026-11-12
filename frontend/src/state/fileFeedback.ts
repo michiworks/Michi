@@ -1,14 +1,9 @@
 import type { ChatNodeState, Project } from './chatTypes';
-import { LOCAL_BACKEND_CONNECTION_ID } from '../config/backendConnections';
+import { projectConnectionId } from '../config/backendConnections';
 import { findTreeIdForNode } from './tree';
 import type { FileFeedbackTarget, FileReadSnapshot } from './fileFeedbackTypes';
 
 export type { FileFeedbackTarget, FileReadSnapshot };
-
-export interface FileFeedbackContext {
-  snapshot: FileReadSnapshot;
-  target: FileFeedbackTarget;
-}
 
 export async function createFileReadSnapshot(
   content: string,
@@ -29,7 +24,7 @@ export function isFileFeedbackTargetValid(
   const node = nodes[target.nodeId];
   if (!project || project.deletedAt || project.archivedAt || !node || node.deletedAt || node.kind !== 'chat') return false;
   if (node.projectId !== project.id || !project.chatIds.includes(node.nodeId)) return false;
-  if ((project.backendConnectionId ?? LOCAL_BACKEND_CONNECTION_ID) !== target.backendConnectionId) return false;
+  if (projectConnectionId(project) !== target.backendConnectionId) return false;
   if (!target.treeId || findTreeIdForNode(node.nodeId, project) !== target.treeId) return false;
   const tree = project.trees.find(candidate => candidate.id === target.treeId);
   return !!tree && !tree.archivedAt && !!nodes[tree.rootNodeId] && !nodes[tree.rootNodeId].deletedAt;

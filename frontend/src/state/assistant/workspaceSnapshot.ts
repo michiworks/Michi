@@ -1,5 +1,6 @@
 import { hydrateBackendWorkspaces } from '../chatHydration';
 import type { ChatNodeState, Project, ProjectEdge } from '../chatTypes';
+import { pickLandingTreeId } from '../conversationVisibility';
 import { serializedEdgeId, type BackendInstalledEntities, type PendingBackendDeletes } from '../workspacePersistence';
 
 export interface WorkspaceSnapshotMerge {
@@ -74,6 +75,10 @@ export function mergeWorkspaceSnapshot(
       // workspace snapshot; preserve every local runtime/message field.
       if (node.pageId !== undefined && node.pageId !== held.pageId) patch.pageId = node.pageId;
       if (node.maintenanceJobId && node.maintenanceJobId !== held.maintenanceJobId) patch.maintenanceJobId = node.maintenanceJobId;
+      // Moving a Scheduled-only run to its workspace clears it: take both directions.
+      if (node.scheduledOnlyJobId !== undefined && (node.scheduledOnlyJobId ?? null) !== (held.scheduledOnlyJobId ?? null)) {
+        patch.scheduledOnlyJobId = node.scheduledOnlyJobId;
+      }
       if (node.deletedAt != null && held.deletedAt == null) patch.deletedAt = node.deletedAt;
       if (Object.keys(patch).length > 0) next = { ...held, ...patch };
     }
@@ -92,9 +97,9 @@ export function mergeWorkspaceSnapshot(
       chatIds: server.chatIds.filter(belongsHere),
       trees,
       edges: server.edges.filter(edgeBelongsHere),
-      // As hydration picks one: the most recently active tree still open.
+      // As hydration picks one.
       activeTreeId: server.activeTreeId && skippedTrees.has(server.activeTreeId)
-        ? [...trees].filter((tree) => !tree.archivedAt).sort((a, b) => b.lastActiveAt - a.lastActiveAt)[0]?.id ?? null
+        ? pickLandingTreeId(trees, nodes)
         : server.activeTreeId,
     };
     return { projects: [...currentProjects, fresh], nodes };

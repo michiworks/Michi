@@ -245,7 +245,6 @@ describe('useSmooth', () => {
     // Under leaky controller, the ratio should be much closer (within 2:1).
     // Allow generous bounds since we're testing the principle, not exact values.
     if (earlyRate > 0 && lateRate > 0) {
-      const ratio = earlyRate / lateRate;
       // Normalize by time: earlyRate is over 200ms, lateRate over 300ms
       const earlyPerMs = earlyRate / 200;
       const latePerMs = lateRate / 300;

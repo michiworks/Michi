@@ -1,6 +1,6 @@
 /**
- * McpSlotRegistry as the runtime package's McpSlotProvider: endpoint(),
- * sessionEndpoint() and hookEndpoint() give byte for byte the URLs the Kiro,
+ * McpSlotRegistry as the runtime package's McpSlotProvider: endpoint() and
+ * sessionEndpoint() give byte for byte the URLs the Kiro,
  * Codex and Claude adapters build today (and Crew's relay accepts), and
  * rebind() patches the live binding that tool calls read, observed through a
  * real MCP client on mountMcp.
@@ -18,7 +18,6 @@ import { McpSlotRegistry, mountMcp, type McpSlotCallbacks } from '../src/service
 import { JSON_BODY_LIMIT_BYTES } from '../src/services/requestBodyLimit';
 import { michiMcpServer, michiSessionMcpServer } from 'michi-runtime/internal/adapters/kiro/kiroProtocol';
 import { buildCodexMcpConfig } from 'michi-runtime/internal/adapters/codex/codexProtocol';
-import { buildCodexFollowUpsHookPocConfig } from 'michi-runtime/internal/adapters/codex/codexFollowUpsHookPoc';
 import { buildClaudeMcpConfig, MICHI_INTERNAL_MCP_NAME } from 'michi-runtime/internal/adapters/claude/claudeMcpConfig';
 import { validateMichiEndpoint } from 'michi-runtime/internal/adapters/crew/crewMcpBinding';
 import { mcpSlotProviderInternals } from 'michi-runtime/internal/mcp-host/slotProviderInternals';
@@ -105,19 +104,11 @@ for (const port of [3000, 43117]) {
         assert.throws(() => validateMichiEndpoint(session.url), /Invalid Michi MCP endpoint/,
             'Crew cannot use the session group URL');
 
-        const hook = provider.hookEndpoint(slotId, 'stop');
-        assert.equal(hook, `http://127.0.0.1:${port}/api/codex-hooks/${slotId}/stop`);
-        const hookConfig = buildCodexFollowUpsHookPocConfig(slotId, hook, { nodePath: '/usr/bin/node', runnerPath: '/opt/runner.cjs' }) as {
-            hooks: { Stop: Array<{ hooks: Array<{ command: string }> }> };
-        };
-        assert.equal(hookConfig.hooks.Stop[0].hooks[0].command, `ELECTRON_RUN_AS_NODE=1 '/usr/bin/node' '/opt/runner.cjs' '${hook}'`);
-
         // The package host got the same base URL, so its own endpoint() agrees.
         assert.deepEqual(hostSlot(registry, slotId).endpoint(), endpoint);
         // URLs are built from the id alone: a disposed slot keeps its URL, which then answers 404.
         await provider.dispose(slotId);
         assert.deepEqual(provider.endpoint(slotId), endpoint);
-        assert.equal(provider.hookEndpoint(slotId, 'stop'), hook);
     });
 }
 
@@ -133,7 +124,6 @@ test('a port function is read each time a URL is built, by the registry and its 
         assert.deepEqual(registry.endpoint(slot.slotId), fixed.endpoint(slot.slotId));
         assert.equal(registry.endpoint(slot.slotId).url, `http://127.0.0.1:${bound}/api/mcp/${slot.slotId}`);
         assert.deepEqual(registry.sessionEndpoint(groupId), fixed.sessionEndpoint(groupId));
-        assert.equal(registry.hookEndpoint(slot.slotId, 'stop'), fixed.hookEndpoint(slot.slotId, 'stop'));
         assert.deepEqual(hostSlot(registry, slot.slotId).endpoint(), registry.endpoint(slot.slotId));
     }
 });
@@ -247,13 +237,33 @@ test('tool calls on endpoint() see a rebind from the next call on', async (t) =>
     assert.deepEqual((await client.listTools()).tools.map((tool) => tool.name), ['save_artifact']);
 });
 
-test('sessionEndpoint() and hookEndpoint() reach mountMcp routes', async (t) => {
+test("an Agent Run tool call carries the agent's own tool-call id, as on Pi", async (t) => {
+    t.mock.method(dbRepository, 'getNodeSessionBinding', () => null);
+    const { registry, connect } = await startMcpApp(t);
+    const metas: unknown[] = [];
+    const slot = registry.create('chat-a', '/tmp', null, callbacks({
+        owner: chatOwner('node-a'),
+        agentRuns: { invoke: async (_name, _args, meta) => { metas.push(meta); return { runs: [] }; } },
+    }), { nodeId: 'node-a' });
+    t.after(() => registry.dispose(slot.slotId));
+    const client = await connect(registry.endpoint(slot.slotId).url);
+
+    // Two identical sibling spawns are two runs only if each keeps its own id.
+    const args = { agentId: 'reviewer', task: 'Review the diff' };
+    for (const id of ['toolu_1', 'toolu_2']) {
+        const result = await client.callTool({ name: 'spawn_agent', arguments: args, _meta: { 'claudecode/toolUseId': id } }) as CallResult;
+        assert.notEqual(result.isError, true, textOf(result));
+    }
+    await client.callTool({ name: 'list_agents', arguments: {} });
+    assert.deepEqual(metas, [{ runtimeToolCallId: 'toolu_1' }, { runtimeToolCallId: 'toolu_2' }, { runtimeToolCallId: null }]);
+});
+
+test('sessionEndpoint() reaches the mountMcp route', async (t) => {
     t.mock.method(dbRepository, 'getNodeSessionBinding', () => null);
     const { registry, connect } = await startMcpApp(t);
     const saved: string[] = [];
     const slot = registry.create('chat-a', '/tmp', null, callbacks({
         onSaveArtifact: (name, body = '') => { saved.push(name); return { name, filePath: `/tmp/${name}`, size: body.length }; },
-        onValidateFollowUps: () => ({ decision: 'block', reason: 'Call set_follow_ups first.' }),
     }), { nodeId: 'node-a' });
     const groupId = registry.createSessionGroup(slot);
     registry.bindSession(groupId, 'chat-a', slot.slotId);
@@ -264,20 +274,6 @@ test('sessionEndpoint() and hookEndpoint() reach mountMcp routes', async (t) => 
     const routed = await shared.callTool({ name: 'save_artifact', arguments: { session_id: 'chat-a', name: 'routed', body: 'x' } }) as CallResult;
     assert.equal(textOf(routed), 'Saved artifact: @routed');
     assert.deepEqual(saved, ['routed']);
-
-    const post = async (url: string) => {
-        const response = await fetch(url, {
-            method: 'POST',
-            headers: { 'content-type': 'application/json' },
-            body: JSON.stringify({ hook_event_name: 'Stop', stop_hook_active: false }),
-        });
-        return { status: response.status, body: await response.json() };
-    };
-    assert.deepEqual(await post(registry.hookEndpoint(slot.slotId, 'stop')),
-        { status: 200, body: { decision: 'block', reason: 'Call set_follow_ups first.' } });
-    assert.deepEqual(await post(registry.hookEndpoint('f'.repeat(32), 'stop')), { status: 200, body: {} },
-        'an unknown slot fails open with {}');
-    assert.throws(() => registry.hookEndpoint(slot.slotId, 'start' as 'stop'), /Unknown MCP slot hook/);
 });
 
 test("create() hands the session's sink to the slot's tools, which report after the callback and before answering", async (t) => {

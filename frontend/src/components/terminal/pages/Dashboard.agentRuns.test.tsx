@@ -1,4 +1,3 @@
-import React from 'react';
 import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { AgentRunStatus } from 'michi-shared';
@@ -9,6 +8,7 @@ import { agentRunPaneId } from '../../../state/paneItems';
 const mocks = vi.hoisted(() => ({
   customAgentsEnabled: true as boolean | undefined,
   closePane: vi.fn(),
+  openAgentRunPane: vi.fn(),
   loadRuns: vi.fn(async () => undefined),
   subscribeWorkspace: vi.fn(() => vi.fn()),
   getAgentRunDetail: vi.fn<(...args: unknown[]) => Promise<unknown>>(() => new Promise(() => undefined)),
@@ -35,7 +35,7 @@ vi.mock('../../../state/chatStore', () => ({
   useChatPanes: () => ({
     openPanes: [paneId], focusedPane: paneId, paneItems: { [paneId]: item },
   }),
-  useChatActions: () => ({ closePane: mocks.closePane, setPaneWidth: vi.fn(), openAgentRunPane: vi.fn() }),
+  useChatActions: () => ({ closePane: mocks.closePane, setPaneWidth: vi.fn(), openAgentRunPane: mocks.openAgentRunPane }),
   useStructuralSelector: (selector: (nodes: Record<string, never>) => unknown) => selector({}),
   shallowArrayEqual: <T,>(a: readonly T[], b: readonly T[]) => a.length === b.length && a.every((value, index) => Object.is(value, b[index])),
 }));
@@ -51,7 +51,10 @@ vi.mock('../../../services/api', () => ({
   getAgentRunDetail: mocks.getAgentRunDetail,
   getWebUploadCwd: vi.fn(), importWorkspaceFileUpload: vi.fn(), respondAgentRunInteraction: mocks.respondAgentRunInteraction,
 }));
-vi.mock('../../../services/notifications', () => ({ notify: vi.fn() }));
+vi.mock('../../../services/attention/policy', async (importOriginal) => ({
+  ...await importOriginal<typeof import('../../../services/attention/policy')>(),
+  presentAttention: vi.fn(),
+}));
 vi.mock('../../../lib/electronBridge', () => ({ getElectron: () => null }));
 vi.mock('../agentRuns/AgentRunPane', () => ({
   AgentRunPane: ({ onClose, onRespondInteraction, run, attempts }: AgentRunPaneProps) => <div>
@@ -68,6 +71,9 @@ vi.mock('../../ResizeHandle', () => ({ default: () => null }));
 
 import TerminalDashboard from './Dashboard';
 import AgentRunPaneSurface from '../agentRuns/AgentRunPaneSurface';
+import { presentAttention } from '../../../services/attention/policy';
+import { noteServerAttentionCapabilities, resetServerAttentionStore } from '../../../services/serverAttentionStore';
+import { setPanePresenceDashboardVisible } from '../../../state/panePresenceVisibility';
 
 function detail(id = 'run-1') {
   return { backendConnectionId: 'backend-a', value: { run: { ...run, id }, attempts: [{ id: `attempt-${id}` }], events: [], interactions: [] } };
@@ -91,6 +97,52 @@ describe('Dashboard Agent Run panes', () => {
       if (action.type === 'replace-run-feed') mocks.state.runs[JSON.stringify([action.resource.backendConnectionId, action.resource.value.id])] = action.resource;
     });
     HTMLElement.prototype.scrollTo = vi.fn();
+  });
+
+  it('hands a Run transition to the attention policy, visible while its pane is on the Dashboard', () => {
+    const { rerender } = render(<TerminalDashboard />);
+    vi.mocked(presentAttention).mockClear();
+    const runKey = '["backend-a","run-1"]';
+    mocks.state = { ...mocks.state, runs: { [runKey]: { backendConnectionId: 'backend-a', value: { ...run, status: AgentRunStatus.Completed } } as AgentDomainState['runs'][string] } };
+    rerender(<TerminalDashboard />);
+    expect(presentAttention).toHaveBeenCalledTimes(1);
+    const intent = vi.mocked(presentAttention).mock.calls[0]![0];
+    expect(intent).toMatchObject({
+      key: `agent_run:${runKey}`, kind: 'finished', title: 'Reviewer completed',
+      target: { type: 'agent_run', runId: 'run-1', workspaceId: 'workspace-1', backendConnectionId: 'backend-a' },
+    });
+    try {
+      setPanePresenceDashboardVisible(true);
+      expect(intent.isTargetVisible!()).toBe(true);
+    } finally {
+      setPanePresenceDashboardVisible(false);
+    }
+    expect(intent.isTargetVisible!()).toBe(false);
+    expect(intent.isStillCurrent!()).toBe(true);
+    intent.onOpen!();
+    expect(mocks.openAgentRunPane).toHaveBeenCalledWith({ backendConnectionId: 'backend-a', id: 'run-1' }, 'workspace-1', 'Reviewer');
+    // Replaying the same snapshot raises nothing new.
+    rerender(<TerminalDashboard />);
+    expect(presentAttention).toHaveBeenCalledTimes(1);
+  });
+
+  it('leaves the end of a notify-mode Run to a backend that announces it to every window', () => {
+    noteServerAttentionCapabilities('backend-a', { attention: 'v1' });
+    try {
+      const at = (id: string, completionMode: string, status: AgentRunStatus) => ({
+        [`["backend-a","${id}"]`]: { backendConnectionId: 'backend-a', value: { ...run, id, completionMode, status } } as unknown as AgentDomainState['runs'][string],
+      });
+      mocks.state = { ...mocks.state, runs: { ...at('run-notify', 'notify', AgentRunStatus.Running), ...at('run-wait', 'wait', AgentRunStatus.Running) } };
+      const { rerender } = render(<TerminalDashboard />);
+      vi.mocked(presentAttention).mockClear();
+      mocks.state = { ...mocks.state, runs: { ...at('run-notify', 'notify', AgentRunStatus.Completed), ...at('run-wait', 'wait', AgentRunStatus.Completed) } };
+      rerender(<TerminalDashboard />);
+      expect(vi.mocked(presentAttention).mock.calls.map(([intent]) => intent.target)).toEqual([
+        expect.objectContaining({ type: 'agent_run', runId: 'run-wait' }),
+      ]);
+    } finally {
+      resetServerAttentionStore();
+    }
   });
 
   it('renders and closes a Run pane without cancelling the backend Run', async () => {
@@ -200,38 +252,4 @@ describe('Dashboard Agent Run panes', () => {
     expect(mocks.respondAgentRunInteraction).toHaveBeenCalledTimes(1);
   });
 
-});
-
-describe('Dashboard page target reveal', () => {
-  function revealBlock() {
-    const owner = document.createElement('div');
-    Object.assign(owner.dataset, { nativePagePane: '', pageId: 'page-1', workspaceId: 'workspace-1', backendConnectionId: 'backend-a' });
-    const block = document.createElement('div');
-    block.dataset.blockId = 'block-1';
-    block.scrollIntoView = vi.fn();
-    owner.appendChild(block);
-    document.body.appendChild(owner);
-    act(() => {
-      window.dispatchEvent(new CustomEvent('michi:scroll-to-page-target', { detail: {
-        pageId: 'page-1', workspaceId: 'workspace-1', backendConnectionId: 'backend-a',
-        resourceKind: 'page', resourceId: 'page-1', targetId: 'block-1',
-      } }));
-    });
-    owner.remove();
-    return block.scrollIntoView as ReturnType<typeof vi.fn>;
-  }
-
-  beforeEach(() => { HTMLElement.prototype.scrollTo = vi.fn(); });
-
-  it('scrolls a page target into view smoothly, and jumps when the OS reduces motion', () => {
-    render(<TerminalDashboard />);
-    expect(revealBlock()).toHaveBeenCalledWith(expect.objectContaining({ behavior: 'smooth' }));
-    const matchMedia = window.matchMedia;
-    window.matchMedia = vi.fn((query: string) => ({ matches: query.includes('reduce'), media: query, addEventListener: vi.fn(), removeEventListener: vi.fn() })) as unknown as typeof window.matchMedia;
-    try {
-      expect(revealBlock()).toHaveBeenCalledWith(expect.objectContaining({ behavior: 'auto' }));
-    } finally {
-      window.matchMedia = matchMedia;
-    }
-  });
 });

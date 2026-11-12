@@ -125,7 +125,8 @@ describe('Spaces Home API', () => {
   it('maps activity, progress cards and the workspace list', async () => {
     const fetchMock = vi.fn()
       .mockResolvedValueOnce(ok({ items: [
-        { kind: 'page-change', batchId: 'b1', pageId: 'p1', pageTitle: 'Release', workspaceId: 'ws-1', workspaceName: 'rabbitholes', at: 1, count: 2, pending: 1, ops: ['update'], summary: 'Risk', actor: 'agent', sourceKind: 'chat', sourceNodeId: 'n1' },
+        { kind: 'page-change', batchId: 'b1', pageId: 'p1', pageTitle: 'Release', workspaceId: 'ws-1', workspaceName: 'rabbitholes', at: 1, count: 2, pending: 1, ops: ['update'], summary: 'Risk', actor: 'agent', sourceKind: 'chat', sourceNodeId: 'n1',
+          detail: { by: { kind: 'meta-agent' }, action: 'rewrote', names: ['Risk'], targets: 1, undone: false } },
         { kind: 'conversation', threadNodeId: 'n2', title: 'Perf', workspaceId: 'ws-1', workspaceName: 'rabbitholes', startedFromPageId: 'p1', startedFromPageTitle: 'Release', at: 2 },
       ] }))
       .mockResolvedValueOnce(ok({ items: [
@@ -142,6 +143,8 @@ describe('Spaces Home API', () => {
 
     expect(String(fetchMock.mock.calls[0][0])).toContain('/spaces-home/activity?limit=5');
     expect(activity[0]).toMatchObject({ pageId: 'remote:host:p1', workspaceId: 'remote:host:ws-1', sourceNodeId: 'remote:host:n1', batchId: 'b1' });
+    // An older backend's 'meta-agent' writer reads as the agent's Pages upkeep (legacyActor.ts).
+    expect(activity[0]).toMatchObject({ detail: { by: { kind: 'companion', via: 'upkeep' }, action: 'rewrote' } });
     expect(activity[1]).toMatchObject({ threadNodeId: 'remote:host:n2', startedFromPageId: 'remote:host:p1' });
     expect(cards[0]).toMatchObject({ threadNodeId: 'remote:host:n2', treeId: null, workspaceId: 'remote:host:ws-1' });
     expect(workspaces[0]).toMatchObject({ workspaceId: 'remote:host:ws-1', homePageId: null });

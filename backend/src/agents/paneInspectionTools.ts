@@ -13,9 +13,8 @@
  *    SERVICE functions (`inspect` from `paneInspection.ts`, `readOutput` from
  *    `paneInspectionOutput.ts`, `waitPane` from `paneInspectionWait.ts`) that accept only the
  *    target locator + read/wait options as arguments, call the service with the caller built
- *    from the binding, and render a `{ text }` result. Calling these directly (rather than
- *    through backend/src/routes/paneInspection.ts, which P1-8/P3-5b's route half own) matches the
- *    read_node template R4 traces end to end.
+ *    from the binding, and render a `{ text }` result. These services have no HTTP routes;
+ *    calling them directly matches the read_node template R4 traces end to end.
  *  - Result rendering that follows design §10: no tool outputs, thoughts, environment
  *    variables, credentials, absolute execution-environment paths, native resume tokens, or
  *    permission options ever enter the text. Section<T> states are rendered as prose that names
@@ -24,8 +23,8 @@
  *
  * NOT in this file: MCP's Zod schema (mcpServer.ts hand-registers it, same as read_node) and
  * Pi's typebox schema (auto-derived from BUILTIN_TOOLS in builtinTools.ts via piTools.ts's own
- * fieldToTypebox). Both runtimes import the request-shaping helpers below so a tool call and an
- * HTTP call reject identically (brief: "Use the shared parsers").
+ * fieldToTypebox). Both runtimes import the request-shaping helpers below so their tool calls
+ * reject identically (brief: "Use the shared parsers").
  *
  * `wait_pane`'s tool wrapper (P3-5b, this task) calls `waitPane` from `paneInspectionWait.ts`
  * (P3-5) with no `deps` override: the service's own default (`{ clock: systemPaneSubscribeClock
@@ -50,13 +49,14 @@ import {
   parseWaitPaneRequestV1,
 } from "michi-shared";
 import { inspect, resolveCallerForTarget, type PaneInspectionCaller } from "../services/paneInspection";
-import { getWorkspace } from "../services/dbRepository";
+import { assistantTargetWorkspace } from "../assistant/identity";
 import { workspaceIdKindHint } from "../services/idKindHint";
 import { readOutput, type ReadPaneOutputResult } from "../services/paneInspectionOutput";
 import { list, type ListPanesResult } from "../services/paneInspectionList";
 import { waitPane } from "../services/paneInspectionWait";
 import { DISABLED_MESSAGE } from "../services/globalContext";
 import { LOCAL_AGENT_OWNER_ID } from "../services/agentOwner";
+import { codedErrorResult, type McpTextResult } from "./tools/types";
 
 // ---------------------------------------------------------------------------
 // Caller binding — the security core (brief step 3 / design §10 / COMMON.md decision 10).
@@ -121,11 +121,16 @@ function isAssistantBinding(binding: PaneInspectionToolBinding): boolean {
  * The caller for one call. Ordinary callers keep their own workspace. The Michi assistant reads
  * across workspaces: the target's own workspace becomes its scope, so every downstream check
  * (ownership, cursors, waits) runs exactly as it would for a chat in that workspace. A target
- * that does not resolve keeps the session's workspace and fails NOT_FOUND as usual.
+ * outside the workspaces the assistant may name (its own hidden one included) is NOT_FOUND,
+ * worded as for a missing target.
  */
 function scopedToTarget(binding: PaneInspectionToolBinding, caller: PaneInspectionCaller, locator: PaneLocator): PaneInspectionCaller {
   if (!isAssistantBinding(binding)) return caller;
-  return resolveCallerForTarget(caller, locator) ?? caller;
+  const scoped = resolveCallerForTarget(caller, locator);
+  if (!scoped || !assistantTargetWorkspace(caller.ownerUserId, scoped.workspaceId)) {
+    throw new PaneInspectionError("NOT_FOUND", "inspect", "target not found");
+  }
+  return scoped;
 }
 
 /** The assistant's caller re-scoped to `workspaceId`, for list_panes (which takes no locator). */
@@ -133,8 +138,8 @@ function assistantListCaller(caller: PaneInspectionCaller, workspaceId: unknown)
   if (typeof workspaceId !== "string" || !workspaceId.trim()) {
     throw new PaneInspectionError("INVALID_ARGUMENT", "list", "workspaceId is required; get one from list_workspaces.");
   }
-  const workspace = getWorkspace(workspaceId.trim(), caller.ownerUserId);
-  if (!workspace || workspace.deleted_at != null) throw new PaneInspectionError("NOT_FOUND", "list", `workspace not found.${workspaceIdKindHint(workspaceId)} Get workspace ids from list_workspaces.`);
+  const workspace = assistantTargetWorkspace(caller.ownerUserId, workspaceId.trim());
+  if (!workspace) throw new PaneInspectionError("NOT_FOUND", "list", `workspace not found.${workspaceIdKindHint(workspaceId)} Get workspace ids from list_workspaces.`);
   return { ...caller, workspaceId: workspace.id };
 }
 
@@ -201,20 +206,13 @@ export interface WaitPaneToolArgs {
   timeoutMs?: unknown;
 }
 
-export interface PaneInspectionToolResult {
-  [key: string]: unknown;
-  content: Array<{ type: "text"; text: string }>;
-  isError?: true;
-}
-
 function targetFromArgs(args: { paneId?: string; nodeId?: string; runId?: string; executionRef?: unknown }): {
   locator: PaneLocator;
   executionRef?: ExecutionRef;
 } {
-  // parsePaneTargetArgs (shared/src/paneInspection.ts) is the same runtime parser the HTTP
-  // routes use, so a tool call and an HTTP call reject identically (brief: "Use the shared
-  // parsers so a tool call and an HTTP call reject identically"). It enforces at most one of
-  // paneId | nodeId | runId and lets an executionRef supply the locator (or vice versa).
+  // parsePaneTargetArgs (shared/src/paneInspection.ts) is the shared runtime parser. It enforces
+  // at most one of paneId | nodeId | runId and lets an executionRef supply the locator (or vice
+  // versa).
   return parsePaneTargetArgs({
     paneId: args.paneId,
     nodeId: args.nodeId,
@@ -367,12 +365,12 @@ function renderWaitPaneResult(result: WaitPaneResultV1): string {
   return lines.join("\n");
 }
 
-function errorResult(error: unknown): PaneInspectionToolResult {
+function errorResult(error: unknown): McpTextResult {
   if (error instanceof PaneInspectionError) {
     // NAVIGATION_DISABLED gets the exact existing DISABLED_MESSAGE wording (brief: "so the user
     // sees one consistent instruction") rather than this module's own phrasing.
-    const text = error.code === "NAVIGATION_DISABLED" ? DISABLED_MESSAGE : `${error.code}: ${error.message}`;
-    return { content: [{ type: "text", text }], isError: true };
+    if (error.code === "NAVIGATION_DISABLED") return { content: [{ type: "text", text: DISABLED_MESSAGE }], isError: true };
+    return codedErrorResult(error.code, error.message);
   }
   throw error;
 }
@@ -384,7 +382,7 @@ function errorResult(error: unknown): PaneInspectionToolResult {
 export function inspectPaneTool(
   binding: PaneInspectionToolBinding,
   args: InspectPaneToolArgs,
-): PaneInspectionToolResult {
+): McpTextResult {
   try {
     const sessionCaller = buildPaneInspectionCaller(binding);
     const { locator, executionRef } = targetFromArgs(args);
@@ -403,7 +401,7 @@ export function inspectPaneTool(
 export function readPaneOutputTool(
   binding: PaneInspectionToolBinding,
   args: ReadPaneOutputToolArgs,
-): PaneInspectionToolResult {
+): McpTextResult {
   try {
     const sessionCaller = buildPaneInspectionCaller(binding);
     const selection: ExecutionSelection = args.selection !== undefined
@@ -435,7 +433,7 @@ export function readPaneOutputTool(
 export function listPanesTool(
   binding: PaneInspectionToolBinding,
   args: ListPanesToolArgs,
-): PaneInspectionToolResult {
+): McpTextResult {
   try {
     const sessionCaller = buildPaneInspectionCaller(binding);
     // list_panes has no locator; the request's workspaceId comes from the CALLER binding, never
@@ -476,7 +474,7 @@ export function listPanesTool(
 export async function waitPaneTool(
   binding: PaneInspectionToolBinding,
   args: WaitPaneToolArgs,
-): Promise<PaneInspectionToolResult> {
+): Promise<McpTextResult> {
   try {
     const sessionCaller = buildPaneInspectionCaller(binding);
     const parsed = parseWaitPaneRequestV1({

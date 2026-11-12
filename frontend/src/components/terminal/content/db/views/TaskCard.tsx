@@ -1,4 +1,3 @@
-import React from 'react';
 import type { MichiDatabase, MichiDbRow } from 'michi-shared';
 import { ALL_TASKS_COLUMN, taskThreadIds, TASK_COLUMN } from 'michi-shared';
 import { formatMichiAge } from '../../michiFormat';

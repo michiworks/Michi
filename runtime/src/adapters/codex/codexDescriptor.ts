@@ -43,6 +43,8 @@ export const CODEX_RUNTIME_DESCRIPTOR: RuntimeDescriptor = {
     backgroundTurns: false,
     // A title thread runs beside the first chat turn; its result joins the turn's events.
     titles: 'in-stream',
+    // An ephemeral thread on an app-server and home of its own (codexEphemeralHome.ts; probe P3).
+    ephemeralSessions: 'native',
   },
   run: CODEX_RUN,
 };

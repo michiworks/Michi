@@ -3,6 +3,8 @@ import { TriangleAlert } from 'lucide-react';
 import { Button } from '../../../ui/controls';
 import { PlusIcon, TrashIcon } from '../../icons';
 import { MICHI_CHECKLIST_MAX_ITEMS, MICHI_HEADING_MAX, MICHI_TEXT_MAX, type ChecklistDraftItem } from './pageEdits';
+import { isImeComposing } from '../../../../lib/ime';
+import { kbd } from '../../../../lib/platform';
 import './michiPage.css';
 
 /** Whether a click came from the keyboard (Enter or Space on the button): those report no clicks. */
@@ -13,7 +15,7 @@ const COUNT = new Intl.NumberFormat('en-US');
 /** ⌘↵ / Ctrl↵ saves and Esc cancels; neither reaches the page (Esc there leaves it or clears the selection). */
 function editorKeys(onSave: () => void, onCancel: () => void) {
   return (event: React.KeyboardEvent) => {
-    if (event.nativeEvent.isComposing) return;
+    if (isImeComposing(event)) return;
     const save = event.key === 'Enter' && (event.metaKey || event.ctrlKey);
     if (!save && event.key !== 'Escape') return;
     event.preventDefault();
@@ -47,7 +49,7 @@ function EditorFooter({ busy, saveDisabled, onSave, onCancel, saveLabel = 'Save'
   return (
     <div className="michi-doc-editor__foot">
       <span className="michi-doc-editor__hint" aria-hidden="true">
-        <kbd className="michi-doc-kbd">⌘↵</kbd> {saveLabel}
+        <kbd className="michi-doc-kbd">{kbd('mod', 'enter')}</kbd> {saveLabel}
         <kbd className="michi-doc-kbd">Esc</kbd> {cancelLabel}
       </span>
       {count}
@@ -199,7 +201,7 @@ export function TextBlockEditor({
           onChange={(event) => changeTitle(event.target.value)}
           onKeyDown={(event) => {
             // One line: plain Enter goes on to the words.
-            if (event.key === 'Enter' && !event.metaKey && !event.ctrlKey && !event.nativeEvent.isComposing) {
+            if (event.key === 'Enter' && !event.metaKey && !event.ctrlKey && !isImeComposing(event)) {
               event.preventDefault();
               event.stopPropagation();
               areaRef.current?.focus();
@@ -232,7 +234,7 @@ export function TextBlockEditor({
           onChange={(event) => change(event.target.value)}
           onKeyDown={(event) => {
             // One line: plain Enter saves too.
-            if (event.key === 'Enter' && !event.nativeEvent.isComposing) {
+            if (event.key === 'Enter' && !isImeComposing(event)) {
               event.preventDefault();
               event.stopPropagation();
               save(true);
@@ -337,7 +339,7 @@ export function ChecklistEditor({
               maxLength={MICHI_TEXT_MAX}
               onChange={(event) => setItem(i, { text: event.target.value })}
               onKeyDown={(event) => {
-                if (event.nativeEvent.isComposing || event.metaKey || event.ctrlKey) return;
+                if (isImeComposing(event) || event.metaKey || event.ctrlKey) return;
                 if (event.key === 'Enter') {
                   event.preventDefault();
                   event.stopPropagation();

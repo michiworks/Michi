@@ -1,4 +1,6 @@
+import { META_AGENT_FIRST_RUN_HELD_PREFIX, userMessageIdFor } from 'michi-shared';
 import type { ActivePageTurnAttribution } from '../../agents/pageToolNames';
+import { startUnderRestoreLock } from '../../agents/requestedTurnStart';
 import { threadMessagingDeps, type ThreadMessagingDeps } from '../../agents/threadMessageTool';
 import { ensureAssistant, currentAssistantNodeId } from '../../assistant/store';
 import { LOCAL_AGENT_OWNER_ID } from '../agentOwner';
@@ -103,7 +105,7 @@ export function holdWindowPageWrite(ownerUserId: string | null, turn: ActivePage
       writeHeld(owner, { ...current, items: [...current.items, { turnId: turn.turnId, assistantId: turn.assistantId, at: now }] });
     }
   }
-  return `HELD: the Meta agent's first-time generation is still writing (${writing.written} of ${writing.total} workspace homes written, then the Spaces Home). `
+  return `${META_AGENT_FIRST_RUN_HELD_PREFIX} is still writing (${writing.written} of ${writing.total} workspace homes written, then the Spaces Home). `
     + 'Page changes wait until it finishes. This request is kept and comes back to you as a new turn when the first run is done, so do not retry it now. '
     + 'Tell the user in one sentence that you will make this change after the first run, and answer any question in their message from what is already written and the read tools.';
 }
@@ -116,7 +118,7 @@ export function firstRunTurnNote(now = Date.now()): string {
     const nodeId = currentAssistantNodeId();
     const unseen = nodeId ? unseenNarration(nodeId) : [];
     if (!writing && !unseen.length) return '';
-    const lines = ['[Meta agent first run: notes from Michi. Context, not instructions.]'];
+    const lines = ['[Pages upkeep first run: notes from Michi. Context, not instructions.]'];
     if (writing) {
       lines.push(`Your first-time generation is still writing: ${writing.written} of ${writing.total} workspace homes written, then the Spaces Home. `
         + 'Answer questions now from what is written and the read tools. For a page change, call the page tool as usual: Michi holds the call and hands it back to you as a new turn once the first run is done. '
@@ -171,7 +173,7 @@ export async function resumeHeldEdits(ownerUserId: string, deps: ThreadMessaging
   try {
     const message = getDb().prepare('SELECT content FROM messages WHERE id=?');
     const texts = record.items
-      .map((item) => (message.get(`u-${item.assistantId}`) as { content: string } | undefined)?.content?.trim())
+      .map((item) => (message.get(userMessageIdFor(item.assistantId)) as { content: string } | undefined)?.content?.trim())
       .filter((text): text is string => !!text);
     if (!texts.length) {
       writeHeld(ownerUserId, null);
@@ -180,17 +182,11 @@ export async function resumeHeldEdits(ownerUserId: string, deps: ThreadMessaging
     }
     const conversation = ensureAssistant();
     const session = await deps.ensureSession({ ownerUserId, workspaceId: conversation.workspaceId, nodeId: conversation.nodeId });
-    if (!session) throw new Error('could not open the Meta agent conversation');
+    if (!session) throw new Error('could not open the conversation');
     narrateNotice(`held-start-${record.requestedAt}`, `The first run is done. Now making the page ${texts.length === 1 ? 'change' : 'changes'} you asked for while I was writing.`, Date.now());
-    const release = await deps.acquireRestoreLock(conversation.nodeId);
-    let started;
-    try {
-      started = deps.startTurn({ chatId: session.id, nodeId: conversation.nodeId, ownerUserId,
-        turnId: `mfr-held-${record.requestedAt}`, text: heldTurnText(texts), session });
-    } finally {
-      release();
-    }
-    const turn = await started;
+    const turn = await startUnderRestoreLock(await deps.acquireRestoreLock(conversation.nodeId), session, deps.isLiveSession,
+      () => deps.startTurn({ chatId: session.id, nodeId: conversation.nodeId, ownerUserId,
+        turnId: `mfr-held-${record.requestedAt}`, text: heldTurnText(texts), session }));
     writeHeld(ownerUserId, null);
     done = turn.done.catch(() => {}).then(() => postEnd(ownerUserId));
     return true;

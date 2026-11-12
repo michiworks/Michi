@@ -8,8 +8,7 @@
       { "role": "user", "text": "不是 4 个，是 2 个空格，我之前看错文件了。" }
     ],
     "expected": {
-      "candidates": [{ "kind": "convention", "scopeHint": "workspace", "bodyIncludes": ["2", "空格"] }],
-      "correction": { "pattern": "zh_not_but" }
+      "candidates": [{ "kind": "convention", "about": "project", "bodyIncludes": ["2", "空格"], "quote": "不是 4 个，是 2 个空格" }]
     }
   },
   {
@@ -20,8 +19,7 @@
       { "role": "user", "text": "包管理器不是 npm 而是 pnpm，你上次也弄混了。" }
     ],
     "expected": {
-      "candidates": [{ "kind": "convention", "scopeHint": "workspace", "bodyIncludes": ["pnpm"] }],
-      "correction": { "pattern": "zh_not_but" }
+      "candidates": [{ "kind": "convention", "about": "project", "bodyIncludes": ["pnpm"], "quote": "包管理器不是 npm 而是 pnpm" }]
     }
   },
   {
@@ -32,8 +30,7 @@
       { "role": "user", "text": "不对，API 前缀应该是 /api/v2。" }
     ],
     "expected": {
-      "candidates": [{ "kind": "convention", "scopeHint": "workspace", "bodyIncludes": ["/api/v2"] }],
-      "correction": { "pattern": "zh_wrong_should_be" }
+      "candidates": [{ "kind": "convention", "about": "project", "bodyIncludes": ["/api/v2"], "quote": "API 前缀应该是 /api/v2" }]
     }
   },
   {
@@ -45,8 +42,7 @@
       { "role": "user", "text": "我之前说错了，生产环境是 MySQL 8，不是 Postgres。" }
     ],
     "expected": {
-      "candidates": [{ "kind": "fact", "scopeHint": "workspace", "bodyIncludes": ["MySQL"] }],
-      "correction": { "pattern": "zh_i_was_wrong" }
+      "candidates": [{ "kind": "fact", "about": "project", "bodyIncludes": ["MySQL"], "quote": "生产环境是 MySQL 8，不是 Postgres" }]
     }
   },
   {
@@ -58,8 +54,7 @@
       { "role": "user", "text": "更正一下：发版分支是 release，不是 main。" }
     ],
     "expected": {
-      "candidates": [{ "kind": "fact", "scopeHint": "workspace", "bodyIncludes": ["release"] }],
-      "correction": { "pattern": "zh_correction_marker" }
+      "candidates": [{ "kind": "fact", "about": "project", "bodyIncludes": ["release"], "quote": "发版分支是 release，不是 main" }]
     }
   },
   {
@@ -70,8 +65,7 @@
       { "role": "user", "text": "以后别在提交信息里加 emoji 了。" }
     ],
     "expected": {
-      "candidates": [{ "kind": "convention", "scopeHint": "workspace", "bodyIncludes": ["emoji"] }],
-      "correction": { "pattern": "zh_from_now_on_dont" }
+      "candidates": [{ "kind": "convention", "about": "project", "bodyIncludes": ["emoji"], "quote": "以后别在提交信息里加 emoji 了" }]
     }
   },
   {
@@ -82,8 +76,7 @@
       { "role": "user", "text": "别再用 moment.js 了，项目里已经统一换成 dayjs。" }
     ],
     "expected": {
-      "candidates": [{ "kind": "convention", "scopeHint": "workspace", "bodyIncludes": ["dayjs"] }],
-      "correction": { "pattern": "zh_dont_again" }
+      "candidates": [{ "kind": "convention", "about": "project", "bodyIncludes": ["dayjs"], "quote": "项目里已经统一换成 dayjs" }]
     }
   },
   {
@@ -94,8 +87,7 @@
       { "role": "user", "text": "不要再把日志打到 stdout 了，统一写到 logs/ 目录。" }
     ],
     "expected": {
-      "candidates": [{ "kind": "convention", "scopeHint": "workspace", "bodyIncludes": ["logs"] }],
-      "correction": { "pattern": "zh_dont_again" }
+      "candidates": [{ "kind": "convention", "about": "project", "bodyIncludes": ["logs"], "quote": "统一写到 logs/ 目录" }]
     }
   },
   {
@@ -107,8 +99,7 @@
       { "role": "user", "text": "测试框架改成 Vitest，Jest 那套配置可以删了。" }
     ],
     "expected": {
-      "candidates": [{ "kind": "decision", "scopeHint": "workspace", "bodyIncludes": ["Vitest"] }],
-      "correction": { "pattern": "zh_change_to" }
+      "candidates": [{ "kind": "decision", "about": "project", "bodyIncludes": ["Vitest"], "quote": "测试框架改成 Vitest" }]
     }
   },
   {
@@ -119,8 +110,7 @@
       { "role": "user", "text": "把默认端口换成 3001 吧，3000 老被别的项目占用。" }
     ],
     "expected": {
-      "candidates": [{ "kind": "fact", "scopeHint": "workspace", "bodyIncludes": ["3001"] }],
-      "correction": { "pattern": "zh_change_to" }
+      "candidates": [{ "kind": "fact", "about": "project", "bodyIncludes": ["3001"], "quote": "把默认端口换成 3001 吧" }]
     }
   },
   {
@@ -131,8 +121,7 @@
       { "role": "user", "text": "日期处理改用 date-fns，不用 dayjs 了。" }
     ],
     "expected": {
-      "candidates": [{ "kind": "convention", "scopeHint": "workspace", "bodyIncludes": ["date-fns"] }],
-      "correction": { "pattern": "zh_change_to" }
+      "candidates": [{ "kind": "convention", "about": "project", "bodyIncludes": ["date-fns"], "quote": "日期处理改用 date-fns" }]
     }
   },
   {
@@ -144,8 +133,7 @@
       { "role": "user", "text": "还是用回 webpack 吧，Vite 的插件跟我们的代码生成不兼容。" }
     ],
     "expected": {
-      "candidates": [{ "kind": "decision", "scopeHint": "workspace", "bodyIncludes": ["webpack"] }],
-      "correction": { "pattern": "zh_switch_back" }
+      "candidates": [{ "kind": "decision", "about": "project", "bodyIncludes": ["webpack"], "quote": "还是用回 webpack 吧" }]
     }
   },
   {
@@ -156,8 +144,7 @@
       { "role": "user", "text": "算了，还是用 Jest 吧，迁移成本太高。" }
     ],
     "expected": {
-      "candidates": [{ "kind": "decision", "scopeHint": "workspace", "bodyIncludes": ["Jest"] }],
-      "correction": { "pattern": "zh_prefer_instead" }
+      "candidates": [{ "kind": "decision", "about": "project", "bodyIncludes": ["Jest"], "quote": "还是用 Jest 吧" }]
     }
   },
   {
@@ -168,8 +155,7 @@
       { "role": "user", "text": "我们不用 Redux 了，状态都放到 Zustand 里。" }
     ],
     "expected": {
-      "candidates": [{ "kind": "decision", "scopeHint": "workspace", "bodyIncludes": ["Zustand"] }],
-      "correction": { "pattern": "zh_no_longer_use" }
+      "candidates": [{ "kind": "decision", "about": "project", "bodyIncludes": ["Zustand"], "quote": "状态都放到 Zustand 里" }]
     }
   },
   {
@@ -180,8 +166,7 @@
       { "role": "user", "text": "Lint 规则不用 airbnb 了，换成我们自己的 eslint-config-michi。" }
     ],
     "expected": {
-      "candidates": [{ "kind": "convention", "scopeHint": "workspace", "bodyIncludes": ["eslint-config-michi"] }],
-      "correction": { "pattern": "zh_no_longer_use" }
+      "candidates": [{ "kind": "convention", "about": "project", "bodyIncludes": ["eslint-config-michi"], "quote": "换成我们自己的 eslint-config-michi" }]
     }
   },
   {
@@ -192,8 +177,7 @@
       { "role": "user", "text": "用 dayjs 代替 moment，体积小很多。" }
     ],
     "expected": {
-      "candidates": [{ "kind": "convention", "scopeHint": "workspace", "bodyIncludes": ["dayjs"] }],
-      "correction": { "pattern": "zh_use_instead" }
+      "candidates": [{ "kind": "convention", "about": "project", "bodyIncludes": ["dayjs"], "quote": "用 dayjs 代替 moment" }]
     }
   },
   {
@@ -205,8 +189,7 @@
       { "role": "user", "text": "Actually, use 2 spaces for YAML files; 4 is only for Python." }
     ],
     "expected": {
-      "candidates": [{ "kind": "convention", "scopeHint": "workspace", "bodyIncludes": ["YAML"] }],
-      "correction": { "pattern": "en_actually" }
+      "candidates": [{ "kind": "convention", "about": "project", "bodyIncludes": ["YAML"], "quote": "use 2 spaces for YAML files" }]
     }
   },
   {
@@ -218,8 +201,7 @@
       { "role": "user", "text": "No, I meant the team's own bucket, michi-logs-team, not the shared one." }
     ],
     "expected": {
-      "candidates": [{ "kind": "fact", "scopeHint": "workspace", "bodyIncludes": ["michi-logs-team"] }],
-      "correction": { "pattern": "en_i_meant" }
+      "candidates": [{ "kind": "fact", "about": "project", "bodyIncludes": ["michi-logs-team"], "quote": "the team's own bucket, michi-logs-team" }]
     }
   },
   {
@@ -230,8 +212,7 @@
       { "role": "user", "text": "The staging region is not us-east-1 but eu-west-1." }
     ],
     "expected": {
-      "candidates": [{ "kind": "fact", "scopeHint": "workspace", "bodyIncludes": ["eu-west-1"] }],
-      "correction": { "pattern": "en_not_but" }
+      "candidates": [{ "kind": "fact", "about": "project", "bodyIncludes": ["eu-west-1"], "quote": "The staging region is not us-east-1 but eu-west-1" }]
     }
   },
   {
@@ -243,8 +224,7 @@
       { "role": "user", "text": "It's port 5433, not 5432 — I mistyped it before." }
     ],
     "expected": {
-      "candidates": [{ "kind": "fact", "scopeHint": "workspace", "bodyIncludes": ["5433"] }],
-      "correction": { "pattern": "en_x_not_y" }
+      "candidates": [{ "kind": "fact", "about": "project", "bodyIncludes": ["5433"], "quote": "It's port 5433, not 5432" }]
     }
   },
   {
@@ -255,8 +235,7 @@
       { "role": "user", "text": "From now on, don't run the e2e suite unless I ask; it takes 20 minutes." }
     ],
     "expected": {
-      "candidates": [{ "kind": "preference", "scopeHint": "workspace", "bodyIncludes": ["e2e"] }],
-      "correction": { "pattern": "en_from_now_on" }
+      "candidates": [{ "kind": "preference", "about": "project", "bodyIncludes": ["e2e"], "quote": "don't run the e2e suite unless I ask" }]
     }
   },
   {
@@ -267,8 +246,7 @@
       { "role": "user", "text": "Please don't add explicit return types to test helpers anymore." }
     ],
     "expected": {
-      "candidates": [{ "kind": "convention", "scopeHint": "workspace", "bodyIncludes": ["test helpers"] }],
-      "correction": { "pattern": "en_dont_again" }
+      "candidates": [{ "kind": "convention", "about": "project", "bodyIncludes": ["test helpers"], "quote": "don't add explicit return types to test helpers anymore" }]
     }
   },
   {
@@ -279,8 +257,7 @@
       { "role": "user", "text": "Change it to snake_case, the public API uses snake_case everywhere." }
     ],
     "expected": {
-      "candidates": [{ "kind": "convention", "scopeHint": "workspace", "bodyIncludes": ["snake_case"] }],
-      "correction": { "pattern": "en_change_to" }
+      "candidates": [{ "kind": "convention", "about": "project", "bodyIncludes": ["snake_case"], "quote": "Change it to snake_case" }]
     }
   },
   {
@@ -292,8 +269,7 @@
       { "role": "user", "text": "Let's switch back to npm, pnpm broke the Electron rebuild." }
     ],
     "expected": {
-      "candidates": [{ "kind": "decision", "scopeHint": "workspace", "bodyIncludes": ["npm"] }],
-      "correction": { "pattern": "en_switch_back" }
+      "candidates": [{ "kind": "decision", "about": "project", "bodyIncludes": ["npm"], "quote": "Let's switch back to npm" }]
     }
   },
   {
@@ -305,8 +281,7 @@
       { "role": "user", "text": "I was wrong earlier: the CI uses Node 22, not Node 20." }
     ],
     "expected": {
-      "candidates": [{ "kind": "fact", "scopeHint": "workspace", "bodyIncludes": ["22"] }],
-      "correction": { "pattern": "en_i_was_wrong" }
+      "candidates": [{ "kind": "fact", "about": "project", "bodyIncludes": ["22"], "quote": "the CI uses Node 22, not Node 20" }]
     }
   },
   {
@@ -318,8 +293,7 @@
       { "role": "user", "text": "Scratch that, keep the default branch as main." }
     ],
     "expected": {
-      "candidates": [{ "kind": "convention", "scopeHint": "workspace", "bodyIncludes": ["main"] }],
-      "correction": { "pattern": "en_scratch_that" }
+      "candidates": [{ "kind": "convention", "about": "project", "bodyIncludes": ["main"], "quote": "keep the default branch as main" }]
     }
   },
   {
@@ -330,8 +304,7 @@
       { "role": "user", "text": "Use the built-in fetch instead, we don't want extra dependencies." }
     ],
     "expected": {
-      "candidates": [{ "kind": "convention", "scopeHint": "workspace", "bodyIncludes": ["fetch"] }],
-      "correction": { "pattern": "en_use_instead" }
+      "candidates": [{ "kind": "convention", "about": "project", "bodyIncludes": ["fetch"], "quote": "Use the built-in fetch instead" }]
     }
   }
 ]

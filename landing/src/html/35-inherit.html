@@ -1,0 +1,27 @@
+<!-- #inherit: what a branch inherits (owner: figures). Brief §3.5, §5.11.2,
+     I1-I3. HTML, not SVG, so it stays fluid. tB in the markup; data-ta and
+     data-ta-cls declare tA. The take is gated on row 4, so the whole figure is
+     in view when it draws. -->
+<section class="sec sec--s inh" id="inherit" aria-labelledby="inherit-title">
+  <div class="wrap inh-in">
+    <div class="inh-copy">
+      <h2 class="h2" id="inherit-title"><span class="claim">Every branch starts with everything above it.</span> <span class="consequence">Nothing leaks back up.</span></h2>
+      <p class="body inh-body">The branch gets the question and the answer up to the words you picked. Whatever the main thread says next stays there, until you merge it or @ it.</p>
+    </div>
+    <figure class="inh-fig" data-take="inherit">
+      <p class="sr-only">Diagram. The first three messages of the main thread, up to the words “task runner role”, are bracketed into the branch that asks “Who creates the task runner role?”. The next main-thread message, “Prepare the post-deploy checks.”, is dimmed: the branch never sees it.</p>
+      <div class="inh-chart" aria-hidden="true">
+        <div class="inh-group">
+          <div class="inh-row"><i class="inh-node"></i><span class="inh-who">you</span><p class="inh-text">Tokyo’s deploy failed with “Invalid principal”. The same release works in the other regions.</p></div>
+          <div class="inh-row"><i class="inh-node"></i><span class="inh-who">michi</span><p class="inh-text">The failure is in the permissions policy, before the service starts.</p></div>
+          <div class="inh-row"><i class="inh-node"></i><span class="inh-who">michi</span><p class="inh-text">…the policy lists 11 developer accounts and a <b>task runner role</b>.</p></div>
+          <i class="inh-bracket" data-ta="off"></i>
+        </div>
+        <p class="meta-sm inh-blabel e" data-ta="off">the branch starts with these</p>
+        <div class="inh-row inh-row4 inh-dim" data-ta-cls="-inh-dim" data-take-observe><i class="inh-node"></i><span class="inh-who">you</span><p class="inh-text">Prepare the post-deploy checks.</p></div>
+        <div class="inh-branch"><i class="inh-elbow" data-ta="off"></i><p class="inh-q e" data-ta="off"><i class="inh-sq"></i>Who creates the task runner role?</p></div>
+        <p class="meta-sm inh-r4label e" data-ta="off">main thread only, never seen by the branch</p>
+      </div>
+    </figure>
+  </div>
+</section>

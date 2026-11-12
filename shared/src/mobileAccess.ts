@@ -18,6 +18,8 @@ export interface MobileAccessStatus {
   provider?: MobileAccessProvider;
   providers?: MobileAccessProvider[];
   tailscale?: TailscaleSetup;
+  /** Whether phones may open terminals on this machine. Absent on older backends. */
+  terminal?: boolean;
 }
 
 export interface MobileAccessLink {

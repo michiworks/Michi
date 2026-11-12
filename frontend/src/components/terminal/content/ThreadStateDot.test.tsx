@@ -1,4 +1,3 @@
-import React from 'react';
 import { describe, it, expect } from 'vitest';
 import { render, screen } from '@testing-library/react';
 import { ThreadStateDot } from './ThreadStateDot';
@@ -15,12 +14,12 @@ function colours(el: Element): string[] {
 }
 
 describe('ThreadStateDot', () => {
-  it('draws waiting as a filled accent dot', () => {
+  it('draws waiting as a filled amber dot, the waiting-on-you colour', () => {
     render(<ThreadStateDot state="waiting" />);
     expect(dot().getAttribute('data-state')).toBe('waiting');
     expect(screen.getByRole('img', { name: 'Waiting on you' })).toBeTruthy();
     const circle = dot().querySelector('circle')!;
-    expect(circle.getAttribute('fill')).toBe('var(--term-accent)');
+    expect(circle.getAttribute('fill')).toBe('var(--term-waiting)');
     expect(circle.getAttribute('r')).toBe('3.5');
   });
 
@@ -91,12 +90,12 @@ describe('ThreadStateDot', () => {
 });
 
 describe('ThreadStateDot — Michi’s own kinds', () => {
-  it('draws a running Michi turn as a turning three-quarter arc in the streaming colour', () => {
+  it('draws a running Michi turn as a turning three-quarter arc in the running colour', () => {
     render(<ThreadStateDot kind="running" />);
     expect(dot().getAttribute('data-state')).toBe('running');
     expect(screen.getByRole('img', { name: 'Running now' })).toBeTruthy();
     const arc = dot().querySelector('circle')!;
-    expect(arc.getAttribute('stroke')).toBe('var(--term-select)');
+    expect(arc.getAttribute('stroke')).toBe('var(--term-run)');
     expect(arc.getAttribute('fill')).toBe('none');
     expect(arc.getAttribute('stroke-dasharray')).toBe('16.5 22');
     // The turn is CSS (desk.css), so prefers-reduced-motion can stop it.

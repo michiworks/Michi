@@ -1,7 +1,8 @@
 import {
   boundActivity,
   isBackgroundSubagentPending,
-  isWorkflowRunOpen,
+  isWorkflowRunActive,
+  isWorkflowRunAwaitingStart,
   mergeActivityLists,
   untrackedSubagent,
 } from 'michi-shared';
@@ -337,6 +338,15 @@ export function countActiveSubagents(node: ChatNodeState, live?: LiveBackgroundS
   return count;
 }
 
+/**
+ * One of the conversation's background agents still waits for its outcome,
+ * as its roster says, whatever its liveness: whether a process still runs it
+ * is for its workspace's feed to say.
+ */
+export function hasPendingBackgroundSubagent(node: ChatNodeState): boolean {
+  return conversationSubagents(node).some((entry) => isBackgroundSubagentPending(entry.subagent));
+}
+
 /** Where a workflow run was launched, as far as placement needs to know. */
 export interface WorkflowLaunchSite {
   parentToolCallId: string | null;
@@ -418,12 +428,16 @@ function activeFirst<T extends { active: boolean }>(items: T[]): T[] {
  * - every subagent and workflow run that is still running (a workflow that
  *   is running or paused), whichever turn started it;
  * - everything the conversation's latest assistant turn started, finished
- *   or not;
+ *   or not; a multi-model run also belongs to the turn that wrote its
+ *   synthesis or latest addendum (`lastMessageId`);
  * - items in `keep` (the item the drawer was opened on, and what it has
  *   shown since, so nothing leaves the list while it stays open).
  *
- * Finished work from earlier turns is hidden: the transcript still shows it
- * where it happened. Running items come first, then chronological order.
+ * A multi-model plan that was never started (waiting for Start, or a
+ * cancelled or replaced proposal) is not background work: it is left out
+ * unless kept. Finished work from earlier turns is hidden: the transcript
+ * still shows it where it happened. Running items come first, then
+ * chronological order.
  * `runs` may hold any runs; only this node's are considered. With `live`
  * known, a background agent no live process tracks reads stopped and does
  * not run (presentConversationSubagent).
@@ -451,10 +465,13 @@ export function selectBackgroundWork(
     .sort((a, b) => a.value.startedAt - b.value.startedAt);
   for (const run of own) {
     const runKey = agentResourceKey({ backendConnectionId: run.backendConnectionId, id: run.value.id });
-    const messageId = resolve(run.value);
-    const active = isWorkflowRunOpen(run.value);
-    const latestTurn = latestId !== undefined && messageId === latestId;
-    if (active || latestTurn || keep.runKeys?.has(runKey)) {
+    const kept = keep.runKeys?.has(runKey) ?? false;
+    const plan = run.value.runtime === 'michi' ? run.value.multiModel : undefined;
+    if (run.value.runtime === 'michi' && !kept && (isWorkflowRunAwaitingStart(run.value) || plan?.startedAt === undefined)) continue;
+    const messageId = plan?.callerMessageId ?? resolve(run.value);
+    const active = isWorkflowRunActive(run.value);
+    const latestTurn = latestId !== undefined && (messageId === latestId || plan?.lastMessageId === latestId);
+    if (active || latestTurn || kept) {
       workflows.push({ run, runKey, messageId, active, latestTurn });
     }
   }
@@ -464,6 +481,8 @@ export function selectBackgroundWork(
 export interface RunningWorkCounts {
   subagents: number;
   workflows: number;
+  /** A running workflow of the conversation waits for the user's approval. */
+  waiting?: boolean;
 }
 
 /** "2 subagents · 1 workflow running"; undefined when nothing runs. */
@@ -512,7 +531,8 @@ export function selectBackgroundWorkIndicator(
       workflows: work.workflows.filter((item) => item.active).length,
     };
     const busy = running.subagents + running.workflows > 0;
-    return { nodeId: id, running, total, waiting: busy && !!node.pendingPermission };
+    const runWaits = work.workflows.some((item) => (item.run.value.approvals?.length ?? 0) > 0);
+    return { nodeId: id, running, total, waiting: busy && (!!node.pendingPermission || runWaits) };
   };
   if (focusedId && paneIds.includes(focusedId)) {
     const focused = summarize(focusedId);

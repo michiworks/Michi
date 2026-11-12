@@ -1,40 +1,18 @@
 /**
  * Persists user UI preferences in the selected config.json under the "prefs" key.
  *
- * Only Settings-visible fields are persisted here. Transient UI state
- * (sidebarExpanded, workspaceOrder, terminalSidebarWidth, etc.) stays in
- * frontend localStorage.
+ * Only SERVER_PREF_KEYS are persisted here: the Settings-visible fields that
+ * should survive app reinstalls and origin changes. Transient UI state
+ * (sidebarExpanded, workspaceOrder, terminalSidebarWidth, etc.) and
+ * per-device choices stay in frontend localStorage.
  */
+import { SERVER_PREF_KEYS } from "michi-shared";
 import { readJsonConfig, updateJsonConfig } from "./jsonConfigStore";
 import { getMichiConfigPaths } from './configPaths';
 
 const { configPath: CONFIG_PATH } = getMichiConfigPaths();
 
-/**
- * The subset of prefs that are user-facing in Settings and should survive
- * across app reinstalls / origin changes. Keep in sync with the Settings UI.
- */
-const PERSISTED_KEYS: ReadonlySet<string> = new Set([
-  "linkOpenTarget",
-  "terminalPalette",
-  "terminalAccentOverrides",
-  "uiFont",
-  "messageFont",
-  "messageFontSize",
-  "composerFontSize",
-  "sidebarDensity",
-  "sidebarInset",
-  "codeBlockStyle",
-  "codeWrap",
-  "terminalDensity",
-  "focusDim",
-  "defaultPaneWidth",
-  "singlePaneContentWidth",
-  "paneRules",
-  "notifications",
-  "enableKiroSidecarTitles",
-  "enableFollowUps",
-]);
+const PERSISTED_KEYS: ReadonlySet<string> = new Set(SERVER_PREF_KEYS);
 
 function readDiskFile(): Record<string, any> | null {
   return readJsonConfig(CONFIG_PATH);

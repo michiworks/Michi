@@ -1,21 +1,21 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { Ellipsis } from 'lucide-react';
 import { useTreePrefetchIntent } from '../../state/treePrefetch';
 import { Row } from './primitives';
 import { usePrefs } from '../../state/prefs';
 import WorkspaceIcon, { modeForPalette } from './WorkspaceIcon';
 import { workspaceAccent } from './workspaceAccent';
-import ThreadRow, { CARD_FILL } from './ThreadRow';
+import ThreadRow, { CARD_FILL, PinMark } from './ThreadRow';
 import { rowGeom, spinePadding, branchBlockGap, WORKSPACE_ICON_GAP, WORKSPACE_ICON_SIZE, type RowGeom } from './sidebarRowStyle';
 import { FolderIcon, FolderOpenIcon } from './icons';
 import BranchRow from './BranchRow';
 import { UnreadDot, UNREAD_DOT_LEAD } from './UnreadDot';
-import ContextMenu, { MenuPresence, type MenuSection } from '../ContextMenu';
+import { SidebarOpenRail } from './RailAfterglow';
+import ContextMenu, { MenuPresence, menuOpenKey } from '../ContextMenu';
 import { HoverTip } from '../ui/Popover';
-import { buildTree } from '../../state/tree';
-import {
-  buildWorkspaceRowContextMenu,
-  type ContextMenuSection,
-} from '../../lib/workspaceRowContextMenu';
+import { InlineRenameInput } from '../ui/InlineRenameInput';
+import { buildBranchChildrenOf, buildTree } from '../../state/tree';
+import { buildWorkspaceRowContextMenu } from '../../lib/workspaceRowContextMenu';
 import type { Project, Tree, ProjectEdge, ChatNodeState } from '../../state/chatTypes';
 import { useChatPanes, useChatProjects, useStructuralSelector } from '../../state/chatStore';
 import {
@@ -24,13 +24,15 @@ import {
   subtreeOpenState,
   workspaceHasUnread,
   treeHasUnread,
-  buildBranchChildrenOf,
   orderPinnedFirst,
   type NodePinnedAt,
   type OpenState,
 } from '../../state/sidebarSelectors';
+import { useRunningWorkNodeIds } from '../../state/runningWork';
 import { getKnownBackendConnections } from '../../config/backendConnections';
-import { isSystemWorkspace } from '../../state/assistant/systemWorkspace';
+import { moveTargetsFor, type MoveTargetWorkspace } from '../../state/moveTargets';
+import type { ThreadRowClick } from './sidebar/useSidebarTreeController';
+import { rowKeyDown } from './sidebar/rowKeyboard';
 
 const THREAD_PREVIEW_LIMIT_FALLBACK = 5;
 const THREAD_PAGE_SIZE = 10;
@@ -65,24 +67,8 @@ interface Actions {
   selectBranch: (nodeId: string, event: React.MouseEvent) => void;
   /** Right-click on a branch row. */
   branchContextMenu: (nodeId: string, event: React.MouseEvent) => void;
-  /** Click on a thread row body — opens + focuses that thread's root node,
-   *  with cross-thread/workspace routing equivalent to `selectBranch`. */
-  selectThreadRoot: (tree: Tree, project: Project) => void;
-  /** Modifier-aware click on a thread row — handles ⌘/⇧ multi-selection. */
-  selectThread: (treeId: string, project: Project, event: React.MouseEvent) => void;
-}
-
-function toMenuSections(sections: ContextMenuSection[]): MenuSection[] {
-  return sections.map((s, si) => ({
-    items: s.items.map((item, ii) => ({
-      id: `${si}-${ii}`,
-      label: item.label,
-      danger: item.danger,
-      disabled: item.disabled,
-      keys: item.keys,
-      run: item.onSelect,
-    })),
-  }));
+  /** Click on a thread row body (useSidebarTreeController's clickThreadRow). */
+  clickThreadRow: (tree: Tree, project: Project, event: React.MouseEvent | undefined, row: ThreadRowClick) => void;
 }
 
 export interface WorkspaceRowDndProps {
@@ -172,9 +158,8 @@ export default function WorkspaceRow({
     if (!workspaceExpanded) setThreadVisibleLimit(threadPreviewLimit);
   }, [workspaceExpanded, threadPreviewLimit]);
 
-  const [menu, setMenu] = useState<{ x: number; y: number } | null>(null);
+  const [menu, setMenu] = useState<{ x: number; y: number; trigger?: HTMLElement } | null>(null);
   const [renaming, setRenaming] = useState(false);
-  const [draftName, setDraftName] = useState(project.name);
   const renameRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
@@ -184,41 +169,25 @@ export default function WorkspaceRow({
     }
   }, [renaming]);
 
-  const beginRename = () => {
-    setDraftName(project.name);
-    setRenaming(true);
-  };
-  const commitRename = () => {
-    const trimmed = draftName.trim();
-    if (trimmed && trimmed !== project.name) {
-      actions.renameProject(project.id, trimmed);
-    }
-    setRenaming(false);
-  };
-  const cancelRename = () => {
-    setDraftName(project.name);
-    setRenaming(false);
-  };
+  const beginRename = () => setRenaming(true);
 
   const sections = menu
-    ? toMenuSections(
-        buildWorkspaceRowContextMenu({
-          project,
-          actions: {
-            archiveProject: actions.archiveProject,
-            unarchiveProject: actions.unarchiveProject,
-            pinProject: actions.pinProject,
-            unpinProject: actions.unpinProject,
-            deleteProject: actions.deleteProject,
-            beginInlineRename: () => beginRename(),
-            openManageWorkspace: (projectId) => {
-              window.dispatchEvent(
-                new CustomEvent('michi:open-workspace-manage', { detail: { projectId } }),
-              );
-            },
+    ? buildWorkspaceRowContextMenu({
+        project,
+        actions: {
+          archiveProject: actions.archiveProject,
+          unarchiveProject: actions.unarchiveProject,
+          pinProject: actions.pinProject,
+          unpinProject: actions.unpinProject,
+          deleteProject: actions.deleteProject,
+          beginInlineRename: () => beginRename(),
+          openManageWorkspace: (projectId) => {
+            window.dispatchEvent(
+              new CustomEvent('michi:open-workspace-manage', { detail: { projectId } }),
+            );
           },
-        }),
-      )
+        },
+      })
     : [];
 
   const { projects } = useChatProjects();
@@ -230,15 +199,8 @@ export default function WorkspaceRow({
     () => buildBranchChildrenOf(edges),
     [edges],
   );
-  // Other live (not archived, not in trash) workspaces this thread can move
-  // to. Computed once per render; an empty list hides the section entirely.
-  const moveTargets = React.useMemo(
-    () =>
-      projects
-        .filter((p) => p.id !== project.id && !p.deletedAt && !p.archivedAt && !isSystemWorkspace(p))
-        .map((p) => ({ id: p.id, name: p.name })),
-    [projects, project.id],
-  );
+  // An empty list hides the section entirely.
+  const moveTargets = React.useMemo(() => moveTargetsFor(projects, project.id), [projects, project.id]);
   const nodeStatusesSelector = useCallback(
     (nodes: Record<string, ChatNodeState>) => selectProjectNodeStatuses(project.chatIds, nodes),
     [project.chatIds],
@@ -253,7 +215,7 @@ export default function WorkspaceRow({
     },
   );
   const wsUnread = useStructuralSelector(
-    (nodes) => workspaceHasUnread(project, nodes, focusedNodeId),
+    (nodes) => workspaceHasUnread(project, nodes, focusedNodeId, branchChildrenOf),
   );
   // A workspace is never unread itself: it carries a ring while collapsed over
   // an unread thread, and nothing once open (its rows show their own dots).
@@ -299,11 +261,14 @@ export default function WorkspaceRow({
         }
         return sliced;
       })();
+  const shownTreeIds = displayedLiveTrees.map((t) => t.id);
 
+  // Conversations whose workflow or background agents still run after their turn ended.
+  const workRunning = useRunningWorkNodeIds();
   const getNodeOpenState = useCallback(
     (id: string): OpenState =>
-      nodeOpenState(id, openPanes, focusedPane, nodeStatuses[id] ?? 'idle'),
-    [openPanes, focusedPane, nodeStatuses],
+      nodeOpenState(id, openPanes, focusedPane, nodeStatuses[id] ?? 'idle', workRunning.has(id)),
+    [openPanes, focusedPane, nodeStatuses, workRunning],
   );
 
   const getSubtreeOpenState = useCallback(
@@ -357,11 +322,28 @@ export default function WorkspaceRow({
       )}
       <Row
         {...prefetchIntent}
+        data-context-target=""
+        // A button to the keyboard: Tab reaches it, Enter/Space does what a
+        // click does, ←/→ fold it (sidebar/rowKeyboard).
+        role="button"
+        tabIndex={0}
+        className="t-row-focus"
+        // Its name, not the ⋯ and + buttons inside it.
+        aria-label={project.name}
+        aria-expanded={workspaceExpanded || forceExpand}
         active={false}
-        aria-current={false ? 'page' : undefined}
         onClick={() => {
           if (renaming) return;
           actions.toggleWorkspaceExpand(project.id);
+        }}
+        onKeyDown={(e) => {
+          if (renaming) return;
+          rowKeyDown(e, {
+            activate: () => actions.toggleWorkspaceExpand(project.id),
+            expanded: forceExpand ? undefined : workspaceExpanded,
+            toggle: () => actions.toggleWorkspace(project.id),
+            openMenu: (anchor) => setMenu(anchor),
+          });
         }}
         onContextMenu={(e) => {
           e.preventDefault();
@@ -455,21 +437,12 @@ export default function WorkspaceRow({
           />
         )}
         {renaming ? (
-          <input
+          <InlineRenameInput
             ref={renameRef}
-            value={draftName}
-            onChange={(e) => setDraftName(e.target.value)}
+            value={project.name}
+            onCommit={(name) => actions.renameProject(project.id, name)}
+            onEnd={() => setRenaming(false)}
             onClick={(e) => e.stopPropagation()}
-            onKeyDown={(e) => {
-              if (e.key === 'Enter') {
-                e.preventDefault();
-                commitRename();
-              } else if (e.key === 'Escape') {
-                e.preventDefault();
-                cancelRename();
-              }
-            }}
-            onBlur={commitRename}
             style={{
               flex: 1,
               minWidth: 0,
@@ -546,21 +519,7 @@ export default function WorkspaceRow({
                   +{project.folders!.length - 1}
                 </span>
               )}
-              {project.pinnedAt && (
-                <svg
-                  aria-label="pinned"
-                  width="9"
-                  height="9"
-                  viewBox="0 0 16 16"
-                  fill="currentColor"
-                  stroke="currentColor"
-                  strokeWidth="1.4"
-                  strokeLinejoin="round"
-                  style={{ color: 'var(--term-select)', flexShrink: 0 }}
-                >
-                  <path d="M8 1.5l1.9 4 4.4.5-3.3 3 .9 4.3L8 11.3 4.1 13.3 5 9 1.7 6l4.4-.5L8 1.5z" />
-                </svg>
-              )}
+              {project.pinnedAt && <PinMark />}
               <span
                 className="ws-hover-chevron"
                 aria-hidden
@@ -581,18 +540,21 @@ export default function WorkspaceRow({
               </span>
             </span>
             <span className="ws-hover-actions" style={{ display: 'inline-flex', alignItems: 'center', gap: 2, flexShrink: 0, ...(menu ? { opacity: 1, pointerEvents: 'auto' as const } : {}) }}>
-              <HoverTip label="Workspace options">
+              <HoverTip label="More actions">
               <button
                 type="button"
-                className="ws-action-btn"
-                aria-label="Workspace options"
+                className="ws-action-btn ws-menu-btn"
+                aria-label={`Actions for ${project.name}`}
+                aria-haspopup="menu"
+                aria-expanded={menu ? true : undefined}
                 onClick={(e) => {
                   e.stopPropagation();
-                  const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
-                  setMenu({ x: rect.left, y: rect.bottom + 4 });
+                  const trigger = e.currentTarget;
+                  const rect = trigger.getBoundingClientRect();
+                  setMenu((open) => (open?.trigger === trigger ? null : { x: rect.left, y: rect.bottom + 4, trigger }));
                 }}
               >
-                ⋯
+                <Ellipsis size={16} aria-hidden="true" />
               </button>
               </HoverTip>
               <HoverTip label="New chat in this workspace">
@@ -612,41 +574,15 @@ export default function WorkspaceRow({
             </span>
           </>
         )}
-        {workspaceOpenState !== 'none' && (
-          <span
-            aria-hidden
-            style={{
-              position: 'absolute',
-              right: 2,
-              top: 5,
-              bottom: 5,
-              width: 2,
-              borderRadius: 'var(--ui-radius-pill)',
-              // Brand accent for both states; the streaming pulse + glow (below)
-              // distinguish "live" from a static idle-open pane. `color` is set so
-              // the glow's currentColor matches the bar instead of inheriting the
-              // row's neutral text color.
-              color: 'var(--term-accent)',
-              background: 'var(--term-accent)',
-              boxShadow:
-                workspaceOpenState === 'streaming'
-                  ? '0 0 6px 0 currentColor'
-                  : undefined,
-              animation:
-                workspaceOpenState === 'streaming'
-                  ? 'tpulse var(--t-loop) ease-in-out infinite'
-                  : undefined,
-              pointerEvents: 'none',
-            }}
-          />
-        )}
+        <SidebarOpenRail state={workspaceOpenState} isCard={geom.isCard} />
       </Row>
       <MenuPresence>
         {menu && (
           <ContextMenu
-            key={`${menu.x}:${menu.y}`}
+            key={menuOpenKey(menu)}
             x={menu.x}
             y={menu.y}
+            trigger={menu.trigger}
             sections={sections}
             onClose={() => setMenu(null)}
           />
@@ -691,6 +627,7 @@ export default function WorkspaceRow({
               onRenameNode,
               onRenameEnd,
               geom,
+              shownTreeIds,
             }),
           )}
           {!forceExpand && unpinnedTrees.length > threadVisibleLimit && (
@@ -749,14 +686,16 @@ function renderThread(args: {
   actions: Actions;
   getNodeOpenState: (nodeId: string) => OpenState;
   getSubtreeOpenState: (rootId: string) => OpenState;
-  moveTargets?: readonly { id: string; name: string }[];
+  moveTargets?: readonly MoveTargetWorkspace[];
   renamingNodeId?: string | null;
   onRenameNode?: (nodeId: string, title: string) => void;
   onRenameEnd?: () => void;
   geom: RowGeom;
+  shownTreeIds: readonly string[];
 }) {
   const {
     geom,
+    shownTreeIds,
     tree,
     project,
     activeProjectId,
@@ -791,28 +730,8 @@ function renderThread(args: {
         hasBranches={hasBranches}
         expanded={threadOpen}
         openState={threadOpenStateValue}
-        onActivate={(e?: React.MouseEvent) => {
-          // ⌘/⇧+click are pure selection ops — don't activate or toggle.
-          if (e && (e.metaKey || e.ctrlKey || e.shiftKey)) {
-            actions.selectThread(tree.id, project, e);
-            return;
-          }
-          // Always route through selectThreadRoot so the root node is opened
-          // and focused — even when this thread is already active. Without
-          // this, after the sidebar focus has been moved to a branch via
-          // selectBranch, clicking the thread row would only toggle expand
-          // and never restore root to the pane stack.
-          actions.selectThreadRoot(tree, project);
-          // Unified expand rule (see WorkspaceRow):
-          //   collapsed → expand; expanded + already active → collapse;
-          //   expanded + inactive → keep open (just activate).
-          if (!hasBranches) return;
-          if (!threadOpen) {
-            actions.toggleThread(tree.id);
-          } else if (isActive) {
-            actions.toggleThread(tree.id);
-          }
-        }}
+        onActivate={(e?: React.MouseEvent) =>
+          actions.clickThreadRow(tree, project, e, { hasBranches, expanded: threadOpen, isActive, shownTreeIds })}
         onToggleExpand={() => actions.toggleThread(tree.id)}
         actions={{
           activateTree: actions.activateTree,

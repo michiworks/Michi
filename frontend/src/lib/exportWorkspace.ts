@@ -1,9 +1,11 @@
 import { ExportRequestPayload } from '../services/api';
 import { getElectron } from './electronBridge';
-import { descendants } from '../state/tree';
+import { downloadText } from './download';
+import { buildBranchChildrenOf, descendants } from '../state/tree';
 import { ChatNodeState, Project } from '../state/chatStore';
 import { migrateAssistantToBlocks, visibleMessageText } from '../state/assistantBlocks';
 import { isVisibleConversationNode } from '../state/conversationVisibility';
+import { treeOfRoot } from '../state/displayTitle';
 import type { ChatMessage } from '../state/chatTypes';
 
 /** Filter a node's messages down to user/assistant pairs suitable for export. */
@@ -62,15 +64,8 @@ function computeDepths(
   rootId: string,
   edges: Array<{ source: string; target: string; kind?: 'branch' | 'merge' | 'link' | 'digest-source' }>,
 ): Map<string, number> {
-  const childrenOf = new Map<string, string[]>();
-  for (const e of edges) {
-    // Only follow real parent→child (branch) edges for depth. Merge and
-    // link edges are cross-references, not tree structure.
-    if (e.kind !== undefined && e.kind !== 'branch') continue;
-    const arr = childrenOf.get(e.source) ?? [];
-    arr.push(e.target);
-    childrenOf.set(e.source, arr);
-  }
+  // Merge and link edges are cross-references, not tree structure.
+  const childrenOf = buildBranchChildrenOf(edges);
   const depths = new Map<string, number>();
   const stack: Array<{ id: string; depth: number }> = [{ id: rootId, depth: 0 }];
   while (stack.length > 0) {
@@ -93,9 +88,10 @@ export function buildExportPayload(
   if (isVisibleConversationNode(nodes[rootNodeId])) included.add(rootNodeId);
   const depths = computeDepths(rootNodeId, project.edges);
   const rootNode = nodes[rootNodeId];
-  const rootTitle = rootNode?.title
-    ?? rootNode?.messages.find((m) => m.role === 'user')?.text.slice(0, 80)
-    ?? project.name;
+  const rootTitle = treeOfRoot(project, rootNodeId)?.name?.trim()
+    || (rootNode?.title
+      ?? rootNode?.messages.find((m) => m.role === 'user')?.text.slice(0, 80)
+      ?? project.name);
   const nodeList: ExportRequestPayload['nodes'] = [];
   for (const id of Array.from(included)) {
     const n = nodes[id];
@@ -225,15 +221,7 @@ export async function saveMarkdown(suggestedName: string, content: string): Prom
     const r = await electron.saveMarkdown(suggestedName, content);
     return !r.canceled;
   }
-  const blob = new Blob([content], { type: 'text/markdown;charset=utf-8' });
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement('a');
-  a.href = url;
-  a.download = suggestedName;
-  document.body.appendChild(a);
-  a.click();
-  a.remove();
-  URL.revokeObjectURL(url);
+  downloadText(suggestedName, content, 'text/markdown;charset=utf-8');
   return true;
 }
 

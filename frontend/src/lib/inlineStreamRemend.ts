@@ -8,6 +8,8 @@
  * refresh. All output from this module is display-only.
  */
 
+import { closesFence, openingFence, type MarkdownFence } from 'michi-shared';
+
 export type InlineMarker =
   | '**'
   | '__'
@@ -36,7 +38,7 @@ export interface InlineStreamState {
   /** Open inline delimiters, innermost last. */
   stack: OpenDelimiter[];
   inFence: boolean;
-  fenceMarker: '```' | '~~~' | null;
+  fence: MarkdownFence | null;
   /** Inside the `(destination` portion of a Markdown link. */
   inLinkDestination: boolean;
   linkDestinationDepth: number;
@@ -54,7 +56,7 @@ export interface InlineStreamState {
 export const INITIAL_INLINE_STATE: InlineStreamState = {
   stack: [],
   inFence: false,
-  fenceMarker: null,
+  fence: null,
   inLinkDestination: false,
   linkDestinationDepth: 0,
   lineIndent: 0,
@@ -176,7 +178,7 @@ export function scanInline(
 ): InlineScanResult {
   const stack: OpenDelimiter[] = initial.stack.map((delimiter) => ({ ...delimiter }));
   let inFence = initial.inFence;
-  let fenceMarker = initial.fenceMarker;
+  let fence = initial.fence;
   let inLinkDestination = initial.inLinkDestination;
   let linkDestinationDepth = initial.linkDestinationDepth;
   let lineIndent = initial.lineIndent;
@@ -264,23 +266,19 @@ export function scanInline(
         carry = input.slice(index);
         break;
       }
-      if (runLength >= 3) {
-        const marker = (character === '`' ? '```' : '~~~') as '```' | '~~~';
-        if (!inFence || marker === fenceMarker) {
-          const newlineAt = input.indexOf('\n', end);
-          if (newlineAt < 0) {
-            carry = input.slice(index);
-            break;
-          }
-          const action = inFence ? 'close' : 'open';
-          if (!inFence) {
-            inFence = true;
-            fenceMarker = marker;
-            stack.length = 0;
-          } else {
-            inFence = false;
-            fenceMarker = null;
-          }
+      if (runLength >= 3 && (!fence || character === fence.char)) {
+        const newlineAt = input.indexOf('\n', end);
+        if (newlineAt < 0) {
+          carry = input.slice(index);
+          break;
+        }
+        const line = input.slice(index, newlineAt);
+        const opened = fence ? null : openingFence(line);
+        if (opened || (fence && closesFence(line, fence))) {
+          const action = fence ? 'close' : 'open';
+          fence = opened;
+          inFence = !!opened;
+          if (opened) stack.length = 0;
           events.push({ type: 'fence', action });
           if (action === 'close') pushText('\n');
           prevChar = '\n';
@@ -732,7 +730,7 @@ export function scanInline(
     state: {
       stack,
       inFence,
-      fenceMarker,
+      fence,
       inLinkDestination,
       linkDestinationDepth,
       lineIndent,
@@ -756,26 +754,20 @@ export interface TailRemendResult {
   endState: InlineStreamState;
 }
 
-const fenceRunAtLineStartPattern = /(?:^|\n)[ \t]{0,3}(`{3,}|~{3,})/g;
-
 function inlineStateAt(blockText: string, offset: number): InlineStreamState {
   if (offset === 0) return INITIAL_INLINE_STATE;
 
-  fenceRunAtLineStartPattern.lastIndex = 0;
-  let fenceMarker: '```' | '~~~' | null = null;
-  let match: RegExpExecArray | null;
-  while ((match = fenceRunAtLineStartPattern.exec(blockText)) !== null) {
-    const runStart = match.index + match[0].length - match[1].length;
-    if (runStart >= offset) break;
-    const marker = (match[1][0] === '`' ? '```' : '~~~') as '```' | '~~~';
-    if (fenceMarker === null) fenceMarker = marker;
-    else if (fenceMarker === marker) fenceMarker = null;
+  let fence: MarkdownFence | null = null;
+  const lines = blockText.slice(0, offset).split('\n');
+  for (const line of lines.slice(0, -1)) {
+    if (!fence) fence = openingFence(line);
+    else if (closesFence(line, fence)) fence = null;
   }
 
   return {
     stack: [],
-    inFence: fenceMarker !== null,
-    fenceMarker,
+    inFence: fence !== null,
+    fence,
     inLinkDestination: false,
     linkDestinationDepth: 0,
     lineIndent: 0,
@@ -839,7 +831,10 @@ export function computeTailRemend(blockText: string): TailRemendResult {
     .map(delimiterCloser)
     .join('');
   const displayBase = blockText.slice(0, scanFrom) + scanText.slice(0, cut);
-  const safeDisplayBase = stripIncompleteHtmlTail(rewriteIncompleteLinkTail(displayBase));
+  const inCode = rescan.state.inFence || rescan.state.stack[rescan.state.stack.length - 1]?.marker === '`';
+  const safeDisplayBase = inCode
+    ? displayBase
+    : stripIncompleteHtmlTail(rewriteIncompleteLinkTail(displayBase));
 
   return {
     displayText: safeDisplayBase + closers,

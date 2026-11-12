@@ -20,6 +20,7 @@ import { configureThreadMessaging, type ThreadMessagingDeps } from '../src/agent
 import { ensureAssistant } from '../src/assistant/store';
 import { assistantTool } from '../src/assistant/tools';
 import { startConversationTool } from '../src/services/metaAgent/startConversation';
+import { getDelegation } from '../src/services/companion/repository';
 import { updateMetaAgentSettings } from '../src/services/metaAgent/settings';
 import { updateAgentConfig } from '../src/services/agentConfig';
 import { LOCAL_AGENT_OWNER_ID } from '../src/services/agentOwner';
@@ -393,14 +394,14 @@ describe('Meta agent chat window tools', () => {
     assert.match((await call(meta, 'create_page', { title: 'Nowhere' })).text, /workspaceId/);
   });
 
-  test('a Space says who made it: a person, the Meta agent\'s chat or an ordinary conversation', async () => {
+  test('a Space says who made it: a person, the user\'s agent in its own conversation, or an ordinary conversation', async () => {
     const byPerson = createPage({ workspaceId: 'ws-b', ownerUserId: OWNER, title: 'Mine' });
     const byMeta = await call(meta, 'create_page', { workspaceId: 'ws-b', title: '性能' });
     const byChat = await call(ordinary, 'create_page', { title: 'From a chat' });
     assert.equal(byMeta.isError || byChat.isError, false, `${byMeta.text} ${byChat.text}`);
     const createdBy = (workspaceId: string, id: string) => listSpaces(OWNER, { workspaceId }).items.find((space) => space.id === id)?.createdBy;
     assert.equal(createdBy('ws-b', byPerson.id), 'user');
-    assert.equal(createdBy('ws-b', byMeta.body.page.id), 'meta-agent');
+    assert.deepEqual(createdBy('ws-b', byMeta.body.page.id), { kind: 'companion', via: 'conversation' });
     assert.equal(createdBy('ws-a', byChat.body.page.id), 'agent');
     // A later edit by someone else does not change who made it.
     await call(meta, 'edit_page', { pageId: byPerson.id, ops: [{ op: 'insert', after: null, block: { type: 'markdown', text: 'Agent text' } }] });
@@ -477,6 +478,29 @@ describe('Meta agent chat window tools', () => {
     assert.equal(h.started[0].displayText, h.started[0].text, 'the first message is a visible user message');
     assert.equal(h.started[0].userMetadata, undefined, 'an ordinary input, so conversation updates count it');
     assert.deepEqual(listPageProgressCards(page.id, OWNER).map((card) => card.threadNodeId), [conversation.nodeId]);
+    // The agent follows what its own conversation started (DESIGN-v2 §4): worker reports and follow-ups.
+    const delegation = getDelegation(conversation.nodeId)!;
+    assert.deepEqual([delegation.workspaceId, delegation.title, delegation.state, delegation.origin, delegation.autoSend],
+      ['ws-b', 'Run the transaction rollback tests', 'following', 'start_conversation', false]);
+    assert.match(body.next, /send it with companion_session_send/);
+    assert.doesNotMatch(body.next, /Do not message it/);
+  });
+
+  test('start_conversation from a closed conversation is not followed, nor one that never started (DESIGN-v2 §4)', async () => {
+    const h = harness();
+    // The MVP's closed Companion conversation: assistant workspace, purpose recorded 'companion'.
+    getDb().prepare('INSERT INTO meta (key, value) VALUES (?, ?)').run(`assistant:purpose:${assistant.nodeId}`, 'companion');
+    const closed = await startConversationTool({ ownerUserId: null, workspaceId: assistant.workspaceId, nodeId: assistant.nodeId },
+      { workspaceId: 'ws-b', text: 'Run it' }, async () => ({ approved: true }), h.deps);
+    const body = JSON.parse(closed.content[0].text);
+    assert.equal(getDelegation(body.conversation.nodeId), null);
+    assert.match(body.next, /Do not message it/);
+    getDb().prepare('DELETE FROM meta WHERE key = ?').run(`assistant:purpose:${assistant.nodeId}`);
+    h.deps.startTurn = async () => { throw new Error('no turn'); };
+    const failed = await startConversationTool({ ownerUserId: null, workspaceId: assistant.workspaceId, nodeId: assistant.nodeId },
+      { workspaceId: 'ws-b', text: 'Run it again' }, async () => ({ approved: true }), h.deps);
+    assert.ok(failed.isError);
+    assert.equal((getDb().prepare("SELECT COUNT(*) AS n FROM companion_delegations").get() as { n: number }).n, 0);
   });
 
   test('start_conversation asks first, and refuses system workspaces and other callers', async () => {
@@ -491,6 +515,9 @@ describe('Meta agent chat window tools', () => {
     const system = await startConversationTool({ ownerUserId: null, workspaceId: assistant.workspaceId, nodeId: assistant.nodeId },
       { workspaceId: assistant.workspaceId, text: 'hi' }, approve, h.deps);
     assert.match(system.content[0].text, /^NOT_FOUND/);
+    const threadId = await startConversationTool({ ownerUserId: null, workspaceId: assistant.workspaceId, nodeId: assistant.nodeId },
+      { workspaceId: 't-x', text: 'hi' }, approve, h.deps);
+    assert.match(threadId.content[0].text, /^NOT_FOUND: .*thread or node id/);
     const ordinaryCaller = await startConversationTool({ ownerUserId: null, workspaceId: 'ws-a', nodeId: 'n-a1' },
       { workspaceId: 'ws-b', text: 'hi' }, approve, h.deps);
     assert.match(ordinaryCaller.content[0].text, /^UNSUPPORTED/);

@@ -1,17 +1,24 @@
 import { useCallback, type Dispatch, type SetStateAction } from 'react';
-import { reduceProject } from './chatReducers';
+import { newArtifactId, reduceProject } from './chatReducers';
 import type { Project, ProjectAction } from './chatTypes';
 
 interface UseContextActionsArgs {
   projects: Project[];
   activeProjectId: string | null;
   setProjects: Dispatch<SetStateAction<Project[]>>;
+  /**
+   * This window named an artifact: made it (`name` null: the reducer may
+   * suffix it) or renamed it to `name`. Persistence keeps a free name for it
+   * when the backend answers that write name-taken (noteArtifactNamed).
+   */
+  onArtifactNamed?: (projectId: string, contextId: string, name: string | null) => void;
 }
 
 export function useContextActions({
   projects,
   activeProjectId,
   setProjects,
+  onArtifactNamed,
 }: UseContextActionsArgs) {
   const createContext = useCallback(
     (
@@ -28,12 +35,15 @@ export function useContextActions({
     ) => {
       const p = projects.find((p) => p.id === activeProjectId);
       if (!p) return;
+      const newId = newArtifactId();
+      onArtifactNamed?.(p.id, newId, null);
       setProjects((prev) =>
         prev.map((proj) =>
           proj.id === p.id
             ? reduceProject(proj, {
                 type: 'upsert-context',
                 projectId: p.id,
+                newId,
                 context: {
                   name,
                   filePath,
@@ -49,7 +59,7 @@ export function useContextActions({
         ),
       );
     },
-    [activeProjectId, projects, setProjects],
+    [activeProjectId, onArtifactNamed, projects, setProjects],
   );
 
   const updateContext = useCallback(
@@ -61,6 +71,7 @@ export function useContextActions({
       if (!p) return;
       const existing = p.artifacts?.find((c) => c.id === contextId);
       if (!existing) return;
+      if (patch.name !== undefined && patch.name !== existing.name) onArtifactNamed?.(p.id, contextId, patch.name);
       setProjects((prev) =>
         prev.map((proj) =>
           proj.id === p.id
@@ -82,7 +93,7 @@ export function useContextActions({
         ),
       );
     },
-    [activeProjectId, projects, setProjects],
+    [activeProjectId, onArtifactNamed, projects, setProjects],
   );
 
   const deleteContext = useCallback(

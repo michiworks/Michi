@@ -185,4 +185,56 @@ describe('ChatHub authoritative persistence integration', () => {
     });
   }
 
+  test('done carries the node completion facts the receipt committed, live and on replay', async () => {
+    const reply = (events: NormalizedEvent[]): AgentSession => ({
+      id: 'chat-1', runtimeId: 'kiro', getHistory: () => [], getPendingAssistant: () => undefined,
+      send: () => iterator(events), cancel: () => {},
+    });
+    const hub = new ChatHub({ retentionMs: 1_000, titleGenerator: null });
+    const live: ChatStreamEvent[] = [];
+    hub.subscribe('chat-1', { send: (event) => live.push(event), close: () => {} });
+    const run = async (turnId: string, events: NormalizedEvent[]) => {
+      const started = await hub.startTurn({ chatId: 'chat-1', nodeId: 'node-1', text: turnId, session: reply(events), turnId });
+      await started.done;
+    };
+    const facts = () => live.filter((event) => event.event === 'done')
+      .map((event) => event.event === 'done' ? [event.data.nodeCompletionSeq, event.data.nodeSeenCompletionSeq] : []);
+
+    await run('turn-a', [{ kind: 'chunk', text: 'An answer' }, { kind: 'turn_end', stopReason: 'end_turn' }]);
+    getDb().prepare('UPDATE nodes SET seen_completion_seq = 1 WHERE id = ?').run('node-1');
+    // A turn that only thought is not a completion: the count stays, still reported.
+    await run('turn-b', [{ kind: 'thought', text: 'hmm' }, { kind: 'turn_end', stopReason: 'end_turn' }]);
+    // Nor is one that left only its title.
+    await run('turn-t', [{ kind: 'chunk', text: '[TITLE: Foo]' }, { kind: 'turn_end', stopReason: 'end_turn' }]);
+    await run('turn-c', [{ kind: 'chunk', text: 'Another' }, { kind: 'turn_end', stopReason: 'end_turn' }]);
+    assert.deepEqual(facts(), [[1, 0], [1, 1], [1, 1], [2, 1]]);
+
+    const replay: ChatStreamEvent[] = [];
+    assert.ok(hub.subscribeTurn('chat-1', 'turn-c', { send: (event) => replay.push(event), close: () => {} }));
+    const replayed = replay.find((event) => event.event === 'done');
+    assert.equal(replayed?.event === 'done' ? replayed.data.nodeCompletionSeq : undefined, 2);
+  });
+
+  test('done goes out without facts from a store that has none', async () => {
+    const finalized: string[] = [];
+    const hub = new ChatHub({
+      retentionMs: 10,
+      titleGenerator: null,
+      persistence: { begin() {}, checkpoint() {}, finalize(snapshot) { finalized.push(snapshot.turnId); } },
+    });
+    const events: ChatStreamEvent[] = [];
+    hub.subscribe('chat-1', { send: (event) => events.push(event), close: () => {} });
+    const session: AgentSession = {
+      id: 'chat-1', runtimeId: 'kiro', getHistory: () => [], getPendingAssistant: () => undefined,
+      send: () => iterator([{ kind: 'chunk', text: 'Hi' }, { kind: 'turn_end', stopReason: 'end_turn' }]),
+      cancel: () => {},
+    };
+    const started = await hub.startTurn({ chatId: 'chat-1', nodeId: 'node-1', text: 'x', session, turnId: 'turn-x' });
+    await started.done;
+    const done = events.find((event) => event.event === 'done');
+    assert.deepEqual(finalized, ['turn-x']);
+    assert.equal(done?.data.persisted, true);
+    assert.equal(done && 'nodeCompletionSeq' in done.data, false);
+  });
+
 });

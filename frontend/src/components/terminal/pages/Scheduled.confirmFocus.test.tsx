@@ -29,7 +29,6 @@ vi.mock('../scheduled/useScheduledJobs', () => ({
 vi.mock('../scheduled/useBackgroundService', () => ({
   useBackgroundService: () => ({ available: false, status: null, busy: false, error: null, setEnabled: vi.fn() }),
 }));
-vi.mock('../scheduled/ScheduledAgentChat', () => ({ ScheduledAgentChat: ({ children }: { children: React.ReactNode }) => children }));
 
 
 beforeEach(() => {

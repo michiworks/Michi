@@ -40,4 +40,25 @@ describe('GET /persistence/capabilities — paneInspection capability', () => {
       assert.equal(body.streamTransport, 'websocket-v1');
     });
   });
+
+  test('advertises the artifact tools, so a frontend may send only pinned artifacts and artifactCount', async () => {
+    await withServer(async (baseUrl) => {
+      const body = await (await fetch(`${baseUrl}/persistence/capabilities`)).json() as Record<string, unknown>;
+      assert.equal(body.artifactTools, 'v1');
+    });
+  });
+
+  test('advertises the command batch limit that POST /workspaces/:id/commands enforces', async () => {
+    await withServer(async (baseUrl) => {
+      const body = await (await fetch(`${baseUrl}/persistence/capabilities`)).json() as Record<string, unknown>;
+      assert.equal(body.maxCommandsPerBatch, 500);
+    });
+  });
+
+  test('advertises that artifact writes it skips are answered (gone, name-taken), not a failed batch', async () => {
+    await withServer(async (baseUrl) => {
+      const body = await (await fetch(`${baseUrl}/persistence/capabilities`)).json() as Record<string, unknown>;
+      assert.equal(body.artifactWriteAnswers, 'v1');
+    });
+  });
 });

@@ -1,4 +1,3 @@
-import React from 'react';
 import { AnimatePresence } from 'motion/react';
 import { ChevronLeft, Layers, X } from 'lucide-react';
 import { Button } from '../../ui/controls';

@@ -260,6 +260,41 @@ test('cancelPermission resolves to decline (null → decline path)', async (t) =
   await runtime.shutdown();
 });
 
+test('an unanswered approval times out as decline with permission_resolved; a later answer is a no-op', async (t) => {
+  const client = makeStubClient();
+  const runtime = new CodexRuntime(
+    { ...codexTestOptions({ approveTimeoutMs: 20 }), bridge: makeStubBridge(), mcpSlots: makeStubMcpRegistry() },
+    { client },
+  );
+  const session = await runtime.newSession({ sessionId: 'node-approval-timeout', cwd: '/tmp/test', model: 'test-model' }) as CodexSession;
+  const events: Array<{ kind: string; requestId?: number }> = [];
+  const turn = (async () => {
+    for await (const event of session.send('Run the approval test')) events.push(event as { kind: string; requestId?: number });
+  })();
+  t.after(async () => {
+    client._emit(session.threadId, 'turn/completed', { threadId: session.threadId, turn: { id: 'turn-1', status: 'completed' } });
+    await runtime.shutdown();
+    await turn;
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+
+  const result = await client._fireServerRequest(
+    CODEX_SERVER_REQUESTS.commandApproval,
+    { threadId: 'thread-approval-test', command: 'echo wait' },
+  );
+  assert.deepEqual(result, { decision: 'decline' });
+  await new Promise((resolve) => setImmediate(resolve));
+  const request = events.find((event) => event.kind === 'permission_request');
+  assert.ok(request, 'asked in the chat');
+  assert.deepEqual(events.filter((event) => event.kind === 'permission_resolved'),
+    [{ kind: 'permission_resolved', requestId: request.requestId }]);
+  assert.equal(session.pendingPermissions.size, 0);
+  const count = events.length;
+  session.respondToPermission(request.requestId!, 'allow_once');
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(events.length, count, 'a late answer pushes nothing');
+});
+
 test('approval with missing threadId in params → immediate decline', async () => {
   const client = makeStubClient();
   makeRuntime(client);

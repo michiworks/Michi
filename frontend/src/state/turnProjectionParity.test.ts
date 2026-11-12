@@ -52,6 +52,40 @@ describe('frontend canonical turn projection parity', () => {
     expect(durable.assistantMessage.content).toBe(marker);
   });
 
+  it.each(['`[BRANCH-OVERVIEW:`', '[BRANCH-OVERVIEW:', '`[TITLE:`', '[TITLE:'])('keeps the answer after a quoted %s, live and durably', (quoted) => {
+    const assistantId = 'a-quoted-prefix';
+    let nodes: Record<string, ChatNodeState> = {
+      'node-1': {
+        nodeId: 'node-1', kind: 'chat', chatId: 'chat-1', projectId: 'ws-1',
+        messages: [{ id: assistantId, role: 'assistant', text: '', toolCalls: [], blocks: [], streaming: true }],
+        followUps: [], status: 'streaming',
+      },
+    };
+    let durable = createDurableTurn({
+      turnId: 'turn-quoted', assistantId, nodeId: 'node-1', workspaceId: 'ws-1', displayUserText: 'plan', startedAt: 100,
+    });
+    const answer = `a\n- x 少了 ${quoted}\n- next`;
+    // Four-character chunks split the quoted prefix and every sentinel.
+    const chunks = `${answer}\n\n[FOLLOW-UP 1/3: q?]\n[FOLLOW-UP 2/3: r?]\n[FOLLOW-UP 3/3: s?]\n[BRANCH-OVERVIEW: o]`
+      .match(/[\s\S]{1,4}/g) ?? [];
+    let previousVisible = '';
+    for (const [index, text] of chunks.entries()) {
+      durable = applyTurnEvent(durable, event('chunk', { text, seq: index + 1 }));
+      nodes = reduceNodes(nodes, { type: 'chunk', nodeId: 'node-1', assistantId, text });
+      const visible = assistantAnswerVisibleText(nodes['node-1'].messages[0]);
+      expect(visible.startsWith(previousVisible)).toBe(true);
+      expect(checkpointTurnContent(durable)).toBe(visible);
+      previousVisible = visible;
+    }
+    durable = applyTurnEvent(durable, event('done', { stopReason: 'completed', seq: chunks.length + 1 }));
+    nodes = reduceNodes(nodes, { type: 'done', nodeId: 'node-1', assistantId });
+    const message = nodes['node-1'].messages[0];
+    expect(assistantAnswerVisibleText(message)).toBe(`${answer}\n\n`);
+    expect(assistantPersistenceContent(message)).toBe(answer);
+    expect(durable.assistantMessage.content).toBe(answer);
+    expect(nodes['node-1'].title).toBeUndefined();
+  });
+
   it('matches the shared projector for durable assistant events', () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date('2026-01-01T00:00:00.000Z'));
@@ -100,6 +134,26 @@ describe('frontend canonical turn projection parity', () => {
     expect(nodes['node-1'].title).toBe(durable.nodeMetadata.title);
     expect(nodes['node-1'].followUps).toEqual(durable.nodeMetadata.followUps);
     expect(nodes['node-1'].branchOverview).toBe(durable.nodeMetadata.branchOverview);
+  });
+
+  it('keeps an overview frame canonical when it repeats the stored entry', () => {
+    const assistantId = 'a-repeat-overview';
+    let nodes: Record<string, ChatNodeState> = {
+      'node-1': {
+        nodeId: 'node-1', kind: 'chat', chatId: 'chat-1', projectId: 'ws-1',
+        messages: [{ id: assistantId, role: 'assistant', text: '', toolCalls: [], blocks: [], streaming: true }],
+        followUps: [], status: 'streaming',
+        branchOverview: 'Same.', branchOverviewEntries: [{ at: 1, text: 'Same.' }],
+      },
+    };
+    const actions: ChatAction[] = [
+      { type: 'chunk', nodeId: 'node-1', assistantId, text: 'answer\n\n[BRANCH-OVERVIEW: Other.]' },
+      { type: 'set-branch-overview', nodeId: 'node-1', overview: 'Same.', assistantId },
+      { type: 'done', nodeId: 'node-1', assistantId },
+    ];
+    for (const action of actions) nodes = reduceNodes(nodes, action);
+    expect(nodes['node-1'].branchOverviewEntries).toEqual([{ at: 1, text: 'Same.' }]);
+    expect(nodes['node-1'].branchOverview).toBe('Same.');
   });
 
   it('stamps the same backend-observed text-block timing live and durably', () => {

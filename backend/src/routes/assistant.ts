@@ -1,6 +1,6 @@
 import { Router } from 'express';
 import type { Request, Response } from 'express';
-import type { MichiAssistantSettingsPatch } from 'michi-shared';
+import { isCheckinNodeId, type MichiAssistantSettingsPatch } from 'michi-shared';
 import { chatHub } from '../agents/chatHub';
 import { getRuntime } from '../agents/registry';
 import * as sessionRegistry from '../agents/sessionRegistry';
@@ -9,11 +9,10 @@ import {
   listAssistantConversations,
   AssistantSettingsError,
   ensureAssistant,
-  ensureAssistantFor,
   resetAssistant,
   updateAssistantSettings,
-  type AssistantPurpose,
 } from '../assistant/store';
+import { assistantPurposeOf } from '../assistant/identity';
 import { localOnlyGuard } from './middleware/localOnly';
 import { log } from '../services/logger';
 
@@ -42,19 +41,31 @@ function settingsPatch(body: unknown): MichiAssistantSettingsPatch {
 }
 
 /**
- * The Michi assistant: one persistent conversation in a hidden system
- * workspace (assistant/store.ts). Available locally and to the authenticated remote owner; never mounted in cloud mode.
+ * A check-in node, or the MVP's closed conversation: the user never reaches
+ * one (DESIGN-v2 §2.5), so these routes answer 409 `checkin_node` before
+ * anything is looked up.
+ */
+function closedConversation(nodeId: unknown): boolean {
+  return typeof nodeId === 'string' && (isCheckinNodeId(nodeId) || assistantPurposeOf(nodeId) === 'checkin');
+}
+
+const CHECKIN_NODE = { error: "A check-in's conversation is not one of yours to open", code: 'checkin_node' } as const;
+
+/**
+ * The Michi assistant: V, the user's one conversation with the agent, in a
+ * hidden system workspace (assistant/store.ts, DESIGN-v2 §0.2). Available
+ * locally and to the authenticated remote owner; never mounted in cloud mode.
  *
- *   GET  /api/assistant           → MichiAssistantInfo (creates it on first use)
+ *   GET  /api/assistant           → MichiAssistantInfo of V (creates it on first use), with
+ *                                 `hadMessagesBeforeMerge` (D7: the one-time upgrade note) and
+ *                                 `jobCreated` (D6: a turn sent from Scheduled made a job); every answer below has both
  *   PUT  /api/assistant/settings  {nodeId?, runtimeId?, providerId?, modelId?, reasoning?} → MichiAssistantInfo
- *                                 (what the user picked in that conversation, the current one by default)
- *   POST /api/assistant/reset     {nodeId?} → MichiAssistantInfo of a fresh conversation (the old one is archived)
- *                                 409 assistant_busy while it answers; 409 assistant_changed (with `current`)
- *                                 when `nodeId` is given and is no longer the current conversation
- *   GET  /api/assistant/schedule        → MichiAssistantInfo of the Scheduled window's conversation
- *   POST /api/assistant/schedule/reset  {nodeId?} → as /reset, for that conversation only
- *
- * PUT /settings takes a Scheduled conversation's nodeId too and answers with that window's info.
+ *                                 (what the user picked in that conversation, V by default); 409 checkin_node for a check-in
+ *   GET  /api/assistant/conversations          → History: every 'main' conversation, the old Scheduled ones included
+ *   POST /api/assistant/conversations/:id/activate {currentNodeId} → that conversation becomes V; 409 checkin_node for a check-in
+ *   POST /api/assistant/reset     {nodeId?} → MichiAssistantInfo of a fresh V (the old one is archived)
+ *                                 409 assistant_busy while it answers or a post waits; 409 assistant_changed (with `current`)
+ *                                 when `nodeId` is given and is no longer V
  */
 export function setupAssistantRoutes(): Router {
   const router = Router();
@@ -79,6 +90,10 @@ export function setupAssistantRoutes(): Router {
 
   router.put('/assistant/settings', (req, res) => {
     try {
+      if (isObject(req.body) && closedConversation(req.body.nodeId)) {
+        res.status(409).json(CHECKIN_NODE);
+        return;
+      }
       res.json(updateAssistantSettings(settingsPatch(req.body)));
     } catch (err) {
       fail(res, err, 'settings update');
@@ -94,14 +109,17 @@ export function setupAssistantRoutes(): Router {
 
   router.post('/assistant/conversations/:nodeId/activate', (req, res) => {
     try {
+      if (closedConversation(req.params.nodeId)) {
+        res.status(409).json(CHECKIN_NODE);
+        return;
+      }
       const current = ensureAssistant();
       const expected = isObject(req.body) ? req.body.currentNodeId : undefined;
       if (expected !== current.nodeId) {
         res.status(409).json({ error: 'The assistant conversation changed. Try again.', code: 'assistant_changed', current });
         return;
       }
-      const busy = (id: string) => chatHub.isActive(id) || chatHub.isOwnerTurnActive(id) || chatHub.hasPendingSelfTurn(id);
-      if (busy(current.nodeId) || busy(req.params.nodeId)) {
+      if (chatHub.isBusy(current.nodeId) || chatHub.isBusy(req.params.nodeId)) {
         res.status(409).json({ error: 'The assistant is still answering', code: 'assistant_busy' });
         return;
       }
@@ -109,14 +127,14 @@ export function setupAssistantRoutes(): Router {
     } catch (err) { fail(res, err, 'conversation switch'); }
   });
 
-  const reset = (purpose: AssistantPurpose) => async (req: Request, res: Response) => {
+  router.post('/assistant/reset', async (req: Request, res: Response) => {
     try {
       const expected = isObject(req.body) ? req.body.nodeId : undefined;
       if (expected !== undefined && (typeof expected !== 'string' || !expected || expected.length > 160)) {
         res.status(400).json({ error: 'nodeId must be the current conversation id' });
         return;
       }
-      const current = ensureAssistantFor(purpose);
+      const current = ensureAssistant();
       // A client starting over a conversation it no longer shows (another
       // window already did) gets the current one instead of archiving it.
       if (expected !== undefined && expected !== current.nodeId) {
@@ -124,11 +142,11 @@ export function setupAssistantRoutes(): Router {
         return;
       }
       // Turn completion and runtime cleanup are separate: wait for both.
-      if (chatHub.isActive(current.nodeId) || chatHub.isOwnerTurnActive(current.nodeId) || chatHub.hasPendingSelfTurn(current.nodeId)) {
+      if (chatHub.isBusy(current.nodeId)) {
         res.status(409).json({ error: 'The assistant is still answering', code: 'assistant_busy' });
         return;
       }
-      const { info, previousNodeId } = resetAssistant(purpose);
+      const { info, previousNodeId } = resetAssistant();
       // The archived conversation keeps its history; its live runtime session is not needed.
       const live = sessionRegistry.getSession(previousNodeId);
       if (live) {
@@ -139,20 +157,7 @@ export function setupAssistantRoutes(): Router {
     } catch (err) {
       fail(res, err, 'reset');
     }
-  };
-
-  router.post('/assistant/reset', reset('spaces'));
-
-  // The Scheduled window's conversation: same workspace and settings, its own pointer and tools.
-  router.get('/assistant/schedule', (_req, res) => {
-    try {
-      res.json(ensureAssistantFor('schedule'));
-    } catch (err) {
-      fail(res, err, 'provisioning');
-    }
   });
-
-  router.post('/assistant/schedule/reset', reset('schedule'));
 
   return router;
 }

@@ -1,8 +1,8 @@
-import React from 'react';
 import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { ConfirmDialogHost } from '../../ui/ConfirmDialog';
 import { ScheduledBlockedExecutions } from './ScheduledBlockedExecutions';
+import { formatDateTime } from './scheduleModel';
 
 const state = vi.hoisted(() => ({ confirmStopped: vi.fn() }));
 vi.mock('../../../services/api/scheduledJobs', () => ({
@@ -18,6 +18,16 @@ function Recovery({ refresh = async () => {} }: { refresh?: () => Promise<void> 
 }
 
 describe('Scheduled blocked execution confirmation', () => {
+  it('says runs resume automatically when the last execution is released, or sooner on confirmation', () => {
+    const releasesAt = 100_000 + 40 * 60_000;
+    render(<ScheduledBlockedExecutions jobs={[]} workspaceName={() => 'michi'} now={100_000} onReleased={async () => {}}
+      executions={[{ ...execution, releasesAt }, { ...execution, runId: 'older-run', releasesAt: releasesAt - 60_000 }]} />);
+    expect(screen.getByText(`New scheduled runs are paused. They resume automatically at ${formatDateTime(releasesAt, 100_000)}, `
+      + 'or as soon as you confirm the earlier execution has stopped. Stop the previous Michi process and its agent before confirming.')).toBeTruthy();
+    expect(screen.queryByText(/All new scheduled runs are paused/)).toBeNull();
+    expect(screen.getAllByRole('button', { name: 'Confirm stopped: Previous scheduled job' })).toHaveLength(2);
+  });
+
   it('uses the shared dialog and performs no release when cancelled', async () => {
     render(<Recovery />);
     fireEvent.click(screen.getByRole('button', { name: 'Confirm stopped: Previous scheduled job' }));

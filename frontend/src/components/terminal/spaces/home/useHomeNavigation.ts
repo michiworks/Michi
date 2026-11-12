@@ -1,7 +1,6 @@
 import React from 'react';
 import type { HomeSectionItem, HomeSectionKey, SpaceActivityItem } from 'michi-shared';
-import { openNativePageRoute } from '../SpacesPage';
-import { revealPageBlock } from './HomeDocument';
+import { openSpacesPage } from '../../../../state/metaChat/spacesPages';
 import { homeRowAction } from './homeFormat';
 import { useSpacesSourceNav } from './homeLinks';
 
@@ -17,29 +16,29 @@ export interface HomeThreadTarget {
 
 /**
  * Where the home pages' rows lead: a conversation opens in the conversation
- * area with a way back to Spaces, and a page change opens its page with the
- * block flashed. `currentPageId` is the page on screen, which flashes in
- * place instead of reopening.
+ * area with a way back to Spaces, and a page change opens its page (a home as
+ * its home view) with the block flashed. `currentPageId` is the page on
+ * screen, which flashes in place instead of reopening.
  */
 export function useHomeNavigation(backendConnectionId: string, currentPageId: string | null) {
   const sourceNav = useSpacesSourceNav();
-  // A reveal outlives this page on purpose: opening another page unmounts the home, and the
-  // reveal then waits for that page to render the block. It gives up on its own.
-  const cancelRef = React.useRef<(() => void) | null>(null);
 
   const openThread = React.useCallback((thread: HomeThreadTarget) => sourceNav.openConversationFromSpaces({
     backendConnectionId, workspaceId: thread.workspaceId, nodeId: thread.nodeId, messageId: thread.messageId ?? null, focus: thread.focus === true,
   }), [backendConnectionId, sourceNav]);
 
-  const openPage = React.useCallback((pageId: string, workspaceId: string, blockId: string | null) => {
-    cancelRef.current?.();
-    if (pageId !== currentPageId) openNativePageRoute({ pageId, workspaceId, backendConnectionId });
-    cancelRef.current = blockId ? revealPageBlock(blockId) : null;
+  // A Spaces Home row names no workspace: the page says where it lives.
+  const openPage = React.useCallback((pageId: string, workspaceId: string | null, blockId: string | null) => {
+    void openSpacesPage({
+      pageId, backendConnectionId, currentPageId,
+      ...(workspaceId ? { workspaceId } : {}),
+      ...(blockId ? { blockId } : {}),
+    });
   }, [backendConnectionId, currentPageId]);
 
   const openSectionItem = React.useCallback((item: HomeSectionItem, section: HomeSectionKey | null) => {
     const target = item.target;
-    if (target.kind === 'page') openPage(target.pageId, item.workspaceId ?? '', target.blockId);
+    if (target.kind === 'page') openPage(target.pageId, item.workspaceId, target.blockId);
     else void openThread({ nodeId: target.nodeId, workspaceId: target.workspaceId, messageId: target.messageId, focus: homeRowAction(section, item) === 'Continue' });
   }, [openPage, openThread]);
 

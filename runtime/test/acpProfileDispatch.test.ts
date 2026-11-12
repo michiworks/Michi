@@ -72,10 +72,10 @@ describe("ACP core dispatch driven by a profile", () => {
         } });
         const [shown] = await r.drain(q, 1);
         assert.equal(shown.sessionUpdate, "permission_request");
-        assert.equal(shown.requestId, 7, "a numeric agent id is the UI's id");
+        assert.ok(Number.isSafeInteger(shown.requestId) && shown.requestId !== 7, "the UI gets Michi's request ID, not the agent's");
         assert.deepEqual(shown.options.map((o: Frame) => [o.optionId, o.kind]), [["allow-once", "allow_once"], ["reject-once", "reject_once"]]);
-        assert.throws(() => r.client.respondToPermission(7, "allow_once"), /Unknown permission option/);
-        r.client.respondToPermission(7, "allow-once");
+        assert.throws(() => r.client.respondToPermission(shown.requestId, "allow_once"), /Unknown permission option/);
+        r.client.respondToPermission(shown.requestId, "allow-once");
         assert.deepEqual(r.writes, [{ jsonrpc: "2.0", id: 7, result: { outcome: { outcome: "selected", optionId: "allow-once" } } }]);
     });
 

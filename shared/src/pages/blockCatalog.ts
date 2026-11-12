@@ -6,10 +6,14 @@
  * here, so a new block is one entry plus its renderer. Validation stays in
  * blocks.ts.
  */
+import { isRecord } from '../guards';
+import { PAGE_COMPONENT_LIMITS } from './components';
 import { RICH_BLOCK_CATALOG, richContentText } from './richCatalog';
 import {
   RICH_BLOCK_SCHEMAS, RICH_CHART_RULES, blockPath, briefJsonSchema, richBlockJsonSchema, richChartSchema, sentValue, zodBlockIssues, type RichBlockType,
 } from './richBlocks';
+import { HOME_SECTION_KEYS, HOME_SECTION_TITLES } from './home';
+import { PAGE_CONTAINER_LIMITS as CONTAINER, TOP_LEVEL_ONLY_BLOCK_TYPES } from './containers';
 import { PAGE_VIEW_PRESENTATIONS } from './viewInteractions';
 import {
   BLOCK_TONES, CHART_KINDS, CRITERION_STATES, FORGOT_STATES, METRIC_TONES, NEXT_STEP_WHO, PAGE_BLOCK_LIMITS as LIMITS,
@@ -362,11 +366,11 @@ export const PAGE_BLOCK_CATALOG: { readonly [T in PageBlockType]: PageBlockCatal
     type: 'home-section', label: 'Attention list', category: 'conversations',
     blurb: 'Live reminders from your conversations and page suggestions.',
     describe: 'A live Home section. Its content is computed from conversations; move or delete the block with ordinary page edits.',
-    fields: '{section: waiting | stalled | done}',
-    schema: block('home-section', 'Live reminders from your conversations.', { section: { type: 'string', enum: ['waiting', 'stalled', 'done'] } }, ['section']),
+    fields: `{section: ${HOME_SECTION_KEYS.join(' | ')}}`,
+    schema: block('home-section', 'Live reminders from your conversations.', { section: { type: 'string', enum: [...HOME_SECTION_KEYS] } }, ['section']),
     example: { type: 'home-section', section: 'waiting' },
-    title: b => ({ waiting: 'Waiting on you', stalled: 'Stalled', done: 'Just done' })[b.section],
-    text: b => ({ waiting: 'Waiting on you', stalled: 'Stalled', done: 'Just done' })[b.section],
+    title: b => HOME_SECTION_TITLES[b.section],
+    text: b => HOME_SECTION_TITLES[b.section],
   },
   'task-view': {
     type: 'task-view', label: 'Task board', category: 'references',
@@ -392,7 +396,7 @@ export const PAGE_BLOCK_CATALOG: { readonly [T in PageBlockType]: PageBlockCatal
     describe: 'A saved workspace component: sandboxed HTML and JS from the component library, with its props. Use one only when no other block fits.',
     fields: '{componentId, pinnedVersion?, props, height?}',
     schema: block('component', 'A saved workspace component: sandboxed HTML and JS from the component library, with its props. Use one only when no other block fits.', {
-      componentId: id, pinnedVersion: { type: 'integer', minimum: 1 }, props: { type: 'object' }, height: { type: 'integer', minimum: 80, maximum: 1600 },
+      componentId: id, pinnedVersion: { type: 'integer', minimum: 1 }, props: { type: 'object' }, height: { type: 'integer', minimum: PAGE_COMPONENT_LIMITS.heightMin, maximum: PAGE_COMPONENT_LIMITS.heightMax },
     }, ['componentId', 'props']),
     title: () => '',
     text: (b) => `Component ${b.componentId}${b.pinnedVersion ? ` v${b.pinnedVersion}` : ''}`,
@@ -400,28 +404,28 @@ export const PAGE_BLOCK_CATALOG: { readonly [T in PageBlockType]: PageBlockCatal
   ...RICH_BLOCK_CATALOG,
   toggle: {
     type: 'toggle', label: 'Toggle', category: 'text', blurb: 'Details that start folded away.',
-    describe: 'A collapsed section of content blocks. Containers nest at most 2 levels; resources and conversation references stay top-level.',
-    fields: '{title, blocks: [content block]} (at most 20 children)',
-    schema: block('toggle', 'A collapsed content group; nested blocks have the same validation as top-level content.', { title, blocks: { type: 'array', maxItems: 20, items: { type: 'object', description: 'A content block; no server metadata, resources or conversation references.' } } }, ['title', 'blocks']),
+    describe: `A collapsed section of content blocks. Containers nest at most ${CONTAINER.depth} levels; resources and conversation references stay top-level.`,
+    fields: `{title, blocks: [content block]} (at most ${CONTAINER.slotBlocks} children)`,
+    schema: block('toggle', 'A collapsed content group; nested blocks have the same validation as top-level content.', { title, blocks: { type: 'array', maxItems: CONTAINER.slotBlocks, items: { type: 'object', description: 'A content block; no server metadata, resources or conversation references.' } } }, ['title', 'blocks']),
     example: { type: 'toggle', title: 'Details', blocks: [{ type: 'markdown', text: 'More context when you need it.' }] },
     title: own, text: (b) => lines(b.title, ...b.blocks.map(pageBlockText)),
   },
   columns: {
     type: 'columns', label: 'Columns', category: 'text', blurb: 'Content side by side.',
-    describe: '2 to 4 columns of content blocks, at most 20 per column and 2 container levels. Resources and conversation references stay top-level.',
+    describe: `${CONTAINER.columns.min} to ${CONTAINER.columns.max} columns of content blocks, at most ${CONTAINER.slotBlocks} per column and ${CONTAINER.depth} container levels. Resources and conversation references stay top-level.`,
     fields: '{columns: [[content block]]}',
-    schema: block('columns', 'Side-by-side content groups.', { columns: { type: 'array', minItems: 2, maxItems: 4, items: { type: 'array', maxItems: 20, items: { type: 'object' } } } }, ['columns']),
+    schema: block('columns', 'Side-by-side content groups.', { columns: { type: 'array', minItems: CONTAINER.columns.min, maxItems: CONTAINER.columns.max, items: { type: 'array', maxItems: CONTAINER.slotBlocks, items: { type: 'object' } } } }, ['columns']),
     example: { type: 'columns', columns: [[{ type: 'markdown', text: 'Plan' }], [{ type: 'markdown', text: 'Actual' }]] },
     title: () => '', text: (b) => b.columns.flat().map(pageBlockText).join('\n'),
   },
   grid: {
     type: 'grid', label: 'Responsive grid', category: 'text', blurb: 'Arrange content in resizable regions that stack on a small screen.',
-    describe: 'A responsive 12-column grid with 1 to 12 stable-id regions in reading order. span sets desktop width, tabletSpan sets medium-pane width (defaults to 12), and small panes stack every region at full width. Keep region IDs unchanged on edits. Each region holds at most 20 content blocks; containers nest at most 2 levels and resource or conversation references stay top-level.',
-    fields: '{regions: [{id (unique and stable), span: 1..12, tabletSpan?: 1..12, title?, blocks: [content block]}]} (1-12 regions, at most 20 children per region)',
-    schema: block('grid', 'Responsive 12-column content grid. Keep every region id stable; small panes stack all regions. Resources and conversation references stay top-level.', {
-      regions: list(object({ id, span: { type: 'integer', minimum: 1, maximum: 12 }, tabletSpan: { type: 'integer', minimum: 1, maximum: 12 }, title,
-        blocks: list({ type: 'object', description: 'A content block; no server metadata, resources or conversation references.' }, 20),
-      }, ['id', 'span', 'blocks']), 12, 1),
+    describe: `A responsive ${CONTAINER.gridColumns}-column grid with ${CONTAINER.regions.min} to ${CONTAINER.regions.max} stable-id regions in reading order. span sets desktop width, tabletSpan sets medium-pane width (defaults to ${CONTAINER.gridColumns}), and small panes stack every region at full width. Keep region IDs unchanged on edits. Each region holds at most ${CONTAINER.slotBlocks} content blocks; containers nest at most ${CONTAINER.depth} levels and resource or conversation references stay top-level.`,
+    fields: `{regions: [{id (unique and stable), span: 1..${CONTAINER.gridColumns}, tabletSpan?: 1..${CONTAINER.gridColumns}, title?, blocks: [content block]}]} (${CONTAINER.regions.min}-${CONTAINER.regions.max} regions, at most ${CONTAINER.slotBlocks} children per region)`,
+    schema: block('grid', `Responsive ${CONTAINER.gridColumns}-column content grid. Keep every region id stable; small panes stack all regions. Resources and conversation references stay top-level.`, {
+      regions: list(object({ id, span: { type: 'integer', minimum: 1, maximum: CONTAINER.gridColumns }, tabletSpan: { type: 'integer', minimum: 1, maximum: CONTAINER.gridColumns }, title,
+        blocks: list({ type: 'object', description: 'A content block; no server metadata, resources or conversation references.' }, CONTAINER.slotBlocks),
+      }, ['id', 'span', 'blocks']), CONTAINER.regions.max, CONTAINER.regions.min),
     }, ['regions']),
     example: { type: 'grid', regions: [
       { id: 'main', title: 'Current work', span: 8, blocks: [{ type: 'markdown', text: 'Keep the main details here.' }] },
@@ -431,9 +435,9 @@ export const PAGE_BLOCK_CATALOG: { readonly [T in PageBlockType]: PageBlockCatal
   },
   tabs: {
     type: 'tabs', label: 'Tabs', category: 'text', blurb: 'Switch between related sections.',
-    describe: '2 to 6 named tabs of content blocks, at most 20 per tab and 2 container levels. Resources and conversation references stay top-level.',
+    describe: `${CONTAINER.tabs.min} to ${CONTAINER.tabs.max} named tabs of content blocks, at most ${CONTAINER.slotBlocks} per tab and ${CONTAINER.depth} container levels. Resources and conversation references stay top-level.`,
     fields: '{tabs: [{label, blocks: [content block]}]}',
-    schema: block('tabs', 'Tabbed content groups.', { tabs: { type: 'array', minItems: 2, maxItems: 6, items: object({ label: title, blocks: { type: 'array', maxItems: 20, items: { type: 'object' } } }, ['label', 'blocks']) } }, ['tabs']),
+    schema: block('tabs', 'Tabbed content groups.', { tabs: { type: 'array', minItems: CONTAINER.tabs.min, maxItems: CONTAINER.tabs.max, items: object({ label: title, blocks: { type: 'array', maxItems: CONTAINER.slotBlocks, items: { type: 'object' } } }, ['label', 'blocks']) } }, ['tabs']),
     example: { type: 'tabs', tabs: [{ label: 'Plan', blocks: [{ type: 'markdown', text: 'What we planned.' }] }, { label: 'Actual', blocks: [{ type: 'markdown', text: 'Where we are.' }] }] },
     title: () => '', text: (b) => b.tabs.map((tab) => lines(tab.label, ...tab.blocks.map(pageBlockText))).join('\n'),
   },
@@ -465,10 +469,6 @@ function withInteraction(schema: Record<string, unknown>): Record<string, unknow
 }
 for (const type of PAGE_BLOCK_TYPES) if (type !== 'view') PAGE_BLOCK_CATALOG[type].schema = withInteraction(PAGE_BLOCK_CATALOG[type].schema);
 
-export function pageBlockEntry<T extends PageBlockType>(type: T): PageBlockCatalogEntry<T> {
-  return PAGE_BLOCK_CATALOG[type] as PageBlockCatalogEntry<T>;
-}
-
 type AnyEntry = PageBlockCatalogEntry<PageBlockType> & { title(block: PageBlockInput): string; text(block: PageBlockInput): string };
 
 /** A block's entry; none for a type this build does not know (a newer backend's), or a key that is not a type. */
@@ -497,14 +497,10 @@ export function pageBlockFieldsDoc(): string {
     + '. Optional on any content block: interaction:{label,action:{type:"open-view",viewId,presentation?:inline|drawer|modal}} adds a view entry. Top-level visibility:"detail" keeps content off the main page until opened. Named views reference real blockIds; create content first, then views and entries. Use these capabilities only when helpful; static summaries, comparisons and visualizations remain valid';
 }
 
-const isObject = (value: unknown): value is Record<string, unknown> => typeof value === 'object' && value !== null && !Array.isArray(value);
 const kindOf = (value: unknown): string => (Array.isArray(value) ? 'a list' : value === null ? 'null' : typeof value === 'object' ? 'an object' : typeof value);
 const has = (value: object, key: string) => Object.prototype.hasOwnProperty.call(value, key);
 
-/** Content that a container may not hold, as blocks.ts refuses it. */
-const TOP_LEVEL_ONLY = new Set<string>(['database-ref', 'page-link', 'component', 'threads', 'conflict', 'home-section', 'view']);
-/** Containers nest at most this deep, as blocks.ts counts it. */
-const MAX_DEPTH = 2;
+const TOP_LEVEL_ONLY = new Set<string>(TOP_LEVEL_ONLY_BLOCK_TYPES);
 
 type Schema = Record<string, unknown>;
 
@@ -561,7 +557,7 @@ function schemaIssues(schema: Schema, value: unknown, path: string, depth: numbe
       return issues;
     }
     case 'object': {
-      if (!isObject(value)) return [`${where} must be an object, not ${kindOf(value)}`];
+      if (!isRecord(value)) return [`${where} must be an object, not ${kindOf(value)}`];
       const properties = schema.properties as Record<string, Schema> | undefined;
       if (!properties) return [];
       const issues: string[] = [];
@@ -579,10 +575,10 @@ function schemaIssues(schema: Schema, value: unknown, path: string, depth: numbe
 /** Where one block's content is wrong, top-level (depth 0) or inside a container. */
 function contentIssues(value: unknown, path: string, depth: number): string[] {
   const where = path || 'the block';
-  if (!isObject(value)) return [`${where} must be a block object with a type, not ${kindOf(value)}`];
+  if (!isRecord(value)) return [`${where} must be a block object with a type, not ${kindOf(value)}`];
   const type = value.type;
   if (typeof type !== 'string' || !has(PAGE_BLOCK_CATALOG, type)) return [`${blockPath(path, ['type'])} is not a block type${sentValue(type)}`];
-  if (depth > MAX_DEPTH) return [`${where} is nested too deep; containers nest at most ${MAX_DEPTH} levels`];
+  if (depth > CONTAINER.depth) return [`${where} is nested too deep; containers nest at most ${CONTAINER.depth} levels`];
   if (depth > 0 && TOP_LEVEL_ONLY.has(type)) return [`${where} is a ${type} block, which stays at the top level of the page`];
   const { interaction: entry, visibility, ...content } = value;
   const issues: string[] = [];
@@ -613,7 +609,7 @@ const SHOWN_ISSUES = 12;
  */
 export function pageBlockProblem(value: unknown): string {
   if (parsePageBlockInput(value)) return '';
-  if (!isObject(value)) return 'A block is an object with a type';
+  if (!isRecord(value)) return 'A block is an object with a type';
   const type = value.type;
   if (typeof type !== 'string' || !has(PAGE_BLOCK_CATALOG, type)) {
     return `Unknown block type ${JSON.stringify(type) ?? 'undefined'}; the types are ${PAGE_BLOCK_TYPES.join(', ')}`;

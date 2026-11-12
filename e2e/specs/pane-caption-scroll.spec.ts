@@ -116,9 +116,9 @@ for (const native of [true, false]) {
     await page.mouse.move(handleBox.x - 76, handleBox.y + 100, { steps: 5 });
     await page.mouse.up();
     await expect.poll(async () => (await alignment(page)).error).toBeLessThan(2);
-    await page.getByRole('button', { name: 'Overview', exact: true }).click();
+    await page.getByRole('button', { name: 'Map', exact: true }).click();
     await expect(strip).toHaveCount(0);
-    await page.getByRole('button', { name: 'Overview', exact: true }).click();
+    await page.getByRole('button', { name: 'Map', exact: true }).click();
     await expect(strip).toBeVisible();
     await settlePanes(page);
     await expect.poll(async () => (await alignment(page)).error).toBeLessThan(2);
@@ -130,11 +130,12 @@ for (const native of [true, false]) {
     await strip.evaluate(el => el.scrollTo({ left: 550, behavior: 'instant' }));
     await expect.poll(async () => (await alignment(page)).error).toBeLessThan(2);
     await page.screenshot({ path: info.outputPath('aligned-desktop.png') });
+    // A phone shows one pane and switches from the top-right title list
+    // (mobile-panes.spec.ts), so it has no caption strip to keep aligned.
     await page.setViewportSize({ width: 390, height: 844 });
-    await expect.poll(async () => (await alignment(page)).error).toBeLessThan(2);
-    await strip.evaluate(el => el.scrollTo({ left: el.scrollWidth, behavior: 'instant' }));
-    await expect.poll(async () => (await alignment(page)).error).toBeLessThan(2);
-    await page.screenshot({ path: info.outputPath('aligned-mobile.png') });
+    await expect(page.locator('[data-pane-captions]')).toHaveCount(0);
+    await expect(page.getByRole('button', { name: 'Switch pane' })).toBeVisible();
+    await page.screenshot({ path: info.outputPath('phone.png') });
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
     expect(errors).toEqual([]);
   });

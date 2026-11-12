@@ -212,6 +212,31 @@ describe('claudeEventTranslator', () => {
     assert.equal((emitted[0] as Extract<NormalizedEvent, { kind: 'warning' }>).code, 'error_max_turns');
   });
 
+  test('what a command the CLI ran itself printed is the reply; streamed replies are not repeated', () => {
+    const { emitted, feed, startTurn } = makeTranslator();
+    startTurn();
+    // As CLI 2.1.318 sends a skill it refuses to run by slash (user-invocable: false): no deltas, num_turns 0.
+    const refusal = 'This skill can only be invoked by Claude, not directly by users. Ask Claude to use the "michi:lib-hidden" skill for you.';
+    feed({ type: 'system', subtype: 'init', session_id: 'local-1', model: 'claude-sonnet-4-6-20250514' });
+    feed({ type: 'assistant', uuid: 'twin-1', parent_tool_use_id: null, session_id: 'local-1',
+      local_command_source: `<local-command-stdout>${refusal}</local-command-stdout>`,
+      message: { model: '<synthetic>', role: 'assistant', stop_reason: 'end_turn', content: [{ type: 'text', text: refusal }],
+        usage: { input_tokens: 0, output_tokens: 0, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 } } });
+    feed({ type: 'result', subtype: 'success', num_turns: 0, result: refusal, usage: { input_tokens: 0, output_tokens: 0 } });
+    assert.deepEqual(emitted.filter((ev) => ev.kind === 'chunk'), [{ kind: 'chunk', text: refusal }]);
+    assert.equal(emitted.some((ev) => ev.kind === 'context_usage'), false, 'its zero usage is no context size');
+
+    emitted.length = 0;
+    startTurn();
+    feed({ type: 'assistant', uuid: 'twin-2', local_command_run: { command: 'usage', args: '' },
+      local_command_source: '<local-command-stdout>Total cost: $0.0000</local-command-stdout>',
+      message: { model: '<synthetic>', content: [{ type: 'text', text: 'Total cost: $0.0000' }] } });
+    feed({ type: 'stream_event', event: { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'model answer' } } });
+    feed({ type: 'assistant', uuid: 'model-1', message: { model: 'claude-sonnet-4-6-20250514', content: [{ type: 'text', text: 'model answer' }] } });
+    assert.deepEqual(emitted.filter((ev) => ev.kind === 'chunk').map((ev) => (ev as { text: string }).text),
+      ['Total cost: $0.0000', 'model answer']);
+  });
+
   // ── Case 10: system.api_retry → provider warning ─────────────────────────
 
   test('system.api_retry envelope emits a provider warning', () => {
@@ -380,6 +405,25 @@ describe('claudeEventTranslator', () => {
     assert.equal(snapshot.assistantMessage.toolCalls[0].inputJson, JSON.stringify(input));
     assert.equal(snapshot.assistantMessage.toolCalls[0].output, 'saved');
     assert.equal(snapshot.assistantMessage.toolCalls[0].status, 'completed');
+  });
+
+  test('tool_result images reach the chip as placeholders before the 16 KB cap; the envelope is untouched', () => {
+    const { emitted, feed } = makeTranslator();
+    const data = Buffer.concat([Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]), Buffer.alloc(40_000, 1)]).toString('base64');
+    const content = [
+      { type: 'text', text: 'Read shot.png' },
+      { type: 'image', source: { type: 'base64', media_type: 'image/png', data } },
+    ];
+    const envelope = { type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: 'read-1', content }] } };
+    const before = structuredClone(envelope);
+    feed(envelope);
+    assert.deepEqual(envelope, before);
+    const update = emitted.find((ev) => ev.kind === 'tool_call_update');
+    assert.ok(update && update.kind === 'tool_call_update');
+    assert.deepEqual(JSON.parse(update.output!), [
+      { type: 'text', text: 'Read shot.png' },
+      { type: 'image', source: { type: 'base64', media_type: 'image/png', data: '[image image/png 39 KB omitted]' } },
+    ]);
   });
 
   // ── Regression: cross-turn paragraph break ──────────────────────────────
@@ -570,6 +614,28 @@ describe('claudeEventTranslator', () => {
     assert.equal(activity[0].toolCallId, 'toolu_inner');
     assert.equal(activity[0].status, 'completed');
     assert.equal(activity[0].output, '1\tconst x = 1;');
+  });
+
+  test('frames under a plain tool (a long Bash) make no subagent; an agent resumed by SendMessage still does', () => {
+    const { emitted, feed } = makeTranslator();
+    feed({
+      type: 'assistant',
+      message: { content: [
+        { type: 'tool_use', id: 'toolu_bash', name: 'Bash', input: { command: 'npm run check', description: 'Run the checks' } },
+        { type: 'tool_use', id: 'toolu_send', name: 'SendMessage', input: { to: 'reviewer', message: 'go on' } },
+      ] },
+    });
+    feed({ type: 'tool_progress', tool_use_id: 'toolu_bash', tool_name: 'Bash', parent_tool_use_id: 'toolu_bash', elapsed_time_seconds: 31 });
+    feed({ type: 'user', parent_tool_use_id: 'toolu_bash', message: { content: [] } });
+    feed({ type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: 'toolu_bash', content: 'all checks passed' }] } });
+    feed({
+      type: 'assistant',
+      parent_tool_use_id: 'toolu_send',
+      message: { content: [{ type: 'tool_use', id: 'toolu_inner', name: 'Read', input: { file_path: '/x.ts' } }] },
+    });
+    const roster = byKind(emitted, 'subagent_list_update').reduce<SubagentInfo[]>(
+      (acc, ev) => mergeSubagentRoster(acc, ev.subagents as SubagentInfo[]), []);
+    assert.deepEqual(roster.map((entry) => entry.sessionId), ['toolu_send']);
   });
 
   test('the Agent tool (renamed Task) spawns a subagent with prompt and model', () => {

@@ -1,6 +1,6 @@
-import React from 'react';
 import { act, render } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import type { BrowserShellChord } from 'michi-shared';
 import type { BrowserSurfaceState } from '../../lib/electronBridge';
 import BrowserPane from './BrowserPane';
 
@@ -11,6 +11,7 @@ const updatePaneItem = vi.fn();
 const browserCreate = vi.fn();
 const browserSetBounds = vi.fn();
 let closeRequest: ((surfaceId: string) => void) | undefined;
+let shortcut: ((surfaceId: string, chord: BrowserShellChord) => void) | undefined;
 let resolveBrowserCreate: ((state: BrowserSurfaceState) => void) | undefined;
 
 const createdState: BrowserSurfaceState = {
@@ -31,6 +32,10 @@ const electronBridge = {
     closeRequest = handler;
     return vi.fn();
   }),
+  onBrowserShortcut: vi.fn((handler: (surfaceId: string, chord: BrowserShellChord) => void) => {
+    shortcut = handler;
+    return vi.fn();
+  }),
 };
 
 vi.mock('../../state/chatStore', () => ({
@@ -43,7 +48,13 @@ vi.mock('../../state/chatStore', () => ({
 }));
 
 // Report the unfocused dim so tests can verify the browser chrome opts out.
-vi.mock('../../hooks/usePaneShellStyle', () => ({ usePaneShellStyle: () => ({ filter: 'brightness(0.76)' }) }));
+const paneShellOptions = vi.hoisted(() => [] as Array<{ dim?: boolean } | undefined>);
+vi.mock('../../hooks/usePaneShellStyle', () => ({
+  usePaneShellStyle: (_id: string, options?: { dim?: boolean }) => {
+    paneShellOptions.push(options);
+    return { '--pane-dim': options?.dim === false ? 0 : 0.24 };
+  },
+}));
 
 vi.mock('../../lib/electronBridge', () => ({
   getElectron: () => electronBridge,
@@ -74,6 +85,21 @@ describe('BrowserPane native bridge', () => {
 
   afterEach(() => vi.unstubAllGlobals());
 
+  it('styles the address field as the shared input, so keyboard focus shows its ring', () => {
+    const { getByRole } = render(<BrowserPane item={item} />);
+    const address = getByRole('textbox', { name: 'Browser address' });
+    expect(address.className).toBe('ui-input');
+    expect(address.style.outline).toBe('');
+  });
+
+  it('never takes the unfocused dim: the native page cannot share it', () => {
+    paneShellOptions.length = 0;
+    const { container } = render(<BrowserPane item={item} />);
+    expect(paneShellOptions.every((options) => options?.dim === false)).toBe(true);
+    const root = container.querySelector('[data-pane-kind="browser"]') as HTMLElement;
+    expect(root.style.getPropertyValue('--pane-dim')).toBe('0');
+  });
+
   it('closes only the pane that owns the requested native surface', () => {
     render(<BrowserPane item={item} />);
     expect(closeRequest).toBeTypeOf('function');
@@ -84,6 +110,22 @@ describe('BrowserPane native bridge', () => {
     act(() => closeRequest?.('surface-browser-1'));
     expect(closePane).toHaveBeenCalledOnce();
     expect(closePane).toHaveBeenCalledWith('pane-browser-1');
+  });
+
+  it('replays a shell chord its own surface passed on as a keydown for the shell', () => {
+    const keys: KeyboardEvent[] = [];
+    const listen = (event: KeyboardEvent) => { keys.push(event); };
+    window.addEventListener('keydown', listen);
+    try {
+      render(<BrowserPane item={item} />);
+      const chord = { key: 'Tab', meta: false, control: true, shift: true, alt: false };
+      act(() => shortcut?.('another-surface', chord));
+      expect(keys).toHaveLength(0);
+      act(() => shortcut?.('surface-browser-1', chord));
+      expect(keys.map((e) => [e.key, e.metaKey, e.ctrlKey, e.shiftKey, e.altKey])).toEqual([['Tab', false, true, true, false]]);
+    } finally {
+      window.removeEventListener('keydown', listen);
+    }
   });
 
   it('publishes bounds as soon as the viewport resizes, so a dock drag does not lag a frame', () => {

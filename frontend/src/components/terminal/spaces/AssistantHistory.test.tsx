@@ -1,10 +1,11 @@
 import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { AssistantHistory } from './AssistantHistory';
-import { getAssistantSnapshot, resetAssistantStoreForTests } from '../../../state/assistant/assistantStore';
+import { useZhCnDefaultLocale } from '../../../test/zhCnLocale';
+import { getCompanionAssistant as getAssistantSnapshot, resetCompanionStoreForTests } from '../../../state/companion/companionStore';
 const api = vi.hoisted(() => ({ list: vi.fn(), activate: vi.fn(), workspace: vi.fn(), install: vi.fn(), status: 'idle' }));
 vi.mock('../../../services/api/assistant', async importOriginal => ({ ...(await importOriginal<typeof import('../../../services/api/assistant')>()), fetchAssistantConversations: api.list, activateAssistantConversation: api.activate }));
-vi.mock('../../../services/api/persistence', () => ({ fetchWorkspace: api.workspace }));
+vi.mock('../../../services/api/persistence', () => ({ fetchWorkspaceStructure: api.workspace }));
 vi.mock('../../../state/chatStore', () => ({ useChatActions: () => ({ installWorkspaceSnapshot: api.install }), useStructuralSelector: (selector: (nodes: unknown) => unknown) => selector({ current: { status: api.status } }) }));
 const info = (nodeId = 'current') => ({ nodeId, workspaceId: 'assistant', treeId: `tree-${nodeId}`, settings: { runtimeId: 'claude', modelId: null, reasoning: null }, supportedRuntimes: ['claude'] });
 const row = (i: number) => ({ nodeId: `old-${i}`, title: `Previous question ${i}`, updatedAt: 1000 + i });
@@ -13,9 +14,20 @@ beforeEach(() => {
   api.activate.mockReset().mockImplementation(async id => info(id));
   api.workspace.mockReset().mockResolvedValue({ workspace: { id: 'assistant' } });
   api.install.mockReset(); api.status = 'idle';
-  resetAssistantStoreForTests({ status: 'ready', info: info() });
+  resetCompanionStoreForTests({ assistant: { status: 'ready', info: info(), error: null } });
 });
 describe('Assistant history', () => {
+  it('dates conversations in English whatever the browser locale', async () => {
+    useZhCnDefaultLocale();
+    try {
+      const at = new Date(2026, 9, 17, 14, 30).getTime();
+      api.list.mockResolvedValue({ items: [{ nodeId: 'old', title: 'Previous question', updatedAt: at }], nextCursor: null });
+      render(<AssistantHistory onOpenAssistant={vi.fn()} visible />);
+      const time = (await screen.findByRole('button', { name: /Previous question/ })).querySelector('time')!;
+      expect(time.textContent).toMatch(/^Oct 17(, 2026)?$/);
+      expect(time.title).toBe('Oct 17, 14:30');
+    } finally { vi.restoreAllMocks(); }
+  });
   it('only shows and loads history while the assistant is open, refreshing on reopen', async () => {
     const open = vi.fn();
     const view = render(<AssistantHistory onOpenAssistant={open} />);

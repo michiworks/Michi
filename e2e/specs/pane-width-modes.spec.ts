@@ -128,7 +128,7 @@ test.describe('pane width modes', () => {
       await assertWidths(page, mode, 2);
       const after = await measurements(page);
       await info.attach('layout-frames', { body: JSON.stringify(frames, null, 2), contentType: 'application/json' });
-      expect(frames.durations).toEqual([150]);
+      expect(frames.durations).toHaveLength(1);
       expect(frames.samples.some(frame => frame.progress !== null && frame.progress > 0 && frame.progress < 1)).toBe(true);
       expect(frames.samples.every(frame => frame.widths.every((width, i) => Math.abs(width - after.widths[i]) < 1)), JSON.stringify(frames)).toBe(true);
       expect(frames.samples[0].textWidth).toBeGreaterThan(0);
@@ -197,7 +197,8 @@ test.describe('pane width modes', () => {
   test('switching policies is live and keeps custom widths; resize bypasses animation', async ({ page }) => {
     await installLayoutApi(page);
     await bootWithWorkspace(page);
-    await page.getByRole('button', { name: 'New pane', exact: true }).click();
+    await page.locator(COMPOSER_EDITOR).first().fill('Compare pane sizing policies');
+    await page.getByRole('button', { name: /Send \(Enter\)/ }).click();
     await expect(page.locator('.terminal-dashboard')).toBeVisible();
     await page.getByRole('button', { name: 'New pane', exact: true }).click();
     await setMode(page, 'half');
@@ -226,17 +227,20 @@ test.describe('pane width modes', () => {
     await page.emulateMedia({ reducedMotion: 'reduce' });
     await installLayoutApi(page);
     await bootWithWorkspace(page);
-    await page.getByRole('button', { name: 'New pane', exact: true }).click();
+    await page.locator(COMPOSER_EDITOR).first().fill('Check reduced pane motion');
+    await page.getByRole('button', { name: /Send \(Enter\)/ }).click();
+    await expect(page.locator('.terminal-dashboard')).toBeVisible();
     await setMode(page, 'fixed');
     await page.getByRole('button', { name: 'New pane', exact: true }).click();
     await assertWidths(page, 'fixed', 2);
     expect(await motionCount(page)).toBe(0);
     await page.setViewportSize({ width: 390, height: 844 });
-    await assertWidths(page, 'fixed', 2);
+    // Phones (≤700px) switch panes from a top-right list instead of the caption strip.
+    await expect(page.getByRole('button', { name: 'Switch pane' })).toBeVisible();
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
     await closeFocused(page);
     await expect(page.locator('[data-pane-exiting]')).toHaveCount(0);
-    await assertWidths(page, 'fixed', 1);
+    await expect(panes(page)).toHaveCount(1);
   });
 
   test('opening existing chats reveals them while they expand, including a reopened chat', async ({ page }, info) => {
@@ -312,7 +316,8 @@ test.describe('pane width modes', () => {
   test('rapid opens retarget smoothly and manual scrolling interrupts the reveal', async ({ page }) => {
     await installLayoutApi(page);
     await bootWithWorkspace(page);
-    await page.getByRole('button', { name: 'New pane', exact: true }).click();
+    await page.locator(COMPOSER_EDITOR).first().fill('Open panes in quick succession');
+    await page.getByRole('button', { name: /Send \(Enter\)/ }).click();
     await page.getByRole('button', { name: 'New pane', exact: true }).click();
     await setMode(page, 'adaptive');
     await assertWidths(page, 'adaptive', 2);

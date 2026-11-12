@@ -193,11 +193,11 @@ describe('ClaudeSessionManager Agent Run ownership', () => {
         runOwner('run-1', 'attempt-other'),
         chatOwner('attempt-shared'),
       ]) {
-        assert.throws(() => manager.getCompatible(session.id, wrongOwner, null), /different owner/);
+        assert.throws(() => manager.getCompatible(session.id, wrongOwner, null, null), /Owner mismatch/);
         await assert.rejects(manager.releaseSession(session.id, wrongOwner), /Owner mismatch/);
         assert.equal(manager.get(session.id), session);
       }
-      assert.equal(manager.getCompatible(session.id, { ...owner }, null), session);
+      assert.equal(manager.getCompatible(session.id, { ...owner }, null, null), session);
       await manager.releaseSession(session.id, { ...owner });
       assert.equal(manager.get(session.id), undefined);
     } finally {
@@ -238,8 +238,25 @@ describe('ClaudeSessionManager Agent Run ownership', () => {
       for (const session of [fresh, restored]) {
         const prompt = (session as any).systemPromptAppend as string;
         assert.match(prompt, /You are Michi/);
-        assert.doesNotMatch(prompt, /\[TITLE:|\[FOLLOW-UP|\[BRANCH-OVERVIEW:|set_branch_overview|set_follow_ups|validate_turn_metadata/);
+        assert.doesNotMatch(prompt, /\[TITLE:|\[FOLLOW-UP|\[BRANCH-OVERVIEW:|set_branch_overview|set_follow_ups/);
+        // The assistant runs with the CLI's native tools, so its AskUserQuestion reaches the UI too.
+        assert.match(prompt, /Use AskUserQuestion or the Michi ask_user tool/);
       }
+      assert.equal((fresh as any).systemPromptAppend, (restored as any).systemPromptAppend);
+    } finally {
+      await manager.shutdown();
+    }
+  });
+
+  test('an ordinary cold or restored spawn gets the warm pool prompt byte for byte', async () => {
+    const manager = createManager();
+    try {
+      const cold = await manager.createSession({ id: 'cold-chat', cwd: process.cwd() });
+      const restored = await manager.loadSession({ id: 'restored-chat', cwd: process.cwd(), externalSessionId: 'native' });
+      // What spawnWarmSession passes.
+      const warm = (manager as any).host.prompt.stableSystemPrompt((manager as any).metadataOutputMode, true, true);
+      assert.equal((cold as any).systemPromptAppend, warm);
+      assert.equal((restored as any).systemPromptAppend, warm);
     } finally {
       await manager.shutdown();
     }

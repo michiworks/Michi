@@ -4,10 +4,13 @@ import { describe, expect, it, vi } from 'vitest';
 import type { AgentRunDtoV1, AgentRunEventV1 } from 'michi-shared';
 import { AgentRunEventType, AgentRunStatus } from 'michi-shared';
 import type { AgentRunSubscriptionOptions } from '../services/api/agentRuns';
+import { SseHttpError } from '../services/api/sseParser';
+import { HttpResponseError } from '../services/api/httpError';
 import {
   type AgentDomainApi, AgentDomainProvider, agentDomainReducer,
   initialAgentDomainState, useAgentDomain,
 } from './agentDomain';
+import { knownAgentRunName } from './agentRunNotifications';
 import { agentResourceKey, locatedAgentResource } from './agentIdentity';
 
 const hash = 'a'.repeat(64);
@@ -80,5 +83,107 @@ describe('AgentDomainProvider subscriptions', () => {
     act(() => { subscription!.onMalformed?.(new Error('wrong version'), '{}'); });
     expect(result.current.state.runs).toBe(before);
     expect(result.current.state.errors.at(-1)).toBe('wrong version');
+  });
+
+  it('reconnects with backoff from the cursors applied since, until the workspace is refused or released', async () => {
+    vi.useFakeTimers();
+    try {
+      const feeds: AgentRunSubscriptionOptions[] = [];
+      const api: AgentDomainApi = {
+        listDefinitions: async () => [], listRuns: async () => [runFixture('local')], spawnRun: async () => runFixture('local'),
+        getRun: async () => runFixture('local'), getEvents: async () => [],
+        subscribe: (_workspaceId, options) => { feeds.push(options); return () => {}; },
+        sendInput: async () => {}, cancelRun: async () => {},
+      };
+      const wrapper = ({ children }: { children: React.ReactNode }) => <AgentDomainProvider api={api}>{children}</AgentDomainProvider>;
+      const { result } = renderHook(() => useAgentDomain(), { wrapper });
+      await act(async () => { await result.current.loadRuns({ version: 1, workspaceId: 'workspace-local' }); });
+      let release = () => {};
+      act(() => { release = result.current.subscribeWorkspace('workspace-local'); });
+      await act(async () => { await feeds[0].onEnvelope({ version: 1, event: 'agent_run_event', runId: 'same-run', seq: 0, eventData: statusEvent(0, AgentRunStatus.Running, AgentRunStatus.Running), gapAfterSeq: null, emittedAt: 10 }); });
+
+      act(() => feeds[0].onDisconnect?.(new Error('backend restarted')));
+      act(() => { vi.advanceTimersByTime(999); });
+      expect(feeds).toHaveLength(1);
+      act(() => { vi.advanceTimersByTime(1); });
+      expect(feeds).toHaveLength(2);
+      expect(feeds[1].cursors).toEqual({ 'same-run': 0 });
+      expect(result.current.subscribeWorkspace('workspace-local'), 'one feed per workspace while it reconnects').toBe(release);
+
+      act(() => feeds[1].onDisconnect?.());
+      act(() => { vi.advanceTimersByTime(1_999); });
+      expect(feeds, 'the delay doubles').toHaveLength(2);
+      act(() => { vi.advanceTimersByTime(1); });
+      expect(feeds).toHaveLength(3);
+      act(() => { feeds[2].onOpen?.(); feeds[2].onDisconnect?.(); });
+      act(() => { vi.advanceTimersByTime(1_000); });
+      expect(feeds, 'an open feed starts the delay over').toHaveLength(4);
+
+      act(() => feeds[3].onDisconnect?.(new SseHttpError(403)));
+      act(() => { vi.advanceTimersByTime(60_000); });
+      expect(feeds, 'a refused workspace is not retried').toHaveLength(4);
+
+      act(() => { release = result.current.subscribeWorkspace('workspace-local'); });
+      expect(feeds).toHaveLength(5);
+      act(() => { feeds[4].onDisconnect?.(); release(); });
+      act(() => { vi.advanceTimersByTime(60_000); });
+      expect(feeds, 'a released feed is not retried').toHaveLength(5);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('drops a Run deleted on the server from the cursors after a 404, and stops when nothing was dropped', async () => {
+    vi.useFakeTimers();
+    try {
+      const feeds: AgentRunSubscriptionOptions[] = [];
+      const getRun = vi.fn(async () => { throw new HttpResponseError('not_found', 404); });
+      const api: AgentDomainApi = {
+        listDefinitions: async () => [], listRuns: async () => [runFixture('local')], spawnRun: async () => runFixture('local'),
+        getRun, getEvents: async () => [],
+        subscribe: (_workspaceId, options) => { feeds.push(options); return () => {}; },
+        sendInput: async () => {}, cancelRun: async () => {},
+      };
+      const wrapper = ({ children }: { children: React.ReactNode }) => <AgentDomainProvider api={api}>{children}</AgentDomainProvider>;
+      const { result } = renderHook(() => useAgentDomain(), { wrapper });
+      await act(async () => { await result.current.loadRuns({ version: 1, workspaceId: 'workspace-local' }); });
+      act(() => { result.current.subscribeWorkspace('workspace-local'); });
+      await act(async () => { await feeds[0].onEnvelope({ version: 1, event: 'agent_run_event', runId: 'same-run', seq: 0, eventData: statusEvent(0, AgentRunStatus.Running, AgentRunStatus.Running), gapAfterSeq: null, emittedAt: 10 }); });
+
+      act(() => feeds[0].onDisconnect?.(new Error('backend restarted')));
+      act(() => { vi.advanceTimersByTime(1_000); });
+      expect(feeds[1].cursors).toEqual({ 'same-run': 0 });
+
+      await act(async () => { feeds[1].onDisconnect?.(new SseHttpError(404)); await Promise.resolve(); await Promise.resolve(); });
+      expect(getRun).toHaveBeenCalledWith({ backendConnectionId: 'local', id: 'same-run' });
+      act(() => { vi.advanceTimersByTime(1_000); });
+      expect(feeds).toHaveLength(3);
+      expect(feeds[2].cursors, 'the deleted Run is no longer resumed').toEqual({});
+
+      await act(async () => { feeds[2].onDisconnect?.(new SseHttpError(404)); await Promise.resolve(); await Promise.resolve(); });
+      act(() => { vi.advanceTimersByTime(60_000); });
+      expect(feeds, 'a 404 with nothing left to drop is not retried').toHaveLength(3);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
+
+describe('knownAgentRunName', () => {
+  it('names a Run the mounted provider has loaded, for readers above it, and nothing once it unmounts', async () => {
+    const api: AgentDomainApi = {
+      listDefinitions: async () => [], listRuns: async () => [runFixture('remote-a')], spawnRun: async () => runFixture('remote-a'),
+      getRun: async () => runFixture('remote-a'), getEvents: async () => [], subscribe: () => () => {},
+      sendInput: async () => {}, cancelRun: async () => {},
+    };
+    const wrapper = ({ children }: { children: React.ReactNode }) => <AgentDomainProvider api={api}>{children}</AgentDomainProvider>;
+    const { result, unmount } = renderHook(() => useAgentDomain(), { wrapper });
+    const identity = { backendConnectionId: 'remote-a', id: 'same-run' };
+    expect(knownAgentRunName(identity)).toBeUndefined();
+    await act(async () => { await result.current.loadRuns({ version: 1, workspaceId: 'workspace-remote-a' }); });
+    expect(knownAgentRunName(identity)).toBe('Worker');
+    expect(knownAgentRunName({ backendConnectionId: 'remote-b', id: 'same-run' }), 'another backend').toBeUndefined();
+    unmount();
+    expect(knownAgentRunName(identity)).toBeUndefined();
   });
 });

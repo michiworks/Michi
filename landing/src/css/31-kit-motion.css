@@ -1,0 +1,173 @@
+/* ==========================================================================
+   6-8. Take states, keyframes, reduced motion (owner: engine).
+   Generic state classes the ops in 05-ops.js toggle; CSS does every tween with
+   Michi's own tokens (brief §6.1). Nothing here moves unless a class changes.
+   ========================================================================== */
+
+/* -- 6.1 App keyframes (index.css L1475-1575, L4352-4427) ------------------ */
+@keyframes tpulse { 0%, 100% { opacity: .4; } 50% { opacity: 1; } }
+@keyframes bounce-dot { 0%, 80%, 100% { transform: translateY(0); } 40% { transform: translateY(-4px); } }
+@keyframes t-stream-token-reveal { from { opacity: .28; } to { opacity: 1; } }
+@keyframes pane-entrance-bg { 0% { background-color: var(--mk-flash); } 100% { background-color: transparent; } }
+@keyframes bar-pulse-once { 0%, 100% { opacity: 1; } 50% { opacity: .3; } }
+@keyframes map-edge-flow { to { stroke-dashoffset: -16; } }
+@keyframes map-live-blink { 0%, 100% { opacity: 1; } 50% { opacity: .25; } }
+/* Keyframe colours are .mk tokens (var() resolves on the animated element). */
+@keyframes map-breathe-b {
+  0%, 100% { box-shadow: var(--map-card-shadow); }
+  50% { box-shadow: var(--map-breathe); }
+}
+@keyframes tspin { to { transform: rotate(360deg); } }
+@keyframes tblink { 0%, 50% { opacity: 1; } 50.01%, 100% { opacity: 0; } }
+@keyframes mk-in { from { opacity: 0; } to { opacity: 1; } }
+@keyframes mk-snap { from { opacity: 0; scale: .96; } to { opacity: 1; scale: 1; } }
+/* From and to the phrase's own background: transparent, or the touch rest tint. */
+@keyframes mk-invite { 50% { background-color: var(--mk-hot); } }
+/* The hero fail-safe (brief §5.12). */
+@keyframes ff-show { to { visibility: visible; } }
+@keyframes ff-unshift { to { transform: none; } }
+
+/* -- 6.2 Tokens: streamed words (.w) and typed characters (.c) -------------
+   M.prepare() wraps [data-stream] text in .w and [data-type] text in .c, all
+   .on (tB). Hidden tokens keep their box, so nothing reflows. A streamed word
+   fades .28 -> 1 over --t-decay (.rv, the app's t-stream-token-reveal); a
+   typed character appears at once, as in the real composer. */
+.w:not(.on), .c:not(.on) { visibility: hidden; }
+.w.rv { animation: t-stream-token-reveal var(--t-decay) ease-out both; }
+
+/* -- 6.3 Enter / exit on Michi tokens ---------------------------------------
+   .e + one shape class. Remove .is-off to enter (--t-enter, out), add it to
+   exit (--t-exit, faster). Offsets use the individual translate/scale
+   properties, so an element's own transform stays free for layout. Override
+   per element with --e-in / --e-out. */
+.e { transition-property: opacity, translate, scale, visibility;
+  transition-duration: var(--e-in, var(--t-enter)); transition-timing-function: var(--e-ease, var(--ease-out)); }
+.e.is-off { opacity: 0; visibility: hidden;
+  transition-duration: var(--e-out, var(--t-exit)); transition-timing-function: var(--e-ease-out, var(--ease-out)); }
+.e-up.is-off { translate: 0 4px; }                       /* thought and tool rows */
+.e-up6.is-off { translate: 0 6px; }                      /* user bubble */
+.e-pop.is-off { scale: .96; }                            /* chips, popovers */
+.e-slide { --e-in: var(--t-expand); }
+.e-slide.is-off { translate: 100% 0; }                   /* edge bookmark (V2) */
+.e-lift { --e-in: var(--t-pane); --e-ease: var(--ease-pane); }
+.e-lift.is-off { translate: 0 12px; }                    /* Map bar (M6) */
+.e-rise { --e-in: var(--t-slow); }
+.e-rise.is-off { translate: 0 10px; scale: .97; }        /* Map cards (M2) */
+.e-soft { --e-in: var(--t-soft); --e-out: 80ms; }        /* branch / footnote card (V3, P11) */
+/* .e-fade: opacity only (no shape class needed). */
+
+/* Scene swap inside a frame that never fades (swap op, T1): out 110, in 180
+   with a 16 px drift. Scenes are stacked in the frame and carry .e-scene. */
+.e-scene { transition: opacity var(--t-enter) var(--ease-out), translate var(--t-enter) var(--ease-out); }
+.e-scene.is-off { opacity: 0; translate: 16px 0; visibility: hidden; transition: none; }
+.e-scene.is-out { opacity: 0; translate: 0 0; visibility: visible; transition: opacity var(--t-exit) var(--ease-out); }
+
+/* Follow-the-tail moves (brief H15): 220 ms pane ease. */
+[data-follow] { transition: transform var(--t-pane) var(--ease-pane); }
+
+/* Rows that grow: grid-template-rows 0fr -> 1fr. One child, which clips. */
+.grow { display: grid; grid-template-rows: 1fr;
+  transition: grid-template-rows var(--g-in, var(--t-enter)) var(--ease-out), opacity var(--g-in, var(--t-enter)) var(--ease-out), visibility 0s; }
+.grow > * { min-height: 0; overflow: hidden; }
+.grow.is-off { grid-template-rows: 0fr; opacity: 0; visibility: hidden;
+  transition: grid-template-rows var(--t-pane-exit) var(--ease-pane), opacity var(--t-pane-exit) var(--ease-pane), visibility 0s var(--t-pane-exit); }
+
+/* SVG stroke draws: put pathLength="1" on the path. */
+.draw { stroke-dasharray: 1; stroke-dashoffset: 0;
+  transition: stroke-dashoffset var(--d-ms, var(--t-slow)) var(--d-ease, var(--ease-out)) var(--d-delay, 0ms); }
+.draw.is-off { stroke-dashoffset: 1; visibility: hidden; transition: none; }
+
+/* MapCard heat bar fill (M3): the track stays, the fill grows 0 -> 1. */
+.mk-heat > i { transition: transform 1200ms var(--ease-out); }
+.mk-heat.is-off > i { transform: scaleX(0); transition: none; }
+
+/* One drawn strike through text (brief §5.9). */
+.strike { background-image: linear-gradient(currentColor, currentColor); background-repeat: no-repeat;
+  background-position: 0 55%; background-size: 100% 1.5px; transition: background-size var(--t-decay) var(--ease-out); }
+.strike.is-off { background-size: 0 1.5px; }
+
+/* Crossfade stack: children share one cell; the hidden one carries .is-off
+   and leaves the flow at once (the app's popLayout), fading out on top. */
+.xf { display: inline-grid; position: relative; }
+.xf > * { grid-area: 1 / 1; transition: opacity var(--xf-ms, var(--t-soft)) var(--ease), visibility 0s; }
+.xf > .is-off { position: absolute; opacity: 0; visibility: hidden;
+  transition: opacity var(--xf-ms, var(--t-soft)) var(--ease), visibility 0s var(--xf-ms, var(--t-soft)); }
+/* A single-line caption keeps its ellipsis through and after a text crossfade. */
+.mk-head-title.xf { display: grid; grid-template-columns: minmax(0, 1fr); }
+.mk-head-title.xf > * { overflow: hidden; text-overflow: ellipsis; }
+.mk-tool-st > *, .mk-tool-dur { transition: opacity var(--t-soft) var(--ease); }
+.mk-tool-row.is-running .mk-tool-dur { opacity: 0; }
+
+/* Press: 45 down (.12,.9,.25,1), 110 up out (brief P5, §5.5). */
+.press, .mk-send, .mk-bcomp-btn, .mk-mapbar-btn {
+  transition: translate 110ms var(--ease-out), filter 110ms var(--ease-out), opacity var(--t-quick) var(--ease); }
+:is(.press, .mk-send, .mk-bcomp-btn, .mk-mapbar-btn).is-pressed {
+  translate: 0 1px; filter: brightness(1.08); transition-duration: 45ms; transition-timing-function: cubic-bezier(.12, .9, .25, 1); }
+/* The Map bar's white buttons darken instead (brightening white shows nothing);
+   a palette with dark buttons sets --map-press back to the shared brighten. */
+.mk-mapbar-btn.is-pressed { filter: var(--map-press); }
+
+/* Selection wipe and highlight already transition in 30-kit.css (.mk-hl). */
+
+/* -- 6.4 Live state loops (only while a take plays; nothing loops at hold) --
+   Phase-locked: the op that turns a loop on writes --ph1 / --ph14 / --ph24
+   (-(now mod period)) on the element (M.lock). */
+.mk-pane.is-streaming > .mk-head .mk-dot,
+.mk-arrival.is-working .mk-dot { box-shadow: 0 0 6px 0 currentColor;
+  animation: tpulse var(--t-loop) ease-in-out var(--ph14, 0s) infinite; }
+.mk-dot.is-live { box-shadow: 0 0 6px 0 currentColor; animation: tpulse var(--t-loop) ease-in-out var(--ph14, 0s) infinite; }
+.mk-srow-rail.is-live { box-shadow: var(--mk-rail-glow); animation: tpulse var(--t-loop) ease-in-out var(--ph14, 0s) infinite; }
+/* The branch list's Running LoaderCircle is a static amber glyph in the app
+   (BranchAnchorRow.tsx; no CSS turns it), so it is not in this list. */
+.mk-tool-row.is-running .mk-spin, .mk-group.is-running .mk-spin, .mk-spin.is-live,
+.i.spin { animation: tspin var(--t-loop-fast) linear var(--ph1, 0s) infinite; }
+.mk-bcard-typing.is-live > i { animation: bounce-dot var(--t-loop) ease-in-out infinite; }
+.mk-bcard-typing > i:nth-child(1) { animation-delay: var(--ph14, 0s); }
+.mk-bcard-typing > i:nth-child(2) { animation-delay: calc(var(--ph14, 0s) + .15s); }
+.mk-bcard-typing > i:nth-child(3) { animation-delay: calc(var(--ph14, 0s) + .3s); }
+.mk-mlive.is-live > .mk-mlive-dot, .mk-mlive-dot.is-live { animation: map-live-blink var(--t-loop) ease-in-out var(--ph14, 0s) infinite; }
+.mk-medge.is-flow { animation: map-edge-flow var(--t-loop-fast) linear var(--ph1, 0s) infinite; }
+
+/* One-shot effects (M.fx adds the class and removes it after its length). */
+.fx-flash { animation: pane-entrance-bg var(--t-slow) ease-out both; }         /* branch header cell (H10), 600 */
+.fx-pulse2 { animation: bar-pulse-once 600ms ease-in-out 2; }                  /* sidebar rail (H11), 1200 */
+.fx-breathe { animation: map-breathe-b var(--t-loop-slow) ease-in-out 1; }     /* merged card (M8), 2400 */
+.fx-snap { animation: mk-snap var(--t-soft) var(--ease-out) both; }            /* mention chip (T5), 100 */
+.fx-invite { animation: mk-invite 600ms ease-in-out 2; }                       /* hot phrases (H18), 1200 */
+.fx-blink3 { animation: tblink 1.05s step-end 3; }                             /* Home caret (C1), 3150 */
+
+/* -- 7. Engine contract ----------------------------------------------------- */
+/* finish() / reset(): no tweens inside the take root. */
+.instant, .instant *, .instant *::before, .instant *::after { transition: none !important; }
+/* pause(): freeze every loop in the figure (brief §5.12). */
+.is-paused, .is-paused *, .is-paused *::before, .is-paused *::after { animation-play-state: paused !important; }
+.is-paused [data-take-control] { animation-play-state: running !important; }
+
+/* Hero start frame and its 2.5 s CSS fail-safe (brief §5.12, G14). */
+html[data-take-hero="t0"]:not([data-hero-ready]) [data-t0="hide"] { visibility: hidden; animation: ff-show 1ms 2500ms forwards; }
+html[data-take-hero="t0"]:not([data-hero-ready]) [data-t0="shift"] { transform: translateX(var(--t0-shift, 250px)); animation: ff-unshift 1ms 2500ms forwards; }
+
+/* Take chrome. Controls are real buttons the engine shows and hides with the
+   hidden attribute; hold UI (caption, hints) keeps its box and fades (P9). */
+html:not(.js) [data-take-control] { display: none !important; }
+[data-take-control][hidden] { display: none !important; }
+[data-take-control]:not([hidden]) { animation: mk-in var(--t-enter) var(--ease-out) both; }
+[data-take-hold] { transition: opacity var(--t-enter) var(--ease-out), visibility 0s; }
+[data-take-hold].is-off { opacity: 0; visibility: hidden; transition: opacity var(--t-exit) var(--ease-out), visibility 0s var(--t-exit); }
+
+/* Live heading (P7/P8): the consequence span goes violet while its take is
+   the live one; its solid caret fades in. Base colour comes from the heading. */
+[data-live-for] { transition: color var(--t-slow) var(--ease); }
+[data-live-for].is-live { color: var(--violet) !important; transition-duration: var(--t-decay); }
+.live-caret { display: inline-block; width: .5em; height: .86em; margin-left: .06em; vertical-align: baseline;
+  background: var(--violet); opacity: 0; transition: opacity var(--t-exit) var(--ease-out); }
+.is-live > .live-caret, .is-live .live-caret { opacity: 1; transition-duration: var(--t-enter); }
+
+/* -- 8. Reduced motion: every figure at tB, nothing tweens or loops ---------- */
+@media (prefers-reduced-motion: reduce) {
+  .mk *, .mk *::before, .mk *::after,
+  [data-take], [data-take] *, [data-take] *::before, [data-take] *::after {
+    animation: none !important; transition-duration: 0s !important; transition-delay: 0s !important; }
+  [data-take-control]:not([hidden]) { animation: none; }
+  .live-caret { transition: none; }
+}

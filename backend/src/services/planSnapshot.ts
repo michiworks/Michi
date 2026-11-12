@@ -54,6 +54,8 @@ function explicitCut(nodeId: string, branch: NonNullable<PlanSnapshotQuery['bran
 
 /** The parent rows a node's own branch edge inherits, through the same cut its session context uses. */
 function edgeCut(nodeId: string, userId?: string): PlanCut | undefined {
+  // A fresh multi-model branch inherits nothing, so its descendants stop there too.
+  if (getNode(nodeId)?.fresh_context === 1) return undefined;
   try {
     const boundary = resolveBranchBoundary({ childNodeId: nodeId, userId });
     return boundary ? { parentNodeId: boundary.parentNodeId, rows: boundary.messages } : undefined;
@@ -73,6 +75,8 @@ export function sessionPlanSnapshot(input: PlanSnapshotQuery): PlanEntry[] | nul
   const userId = input.userId ?? undefined;
   const own = latestPlanSnapshot(listMessages(input.nodeId, userId));
   if (own) return own;
+  // A fresh multi-model branch inherits no plan from its caller or above.
+  if (getNode(input.nodeId)?.fresh_context === 1) return null;
   const visited = new Set([input.nodeId]);
   let cut = input.branch ? explicitCut(input.nodeId, input.branch, userId) : edgeCut(input.nodeId, userId);
   while (cut && !visited.has(cut.parentNodeId) && visited.size <= MAX_PLAN_ANCESTORS) {

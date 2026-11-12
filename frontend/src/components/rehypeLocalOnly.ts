@@ -14,7 +14,9 @@
  *     its text.
  *
  * Runs last, after sanitize and every autolinking pass, so it sees the tree
- * exactly as it will render, whatever Markdown or raw HTML produced it.
+ * exactly as it will render, whatever Markdown or raw HTML produced it. Code
+ * blocks are the exception: they render from their text and link URLs again
+ * after this pass, so they take the rule as LegacyCodeBlock's httpsLinksOnly.
  */
 
 type HastNode = {

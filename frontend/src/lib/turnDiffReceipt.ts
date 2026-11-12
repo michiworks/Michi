@@ -1,4 +1,5 @@
 import type { ChatMessage, ToolCallState } from '../state/chatTypes';
+import { editLineDelta } from './editLineDelta';
 
 /**
  * Turn diff receipts — derive a compact "N files changed (+X −Y)" summary
@@ -9,11 +10,10 @@ import type { ChatMessage, ToolCallState } from '../state/chatTypes';
  * can reconstruct which files were touched and estimate line deltas.
  *
  * Heuristics (v1):
- *   - `write`: added = line count of `content`, removed = 0. A write is a
- *     full overwrite so a later write to the same path REPLACES any counts
- *     accumulated so far for that path.
- *   - `edit`: added = line count of `new_string`, removed = line count of
- *     `old_string`. Edits ACCUMULATE per path.
+ *   - Line deltas come from editLineDelta, as on each call's step row.
+ *   - `write`: removed = 0. A write is a full overwrite so a later write to
+ *     the same path REPLACES any counts accumulated so far for that path.
+ *   - `edit`: edits ACCUMULATE per path.
  *   - Codex `fileChange` items: title is 'Edit <basename>' / 'Edit N files'
  *     and inputJson is the whole item with a `changes: [{ path, ... }]`
  *     array (no path/file_path key). We list the touched paths; Codex does
@@ -34,7 +34,7 @@ export interface DiffFileEntry {
   kind: 'write' | 'edit' | 'bash';
   /**
    * True when `added`/`removed` were computed from real tool input (a write's
-   * `content`, or an edit's `old_string`/`new_string`). False when we could
+   * content, or an edit's old and new text). False when we could
    * recover the touched path but NOT the line deltas — subagent-relayed
    * write/edit calls (forwarded for visibility, no inputJson) and Codex
    * `fileChange` items carry no old/new text, so their counts default to 0.
@@ -51,18 +51,6 @@ export interface DiffReceipt {
 }
 
 const SKIPPED_STATUSES = new Set(['error', 'failed', 'interrupted']);
-
-/** Count lines in a string the way diff tools do: 1 line minimum, +1 per \n. */
-function countLines(text: string): number {
-  if (text === '') return 0;
-  let n = 1;
-  for (let i = 0; i < text.length; i++) {
-    if (text[i] === '\n') n++;
-  }
-  // A trailing newline doesn't start a new line of content.
-  if (text.endsWith('\n')) n--;
-  return n;
-}
 
 /** Normalize a tool title to its mutation kind, or null if not file-mutating. */
 function mutationKind(title: string): 'write' | 'edit' | null {
@@ -186,34 +174,29 @@ export function deriveDiffReceipt(message: ChatMessage): DiffReceipt | null {
     }
     if (!path) continue;
 
+    // Counts are only real when the call carried its text. A subagent-relayed
+    // call recovers the path (detail/output/title) but has no inputJson.
+    const delta = input ? editLineDelta(input) : null;
+    const added = delta?.added ?? 0;
+    const removed = delta?.removed ?? 0;
     if (kind === 'write') {
-      // Counts are only real when the write carried its `content`. A
-      // subagent-relayed write recovers the path (detail/output/title) but
-      // has no inputJson, so content is empty and the delta is unknown.
-      const hasContent = !!input && typeof input.content === 'string';
-      const content = hasContent ? (input!.content as string) : '';
       // Latest write wins: a write is a full overwrite of the file, so it
       // supersedes any counts accumulated for this path so far.
-      byPath.set(path, { path, added: countLines(content), removed: 0, kind: 'write', countsKnown: hasContent });
+      byPath.set(path, { path, added, removed: 0, kind: 'write', countsKnown: !!delta });
     } else {
-      // An edit's delta is only real when old/new strings were present.
-      const hasStrings =
-        !!input && (typeof input.old_string === 'string' || typeof input.new_string === 'string');
-      const oldStr = input && typeof input.old_string === 'string' ? input.old_string : '';
-      const newStr = input && typeof input.new_string === 'string' ? input.new_string : '';
       const prev = byPath.get(path);
       if (prev) {
         byPath.set(path, {
           path,
-          added: prev.added + countLines(newStr),
-          removed: prev.removed + countLines(oldStr),
+          added: prev.added + added,
+          removed: prev.removed + removed,
           kind: prev.kind === 'write' ? 'write' : 'edit',
           // Accumulated counts are only trustworthy if every contributing
           // tool call had derivable deltas.
-          countsKnown: prev.countsKnown && hasStrings,
+          countsKnown: prev.countsKnown && !!delta,
         });
       } else {
-        byPath.set(path, { path, added: countLines(newStr), removed: countLines(oldStr), kind: 'edit', countsKnown: hasStrings });
+        byPath.set(path, { path, added, removed, kind: 'edit', countsKnown: !!delta });
       }
     }
   }

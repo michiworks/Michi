@@ -1,7 +1,7 @@
 import { useCallback, useEffect } from 'react';
 import type { PageSummaryDto } from 'michi-shared';
 import { listPages, type PageApiOptions } from '../../services/api/pages';
-import { commitResourceRead, failResourceRead, resourceKey, startResourceRead, useResource } from './resourceCache';
+import { commitResourceRead, failResourceRead, pollResource, resourceKey, startResourceRead, useResource } from './resourceCache';
 import { subscribePageChanges } from './pageEvents';
 
 export interface UseSpaceTreeOptions {
@@ -47,18 +47,7 @@ export function useSpaceTree({ backendConnectionId, workspaceId, enabled = true 
     if (!enabled) return undefined;
     return subscribePageChanges({ backendConnectionId, workspaceId }, refresh);
   }, [backendConnectionId, enabled, refresh, workspaceId]);
-  useEffect(() => {
-    if (!enabled) return undefined;
-    const onFocus = () => refresh();
-    const timer = window.setInterval(() => {
-      if (document.visibilityState === 'visible') refresh();
-    }, TREE_POLL_MS);
-    window.addEventListener('focus', onFocus);
-    return () => {
-      window.clearInterval(timer);
-      window.removeEventListener('focus', onFocus);
-    };
-  }, [enabled, refresh]);
+  useEffect(() => (enabled ? pollResource(key, TREE_POLL_MS, refresh) : undefined), [enabled, key, refresh]);
 
   return { pages: snapshot.data, status: snapshot.status, error: snapshot.error, refresh };
 }

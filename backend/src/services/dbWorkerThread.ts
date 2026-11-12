@@ -1,6 +1,7 @@
 import { DomainError, serializeDomainError } from './domainErrors';
-import { assertNodePlacement } from './nodePlacement';
+import { assertActiveTree, assertEdgePlacement, assertNodePlacement, assertTreeRoot, type NodePlacementLookup } from './nodePlacement';
 import { assertGraphNodeInput, requiredGraphId as requiredId } from './graphCommandValidation';
+import type { TreeRowChange } from './graphCommandTypes';
 /**
  * Database Worker Thread
  *
@@ -98,12 +99,6 @@ function runNamed(sql: string, params: Record<string, SQLInputValue>): void {
 
 // ── Tombstone guards ───────────────────────────────────────────────────────
 
-/** JSON-deserialized objects from the main thread are pre-validated and only
- *  contain SQLite-safe values (string | number | null). This cast avoids
- *  sprinkling `as SQLInputValue` on every property access. */
-function asRow(obj: Record<string, unknown>): Record<string, SQLInputValue> {
-  return obj as Record<string, SQLInputValue>;
-}
 function asValue(v: unknown): SQLInputValue {
   return v as SQLInputValue;
 }
@@ -116,6 +111,11 @@ function isWorkspaceTombstoned(workspaceId: string): boolean {
 function isNodeTombstoned(nodeId: string): boolean {
   const row = getRow('SELECT purged_at FROM nodes WHERE id = ?', nodeId);
   return (row as { purged_at: number | null } | undefined)?.purged_at != null;
+}
+
+/** Same lookup as dbRepository.getNode: a tombstoned node is not found. */
+function getNode(nodeId: SQLInputValue): Row | undefined {
+  return getRow('SELECT * FROM nodes WHERE id = ? AND purged_at IS NULL', nodeId);
 }
 
 // ── Graph prerequisite (ensureDurableGraphNode) ────────────────────────────
@@ -170,48 +170,101 @@ function saveWorkspace(ws: SaveWorkspaceInput): void {
   `, params);
 }
 
-function saveTree(tree: Record<string, SQLInputValue>, _userId?: string): void {
+/**
+ * Same upsert as dbRepository.saveTree. ensureDurableGraphNode, like
+ * graphCommands, rejects a tree replayed with another root before saving it,
+ * so the root_node_id update never re-roots a tree. This thread has no
+ * structure bus: the change dbRepository.saveTree passes to
+ * recordTreeRowChange is returned instead, and the main thread records it
+ * once this transaction has committed.
+ */
+function saveTree(tree: Record<string, SQLInputValue>, _userId?: string): TreeRowChange | null {
   const wsId = tree.workspace_id as string;
-  if (isWorkspaceTombstoned(wsId)) return;
+  if (isWorkspaceTombstoned(wsId)) return null;
+  const existing = getRow('SELECT workspace_id, name, archived_at FROM trees WHERE id = ?', tree.id) as
+    TreeRowChange['before'] | undefined;
   runNamed(`
-    INSERT INTO trees (id, workspace_id, root_node_id, name, archived_at, pinned_at, last_active_at, created_at)
-    VALUES (@id, @workspace_id, @root_node_id, @name, @archived_at, @pinned_at, @last_active_at, @created_at)
+    INSERT INTO trees (id, workspace_id, root_node_id, name, archived_at, pinned_at, last_active_at, created_at, rev)
+    VALUES (@id, @workspace_id, @root_node_id, @name, @archived_at, @pinned_at, @last_active_at, @created_at, @rev)
     ON CONFLICT(id) DO UPDATE SET
-      name=excluded.name, archived_at=excluded.archived_at, pinned_at=excluded.pinned_at,
-      last_active_at=excluded.last_active_at
-  `, tree);
+      root_node_id=excluded.root_node_id, name=excluded.name,
+      archived_at=excluded.archived_at, pinned_at=excluded.pinned_at,
+      last_active_at=excluded.last_active_at,
+      rev=COALESCE(excluded.rev, trees.rev)
+  `, { name: null, archived_at: null, pinned_at: null, rev: null, ...tree });
+  // An upsert never moves a tree: the stored workspace stands.
+  return {
+    before: existing ?? null,
+    after: {
+      id: tree.id as string,
+      workspace_id: existing?.workspace_id ?? wsId,
+      name: (tree.name as string | null) ?? null,
+      archived_at: (tree.archived_at as number | null) ?? null,
+    },
+  };
 }
 
+/**
+ * The insert dbRepository.saveNode makes for a new node. Like it, the node
+ * takes maintenance_job_id and scheduled_only_job_id from its stored parent,
+ * never from the input, so a branch stays restricted and hidden where its
+ * parent is. ensureDurableGraphNode calls this only for a node getNode does
+ * not find, so the conflict clause does not run.
+ */
 function saveNode(node: Record<string, SQLInputValue>, _userId?: string): void {
   const wsId = node.workspace_id as string;
   if (isWorkspaceTombstoned(wsId)) return;
   if (isNodeTombstoned(node.id as string)) return;
+  const parentMarkers = node.parent_node_id
+    ? getRow('SELECT maintenance_job_id, scheduled_only_job_id FROM nodes WHERE id = ?', node.parent_node_id)
+    : undefined;
   runNamed(`
     INSERT INTO nodes (
       id, workspace_id, tree_id, parent_node_id, kind, title, status, minimized,
-      spawned_by_agent, current_mode_id, composer_draft, created_at
+      spawned_by_agent, current_mode_id, composer_draft, created_at, maintenance_job_id, scheduled_only_job_id
     ) VALUES (
       @id, @workspace_id, @tree_id, @parent_node_id, @kind, @title, @status, @minimized,
-      @spawned_by_agent, @current_mode_id, @composer_draft, @created_at
+      @spawned_by_agent, @current_mode_id, @composer_draft, @created_at, @maintenance_job_id, @scheduled_only_job_id
     )
     ON CONFLICT(id) DO NOTHING
-  `, node);
+  `, {
+    ...node,
+    maintenance_job_id: parentMarkers?.maintenance_job_id ?? null,
+    scheduled_only_job_id: parentMarkers?.scheduled_only_job_id ?? null,
+  });
 }
 
+/**
+ * Same tombstone guards and upsert as dbRepository.saveEdge. A replay takes
+ * the new anchor_message_id and created_at and keeps the first fork boundary.
+ * ensureDurableGraphNode rejects an edge replayed with other endpoints or
+ * kind before saving it, so those columns keep their values.
+ */
 function saveEdge(edge: Record<string, SQLInputValue>, _userId?: string): void {
   const wsId = edge.workspace_id as string;
-  if (isWorkspaceTombstoned(wsId)) return;
+  if (
+    isWorkspaceTombstoned(wsId)
+    || isNodeTombstoned(edge.source_node_id as string)
+    || isNodeTombstoned(edge.target_node_id as string)
+  ) return;
   runNamed(`
     INSERT INTO edges (id, workspace_id, source_node_id, target_node_id, kind, anchor_message_id,
-      fork_boundary_message_id, fork_kind, created_at)
+      fork_boundary_message_id, fork_kind, created_at, rev)
     VALUES (@id, @workspace_id, @source_node_id, @target_node_id, @kind, @anchor_message_id,
-      @fork_boundary_message_id, @fork_kind, @created_at)
+      @fork_boundary_message_id, @fork_kind, @created_at, @rev)
     ON CONFLICT(id) DO UPDATE SET
-      fork_boundary_message_id=COALESCE(edges.fork_boundary_message_id, excluded.fork_boundary_message_id)
-  `, edge);
+      source_node_id=excluded.source_node_id,
+      target_node_id=excluded.target_node_id,
+      kind=excluded.kind,
+      anchor_message_id=excluded.anchor_message_id,
+      fork_boundary_message_id=COALESCE(edges.fork_boundary_message_id, excluded.fork_boundary_message_id),
+      fork_kind=COALESCE(excluded.fork_kind, edges.fork_kind),
+      created_at=excluded.created_at,
+      rev=COALESCE(excluded.rev, edges.rev)
+  `, { rev: null, ...edge });
 }
 
-function ensureDurableGraphNode(input: Record<string, unknown>): Record<string, SQLInputValue | null | Row | Row[]> {
+function ensureDurableGraphNode(input: Record<string, unknown>): Record<string, SQLInputValue | null | Row | Row[] | TreeRowChange> {
   assertGraphNodeInput(input);
   return runInTransaction(() => {
     const workspace = input.workspace as Record<string, unknown>;
@@ -250,6 +303,7 @@ function ensureDurableGraphNode(input: Record<string, unknown>): Record<string, 
     });
 
     let treeRow: Row | null = null;
+    let treeChange: TreeRowChange | null = null;
     if (tree) {
       const treeId = requiredId(tree.id as string, 'tree.id');
       if (node.treeId && node.treeId !== treeId) {
@@ -264,7 +318,7 @@ function ensureDurableGraphNode(input: Record<string, unknown>): Record<string, 
       if (existingTree && existingTree.root_node_id !== tree.rootNodeId) {
         throw new DomainError('conflict', 'tree_identity_mismatch', `tree ${treeId} was replayed with a different root`);
       }
-      saveTree({
+      treeChange = saveTree({
         id: treeId,
         workspace_id: workspaceId,
         root_node_id: requiredId(tree.rootNodeId as string, 'tree.rootNodeId'),
@@ -278,12 +332,13 @@ function ensureDurableGraphNode(input: Record<string, unknown>): Record<string, 
       treeRow = trees.find((t) => t.id === treeId) ?? null;
     }
 
-    assertNodePlacement(workspaceId, (node.treeId as string) ?? null, (node.parentNodeId as string) ?? null, {
+    const placement: NodePlacementLookup = {
       getTree: (id) => getRow('SELECT workspace_id FROM trees WHERE id = ?', id) as { workspace_id: string } | undefined,
-      getNode: (id) => getRow('SELECT workspace_id, tree_id FROM nodes WHERE id = ? AND purged_at IS NULL', id) as { workspace_id: string; tree_id: string | null } | undefined,
-    });
+      getNode: (id) => getNode(id) as { workspace_id: string; tree_id: string | null } | undefined,
+    };
+    assertNodePlacement(workspaceId, (node.treeId as string) ?? null, (node.parentNodeId as string) ?? null, placement);
 
-    const existingNode = getRow('SELECT * FROM nodes WHERE id = ?', nodeId);
+    const existingNode = getNode(nodeId);
     if (existingNode) {
       if (
         existingNode.workspace_id !== workspaceId
@@ -310,32 +365,16 @@ function ensureDurableGraphNode(input: Record<string, unknown>): Record<string, 
     }
 
     if (tree) {
-      const root = getRow('SELECT * FROM nodes WHERE id = ?', asValue(tree.rootNodeId));
-      if (!root || root.workspace_id !== workspaceId || root.tree_id !== tree.id) {
-        throw new DomainError('conflict', 'tree_root_mismatch', `tree ${tree.id} root must belong to the same workspace and tree`);
-      }
+      assertTreeRoot(workspaceId, { id: tree.id as string, workspace_id: workspaceId, root_node_id: tree.rootNodeId as string }, placement);
     }
-
     const ws = getRow('SELECT * FROM workspaces WHERE id = ? AND purged_at IS NULL', workspaceId);
-    if (ws?.active_tree_id) {
-      const trees = allRows('SELECT id FROM trees WHERE workspace_id = ?', workspaceId);
-      if (!trees.some((t) => t.id === ws.active_tree_id)) {
-        throw new DomainError('conflict', 'active_tree_workspace_mismatch', 'active tree must belong to the same workspace');
-      }
-    }
+    assertActiveTree(ws?.active_tree_id as string | null | undefined, () => allRows('SELECT id FROM trees WHERE workspace_id = ?', workspaceId));
 
     for (const edge of edges) {
       if (edge.targetNodeId !== nodeId) {
         throw new DomainError('conflict', 'edge_target_mismatch', 'graph prerequisite edges must target the ensured node');
       }
-      const source = getRow('SELECT * FROM nodes WHERE id = ?', asValue(edge.sourceNodeId));
-      const target = getRow('SELECT * FROM nodes WHERE id = ?', asValue(edge.targetNodeId));
-      if (!source || !target || source.workspace_id !== workspaceId || target.workspace_id !== workspaceId) {
-        throw new DomainError('conflict', 'edge_workspace_mismatch', 'edge endpoints must belong to the same workspace');
-      }
-      if (edge.kind === 'branch' && source.tree_id !== target.tree_id) {
-        throw new DomainError('conflict', 'edge_tree_mismatch', 'branch edge endpoints must belong to the same tree');
-      }
+      assertEdgePlacement(workspaceId, edge as { kind: string; sourceNodeId: string; targetNodeId: string }, placement);
       const existingEdge = getRow(
         'SELECT workspace_id, source_node_id, target_node_id, kind FROM edges WHERE id = ?',
         asValue(edge.id),
@@ -369,7 +408,7 @@ function ensureDurableGraphNode(input: Record<string, unknown>): Record<string, 
 
     run('UPDATE workspaces SET persistence_version = 2 WHERE id = ?', workspaceId);
     const finalWorkspace = getRow('SELECT * FROM workspaces WHERE id = ? AND purged_at IS NULL', workspaceId);
-    const finalNode = getRow('SELECT * FROM nodes WHERE id = ?', nodeId);
+    const finalNode = getNode(nodeId);
     if (!finalWorkspace || !finalNode) throw new Error('graph prerequisite transaction did not materialize canonical rows');
     const edgeIds = new Set(edges.map((e) => e.id));
     const allEdges = allRows('SELECT * FROM edges WHERE workspace_id = ?', workspaceId);
@@ -378,6 +417,8 @@ function ensureDurableGraphNode(input: Record<string, unknown>): Record<string, 
       tree: treeRow,
       node: finalNode,
       edges: allEdges.filter((e) => edgeIds.has(e.id as string)),
+      // For dbWorkerClient only: it records this change and strips it from the result.
+      treeChange,
     };
   });
 }

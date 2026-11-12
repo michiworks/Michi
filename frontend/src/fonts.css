@@ -161,3 +161,75 @@
   src: url('../../node_modules/@fontsource-variable/source-serif-4/files/source-serif-4-latin-opsz-italic.woff2') format('woff2-variations');
   unicode-range: U+0000-00FF,U+0131,U+0152-0153,U+02BB-02BC,U+02C6,U+02DA,U+02DC,U+0304,U+0308,U+0329,U+2000-206F,U+2074,U+20AC,U+2122,U+2191,U+2193,U+2212,U+2215,U+FEFF,U+FFFD;
 }
+
+/* CJK alias faces: 'Michi CJK SC' / 'Michi CJK JP' / 'Michi CJK KR', picked by
+   the document language through --cjk-alias (index.css) and listed right
+   after the Latin web font in every sans and mono stack. They cover only Han,
+   kana, Hangul, CJK punctuation and fullwidth forms, drawn from the system's
+   own CJK fonts. Without them those glyphs fall through Geist to system-ui,
+   whose fallback iOS draws at ~0.95 em (15px text measured 14.3pt on an
+   iPhone), and the CJK list at the end of each stack is never reached. With no
+   local() match a face fails and the stack continues exactly as before. */
+@font-face {
+  font-family: 'Michi CJK SC';
+  font-style: normal;
+  font-weight: 100 449;
+  src: local('PingFangSC-Regular'), local('PingFang SC Regular'), local('PingFang SC'), local('HiraginoSansGB-W3'), local('Hiragino Sans GB W3'), local('MicrosoftYaHei'), local('Microsoft YaHei'), local('SourceHanSansSC-Regular'), local('Source Han Sans SC'), local('NotoSansCJKsc-Regular'), local('Noto Sans CJK SC'), local('NotoSansSC-Regular'), local('Noto Sans SC');
+  unicode-range: U+2E80-2FDF, U+3000-303F, U+3040-30FF, U+3100-312F, U+31A0-31BF, U+3400-4DBF, U+4E00-9FFF, U+F900-FAFF, U+FE30-FE4F, U+FF00-FFEF;
+}
+@font-face {
+  font-family: 'Michi CJK SC';
+  font-style: normal;
+  font-weight: 450 549;
+  src: local('PingFangSC-Medium'), local('PingFang SC Medium'), local('SourceHanSansSC-Medium'), local('NotoSansCJKsc-Medium'), local('Noto Sans CJK SC Medium'), local('NotoSansSC-Medium'), local('Noto Sans SC Medium'), local('PingFangSC-Regular'), local('MicrosoftYaHei'), local('Microsoft YaHei'), local('NotoSansCJKsc-Regular'), local('Noto Sans CJK SC'), local('Noto Sans SC');
+  unicode-range: U+2E80-2FDF, U+3000-303F, U+3040-30FF, U+3100-312F, U+31A0-31BF, U+3400-4DBF, U+4E00-9FFF, U+F900-FAFF, U+FE30-FE4F, U+FF00-FFEF;
+}
+@font-face {
+  font-family: 'Michi CJK SC';
+  font-style: normal;
+  font-weight: 550 900;
+  src: local('PingFangSC-Semibold'), local('PingFang SC Semibold'), local('HiraginoSansGB-W6'), local('Hiragino Sans GB W6'), local('MicrosoftYaHei-Bold'), local('Microsoft YaHei Bold'), local('SourceHanSansSC-Bold'), local('NotoSansCJKsc-Bold'), local('Noto Sans CJK SC Bold'), local('NotoSansSC-Bold'), local('Noto Sans SC Bold');
+  unicode-range: U+2E80-2FDF, U+3000-303F, U+3040-30FF, U+3100-312F, U+31A0-31BF, U+3400-4DBF, U+4E00-9FFF, U+F900-FAFF, U+FE30-FE4F, U+FF00-FFEF;
+}
+@font-face {
+  font-family: 'Michi CJK JP';
+  font-style: normal;
+  font-weight: 100 449;
+  src: local('HiraKakuProN-W3'), local('Hiragino Kaku Gothic ProN W3'), local('HiraginoSans-W3'), local('Hiragino Sans W3'), local('NotoSansCJKjp-Regular'), local('Noto Sans CJK JP'), local('NotoSansJP-Regular'), local('Noto Sans JP'), local('YuGothic-Regular'), local('Yu Gothic Regular'), local('Meiryo');
+  unicode-range: U+2E80-2FDF, U+3000-303F, U+3040-30FF, U+31F0-31FF, U+3400-4DBF, U+4E00-9FFF, U+F900-FAFF, U+FE30-FE4F, U+FF00-FFEF;
+}
+@font-face {
+  font-family: 'Michi CJK JP';
+  font-style: normal;
+  font-weight: 450 549;
+  src: local('HiraginoSans-W5'), local('Hiragino Sans W5'), local('NotoSansCJKjp-Medium'), local('Noto Sans CJK JP Medium'), local('NotoSansJP-Medium'), local('YuGothic-Medium'), local('Yu Gothic Medium'), local('HiraKakuProN-W3'), local('Hiragino Kaku Gothic ProN W3'), local('Meiryo');
+  unicode-range: U+2E80-2FDF, U+3000-303F, U+3040-30FF, U+31F0-31FF, U+3400-4DBF, U+4E00-9FFF, U+F900-FAFF, U+FE30-FE4F, U+FF00-FFEF;
+}
+@font-face {
+  font-family: 'Michi CJK JP';
+  font-style: normal;
+  font-weight: 550 900;
+  src: local('HiraKakuProN-W6'), local('Hiragino Kaku Gothic ProN W6'), local('HiraginoSans-W6'), local('Hiragino Sans W6'), local('NotoSansCJKjp-Bold'), local('Noto Sans CJK JP Bold'), local('NotoSansJP-Bold'), local('YuGothic-Bold'), local('Yu Gothic Bold'), local('Meiryo-Bold'), local('Meiryo Bold');
+  unicode-range: U+2E80-2FDF, U+3000-303F, U+3040-30FF, U+31F0-31FF, U+3400-4DBF, U+4E00-9FFF, U+F900-FAFF, U+FE30-FE4F, U+FF00-FFEF;
+}
+@font-face {
+  font-family: 'Michi CJK KR';
+  font-style: normal;
+  font-weight: 100 449;
+  src: local('AppleSDGothicNeo-Regular'), local('Apple SD Gothic Neo Regular'), local('Apple SD Gothic Neo'), local('NotoSansCJKkr-Regular'), local('Noto Sans CJK KR'), local('NotoSansKR-Regular'), local('Noto Sans KR'), local('MalgunGothic'), local('Malgun Gothic');
+  unicode-range: U+1100-11FF, U+2E80-2FDF, U+3000-303F, U+3130-318F, U+3400-4DBF, U+4E00-9FFF, U+AC00-D7AF, U+F900-FAFF, U+FE30-FE4F, U+FF00-FFEF;
+}
+@font-face {
+  font-family: 'Michi CJK KR';
+  font-style: normal;
+  font-weight: 450 549;
+  src: local('AppleSDGothicNeo-Medium'), local('Apple SD Gothic Neo Medium'), local('NotoSansCJKkr-Medium'), local('Noto Sans CJK KR Medium'), local('NotoSansKR-Medium'), local('AppleSDGothicNeo-Regular'), local('MalgunGothic'), local('Malgun Gothic');
+  unicode-range: U+1100-11FF, U+2E80-2FDF, U+3000-303F, U+3130-318F, U+3400-4DBF, U+4E00-9FFF, U+AC00-D7AF, U+F900-FAFF, U+FE30-FE4F, U+FF00-FFEF;
+}
+@font-face {
+  font-family: 'Michi CJK KR';
+  font-style: normal;
+  font-weight: 550 900;
+  src: local('AppleSDGothicNeo-SemiBold'), local('AppleSDGothicNeo-Bold'), local('Apple SD Gothic Neo SemiBold'), local('NotoSansCJKkr-Bold'), local('Noto Sans CJK KR Bold'), local('NotoSansKR-Bold'), local('MalgunGothicBold'), local('Malgun Gothic Bold');
+  unicode-range: U+1100-11FF, U+2E80-2FDF, U+3000-303F, U+3130-318F, U+3400-4DBF, U+4E00-9FFF, U+AC00-D7AF, U+F900-FAFF, U+FE30-FE4F, U+FF00-FFEF;
+}

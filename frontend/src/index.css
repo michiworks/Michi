@@ -36,7 +36,7 @@
 
   /* Font families */
   --font-sans: var(--ui-font);
-  --font-mono: 'Geist Mono', 'IBM Plex Mono', Menlo, ui-monospace, monospace;
+  --font-mono: 'Geist Mono', var(--cjk-alias), 'IBM Plex Mono', Menlo, ui-monospace, monospace;
   --font-serif: ui-serif, Georgia, Cambria, 'Times New Roman', serif;
 }
 
@@ -51,9 +51,11 @@
 :root {
   /* Defaults match DEFAULT_PREFS (Geist) so first paint doesn't flash another
      face before prefs.tsx applies the user's choice. */
-  --ui-font: 'Geist', system-ui, -apple-system, sans-serif, var(--ui-cjk-font);
+  --ui-font: 'Geist', var(--cjk-alias), system-ui, -apple-system, sans-serif, var(--ui-cjk-font);
   --ui-cjk-font: 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei',
                  'Source Han Sans SC', 'Noto Sans CJK SC', sans-serif;
+  /* CJK glyphs right after the Latin web font, at full size (fonts.css). */
+  --cjk-alias: 'Michi CJK SC';
 
   /* Interface type scale. Every chrome font-size resolves to one of these —
      no half pixels. Message bodies scale separately from --message-body-size. */
@@ -74,16 +76,22 @@
   --ls-wide: 0.04em;
   --ls-caps: 0.08em;
   --ls-caps-wide: 0.14em;
+
+  /* Keyboard focus: the baseline ring below, and the one component rules
+     restate with an offset of their own. */
+  --focus-ring: 2px solid color-mix(in srgb, var(--term-accent) 62%, transparent);
 }
 
 :root:lang(ja) {
   --ui-cjk-font: 'Hiragino Kaku Gothic ProN', 'Noto Sans JP',
                  'Yu Gothic', 'Meiryo', sans-serif;
+  --cjk-alias: 'Michi CJK JP';
 }
 
 :root:lang(ko) {
   --ui-cjk-font: 'Apple SD Gothic Neo', 'Noto Sans KR',
                  'Malgun Gothic', sans-serif;
+  --cjk-alias: 'Michi CJK KR';
 }
 
 /* Tailwind 4 changed the default border color from gray-200 to currentColor.
@@ -102,7 +110,7 @@
    fills the gaps (icon buttons, rows, ad-hoc controls). */
 @layer base {
   :where(button, [role='button'], a[href], input, select, textarea):focus-visible {
-    outline: 2px solid color-mix(in srgb, var(--term-accent) 62%, transparent);
+    outline: var(--focus-ring);
     outline-offset: 1px;
   }
 }
@@ -171,6 +179,12 @@
   padding: 0.4em 1em;
   background: color-mix(in srgb, currentColor 3%, transparent);
   border-radius: 0 var(--ui-radius) var(--ui-radius) 0;
+  /* @tailwindcss/typography sets italic, weight 500 and generated curly
+     quotes; no italic face ships, so they rendered as synthetic oblique
+     (Han included) with marks that are not in the message. */
+  font-style: normal;
+  font-weight: inherit;
+  quotes: none;
 }
 
 .prose a {
@@ -193,7 +207,7 @@
    render identically.
    --------------------------------------------------------------------------- */
 :root {
-  --message-latin-font: 'Geist', system-ui, -apple-system, sans-serif;
+  --message-latin-font: 'Geist', var(--cjk-alias), system-ui, -apple-system, sans-serif;
   --message-cjk-font: 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei',
                       'Source Han Sans SC', 'Noto Sans CJK SC', sans-serif;
   /* Font for code inside messages (inline + fenced blocks). Always monospace
@@ -201,7 +215,7 @@
      column-aligned. Overridden by prefs.tsx per messageFont preset to pair
      with the prose typeface; the no-JS / SSR default below is a safe mono
      stack. */
-  --message-code-font: 'Geist Mono', 'IBM Plex Mono', Menlo, ui-monospace, monospace;
+  --message-code-font: 'Geist Mono', var(--cjk-alias), 'IBM Plex Mono', Menlo, ui-monospace, monospace;
   /* Font size remains user configurable; pane density only changes chrome. */
   --message-body-size-base: 16px;
   --message-body-size: var(--message-body-size-base);
@@ -236,7 +250,7 @@
 }
 /* Feature components provide the outer block; their nested table/pre keeps
    its own internal layout rather than adding a second paragraph margin. */
-:is(.terminal-message-assistant, .terminal-message-user) .prose :where(.michi-code-block, .michi-table-feature, .michi-mermaid-block) {
+:is(.terminal-message-assistant, .terminal-message-user) .prose :where(.michi-code-block, .michi-table-feature) {
   margin-block: var(--message-prose-flow) 0;
 }
 :is(.terminal-message-assistant, .terminal-message-user) .prose .michi-table-feature table {
@@ -245,7 +259,7 @@
 /* Use leading margins, including the previous semantic block across the
    display:contents roots used during streaming. Whitespace blocks are ignored
    by the splitter metadata, so completion does not change the rhythm. */
-:is(.terminal-message-assistant, .terminal-message-user) .prose :where(p, ul, ol, dl, blockquote, pre, table, figure, details, .michi-code-block, .michi-table-feature, .michi-mermaid-block) {
+:is(.terminal-message-assistant, .terminal-message-user) .prose :where(p, ul, ol, dl, blockquote, pre, table, figure, details, .michi-code-block, .michi-table-feature) {
   margin-block: var(--message-prose-flow) 0;
 }
 :is(.terminal-message-assistant, .terminal-message-user) .prose :where(ul, ol) {
@@ -299,11 +313,11 @@
 :is(.terminal-message-assistant, .terminal-message-user) .prose :where(h5, h6) {
   font-size: 0.875em;
 }
-:is(.terminal-message-assistant, .terminal-message-user) .prose :where(h1, h2, h3, h4, h5, h6) + :where(p, ul, ol, dl, blockquote, pre, table, figure, details, .michi-code-block, .michi-table-feature, .michi-mermaid-block, h1, h2, h3, h4, h5, h6),
+:is(.terminal-message-assistant, .terminal-message-user) .prose :where(h1, h2, h3, h4, h5, h6) + :where(p, ul, ol, dl, blockquote, pre, table, figure, details, .michi-code-block, .michi-table-feature, h1, h2, h3, h4, h5, h6),
 :is(.terminal-message-assistant, .terminal-message-user) .prose[data-markdown-after='heading'] > :first-child {
   margin-block-start: calc(var(--message-prose-flow) * 0.667);
 }
-:is(.terminal-message-assistant, .terminal-message-user) .prose :where(ul, ol, dl) + :where(p, ul, ol, dl, blockquote, pre, table, figure, details, .michi-code-block, .michi-table-feature, .michi-mermaid-block, h1, h2, h3, h4, h5, h6),
+:is(.terminal-message-assistant, .terminal-message-user) .prose :where(ul, ol, dl) + :where(p, ul, ol, dl, blockquote, pre, table, figure, details, .michi-code-block, .michi-table-feature, h1, h2, h3, h4, h5, h6),
 :is(.terminal-message-assistant, .terminal-message-user) .prose[data-markdown-after='list'] > :first-child {
   margin-block-start: calc(var(--message-prose-flow) * 2);
 }
@@ -311,7 +325,7 @@
 :is(.terminal-message-assistant, .terminal-message-user) .prose[data-markdown-after='list'] > :is(h1, h2, h3, h4, h5, h6) {
   margin-block-start: calc(var(--message-prose-flow) * max(2, var(--message-heading-space)));
 }
-:is(.terminal-message-assistant, .terminal-message-user) .prose :where(table, .michi-table-feature) + :where(p, ul, ol, dl, blockquote, pre, table, figure, details, .michi-code-block, .michi-table-feature, .michi-mermaid-block, h1, h2, h3, h4, h5, h6),
+:is(.terminal-message-assistant, .terminal-message-user) .prose :where(table, .michi-table-feature) + :where(p, ul, ol, dl, blockquote, pre, table, figure, details, .michi-code-block, .michi-table-feature, h1, h2, h3, h4, h5, h6),
 :is(.terminal-message-assistant, .terminal-message-user) .prose[data-markdown-after='table'] > :first-child {
   margin-block-start: calc(var(--message-prose-flow) * 2);
 }
@@ -375,14 +389,144 @@
   overflow-wrap: break-word;
 }
 
+/* Focus dim. An unfocused pane is covered by a black veil at --pane-dim
+   (usePaneShellStyle, which every .terminal-pane root spreads): the same
+   result as the brightness(1 - --pane-dim) it replaces and the Topbar caption
+   cell still uses, composited as one layer instead of filtering the pane's
+   subtree. The pane isolates, so the veil sits over its raised children (find
+   bar, drop overlays) and under everything outside it. It never takes
+   pointer events: clicks, text selection, scrollbars and drops reach the pane
+   below. Black is the arithmetic of brightness(), not a theme surface. */
+.terminal-pane::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  z-index: var(--z-pane-dim);
+  background: black;
+  opacity: var(--pane-dim, 0);
+  pointer-events: none;
+  transition: opacity var(--t-soft) var(--t-ease);
+}
+
+/* content-visibility clips painting to the frame's padding box. Agent lines
+   hang their icon 28px left of the prose and their hover 4px right of it
+   (AgentLineBlocks.css), so the frame reaches that far through padding that
+   its negative margin cancels: the content does not move. */
 .terminal-message-frame {
+  --message-frame-bleed-start: 28px;
+  --message-frame-bleed-end: 4px;
   content-visibility: auto;
   contain-intrinsic-size: auto 72px;
+  margin-inline: calc(-1 * var(--message-frame-bleed-start)) calc(-1 * var(--message-frame-bleed-end));
+  padding-inline: var(--message-frame-bleed-start) var(--message-frame-bleed-end);
 }
 
 .terminal-message-frame[data-streaming-tail="true"] {
   content-visibility: visible;
   contain-intrinsic-size: auto;
+}
+
+/* Pane density, one scale for a chat pane: the transcript's padding and type,
+   the messages' spacing and the floating composer's inset. It sits on the
+   pane root because the composer is the transcript's sibling. The composer
+   card sits a little outside the text column on purpose (adc8d509).
+
+   A user message starts a turn, so it sits further from the answer above it
+   than from its own answer below. The extra space sits under the message
+   before it (data-next-role, PaneMessageList), so no message's own box
+   changes when an older page loads above it with the scroll anchored. Its
+   hover actions float over the lead space above its answer (--answer-lead,
+   where a speaker line once sat) instead of holding an empty row under the
+   bubble, so the frame skips content-visibility, which would clip them. A
+   user message followed by another keeps the row, so the actions never cover
+   that bubble. */
+.terminal-pane {
+  --pane-pad-top: 12px; --pane-gutter: 24px; --pane-font-size: 12px; --pane-leading: 1.6;
+  --msg-gap: 10px; --msg-label-size: 10px; --msg-label-gap: 3px; --msg-assistant-pad: 5px;
+  --composer-inset: 20px; --user-turn-gap: 14px; --answer-lead: 18px;
+}
+.terminal-pane[data-density='dense'] {
+  --pane-pad-top: 8px; --pane-gutter: 22px; --pane-font-size: 11px; --pane-leading: 1.45;
+  --msg-gap: 6px; --msg-label-size: 9px; --msg-label-gap: 2px; --msg-assistant-pad: 4px;
+  --composer-inset: 18px; --user-turn-gap: 8px; --answer-lead: 16px;
+}
+.terminal-pane[data-density='comfortable'] {
+  --pane-pad-top: 16px; --pane-gutter: 32px; --pane-font-size: 13px; --pane-leading: 1.75;
+  --msg-gap: 16px; --msg-label-size: 10.5px; --msg-label-gap: 4px; --msg-assistant-pad: 6px;
+  --composer-inset: 26px; --user-turn-gap: 20px; --answer-lead: 20px;
+}
+.terminal-message-frame[data-next-role='user']:not([data-role='user']) { padding-bottom: var(--user-turn-gap, 14px); }
+.terminal-message-frame[data-role='user'][data-next-role='assistant'] { padding-bottom: var(--answer-lead, 18px); }
+.terminal-message-frame[data-role='user'] {
+  content-visibility: visible;
+  contain-intrinsic-size: auto;
+}
+.terminal-message-frame[data-role='user'] .t-user-msg-actions {
+  position: absolute;
+  top: 100%;
+  right: 0;
+  z-index: 1;
+}
+.terminal-message-frame[data-role='user'][data-next-role='user'] .t-user-msg-actions {
+  position: static;
+}
+
+/* Replies with no user message between them read as one message, its actions
+   under the last part (PaneMessageList marks the run). Hovering an earlier
+   part shows them too: the first run end after the hovered part is its own. */
+@media (hover: hover) {
+  .terminal-message-frame[data-run-part]:hover
+    ~ .terminal-message-frame[data-run-end]:not(.terminal-message-frame[data-run-part]:hover ~ [data-run-end] ~ *)
+    .t-msg-actions {
+    opacity: 1 !important;
+    pointer-events: auto !important;
+  }
+}
+/* On a touch screen a tap is the hover, and a tap on a control is the
+   control's: revealing the actions would make WebKit drop it. The list is
+   MessageBlock.tsx's TAP_CONTROL. */
+@media (hover: none) {
+  .terminal-message-frame[data-run-part]:hover:not(:has(:is(a[href], button, input, select, textarea, summary, [role='button'], [data-mention], [data-tap-target]):hover))
+    ~ .terminal-message-frame[data-run-end]:not(.terminal-message-frame[data-run-part]:hover ~ [data-run-end] ~ *)
+    .t-msg-actions {
+    opacity: 1 !important;
+    pointer-events: auto !important;
+  }
+}
+/* Focus shows them as hover does: anywhere in an answer (a link, a tool row,
+   the meta line's own buttons), or on a user message's buttons, so a keyboard
+   never lands on a control it cannot see. Keyboard focus only (:focus-visible):
+   a tap that focuses a button in the answer, such as the memory sources
+   toggle, must not reveal the actions on a phone. */
+.terminal-message-frame[data-role='assistant']:has(:focus-visible) .t-msg-actions,
+.t-msg-actions:has(:focus-visible) {
+  opacity: 1 !important;
+  pointer-events: auto !important;
+}
+
+/* An answer's meta line (MessageBlock): copy, retry and branch, then
+   "time · tokens" in the chrome's 12px. The copy glyph lines up with the
+   prose; its button's padding hangs into the gutter. */
+.t-answer-meta {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+  margin: 4px 0 0 -6px;
+}
+.t-answer-meta__text {
+  min-width: 0;
+  margin-left: 6px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--term-muted);
+  /* A phone sets --msg-meta-size from its Text size (mobile.css). */
+  font: 400 var(--msg-meta-size, var(--fs-md))/1.4 var(--ui-font);
+  font-variant-numeric: tabular-nums;
+}
+.t-answer-meta__part + .t-answer-meta__part::before {
+  content: '·';
+  margin-inline: 6px;
 }
 
 /* Boundary between copied parent history and an extracted thread's own turns. */
@@ -572,24 +716,12 @@
   background-color: var(--michi-code-token-bg, transparent);
 }
 
-.michi-table-feature,
-.michi-mermaid-block {
+.michi-table-feature {
   position: relative;
   margin: var(--message-paragraph-spacing, 1em) 0;
   border: 1px solid var(--term-line, var(--line));
   border-radius: var(--ui-radius);
   background: var(--term-surface, var(--surface));
-}
-
-.michi-mermaid-block.is-fullscreen {
-  position: fixed;
-  inset: 16px;
-  z-index: var(--z-lightbox);
-  display: flex;
-  flex-direction: column;
-  margin: 0;
-  padding: 12px;
-  background: var(--term-bg);
 }
 
 /* --- Table lightbox (fullscreen viewer on ModalShell) --- */
@@ -644,14 +776,6 @@
   word-break: normal;
 }
 
-.michi-mermaid-controls {
-  display: flex;
-  justify-content: flex-end;
-  gap: 4px;
-  padding: 6px;
-  border-bottom: 1px solid var(--term-line, var(--line));
-}
-
 /* Touch (no hover): the controls stay visible as a toolbar strip inside the
    table box, since nothing could reveal them. */
 .michi-table-controls {
@@ -690,8 +814,7 @@
   }
 }
 
-.michi-table-controls button,
-.michi-mermaid-controls button {
+.michi-table-controls button {
   min-height: 24px;
   padding: 2px 7px;
   border: 1px solid var(--term-line, var(--line));
@@ -717,7 +840,7 @@
    MarkdownContent wraps each cell's content in .michi-table-cell, so the grid
    holds exactly the label and one value item; bare text, code and <br> would
    otherwise each become a grid item and wrap into the label column. */
-@media (max-width: 700px) {
+@media (max-width: 700px), (pointer: coarse) and (max-height: 500px) {
   .michi-table-scroll:has(> table[data-cards]) { overflow: visible; }
   .prose table[data-cards],
   .prose table[data-cards] :is(tbody, tr) { display: block; }
@@ -741,36 +864,6 @@
     font-size: 0.92em;
   }
   .prose table[data-cards] td:first-child { font-weight: 600; }
-}
-
-.michi-mermaid-block {
-  content-visibility: auto;
-  contain-intrinsic-size: auto 220px;
-}
-
-.michi-mermaid-viewport {
-  min-height: 200px;
-  overflow: hidden;
-  padding: 12px;
-}
-
-.michi-mermaid-svg {
-  display: flex;
-  justify-content: center;
-  transform-origin: center;
-  transition: transform var(--t-soft) var(--t-ease);
-}
-
-.michi-mermaid-svg svg {
-  max-width: 100%;
-  height: auto;
-}
-
-.michi-mermaid-loading,
-.michi-mermaid-error {
-  color: var(--term-muted, var(--fg-muted));
-  font-family: var(--message-code-font);
-  font-size: var(--fs-md);
 }
 
 /* ───────────────────────────────────────────────────────────────────────
@@ -862,7 +955,7 @@
 }
 /* Phones always wrap: a block that scrolls sideways under a finger reads as
    the page itself sliding. */
-@media (max-width: 700px) {
+@media (max-width: 700px), (pointer: coarse) and (max-height: 500px) {
   .michi-code-scroll { overflow-x: hidden; }
   .michi-code-pre { min-width: 0; }
   .michi-code-line { white-space: pre-wrap; overflow-wrap: anywhere; }
@@ -875,12 +968,13 @@
   background-color: var(--shiki-dark-bg, var(--michi-code-token-bg, transparent));
 }
 
-/* User bubble · quiet paper card. No role/time label: the card, its right
-   alignment and the 2px accent right rule already mark the speaker, and the
-   time shows in the hover action row (MessageActions). The bubble reads as a
-   warm-paper card kissed with a hint of accent (4% mix), with a warm drop
-   shadow tinted by the accent so the lift feels of-a-piece with the rule
-   instead of a neutral gray cast.
+/* User bubble · a quiet card with an accent right rule. No role/time label:
+   the card, its right alignment and the 2px rule mark the speaker, and the
+   time shows in the hover action row (MessageActions). The card is one step
+   up from the pane it sits on (--term-user-bubble-bg; the pane itself paints
+   --term-surface) with no shadow, so the rule is its only accent. Its left
+   corners take the composer's radius (square on desktop, rounded on the
+   phone, mobile.css); the rule's side stays square so the rule runs straight.
    Typography uses the !important rules so they beat the density-driven
    inline fontFamily/fontSize/lineHeight that MessageBlock sets. */
 .terminal-message-user {
@@ -890,12 +984,9 @@
   position: relative;
   max-width: 72%;
   padding: 9px 15px 10px;
-  background: color-mix(in srgb, var(--term-accent) 4%, var(--term-surface));
+  border-radius: var(--term-composer-radius) 0 0 var(--term-composer-radius);
+  background: var(--term-user-bubble-bg);
   border-right: 2px solid var(--term-accent);
-  box-shadow:
-    0 1px 0 color-mix(in srgb, var(--term-accent) 6%, transparent),
-    0 1px 2px rgba(0, 0, 0, 0.03),
-    0 6px 18px -10px color-mix(in srgb, var(--term-accent) 22%, transparent);
 }
 .terminal-message-user[data-density='dense'] { padding: 6px 13px 7px; }
 .terminal-message-user[data-density='compact'] { padding: 8px 15px 9px; }
@@ -903,12 +994,9 @@
 /* The long-message fade belongs to its content, never its expansion control. */
 .t-user-text-toggle { color: var(--term-muted); }
 .t-user-text-toggle:is(:hover, :focus-visible) { color: var(--term-fg); }
-.t-user-text-toggle:focus-visible {
-  outline: 2px solid color-mix(in srgb, var(--term-accent) 62%, transparent);
-  outline-offset: 1px;
-}
 
 .terminal-message-steered,
+.terminal-message-skill,
 .terminal-message-thread-source {
   margin-bottom: 4px;
   color: var(--term-muted);
@@ -1085,11 +1173,13 @@ body {
   --term-sidebar-outline: none;
   --term-sidebar-radius: 0px;
   --term-pane-bg: var(--term-surface);
+  /* The user bubble: the pane lifted by a little of the text colour, so it
+     reads as a card in light and dark palettes alike. */
+  --term-user-bubble-bg: color-mix(in srgb, var(--term-fg) 4%, var(--term-pane-bg));
   --term-pane-border: none;
   --term-pane-divider: 1px solid var(--term-line);
   --term-pane-radius: 0px;
   --term-pane-shadow: none;
-  --term-pane-header-bg: var(--term-alt);
   --term-hover-bg: var(--term-alt);
   /* Motion timing tokens. motion/tokens.ts (DUR) mirrors the one-shot ones
      for motion components; tokens.css.test.js keeps the two in step. Every
@@ -1131,50 +1221,35 @@ body {
   --term-rail-1: var(--term-line);
   --term-rail-2: color-mix(in srgb, var(--term-line) 70%, var(--term-bg));
   --term-rail-3: color-mix(in srgb, var(--term-line) 40%, var(--term-bg));
-  /* ── Shared glass material — the sidebar and every overlay are ONE sheet ─────
-     The sidebar and every .term-glass surface (Settings drawer, menus, popovers)
-     read the SAME blur, the SAME slider-driven translucency, and the SAME accent
-     wash — so they're identical by construction and move together when the glass
-     slider changes. The sidebar reveals the wash from --term-shell-bg painted
-     behind it; overlays sit over content instead, so they bake an equivalent
-     transparent-based wash into their own background. Under vibrancy the CSS blur
-     still works over OPAQUE web content (the Settings drawer over the content
-     column), but an overlay floating over a transparent region (a menu over the
-     vibrancy-transparent sidebar) has nothing to blur — a positional limit, not a
-     vibrancy bug. */
+  /* ── Glass materials: the sidebar and the overlays are separate ──────────────
+     The sidebar is thin glass: its solidity follows the translucency slider and
+     it blurs the --term-shell-bg wash painted behind it. Overlays (modals,
+     popovers, menus — every .term-glass surface) float over reading text, so
+     they use a denser frost of their own (below) that does not follow the
+     sidebar: at the sidebar's thin setting the text and colour behind a dialog
+     ghosted through its navigation and lists. Under vibrancy the CSS blur still
+     works over OPAQUE web content (a modal over the content column), but an
+     overlay floating over a transparent region (a menu over the
+     vibrancy-transparent sidebar) has nothing to blur — a positional limit, not
+     a vibrancy bug. */
   --term-glass-blur: 26px;
   --term-glass-saturate: 160%;
-  /* Per-surface solidity knob: defaults to the sidebar slider so the Settings
-     drawer + sidebar move together. A surface can still override it locally; the
-     color-mix lives in .term-glass itself (NOT a :root token) so the var resolves
-     at the element that overrides it — a :root token would bake in :root's alpha
-     and inherit that, ignoring per-surface overrides. */
-  --term-glass-solid-alpha: var(--term-sidebar-solid-alpha);
-  /* Accent+mauve wash so an overlay reads as tinted glass on ANY backdrop, the
-     way the sidebar does. Transparent-based (no opaque floor) so it layers over
-     content; anchored top/trailing to mirror the sidebar's left-anchored wash.
-     Colour strength is scaled by --term-glass-wash-strength (0..2, default 1;
-     driven by the "Glass tint" slider via prefs.glassTint / 100). The base
-     percentages (11% / 9%) are multiplied by that factor. */
-  --term-glass-wash-strength: 1;
-  --term-glass-wash:
-    radial-gradient(600px 420px at 100% -8%,
-      color-mix(in srgb, var(--term-accent) calc(11% * var(--term-glass-wash-strength)), transparent), transparent 60%),
-    radial-gradient(520px 480px at 88% 108%,
-      color-mix(in srgb, var(--term-mauve) calc(9% * var(--term-glass-wash-strength)), transparent), transparent 62%);
-  /* Edge cues: a hairline inner highlight + a soft neutral drop so the panel
-     floats. Neutral (not directional) so the SAME primitive reads right for the
-     right-anchored Settings drawer AND a free-floating context menu. Opacity of
-     both is scaled by --term-glass-depth (0..2, default 1; the "Glass depth"
-     slider via prefs.glassDepth / 100) so highlight + shadow strengthen together. */
-  --term-glass-depth: 1;
-  --term-glass-highlight: inset 0 1px 0 color-mix(in srgb, #ffffff calc(55% * var(--term-glass-depth)), transparent);
-  --term-glass-cast:
-    0 12px 32px -12px rgba(0, 0, 0, calc(0.25 * var(--term-glass-depth))),
-    0 4px 12px -6px rgba(0, 0, 0, calc(0.12 * var(--term-glass-depth)));
+  /* Overlay frost: mostly solid surface, a wide blur so nothing behind keeps
+     its shape, near-neutral saturation and no accent wash, so what shows
+     through is a soft haze rather than smeared text and colour. Desktop modals
+     freeze the same blur and saturation into their capture (useFrozenGlass). */
+  --term-overlay-solid-alpha: 0.88;
+  --term-overlay-blur: 48px;
+  --term-overlay-saturate: 110%;
+  /* Edge cues: a faint inner top highlight and a soft neutral drop so the
+     panel floats. Neutral (not directional) so the same material reads right
+     for a centered modal and a free-floating menu. */
+  --term-overlay-highlight: inset 0 1px 0 color-mix(in srgb, #ffffff 8%, transparent);
+  --term-overlay-cast:
+    0 24px 60px -18px rgba(0, 0, 0, 0.45),
+    0 6px 16px -8px rgba(0, 0, 0, 0.25);
   /* Card/list surface for controls INSIDE a glass panel. Fixed modest
-     translucency (NOT slider-driven) so control labels stay legible even at full
-     glass. Only container/card surfaces use this — knobs, selected states, accent
+     translucency (NOT slider-driven) so control labels stay legible. Only container/card surfaces use this — knobs, selected states, accent
      fills and text keep their opaque tokens. */
   --term-surface-glass: color-mix(in srgb, color-mix(in srgb, var(--term-accent) 6%, var(--term-surface)) 46%, transparent);
 }
@@ -1190,7 +1265,6 @@ body {
    apps) will layer on top of this in a later pass, gated to Electron.
    ------------------------------------------------------------------------- */
 .terminal-sidebar {
-  /* One blur source shared with .term-glass so sidebar + overlays stay identical. */
   -webkit-backdrop-filter: blur(var(--term-glass-blur)) saturate(var(--term-glass-saturate));
   backdrop-filter: blur(var(--term-glass-blur)) saturate(var(--term-glass-saturate));
 }
@@ -1277,7 +1351,9 @@ body {
 .sb-unread-dot[data-unread='self'],
 .sb-unread-dot[data-unread='within'] {
   transform: scale(1);
-  transition: transform var(--t-enter) cubic-bezier(.3, 1.6, .5, 1);
+  /* A beat late, so a reply that lands while the row's rail is still lit pops
+     its dot as the rail starts to go out (see RailAfterglow), not over it. */
+  transition: transform var(--t-enter) cubic-bezier(.3, 1.6, .5, 1) 120ms;
 }
 .sb-unread-dot[data-unread='self'] { background: var(--term-digest); }
 .sb-unread-dot[data-unread='within'] { box-shadow: inset 0 0 0 1.5px var(--term-digest); }
@@ -1289,6 +1365,29 @@ body {
 }
 @media (prefers-reduced-motion: reduce) {
   .sb-unread-dot { transition: none !important; }
+}
+
+/* ── Sidebar rail afterglow (see RailAfterglow.tsx) ────────────────────────
+   The live rail's last frame, fading out over the row's own rail when a run
+   ends. Starts at the pulse's midpoint so the hand-off doesn't flash. */
+.sb-rail-afterglow {
+  position: absolute;
+  top: 5px;
+  bottom: 5px;
+  width: 2px;
+  border-radius: var(--ui-radius-pill);
+  color: var(--term-run);
+  background: var(--term-run);
+  box-shadow: 0 0 6px 0 currentColor;
+  pointer-events: none;
+  animation: sb-rail-out var(--t-decay) var(--t-ease) forwards;
+}
+@keyframes sb-rail-out {
+  from { opacity: .7; }
+  to   { opacity: 0; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .sb-rail-afterglow { display: none; }
 }
 
 /* ── Card-mode row fills ───────────────────────────────────────────────────
@@ -1329,12 +1428,21 @@ html[data-vibrancy='on'] {
    its last 28px, so the gradient only added a darkening wedge at the right edge
    on hover — the row should just not change there.
 
-   The right padding also shrinks from 10 to 6 so the caret + ⋯ cluster at the
-   row end stays compact. That number feeds `KEBAB_FOOTPRINT` in
-   sidebarRowStyle.ts, which sizes the caret's clearance — keep them in sync. */
+   The right padding also shrinks from 10 to 6 so the ⋯ stays near the row end;
+   thread and branch rows, which carry a rail there, override it below. */
 .terminal-sidebar[data-row-style]:not([data-row-style='classic']) .row-kebab {
   background: none !important;
   padding-right: 6px !important;
+}
+/* Thread and branch rows draw their 2px open/running rail at right: 3px. With
+   RowKebab's -3px margin, 6px would end the ⋯'s 22px hover box on that rail,
+   so these rows end it 8px from the edge, 3px clear. KEBAB_FOOTPRINT in
+   sidebarRowStyle.ts reserves the caret's room from this — keep them in sync.
+   Hover-only: without hover the ⋯ is clipped out of sight (below). */
+@media (hover: hover) {
+  .terminal-sidebar[data-row-style]:not([data-row-style='classic']) [data-sidebar-row] > .row-kebab {
+    padding-right: 11px !important;
+  }
 }
 
 /* Respect users who ask the OS to reduce transparency: fall back to the solid
@@ -1350,17 +1458,14 @@ html[data-vibrancy='on'] {
 /* ── Overlay glass · reusable frost for floating chrome ──────────────────────
    Opt in by adding `term-glass` to any floating surface (drawer / menu / popover)
    that overlays the reading column. It blurs the REAL content behind it (panes),
-   not a painted wash, so it gets true depth for free. Kept to the exact recipe
-   that works on the sidebar — no `contain`/`transform` on this element, both of
-   which can null out backdrop-filter in Chromium. Same reduced-transparency
-   fallback as the sidebar. */
+   at the dense overlay setting above. No `contain`/`transform` on this element,
+   both of which can null out backdrop-filter in Chromium. Same
+   reduced-transparency fallback as the sidebar. */
 .term-glass {
-  background:
-    var(--term-glass-wash),
-    color-mix(in srgb, var(--term-surface) calc(var(--term-glass-solid-alpha) * 100%), transparent);
-  -webkit-backdrop-filter: blur(var(--term-glass-blur)) saturate(var(--term-glass-saturate));
-  backdrop-filter: blur(var(--term-glass-blur)) saturate(var(--term-glass-saturate));
-  box-shadow: var(--term-glass-highlight), var(--term-glass-cast);
+  background: color-mix(in srgb, var(--term-surface) calc(var(--term-overlay-solid-alpha) * 100%), transparent);
+  -webkit-backdrop-filter: blur(var(--term-overlay-blur)) saturate(var(--term-overlay-saturate));
+  backdrop-filter: blur(var(--term-overlay-blur)) saturate(var(--term-overlay-saturate));
+  box-shadow: var(--term-overlay-highlight), var(--term-overlay-cast);
 }
 @media (prefers-reduced-transparency: reduce) {
   .term-glass {
@@ -1521,7 +1626,7 @@ html[data-vibrancy="on"],
   40%           { transform: translateY(-4px); }
 }
 
-/* Terminal shell — keyframes used by Dot pulse and cursor blink.
+/* Terminal shell — a loading pulse (the assistant skeleton).
    Opacity-only so it stays on the compositor: animating box-shadow here would
    force a main-thread repaint every frame, which stutters (and drags the whole
    sidebar) while streaming saturates the main thread. Callers that want the glow
@@ -1535,11 +1640,6 @@ html[data-vibrancy="on"],
 @keyframes tpulse-glyph {
   0%, 100% { opacity: .55; }
   50%      { opacity: 1; }
-}
-/* Gentle size + opacity pulse for the Activity View "Now" dot indicator. */
-@keyframes pulse {
-  0%, 100% { opacity: 1; transform: scale(1); }
-  50%      { opacity: 0.5; transform: scale(0.8); }
 }
 @keyframes tspin {
   to { transform: rotate(360deg); }
@@ -1604,7 +1704,7 @@ html[data-vibrancy="on"],
 }
 
 /* ── Tool call / thinking status language (ToolCallGroup, TermThoughtBlock) ──
-   One glyph system: breathing accent dot = running, muted dot = done,
+   One glyph system: breathing run dot = running, muted dot = done,
    red × = failed (rendered inline, no class). Labels shimmer while live. */
 .term-dot-i {
   display: inline-block;
@@ -1616,7 +1716,7 @@ html[data-vibrancy="on"],
   flex-shrink: 0;
 }
 .term-dot-i--run {
-  background: var(--term-accent);
+  background: var(--term-run);
   opacity: 1;
   animation: termBreathe var(--t-loop) ease-in-out infinite;
 }
@@ -1656,7 +1756,7 @@ html[data-vibrancy="on"],
   width: 10px;
   height: 10px;
   border: 1.5px solid var(--term-line);
-  border-top-color: var(--term-accent);
+  border-top-color: var(--term-run);
   border-radius: 50%;
   flex-shrink: 0;
   animation: tspin var(--t-loop-fast) linear infinite;
@@ -1695,6 +1795,15 @@ html[data-vibrancy="on"],
   .agent-glyph-run { animation: none; }
 }
 
+/* Verbatim mono text in agent blocks (commands, paths, payloads). Geist Mono's
+   contextual alternates draw "rev-list --count" as "rev-list--count" and
+   "dev...origin" as "dev.origin"; .terminal-message turns "liga" on for prose,
+   so both features are switched off here, on the element itself. */
+.agent-verbatim {
+  font-variant-ligatures: none;
+  font-feature-settings: "calt" 0, "liga" 0;
+}
+
 /* Hide scrollbars (used in terminal sidebar tree). */
 .hide-sb::-webkit-scrollbar { display: none; }
 .hide-sb { scrollbar-width: none; -ms-overflow-style: none; }
@@ -1717,16 +1826,43 @@ html[data-vibrancy="on"],
 .term-scrollbar::-webkit-scrollbar-thumb:hover { background: var(--term-scrollbar-thumb-hover); }
 .term-scrollbar::-webkit-scrollbar-corner { background: transparent; }
 
-/* Sidebar scrollbars are a pointer affordance: Sidebar.tsx adds
-   data-scrollbars="quiet" while the pointer is away and rebinds the thumb to
-   transparent. Keeping the bar (rather than display:none) lets
-   scrollbar-gutter reserve its space, so revealing it never reflows a row. */
-.terminal-sidebar[data-scrollbars='quiet'] {
-  --term-scrollbar-thumb: transparent;
-  --term-scrollbar-thumb-hover: transparent;
-  --term-scrollbar-border: transparent;
+/* Sidebar lists draw their own thumb (SidebarScroller.tsx). macOS overlay
+   scrollbars float over the rows and take no room, so scrollbar-gutter could
+   not keep them off the running rail at each row's right edge (right 2–5px).
+   The thumb is a 2px strip flush with the edge, beside the rail. Native bars
+   are hidden, so no gutter is reserved on any platform. It is a pointer
+   affordance: Sidebar.tsx sets data-scrollbars="quiet" while the pointer is
+   away. */
+.sb-scroller {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
 }
-.terminal-sidebar .term-scrollbar { scrollbar-gutter: stable; }
+.sb-scroller__view {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  scrollbar-width: none;
+}
+.sb-scroller__view::-webkit-scrollbar { display: none; }
+.sb-scroller__thumb {
+  position: absolute;
+  top: 0;
+  right: 0;
+  width: 2px;
+  border-radius: var(--ui-radius-pill) 0 0 var(--ui-radius-pill);
+  background: color-mix(in srgb, var(--term-fg) 28%, transparent);
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity var(--t-enter) ease;
+}
+.sb-scroller:not([data-overflow]) .sb-scroller__thumb { display: none; }
+.terminal-sidebar[data-scrollbars='visible'] .sb-scroller__thumb { opacity: 1; }
+@media (prefers-reduced-motion: reduce) {
+  .sb-scroller__thumb { transition: none; }
+}
 
 /* Collapsing the sidebar fades its content in place (still clipped by the
    shell); the content keeps its expanded width, so nothing reflows mid-slide. */
@@ -1758,6 +1894,12 @@ html[data-vibrancy="on"],
   transition: color var(--t-quick) var(--t-ease);
 }
 .t-hover-fg:hover { color: var(--term-fg); }
+
+.t-hover-accent {
+  color: var(--term-muted);
+  transition: color var(--t-soft);
+}
+.t-hover-accent:hover { color: var(--term-accent); }
 
 /* Icon buttons — subtle bg on hover, dimmed bg + press on active. Used by
    message-action rows and any single-icon interactive affordance.
@@ -1795,10 +1937,39 @@ html[data-vibrancy="on"],
 .t-icon-btn.is-on:hover {
   background: color-mix(in srgb, var(--term-fg) 12%, transparent);
 }
+
+/* Pane caption controls (PaneCaption.tsx): the hover-only ⤢ and ×, and the
+   persistent exit control a zoomed caption carries. */
+.pane-caption-icon,
+.pane-caption-zoom-exit {
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--term-faint);
+  transition: opacity var(--t-quick) var(--t-ease),
+              background var(--t-quick) var(--t-ease),
+              color var(--t-quick) var(--t-ease),
+              border-color var(--t-quick) var(--t-ease);
+}
+.pane-caption-zoom-exit {
+  border-color: var(--term-line);
+  color: var(--term-mid);
+}
+.pane-caption-icon:hover,
+.pane-caption-zoom-exit:hover {
+  border-color: var(--term-line-s, var(--term-line));
+  background: var(--term-alt2, var(--term-alt));
+  color: var(--term-fg);
+}
 /* Message actions (copy, retry, edit, branch) are 26px for a mouse; a finger
    needs 40. The negative block margin keeps the space under the message. */
 @media (hover: none) and (pointer: coarse) {
   .t-msg-actions .t-icon-btn { min-width: 40px; min-height: 40px; margin-block: -7px; }
+  .t-msg-actions .t-icon-btn svg { width: 16px; height: 16px; }
+  /* Nothing hints that a tap reveals the row, so the latest reply shows it at
+     rest (MessageBlock actionsAtRest). All of it, Retry included: the row must
+     not change when a tap's emulated hover lands, or iOS takes the first tap on
+     a button as a hover and drops the click (and the buttons would shift). */
+  [data-msg-actions='rest'] > .t-msg-actions { opacity: 1 !important; pointer-events: auto !important; }
 }
 
 /* Text buttons — compact text-label affordance, default borderless.
@@ -1963,7 +2134,7 @@ html[data-vibrancy="on"],
 .t-followup-text:focus-visible,
 .t-followup-branch:focus-visible,
 .t-followups-toggle:focus-visible {
-  outline: 2px solid var(--term-accent);
+  outline: var(--focus-ring);
   outline-offset: -2px;
 }
 .t-followup-branch {
@@ -1988,6 +2159,9 @@ html[data-vibrancy="on"],
   cursor: pointer;
 }
 .t-followup-branch-label { white-space: nowrap; }
+/* Branched from here (phones): the row steps back a shade */
+.t-followup-row[data-branched='true'] .t-followup-text,
+.t-followup-row[data-branched='true'] .t-followup-branch { color: var(--term-muted); transition: color var(--t-decay) ease; }
 .t-followup-branch:focus-visible {
   color: var(--term-accent);
 }
@@ -2107,7 +2281,7 @@ html[data-vibrancy="on"],
 }
 /* Rows that are buttons to the keyboard (sidebar bottom nav, Appearance swatches): a ring inside the row. */
 .t-row-focus:focus-visible {
-  outline: 2px solid var(--term-accent);
+  outline: var(--focus-ring);
   outline-offset: -2px;
 }
 
@@ -2442,10 +2616,11 @@ html[data-vibrancy="on"],
   align-items: stretch;
   gap: 6px;
 }
-/* Generated branches are full-row destinations, not quote blocks. */
+/* Generated branches are full-row destinations, not quote blocks: one framed
+   list under its heading, in the workflow card's shell (WorkflowRunCard.css). */
 .t-branch-anchors {
   container: branch-anchors / inline-size;
-  margin: 26px 0 10px;
+  margin: 14px 0 10px;
 }
 .t-branch-anchors-heading {
   display: flex;
@@ -2458,25 +2633,42 @@ html[data-vibrancy="on"],
   font-weight: 500;
 }
 .t-branch-anchors-heading span { color: var(--term-muted); }
+.t-branch-anchors-list {
+  --workflow-card-bg: color-mix(in srgb, var(--term-alt) 32%, var(--term-surface));
+  border: 1px solid var(--term-line);
+  border-radius: var(--term-composer-radius);
+  background: var(--workflow-card-bg);
+  overflow: hidden;
+}
+/* Rows, or the wrappers new rows grow in with, divide from the title column
+   on, so the glyph column runs unbroken. */
+.t-branch-anchors-list > * { position: relative; }
+.t-branch-anchors-list > * + *::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  right: 0;
+  left: 50px; /* row padding 14 + glyph 20 + gap 16 */
+  border-top: 1px solid var(--term-line);
+  pointer-events: none;
+}
 .t-branch-anchor-row {
   display: grid;
   grid-template-columns: 20px minmax(0, 1fr) auto;
   align-items: center;
   gap: 16px;
   width: 100%;
-  min-height: 63px;
-  padding: 16px;
+  min-height: 60px;
+  padding: 14px;
   border: 0;
-  border-bottom: 1px solid var(--term-line);
   background: transparent;
   color: var(--term-fg);
   font: inherit;
   text-align: left;
   cursor: pointer;
 }
-.t-branch-anchor-row:last-child { border-bottom: 0; }
-.t-branch-anchor-row:hover { background: color-mix(in srgb, var(--term-alt) 65%, transparent); }
-.t-branch-anchor-row:focus-visible { outline: 2px solid var(--term-accent); outline-offset: -2px; }
+.t-branch-anchor-row:hover { background: color-mix(in srgb, var(--term-alt) 70%, var(--workflow-card-bg)); }
+.t-branch-anchor-row:focus-visible { outline: var(--focus-ring); outline-offset: -2px; }
 .t-branch-anchor-glyph { display: inline-flex; color: var(--term-muted); }
 .t-branch-anchor-name {
   min-width: 0;
@@ -2502,10 +2694,11 @@ html[data-vibrancy="on"],
 .t-branch-anchor-details { flex-wrap: wrap; }
 .t-branch-anchor-status { gap: 5px; white-space: nowrap; }
 .t-branch-anchor-status svg { flex-shrink: 0; }
-.t-branch-anchor-status.is-streaming { color: var(--term-select); }
-.t-branch-anchor-status.is-error { color: var(--term-danger); }
+.t-branch-anchor-status.is-streaming { color: var(--term-run); }
+.t-branch-anchor-status.is-error { color: var(--term-danger-text); }
 @container branch-anchors (max-width: 520px) {
-  .t-branch-anchor-row { grid-template-columns: 18px minmax(0, 1fr); gap: 8px 10px; padding: 14px 12px; }
+  .t-branch-anchor-row { grid-template-columns: 18px minmax(0, 1fr); gap: 8px 10px; padding: 12px; }
+  .t-branch-anchors-list > * + *::before { left: 40px; } /* 12 + 18 + 10 */
   .t-branch-anchor-meta { grid-column: 2; flex-direction: row; flex-wrap: wrap; align-items: center; gap: 10px; }
 }
 
@@ -2528,7 +2721,7 @@ html[data-vibrancy="on"],
   background: color-mix(in srgb, var(--term-mauve) 15%, transparent);
 }
 .t-branch-anchor-underline:focus-visible {
-  outline: 2px solid var(--term-accent);
+  outline: var(--focus-ring);
   outline-offset: 2px;
 }
 .t-branch-card {
@@ -2565,7 +2758,7 @@ html[data-vibrancy="on"],
 .t-branch-card-item + .t-branch-card-item { border-top: 1px solid var(--term-line); }
 .t-branch-card-item.is-compact { padding-block: 9px; }
 .t-branch-card-item:hover { background: color-mix(in srgb, var(--term-fg) 5%, transparent); }
-.t-branch-card-item:focus-visible { outline: 2px solid var(--term-accent); outline-offset: -2px; }
+.t-branch-card-item:focus-visible { outline: var(--focus-ring); outline-offset: -2px; }
 .t-branch-card-head {
   display: flex;
   align-items: center;
@@ -2618,7 +2811,7 @@ html[data-vibrancy="on"],
 .t-branch-card-question { color: var(--term-fg); -webkit-line-clamp: 2; }
 .t-branch-card-reply { color: var(--term-mid); -webkit-line-clamp: 3; }
 .t-branch-card-typing { display: inline-flex; align-items: center; height: 1.65em; }
-.t-branch-card-typing .typing-dot { background: var(--term-select); }
+.t-branch-card-typing .typing-dot { background: var(--term-run); }
 @media (hover: none) and (pointer: coarse) {
   .t-branch-card-item { min-height: 44px; }
   .t-branch-card-open { opacity: 1; }
@@ -2674,7 +2867,19 @@ html[data-vibrancy="on"],
   box-shadow: 0 0 6px rgba(128,128,128,.2);
 }
 
-/* Pending attachment item — hover-reveal close button + unified hover */
+/* Pending attachments start at the field's inset, so a thumbnail clears the
+   frame and lines up with the text below it. Composers that change the
+   field's padding set --composer-att-row-padding to match (mobile.css).
+   Below another pre-block it keeps the stack's 8px rhythm. */
+.t-att-pending-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: var(--composer-att-row-padding, 10px 12px 0);
+}
+* + .t-att-pending-row { padding-top: 8px; }
+
+/* Pending attachment item: its remove button is a hover reveal (.t-reveal) */
 .t-att-pending-item {
   position: relative;
   border-radius: 0;
@@ -2711,16 +2916,12 @@ html[data-vibrancy="on"],
   font-size: var(--fs-md);
   line-height: 1;
   color: var(--term-muted);
+  padding: 0;
+  font-family: inherit;
   cursor: pointer;
   user-select: none;
   box-shadow: 0 1px 3px rgba(0,0,0,.15);
-  opacity: 0;
-  pointer-events: none;
   transition: opacity var(--t-soft) ease, color var(--t-soft) ease;
-}
-.t-att-pending-item:hover .t-att-pending-x {
-  opacity: 1;
-  pointer-events: auto;
 }
 .t-att-pending-x:hover {
   color: var(--term-danger);
@@ -2828,8 +3029,18 @@ html[data-vibrancy="on"],
   white-space: nowrap;
   min-width: 0;
 }
-.t-toolbar-chip:not(:disabled):not([aria-disabled="true"]):is(:hover, :active),
-.t-action-btn.is-outline:not(:disabled):not([aria-disabled="true"]):is(:hover, :active) {
+/* Touch browsers keep :hover on the last-tapped element until the next tap
+   elsewhere, so hover only paints for a real pointer; :active still gives
+   taps their press. */
+@media (hover: hover) and (pointer: fine) {
+  .t-toolbar-chip:not(:disabled):not([aria-disabled="true"]):hover,
+  .t-action-btn.is-outline:not(:disabled):not([aria-disabled="true"]):hover {
+    background: var(--term-hover-bg, var(--term-alt));
+    color: var(--term-fg);
+  }
+}
+.t-toolbar-chip:not(:disabled):not([aria-disabled="true"]):active,
+.t-action-btn.is-outline:not(:disabled):not([aria-disabled="true"]):active {
   background: var(--term-hover-bg, var(--term-alt));
   color: var(--term-fg);
 }
@@ -2919,7 +3130,7 @@ html[data-vibrancy="on"],
   color: var(--term-accent);
 }
 .t-action-btn.is-queue:focus-visible {
-  outline: 2px solid color-mix(in srgb, var(--term-accent) 62%, transparent);
+  outline: var(--focus-ring);
   outline-offset: 1px;
 }
 @media (prefers-reduced-motion: reduce) {
@@ -2997,6 +3208,28 @@ html[data-vibrancy="on"],
   background: var(--term-hover-bg, var(--term-alt)) !important;
 }
 
+/* Bordered on hover: a frame and a fill appear (pane chooser, a row's ⋯).
+   A disabled button, such as a choice that is busy, shows neither. */
+.t-hover-frame {
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--term-muted);
+}
+.t-hover-frame:hover:not(:disabled) {
+  border-color: var(--term-line);
+  background: var(--term-hover-bg, var(--term-alt));
+  color: var(--term-fg);
+}
+
+/* Danger-outlined button (a failed turn's retry and connection test): tinted
+   on hover, and not while disabled for a running check. */
+.t-danger-outline-btn {
+  background: transparent;
+}
+.t-danger-outline-btn:hover:not(:disabled) {
+  background: var(--term-danger-f);
+}
+
 /* Inline icon button — color brightens, no background. */
 .t-icon-hover {
   cursor: pointer;
@@ -3006,6 +3239,25 @@ html[data-vibrancy="on"],
 .t-icon-hover:hover {
   color: var(--term-fg) !important;
   opacity: 1 !important;
+}
+
+/* Hover reveal: a control (.t-reveal) that a pointer device shows only while
+   its row (.t-reveal-host) is hovered or holds the focus, while the control
+   has keyboard focus, or while its menu is open. Hidden, it takes no clicks.
+   A touch screen has no hover to reveal it, so there it always shows, and a
+   tap's hover changes nothing (iOS drops a tap that reveals content on
+   hover). Each control keeps its own transition. */
+@media (hover: hover) {
+  .t-reveal {
+    opacity: 0;
+    pointer-events: none;
+  }
+  .t-reveal-host:is(:hover, :focus-within) .t-reveal,
+  .t-reveal:focus-visible,
+  .t-reveal[aria-expanded='true'] {
+    opacity: 1;
+    pointer-events: auto;
+  }
 }
 
 /* Hover-only kebab (⋯) overlay for sidebar rows. The wrapper is anchored to
@@ -3023,6 +3275,7 @@ html[data-vibrancy="on"],
 }
 .t-row-hover:hover .row-kebab,
 .t-row-hover:focus-within .row-kebab,
+.t-reveal-host:is(:hover, :focus-within) .row-kebab,
 .row-kebab.is-open,
 .row-kebab:focus-within {
   opacity: 1;
@@ -3032,40 +3285,51 @@ html[data-vibrancy="on"],
 }
 .t-row-hover:hover .row-kebab > button,
 .t-row-hover:focus-within .row-kebab > button,
+.t-reveal-host:is(:hover, :focus-within) .row-kebab > button,
 .row-kebab.is-open > button,
 .row-kebab:focus-within > button {
   pointer-events: auto;
 }
 
-/* Coarse pointers have no hover state to reveal these affordances. Showing
-   them permanently beats stranding workspace actions and the row menu behind
-   an interaction the device cannot express. */
+/* Long press (lib/touchContextMenu.ts): anything marked as a context-menu
+   target opens its menu on a touch hold. No callout or text selection on the
+   hold, and the pressed fill while the finger is down. */
+[data-context-target] { -webkit-touch-callout: none; }
+@media (hover: none) and (pointer: coarse) {
+  [data-context-target] { -webkit-user-select: none; user-select: none; }
+}
+[data-context-target][data-press] { background-color: var(--term-hover-bg, var(--term-alt)) !important; }
+
+/* Without hover nothing can reveal these affordances, so the workspace
+   actions stay shown. The rows' ⋯ menu buttons go instead: a long press opens
+   the same menu. They stay for screen readers, out of sight and identical
+   hovered or not — iOS drops a tap whose emulated hover changes what shows. */
 @media (hover: none) {
   .ws-hover-chevron,
   .ws-hover-actions {
     opacity: 1;
     pointer-events: auto;
   }
-  .row-kebab {
+  .row-kebab,
+  .terminal-sidebar[data-row-style]:not([data-row-style='classic']) .row-kebab,
+  .ws-menu-btn {
+    position: absolute !important;
+    width: 1px !important;
+    height: 1px !important;
+    padding: 0 !important;
+    margin: 0 !important;
+    overflow: hidden;
+    clip-path: inset(50%);
+    background: none !important;
     opacity: 1;
   }
   .row-kebab > button {
     pointer-events: auto;
   }
 }
-/* A finger needs more than the 16px ⋯ and the 22px workspace buttons. The ⋯
-   takes the row's full height and 32px of width; its wrapper drops most of its
-   right padding, so the footprint grows by 12px, which the row's trailing caret
-   adds to its clearance through --row-kebab-extra (see caretKebabClearance). */
+/* A finger needs more than the 22px workspace buttons. */
 @media (hover: none) and (pointer: coarse) {
-  .terminal-sidebar { --row-kebab-extra: 12px; }
-  .row-kebab,
-  .terminal-sidebar[data-row-style]:not([data-row-style='classic']) .row-kebab { padding-right: 2px !important; }
-  .row-kebab > button { width: 32px !important; height: 100% !important; max-height: 44px; }
   .ws-action-btn { width: 32px; height: 32px; }
-}
-.row-kebab > button:hover {
-  color: var(--term-fg) !important;
 }
 
 /* Rows that host a kebab also drop the .t-row-hover 60ms bg/color fade
@@ -3144,126 +3408,10 @@ html[data-vibrancy="on"],
   background: var(--term-hover-bg, var(--term-alt));
   border-color: color-mix(in srgb, var(--term-fg) 12%, transparent);
 }
-.t-sidebar-toggle[aria-pressed="true"] {
+.t-sidebar-toggle[aria-expanded="false"] {
   background: color-mix(in srgb, var(--term-fg) 10%, transparent);
   border-color: color-mix(in srgb, var(--term-fg) 14%, transparent);
 }
-
-/* Two-zone topbar: tab pill variants. The focused pill uses --term-bg
-   (the body color) so it visually merges with the content area below.
-   Background pills use --term-alt (one shade darker than the body). */
-.t-tab-pill {
-  display: flex;
-  align-items: center;
-  gap: 7px;
-  padding: 8px 14px 9px;
-  font-size: var(--fs-md);
-  font-family: var(--ui-font);
-  cursor: default;
-  min-width: 0;
-  max-width: 220px;
-  flex: 1 1 auto;
-  margin-top: 4px;
-  margin-right: 1px;
-  border-radius: var(--ui-radius-lg) var(--ui-radius-lg) 0 0;
-  position: relative;
-  transition: background var(--t-quick) var(--t-ease), color var(--t-quick) var(--t-ease);
-  -webkit-app-region: no-drag;
-}
-.t-tab-pill__title {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  flex: 1;
-  min-width: 0;
-}
-.t-tab-pill__close {
-  color: var(--term-faint);
-  font-size: var(--fs-lg);
-  line-height: 1;
-  opacity: 0;
-  transition: opacity var(--t-quick) var(--t-ease);
-  flex-shrink: 0;
-  padding: 0 2px;
-}
-.t-tab-pill:hover .t-tab-pill__close { opacity: 0.9; }
-
-.t-tab-pill.is-focused {
-  background: var(--term-bg);
-  color: var(--term-fg);
-  font-weight: 600;
-  box-shadow: -1px -1px 0 var(--term-line), 1px -1px 0 var(--term-line);
-  z-index: 2;
-}
-/* Close the seam between the focused pill and the body below. */
-.t-tab-pill.is-focused::after {
-  content: '';
-  position: absolute;
-  left: 0;
-  right: 0;
-  bottom: -1px;
-  height: 1px;
-  background: var(--term-bg);
-}
-
-.t-tab-pill.is-bg {
-  background: var(--term-alt);
-  color: var(--term-mid);
-}
-.t-tab-pill.is-bg:hover {
-  background: var(--term-hover-bg, var(--term-alt));
-  color: var(--term-fg);
-}
-
-/* Drag-and-drop reorder indicators. The ::before bar marks where the dragged
-   tab will land (left or right of this pill). z-index 3 so it sits above
-   focused-pill chrome. */
-.t-tab-pill.is-drag-left::before,
-.t-tab-pill.is-drag-right::before {
-  content: '';
-  position: absolute;
-  top: 4px;
-  bottom: 0;
-  width: 2px;
-  background: var(--term-accent);
-  z-index: 3;
-  pointer-events: none;
-}
-.t-tab-pill.is-drag-left::before { left: -1px; }
-.t-tab-pill.is-drag-right::before { right: -1px; }
-
-/* Single-tab state: a left-aligned title with hover-revealed controls.
-   No tab chrome. Used when openPanes.length === 1. */
-.t-single-title {
-  display: inline-flex;
-  align-items: center;
-  gap: 8px;
-  padding: 4px 10px;
-  border-radius: var(--ui-radius);
-  color: var(--term-fg);
-  font-size: var(--fs-lg);
-  font-weight: 600;
-  cursor: default;
-  margin: auto 0 auto 14px;
-  transition: background var(--t-quick) var(--t-ease);
-  -webkit-app-region: no-drag;
-}
-.t-single-title:hover { background: var(--term-hover-bg, var(--term-alt)); }
-.t-single-title__more,
-.t-single-title__close {
-  color: var(--term-faint);
-  font-size: var(--fs-xl);
-  line-height: 1;
-  opacity: 0;
-  transition: opacity var(--t-quick) var(--t-ease);
-  background: transparent;
-  border: none;
-  cursor: pointer;
-  padding: 0;
-  font: inherit;
-}
-.t-single-title:hover .t-single-title__more,
-.t-single-title:hover .t-single-title__close { opacity: 0.9; }
 
 /* -----------------------------------------------------------------------
    Popover surface tokens (used by components/ui/Popover.tsx)
@@ -3355,7 +3503,7 @@ html[data-vibrancy="on"],
 .boot-warm-failed {
   padding: 8px 12px;
   background: var(--term-danger-f);
-  color: var(--term-danger);
+  color: var(--term-danger-text);
   border-radius: var(--ui-radius);
   font-size: var(--fs-lg);
 }
@@ -3457,15 +3605,41 @@ html[data-vibrancy="on"],
   border-left: 2px solid var(--term-line);
   color: var(--term-muted);
 }
+/* Typed or pasted links look like message links but stay editable text: a
+   plain click places the caret. They become clickable (pointer, full underline)
+   only while Cmd/Ctrl is held — MentionEditor sets data-link-modifier. */
+.mention-editor-host .ProseMirror a[href] {
+  color: var(--term-accent);
+  text-decoration: underline;
+  text-underline-offset: 3px;
+  text-decoration-color: color-mix(in srgb, currentColor 40%, transparent);
+  cursor: text;
+}
+.mention-editor-host[data-link-modifier] .ProseMirror a[href]:hover {
+  cursor: pointer;
+  text-decoration-color: currentColor;
+}
 /* Atomic @-mention chip. box-shadow (not border) for the 1px frame so the chip
-   adds zero horizontal layout — matches the old overlay's byte-perfect chips. */
+   adds zero horizontal layout — matches the old overlay's byte-perfect chips.
+   An inline-block, so a line never splits a chip: one that doesn't fit moves
+   to the next line whole, and only a chip wider than a whole line (a long
+   thread title) wraps, inside its own box, instead of running out of the
+   bubble or composer. Drawn to match the old inline chip: line-height: normal
+   is the text's own height and the -1px margins keep the padding from making
+   its line taller. */
 .mention-chip {
+  display: inline-block;
+  max-width: 100%;
+  box-sizing: border-box;
+  overflow-wrap: anywhere;
+  line-height: normal;
+  margin-block: -1px;
   background: color-mix(in srgb, var(--term-mauve) 12%, transparent);
   color: var(--term-mauve);
   border-radius: var(--ui-radius-sm);
   padding: 1px 6px;
   font-weight: 500;
-  white-space: nowrap;
+  white-space: normal;
   cursor: pointer;
   transition: box-shadow var(--t-enter) ease, background var(--t-enter) ease;
 }
@@ -3473,431 +3647,281 @@ html[data-vibrancy="on"],
   background: color-mix(in srgb, var(--term-mauve) 18%, transparent);
   box-shadow: 0 0 3px color-mix(in srgb, var(--term-mauve) 30%, transparent);
 }
-/* ── Global ask-user alert bar ────────────────────────────────────────────────
-   Shell-level reminder row (AskUserAlertBar) shown under the topbar on every
-   page while any node has an unanswered Ask User request. The inline ask card
-   below owns the actual answering UI. */
-.ask-alert-bar {
+/* Picked from the @ menu (see mentionEnter.ts): the chip grows out of the
+   query it replaces. Its first frame is the typed `@query`, plain and in
+   place: no fill, no padding, the label clear, the query (::before, from
+   data-from) drawn over it. Then the fill opens from the query's width to the
+   whole label, the padding eases in so the text after the chip moves rather
+   than jumps, and the query fades into the label. */
+.mention-chip--enter {
+  position: relative;
+  animation: mention-chip-grow var(--t-decay) cubic-bezier(.23, 1, .32, 1) both;
+}
+.mention-chip--enter::before {
+  content: attr(data-from);
+  position: absolute;
+  color: var(--term-fg);
+  font-weight: 400;
+  pointer-events: none;
+  animation: mention-chip-from var(--t-decay) ease both;
+}
+@keyframes mention-chip-grow {
+  from {
+    clip-path: inset(0 calc(100% - var(--mention-from-w, 0px)) 0 0);
+    padding-left: 0;
+    padding-right: 0;
+    background-color: transparent;
+    color: transparent;
+  }
+  to { clip-path: inset(0); }
+}
+@keyframes mention-chip-from {
+  from { opacity: 1; }
+  55%, to { opacity: 0; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .mention-chip--enter { animation: none; }
+  .mention-chip--enter::before { content: none; }
+}
+/* ── Shell notice corner ──────────────────────────────────────────────────────
+   ShellNotices: what waits on the user (an agent's question, tasks that
+   stopped before finishing) pinned under the topbar's right end, where toasts
+   appear and in their tab shape against the window edge. The card speaks the
+   Background work cards' language (WorkflowWorkCard): an icon and semibold
+   title, the run chip (Needs you, workflows/runChip.css), mid-grey prose, mono detail and
+   the .ui-btn buttons. Only the question is amber; interrupted work is the
+   muted tone it has in the status pills. Unlike a toast a notice stays until
+   its state resolves; it can shrink to its tab (icon and count). While the
+   user works in a region it would cover, the stack steps aside off the edge
+   ([data-aside]). The anchor takes no height in the shell's flow; toasts
+   start below the stack (--shell-notices-height, set by ShellNotices).
+   Phone sizes live in mobile.css. */
+.shell-notices-anchor {
+  position: relative;
+  height: 0;
+  flex-shrink: 0;
+  z-index: var(--z-shell-notice);
+}
+.shell-notices {
+  position: absolute;
+  top: 6px;
+  right: 0;
+  width: min(372px, calc(100vw - 16px));
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 8px;
+  pointer-events: none;
+  transition: transform var(--t-enter) var(--t-ease), opacity var(--t-enter) var(--t-ease);
+}
+.shell-notices[data-aside] {
+  transform: translateX(calc(100% + 8px));
+  opacity: 0;
+}
+@media (prefers-reduced-motion: reduce) {
+  .shell-notices { transition: opacity var(--t-enter) var(--t-ease); }
+  .shell-notices[data-aside] { transform: none; }
+}
+.shell-notice-motion {
+  pointer-events: auto;
+  max-width: 100%;
+}
+.shell-notice,
+.shell-notice-tab {
+  font-family: var(--ui-font);
+  color: var(--term-fg);
+  background: var(--term-surface);
+  border: 1px solid var(--term-line);
+  border-right-width: 0;
+  border-radius: var(--term-composer-radius) 0 0 var(--term-composer-radius);
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.1);
+}
+.shell-notice {
+  width: 372px;
+  max-width: 100%;
+  box-sizing: border-box;
+  padding: 12px 14px 12px 16px;
+  font-size: var(--fs-md);
+}
+.shell-notice--ask {
+  cursor: pointer;
+}
+@media (hover: hover) {
+  .shell-notice--ask:hover {
+    background: color-mix(in srgb, var(--term-alt) 45%, var(--term-surface));
+  }
+}
+.shell-notice-head {
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 6px 12px;
-  flex-shrink: 0;
-  cursor: pointer;
-  font-family: var(--ui-font);
-  font-size: var(--fs-md);
-  color: var(--term-fg);
-  background: color-mix(in srgb, var(--term-accent) 12%, var(--term-surface));
-  border-bottom: 1px solid color-mix(in srgb, var(--term-accent) 40%, transparent);
-}
-.ask-alert-bar:hover {
-  background: color-mix(in srgb, var(--term-accent) 18%, var(--term-surface));
-}
-.ask-alert-badge {
-  background: var(--term-accent);
-  color: var(--term-bg);
-  font-size: var(--fs-xs);
-  font-weight: 600;
-  letter-spacing: var(--ls-wide);
-  padding: 2px 6px;
-  border-radius: var(--ui-radius-sm);
-  flex-shrink: 0;
-  animation: ask-alert-pulse var(--t-loop) ease-in-out infinite;
-}
-.ask-alert-text {
   min-width: 0;
+}
+.shell-notice-icon-mark {
+  flex-shrink: 0;
+  display: inline-flex;
+}
+.shell-notice-icon-mark--ask { color: var(--term-waiting); }
+.shell-notice-icon-mark--interrupted { color: var(--term-mid); }
+.shell-notice-count {
+  flex-shrink: 0;
+  font-family: var(--font-mono);
+  font-size: var(--fs-sm);
+  font-variant-numeric: tabular-nums;
+}
+.shell-notice-count--ask { color: var(--term-waiting-text); }
+.shell-notice-count--interrupted { color: var(--term-mid); }
+.shell-notice-spacer {
   flex: 1;
+}
+.shell-notice-title {
+  flex: 0 1 auto;
+  min-width: 0;
+  margin: 0;
+  font-size: var(--fs-lg);
+  font-weight: 600;
+  line-height: 1.3;
+  color: var(--term-fg);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.ask-alert-q {
-  color: var(--term-mid);
+.shell-notice-title:focus-visible {
+  outline: var(--focus-ring);
+  outline-offset: 2px;
 }
-.ask-alert-more {
-  color: var(--term-mid);
-  flex-shrink: 0;
-}
-.ask-alert-cta {
-  flex-shrink: 0;
-  font: inherit;
-  font-weight: 600;
-  color: var(--term-accent);
-  background: none;
-  border: none;
-  padding: 0 2px;
-  cursor: pointer;
-}
-.ask-alert-cta:focus-visible {
-  outline: 1px solid var(--term-accent);
-  outline-offset: 1px;
-}
-@keyframes ask-alert-pulse {
-  0%, 100% { opacity: 1; }
-  50% { opacity: 0.55; }
-}
-@media (prefers-reduced-motion: reduce) {
-  .ask-alert-badge { animation: none; }
-}
-
-/* ── Ask-user input card ──────────────────────────────────────────────────── */
-.ask-card {
-  background: var(--term-surface);
-  border: none;
-  border-radius: var(--ui-radius-sm);
-  margin: 8px 0;
-  padding: 12px;
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-  font-family: var(--ui-font);
-  font-size: var(--fs-lg);
-  overflow: hidden;
-  /* Hairline ring + soft lift instead of a hard 1px border. */
-  box-shadow:
-    0 0 0 0.5px color-mix(in srgb, var(--term-fg) 16%, transparent),
-    0 1px 2px rgba(0, 0, 0, 0.05),
-    0 2px 4px rgba(0, 0, 0, 0.03);
-}
-.ask-card-head {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-.ask-head-icon {
-  flex: none;
-  width: 22px;
-  height: 22px;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  border-radius: var(--ui-radius-sm);
-  background: color-mix(in srgb, var(--term-accent) 14%, transparent);
-  color: var(--term-accent);
-  font-family: var(--font-mono);
-  font-size: var(--fs-sm);
-  font-weight: 700;
-}
-.ask-head-title {
+.shell-notice-text {
+  margin: 6px 0 0;
   font-size: var(--fs-md);
-  font-weight: 600;
-  color: var(--term-fg);
-}
-.ask-head-count {
-  margin-left: auto;
-  font-size: var(--fs-sm);
-  color: var(--term-muted);
-  font-variant-numeric: tabular-nums;
-}
-/* ── Horizontal sliding question track ──
-   The viewport height follows the active question; the track slides on X.
-   Question widths are locked to the viewport by UserInputBanner via a
-   ResizeObserver (panes are user-resizable). */
-.ask-viewport {
-  overflow: hidden;
-  width: 100%;
-  padding: 1px;
-  margin: -1px;
-}
-.ask-viewport[data-animate="true"] {
-  transition: height var(--t-decay) cubic-bezier(0.22, 1, 0.36, 1);
-}
-.ask-track {
-  position: relative;
-  display: flex;
-  flex-direction: row;
-  align-items: flex-start;
-  gap: 28px; /* must match TRACK_GAP in UserInputBanner.tsx */
-  will-change: transform;
-}
-.ask-track[data-animate="true"] {
-  transition: transform var(--t-decay) cubic-bezier(0.22, 1, 0.36, 1);
-}
-.ask-question {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-  flex: none;
-  opacity: 0;
-}
-.ask-question[data-active="true"] { opacity: 1; }
-.ask-track[data-animate="true"] .ask-question {
-  transition: opacity var(--t-decay) cubic-bezier(0.22, 1, 0.36, 1);
-}
-.ask-question:not([data-active="true"]) { pointer-events: none; }
-@media (prefers-reduced-motion: reduce) {
-  .ask-viewport[data-animate="true"],
-  .ask-track[data-animate="true"],
-  .ask-track[data-animate="true"] .ask-question { transition: none; }
-}
-.ask-card-qheader {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-}
-.ask-card-chip {
-  background: color-mix(in srgb, var(--term-accent) 14%, transparent);
-  color: var(--term-accent);
-  font-size: var(--fs-xs);
-  font-weight: 600;
-  text-transform: uppercase;
-  letter-spacing: var(--ls-wide);
-  padding: 2px 6px;
-  border-radius: var(--ui-radius-sm);
-  align-self: flex-start;
-}
-.ask-card-qtext {
-  color: var(--term-fg);
-  font-weight: 500;
-  line-height: 1.4;
-  /* Questions keep their line breaks: approval questions (scheduled jobs) put
-     one fact per line, and one can carry a whole message to approve
-     (send_to_thread from the Michi assistant), so a long one scrolls. */
-  white-space: pre-wrap;
-  overflow-wrap: anywhere;
-  max-height: 40vh;
-  overflow-y: auto;
-}
-/* Title line plus one `Label: value` fact per line (approval questions):
-   the facts form a two-column list; a quoted value (a job's prompt) gets
-   the full width as a quote. */
-.ask-card-qtext-structured {
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-  white-space: normal;
-}
-.ask-card-qtitle {
-  font-weight: 600;
-  white-space: pre-wrap;
-}
-.ask-card-details {
-  display: grid;
-  grid-template-columns: fit-content(40%) minmax(0, 1fr);
-  align-items: baseline;
-  column-gap: 14px;
-  row-gap: 7px;
-  padding: 10px 12px;
-  border-radius: var(--ui-radius-sm);
-  background: color-mix(in srgb, var(--term-fg) 4%, transparent);
-  font-size: var(--fs-md);
-  font-weight: 400;
-}
-.ask-card-detail { display: contents; }
-.ask-card-detail-label {
-  color: var(--term-muted);
-  font-size: var(--fs-sm);
-}
-.ask-card-detail-value {
-  color: var(--term-fg);
-  white-space: pre-wrap;
-}
-.ask-card-detail.is-quoted .ask-card-detail-label,
-.ask-card-detail.is-quoted .ask-card-detail-value,
-.ask-card-detail.is-note { grid-column: 1 / -1; }
-.ask-card-detail.is-quoted .ask-card-detail-label { margin-top: 3px; }
-.ask-card-detail.is-quoted .ask-card-detail-value {
-  margin-top: -3px;
-  padding-left: 10px;
-  border-left: 2px solid color-mix(in srgb, var(--term-accent) 45%, transparent);
-  color: var(--term-mid);
   line-height: 1.5;
-}
-.ask-card-detail.is-note { color: var(--term-mid); }
-.ask-card-hint {
   color: var(--term-mid);
-  font-size: var(--fs-sm);
-  font-style: italic;
 }
-.ask-card-options {
-  display: flex;
-  flex-direction: column;
-  gap: 5px;
+.ask-notice-question {
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
 }
-.ask-card-opt {
-  display: flex;
-  align-items: center;
-  gap: 9px;
-  padding: 7px 10px;
-  border: 0.5px solid color-mix(in srgb, var(--term-fg) 14%, transparent);
-  border-radius: var(--ui-radius-sm);
-  background: transparent;
-  color: var(--term-fg);
-  cursor: pointer;
-  text-align: left;
-  font-size: var(--fs-lg);
-  font-family: inherit;
-  transition:
-    background-color 150ms cubic-bezier(0.22, 1, 0.36, 1),
-    border-color 150ms cubic-bezier(0.22, 1, 0.36, 1),
-    box-shadow 150ms cubic-bezier(0.22, 1, 0.36, 1);
-}
-.ask-card-opt:hover:not(.selected):not(:disabled) {
-  background: color-mix(in srgb, var(--term-fg) 3%, transparent);
-}
-/* Selection = the border melts away and the row lifts on an accent ring. */
-.ask-card-opt.selected {
-  border-color: transparent;
-  background: var(--term-surface);
-  box-shadow:
-    0 0 0 0.5px color-mix(in srgb, var(--term-accent) 55%, transparent),
-    0 1px 2px rgba(0, 0, 0, 0.06),
-    0 2px 4px rgba(0, 0, 0, 0.03);
-}
-.ask-card-opt:active:not(:disabled) { transform: scale(0.99); }
-.ask-card-opt:disabled { cursor: default; }
-.ask-card-opt-other { cursor: text; }
-.ask-card-opt-other:active { transform: none; }
-.ask-card-opt-other input {
-  flex: 1;
-  min-width: 0;
-  border: 0;
-  background: transparent;
-  color: var(--term-fg);
-  font: inherit;
-  font-size: var(--fs-lg);
-  outline: none;
-  padding: 0;
-}
-.ask-card-opt-other input::placeholder { color: var(--term-faint); }
-.ask-card-indicator {
-  flex-shrink: 0;
-  width: 14px;
-  height: 14px;
-  border-radius: 50%;
-  border: 2px solid var(--term-line);
-  transition:
-    border-color 240ms cubic-bezier(0.22, 1, 0.36, 1),
-    background 240ms cubic-bezier(0.22, 1, 0.36, 1),
-    box-shadow 240ms cubic-bezier(0.22, 1, 0.36, 1);
-}
-.ask-card-indicator.checkbox { border-radius: var(--ui-radius-sm); }
-.ask-card-opt.selected .ask-card-indicator {
-  border-color: var(--term-accent);
-  background: var(--term-accent);
-  box-shadow: inset 0 0 0 2.5px var(--term-surface);
-}
-.ask-card-opt.selected .ask-card-indicator.checkbox { box-shadow: none; }
-.ask-card-opt-label {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-}
-.ask-card-opt-desc {
-  display: block;
-  color: var(--term-mid);
-  font-size: var(--fs-sm);
-}
-.ask-card-footer {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding-top: 8px;
-  border-top: 1px solid color-mix(in srgb, var(--term-fg) 10%, transparent);
-}
-.ask-card-footer-right {
+.shell-notice-foot {
   display: flex;
   align-items: center;
   gap: 6px;
+  margin-top: 10px;
+  min-height: 24px;
 }
-.ask-card-skip {
-  border: 0;
-  border-radius: var(--ui-radius);
-  background: transparent;
+.shell-notice-muted {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: var(--fs-sm);
   color: var(--term-muted);
-  cursor: pointer;
-  font-size: var(--fs-md);
-  font-family: inherit;
-  padding: 5px 10px;
-  transition: color var(--t-soft) cubic-bezier(0.22, 1, 0.36, 1);
 }
-.ask-card-skip:hover { color: var(--term-fg); }
-.ask-nav-arrow {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 20px;
-  height: 20px;
-  border: 0;
-  background: transparent;
+.shell-notice-end {
+  margin-left: auto;
+}
+/* The shrink and dismiss controls: .t-icon-btn, a little smaller and quiet. */
+.shell-notice-icon {
+  flex-shrink: 0;
+  min-width: 22px;
+  min-height: 22px;
+  padding: 3px;
   color: var(--term-muted);
-  cursor: pointer;
-  font-size: var(--fs-xl);
-  padding: 0;
-  font-family: inherit;
-  transition: color var(--t-soft) cubic-bezier(0.22, 1, 0.36, 1);
 }
-.ask-nav-arrow:hover:not(:disabled) { color: var(--term-fg); }
-.ask-nav-arrow:active:not(:disabled) { transform: scale(0.95); }
-.ask-nav-arrow:disabled { opacity: 0.28; cursor: default; }
-.ask-card-submit {
-  position: relative;
-  z-index: 0;
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
-  padding: 5px 12px;
-  border: 0;
-  border-radius: var(--ui-radius);
-  background: transparent;
-  color: var(--on-accent);
-  font-size: var(--fs-md);
-  font-weight: 600;
-  font-family: inherit;
-  cursor: pointer;
+.shell-notice-head .shell-notice-icon {
+  margin-right: -4px;
 }
-.ask-card-submit::before {
-  content: "";
-  position: absolute;
-  inset: 0;
-  z-index: -1;
-  border-radius: inherit;
-  background: var(--term-accent);
-  transition: background var(--t-soft) cubic-bezier(0.22, 1, 0.36, 1);
-}
-.ask-card-submit:hover:not(:disabled)::before {
-  background: color-mix(in srgb, var(--term-accent) 85%, var(--term-fg));
-}
-.ask-card-submit:active:not(:disabled) { transform: scale(0.98); }
-.ask-card-submit:disabled { opacity: 0.38; cursor: default; }
-.ask-card-opt:focus-visible,
-.ask-card-skip:focus-visible,
-.ask-nav-arrow:focus-visible,
-.ask-card-submit:focus-visible,
-.ask-card-opt-other input:focus-visible {
-  outline: 1px solid var(--term-accent);
+.shell-notice-tab:focus-visible {
+  outline: var(--focus-ring);
   outline-offset: 1px;
 }
-/* Resolved read-only state */
-.ask-card-body {
-  padding: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
+/* The shrunk notice: its icon and count, docked to the edge. */
+.shell-notice-tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  height: 32px;
+  padding: 0 10px 0 12px;
+  font-size: var(--fs-md);
+  cursor: pointer;
 }
-.ask-qa-pair {
+@media (hover: hover) {
+  .shell-notice-tab:hover {
+    background: color-mix(in srgb, var(--term-alt) 45%, var(--term-surface));
+  }
+}
+/* The tasks: a bordered list like the Background work drawer's sections. */
+.interrupted-notice-list {
+  list-style: none;
+  margin: 10px 0 0;
+  padding: 0;
+  border: 1px solid var(--term-line);
+  border-radius: var(--term-composer-radius);
+  background: color-mix(in srgb, var(--term-alt) 28%, transparent);
+}
+.interrupted-notice-list--all {
+  max-height: 40vh;
+  overflow-y: auto;
+}
+.interrupted-notice-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 6px 7px 10px;
+}
+.interrupted-notice-item + .interrupted-notice-item {
+  border-top: 1px solid var(--term-line);
+}
+.interrupted-notice-item-main {
+  flex: 1;
+  min-width: 0;
   display: flex;
   flex-direction: column;
   gap: 2px;
-  padding-top: 8px;
 }
-.ask-qa-pair:first-child { padding-top: 0; }
-.ask-qa-pair + .ask-qa-pair {
-  border-top: 1px solid color-mix(in srgb, var(--term-fg) 10%, transparent);
-}
-.ask-qa-question {
+.interrupted-notice-item-title {
+  display: block;
+  max-width: 100%;
+  padding: 0;
+  border: 0;
+  background: none;
+  font: inherit;
+  font-weight: 500;
   color: var(--term-fg);
-  font-size: var(--fs-md);
-  font-weight: 600;
+  text-align: left;
+  cursor: pointer;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
-.ask-qa-answer {
-  color: var(--term-mid);
-  font-size: var(--fs-lg);
+.interrupted-notice-item-title:hover {
+  text-decoration: underline;
+  text-underline-offset: 2px;
 }
-.ask-qa-answer.skipped {
-  color: var(--term-mid);
-  font-style: italic;
+.interrupted-notice-item-title:focus-visible {
+  outline: var(--focus-ring);
+  outline-offset: 1px;
 }
+.interrupted-notice-item-meta {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+  color: var(--term-muted);
+}
+/* Toasts start below the notice stack. */
+:root [data-sonner-toaster][data-y-position='top'] {
+  top: calc(var(--offset-top) + var(--shell-notices-height, 0px));
+}
+@media (max-width: 600px) {
+  :root [data-sonner-toaster][data-y-position='top'] {
+    top: calc(var(--mobile-offset-top) + var(--shell-notices-height, 0px));
+  }
+}
+
+/* The inline ask card lives in components/terminal/UserInputBanner.css. */
+
 
 /* ══════════════════════════════════════════════════════════════════════════
    Shared overlay design system — drawers, modals, controls
@@ -3917,9 +3941,11 @@ html[data-vibrancy="on"],
   --z-raised: 1;          /* lift above siblings (sidebar edge shadow, hovered map card) */
   --z-sticky: 10;         /* resize handles, scroll thumbs, expanded map cards */
   --z-pane-overlay: 20;   /* over a pane: find bar, find flash, map toolbar, drop zones */
+  --z-shell-notice: 30;   /* the notice corner (ShellNotices): over panes, under the overlay sidebar */
   --z-sidebar-scrim: 34;  /* behind the overlay sidebar in narrow windows */
   --z-sidebar-overlay: 35;
   --z-drag: 36;           /* pane drag-and-drop targets */
+  --z-pane-dim: 38;       /* unfocused pane's veil, over all it holds (inside the pane's own stacking context) */
   /* Page-level ladder. */
   --z-drawer-scrim: 40;
   --z-drawer: 41;
@@ -3932,12 +3958,15 @@ html[data-vibrancy="on"],
   --z-selection: 1350;    /* selection bar: over any surface text can be selected in */
   --z-toast: 1400;
 
-  /* One scrim recipe for every dim-behind surface. Warm-tinted off the app bg
-     so it reads as part of the palette (not a flat black wash) and adapts to
-     light/dark themes. Drawers and modals share one dim (the Cmd+K palette's
-     46%) so opening Settings and opening the palette look identical; the two
-     tokens stay so a surface can still diverge later. */
-  --scrim-modal: color-mix(in srgb, var(--term-bg) 46%, transparent);
+  /* One scrim recipe for every dim-behind surface. It dims what is behind
+     (tokens.ts --term-scrim): the palette's ink at 20% on light palettes, so
+     it reads as part of the palette rather than a flat grey, and black at 42%
+     on dark ones. Drawers and modals share one dim so opening Settings and
+     opening the Cmd+K palette look identical; the two tokens stay so a surface
+     can still diverge later. The fallback, for a page without the palette,
+     is 68% so the room behind a dialog recedes: at 46% the sidebar titles and
+     transcript beside it stayed readable and competed with the dialog. */
+  --scrim-modal: var(--term-scrim, color-mix(in srgb, var(--term-bg) 68%, transparent));
   --scrim-drawer: var(--scrim-modal);
 
   /* Text/glyph color that sits ON a saturated fill — accent (primary buttons,
@@ -3954,6 +3983,7 @@ html[data-vibrancy="on"],
      per-palette value (mixed toward fg on the dark palettes, whose danger is
      too dim for words); this is only the fallback outside the shell. */
   --term-danger-text: var(--term-danger);
+  --term-waiting-text: var(--term-waiting, var(--term-select));
 }
 
 /* ── Button primitive · .ui-btn ──────────────────────────────────────────────
@@ -3987,7 +4017,7 @@ html[data-vibrancy="on"],
   background: var(--term-hover-bg, var(--term-alt));
 }
 .ui-btn:focus-visible {
-  outline: 2px solid color-mix(in srgb, var(--term-accent) 60%, transparent);
+  outline: var(--focus-ring);
   outline-offset: 1px;
 }
 .ui-btn:disabled {
@@ -4034,7 +4064,7 @@ html[data-vibrancy="on"],
 }
 /* danger recolor — applies to any variant via data-danger */
 .ui-btn[data-danger='true']:not(.ui-btn--primary) {
-  color: var(--term-danger);
+  color: var(--term-danger-text);
 }
 .ui-btn--primary[data-danger='true'] {
   border-color: var(--term-danger);
@@ -4057,6 +4087,35 @@ html[data-vibrancy="on"],
   background-color: var(--term-alt2);
   color: var(--term-muted);
 }
+
+/* ── Switch primitive · .ui-switch ───────────────────────────────────────────
+   components/ui/controls Switch: a 28×16 square track with a 12px knob that
+   slides right when on. Settings draws its own size (Settings.css). */
+.ui-switch {
+  position: relative;
+  display: inline-block;
+  flex-shrink: 0;
+  width: 28px;
+  height: 16px;
+  padding: 0;
+  border: 1px solid var(--term-line-s);
+  border-radius: 0;
+  background: var(--term-surface);
+  cursor: pointer;
+  transition: background var(--t-soft) var(--t-ease);
+}
+.ui-switch[aria-checked='true'] { background: var(--term-accent); }
+.ui-switch:disabled { cursor: not-allowed; opacity: 0.5; }
+.ui-switch__knob {
+  position: absolute;
+  top: 1px;
+  left: 1px;
+  width: 12px;
+  height: 12px;
+  background: var(--term-line-s);
+  transition: left var(--t-soft) var(--t-ease);
+}
+.ui-switch[aria-checked='true'] .ui-switch__knob { left: 13px; background: var(--term-surface); }
 
 /* Approval choices stay neutral until hover or keyboard focus. */
 .ui-btn.t-permission-choice {
@@ -4098,10 +4157,6 @@ html[data-vibrancy="on"],
   border-color: color-mix(in srgb, var(--term-accent) 70%, var(--term-line));
   box-shadow: 0 0 0 2px color-mix(in srgb, var(--term-accent) 22%, transparent);
 }
-.ui-input[type='search']:focus {
-  border-color: var(--term-line);
-  box-shadow: none;
-}
 .ui-input::placeholder {
   color: var(--term-faint);
 }
@@ -4123,7 +4178,7 @@ html[data-vibrancy="on"],
   border-radius: var(--ui-radius);
 }
 .ui-search:focus-within {
-  outline: 2px solid color-mix(in srgb, var(--term-accent) 45%, transparent);
+  outline: var(--focus-ring);
   outline-offset: 1px;
 }
 .ui-search input {
@@ -4155,6 +4210,21 @@ html[data-vibrancy="on"],
   background: transparent;
   color: var(--term-muted);
   cursor: pointer;
+}
+/* A search match in a list (SearchHighlight). */
+.search-mark {
+  background: color-mix(in srgb, var(--term-select) 30%, transparent);
+  color: inherit;
+}
+/* A pane side column's filter, in its 48px header. */
+.ui-search--compact {
+  height: 29px;
+  gap: 7px;
+  padding: 0 9px;
+  background: var(--term-bg);
+}
+.ui-search--compact input {
+  font-size: var(--fs-sm);
 }
 
 /* ── Shared drawer / modal scrim + panel classes ─────────────────────────────

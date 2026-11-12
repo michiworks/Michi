@@ -1,60 +1,7 @@
 import { vi } from 'vitest';
 import { reduceProject, Project } from './chatStore';
-import { parseTitle } from './assistantParsing';
-import { finalizeAssistant } from './assistantParsing';
+import type { ChatNodeState } from './chatTypes';
 import { hydrateSavedState, hydrateBackendWorkspaces } from './chatHydration';
-
-describe('parseTitle', () => {
-  it('extracts a plain Title: line', () => {
-    const input = 'Title: How birds navigate\n\n#### Overview\nBody text here.';
-    const { title, rest } = parseTitle(input);
-    expect(title).toBe('How birds navigate');
-    expect(rest).toBe('#### Overview\nBody text here.');
-  });
-
-  it('returns null when no title marker is present', () => {
-    const input = '#### Overview\nNo title here.';
-    const { title, rest } = parseTitle(input);
-    expect(title).toBeNull();
-    expect(rest).toBe(input);
-  });
-});
-
-describe('finalizeAssistant remapOffset', () => {
-  it('shifts offsets after a title line is removed', () => {
-    const raw = 'Title: My Title\n\nBody text here.';
-    const { remapOffset, visibleText } = finalizeAssistant(raw);
-    expect(visibleText).toBe('Body text here.');
-    // Offset 0 (before title) → 0
-    expect(remapOffset(0)).toBe(0);
-    // Offset inside the removed title → snaps to removal point (0)
-    expect(remapOffset(5)).toBe(0);
-    // Offset right after the title+newlines (17) → 0 in visible
-    expect(remapOffset(17)).toBe(0);
-    // Offset at "Body" (17) → 0 in visible text
-    const bodyStart = raw.indexOf('Body');
-    expect(remapOffset(bodyStart)).toBe(visibleText.indexOf('Body'));
-    // Offset at end of raw → end of visible
-    expect(remapOffset(raw.length)).toBe(visibleText.length);
-  });
-
-  it('clamps offsets beyond follow-up marker', () => {
-    const raw = 'Some answer.\n\nFollow-up Questions:\n1. Q1?\n2. Q2?';
-    const { remapOffset, visibleText } = finalizeAssistant(raw);
-    expect(visibleText).toBe('Some answer.');
-    // Offset within visible portion
-    expect(remapOffset(5)).toBe(5);
-    // Offset beyond the follow-up marker → clamped to visible length
-    expect(remapOffset(raw.length)).toBe(visibleText.length);
-  });
-
-  it('prefers the LAST inline sentinel when multiple are present', () => {
-    // Defensive against the LLM quoting an earlier [FOLLOW-UPS: ...] mid-reply.
-    const raw = 'Earlier I wrote [FOLLOW-UPS: old1 | old2 | old3]. Now the real answer.\n\n[FOLLOW-UPS: new1? | new2? | new3?]';
-    const { followUps } = finalizeAssistant(raw);
-    expect(followUps).toEqual(['new1?', 'new2?', 'new3?']);
-  });
-});
 
 describe('hydrateSavedState', () => {
   const baseState = {
@@ -336,26 +283,48 @@ function makeProject(): Project {
   };
 }
 
+const threadRoot = (nodeId: string, extra: Partial<ChatNodeState> = {}): ChatNodeState => ({
+  nodeId, projectId: 'p1', kind: 'chat', chatId: null, messages: [], followUps: [], status: 'idle', ...extra,
+});
+
 describe('reduceProject: thread lifecycle', () => {
   it('archive-tree on the active tree flips activeTreeId to the next non-archived by lastActiveAt', () => {
     let p = reduceProject(makeProject(), { type: 'create-tree', treeId: 't2', rootNodeId: 'r2', now: 200 });
     // t1 has lastActiveAt=0, t2=200; archive t2, expect t1 to activate.
-    p = reduceProject(p, { type: 'archive-tree', treeId: 't2', now: 300 });
+    p = reduceProject(p, { type: 'archive-tree', treeId: 't2', now: 300, nodes: { r1: threadRoot('r1'), r2: threadRoot('r2') } });
     expect(p.trees.find((t) => t.id === 't2')!.archivedAt).toBe(300);
     expect(p.activeTreeId).toBe('t1');
   });
 
+  it('archive-tree on the active tree never lands on a thread in Trash or a hidden helper', () => {
+    let p = makeProject();
+    p = reduceProject(p, { type: 'create-tree', treeId: 't-binned', rootNodeId: 'r-binned', now: 100 });
+    p = reduceProject(p, { type: 'create-tree', treeId: 't-run', rootNodeId: 'r-run', now: 150 });
+    p = reduceProject(p, { type: 'create-tree', treeId: 't2', rootNodeId: 'r2', now: 200 });
+    const nodes = {
+      r1: threadRoot('r1'),
+      'r-binned': threadRoot('r-binned', { deletedAt: 120 }),
+      'r-run': threadRoot('r-run', { scheduledOnlyJobId: 'job-hidden' }),
+      r2: threadRoot('r2'),
+    };
+    p = reduceProject(p, { type: 'archive-tree', treeId: 't2', now: 300, nodes });
+    expect(p.activeTreeId).toBe('t1');
+  });
+
   it('unarchive-tree clears archivedAt and bumps lastActiveAt; does not auto-activate', () => {
-    let p = reduceProject(makeProject(), { type: 'archive-tree', treeId: 't1', now: 300 });
+    let p = reduceProject(makeProject(), { type: 'archive-tree', treeId: 't1', now: 300, nodes: { r1: threadRoot('r1') } });
     p = reduceProject(p, { type: 'unarchive-tree', treeId: 't1', now: 400 });
     expect(p.trees[0].archivedAt).toBeUndefined();
     expect(p.trees[0].lastActiveAt).toBe(400);
     expect(p.activeTreeId).toBeNull();
   });
 
-  it('rename-tree sets name', () => {
-    const p = reduceProject(makeProject(), { type: 'rename-tree', treeId: 't1', name: 'Research' });
-    expect(p.trees[0].name).toBe('Research');
+  it("clear-thread-name drops a name stored apart from the root's title", () => {
+    const named = makeProject();
+    named.trees[0].name = 'Research';
+    const p = reduceProject(named, { type: 'clear-thread-name', rootNodeId: 'r1' });
+    expect(p.trees[0]).not.toHaveProperty('name');
+    expect(reduceProject(p, { type: 'clear-thread-name', rootNodeId: 'r1' })).toBe(p);
   });
 
   it('pin-tree stamps pinnedAt; unpin-tree clears it', () => {
@@ -410,6 +379,23 @@ describe('reduceProject context actions', () => {
         });
         expect(withTwo.artifacts).toHaveLength(2);
         expect(withTwo.artifacts![1].name).toBe('api-spec-2');
+    });
+
+    it('an agent save updates the artifact with its id, not another differing from it only by case', () => {
+        const p: Project = { ...baseProject, artifacts: [
+            { id: 'ctx-1', name: 'Plan', filePath: '.contexts/Plan.md', source: 'agent', createdAt: 1, updatedAt: 1 },
+            { id: 'ctx-2', name: 'plan', filePath: '.contexts/plan.md', source: 'agent', createdAt: 1, updatedAt: 1 },
+        ] };
+        const saved = reduceProject(p, {
+            type: 'upsert-context', projectId: 'p1',
+            context: { id: 'ctx-2', name: 'plan', filePath: '.contexts/plan.md', size: 5, source: 'agent' },
+        });
+        expect(saved.artifacts!.map((c) => [c.id, c.name, c.size])).toEqual([['ctx-1', 'Plan', undefined], ['ctx-2', 'plan', 5]]);
+        const updated = reduceProject(p, {
+            type: 'update-context-by-name', projectId: 'p1',
+            context: { id: 'ctx-2', name: 'plan', filePath: '.contexts/plan.md', size: 7, source: 'agent' },
+        });
+        expect(updated.artifacts!.map((c) => [c.id, c.name, c.size])).toEqual([['ctx-1', 'Plan', undefined], ['ctx-2', 'plan', 7]]);
     });
 
     it('update-context-by-name updates an existing context without duplicating it', () => {

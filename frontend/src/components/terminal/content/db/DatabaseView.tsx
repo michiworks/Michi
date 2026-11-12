@@ -1,7 +1,7 @@
 import type { MichiNoticeTone } from '../page/editorTypes';
 import React, { useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { Plus } from 'lucide-react';
-import type { MichiDatabase, MichiDbView, MichiDbViewType, DatabaseRowStatus, MichiThreadState } from 'michi-shared';
+import { plural, type MichiDatabase, type MichiDbView, type MichiDbViewType, type DatabaseRowStatus, type MichiThreadState } from 'michi-shared';
 import { openMichiAssistant, type MichiAssistantPage } from '../../../../state/content/assistantBridge';
 import { EMPTY_SELECTION, applySelectionClick, type ThreadSelection } from '../threads/selection';
 import { dialogOf, isEditableTarget, type ThreadItemHandlers } from '../threads/threadItem';
@@ -38,16 +38,13 @@ export const ROWS_PAGE = 300;
 const FALLBACK_VIEW: MichiDbView = { id: 'table', name: 'Table', type: 'table', config: emptyConfig(), position: 0 };
 const THREADS_PAGE: MichiAssistantPage = { kind: 'threads' };
 
-/** Host services for database feedback, clipboard and assistant actions.
+/** Host services for database feedback and assistant actions.
  * Omitted capabilities remain unavailable. */
 export interface DatabaseViewServices {
   notice?: (text: string, tone?: MichiNoticeTone) => void;
-  copyText?: (text: string) => Promise<void>;
   handToAgent?: (items: Array<{ id: string; title: string }>, page: MichiAssistantPage) => void;
-}
-
-function plural(n: number, noun: string) {
-  return `${n} ${noun}${n === 1 ? '' : 's'}`;
+  /** Ask the host's assistant about one row (a page's database: the page assistant). */
+  askRow?: (row: { id: string; title: string }) => void;
 }
 
 const sameIds = (a: readonly string[], b: readonly string[]) => a.length === b.length && a.every((id, i) => id === b[i]);
@@ -336,6 +333,7 @@ export function DatabaseView({
         keysFirst={embedded ? rootRef : null}
         assistantPage={assistantPage}
         handToAgent={services ? (services.handToAgent ? (row) => services.handToAgent?.([{ id: row.id, title: rowTitle(db, row) }], assistantPage) : null) : undefined}
+        onAsk={services?.askRow ? (row) => services.askRow?.({ id: row.id, title: rowTitle(db, row) }) : undefined}
       />
     </div>
   );

@@ -1,33 +1,32 @@
-import type { AgentRunEventV1 } from 'michi-shared';
+import { createKeyedListenerSets, createListenerSet, type AgentRunEventV1 } from 'michi-shared';
 import type { AgentRunClock } from './ports';
 import { systemAgentRunClock } from './ports';
+import { log } from '../../services/logger';
 
 type Listener = (event: AgentRunEventV1) => void;
+
+/** A listener's failure is logged, never thrown into the coordinator flow that just committed. */
+const listenerOptions = {
+  onError: (error: unknown) => log.warn('chat', 'Agent Run event listener failed', { error: error instanceof Error ? error.message : String(error) }),
+};
 
 /** Instance-scoped live fanout. Callers may publish only repository-returned
  * events, which guarantees commit-before-broadcast ordering. */
 export class AgentRunEventBus {
-  private readonly listeners = new Map<string, Set<Listener>>();
-  private readonly allListeners = new Set<Listener>();
+  private readonly listeners = createKeyedListenerSets<string, [AgentRunEventV1]>(listenerOptions);
+  private readonly allListeners = createListenerSet<[AgentRunEventV1]>(listenerOptions);
 
   publishCommitted(event: AgentRunEventV1): void {
-    for (const listener of this.listeners.get(event.runId) ?? []) listener(event);
-    for (const listener of this.allListeners) listener(event);
+    this.listeners.emit(event.runId, event);
+    this.allListeners.emit(event);
   }
 
   subscribeAll(listener: Listener): () => void {
-    this.allListeners.add(listener);
-    return () => { this.allListeners.delete(listener); };
+    return this.allListeners.subscribe(listener);
   }
 
   subscribe(runId: string, listener: Listener): () => void {
-    const set = this.listeners.get(runId) ?? new Set<Listener>();
-    set.add(listener);
-    this.listeners.set(runId, set);
-    return () => {
-      set.delete(listener);
-      if (!set.size) this.listeners.delete(runId);
-    };
+    return this.listeners.subscribe(runId, listener);
   }
 
   waitForEvent(runId: string, afterSeq: number, timeoutMs: number,

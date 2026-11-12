@@ -2,9 +2,9 @@ import React from 'react';
 import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import MarkdownContent from '../../MarkdownContent';
-import { AssistantLinkScope, AssistantPaneScope } from './AssistantLinks';
+import { AssistantLinkScope, MichiLinkScope } from './AssistantLinks';
 
-const navigateToNode = vi.hoisted(() => vi.fn());
+const revealNode = vi.hoisted(() => vi.fn((_nodeId: string, _opts?: { workspaceId?: string; messageId?: string }) => true));
 const store = vi.hoisted(() => ({
   nodes: { n7: { nodeId: 'n7', projectId: 'w1', title: 'S7 thread' } } as Record<string, unknown>,
   projects: [
@@ -20,27 +20,23 @@ const store = vi.hoisted(() => ({
     return () => { store.listeners.delete(listener); };
   },
 }));
-const persistence = vi.hoisted(() => ({ fetchNodeWorkspace: vi.fn(), fetchWorkspace: vi.fn() }));
+const persistence = vi.hoisted(() => ({ fetchNodeWorkspace: vi.fn(), fetchWorkspaceStructure: vi.fn() }));
 
-vi.mock('../../../state/navigateToNode', () => ({ navigateToNode }));
 vi.mock('../../../services/api/persistence', () => persistence);
 vi.mock('../../../state/chatStore', () => ({
   useChatNode: (id: string) => React.useSyncExternalStore(store.subscribe, () => store.nodes[id]),
   // The real reader sees an install at once, before any re-render.
   useChatNodeReader: () => (id: string) => store.nodes[id],
   useChatProjects: () => ({ projects: React.useSyncExternalStore(store.subscribe, () => store.projects), activeProjectId: 'w1' }),
-  useChatActions: () => ({
-    selectProject: vi.fn(), openPane: vi.fn(), openPaneInTree: vi.fn(), activateTree: vi.fn(), setFocusedNodeId: vi.fn(),
-    installWorkspaceSnapshot: store.installWorkspaceSnapshot,
-  }),
+  useChatActions: () => ({ revealNode, installWorkspaceSnapshot: store.installWorkspaceSnapshot }),
 }));
 
 const ANSWER = 'See [S7](michi://node/n7).';
 
 beforeEach(() => {
-  navigateToNode.mockReset();
+  revealNode.mockClear();
   persistence.fetchNodeWorkspace.mockReset();
-  persistence.fetchWorkspace.mockReset();
+  persistence.fetchWorkspaceStructure.mockReset();
   store.installWorkspaceSnapshot.mockReset().mockReturnValue(true);
 });
 
@@ -53,21 +49,20 @@ describe('assistant answer chips', () => {
 
   it('opens what each chip points at', () => {
     render(<AssistantLinkScope><MarkdownContent text={ANSWER} /></AssistantLinkScope>);
-    const nav = vi.fn();
-    window.addEventListener('michi:nav-page', nav);
-    try {
-      fireEvent.click(screen.getByRole('button', { name: 'S7' }));
-    } finally {
-      window.removeEventListener('michi:nav-page', nav);
-    }
-    expect(navigateToNode).toHaveBeenCalledWith(expect.objectContaining({ activeProjectId: 'w1' }), 'n7', 'w1');
-    expect((nav.mock.calls[0][0] as CustomEvent).detail).toEqual({ page: 'dashboard' });
+    fireEvent.click(screen.getByRole('button', { name: 'S7' }));
+    expect(revealNode).toHaveBeenCalledWith('n7', { workspaceId: 'w1' });
+  });
+
+  it('opens a message link at the message it cites', () => {
+    render(<AssistantLinkScope><MarkdownContent text={'See [the decision](michi://node/n7?message=m42).'} /></AssistantLinkScope>);
+    fireEvent.click(screen.getByRole('button', { name: 'the decision' }));
+    expect(revealNode).toHaveBeenCalledWith('n7', { workspaceId: 'w1', messageId: 'm42' });
   });
 
   it('loads a thread this window does not have yet, then opens it', async () => {
     const raw = { workspace: { id: 'w2' }, trees: [{ id: 't9', root_node_id: 'n9' }], nodes: [{ id: 'n9', title: 'New elsewhere' }], edges: [] };
     persistence.fetchNodeWorkspace.mockResolvedValue({ workspaceId: 'w2', treeId: 't9' });
-    persistence.fetchWorkspace.mockResolvedValue(raw);
+    persistence.fetchWorkspaceStructure.mockResolvedValue(raw);
     // As the real install: the node is in the store at once, for the next render.
     store.installWorkspaceSnapshot.mockImplementation(() => {
       store.nodes = { ...store.nodes, n9: { nodeId: 'n9', projectId: 'w2', title: 'New elsewhere' } };
@@ -84,8 +79,8 @@ describe('assistant answer chips', () => {
       expect(store.installWorkspaceSnapshot.mock.calls[0][1]).toBeGreaterThanOrEqual(before);
       // Only that one workspace is read.
       expect(persistence.fetchNodeWorkspace).toHaveBeenCalledWith('n9', expect.any(AbortSignal));
-      expect(persistence.fetchWorkspace).toHaveBeenCalledWith('w2', expect.any(AbortSignal));
-      await waitFor(() => expect(navigateToNode).toHaveBeenCalledWith(expect.objectContaining({ activeProjectId: 'w1' }), 'n9', 'w2'));
+      expect(persistence.fetchWorkspaceStructure).toHaveBeenCalledWith('w2', expect.any(AbortSignal));
+      await waitFor(() => expect(revealNode).toHaveBeenCalledWith('n9', { workspaceId: 'w2' }));
     } finally {
       const { n9: _n9, ...rest } = store.nodes;
       store.nodes = rest;
@@ -96,7 +91,7 @@ describe('assistant answer chips', () => {
   it('says not found when the workspace came in without that thread', async () => {
     persistence.fetchNodeWorkspace.mockResolvedValue({ workspaceId: 'w2', treeId: 't9' });
     // Deleted between the lookup and the read: the workspace has no live n9.
-    persistence.fetchWorkspace.mockResolvedValue({ workspace: { id: 'w2' }, trees: [], nodes: [], edges: [] });
+    persistence.fetchWorkspaceStructure.mockResolvedValue({ workspace: { id: 'w2' }, trees: [], nodes: [], edges: [] });
     render(<AssistantLinkScope><MarkdownContent text={'See [Just deleted](michi://node/n9).'} /></AssistantLinkScope>);
     const chip = screen.getByRole('button', { name: /Just deleted/ });
     fireEvent.click(chip);
@@ -105,12 +100,12 @@ describe('assistant answer chips', () => {
     expect(store.installWorkspaceSnapshot).toHaveBeenCalledTimes(1);
     fireEvent.click(chip);
     expect(persistence.fetchNodeWorkspace).toHaveBeenCalledTimes(1);
-    expect(navigateToNode).not.toHaveBeenCalled();
+    expect(revealNode).not.toHaveBeenCalled();
   });
 
   it('says it could not load a workspace it could not read, and tries again on the next click', async () => {
     persistence.fetchNodeWorkspace.mockResolvedValue({ workspaceId: 'w2', treeId: 't9' });
-    persistence.fetchWorkspace.mockResolvedValue({ nope: true });
+    persistence.fetchWorkspaceStructure.mockResolvedValue({ nope: true });
     store.installWorkspaceSnapshot.mockReturnValue(false);
     render(<AssistantLinkScope><MarkdownContent text={'See [Odd one](michi://node/n9).'} /></AssistantLinkScope>);
     const chip = screen.getByRole('button', { name: /Odd one/ });
@@ -119,7 +114,7 @@ describe('assistant answer chips', () => {
     expect(chip.getAttribute('aria-disabled')).toBeNull();
     fireEvent.click(chip);
     await waitFor(() => expect(persistence.fetchNodeWorkspace).toHaveBeenCalledTimes(2));
-    expect(navigateToNode).not.toHaveBeenCalled();
+    expect(revealNode).not.toHaveBeenCalled();
   });
 
   it('says so when Michi has no such thread, and does nothing else', async () => {
@@ -132,7 +127,7 @@ describe('assistant answer chips', () => {
     expect(store.installWorkspaceSnapshot).not.toHaveBeenCalled();
     act(() => { fireEvent.click(chip); });
     expect(persistence.fetchNodeWorkspace).toHaveBeenCalledTimes(1);
-    expect(navigateToNode).not.toHaveBeenCalled();
+    expect(revealNode).not.toHaveBeenCalled();
   });
 
   it('tries again on the next click when the backend could not be asked', async () => {
@@ -162,11 +157,11 @@ describe('assistant answer chips', () => {
   it('installs nothing for a chip that went away mid-lookup', async () => {
     let answer!: (value: unknown) => void;
     persistence.fetchNodeWorkspace.mockResolvedValue({ workspaceId: 'w2', treeId: null });
-    persistence.fetchWorkspace.mockReturnValue(new Promise((resolve) => { answer = resolve; }));
+    persistence.fetchWorkspaceStructure.mockReturnValue(new Promise((resolve) => { answer = resolve; }));
     const view = render(<AssistantLinkScope><MarkdownContent text={'See [Gone soon](michi://node/n9).'} /></AssistantLinkScope>);
     fireEvent.click(screen.getByRole('button', { name: 'Gone soon' }));
-    await waitFor(() => expect(persistence.fetchWorkspace).toHaveBeenCalled());
-    const signal = persistence.fetchWorkspace.mock.calls[0][1] as AbortSignal;
+    await waitFor(() => expect(persistence.fetchWorkspaceStructure).toHaveBeenCalled());
+    const signal = persistence.fetchWorkspaceStructure.mock.calls[0][1] as AbortSignal;
     view.unmount();
     expect(signal.aborted).toBe(true);
     await act(async () => { answer({ workspace: { id: 'w2' }, nodes: [{ id: 'n9' }] }); });
@@ -181,11 +176,9 @@ describe('assistant answer chips', () => {
     }
   });
 
-  it('gives the assistant pane the chips, and other panes nothing', () => {
-    const { unmount } = render(<AssistantPaneScope nodeId="n-sys"><MarkdownContent text={ANSWER} /></AssistantPaneScope>);
-    expect(screen.getAllByRole('button')).toHaveLength(1);
-    unmount();
-    render(<AssistantPaneScope nodeId="n7"><MarkdownContent text={ANSWER} /></AssistantPaneScope>);
-    expect(screen.queryAllByRole('button')).toHaveLength(0);
+  it('gives Markdown anywhere in the app the chips', () => {
+    render(<MichiLinkScope><MarkdownContent text={ANSWER} /></MichiLinkScope>);
+    fireEvent.click(screen.getByRole('button', { name: 'S7' }));
+    expect(revealNode).toHaveBeenCalledWith('n7', { workspaceId: 'w1' });
   });
 });

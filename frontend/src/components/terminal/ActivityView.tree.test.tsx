@@ -18,7 +18,6 @@ vi.mock('../../services/api', async (importOriginal) => {
   return {
     ...actual,
     listAgentModes: vi.fn().mockResolvedValue({ availableModes: [], defaultModeId: null }),
-    fetchAllWorkspaces: vi.fn().mockResolvedValue([]),
     fetchAllWorkspacesMeta: vi.fn().mockResolvedValue([]),
     fetchTreeMessages: vi.fn().mockResolvedValue([]),
     fetchWorkspaces: vi.fn().mockResolvedValue([]),
@@ -43,6 +42,9 @@ if (typeof (globalThis as { CSS?: unknown }).CSS === 'undefined') {
 beforeEach(() => {
   cleanup();
   localStorage.clear();
+  // Pane state lives in sessionStorage: a pane an earlier test focused would
+  // be restored after the click and expand its thread again.
+  sessionStorage.clear();
   mocks.extractNodeTree.mockReset();
   mocks.extractNodeTree.mockResolvedValue(false);
   Element.prototype.scrollIntoView = vi.fn() as unknown as typeof Element.prototype.scrollIntoView;
@@ -101,8 +103,12 @@ function StoreProbe() {
   return null;
 }
 
-function renderActivity() {
+function renderActivity(
+  patch: Record<string, Partial<ChatNodeState>> = {},
+  props: React.ComponentProps<typeof ActivityView> = {},
+) {
   const { nodes, projects } = fixture();
+  for (const [id, extra] of Object.entries(patch)) nodes[id] = { ...nodes[id], ...extra };
   localStorage.setItem(
     'michi:v1:state',
     JSON.stringify({ version: 2, projects, nodes, activeProjectId: 'p1' }),
@@ -112,7 +118,7 @@ function renderActivity() {
     <PrefsProvider>
       <ChatProvider>
         <StoreProbe />
-        <ActivityView />
+        <ActivityView {...props} />
       </ChatProvider>
     </PrefsProvider>,
   );
@@ -121,6 +127,41 @@ function renderActivity() {
 const row = (nodeId: string) => document.querySelector<HTMLElement>(`[data-sidebar-row="${nodeId}"]`);
 
 describe('ActivityView tree controller', () => {
+  it('marks the active thread only while the chat view is showing', async () => {
+    const { unmount } = renderActivity();
+    await screen.findByText('Child of A');
+    expect(row('rootA')?.classList.contains('is-active')).toBe(true);
+    expect(row('rootA')?.getAttribute('aria-current')).toBe('true');
+    unmount();
+
+    renderActivity({}, { chatViewActive: false });
+    await screen.findByText('Child of A');
+    expect(row('rootA')?.classList.contains('is-active')).toBe(false);
+    expect(row('rootA')?.hasAttribute('aria-current')).toBe(false);
+  });
+
+  it.each(['classic', 'square-full'])('labels its time groups in sentence case in %s rows', async (sidebarRowStyle) => {
+    localStorage.setItem(PREFS_KEY, JSON.stringify({ sidebarRowStyle }));
+    renderActivity();
+    await screen.findByText('Child of A');
+    const label = document.querySelector<HTMLElement>('.activity-time-label')!;
+    expect(label.textContent).toBe('Today');
+    expect(label.style.textTransform).toBe('');
+  });
+
+  it('opens a thread and a branch from the keyboard', async () => {
+    renderActivity();
+    await screen.findByText('Thread B');
+    const thread = screen.getByRole('button', { name: 'Thread B, Workspace one' });
+    expect(thread.tabIndex).toBe(0);
+    fireEvent.keyDown(thread, { key: 'Enter' });
+    await waitFor(() => expect(storeRef.current?.activeProject?.activeTreeId).toBe('tB'));
+    const branch = await screen.findByRole('button', { name: 'Child of B' });
+    fireEvent.keyDown(branch, { key: ' ' });
+    await waitFor(() => expect(storeRef.current?.focusedNodeId).toBe('childB'));
+    expect(branch.getAttribute('aria-current')).toBe('true');
+  });
+
   it('keeps the previous thread expanded when switching to another thread in the same workspace', async () => {
     renderActivity();
     await screen.findByText('Child of A');
@@ -151,6 +192,36 @@ describe('ActivityView tree controller', () => {
     fireEvent.click(row('childA2')!, { shiftKey: true });
 
     await waitFor(() => expect([...storeRef.current!.selection].sort()).toEqual(['childA', 'childA2']));
+  });
+
+  it('collapses the open active thread on a plain click, as Structure does', async () => {
+    renderActivity();
+    await screen.findByText('Child of A');
+    fireEvent.click(screen.getByText('Thread A'));
+    await waitFor(() => expect(row('childA')).toBeNull());
+  });
+
+  // Owner decision 14 (F26): ⌘/⇧ select threads as in Structure, across the
+  // workspaces this list mixes.
+  it('⌘-click toggles a thread of any workspace in the selection without opening it', async () => {
+    renderActivity();
+    await screen.findByText('Child of A');
+    fireEvent.click(screen.getByText('Thread C'), { metaKey: true });
+    fireEvent.click(screen.getByText('Thread B'), { metaKey: true });
+    await waitFor(() => expect([...storeRef.current!.treeSelection].sort()).toEqual(['tB', 'tC']));
+    fireEvent.click(screen.getByText('Thread B'), { metaKey: true });
+    await waitFor(() => expect([...storeRef.current!.treeSelection]).toEqual(['tC']));
+    expect(storeRef.current!.activeProject?.id).toBe('p1');
+    expect(storeRef.current!.activeProject?.activeTreeId).toBe('tA');
+  });
+
+  it('⇧-click adds the rows the list shows from the anchor through the clicked one', async () => {
+    renderActivity();
+    await screen.findByText('Child of A');
+    fireEvent.click(screen.getByText('Thread C'), { metaKey: true });
+    fireEvent.click(screen.getByText('Thread A'), { shiftKey: true });
+    await waitFor(() => expect([...storeRef.current!.treeSelection].sort()).toEqual(['tA', 'tB', 'tC']));
+    expect(storeRef.current!.activeProject?.id).toBe('p1');
   });
 
   it('offers "Extract as new thread" for a live child and extracts it', async () => {
@@ -186,6 +257,30 @@ describe('ActivityView re-sort', () => {
       .map((el) => el.getAttribute('data-sidebar-row'))
       .filter((id) => id?.startsWith('root'));
     expect(threadRows).toEqual(['rootC', 'rootA', 'rootB']);
+  });
+
+  it('keeps a thread opened from Unread there until the user switches to another thread', async () => {
+    // The label each thread row sits under, in list order.
+    const bucketOf = (nodeId: string) => {
+      let label: string | null = null;
+      for (const el of document.querySelectorAll('.activity-time-label, [data-sidebar-row]')) {
+        if (el.classList.contains('activity-time-label')) label = el.textContent;
+        else if (el.getAttribute('data-sidebar-row') === nodeId) return label;
+      }
+      return null;
+    };
+    renderActivity({ rootB: { lastAssistantAt: Date.now() - 500 } });
+    await screen.findByText('Child of A');
+    expect(bucketOf('rootB')).toBe('Unread');
+
+    fireEvent.click(screen.getByText('Thread B'));
+    await waitFor(() => expect(storeRef.current?.focusedNodeId).toBe('rootB'));
+    expect(bucketOf('rootB')).toBe('Unread');
+
+    fireEvent.click(screen.getByText('Thread A'));
+    await waitFor(() => expect(storeRef.current?.focusedNodeId).toBe('rootA'));
+    await waitFor(() => expect(bucketOf('rootB')).toBe('Today'));
+    expect(labels()).toEqual(['Today']);
   });
 
   it('scrolls a revealed row into view, without gliding under reduce motion', async () => {

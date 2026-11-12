@@ -1,6 +1,8 @@
 import React from 'react';
 import { MAINTENANCE_WATCH_LIMITS, type MaintenanceWatch } from 'michi-shared';
+import { useCompanionName } from '../../../state/companion/companionName';
 import type { PageMaintenanceState } from '../../../state/pages/usePageMaintenance';
+import { formatMichiClock } from '../content/michiFormat';
 import type { MaintenanceWatchInput } from '../../../services/api/pageMaintenance';
 
 const INTERVALS: ReadonlyArray<{ minutes: number; label: string }> = [
@@ -30,8 +32,8 @@ function intervalLabel(minutes: number): string {
 function lastCheckLine(watch: MaintenanceWatch): string {
   const run = watch.lastRun;
   if (!run) return watch.enabled ? 'Not checked yet' : 'Never checked';
-  if (run.state === 'running') return `Checking now · started ${new Date(run.startedAt).toLocaleString()}`;
-  const when = new Date(run.finishedAt ?? run.startedAt).toLocaleString();
+  if (run.state === 'running') return `Checking now · started ${formatMichiClock(run.startedAt)}`;
+  const when = formatMichiClock(run.finishedAt ?? run.startedAt);
   if (run.state === 'succeeded') return `Last check ${when}${run.summary ? ` · ${run.summary.replace(/^Watch “[^”]*”: /, '')}` : ''}`;
   if (run.state === 'interrupted') return `Last check ${when} stopped before it finished`;
   return `Last check failed ${when}${run.error ? ` · ${run.error}` : ''}`;
@@ -40,7 +42,7 @@ function lastCheckLine(watch: MaintenanceWatch): string {
 function nextCheckLine(watch: MaintenanceWatch): string | null {
   if (!watch.enabled || watch.nextCheckAt === null || watch.lastRun?.state === 'running') return null;
   if (watch.runRequested || watch.nextCheckAt <= Date.now()) return 'Next check as soon as maintenance is free';
-  return `Next check ${new Date(watch.nextCheckAt).toLocaleString()}`;
+  return `Next check ${formatMichiClock(watch.nextCheckAt)}`;
 }
 
 function WatchForm({ initial, busy, submitLabel, onSubmit, onCancel }: {
@@ -84,6 +86,7 @@ function WatchForm({ initial, busy, submitLabel, onSubmit, onCancel }: {
 }
 
 function InstructionsEditor({ maintenance }: { maintenance: PageMaintenanceState }) {
+  const name = useCompanionName();
   const savedText = maintenance.value?.instructions?.text ?? '';
   const [text, setText] = React.useState(savedText);
   const [saved, setSaved] = React.useState(false);
@@ -100,7 +103,7 @@ function InstructionsEditor({ maintenance }: { maintenance: PageMaintenanceState
       void maintenance.saveInstructions(text).then(() => setSaved(true), () => undefined);
     }}>
       <h4 style={heading}>Instructions for this workspace</h4>
-      <p style={{ ...muted, margin: '3px 0 0' }}>The Meta agent follows these in every update of this workspace: conversation maintenance, its first page and each watch.</p>
+      <p style={{ ...muted, margin: '3px 0 0' }}>{name} follows these in every update of this workspace: conversation maintenance, its first page and each watch.</p>
       <textarea aria-label="Instructions for this workspace" style={field} rows={3} value={text}
         maxLength={MAINTENANCE_WATCH_LIMITS.workspaceInstructionsMaxLength}
         placeholder="For example: Keep the summary in English. Every task names its owner."
@@ -113,8 +116,9 @@ function InstructionsEditor({ maintenance }: { maintenance: PageMaintenanceState
   );
 }
 
-/** Per-workspace Meta agent instructions and watches, inside the Conversation maintenance panel. */
+/** Per-workspace Pages upkeep instructions and watches, inside the Conversation maintenance panel. */
 export function MaintenanceWatches({ maintenance }: { maintenance: PageMaintenanceState }) {
+  const name = useCompanionName();
   const { value, busy } = maintenance;
   const [editing, setEditing] = React.useState<string | 'new' | null>(null);
   const [confirmingDelete, setConfirmingDelete] = React.useState<string | null>(null);
@@ -128,8 +132,8 @@ export function MaintenanceWatches({ maintenance }: { maintenance: PageMaintenan
       <section aria-label="Watches" style={{ marginTop: 14 }}>
         <h4 style={heading}>Watches</h4>
         <p style={{ ...muted, margin: '3px 0 0' }}>
-          Timed checks of outside sources, such as tickets or tasks. Each check uses the Meta agent’s read-only tools and updates this workspace’s pages and task board.
-          Tools that are not read-only need your approval in Settings › Meta agent first.
+          Timed checks of outside sources, such as tickets or tasks. Each check uses {name}’s read-only tools and updates this workspace’s pages and task board.
+          Tools that are not read-only need your approval in Settings › {name} › Pages upkeep first.
         </p>
         {watches.map((watch) => editing === watch.id
           ? <WatchForm key={watch.id} initial={watch} busy={busy} submitLabel="Save watch" onCancel={() => setEditing(null)}
@@ -142,7 +146,7 @@ export function MaintenanceWatches({ maintenance }: { maintenance: PageMaintenan
                 <p style={{ ...muted, margin: '3px 0 0', whiteSpace: 'pre-wrap' }}>{watch.instructions}</p>
                 <p style={{ ...muted, margin: '3px 0 0' }}>{lastCheckLine(watch)}</p>
                 {nextCheckLine(watch) && <p style={{ ...muted, margin: '2px 0 0' }}>{nextCheckLine(watch)}</p>}
-                {watch.pausedReason && <p role="alert" style={{ margin: '3px 0 0', color: 'var(--term-danger)', fontSize: 'var(--fs-xs)' }}>{watch.pausedReason}</p>}
+                {watch.pausedReason && <p role="alert" style={{ margin: '3px 0 0', color: 'var(--term-danger-text)', fontSize: 'var(--fs-xs)' }}>{watch.pausedReason}</p>}
               </div>
               <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
                 <button type="button" disabled={busy || !watch.enabled || watch.lastRun?.state === 'running'} onClick={act(() => maintenance.runWatch(watch.id))}>Check now</button>

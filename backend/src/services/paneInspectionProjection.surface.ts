@@ -16,16 +16,15 @@ import {
   type PaneDescriptorV1,
   type PaneKind,
   type Section,
+  type SurfacePaneKind,
 } from 'michi-shared';
 
 // ---------------------------------------------------------------------------
 // Input shape
 // ---------------------------------------------------------------------------
 
-/** The seven kinds this adapter owns. A `PaneKind` outside this set is a caller bug — see
- *  `SURFACE_PANE_KINDS` below, which is what the coverage test walks against `PANE_KINDS`. */
-export type SurfacePaneKind = 'launcher' | 'files' | 'review' | 'file' | 'diff' | 'terminal' | 'browser';
-
+/** The seven kinds this adapter owns. A `PaneKind` outside this set is a caller bug; the coverage
+ *  test walks this list against `PANE_KINDS`. */
 export const SURFACE_PANE_KINDS: readonly SurfacePaneKind[] = [
   'launcher', 'files', 'review', 'file', 'diff', 'terminal', 'browser',
 ];
@@ -57,12 +56,6 @@ export interface SurfaceProjectionInput {
  *  UI surfaces with nothing that runs. `not_applicable` is correct here per §5.1's own rule:
  *  it is a positive claim that the concept does not apply. */
 const NOT_APPLICABLE_EXECUTION_KINDS: ReadonlySet<SurfacePaneKind> = new Set(['launcher', 'files', 'review', 'file', 'diff']);
-
-/** terminal/browser: a terminal may have a live process and a browser a loading page — the
- *  window existing tells us nothing about it, and §5.1 forbids inferring process state from
- *  window presence. This is `unknown`, never `not_applicable`: `not_applicable` would assert
- *  these kinds never execute, which is false. */
-const UNKNOWN_EXECUTION_KINDS: ReadonlySet<SurfacePaneKind> = new Set(['terminal', 'browser']);
 
 const EXECUTION_REASON: Record<SurfacePaneKind, string> = {
   launcher: 'launcher panes are a UI chooser with nothing that executes',
@@ -118,7 +111,9 @@ function executionSection(kind: SurfacePaneKind): Section<null> {
   if (NOT_APPLICABLE_EXECUTION_KINDS.has(kind)) {
     return { status: 'unsupported', reason: EXECUTION_REASON[kind] };
   }
-  // UNKNOWN_EXECUTION_KINDS — the only remaining member of SurfacePaneKind by construction.
+  // terminal/browser, the only remaining SurfacePaneKind members: a terminal may have a live
+  // process and a browser a loading page, and §5.1 forbids inferring process state from window
+  // presence. This is `unknown`, never `not_applicable`, which would claim they never execute.
   return { status: 'unknown', reason: EXECUTION_REASON[kind] };
 }
 

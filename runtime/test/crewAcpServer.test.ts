@@ -24,8 +24,6 @@ import {
 type Call = { method: string; args: unknown[] };
 type StreamScript = (slot: string, message: string, signal: AbortSignal, turnId?: string) => AsyncIterable<CrewChatEvent>;
 
-const BANNED = ['timed out', 'response stream', 'connection reset', 'econnreset'];
-
 function frame(type: string, content?: unknown, extra: Partial<CrewChatFrame> = {}): CrewChatEvent {
     return { kind: 'frame', frame: { type, content, ...extra } };
 }
@@ -422,7 +420,7 @@ describe('Crew ACP server: frames', () => {
         assert.deepEqual(updates[2], { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: '{"rich":true}' } });
         assert.equal(updates[3].title, 'Tool');
         assert.equal(updates[4].title.length, 120);
-        assert.equal(updates[4].rawOutput.length, 16_000);
+        assert.equal(updates[4].rawOutput.length, 16 * 1024, 'the cap Michi keeps for every runtime');
         assert.notEqual(updates[3].toolCallId, updates[4].toolCallId);
         assert.equal(updates.length, 7);
     });
@@ -574,6 +572,28 @@ describe('Crew ACP server: Gateway capabilities', () => {
         assert.deepEqual(gw.callsTo('streamChat'), [[sessionId, 'next']]);
         await s.close();
     });
+    test('a settings change after a Stop during slot creation waits for the slot and applies to it', async () => {
+        const gw = new FakeGateway();
+        const creating = deferred(), release = deferred();
+        gw.createSlot = async (input) => { creating.resolve(); await release.promise; return { key: input.name }; };
+        gw.getSlot = async () => ({ key: 'slot', messages: [], running: false, total: 0 });
+        const s = startServer(gw);
+        const sessionId = await s.newSession();
+        const first = s.prompt(sessionId, 'cancel me');
+        await creating.promise;
+        s.notify('session/cancel', { sessionId });
+        assert.equal((await first).result.stopReason, 'cancelled');
+        const model = s.request('session/set_model', { sessionId, modelId: 'claude-next' });
+        const compact = await s.request('_kiro.dev/commands/execute', { sessionId, command: { command: 'compact', args: {} } });
+        assert.deepEqual(compact.result, { success: false, message: 'Nothing to compact yet' });
+        release.resolve();
+        assert.deepEqual((await model).result, {});
+        assert.deepEqual(gw.callsTo('setModel'), [[sessionId, 'claude-next']], 'applied to the slot once it exists');
+        assert.deepEqual((await s.request('_kiro.dev/commands/execute', { sessionId, command: { command: 'effort', args: { value: 'high' } } })).result,
+            { success: true });
+        await s.close();
+    });
+
     test('new-session memory configuration never changes a resumed or forked identity', async () => {
         const gw = new FakeGateway();
         gw.streams.push(scripted([]), scripted([]), scripted([]));

@@ -1,4 +1,3 @@
-import React from 'react';
 import { render, screen } from '@testing-library/react';
 import { describe, expect, it, vi } from 'vitest';
 import type { ChatNodeState } from '../../state/chatTypes';
@@ -29,7 +28,6 @@ function list(value: ChatNodeState) {
     prefs={DEFAULT_PREFS}
     contentStyle={{}}
     streaming={value.status === 'streaming'}
-    viewportHeight={800}
     onRetryTurn={noop}
     onEditUserMessage={noop}
     onContinueFollowUp={noop}

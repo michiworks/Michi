@@ -1,60 +1,15 @@
-import type { AgentCommand, SessionMode } from '../services/api';
+import type { SessionMode } from '../services/api';
+import { buildSlashEntries, type SlashEntry } from '../state/slashEntries';
 
 /** One entry in the autocomplete list. */
-export interface SlashItem {
-  /** The command name WITHOUT the leading slash. */
-  name: string;
-  /** Optional one-line description. */
-  description?: string;
-  /** 'local' = client-side (branch/fanout); 'runtime' = runtime-advertised;
-   *  'agent' = an agent/mode pick surfaced under /agent. */
-  source: 'local' | 'runtime' | 'agent';
-  /** When present, the popup inserts `/<name> ` and keeps the cursor at the end
-   *  (so the user can type arguments). When false, we insert `/<name>`. */
-  takesArgs: boolean;
+export interface SlashItem extends Omit<SlashEntry, 'source'> {
+  /** SlashEntry's sources, plus 'agent': an agent/mode pick surfaced under /agent. */
+  source: SlashEntry['source'] | 'agent';
   /** Only set for source='agent' — the ACP modeId to pass to session/set_mode. */
   modeId?: string;
 }
 
-/** Local commands the client handles directly. Merged with node.agentCommands. */
-const LOCAL_COMMANDS: SlashItem[] = [
-  {
-    name: 'agent',
-    description: 'Switch the active agent (kiro mode) for this chat.',
-    source: 'local',
-    takesArgs: true,
-  },
-  {
-    name: 'branch',
-    description: 'Open this message as a new child thread.',
-    source: 'local',
-    takesArgs: true,
-  },
-  {
-    name: 'btw',
-    description: 'Alias for /branch.',
-    source: 'local',
-    takesArgs: true,
-  },
-  {
-    name: 'fanout',
-    description: 'Spawn N parallel child branches: /fanout A; B; C',
-    source: 'local',
-    takesArgs: true,
-  },
-  {
-    name: 'fan-out',
-    description: 'Alias for /fanout.',
-    source: 'local',
-    takesArgs: true,
-  },
-  {
-    name: 'explore',
-    description: 'Alias for /fanout.',
-    source: 'local',
-    takesArgs: true,
-  },
-];
+const LOCAL_ONLY = buildSlashEntries({});
 
 /** Does the current input put us "in a slash command"? Matches `/…` at the
  *  very start of the value, before any whitespace or newline. Returns the
@@ -65,8 +20,9 @@ export function matchSlashContext(
   selectionStart: number | null,
 ): { query: string; command?: string } | null {
   if (!value.startsWith('/')) return null;
-  // Pass 1: bare slash command being typed (no args yet).
-  const head = value.match(/^\/([\w-]*)$/);
+  // Pass 1: bare slash command being typed (no args yet). Names may be
+  // qualified (`plugin:skill`).
+  const head = value.match(/^\/([\w:-]*)$/);
   if (head) {
     if (selectionStart !== null && selectionStart > value.length) return null;
     return { query: head[1] };
@@ -111,36 +67,26 @@ export function buildAgentItems(
   return [...prefix, ...rest];
 }
 
-/** Merge local + runtime commands and filter by prefix (case-insensitive on name). */
-export function buildSlashItems(
-  agentCommands: AgentCommand[] | undefined,
-  query: string,
-): SlashItem[] {
-  const runtimeItems: SlashItem[] = (agentCommands ?? []).map((c) => ({
-    name: c.name,
-    description: c.description,
-    source: 'runtime',
-    // AvailableCommandInput.type === 'unstructured' means free text after the
-    // command. Absent `input` means no args. Either way we insert a trailing
-    // space so the user can type args if they want; it's a no-op if they don't.
-    takesArgs: !!c.input,
-  }));
-  // Dedupe: if the runtime publishes a command with the same name as a local one, the
-  // local version wins (we own its semantics). This is rare but possible.
-  const seen = new Set(LOCAL_COMMANDS.map((c) => c.name));
-  const merged = [
-    ...LOCAL_COMMANDS,
-    ...runtimeItems.filter((c) => !seen.has(c.name)),
-  ];
+/**
+ * The chat's / entries (buildSlashEntries; without them, Michi's own
+ * commands) whose names contain the query: those it names exactly first, so
+ * Enter completes the name typed; then commands, then skills, each with the
+ * names that start with the query before the ones that only contain it.
+ * Within each, the entries keep their order (Michi's, then the runtime's;
+ * library skills, then the runtime's).
+ */
+export function buildSlashItems(entries: readonly SlashEntry[] | undefined, query: string): SlashItem[] {
+  const all = entries ?? LOCAL_ONLY;
   const q = query.toLowerCase();
-  if (!q) return merged;
-  // Prefer prefix matches, then substring matches for typos.
-  const prefix: SlashItem[] = [];
-  const rest: SlashItem[] = [];
-  for (const it of merged) {
+  if (!q) return [...all];
+  const exact: SlashItem[] = [];
+  const groups = { command: { prefix: [] as SlashItem[], rest: [] as SlashItem[] }, skill: { prefix: [] as SlashItem[], rest: [] as SlashItem[] } };
+  for (const it of all) {
     const lower = it.name.toLowerCase();
-    if (lower.startsWith(q)) prefix.push(it);
-    else if (lower.includes(q)) rest.push(it);
+    const group = groups[it.source === 'skill' ? 'skill' : 'command'];
+    if (lower === q) exact.push(it);
+    else if (lower.startsWith(q)) group.prefix.push(it);
+    else if (lower.includes(q)) group.rest.push(it);
   }
-  return [...prefix, ...rest];
+  return [...exact, ...groups.command.prefix, ...groups.command.rest, ...groups.skill.prefix, ...groups.skill.rest];
 }

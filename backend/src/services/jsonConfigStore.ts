@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
+import { writeFileAtomicSync } from 'michi-runtime/internal/core/atomicFile';
 
 export type JsonConfig = Record<string, any>;
 
@@ -90,15 +91,10 @@ function withConfigLock<T>(filePath: string, run: () => T): T {
 
 /** Readers see a complete old/new document, with credential-safe permissions. */
 function replaceJsonConfig(filePath: string, value: JsonConfig): void {
-  const temp = path.join(path.dirname(filePath), `.${path.basename(filePath)}.${process.pid}.${randomUUID()}.tmp`);
   try {
-    const data = JSON.stringify(value, null, 2);
-    fs.writeFileSync(temp, data, { mode: 0o600, flag: 'wx' });
-    fs.renameSync(temp, filePath);
+    writeFileAtomicSync(filePath, JSON.stringify(value, null, 2));
   } catch (error) {
     throw new JsonConfigError(filePath, 'write', error);
-  } finally {
-    try { fs.unlinkSync(temp); } catch { /* successful rename or failed creation */ }
   }
 }
 

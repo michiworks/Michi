@@ -2,6 +2,7 @@ import { finalizeTurnContent } from 'michi-shared';
 import fs from 'fs';
 import path from 'path';
 import { createHash } from 'crypto';
+import { writeFileAtomicSync } from 'michi-runtime/internal/core/atomicFile';
 import type { PiSessionDeps } from './PiSession';
 import { getMichiDataDir } from '../../services/dataDir';
 import { loadPiAi, loadPiBundle } from './piAi';
@@ -25,7 +26,7 @@ export async function loadPiCodingAgent(): Promise<any> {
 }
 
 /** Hash every security boundary; public node ids alone are never a storage scope. */
-export function piSdkSessionDirectory(id: string, deps: PiSessionDeps): string {
+export function piSdkSessionDirectory(id: string, deps: Pick<PiSessionDeps, 'ownerUserId' | 'workspaceId' | 'owner' | 'profileHash'>): string {
   const scope = JSON.stringify([deps.ownerUserId, deps.workspaceId, deps.owner, deps.profileHash ?? null, id]);
   return path.join(getMichiDataDir(), 'pi-sessions', createHash('sha256').update(scope).digest('hex'));
 }
@@ -91,10 +92,43 @@ export function invalidatePiSdkTranscript(id: string, deps: PiSessionDeps): void
   if (fs.existsSync(directory)) fs.writeFileSync(path.join(directory, 'invalidated'), 'agent-core');
 }
 
+/**
+ * PiSessionDeps of an ephemeral session (NewAgentSessionOptions.ephemeral,
+ * DESIGN-v2 §3.2), as PiRuntime builds them: the SDK session keeps its
+ * transcript in memory only (SessionManager.inMemory) and writes nothing
+ * under the scope directory: no session.jsonl, no host checkpoint, no
+ * retired transcript. A process exit loses it; it is never restored.
+ */
+export interface PiEphemeralSessionDeps extends PiSessionDeps {
+  ephemeral?: true;
+}
+
+/** Whether `deps` are an ephemeral session's (PiEphemeralSessionDeps). */
+export function isPiEphemeralSession(deps: PiSessionDeps): boolean {
+  return (deps as PiEphemeralSessionDeps).ephemeral === true;
+}
+
+/**
+ * Removes a session's scope directory (its SDK transcript, checkpoint and
+ * retired transcripts); whether there was one. For a released session
+ * (AgentRuntime.discardNativeSession).
+ */
+export function discardPiSdkSessionDirectory(id: string, scope: Pick<PiSessionDeps, 'ownerUserId' | 'workspaceId' | 'owner' | 'profileHash'>): boolean {
+  const directory = piSdkSessionDirectory(id, scope);
+  if (!fs.existsSync(directory)) return false;
+  fs.rmSync(directory, { recursive: true, force: true });
+  return true;
+}
+
 /** Host-chosen SDK features; the agent-core engine has neither. */
 export interface PiSdkFeatures {
   /** Load AGENTS.md / CLAUDE.md from cwd and its ancestors (never ~/.pi). */
   projectContext?: boolean;
+  /**
+   * Skill folders Pi names in its prompt (<available_skills>, with each
+   * SKILL.md path for the read tool). Pi's own skill discovery stays off.
+   */
+  skillPaths?: string[];
 }
 
 const MCP_SERVERS_SECTION = 'mcp_servers';
@@ -123,8 +157,11 @@ export async function createPiSdkHarness(
 ): Promise<any> {
   const sdk = await loadPiCodingAgent();
   const ai = await loadPiAi();
+  const ephemeral = isPiEphemeralSession(deps);
   const directory = piSdkSessionDirectory(id, deps);
-  fs.mkdirSync(directory, { recursive: true, mode: 0o700 });
+  // An ephemeral session never creates its scope directory; the resource
+  // loader below only reads its agentDir, so a missing one contributes nothing.
+  if (!ephemeral) fs.mkdirSync(directory, { recursive: true, mode: 0o700 });
   const transcript = path.join(directory, 'session.jsonl');
   const settings = sdk.SettingsManager.inMemory({
     retry: { enabled: false }, // Michi/provider retry policy owns retries.
@@ -155,7 +192,9 @@ export async function createPiSdkHarness(
     // agentDir is this session's private directory, so only cwd and its
     // ancestors can contribute context files, never a user-global ~/.pi one.
     cwd: deps.cwd, agentDir: directory, settingsManager: settings,
-    noExtensions: true, disabledBuiltinExtensions: ['mcp'], noSkills: true,
+    noExtensions: true, disabledBuiltinExtensions: ['mcp'],
+    // noSkills still loads the additional paths, and only those.
+    noSkills: true, additionalSkillPaths: features.skillPaths ?? [],
     noPromptTemplates: true, noThemes: true, noContextFiles: features.projectContext !== true,
     systemPrompt: options.initialState.systemPrompt,
     extensionFactories: [{ name: 'michi-host', factory: (pi: any) => {
@@ -184,9 +223,9 @@ export async function createPiSdkHarness(
   const checkpoint = path.join(directory, 'host-history.sha256');
   const invalidated = path.join(directory, 'invalidated');
   const host = deps.initialMessages ?? [];
-  const saved = deps.restoreNative ? readHostCheckpoint(checkpoint) : null;
+  const saved = deps.restoreNative && !ephemeral ? readHostCheckpoint(checkpoint) : null;
   const match = matchHostCheckpoint(saved, host);
-  let manager = fs.existsSync(transcript) && match !== null && !fs.existsSync(invalidated)
+  let manager = !ephemeral && fs.existsSync(transcript) && match !== null && !fs.existsSync(invalidated)
     ? sdk.SessionManager.open(transcript, directory, deps.cwd)
     : undefined;
   // Host rows past the checkpoint: the turn the process died in, and any
@@ -204,14 +243,17 @@ export async function createPiSdkHarness(
       manager = undefined;
     }
   }
-  if (fs.existsSync(transcript) && !manager) {
+  if (!ephemeral && fs.existsSync(transcript) && !manager) {
     // SQLite replay/cut/rollback is authoritative. Retain the original native
     // tree for recovery; never silently resume an older view or erase it.
     fs.renameSync(transcript, path.join(directory, `retired-${Date.now()}-${process.hrtime.bigint()}.jsonl`));
   }
-  fs.rmSync(invalidated, { force: true });
+  if (!ephemeral) fs.rmSync(invalidated, { force: true });
   const resumed = !!manager;
-  if (!manager) {
+  if (!manager && ephemeral) {
+    manager = sdk.SessionManager.inMemory(deps.cwd);
+    for (const message of options.initialState.messages ?? []) manager.appendMessage(message);
+  } else if (!manager) {
     manager = sdk.SessionManager.create(deps.cwd, directory);
     manager.setSessionFile(transcript);
     for (const message of options.initialState.messages ?? []) manager.appendMessage(message);
@@ -264,7 +306,8 @@ export async function createPiSdkHarness(
       try { await session.prompt(text, { images, expandPromptTemplates: false }); }
       finally { approvals.clear(); }
       // An input extension may handle the prompt without starting an Agent.
-      // Successful SDK settlement still closes the owning durable turn.
+      // Successful SDK settlement still closes the owning durable turn; a
+      // listener that fails to see the end must reject prompt(), so no isolation.
       for (const listener of listeners) listener(endEvent ?? { type: 'agent_end', messages: [] });
     },
     steer(message: any) {
@@ -274,10 +317,10 @@ export async function createPiSdkHarness(
     /** Manual compaction; resolves with the SDK's CompactionResult once the transcript records it. */
     compact(instructions?: string) { return session.compact(instructions); },
     checkpoint(messages: ChatMessage[]) {
-      const temporary = `${checkpoint}.tmp`;
+      // Nothing to restore an ephemeral session from, so nothing to settle against.
+      if (ephemeral) return;
       const state: HostCheckpoint = { hash: historyHash(messages), count: messages.length, leafId: manager.getLeafId() };
-      fs.writeFileSync(temporary, JSON.stringify(state), { mode: 0o600 });
-      fs.renameSync(temporary, checkpoint);
+      writeFileAtomicSync(checkpoint, JSON.stringify(state));
     },
     async dispose() {
       try {

@@ -19,7 +19,6 @@ vi.mock('../services/api', () => ({
   subscribeBackground: vi.fn(() => () => {}),
   cancelChat: vi.fn().mockResolvedValue(undefined),
   streamMessage: vi.fn(),
-  searchMessages: vi.fn().mockResolvedValue([]),
   hydrateBackendWorkspaces: vi.fn().mockResolvedValue([]),
 }));
 

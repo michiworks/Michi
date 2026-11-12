@@ -34,7 +34,7 @@ afterEach(() => { document.body.innerHTML = ''; toast.error.mockReset(); });
 /** Words a person should not have to know: API and column names, cursor numbers. */
 const DEVELOPER_TERMS = /completion_seq|list_threads|read_node|read_conversation_updates|incremental from|read through #|#\d/;
 
-describe('Meta agent detail rows in words', () => {
+describe('Pages upkeep detail rows in words', () => {
   it('says where each workspace stands without the cursor number', () => {
     expect(workspaceDetailText(null, cursor(), read(), NOW)).toBe('Up to date · read 12m ago · last run: 2 changes, 1 suggestion');
     expect(workspaceDetailText(null, cursor({ state: 'next', unread: 2 }), read({ noModelCall: true }), NOW))
@@ -62,7 +62,7 @@ describe('Meta agent detail rows in words', () => {
   it('explains the first read in plain words', () => {
     const status: SpacesFirstRunStatus = { requestedAt: 1, workspaces: [home(firstRun('reading', 21))], summary: { state: 'waiting', summarizedAt: null }, haltedReason: null };
     render(<MetaAgentStatusLine status={DEFAULT_META_STATUS} workspaces={status.workspaces} clock={NOW} mode="first-run" firstRun={status} />);
-    const list = screen.getByRole('list', { name: 'Meta agent per workspace' });
+    const list = screen.getByRole('list', { name: 'Pages upkeep per workspace' });
     expect(within(list).getByText('First time: it reads your past conversations once. After that it only reads conversations that finish.')).toBeTruthy();
     expect(list.textContent).not.toMatch(DEVELOPER_TERMS);
   });
@@ -72,18 +72,18 @@ describe('Meta agent detail rows in words', () => {
     const workspaces = [home(null), { ...home(null), workspaceId: 'ws-2', workspaceName: 'agent-desk' }];
     render(<MetaAgentStatusLine status={DEFAULT_META_STATUS} workspaces={workspaces} clock={NOW} cursors={cursors} recentRuns={[read()]} />);
     fireEvent.click(screen.getByRole('button', { name: 'Details' }));
-    expect(screen.getByRole('list', { name: 'Meta agent per workspace' }).textContent).not.toMatch(DEVELOPER_TERMS);
+    expect(screen.getByRole('list', { name: 'Pages upkeep per workspace' }).textContent).not.toMatch(DEVELOPER_TERMS);
   });
 });
 
-describe('Meta agent status line states', () => {
+describe('Pages upkeep status line states', () => {
   it('can leave the latest write to a page header without hiding maintenance status or actions', () => {
     const status = { ...DEFAULT_META_STATUS, lastWrite: { workspaceName: 'rabbitholes', at: NOW - 12 * MIN }, runtimeLabel: 'Claude', followsGlobal: true };
     const view = render(<MetaAgentStatusLine status={status} workspaces={[]} clock={NOW} />);
     expect(screen.getByText(/wrote rabbitholes 12m ago/)).toBeTruthy();
     view.rerender(<MetaAgentStatusLine status={status} workspaces={[]} clock={NOW} showLastWrite={false} />);
     expect(screen.queryByText(/wrote rabbitholes/)).toBeNull();
-    expect(screen.getByText(/Meta agent checks new conversations every 60 s · Claude \(follows global\)/)).toBeTruthy();
+    expect(screen.getByText(/Pages upkeep checks new conversations every 60 s · Claude \(follows global\)/)).toBeTruthy();
     expect(screen.getByRole('button', { name: 'Details' })).toBeTruthy();
     expect(screen.getByRole('button', { name: 'Scheduled' })).toBeTruthy();
   });
@@ -92,7 +92,7 @@ describe('Meta agent status line states', () => {
     const onRetry = vi.fn().mockResolvedValue(undefined);
     const onOpenSettings = vi.fn();
     const view = render(<MetaAgentStatusLine status={DEFAULT_META_STATUS} workspaces={[]} clock={NOW} mode="stopped" stop={STOP} onRetry={onRetry} onOpenSettings={onOpenSettings} />);
-    expect(screen.getByText('Meta agent stopped: Kiro is not signed in')).toBeTruthy();
+    expect(screen.getByText('Pages upkeep stopped: Kiro is not signed in')).toBeTruthy();
     fireEvent.click(screen.getByRole('button', { name: 'Change runtime' }));
     expect(onOpenSettings).toHaveBeenCalledTimes(1);
     fireEvent.click(screen.getByRole('button', { name: 'Retry' }));
@@ -103,7 +103,7 @@ describe('Meta agent status line states', () => {
 
     render(<MetaAgentStatusLine status={DEFAULT_META_STATUS} workspaces={[]} clock={NOW} mode="stopped" onRetry={onRetry} onOpenSettings={onOpenSettings}
       stop={{ reason: 'other', message: 'The model returned an empty answer', workspaceIds: [] }} />);
-    expect(screen.getByText('Meta agent stopped: The model returned an empty answer')).toBeTruthy();
+    expect(screen.getByText('Pages upkeep stopped: The model returned an empty answer')).toBeTruthy();
     expect(screen.queryByRole('button', { name: 'Change runtime' })).toBeNull();
   });
 
@@ -118,13 +118,13 @@ describe('Meta agent status line states', () => {
     const cursors = [cursor({ state: 'error', problem: { reason: 'quota', message: 'Claude reached its usage or rate limit', stopped: false } })];
     render(<MetaAgentStatusLine status={{ ...DEFAULT_META_STATUS, runtimeLabel: 'Claude', followsGlobal: true }} workspaces={[]} clock={NOW} cursors={cursors} />);
     expect(document.querySelector('.spaces-home-status__text')?.textContent)
-      .toBe('Meta agent checks new conversations every 60 s · Claude (follows global)·Details·Scheduled·Claude reached its usage or rate limit · retrying');
+      .toBe('Pages upkeep checks new conversations every 60 s · Claude (follows global)·Details·Scheduled·Claude reached its usage or rate limit · retrying');
   });
 
   it('paused: says so and resumes, apart from the stopped state', () => {
     const onResume = vi.fn();
     render(<MetaAgentStatusLine status={DEFAULT_META_STATUS} workspaces={[]} clock={NOW} mode="paused" stop={STOP} onResume={onResume} />);
-    expect(screen.getByText('Meta agent is paused')).toBeTruthy();
+    expect(screen.getByText('Pages upkeep is paused')).toBeTruthy();
     expect(screen.queryByText(/stopped/)).toBeNull();
     fireEvent.click(screen.getByRole('button', { name: 'Resume' }));
     expect(onResume).toHaveBeenCalledTimes(1);

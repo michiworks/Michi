@@ -1,4 +1,3 @@
-import React from 'react';
 import { act, render, screen, waitFor } from '@testing-library/react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { MichiDbEditOp, PageDatabase } from 'michi-shared';
@@ -7,7 +6,7 @@ import { revertPageBatch } from '../../../services/api/pages';
 import { notifyPageChanged } from '../../../state/pages/pageEvents';
 import { usePageDatabase } from '../../../state/pages/usePageDatabase';
 import type { DbEdit } from '../content/db/views/viewTypes';
-import { NativeDatabase } from './NativeDatabase';
+import NativeDatabase from './NativeDatabase';
 
 const captured = vi.hoisted(() => ({ edit: null as null | DbEdit }));
 vi.mock('sonner', () => ({ toast: Object.assign(vi.fn(), { error: vi.fn() }) }));
@@ -93,7 +92,8 @@ describe('NativeDatabase undo', () => {
     show();
     await act(async () => { expect(await captured.edit!(ops, 'Changed Status', { undo: true })).toBe(false); });
     expect(screen.getByRole('alert').textContent).toBe('This database just changed, so it was refreshed. Try again.');
-    expect(refresh).toHaveBeenCalled();
+    // The database hook's edit has already read it again.
+    expect(refresh).not.toHaveBeenCalled();
     expect(toast).not.toHaveBeenCalled();
   });
 });

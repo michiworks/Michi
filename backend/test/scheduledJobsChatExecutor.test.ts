@@ -1,3 +1,5 @@
+// Must stay first: agentConfig would otherwise persist these fixtures to ~/.michi/config.json.
+import './isolatedConfigDir';
 import assert from 'node:assert/strict';
 import { afterEach, beforeEach, describe, test } from 'node:test';
 import fs from 'node:fs';
@@ -18,6 +20,7 @@ import { ScheduledJobsRepository } from '../src/services/scheduledJobs/repositor
 import { ScheduledJobEventBus } from '../src/services/scheduledJobs/events';
 import { ScheduledJobScheduler } from '../src/services/scheduledJobs/scheduler';
 import { LOCAL_AGENT_OWNER_ID } from '../src/services/agentOwner';
+import { updateAgentConfig } from '../src/services/agentConfig';
 
 function iterator(events: NormalizedEvent[], gate?: Promise<void>): AsyncIterableIterator<NormalizedEvent> {
   let index = 0;
@@ -50,8 +53,25 @@ const MODELS: ModelInfo[] = [
   { id: 'deep', supportsReasoning: true, supportedReasoningLevels: ['low', 'high'], defaultReasoning: 'high' },
 ];
 
+/** Each provider's catalog; the first entry is its default. */
+const PI_CATALOG: Record<string, string[]> = { anthropic: ['claude-default', 'claude-2'], google: ['gemini-default', 'gemini-2'] };
+
 /** Just enough of a runtime for profile resolution. */
 function fakeRuntime(id: string): AgentRuntime | undefined {
+  if (id === 'pi') {
+    return {
+      id: 'pi',
+      label: 'Pi',
+      capabilities: {
+        modes: false, permissions: true, models: true, providerModels: true, reasoning: true,
+        supportedReasoningLevels: ['low', 'high'], apiKeys: true, warmSessions: false,
+        saveContext: false, spawnBranches: false, nativeResume: false,
+      },
+      listProviders: async () => Object.entries(PI_CATALOG).map(([provider, models]) => ({ id: provider, label: provider, defaultModel: models[0] })),
+      listModels: async (opts?: { provider?: string }) => (PI_CATALOG[opts?.provider ?? ''] ?? [])
+        .map((model, index) => ({ id: model, isDefault: index === 0, supportsReasoning: false })),
+    } as unknown as AgentRuntime;
+  }
   if (id !== 'kiro') return undefined;
   return {
     id: 'kiro',
@@ -204,6 +224,36 @@ describe('ChatScheduledJobExecutor', () => {
     finish(); await handle.done; worker.dispose();
   });
 
+  test('the scheduled turn registers under its thread\'s restore lock, on the session still live', async () => {
+    const locks: string[] = [];
+    let locked = false;
+    let live = true;
+    const opened: AgentSession[] = [];
+    const starts: string[] = [];
+    const worker = new ChatScheduledJobExecutor({ getRuntime: fakeRuntime,
+      ensureSession: async input => { const session = { id: input.nodeId, runtimeId: 'kiro' } as AgentSession; opened.push(session); return session; },
+      acquireRestoreLock: async nodeId => { locks.push(nodeId); locked = true; return () => { locked = false; }; },
+      isLiveSession: session => live && session === opened.at(-1),
+      chatHub: {
+        startRequestedSelfTurn: async args => {
+          assert.equal(locked, true, 'the turn registers under the restore lock');
+          starts.push(args.turnId);
+          return { turnId: args.turnId, assistantId: 'reply', done: Promise.resolve(), existing: false };
+        },
+        cancel: () => false, requestedTurnStatus: () => 'completed', subscribeBackground: () => () => {},
+      } });
+    const handle = await worker.start(job(), run, { onAttention: () => {} });
+    await handle.done;
+    assert.deepEqual(locks, [handle.nodeId]);
+    assert.equal(locked, false);
+
+    live = false;
+    await assert.rejects(() => worker.start(job(), { ...run, id: 'run-2' } as ScheduledJobRunRecord, { onAttention: () => {} }), /session changed/);
+    assert.equal(starts.length, 1);
+    assert.equal(locked, false);
+    worker.dispose();
+  });
+
   test('opens a new thread, runs the prompt and summarizes the reply', async () => {
     const handle = await executor().start(job(), run, { onAttention: () => {} });
     const outcome = await handle.done;
@@ -235,6 +285,68 @@ describe('ChatScheduledJobExecutor', () => {
     assert.equal(second.nodeId, first.nodeId);
     assert.equal(getNode(first.nodeId)?.title, 'Digest');
     assert.equal(listMessages(first.nodeId).length, 4);
+  });
+
+  test('starts a new persistent thread once the last one is archived or in the Trash', async () => {
+    const cases: Array<[string, (nodeId: string, treeId: string) => void]> = [
+      ['archived thread', (_nodeId, treeId) => getDb().prepare('UPDATE trees SET archived_at = 5 WHERE id = ?').run(treeId)],
+      ['legacy archived status', (nodeId) => getDb().prepare("UPDATE nodes SET status = 'archived' WHERE id = ?").run(nodeId)],
+      ['archived branch', (nodeId) => getDb().prepare("UPDATE nodes SET deleted_at = 5, deletion_group_id = 'arch-1' WHERE id = ?").run(nodeId)],
+      ['in the Trash', (nodeId) => getDb().prepare("UPDATE nodes SET deleted_at = 5, deletion_group_id = 'del-1' WHERE id = ?").run(nodeId)],
+    ];
+    for (const [label, mutate] of cases) {
+      const first = await executor().start(job({ sessionMode: 'persistent' }), run, { onAttention: () => {} });
+      await first.done;
+      mutate(first.nodeId, getNode(first.nodeId)!.tree_id!);
+      const next = await executor().start(job({ sessionMode: 'persistent', persistentNodeId: first.nodeId }), run, { onAttention: () => {} });
+      await next.done;
+      assert.notEqual(next.nodeId, first.nodeId, label);
+      assert.equal(listMessages(first.nodeId).length, 2, `${label}: the earlier thread`);
+    }
+  });
+
+  test('refuses a job in an archived workspace, and adds nothing to its ongoing thread', async () => {
+    const first = await executor().start(job({ sessionMode: 'persistent' }), run, { onAttention: () => {} });
+    await first.done;
+    getDb().prepare("UPDATE workspaces SET archived_at = 5 WHERE id = 'ws-1'").run();
+    await assert.rejects(() => executor().start(job({ sessionMode: 'persistent', persistentNodeId: first.nodeId }), run, { onAttention: () => {} }),
+      /The workspace for this job is archived/);
+    await assert.rejects(() => executor().start(job(), run, { onAttention: () => {} }), /The workspace for this job is archived/);
+    assert.equal(listMessages(first.nodeId).length, 2);
+    assert.equal(listTrees('ws-1').length, 1, 'no new thread is created');
+    assert.equal(sessions.length, 1, 'no session is opened');
+  });
+
+  test('a Scheduled-only job hides its thread and starts a new one, with earlier results, once it is full', async () => {
+    const repo = new ScheduledJobsRepository();
+    const hidden = job({ visibility: 'scheduled', sessionMode: 'persistent' });
+    repo.insertJob(hidden);
+    const first = await executor().start(hidden, run, { onAttention: () => {} });
+    await first.done;
+    assert.equal(getNode(first.nodeId)?.scheduled_only_job_id, 'job-1');
+    const visible = await executor().start(job({ id: 'job-2' }), run, { onAttention: () => {} });
+    await visible.done;
+    assert.equal(getNode(visible.nodeId)?.scheduled_only_job_id ?? null, null);
+
+    // Twenty runs continued the thread; the latest results go to the next one.
+    for (let index = 0; index < 20; index += 1) {
+      getDb().prepare(`INSERT INTO scheduled_job_runs (id, job_id, workspace_id, node_id, trigger, status, started_at, summary, claimed_by)
+        VALUES (?, 'job-1', 'ws-1', ?, 'scheduled', 'succeeded', ?, ?, 'test')`).run(`run-${index}`, first.nodeId, index, `result ${index}`);
+    }
+    const rotated = await executor().start({ ...hidden, persistentNodeId: first.nodeId }, run, { onAttention: () => {} });
+    await rotated.done;
+    assert.notEqual(rotated.nodeId, first.nodeId);
+    assert.equal(getNode(rotated.nodeId)?.scheduled_only_job_id, 'job-1');
+    const prompt = sessions.at(-1)?.prompt ?? '';
+    assert.match(prompt, /result 15[\s\S]*result 19/);
+    assert.doesNotMatch(prompt, /result 14/);
+    assert.equal(listMessages(rotated.nodeId)[0].content, 'Summarize the news', 'the thread shows the job prompt only');
+
+    // Moved to the workspace, the thread is the user's: the job does not continue it.
+    getDb().prepare('UPDATE nodes SET scheduled_only_job_id = NULL WHERE id = ?').run(rotated.nodeId);
+    const fresh = await executor().start({ ...hidden, persistentNodeId: rotated.nodeId }, run, { onAttention: () => {} });
+    await fresh.done;
+    assert.notEqual(fresh.nodeId, rotated.nodeId);
   });
 
   test('reports approval requests from the scheduled turn', async () => {
@@ -408,6 +520,22 @@ describe('ChatScheduledJobExecutor', () => {
     const fallback = await executor().start(job({ modelId: 'deep', reasoning: 'medium' }), run, { onAttention: () => {} });
     await fallback.done;
     assert.equal(getNode(fallback.nodeId)?.reasoning, 'high');
+  });
+
+  test('a job that names only a provider runs on that provider\'s default model, not the global provider\'s', async () => {
+    updateAgentConfig({ runtime: 'pi', providerByRuntime: { pi: 'anthropic' }, modelByRuntime: { pi: 'claude-2' } });
+    const seeded = async (fields: Partial<ScheduledJobRecord>) => {
+      const handle = await executor().start(job({ runtimeId: 'pi', reasoning: null, ...fields }), run, { onAttention: () => {} });
+      await handle.done;
+      const node = getNode(handle.nodeId);
+      return { providerId: node?.provider_id ?? null, modelId: node?.model_id ?? null };
+    };
+    assert.deepEqual(await seeded({ providerId: 'google', modelId: null }), { providerId: 'google', modelId: 'gemini-default' });
+    assert.deepEqual(await seeded({ providerId: null, modelId: null }), { providerId: 'anthropic', modelId: 'claude-2' },
+      'a job that names neither follows the global pair');
+    assert.deepEqual(await seeded({ providerId: 'anthropic', modelId: null }), { providerId: 'anthropic', modelId: 'claude-2' },
+      'the global provider brings the global model');
+    assert.deepEqual(await seeded({ providerId: 'google', modelId: 'gemini-2' }), { providerId: 'google', modelId: 'gemini-2' });
   });
 
   test('a profile resolved when the run started replaces the job\'s own runtime fields', async () => {

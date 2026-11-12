@@ -1,25 +1,21 @@
 import React, { useMemo, useState } from 'react';
 import { useChatProjects } from '../../../state/chatStore';
 import { notifyPageChanged } from '../../../state/pages/pageEvents';
-import { backendConnectionIdForWorkspace, getKnownBackendConnections } from '../../../config/backendConnections';
+import { backendConnectionIdForWorkspace, getKnownBackendConnections, LOCAL_BACKEND_CONNECTION_ID } from '../../../config/backendConnections';
 import { createPage } from '../../../services/api/pages';
 import { getPageMaintenance, setPageMaintenanceSpaceExcluded } from '../../../services/api/pageMaintenance';
 import { MaintenanceEnrollmentCheckbox } from './MaintenanceStatus';
 import type { SpacesHomeTarget } from '../../../state/shellArea';
 import { useSpacesFirstRun } from '../../../state/metaAgent/spacesFirstRun';
 import { clearHeldWorkspaceHome, useHeldWorkspaceHome } from '../../../state/pages/workspaceHomeNav';
+import type { OpenNativePageRoute } from '../../../state/pages/nativePageRoute';
 import type { SpaceRoute } from './SpaceView';
+import { ModalShell } from '../../ui/ModalShell';
 import './spaces.css';
 import '../rail/rail.css';
 
 export type NativePageRoute = SpaceRoute;
-export type OpenNativePageRoute = Omit<Extract<NativePageRoute, { type: 'space' }>, 'type'>;
-export const OPEN_NATIVE_PAGE_EVENT = 'michi:open-native-page';
-
-/** Open a native page in the terminal shell while retaining its owning backend and workspace. */
-export function openNativePageRoute(route: OpenNativePageRoute): void {
-  window.dispatchEvent(new CustomEvent<OpenNativePageRoute>(OPEN_NATIVE_PAGE_EVENT, { detail: route }));
-}
+export { OPEN_NATIVE_PAGE_EVENT, openNativePageRoute, type OpenNativePageRoute } from '../../../state/pages/nativePageRoute';
 
 const templates = [
   { value: 'blank', label: 'Blank' },
@@ -37,7 +33,7 @@ export function CreateSpaceDialog({ activeWorkspaceId, onClose, onCreated }: {
   const { projects } = useChatProjects();
   const activeProject = projects.find((project) => project.id === activeWorkspaceId);
   const connections = getKnownBackendConnections();
-  const [connectionId, setConnectionId] = useState(activeProject ? backendConnectionIdForWorkspace(activeProject.id) : 'local');
+  const [connectionId, setConnectionId] = useState(activeProject ? backendConnectionIdForWorkspace(activeProject.id) : LOCAL_BACKEND_CONNECTION_ID);
   const workspaces = useMemo(() => projects
     .filter((project) => backendConnectionIdForWorkspace(project.id) === connectionId && !project.archivedAt && !project.deletedAt && !project.system)
     .map((project) => ({ id: project.id, name: project.name })), [projects, connectionId]);
@@ -76,9 +72,9 @@ export function CreateSpaceDialog({ activeWorkspaceId, onClose, onCreated }: {
   };
 
   return (
-    <div className="spaces-modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget && !creating) onClose(); }}>
-      <form className="spaces-modal" aria-labelledby="spaces-create-heading" onSubmit={(event) => void submit(event)}>
-        <div className="spaces-modal-heading"><div><p className="spaces-eyebrow">NEW DOCUMENT</p><h2 id="spaces-create-heading">Create a page</h2></div><button type="button" aria-label="Close" onClick={onClose}>×</button></div>
+    // Esc, Back, the scrim and × close it, except while the page is being created.
+    <ModalShell open onClose={onClose} title="Create a page" width={440} dismissible={!creating} captureEscape>
+      <form className="spaces-modal" onSubmit={(event) => void submit(event)}>
         {connections.length > 1 && <label>Backend<select disabled={Boolean(createdPage)} value={connectionId} onChange={(event) => setConnectionId(event.target.value)}>
           {connections.map((connection) => <option key={connection.id} value={connection.id}>{connection.name}</option>)}
         </select></label>}
@@ -90,7 +86,7 @@ export function CreateSpaceDialog({ activeWorkspaceId, onClose, onCreated }: {
         {!workspaces.length && <p className="spaces-form-error">There are no workspaces on this backend yet.</p>}
         <footer><button type="button" className="spaces-secondary" disabled={creating} onClick={onClose}>Cancel</button><button type="submit" className="spaces-primary" disabled={creating || !workspaceId || !title.trim()}>{creating ? 'Creating…' : 'Create page'}</button></footer>
       </form>
-    </div>
+    </ModalShell>
   );
 }
 
@@ -124,11 +120,11 @@ export function AllTasks() {
  * first run. A workspace home asked for while no Spaces sidebar is mounted
  * to answer shows here until the shell's own target changes.
  */
-export function SpacesPage({ target, onOpenPage }: {
+function SpacesPage({ target, onOpenPage }: {
   target: SpacesHomeTarget;
   onOpenPage: (route: OpenNativePageRoute) => void;
 }) {
-  useSpacesFirstRun('local', { start: true });
+  useSpacesFirstRun(LOCAL_BACKEND_CONNECTION_ID, { start: true });
   const held = useHeldWorkspaceHome();
   React.useEffect(() => () => clearHeldWorkspaceHome(), []);
   React.useEffect(() => { clearHeldWorkspaceHome(); }, [target]);

@@ -1,13 +1,13 @@
 import { act, renderHook } from '@testing-library/react';
 import { StrictMode } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import type { RemovePresenceRequest, SubmitPresenceRequest } from 'michi-shared';
 import {
   usePanePresenceReporter,
+  WINDOW_FOCUS_REFRESH_MS,
   type PanePresenceBackendSlots,
   type PanePresenceIdResolver,
   type PanePresenceTransport,
-  type RemovePresenceRequest,
-  type SubmitPresenceRequest,
 } from './usePanePresenceReporter';
 
 const CONN = 'local';
@@ -912,5 +912,138 @@ describe('usePanePresenceReporter', () => {
       expect(transport.submitCalls).toHaveLength(2);
       expect(transport.submitCalls[1].req.rendererLeaseId).toBeUndefined();
     });
+  });
+});
+
+describe('usePanePresenceReporter window focus (server attention)', () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('reports focus with every submission and keepalive, and on its own when it changes', async () => {
+    const transport = makeTransport();
+    const keepalive = vi.spyOn(transport, 'keepalive');
+    let focused = true;
+    const backends = [backendSlot({ openPanesMap: { 'proj::tree-1': ['n1'] }, activeSlotKey: 'proj::tree-1' })];
+    const hook = renderHook(() => usePanePresenceReporter({
+      hydrated: true, windowId: WINDOW_ID, backends, resolveViewSource, transport, windowFocused: () => focused,
+    }));
+    await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+    expect(transport.submitCalls[0].req.windowFocused).toBe(true);
+
+    focused = false;
+    act(() => { window.dispatchEvent(new Event('blur')); });
+    expect(keepalive.mock.calls.map((call) => call[2]), 'a lost focus goes out at once')
+      .toEqual([{ rendererLeaseId: 'lease-local-1', windowFocused: false }]);
+    expect(transport.submitCalls, 'a focus change is not a view change').toHaveLength(1);
+
+    act(() => {
+      window.dispatchEvent(new Event('blur'));
+      document.dispatchEvent(new Event('visibilitychange'));
+    });
+    await act(async () => { await vi.advanceTimersByTimeAsync(300); });
+    expect(keepalive, 'an unchanged focus is not reported again').toHaveBeenCalledTimes(1);
+
+    focused = true;
+    act(() => { window.dispatchEvent(new Event('focus')); });
+    await act(async () => { await vi.advanceTimersByTimeAsync(249); });
+    expect(keepalive, 'a gained focus settles first').toHaveBeenCalledTimes(1);
+    await act(async () => { await vi.advanceTimersByTimeAsync(1); });
+    expect(keepalive.mock.calls[1][2]).toEqual({ rendererLeaseId: 'lease-local-1', windowFocused: true });
+
+    await act(async () => { await vi.advanceTimersByTimeAsync(20_000); });
+    expect(keepalive.mock.calls.at(-1)?.[2], 'the periodic keepalive carries it too').toEqual({
+      rendererLeaseId: 'lease-local-1', windowFocused: true,
+    });
+    hook.unmount();
+  });
+
+  it('refreshes a focused report every 10 s; unfocused, it only renews the lease every 20 s', async () => {
+    const transport = makeTransport();
+    const keepalive = vi.spyOn(transport, 'keepalive');
+    let focused = true;
+    const backends = [backendSlot({ openPanesMap: { 'proj::tree-1': ['n1'] }, activeSlotKey: 'proj::tree-1' })];
+    const hook = renderHook(() => usePanePresenceReporter({
+      hydrated: true, windowId: WINDOW_ID, backends, resolveViewSource, transport, windowFocused: () => focused,
+    }));
+    await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+    await act(async () => { await vi.advanceTimersByTimeAsync(WINDOW_FOCUS_REFRESH_MS); });
+    await act(async () => { await vi.advanceTimersByTimeAsync(WINDOW_FOCUS_REFRESH_MS); });
+    expect(keepalive.mock.calls.map((call) => call[2].windowFocused)).toEqual([true, true]);
+
+    // Unfocused ticks every 10 s but sends only for the lease, every 20 s (no visibility event here).
+    focused = false;
+    await act(async () => { await vi.advanceTimersByTimeAsync(WINDOW_FOCUS_REFRESH_MS); });
+    expect(keepalive).toHaveBeenCalledTimes(2);
+    await act(async () => { await vi.advanceTimersByTimeAsync(WINDOW_FOCUS_REFRESH_MS); });
+    expect(keepalive.mock.calls.map((call) => call[2].windowFocused)).toEqual([true, true, false]);
+    hook.unmount();
+  });
+
+  it('a page going away reports its lost focus, and drops its lease, with requests that outlive it', async () => {
+    const transport = makeTransport();
+    const keepalive = vi.spyOn(transport, 'keepalive');
+    const remove = vi.spyOn(transport, 'remove');
+    const backends = [backendSlot({ openPanesMap: { 'proj::tree-1': ['n1'] }, activeSlotKey: 'proj::tree-1' })];
+    const hook = renderHook(() => usePanePresenceReporter({
+      hydrated: true, windowId: WINDOW_ID, backends, resolveViewSource, transport, windowFocused: () => true,
+    }));
+    await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+
+    act(() => { window.dispatchEvent(new Event('pagehide')); });
+    expect(keepalive.mock.calls.map((call) => [call[2], call[3]])).toEqual([
+      [{ rendererLeaseId: 'lease-local-1', windowFocused: false }, { unloading: true }],
+    ]);
+    act(() => { window.dispatchEvent(new Event('beforeunload')); });
+    expect(remove.mock.calls.map((call) => [call[2], call[3]])).toEqual([
+      [{ rendererLeaseId: 'lease-local-1' }, { unloading: true }],
+    ]);
+    hook.unmount();
+    expect(remove, 'nothing left to remove on unmount').toHaveBeenCalledTimes(1);
+  });
+
+  it('sends nothing before hydration or without a lease', async () => {
+    const transport = makeTransport();
+    const keepalive = vi.spyOn(transport, 'keepalive');
+    const hook = renderHook(() => usePanePresenceReporter({
+      hydrated: false, windowId: WINDOW_ID, backends: [], resolveViewSource, transport, windowFocused: () => false,
+    }));
+    act(() => { window.dispatchEvent(new Event('blur')); });
+    act(() => { window.dispatchEvent(new Event('pagehide')); });
+    await act(async () => { await vi.advanceTimersByTimeAsync(1_000); });
+    expect(keepalive).not.toHaveBeenCalled();
+    hook.unmount();
+  });
+});
+
+describe('usePanePresenceReporter visible views', () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('reports visible only the panes of the active slot that are on screen', async () => {
+    const transport = makeTransport();
+    const openPanesMap = { 'proj::tree-1': ['n1', 'n2'], 'proj::tree-2': ['n3'] };
+    const hook = renderHook(({ slots }) => usePanePresenceReporter({
+      hydrated: true, windowId: WINDOW_ID, backends: slots, resolveViewSource, transport,
+    }), { initialProps: { slots: [backendSlot({ openPanesMap, activeSlotKey: 'proj::tree-1', visibleUiPaneIds: ['n2', 'n3'] })] } });
+    await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+    const visibility = () => Object.fromEntries(transport.submitCalls.at(-1)!.req.views.map((view) => [view.uiPaneId, view.visible]));
+    // n1 is open but off screen (a background tab, scrolled away); n3 is in another tree.
+    expect(visibility()).toEqual({ n1: false, n2: true, n3: false });
+
+    hook.rerender({ slots: [backendSlot({ openPanesMap, activeSlotKey: 'proj::tree-1' })] });
+    await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+    expect(visibility(), 'without the list, the whole active slot').toEqual({ n1: true, n2: true, n3: false });
+    expect(transport.removeCalls, 'off screen is still open').toHaveLength(0);
+    hook.unmount();
   });
 });

@@ -1,9 +1,13 @@
+import { nodeLifecycleState, type NodeLifecycleState } from 'michi-shared';
 import { getDb } from '../db';
 import { workspaceOwnerMatches } from '../agentOwner';
 import { PageWriteError } from './core';
 
 /** Longest message text a source preview carries. */
 export const SOURCE_TEXT_MAX = 1_200;
+
+// Purged rows are not read.
+const SOURCE_STATE: Record<NodeLifecycleState, HomeSourceDto['state']> = { live: 'live', archived: 'archived', trashed: 'deleted', purged: 'deleted' };
 
 export interface HomeSourceMessage {
   id: string;
@@ -21,7 +25,7 @@ export interface HomeSourceDto {
   workspaceName: string;
   title: string;
   runtimeId: string | null;
-  /** `archived`: its workspace or thread is archived. `deleted`: it or its workspace is in the trash. */
+  /** `archived`: it, its thread or its workspace is archived. `deleted`: it or its workspace is in the trash. */
   state: 'live' | 'archived' | 'deleted';
   /** Null when the message cannot be found in the native conversation. */
   message: HomeSourceMessage | null;
@@ -36,12 +40,12 @@ export interface HomeSourceQuery {
 }
 
 type NodeRow = {
-  id: string; workspace_id: string; title: string | null; runtime_id: string | null; deleted_at: number | null;
-  tree_archived_at: number | null; workspace_name: string; owner_user_id: string | null; settings: string | null;
+  id: string; workspace_id: string; title: string | null; runtime_id: string | null; status: string; deleted_at: number | null;
+  deletion_group_id: string | null; tree_archived_at: number | null; workspace_name: string; owner_user_id: string | null; settings: string | null;
   workspace_deleted_at: number | null; workspace_archived_at: number | null;
 };
 
-const NODE_SQL = `SELECT n.id,n.workspace_id,n.title,n.runtime_id,n.deleted_at,t.archived_at AS tree_archived_at,
+const NODE_SQL = `SELECT n.id,n.workspace_id,n.title,n.runtime_id,n.status,n.deleted_at,n.deletion_group_id,t.archived_at AS tree_archived_at,
     w.name AS workspace_name,w.owner_user_id,w.settings,w.deleted_at AS workspace_deleted_at,w.archived_at AS workspace_archived_at
   FROM nodes n JOIN workspaces w ON w.id=n.workspace_id LEFT JOIN trees t ON t.id=n.tree_id
   WHERE n.purged_at IS NULL AND w.purged_at IS NULL`;
@@ -82,8 +86,10 @@ export function homeSource(query: HomeSourceQuery): HomeSourceDto {
     workspaceName: node.workspace_name,
     title: node.title ?? '',
     runtimeId: node.runtime_id,
-    state: node.deleted_at !== null || node.workspace_deleted_at !== null ? 'deleted'
-      : node.workspace_archived_at !== null || node.tree_archived_at !== null ? 'archived' : 'live',
+    state: SOURCE_STATE[nodeLifecycleState({
+      deletedAt: node.deleted_at, deletionGroupId: node.deletion_group_id, status: node.status, treeArchivedAt: node.tree_archived_at,
+      workspaceDeletedAt: node.workspace_deleted_at, workspaceArchivedAt: node.workspace_archived_at,
+    })],
     message: row ? {
       id: row.id, role: row.role,
       text: text.length > SOURCE_TEXT_MAX ? `${text.slice(0, SOURCE_TEXT_MAX - 1)}…` : text,

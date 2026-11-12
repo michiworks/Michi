@@ -11,7 +11,6 @@ import { test, describe, beforeEach, afterEach, mock } from 'node:test';
 import assert from 'node:assert/strict';
 import { claudeTestOptions } from './helpers/claudeTestOptions';
 import type { RuntimeHost } from 'michi-runtime/internal/contract/host';
-import type { ClaudeHostText } from 'michi-runtime/internal/adapters/claude/claudeAdapterOptions';
 import { EventEmitter, PassThrough } from 'node:stream';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
@@ -237,22 +236,6 @@ describe('ClaudeSession', () => {
     } finally { await session.dispose(); }
   });
 
-  test('the hook POC appends no instruction to the system prompt without hostText.followUpsHookPocInstruction', async () => {
-    const { ClaudeSession } = freshClaudeSession();
-    const systemPromptAppend = async (hostText: ClaudeHostText | undefined) => {
-      capturedSpawnArgs.length = 0;
-      const session = new ClaudeSession('node-hook-text', makeSessionDeps({
-        systemPromptAppend: 'stable prompt',
-        options: { ...claudeTestOptions(), followUpsHookPoc: () => true, hostText },
-      }));
-      try {
-        await session.spawnFresh();
-        return (capturedSpawnArgs[0] as Record<string, unknown>).systemPromptAppend;
-      } finally { await session.dispose(); }
-    };
-    assert.equal(await systemPromptAppend(undefined), 'stable prompt');
-    assert.equal(await systemPromptAppend({ followUpsHookPocInstruction: () => '<poc>' }), 'stable prompt\n<poc>');
-  });
   beforeEach(() => {
     stubSpawnClaude();
     stubDbRepository();
@@ -1105,242 +1088,103 @@ describe('ClaudeSession', () => {
     } finally { await session.dispose(); }
   });
 
-  test('metadata hook POC blocks once, then passes after overview and follow-ups are set', async () => {
-    const previous = process.env.MICHI_CLAUDE_FOLLOW_UPS_HOOK_POC;
-    const previousMode = process.env.MICHI_FOLLOW_UPS_EXPERIMENT_MODE;
-    process.env.MICHI_CLAUDE_FOLLOW_UPS_HOOK_POC = '1';
-    process.env.MICHI_FOLLOW_UPS_EXPERIMENT_MODE = 'hook-tool';
-    const { log } = require('../src/services/logger') as typeof import('../src/services/logger');
-    // Per-event POC logs were downgraded to debug (a491c789).
-    const infoSpy = mock.method(log, 'debug', () => {});
-    const enabledSpy = mock.method(log, 'info', () => {});
+  test('an unanswered permission times out as permission_resolved, and a later answer is a no-op', async () => {
     const child = new MockClaudeChild();
     stubSpawnClaude(() => child);
-    const registry = makeMcpRegistry();
-
+    setTimeout(() => child.emitInit('ext-approve-timeout'), 20);
+    const policyMod = require('../src/agents/permissionPolicy');
+    const origResolve = policyMod.resolveChatPolicy;
+    policyMod.resolveChatPolicy = () => 'ask';
     const { ClaudeSession } = freshClaudeSession();
-    const session = new ClaudeSession('session-hook-poc', makeSessionDeps({
-      nodeId: 'node-hook-poc',
-      mcpRegistry: registry as any,
-      systemPromptAppend: buildStableSystemPrompt('structured-tool'),
+    const options = claudeTestOptions();
+    const session = new ClaudeSession('session-approve-timeout', makeSessionDeps({
+      options: { ...options, limits: { ...options.limits, approveTimeoutMs: 20 } },
     }) as any);
-
+    await session.spawnFresh();
+    const onApprove: Function = (session as any).makeOnApprove();
+    const events: any[] = [];
+    const queue = (session as any).queue;
+    const push = queue.push.bind(queue);
+    queue.push = (event: any) => { events.push(event); return push(event); };
     try {
-      await session.spawnFresh();
-      // The slot id is a capability: the info log names only its first four characters.
-      const slotId = (session as any).slotId as string;
-      const enabledLogs = enabledSpy.mock.calls.filter((call) => call.arguments[1] === 'claude follow-ups hook poc enabled');
-      assert.equal(enabledLogs.length, 1);
-      assert.equal((enabledLogs[0].arguments[2] as { slotId?: string }).slotId, `${slotId.slice(0, 4)}…`);
-      assert.ok(!JSON.stringify(enabledLogs[0].arguments).includes(slotId), 'the full slot id is not logged');
-      const spawnArgs = capturedSpawnArgs[0] as Record<string, unknown>;
-      assert.equal(spawnArgs.includeHookEvents, true);
-      assert.equal(spawnArgs.bare, false);
-      assert.match(String(spawnArgs.mcpConfigInline), /"alwaysLoad":true/);
-      assert.match(String(spawnArgs.settingsInline), /validate_turn_metadata/);
-      assert.match(String(spawnArgs.systemPromptAppend), /set_branch_overview/);
-      assert.match(String(spawnArgs.systemPromptAppend), /set_follow_ups/);
-      assert.doesNotMatch(String(spawnArgs.systemPromptAppend), /\[FOLLOW-UP/);
-      assert.doesNotMatch(String(spawnArgs.systemPromptAppend), /\[BRANCH-OVERVIEW:/);
-
-      child.send({
-        type: 'system',
-        subtype: 'hook_started',
-        hook_name: 'Stop',
-        hook_id: 'hook-poc-1',
-      });
-      child.send({
-        type: 'system',
-        subtype: 'hook_response',
-        hook_name: 'Stop',
-        hook_id: 'hook-poc-1',
-        outcome: 'success',
-      });
-      child.send({
-        type: 'system',
-        subtype: 'hook_started',
-        hook_name: 'SessionStart:startup',
-        hook_id: 'unrelated-hook',
-      });
-      await new Promise<void>((resolve) => setImmediate(resolve));
-      const lifecycleLogs = infoSpy.mock.calls.filter(
-        (call) => call.arguments[1] === 'claude follow-ups hook poc lifecycle event',
-      );
-      assert.equal(lifecycleLogs.length, 2);
-      assert.deepEqual(lifecycleLogs.map((call) => call.arguments[2]), [
-        {
-          nodeId: 'node-hook-poc',
-          sessionId: 'session-hook-poc',
-          type: 'hook_started',
-          hookName: 'Stop',
-          hookId: 'hook-poc-1',
-          outcome: undefined,
-        },
-        {
-          nodeId: 'node-hook-poc',
-          sessionId: 'session-hook-poc',
-          type: 'hook_response',
-          hookName: 'Stop',
-          hookId: 'hook-poc-1',
-          outcome: 'success',
-        },
-      ]);
-
-      const callbacks = registry.createdCallbacks[0];
-      assert.equal(typeof callbacks.onSetFollowUps, 'function');
-      assert.equal(typeof callbacks.onSetBranchOverview, 'function');
-      assert.equal(typeof callbacks.onValidateFollowUps, 'function');
-
-      const turnEventsPromise = (async () => {
-        const events: any[] = [];
-        for await (const ev of session.send('hello')) events.push(ev);
-        return events;
-      })();
-      await new Promise<void>((resolve) => setImmediate(resolve));
-
-      child.emitChunk('original answer');
-      await new Promise<void>((resolve) => setImmediate(resolve));
-
-      const blocked = callbacks.onValidateFollowUps();
-      assert.equal(blocked.decision, 'block');
-      assert.match(String(blocked.reason), /set_branch_overview/);
-      assert.match(String(blocked.reason), /set_follow_ups/);
-
-      child.emitChunk('duplicate repair answer');
-      child.emitThought('repair-only reasoning');
-      callbacks.onSetBranchOverview(' Current durable branch state. ');
-      callbacks.onSetFollowUps(['one?', 'two?', 'three?']);
-      child.emitChunk('tool acknowledgement');
-      child.send({ type: 'stream_event', event: { type: 'message_stop' } });
-      assert.deepEqual(callbacks.onValidateFollowUps(), {});
-
-      child.emitResult('success');
-      const events = await turnEventsPromise;
-      assert.equal(
-        events.filter((ev) => ev.kind === 'chunk').map((ev) => ev.text).join(''),
-        'original answer',
-      );
-      assert.equal(events.some((ev) => ev.kind === 'thought'), false);
-      assert.deepEqual(
-        events.find((ev) => isHostEvent(ev, 'follow_ups'))?.payload.followUps,
-        ['one?', 'two?', 'three?'],
-      );
-      assert.deepEqual(
-        events.filter((ev) => isHostEvent(ev, 'follow_ups_status')).map((ev) => ev.payload.status),
-        ['in_progress', 'completed'],
-      );
-      assert.ok(
-        events.findIndex((ev) => isHostEvent(ev, 'follow_ups_status') && ev.payload.status === 'in_progress')
-          < events.findIndex((ev) => isHostEvent(ev, 'follow_ups')),
-      );
-      assert.ok(
-        events.findIndex((ev) => isHostEvent(ev, 'follow_ups'))
-          < events.findIndex((ev) => isHostEvent(ev, 'follow_ups_status') && ev.payload.status === 'completed'),
-      );
-      assert.equal(
-        events.find((ev) => isHostEvent(ev, 'branch_overview'))?.payload.overview,
-        'Current durable branch state.',
-      );
-      assert.equal(events.some((ev) => ev.kind === 'turn_end'), true);
-      assert.deepEqual(
-        session.getHistory().filter((message) => message.role === 'assistant'),
-        [{ role: 'assistant', content: 'original answer' }],
-      );
-      const suppressionLogs = infoSpy.mock.calls.filter(
-        (call) => call.arguments[1] === 'claude follow-ups hook poc hidden metadata output suppressed',
-      );
-      assert.deepEqual(suppressionLogs.map((call) => call.arguments[2]), [{
-        nodeId: 'node-hook-poc',
-        sessionId: 'session-hook-poc',
-        chunks: 2,
-        thoughts: 1,
-      }]);
+      const result = await onApprove({ toolName: 'Bash', input: { command: 'ls' }, toolUseId: 'tc-timeout' });
+      assert.equal(result.behavior, 'deny');
+      const request = events.find((event) => event.kind === 'permission_request');
+      assert.ok(request, 'asked in the chat');
+      assert.deepEqual(events.filter((event) => event.kind === 'permission_resolved'),
+        [{ kind: 'permission_resolved', requestId: request.requestId }]);
+      assert.equal((session as any).pendingPermissions.size, 0);
+      const count = events.length;
+      session.respondToPermission(request.requestId, 'allow_once');
+      assert.equal(events.length, count, 'a late answer pushes nothing');
     } finally {
-      if (previous === undefined) delete process.env.MICHI_CLAUDE_FOLLOW_UPS_HOOK_POC;
-      else process.env.MICHI_CLAUDE_FOLLOW_UPS_HOOK_POC = previous;
-      if (previousMode === undefined) delete process.env.MICHI_FOLLOW_UPS_EXPERIMENT_MODE;
-      else process.env.MICHI_FOLLOW_UPS_EXPERIMENT_MODE = previousMode;
+      policyMod.resolveChatPolicy = origResolve;
       await session.dispose();
     }
   });
 
-  for (const [hookEnabled, mode] of [['0', 'sentinel'], ['1', 'sentinel'], ['1', 'hook-tool']] as const) {
-    test(`Michi assistant omits metadata hooks and reminders before and after native restore (${hookEnabled}/${mode})`, async () => {
-      const previousHook = process.env.MICHI_CLAUDE_FOLLOW_UPS_HOOK_POC;
-      const previousMode = process.env.MICHI_FOLLOW_UPS_EXPERIMENT_MODE;
-      process.env.MICHI_CLAUDE_FOLLOW_UPS_HOOK_POC = hookEnabled;
-      process.env.MICHI_FOLLOW_UPS_EXPERIMENT_MODE = mode;
-      const { assistantToolProfile } = require('../src/assistant/policy') as typeof import('../src/assistant/policy');
-      const { MICHI_INTERNAL_MCP_NAME, MICHI_MCP_TOOL_PREFIX } = require('michi-runtime/internal/adapters/claude/claudeMcpConfig') as typeof import('michi-runtime/internal/adapters/claude/claudeMcpConfig');
-      const profile = restrictedChatProfile();
-      const prompts: string[] = [];
-      stubSpawnClaude(() => {
-        const child = new MockClaudeChild();
-        child.stdin.on('data', (chunk: Buffer) => {
-          const message = JSON.parse(chunk.toString());
-          prompts.push(message.message.content);
-        });
-        return child;
+  test('Michi assistant omits metadata hooks and reminders before and after native restore', async () => {
+    const { assistantToolProfile } = require('../src/assistant/policy') as typeof import('../src/assistant/policy');
+    const { MICHI_INTERNAL_MCP_NAME, MICHI_MCP_TOOL_PREFIX } = require('michi-runtime/internal/adapters/claude/claudeMcpConfig') as typeof import('michi-runtime/internal/adapters/claude/claudeMcpConfig');
+    const profile = restrictedChatProfile();
+    const prompts: string[] = [];
+    stubSpawnClaude(() => {
+      const child = new MockClaudeChild();
+      child.stdin.on('data', (chunk: Buffer) => {
+        const message = JSON.parse(chunk.toString());
+        prompts.push(message.message.content);
       });
-      const registry = makeMcpRegistry();
-      const { ClaudeSession } = freshClaudeSession();
-      const session = new ClaudeSession('michi-assistant', makeSessionDeps({
-        toolProfile: profile,
-        mcpRegistry: registry as any,
-        systemPromptAppend: buildStableSystemPrompt('structured-tool', false, false, 'assistant'),
-      }));
-      try {
-        await session.spawnFresh();
-        // A caller enabling ordinary-chat suggestions must not add them to Michi.
-        session.setEnableFollowUps(true);
-        for (let turn = 1; turn <= 6; turn += 1) {
-          if (turn === 4) await session.spawnResume(session.nativeSessionId!);
-          const pending = (async () => {
-            const events: any[] = [];
-            for await (const event of session.send(`Question ${turn}`)) events.push(event);
-            return events;
-          })();
-          await new Promise<void>((resolve) => setImmediate(resolve));
-          const child = createdChildren.at(-1)!;
-          child.send({
-            type: 'system', subtype: 'init', session_id: session.nativeSessionId ?? 'michi-native',
-            tools: profile.allowedToolNames!.map((name) => `${MICHI_MCP_TOOL_PREFIX}${name}`),
-            mcp_servers: [{ name: MICHI_INTERNAL_MCP_NAME, status: 'connected' }],
-            permissionMode: 'default',
-          });
-          child.emitChunk(`Answer ${turn}`);
-          child.emitResult();
-          const events = await pending;
-          assert.equal(prompts.at(-1), `Question ${turn}`);
-          assert.deepEqual(events.filter((event) => event.kind === 'chunk').map((event) => event.text), [`Answer ${turn}`]);
-          assert.equal(events.some((event) => ['follow_ups', 'follow_ups_status', 'branch_overview'].includes(event.kind)), false);
-        }
-        assert.equal(capturedSpawnArgs.length, 2, 'the original and restored native transports were checked');
-        for (const args of capturedSpawnArgs as Array<Record<string, unknown>>) {
-          assert.equal(args.includeHookEvents, false);
-          assert.equal(args.settingsInline, undefined);
-          assert.doesNotMatch(String(args.systemPromptAppend), /\[TITLE:|\[FOLLOW-UP|\[BRANCH-OVERVIEW:|set_branch_overview|set_follow_ups|validate_turn_metadata/);
-        }
-        for (const callbacks of registry.createdCallbacks) {
-          assert.equal(callbacks.onSetFollowUps, undefined);
-          assert.equal(callbacks.onSetBranchOverview, undefined);
-          assert.equal(callbacks.onValidateFollowUps, undefined);
-        }
-      } finally {
-        if (previousHook === undefined) delete process.env.MICHI_CLAUDE_FOLLOW_UPS_HOOK_POC;
-        else process.env.MICHI_CLAUDE_FOLLOW_UPS_HOOK_POC = previousHook;
-        if (previousMode === undefined) delete process.env.MICHI_FOLLOW_UPS_EXPERIMENT_MODE;
-        else process.env.MICHI_FOLLOW_UPS_EXPERIMENT_MODE = previousMode;
-        await session.dispose();
-      }
+      return child;
     });
-  }
+    const registry = makeMcpRegistry();
+    const { ClaudeSession } = freshClaudeSession();
+    const session = new ClaudeSession('michi-assistant', makeSessionDeps({
+      toolProfile: profile,
+      mcpRegistry: registry as any,
+      systemPromptAppend: buildStableSystemPrompt('sentinel', false, false, 'assistant'),
+    }));
+    try {
+      await session.spawnFresh();
+      // A caller enabling ordinary-chat suggestions must not add them to Michi.
+      session.setEnableFollowUps(true);
+      for (let turn = 1; turn <= 6; turn += 1) {
+        if (turn === 4) await session.spawnResume(session.nativeSessionId!);
+        const pending = (async () => {
+          const events: any[] = [];
+          for await (const event of session.send(`Question ${turn}`)) events.push(event);
+          return events;
+        })();
+        await new Promise<void>((resolve) => setImmediate(resolve));
+        const child = createdChildren.at(-1)!;
+        child.send({
+          type: 'system', subtype: 'init', session_id: session.nativeSessionId ?? 'michi-native',
+          tools: profile.allowedToolNames!.map((name) => `${MICHI_MCP_TOOL_PREFIX}${name}`),
+          mcp_servers: [{ name: MICHI_INTERNAL_MCP_NAME, status: 'connected' }],
+          permissionMode: 'default',
+        });
+        child.emitChunk(`Answer ${turn}`);
+        child.emitResult();
+        const events = await pending;
+        assert.equal(prompts.at(-1), `Question ${turn}`);
+        assert.deepEqual(events.filter((event) => event.kind === 'chunk').map((event) => event.text), [`Answer ${turn}`]);
+        assert.equal(events.some((event) => ['follow_ups', 'follow_ups_status', 'branch_overview'].includes(event.kind)), false);
+      }
+      assert.equal(capturedSpawnArgs.length, 2, 'the original and restored native transports were checked');
+      for (const args of capturedSpawnArgs as Array<Record<string, unknown>>) {
+        assert.equal(args.includeHookEvents, false);
+        assert.equal(args.settingsInline, undefined);
+        assert.doesNotMatch(String(args.systemPromptAppend), /\[TITLE:|\[FOLLOW-UP|\[BRANCH-OVERVIEW:|set_branch_overview|set_follow_ups/);
+      }
+      for (const callbacks of registry.createdCallbacks) {
+        assert.equal(callbacks.onSetFollowUps, undefined);
+        assert.equal(callbacks.onSetBranchOverview, undefined);
+      }
+    } finally {
+      await session.dispose();
+    }
+  });
 
-  test('warm slot binding disables follow-up output and repair while retaining overview metadata', async () => {
-    const previous = process.env.MICHI_CLAUDE_FOLLOW_UPS_HOOK_POC;
-    const previousMode = process.env.MICHI_FOLLOW_UPS_EXPERIMENT_MODE;
-    process.env.MICHI_CLAUDE_FOLLOW_UPS_HOOK_POC = '1';
-    process.env.MICHI_FOLLOW_UPS_EXPERIMENT_MODE = 'hook-tool';
+  test('a child branch inherits the chat\'s disabled follow-ups', async () => {
     const child = new MockClaudeChild();
     stubSpawnClaude(() => child);
     const registry = makeMcpRegistry();
@@ -1353,36 +1197,12 @@ describe('ClaudeSession', () => {
     try {
       await session.spawnFresh();
       const callbacks = registry.createdCallbacks[0];
-      assert.equal(typeof callbacks.onSetFollowUps, 'function', 'warm slots register before per-chat binding');
+      assert.equal(callbacks.onSetFollowUps, undefined);
+      assert.equal(callbacks.onSetBranchOverview, undefined);
       session.setEnableFollowUps(false);
-      const pending = (async () => {
-        const events: any[] = [];
-        for await (const event of session.send('overview only')) events.push(event);
-        return events;
-      })();
-      await new Promise<void>((resolve) => setImmediate(resolve));
-      child.emitChunk('Original answer.');
-      await new Promise<void>((resolve) => setImmediate(resolve));
       await callbacks.onSpawnBranches([{ title: 'Child', prompt: 'Continue without follow-ups.' }]);
       assert.equal(branchRequests[0]?.enableFollowUps, false, 'actual child callback inherits disabled follow-ups');
-      callbacks.onSetFollowUps(['should not appear?', 'nor this?', 'nor this?']);
-      const decision = callbacks.onValidateFollowUps();
-      assert.equal(decision.decision, 'block');
-      assert.match(String(decision.reason), /set_branch_overview/);
-      assert.doesNotMatch(String(decision.reason), /set_follow_ups/);
-      callbacks.onSetBranchOverview(' Overview remains required. ');
-      assert.deepEqual(callbacks.onValidateFollowUps(), {});
-      child.emitChunk('Hidden metadata acknowledgement.');
-      child.emitResult();
-      const events = await pending;
-      assert.equal(events.some((event) => isHostEvent(event, 'follow_ups') || isHostEvent(event, 'follow_ups_status')), false);
-      assert.deepEqual(events.filter((event) => event.kind === 'chunk').map((event) => event.text), ['Original answer.']);
-      assert.equal(events.find((event) => isHostEvent(event, 'branch_overview'))?.payload.overview, 'Overview remains required.');
     } finally {
-      if (previous === undefined) delete process.env.MICHI_CLAUDE_FOLLOW_UPS_HOOK_POC;
-      else process.env.MICHI_CLAUDE_FOLLOW_UPS_HOOK_POC = previous;
-      if (previousMode === undefined) delete process.env.MICHI_FOLLOW_UPS_EXPERIMENT_MODE;
-      else process.env.MICHI_FOLLOW_UPS_EXPERIMENT_MODE = previousMode;
       await session.dispose();
     }
   });
@@ -1403,159 +1223,6 @@ describe('ClaudeSession', () => {
       assert.deepEqual(await offered(makeBridge(), resume), effects);
       assert.deepEqual(await offered({ saveContext: () => null }, resume), ['onSaveArtifact']);
       assert.deepEqual(await offered({}, resume), []);
-    }
-  });
-
-  test('sentinel experiment reminds every turn and Hook requires only Overview', async () => {
-    const previous = process.env.MICHI_CLAUDE_FOLLOW_UPS_HOOK_POC;
-    const previousMode = process.env.MICHI_FOLLOW_UPS_EXPERIMENT_MODE;
-    process.env.MICHI_CLAUDE_FOLLOW_UPS_HOOK_POC = '1';
-    process.env.MICHI_FOLLOW_UPS_EXPERIMENT_MODE = 'sentinel';
-    const child = new MockClaudeChild();
-    const stdinChunks: string[] = [];
-    child.stdin.on('data', (chunk: Buffer) => stdinChunks.push(chunk.toString()));
-    stubSpawnClaude(() => child);
-    const registry = makeMcpRegistry();
-
-    const { ClaudeSession } = freshClaudeSession();
-    const session = new ClaudeSession('session-sentinel-poc', makeSessionDeps({
-      nodeId: 'node-sentinel-poc',
-      mcpRegistry: registry as any,
-    }) as any);
-
-    try {
-      await session.spawnFresh();
-      const spawnArgs = capturedSpawnArgs[0] as Record<string, unknown>;
-      assert.match(String(spawnArgs.mcpConfigInline), /"alwaysLoad":true/);
-      const callbacks = registry.createdCallbacks[0];
-      assert.equal(callbacks.onSetFollowUps, undefined);
-      assert.equal(typeof callbacks.onSetBranchOverview, 'function');
-
-      const turnPromise = (async () => {
-        const events: any[] = [];
-        for await (const event of session.send('hello')) events.push(event);
-        return events;
-      })();
-      await new Promise<void>((resolve) => setImmediate(resolve));
-
-      const envelopes = stdinChunks
-        .join('')
-        .trim()
-        .split('\n')
-        .filter(Boolean)
-        .map((line) => JSON.parse(line));
-      const prompt = String(envelopes.at(-1)?.message?.content ?? '');
-      assert.match(prompt, /do not call set_follow_ups/i);
-      assert.match(prompt, /FOLLOW-UP 1\/3/);
-      assert.match(prompt, /FOLLOW-UP 3\/3/);
-
-      child.emitChunk('answer\n[FOLLOW-UP 1/3: one?]\n[FOLLOW-UP 2/3: two?]\n[FOLLOW-UP 3/3: three?]');
-      await new Promise<void>((resolve) => setImmediate(resolve));
-      callbacks.onSetBranchOverview('Sentinel experiment overview.');
-      assert.deepEqual(callbacks.onValidateFollowUps(), {});
-      child.emitChunk('SHOULD STAY HIDDEN');
-      child.emitResult('success');
-      const events = await turnPromise;
-      assert.equal(events.some((event) => isHostEvent(event, 'follow_ups')), false);
-      assert.deepEqual(
-        events.filter((event) => event.kind === 'chunk').map((event) => event.text),
-        ['answer\n[FOLLOW-UP 1/3: one?]\n[FOLLOW-UP 2/3: two?]\n[FOLLOW-UP 3/3: three?]'],
-      );
-      assert.equal(events.some((event) => event.kind === 'turn_end'), true);
-    } finally {
-      if (previous === undefined) delete process.env.MICHI_CLAUDE_FOLLOW_UPS_HOOK_POC;
-      else process.env.MICHI_CLAUDE_FOLLOW_UPS_HOOK_POC = previous;
-      if (previousMode === undefined) delete process.env.MICHI_FOLLOW_UPS_EXPERIMENT_MODE;
-      else process.env.MICHI_FOLLOW_UPS_EXPERIMENT_MODE = previousMode;
-      await session.dispose();
-    }
-  });
-
-  test('follow-ups hook POC fails open after one block and resets on the next turn', async () => {
-    const previous = process.env.MICHI_CLAUDE_FOLLOW_UPS_HOOK_POC;
-    process.env.MICHI_CLAUDE_FOLLOW_UPS_HOOK_POC = '1';
-    const child = new MockClaudeChild();
-    stubSpawnClaude(() => child);
-    const registry = makeMcpRegistry();
-
-    const { ClaudeSession } = freshClaudeSession();
-    const session = new ClaudeSession('session-hook-retry', makeSessionDeps({
-      nodeId: 'node-hook-retry',
-      mcpRegistry: registry as any,
-    }) as any);
-
-    try {
-      await session.spawnFresh();
-      const callbacks = registry.createdCallbacks[0];
-
-      const firstTurn = (async () => {
-        const events: any[] = [];
-        for await (const event of session.send('first')) events.push(event);
-        return events;
-      })();
-      await new Promise<void>((resolve) => setImmediate(resolve));
-      child.emitChunk('first visible');
-      await new Promise<void>((resolve) => setImmediate(resolve));
-      assert.equal(callbacks.onValidateFollowUps().decision, 'block');
-      child.emitChunk('first repair hidden');
-      assert.deepEqual(callbacks.onValidateFollowUps(), {});
-      child.emitResult('success');
-      const firstEvents = await firstTurn;
-      assert.equal(
-        firstEvents.filter((event) => event.kind === 'chunk').map((event) => event.text).join(''),
-        'first visible',
-      );
-
-      const secondTurn = (async () => {
-        const events: any[] = [];
-        for await (const event of session.send('second')) events.push(event);
-        return events;
-      })();
-      await new Promise<void>((resolve) => setImmediate(resolve));
-      child.emitChunk('second visible');
-      await new Promise<void>((resolve) => setImmediate(resolve));
-      assert.equal(callbacks.onValidateFollowUps().decision, 'block');
-      child.emitChunk('second repair hidden');
-      assert.deepEqual(callbacks.onValidateFollowUps(), {});
-      child.emitResult('success');
-      const secondEvents = await secondTurn;
-      assert.equal(
-        secondEvents.filter((event) => event.kind === 'chunk').map((event) => event.text).join(''),
-        'second visible',
-      );
-    } finally {
-      if (previous === undefined) delete process.env.MICHI_CLAUDE_FOLLOW_UPS_HOOK_POC;
-      else process.env.MICHI_CLAUDE_FOLLOW_UPS_HOOK_POC = previous;
-      await session.dispose();
-    }
-  });
-
-  test('follow-ups hook POC skips validation during warmInit', async () => {
-    const previous = process.env.MICHI_CLAUDE_FOLLOW_UPS_HOOK_POC;
-    process.env.MICHI_CLAUDE_FOLLOW_UPS_HOOK_POC = '1';
-    const child = new MockClaudeChild();
-    stubSpawnClaude(() => child);
-    const registry = makeMcpRegistry();
-
-    const { ClaudeSession } = freshClaudeSession();
-    const session = new ClaudeSession('session-hook-warm', makeSessionDeps({
-      nodeId: 'node-hook-warm',
-      mcpRegistry: registry as any,
-    }) as any);
-
-    try {
-      await session.spawnFresh();
-      const callbacks = registry.createdCallbacks[0];
-      const warm = session.warmInit();
-      await new Promise<void>((resolve) => setImmediate(resolve));
-      assert.deepEqual(callbacks.onValidateFollowUps(), {});
-      child.emitInit('ext-hook-warm');
-      child.emitResult('success');
-      await warm;
-    } finally {
-      if (previous === undefined) delete process.env.MICHI_CLAUDE_FOLLOW_UPS_HOOK_POC;
-      else process.env.MICHI_CLAUDE_FOLLOW_UPS_HOOK_POC = previous;
-      await session.dispose();
     }
   });
 });

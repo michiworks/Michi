@@ -41,17 +41,14 @@ async function closeNewWorkspaceDialog(page: Page) {
 
 /**
  * Spaces always opens on its Home; Spaces live in the sidebar under their
- * workspace. The assistant window floats over the page's right side, so put
- * it away first.
+ * workspace. Pages has no assistant window of its own (DESIGN-v2 §1.4) and
+ * the one panel stays closed until asked for.
  */
 async function openSpaces(page: Page) {
   await openArea(page, 'spaces');
   await expect(page.locator('main.spaces-home').getByRole('heading', { name: 'Home', level: 1 })).toBeVisible();
-  const assistant = page.getByRole('region', { name: 'Assistant', exact: true });
-  const pill = page.getByRole('button', { name: /^Ask assistant/ });
-  await assistant.or(pill).first().waitFor();
-  if (await assistant.isVisible()) await assistant.getByRole('button', { name: 'Minimize', exact: true }).click();
-  await expect(pill).toBeVisible();
+  await expect(page.locator('.meta-chat-area, button.meta-chat-pill')).toHaveCount(0);
+  await expect(page.locator('aside[data-companion-panel]')).toHaveCount(0);
 }
 
 async function newSpace(page: Page) {
@@ -115,8 +112,11 @@ test('create a release Space, add a nested page, edit Risks and resolve its prot
   await expect(suggestion).toContainText('You edited this, so it asks first');
   await suggestion.getByRole('button', { name: 'Accept', exact: true }).click();
   // Accepted blocks have no source/Undo footer; history remains in Activity.
-  await space.locator(`[data-block-id="${risksId}"]`).hover();
+  // Wait for the answered suggestion to collapse first: hovering while it
+  // still holds its height scrolls the page, and the scroll back on the next
+  // click closes the Page actions menu.
   await expect(space.locator(`[data-block-id="${risksId}"]`).locator('.page-change-targets')).toHaveCount(0);
+  await space.locator(`[data-block-id="${risksId}"]`).hover();
   await space.getByRole('button', { name: 'Page actions' }).click();
   await page.getByRole('menuitem', { name: /^Activity/ }).click();
   const activity = space.getByRole('region', { name: 'Activity', exact: true });

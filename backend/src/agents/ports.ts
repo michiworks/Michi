@@ -10,6 +10,8 @@ import type { PlanEntry } from "michi-shared";
 export interface NodeRowLike {
   parent_node_id?: string | null;
   workspace_id: string | null;
+  /** 1: a fresh multi-model branch, which inherits nothing from its parent. */
+  fresh_context?: number | null;
 }
 export interface MessageRowLike {
   role: string;
@@ -51,15 +53,19 @@ export interface GlobalContextResultLike {
  *  read_node_overview tools. When omitted, Pi does not register those tools. */
 export interface GlobalContextProvider {
   listThreads(sessionWorkspaceId: string | null, ownerUserId: string | null | undefined,
-              targetWorkspaceId?: string, currentNodeId?: string): GlobalContextResultLike;
+              targetWorkspaceId?: string, currentNodeId?: string,
+              options?: { includeScheduledRuns?: boolean }): GlobalContextResultLike;
   searchMessages(sessionWorkspaceId: string | null, ownerUserId: string | null | undefined,
-                 query: string, scope?: "current" | "all", limit?: number): GlobalContextResultLike;
+                 query: string, scope?: "current" | "all", limit?: number,
+                 options?: { includeScheduledRuns?: boolean }): GlobalContextResultLike;
   readNode(sessionWorkspaceId: string | null, ownerUserId: string | null | undefined,
            nodeId: string, opts?: {
              role?: "user" | "assistant";
              from?: "head" | "tail";
              offset?: number;
              limit?: number;
+             messageId?: string;
+             charOffset?: number;
            }): GlobalContextResultLike;
   readNodeOverview(sessionWorkspaceId: string | null, ownerUserId: string | null | undefined,
                    nodeId: string): GlobalContextResultLike;

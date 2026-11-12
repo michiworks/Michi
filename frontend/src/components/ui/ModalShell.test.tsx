@@ -1,4 +1,3 @@
-import React from 'react';
 import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { AnimatePresence } from 'motion/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';

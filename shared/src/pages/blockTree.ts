@@ -1,5 +1,5 @@
 import type { PageBlock } from './blocks';
-import type { BlockLocation } from './types';
+import type { BlockLocation, RowLocation } from './types';
 
 export interface BlockSnapshot {
   exists: boolean;
@@ -14,6 +14,13 @@ export function blockLocation(blocks: readonly PageBlock[], index: number): Bloc
     previousId: index > 0 ? blocks[index - 1].id : null,
     nextId: index + 1 < blocks.length ? blocks[index + 1].id : null,
   };
+}
+
+/** A missing row's location is the end of the table. */
+export function rowLocation(database: { readonly rows: readonly { id: string }[] }, rowId: string): RowLocation {
+  const position = database.rows.findIndex((row) => row.id === rowId);
+  if (position < 0) return { position: database.rows.length, after: database.rows[database.rows.length - 1]?.id ?? null };
+  return { position, after: database.rows[position - 1]?.id ?? null };
 }
 
 export function snapshotBlock(blocks: readonly PageBlock[], index: number): BlockSnapshot {

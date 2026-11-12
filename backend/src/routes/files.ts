@@ -1,8 +1,8 @@
 import express, { Request, Response } from "express";
 import * as fs from "node:fs";
-import * as path from "node:path";
 import { NotFoundError } from "../services/workspaceSandbox";
 import { SHOW_IMAGE_MAX_BYTES } from "michi-runtime/internal/core/showImage";
+import { imageMimeType } from "michi-runtime/internal/core/attachments";
 import { resolveWorkspaceFileRoot, resolveWorkspaceRegularFile, WORKSPACE_FILE_ID_RE } from "../services/workspaceFiles";
 
 /**
@@ -27,14 +27,6 @@ import { resolveWorkspaceFileRoot, resolveWorkspaceRegularFile, WORKSPACE_FILE_I
  * Every rejection returns a bare 404 (no body) so the route never leaks
  * whether a path exists, is the wrong type, or escaped the sandbox.
  */
-
-const IMAGE_MIME_BY_EXT: Record<string, string> = {
-    ".png": "image/png",
-    ".jpg": "image/jpeg",
-    ".jpeg": "image/jpeg",
-    ".gif": "image/gif",
-    ".webp": "image/webp",
-};
 
 export interface FilesRouteDeps {
     /**
@@ -92,7 +84,7 @@ export function setupFilesRoutes(deps: FilesRouteDeps = {}): express.Router {
         if (stat.size > SHOW_IMAGE_MAX_BYTES) return res.status(404).end();
 
         // 5. MIME allowlist (png/jpg/jpeg/gif/webp; SVG excluded). Unknown → 404.
-        const mime = IMAGE_MIME_BY_EXT[path.extname(real).toLowerCase()];
+        const mime = imageMimeType(real);
         if (!mime) return res.status(404).end();
 
         res.setHeader("Content-Type", mime);

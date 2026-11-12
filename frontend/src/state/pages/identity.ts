@@ -1,3 +1,4 @@
+import { mapPageChildBlocks } from 'michi-shared';
 import type {
   PageBlock,
   PageBlockInput,
@@ -27,18 +28,8 @@ function mapPageBlockReferences<T extends PageBlock | PageBlockInput>(block: T, 
       sources: segment.sources.map((source) => ({ ...source, nodeId: mapId(source.nodeId, connectionId, direction) })),
     })) } as T;
   }
-  if (block.type === 'toggle') {
-    return { ...block, blocks: block.blocks.map((child) => mapPageBlockReferences(child, connectionId, direction)) } as T;
-  }
-  if (block.type === 'columns') {
-    return { ...block, columns: block.columns.map((column) => column.map((child) => mapPageBlockReferences(child, connectionId, direction))) } as T;
-  }
-  if (block.type === 'tabs') {
-    return { ...block, tabs: block.tabs.map((tab) => ({ ...tab, blocks: tab.blocks.map((child) => mapPageBlockReferences(child, connectionId, direction)) })) } as T;
-  }
-  if (block.type === 'grid') {
-    return { ...block, regions: block.regions.map((region) => ({ ...region, blocks: region.blocks.map((child) => mapPageBlockReferences(child, connectionId, direction)) })) } as T;
-  }
+  // A container's own fields hold no references; its children may.
+  block = mapPageChildBlocks(block, (child) => mapPageBlockReferences(child, connectionId, direction));
   const mapped = block.type === 'database-ref'
     ? { ...block, databaseId: mapId(block.databaseId, connectionId, direction) }
     : block.type === 'page-link'
@@ -216,18 +207,5 @@ export function mapPageWriteIdentity(
     resource: { ...write.resource, id: mapId(write.resource.id, connectionId, direction) },
     applied: write.applied.map((change) => mapPageChangeIdentity(change, connectionId, direction)),
     proposed: write.proposed.map((change) => mapPageChangeIdentity(change, connectionId, direction)),
-  };
-}
-
-export function mapHelperDescriptorIdentity<T extends { workspaceId: string; treeId: string; nodeId: string }>(
-  descriptor: T,
-  connectionId: string,
-  direction: IdentityDirection,
-): T {
-  return {
-    ...descriptor,
-    workspaceId: mapId(descriptor.workspaceId, connectionId, direction),
-    treeId: mapId(descriptor.treeId, connectionId, direction),
-    nodeId: mapId(descriptor.nodeId, connectionId, direction),
   };
 }

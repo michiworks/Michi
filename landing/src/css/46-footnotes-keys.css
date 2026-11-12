@@ -1,0 +1,32 @@
+/* ==========================================================================
+   46-footnotes-keys.css (owner: figures): footnote branch cards (brief §3.13,
+   §7.6, P11), the note arrival target (P12) and the keys sheet (§3.14, P14).
+   The card is the kit's .mk-bcard, cloned into <body> by 80-footnotes.js and
+   placed in document coordinates. It fades 100 in / 80 out (P11); its
+   visibility flips at once on open (so Enter can focus into it in the same
+   task) and only after the fade on close.
+   ========================================================================== */
+.fn-card { z-index: 60; width: min(364px, calc(100% - 16px)); transition: opacity var(--t-soft) ease-out, visibility 0s; }
+.fn-card.is-off { transition: opacity 80ms ease-out, visibility 0s 80ms; }
+/* The app's item states (index.css .t-branch-card-item); the ring sits inside because the card clips. */
+.fn-card .mk-bcard-item:hover { background-color: var(--mk-card-hover); }
+.fn-card .mk-bcard-item:focus-visible { outline-offset: -2px; }
+@media (prefers-reduced-motion: reduce) { .fn-card { transition: none; } }
+/* Programmatic focus targets: the note a footnote jumps to, the keys sheet. */
+.note[tabindex="-1"]:focus, .keys-sheet:focus { outline: none; }
+
+/* Keys sheet: non-modal, bottom right, no shadow (brief §7.5); opacity and
+   scale .98 -> 1 over 180 on open, gone at once on close (hidden). */
+.keys-sheet { position: fixed; z-index: 70; right: var(--margin); bottom: 24px; width: min(420px, calc(100% - 2 * var(--margin)));
+  padding: 14px 20px 16px; background: var(--surface); border: 1px solid var(--line);
+  transform-origin: 100% 100%; animation: keys-in var(--t-enter) var(--ease-out) both; }
+@keyframes keys-in { from { opacity: 0; scale: .98; } }
+.keys-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 10px; }
+.keys-title { font-size: 15px; line-height: 1.4; font-weight: 600; }
+.keys-close { position: relative; display: inline-flex; align-items: center; gap: 8px; font-size: 14px; line-height: 1; font-weight: 500; color: var(--ink-2); }
+.keys-close:hover { color: var(--ink); }
+.keys-close::after { content: ""; position: absolute; inset: -13px -8px; }
+.keys-list > div { display: grid; grid-template-columns: 60px minmax(0, 1fr); align-items: baseline; column-gap: 12px; padding: 5px 0; font-size: 14px; line-height: 1.5; }
+.keys-list dt { color: var(--ink-3); }
+/* The sheet is the key reference: its keycaps show on touch screens too. */
+.keys-sheet .kbd { display: inline-flex; }

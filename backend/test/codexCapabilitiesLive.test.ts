@@ -21,7 +21,7 @@ test('real Codex: auth gate, collaboration modes, goals off, steer and cancel th
 }, async () => {
   const directory = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'michi-codex-live-')));
   const priorEnv = { ...process.env };
-  Object.assign(process.env, { MICHI_DATA_DIR: directory, MICHI_TITLE_MODEL_CODEX: 'off', MICHI_CODEX_FOLLOW_UPS_HOOK_POC: '0' });
+  Object.assign(process.env, { MICHI_DATA_DIR: directory, MICHI_TITLE_MODEL_CODEX: 'off' });
   delete process.env.MICHI_CLOUD;
   const { closeDb, getDb, initDb } = require('../src/services/db') as typeof import('../src/services/db');
   const repo = require('../src/services/dbRepository') as typeof import('../src/services/dbRepository');

@@ -1,13 +1,18 @@
 import { DatabaseSync, type StatementSync } from 'node:sqlite';
+import fs from 'fs';
 import path from 'path';
-import { runMigrations as runSqlMigrations } from './migrate';
+import { pendingMigrations, runMigrations as runSqlMigrations } from './migrate';
+import { snapshotBeforeMigrations } from './migrationSnapshot';
 import { getMichiDataDir } from './dataDir';
+import { log } from './logger';
 import { instrumentDatabase, timedSync } from './performanceDiagnostics';
 
 declare const __MICHIBUNDLE__: boolean | undefined;
 
 let _db: DatabaseSync | null = null;
 let _auditDb: DatabaseSync | null = null;
+/** Why audit.db could not be opened; getAuditDb does not try again until closeAuditDb(). */
+let _auditDbFailure: Error | null = null;
 const statementCache = new Map<string, StatementSync>();
 
 /**
@@ -35,20 +40,32 @@ export function getDbPath(): string {
 
 export function initDb(): DatabaseSync {
   if (_db) return _db;
-  _db = instrumentDatabase(new DatabaseSync(getDbPath()), 'main-db');
-  _db.exec('PRAGMA journal_mode = WAL');
-  _db.exec('PRAGMA synchronous = NORMAL');
-  _db.exec('PRAGMA foreign_keys = ON');
-  // Multi-window prereq (spec §18/D12): a writer that loses the WAL write-lock
-  // race waits up to 15s for the lock instead of throwing SQLITE_BUSY at once.
-  // 15s is generous for a desktop app; the real mitigation is the retry loop in
-  // runInTransaction() below.
-  _db.exec('PRAGMA busy_timeout = 15000');
-  runMigrations(_db);
-  // File-based SQL migration runner — records applied files in schema_migrations.
-  // Runs after the in-process DDL block so behaviour is identical on fresh installs.
-  runSqlMigrations(_db, resolveMigrationsDir('migrations'));
-  return _db;
+  const db = instrumentDatabase(new DatabaseSync(getDbPath()), 'main-db');
+  _db = db;
+  try {
+    db.exec('PRAGMA journal_mode = WAL');
+    db.exec('PRAGMA synchronous = NORMAL');
+    db.exec('PRAGMA foreign_keys = ON');
+    // Multi-window prereq (spec §18/D12): a writer that loses the WAL write-lock
+    // race waits up to 15s for the lock instead of throwing SQLITE_BUSY at once.
+    // 15s is generous for a desktop app; the real mitigation is the retry loop in
+    // runInTransaction() below.
+    db.exec('PRAGMA busy_timeout = 15000');
+    const migrationsDir = resolveMigrationsDir('migrations');
+    // Throws UnsupportedSchemaError, before anything is written, for a database below V14.
+    const fresh = isFreshSchema(db);
+    // Copies an existing database to backups/ before the migrations below
+    // change it; when the copy fails this throws and nothing is migrated.
+    snapshotBeforeMigrations(db, pendingMigrations(db, migrationsDir)[0]);
+    if (fresh) createV14Schema(db);
+    // File-based SQL migration runner — records applied files in schema_migrations.
+    runSqlMigrations(db, migrationsDir);
+  } catch (err) {
+    // No half-initialized connection stays open; the next getDb() starts over.
+    closeDb();
+    throw err;
+  }
+  return db;
 }
 
 export function getDb(): DatabaseSync {
@@ -88,41 +105,119 @@ export function getAuditDbPath(): string {
 }
 
 /**
- * Lazy-init audit DB. Opens audit.db in the same data dir as data.db,
- * but deliberately separate so cascade deletes on user rows in data.db
- * do NOT wipe audit history. The audit DB has its own schema_migrations
- * ledger pointing at src/db/auditMigrations/.
+ * The audit DB: audit.db in the same data dir as data.db, but deliberately
+ * separate so cascade deletes on user rows in data.db do NOT wipe audit
+ * history. The audit DB has its own schema_migrations ledger pointing at
+ * src/db/auditMigrations/. openExistingAuditDb() opens an existing one at
+ * startup; the first audit record creates a new one.
+ *
+ * When opening fails (e.g. its pre-migration snapshot or a migration fails),
+ * the error is logged once and every later call throws it without trying
+ * again, which would repeat the whole copy on a request, until closeAuditDb()
+ * or a restart. Audit records are dropped meanwhile (auditDbUnavailable()).
  */
 export function getAuditDb(): DatabaseSync {
   if (_auditDb) return _auditDb;
-  _auditDb = instrumentDatabase(new DatabaseSync(getAuditDbPath()), 'audit-db');
-  _auditDb.exec('PRAGMA journal_mode = WAL');
-  _auditDb.exec('PRAGMA foreign_keys = ON');
-  // Same multi-window prereq as initDb: audit rows are written on the hot path
-  // (every turn / permission), so a second window writing concurrently would
-  // otherwise hit SQLITE_BUSY here too.
-  _auditDb.exec('PRAGMA busy_timeout = 15000');
-  runSqlMigrations(_auditDb, resolveMigrationsDir('auditMigrations'));
-  return _auditDb;
+  if (_auditDbFailure) throw _auditDbFailure;
+  let db: DatabaseSync | null = null;
+  try {
+    db = instrumentDatabase(new DatabaseSync(getAuditDbPath()), 'audit-db');
+    db.exec('PRAGMA journal_mode = WAL');
+    db.exec('PRAGMA foreign_keys = ON');
+    // Same multi-window prereq as initDb: audit rows are written on the hot path
+    // (every turn / permission), so a second window writing concurrently would
+    // otherwise hit SQLITE_BUSY here too.
+    db.exec('PRAGMA busy_timeout = 15000');
+    const migrationsDir = resolveMigrationsDir('auditMigrations');
+    snapshotBeforeMigrations(db, pendingMigrations(db, migrationsDir)[0]);
+    runSqlMigrations(db, migrationsDir);
+  } catch (err) {
+    db?.close();
+    _auditDbFailure = err as Error;
+    log.error('boot', 'audit database unavailable until restart; audit records are dropped', {
+      db: getAuditDbPath(),
+      error: (err as Error).message,
+    });
+    throw err;
+  }
+  _auditDb = db;
+  return db;
 }
 
+/**
+ * Open audit.db at startup when it exists, so its pending migrations, and the
+ * snapshot before them, run before the server listens rather than in the
+ * request that writes the next audit record. A failure does not stop startup:
+ * getAuditDb logs it and the audit log stays unavailable until restart.
+ */
+export function openExistingAuditDb(): void {
+  if (!fs.existsSync(getAuditDbPath())) return;
+  try {
+    getAuditDb();
+  } catch {
+    // Logged by getAuditDb.
+  }
+}
+
+/** True once audit.db failed to open in this process: audit records are being dropped. */
+export function auditDbUnavailable(): boolean {
+  return _auditDbFailure !== null;
+}
+
+/** Closes audit.db; the next getAuditDb() opens it again, also after a failure. */
 export function closeAuditDb(): void {
+  _auditDbFailure = null;
   if (_auditDb) {
     _auditDb.close();
     _auditDb = null;
   }
 }
 
+// Callbacks registered (runAfterCommit) while runInTransaction's body runs.
+let commitHooks: Array<() => void> | null = null;
+
+/**
+ * Run `fn` once the current runInTransaction commits; dropped if it rolls
+ * back (or is retried). Outside a transaction a write has already committed,
+ * so `fn` runs now. One failing callback does not stop the others.
+ */
+export function runAfterCommit(fn: () => void): void {
+  if (commitHooks) commitHooks.push(fn);
+  else runCommitHook(fn);
+}
+
+function runCommitHook(fn: () => void): void {
+  try {
+    fn();
+  } catch {
+    // Observers of a committed write must not turn it into a failure.
+  }
+}
+
+let savepointSerial = 0;
+
+/**
+ * Inside an open transaction `fn` runs in a savepoint: its after-commit work
+ * joins the enclosing transaction's, or is dropped if the savepoint rolls back,
+ * and the outermost transaction alone retries on SQLITE_BUSY.
+ */
 export function runInTransaction<T>(fn: () => T): T {
   const db = getDb();
+  if (db.isTransaction) return runInSavepoint(db, fn);
   const maxRetries = 3;
   for (let attempt = 0; ; attempt++) {
     db.exec('BEGIN');
+    const outerHooks = commitHooks;
+    const hooks: Array<() => void> = [];
+    commitHooks = hooks;
     try {
       const result = fn();
       db.exec('COMMIT');
+      commitHooks = outerHooks;
+      for (const hook of hooks) runCommitHook(hook);
       return result;
     } catch (err) {
+      commitHooks = outerHooks;
       db.exec('ROLLBACK');
       if (isSqliteBusy(err) && attempt < maxRetries) {
         // Exponential backoff: 100ms, 200ms, 400ms.
@@ -132,6 +227,28 @@ export function runInTransaction<T>(fn: () => T): T {
       }
       throw err;
     }
+  }
+}
+
+function runInSavepoint<T>(db: DatabaseSync, fn: () => T): T {
+  const name = `tx_${++savepointSerial}`;
+  db.exec(`SAVEPOINT ${name}`);
+  const outerHooks = commitHooks;
+  const hooks: Array<() => void> = [];
+  commitHooks = hooks;
+  try {
+    const result = fn();
+    db.exec(`RELEASE SAVEPOINT ${name}`);
+    commitHooks = outerHooks;
+    // A transaction begun outside runInTransaction has no frame to join.
+    if (outerHooks) outerHooks.push(...hooks);
+    else for (const hook of hooks) runCommitHook(hook);
+    return result;
+  } catch (err) {
+    commitHooks = outerHooks;
+    db.exec(`ROLLBACK TO SAVEPOINT ${name}`);
+    db.exec(`RELEASE SAVEPOINT ${name}`);
+    throw err;
   }
 }
 
@@ -148,6 +265,31 @@ function sleepSyncMs(ms: number): void {
   Atomics.wait(new Int32Array(buf), 0, 0, ms);
 }
 
+/**
+ * The oldest schema initDb opens: `meta.schema_version` 14, written by the last
+ * of the retired in-process steps V1..V14 (2026-05-25). The SQL files build on
+ * it; the first, 0000_baseline, repeats the V1..V14 DDL. Their runner first ran
+ * on 2026-05-27, after V14, so a database with its ledger (schema_migrations)
+ * is at V14 even without that row.
+ */
+const MIN_SCHEMA_VERSION = 14;
+
+/**
+ * A data.db below MIN_SCHEMA_VERSION: initDb no longer upgrades one, and
+ * throws this before writing anything to it.
+ */
+export class UnsupportedSchemaError extends Error {
+  readonly code = 'unsupported_schema';
+
+  constructor(readonly dbPath: string, readonly schemaVersion: number) {
+    super(
+      `${dbPath} predates schema v14 (May 2026): it is at v${schemaVersion}, which this Michi no longer upgrades. ` +
+        'Open it once with an older Michi release to upgrade it, then retry.',
+    );
+    this.name = 'UnsupportedSchemaError';
+  }
+}
+
 function getSchemaVersion(db: DatabaseSync): number {
   try {
     const row = db.prepare("SELECT value FROM meta WHERE key = 'schema_version'").get() as unknown as { value: string } | undefined;
@@ -157,37 +299,45 @@ function getSchemaVersion(db: DatabaseSync): number {
   }
 }
 
-function runMigrations(db: DatabaseSync): void {
+/**
+ * True for an empty database, which initDb creates at V14; false for one at
+ * V14 or later, by its schema_version or SQL ledger. Throws
+ * UnsupportedSchemaError for any other: a database below V14, which the SQL
+ * files cannot bring up to date.
+ */
+function isFreshSchema(db: DatabaseSync): boolean {
   const version = getSchemaVersion(db);
-  if (version < 1) migrateV1(db);
-  if (version < 2 || !columnExists(db, 'contexts', 'size')) migrateV2(db);
-  if (version < 3 || !columnExists(db, 'nodes', 'digest')) migrateV3(db);
-  if (version < 4 || !columnExists(db, 'nodes', 'follow_ups')) migrateV4(db);
-  if (version < 5 || !columnExists(db, 'nodes', 'acp_session_id')) migrateV5(db);
-  if (version < 6 || !columnExists(db, 'nodes', 'composer_draft')) migrateV6(db);
-  if (version < 7 || !tableExists(db, 'workspace_permission_grants')) migrateV7(db);
-  if (version < 8 || !columnExists(db, 'workspaces', 'deleted_at')) migrateV8(db);
-  if (version < 9 || !columnExists(db, 'workspaces', 'backend')) migrateV9(db);
-  if (version < 10 || !columnExists(db, 'nodes', 'runtime_id')) migrateV10(db);
-  if (version < 11 || !columnExists(db, 'nodes', 'resume_fingerprint')) migrateV11(db);
-  if (version < 12 || !columnExists(db, 'messages', 'blocks')) migrateV12(db);
-  if (version < 13 || !tableExists(db, 'user_provider_keys')) migrateV13(db);
-  if (version < 14 || !columnExists(db, 'trees', 'pinned_at')) migrateV14(db);
-  // V15+ live in src/db/migrations/*.sql, applied by services/migrate.ts at
-  // boot. The SQL ledger lives in `schema_migrations` (separate from the
-  // V1..V14 `meta.schema_version` ledger). The runner's benign-error swallow
-  // makes the SQL files idempotent across DBs whose V15/V16 columns landed
-  // via the retired inline migrateVN code path.
+  if (version >= MIN_SCHEMA_VERSION) return false;
+  if (db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'schema_migrations'").get()) return false;
+  if (!db.prepare('SELECT 1 FROM sqlite_master LIMIT 1').get()) return true;
+  const error = new UnsupportedSchemaError(getDbPath(), version);
+  log.error('boot', 'database predates schema v14; not opening it', { db: error.dbPath, schemaVersion: version });
+  throw error;
 }
 
-function tableExists(db: DatabaseSync, table: string): boolean {
-  const row = db
-    .prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?")
-    .get(table) as { name: string } | undefined;
-  return !!row;
+/**
+ * Creates the V14 schema on an empty database the way the retired V1..V14
+ * steps did: V1's tables, then the columns V5, V9, V10 and V11 added, then the
+ * tables of V7 and V13. Every data.db was made like this, so a new one keeps
+ * their column order and stored CREATE text (test/fixtures/dataDbSchema.golden.txt);
+ * 0000_baseline.sql orders nodes' columns differently. One transaction, so a
+ * crash cannot leave a partial schema, which the next start would refuse.
+ *
+ * Some SQL files add these columns again (0005_branch_anchor, 0031): migrate.ts
+ * skips such a duplicate ADD COLUMN, so keep that tolerance.
+ */
+function createV14Schema(db: DatabaseSync): void {
+  db.exec('BEGIN');
+  try {
+    createSchemaTables(db);
+    db.exec('COMMIT');
+  } catch (err) {
+    db.exec('ROLLBACK');
+    throw err;
+  }
 }
 
-function migrateV1(db: DatabaseSync): void {
+function createSchemaTables(db: DatabaseSync): void {
   db.exec(`
     CREATE TABLE IF NOT EXISTS meta (
       key   TEXT PRIMARY KEY,
@@ -282,9 +432,6 @@ function migrateV1(db: DatabaseSync): void {
 	      UNIQUE(workspace_id, name)
 	    );
     CREATE INDEX IF NOT EXISTS idx_contexts_workspace ON contexts(workspace_id);
-
-
-	    INSERT OR REPLACE INTO meta (key, value) VALUES ('schema_version', '1');
 	  `);
 
   // FTS5 full-text index - optional. Node 22.11 ships sqlite without FTS5;
@@ -310,49 +457,20 @@ function migrateV1(db: DatabaseSync): void {
   } catch {
     // FTS5 unavailable
   }
-}
-function columnExists(db: DatabaseSync, table: string, column: string): boolean {
-  const rows = db.prepare(`PRAGMA table_info(${table})`).all() as unknown as Array<{ name: string }>;
-  return rows.some((row) => row.name === column);
-}
 
-function migrateV2(db: DatabaseSync): void {
-  if (!columnExists(db, 'contexts', 'size')) {
-    db.prepare('ALTER TABLE contexts ADD COLUMN size INTEGER').run();
-  }
-  db.prepare("INSERT OR REPLACE INTO meta (key, value) VALUES ('schema_version', '2')").run();
-}
+  // V5, V9, V10 and V11: session and runtime columns.
+  db.exec(`
+    ALTER TABLE nodes ADD COLUMN acp_session_id TEXT;
+    ALTER TABLE workspaces ADD COLUMN backend TEXT NOT NULL DEFAULT 'kiro';
+    ALTER TABLE nodes ADD COLUMN external_session_id TEXT;
+    ALTER TABLE nodes ADD COLUMN runtime_id TEXT;
+    ALTER TABLE nodes ADD COLUMN provider_id TEXT;
+    ALTER TABLE nodes ADD COLUMN model_id TEXT;
+    ALTER TABLE nodes ADD COLUMN reasoning TEXT;
+    ALTER TABLE nodes ADD COLUMN resume_fingerprint TEXT;
+  `);
 
-function migrateV3(db: DatabaseSync): void {
-  if (!columnExists(db, 'nodes', 'digest')) {
-    db.prepare('ALTER TABLE nodes ADD COLUMN digest TEXT').run();
-  }
-  db.prepare("INSERT OR REPLACE INTO meta (key, value) VALUES ('schema_version', '3')").run();
-}
-
-function migrateV4(db: DatabaseSync): void {
-  if (!columnExists(db, 'nodes', 'follow_ups')) {
-    db.prepare('ALTER TABLE nodes ADD COLUMN follow_ups TEXT').run();
-  }
-  db.prepare("INSERT OR REPLACE INTO meta (key, value) VALUES ('schema_version', '4')").run();
-}
-
-function migrateV5(db: DatabaseSync): void {
-  if (!columnExists(db, 'nodes', 'acp_session_id')) {
-    db.prepare('ALTER TABLE nodes ADD COLUMN acp_session_id TEXT').run();
-  }
-  db.prepare("INSERT OR REPLACE INTO meta (key, value) VALUES ('schema_version', '5')").run();
-}
-
-function migrateV6(db: DatabaseSync): void {
-  if (!columnExists(db, 'nodes', 'composer_draft')) {
-    db.prepare('ALTER TABLE nodes ADD COLUMN composer_draft TEXT').run();
-  }
-  db.prepare("INSERT OR REPLACE INTO meta (key, value) VALUES ('schema_version', '6')").run();
-}
-
-function migrateV7(db: DatabaseSync): void {
-  // Per-workspace, per-tool always-allow grants. Written when the user
+  // V7: per-workspace, per-tool always-allow grants. Written when the user
   // selects "Allow always" on a permission prompt; read by the policy
   // resolver to short-circuit ask → allow.
   //
@@ -371,68 +489,13 @@ function migrateV7(db: DatabaseSync): void {
     );
     CREATE INDEX IF NOT EXISTS idx_grants_workspace ON workspace_permission_grants(workspace_id);
   `);
-  db.prepare("INSERT OR REPLACE INTO meta (key, value) VALUES ('schema_version', '7')").run();
-}
 
-function migrateV8(db: DatabaseSync): void {
-  if (!columnExists(db, 'workspaces', 'deleted_at')) {
-    db.prepare('ALTER TABLE workspaces ADD COLUMN deleted_at INTEGER').run();
-  }
-  if (!columnExists(db, 'workspaces', 'archived_at')) {
-    db.prepare('ALTER TABLE workspaces ADD COLUMN archived_at INTEGER').run();
-  }
-  db.prepare("INSERT OR REPLACE INTO meta (key, value) VALUES ('schema_version', '8')").run();
-}
-
-function migrateV9(db: DatabaseSync): void {
-  if (!columnExists(db, 'workspaces', 'backend')) {
-    db.prepare("ALTER TABLE workspaces ADD COLUMN backend TEXT NOT NULL DEFAULT 'kiro'").run();
-  }
-  if (!columnExists(db, 'nodes', 'external_session_id')) {
-    db.prepare('ALTER TABLE nodes ADD COLUMN external_session_id TEXT').run();
-  }
-  db.prepare("INSERT OR REPLACE INTO meta (key, value) VALUES ('schema_version', '9')").run();
-}
-
-function migrateV10(db: DatabaseSync): void {
-  if (!columnExists(db, 'nodes', 'runtime_id')) {
-    db.prepare('ALTER TABLE nodes ADD COLUMN runtime_id TEXT').run();
-  }
-  db.prepare("INSERT OR REPLACE INTO meta (key, value) VALUES ('schema_version', '10')").run();
-}
-
-function migrateV11(db: DatabaseSync): void {
-  if (!columnExists(db, 'nodes', 'provider_id')) {
-    db.prepare('ALTER TABLE nodes ADD COLUMN provider_id TEXT').run();
-  }
-  if (!columnExists(db, 'nodes', 'model_id')) {
-    db.prepare('ALTER TABLE nodes ADD COLUMN model_id TEXT').run();
-  }
-  if (!columnExists(db, 'nodes', 'reasoning')) {
-    db.prepare('ALTER TABLE nodes ADD COLUMN reasoning TEXT').run();
-  }
-  if (!columnExists(db, 'nodes', 'resume_fingerprint')) {
-    db.prepare('ALTER TABLE nodes ADD COLUMN resume_fingerprint TEXT').run();
-  }
-  db.prepare("INSERT OR REPLACE INTO meta (key, value) VALUES ('schema_version', '11')").run();
-}
-
-function migrateV12(db: DatabaseSync): void {
-  if (!columnExists(db, 'messages', 'blocks')) {
-    db.prepare('ALTER TABLE messages ADD COLUMN blocks TEXT').run();
-  }
-  db.prepare("INSERT OR REPLACE INTO meta (key, value) VALUES ('schema_version', '12')").run();
-}
-
-/**
- * BYOK provider keys, scoped per user. Plaintext keys are encrypted at
- * rest with AES-256-GCM using MICHI_ENCRYPTION_KEY (see services/userKeys.ts).
- *
- * No FK on user_id because Better-Auth's `user` table lives in a
- * separate sqlite file (auth.sqlite) and SQLite can't enforce FKs across
- * databases. Application code is the single writer.
- */
-function migrateV13(db: DatabaseSync): void {
+  // V13: BYOK provider keys, scoped per user. Plaintext keys are encrypted at
+  // rest with AES-256-GCM using MICHI_ENCRYPTION_KEY (see services/userKeys.ts).
+  //
+  // No FK on user_id because Better-Auth's `user` table lives in a
+  // separate sqlite file (auth.sqlite) and SQLite can't enforce FKs across
+  // databases. Application code is the single writer.
   db.exec(`
     CREATE TABLE IF NOT EXISTS user_provider_keys (
       user_id    TEXT NOT NULL,
@@ -445,12 +508,6 @@ function migrateV13(db: DatabaseSync): void {
     );
     CREATE INDEX IF NOT EXISTS idx_user_provider_keys_user ON user_provider_keys(user_id);
   `);
-  db.prepare("INSERT OR REPLACE INTO meta (key, value) VALUES ('schema_version', '13')").run();
-}
 
-function migrateV14(db: DatabaseSync): void {
-  if (!columnExists(db, 'trees', 'pinned_at')) {
-    db.prepare('ALTER TABLE trees ADD COLUMN pinned_at INTEGER').run();
-  }
-  db.prepare("INSERT OR REPLACE INTO meta (key, value) VALUES ('schema_version', '14')").run();
+  db.prepare("INSERT OR REPLACE INTO meta (key, value) VALUES ('schema_version', ?)").run(String(MIN_SCHEMA_VERSION));
 }

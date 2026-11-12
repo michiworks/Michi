@@ -6,6 +6,8 @@ import { DatabaseView, type DatabaseViewServices } from './DatabaseView';
 import { DOUBLE_CLICK_MS } from './views/TableView';
 import { findBoardCard } from './views/BoardView';
 import { applyOpsLocally, userDatabase } from './dbTestData';
+import { getCompanionPanelState, resetCompanionPanelForTests, takeCompanionRequests } from '../../../../state/companion/companionPanel';
+import { MarkdownBlock } from '../page/blocks/text';
 
 const michiState = vi.hoisted(() => ({ value: null as null | Record<string, unknown> }));
 
@@ -27,6 +29,17 @@ function Harness({ initial, services, onAddCustomView }: { initial: MichiDatabas
 function withView(view: Partial<MichiDbView>): MichiDatabase {
   const db = userDatabase();
   return { ...db, views: [{ ...db.views[0], ...view }] };
+}
+
+/** The sample database with a Progress column: the hotel is 30% done, packing 50%. */
+function withProgress(): MichiDatabase {
+  const db = userDatabase();
+  const progress: Record<string, number> = { r1: 0.3, r2: 0.5 };
+  return {
+    ...db,
+    columns: [...db.columns, { id: 'c_prog', name: 'Progress', type: 'progress' }],
+    rows: db.rows.map((r) => (r.id in progress ? { ...r, values: { ...r.values, c_prog: progress[r.id] } } : r)),
+  };
 }
 
 function setup(db: MichiDatabase = userDatabase()) {
@@ -198,6 +211,47 @@ describe('filters, sorts and groups', () => {
     expect(rowNames()).toEqual(['Book the hotel', 'Rail pass']);
   });
 
+  it('reads a typed percent and a number with separators as a cell does', () => {
+    setup(withProgress());
+    fireEvent.click(screen.getByRole('button', { name: 'Filter' }));
+    fireEvent.click(screen.getByRole('button', { name: '+ Add filter' }));
+    fireEvent.change(screen.getByRole('combobox', { name: 'Filter 1 column' }), { target: { value: 'c_prog' } });
+    const value = screen.getByRole('textbox', { name: 'Filter 1 value' });
+    fireEvent.change(value, { target: { value: '40%' } });
+    fireEvent.keyDown(value, { key: 'Enter' });
+    expect(lastOps()[0]).toMatchObject({ view: { config: { filters: [{ column: 'c_prog', op: 'gt', value: 0.4 }] } } });
+    expect(rowNames()).toEqual(['Pack']);
+
+    fireEvent.click(screen.getByRole('button', { name: '+ Add filter' }));
+    fireEvent.change(screen.getByRole('combobox', { name: 'Filter 2 column' }), { target: { value: 'c_effort' } });
+    fireEvent.change(screen.getByRole('combobox', { name: 'Filter 2 condition' }), { target: { value: 'lt' } });
+    const effort = screen.getByRole('textbox', { name: 'Filter 2 value' });
+    fireEvent.change(effort, { target: { value: '1,200' } });
+    fireEvent.keyDown(effort, { key: 'Enter' });
+    expect(lastOps()[0]).toMatchObject({ view: { config: { filters: [{ column: 'c_prog', op: 'gt', value: 0.4 }, { column: 'c_effort', op: 'lt', value: 1200 }] } } });
+
+    fireEvent.keyDown(document.activeElement ?? document.body, { key: 'Escape' });
+    const chips = screen.getByRole('group', { name: 'Filters' });
+    expect(within(chips).getByText('Progress is more than 40%')).toBeTruthy();
+    expect(within(chips).getByText('Effort is less than 1200')).toBeTruthy();
+  });
+
+  it('keeps a saved condition when its new value is not a number, and says so', () => {
+    setup(withView({ config: { filters: [{ column: 'c_effort', op: 'gt', value: 2 }], match: 'all', sorts: [] } }));
+    fireEvent.click(screen.getByRole('button', { name: 'Filter, 1 on' }));
+    const value = screen.getByRole('textbox', { name: 'Filter 1 value' });
+    fireEvent.change(value, { target: { value: 'abc' } });
+    fireEvent.keyDown(value, { key: 'Enter' });
+    expect(edits).not.toHaveBeenCalled();
+    expect(screen.getByRole('alert').textContent).toBe('Type a number');
+    fireEvent.change(value, { target: { value: 'ab' } });
+    expect(screen.queryByRole('alert')).toBeNull();
+
+    fireEvent.keyDown(document.activeElement ?? document.body, { key: 'Escape' });
+    expect(edits).not.toHaveBeenCalled();
+    expect(within(screen.getByRole('group', { name: 'Filters' })).getByText('Effort is more than 2')).toBeTruthy();
+  });
+
   it('orders by several sorts and removes one', () => {
     setup();
     fireEvent.click(screen.getByRole('button', { name: 'Sort' }));
@@ -307,7 +361,11 @@ describe('cells', () => {
 
     fireEvent.keyDown(screen.getByText('Pack light').closest('[data-cell]') as HTMLElement, { key: 'Enter' });
     fireEvent.keyDown(screen.getByRole('textbox', { name: 'Edit Name' }), { key: 'Escape' });
-    fireEvent.click(screen.getByRole('button', { name: 'Rename Pack light' }));
+    const rename = screen.getByRole('button', { name: 'Rename Pack light' });
+    // Revealed by its row on a pointer device; always shown on a touch screen.
+    expect(rename.classList.contains('t-reveal')).toBe(true);
+    expect(rename.closest('tr')?.classList.contains('t-reveal-host')).toBe(true);
+    fireEvent.click(rename);
     expect(screen.getByRole('textbox', { name: 'Edit Name' })).toBeTruthy();
     expect(screen.queryByRole('button', { name: /^Open / })).toBeNull();
   });
@@ -404,15 +462,16 @@ describe('the rows batch bar', () => {
     ]);
     expect(lastLabel()).toBe('Set Priority on 2 rows');
 
-    const heard = vi.fn();
-    window.addEventListener('michi:assistant-open', heard);
+    // "Hand to agent…" opens the one panel on Chat with the rows as chips (DESIGN-v2 §1.2, §2.8 T5).
+    resetCompanionPanelForTests();
     try {
       fireEvent.click(within(bar).getByRole('button', { name: 'Hand to agent…' }));
-      const items = (heard.mock.calls[0][0] as CustomEvent).detail.attachments;
-      expect(items.map((i: { kind: string; id: string }) => [i.kind, i.id])).toEqual([['row', 'db_trip:r1'], ['row', 'db_trip:r2']]);
+      expect(getCompanionPanelState()).toMatchObject({ open: true, tab: 'chat' });
+      const items = takeCompanionRequests().flatMap((request) => request.attachments ?? []);
+      expect(items.map((i) => [i.kind, i.id])).toEqual([['row', 'db_trip:r1'], ['row', 'db_trip:r2']]);
       expect(items[0].text).toContain('Priority: Normal');
     } finally {
-      window.removeEventListener('michi:assistant-open', heard);
+      resetCompanionPanelForTests();
     }
 
     fireEvent.click(within(bar).getByRole('button', { name: 'Delete' }));
@@ -420,18 +479,58 @@ describe('the rows batch bar', () => {
     expect(rowNames()).toEqual(['Rail pass']);
     expect(screen.queryByRole('toolbar', { name: /selected/ })).toBeNull();
   });
+
+  it('sets a typed percent, and refuses a number it cannot read instead of clearing the column', async () => {
+    const notice = vi.fn();
+    render(<Harness initial={withProgress()} services={{ notice }} />);
+    fireEvent.click(screen.getByRole('checkbox', { name: 'Select Book the hotel' }));
+    fireEvent.click(screen.getByRole('checkbox', { name: 'Select Pack' }));
+    const bar = screen.getByRole('toolbar', { name: '2 rows selected' });
+    const open = () => {
+      fireEvent.click(within(bar).getByRole('button', { name: 'Set Priority…' }));
+      return screen.getByRole('dialog', { name: 'Set a value on 2 rows' });
+    };
+
+    let form = open();
+    fireEvent.change(within(form).getByLabelText('Column'), { target: { value: 'c_prog' } });
+    fireEvent.change(within(form).getByLabelText('Set to'), { target: { value: '40%' } });
+    await act(async () => { fireEvent.click(within(form).getByRole('button', { name: 'Set on 2 rows' })); });
+    expect(lastOps()).toEqual([
+      { op: 'row.update', id: 'r1', values: { c_prog: 0.4 } },
+      { op: 'row.update', id: 'r2', values: { c_prog: 0.4 } },
+    ]);
+
+    edits.mockClear();
+    form = open();
+    fireEvent.change(within(form).getByLabelText('Column'), { target: { value: 'c_effort' } });
+    fireEvent.change(within(form).getByLabelText('Set to'), { target: { value: '1.2.3' } });
+    await act(async () => { fireEvent.click(within(form).getByRole('button', { name: 'Set on 2 rows' })); });
+    expect(edits).not.toHaveBeenCalled();
+    expect(notice).toHaveBeenCalledWith('Type a number', 'info');
+    expect(screen.getByRole('dialog', { name: 'Set a value on 2 rows' })).toBeTruthy();
+  });
 });
 
 describe('the row drawer', () => {
   it('uses injected native services and hides Michi assistant actions', () => {
-    render(<Harness initial={userDatabase()} services={{ notice: vi.fn(), copyText: vi.fn().mockResolvedValue(undefined) }} />);
+    render(<Harness initial={userDatabase()} services={{ notice: vi.fn() }} />);
     fireEvent.click(screen.getByText('Book the hotel'));
     const drawer = screen.getByRole('dialog', { name: /Row/ });
     expect(within(drawer).queryByRole('button', { name: 'Hand to agent…' })).toBeNull();
+    expect(within(drawer).queryByRole('button', { name: 'Ask' }), 'no askRow service, no Ask').toBeNull();
 
     fireEvent.click(screen.getByRole('checkbox', { name: 'Select Book the hotel' }));
     const bar = screen.getByRole('toolbar', { name: '1 row selected' });
     expect(within(bar).queryByRole('button', { name: 'Hand to agent…' })).toBeNull();
+  });
+
+  it('asks the host about the open row through the askRow service', () => {
+    const askRow = vi.fn();
+    render(<Harness initial={userDatabase()} services={{ notice: vi.fn(), askRow }} />);
+    fireEvent.click(screen.getByText('Book the hotel'));
+    const drawer = screen.getByRole('dialog', { name: /Row/ });
+    fireEvent.click(within(drawer).getByRole('button', { name: 'Ask' }));
+    expect(askRow).toHaveBeenCalledWith({ id: 'r1', title: 'Book the hotel' });
   });
 
   it('shows every property and the body, each editable, and steps with ↑/↓', () => {
@@ -458,6 +557,15 @@ describe('the row drawer', () => {
     expect(within(screen.getByRole('dialog', { name: /Row/ })).getByRole('heading', { level: 2 }).textContent).toBe('Pack');
     fireEvent.keyDown(document.body, { key: 'Escape' });
     expect(screen.queryByRole('heading', { level: 2, name: 'Pack' })).toBeNull();
+  });
+
+  it('draws a row’s notes in the colours of a page’s Markdown block, headings included', () => {
+    setup();
+    fireEvent.click(screen.getByText('Book the hotel'));
+    const notes = within(screen.getByRole('dialog', { name: /Row/ })).getByText('Ace').closest('.prose');
+    const page = render(<MarkdownBlock block={{ type: 'markdown', id: 'm1', text: 'Kanra or **Ace**' }} ctx={{ depth: 0 }} />).container.querySelector('.prose');
+    expect(notes?.className).toContain('[&_h2]:text-(--term-fg)');
+    expect(notes?.className).toBe(page?.className);
   });
 
   it('steps only through the rows the view draws', () => {
@@ -649,5 +757,96 @@ describe('views of a database a person made', () => {
     list.unmount();
     setup(withView({ type: 'custom' }));
     expect(screen.getByText(/widgets are off/)).toBeTruthy();
+  });
+});
+
+/**
+ * Keys an input method still owns: Chromium flags them isComposing; Safari
+ * sends the key that ends a composition after compositionend as keyCode 229.
+ * Esc there dismisses the candidate window, Enter picks a candidate.
+ */
+const COMPOSING = [{ isComposing: true }, { keyCode: 229 }] as const;
+
+describe('keys an input method is composing with', () => {
+  it.each(COMPOSING)('keeps the column menu and its new name on Esc or Enter (%o)', (ime) => {
+    setup();
+    fireEvent.click(screen.getByRole('button', { name: 'Priority' }));
+    const name = screen.getByRole('textbox', { name: 'Column name' });
+    fireEvent.change(name, { target: { value: 'ji' } });
+    fireEvent.keyDown(name, { key: 'Escape', ...ime });
+    fireEvent.keyDown(name, { key: 'Enter', ...ime });
+    expect(edits).not.toHaveBeenCalled();
+    expect(screen.getByRole('menu')).toBeTruthy();
+    fireEvent.change(name, { target: { value: '紧急' } });
+    fireEvent.keyDown(name, { key: 'Escape' });
+    expect(lastOps()).toEqual([{ op: 'column.update', id: 'c_pri', patch: { name: '紧急' } }]);
+    expect(screen.queryByRole('menu')).toBeNull();
+  });
+
+  it.each(COMPOSING)('keeps a text cell editing on Esc (%o)', (ime) => {
+    const db = userDatabase();
+    setup({ ...db, columns: [...db.columns, { id: 'c_url', name: 'Site', type: 'url' }] });
+    const row = screen.getByText('Pack').closest('tr') as HTMLElement;
+    fireEvent.click(row.querySelector('[data-type="url"] .michi-db-cell') as HTMLElement);
+    const field = screen.getByRole('textbox', { name: 'Edit Site' });
+    fireEvent.change(field, { target: { value: 'https://ex' } });
+    fireEvent.keyDown(field, { key: 'Escape', ...ime });
+    expect(screen.getByRole('textbox', { name: 'Edit Site' })).toBe(field);
+    expect(field).toHaveProperty('value', 'https://ex');
+  });
+
+  it.each(COMPOSING)('keeps a number cell editing on Esc (%o)', (ime) => {
+    setup();
+    fireEvent.click(screen.getByText('Book the hotel'));
+    const drawer = screen.getByRole('dialog', { name: /Row/ });
+    fireEvent.click(within(drawer).getByRole('button', { name: 'Edit Effort' }));
+    const effort = within(drawer).getByRole('textbox', { name: 'Edit Effort' });
+    fireEvent.keyDown(effort, { key: 'Escape', ...ime });
+    expect(within(drawer).getByRole('textbox', { name: 'Edit Effort' })).toBe(effort);
+  });
+
+  it.each(COMPOSING)('keeps the notes typed since Edit on Esc (%o)', (ime) => {
+    setup();
+    fireEvent.click(screen.getByText('Book the hotel'));
+    const drawer = screen.getByRole('dialog', { name: /Row/ });
+    fireEvent.click(within(drawer).getByRole('button', { name: 'Edit' }));
+    const notes = within(drawer).getByRole('textbox', { name: 'Notes' });
+    fireEvent.change(notes, { target: { value: 'Kanra it is\n\nzhu' } });
+    fireEvent.keyDown(notes, { key: 'Escape', ...ime });
+    expect(within(drawer).getByRole('textbox', { name: 'Notes' })).toHaveProperty('value', 'Kanra it is\n\nzhu');
+  });
+
+  it.each(COMPOSING)('keeps a view being renamed on Esc or Enter (%o)', (ime) => {
+    setup();
+    fireEvent.click(screen.getByRole('button', { name: 'More for Table' }));
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Rename' }));
+    const field = screen.getByRole('textbox', { name: 'View name' });
+    fireEvent.change(field, { target: { value: 'quan' } });
+    fireEvent.keyDown(field, { key: 'Escape', ...ime });
+    fireEvent.keyDown(field, { key: 'Enter', ...ime });
+    expect(edits).not.toHaveBeenCalled();
+    expect(screen.getByRole('textbox', { name: 'View name' })).toHaveProperty('value', 'quan');
+  });
+
+  it.each(COMPOSING)('keeps the filter panel and does not save the value on Esc or Enter (%o)', (ime) => {
+    setup();
+    fireEvent.click(screen.getByRole('button', { name: 'Filter' }));
+    fireEvent.click(screen.getByRole('button', { name: '+ Add filter' }));
+    const value = screen.getByRole('textbox', { name: 'Filter 1 value' });
+    fireEvent.change(value, { target: { value: 'jiu' } });
+    fireEvent.keyDown(value, { key: 'Escape', ...ime });
+    fireEvent.keyDown(value, { key: 'Enter', ...ime });
+    expect(edits).not.toHaveBeenCalled();
+    expect(screen.getByRole('textbox', { name: 'Filter 1 value' })).toBe(value);
+  });
+
+  it.each(COMPOSING)('keeps the new-card field and its text on Esc (%o)', (ime) => {
+    setup(withView({ type: 'board' }));
+    const low = () => screen.getByRole('region', { name: 'Low' });
+    fireEvent.click(within(low()).getByRole('button', { name: 'New in Low' }));
+    const field = within(low()).getByRole('textbox', { name: 'New in Low' });
+    fireEvent.change(field, { target: { value: 'mai' } });
+    fireEvent.keyDown(field, { key: 'Escape', ...ime });
+    expect(within(low()).getByRole('textbox', { name: 'New in Low' })).toHaveProperty('value', 'mai');
   });
 });

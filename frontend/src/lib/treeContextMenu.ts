@@ -21,20 +21,87 @@ export interface TreeMenuActions {
   createMergedChat: (sourceIds: string[]) => Promise<string>;
   /** Create a digest covering the given chat nodes. */
   createDigest: (projectId: string, sourceIds: string[], customPrompt?: string) => Promise<string>;
-  /** Fire the export-panel toggle event. */
-  openExportPanel: () => void;
+  /** Open the export panel for the given nodes. */
+  openExportPanel: (ids: string[]) => void;
   /** Archive a tree by its tree id. Used by the multi-select menu when every
    *  selected node is the root of a live tree. */
   archiveTree: (treeId: string) => void;
   /** Open the pane for the given node (called after creating a digest). */
   focusOrOpen: (id: string) => void;
-  /** Begin inline rename for a node. */
+  /** Begin inline rename for a node. Without it the menu offers no Rename. */
   beginInlineRename?: (id: string) => void;
   /** Toggle the node-level sidebar pin. Both must be supplied for the
    *  Pin/Unpin item to appear. Not offered on tree roots, which pin at
    *  the thread level instead (see threadRowContextMenu). */
   pinNode?: (id: string) => void;
   unpinNode?: (id: string) => void;
+}
+
+/** Rules a surface adds to the store's for Weave and Digest. The Map applies
+ *  both; the sidebar's cross-thread selection keeps the store's rules. */
+export interface SelectionRules {
+  /** Refuse while a selected chat is streaming. */
+  requireIdle?: boolean;
+  /** Refuse when the selected chats span threads. */
+  requireSingleThread?: boolean;
+}
+
+export interface SelectionActionState {
+  chatIds: string[];
+  hasStreaming: boolean;
+  spansThreads: boolean;
+  canWeave: boolean;
+  /** Why Weave is refused; absent when it is allowed. */
+  weaveReason?: string;
+  canDigest: boolean;
+  /** Why Digest is refused; absent when it is allowed. */
+  digestReason?: string;
+}
+
+/** Which of `ids` Weave and Digest act on, and whether they may. */
+export function selectionActionState({
+  ids,
+  project,
+  nodes,
+  requireIdle = false,
+  requireSingleThread = false,
+}: {
+  ids: readonly string[];
+  project: Project;
+  nodes: Record<string, ChatNodeState>;
+} & SelectionRules): SelectionActionState {
+  const chatIds = ids.filter((id) => nodes[id]?.kind === 'chat');
+  const hasStreaming = chatIds.some((id) => nodes[id]?.status === 'streaming');
+  const treeIds = chatIds.map((id) => findTreeIdForNode(id, project));
+  const spansThreads = treeIds.some((id) => !id) || new Set(treeIds).size > 1;
+  const blocked = requireIdle && hasStreaming
+    ? 'streaming'
+    : requireSingleThread && spansThreads
+      ? 'threads'
+      : null;
+  const weaveReason = blocked === 'streaming'
+    ? 'Wait for streaming to finish before merging.'
+    : blocked === 'threads'
+      ? 'Merge requires nodes from a single thread.'
+      : chatIds.length < 2
+        ? 'Select at least two nodes to merge.'
+        : undefined;
+  const digestReason = blocked === 'streaming'
+    ? 'Wait for streaming to finish before creating a digest.'
+    : blocked === 'threads'
+      ? 'Digest requires nodes from a single thread.'
+      : chatIds.length < 1
+        ? 'Select at least one chat to digest.'
+        : undefined;
+  return {
+    chatIds,
+    hasStreaming,
+    spansThreads,
+    canWeave: !weaveReason,
+    weaveReason,
+    canDigest: !digestReason,
+    digestReason,
+  };
 }
 
 /**
@@ -51,12 +118,17 @@ export function buildTreeContextMenu({
   nodes,
   selection,
   actions,
+  rules,
+  digestEnabled = false,
 }: {
   targetId: string;
   project: Project;
   nodes: Record<string, ChatNodeState>;
   selection: ReadonlySet<string>;
   actions: TreeMenuActions;
+  rules?: SelectionRules;
+  /** Settings › Digest; the multi-select "Digest from N chats" item needs it on. */
+  digestEnabled?: boolean;
 }): MenuSection[] {
   const rootIds = new Set(project.trees.map((tree) => tree.rootNodeId));
   const targetIsSelected = selection.has(targetId);
@@ -64,7 +136,6 @@ export function buildTreeContextMenu({
     ? Array.from(selection)
     : [targetId];
   const isMulti = scope.length >= 2;
-  const chatScope = scope.filter((id) => nodes[id]?.kind === 'chat');
   const anyRoot = scope.some((id) => rootIds.has(id));
 
   // Map live tree-root nodeId → tree id. Used to decide whether the multi-
@@ -77,14 +148,17 @@ export function buildTreeContextMenu({
   const allRoots = isMulti && scope.every((id) => treeIdByRoot.has(id));
 
   if (isMulti) {
+    const state = selectionActionState({ ids: scope, project, nodes, ...rules });
+    const chatScope = state.chatIds;
     const sections: MenuSection[] = [
       {
         items: [
           {
             id: 'weave',
             label: `Weave ${chatScope.length} chats`,
+            sublabel: state.weaveReason,
             keys: 'W',
-            disabled: chatScope.length < 2,
+            disabled: !state.canWeave,
             run: () => {
               void actions.createMergedChat(chatScope).then((newId) => {
                 actions.focusOrOpen(newId);
@@ -92,21 +166,22 @@ export function buildTreeContextMenu({
               }).catch(() => {});
             },
           },
-          {
+          ...(digestEnabled ? [{
             id: 'digest',
             label: `Digest from ${chatScope.length} chats`,
+            sublabel: state.digestReason,
             keys: 'G',
-            disabled: chatScope.length < 1,
+            disabled: !state.canDigest,
             run: () => {
               requestDigest(project.id, chatScope);
               actions.clearSelection();
             },
-          },
+          }] : []),
           {
             id: 'export',
             label: `Export ${scope.length} selected`,
             keys: 'E',
-            run: actions.openExportPanel,
+            run: () => actions.openExportPanel(scope),
           },
         ],
       },
@@ -194,12 +269,9 @@ export function buildTreeContextMenu({
           keys: 'O',
           run: () => actions.openPane(targetId),
         },
-        {
-          id: 'rename',
-          label: 'Rename…',
-          keys: 'R',
-          run: () => actions.beginInlineRename?.(targetId),
-        },
+        ...(actions.beginInlineRename
+          ? [{ id: 'rename', label: 'Rename…', keys: 'R', run: () => actions.beginInlineRename!(targetId) }]
+          : []),
         ...(canPin
           ? [
               pinned

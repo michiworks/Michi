@@ -72,7 +72,10 @@ for (const view of ['activity', 'structure'] as const) {
     await expect(panes).toHaveCount(1);
     await expect(panes.first()).toHaveAttribute('data-node-id', 'other');
 
-    await sidebar.getByText('Workspaces', { exact: true }).click();
+    // By project's Projects header links to the Workspaces page; Recent has no
+    // such header, so there it is ⌘O.
+    if (view === 'structure') await sidebar.getByRole('button', { name: 'All 1 workspaces', exact: true }).click();
+    else await page.keyboard.press('ControlOrMeta+O');
     await page.locator('.terminal-content-col').getByText('Navigation workspace', { exact: true }).first().click();
     await page.locator('.terminal-content-col').getByText('root conversation', { exact: true }).first().click();
     await expect(panes).toHaveCount(2);
@@ -85,20 +88,16 @@ for (const view of ['activity', 'structure'] as const) {
   });
 }
 
-test('Artifacts opens from home and dashboard, closes, and reopens', async ({ page }, info) => {
+test('Artifacts opens from the dashboard, closes, and reopens', async ({ page }, info) => {
   await bootNavigation(page, 'activity');
   const trigger = page.getByRole('button', { name: /Artifacts/ });
   const drawer = page.getByRole('dialog', { name: 'Artifacts', exact: true });
-  await trigger.click();
-  await expect(drawer).toBeVisible();
-  await drawer.getByRole('button', { name: 'Close', exact: true }).click();
-  await expect(drawer).toHaveCount(0);
   await page.locator('.terminal-sidebar').getByText('root conversation', { exact: true }).first().click();
   await expect(page.locator('.terminal-dashboard')).toBeVisible();
   await trigger.click();
   await expect(drawer).toBeVisible();
+  // A tap on a row opens it: this doc in a pane beside the conversation.
   await drawer.getByText('navigation-notes', { exact: true }).click();
-  await drawer.getByRole('button', { name: 'Open', exact: true }).click();
   await expect(page.locator('.terminal-dashboard > [data-node-id]')).toHaveCount(2);
   await expect(page.locator('.terminal-dashboard').getByRole('heading', { name: 'Navigation notes' })).toBeVisible();
   await trigger.click();

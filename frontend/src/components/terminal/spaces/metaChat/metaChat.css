@@ -55,7 +55,6 @@
 .meta-chat-panel__suggestions .t-followup-row { grid-template-columns: minmax(0, 1fr); }
 .meta-chat-panel__suggestions .t-followup-text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
-.meta-chat-panel__input { flex: none; margin: 6px 12px 12px; }
 .meta-chat-panel__target {
   display: inline-flex; align-items: center; gap: 4px; margin: 8px 12px 0; padding: 2px 2px 2px 7px;
   border: 1px solid var(--term-line); border-radius: var(--ui-radius-sm);
@@ -116,38 +115,6 @@
 }
 .meta-chat-dock-ghost[data-on] { opacity: 1; }
 
-/* ── Minimized assistant button ─────────────────────────────── */
-.meta-chat-pill {
-  position: absolute; z-index: var(--z-pane-overlay); right: 20px; bottom: 20px;
-  display: grid; place-items: center; width: 44px; height: 44px; padding: 0;
-  border: 1px solid var(--term-line); border-radius: var(--ui-radius);
-  background: var(--term-surface); color: var(--term-fg); box-shadow: var(--term-float-shadow);
-  cursor: pointer;
-  /* Hover only: showing and hiding the pill (opacity, its morph with the window) is MetaChatArea's motion. */
-  transition: transform var(--t-enter) var(--t-ease), border-color var(--t-soft) ease, background var(--t-soft) ease;
-}
-.meta-chat-pill:hover { border-color: var(--term-line-s); background: var(--term-hover); transform: translateY(-2px); }
-.meta-chat-pill:focus-visible { outline: 2px solid color-mix(in srgb, var(--term-accent) 62%, transparent); outline-offset: 3px; }
-.meta-chat-pill__icon { transition: transform var(--t-enter) var(--t-ease); }
-.meta-chat-pill:hover .meta-chat-pill__icon { transform: rotate(8deg) scale(1.05); }
-.meta-chat-pill:active { transform: translateY(0); }
-@media (prefers-reduced-motion: reduce) {
-  .meta-chat-pill, .meta-chat-pill__icon { transition: none; }
-  .meta-chat-pill:hover, .meta-chat-pill:hover .meta-chat-pill__icon { transform: none; }
-}
-:root[data-reduce-motion='on'] .meta-chat-pill:hover,
-:root[data-reduce-motion='on'] .meta-chat-pill:hover .meta-chat-pill__icon { transform: none; }
-.meta-chat-pill__dot {
-  position: absolute; right: 8px; top: -4px; width: 10px; height: 10px; border-radius: 50%;
-  background: var(--term-accent); border: 2px solid var(--term-surface);
-}
-/* With text ("Create with agent"): the same button, only as wide as its label.
-   The icon keeps its place and size: 11px padding + 1px border puts it 12px in, as in the 44px square. */
-.meta-chat-pill[data-labelled] {
-  display: inline-flex; align-items: center; gap: 8px; width: auto; padding: 0 14px 0 11px;
-  font: 500 var(--fs-md)/1 var(--ui-font); white-space: nowrap;
-}
-
 /* ── Host in the shell's content column, hidden outside Spaces ── */
 .spaces-meta-host { display: flex; flex: 1 1 auto; min-width: 0; min-height: 0; }
 .spaces-meta-host[hidden] { display: none; }
@@ -193,16 +160,20 @@
 /* Copy / retry / time sit over the message's free corner instead of taking a row of their own. */
 .meta-chat-conversation .terminal-message-frame { position: relative; }
 .meta-chat-conversation div:has(> div > button[aria-label='copy message']) {
-  position: absolute; top: 0; right: 0; z-index: 2; margin: 0 !important;
+  position: absolute; top: 0; right: var(--message-frame-bleed-end, 0); z-index: 2; margin: 0 !important;
 }
 .meta-chat-conversation .terminal-message-frame:has(.terminal-message-user) div:has(> div > button[aria-label='copy message']) {
-  top: 6px; right: auto; left: 0;
+  top: 6px; right: auto; left: var(--message-frame-bleed-start, 0);
 }
+/* The window labels its replies (the speaker line), so a pane's lead space
+   above an answer is not added, and the corner time keeps its small size. */
+.meta-chat-conversation .terminal-message-frame[data-role='user'][data-next-role='assistant'] { padding-bottom: 0; }
+.meta-chat-conversation .t-answer-meta__text { font-size: var(--fs-xs); }
 
 /* ── Conversation decorations ───────────────────────────────── */
 .meta-chat-speaker {
   display: inline-flex; align-items: center; gap: 6px; color: var(--term-mauve);
-  font: 500 var(--fs-xs)/1 var(--ui-font); letter-spacing: var(--ls-caps-wide, .1em); text-transform: uppercase;
+  font: 500 var(--fs-xs)/1 var(--ui-font); letter-spacing: var(--ls-caps-wide); text-transform: uppercase;
 }
 .meta-chat-runtime-switch {
   display: flex; align-items: center; gap: 10px; margin: 4px 0 14px;
@@ -232,7 +203,7 @@
 
 .meta-chat-panel__notice {
   display: flex; align-items: baseline; gap: 6px; flex: none; margin: 0 14px 4px; overflow: hidden;
-  color: var(--term-danger); font-size: var(--fs-sm); white-space: nowrap;
+  color: var(--term-danger-text); font-size: var(--fs-sm); white-space: nowrap;
 }
 .meta-chat-panel__notice span { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 /* A note, not an error: muted and wrapped so the whole sentence shows. */
@@ -248,10 +219,8 @@
 .meta-chat-panel[data-form='full'] .meta-chat-conversation { --message-body-size: var(--message-body-size-base); }
 .meta-chat-panel[data-form='full'] .term-scrollbar { padding-top: 28px !important; padding-left: max(24px, calc((100% - 860px) / 2)) !important; padding-right: max(24px, calc((100% - 860px) / 2)) !important; }
 .meta-chat-panel[data-form='full'] .terminal-composer { max-width: 860px; margin-inline: auto; }
-.meta-chat-panel[data-form='full'] .meta-chat-panel__input,
 .meta-chat-panel[data-form='full'] .meta-chat-panel__suggestions,
 .meta-chat-panel[data-form='full'] .meta-chat-panel__notice { width: min(860px, calc(100% - 48px)); margin-left: auto; margin-right: auto; }
-.meta-chat-panel[data-form='full'] .meta-chat-panel__input { margin-bottom: 24px; }
 .meta-chat-panel__new span { display: none; }
 .meta-chat-panel[data-form='full'] .meta-chat-panel__new { width: auto; padding: 0 10px; gap: 6px; border: 1px solid var(--term-line); }
 .meta-chat-panel[data-form='full'] .meta-chat-panel__new span { display: inline; }

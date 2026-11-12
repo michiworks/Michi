@@ -37,6 +37,8 @@ test('MCP bindings isolate forks and refuse missing, unknown and stale identitie
     await assert.rejects(resolveCrewMcpEndpoint(caller('other'), dir));
     assert.throws(() => validateMichiEndpoint('https://example.com/api/mcp/secret'));
     assert.throws(() => validateMichiEndpoint('http://127.0.0.1:3000/api/admin'));
+    assert.equal(validateMichiEndpoint('http://[::1]:3000/api/mcp/x'), 'http://[::1]:3000/api/mcp/x');
+    assert.throws(() => validateMichiEndpoint('http://localhost:3000/api/mcp/x'));
     await resumed.bind('parent', serverConfig('http://127.0.0.1:3000/api/mcp/resumed'));
     await release();
     assert.match(await resolveCrewMcpEndpoint(caller('parent'), dir), /resumed$/);
@@ -74,6 +76,33 @@ test('official caller metadata routes concurrent MCP calls to their exact endpoi
     const denied = await client.callTool({ name: 'michi_call_tool', arguments: { ...save, sessionKey: 'dashboard:one' } });
     assert.equal(denied.isError, true);
     assert.doesNotMatch(JSON.stringify(denied), /127\.0\.0\.1|api\/mcp/);
+});
+
+test('a Crew session relays to its slot on a backend listening on ::1', async t => {
+    const app = express(); app.use(express.json());
+    const registry = new McpSlotRegistry({ mcpPort: () => (http.address() as AddressInfo).port, mcpHost: () => '::1' });
+    const router = express.Router(); mountMcp(router, registry); app.use('/api', router);
+    const http = app.listen(0, '::1');
+    try { await once(http, 'listening'); } catch { t.skip('this host has no IPv6 loopback'); return; }
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'crew-ipv6-'));
+    const bindings = new CrewMcpBindings(dir);
+    const relay = createCrewMcpRelay(dir);
+    const client = new Client({ name: 'crew-ipv6-test', version: '1' });
+    const [a, b] = InMemoryTransport.createLinkedPair();
+    t.after(async () => {
+        await client.close(); await relay.close(); await bindings.close(); http.closeAllConnections();
+        await new Promise<void>(resolve => http.close(() => resolve())); await fs.rm(dir, { recursive: true, force: true });
+    });
+    const slot = registry.create('crew-ipv6', dir, null, {
+        exposedToolNames: new Set(['save_artifact']), onSpawnBranches: async () => [],
+        onSaveArtifact: (name) => ({ name: `ipv6:${name}`, filePath: `${dir}/${name}`, size: 1 }),
+        onUpdateArtifact: () => null,
+    });
+    await bindings.bind('ipv6', serverConfig(registry.endpoint(slot.slotId).url));
+    await relay.connect(a); await client.connect(b);
+    const save = await client.callTool({ name: 'michi_call_tool',
+        arguments: { tool: 'save_artifact', arguments: { name: 'probe', body: 'x' } }, _meta: caller('ipv6') });
+    assert.deepEqual(save.content, [{ type: 'text', text: 'Saved artifact: @ipv6:probe' }]);
 });
 
 test('Crew discovers and reads real bundled Michi docs through the bound MCP relay', async t => {

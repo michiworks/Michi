@@ -14,7 +14,7 @@ import http from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
 import type { AddressInfo } from 'node:net';
-import { closeDb, initDb } from '../src/services/db';
+import { closeDb, getDb, initDb } from '../src/services/db';
 import { loadFullWorkspace, saveEdge, saveMessage, saveNode, saveTree, saveWorkspace, setAiGlobalContext } from '../src/services/dbRepository';
 import { ensureAssistant } from '../src/assistant/store';
 import { keywordSearch, nodeGroupedSearch, setupSearchRoutes } from '../src/routes/search';
@@ -90,6 +90,22 @@ describe('search leaves the assistant out', () => {
     // Their own workspace and other ordinary ones are unchanged.
     assert.equal(listThreads('ws-a', null).status, 'ok');
     assert.equal(readNode('ws-a', null, 'n-a').status, 'ok');
+  });
+
+  test('search_messages across workspaces leaves out Trash and workspaces AI navigation may not read', () => {
+    for (const [id, title] of [['ws-b', 'Pelican elsewhere'], ['ws-trash', 'Pelican in Trash'], ['ws-private', 'Pelican private']]) {
+      saveWorkspace({ id, name: id, cwd: `/tmp/${id}`, created_at: 1, updated_at: 1, settings: null });
+      seedChat(`n-${id}`, id, title);
+      saveMessage({ id: `m-${id}`, node_id: `n-${id}`, role: 'user', content: `pelican notes in ${id}`, seq: 1, created_at: 1 });
+    }
+    getDb().prepare('UPDATE workspaces SET deleted_at = 5 WHERE id = ?').run('ws-trash');
+    setAiGlobalContext('ws-private', false);
+    const all = searchMessages('ws-a', null, 'pelican', 'all');
+    assert.match(all.text, /Found 2 matches/);
+    assert.match(all.text, /n-ws-b/);
+    assert.doesNotMatch(all.text, /n-ws-trash|n-ws-private/);
+    // Searching one workspace is unchanged.
+    assert.match(searchMessages('ws-trash', null, 'pelican').text, /n-ws-trash/);
   });
 
   test('unpromoted page helpers stay out of every ordinary search and export, then appear immediately after promotion', async () => {

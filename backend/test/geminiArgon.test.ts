@@ -3,10 +3,10 @@ import assert from 'node:assert/strict';
 import { GEMINI_ARGON_MAX_OUTPUT, geminiArgonModel } from '../src/agents/pi/geminiArgonModel';
 import { loadPiAi, loadPiTypebox } from '../src/agents/pi/piAi';
 import { verifyPiProviderKey } from '../src/agents/pi/piProviders';
-import { invalidateOpenRouterCache } from '../src/agents/pi/openrouterModels';
+import { resetModelDiscoveryForTests } from '../src/agents/pi/providerModelDiscovery';
 
 const originalFetch = globalThis.fetch;
-afterEach(() => { globalThis.fetch = originalFetch; invalidateOpenRouterCache(); });
+afterEach(() => { globalThis.fetch = originalFetch; resetModelDiscoveryForTests(); });
 
 /** Pi's Google provider talks to the real @google/genai SDK; only the network is replaced. */
 function captureGoogle(finishReason = 'STOP') {

@@ -1,4 +1,3 @@
-import React from 'react';
 import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { SelectionActionsProps } from '../SelectionActions';
@@ -125,5 +124,13 @@ describe('FilePane captured feedback', () => {
     fireEvent.change(picker.getByLabelText('File feedback thread'),{target:{value:'b'}});
     act(() => {expect(H.props!.onQuote('selected',undefined,context)).toBe(true);});
     expect(H.draft.mock.calls[0][0]).toBe('b');
+  });
+});
+
+describe('FilePane footer', () => {
+  it('shows a file over 1 MB in MB', async () => {
+    H.fetch.mockResolvedValue({ content: v1, size: 4_194_304, modifiedAt: 1, extension: 'txt' });
+    const view = render(<FilePane item={item} />); await loaded(view.container);
+    expect(screen.getByText('4.0 MB')).toBeTruthy();
   });
 });

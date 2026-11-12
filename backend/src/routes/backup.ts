@@ -2,24 +2,26 @@ import express from 'express';
 import { randomUUID } from 'node:crypto';
 import { getDb, runInTransaction } from '../services/db';
 import {
-  loadFullWorkspace, loadAllWorkspaces, saveWorkspace, saveTree,
+  loadFullWorkspace, loadAllWorkspaces, purgeWorkspaceInTransaction, saveWorkspace, saveTree,
   saveNode, saveEdge, saveMessage, saveContext, setNodeForkProvenance,
   WorkspaceRow, TreeRow, NodeRow, EdgeRow, MessageRow, ContextRow,
 } from '../services/dbRepository';
 import { normalizeIncomingMessageRow } from '../services/messageSerialization';
-import { LOCAL_AGENT_OWNER_ID } from '../services/agentOwner';
+import { requestAgentOwner } from '../services/agentOwner';
 import {
   exportAgentRunBackup,
   importAgentRunBackup,
   portableBackupRelativePath,
+  portableContextRow,
+  portableEncodedJson,
+  portableMessageRow,
+  portableUrl,
   sanitizeAgentNodeForBackup,
   sanitizePortableBackupJson,
 } from '../services/agentRunBackup';
 import { assertAgentOwnerWritable } from '../services/agentOwnerDeletionGate';
-import { AgentRunContractError, isSystemWorkspaceSettings, type AgentRunBackupFragmentV2 } from 'michi-shared';
+import { AgentRunContractError, edgeRowId, isCheckinNodeId, isSystemWorkspaceSettings, type AgentRunBackupFragmentV2 } from 'michi-shared';
 import { requireWorkspaceOwner } from './middleware/ownership';
-import { purgeWorkspacePages } from '../services/pages/repository';
-import { purgeScheduledJobsForWorkspace } from '../services/scheduledJobs/workspacePurge';
 
 export interface BackupPayload {
   version: 1 | 2;
@@ -37,7 +39,7 @@ export interface BackupPayload {
 }
 
 function agentOwnerId(req: express.Request): string {
-  return process.env.MICHI_CLOUD === '1' ? req.user?.id ?? '' : LOCAL_AGENT_OWNER_ID;
+  return requestAgentOwner(req.user?.id);
 }
 
 /**
@@ -54,28 +56,14 @@ function portable(data: unknown): boolean {
 }
 
 function sanitizeWorkspace(data: BackupPayload['workspaces'][number]): BackupPayload['workspaces'][number] {
-  let settings = data.workspace.settings ?? null;
-  if (settings) {
-    try { settings = JSON.stringify(sanitizePortableBackupJson(JSON.parse(settings))); }
-    catch { settings = null; }
-  }
   return {
     ...data,
-    workspace: { ...data.workspace, cwd: null, folders: '[]', settings },
+    workspace: { ...data.workspace, cwd: null, folders: '[]', settings: portableEncodedJson(data.workspace.settings) },
     nodes: data.nodes.map((node) => sanitizeAgentNodeForBackup(
       node as unknown as Record<string, unknown>,
     ) as unknown as NodeRow),
-    messages: data.messages.map((message) => ({
-      ...message,
-      blocks: sanitizeEncodedJson(message.blocks),
-      tool_calls: sanitizeEncodedJson(message.tool_calls),
-      metadata: sanitizeEncodedJson(message.metadata),
-    })),
-    contexts: data.contexts.map((context) => ({
-      ...context,
-      file_path: portableBackupRelativePath(context.file_path),
-      url: portableUrl(context.url),
-    })),
+    messages: data.messages.map(portableMessageRow),
+    contexts: data.contexts.map(portableContextRow),
   };
 }
 
@@ -117,28 +105,6 @@ function withoutUnpromotedHelpers(data: BackupPayload['workspaces'][number]): Ba
   const activeTreeId = data.workspace.active_tree_id && treeIds.has(data.workspace.active_tree_id)
     ? data.workspace.active_tree_id : null;
   return { ...data, workspace: { ...data.workspace, active_tree_id: activeTreeId }, trees, nodes, messages, edges, contexts };
-}
-
-function sanitizeEncodedJson(encoded: string | null | undefined): string | null {
-  if (!encoded) return null;
-  try { return JSON.stringify(sanitizePortableBackupJson(JSON.parse(encoded))); }
-  catch { return null; }
-}
-
-function portableUrl(value: string | null | undefined): string | null {
-  if (!value || /^file:/i.test(value)) return null;
-  const sanitized = sanitizePortableBackupJson({ url: value }) as { url?: unknown };
-  if (typeof sanitized.url !== 'string' || sanitized.url === 'not-exported') return null;
-  try {
-    const url = new URL(sanitized.url);
-    url.username = '';
-    url.password = '';
-    url.search = '';
-    url.hash = '';
-    return url.toString();
-  } catch {
-    return sanitized.url;
-  }
 }
 
 function importedId(kind: string): string {
@@ -241,7 +207,7 @@ function nodeRowForSave(source: NodeRow, overrides: Partial<NodeRow>): NodeRow {
     current_mode_id: source.current_mode_id ?? null,
     pane_width: source.pane_width ?? null,
     digest: overrides.digest !== undefined ? overrides.digest : source.digest ?? null,
-    follow_ups: sanitizeEncodedJson(source.follow_ups),
+    follow_ups: portableEncodedJson(source.follow_ups),
     follow_ups_source_message_id: overrides.follow_ups_source_message_id ?? null,
     acp_session_id: null,
     runtime_id: source.runtime_id ?? null,
@@ -309,30 +275,6 @@ function contextRowForSave(source: ContextRow, id: string, workspaceId: string,
     updated_at: source.updated_at,
     rev: null,
   };
-}
-
-/** Exported for tests. Must run inside the import transaction. */
-export function replaceWorkspaceInTransaction(workspaceId: string, userId?: string): void {
-  const db = getDb();
-  // Same rule as dbRepository.deleteWorkspace: an empty id still scopes.
-  if (process.env.MICHI_CLOUD === '1' && userId !== undefined) {
-    const owned = db.prepare('SELECT 1 FROM workspaces WHERE id = ? AND owner_user_id = ?')
-      .get(workspaceId, userId);
-    if (!owned) return;
-  }
-  const workspace = db.prepare('SELECT owner_user_id,purged_at,settings FROM workspaces WHERE id=?').get(workspaceId) as
-    { owner_user_id: string | null; purged_at: number | null; settings: string | null } | undefined;
-  if (workspace && workspace.purged_at === null && !isSystemWorkspaceSettings(workspace.settings)) {
-    purgeScheduledJobsForWorkspace(workspaceId);
-    purgeWorkspacePages(workspaceId, workspace.owner_user_id ?? LOCAL_AGENT_OWNER_ID);
-  }
-  const now = Date.now();
-  db.prepare('UPDATE workspaces SET purged_at = ? WHERE id = ? AND purged_at IS NULL').run(now, workspaceId);
-  db.prepare('UPDATE nodes SET purged_at = ? WHERE workspace_id = ? AND purged_at IS NULL').run(now, workspaceId);
-  db.prepare('DELETE FROM messages WHERE node_id IN (SELECT id FROM nodes WHERE workspace_id = ?)').run(workspaceId);
-  db.prepare('DELETE FROM edges WHERE workspace_id = ?').run(workspaceId);
-  db.prepare('DELETE FROM trees WHERE workspace_id = ?').run(workspaceId);
-  db.prepare('DELETE FROM contexts WHERE workspace_id = ?').run(workspaceId);
 }
 
 function validateWorkspaceGraph(workspace: BackupPayload['workspaces'][number]): void {
@@ -456,17 +398,21 @@ export function setupBackupRoutes(): express.Router {
       let workspaceCount = 0;
       let importedDefinitions = 0;
       let importedRuns = 0;
+      // A check-in node id (DESIGN-v2 §2.5) is the backend's alone: no backup brings one in.
+      const reserved = body.workspaces.flatMap((workspace) => Array.isArray(workspace?.nodes) ? workspace.nodes : [])
+        .find((node) => isCheckinNodeId((node as { id?: unknown } | null)?.id as string | undefined));
+      if (reserved) {
+        return res.status(400).json({ code: 'reserved_node_id', error: `Invalid backup: node id ${reserved.id} is reserved for Michi's check-ins` });
+      }
       const portableWorkspaces = body.workspaces.filter(portable).map(sanitizeWorkspace);
       portableWorkspaces.forEach(validateWorkspaceGraph);
       const allTrees = portableWorkspaces.flatMap((workspace) => workspace.trees);
       const allNodes = portableWorkspaces.flatMap((workspace) => workspace.nodes);
-      const allEdges = portableWorkspaces.flatMap((workspace) => workspace.edges);
       const allMessages = portableWorkspaces.flatMap((workspace) => workspace.messages);
       const allContexts = portableWorkspaces.flatMap((workspace) => workspace.contexts);
       const workspaceIdMap = idMap(portableWorkspaces.map(({ workspace }) => workspace), 'workspace');
       const treeIdMap = idMap(allTrees, 'tree');
       const nodeIdMap = idMap(allNodes, 'node');
-      const edgeIdMap = idMap(allEdges, 'edge');
       const messageIdMap = idMap(allMessages, 'message');
       const contextIdMap = idMap(allContexts, 'context');
       const deletionGroupIdMap = new Map<string, string>();
@@ -479,7 +425,7 @@ export function setupBackupRoutes(): express.Router {
       runInTransaction(() => {
         assertAgentOwnerWritable(ownerUserId);
         for (const ws of portableWorkspaces) {
-          if (mode === 'replace') replaceWorkspaceInTransaction(ws.workspace.id, userId);
+          if (mode === 'replace') purgeWorkspaceInTransaction(ws.workspace.id, userId);
           const workspaceId = requiredMapped(workspaceIdMap, ws.workspace.id, 'Workspace');
           const wsRow = workspaceRowForSave(ws.workspace, workspaceId, userId ?? null);
           saveWorkspace(wsRow);
@@ -543,9 +489,10 @@ export function setupBackupRoutes(): express.Router {
             });
           }
           for (const e of ws.edges) {
-            saveEdge(edgeRowForSave(e, requiredMapped(edgeIdMap, e.id, 'Edge'), workspaceId,
-              requiredMapped(nodeIdMap, e.source_node_id, 'Edge source Node'),
-              requiredMapped(nodeIdMap, e.target_node_id, 'Edge target Node'),
+            const sourceNodeId = requiredMapped(nodeIdMap, e.source_node_id, 'Edge source Node');
+            const targetNodeId = requiredMapped(nodeIdMap, e.target_node_id, 'Edge target Node');
+            saveEdge(edgeRowForSave(e, edgeRowId(e.kind, sourceNodeId, targetNodeId), workspaceId,
+              sourceNodeId, targetNodeId,
               mapped(messageIdMap, e.anchor_message_id),
               mapped(messageIdMap, e.fork_boundary_message_id)), userId);
           }

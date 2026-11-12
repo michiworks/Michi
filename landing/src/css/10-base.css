@@ -1,0 +1,315 @@
+/* ==========================================================================
+   3. Base (owner: shell): reset, body type, grid, section rhythm, type roles,
+   two-tone headings, sr-only, focus ring, selection.
+
+   API for section builders (copy these names; do not restyle them locally)
+   -------------------------------------------------------------------------
+   Breakpoints (brief §7.4; media queries cannot read custom properties):
+     desktop (min-width: 1280px) · laptop (min-width: 1024px) and (max-width: 1279px)
+     tablet (min-width: 768px) and (max-width: 1023px) · phone (max-width: 767px)
+
+   Layout
+     .wrap            page container: max 1296 px of content + --margin each side
+     .grid            12 columns, 24 px gutters (put it on or inside .wrap)
+     .sec             a page section; top padding by weight (brief §7.4):
+       .sec--xl .sec--l   112 at >= 1024 · 80 at 768-1023 · 64 below 768
+       .sec--m  .sec--s    96 at >= 1024 · 64 at 768-1023 · 56 below 768
+     Spacing: --sp-head-body 16 · --sp-body-fig 40 · --sp-fig-bar 12 · --sp-bar-rows 8
+     The nav is sticky and 64 tall: html has scroll-padding-top: 64px.
+
+   Type roles (put the class on the element; colour included)
+     .h1 .display .h2 .statement   headings (--ink), sizes per brief §7.3
+     .lead  hero sub (17/1.55, 16 below 768, --ink-2)
+     .body  body copy (17/1.6, 16 below 768, --ink-2, max-width 34em)
+     .meta  meta, captions, hints (14/1.5, --ink-3) · .meta-sm the 13 px replica note
+     .mono  Geist Mono · .mono-sm breadcrumb, keys line (Geist Mono 12/1.4)
+     .nowrap  keeps a word and the caret together
+
+   Two-tone headings (brief §3 rules: claim in --ink, consequence in --ink-60)
+     <h2 class="h2" id="how-title"><span class="claim">Every branch is a whole
+       conversation.</span> <span class="consequence">Open more, go back for a
+       second round, pull in what it found.</span></h2>
+     In .h1 and .display each span is its own line; in .h2 from 768 up.
+     The inverted #why heading puts the foil first: .consequence, then .claim.
+
+   Live heading (P7 + P8; at most one on the page). The engine owns it
+   (31-kit-motion.css section 7): data-live-for="<take name>" on the span that
+   goes violet, .live-caret inside it. Keep the caret glued to the last word
+   with .nowrap; it is always laid out (opacity only), so nothing shifts:
+     <span class="consequence" data-live-for="hero">The main thread keeps
+       <span class="nowrap">going.<span class="live-caret" aria-hidden="true"></span></span></span>
+   ========================================================================== */
+
+/* Layout constants (page level, not in the brief's token block) */
+:root {
+  --sec-xl: 112px;          /* XL and L sections */
+  --sec-m: 96px;            /* M and S sections */
+  --sp-head-body: 16px;     /* heading -> body */
+  --sp-body-fig: 40px;      /* body -> figure */
+  --sp-fig-bar: 12px;       /* figure -> under-bar */
+  --sp-bar-rows: 8px;       /* under-bar rows */
+  --nav-h: 64px;
+}
+@media (max-width: 1023px) {
+  :root { --sec-xl: 80px; --sec-m: 64px; }
+}
+@media (max-width: 767px) {
+  :root { --sec-xl: 64px; --sec-m: 56px; }
+}
+
+/* Reset ----------------------------------------------------------------- */
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html {
+  -webkit-text-size-adjust: 100%;
+  text-size-adjust: 100%;
+  scroll-behavior: smooth;            /* off under reduced motion: 90-global.css */
+  scroll-padding-top: var(--nav-h);   /* anchors land below the sticky nav */
+  background: var(--ground);
+}
+
+body {
+  margin: 0;
+  min-height: 100vh;
+  background: var(--ground);
+  color: var(--ink-2);
+  font-family: var(--font);
+  font-size: 17px;
+  line-height: 1.6;
+  font-weight: 400;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  font-kerning: normal;
+  overflow-x: clip;                   /* a stray pixel never pans the page sideways */
+}
+
+h1, h2, h3, h4, h5, h6,
+p, figure, blockquote, dl, dd, pre {
+  margin: 0;
+}
+
+h1, h2, h3, h4, h5, h6 {
+  color: var(--ink);
+  font-size: inherit;
+  font-weight: 600;
+}
+
+img {
+  display: block;
+  max-width: 100%;
+  height: auto;
+}
+
+a {
+  color: inherit;
+  text-decoration: none;
+}
+
+button,
+input,
+select,
+textarea {
+  font: inherit;
+  color: inherit;
+  letter-spacing: inherit;
+}
+
+button {
+  margin: 0;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: none;
+  text-align: inherit;
+  cursor: pointer;
+}
+
+button:disabled {
+  cursor: default;
+}
+
+kbd,
+code,
+samp {
+  font-family: var(--mono);
+  font-size: inherit;
+}
+
+[hidden] {
+  display: none !important;
+}
+
+/* Grid, container, section rhythm (brief §7.4) --------------------------- */
+.wrap {
+  width: 100%;
+  max-width: calc(var(--max) + 2 * var(--margin));
+  margin-inline: auto;
+  padding-inline: var(--margin);
+}
+
+.grid {
+  display: grid;
+  grid-template-columns: repeat(12, minmax(0, 1fr));
+  column-gap: var(--gutter);
+}
+
+.sec {
+  padding-top: var(--sec-m);
+}
+.sec--xl,
+.sec--l {
+  padding-top: var(--sec-xl);
+}
+.sec--m,
+.sec--s {
+  padding-top: var(--sec-m);
+}
+
+/* Type roles (brief §7.3) ------------------------------------------------- */
+.h1 {
+  font-size: clamp(36px, 2.2vw + 16px, 48px);
+  line-height: 1.06;
+  font-weight: 700;
+  letter-spacing: -0.03em;
+  color: var(--ink);
+}
+
+.display {
+  font-size: clamp(36px, 2.8vw + 16px, 56px);
+  line-height: 1.04;
+  font-weight: 700;
+  letter-spacing: -0.035em;
+  color: var(--ink);
+  text-wrap: balance;
+}
+
+.h2 {
+  font-size: clamp(28px, 1.2vw + 18px, 36px);
+  line-height: 1.12;
+  font-weight: 600;
+  letter-spacing: -0.025em;
+  color: var(--ink);
+  text-wrap: balance;
+}
+
+.statement {
+  font-size: clamp(22px, 0.8vw + 14px, 26px);
+  line-height: 1.3;
+  font-weight: 600;
+  letter-spacing: -0.015em;
+  color: var(--ink);
+}
+
+.lead {
+  font-size: 17px;
+  line-height: 1.55;
+  font-weight: 400;
+  letter-spacing: -0.005em;
+  color: var(--ink-2);
+  text-wrap: pretty;
+}
+
+.body {
+  max-width: 34em;
+  font-size: 17px;
+  line-height: 1.6;
+  font-weight: 400;
+  color: var(--ink-2);
+  text-wrap: pretty;
+}
+
+.meta {
+  font-size: 14px;
+  line-height: 1.5;
+  font-weight: 400;
+  color: var(--ink-3);
+}
+
+.meta-sm {
+  font-size: 13px;
+  line-height: 1.5;
+  font-weight: 400;
+  color: var(--ink-3);
+}
+
+.mono {
+  font-family: var(--mono);
+}
+
+.mono-sm {
+  font-family: var(--mono);
+  font-size: 12px;
+  line-height: 1.4;
+  font-weight: 400;
+}
+
+.nowrap {
+  white-space: nowrap;
+}
+
+@media (max-width: 767px) {
+  body,
+  .lead,
+  .body {
+    font-size: 16px;
+  }
+}
+
+/* Two-tone headings (the live state is the engine's [data-live-for]) ------ */
+.claim {
+  color: var(--ink);
+}
+
+.consequence {
+  color: var(--ink-60);
+}
+
+.h1 .claim,
+.h1 .consequence,
+.display .claim,
+.display .consequence {
+  display: block;
+}
+
+@media (min-width: 768px) {
+  .h2 .claim,
+  .h2 .consequence {
+    display: block;
+  }
+}
+
+/* Utilities --------------------------------------------------------------- */
+.sr-only {
+  position: absolute !important;
+  width: 1px !important;
+  height: 1px !important;
+  margin: -1px !important;
+  padding: 0 !important;
+  overflow: hidden !important;
+  clip: rect(0 0 0 0) !important;
+  clip-path: inset(50%) !important;
+  white-space: nowrap !important;
+  border: 0 !important;
+}
+
+/* Focus (P6): 2 px violet, offset 2, on everything focusable. */
+:focus-visible {
+  outline: 2px solid var(--violet);
+  outline-offset: 2px;
+}
+
+/* Programmatic focus targets (skip link, J/K) do not draw a ring. */
+main:focus,
+section[tabindex="-1"]:focus,
+h2[tabindex="-1"]:focus {
+  outline: none;
+}
+
+/* Text selection: the app's accent wash at 26 % (index.css L1452). */
+::selection {
+  background: var(--selection);
+}

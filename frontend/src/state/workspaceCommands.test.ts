@@ -38,6 +38,54 @@ describe('explicit workspace command projection', () => {
     expect(batch.commands[0].payload.cwd).toBe(root.path);
   });
 
+  it.each([
+    ['pin', undefined, 5],
+    ['unpin', 5, undefined],
+  ] as const)('persists a %s-only change through workspace.upsert', (_change, before, after) => {
+    const { project, nodes } = fixture();
+    const prev: Project = { ...project, pinnedAt: before };
+    const cur: Project = { ...prev, pinnedAt: after };
+    const delta = accumulateWorkspaceDirtyDelta(prev, cur, nodes, nodes, emptyWorkspaceDirtyDelta());
+
+    const batch = buildExplicitWorkspaceCommands(cur, nodes, delta, new Map());
+
+    expect(batch.commands.map((command) => command.type)).toEqual(['workspace.upsert']);
+    expect(batch.commands[0].payload.pinned_at).toBe(after ?? null);
+  });
+
+  it.each<[string, Partial<Project>, Partial<Project>]>([
+    ['aiGlobalContext', { aiGlobalContext: true }, { aiGlobalContext: undefined }],
+    ['cwd', { cwd: '' }, { cwd: undefined }],
+    ['instructions', { instructions: '' }, { instructions: undefined }],
+    ['folders', { folders: [] }, { folders: undefined }],
+  ])('writes nothing when %s changes to a value that writes the same row', (_field, before, after) => {
+    const { project, nodes } = fixture();
+    const prev: Project = { ...project, ...before };
+    const cur: Project = { ...prev, ...after };
+    const delta = accumulateWorkspaceDirtyDelta(prev, cur, nodes, nodes, emptyWorkspaceDirtyDelta());
+
+    expect(buildExplicitWorkspaceCommands(cur, nodes, delta, new Map()).commands).toEqual([]);
+  });
+
+  it('writes nothing for a node that has left the workspace since it was marked', () => {
+    const { project, nodes } = fixture();
+    // n2 moved to another workspace after its edits were marked here.
+    const moved: ChatNodeState = {
+      ...nodes.n1, nodeId: 'n2', projectId: 'ws-2', title: 'Moved', titleNeedsPersistence: true,
+      composerDraft: { value: 'draft', mentions: [] },
+    };
+    const all = { ...nodes, n2: moved };
+    const delta = emptyWorkspaceDirtyDelta();
+    delta.nodeIds.add('n1');
+    delta.nodeIds.add('n2');
+    const drafts = emptyWorkspaceDirtyDelta();
+    drafts.draftNodeIds.add('n2');
+    const batch = buildExplicitWorkspaceCommands(project, all, delta, new Map(), 'window-a');
+    expect(batch.commands.map((command) => [command.type, command.payload.id])).toEqual([['node.upsert', 'n1'], ['node.patch', 'n1']]);
+    expect([...batch.nodeProjectionUpdates.keys()]).toEqual(['n1']);
+    expect(buildExplicitWorkspaceCommands(project, all, drafts, new Map(), 'window-a').commands).toEqual([]);
+  });
+
   it('scopes composer draft writes to the current window', () => {
     const { project, nodes } = fixture();
     nodes.n1.composerDraft = { value: 'unsent draft', mentions: [] };

@@ -1123,7 +1123,7 @@ refresh, and captures desktop/mobile screenshots.
 It uses temporary database/config/workspace directories, not the user's Michi
 data. `MICHI_KIRO_SMOKE_OUTPUT` optionally selects an evidence directory.
 See [Runtime capabilities](backend/src/docs/runtime-capabilities.md) for current
-integration limits. The [historical Kiro ACP validation](docs/validation/2026-09-24-kiro-acp.md)
+integration limits. The historical Kiro ACP validation
 records the tested versions and results of earlier runs.
 
 ### Electron

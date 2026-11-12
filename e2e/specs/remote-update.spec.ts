@@ -71,8 +71,10 @@ test('closing Settings or switching panes mid-update keeps showing that update i
   await expect(notice.getByRole('button', { name: 'Updating…' })).toBeDisabled();
   await expect.poll(() => updateCalls).toBe(1);
 
-  // Leaving Settings unmounts Connections.
+  // Leaving Settings unmounts Connections once the window has faded out.
+  // Reopening during the fade revives the same notice, still on its own stream.
   await leaveSettings(page);
+  await expect(page.locator('.terminal-settings')).toHaveCount(0);
   settings = await openConnections();
   notice = settings.getByLabel('Michi update for Build box');
   await expect(notice.getByRole('button', { name: 'Updating…' })).toBeDisabled();

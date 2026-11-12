@@ -177,3 +177,17 @@ it('restores a rejected quote from a different read version without misattributi
   expect(draft.value).toContain('old selection');
   for (const m of draft.mentions) expect(draft.value.slice(m.start, m.end)).toBe('@n');
 });
+
+it('keeps what the user typed when a rejected send restores no text (an attachment-only send)', () => {
+  const state = { n1: node({ composerDraft: { value: 'typed since', mentions: [] } }) };
+  const next = reduceNodes(state, { type: 'set-composer-draft', nodeId: 'n1', preserveExisting: true, draft: { value: '', mentions: [] } });
+  expect(next.n1.composerDraft?.value).toBe('typed since');
+});
+
+it('adds a suggested prompt after the draft it finds, keeping its quote', () => {
+  const state = { n1: node({ composerDraft: { value: 'my notes', mentions: [], quotedText: 'kept quote' } }) };
+  const next = reduceNodes(state, { type: 'append-composer-line', nodeId: 'n1', text: 'Is the review still pending?' });
+  expect(next.n1.composerDraft).toMatchObject({ value: 'my notes\nIs the review still pending?', quotedText: 'kept quote' });
+  const empty = reduceNodes({ n1: node() }, { type: 'append-composer-line', nodeId: 'n1', text: 'Is the review still pending?' });
+  expect(empty.n1.composerDraft?.value).toBe('Is the review still pending?');
+});

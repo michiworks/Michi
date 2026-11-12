@@ -299,8 +299,36 @@ function runChecked(command, args, options = {}) {
   return result;
 }
 
+/**
+ * node-pty, which backend terminals need, is optional and compiled at install
+ * time on Linux. node-gyp rejects the Python 3.7 some hosts default to, so
+ * point it at a newer Python on PATH; with none, terminals stay unavailable.
+ */
+export function nodeGypEnvironment(env = process.env, pythonAtLeast38 = defaultPythonAtLeast38, findExecutable = findOnPath) {
+  if (process.platform === 'win32' || env.npm_config_python || env.PYTHON || pythonAtLeast38(env)) return env;
+  for (const name of ['python3.13', 'python3.12', 'python3.11', 'python3.10', 'python3.9', 'python3.8']) {
+    const found = findExecutable(name, env);
+    if (found) return { ...env, npm_config_python: found };
+  }
+  return env;
+}
+
+function defaultPythonAtLeast38(env) {
+  const result = spawnSync('python3', ['-c', 'import sys; sys.exit(0 if sys.version_info >= (3, 8) else 1)'], { env, stdio: 'ignore' });
+  return result.status === 0;
+}
+
+function findOnPath(name, env) {
+  for (const dir of (env.PATH ?? '').split(path.delimiter)) {
+    if (!dir) continue;
+    const candidate = path.join(dir, name);
+    if (existsSync(candidate)) return candidate;
+  }
+  return null;
+}
+
 function runSetup() {
-  runChecked('npm', ['run', 'remote:setup'], { cwd: REPO_ROOT, stdio: 'inherit' });
+  runChecked('npm', ['run', 'remote:setup'], { cwd: REPO_ROOT, stdio: 'inherit', env: nodeGypEnvironment() });
   if (!existsSync(SERVER_PATH)) throw new Error(`remote build did not produce ${SERVER_PATH}`);
 }
 

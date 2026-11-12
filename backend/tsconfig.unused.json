@@ -1,0 +1,9 @@
+{
+  // Check-only: npm run check:unused. Builds read tsconfig.json, not this file.
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "noUnusedLocals": true,
+    "noFallthroughCasesInSwitch": true
+  }
+}

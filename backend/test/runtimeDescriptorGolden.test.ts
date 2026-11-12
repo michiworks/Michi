@@ -8,7 +8,7 @@ import path from 'node:path';
 import { once } from 'node:events';
 import type { AddressInfo } from 'node:net';
 import express from 'express';
-import { describeRuntimeCapabilities } from '../src/agents/capabilityDescriptors';
+import { staticRuntimeDescriptor } from '../src/agents/runtimeStaticDescriptors';
 import { AcpAgentRuntime, type KiroAdapterOptions } from 'michi-runtime/internal/adapters/kiro/AcpAgentRuntime';
 import { ClaudeRuntime } from 'michi-runtime/internal/adapters/claude/ClaudeRuntime';
 import { CodexRuntime } from 'michi-runtime/internal/adapters/codex/CodexRuntime';
@@ -110,7 +110,7 @@ function claude(): ClaudeRuntime {
 }
 
 function codex(): CodexRuntime {
-  return track(new CodexRuntime({ ...codexTestOptions(), bridge, mcpSlots: mcpRegistry }, { client: codexClient, followUpsHookPocEnabled: false }));
+  return track(new CodexRuntime({ ...codexTestOptions(), bridge, mcpSlots: mcpRegistry }, { client: codexClient }));
 }
 
 function pi(): PiRuntime {
@@ -118,9 +118,10 @@ function pi(): PiRuntime {
 }
 
 describe('runtime capability descriptor golden', () => {
-  test('describeRuntimeCapabilities by id, including ids no runtime owns', () => {
-    const ids = ['kiro', 'crew', 'pi', 'claude', 'codex', 'cursor', 'constructor', '__proto__', ''];
-    assertGolden('describeRuntimeCapabilities', Object.fromEntries(ids.map((id) => [id, describeRuntimeCapabilities(id)])));
+  test('static harness by id, including ids no runtime owns', () => {
+    const ids = ['kiro', 'crew', 'pi', 'claude', 'codex', 'antigravity', 'cursor', 'constructor', '__proto__', ''];
+    // The golden keeps the name of the removed describeRuntimeCapabilities it was recorded from.
+    assertGolden('describeRuntimeCapabilities', Object.fromEntries(ids.map((id) => [id, staticRuntimeDescriptor(id).harness])));
   });
 
   test('capabilityDescriptor of each runtime instance', () => {

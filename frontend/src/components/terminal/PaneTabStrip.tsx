@@ -1,21 +1,22 @@
-import React, { useCallback, useEffect, useRef, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { AnimatePresence } from 'motion/react';
 import {
-  chatLabel,
   shallowArrayEqual,
   useChatActions,
   useChatPanes,
   useStructuralSelector,
 } from '../../state/chatStore';
 import type { PaneItemKind } from '../../state/paneItems';
-import ContextMenu from '../ContextMenu';
+import { paneTitle } from '../../state/paneLabels';
+import { useCloseOtherPanes } from '../../state/closeOtherPanes';
+import ContextMenu, { menuOpenKey } from '../ContextMenu';
 import { Dot } from './primitives';
 import PaneLauncher from './PaneLauncher';
 import { kbd } from '../../lib/platform';
 
 const TAB_DRAG_MIME = 'application/x-michi-tab-id';
 
-type TabKind = PaneItemKind | 'chat' | 'digest' | 'artifact';
+type TabKind = PaneItemKind | 'chat' | 'digest';
 
 const KIND_GLYPH: Partial<Record<TabKind, string>> = {
   launcher: '+',
@@ -42,7 +43,7 @@ function ChatGlyph() {
 }
 
 function TabIcon({ kind, status }: { kind: TabKind; status: string }) {
-  if (status === 'streaming') return <Dot color="var(--term-select)" size={7} pulse />;
+  if (status === 'streaming') return <Dot color="var(--term-run)" size={7} pulse />;
   if (status === 'error') return <Dot color="var(--term-danger)" size={7} />;
   const glyph = KIND_GLYPH[kind];
   if (!glyph) return <ChatGlyph />;
@@ -64,15 +65,10 @@ export default function PaneTabStrip({ titleOverride, leftInset }: {
   leftInset: number;
 }) {
   const { tabPanes = [], focusedPane, paneItems = {} } = useChatPanes();
-  const { focusPane, closePane, reorderPane, setPaneWidth } = useChatActions();
+  const { focusPane, closePane, reorderPane } = useChatActions();
 
   const titles = useStructuralSelector(
-    (nodesMap) => tabPanes.map((id) => {
-      if (paneItems[id]) return paneItems[id].title;
-      if (titleOverride) return titleOverride;
-      const node = nodesMap[id];
-      return node ? node.title || chatLabel(node) : '';
-    }),
+    (nodesMap) => tabPanes.map((id) => paneTitle(nodesMap[id], paneItems[id], { override: titleOverride })),
     shallowArrayEqual,
   );
   const statuses = useStructuralSelector(
@@ -88,11 +84,7 @@ export default function PaneTabStrip({ titleOverride, leftInset }: {
     shallowArrayEqual,
   );
 
-  const closeOthers = useCallback((keepId: string) => {
-    for (const id of tabPanes) if (id !== keepId) closePane(id);
-    focusPane(keepId);
-    setPaneWidth(keepId, undefined);
-  }, [tabPanes, closePane, focusPane, setPaneWidth]);
+  const { closeOtherPanes, canCloseOtherPanes } = useCloseOtherPanes();
 
   const [menu, setMenu] = useState<{ id: string; x: number; y: number } | null>(null);
   const tabRefs = useRef<Record<string, HTMLDivElement | null>>({});
@@ -133,7 +125,7 @@ export default function PaneTabStrip({ titleOverride, leftInset }: {
           tabRef={(el) => { tabRefs.current[id] = el; }}
           onSelect={focusPane}
           onClose={closePane}
-          onMenu={(x, y) => setMenu({ id, x, y })}
+          onMenu={(x, y, toggle) => setMenu((open) => (toggle && open?.id === id ? null : { id, x, y }))}
           onReorder={reorderPane}
         />
       ))}
@@ -144,7 +136,7 @@ export default function PaneTabStrip({ titleOverride, leftInset }: {
       {/* Outside the drag region so Electron doesn't swallow menu clicks. */}
       <AnimatePresence>{menu && (
         <ContextMenu
-          key={`${menu.x}:${menu.y}`}
+          key={menuOpenKey(menu)}
           x={menu.x}
           y={menu.y}
           onClose={() => setMenu(null)}
@@ -154,8 +146,8 @@ export default function PaneTabStrip({ titleOverride, leftInset }: {
               {
                 id: 'close-others',
                 label: 'Close Others',
-                disabled: tabPanes.length < 2,
-                run: () => closeOthers(menu.id),
+                disabled: !canCloseOtherPanes(menu.id),
+                run: () => closeOtherPanes(menu.id),
               },
             ],
           }]}
@@ -174,7 +166,8 @@ function PaneTab({ id, title, kind, status, active, tabRef, onSelect, onClose, o
   tabRef: (el: HTMLDivElement | null) => void;
   onSelect: (id: string) => void;
   onClose: (id: string) => void;
-  onMenu: (x: number, y: number) => void;
+  /** `toggle`: from the ⋯, whose second press closes the menu. */
+  onMenu: (x: number, y: number, toggle?: boolean) => void;
   onReorder: (fromId: string, toId: string) => void;
 }) {
   const [hovered, setHovered] = useState(false);
@@ -241,7 +234,7 @@ function PaneTab({ id, title, kind, status, active, tabRef, onSelect, onClose, o
           label={`Actions for ${title}`}
           onClick={(e) => {
             const rect = e.currentTarget.getBoundingClientRect();
-            onMenu(rect.left, rect.bottom + 4);
+            onMenu(rect.left, rect.bottom + 4, true);
           }}
         >
           ⋯

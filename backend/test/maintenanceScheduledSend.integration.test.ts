@@ -16,6 +16,9 @@ import { LOCAL_AGENT_OWNER_ID } from '../src/services/agentOwner';
 import { ChatScheduledJobExecutor } from '../src/services/scheduledJobs/chatExecutor';
 import type { ScheduledJobRecord, ScheduledJobRunRecord } from '../src/services/scheduledJobs/repository';
 import { MAINTENANCE_BOOTSTRAP_INSTRUCTIONS, META_AGENT_MAINTENANCE_TOOL_NAMES } from '../src/agents/maintenancePolicy';
+import { memoryExtractionBootstrapInstructions } from '../src/services/memory/extractionProfile';
+import { memoryProfileBootstrapInstructions } from '../src/services/memory/userProfile';
+import { CONSOLIDATION_INSTRUCTIONS } from '../src/services/memory/consolidationPolicy';
 
 let tmpDir: string;
 let optionsSeen: NewAgentSessionOptions | undefined;
@@ -174,4 +177,39 @@ test('a finished fresh maintenance run releases its session through ChatManager,
   getDb().prepare("UPDATE nodes SET maintenance_job_id = NULL WHERE id = ?").run(second.nodeId);
   assert.equal(await manager.releaseMaintenanceSession(input), false, 'only maintenance nodes');
   assert.deepEqual(releases, []);
+});
+
+test('an automatic memory session gets its run\'s instructions: reading turns, or rebuilding the user\'s profile; the same two tools either way', async () => {
+  const memoryJob = { ...scheduledJob, id: 'job-memory', name: 'Automatic memory', prompt: 'Extract memories' } as ScheduledJobRecord;
+  getDb().prepare(`INSERT INTO scheduled_jobs(id,workspace_id,name,prompt,schedule,created_at,updated_at) VALUES(?,?,?,?,?,1,1)`)
+    .run(memoryJob.id, memoryJob.workspaceId, memoryJob.name, memoryJob.prompt, JSON.stringify(memoryJob.schedule));
+  getDb().prepare(`INSERT INTO memory_extraction_cursors(workspace_id,owner_user_id,job_id,completion_cursor,created_at,updated_at)
+    VALUES(?,?,?,0,1,1)`).run(memoryJob.workspaceId, LOCAL_AGENT_OWNER_ID, memoryJob.id);
+  const manager = new ChatManager(undefined, tmpDir);
+  const executor = new ChatScheduledJobExecutor({
+    chatHub: new ChatHub({ retentionMs: 100 }),
+    getRuntime: (id) => id === 'pi' ? runtime : undefined,
+    ensureSession: (input) => manager.ensureParentSession(input),
+    clock: () => 10,
+  });
+  const sessionFor = async (planId: string, runId: string): Promise<NewAgentSessionOptions> => {
+    const context = { workspaceId: memoryJob.workspaceId, ownerUserId: LOCAL_AGENT_OWNER_ID, jobId: memoryJob.id, runId, claimedBy: 'worker-1',
+      configRevision: 1, planId, sources: [] };
+    const handle = await executor.start(memoryJob, { id: runId } as ScheduledJobRunRecord, { onAttention: () => {}, maintenanceContext: context });
+    assert.equal((await handle.done).status, 'succeeded');
+    return optionsSeen!;
+  };
+  const tools = ['memory_extract', 'memory_profile', 'memory_consolidate'];
+  const extraction = await sessionFor('mxr-1', 'run-extract');
+  assert.equal(extraction.bootstrapInstructions, memoryExtractionBootstrapInstructions());
+  assert.deepEqual(extraction.toolProfile?.allowedToolNames, tools);
+  const rebuild = await sessionFor('mpr-1', 'run-profile');
+  assert.equal(rebuild.bootstrapInstructions, memoryProfileBootstrapInstructions());
+  assert.deepEqual(rebuild.toolProfile?.allowedToolNames, tools);
+  assert.notEqual(rebuild.profileHash, extraction.profileHash, 'its own session profile');
+  const tidy = await sessionFor('mcr-1', 'run-consolidate');
+  assert.equal(tidy.bootstrapInstructions, CONSOLIDATION_INSTRUCTIONS('memory_consolidate'));
+  assert.deepEqual(tidy.toolProfile?.allowedToolNames, tools);
+  assert.notEqual(tidy.profileHash, extraction.profileHash, 'its own session profile');
+  assert.notEqual(tidy.profileHash, rebuild.profileHash);
 });

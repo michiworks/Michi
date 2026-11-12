@@ -1,4 +1,3 @@
-import React from 'react';
 import { fireEvent, render, screen } from '@testing-library/react';
 import { describe, expect, it, vi } from 'vitest';
 import type { ChatNodeState } from '../../state/chatTypes';
@@ -18,7 +17,7 @@ const node: ChatNodeState = {
 
 function list(value: ChatNodeState, onCheck = vi.fn(), onRunAgain = vi.fn()) {
   return <PaneMessageList node={value} prefs={DEFAULT_PREFS} contentStyle={{}} streaming={false}
-    viewportHeight={800} onRetryTurn={onCheck} onRunAgain={onRunAgain}
+    onRetryTurn={onCheck} onRunAgain={onRunAgain}
     onEditUserMessage={vi.fn()} onContinueFollowUp={vi.fn()} onBranchFollowUp={vi.fn()} />;
 }
 

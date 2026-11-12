@@ -7,7 +7,7 @@ import { hydrateBackendWorkspaces } from './chatHydration';
 // to `artifacts`. When the hydrator only read `full.artifacts`, every restart
 // silently dropped all artifacts (rows stayed in SQLite, UI showed none).
 //
-// These tests feed a RAW backend payload — the exact shape `fetchAllWorkspaces`
+// These tests feed a RAW backend payload — the exact shape `fetchAllWorkspacesMeta`
 // hands to the hydrator — and assert the rows land in `project.artifacts`.
 // The existing artifact fixtures are all `Project`-shaped (domain model), so
 // none of them exercised this wire-key read; that gap is what let the bug ship.

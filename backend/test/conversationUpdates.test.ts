@@ -10,6 +10,7 @@ import { closeDb, getDb, getDbPath, initDb } from '../src/services/db';
 import { beginTurn, finalizeTurn, moveTreeToWorkspace } from '../src/services/dbRepository';
 import { dbWorker, initDbWorker, shutdownDbWorker } from '../src/services/dbWorkerClient';
 import { conversationCompletionCounter, readConversationUpdates } from '../src/services/conversationUpdates';
+import { readExtractionTurn } from '../src/services/memory/extractionRun';
 import { setupConversationUpdatesRoutes } from '../src/routes/conversationUpdates';
 import { readConversationUpdatesTool } from '../src/agents/conversationUpdatesTool';
 import { LOCAL_AGENT_OWNER_ID } from '../src/services/agentOwner';
@@ -173,6 +174,26 @@ describe('conversation completion increments', () => {
     assert.deepEqual(page.turns[0].messages?.map(m => m.id), ['u-a-steered', 'steer', 'a-steered']);
     assert.deepEqual(page.turns[0].messages?.map(m => m.content), ['input steered', 'correction', 'corrected answer']);
     assert.deepEqual(page.turns[0].messages?.[0].metadata, { quotedText: 'quote', quoteSource });
+  });
+
+  test('memory extraction reads the same turn messages as the conversation feed', () => {
+    let steered = start('steered');
+    steered = applyTurnEvent(steered, ev('steer_accepted', { seq: 1, messageId: 'steer', text: 'correction', createdAt: 11 }));
+    finalizeTurn(done(steered, 'corrected answer'));
+    finalizeTurn(done(start('interrupted'), 'reply'));
+    getDb().prepare("UPDATE messages SET seq = seq + 1 WHERE node_id = 'ws' AND id = 'a-interrupted'").run();
+    getDb().prepare(`INSERT INTO messages(id,node_id,role,content,seq,created_at,metadata)
+      SELECT 'unrelated', 'ws', 'user', 'another input', seq - 1, 12, '{}' FROM messages WHERE id = 'a-interrupted'`).run();
+    finalizeTurn(done(start('reversed'), 'reply'));
+    getDb().prepare("UPDATE messages SET seq = 1000 WHERE id = 'u-a-reversed'").run();
+    const feed = (after: number) => readConversationUpdates(caller, { after, limit: 1, includeMessages: true }).turns[0]!;
+    for (const [after, expected] of [[0, ['u-a-steered', 'steer', 'a-steered']], [1, null], [2, null]] as const) {
+      const turn = feed(after);
+      const extracted = readExtractionTurn(turn, caller.ownerUserId);
+      assert.deepEqual(turn.messages?.map(m => m.id) ?? null, expected, turn.turnId);
+      assert.equal(extracted !== null, expected !== null, turn.turnId);
+      if (extracted) assert.match(extracted.userText, /correction/, 'the steered input is the user\'s too');
+    }
   });
 
   test('MCP and Pi registrations return the same bound increment without accepting a workspace override', async () => {

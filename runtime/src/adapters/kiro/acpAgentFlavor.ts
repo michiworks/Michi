@@ -1,6 +1,7 @@
 import type { KiroForkAnchor, PreambleInput, RuntimeHost, RuntimePortName, TurnSuffixInput } from '../../contract/host';
 import type { AcpClient, AcpUpdate } from './acpClient';
 import type { NormalizedEvent } from '../../contract/events';
+import type { AgentCommand } from 'michi-shared';
 import type { CancelAck, NewAgentSessionOptions } from '../../contract/types';
 
 // How an ACP agent that speaks Kiro's protocol differs from kiro-cli.
@@ -53,6 +54,20 @@ export interface AcpAgentFlavor {
      * the chat's own). Absent: true.
      */
     readonly warmSessions?: boolean;
+    /**
+     * The agent advertises the skills it loads as plain commands, with
+     * nothing that marks them (agy). A command it advertises is then
+     * reported as a skill when a skill listSkills finds for the cwd has its
+     * name, so the host runs it as that skill. Absent: only a command the
+     * agent marks is a skill (Kiro V3's `_meta.kiro.type`).
+     */
+    readonly unmarkedSkills?: boolean;
+    /**
+     * The commands a chat runs through the agent before its session lists
+     * any (AgentRuntime.hostCommands). Absent: kiro-cli's for the engine
+     * (kiroHostCommands).
+     */
+    readonly hostCommands?: readonly AgentCommand[];
     /** How the agent names and titles its tool calls. Absent: Kiro's titles and `_meta` names. */
     readonly tools?: {
         /** Display title of a tool_call / tool_call_update; undefined keeps the update's title. */
@@ -61,6 +76,15 @@ export interface AcpAgentFlavor {
         name?(toolCall: Record<string, any> | undefined): string | undefined;
         /** A tool name as an MCP server and the tool's name there; undefined: not an MCP tool. Absent: Kiro's `@<server>/<tool>`. */
         mcpName?(name: string): { server: string; tool: string } | undefined;
+        /**
+         * A chat permission request for the tool through which the agent
+         * reaches the host's MCP tools, when the agent has one (Kiro Crew's
+         * relay): the host tool it runs, by Kiro's name for that tool
+         * (`@michi/<tool>`), for the host's policy and grants. Undefined: no
+         * such request, or one whose input names no tool. Absent: the agent
+         * calls the host's tools directly.
+         */
+        relayedHostTool?(toolCall: Record<string, any> | undefined, meta: Record<string, any> | undefined): string | undefined;
     };
     /**
      * How a launch-override agent reports that it is signed out. Absent: no

@@ -6,20 +6,11 @@ import {
   deleteOps,
   draftMarkdown,
   draftText,
-  findByFingerprint,
   insertMarkdown,
-  databaseRefOp,
   insertOp,
   isEditableBlock,
   isEditedBlock,
-  markdownPieces,
-  moveStepOp,
-  moveToOp,
-  pageUnits,
   releaseOp,
-  replaceBlocks,
-  shareBlocks,
-  shareValue,
   staleTargetOf,
   textChanges,
   toggledChecklist,
@@ -116,89 +107,9 @@ describe('adding blocks', () => {
     expect(insertOp(null, 'Top')).toEqual({ op: 'insert', after: null, parent: null, block: { type: 'markdown', text: 'Top' } });
   });
 
-  it('adds a database by reference after the block, as Michi’s own Add menu does', () => {
-    expect(databaseRefOp('b1~2', 'db_trip')).toEqual({ op: 'insert', after: 'b1~2', block: { type: 'database-ref', databaseId: 'db_trip' } });
-  });
-
   it('deletes and releases by id', () => {
     expect(deleteOps(['a', 'b'])).toEqual([{ op: 'delete', id: 'a' }, { op: 'delete', id: 'b' }]);
     expect(releaseOp('a')).toEqual({ op: 'release', id: 'a' });
-  });
-});
-
-describe('moving blocks', () => {
-  const order = ['a', 'b', 'c', 'd'];
-
-  it('names the block it lands after, null at the top', () => {
-    expect(moveToOp(order, 'c', 0)).toEqual({ op: 'move', id: 'c', after: null, parent: null });
-    expect(moveToOp(order, 'a', 2)).toEqual({ op: 'move', id: 'a', after: 'b', parent: null });
-    expect(moveToOp(order, 'a', 4)).toEqual({ op: 'move', id: 'a', after: 'd', parent: null });
-    expect(moveToOp(order, 'd', 1)).toEqual({ op: 'move', id: 'd', after: 'a', parent: null });
-  });
-
-  it('is nothing when the block stays where it is', () => {
-    expect(moveToOp(order, 'b', 1)).toBeNull();
-    expect(moveToOp(order, 'b', 2)).toBeNull();
-    expect(moveToOp(order, 'x', 0)).toBeNull();
-  });
-
-  it('steps one place up or down', () => {
-    expect(moveStepOp(order, 'c', -1)).toEqual({ op: 'move', id: 'c', after: 'a', parent: null });
-    expect(moveStepOp(order, 'b', -1)).toEqual({ op: 'move', id: 'b', after: null, parent: null });
-    expect(moveStepOp(order, 'b', 1)).toEqual({ op: 'move', id: 'b', after: 'c', parent: null });
-    expect(moveStepOp(order, 'a', -1)).toBeNull();
-    expect(moveStepOp(order, 'd', 1)).toBeNull();
-  });
-});
-
-describe('replacing blocks on screen', () => {
-  it('swaps blocks by id at any depth', () => {
-    const inner: MichiPageBlock = { type: 'checklist', id: 'in', title: 'T', items: [{ text: 'x', done: false }] };
-    const page: MichiPageBlock[] = [
-      md,
-      { type: 'columns', id: 'cols', columns: [[inner], [{ type: 'markdown', id: 'r', text: 'R' }]] },
-      { type: 'tabs', id: 'tabs', tabs: [{ label: 'A', blocks: [{ type: 'heading', id: 'h', text: 'H' }] }] },
-    ];
-    const ticked = toggledChecklist(inner, 0)!;
-    const heading = { type: 'heading', id: 'h', text: 'New' };
-    const out = replaceBlocks(page, new Map([['in', ticked], ['h', heading]]));
-    expect((out[1].columns as MichiPageBlock[][])[0][0]).toBe(ticked);
-    expect((out[2].tabs as Array<{ blocks: MichiPageBlock[] }>)[0].blocks[0]).toBe(heading);
-    expect(out[0]).toBe(md);
-    expect(replaceBlocks(page, new Map())).toBe(page);
-  });
-});
-
-describe('agent Markdown pieces', () => {
-  const prose: MichiPageBlock = {
-    type: 'markdown', id: 'intro', sources: [{ sessionId: 's1' }], staleFor: 'h1',
-    text: '## Where it stands\nThe schema is in.\n\n- Tests fail\n- CI is red',
-  };
-
-  it('cuts an agent block as Michi does: ids <block>~<n>, sources on each, the note mark on the first', () => {
-    expect(markdownPieces(prose)).toEqual([
-      { id: 'intro~0', type: 'markdown', text: '## Where it stands', sources: [{ sessionId: 's1' }], staleFor: 'h1' },
-      { id: 'intro~1', type: 'markdown', text: 'The schema is in.', sources: [{ sessionId: 's1' }] },
-      { id: 'intro~2', type: 'markdown', text: '- Tests fail', sources: [{ sessionId: 's1' }] },
-      { id: 'intro~3', type: 'markdown', text: '- CI is red', sources: [{ sessionId: 's1' }] },
-    ]);
-    // The same block object gives the same pieces, so they draw once.
-    expect(markdownPieces(prose)).toBe(markdownPieces(prose));
-  });
-
-  it('leaves whole what is one piece, a person’s own, without an id, or not Markdown', () => {
-    expect(markdownPieces({ type: 'markdown', id: 'one', text: 'Just this.' })).toBeNull();
-    expect(markdownPieces({ ...prose, edit: { at: 1, anchor: null } })).toBeNull();
-    expect(markdownPieces({ type: 'markdown', text: 'A\n\nB' })).toBeNull();
-    expect(markdownPieces({ type: 'callout', id: 'c', text: 'A\n\nB' })).toBeNull();
-  });
-
-  it('lists the page as what a person points at', () => {
-    const heading: MichiPageBlock = { type: 'heading', id: 'h1', text: 'Progress' };
-    const units = pageUnits([heading, prose]);
-    expect(units.map((u) => [u.block.id, u.segmentOf ?? null])).toEqual([
-      ['h1', null], ['intro~0', 'intro'], ['intro~1', 'intro'], ['intro~2', 'intro'], ['intro~3', 'intro'],
-    ]);
   });
 });
 
@@ -222,30 +133,6 @@ describe('drafts', () => {
   });
 });
 
-describe('keeping what a reload left alone', () => {
-  it('keeps unchanged blocks as the same objects, and the whole list when nothing changed', () => {
-    const a: MichiPageBlock = { type: 'heading', id: 'a', text: 'A' };
-    const b: MichiPageBlock = { type: 'markdown', id: 'b', text: 'B' };
-    const prev = [a, b];
-    expect(shareBlocks(prev, structuredClone(prev))).toBe(prev);
-    const next = shareBlocks(prev, [structuredClone(a), { ...b, text: 'B2' }, { type: 'divider' }]);
-    expect(next[0]).toBe(a);
-    expect(next[1]).not.toBe(b);
-    expect(next[1].text).toBe('B2');
-    // Moved: still the same objects, in the new order.
-    const moved = shareBlocks(prev, [structuredClone(b), structuredClone(a)]);
-    expect(moved[0]).toBe(b);
-    expect(moved[1]).toBe(a);
-  });
-
-  it('keeps a value whose data did not change', () => {
-    const prev = [{ id: 't1', state: 'doing' }];
-    expect(shareValue(prev, structuredClone(prev))).toBe(prev);
-    const changed = [{ id: 't1', state: 'done' }];
-    expect(shareValue(prev, changed)).toBe(changed);
-  });
-});
-
 describe('fingerprints', () => {
   it('tell a block by what it says and, for a piece, the block it came from', () => {
     const b: MichiPageBlock = { type: 'markdown', id: 'b', text: 'Words' };
@@ -254,15 +141,5 @@ describe('fingerprints', () => {
     expect(blockFingerprint(b)).not.toBe(blockFingerprint({ ...b, type: 'heading' }));
     expect(blockFingerprint(b, 'x')).not.toBe(blockFingerprint(b, 'y'));
     expect(blockFingerprint(list)).not.toBe(blockFingerprint(toggledChecklist(list, 1)!));
-  });
-
-  it('finds where the words went: a moved piece, a block in a container', () => {
-    const page: MichiPageBlock[] = [
-      { type: 'markdown', id: 'intro', text: 'First.\n\nInserted.\n\nSecond.' },
-      { type: 'toggle', id: 't', title: 'More', blocks: [{ type: 'callout', id: 'c', text: 'Inside' }] },
-    ];
-    expect(findByFingerprint(page, blockFingerprint({ type: 'markdown', id: 'intro~1', text: 'Second.' }, 'intro'))).toBe('intro~2');
-    expect(findByFingerprint(page, blockFingerprint({ type: 'callout', id: 'c', text: 'Inside' }))).toBe('c');
-    expect(findByFingerprint(page, blockFingerprint({ type: 'markdown', id: 'intro~1', text: 'Gone.' }, 'intro'))).toBeNull();
   });
 });

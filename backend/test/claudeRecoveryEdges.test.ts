@@ -1,4 +1,4 @@
-import './helpers/claudeSdkFixture';
+import { untilSpawned } from './helpers/claudeSdkFixture';
 import { test, type TestContext } from 'node:test';
 import assert from 'node:assert/strict';
 import { claudeTestOptions } from './helpers/claudeTestOptions';
@@ -351,7 +351,7 @@ for (const fresh of [true, false]) {
     assert.equal(session.nativeSessionId, 'native-original');
     h.failPersistence(null);
     const retry = drain(session.send('retry'));
-    await tick();
+    await untilSpawned(() => h.spawns.length === 2);
     assert.equal(h.spawns[1].resumeSessionId, 'native-original');
     h.children[1].init();
     h.children[1].chunk('validated');
@@ -375,7 +375,7 @@ test('asynchronous spawn failure without PID or exit does not poison native retr
   assert.ok((await running).some((event) => event.kind === 'runtime_error'));
   assert.equal(h.children[0].exited, false, 'failed spawn must not need an exit event');
   const retry = drain(session.send('retry'));
-  await tick();
+  await untilSpawned(() => h.spawns.length === 2);
   assert.equal(h.spawns[1].resumeSessionId, 'native-original');
   h.children[1].init();
   h.children[1].result();
@@ -389,11 +389,46 @@ test('synchronous spawn failure cleans its slot without losing the native retry 
   assert.equal(h.slots.size, 0);
   assert.equal(session.nativeSessionId, 'native-original');
   const retry = drain(session.send('retry'));
-  await tick();
+  await untilSpawned(() => h.spawns.length === 2);
   assert.equal(h.spawns[1].resumeSessionId, 'native-original');
   h.children[0].init();
   h.children[0].result();
   await retry;
+});
+
+/** Holds the session's skill library reads until release(). */
+function holdSkillLibraryRead(t: TestContext) {
+  const skills = require('michi-runtime/internal/adapters/claude/claudeSkills');
+  let started!: () => void, release!: () => void;
+  const reading = new Promise<void>((resolve) => { started = resolve; });
+  const held = new Promise<void>((resolve) => { release = resolve; });
+  t.mock.method(skills, 'readClaudeSkillLibrary', async () => { started(); await held; return skills.NO_CLAUDE_SKILL_LIBRARY; });
+  return { reading, release };
+}
+
+test('a Stop while a restore reads the skill library starts no process', async (t) => {
+  const h = harness(t), session = h.session();
+  h.failSpawn(new Error('binary temporarily unavailable'));
+  await assert.rejects(session.spawnResume('native-original'), /temporarily unavailable/);
+  const read = holdSkillLibraryRead(t);
+  const retry = drain(session.send('retry'));
+  await read.reading;
+  await session.cancel();
+  read.release();
+  assert.deepEqual((await retry).at(-1), { kind: 'turn_end', stopReason: 'cancelled' });
+  assert.equal(h.spawns.length, 1, 'only the failed spawn');
+  assert.equal(session.nativeSessionId, 'native-original');
+});
+
+test('a session disposed while it reads the skill library starts no process', async (t) => {
+  const h = harness(t), session = h.session();
+  const read = holdSkillLibraryRead(t);
+  const spawning = session.spawnFresh();
+  await read.reading;
+  await session.dispose();
+  read.release();
+  await assert.rejects(spawning, /disposed during startup/);
+  assert.equal(h.spawns.length, 0);
 });
 
 test('warm initialization and handoff do not write an anonymous or partial DB binding', async (t) => {
@@ -512,12 +547,53 @@ test('SDK model failure keeps selected model and rejects concurrent commands', a
   assert.equal((await session.executeCommand('fork')).success, false);
 });
 
-test('structured authentication failure stops retrying while retaining native identity', async (t) => {
+test('a first authentication retry lets the CLI renew credentials without a notice', async (t) => {
   const h = harness(t), session = h.session(); await session.spawnFresh();
   const active = drain(session.send('work')); await tick(); h.children[0].init('auth-original');
-  h.children[0].send({ type: 'system', subtype: 'api_retry', error: 'authentication_failed' });
+  const authRetry = { type: 'system', subtype: 'api_retry', attempt: 1, max_retries: 10, retry_delay_ms: 500, error_status: 403, error: 'authentication_failed' };
+  h.children[0].send(authRetry); await tick();
+  h.children[0].chunk('renewed'); await tick();
+  // Model output in between: a later request's first auth retry is again a renewal.
+  h.children[0].send(authRetry); await tick();
+  h.children[0].chunk(' again'); h.children[0].result();
+  const events = await active;
+  assert.notEqual(session.getState(), 'crashed');
+  assert(!h.children[0].signals.includes('SIGKILL'));
+  assert.equal(events.filter(e => e.kind === 'chunk').map(e => (e as any).text).join(''), 'renewed again');
+  assert(!events.some(e => e.kind === 'runtime_error' || e.kind === 'warning'));
+  assert(events.some(e => e.kind === 'turn_end' && e.stopReason === 'end_turn'));
+  assert.equal(h.logs.filter(entry => entry.message === 'claude authentication retry').length, 2);
+});
+
+test('a repeated authentication retry stops retrying while retaining native identity', async (t) => {
+  const h = harness(t), session = h.session(); await session.spawnFresh();
+  const active = drain(session.send('work')); await tick(); h.children[0].init('auth-original');
+  h.children[0].send({ type: 'system', subtype: 'api_retry', attempt: 1, error: 'authentication_failed' }); await tick();
+  assert.notEqual(session.getState(), 'crashed');
+  h.children[0].send({ type: 'system', subtype: 'api_retry', attempt: 2, error: 'authentication_failed' });
   const events = await active;
   assert.equal(session.nativeSessionId, 'auth-original'); assert.equal(session.getState(), 'crashed');
+  assert(events.some(e => e.kind === 'runtime_error' && /authentication failed/.test(e.error)));
+  assert(h.children[0].signals.includes('SIGKILL'));
+});
+
+test('the CLI refreshes its credentials once before an authentication failure stops the turn', async (t) => {
+  const retry = (attempt: number) => ({ type: 'system', subtype: 'api_retry', attempt, max_retries: 10, retry_delay_ms: 500, error_status: 403, error: 'authentication_failed' });
+  const h = harness(t), session = h.session(); await session.spawnFresh();
+  const recovered = drain(session.send('work')); await tick(); h.children[0].init('auth-refresh');
+  // The CLI's attempt counts every retry of the request: a rate limit first makes this one attempt 2.
+  h.children[0].send({ type: 'system', subtype: 'api_retry', attempt: 1, max_retries: 10, retry_delay_ms: 500, error_status: 429, error: 'rate_limit' });
+  h.children[0].send(retry(2)); await tick();
+  assert.notEqual(session.getState(), 'crashed');
+  assert(!h.children[0].signals.includes('SIGKILL'));
+  h.children[0].result();
+  assert(!(await recovered).some(e => e.kind === 'runtime_error'));
+
+  const rejected = drain(session.send('again')); await tick();
+  h.children[0].send(retry(1)); await tick();
+  h.children[0].send(retry(2));
+  const events = await rejected;
+  assert.equal(session.nativeSessionId, 'auth-refresh'); assert.equal(session.getState(), 'crashed');
   assert(events.some(e => e.kind === 'runtime_error' && /authentication failed/.test(e.error)));
   assert(h.children[0].signals.includes('SIGKILL'));
 });
@@ -662,6 +738,15 @@ for (const kind of ['chat', 'run'] as const) {
     assert.equal((await current).behavior, 'deny');
   });
 }
+
+test('Claude rejects an unknown approval option, and allow_session from a run', t => {
+  const h = harness(t);
+  assert.throws(() => h.session({ ownerUserId: 'fixture-owner' }).respondToPermission(1, 'forged'), /Invalid permission option/);
+  const run = h.session({ ownerUserId: 'fixture-owner', owner: runOwner('run', 'attempt') });
+  assert.throws(() => run.respondToPermission(1, 'allow_session'), /Invalid permission option/);
+  run.respondToPermission(1, 'allow_always');
+  h.session({ ownerUserId: 'fixture-owner' }).respondToPermission(1, 'allow_session');
+});
 
 test('completed SDK turns persist their last parent message and original user UUID before yielding completion', async t => {
   const h = harness(t), session = h.session();

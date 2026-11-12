@@ -98,6 +98,7 @@ function baseInput(overrides: Partial<ChatNodeToDescriptorInput> = {}): ChatNode
     },
     runtime: { runtimeId: null, modelId: null, providerId: null, contextUsagePercentage: null },
     presence: { coverage: 'unknown', views: [] },
+    archived: false,
     backendConnectionId: 'conn-1',
     observedAt: 10_000,
     ...overrides,

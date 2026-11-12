@@ -1,30 +1,33 @@
 # Find Michi help
 
-Applies to: bundled product documentation served by the current backend. Source checked: 2026-10-16. The general guides were reviewed against source on that date; Pages, component-design and maintenance references were checked again on 2026-10-26. Other topics retain their own review dates. The Crew guide records its own dated real-provider/version/platform acceptance; those tests were not rerun for this documentation expansion.
+Applies to: bundled product documentation served by the current backend. Source checked: 2026-11-08. Most articles state their own applicability. The Crew guide records its own dated real-provider/version/platform acceptance; source checks do not rerun those tests.
 
 ## Choose a document
 
 | Document ID | Use it when |
 | --- | --- |
 | `getting-started` | Installing/launching and completing the first task |
-| `concepts-and-context` | Understanding trees, branches, references, instructions and Memory |
+| `concepts-and-context` | Understanding trees, branches, references, instructions and Michi Memory |
 | `common-workflows` | Researching alternatives, implementing, reviewing and handing off |
-| `runtimes` | Choosing/configuring Kiro CLI, Crew, Pi, Claude or Codex |
+| `runtimes` | Choosing/configuring Kiro CLI, Crew, Pi, Claude, Codex or the opt-in Antigravity runtime |
 | `runtime-capabilities` | Comparing supported integration behavior and limits |
-| `pages-and-components` | Pages navigation, Assistant, blocks, grids, Sources, layout preferences, database views and component APIs |
-| `pages-maintenance` | Meta agent runtime, initial Home generation, automatic updates, catch-up and proposals |
+| `skills` | Keeping skills in the Michi library, using runtime skills and running skills with / |
+| `pages-and-components` | Pages navigation, Assistant, blocks, tasks and task boards, grids, Sources, layout preferences, database views, component APIs and chat Home customization |
+| `pages-maintenance` | Pages upkeep runtime, initial Home generation, automatic updates, workspace instructions, watches, catch-up and proposals |
 | `page-component-design` | Generated-component design conventions, theme tokens, sandbox limits and preview workflow |
-| `permissions` | Choosing Ask/Trust/YOLO or understanding approval grants |
+| `page-interactions` | Optional named views, text links, metric actions and block entries that open content inline, in drawers or dialogs |
+| `permissions` | Choosing Ask/Approve for me/Trust/YOLO or understanding approval grants |
 | `sessions-and-recovery` | Queueing, steering, Stop, reconnection, resume and fork |
 | `files-and-artifacts` | Finding files, uploading attachments, reusing sources and viewing websites |
 | `data-and-backups` | Recovering history, deletion, export, backup and migration |
-| `configuration` | Settings scope, authentication, CLI paths, environment and updates |
+| `configuration` | Settings scope, authentication, CLI paths, environment, Pi web search, updates and the macOS background service |
 | `performance-and-usage` | Slow responses, context, reasoning and usage/billing distinctions |
-| `privacy-and-data` | Data locations, external recipients, logs and access controls |
+| `privacy-and-data` | Data locations, external recipients, Michi Memory, logs and activity reporting |
 | `troubleshooting` | Finding an error/symptom and gathering useful evidence |
 | `custom-agents` | Experimental definitions, Runs, permissions and watches |
 | `crew` | Required Crew App/MCP/sessionApproval setup, Sync and Memory |
-| `remote-backend` | Remote launch, SSH, tokens and backend lifecycle |
+| `remote-backend` | Remote launch, connecting by host/SSH/URL, tokens, updates and backend lifecycle |
+| `mobile-access` | Opening Michi on a phone through Tailscale, updating from the phone and phone panes |
 
 ## Ask a question
 
@@ -36,7 +39,7 @@ Useful prompts:
 - “Read the backup guide and explain what I need to preserve before moving machines.”
 - “Read the Pages and component-design guides, inspect this page’s preferences, and use native blocks before generating a component.”
 
-If the tool is unavailable, open the repository/installation's `docs/user-guide.md`, or the public repository. A source installation keeps canonical Markdown files under `backend/src/docs/`; built backends carry flattened public documents under `backend/dist/docs/`. Crew and remote setup have their own canonical source files; the human guide links them.
+If the tool is unavailable, open `docs/user-guide.md` in a source or installation checkout. A source installation keeps canonical Markdown files under `backend/src/docs/`; built backends carry flattened copies of the catalogued documents under `backend/dist/docs/`. A packaged desktop app does not include the user guide, and its `backend/dist/docs/` is inside the app archive. The `crew`, `remote-backend` and `mobile-access` documents have canonical sources outside `backend/src/docs/`: `runtime/src/adapters/crew/GETTING_STARTED.md`, `docs/remote-backend.md` and `docs/mobile-access.md`.
 
 ## Agent lookup procedure
 
@@ -58,7 +61,7 @@ Reads default to 80 lines, allow at most 160 and cap output at 16,000 bytes. Sea
 
 ## Versions and evidence
 
-`contentVersion` and `docsVersion` are content fingerprints. They identify the text returned by this backend, not a semantic app version or proof of provider compatibility. Read each article's applicability/review statement and the native runtime's actual version.
+`contentVersion` and `docsVersion` are content fingerprints. They identify the text returned by this backend, not a semantic app version or proof of provider compatibility. Read each article's applicability/review statement, where present, and the native runtime's actual version.
 
 Bundled docs work offline and are public product references. They do not inspect credentials, running processes, current permissions, account balances or private conversations. They do not grant authorization to change those things.
 

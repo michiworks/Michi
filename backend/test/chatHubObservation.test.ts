@@ -316,3 +316,46 @@ describe('ChatHub.getSnapshot', () => {
     assert.equal(finalSnapshot.durableStatus, 'completed');
   });
 });
+
+describe('ChatHub controls while a turn finalizes', () => {
+  it('appends nothing after done is stamped, so no event overtakes it', async () => {
+    let release!: () => void;
+    let entered!: () => void;
+    const finalizing = new Promise<void>((resolve) => { entered = resolve; });
+    const chatHub = hub({
+      finalize: () => { entered(); return new Promise<void>((resolve) => { release = resolve; }); },
+    });
+    const events: ChatStreamEvent[] = [];
+    chatHub.subscribe('node-a', { send: (ev) => events.push(ev), close: () => {} });
+    const started = await chatHub.startTurn({
+      chatId: 'node-a',
+      nodeId: 'node-a',
+      text: 'hello',
+      session: mockSession({
+        events: [
+          { kind: 'permission_request', requestId: 1, title: 'Run it?', options: [] },
+          { kind: 'user_input_request', requestId: 2, questions: [{ id: 'q1', question: 'Which?', options: [], multiSelect: false }] },
+          { kind: 'turn_end', stopReason: 'end_turn' },
+        ],
+        compact: async () => ({ started: true, completed: true }),
+      }),
+    });
+    await finalizing;
+    const before = events.length;
+    await chatHub.compact('node-a');
+    chatHub.cancel('node-a');
+    chatHub.resolvePermission('node-a', 1);
+    chatHub.resolveUserInput('node-a', 2, [], true);
+    assert.deepEqual(events.slice(before).map((ev) => ev.event), []);
+
+    release();
+    await started.done;
+    const done = events.at(-1)!;
+    assert.equal(done.event, 'done');
+    assert.ok(events.slice(0, -1).every((ev) => (ev.data.seq ?? -1) < done.data.seq!), 'every other event precedes done');
+    const replayed: ChatStreamEvent[] = [];
+    chatHub.subscribe('node-a', { send: (ev) => replayed.push(ev), close: () => {} });
+    assert.deepEqual(replayed.map((ev) => ev.data.seq), [...replayed.map((ev) => ev.data.seq)].sort((a, b) => a! - b!));
+    assert.equal(replayed.at(-1)?.event, 'done');
+  });
+});

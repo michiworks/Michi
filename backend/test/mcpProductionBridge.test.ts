@@ -9,6 +9,11 @@ import { loadPiAi, loadPiTypebox } from '../src/agents/pi/piAi';
 import { configureRuntimeDeps, __resetRuntimeDeps } from '../src/agents/runtimeDeps';
 import { JSON_BODY_LIMIT_BYTES } from '../src/services/requestBodyLimit';
 import { STDIO_DEFAULT_MAX_BUFFER_SIZE } from '@modelcontextprotocol/sdk/shared/stdio.js';
+import { ChatApprovalState } from '../src/agents/chatApprovalState';
+import { closeDb, getDb, initDb } from '../src/services/db';
+import { recordCompanionTaint } from '../src/services/turnTrust';
+import { chatOwner } from './helpers/owners';
+import { activeTurnRow } from './helpers/checkinNodes';
 
 const fixture = path.resolve(__dirname, 'fixtures/mcpConsistencyServer.cjs');
 const config = (serverName: string, mode = 'pagination', args: string[] = []) => ({ serverName, command: process.execPath, args: [fixture, mode, ...args] });
@@ -57,6 +62,38 @@ test('a stdio server result above the SDK default read buffer reaches the manage
   // The connection stays open for the next call.
   const echo = await manager.callTool('large', 'echo', { after: true });
   assert.deepEqual(echo.content, [{ type: 'text', text: '{"after":true}' }]);
+});
+
+test('a long-lived stdio server that keeps writing to stderr never blocks on the unread pipe', async t => {
+  // Writes go to fd 2 synchronously (not through process.stderr), so a full pipe nobody reads blocks the server;
+  // a full non-blocking one is retried. Either way the call only returns once Michi drains what was written.
+  const server = `
+    const fs = require('node:fs');
+    const { Server } = require('@modelcontextprotocol/sdk/server/index.js');
+    const { StdioServerTransport } = require('@modelcontextprotocol/sdk/server/stdio.js');
+    const { ListToolsRequestSchema, CallToolRequestSchema } = require('@modelcontextprotocol/sdk/types.js');
+    const server = new Server({ name: 'noisy', version: '1' }, { capabilities: { tools: {} } });
+    server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: [{ name: 'noisy', inputSchema: { type: 'object', additionalProperties: true } }] }));
+    const line = Buffer.from('diagnostic noise '.repeat(60) + '\\n');
+    const pause = new Int32Array(new SharedArrayBuffer(4));
+    server.setRequestHandler(CallToolRequestSchema, async ({ params }) => {
+      let written = 0;
+      while (written < params.arguments.bytes) {
+        try { written += fs.writeSync(2, line); }
+        catch (error) { if (error.code !== 'EAGAIN') throw error; Atomics.wait(pause, 0, 0, 5); }
+      }
+      return { content: [{ type: 'text', text: String(written) }] };
+    });
+    server.connect(new StdioServerTransport()).catch(() => process.exit(1));`;
+  const manager = new McpClientManager(); t.after(() => manager.dispose());
+  await manager.connect({ serverName: 'noisy', command: process.execPath, args: ['-e', server], cwd: path.resolve(__dirname, '..') });
+  // Far more than any pipe or socket buffer holds, twice over the same connection.
+  const bytes = 4 * 1024 * 1024;
+  for (let call = 0; call < 2; call++) {
+    const result = await manager.callTool('noisy', 'noisy', { bytes }, AbortSignal.timeout(15_000));
+    assert.notEqual(result.isError, true, JSON.stringify(result.content).slice(0, 300));
+    assert.ok(Number((result.content[0] as { text: string }).text) >= bytes);
+  }
 });
 
 test('real image-only, resource-only and structured-only results stay useful through the production bridge', async t => {
@@ -179,4 +216,44 @@ test('real paginated first-page output schema and required-task metadata remain 
   assert.equal(task.isError, true); assert.match((task.content[0] as any).text, /task-based execution/);
   const log = await manager.callTool('metadata', 'call-log', {});
   assert.equal(JSON.parse((log.content[0] as any).text).includes('task-first'), false, 'required task must be refused before network invocation');
+});
+
+test('a turn that took in check-in material asks before every tool the production Pi bridge makes of a real server, whatever its mode, grants or session trust (DESIGN-v2 §2.8 T5)', async t => {
+  const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'michi-bridge-taint-'));
+  process.env.MICHI_DATA_DIR = tmpDir;
+  closeDb();
+  initDb();
+  const grants = new Set<string>();
+  configureRuntimeDeps({
+    dataDir: path.join(tmpDir, 'runtime'),
+    historyStore: { getNode: () => null, listMessages: () => [], getWorkspace: () => null, getWorkspaceInstructions: () => null },
+    agentConfig: { getAgentConfig: () => ({ runtime: 'pi', provider: 'x', modelByRuntime: {}, reasoningByRuntime: {} }) as never, resolveModel: () => '', resolveReasoning: () => undefined },
+    chatPermissions: {
+      getMode: () => 'trust', getApproveForMe: () => false,
+      hasGrant: (id, tool) => grants.has(`${id}:${tool}`), grant: (id, tool) => { grants.add(`${id}:${tool}`); },
+    },
+  });
+  t.after(async () => { __resetRuntimeDeps(); closeDb(); await fs.rm(tmpDir, { recursive: true, force: true }); });
+  getDb().prepare("INSERT INTO workspaces (id, name, cwd, created_at, updated_at) VALUES ('ws-1', 'W', ?, 1, 1)").run(tmpDir);
+  getDb().prepare("INSERT INTO nodes (id, workspace_id, kind, status, created_at) VALUES ('n-pi', 'ws-1', 'chat', 'idle', 1)").run();
+  activeTurnRow('n-pi', 'turn-bridge', 'a-bridge');
+
+  const manager = new McpClientManager(); t.after(() => manager.dispose());
+  await manager.connect(config('fixture'));
+  const tools = buildMcpToolsForPi({ mcpManager: manager, Type: (await loadPiTypebox()).Type });
+  assert.deepEqual(tools.map(tool => tool.name), ['mcp__fixture__echo', 'mcp__fixture__rich', 'mcp__fixture__environment']);
+  // As PiSession asks before each call: its coordinator, with the turn's mode.
+  const approvals = new ChatApprovalState();
+  const owner = chatOwner('n-pi');
+  for (const tool of tools) {
+    grants.add(`n-pi:${tool.name}`);
+    assert.equal(approvals.policy(owner, null, tool.name, false, 'ask'), 'allow', `${tool.name}: its grant`);
+  }
+  assert.equal(approvals.accept('allow_session', owner, tools[0].name, null), true);
+  recordCompanionTaint({ nodeId: 'n-pi', turnId: 'turn-bridge' }, 'read_page', 'checkin');
+  for (const tool of tools) {
+    for (const mode of ['ask', 'trust', 'yolo'] as const) {
+      assert.equal(approvals.policy(owner, null, tool.name, false, mode), 'ask', `${tool.name} in ${mode}`);
+    }
+  }
 });

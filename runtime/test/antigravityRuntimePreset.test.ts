@@ -129,6 +129,12 @@ describe('createAntigravityRuntime', () => {
     assert.deepEqual(runtime.checkAvailability(), {
       available: false, detail: `MICHI_ANTIGRAVITY_BIN=${path.join(dir, 'missing-agy')} is not an executable file`,
     });
+
+    // A searchable folder passes X_OK but cannot be spawned.
+    locations = { binPath: dir };
+    assert.deepEqual(runtime.checkAvailability(), {
+      available: false, detail: `MICHI_ANTIGRAVITY_BIN=${dir} is not an executable file`,
+    });
   });
 
   it('finds agy in the first searchPath entry that has it, and prefers binPath', () => {
@@ -221,6 +227,36 @@ process.stdin.on('data', (chunk) => {
     assert.deepEqual(sessionNew.params._meta, { antigravity: { systemPrompt: { append: 'STABLE sentinel true' } } });
     assert.deepEqual(received.filter((msg) => msg.method?.startsWith('_')).map((msg) => msg.method), []);
   });
+
+  it('starts agy with spawnEnv as it is, and nothing else of this environment', async (t) => {
+    const dir = tempDir();
+    const envFile = path.join(dir, 'env.json');
+    const agent = path.join(dir, 'agy');
+    fs.writeFileSync(agent, `#!${process.execPath}
+require('fs').writeFileSync(${JSON.stringify(envFile)}, JSON.stringify({ parentOnly: 'AGY_PARENT_ONLY' in process.env, marker: process.env.AGY_ENV_MARKER }));
+let buf = '';
+process.stdin.on('data', (chunk) => {
+  buf += chunk;
+  let i;
+  while ((i = buf.indexOf('\\n')) !== -1) {
+    const msg = JSON.parse(buf.slice(0, i));
+    buf = buf.slice(i + 1);
+    if (msg.id === undefined || !msg.method) continue;
+    const result = msg.method === 'initialize' ? { protocolVersion: 1 } : msg.method === 'session/new' ? { sessionId: 'agy-session-1' } : {};
+    process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id: msg.id, result }) + '\\n');
+  }
+});
+`);
+    fs.chmodSync(agent, 0o755);
+    process.env.AGY_PARENT_ONLY = '1';
+    t.after(() => { delete process.env.AGY_PARENT_ONLY; });
+    const runtime = createAntigravityRuntime({
+      host: createDefaultHost({ logLevel: 'silent' }), bridge, antigravity: { binPath: agent }, spawnEnv: () => ({ AGY_ENV_MARKER: 'from-host' }),
+    });
+    t.after(() => runtime.shutdown());
+    await runtime.newSession({ cwd: tempDir(), sessionId: 'chat-env' });
+    assert.deepEqual(JSON.parse(fs.readFileSync(envFile, 'utf8')), { parentOnly: false, marker: 'from-host' });
+  });
 });
 
 describe('Antigravity flavor', () => {
@@ -305,8 +341,11 @@ describe('Antigravity flavor', () => {
     assert.deepEqual(ANTIGRAVITY_KIRO_FLAVOR.nativeSessions, { replaceable: true });
     assert.deepEqual(ANTIGRAVITY_KIRO_FLAVOR.hostPorts, []);
     for (const flavor of [KIRO_FLAVOR, CREW_KIRO_FLAVOR]) {
-      for (const key of ['promptImages', 'warmSessions', 'tools', 'signIn'] as const) assert.equal(flavor[key], undefined);
+      for (const key of ['promptImages', 'warmSessions', 'signIn'] as const) assert.equal(flavor[key], undefined);
     }
+    assert.equal(KIRO_FLAVOR.tools, undefined);
+    // Crew names only the requests of its relay of Michi's tools (crewRelayTools), none of agy's tool naming.
+    assert.deepEqual(Object.keys(CREW_KIRO_FLAVOR.tools ?? {}), ['relayedHostTool']);
   });
 });
 

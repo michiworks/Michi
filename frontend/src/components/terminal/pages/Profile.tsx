@@ -8,7 +8,6 @@ import { PALETTES } from '../tokens';
 import {
   saveProviderKey,
   clearProviderKey,
-  fetchAgentStatus,
   fetchProfileActivity,
   type AgentStatus,
   type AgentProviderInfo,
@@ -21,6 +20,7 @@ import {
   type ProfileActivity,
 } from './profileActivity';
 import { providerRequiresUserKey } from '../../../lib/providerCapabilities';
+import { useKeyEditor } from '../../../hooks/useKeyEditor';
 import { confirmDialog } from '../../ui/ConfirmDialog';
 import {
   activeBackendApiBase,
@@ -33,8 +33,8 @@ import { backendConnectionIdFromApiBase } from '../../../state/agentIdentity';
  *
  * Wired to the real backend where it makes sense:
  *   - Google identity comes from better-auth's session.
- *   - Provider list + hasKey come from /api/agent/status; add/remove keys
- *     uses /api/agent/provider-key.
+ *   - Provider list + hasKey come from the chat store's /api/agent/status;
+ *     add/remove keys uses /api/agent/provider-key, then reloads that status.
  *   - Theme swatches drive prefs.terminalPalette.
  *   - Sign-out hits authClient.signOut() and reloads to drop the cookie.
  *
@@ -46,7 +46,7 @@ export default function ProfilePage({ onNav }: { onNav?: (p: PageId) => void } =
   const session = useAuthSession();
   const user = session?.user;
   const { prefs, setPref } = usePrefs();
-  const { projects } = useChatStore();
+  const { projects, agentStatus } = useChatStore();
   const activeBackendConnectionId = backendConnectionIdFromApiBase(activeBackendApiBase());
   const scopedProjects = useMemo(
     () => projects.filter(
@@ -82,14 +82,6 @@ export default function ProfilePage({ onNav }: { onNav?: (p: PageId) => void } =
     [activitySnapshot, localActivity],
   );
 
-  const [agentStatus, setAgentStatus] = useState<AgentStatus | null>(null);
-  const refreshAgent = React.useCallback(() => {
-    fetchAgentStatus()
-      .then(setAgentStatus)
-      .catch(() => setAgentStatus(null));
-  }, []);
-  useEffect(() => { refreshAgent(); }, [refreshAgent]);
-
   const initials = useMemo(() => deriveInitials(user?.name, user?.email), [user?.name, user?.email]);
 
   const onSignOut = async () => {
@@ -112,6 +104,7 @@ export default function ProfilePage({ onNav }: { onNav?: (p: PageId) => void } =
       <div className="profile-shell">
         <SideNav
           onNav={onNav}
+          digestEnabled={prefs.digestEnabled === true}
           providerCount={
             agentStatus?.providers
               ?.filter(providerRequiresUserKey)
@@ -131,7 +124,7 @@ export default function ProfilePage({ onNav }: { onNav?: (p: PageId) => void } =
 
           <HeatmapCard activity={activity} />
 
-          <ApiKeysSection status={agentStatus} onChanged={refreshAgent} />
+          <ApiKeysSection status={agentStatus} onChanged={reloadAgentStatusSilently} />
 
           <AccountSettings
             displayName={user?.name || ''}
@@ -158,9 +151,11 @@ export default function ProfilePage({ onNav }: { onNav?: (p: PageId) => void } =
 
 function SideNav({
   onNav,
+  digestEnabled,
   providerCount,
 }: {
   onNav?: (p: PageId) => void;
+  digestEnabled: boolean;
   providerCount: number;
 }) {
   return (
@@ -199,10 +194,12 @@ function SideNav({
             <span className="profile-sidenav__caret" />
             <ChatIcon /> <span>threads</span>
           </a>
-          <a className="profile-sidenav__item" href="#" onClick={(e) => { e.preventDefault(); onNav?.('digest'); }}>
-            <span className="profile-sidenav__caret" />
-            <BookIcon /> <span>library</span>
-          </a>
+          {digestEnabled && (
+            <a className="profile-sidenav__item" href="#" onClick={(e) => { e.preventDefault(); onNav?.('digest'); }}>
+              <span className="profile-sidenav__caret" />
+              <BookIcon /> <span>library</span>
+            </a>
+          )}
         </div>
       </div>
 
@@ -413,6 +410,12 @@ function formatCompact(value: number): string {
 
 // ─── api keys ──────────────────────────────────────────────────────────────
 
+// Keys saved here are often for providers other than the active one, so the
+// reload must not open the key window.
+function reloadAgentStatusSilently() {
+  window.dispatchEvent(new CustomEvent('michi:reload-agent-status', { detail: { silent: true } }));
+}
+
 function ApiKeysSection({
   status,
   onChanged,
@@ -504,27 +507,19 @@ function KeyRow({
   startEditing?: boolean;
 }) {
   const [editing, setEditing] = useState(startEditing);
-  const [draft, setDraft] = useState('');
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const editor = useKeyEditor({
+    save: (key) => saveProviderKey(provider.id, key),
+    clear: () => clearProviderKey(provider.id),
+    onChanged,
+  });
+  const { draft, error } = editor;
+  const busy = editor.saving || editor.clearing;
 
   const iconClass = PROVIDER_ICON_CLASS[provider.id] ?? 'key-row__icon--anthropic';
   const iconChar = provider.label.charAt(0).toUpperCase();
 
   const save = async () => {
-    const key = draft.trim();
-    if (!key) return;
-    setBusy(true);
-    setError(null);
-    const res = await saveProviderKey(provider.id, key);
-    setBusy(false);
-    if (!res.ok) {
-      setError(res.error);
-      return;
-    }
-    setDraft('');
-    setEditing(false);
-    onChanged();
+    if (await editor.save()) setEditing(false);
   };
 
   const remove = async () => {
@@ -533,15 +528,7 @@ function KeyRow({
       message: `Clear the saved ${provider.label} API key?`,
       confirmLabel: 'Clear',
     }))) return;
-    setBusy(true);
-    setError(null);
-    const res = await clearProviderKey(provider.id);
-    setBusy(false);
-    if (!res.ok) {
-      setError(res.error);
-      return;
-    }
-    onChanged();
+    await editor.clear();
   };
 
   const envLabel = provider.envVars.join(', ') || provider.keyLabel;
@@ -565,11 +552,11 @@ function KeyRow({
                 autoFocus
                 type="password"
                 value={draft}
-                onChange={(e) => { setDraft(e.target.value); setError(null); }}
+                onChange={(e) => editor.setDraft(e.target.value)}
                 onKeyDown={(e) => {
                   if (e.key === 'Enter') void save();
                   if (e.key === 'Escape') {
-                    setEditing(false); setDraft(''); setError(null);
+                    setEditing(false); editor.reset();
                     onCancel?.();
                   }
                 }}
@@ -590,7 +577,7 @@ function KeyRow({
                   type="button"
                   className="profile-btn profile-btn--sm profile-btn--ghost"
                   onClick={() => {
-                    setEditing(false); setDraft(''); setError(null);
+                    setEditing(false); editor.reset();
                     onCancel?.();
                   }}
                 >
@@ -612,7 +599,7 @@ function KeyRow({
       <div className="key-row__actions">
         {provider.hasKey && !editing && (
           <>
-            <button type="button" className="icon-btn" aria-label="Replace" onClick={() => { setEditing(true); setDraft(''); }}>
+            <button type="button" className="icon-btn" aria-label="Replace" onClick={() => { setEditing(true); editor.reset(); }}>
               <RotateIcon />
             </button>
             <button type="button" className="icon-btn icon-btn--danger" aria-label="Remove" onClick={() => void remove()} disabled={busy}>

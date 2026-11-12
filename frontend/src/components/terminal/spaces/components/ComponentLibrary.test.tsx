@@ -1,7 +1,7 @@
-import React from 'react';
-import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { PageComponent } from 'michi-shared';
+import { ConfirmDialogHost } from '../../../ui/ConfirmDialog';
 import { ComponentLibrary } from './ComponentLibrary';
 
 const api = vi.hoisted(() => ({
@@ -68,6 +68,21 @@ describe('ComponentLibrary insertion', () => {
     expect(screen.getByText('Created in chat')).toBeTruthy();
     fireEvent.click(openSource);
     expect(onOpenSource).toHaveBeenCalledWith({ kind: 'chat', nodeId: 'node-original', turnId: 'turn-1', assistantId: 'answer-1' });
+  });
+
+  it('asks in the app\'s confirm dialog before deleting a component', async () => {
+    const nativeConfirm = vi.spyOn(window, 'confirm');
+    api.deletePageComponent.mockResolvedValue(undefined);
+    render(<><ConfirmDialogHost /><ComponentLibrary workspaceId="workspace-1" connectionId="local" /></>);
+    fireEvent.click(await screen.findByRole('button', { name: /Risk card/ }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Delete' }));
+    const dialog = await screen.findByRole('dialog', { name: 'Delete component' });
+    expect(within(dialog).getByText('Delete Risk card? Existing references will show a fallback.')).toBeTruthy();
+    expect(api.deletePageComponent).not.toHaveBeenCalled();
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Delete' }));
+    await waitFor(() => expect(api.deletePageComponent).toHaveBeenCalledWith(component.id, 'workspace-1', 'local', 4));
+    expect(nativeConfirm).not.toHaveBeenCalled();
+    nativeConfirm.mockRestore();
   });
 
   it('does not allow inserting a disabled component', async () => {

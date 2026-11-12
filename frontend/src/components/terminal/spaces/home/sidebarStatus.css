@@ -7,14 +7,14 @@
 .area-side__foot .agent-spinner { width: 9px; height: 9px; }
 .spaces-side-foot-link {
   padding: 0; border: 0; background: none; font: inherit; cursor: pointer;
-  color: var(--term-danger); text-decoration: underline; text-underline-offset: 2px;
+  color: var(--term-danger-text); text-decoration: underline; text-underline-offset: 2px;
 }
 /* Not running is a warning, not an error: the link keeps the row's own colour. */
 .spaces-side-foot-link[data-tone='warn'] { color: inherit; }
 .spaces-side-foot-link:focus-visible { outline: 1px solid var(--term-accent); outline-offset: 2px; }
 
 .spaces-side-progress { font: 400 var(--fs-sm)/1 var(--font-mono); font-variant-numeric: tabular-nums; color: var(--term-faint); }
-.spaces-side-progress[data-tone='danger'] { color: var(--term-danger); }
+.spaces-side-progress[data-tone='danger'] { color: var(--term-danger-text); }
 .spaces-side-new {
   padding: 2px 5px;
   border-radius: var(--ui-radius-sm);

@@ -40,6 +40,7 @@ describe('TerminalTopbar', () => {
     onNav: () => {},
     sidebarCollapsed: false,
     onToggleSidebar: () => {},
+    navigation: { canBack: false, canForward: false, onBack: () => {}, onForward: () => {} },
   };
 
   // getElectron is mocked to null above, so showBrowserBrand is true and the
@@ -53,5 +54,21 @@ describe('TerminalTopbar', () => {
     );
     fireEvent.click(screen.getByLabelText('Go home'));
     expect(onNav).toHaveBeenCalledWith('home');
+  });
+
+  it('steps through the shell history it is given', () => {
+    const navigation = { canBack: true, canForward: false, onBack: vi.fn(), onForward: vi.fn() };
+    render(
+      <Wrap>
+        <TerminalTopbar {...baseProps} workspaceReady navigation={navigation} />
+      </Wrap>,
+    );
+    const back = screen.getByLabelText('Navigate back') as HTMLButtonElement;
+    const forward = screen.getByLabelText('Navigate forward') as HTMLButtonElement;
+    expect(back.disabled).toBe(false);
+    expect(forward.disabled).toBe(true);
+    fireEvent.click(back);
+    expect(navigation.onBack).toHaveBeenCalledTimes(1);
+    expect(navigation.onForward).not.toHaveBeenCalled();
   });
 });

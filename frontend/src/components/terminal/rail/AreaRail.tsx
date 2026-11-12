@@ -15,8 +15,6 @@ export interface RailBadges {
   conversationsDone: boolean;
   /** The Meta agent stopped (for example, its tool check failed). */
   settingsAlert: boolean;
-  /** Memories waiting for approval in Settings › Memory. */
-  memoryPending?: number;
 }
 
 export const NO_RAIL_BADGES: RailBadges = { spacesWaiting: 0, scheduledRunning: false, conversationsDone: false, settingsAlert: false };
@@ -32,11 +30,6 @@ function describe(area: ShellArea, label: string, badges: RailBadges): { name: s
   if (area === 'scheduled' && badges.scheduledRunning) return { name: `${label}, running`, badge: <i className="area-rail__dot" data-tone="run" /> };
   if (area === 'conversations' && badges.conversationsDone) return { name: `${label}, finished`, badge: <i className="area-rail__dot" data-tone="done" /> };
   if (area === 'settings' && badges.settingsAlert) return { name: `${label}, needs attention`, badge: <i className="area-rail__dot" data-tone="warn" /> };
-  const pending = area === 'settings' ? badges.memoryPending ?? 0 : 0;
-  if (pending > 0) {
-    const memories = pending === 1 ? '1 memory' : `${pending} memories`;
-    return { name: `${label}, ${memories} waiting for confirmation`, badge: <em className="area-rail__count" aria-hidden="true">{pending > 99 ? '99+' : pending}</em> };
-  }
   return { name: label, badge: null };
 }
 
@@ -110,5 +103,3 @@ export function AreaTabs({ area, onSelect, badges = NO_RAIL_BADGES, settingsOpen
     </nav>
   );
 }
-
-export default AreaRail;

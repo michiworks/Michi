@@ -1,7 +1,7 @@
 /**
  * Tests for Step 3 of Claude Code Runtime:
  *   - McpSlotRegistry (extended with transport ownership)
- *   - the follow-up and Stop Hook tools; the removed approve tool stays gone
+ *   - the follow-up tool; the removed approve tool stays gone
  *
  * Uses node:test (Node 22+) + ts-node.
  * Run: cd backend && npm test -- --test-name-pattern mcpServerStep3
@@ -17,7 +17,6 @@ import assert from 'node:assert/strict';
 import {
     McpSlotRegistry,
     buildMcpServerForSlot,
-    validateCodexStopHookForSlot,
 } from '../src/services/mcpServer';
 import { runOwner } from './helpers/owners';
 
@@ -83,7 +82,6 @@ describe('McpSlotRegistry', () => {
             onSubmitAgentResult: () => ({ version: 1, status: 'completed' }),
             onSetFollowUps: () => {},
             onSetBranchOverview: () => {},
-            onValidateFollowUps: () => ({}),
             onAskUser: async () => ({}),
         } as never);
         const tools = (buildMcpServerForSlot(slot) as any)._registeredTools;
@@ -91,7 +89,7 @@ describe('McpSlotRegistry', () => {
         assert.ok(tools['submit_agent_result']);
         for (const denied of [
             'spawn_branches', 'save_artifact', 'update_artifact', 'show_image',
-            'set_follow_ups', 'set_branch_overview', 'validate_follow_ups', 'validate_turn_metadata',
+            'set_follow_ups', 'set_branch_overview',
             'list_threads', 'search_messages', 'read_node', 'read_node_overview',
             'inspect_pane', 'read_pane_output', 'list_panes', 'wait_pane', 'send_to_thread', 'ask_user',
         ]) {
@@ -115,7 +113,7 @@ describe('McpSlotRegistry', () => {
     });
 });
 
-describe('Claude follow-up POC MCP tools', () => {
+describe('set_follow_ups MCP tool', () => {
     let registry: McpSlotRegistry;
 
     beforeEach(() => {
@@ -136,71 +134,6 @@ describe('Claude follow-up POC MCP tools', () => {
 
         assert.deepEqual(captured, ['first?', 'second?', 'third?']);
         assert.equal(result.content[0].text, 'Follow-ups set: 3');
-    });
-
-    test('validate_turn_metadata uses the same bounded validator callback', async () => {
-        const decision = {
-            decision: 'block',
-            reason: 'Call missing metadata tools before stopping.',
-        };
-        const slot = registry.create('chat-metadata-validate', '/tmp', null, {
-            ...makeCallbacks(),
-            onValidateFollowUps: () => decision,
-        } as never);
-        const handler = getToolHandler(registry, slot.slotId, 'validate_turn_metadata');
-
-        const result = await handler({});
-
-        assert.deepEqual(JSON.parse(result.content[0].text), decision);
-    });
-});
-
-describe('Codex follow-up POC Stop Hook routing', () => {
-    test('random slot capability routes concurrent branches to the correct validator', () => {
-        const registry = new McpSlotRegistry();
-        let branchACalls = 0;
-        let branchBCalls = 0;
-        const slotA = registry.create('branch-a', '/tmp', null, {
-            ...makeCallbacks(),
-            onValidateFollowUps: () => {
-                branchACalls += 1;
-                return { decision: 'block', reason: 'branch-a' };
-            },
-        } as never);
-        const slotB = registry.create('branch-b', '/tmp', null, {
-            ...makeCallbacks(),
-            onValidateFollowUps: () => {
-                branchBCalls += 1;
-                return { decision: 'block', reason: 'branch-b' };
-            },
-        } as never);
-
-        const result = validateCodexStopHookForSlot(registry, slotB.slotId, {
-            hook_event_name: 'Stop',
-            session_id: 'codex-thread-b',
-        });
-
-        assert.deepEqual(result, { decision: 'block', reason: 'branch-b' });
-        assert.equal(branchACalls, 0);
-        assert.equal(branchBCalls, 1);
-        assert.notEqual(slotA.slotId, slotB.slotId);
-    });
-
-    test('unknown slot and non-Stop payload fail open', () => {
-        const registry = new McpSlotRegistry();
-        const slot = registry.create('branch-a', '/tmp', null, {
-            ...makeCallbacks(),
-            onValidateFollowUps: () => ({ decision: 'block' }),
-        } as never);
-
-        assert.deepEqual(
-            validateCodexStopHookForSlot(registry, 'missing-slot', { hook_event_name: 'Stop' }),
-            {},
-        );
-        assert.deepEqual(
-            validateCodexStopHookForSlot(registry, slot.slotId, { hook_event_name: 'PostToolUse' }),
-            {},
-        );
     });
 });
 
@@ -236,4 +169,25 @@ test('save_artifact forwards a file path without requiring a Markdown body', asy
     await handler({ name: 'shot', path: '.attachments/shot.png' });
     assert.deepEqual(received, ['shot', undefined, '.attachments/shot.png']);
     await assert.rejects(() => handler({ name: 'shot', path: 'shot.png', body: 'text' }), /exactly one/);
+});
+
+test('ask_user rejects blank questions and options as a tool error without asking, as Pi and the runtime builtin do', async () => {
+    const registry = new McpSlotRegistry();
+    let asked = 0;
+    const slot = registry.create('ask-chat', '/tmp', null, {
+        ...makeCallbacks(),
+        onAskUser: async () => { asked++; return {}; },
+    } as never);
+    const handler = getToolHandler(registry, slot.slotId, 'ask_user') as (args: Record<string, unknown>) => Promise<{ content: Array<{ text: string }>; isError?: boolean }>;
+    for (const [questions, error] of [
+        [[], 'questions must be an array of 1-4 questions.'],
+        [[{ question: ' ', options: [{ label: 'A' }, { label: 'B' }] }], 'questions[0].question must be a non-empty string.'],
+        [[{ question: 'Q?', options: [{ label: 'Only' }] }], 'questions[0].options must list 2-4 options.'],
+        [[{ question: 'Q?', options: [{ label: 'A' }, { label: '' }] }], 'questions[0].options[1].label must be a non-empty string.'],
+    ] as const) {
+        const result = await handler({ questions });
+        assert.equal(result.isError, true);
+        assert.equal(result.content[0].text, error);
+    }
+    assert.equal(asked, 0);
 });

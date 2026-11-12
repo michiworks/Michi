@@ -1,6 +1,5 @@
 import { render, screen, fireEvent, within } from '@testing-library/react';
 import { describe, it, expect, vi } from 'vitest';
-import React from 'react';
 import { PaneMessageList } from './PaneMessageList';
 import type { ChatNodeState, ChatMessage } from '../../state/chatTypes';
 import type { ChildAnchor } from '../../state/branchAnchors';
@@ -59,7 +58,6 @@ function renderList(
       prefs={BASE_PREFS}
       contentStyle={{}}
       streaming={false}
-      viewportHeight={800}
       onRetryTurn={vi.fn()}
       onEditUserMessage={vi.fn()}
       onContinueFollowUp={vi.fn()}

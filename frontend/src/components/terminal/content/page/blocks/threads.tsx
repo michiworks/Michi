@@ -1,4 +1,3 @@
-import React from 'react';
 import type { BlockProps } from '../blockTypes';
 import { objects, str, timelineWhen } from '../michiPageModel';
 import { BlockTitle } from './text';

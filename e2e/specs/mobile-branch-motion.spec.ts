@@ -94,8 +94,14 @@ test.describe('on a touch screen', () => {
 
   test('tapping a message reaches branch from here, and the push settles on the new pane', async ({ page }, info) => {
     await boot(page);
-    await page.locator(PANE('root')).getByText('A quiet workspace').tap();
-    await page.locator(PANE('root')).getByRole('button', { name: 'branch from here' }).last().tap();
+    // A tap gives the message the hover that shows its actions, but Chromium
+    // hands hover back to the mouse boot left on the sidebar toggle ~100ms
+    // later; a phone has no parked mouse. Tap the message again if the hover
+    // lapsed before the second tap could land.
+    await expect(async () => {
+      await page.locator(PANE('root')).getByText('A quiet workspace').tap();
+      await page.locator(PANE('root')).getByRole('button', { name: 'branch from here' }).last().tap({ timeout: 1_000 });
+    }).toPass({ timeout: 10_000 });
     const incoming = page.locator('.terminal-dashboard > [data-node-id]:not([data-node-id="root"])');
     await expect(incoming).toBeVisible();
     await expect.poll(() => page.evaluate(() => document.getAnimations().filter(animation => animation.playState === 'running'

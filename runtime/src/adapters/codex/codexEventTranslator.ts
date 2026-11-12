@@ -1,4 +1,6 @@
 import type { NormalizedEvent } from '../../contract/events';
+import { omitInlineImages, truncateToolPayload } from '../../contract/toolPayload';
+import { contextFillPercentage } from '../../contract/usage';
 import {
   CODEX_COLLAB_ITEM,
   CODEX_SUBAGENT_ACTIVITY_ITEM,
@@ -104,8 +106,7 @@ function tokenUsageSnapshot(value: unknown): CodexTokenUsageSnapshot | undefined
 function contextUsagePercentage(activeTokens: number, modelContextWindow: number): number {
   if (modelContextWindow <= CODEX_CONTEXT_BASELINE_TOKENS) return 100;
   const effectiveWindow = modelContextWindow - CODEX_CONTEXT_BASELINE_TOKENS;
-  const usedTokens = Math.max(0, activeTokens - CODEX_CONTEXT_BASELINE_TOKENS);
-  return Math.min(100, Math.max(0, (usedTokens / effectiveWindow) * 100));
+  return contextFillPercentage(activeTokens - CODEX_CONTEXT_BASELINE_TOKENS, effectiveWindow) ?? 100;
 }
 
 function safeJson(value: unknown): string {
@@ -123,15 +124,6 @@ function errorMessage(value: unknown): string | undefined {
   const details = stringField(value, 'additionalDetails');
   if (message && details && details !== message) return `${message}: ${details}`;
   return message ?? details;
-}
-
-const MAX_TOOL_PAYLOAD = 16 * 1024;
-
-function truncatePayload(value: unknown): string | undefined {
-  if (value == null) return undefined;
-  const str = typeof value === 'string' ? value : safeJson(value);
-  if (!str) return undefined;
-  return str.length > MAX_TOOL_PAYLOAD ? str.slice(0, MAX_TOOL_PAYLOAD) : str;
 }
 
 function extractCodexPurpose(item: Record<string, unknown>): string | undefined {
@@ -242,8 +234,12 @@ function toolPresentation(item: Record<string, unknown>): ToolPresentation {
     };
   }
   if (itemType === 'mcpToolCall') {
+    const tool = stringField(item, 'tool') ?? 'MCP tool';
+    const server = stringField(item, 'server');
     return {
-      title: stringField(item, 'tool') ?? 'MCP tool',
+      // Another server's tool keeps its server in the title, as Claude's do, so a
+      // reader can tell it from Michi's tool of the same name.
+      title: server && server !== CODEX_HOST_MCP_SERVER ? `mcp__${server}__${tool}` : tool,
       kindType: 'tool',
       detail: item['arguments'] !== undefined
         ? cap(safeJson(item['arguments']))
@@ -422,7 +418,7 @@ export function createCodexTranslator(emit: (ev: NormalizedEvent) => void): Code
               title: 'Spawn agent',
               status: 'in_progress',
               kindType: 'subagent',
-              inputJson: truncatePayload(codexSubagentSpawnInput(item)),
+              inputJson: truncateToolPayload(codexSubagentSpawnInput(item)),
               ...toolIdentity(item),
             });
           }
@@ -435,7 +431,7 @@ export function createCodexTranslator(emit: (ev: NormalizedEvent) => void): Code
             title: codexCollabTitle(item),
             status: 'in_progress',
             kindType: codexCollabKind(item),
-            inputJson: truncatePayload(codexCollabInput(item)),
+            inputJson: truncateToolPayload(codexCollabInput(item)),
             ...toolIdentity(item),
           });
           break;
@@ -454,7 +450,7 @@ export function createCodexTranslator(emit: (ev: NormalizedEvent) => void): Code
           status: 'in_progress',
           kindType: presentation.kindType,
           detail: extractCodexPurpose(item) ?? presentation.detail,
-          inputJson: truncatePayload(item),
+          inputJson: truncateToolPayload(item),
           ...toolIdentity(item),
         });
         break;
@@ -475,7 +471,7 @@ export function createCodexTranslator(emit: (ev: NormalizedEvent) => void): Code
               title: 'Spawn agent',
               status: 'completed',
               kindType: 'subagent',
-              inputJson: truncatePayload(codexSubagentSpawnInput(item)),
+              inputJson: truncateToolPayload(codexSubagentSpawnInput(item)),
               ...toolIdentity(item),
             });
             emit({ kind: 'subagent_list_update', subagents: codexSubagentSpawnRoster(item) });
@@ -492,8 +488,8 @@ export function createCodexTranslator(emit: (ev: NormalizedEvent) => void): Code
             title: codexCollabTitle(item),
             status: failed ? 'failed' : 'completed',
             kindType: codexCollabKind(item),
-            inputJson: truncatePayload(codexCollabInput(item)),
-            ...(failed && errors ? { output: truncatePayload(errors) } : {}),
+            inputJson: truncateToolPayload(codexCollabInput(item)),
+            ...(failed && errors ? { output: truncateToolPayload(errors) } : {}),
             ...toolIdentity(item),
           });
           if (roster.length > 0) emit({ kind: 'subagent_list_update', subagents: roster });
@@ -522,7 +518,8 @@ export function createCodexTranslator(emit: (ev: NormalizedEvent) => void): Code
           status,
           kindType: presentation.kindType,
           detail,
-          output: truncatePayload(rawOutput),
+          // Display copy of a completed item: Codex already gave the model its result.
+          output: truncateToolPayload(omitInlineImages(rawOutput)),
           ...toolIdentity(item),
         });
         break;

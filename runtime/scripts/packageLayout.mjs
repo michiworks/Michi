@@ -39,10 +39,7 @@ export const LICENSE_NOTICES_HEADER = '// Third-party notices: the packages this
 export const LICENSE_NOTICE_ENTRY = /^\/\/ --- (\S+)@(\S+) \((.*)\): (\S+) ---$/;
 
 /** Files under src/ that are not TypeScript and that adapters read at run time, copied to the same path in dist/. */
-export const ASSETS = [
-  // Codex's Stop hook runs it; codexFollowUpsHookPoc looks in assets/ beside itself.
-  'adapters/codex/assets/codexStopHookRunner.cjs',
-];
+export const ASSETS = [];
 
 /**
  * The files under src/ that may mark declarations @internal, which

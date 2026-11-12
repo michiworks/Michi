@@ -1,8 +1,8 @@
 import { createHash } from 'node:crypto';
-import type { PageBlock } from 'michi-shared';
+import { oneLine, type NarrationOption, type PageBlock } from 'michi-shared';
+import { chatHub } from '../../agents/chatHub';
 import { ensureAssistant } from '../../assistant/store';
 import { getDb } from '../db';
-import { saveMessage } from '../dbRepository';
 import { log } from '../logger';
 import { getPage } from '../pages/repository';
 import { listWorkspaceHomes } from '../pages/homePages';
@@ -12,23 +12,20 @@ import { getHomeState } from './firstRunStore';
 import { resolveMetaAgentBehaviour } from './settings';
 
 /**
- * The first run's messages in the Meta agent's window conversation: what it
- * reads at the start, one line per workspace home, and at the end what it
- * wrote with one question. They are stored as assistant messages of that
- * conversation under ids derived from the run, so a restart or a second
- * caller never posts one twice. No model call: the lines come from what the
- * run already holds, the end from the Spaces Home summary's own reply.
+ * The first run's messages in the agent's conversation V ("<name> · first
+ * look", DESIGN-v2 §3.3): what it reads at the start, one line per workspace
+ * home, and at the end what it wrote with one question. Each is posted as a
+ * turn of Michi's own through chatHub.postSelfMessage (queued behind V's
+ * running turn, one transaction, broadcast to the open windows), under an id
+ * derived from the run that is both its turn's and its message's, so a
+ * restart or a second caller never posts one twice. No model call: the lines
+ * come from what the run already holds, the end from the Spaces Home
+ * summary's own reply. The calls return once the post is queued.
  */
 
 /** Message metadata key; the window reads its options from here. */
 export const NARRATION_KEY = 'metaAgentNarration';
 export const FIRST_RUN_POLL_SECONDS = 60;
-
-export interface NarrationOption {
-  label: string;
-  /** Opens this conversation with `draft` in its composer instead of answering. */
-  open?: { nodeId: string; workspaceId: string; draft: string };
-}
 
 export interface Narration {
   kind: 'start' | 'workspace' | 'end' | 'notice';
@@ -64,25 +61,30 @@ function posted(id: string): boolean {
   return !!getDb().prepare('SELECT 1 FROM messages WHERE id=?').get(id);
 }
 
-/** Appends one assistant message; false when it is already there. Options become the conversation's follow-up rows. */
-function post(conversation: WindowConversation, id: string, text: string, narration: Narration, now: number): boolean {
+/**
+ * Queues one post into V; false when its message is already there. Its
+ * options become the conversation's follow-up chips. The post is stamped
+ * when chatHub writes it, not at the caller's `_now`.
+ */
+function post(conversation: WindowConversation, id: string, text: string, narration: Narration, _now: number): boolean {
   if (posted(id)) return false;
-  const seq = (getDb().prepare('SELECT COALESCE(MAX(seq), -1) AS seq FROM messages WHERE node_id=?').get(conversation.nodeId) as { seq: number }).seq + 1;
-  saveMessage({ id, node_id: conversation.nodeId, role: 'assistant', content: text, seq, created_at: now,
-    metadata: JSON.stringify({ [NARRATION_KEY]: narration }) });
-  if (narration.options?.length) {
-    getDb().prepare('UPDATE nodes SET follow_ups=?, follow_ups_source_message_id=? WHERE id=?')
-      .run(JSON.stringify(narration.options.map((option) => option.label)), id, conversation.nodeId);
-  }
+  const labels = narration.options?.map((option) => option.label) ?? [];
+  void chatHub.postSelfMessage({
+    chatId: conversation.nodeId,
+    nodeId: conversation.nodeId,
+    turnId: id,
+    messageId: id,
+    text,
+    metadata: { [NARRATION_KEY]: narration },
+    ...(labels.length ? { followUps: labels } : {}),
+    ownerUserId: null,
+  }).catch((error: unknown) => {
+    log.warn('scheduler', 'Meta agent narration not posted', { kind: narration.kind, error: error instanceof Error ? error.message : String(error) });
+  });
   return true;
 }
 
 const label = (value: string) => value.replace(/[[\]\n]/g, ' ').trim() || 'Untitled';
-
-function clip(value: string, max: number): string {
-  const flat = value.replace(/\s+/g, ' ').trim();
-  return flat.length > max ? `${flat.slice(0, max - 1)}…` : flat;
-}
 
 function homeLink(home: { workspaceName: string; homePageId: string | null }): string {
   return home.homePageId ? `[${label(home.workspaceName)}](michi://page/${home.homePageId})` : `**${label(home.workspaceName)}**`;
@@ -95,7 +97,7 @@ function standing(homePageId: string | null, ownerUserId: string): string | null
     const blocks = getPage(homePageId, ownerUserId).blocks as PageBlock[];
     if (!blocks.length) return '';
     const callout = blocks.find((block) => block.type === 'callout' && !block.edit) as { text?: string } | undefined;
-    return callout?.text?.trim() ? clip(callout.text, LINE_MAX) : null;
+    return callout?.text?.trim() ? oneLine(callout.text, LINE_MAX) : null;
   } catch {
     return null;
   }
@@ -143,7 +145,7 @@ export function narrateFirstRunProgress(ownerUserId: string, now: number): void 
     const run = home.firstRun!;
     let text: string;
     if (run.state === 'failed') {
-      text = `${homeLink(home)}: the home was not written: ${clip(run.error ?? 'unknown reason', LINE_MAX)} Retry it from the Spaces Home.`;
+      text = `${homeLink(home)}: the home was not written: ${oneLine(run.error ?? 'unknown reason', LINE_MAX)} Retry it from the Spaces Home.`;
     } else {
       const line = standing(home.homePageId, ownerUserId);
       const conversations = `${run.total} conversation${run.total === 1 ? '' : 's'}`;
@@ -176,10 +178,10 @@ export function firstRunEndPrompt(): string {
 type Obj = Record<string, unknown>;
 const isObject = (value: unknown): value is Obj => typeof value === 'object' && value !== null && !Array.isArray(value);
 const str = (value: unknown, max: number): string | null =>
-  typeof value === 'string' && value.trim() ? clip(value, max) : null;
+  typeof value === 'string' && value.trim() ? oneLine(value, max) : null;
 
 function conversationWorkspace(nodeId: string, ownerUserId: string): string | null {
-  const row = getDb().prepare("SELECT workspace_id FROM nodes WHERE id=? AND kind='chat' AND deleted_at IS NULL AND maintenance_job_id IS NULL")
+  const row = getDb().prepare("SELECT workspace_id FROM nodes WHERE id=? AND kind='chat' AND deleted_at IS NULL AND maintenance_job_id IS NULL AND scheduled_only_job_id IS NULL")
     .get(nodeId) as { workspace_id: string } | undefined;
   if (!row) return null;
   return listWorkspaceHomes(ownerUserId).some((home) => home.workspaceId === row.workspace_id) ? row.workspace_id : null;

@@ -1,51 +1,52 @@
-import { artifactTypeForPath as typeForPath, artifactHasImagePreview } from 'michi-shared';
-import { artifactImageUrl, downloadArtifactFile } from '../../services/api/artifacts';
-import { openPreferredUrl } from '../../services/openUrl';
-import React, { useCallback, useMemo, useState, useRef } from 'react';
-import { AnimatePresence } from 'motion/react';
-import { useChatStore } from '../../state/chatStore';
+import { artifactTypeForPath as typeForPath } from 'michi-shared';
+import { downloadArtifactFile } from '../../services/api/artifacts';
+import React, { useCallback, useEffect, useMemo, useState, useRef } from 'react';
+import { Ellipsis } from 'lucide-react';
+import { chatLabel, useChatNodeReader, useChatStore } from '../../state/chatStore';
 import type { ArtifactEntry } from '../../state/chatTypes';
 import { sanitizeContextName } from '../../lib/sanitizeContextName';
+import { kbd } from '../../lib/platform';
 import { getElectron } from '../../lib/electronBridge';
+import { artifactHostPath, parentDirectory } from '../../lib/workspaceFilePath';
 import { importWorkspaceFile, importWorkspaceFileUpload, linkWorkspaceFile } from '../../services/api';
-import { relativeTime } from '../../lib/relativeTime';
+import { usePhoneLayout } from '../../hooks/usePhoneLayout';
 import { Lightbox } from './Lightbox';
-import { manageFileType, MANAGE_COLORS } from './manage/tokens';
-import ContextMenu from '../ContextMenu';
+import ContextMenu, { MenuPresence, menuOpenKey, type MenuItem, type MenuSection } from '../ContextMenu';
 import { DrawerShell, type DrawerShellProps } from '../ui/DrawerShell';
 import { Button } from '../ui/controls';
 import { confirmDialog } from '../ui/ConfirmDialog';
+import { ArtifactPreview } from './artifacts/ArtifactPreview';
+import { artifactType, isEmbeddedArtifact, openArtifact as openArtifactWith } from './artifacts/artifactOpen';
+import {
+  artifactRowTime,
+  artifactTouchedAt,
+  artifactTypeLabel,
+  groupArtifactsByTime,
+} from './artifacts/artifactListModel';
+import { useArtifactHeads } from './artifacts/useArtifactHeads';
+import { InlineRenameInput } from '../ui/InlineRenameInput';
+import './artifacts/ArtifactsDrawer.css';
+import { isLocalProject } from '../../config/backendConnections';
 
 /**
- * 3a "Artifacts" sidebar — a right drawer (⌘⇧A) mirroring the Settings drawer
- * mechanism. Workspace-scoped, type-grouped (Documents / Files / Images /
- * Links), collapsible groups, newest-first within a group with favorite rows
- * floated to the top.
+ * The "Artifacts" right drawer (⌘⇧A): everything this workspace has saved,
+ * newest first in calendar groups (artifactListModel.ts), favorites on top.
  *
- * Accordion: a row is a single dense line; clicking it expands metadata + an
- * action bar in place (open-in-pane / cite / favorite / delete). Only one row is
- * expanded at a time. Type-aware behavior:
- *   - doc   → open in a read-only pane (markdown)               [v1: OS opener]
- *   - file  → open via OS default app (no built-in viewer)
- *   - image → open in the Lightbox
- *   - link  → open the URL in the default browser
- * Path-missing liveness is reported lazily: opening a moved/broken file just
- * surfaces the OS/opener error — there's no pre-flight probe.
+ * A row names the artifact by its page title or first heading when the file
+ * has one (useArtifactHeads), else by its @name; the second line says what
+ * it is and which conversation made it. A tap opens it as Manage and a chat's
+ * @mention also do (artifacts/artifactOpen.ts):
+ *   - link  → the URL in the default browser
+ *   - image → the Lightbox
+ *   - doc   → a FilePane (markdown)
+ *   - HTML  → a sandboxed preview in the drawer (ArtifactPreview)
+ *   - other → a download (or the OS opener for files outside the workspace)
+ * Everything else (cite, download, go to conversation, rename, favorite,
+ * delete) is in the row's ⋯ menu, which a long press or right-click also opens.
  */
 
-type ArtifactType = 'doc' | 'file' | 'image' | 'link';
-
-const TYPE_GROUPS: Array<{ key: ArtifactType; title: string }> = [
-  { key: 'doc', title: 'Documents' },
-  { key: 'file', title: 'Files' },
-  { key: 'image', title: 'Images' },
-  { key: 'link', title: 'Links' },
-];
-
-function artifactType(c: ArtifactEntry): ArtifactType {
-  if (c.type) return c.type;
-  return c.url ? 'link' : typeForPath(c.filePath);
-}
+/** A previewed page gets room on a desktop; a phone's drawer is already the screen. */
+const PREVIEW_WIDTH = 960;
 
 /** Host + trimmed path, for a compact link meta line. Falls back to the raw url. */
 function linkLabel(url: string): string {
@@ -57,7 +58,23 @@ function linkLabel(url: string): string {
   }
 }
 
-export default function ArtifactsDrawer({ open, onClose, motion, onPresenceChange }: Pick<DrawerShellProps, 'open' | 'onClose' | 'motion' | 'onPresenceChange'>) {
+type Menu = {
+  id: string;
+  x: number;
+  y: number;
+  /** The row a phone lifts the menu beside (long press or the row's ⋯). */
+  row: HTMLElement | null;
+  /** Opened from the preview's header: drops below its ⋯. */
+  header?: { top: number };
+  /** The ⋯ that opened it, whose second press closes it. */
+  trigger?: HTMLElement;
+};
+
+export default function ArtifactsDrawer({ open, onClose, motion, onPresenceChange, openArtifactId, onOpenArtifactHandled }: Pick<DrawerShellProps, 'open' | 'onClose' | 'motion' | 'onPresenceChange'> & {
+  /** An artifact another surface asked the drawer to open (showArtifactInDrawer). */
+  openArtifactId?: string | null;
+  onOpenArtifactHandled?: () => void;
+}) {
   const {
     activeProject,
     focusedNodeId,
@@ -66,47 +83,44 @@ export default function ArtifactsDrawer({ open, onClose, motion, onPresenceChang
     deleteContext,
     pinContext,
     openArtifactPane,
+    revealNode,
   } = useChatStore();
+  const readNode = useChatNodeReader();
+  const phone = usePhoneLayout();
 
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [uploading, setUploading] = useState(false);
   const [filter, setFilter] = useState('');
-  const [expandedId, setExpandedId] = useState<string | null>(null);
-  const [collapsed, setCollapsed] = useState<Set<ArtifactType>>(() => new Set());
   const [adding, setAdding] = useState(false);
   const [pasteVal, setPasteVal] = useState('');
   const [pasteErr, setPasteErr] = useState<string | null>(null);
   const [lightbox, setLightbox] = useState<{ src: string; name: string } | null>(null);
   const [renameId, setRenameId] = useState<string | null>(null);
-  const [renameDraft, setRenameDraft] = useState('');
-  const [ctxMenu, setCtxMenu] = useState<{ x: number; y: number; ctx: ArtifactEntry } | null>(null);
+  const [menu, setMenu] = useState<Menu | null>(null);
+  const [previewId, setPreviewId] = useState<string | null>(null);
 
   const artifacts = useMemo(() => activeProject?.artifacts ?? [], [activeProject]);
   const cwd = activeProject?.cwd;
+  const workspaceId = activeProject?.id;
+  const heads = useArtifactHeads(workspaceId, artifacts, open);
+  // Derived, so a deleted artifact's preview closes by itself.
+  const preview = previewId ? artifacts.find((c) => c.id === previewId) ?? null : null;
+  const previewing = !!(preview && workspaceId);
+  const menuArtifact = menu ? artifacts.find((c) => c.id === menu.id) ?? null : null;
+
+  const label = useCallback((c: ArtifactEntry) => heads.get(c.id)?.title || c.name, [heads]);
+  const isMissing = useCallback((c: ArtifactEntry) => heads.get(c.id)?.missing === true, [heads]);
+  /** The live conversation the artifact came from, if it still exists. */
+  const originOf = useCallback((c: ArtifactEntry) => {
+    const nodeId = c.origin?.nodeId;
+    const node = nodeId ? readNode(nodeId) : undefined;
+    return node && !node.deletedAt ? { nodeId: node.nodeId, title: node.title || chatLabel(node) } : null;
+  }, [readNode]);
 
   /** Absolute path for a file/doc/image artifact (null if unresolvable). */
   const absPath = useCallback(
-    (c: ArtifactEntry): string | null =>
-      c.kind === 'reference' || c.filePath.startsWith('/')
-        ? c.filePath
-        : cwd
-          ? `${cwd.replace(/\/$/, '')}/${c.filePath}`
-          : null,
-    [cwd],
-  );
-
-  /** Hand a file off to the OS default app (Electron only). */
-  const openViaOS = useCallback(
-    (c: ArtifactEntry) => {
-      const electron = getElectron();
-      if (!electron?.openPath) return;
-      const abs = absPath(c);
-      if (!abs) return;
-      void electron.openPath(abs).then((r) => {
-        if (!r.ok && r.error) console.warn(`openPath(${abs}) failed:`, r.error);
-      });
-    },
-    [absPath],
+    (c: ArtifactEntry): string | null => artifactHostPath(c, activeProject),
+    [activeProject],
   );
 
   const openInFolder = useCallback((c: ArtifactEntry) => {
@@ -115,120 +129,63 @@ export default function ArtifactsDrawer({ open, onClose, motion, onPresenceChang
     // Resolve to absolute, then open the parent directory.
     const abs = absPath(c);
     if (!abs) return;
-    const dir = abs.replace(/\/[^/]+$/, '') || '/';
-    void electron.openPath(dir);
+    void electron.openPath(parentDirectory(abs));
   }, [absPath]);
 
-  const handleRename = useCallback((id: string, newName: string) => {
-    const trimmed = newName.trim();
-    if (!trimmed || !/^[\p{L}\p{N}_-]+$/u.test(trimmed)) return;
-    updateContext(id, { name: trimmed });
-    setRenameId(null);
+  const download = useCallback(async (c: ArtifactEntry) => {
+    if (!workspaceId) return;
+    try { await downloadArtifactFile(workspaceId, c.filePath); }
+    catch (err) { setPreviewId(null); setPasteErr((err as Error).message); setAdding(true); }
+  }, [workspaceId]);
+
+  const handleRename = useCallback((id: string, name: string) => {
+    if (!/^[\p{L}\p{N}_-]+$/u.test(name)) return false;
+    updateContext(id, { name });
   }, [updateContext]);
 
-  // Let the innermost overlay consume Escape before closing the drawer.
+  const startRename = useCallback((c: ArtifactEntry) => {
+    setPreviewId(null);
+    setRenameId(c.id);
+  }, []);
+
+  const confirmDelete = useCallback((c: ArtifactEntry) => {
+    void confirmDialog({
+      title: 'Delete artifact',
+      message: `Delete artifact "${c.name}"?`,
+      confirmLabel: 'Delete',
+    }).then((ok) => { if (ok) deleteContext(c.id); });
+  }, [deleteContext]);
 
   const filtered = useMemo(() => {
     const norm = filter.trim().toLowerCase();
-    const rows = norm
-      ? artifacts.filter(
-          (c) =>
-            c.name.toLowerCase().includes(norm) ||
-            c.filePath.toLowerCase().includes(norm) ||
-            (c.url ?? '').toLowerCase().includes(norm),
-        )
-      : artifacts;
-    const byType = new Map<ArtifactType, ArtifactEntry[]>();
-    for (const c of rows) {
-      const t = artifactType(c);
-      const arr = byType.get(t) ?? [];
-      arr.push(c);
-      byType.set(t, arr);
-    }
-    for (const arr of byType.values()) {
-      arr.sort((a, b) => {
-        if (!!a.pinnedAt !== !!b.pinnedAt) return a.pinnedAt ? -1 : 1;
-        return (b.createdAt ?? 0) - (a.createdAt ?? 0);
-      });
-    }
-    return byType;
-  }, [artifacts, filter]);
+    if (!norm) return artifacts;
+    return artifacts.filter((c) =>
+      [c.name, heads.get(c.id)?.title, c.filePath, c.url, originOf(c)?.title]
+        .some((text) => text?.toLowerCase().includes(norm)));
+  }, [artifacts, filter, heads, originOf]);
+
+  // Today and Yesterday are as of this render; the list re-renders when it changes.
+  const groups = useMemo(() => groupArtifactsByTime(filtered, Date.now()), [filtered]);
 
   const openArtifact = useCallback(
-    async (c: ArtifactEntry) => {
-      const t = artifactType(c);
-      if (t === 'link') {
-        if (c.url) openPreferredUrl(c.url);
-        return;
-      }
-      // Reference artifacts are absolute disk paths *outside* the workspace;
-      // symlink artifacts are cwd-relative paths that resolve (through a symlink)
-      // to a file outside the workspace. For doc types in Electron, try to open
-      // them internally via the main-process readFile IPC (bypasses backend sandbox).
-      // Files >5MB are too large for in-app rendering — prompt to open externally.
-      // Fall back to OS opener for non-doc types or when Electron is unavailable.
-      if (c.kind === 'reference' || c.kind === 'symlink') {
-        if (t === 'doc') {
-          const electron = getElectron();
-          // Resolve to an absolute path so FilePane takes the Electron readFile
-          // branch (which bypasses the backend sandbox / realpath guard). Symlink
-          // artifacts store a cwd-relative filePath that the HTTP route rejects
-          // because the symlink target lives outside the workspace root.
-          const resolved = absPath(c);
-          // Size gate: if Electron statFile is available, check before opening
-          if (resolved && electron?.statFile) {
-            const stat = await electron.statFile(resolved);
-            if (stat && stat.size > 5 * 1024 * 1024) {
-              const sizeMB = (stat.size / (1024 * 1024)).toFixed(1);
-              const confirmed = await confirmDialog({
-                title: 'File too large',
-                message: `This file is ${sizeMB} MB (over 5 MB). Open in external app?`,
-                confirmLabel: 'Open externally',
-                cancelLabel: 'Cancel',
-                danger: false,
-              });
-              if (confirmed) openViaOS(c);
-              return;
-            }
-          }
-          try {
-            await openArtifactPane(resolved ?? c.filePath);
-            onClose();
-            return;
-          } catch {
-            // Fallback to OS if pane open fails
-          }
-        }
-        openViaOS(c);
-        return;
-      }
-      if (t === 'image' && artifactHasImagePreview(c.filePath)) {
-        // Embedded image (e.g. .attachments/...) — serve via the workspace
-        // image route, which resolves within cwd.
-        if (activeProject?.id) {
-          setLightbox({ src: artifactImageUrl(activeProject.id, c.filePath), name: c.name });
-        }
-        return;
-      }
-      // Embedded doc → open in ArtifactPane (markdown viewer) if available.
-      if (t === 'doc') {
-        try {
-          await openArtifactPane(c.filePath);
-          onClose();
-        } catch (err) {
-          // Fallback: open via OS if pane creation fails (e.g. no workspace cwd)
-          console.warn('[ArtifactsDrawer] openArtifactPane failed, falling back to OS opener:', err);
-          openViaOS(c);
-        }
-        return;
-      }
-      if (activeProject?.id) {
-        try { await downloadArtifactFile(activeProject.id, c.filePath); }
-        catch (err) { setPasteErr((err as Error).message); setAdding(true); }
-      }
-    },
-    [absPath, activeProject?.id, openArtifactPane, onClose, openViaOS],
+    (c: ArtifactEntry) => openArtifactWith(c, {
+      project: activeProject,
+      missing: isMissing(c),
+      openArtifactPane,
+      onLightbox: (src) => setLightbox({ src, name: c.name }),
+      onPreview: () => setPreviewId(c.id),
+      onError: (message) => { setPreviewId(null); setPasteErr(message); setAdding(true); },
+      onOpened: onClose,
+    }),
+    [activeProject, isMissing, openArtifactPane, onClose],
   );
+
+  useEffect(() => {
+    if (!openArtifactId) return;
+    onOpenArtifactHandled?.();
+    const requested = artifacts.find((c) => c.id === openArtifactId);
+    if (requested) void openArtifact(requested);
+  }, [openArtifactId, onOpenArtifactHandled, artifacts, openArtifact]);
 
   // "Cite" — ask the focused pane to append @name to its composer. The pane
   // owns the live draft (text + mention offsets), so it merges the token and
@@ -246,6 +203,35 @@ export default function ArtifactsDrawer({ open, onClose, motion, onPresenceChang
     },
     [focusedNodeId, onClose],
   );
+
+  const goToConversation = useCallback((nodeId: string) => {
+    if (!workspaceId) return;
+    revealNode(nodeId, { workspaceId });
+    onClose();
+  }, [workspaceId, revealNode, onClose]);
+
+  const menuSections = useCallback((c: ArtifactEntry): MenuSection[] => {
+    const t = artifactType(c);
+    const missing = isMissing(c);
+    const origin = originOf(c);
+    const reach: MenuItem[] = [];
+    if (focusedNodeId) reach.push({ id: 'cite', label: 'Cite in conversation', run: () => cite(c) });
+    if (t !== 'link' && isEmbeddedArtifact(c) && !missing && workspaceId) reach.push({ id: 'download', label: 'Download', run: () => void download(c) });
+    if (origin) reach.push({ id: 'goto', label: 'Go to conversation', run: () => goToConversation(origin.nodeId) });
+    // Revealing a folder needs the desktop shell; a browser (a phone) has none.
+    if (t !== 'link' && !missing && getElectron()?.openPath) reach.push({ id: 'open-folder', label: 'Open in Folder', run: () => openInFolder(c) });
+    const sections: MenuSection[] = [
+      { items: reach },
+      {
+        items: [
+          { id: 'rename', label: 'Rename', run: () => startRename(c) },
+          { id: c.pinnedAt ? 'unfavorite' : 'favorite', label: c.pinnedAt ? 'Remove from favorites' : 'Add to favorites', run: () => pinContext(c.id) },
+        ],
+      },
+      { items: [{ id: 'delete', label: 'Delete', danger: true, run: () => confirmDelete(c) }] },
+    ];
+    return sections.filter((section) => section.items.length > 0);
+  }, [isMissing, originOf, focusedNodeId, cite, workspaceId, download, goToConversation, openInFolder, startRename, pinContext, confirmDelete]);
 
   const handlePaste = useCallback(async () => {
     const raw = pasteVal.trim();
@@ -268,29 +254,29 @@ export default function ArtifactsDrawer({ open, onClose, motion, onPresenceChang
       return;
     }
     // Non-URL paste → save as a doc under .artifacts/ (requires a cwd).
-    if (!activeProject?.id || !cwd) {
+    if (!workspaceId || !cwd) {
       setPasteErr('Pasting text as a doc needs a workspace folder. Paste a URL to save a link.');
       return;
     }
     try {
       const stem = raw.split('\n', 1)[0].slice(0, 40) || 'note';
       const name = sanitizeContextName(stem, existing);
-      const result = await importWorkspaceFile(activeProject.id, cwd, `${name}.md`, raw);
+      const result = await importWorkspaceFile(workspaceId, cwd, `${name}.md`, raw);
       createContext(result.name, result.filePath, { size: result.size, type: 'doc', kind: 'embedded', source: 'user' });
       setPasteVal('');
       setAdding(false);
     } catch (err) {
       setPasteErr((err as Error).message);
     }
-  }, [pasteVal, artifacts, activeProject?.id, cwd, createContext]);
+  }, [pasteVal, artifacts, workspaceId, cwd, createContext]);
 
   const uploadFiles = async (files: File[]) => {
-    if (!activeProject?.id || !cwd || uploading) return;
+    if (!workspaceId || !cwd || uploading) return;
     setUploading(true);
     setPasteErr(null);
     try {
       for (const file of files) {
-        const result = await importWorkspaceFileUpload(activeProject.id, cwd, file);
+        const result = await importWorkspaceFileUpload(workspaceId, cwd, file);
         createContext(result.name, result.filePath, { size: result.size, type: typeForPath(result.filePath), kind: 'embedded', source: 'user' });
       }
     } catch (err) {
@@ -304,7 +290,7 @@ export default function ArtifactsDrawer({ open, onClose, motion, onPresenceChang
 
   const handlePickFile = useCallback(async () => {
     const electron = getElectron();
-    if (activeProject?.backendConnectionId || !electron?.chooseFiles) {
+    if ((activeProject && !isLocalProject(activeProject)) || !electron?.chooseFiles) {
       if (!cwd) {
         setPasteErr('Uploading files needs a workspace folder.');
         setAdding(true);
@@ -324,9 +310,9 @@ export default function ArtifactsDrawer({ open, onClose, motion, onPresenceChang
         // — and it persists with the workspace. Without a cwd there's nowhere to
         // put the link, so fall back to a bare reference (OS-open only; the agent
         // can't see it).
-        if (activeProject?.id && cwd) {
+        if (workspaceId && cwd) {
           try {
-            const result = await linkWorkspaceFile(activeProject.id, cwd, p);
+            const result = await linkWorkspaceFile(workspaceId, cwd, p);
             existing.push(result.name);
             createContext(result.name, result.filePath, {
               kind: 'symlink',
@@ -348,22 +334,43 @@ export default function ArtifactsDrawer({ open, onClose, motion, onPresenceChang
     } catch (err) {
       setPasteErr((err as Error).message);
     }
-  }, [artifacts, createContext, activeProject?.backendConnectionId, activeProject?.id, cwd]);
+  }, [artifacts, createContext, activeProject, workspaceId, cwd]);
 
+  const closePreview = useCallback(() => setPreviewId(null), []);
   const total = artifacts.length;
+  const now = Date.now();
 
   return (
     <DrawerShell
       open={open}
-      onClose={onClose}
+      // Inside a preview, Back and Escape (and the header's chevron) return to the list.
+      onClose={previewing ? closePreview : onClose}
+      onBack={previewing ? closePreview : undefined}
+      closeControl={previewing ? 'back' : 'close'}
+      width={previewing && !phone ? PREVIEW_WIDTH : undefined}
       motion={motion}
       onPresenceChange={onPresenceChange}
-      closeOnEscape={!lightbox && !ctxMenu}
-      title="Artifacts"
-      titleBadge={
+      title={previewing && preview ? <span className="artifacts-preview-title">{label(preview)}</span> : 'Artifacts'}
+      aria-label={previewing && preview ? `Artifact: ${label(preview)}` : undefined}
+      titleBadge={previewing ? undefined : (
         <span style={{ fontSize: 'var(--fs-sm)', color: 'var(--term-muted)', fontFamily: 'var(--ui-font)' }}>{total}</span>
-      }
-      headerActions={
+      )}
+      headerActions={previewing && preview ? (
+        <button
+          type="button"
+          className="ws-action-btn"
+          aria-label="More actions"
+          title="More actions"
+          onClick={(event) => {
+            const trigger = event.currentTarget;
+            const rect = trigger.getBoundingClientRect();
+            setMenu((open) => (open?.trigger === trigger ? null : { id: preview.id, x: rect.right, y: rect.bottom + 4, row: null, header: { top: rect.top - 4 }, trigger }));
+          }}
+          style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}
+        >
+          <Ellipsis size={16} aria-hidden="true" />
+        </button>
+      ) : (
         <>
           <button
             type="button"
@@ -387,312 +394,212 @@ export default function ArtifactsDrawer({ open, onClose, motion, onPresenceChang
             +
           </button>
         </>
-      }
+      )}
     >
-      <>
-        <input ref={fileInputRef} type="file" multiple hidden aria-label="Upload artifact files"
-          onChange={(event) => void uploadFiles(Array.from(event.target.files ?? []))} />
-        {uploading && <div role="status">Uploading files…</div>}
-        {/* Search */}
-        <div style={{ padding: '8px 12px', borderBottom: '1px solid var(--term-line)' }}>
-          <input
-            type="search"
-            className="ui-input"
-            value={filter}
-            onChange={(e) => setFilter(e.target.value)}
-            placeholder="Search artifacts…"
+      <div className="artifacts-body" data-phone={phone || undefined}>
+        {previewing && preview && workspaceId ? (
+          <ArtifactPreview
+            key={preview.id}
+            workspaceId={workspaceId}
+            artifact={preview}
+            label={label(preview)}
+            knownMissing={isMissing(preview)}
+            onDownload={() => void download(preview)}
+            onRemove={() => { deleteContext(preview.id); closePreview(); }}
           />
-        </div>
-
-        {/* Add bar (paste URL / text) */}
-        {adding && (
-          <div style={{ padding: '8px 12px', borderBottom: '1px solid var(--term-line)', display: 'flex', flexDirection: 'column', gap: 6 }}>
-            <textarea
-              className="ui-input"
-              autoFocus
-              value={pasteVal}
-              onChange={(e) => setPasteVal(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
-                  e.preventDefault();
-                  void handlePaste();
-                }
-              }}
-              placeholder="Paste a URL to save a link, or text to save a doc…  (⌘↵)"
-              rows={2}
-              style={{ resize: 'vertical' }}
-            />
-            {pasteErr && <div style={{ fontSize: 'var(--fs-sm)', color: 'var(--term-danger)' }}>{pasteErr}</div>}
-            <div style={{ display: 'flex', gap: 6, justifyContent: 'flex-end' }}>
-              <Button
-                variant="secondary"
-                size="sm"
-                onClick={() => { setAdding(false); setPasteVal(''); setPasteErr(null); }}
-              >
-                Cancel
-              </Button>
-              <Button variant="primary" size="sm" onClick={() => void handlePaste()}>
-                Save
-              </Button>
+        ) : (
+          <>
+            <input ref={fileInputRef} type="file" multiple hidden aria-label="Upload artifact files"
+              onChange={(event) => void uploadFiles(Array.from(event.target.files ?? []))} />
+            {uploading && <div role="status">Uploading files…</div>}
+            <div className="artifacts-search">
+              <input
+                type="search"
+                className="ui-input"
+                value={filter}
+                onChange={(e) => setFilter(e.target.value)}
+                placeholder="Search artifacts…"
+                aria-label="Search artifacts"
+              />
             </div>
-          </div>
-        )}
 
-        {/* Groups */}
-        <div style={{ flex: 1, minHeight: 0, overflowY: 'auto' }}>
-          {total === 0 && (
-            <div style={{ padding: '24px 14px', fontSize: 'var(--fs-md)', color: 'var(--term-muted)', fontStyle: 'italic', textAlign: 'center' }}>
-              — no artifacts yet · paste a URL or drop a file
-            </div>
-          )}
-          {TYPE_GROUPS.map((g) => {
-            const rows = filtered.get(g.key) ?? [];
-            if (rows.length === 0) return null;
-            const isCollapsed = collapsed.has(g.key);
-            return (
-              <section key={g.key}>
-                <div
-                  onClick={() =>
-                    setCollapsed((prev) => {
-                      const next = new Set(prev);
-                      if (next.has(g.key)) next.delete(g.key);
-                      else next.add(g.key);
-                      return next;
-                    })
-                  }
-                  style={{
-                    display: 'flex',
-                    alignItems: 'center',
-                    gap: 6,
-                    padding: '6px 12px',
-                    cursor: 'pointer',
-                    color: 'var(--term-muted)',
-                    fontFamily: 'var(--ui-font)',
-                    fontSize: 'var(--fs-sm)',
-                    letterSpacing: 'var(--ls-caps)',
-                    textTransform: 'uppercase',
-                    borderBottom: '1px solid color-mix(in srgb, var(--term-line) 50%, transparent)',
+            {/* Add bar (paste URL / text) */}
+            {adding && (
+              <div style={{ padding: '8px 12px', borderBottom: '1px solid var(--term-line)', display: 'flex', flexDirection: 'column', gap: 6 }}>
+                <textarea
+                  className="ui-input"
+                  autoFocus
+                  value={pasteVal}
+                  onChange={(e) => setPasteVal(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
+                      e.preventDefault();
+                      void handlePaste();
+                    }
                   }}
-                >
-                  <span style={{ width: 8, display: 'inline-block' }}>{isCollapsed ? '▸' : '▾'}</span>
-                  <span>{g.title}</span>
-                  <span style={{ color: 'var(--term-muted)' }}>· {rows.length}</span>
+                  placeholder={`Paste a URL to save a link, or text to save a doc…  (${kbd('mod', 'enter')})`}
+                  rows={2}
+                  style={{ resize: 'vertical' }}
+                />
+                {pasteErr && <div style={{ fontSize: 'var(--fs-sm)', color: 'var(--term-danger-text)' }}>{pasteErr}</div>}
+                <div style={{ display: 'flex', gap: 6, justifyContent: 'flex-end' }}>
+                  <Button
+                    variant="secondary"
+                    size="sm"
+                    onClick={() => { setAdding(false); setPasteVal(''); setPasteErr(null); }}
+                  >
+                    Cancel
+                  </Button>
+                  <Button variant="primary" size="sm" onClick={() => void handlePaste()}>
+                    Save
+                  </Button>
                 </div>
-                {!isCollapsed &&
-                  rows.map((c) => (
-                    <ArtifactRow
-                      key={c.id}
-                      c={c}
-                      expanded={expandedId === c.id}
-                      renaming={renameId === c.id}
-                      renameDraft={renameId === c.id ? renameDraft : ''}
-                      onRenameDraftChange={setRenameDraft}
-                      onRenameCommit={() => handleRename(c.id, renameDraft)}
-                      onRenameCancel={() => setRenameId(null)}
-                      onToggle={() => setExpandedId((cur) => (cur === c.id ? null : c.id))}
-                      onOpen={() => openArtifact(c)}
-                      onCite={focusedNodeId ? () => cite(c) : undefined}
-                      onPin={() => pinContext(c.id)}
-                      onRename={() => { setRenameId(c.id); setRenameDraft(c.name); }}
-                      onOpenInFolder={artifactType(c) !== 'link' ? () => openInFolder(c) : undefined}
-                      onDelete={() => {
-                        void confirmDialog({
-                          title: 'Delete artifact',
-                          message: `Delete artifact "${c.name}"?`,
-                          confirmLabel: 'Delete',
-                        }).then((ok) => { if (ok) deleteContext(c.id); });
-                      }}
-                      onContextMenu={(e) => {
-                        e.preventDefault();
-                        setCtxMenu({ x: e.clientX, y: e.clientY, ctx: c });
-                      }}
-                    />
-                  ))}
-              </section>
-            );
-          })}
-        </div>
+              </div>
+            )}
+
+            <div className="artifacts-list term-scrollbar">
+              {total === 0 && (
+                <p className="artifacts-empty">No artifacts yet. Paste a URL or add a file.</p>
+              )}
+              {total > 0 && groups.length === 0 && (
+                <p className="artifacts-empty">No artifacts match “{filter.trim()}”.</p>
+              )}
+              {groups.map((g) => (
+                <section key={g.key} aria-label={g.label}>
+                  <h3 className="artifacts-group__label">
+                    <span>{g.label}</span>
+                    <span className="artifacts-group__count">{g.rows.length}</span>
+                  </h3>
+                  <ul className="artifacts-group">
+                    {g.rows.map((c) => (
+                      <ArtifactRow
+                        key={c.id}
+                        c={c}
+                        label={label(c)}
+                        meta={rowMeta(c, isMissing(c), originOf(c)?.title)}
+                        missing={isMissing(c)}
+                        time={artifactRowTime(artifactTouchedAt(c), now, g.byDay)}
+                        renaming={renameId === c.id}
+                        onRename={(name) => handleRename(c.id, name)}
+                        onRenameEnd={() => setRenameId(null)}
+                        onOpen={() => void openArtifact(c)}
+                        onMenu={(row, point, trigger) => setMenu((open) => (trigger && open?.trigger === trigger ? null : { id: c.id, x: point.x, y: point.y, row, trigger }))}
+                      />
+                    ))}
+                  </ul>
+                </section>
+              ))}
+            </div>
+          </>
+        )}
+      </div>
 
       {lightbox && (
         <Lightbox src={lightbox.src} filename={lightbox.name} onClose={() => setLightbox(null)} />
       )}
 
-      <AnimatePresence>{ctxMenu && (
+      <MenuPresence>{menu && menuArtifact && (
         <ContextMenu
-          key={`${ctxMenu.x}:${ctxMenu.y}`}
-          x={ctxMenu.x}
-          y={ctxMenu.y}
-          onClose={() => setCtxMenu(null)}
-          sections={[{
-            items: [
-              ...(artifactType(ctxMenu.ctx) !== 'link' ? [{
-                id: 'open-folder',
-                label: 'Open in Folder',
-                keys: 'F',
-                run: () => { openInFolder(ctxMenu.ctx); setCtxMenu(null); },
-              }] : []),
-              {
-                id: 'rename',
-                label: 'Rename',
-                keys: 'R',
-                run: () => { setRenameId(ctxMenu.ctx.id); setRenameDraft(ctxMenu.ctx.name); setCtxMenu(null); },
-              },
-              {
-                id: 'delete',
-                label: 'Delete',
-                keys: 'D',
-                danger: true,
-                run: () => {
-                  void confirmDialog({
-                    title: 'Delete artifact',
-                    message: `Delete artifact "${ctxMenu.ctx.name}"?`,
-                    confirmLabel: 'Delete',
-                  }).then((ok) => { if (ok) deleteContext(ctxMenu.ctx.id); });
-                  setCtxMenu(null);
-                },
-              },
-            ],
-          }]}
+          key={menuOpenKey(menu)}
+          x={menu.x}
+          y={menu.y}
+          anchor={menu.row}
+          anchorBottom={menu.header?.top}
+          preferBelow={!!menu.header}
+          trigger={menu.trigger}
+          onClose={() => setMenu(null)}
+          sections={menuSections(menuArtifact).map((section) => ({
+            items: section.items.map((item) => ({ ...item, run: () => { setMenu(null); item.run(); } })),
+          }))}
         />
-      )}</AnimatePresence>
-      </>
+      )}</MenuPresence>
     </DrawerShell>
   );
 }
 
+/** Second line: what it is, then where it came from (or that its file is gone). */
+function rowMeta(c: ArtifactEntry, missing: boolean, origin: string | undefined): React.ReactNode {
+  const t = artifactType(c);
+  const type = artifactTypeLabel(c, t);
+  if (missing) return <>{type} · <span className="artifacts-row__missing">File missing</span></>;
+  if (t === 'link' && c.url) return `${type} · ${linkLabel(c.url)}`;
+  return origin ? `${type} · from ${origin}` : type;
+}
+
 function ArtifactRow({
   c,
-  expanded,
+  label,
+  meta,
+  missing,
+  time,
   renaming,
-  renameDraft,
-  onRenameDraftChange,
-  onRenameCommit,
-  onRenameCancel,
-  onToggle,
-  onOpen,
-  onCite,
-  onPin,
   onRename,
-  onOpenInFolder,
-  onDelete,
-  onContextMenu,
+  onRenameEnd,
+  onOpen,
+  onMenu,
 }: {
   c: ArtifactEntry;
-  expanded: boolean;
+  label: string;
+  meta: React.ReactNode;
+  missing: boolean;
+  time: string;
   renaming: boolean;
-  renameDraft: string;
-  onRenameDraftChange: (v: string) => void;
-  onRenameCommit: () => void;
-  onRenameCancel: () => void;
-  onToggle: () => void;
+  /** False: artifacts can't take that name, and the field stays open. */
+  onRename: (name: string) => boolean | void;
+  onRenameEnd: () => void;
   onOpen: () => void;
-  onCite?: () => void;
-  onPin: () => void;
-  onRename: () => void;
-  onOpenInFolder?: () => void;
-  onDelete: () => void;
-  onContextMenu: (e: React.MouseEvent) => void;
+  onMenu: (row: HTMLElement, point: { x: number; y: number }, trigger?: HTMLElement) => void;
 }) {
-  const t = artifactType(c);
-  const isLink = t === 'link';
-  const ft = isLink ? { label: 'url', color: MANAGE_COLORS.link } : manageFileType(c.name);
-
+  const text = (
+    <span className="artifacts-row__text">
+      {renaming ? (
+        <InlineRenameInput
+          className="ui-input artifacts-row__rename"
+          autoFocus
+          aria-label={`Rename ${c.name}`}
+          value={c.name}
+          onCommit={onRename}
+          onEnd={onRenameEnd}
+          blur="cancel"
+        />
+      ) : (
+        <span className="artifacts-row__title">{label}</span>
+      )}
+      <span className="artifacts-row__meta">{meta}</span>
+    </span>
+  );
   return (
-    <div
-      style={{ borderBottom: '1px solid color-mix(in srgb, var(--term-line) 35%, transparent)' }}
-      onContextMenu={onContextMenu}
+    <li
+      className="artifacts-row"
+      data-missing={missing || undefined}
+      data-context-target=""
+      onContextMenu={(event) => {
+        event.preventDefault();
+        onMenu(event.currentTarget, { x: event.clientX, y: event.clientY });
+      }}
     >
-      {/* Dense single-line row */}
-      <div
-        onClick={renaming ? undefined : onToggle}
-        onDoubleClick={renaming ? undefined : onOpen}
-        style={{
-          display: 'flex',
-          alignItems: 'center',
-          gap: 8,
-          padding: '5px 12px',
-          cursor: renaming ? 'default' : 'pointer',
-          background: expanded ? 'var(--term-alt)' : 'transparent',
-          fontFamily: 'var(--ui-font)',
-          fontSize: 'var(--fs-md)',
-          color: 'var(--term-fg)',
+      {renaming ? (
+        <div className="artifacts-row__open">{text}</div>
+      ) : (
+        // A titled row keeps its @name a hover away, for citing by hand.
+        <button type="button" className="artifacts-row__open" onClick={onOpen} title={label === c.name ? undefined : `@${c.name}`}>
+          {text}
+          <span className="artifacts-row__time">{time}</span>
+        </button>
+      )}
+      <button
+        type="button"
+        className="artifacts-row__more"
+        aria-label={`More actions for ${c.name}`}
+        onClick={(event) => {
+          const rect = event.currentTarget.getBoundingClientRect();
+          const row = event.currentTarget.closest('li');
+          if (row) onMenu(row, { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 }, event.currentTarget);
         }}
       >
-        <span style={{ width: 26, fontSize: 'var(--fs-2xs)', color: ft.color, letterSpacing: 'var(--ls-wide)', flexShrink: 0, textTransform: 'uppercase' }}>
-          {ft.label}
-        </span>
-        {c.source === 'agent' && (
-          <span title="agent-created" style={{ width: 5, height: 5, borderRadius: 'var(--ui-radius-pill)', background: 'var(--term-mauve)', flexShrink: 0 }} />
-        )}
-        {c.pinnedAt && (
-          <span title="favorite" style={{ fontSize: 'var(--fs-xs)', color: 'var(--term-accent)', flexShrink: 0 }}>★</span>
-        )}
-        {renaming ? (
-          <input
-            className="ui-input"
-            autoFocus
-            value={renameDraft}
-            onChange={(e) => onRenameDraftChange(e.target.value)}
-            onKeyDown={(e) => {
-              if (e.key === 'Enter') onRenameCommit();
-              else if (e.key === 'Escape') onRenameCancel();
-            }}
-            onBlur={onRenameCancel}
-            onClick={(e) => e.stopPropagation()}
-            style={{ flex: 1, padding: '1px 4px', minWidth: 0 }}
-          />
-        ) : (
-          <span style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{c.name}</span>
-        )}
-        {!renaming && (
-          <span style={{ fontSize: 'var(--fs-xs)', color: 'var(--term-muted)', flexShrink: 0 }}>{relativeTime(c.updatedAt)}</span>
-        )}
-      </div>
-
-      {/* Expanded metadata + action bar */}
-      {expanded && !renaming && (
-        <div style={{ padding: '2px 12px 10px 38px', display: 'flex', flexDirection: 'column', gap: 6 }}>
-          <div style={{ fontSize: 'var(--fs-sm)', color: 'var(--term-muted)', fontFamily: 'var(--ui-font)', wordBreak: 'break-all' }}>
-            {isLink ? linkLabel(c.url ?? '') : `${c.kind === 'reference' ? '↗ ' : c.kind === 'symlink' ? '⇄ ' : ''}${c.filePath}`}
-          </div>
-          {c.origin?.nodeId && (
-            <div style={{ fontSize: 'var(--fs-sm)', color: 'var(--term-muted)', fontFamily: 'var(--ui-font)' }}>
-              from thread · {c.origin.nodeId.slice(0, 8)}
-            </div>
-          )}
-          {isLink && (
-            <div style={{ fontSize: 'var(--fs-xs)', color: 'var(--term-muted)', fontStyle: 'italic' }}>
-              Injected as <code>[Link: …]</code> — the agent won't auto-fetch it.
-            </div>
-          )}
-          <div style={{ display: 'flex', gap: 4, marginTop: 2, flexWrap: 'wrap' }}>
-            <Button variant="action" onClick={onOpen}>
-              {isLink ? 'Open ↗' : 'Open'}
-            </Button>
-            {onOpenInFolder && (
-              <Button variant="action" onClick={onOpenInFolder}>
-                Open in Folder
-              </Button>
-            )}
-            {onCite && (
-              <Button variant="action" onClick={onCite}>
-                Cite
-              </Button>
-            )}
-            <Button variant="action" onClick={onRename}>
-              Rename
-            </Button>
-            <Button variant="action" onClick={onPin}>
-              {c.pinnedAt ? 'Remove from favorites' : 'Add to favorites'}
-            </Button>
-            <span style={{ flex: 1 }} />
-            <Button variant="action" danger onClick={onDelete}>
-              Delete
-            </Button>
-          </div>
-        </div>
-      )}
-    </div>
+        <Ellipsis size={16} aria-hidden="true" />
+      </button>
+    </li>
   );
 }
 

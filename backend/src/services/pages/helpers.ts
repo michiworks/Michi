@@ -1,14 +1,10 @@
 import { randomUUID } from 'node:crypto';
+import type { PageHelperDescriptor } from 'michi-shared';
 import { getDb } from '../db';
 import { saveNode, saveTree } from '../dbRepository';
+import { liveConversationSql } from '../nodeLifecycleSql';
 import { PageWriteError, invalidatePages, pagesTransaction } from './core';
 import { pageRecord } from './repository';
-
-export interface PageHelperDescriptor {
-  workspaceId: string;
-  treeId: string;
-  nodeId: string;
-}
 
 function currentHelper(pageId: string): PageHelperDescriptor | null {
   const row = getDb().prepare(`
@@ -16,8 +12,7 @@ function currentHelper(pageId: string): PageHelperDescriptor | null {
       FROM pages p JOIN nodes n ON n.id=p.helper_node_id
       JOIN trees t ON t.id=n.tree_id AND t.workspace_id=p.workspace_id
      WHERE p.id=? AND p.deleted_at IS NULL AND n.page_id=p.id
-       AND n.deleted_at IS NULL AND n.purged_at IS NULL AND n.status!='archived'
-       AND t.archived_at IS NULL
+       AND ${liveConversationSql({ node: 'n', tree: 't' })}
   `).get(pageId) as { workspace_id: string; tree_id: string; node_id: string } | undefined;
   return row ? { workspaceId: row.workspace_id, treeId: row.tree_id, nodeId: row.node_id } : null;
 }
@@ -27,8 +22,7 @@ function activeHelperForPage(pageId: string): PageHelperDescriptor | null {
     SELECT p.workspace_id, n.tree_id, n.id AS node_id
       FROM pages p JOIN nodes n ON n.page_id=p.id
       JOIN trees t ON t.id=n.tree_id AND t.workspace_id=p.workspace_id
-     WHERE p.id=? AND p.deleted_at IS NULL AND n.deleted_at IS NULL
-       AND n.purged_at IS NULL AND n.status!='archived' AND t.archived_at IS NULL
+     WHERE p.id=? AND p.deleted_at IS NULL AND ${liveConversationSql({ node: 'n', tree: 't' })}
   `).get(pageId) as { workspace_id: string; tree_id: string; node_id: string } | undefined;
   return row ? { workspaceId: row.workspace_id, treeId: row.tree_id, nodeId: row.node_id } : null;
 }
@@ -38,7 +32,7 @@ export function ensurePageHelper(pageId: string, ownerUserId: string, now = Date
   try { return pagesTransaction(() => {
     const page = pageRecord(pageId, ownerUserId, { write: true });
     // A helper chat would be created in the home page's workspace, which for the Spaces Home is the system workspace.
-    if (page.role !== null) throw new PageWriteError(409, 'invalid', 'Home pages are edited through the Meta agent, not a page helper');
+    if (page.role !== null) throw new PageWriteError(409, 'invalid', 'Home pages are edited through Pages upkeep, not a page helper');
     const existing = currentHelper(pageId);
     if (existing) return existing;
 

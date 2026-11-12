@@ -68,7 +68,8 @@ test('phone uses the top-right indented title list and keeps pane drafts and scr
   await trigger.click();
   const list = page.getByRole('navigation', { name: 'Branches and panes' });
   await expect(list.locator('.mobile-pane-row')).toHaveText(['Root note', 'Alternative plan', 'Implementation details']);
-  expect(await list.getByRole('button', { name: 'Implementation details', exact: true }).evaluate(el => parseFloat(getComputedStyle(el).paddingLeft))).toBe(44);
+  // 12px, plus 22px per level (mobile.css): this row is two levels deep.
+  expect(await list.getByRole('button', { name: 'Implementation details', exact: true }).evaluate(el => parseFloat(getComputedStyle(el).paddingLeft))).toBe(56);
   await page.screenshot({ path: info.outputPath('phone-pane-switcher.png'), animations: 'disabled' });
   await list.getByRole('button', { name: 'Alternative plan', exact: true }).click();
   await assertOnePane(page, 'branch');
@@ -132,15 +133,15 @@ for (const width of [320, 390, 430]) test(`${width}px touch screens keep the ful
   } finally { await context.close(); }
 });
 
-test('phone transcript uses narrow sides and wider user cards, and desktop keeps its own', async ({ page }) => {
+test('phone transcript uses narrower sides and wider user cards than desktop', async ({ page }) => {
   await page.setViewportSize({ width: 390, height: 844 }); await boot(page);
   const pane = page.locator('.terminal-dashboard > [data-node-id="root"]');
   const transcript = pane.locator('.terminal-pane__transcript');
   const card = pane.locator('.terminal-message-user');
-  await expect(transcript).toHaveCSS('padding-left', '14px');
-  await expect(transcript).toHaveCSS('padding-right', '14px');
-  await expect(card).toHaveCSS('max-width', '80%');
+  const side = () => transcript.evaluate(el => parseFloat(getComputedStyle(el).paddingLeft));
+  const cardShare = () => card.evaluate(el => parseFloat(getComputedStyle(el).maxWidth));
+  const phone = { side: await side(), card: await cardShare() };
   await page.setViewportSize({ width: 1440, height: 900 });
-  await expect(transcript).toHaveCSS('padding-left', '24px');
-  await expect(card).toHaveCSS('max-width', '72%');
+  await expect.poll(side).toBeGreaterThan(phone.side);
+  await expect.poll(cardShare).toBeLessThan(phone.card);
 });

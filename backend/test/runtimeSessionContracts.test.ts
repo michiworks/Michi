@@ -75,7 +75,7 @@ test('Pi joins pending acquire, rejects owner/profile reuse, and release waits f
   const opts = { sessionId: 'node', cwd: '/tmp', owner: chatOwner('node'), profileHash: 'hash' };
   const a = runtime.newSession(opts);
   const b = runtime.newSession(opts);
-  const badOwner = assert.rejects(runtime.newSession({ ...opts, owner: chatOwner('other') }), /different owner/);
+  const badOwner = assert.rejects(runtime.newSession({ ...opts, owner: chatOwner('other') }), /Owner mismatch/);
   const badProfile = assert.rejects(runtime.newSession({ ...opts, profileHash: 'other' }), /profile hash mismatch/);
   const releasing = runtime.releaseSession('node', opts.owner);
   gate.resolve();

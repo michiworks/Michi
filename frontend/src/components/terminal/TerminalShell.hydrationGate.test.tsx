@@ -52,7 +52,7 @@ vi.mock('../../state/chatStore', async () => {
     }),
     useStructuralSelector: (s: (n: Record<string, unknown>) => unknown) => s({}),
     useChatNodesSnapshot: () => ({}),
-    useNodesSelector: () => ({}),
+    useNodesSelector: (s: (n: Record<string, unknown>) => unknown) => s({}),
     useChatNode: () => null,
     chatLabel: () => '',
   };
@@ -72,10 +72,14 @@ describe('TerminalShell hydration gate', () => {
     expect(document.querySelector('.terminal-topbar')).not.toBeNull();
     expect(document.querySelector('.terminal-sidebar')).not.toBeNull();
     expect(screen.getByRole('button', { name: 'Settings' })).toBeTruthy();
+    // The topbar's Search waits for workspaces.
     expect(screen.getByRole('button', { name: 'Search' }).hasAttribute('disabled')).toBe(true);
     expect(screen.queryByText(/new workspace/i)).toBeNull();
     expect(screen.queryByText('No project chats')).toBeNull();
-    fireEvent.click(screen.getByText('Workspaces'));
+    // Neither view of a list it does not have yet, nor its way to Workspaces.
+    expect(screen.queryByRole('tablist', { name: 'Sidebar view' })).toBeNull();
+    expect(screen.queryByRole('button', { name: /^All \d+ workspaces$/ })).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: 'New chat' }));
     expect(screen.getByRole('status', { name: 'Loading workspaces' })).toBeTruthy();
   });
 

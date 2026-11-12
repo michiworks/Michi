@@ -31,6 +31,22 @@ export interface DurableUserInput {
   status: 'pending' | 'answered' | 'skipped' | 'interrupted';
 }
 
+// Message ids of a turn, stored in data.db: keep their formats.
+/** The assistant message of a turn a person started (ChatHub.startTurn). */
+export function userTurnAssistantId(nodeId: string, turnId: string): string {
+  return `a-${nodeId}-${turnId}`;
+}
+
+/** The assistant message of a self-turn: backend-requested or the runtime's own. */
+export function selfTurnAssistantId(nodeId: string, turnId: string): string {
+  return `self-${nodeId}-${turnId}`;
+}
+
+/** The user message of the turn whose assistant message is assistantId. */
+export function userMessageIdFor(assistantId: string): string {
+  return `u-${assistantId}`;
+}
+
 /** Stable fallback for older envelopes with no interactionId. */
 export function userInputInteractionId(turnId: string, requestId: number): string {
   return `${turnId}:input:${requestId}`;
@@ -124,12 +140,15 @@ export function steeredUserMessage(data: Extract<ChatStreamEvent, { event: 'stee
 }
 
 const SENTINEL_PREFIXES = ['[TITLE:', '[BRANCH-OVERVIEW:', '[FOLLOW-UP'] as const;
-const INLINE_TITLE_RE = /\[TITLE:\s*([^\]]+)\]/i;
+// One line each, like the sentinels scanTurnMetadataSentinels cuts. An
+// overview runs to its line's last `]`, so it may contain brackets.
+const INLINE_TITLE_RE_G = /\[TITLE:[ \t]*([^\]\n\r]+)\]/gi;
 const PROSE_TITLE_RE = /^\s*(?:#+\s*)?\**\s*title\s*[:：]\s*\**\s*(.+?)\s*\**\s*$/im;
-const INLINE_BRANCH_OVERVIEW_RE = /\[BRANCH-OVERVIEW:\s*([^\]\n\r]+)\]/i;
-const INLINE_BRANCH_OVERVIEW_RE_G = /\[BRANCH-OVERVIEW:\s*[^\]\n\r]+\]/gi;
+const INLINE_BRANCH_OVERVIEW_RE_G = /\[BRANCH-OVERVIEW:[ \t]*([^\n\r]+)\]/gi;
 const INLINE_FOLLOW_UP_RE = /\[FOLLOW-UP\s+([1-3])\s*(?:\/\s*3)?\s*:\s*([^\]\n\r]*?)(?:\]|(?=\s*\[FOLLOW-UP\s+[1-3])|(?=[\n\r])|$)/gi;
 const INLINE_FOLLOW_UPS_RE = /\[FOLLOW-UPS:\s*([^\]]+)\]/gi;
+// INLINE_FOLLOW_UP_RE's third sentinel without its end-of-input close: mid-stream that is a half-written one.
+const LOST_BRACKET_THIRD_FOLLOW_UP_RE_G = /\[FOLLOW-UP\s+3\s*(?:\/\s*3)?\s*:\s*([^\]\n\r]*?)(?:\]|[\n\r]|\s*\[FOLLOW-UP\s+[1-3])/gi;
 const PROSE_FOLLOW_UP_RE = /(?:^|\n)[\s#*>_`-]*follow[-\s]?up\s+questions?\s*[:：][\s*_`]*/i;
 
 export interface ExtractedTurnMetadata {
@@ -138,8 +157,27 @@ export interface ExtractedTurnMetadata {
   branchOverview?: string;
 }
 
+/**
+ * Whether streamed answer text has finished its third follow-up sentinel as
+ * the renderers read it (followUpsMatch): in the last group of follow-up
+ * lines, closed by `]` or its line's end; failing such a group, the lost-`]`
+ * reading. An empty third one is none, as the renderers drop it. Unlike the
+ * renderers, the end of the text does not close it.
+ */
+export function hasClosedFollowUpSentinels(text: string): boolean {
+  const group = lastFollowUpLineGroup(text);
+  if (group.length > 0) return group.some((item) => item.index === 2 && item.closed);
+  return [...text.matchAll(LOST_BRACKET_THIRD_FOLLOW_UP_RE_G)].some((match) => match[1].trim() !== '');
+}
+
+/** Matches of a global sentinel pattern whose `[` is not quoted in inline code. */
+function unquotedMatches(raw: string, pattern: RegExp): RegExpMatchArray[] {
+  const quoted = inlineCodeBrackets(raw);
+  return [...raw.matchAll(pattern)].filter((match) => !quoted.has(match.index ?? -1));
+}
+
 function titleMatch(raw: string): { start: number; end: number; title: string } | null {
-  const inline = raw.match(INLINE_TITLE_RE);
+  const [inline] = unquotedMatches(raw, INLINE_TITLE_RE_G);
   if (inline?.index !== undefined) {
     return { start: inline.index, end: inline.index + inline[0].length, title: inline[1].trim() };
   }
@@ -150,7 +188,84 @@ function titleMatch(raw: string): { start: number; end: number; title: string } 
   return null;
 }
 
+const FOLLOW_UP_START_RE_G = /\[FOLLOW-UP\s+([1-3])\s*(?:\/\s*3)?\s*:\s*/gi;
+/** Sentinels that end at the last `]` of their line. */
+const LINE_SENTINEL_PREFIX_RE = /^\[(?:FOLLOW-UP\s+[1-3]|BRANCH-OVERVIEW:)/i;
+const METADATA_LINE_RE = /^\[(?:TITLE|BRANCH-OVERVIEW):/i;
+
+interface FollowUpSentinel {
+  index: number;
+  followUp: string;
+  start: number;
+  /** Ended by its `]` (in lastFollowUpLineGroup, also by its line's end). */
+  closed: boolean;
+}
+
+/**
+ * The `[FOLLOW-UP n/3: …]` sentinels on one line. Each runs to the last `]`
+ * before the next one or the end of the line, so a question may itself contain
+ * brackets (`app/[slug]`, `[TITLE:]`). A start in `quoted` (inline code) is prose.
+ * A line that is a single follow-up may have lost its closing `]`.
+ */
+export function parseFollowUpSentinelLine(
+  line: string,
+  quoted: ReadonlySet<number> = inlineCodeBrackets(line),
+  offset = 0,
+): FollowUpSentinel[] {
+  const starts = [...line.matchAll(FOLLOW_UP_START_RE_G)].filter((match) => !quoted.has(offset + (match.index ?? -1)));
+  return starts.flatMap((match, i) => {
+    const start = match.index ?? 0;
+    const segment = line.slice(start, starts[i + 1]?.index ?? line.length).trimEnd();
+    const closed = segment.endsWith(']');
+    if (!closed && (starts.length > 1 || line.slice(0, start).trim())) return [];
+    const followUp = segment.slice(match[0].length, closed ? -1 : undefined).trim();
+    return followUp ? [{ index: Number(match[1]) - 1, followUp, start: offset + start, closed }] : [];
+  });
+}
+
+/**
+ * The last group of follow-up lines outside fenced code. Blank lines and the
+ * other metadata lines may sit between the lines of one group.
+ */
+function lastFollowUpLineGroup(raw: string): FollowUpSentinel[] {
+  const quoted = inlineCodeBrackets(raw);
+  let group: FollowUpSentinel[] = [];
+  let last = group;
+  let open = false;
+  let fence = false;
+  let offset = 0;
+  for (const line of raw.split('\n')) {
+    const lineOffset = offset;
+    offset += line.length + 1;
+    const trimmed = line.trim();
+    if (/^(?:```|~~~)/.test(trimmed)) { fence = !fence; open = false; continue; }
+    if (fence) continue;
+    const items = parseFollowUpSentinelLine(line, quoted, lineOffset);
+    if (items.length > 0) {
+      if (!open) group = [];
+      const ended = offset <= raw.length;
+      group.push(...items.map((item) => ({ ...item, closed: item.closed || ended })));
+      last = group;
+      open = true;
+    } else if (trimmed && !METADATA_LINE_RE.test(trimmed)) {
+      open = false;
+    }
+  }
+  return last;
+}
+
+function lineFollowUpsMatch(raw: string): { followUps: string[]; cutStart: number } | null {
+  const last = lastFollowUpLineGroup(raw);
+  const slots: string[] = [];
+  for (const item of last) slots[item.index] = item.followUp;
+  const followUps = slots.filter(Boolean).slice(0, 3);
+  return followUps.length > 0 ? { followUps, cutStart: last[0].start } : null;
+}
+
 function followUpsMatch(raw: string): { followUps: string[]; cutStart: number } | null {
+  const byLine = lineFollowUpsMatch(raw);
+  if (byLine) return byLine;
+  // Sentinels that lost their closing `]`.
   INLINE_FOLLOW_UP_RE.lastIndex = 0;
   const items = [...raw.matchAll(INLINE_FOLLOW_UP_RE)].flatMap((match) => {
     if (match.index === undefined) return [];
@@ -197,10 +312,22 @@ function followUpsMatch(raw: string): { followUps: string[]; cutStart: number } 
   return null;
 }
 
+/**
+ * The branch overview an answer ends with: the last one-line marker outside
+ * inline code that has text. The preamble asks for it on the very last line,
+ * and an answer may quote the format earlier.
+ */
+export function extractBranchOverview(raw: string): string | null {
+  const overviews = unquotedMatches(raw, INLINE_BRANCH_OVERVIEW_RE_G)
+    .map((match) => match[1].trim())
+    .filter(Boolean);
+  return overviews[overviews.length - 1] ?? null;
+}
+
 /** Parse the text fallback used by runtimes that cannot emit metadata events. */
 export function extractTurnMetadata(raw: string): ExtractedTurnMetadata {
   const title = titleMatch(raw)?.title;
-  const branchOverview = raw.match(INLINE_BRANCH_OVERVIEW_RE)?.[1]?.trim();
+  const branchOverview = extractBranchOverview(raw);
   const followUps = followUpsMatch(raw)?.followUps;
   return {
     ...(title ? { title } : {}),
@@ -221,10 +348,23 @@ export function finalizeTurnContent(raw: string): string {
   }
   const followUps = followUpsMatch(withoutTitle);
   const answer = followUps ? withoutTitle.slice(0, followUps.cutStart) : withoutTitle;
-  return stripTurnMetadataSentinels(answer)
-    .replace(INLINE_BRANCH_OVERVIEW_RE_G, '')
+  const visible = stripTurnMetadataSentinels(answer);
+  const quoted = inlineCodeBrackets(visible);
+  return visible
+    .replace(INLINE_BRANCH_OVERVIEW_RE_G, (match: string, _overview: string, offset: number) => (quoted.has(offset) ? match : ''))
     .replace(/\n[ \t]*\n[ \t]*\n+/g, '\n\n')
     .trim();
+}
+
+/**
+ * A turn left something to read: finalized content (finalizeTurnContent), or a
+ * tool call, image or question. A turn that only thought, or left only its
+ * title, follow-ups or branch overview, did not. It decides whether a turn
+ * counts toward a node's completion facts, on the server and in a window.
+ */
+export function turnLeftAnswer(content: string, blocks: readonly { kind: string }[]): boolean {
+  if (content.trim()) return true;
+  return blocks.some((block) => block.kind === 'tool' || block.kind === 'image' || block.kind === 'user-input');
 }
 
 function couldStillBeSentinel(value: string): boolean {
@@ -234,23 +374,81 @@ function couldStillBeSentinel(value: string): boolean {
   );
 }
 
-/** Strip completed or partial Michi metadata sentinels from visible content. */
-export function stripTurnMetadataSentinels(raw: string): string {
+/** Offsets of `[` inside a Markdown inline code span; a span ends with its line. */
+function inlineCodeBrackets(raw: string): Set<number> {
+  const offsets = new Set<number>();
+  if (!raw.includes('`')) return offsets;
+  let openRun = 0;
+  for (let index = 0; index < raw.length;) {
+    const ch = raw[index];
+    if (ch === '`') {
+      let end = index;
+      while (raw[end] === '`') end += 1;
+      const run = end - index;
+      if (openRun === 0) openRun = run;
+      else if (run === openRun) openRun = 0;
+      index = end;
+      continue;
+    }
+    if (ch === '\n' || ch === '\r') openRun = 0;
+    else if (ch === '[' && openRun > 0) offsets.add(index);
+    index += 1;
+  }
+  return offsets;
+}
+
+/**
+ * Index in `text` of the first unquoted follow-up start, or -1. Other
+ * prefixes do not end a line sentinel: questions quote `[TITLE:]`.
+ */
+function nextFollowUpStart(text: string, quoted: ReadonlySet<number>, offset: number): number {
+  for (const match of text.matchAll(FOLLOW_UP_START_RE_G)) {
+    if (!quoted.has(offset + (match.index ?? -1))) return match.index ?? -1;
+  }
+  return -1;
+}
+
+export interface TurnMetadataSentinelScan {
+  /** Completed sentinels, each with the whitespace that follows it. */
+  cuts: Array<{ start: number; end: number }>;
+  /** Start of a trailing candidate still waiting for its `]` (a follow-up or overview: its line's end), or -1. */
+  pendingStart: number;
+}
+
+/**
+ * Locate Michi metadata sentinels in raw answer text. A sentinel is one line
+ * of prose, so a prefix quoted in inline code (`[BRANCH-OVERVIEW:`) or one
+ * whose line ends before a `]` is ordinary text. A follow-up or overview ends at
+ * the last `]` of its line. Undecided text stays held, so appending text never hides
+ * what was already visible.
+ */
+export function scanTurnMetadataSentinels(raw: string): TurnMetadataSentinelScan {
   const cuts: Array<{ start: number; end: number }> = [];
+  const quoted = inlineCodeBrackets(raw);
   let cursor = 0;
   let holdStart = -1;
   while (cursor < raw.length) {
     const ch = raw[cursor];
-    if (holdStart < 0 && ch !== '[') {
-      cursor += 1;
-      continue;
-    }
     if (holdStart < 0) {
-      holdStart = cursor;
+      if (ch === '[' && !quoted.has(cursor)) holdStart = cursor;
       cursor += 1;
       continue;
     }
     const candidate = raw.slice(holdStart, cursor + 1);
+    if (ch === ']' && LINE_SENTINEL_PREFIX_RE.test(candidate)) {
+      // Wait for the line to end (or the next follow-up), then cut to its last
+      // `]`, so brackets inside a question or overview stay hidden with it.
+      const lineEnd = raw.slice(cursor).search(/[\n\r]/);
+      const rest = raw.slice(cursor + 1, lineEnd < 0 ? raw.length : cursor + lineEnd);
+      const next = nextFollowUpStart(rest, quoted, cursor + 1);
+      if (lineEnd < 0 && next < 0) break;
+      let end = cursor + 1 + rest.slice(0, next < 0 ? rest.length : next).lastIndexOf(']') + 1;
+      while (end < raw.length && /\s/.test(raw[end])) end += 1;
+      cuts.push({ start: holdStart, end });
+      cursor = end;
+      holdStart = -1;
+      continue;
+    }
     if (ch === ']') {
       const upper = candidate.toUpperCase();
       if (SENTINEL_PREFIXES.some((prefix) => upper.startsWith(prefix))) {
@@ -264,13 +462,19 @@ export function stripTurnMetadataSentinels(raw: string): string {
       holdStart = -1;
       continue;
     }
-    if (!couldStillBeSentinel(candidate)) holdStart = -1;
+    if (ch === '\n' || ch === '\r' || !couldStillBeSentinel(candidate)) holdStart = -1;
     cursor += 1;
   }
-  if (holdStart >= 0) cuts.push({ start: holdStart, end: raw.length });
+  return { cuts, pendingStart: holdStart };
+}
+
+/** Strip completed or partial Michi metadata sentinels from visible content. */
+export function stripTurnMetadataSentinels(raw: string): string {
+  const { cuts, pendingStart } = scanTurnMetadataSentinels(raw);
+  if (pendingStart >= 0) cuts.push({ start: pendingStart, end: raw.length });
 
   let visible = '';
-  cursor = 0;
+  let cursor = 0;
   for (const cut of cuts) {
     if (cut.start > cursor) visible += raw.slice(cursor, cut.start);
     cursor = cut.end;
@@ -289,7 +493,7 @@ export function createDurableTurn(input: CreateDurableTurnInput): DurableTurnSna
     userMessage: input.selfInitiated && !input.keepUserMessage
       ? null
       : {
-          id: `u-${input.assistantId}`,
+          id: userMessageIdFor(input.assistantId),
           role: 'user',
           content: input.displayUserText,
           blocks: [],

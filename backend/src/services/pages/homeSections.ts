@@ -4,19 +4,21 @@ import {
   HOME_CONVERSATION_LIST_LIMITS, HOME_SECTION_LIMIT, isSystemWorkspaceSettings,
   type HomeReminderAction, type HomeConversationItem, type HomeConversationsDto, type HomeSection, type HomeSectionItem, type HomeSectionKey,
   type HomeWorkspaceCounts, type PageBlock, type SpacesHomeLookDto, type SpacesHomeSectionsDto, type TargetSnapshot, type ThreadCardItem,
-  pageBlockText, pageBlockTitle,
+  conversationEnding, oneLine as oneLineText, pageBlockText, pageBlockTitle,
 } from 'michi-shared';
 import type { ChatHub } from '../../agents/chatHub';
+import { chatHubAwaitingUser } from '../chatAwaitingUser';
+import { ownerMatchParams, ownerMatchSql } from '../agentOwner';
 import { getDb } from '../db';
-import { pageShownOnHome } from './homePages';
+import { archiveGroupSql, liveConversationSql } from '../nodeLifecycleSql';
+import { homeHiddenJoin, pageShownOnHome } from './homeVisibility';
 import { spacesHomeSectionLimits, type EffectiveSectionLimit } from './layoutRules';
 
 const SUMMARY_MAX = 200;
 const isObject = (value: unknown): value is Record<string, unknown> => typeof value === 'object' && value !== null && !Array.isArray(value);
 
-export function oneLine(text: string, max = SUMMARY_MAX): string {
-  const line = text.replace(/\s+/g, ' ').trim();
-  return line.length > max ? `${line.slice(0, max - 1)}…` : line;
+function oneLine(text: string, max = SUMMARY_MAX): string {
+  return oneLineText(text, max);
 }
 
 export function blockLine(block: PageBlock): string {
@@ -46,7 +48,8 @@ export function snapshotLine(snapshot: TargetSnapshot | null): string {
   return oneLine(snapshot.database.title);
 }
 
-function parseJson(raw: string | null): unknown {
+/** Stored JSON read for display: a missing or corrupt value reads as null. */
+export function parseJson(raw: string | null): unknown {
   if (raw === null) return null;
   try { return JSON.parse(raw); } catch { return null; }
 }
@@ -68,11 +71,8 @@ export function chatHubLiveWait(
 ): HomeLiveWait | null {
   const observation = hub.getSnapshot(nodeId);
   if (!observation || observation.inMemoryStatus !== 'active' || !observation.pendingInteraction.waiting) return null;
-  const permission = hub.getPendingPermission(observation.chatId);
-  if (permission) return { kind: 'approval', text: permission.title ?? '' };
-  const input = hub.getPendingUserInput(observation.chatId);
-  if (input) return { kind: 'question', text: input.questions?.[0]?.question ?? '' };
-  return { kind: 'approval', text: '' };
+  const awaiting = chatHubAwaitingUser(hub, observation.chatId);
+  return { kind: awaiting?.kind ?? 'approval', text: awaiting?.detail ?? '' };
 }
 
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -81,13 +81,6 @@ export const STALLED_AFTER_MS = 3 * DAY_MS;
 /** Where Just done starts before the first look at the Spaces Home. */
 export const FIRST_LOOK_WINDOW_MS = DAY_MS;
 const TITLE_MAX = 120;
-
-/** Turns that completed without finishing their work: Just done names why instead of the cut-off reply. */
-const ENDED_EARLY: Record<string, string> = {
-  max_tokens: 'Stopped early: it reached its output limit',
-  max_turn_requests: 'Stopped early: it reached its step limit',
-  refusal: 'Stopped: the agent declined to continue',
-};
 
 type ConversationRow = {
   turn_id: string | null; node_id: string; workspace_id: string; title: string | null; first_user: string | null; node_created_at: number;
@@ -107,8 +100,6 @@ const SCHEDULED_SQL = "COALESCE(json_extract(CASE WHEN json_valid(um.metadata) T
  * workspaces and workspaces hidden from Spaces. Callers also drop the hidden
  * system workspaces (the Meta agent's and the assistant's) by their settings.
  */
-/** The workspace is the owner's (on a local backend, the local user owns them all). Params: owner, owner, MICHI_CLOUD. */
-const OWNER_SQL = "(w.owner_user_id=? OR (?='local-user' AND ?<>'1'))";
 
 /** A conversation and its latest turn: what classifying one reads. Joins n (node), w (workspace), t (latest turn), a (its reply). */
 const CONVERSATION_COLUMNS = `t.turn_id,n.id AS node_id,n.workspace_id,n.title,n.created_at AS node_created_at,n.viewed_at,
@@ -126,16 +117,16 @@ const LATEST_TURN_JOIN = `LEFT JOIN turns t ON t.turn_id=(SELECT l.turn_id FROM 
 
 const CONVERSATIONS_FROM = `FROM nodes n JOIN workspaces w ON w.id=n.workspace_id
     LEFT JOIN trees tr ON tr.id=n.tree_id
-    LEFT JOIN pages hp ON hp.workspace_id=n.workspace_id AND hp.role='workspace-home' AND hp.owner_user_id=? AND hp.deleted_at IS NULL
+    ${homeHiddenJoin('w')}
     ${LATEST_TURN_JOIN}
     LEFT JOIN messages um ON um.id=t.user_message_id AND um.node_id=n.id
-    WHERE n.kind='chat' AND n.deleted_at IS NULL AND n.purged_at IS NULL AND n.status<>'archived' AND n.maintenance_job_id IS NULL
-      AND tr.archived_at IS NULL AND w.deleted_at IS NULL AND w.purged_at IS NULL AND w.archived_at IS NULL AND hp.hidden_at IS NULL
-      AND ${OWNER_SQL}
+    WHERE n.kind='chat' AND ${liveConversationSql({ node: 'n', tree: 'tr' })} AND n.maintenance_job_id IS NULL AND n.scheduled_only_job_id IS NULL
+      AND w.deleted_at IS NULL AND w.purged_at IS NULL AND w.archived_at IS NULL AND hp.hidden_at IS NULL
+      AND ${ownerMatchSql()}
       AND (t.turn_id IS NOT NULL OR EXISTS(SELECT 1 FROM messages e WHERE e.node_id=n.id))
       AND ${SCHEDULED_SQL}=''`;
 
-const ownerParams = (ownerUserId: string): string[] => [ownerUserId, ownerUserId, ownerUserId, process.env.MICHI_CLOUD ?? ''];
+const ownerParams = (ownerUserId: string): string[] => [ownerUserId, ...ownerMatchParams(ownerUserId)];
 
 /**
  * With `candidatesSince`, only conversations that can be in a section: a
@@ -174,6 +165,14 @@ function conversationTitle(row: ConversationRow): string {
   return line ? oneLine(line, TITLE_MAX) : 'Untitled conversation';
 }
 
+const rowEnding = (row: ConversationRow) => conversationEnding({ status: row.turn_status, stopReason: row.stop_reason, error: row.error });
+
+/** What a finished row says instead of its reply: why it stopped early, or that it was cancelled. */
+function stoppedNote(row: ConversationRow): string | undefined {
+  const ending = rowEnding(row);
+  return ending?.outcome === 'stopped_early' || ending?.outcome === 'cancelled' ? ending.note ?? undefined : undefined;
+}
+
 /** Why a conversation waits on you, and since when; null when it does not. */
 function waitingFor(row: ConversationRow, live: HomeLiveWaitReader): { summary: string; at: number } | null {
   if (row.turn_status === 'active') {
@@ -186,9 +185,9 @@ function waitingFor(row: ConversationRow, live: HomeLiveWaitReader): { summary: 
   if (row.replied) return null;
   const at = row.completed_at ?? row.updated_at ?? row.started_at ?? row.node_created_at;
   if (row.turn_status === 'error') {
-    if (row.error === 'backend_restarted') return { summary: 'Interrupted: Michi stopped while it was running', at };
-    const line = row.error ? firstLine(row.error) : '';
-    return { summary: line ? `Failed: ${line}` : 'Failed', at };
+    const ending = rowEnding(row);
+    if (ending?.outcome === 'interrupted') return { summary: ending.note!, at };
+    return { summary: ending?.note ? `Failed: ${oneLine(ending.note)}` : 'Failed', at };
   }
   if (row.turn_status !== 'completed') return null;
   const reply = row.reply ?? '';
@@ -212,8 +211,7 @@ function classify(row: ConversationRow, live: HomeLiveWaitReader, since: number,
   // A message written after it completed, or having it on screen since, means the user was there since.
   if (row.turn_status === 'completed' && !row.replied && row.completed_at !== null && row.completed_at > since
     && !(row.viewed_at !== null && row.viewed_at >= row.completed_at)) {
-    const early = row.stop_reason ? ENDED_EARLY[row.stop_reason] : undefined;
-    return { state: 'done', item: conversationItem(row, row.completed_at, early ?? firstLine(row.reply ?? '')) };
+    return { state: 'done', item: conversationItem(row, row.completed_at, stoppedNote(row) ?? firstLine(row.reply ?? '')) };
   }
   const at = Math.max(row.completed_at ?? 0, row.updated_at ?? 0, row.last_message_at ?? 0) || row.node_created_at;
   return { state: null, item: conversationItem(row, at, '') };
@@ -240,16 +238,16 @@ export function markSpacesHomeLooked(ownerUserId: string, now = Date.now()): Spa
 type ProposalRow = {
   id: string; op: string; page_id: string | null; database_id: string | null; target: string; after_json: string | null; before_json: string | null;
   created_at: number; workspace_id: string; workspace_name: string; workspace_owner: string | null; workspace_settings: string | null;
-  workspace_deleted_at: number | null; workspace_archived_at: number | null; workspace_purged_at: number | null;
+  workspace_deleted_at: number | null; workspace_archived_at: number | null; workspace_purged_at: number | null; home_hidden_at: number | null;
   resolved_page_id: string | null; page_title: string | null; page_role: string | null; page_deleted_at: number | null; page_owner: string | null;
 };
 
 /** A database change shows on the first live page that embeds the database. */
 const PROPOSALS_SQL = `SELECT c.id,c.op,c.page_id,c.database_id,c.target,c.after_json,c.before_json,c.created_at,c.workspace_id,
     w.name AS workspace_name,w.owner_user_id AS workspace_owner,w.settings AS workspace_settings,
-    w.deleted_at AS workspace_deleted_at,w.archived_at AS workspace_archived_at,w.purged_at AS workspace_purged_at,
+    w.deleted_at AS workspace_deleted_at,w.archived_at AS workspace_archived_at,w.purged_at AS workspace_purged_at,hp.hidden_at AS home_hidden_at,
     p.id AS resolved_page_id,p.title AS page_title,p.role AS page_role,p.deleted_at AS page_deleted_at,p.owner_user_id AS page_owner
-  FROM page_changes c JOIN workspaces w ON w.id=c.workspace_id
+  FROM page_changes c JOIN workspaces w ON w.id=c.workspace_id ${homeHiddenJoin('w')}
   LEFT JOIN pages p ON p.id=COALESCE(c.page_id,(SELECT r.page_id FROM page_database_refs r JOIN pages rp ON rp.id=r.page_id
       WHERE r.database_id=c.database_id AND rp.deleted_at IS NULL ORDER BY rp.position,rp.id LIMIT 1))
   LEFT JOIN page_databases d ON d.id=c.database_id
@@ -258,11 +256,11 @@ const PROPOSALS_SQL = `SELECT c.id,c.op,c.page_id,c.database_id,c.target,c.after
   ORDER BY c.created_at DESC,c.seq DESC`;
 
 function shownProposals(ownerUserId: string): ProposalRow[] {
-  return (getDb().prepare(PROPOSALS_SQL).all(ownerUserId) as unknown as ProposalRow[]).filter((row) =>
+  return (getDb().prepare(PROPOSALS_SQL).all(ownerUserId, ownerUserId) as unknown as ProposalRow[]).filter((row) =>
     row.resolved_page_id !== null && row.page_owner !== null && pageShownOnHome(
       { role: row.page_role, deleted_at: row.page_deleted_at, owner_user_id: row.page_owner },
       { owner_user_id: row.workspace_owner, settings: row.workspace_settings, deleted_at: row.workspace_deleted_at,
-        archived_at: row.workspace_archived_at, purged_at: row.workspace_purged_at },
+        archived_at: row.workspace_archived_at, purged_at: row.workspace_purged_at, home_hidden_at: row.home_hidden_at },
       ownerUserId));
 }
 
@@ -444,7 +442,7 @@ export interface ThreadCardsInput {
  * from its latest turn: waiting on the person (stalled after days of it),
  * running, done, or idle before its first turn. Unlike the Home's sections
  * this ignores what the person has seen, and shows archived conversations and
- * maintenance and scheduled runs too. One deleted, or moved to another
+ * maintenance and scheduled runs too. One in the Trash, or moved to another
  * workspace since, is left out, so its card says it is gone.
  */
 export function threadCards(input: ThreadCardsInput): ThreadCardItem[] {
@@ -460,7 +458,7 @@ export interface ThreadStatesInput {
 
 /**
  * The named conversations as each stands now, wherever they are, read as
- * thread cards read them. One deleted, or not the person's, is left out; one
+ * thread cards read them. One in the Trash, or not the person's, is left out; one
  * in another workspace says which, so a task board can say it is no longer here.
  */
 export function threadStates(input: ThreadStatesInput): ThreadCardItem[] {
@@ -472,21 +470,22 @@ function conversationCards(nodeIds: readonly string[], ownerUserId: string, work
   const now = at ?? Date.now();
   const live = reader ?? noLiveWait;
   const scope = workspaceId === null ? ' AND w.deleted_at IS NULL AND w.purged_at IS NULL' : ' AND n.workspace_id=?';
-  const rows = getDb().prepare(`SELECT ${CONVERSATION_COLUMNS}
+  // A branch archived out of its thread sits in the archive lane: deleted_at is set, but it is not in the Trash.
+  const rows = getDb().prepare(`SELECT ${CONVERSATION_COLUMNS},n.deleted_at IS NOT NULL AS archived
     FROM nodes n JOIN workspaces w ON w.id=n.workspace_id
     ${LATEST_TURN_JOIN}
     WHERE n.id IN (${nodeIds.map(() => '?').join(',')})${scope} AND n.kind='chat'
-      AND n.deleted_at IS NULL AND n.purged_at IS NULL AND ${OWNER_SQL}`)
-    .all(...nodeIds, ...(workspaceId === null ? [] : [workspaceId]), ownerUserId, ownerUserId, process.env.MICHI_CLOUD ?? '') as unknown as ConversationRow[];
+      AND (n.deleted_at IS NULL OR ${archiveGroupSql('n.deletion_group_id')}) AND n.purged_at IS NULL AND ${ownerMatchSql()}`)
+    .all(...nodeIds, ...(workspaceId === null ? [] : [workspaceId]), ...ownerMatchParams(ownerUserId)) as unknown as Array<ConversationRow & { archived: number }>;
   return rows.map((row): ThreadCardItem => {
-    const card = { nodeId: row.node_id, workspaceId: row.workspace_id, title: conversationTitle(row), messageId: row.reply_id };
-    const wait = waitingFor(row, live);
+    const card = { nodeId: row.node_id, workspaceId: row.workspace_id, title: conversationTitle(row), messageId: row.reply_id, ...(row.archived ? { archived: true as const } : {}) };
+    // It opens read-only, so it cannot be waiting on the person.
+    const wait = row.archived ? null : waitingFor(row, live);
     if (wait) return { ...card, state: now - wait.at >= STALLED_AFTER_MS ? 'stalled' : 'waiting', summary: wait.summary, at: wait.at };
     const at = Math.max(row.completed_at ?? 0, row.updated_at ?? 0, row.last_message_at ?? 0) || row.node_created_at;
     if (!row.turn_status) return { ...card, state: 'idle', summary: '', at };
     if (row.turn_status === 'active') return { ...card, state: 'running', summary: firstLine(row.reply ?? ''), at };
-    const early = row.turn_status === 'cancelled' ? 'Stopped before it finished' : row.stop_reason ? ENDED_EARLY[row.stop_reason] : undefined;
-    return { ...card, state: 'done', summary: early ?? firstLine(row.reply ?? ''), at };
+    return { ...card, state: 'done', summary: stoppedNote(row) ?? firstLine(row.reply ?? ''), at };
   });
 }
 

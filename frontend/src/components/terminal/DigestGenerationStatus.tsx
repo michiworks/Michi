@@ -1,21 +1,19 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useEffect, useRef } from 'react';
+import { useNow } from '../../hooks/useNow';
+import { formatDuration } from '../../lib/duration';
 import { AnimatePresence, motion, useIsPresent, useReducedMotionConfig } from 'motion/react';
 import type { DigestState } from '../../state/digest';
 import { EASE } from '../../motion/tokens';
 
 export default function DigestGenerationStatus({ digest }: { digest: DigestState }) {
-  const [now, setNow] = useState(Date.now);
   const scrollRef = useRef<HTMLDivElement>(null);
   const followRef = useRef(true);
   const streaming = digest.status === 'streaming';
   const generation = digest.generation;
+  const now = useNow(1_000, streaming);
 
   useEffect(() => {
-    if (!streaming) return;
-    setNow(Date.now());
-    followRef.current = true;
-    const timer = window.setInterval(() => setNow(Date.now()), 1000);
-    return () => window.clearInterval(timer);
+    if (streaming) followRef.current = true;
   }, [streaming, generation?.startedAt]);
 
   useEffect(() => {
@@ -24,13 +22,12 @@ export default function DigestGenerationStatus({ digest }: { digest: DigestState
   }, [generation?.thought]);
 
   if (digest.status === 'error') {
-    return <div role="alert" style={{ color: 'var(--term-danger)', padding: '12px 0', overflowWrap: 'anywhere' }}>
+    return <div role="alert" style={{ color: 'var(--term-danger-text)', padding: '12px 0', overflowWrap: 'anywhere' }}>
       {digest.error || 'Digest generation failed.'}
     </div>;
   }
 
-  const elapsed = Math.max(0, Math.floor((now - (generation?.startedAt ?? now)) / 1000));
-  const duration = elapsed < 60 ? `${elapsed}s` : `${Math.floor(elapsed / 60)}m ${elapsed % 60}s`;
+  const duration = formatDuration(now - (generation?.startedAt ?? now), { live: true });
 
   // Finished, the progress folds away (120ms) as the digest takes its place, rather than vanishing.
   return (

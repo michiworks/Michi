@@ -1,10 +1,13 @@
 import React, { useRef, useState } from 'react';
 import { Calendar, ChartGantt, Code, Copy, Ellipsis, Kanban, LayoutGrid, List, Pencil, Plus, Table2, Trash2, type LucideIcon } from 'lucide-react';
 import type { MichiDatabase, MichiDbView, MichiDbViewType } from 'michi-shared';
+import ContextMenu, { type MenuItem } from '../../../ContextMenu';
+import { usePhoneLayout } from '../../../../hooks/usePhoneLayout';
 import { DbMenuItem, DbPopover } from './DbPopover';
 import { VIEW_TYPE_LABEL, viewName } from './dbLabels';
 import { addViewOp, duplicateViewOp, renameViewOp } from './dbOps';
 import type { DbEdit } from './views/viewTypes';
+import { isImeComposing } from '../../../../lib/ime';
 
 export const VIEW_ICON: Record<MichiDbViewType, LucideIcon> = {
   table: Table2,
@@ -45,6 +48,7 @@ export function ViewTabs({
   /** Offers Custom… in the add menu: a custom view is built for the person, not picked from a type. */
   onAddCustomView?: () => void;
 }) {
+  const phone = usePhoneLayout();
   const [menu, setMenu] = useState<MenuState>(null);
   const [renaming, setRenaming] = useState<{ view: MichiDbView; anchor: HTMLElement } | null>(null);
   const list = useRef<HTMLDivElement>(null);
@@ -104,6 +108,7 @@ export function ViewTabs({
               tabIndex={active ? 0 : -1}
               className="michi-db-tab"
               data-active={active ? 'true' : undefined}
+              data-context-target=""
               onClick={() => onSelect(v.id)}
               onKeyDown={(event) => onKey(event, v)}
               onContextMenu={(event) => {
@@ -152,7 +157,7 @@ export function ViewTabs({
           )}
         </DbPopover>
       )}
-      {menu?.kind === 'view' && (
+      {menu?.kind === 'view' && !phone && (
         <DbPopover anchor={menu.anchor} label={`${viewName(db, menu.view)} view`} role="menu" width={180} onClose={() => setMenu(null)}>
           <DbMenuItem
             icon={<Pencil size={14} strokeWidth={1.7} />}
@@ -169,6 +174,33 @@ export function ViewTabs({
           <DbMenuItem icon={<Trash2 size={14} strokeWidth={1.7} />} label="Delete" danger disabled={views.length < 2} onSelect={() => remove(menu.view)} />
         </DbPopover>
       )}
+      {menu?.kind === 'view' && phone && (() => {
+        const v = menu.view;
+        const tab = tabOf(v);
+        const at = menu.anchor instanceof HTMLElement ? menu.anchor.getBoundingClientRect() : null;
+        const items: MenuItem[] = [
+          {
+            id: 'rename',
+            label: 'Rename',
+            run: () => {
+              setMenu(null);
+              onSelect(v.id);
+              if (tab) setRenaming({ view: v, anchor: tab });
+            },
+          },
+          { id: 'duplicate', label: 'Duplicate', run: () => duplicate(v) },
+          { id: 'delete', label: 'Delete', danger: true, disabled: views.length < 2, run: () => remove(v) },
+        ];
+        return (
+          <ContextMenu
+            x={at ? at.left + at.width / 2 : (menu.anchor as { x: number }).x}
+            y={at ? at.top + at.height / 2 : (menu.anchor as { y: number }).y}
+            anchor={tab}
+            sections={[{ items }]}
+            onClose={() => setMenu(null)}
+          />
+        );
+      })()}
       {renaming && (
         <RenameView
           db={db}
@@ -204,7 +236,7 @@ function RenameView({ db, view, anchor, onDone }: { db: MichiDatabase; view: Mic
         maxLength={100}
         onChange={(event) => setText(event.currentTarget.value)}
         onKeyDown={(event) => {
-          if (event.key === 'Enter' && !event.nativeEvent.isComposing) {
+          if (event.key === 'Enter' && !isImeComposing(event)) {
             event.preventDefault();
             finish(true);
           }

@@ -31,11 +31,13 @@ export interface AgentCapabilities {
   /** Restores meaningful agent-side state rather than replaying the transcript. */
   nativeResume: boolean;
   nativeResumeSettings?: readonly ('model' | 'reasoning')[];
+  /**
+   * A chat can turn on Ultracode: standing multi-agent orchestration, where
+   * the agent runs a workflow for every substantive task (Claude Code). Each
+   * session reports whether it took effect (AgentSessionState.ultracode).
+   */
+  ultracode?: boolean;
 }
-
-/** Older gateways omitted these fields. Normalize once at the HTTP boundary. */
-export type LegacyAgentCapabilities = Omit<AgentCapabilities, 'models' | 'supportedReasoningLevels' | 'nativeResume'>
-  & Partial<Pick<AgentCapabilities, 'models' | 'supportedReasoningLevels' | 'nativeResume'>>;
 
 export interface AgentProviderInfo extends ModelReasoningCapabilities {
   id: string;
@@ -101,8 +103,6 @@ export interface AgentStatus {
   capabilityDescriptor?: CapabilityDescriptor;
 }
 
-export type LegacyAgentStatus = Omit<AgentStatus, 'capabilities'> & { capabilities: LegacyAgentCapabilities };
-
 export interface AgentModelsResponse {
   models: AgentModelInfo[];
   sanitizedModel: string | null;
@@ -160,6 +160,7 @@ export function normalizeAgentCapabilities(value: unknown): AgentCapabilities | 
     saveContext: raw.saveContext === true, spawnBranches: raw.spawnBranches === true,
     nativeResume: raw.nativeResume === true,
     ...(Array.isArray(raw.nativeResumeSettings) ? { nativeResumeSettings: [...new Set(raw.nativeResumeSettings.filter((setting): setting is 'model' | 'reasoning' => setting === 'model' || setting === 'reasoning'))] } : {}),
+    ...(raw.ultracode === true ? { ultracode: true } : {}),
   };
 }
 

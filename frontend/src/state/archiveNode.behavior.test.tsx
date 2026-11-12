@@ -31,7 +31,6 @@ vi.mock('../services/api', () => ({
   ),
   streamMessage: vi.fn(() => () => {}),
   syncWorkspace: () => Promise.resolve({ ok: true }),
-  fetchAllWorkspaces: () => Promise.resolve([]),
 }));
 
 vi.mock('../services/notifications', () => ({ notify: vi.fn() }));
@@ -107,5 +106,38 @@ describe('archiveNode (single-node archive)', () => {
     // Trashed node is gone; archived node survives.
     expect(result.current.nodes[trashId]).toBeUndefined();
     expect(result.current.nodes[archId]?.deletedAt).toBeTruthy();
+  });
+
+  it('moves an archived node to Trash and back, keeping the snapshot that restores it under its parent', async () => {
+    const { result } = renderHook(() => useStoreAndNodes(), { wrapper });
+    await act(async () => { await result.current.store.createProject('test', undefined); });
+    await waitFor(() => expect(result.current.store.activeProject).toBeTruthy());
+
+    let rootId = '';
+    await act(async () => { rootId = (await result.current.store.createThread()) ?? ''; });
+    let archId = '';
+    await act(async () => { archId = await result.current.store.createBlankChild(rootId); });
+    act(() => { result.current.store.archiveNode(archId); });
+    const archived = result.current.nodes[archId];
+    const archivedGroup = archived.deletionGroupId!;
+    expect(archivedGroup.startsWith('arch-')).toBe(true);
+
+    let trashGroup: string | null = null;
+    act(() => { trashGroup = result.current.store.moveDeletionGroupLane(archivedGroup, 'trash', 1234); });
+    expect(trashGroup).toBe(archivedGroup.replace(/^arch-/, 'trim-'));
+    expect(result.current.nodes[archId]).toMatchObject({ deletionGroupId: trashGroup, deletedAt: 1234, trimSnapshot: archived.trimSnapshot });
+    // Now Trash's: ⌘Z finds it, and a second move to Trash does nothing.
+    let again: string | null = 'sentinel';
+    act(() => { again = result.current.store.moveDeletionGroupLane(trashGroup!, 'trash'); });
+    expect(again).toBeNull();
+
+    let back: string | null = null;
+    act(() => { back = result.current.store.moveDeletionGroupLane(trashGroup!, 'archive', archived.deletedAt); });
+    expect(back).toBe(archivedGroup);
+    expect(result.current.nodes[archId]).toMatchObject({ deletionGroupId: archivedGroup, deletedAt: archived.deletedAt });
+
+    act(() => { result.current.store.restoreDeletion(archivedGroup); });
+    expect(result.current.nodes[archId].deletedAt).toBeUndefined();
+    expect(result.current.nodes[archId].parentNodeId).toBe(rootId);
   });
 });

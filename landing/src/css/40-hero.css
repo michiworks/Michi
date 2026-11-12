@@ -1,0 +1,393 @@
+/* ==========================================================================
+   Hero (#top), owner: hero. Brief §3.3, §5.4-5.6, §5.12, §7.4.
+
+   - Band: H1 + meta in cols 1-7 and sub + CTAs in cols 8-12 at >= 1280;
+     stacked below (H1, sub, CTAs, meta).
+   - Replica compositions: wide 1280 x 620 (top row, rail, sidebar, two panes),
+     medium 1000 x 620 (two panes), compact (< 1024: fluid, main pane above,
+     branch pane below, joined by a drawn connector).
+   - Take 1 start frame: .hero-t0 on the strip (tA, from data-ta-cls). The
+     first-paint copy of it lives under html[data-take-hero="t0"]:not([data-hero-ready])
+     with the 2.5 s fail-safe keyframes (hero-ff-*).
+   - The fork never reflows: both panes are always laid out at 500; tA shifts
+     the main content +250 and the header icons and branch pane +500, and the
+     fork clears those transforms (220, pane). Nothing fades.
+   - The selection bar -> branch composer morph: one surface (.hero-skin) is
+     laid out at the composer box and FLIPs from the bar box (scale from its
+     top-left); the content (.hero-pc) sits beside it at natural size, pinned
+     to the surface's top-left and clipped to it, so text never stretches.
+     Every value is linear in the eased progress, so plain transitions match
+     exactly. 20-hero.js writes --bx --by --sx --sy --cr --cb --ey.
+   ========================================================================== */
+
+/* Band ---------------------------------------------------------------------- */
+.hero {
+  padding-top: 32px;
+}
+.hero-band {
+  display: grid;
+  grid-template-columns: repeat(12, minmax(0, 1fr));
+  column-gap: var(--gutter);
+}
+.hero-a { grid-column: 1 / 8; }
+.hero-b { grid-column: 8 / 13; }
+.hero-meta { margin-top: 16px; }
+.hero-ctas { margin-top: 24px; }
+@media (max-width: 1279px) {
+  .hero-band { display: flex; flex-direction: column; }
+  .hero-a,
+  .hero-b { display: contents; }
+  .hero-sub { order: 1; max-width: 40em; margin-top: 20px; }
+  .hero-ctas { order: 2; }
+  .hero-meta { order: 3; }
+}
+
+/* Figure: the window centred; the take bar spans exactly its width. -------- */
+.hero-fig {
+  display: grid;
+  grid-template-columns: min-content;
+  justify-content: center;
+  margin-top: 28px;
+}
+/* No-JS --k (brief §7.4, kept so W x k never exceeds the content width:
+   1280 x .9 fits from 1280, x 1 from 1424; medium 1000 x .92 from 1024). */
+.hero-fit { --w: 1280; --h: 620; --k: .9; }
+@media (min-width: 1424px) {
+  .hero-fit { --k: 1; }
+}
+/* The wide window pins the view cluster to the top row's right end, as the
+   app does; the panes keep only their captions. */
+@media (min-width: 1280px) {
+  .hero-icons { display: none; }
+}
+@media (max-width: 1279px) {
+  .hero-fit { --w: 1000; --k: .92; }
+  .hero :is(.mk-top, .mk-rail, .mk-side) { display: none; }
+}
+
+/* H1 of the motion table: the window settles once from first paint (t0 only).
+   It runs outside the take's pause. */
+html[data-take-hero="t0"] .hero-fit {
+  animation: hero-settle var(--t-slow) var(--ease-out) both;
+}
+.hero .is-paused .hero-fit {
+  animation-play-state: running !important;
+}
+@keyframes hero-settle {
+  from { opacity: 0; translate: 0 8px; }
+}
+
+/* Panes ----------------------------------------------------------------------- */
+/* The frame's hairline is drawn over the edge, so the strip keeps the brief's
+   exact 1000 x 580 (two panes of 500) instead of losing 2 px to the border. */
+.hero .mk-window { border: 0; }
+.hero .mk-window::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: 40;
+  border: 1px solid var(--mk-frame);
+  border-radius: inherit;
+  pointer-events: none;
+}
+.hero-branch {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 500px;
+  z-index: 2;
+}
+.hero-mi,
+.hero-bi {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+.hero-chev { color: var(--term-muted); }
+/* The second exchange: its own wrapper so the first-paint frame can collapse
+   it (the list then shows the t0 tail exactly where tA puts it). The 18 px
+   gaps are margins inside the flex column, not padding, so the collapsed
+   (0fr) wrapper takes no height at all. */
+.hero .hero-later {
+  display: grid;
+  grid-template-rows: 1fr;
+  margin-top: 0;
+}
+.hero-later > div {
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+.hero-later > div > * { margin-top: 18px; }
+/* Text typed into the main composer is visible only while it is being typed. */
+.hero-sent { visibility: hidden; }
+.has-caret > .hero-sent { visibility: visible; }
+
+/* The fork (H8, H9): transforms only, at the app's pane duration and curve. */
+@media (min-width: 1024px) {
+  .hero-mi,
+  .hero-icons,
+  .hero-branch { transition: transform var(--t-pane) var(--ease-pane); }
+  .hero-t0 .hero-mi { transform: translateX(250px); }
+  .hero-t0 :is(.hero-icons, .hero-branch) { transform: translateX(500px); }
+  .hero-t0 :is(.hero-mi, .hero-icons, .hero-branch) { transition: none; }
+}
+.hero-bi { transition: translate var(--t-pane) var(--ease-pane); }
+.hero-t0 .hero-bi { translate: 16px 0; transition: none; }
+
+/* Selection tint (H2, V1 160) and highlight mark ------------------------------ */
+.hero .mk-hl { transition-duration: var(--hl-ms, var(--t-pane)), var(--t-decay), 0s; }
+.hero .mk-hl.is-mark { transition-duration: 0s; }
+
+/* Selection bar -> branch composer (H3-H7, V1) -------------------------------- */
+.hero-pop {
+  position: absolute;
+  z-index: 20;
+  width: min(340px, calc(100% - 24px));   /* place() sets the real width; at rest it stays inside a narrow window */
+  border: 1px solid transparent;
+  color: var(--sel-bar-fg);
+  font-size: var(--fs-md);
+  font-weight: 450;
+  line-height: 1.4;
+  pointer-events: none;
+  transition: opacity 120ms var(--ease-out), translate 120ms var(--ease-out), scale 120ms var(--ease-out);
+}
+.hero-pop.is-off {
+  opacity: 0;
+  visibility: hidden;
+  translate: 0 var(--ey, 4px);
+  scale: .96;
+  transition: none;
+}
+.hero-pop.is-gone {
+  opacity: 0;
+  visibility: hidden;
+  transition: opacity 80ms var(--ease-out), visibility 0s 80ms;
+}
+.hero-skin {
+  inset: -1px;
+  z-index: 0;
+  transform-origin: 0 0;
+  transform: translate(var(--bx), var(--by)) scale(var(--sx), var(--sy));
+}
+.hero-pc {
+  position: relative;
+  z-index: 1;
+  transform: translate(var(--bx), var(--by));
+  clip-path: inset(0 var(--cr) var(--cb) 0);
+}
+.hero-barc {
+  position: absolute;
+  left: 0;
+  top: 0;
+  width: max-content;
+}
+.hero-compc { opacity: 0; visibility: hidden; }
+.is-comp > .hero-skin {
+  transform: none;
+  transition: transform 180ms var(--ease-pane);
+}
+.is-comp > .hero-pc {
+  transform: none;
+  clip-path: inset(0);
+  transition: transform 180ms var(--ease-pane), clip-path 180ms var(--ease-pane);
+}
+.is-comp .hero-barc { visibility: hidden; }
+.is-comp .hero-compc {
+  opacity: 1;
+  visibility: inherit;
+  transition: opacity 120ms linear 40ms;
+}
+
+/* Phrases: hot (visitor) and underlined (branched) ---------------------------- */
+html.js .hero :is(.mk-hot, .mk-anchor:not(.is-off)) { cursor: pointer; }
+.hero .mk-anchor.is-off { background-color: transparent; }
+@media (hover: hover) {
+  html.js .hero [data-hp]:not(.is-used) .mk-hot:hover { background-color: var(--mk-hot); }
+}
+/* Touch: the phrases are the only branch trigger, so each is a 44 px target
+   on screen (brief §9). Vertical padding on an inline box leaves the lines
+   where they are; each wrapped fragment gets its own (clone), z-index lifts
+   it above the next line for hit-testing, and the tint stays on the text. */
+@media (hover: none) and (pointer: coarse) {
+  html.js .hero [data-hp] {
+    position: relative;
+    z-index: 1;
+    padding-block: calc(22px / var(--k, 1) - .6em);
+    -webkit-box-decoration-break: clone;
+    box-decoration-break: clone;
+    background-clip: content-box;
+  }
+}
+
+/* Sidebar row arrival (H11): wash, then the rail draws down from the top. ----- */
+.hero-wash {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+.hero-washing { animation: pane-entrance-bg var(--t-slow) ease-out 80ms both; }
+.hero .mk-srow-rail {
+  transform-origin: 50% 0;
+  transition: transform var(--t-pane) var(--ease-pane) 40ms;
+}
+.hero .hero-rail0 { transform: scaleY(0); transition: none; }
+
+/* Edge bookmarks (V2): centred on the strip's right edge; a second one stacks
+   6 px below the first while the first moves up. */
+.hero-bmw {
+  position: absolute;
+  right: 0;
+  top: 50%;
+  transform: translateY(-50%);
+}
+.hero-bmw.is-up {
+  transform: translateY(calc(-100% - 3px));
+  transition: transform var(--t-pane) var(--ease-pane);
+}
+.hero-bmw.is-dn { transform: translateY(3px); }
+
+/* Branch cards (V3) and their status crossfades. ------------------------------ */
+/* The app's min(364px, 100vw - 16px), measured in the window frame. */
+.hero .mk-bcard { width: min(364px, calc(100% - 16px)); }
+.hero .mk-bcard-typing.is-off { visibility: hidden; }
+.hero-st { display: inline-grid; }
+.hero-st > * {
+  grid-area: 1 / 1;
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 5px;
+}
+.hero-run { color: var(--term-select); }
+.hero :is(.mk-arrival-status, .hero-st) > * { transition: opacity var(--t-soft) var(--ease), visibility 0s; }
+.hero :is(.mk-arrival-status, .hero-st) > .is-off {
+  opacity: 0;
+  visibility: hidden;
+  transition: opacity var(--t-soft) var(--ease), visibility 0s var(--t-soft);
+}
+
+/* Compact connector (drawn at the fork; compact only). */
+.hero-link {
+  display: none;
+  position: absolute;
+  left: 0;
+  top: 440px;
+  overflow: visible;
+  fill: none;
+  stroke: var(--edge);
+  stroke-width: 1;
+}
+.hero-link path {
+  stroke-dasharray: 1;
+  transition: stroke-dashoffset 360ms var(--ease-out);
+}
+.hero-t0 .hero-link path { stroke-dashoffset: 1; transition: none; }
+
+/* Compact (< 1024): fluid panes, stacked; the branch reveals from the top. */
+@media (max-width: 1023px) {
+  .hero-fig { grid-template-columns: minmax(0, 640px); }
+  .hero-fit { --w: 0; --k: 1; width: auto; aspect-ratio: auto; }   /* unscaled */
+  .hero-fit > .mk-canvas {
+    position: relative;
+    width: auto;
+    height: auto;
+    transform: none;
+  }
+  .hero .mk-window {
+    height: auto;
+    background: none;
+    border-radius: 0;
+    box-shadow: none;
+    overflow: visible;
+    contain: none;
+  }
+  .hero .mk-window::after { display: none; }
+  .hero .mk-winbody,
+  .hero-strip {
+    display: block;
+    height: auto;
+    overflow: visible;
+    background: none;
+  }
+  .hero .mk-pane {
+    width: auto;
+    overflow: hidden;
+    border: 1px solid var(--mk-frame);
+    border-radius: 10px;
+    box-shadow: var(--mk-frame-shadow);
+  }
+  .hero-main { height: 440px; }
+  .hero-branch {
+    position: relative;
+    top: auto;
+    bottom: auto;
+    left: auto;
+    height: 360px;
+    margin: 24px 0 0 40px;
+    clip-path: inset(-2px -60px -80px -60px);
+    transition: clip-path var(--t-pane) var(--ease-pane) 140ms;
+  }
+  .hero-t0 .hero-branch {
+    clip-path: inset(-2px -60px calc(100% + 2px) -60px);
+    transition: none;
+  }
+  .hero-branch::before { display: none; }
+  .hero-bi { transition-delay: 140ms; }
+  .hero .mk-col { width: auto; margin: 0 20px; }
+  /* The main pane's right edge is the strip's edge here; it clips, as the strip does. */
+  .hero-arr { left: 0; bottom: auto; height: 440px; overflow: hidden; border-radius: 10px; }
+  .hero-link { display: block; }
+}
+/* Phone panes: the composer inset of the other phone replicas (50-how.css).
+   Under 360 the branch steps in 12 less and its connector follows, so its
+   toolbar keeps the send button inside the card. */
+@media (max-width: 767px) {
+  .hero .mk-composer { margin: 0 12px 12px; }
+}
+@media (max-width: 359px) {
+  .hero-branch { margin-left: 28px; }
+  .hero-link { translate: -12px 0; }
+}
+
+/* First paint (brief §5.12): the t0 frame before main.js takes the hero, and
+   the 2.5 s fail-safe that reveals tB if it never does. [data-t0] parts use
+   the engine's rules; these cover what a hide/shift cannot express. */
+html[data-take-hero="t0"]:not([data-hero-ready]) :is(.hero-later, .hero [data-sr="t"]) {
+  grid-template-rows: 0fr;
+  opacity: 0;
+  visibility: hidden;
+  animation: hero-ff 1ms 2500ms forwards;
+}
+html[data-take-hero="t0"]:not([data-hero-ready]) .hero [data-hp="t"] {
+  text-decoration-color: transparent;
+  animation: hero-ff-ul 1ms 2500ms forwards;
+}
+html[data-take-hero="t0"]:not([data-hero-ready]) .hero-main .mk-input::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: .1em;
+  width: 1.5px;
+  height: 1.3em;
+  background: currentColor;
+  animation: hero-ff-out 1ms 2500ms forwards;
+}
+@media (max-width: 1023px) {
+  html[data-take-hero="t0"]:not([data-hero-ready]) .hero [data-t0="shift"] { transform: none; }
+  html[data-take-hero="t0"]:not([data-hero-ready]) .hero-branch {
+    clip-path: inset(-2px -60px calc(100% + 2px) -60px);
+    animation: hero-ff-clip 1ms 2500ms forwards;
+  }
+  html[data-take-hero="t0"]:not([data-hero-ready]) .hero-link path {
+    stroke-dashoffset: 1;
+    animation: hero-ff-draw 1ms 2500ms forwards;
+  }
+}
+@keyframes hero-ff { to { grid-template-rows: 1fr; opacity: 1; visibility: visible; } }
+@keyframes hero-ff-ul { to { text-decoration-color: var(--term-mauve); } }   /* the branch underline is mauve */
+@keyframes hero-ff-out { to { visibility: hidden; } }
+@keyframes hero-ff-clip { to { clip-path: inset(-2px -60px -80px -60px); } }
+@keyframes hero-ff-draw { to { stroke-dashoffset: 0; } }

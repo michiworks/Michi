@@ -1,8 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { PageLayoutRule } from 'michi-shared';
 import { deleteLayoutRule, fetchLayoutRules } from '../../../../services/api/spacesHome';
-import { notifyPageChanged, type PageEventIdentity } from '../../../../state/pages/pageEvents';
-import { subscribeAssistant } from '../../../../state/assistant/assistantStore';
+import { notifyPageChanged, subscribePageChanges } from '../../../../state/pages/pageEvents';
+import { subscribeCompanionTurnEnd } from '../../../../state/companion/companionStore';
 
 export interface LayoutRulesState {
   /** Null until the first read answers. */
@@ -18,9 +18,10 @@ const sameIds = (a: readonly PageLayoutRule[], b: readonly PageLayoutRule[]) =>
 
 /**
  * A page's layout rules. Read on mount, on page events for the page and after
- * each Meta agent window turn (the assistant store answers then). When the
- * rules changed since the last read, the page's readers are told, so the
- * Home's counted sections re-lay out as soon as the window's turn ends.
+ * each turn of the agent's conversation ends (subscribeCompanionTurnEnd), in
+ * whatever area the panel was used. When the rules changed since the last
+ * read, the page's readers are told, so the Home's counted sections re-lay
+ * out as soon as that turn ends.
  */
 export function useLayoutRules(pageId: string | null, backendConnectionId: string, reportInitialError = false): LayoutRulesState {
   const [rules, setRules] = useState<PageLayoutRule[] | null>(null);
@@ -62,17 +63,11 @@ export function useLayoutRules(pageId: string | null, backendConnectionId: strin
 
   useEffect(() => {
     if (!pageId) return undefined;
-    const onChanged = (event: Event) => {
-      const detail = (event as CustomEvent<PageEventIdentity>).detail;
-      if (!detail || detail.backendConnectionId !== backendConnectionId || (detail.pageId && detail.pageId !== pageId)) return;
-      refresh();
-    };
-    const onAssistant = () => refresh();
-    window.addEventListener('michi:page-changed', onChanged);
-    const unsubscribe = subscribeAssistant(onAssistant);
+    const stopPage = subscribePageChanges({ backendConnectionId, pageId }, () => refresh());
+    const stopTurnEnd = subscribeCompanionTurnEnd(() => refresh());
     return () => {
-      window.removeEventListener('michi:page-changed', onChanged);
-      unsubscribe();
+      stopPage();
+      stopTurnEnd();
     };
   }, [backendConnectionId, pageId, refresh]);
 

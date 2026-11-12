@@ -1,4 +1,4 @@
-import { clampSubagentText, SUBAGENT_LIMITS, type SubagentInfo, type SubagentPatch } from 'michi-shared';
+import { clampSubagentText, oneLine, SUBAGENT_LIMITS, subagentInitialQuery, type SubagentInfo, type SubagentPatch } from 'michi-shared';
 
 /**
  * Codex multi-agent collaboration items (`collabAgentToolCall`).
@@ -15,11 +15,6 @@ type Item = Record<string, unknown>;
 
 function str(value: unknown): string | undefined {
   return typeof value === 'string' && value.trim() ? value : undefined;
-}
-
-function oneLine(text: string, max: number): string {
-  const flat = text.replace(/\s+/g, ' ').trim();
-  return flat.length > max ? `${flat.slice(0, max - 1)}…` : flat;
 }
 
 const TOOL_TITLES: Record<string, string> = {
@@ -163,7 +158,7 @@ export function codexCollabRoster(item: Item): SubagentPatch[] {
     if (spawn) {
       if (!entry.status) entry.status = 'working';
       if (prompt) {
-        entry.initialQuery = oneLine(prompt.split('\n')[0], 200);
+        entry.initialQuery = subagentInitialQuery(prompt);
         entry.prompt = clampSubagentText(prompt, SUBAGENT_LIMITS.prompt);
       }
       const model = str(item['model']);

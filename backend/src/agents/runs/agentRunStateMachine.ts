@@ -1,23 +1,12 @@
 import {
+  AGENT_ATTEMPT_TERMINAL_STATUSES,
   AgentRunStatus,
   AgentRunWaitingReason,
   isValidAgentRunTransition,
   type AgentAttemptStatus,
 } from 'michi-shared';
 
-export const TERMINAL_RUN_STATUSES = new Set<AgentRunStatus>([
-  AgentRunStatus.Completed,
-  AgentRunStatus.Failed,
-  AgentRunStatus.Cancelled,
-]);
-
-export const TERMINAL_ATTEMPT_STATUSES = new Set<AgentAttemptStatus>([
-  'completed', 'failed', 'cancelled',
-]);
-
-export function isTerminalRunStatus(status: AgentRunStatus): boolean {
-  return TERMINAL_RUN_STATUSES.has(status);
-}
+export { isAgentRunTerminal as isTerminalRunStatus } from 'michi-shared';
 
 export function assertAgentRunTransition(from: AgentRunStatus, to: AgentRunStatus): void {
   if (!isValidAgentRunTransition(from, to)) {
@@ -35,7 +24,7 @@ export function assertWaitingProjection(
 }
 
 export function assertAttemptTransition(from: AgentAttemptStatus, to: AgentAttemptStatus): void {
-  if (TERMINAL_ATTEMPT_STATUSES.has(from)) throw new Error(`Attempt is already terminal as ${from}`);
+  if (AGENT_ATTEMPT_TERMINAL_STATUSES.has(from)) throw new Error(`Attempt is already terminal as ${from}`);
   const allowed: Record<AgentAttemptStatus, ReadonlySet<AgentAttemptStatus>> = {
     preparing: new Set(['running', 'waiting', 'failed', 'cancelled']),
     running: new Set(['waiting', 'completed', 'failed', 'cancelled']),

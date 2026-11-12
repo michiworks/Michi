@@ -23,7 +23,6 @@ vi.mock('../../../state/prefs', () => ({
   usePrefs: () => ({ prefs: { terminalPalette: 'bone' }, setPref: vi.fn() }),
 }));
 vi.mock('../../../services/api', () => ({
-  fetchAgentStatus: vi.fn().mockResolvedValue({ providers: [] }),
   fetchProfileActivity,
   saveProviderKey: vi.fn(),
   clearProviderKey: vi.fn(),

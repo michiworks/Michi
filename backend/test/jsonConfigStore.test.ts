@@ -21,6 +21,16 @@ test('missing initializes, namespace updates preserve other fields, complete wri
   assert.deepEqual(fs.readdirSync(root), ['config.json']);
 });
 
+test('a config path that is a symlink is replaced, not written through', { skip: process.platform === 'win32' }, () => {
+  const elsewhere = path.join(root, 'elsewhere.json');
+  fs.writeFileSync(elsewhere, '{"kept":true}');
+  fs.symlinkSync(elsewhere, file);
+  writeJsonConfig(file, { prefs: {} });
+  assert.equal(fs.lstatSync(file).isSymbolicLink(), false);
+  assert.deepEqual(readJsonConfig(file), { prefs: {} });
+  assert.equal(fs.readFileSync(elsewhere, 'utf8'), '{"kept":true}');
+});
+
 test('corrupt and non-object JSON cannot be silently overwritten', () => {
   for (const raw of ['{"agent":', '[]', 'null', '42']) {
     fs.writeFileSync(file, raw);

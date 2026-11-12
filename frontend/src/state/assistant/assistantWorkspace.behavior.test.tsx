@@ -27,6 +27,10 @@ vi.mock('../../services/api', async (importOriginal) => ({
   getSavedTurn: vi.fn(async () => null),
 }));
 vi.mock('../../services/notifications', () => ({ notify: vi.fn() }));
+vi.mock('../../services/attention/policy', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../services/attention/policy')>()),
+  presentAttention: vi.fn(),
+}));
 
 import * as api from '../../services/api';
 import { streamMessage as actualStreamMessage } from '../../services/api/stream';
@@ -35,10 +39,11 @@ import { backendApiBase } from '../../config/backendConnections';
 import { createBackgroundTurnBinding } from '../observeChatStream';
 import { dispatchChatStreamEvent } from '../../services/chatStreamEvents';
 import { encodeChatStreamEvent } from 'michi-shared';
-import { notify } from '../../services/notifications';
+import { presentAttention, type AttentionIntent } from '../../services/attention/policy';
 import { ChatProvider, useChatActions, useChatNodesSnapshot, useChatStore } from '../chatStore';
 import { PrefsProvider } from '../prefs';
-import { getAssistantSnapshot, resetAssistantStoreForTests } from './assistantStore';
+import { getCompanionPanelState, resetCompanionPanelForTests } from '../companion/companionPanel';
+import { resetCompanionStoreForTests } from '../companion/companionStore';
 import { resetUserWorkspaceForTests } from './userWorkspace';
 import { navigateToNode } from '../navigateToNode';
 
@@ -51,7 +56,8 @@ Object.defineProperty(window, 'matchMedia', {
 });
 
 const mockStream = api.streamMessage as unknown as ReturnType<typeof vi.fn>;
-const mockNotify = notify as unknown as ReturnType<typeof vi.fn>;
+const mockPresentAttention = vi.mocked(presentAttention);
+const lastIntent = (): AttentionIntent => mockPresentAttention.mock.calls.at(-1)![0];
 
 const SYSTEM = {
   workspace: { id: 'sys', name: 'Assistant', created_at: 1, settings: JSON.stringify({ system: 'assistant' }) },
@@ -87,16 +93,17 @@ async function mountWithAssistant() {
 
 beforeEach(() => {
   localStorage.clear();
-  mockNotify.mockReset();
+  mockPresentAttention.mockReset();
   mockStream.mockClear();
   resetUserWorkspaceForTests();
-  resetAssistantStoreForTests();
+  resetCompanionPanelForTests();
+  resetCompanionStoreForTests();
   vi.spyOn(document, 'hasFocus').mockReturnValue(true);
   vi.spyOn(window, 'focus').mockImplementation(() => {});
 });
 afterEach(() => {
   vi.restoreAllMocks();
-  act(() => resetAssistantStoreForTests());
+  act(() => { resetCompanionPanelForTests(); resetCompanionStoreForTests(); });
 });
 
 describe('the assistant workspace in the chat store', () => {
@@ -135,23 +142,32 @@ describe('the assistant workspace in the chat store', () => {
 
   it('keeps quiet about an ask the open panel shows, and reveals one in the panel', async () => {
     const { result, userId } = await mountWithAssistant();
-    act(() => { resetAssistantStoreForTests({ open: true, status: 'ready', info: INFO }); });
+    // The one panel shows V (DESIGN-v2 §1.4: isCompanionPanelShowing replaces isShownInAssistantPanel).
+    act(() => {
+      resetCompanionStoreForTests({ assistant: { status: 'ready', info: INFO, error: null } });
+      resetCompanionPanelForTests({ open: true, tab: 'chat' });
+    });
     act(() => { result.current.store.sendMessage('n-sys', 'Archive the chat-only threads'); });
     await waitFor(() => expect(mockStream).toHaveBeenCalledTimes(1));
-    mockNotify.mockClear();
+    mockPresentAttention.mockClear();
     const handlers = mockStream.mock.calls[0][2] as { onUserInputRequest: (data: unknown) => void };
     const ask = (requestId: number) => act(() => {
       handlers.onUserInputRequest({ requestId, questions: [{ question: 'Send it to S7?', options: [], multiSelect: false }] });
     });
 
+    // The policy keeps quiet while the panel shows the conversation (window focused).
+    // V's notices carry the agent's name (chatStore.companionNotices.test.tsx), so only the body is pinned here.
     ask(1);
-    expect(mockNotify).not.toHaveBeenCalled();
+    expect(lastIntent()).toMatchObject({ kind: 'needs_input', body: 'Send it to S7?' });
+    expect(lastIntent().isTargetVisible!()).toBe(true);
 
-    act(() => { resetAssistantStoreForTests({ open: false, status: 'ready', info: INFO }); });
+    act(() => { resetCompanionPanelForTests({ open: false }); });
     ask(2);
-    expect(mockNotify).toHaveBeenCalledWith(expect.objectContaining({ title: 'Agent needs your input' }));
-    act(() => { (mockNotify.mock.calls[0][0] as { onClick: () => void }).onClick(); });
-    expect(getAssistantSnapshot().open).toBe(true);
+    expect(mockPresentAttention).toHaveBeenCalledTimes(2);
+    expect(lastIntent()).toMatchObject({ kind: 'needs_input', body: 'Send it to S7?' });
+    expect(lastIntent().isTargetVisible!()).toBe(false);
+    act(() => { lastIntent().onOpen!(); });
+    expect(getCompanionPanelState()).toMatchObject({ open: true, tab: 'chat' });
     expect(result.current.store.activeProject?.id).toBe(userId);
   });
 
@@ -409,14 +425,18 @@ describe('the assistant workspace in the chat store', () => {
     expect(result.current.store.openPanes).toEqual([threadId]);
   });
 
-  it('does not toast a finished answer the open panel shows', async () => {
+  it('reports a finished answer the open panel shows as in view, so a focused window stays quiet', async () => {
     const { result } = await mountWithAssistant();
-    act(() => { resetAssistantStoreForTests({ open: true, status: 'ready', info: INFO }); });
+    act(() => {
+      resetCompanionStoreForTests({ assistant: { status: 'ready', info: INFO, error: null } });
+      resetCompanionPanelForTests({ open: true, tab: 'chat' });
+    });
     act(() => { result.current.store.sendMessage('n-sys', 'What is stalled?'); });
     await waitFor(() => expect(mockStream).toHaveBeenCalledTimes(1));
-    mockNotify.mockClear();
+    mockPresentAttention.mockClear();
     const handlers = mockStream.mock.calls[0][2] as { onDone: () => void };
     act(() => { handlers.onDone(); });
-    expect(mockNotify).not.toHaveBeenCalled();
+    expect(lastIntent()).toMatchObject({ kind: 'finished', key: 'node:n-sys' });
+    expect(lastIntent().isTargetVisible!()).toBe(true);
   });
 });

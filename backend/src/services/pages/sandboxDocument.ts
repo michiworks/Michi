@@ -169,14 +169,11 @@ export const COMPONENT_SANDBOX_HTML = `<!doctype html>
 })();
 </script></body></html>`;
 
-/** Compatibility exports: the legacy wrapper endpoint now serves the isolated runner document. */
-export const COMPONENT_SANDBOX_WRAPPER_CSP = COMPONENT_SANDBOX_CSP;
-export const COMPONENT_SANDBOX_WRAPPER_HTML = COMPONENT_SANDBOX_HTML;
-
+/** The legacy wrapper endpoint serves the isolated runner document. */
 export function componentSandboxWrapper(pathname: string): { html: string; csp: string } {
   if (!/^\/[A-Za-z0-9/_-]+\/component-sandbox-wrapper$/.test(pathname)) throw new Error('Invalid component sandbox wrapper path');
   return {
-    html: COMPONENT_SANDBOX_WRAPPER_HTML,
-    csp: COMPONENT_SANDBOX_WRAPPER_CSP,
+    html: COMPONENT_SANDBOX_HTML,
+    csp: COMPONENT_SANDBOX_CSP,
   };
 }

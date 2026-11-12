@@ -1,4 +1,5 @@
 import { useSyncExternalStore } from 'react';
+import { startVisiblePoll } from '../visiblePoll';
 
 export type ResourceStatus = 'loading' | 'ready' | 'error';
 
@@ -94,20 +95,23 @@ export function failResourceRead(key: string, generation: number, error: unknown
   return true;
 }
 
+/**
+ * Reads `load` into `key`: a read started later wins, and a failed read
+ * keeps the last data, marked stale. A read aborted through `signal` changes
+ * nothing.
+ */
+export function loadResource<T>(key: string, load: () => Promise<T>, signal?: AbortSignal): Promise<void> {
+  const generation = startResourceRead(key);
+  return load().then(
+    (data) => { commitResourceRead(key, generation, data); },
+    (error: unknown) => { if (!signal?.aborted) failResourceRead(key, generation, error); },
+  );
+}
+
 export function writeResource<T>(key: string, data: T): void {
   const current = entry<T>(key);
   current.generation += 1;
   publish(current, { data, status: 'ready', error: null, stale: false });
-}
-
-export function invalidateResource(key: string): void {
-  const current = entry(key);
-  current.generation += 1;
-  publish(current, {
-    ...current.snapshot,
-    status: current.snapshot.data === null ? 'loading' : 'ready',
-    stale: current.snapshot.data !== null,
-  });
 }
 
 function publish<T>(current: Entry<T>, snapshot: ResourceSnapshot<T>): void {
@@ -115,4 +119,39 @@ function publish<T>(current: Entry<T>, snapshot: ResourceSnapshot<T>): void {
   if (prev.data === snapshot.data && prev.status === snapshot.status && prev.error === snapshot.error && prev.stale === snapshot.stale) return;
   current.snapshot = snapshot;
   for (const listener of current.listeners) listener();
+}
+
+interface PollHolder { refresh: () => void; deferred: boolean }
+const pollers = new Map<string, { holders: PollHolder[]; stop: () => void }>();
+
+/**
+ * One visible-tab poll and focus refresh per key, however many readers mount
+ * it; each mount still reads on its own mount and page events. The poll runs
+ * the newest reader that doesn't defer to a remote's first paint.
+ */
+export function pollResource(key: string, intervalMs: number, refresh: () => void, { deferred = false } = {}): () => void {
+  let poller = pollers.get(key);
+  if (!poller) {
+    const holders: PollHolder[] = [];
+    const run = () => {
+      let chosen = holders[holders.length - 1];
+      for (let index = holders.length - 1; index >= 0; index -= 1) {
+        if (!holders[index].deferred) { chosen = holders[index]; break; }
+      }
+      chosen?.refresh();
+    };
+    poller = { holders, stop: startVisiblePoll(run, { intervalMs }) };
+    pollers.set(key, poller);
+  }
+  const owned = poller;
+  const holder = { refresh, deferred };
+  owned.holders.push(holder);
+  return () => {
+    const index = owned.holders.indexOf(holder);
+    if (index >= 0) owned.holders.splice(index, 1);
+    if (owned.holders.length === 0 && pollers.get(key) === owned) {
+      owned.stop();
+      pollers.delete(key);
+    }
+  };
 }

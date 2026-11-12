@@ -1,4 +1,3 @@
-import React from 'react';
 import { act, cleanup, fireEvent, render, screen } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { DEFAULT_PREFS, PrefsProvider, usePrefs } from './prefs';
@@ -19,7 +18,7 @@ function Probe() {
 
 beforeEach(() => {
   localStorage.clear(); vi.clearAllMocks();
-  api.fetchPrefs.mockResolvedValue(null);
+  api.fetchPrefs.mockResolvedValue(null); api.savePrefs.mockResolvedValue(true);
 });
 afterEach(() => { cleanup(); vi.useRealTimers(); });
 
@@ -31,6 +30,8 @@ describe('pane width preference', () => {
   it('persists a selection locally and remotely and restores it after remount', async () => {
     vi.useFakeTimers();
     const view = render(<PrefsProvider><Probe /></PrefsProvider>);
+    // Nothing is saved before GET /prefs answers (here: it fails).
+    await act(async () => {});
     fireEvent.click(screen.getByText('Fixed'));
     await act(async () => { vi.advanceTimersByTime(500); });
     expect(JSON.parse(localStorage.getItem('michi:v1:prefs')!).paneWidthMode).toBe('fixed');

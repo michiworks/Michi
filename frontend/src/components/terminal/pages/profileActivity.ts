@@ -1,6 +1,7 @@
 import type { ChatNodeState, Project } from '../../../state/chatTypes';
 import { isVisibleConversationNode } from '../../../state/conversationVisibility';
 import type { ProfileActivitySnapshot } from '../../../services/api/persistence';
+import { isBranchEdge } from '../../../state/tree';
 
 export type ActivityMetric = 'nodes' | 'branches' | 'messages';
 
@@ -47,7 +48,7 @@ export function buildProfileActivity(
   for (const project of liveProjects) {
     for (const id of project.chatIds) if (!hidden(id)) nodeIds.add(id);
     totalThreads += project.trees.filter((tree) => !hidden(tree.rootNodeId)).length;
-    totalBranches += project.edges.filter((e) => (e.kind ?? 'branch') === 'branch' && !hidden(e.target)).length;
+    totalBranches += project.edges.filter((e) => isBranchEdge(e) && !hidden(e.target)).length;
   }
 
   const dayCounts: Record<ActivityMetric, Map<string, number>> = {
@@ -106,7 +107,7 @@ function isBranchNode(node: ChatNodeState, project?: Project): boolean {
   if (node.parentNodeId) return true;
   if (!project) return false;
   return project.edges.some(
-    (edge) => edge.target === node.nodeId && (edge.kind ?? 'branch') === 'branch',
+    (edge) => edge.target === node.nodeId && isBranchEdge(edge),
   );
 }
 

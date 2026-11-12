@@ -40,9 +40,10 @@ function isAuthenticationRequired(error: { code?: number; message?: string } | s
  * chat's first message carries only the host's variable prefix; its turn
  * metadata goes through Michi's tools. A chat's system prompt is its own, so
  * no session opens ahead of a chat. agy titles sessions natively, drops
- * image blocks but reads image files, names Michi's tools `mcp_michi_<tool>`,
- * and settles a cancelled prompt at once. A lost native session is rebuilt
- * from the host's history. It reports token usage, not metering.
+ * image blocks but reads image files, advertises its skills as plain
+ * commands, names Michi's tools `mcp_michi_<tool>`, and settles a cancelled
+ * prompt at once. A lost native session is rebuilt from the host's history.
+ * It reports token usage, not metering.
  */
 export const ANTIGRAVITY_KIRO_FLAVOR: AcpAgentFlavor = {
     hostPorts: [],
@@ -55,6 +56,9 @@ export const ANTIGRAVITY_KIRO_FLAVOR: AcpAgentFlavor = {
     nativeSessions: { replaceable: true },
     promptImages: 'resourceLink',
     warmSessions: false,
+    unmarkedSkills: true,
+    // Standard ACP has no command RPC.
+    hostCommands: [],
     tools: {
         title: michiToolName,
         name: (toolCall) => typeof toolCall?.name === 'string' ? toolCall.name : undefined,

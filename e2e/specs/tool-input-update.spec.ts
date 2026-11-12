@@ -15,7 +15,9 @@ test('a late tool input snapshot stays visible after a later output-only update'
   await page.getByRole('button', { name: 'Send (Enter)', exact: true }).click();
   await expect(page.getByText('The file was read.', { exact: true })).toBeVisible();
   // Expand the ordinary tool row; the path is present only in the late input.
-  await page.getByText('/tmp/late-input-evidence.md', { exact: true }).click();
+  await page.getByRole('button', { name: 'Read late-input-evidence.md', exact: true }).click();
+  await expect(page.getByText('/tmp/late-input-evidence.md', { exact: true })).toBeVisible();
+  await page.getByRole('button', { name: 'Raw input', exact: true }).click();
   await expect(page.locator('pre').filter({ hasText: '"file_path"' })).toContainText('/tmp/late-input-evidence.md');
   await expect(page.locator('pre').filter({ hasText: 'TOOL_RESULT_MARKER' })).toBeVisible();
 });

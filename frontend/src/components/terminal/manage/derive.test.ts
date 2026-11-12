@@ -103,6 +103,29 @@ describe('deriveTreeRows', () => {
     const labels = rows.filter((r) => r.kind === 'label');
     expect(labels).toHaveLength(1);
   });
+
+  it('finds a renamed thread by the name the user gave it', () => {
+    const project = mkProject({
+      trees: [{ id: 't1', rootNodeId: 'r1', name: 'Payment bug', createdAt: 0, lastActiveAt: 0 }],
+      chatIds: ['r1'],
+    });
+    const nodes = { r1: mkNode({ nodeId: 'r1', title: 'Debugging foo' }) };
+    expect(deriveTreeRows(project, nodes, 'payment').filter((r) => r.kind === 'label')).toMatchObject([{ title: 'Payment bug' }]);
+  });
+
+  it('orders threads as the sidebar does: pinned first, then by activity, newer first on a tie', () => {
+    const tree = (id: string, patch: Partial<Project['trees'][number]>) => ({ id, rootNodeId: `${id}-root`, name: id, createdAt: 0, lastActiveAt: 0, ...patch });
+    const project = mkProject({
+      trees: [
+        tree('older', { createdAt: 1, lastActiveAt: 50 }),
+        tree('newer', { createdAt: 2, lastActiveAt: 50 }),
+        tree('busiest', { createdAt: 3, lastActiveAt: 90 }),
+        tree('pinned', { createdAt: 4, lastActiveAt: 10, pinnedAt: 5 }),
+      ],
+    });
+    const nodes = Object.fromEntries(project.trees.map((t) => [t.rootNodeId, mkNode({ nodeId: t.rootNodeId, title: t.id })]));
+    expect(deriveTreeRows(project, nodes, '').filter((r) => r.kind === 'label').map((r) => r.treeId)).toEqual(['pinned', 'busiest', 'newer', 'older']);
+  });
 });
 
 describe('Meta agent maintenance runs and page helpers', () => {
@@ -177,6 +200,14 @@ describe('deriveDigests', () => {
     expect(out[0].excerpt.length).toBeGreaterThan(0);
     expect(out[0].sourceCount).toBe(2);
     expect(out[0].updatedAt).toBe(100);
+  });
+
+  it('excerpts a saved digest without its metadata sentinels', () => {
+    const project = mkProject({ chatIds: ['d1'] });
+    const nodes: Record<string, ChatNodeState> = {
+      d1: mkNode({ nodeId: 'd1', kind: 'digest', digest: mkDigest({ content: '[TITLE: Internal]\n# Result\n\nSummary.\n\n[BRANCH-OVERVIEW: Z]' }) }),
+    };
+    expect(deriveDigests(project, nodes)[0].excerpt).toBe('# Result Summary.');
   });
 
   it('counts sources like the digest detail view, including chats branched after generation', () => {

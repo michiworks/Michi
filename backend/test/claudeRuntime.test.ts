@@ -5,7 +5,7 @@
  * spawnClaude is stubbed so no real claude binary is needed.
  */
 
-import './helpers/claudeSdkFixture';
+import { untilSpawned } from './helpers/claudeSdkFixture';
 import { test, describe, beforeEach, afterEach, mock } from 'node:test';
 import assert from 'node:assert/strict';
 import { claudeTestOptions } from './helpers/claudeTestOptions';
@@ -13,10 +13,14 @@ import { michiTestHost } from './helpers/michiTestHost';
 import { EventEmitter, PassThrough } from 'node:stream';
 import * as sessionRegistry from '../src/agents/sessionRegistry';
 import { ChatHub } from '../src/agents/chatHub';
-import type { AgentRuntime, AgentSession } from '../src/agents/types';
+import type { AgentSession } from '../src/agents/types';
 import type { RuntimeHost, SessionRegistryPort } from 'michi-runtime/internal/contract/host';
 import type { DurableTurnSnapshot } from 'michi-shared';
 import { chatOwner } from './helpers/owners';
+
+// No title CLI: warm() would start one through the real SDK, beside the fixture
+// processes these tests count (claudeTitleGenerator.test.ts covers titles).
+process.env.MICHI_TITLE_MODEL_CLAUDE = 'off';
 
 // ---- MockClaudeChild --------------------------------------------------------
 
@@ -222,11 +226,12 @@ describe('ClaudeRuntime', () => {
     sessionRegistry.clearAllSessions();
   });
 
-  test('uses title metadata from the main Claude response without a sidecar model', async () => {
+  test('takes the title from the main Claude response when no sidecar title arrives', async () => {
     const rt = new ClaudeRuntime({ ...claudeTestOptions(), bridge: bridge as any, mcpSlots: mcpRegistry as any });
     let snapshot: DurableTurnSnapshot | undefined;
     const hub = new ChatHub({
       retentionMs: 100,
+      titleGenerator: null,
       workspaceIdForNode: () => 'ws-title',
       persistence: {
         begin: () => {},
@@ -235,7 +240,6 @@ describe('ClaudeRuntime', () => {
       },
     });
     try {
-      assert.equal((rt as AgentRuntime).generateTitle, undefined);
       const session = await rt.newSession({ cwd: '/tmp', sessionId: 'main-title' } as any);
       const { done } = await hub.startTurn({
         chatId: 'main-title', nodeId: 'main-title', text: 'How does Claude title generation work?', session,
@@ -295,7 +299,7 @@ describe('ClaudeRuntime', () => {
 
     concrete.queue.push({ kind: 'chunk', text: 'self turn' });
     await started;
-    assert.ok(concrete.turnLock, 'self turn should own the lock before competing send');
+    assert.equal(concrete.turn?.owner, 'self', 'self turn should own the turn before competing send');
 
     await assert.rejects(
       () => session.send('busy foreground').next(),
@@ -650,9 +654,12 @@ describe('ClaudeRuntime', () => {
     delete require.cache[require.resolve('michi-runtime/internal/adapters/claude/ClaudeSession')];
     delete require.cache[require.resolve('michi-runtime/internal/adapters/claude/ClaudeRuntime')];
     const FreshRuntime = require('michi-runtime/internal/adapters/claude/ClaudeRuntime').ClaudeRuntime;
-    const rt2 = new FreshRuntime({ ...claudeTestOptions(), bridge: bridge as any, mcpSlots: mcpRegistry as any });
+    const options = claudeTestOptions();
+    const rt2 = new FreshRuntime({ ...options, bridge: bridge as any, mcpSlots: mcpRegistry as any });
     try {
       await rt2.warm('/tmp/warm-profile');
+      // warm() returns once the first lands; the pool spawns the rest after.
+      await untilSpawned(() => children.length === options.limits.pool.sessionsPerCwd);
       const warmed = children.length;
       assert.ok(warmed > 0, 'warm processes are ready');
       const restricted = await rt2.newSession({
@@ -839,6 +846,29 @@ describe('ClaudeRuntime', () => {
     } finally {
       const { setDiscoveredClaudeModels } = require('michi-runtime/internal/adapters/claude/claudeModelCatalog');
       setDiscoveredClaudeModels([]);
+      await rt.shutdown();
+    }
+  });
+
+  test('listSkills() runs one probe per folder at a time; a caller that stops waiting leaves it to the others', async (t) => {
+    const answers: Array<(listing: { skills: Array<{ name: string; description: string }> }) => void> = [];
+    t.mock.method(require('michi-runtime/internal/adapters/claude/claudeSkillProbe'), 'listClaudeSkills',
+      () => new Promise((resolve) => { answers.push(resolve); }));
+    const rt = new ClaudeRuntime({ ...claudeTestOptions(), bridge: bridge as any, mcpSlots: mcpRegistry as any });
+    try {
+      const controller = new AbortController();
+      const leaving = rt.listSkills({ cwd: '/work', signal: controller.signal });
+      const staying = rt.listSkills({ cwd: '/work' });
+      void rt.listSkills({ cwd: '/elsewhere' });
+      assert.equal(answers.length, 2);
+      controller.abort();
+      await assert.rejects(leaving);
+      answers[0]({ skills: [{ name: 'tool', description: '' }] });
+      assert.deepEqual((await staying).skills.map((skill) => skill.name), ['tool']);
+      await new Promise((resolve) => setImmediate(resolve));
+      void rt.listSkills({ cwd: '/work' });
+      assert.equal(answers.length, 3, 'a finished probe is not kept: the host keeps the listings');
+    } finally {
       await rt.shutdown();
     }
   });

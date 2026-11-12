@@ -23,7 +23,6 @@ export function rendererStreamProbeEnabled(): boolean {
 export function writeRendererStreamProbe(row: Record<string, unknown>): void {
   if (!rendererStreamProbeEnabled()) return;
   // Text content is intentionally excluded; log only cadence and sizes.
-  // eslint-disable-next-line no-console
   console.info(JSON.stringify({ type: 'stream_probe', source: 'renderer', ...row }));
 }
 

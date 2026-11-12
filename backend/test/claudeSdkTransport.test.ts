@@ -127,6 +127,59 @@ test('a malformed settings file carries nothing over and is logged without its c
   assert.match(JSON.stringify(warnings[0][2]), /SyntaxError/);
 });
 
+test('Ultracode reaches the flag settings explicitly, off included, except where no settings file loads', async t => {
+  // A chat loads the user's and project's settings files, which the flag
+  // layer outranks: an explicit value keeps one from turning it on unseen.
+  for (const ultracode of [true, false]) {
+    const h = harness(t);
+    await h.create({ ultracode });
+    assert.deepEqual(h.options.settingSources, ['user', 'project', 'local']);
+    assert.equal(h.options.settings.ultracode, ultracode);
+  }
+  const unset = harness(t);
+  await unset.create();
+  assert.equal('ultracode' in unset.options.settings, false, 'nothing is sent when the session has no choice');
+  // An isolated session loads no settings file, so off needs no override and
+  // its options stay as they were.
+  const isolated = harness(t);
+  await isolated.create({ restricted: true, bare: true, ultracode: false });
+  assert.deepEqual(isolated.options.settingSources, []);
+  assert.equal('ultracode' in isolated.options.settings, false);
+});
+
+test('added folders reach the SDK in every mode: chat, isolated, the restricted assistant and bare', async t => {
+  const dir = '/data/skill-mounts/claude/michi';
+  const modes: Array<[string, Partial<ClaudeSdkTransportOptions>]> = [
+    ['chat', {}], ['isolated', { isolateSettings: true }], ['restricted', assistantTransportOptions()], ['bare', { bare: true }],
+  ];
+  for (const [mode, options] of modes) {
+    const h = harness(t);
+    await h.create({ ...options, addDirs: [dir] });
+    assert.deepEqual(h.options.additionalDirectories, [dir], mode);
+  }
+  const none = harness(t);
+  await none.create();
+  assert.equal(none.options.additionalDirectories, undefined);
+});
+
+test('the real SDK hands an added folder to the CLI as --add-dir', async t => {
+  const h = harness(t);
+  t.mock.method(require('michi-runtime/internal/adapters/claude/claudeBinary'), 'findClaudeBinary', () => process.execPath);
+  let argv: string[] = [];
+  t.mock.method(require('../src/agents/processTree'), 'spawnAgentProcess', (_command: string, args: string[]) => { argv = args; return h.child; });
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'michi-sdk-add-dir-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const transport = await createClaudeSdkTransport({
+    cwd: dir, onMessage: () => {}, onStderr: () => {}, onError: () => {},
+    authorize: async () => ({ behavior: 'deny', message: 'test' }), preToolUse: async () => undefined,
+    log: michiTestHost().observability.log, spawnEnv: process.env, permissionMode: 'default', mcpConfigInline: '{"mcpServers":{}}',
+    bare: true, addDirs: [dir],
+  });
+  transport.close();
+  const at = argv.indexOf('--add-dir');
+  assert.equal(at >= 0 ? argv[at + 1] : argv.find((arg) => arg.startsWith('--add-dir='))?.slice('--add-dir='.length), dir);
+});
+
 test('SDK input remains ordered and closing releases a pending input reader', async t => {
   const h = harness(t), transport = await h.create();
   const iterator = h.input[Symbol.asyncIterator]();

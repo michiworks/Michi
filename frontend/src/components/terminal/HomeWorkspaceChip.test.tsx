@@ -1,5 +1,4 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
-import React from 'react';
 import { render, screen, fireEvent, act } from '@testing-library/react';
 import { HomeWorkspaceChip } from './HomeWorkspaceChip';
 import { setKnownBackendConnections } from '../../config/backendConnections';

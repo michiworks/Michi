@@ -8,6 +8,7 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { isWithinRoot } from '../../../core/pathSandbox';
 import { errorMessage } from './crewFrames';
 import type { CrewFolder, CrewGateway } from './gatewayTypes';
 
@@ -37,10 +38,7 @@ function realpath(dir: string): string {
 /** Live tests run in temporary directories; their sessions are left unfiled rather than adding folders. */
 export function isTemporaryProject(cwd: string): boolean {
     const target = realpath(path.resolve(cwd));
-    return ['/tmp', os.tmpdir()].flatMap((dir) => [dir, realpath(dir)]).some((root) => {
-        const rel = path.relative(root, target);
-        return rel === '' || (rel !== '..' && !rel.startsWith(`..${path.sep}`) && !path.isAbsolute(rel));
-    });
+    return ['/tmp', os.tmpdir()].flatMap((dir) => [dir, realpath(dir)]).some((root) => isWithinRoot(target, root));
 }
 
 export class CrewFolders {

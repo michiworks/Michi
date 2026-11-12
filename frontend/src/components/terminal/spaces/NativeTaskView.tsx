@@ -1,4 +1,3 @@
-import React from 'react';
 import type { PageComponentSource, ThreadCardItem } from 'michi-shared';
 import { TASK_VIEW } from 'michi-shared';
 import NativeDatabase from './NativeDatabase';
@@ -63,5 +62,3 @@ export function NativeTaskView({ workspaceId, connectionId, viewId, title, compa
     </section>
   );
 }
-
-export default NativeTaskView;

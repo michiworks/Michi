@@ -51,7 +51,6 @@ async function boot(page: Page, mock: PagesMockController, workspaces: Array<{ i
   await page.addInitScript(() => {
     localStorage.setItem('michi:prefs', JSON.stringify({ onboardingCompletedAt: 1, terminalPalette: 'bone' }));
     localStorage.setItem('michi:migrated', '1');
-    localStorage.setItem('michi:metaChat:window:v1', JSON.stringify({ form: 'float', minimized: true, rect: null, dockRatio: 50 }));
   });
   await installMockApi(page, { workspaces: workspaces.map(({ id, name }) => ({
     workspace: { id, name, created_at: 1, active_tree_id: `${id}-tree` },
@@ -95,17 +94,17 @@ async function drag(page: Page, from: Locator, to: Locator) {
   await page.mouse.up();
 }
 
-test("notes the Meta agent's latest update above the board, marks its cards, and undoes it", async ({ page }) => {
+test("notes <name> · Pages upkeep's latest update above the board, marks its cards, and undoes it", async ({ page }) => {
   const { mock, errors } = await openTaskBoard(page);
   const line = page.locator('.michi-task-upkeep');
-  await expect(line).toContainText('Meta agent added 1 task, updated 1 and suggested 1 change');
+  await expect(line).toContainText('Michi · Pages upkeep added 1 task, updated 1 and suggested 1 change');
   await expect(line).toContainText('from “Release check”');
   await expect(taskCard(page, 'Write the release notes').locator('[data-mark="new"]')).toHaveText('New');
   await expect(taskCard(page, 'Ship the release').locator('[data-mark="updated"]')).toHaveText('Updated');
   await expect(taskCard(page, 'Review the docs').locator('[data-mark="suggestion"]')).toHaveText('Suggestion');
 
   await line.getByRole('button', { name: 'Undo', exact: true }).click();
-  await expect(page.getByText("Undid the Meta agent's update")).toBeVisible();
+  await expect(page.getByText('Undid the Pages upkeep update')).toBeVisible();
   await expect(taskCard(page, 'Write the release notes')).toHaveCount(0);
   await expect(taskCard(column(page, 'In progress'), 'Ship the release')).toBeVisible();
   await expect(line).toHaveCount(0);

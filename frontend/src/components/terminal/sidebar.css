@@ -1,4 +1,5 @@
-/* Chat's section labels are shared by every area; geometry comes from Sidebar. */
+/* Chat's section labels are shared by every area; geometry comes from Sidebar.
+   Sentence case ("Pinned", "Projects"), like the rest of the sidebar's text. */
 .sidebar-section-label,
 .area-side__section {
   position: relative;
@@ -9,45 +10,243 @@
   font-family: var(--ui-font);
   font-size: var(--fs-sm);
   font-weight: 600;
-  letter-spacing: var(--sb-section-tracking);
-  text-transform: uppercase;
   color: var(--term-muted);
 }
 
-/* Phone drawer: the current lens name and the Activity on/off switch. */
-.sidebar-lens-header {
-  flex: none;
-  display: flex;
-  align-items: center;
-  min-height: 48px;
-  padding: 4px calc(6px + var(--sb-inset, 0px)) 0 calc(var(--sb-area-left, 20px) + var(--sb-inset, 0px));
-}
-.sidebar-lens-header__title {
-  flex: 1;
-  min-width: 0;
-  font-family: var(--ui-font);
-  font-size: var(--fs-md);
-  font-weight: 600;
-  color: var(--term-mid);
-}
-.sidebar-lens-header__toggle {
-  width: 44px;
-  height: 44px;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  padding: 0;
+/* "All N ›" at the right end of the Projects header: the way to Workspaces. */
+.sidebar-section-label__action {
+  margin: -3px -6px -3px auto;
+  padding: 3px 6px;
   border: 0;
-  border-radius: var(--ui-radius);
+  border-radius: var(--ui-radius-sm);
   background: transparent;
   color: var(--term-muted);
+  font: inherit;
+  font-weight: 500;
   cursor: pointer;
+  white-space: nowrap;
 }
-.sidebar-lens-header__toggle[aria-pressed='true'] {
-  background: color-mix(in srgb, var(--term-fg) 6%, transparent);
+.sidebar-section-label__action:hover,
+.sidebar-section-label__action[aria-current='page'] {
+  color: var(--term-fg);
+  background: var(--term-hover-bg, var(--term-alt));
+}
+.sidebar-section-label__action:focus-visible {
+  outline: var(--focus-ring);
+  outline-offset: -2px;
+}
+
+/* Phone drawer: a list dragged past its end stops there and hands the drag to
+   nothing behind it. NarrowSidebarOverlay cancels the drags this cannot hold.
+   Only the lists that scroll: every overflow: hidden box (a row's title) is a
+   scroll container too, and with contain a drag that starts on a title would
+   not reach the list around it. */
+.terminal-shell[data-sidebar-layout='overlay'] .terminal-sidebar :is(.sb-scroller__view, .area-side__grow, .area-settings) {
+  overscroll-behavior: contain;
+}
+
+/* ── Narrow drawer's first row: New chat + Search ─────────────────────────── */
+.sidebar-new-row {
+  flex: none;
+  display: flex;
+  gap: 6px;
+  padding: 10px var(--sb-spine-right, 12px) 4px var(--sb-spine-left, 12px);
+}
+.sidebar-new-row .ui-btn {
+  height: 30px;
+  border-color: var(--term-line);
+  color: var(--term-mid);
+}
+.sidebar-new-row .ui-btn:hover:not(:disabled) {
   color: var(--term-fg);
 }
-.sidebar-lens-header__toggle:focus-visible {
-  outline: 2px solid color-mix(in srgb, var(--term-accent) 62%, transparent);
+.sidebar-new-row .ui-btn svg {
+  flex: none;
+}
+/* Two classes: these override .ui-btn's padding wherever index.css lands. */
+.sidebar-new-row .sidebar-new-row__new {
+  flex: 1;
+  min-width: 0;
+  justify-content: flex-start;
+  gap: 8px;
+  padding: 0 10px;
+  font-weight: 500;
+}
+.sidebar-new-row__label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.sidebar-new-row__kbd {
+  margin-left: auto;
+  font-family: var(--ui-font);
+  font-size: var(--fs-xs);
+  color: var(--term-muted);
+}
+.sidebar-new-row .sidebar-new-row__search {
+  flex: none;
+  width: 30px;
+  padding: 0;
+}
+/* The phone drawer: finger-sized, and no keyboard shortcut to show. */
+@media (max-width: 700px), (pointer: coarse) and (max-height: 500px) {
+  .sidebar-new-row .ui-btn { height: 40px; }
+  .sidebar-new-row .sidebar-new-row__search { width: 40px; }
+  .sidebar-new-row__kbd { display: none; }
+}
+
+/* ── View tabs: By project / Recent ───────────────────────────────────────── */
+/* Outside the list's scroller, so they stay put while it scrolls. */
+.sidebar-view-tabs {
+  flex: none;
+  display: flex;
+  gap: 14px;
+  padding: 8px var(--sb-spine-right, 16px) 2px var(--sb-spine-left, 12px);
+}
+.sidebar-view-tabs__tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  min-height: 24px;
+  padding: 0;
+  border: 0;
+  border-bottom: 1.5px solid transparent;
+  border-radius: 0;
+  background: transparent;
+  color: var(--term-muted);
+  font-family: var(--ui-font);
+  font-size: var(--fs-md);
+  font-weight: 500;
+  cursor: pointer;
+}
+.sidebar-view-tabs__tab:hover {
+  color: var(--term-fg);
+}
+.sidebar-view-tabs__tab[aria-selected='true'] {
+  color: var(--term-fg);
+  border-bottom-color: var(--term-fg);
+}
+.sidebar-view-tabs__tab:focus-visible {
+  outline: var(--focus-ring);
+  outline-offset: 2px;
+}
+.sidebar-view-tabs__count {
+  font-size: var(--fs-xs);
+  font-variant-numeric: tabular-nums;
+  color: var(--term-accent);
+}
+.sidebar-view-panel {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+/* ── Earlier · N (By project) ─────────────────────────────────────────────── */
+.sidebar-earlier__chevron {
+  flex: none;
+  display: inline-flex;
+  justify-content: center;
+  font-size: var(--fs-sm);
+  color: var(--term-faint);
+  transition: transform var(--t-soft) var(--t-ease, ease-out);
+}
+.sidebar-earlier__chevron[data-open] {
+  transform: rotate(90deg);
+}
+.sidebar-earlier__count {
+  color: var(--term-faint);
+}
+
+/* ── Foot: a machine that is offline ──────────────────────────────────────── */
+.sidebar-foot {
+  flex: none;
+  display: flex;
+  padding: 4px calc(var(--sb-spine-left, 12px) - 8px) 8px;
+}
+
+/* Phone drawer: when something sits under the list (Agents, Profile, the
+   offline chip), it is a thumb zone under one hairline and the conversation
+   list fades into it. With nothing there the list runs to the drawer's edge. */
+.terminal-shell[data-sidebar-layout='overlay'] .terminal-sidebar-content
+  > :is(.sidebar-bottom-nav, .sidebar-foot):not(.sidebar-bottom-nav + .sidebar-foot) {
+  border-top: 1px solid color-mix(in srgb, var(--term-line) 50%, transparent);
+}
+.terminal-shell[data-sidebar-layout='overlay'] .terminal-sidebar-content
+  > .sidebar-view-panel:has(~ :is(.sidebar-bottom-nav, .sidebar-foot)) .sb-scroller__view {
+  -webkit-mask-image: linear-gradient(to bottom, black calc(100% - 12px), transparent);
+  mask-image: linear-gradient(to bottom, black calc(100% - 12px), transparent);
+}
+.sidebar-conn-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  height: 26px;
+  padding: 0 8px;
+  border: 0;
+  border-radius: var(--ui-radius-sm);
+  background: transparent;
+  color: var(--term-muted);
+  font-family: var(--ui-font);
+  font-size: var(--fs-sm);
+  cursor: pointer;
+}
+.sidebar-conn-chip:hover {
+  color: var(--term-fg);
+  background: var(--term-hover-bg, var(--term-alt));
+}
+.sidebar-conn-chip:focus-visible {
+  outline: var(--focus-ring);
   outline-offset: -2px;
+}
+.sidebar-conn-chip__dot {
+  flex: none;
+  width: 7px;
+  height: 7px;
+  border-radius: var(--ui-radius-pill);
+  background: var(--term-danger);
+}
+.sidebar-conn-chip__label {
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+/* ── Rows and the keyboard ────────────────────────────────────────────────── */
+/* The current row (the one on screen) keeps its ⋯; the rest show it on hover
+   or when focus is in the row (index.css .row-kebab). */
+.terminal-sidebar .t-row-hover[aria-current='true'] > .row-kebab {
+  opacity: 1;
+}
+.terminal-sidebar .t-row-hover[aria-current='true'] > .row-kebab > button {
+  pointer-events: auto;
+}
+/* Rows are tabbable, so a click focuses them too. Only keyboard focus should
+   light a row: once the pointer has left, a row that holds focus from a click
+   drops the hover fill and the hover-revealed actions. */
+.terminal-sidebar .t-row-hover[tabindex]:not(.is-active):focus:not(:focus-visible):not(:hover) {
+  background: transparent !important;
+}
+.terminal-sidebar .t-row-hover[tabindex]:not([aria-current='true']):focus:not(:focus-visible):not(:hover) > .row-kebab,
+.terminal-sidebar .t-row-hover[tabindex]:focus:not(:focus-visible):not(:hover) .ws-hover-chevron,
+.terminal-sidebar .t-row-hover[tabindex]:focus:not(:focus-visible):not(:hover) .ws-hover-actions {
+  opacity: 0;
+}
+.terminal-sidebar .t-row-hover[tabindex]:not([aria-current='true']):focus:not(:focus-visible):not(:hover) > .row-kebab > button,
+.terminal-sidebar .t-row-hover[tabindex]:focus:not(:focus-visible):not(:hover) .ws-hover-chevron,
+.terminal-sidebar .t-row-hover[tabindex]:focus:not(:focus-visible):not(:hover) .ws-hover-actions {
+  pointer-events: none;
+}
+@media (hover: none) {
+  /* Touch screens show these permanently (index.css); keep them. */
+  .terminal-sidebar .t-row-hover[tabindex]:not([aria-current='true']):focus:not(:focus-visible):not(:hover) > .row-kebab,
+  .terminal-sidebar .t-row-hover[tabindex]:focus:not(:focus-visible):not(:hover) .ws-hover-chevron,
+  .terminal-sidebar .t-row-hover[tabindex]:focus:not(:focus-visible):not(:hover) .ws-hover-actions {
+    opacity: 1;
+  }
+  .terminal-sidebar .t-row-hover[tabindex]:not([aria-current='true']):focus:not(:focus-visible):not(:hover) > .row-kebab > button,
+  .terminal-sidebar .t-row-hover[tabindex]:focus:not(:focus-visible):not(:hover) .ws-hover-chevron,
+  .terminal-sidebar .t-row-hover[tabindex]:focus:not(:focus-visible):not(:hover) .ws-hover-actions {
+    pointer-events: auto;
+  }
 }

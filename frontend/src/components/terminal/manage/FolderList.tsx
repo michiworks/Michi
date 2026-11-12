@@ -1,7 +1,9 @@
-import React, { useState } from 'react';
+import { useState } from 'react';
 import { toast } from 'sonner';
 import { getElectron } from '../../../lib/electronBridge';
+import { appendFolders, FOLDER_OVERLAP_MESSAGE, MAX_WORKSPACE_FOLDERS, pathBasename } from '../../../lib/workspaceFolders';
 import type { FolderEntry } from '../../../state/chatTypes';
+import { InlineRenameInput } from '../../ui/InlineRenameInput';
 
 interface Props {
   folders: FolderEntry[];
@@ -10,12 +12,6 @@ interface Props {
   onAddFolder: (projectId: string, path: string, label?: string) => void;
   onRemoveFolder: (projectId: string, folderId: string) => void;
   onUpdateLabel: (projectId: string, folderId: string, label: string) => void;
-}
-
-const MAX_FOLDERS = 10;
-
-function basename(p: string): string {
-  return p.split('/').pop() || p;
 }
 
 export default function FolderList({
@@ -27,12 +23,11 @@ export default function FolderList({
   onUpdateLabel,
 }: Props) {
   const [editingId, setEditingId] = useState<string | null>(null);
-  const [draft, setDraft] = useState('');
   const [remotePath, setRemotePath] = useState('');
 
   const handleAdd = async () => {
-    if (folders.length >= MAX_FOLDERS) {
-      toast.error(`Maximum ${MAX_FOLDERS} folders reached`);
+    if (folders.length >= MAX_WORKSPACE_FOLDERS) {
+      toast.error(`Maximum ${MAX_WORKSPACE_FOLDERS} folders reached`);
       return;
     }
     if (remote) {
@@ -41,7 +36,7 @@ export default function FolderList({
         toast.error('Enter an absolute path on the remote server');
         return;
       }
-      onAddFolder(projectId, path, basename(path));
+      onAddFolder(projectId, path, pathBasename(path));
       setRemotePath('');
       return;
     }
@@ -52,16 +47,11 @@ export default function FolderList({
       try {
         const result = await electron.chooseFolders();
         if (result.canceled || result.folders.length === 0) return;
-        let added = 0;
-        for (const picked of result.folders) {
-          if (folders.length + added >= MAX_FOLDERS) {
-            toast.error(`Maximum ${MAX_FOLDERS} folders reached — some selections were skipped`);
-            break;
-          }
-          // Dedupe and nesting are enforced by the store's addFolder action
-          onAddFolder(projectId, picked.path, picked.name);
-          added++;
-        }
+        // The store's addFolder checks each one again.
+        const { added, skipped, limitHit } = appendFolders(folders, result.folders);
+        for (const picked of added) onAddFolder(projectId, picked.path, picked.name);
+        for (const _skipped of skipped) toast.error(FOLDER_OVERLAP_MESSAGE);
+        if (limitHit) toast.error(`Maximum ${MAX_WORKSPACE_FOLDERS} folders reached — some selections were skipped`);
       } catch (err) {
         toast.error(`Failed to add folder: ${(err as Error).message}`);
       }
@@ -92,19 +82,6 @@ export default function FolderList({
     } catch {
       // User cancelled
     }
-  };
-
-  const beginEdit = (f: FolderEntry) => {
-    setEditingId(f.id);
-    setDraft(f.label || basename(f.path));
-  };
-
-  const commitEdit = (folderId: string) => {
-    const trimmed = draft.trim();
-    if (trimmed) {
-      onUpdateLabel(projectId, folderId, trimmed);
-    }
-    setEditingId(null);
   };
 
   return (
@@ -145,15 +122,11 @@ export default function FolderList({
 
           <div style={{ flex: 1, minWidth: 0 }}>
             {editingId === f.id ? (
-              <input
+              <InlineRenameInput
                 autoFocus
-                value={draft}
-                onChange={(e) => setDraft(e.target.value)}
-                onKeyDown={(e) => {
-                  if (e.key === 'Enter') commitEdit(f.id);
-                  if (e.key === 'Escape') setEditingId(null);
-                }}
-                onBlur={() => commitEdit(f.id)}
+                value={f.label || pathBasename(f.path)}
+                onCommit={(label) => onUpdateLabel(projectId, f.id, label)}
+                onEnd={() => setEditingId(null)}
                 style={{
                   width: '100%',
                   fontSize: 'var(--fs-md)',
@@ -178,10 +151,10 @@ export default function FolderList({
                     whiteSpace: 'nowrap',
                     cursor: idx > 0 ? 'pointer' : 'default',
                   }}
-                  onClick={() => idx > 0 && beginEdit(f)}
+                  onClick={() => idx > 0 && setEditingId(f.id)}
                   title={idx > 0 ? 'Click to rename' : undefined}
                 >
-                  {f.label || basename(f.path)}
+                  {f.label || pathBasename(f.path)}
                   {idx === 0 && (
                     <span style={{
                       fontSize: 'var(--fs-xs)',
@@ -237,21 +210,21 @@ export default function FolderList({
       {!remote && <button
         type="button"
         onClick={() => { void handleAdd(); }}
-        disabled={folders.length >= MAX_FOLDERS}
+        disabled={folders.length >= MAX_WORKSPACE_FOLDERS}
         style={{
           marginTop: 8,
           width: '100%',
           padding: '5px 10px',
           fontFamily: 'var(--ui-font)',
           fontSize: 'var(--fs-sm)',
-          color: folders.length >= MAX_FOLDERS ? 'var(--term-muted)' : 'var(--term-fg)',
+          color: folders.length >= MAX_WORKSPACE_FOLDERS ? 'var(--term-muted)' : 'var(--term-fg)',
           background: 'transparent',
           border: '1px dashed var(--term-line)',
-          cursor: folders.length >= MAX_FOLDERS ? 'default' : 'pointer',
-          opacity: folders.length >= MAX_FOLDERS ? 0.5 : 1,
+          cursor: folders.length >= MAX_WORKSPACE_FOLDERS ? 'default' : 'pointer',
+          opacity: folders.length >= MAX_WORKSPACE_FOLDERS ? 0.5 : 1,
         }}
       >
-        + Add folder{folders.length >= MAX_FOLDERS ? ` (limit: ${MAX_FOLDERS})` : ''}
+        + Add folder{folders.length >= MAX_WORKSPACE_FOLDERS ? ` (limit: ${MAX_WORKSPACE_FOLDERS})` : ''}
       </button>}
     </div>
   );

@@ -1,4 +1,5 @@
-import { backendApiBase } from '../../config/backendConnections';
+import { isMichiBackendHealth } from 'michi-shared';
+import { backendApiBase, LOCAL_BACKEND_CONNECTION_ID } from '../../config/backendConnections';
 import { backendConnectionGeneration, backendConnectionUnavailable, markBackendConnectionUnavailable } from '../../config/backendConnectionState';
 
 const checks = new Map<string, { generation: number; result: Promise<boolean> }>();
@@ -6,7 +7,7 @@ const checks = new Map<string, { generation: number; result: Promise<boolean> }>
 /** A failed request/stream must not evict every loaded chat on a healthy remote. */
 export async function confirmBackendConnectionUnavailable(connectionId: string, signal?: AbortSignal | null,
   generation = backendConnectionGeneration(connectionId)): Promise<void> {
-  if (connectionId === 'local' || signal?.aborted || backendConnectionUnavailable(connectionId)
+  if (connectionId === LOCAL_BACKEND_CONNECTION_ID || signal?.aborted || backendConnectionUnavailable(connectionId)
     || generation !== backendConnectionGeneration(connectionId)) return;
   let check = checks.get(connectionId);
   if (!check || check.generation !== generation) {
@@ -18,8 +19,7 @@ export async function confirmBackendConnectionUnavailable(connectionId: string, 
           signal: AbortSignal.timeout(5_000), cache: 'no-store',
         });
         if (!response.ok) { await response.body?.cancel(); return false; }
-        const body = await response.json();
-        return body?.service === 'michi-backend' && body?.status === 'healthy';
+        return isMichiBackendHealth(await response.json());
       } catch { return false; }
     })();
     check = { generation, result };

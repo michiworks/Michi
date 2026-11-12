@@ -98,6 +98,20 @@ export function resolveChatPermissionMode(nodeId: string, userId?: string | null
   return isChatPermissionMode(node?.permission_mode) ? node.permission_mode : 'ask';
 }
 
+/**
+ * The chat's own setting as stored on it, whatever the global setting says:
+ * what a chat created from it copies, so turning the global setting off later
+ * leaves both on the same mode. In cloud mode a non-owner gets Ask.
+ */
+export function readNodePermissionSetting(nodeId: string, userId?: string | null): { mode: ChatPermissionMode; approveForMe: boolean } {
+  const node = getNode(nodeId);
+  if (process.env.MICHI_CLOUD === '1' && (!node || !userId || getWorkspace(node.workspace_id)?.owner_user_id !== userId)) {
+    return { mode: 'ask', approveForMe: false };
+  }
+  const mode = isChatPermissionMode(node?.permission_mode) ? node.permission_mode : 'ask';
+  return { mode, approveForMe: mode === 'ask' && node?.permission_approve_for_me === 1 };
+}
+
 /** Approve for me is on for this chat: its effective mode is Ask with the flag set. */
 export function resolveChatApproveForMe(nodeId: string, userId?: string | null): boolean {
   const node = getNode(nodeId);

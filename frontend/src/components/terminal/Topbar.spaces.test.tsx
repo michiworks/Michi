@@ -18,7 +18,7 @@ vi.mock('../../services/api', async (importOriginal) => {
 });
 vi.mock('../../lib/electronBridge', () => ({ getElectron: () => null }));
 
-const base = { onNav: () => {}, sidebarCollapsed: false, onToggleSidebar: () => {}, spacesAssistant: { open: false, onToggle: () => {} } };
+const base = { onNav: () => {}, sidebarCollapsed: false, onToggleSidebar: () => {}, navigation: { canBack: false, canForward: false, onBack: () => {}, onForward: () => {} } };
 const pageScope = { backendConnectionId: 'local', pageId: 'p1', workspaceId: 'w1', workspaceName: 'rabbitholes', pageTitle: 'Michi 0.9 发布' };
 
 function renderTopbar(props: Partial<React.ComponentProps<typeof TerminalTopbar>> & { page: React.ComponentProps<typeof TerminalTopbar>['page'] }) {
@@ -49,7 +49,8 @@ describe('Spaces topbar', () => {
     expect(beside.textContent).toBe('Open beside chat');
     fireEvent.click(beside);
     expect(onOpenBeside).toHaveBeenCalled();
-    expect(screen.getByRole('button', { name: 'Assistant' })).toBeTruthy();
+    // The agent is the one Topbar button of every area, not a Pages toggle (DESIGN-v2 §1.2).
+    expect(screen.queryByRole('button', { name: 'Assistant' })).toBeNull();
   });
 
   it('reads Spaces › Home on Home, with Start a task but nothing to open beside the chat', () => {

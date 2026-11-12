@@ -2,30 +2,33 @@ import React, { useCallback, useContext, useEffect, useLayoutEffect, useMemo, us
 import type { FilePaneItem, SourceLocation } from '../../state/paneItems';
 import { useChatActions, useChatProjects, useChatStore, ChatNodeStoreContext } from '../../state/chatStore';
 import { usePaneShellStyle } from '../../hooks/usePaneShellStyle';
-import { fetchArtifactContent } from '../../services/api';
+import { readWorkspaceFile } from '../../services/workspaceFileReader';
 import { getElectron } from '../../lib/electronBridge';
+import { hostPathFor } from '../../lib/workspaceFilePath';
+import { formatBytes } from '../../lib/formatBytes';
 import MarkdownContent from '../MarkdownContent';
 import SelectionActions from '../SelectionActions';
 import { formatQuotedMessage, QuoteSource } from '../../lib/quoteFormat';
 import { computeTextSelector, rangeToOffsets, type TextSelector } from '../../lib/textSelector';
 import { RetryIcon, ExternalLinkIcon } from './icons';
+import PanePath from './PanePath';
 import { usePrefs } from '../../state/prefs';
 import { DARK_PALETTES } from './tokens';
 import { usePaneViewState } from './PaneViewState';
-import { LOCAL_BACKEND_CONNECTION_ID } from '../../config/backendConnections';
+import { isLocalProject, LOCAL_BACKEND_CONNECTION_ID } from '../../config/backendConnections';
 import { createFileReadSnapshot, isFileFeedbackTargetValid, type FileFeedbackTarget, type FileReadSnapshot } from '../../state/fileFeedback';
 import type { ChatNodeState } from '../../state/chatTypes';
 import { findTreeIdForNode } from '../../state/tree';
 
 const MARKDOWN_EXTS = new Set(['md', 'mdx', 'markdown']);
-const MAX_FILE_BYTES = 5 * 1024 * 1024;
 
 type LoadState =
   | { phase: 'loading' }
   | {
       phase: 'loaded';
       content: string;
-      imageMime?: string;
+      /** content is the image's data URL. */
+      image: boolean;
       size: number;
       modifiedAt: number;
       extension: string;
@@ -42,11 +45,6 @@ interface CapturedFileSelection {
 
 function basename(filePath: string): string {
   return filePath.split(/[\\/]/).filter(Boolean).pop() ?? filePath;
-}
-
-function isAbsoluteFilePath(filePath: string): boolean {
-  const isUncPath = filePath.length >= 2 && filePath[0] === '\\' && filePath[1] === '\\';
-  return filePath.startsWith('/') || isUncPath || /^[a-zA-Z]:[\\/]/.test(filePath);
 }
 
 function measuredLineHeight(element: HTMLElement): number | null {
@@ -76,7 +74,7 @@ function getSelectionSourceLabel(context: unknown): string | undefined {
 
 export default function FilePane({ item }: { item: FilePaneItem }) {
   const { projects } = useChatProjects();
-  const { focusPane, setFocusedNodeId, updatePaneItem, createChildChat, addPendingComment, setComposerDraft } = useChatActions();
+  const { focusPane, updatePaneItem, createChildChat, addPendingComment, setComposerDraft } = useChatActions();
   // Keep destination choices current when threads are deleted or archived.
   useChatStore();
   const nodeStore = useContext(ChatNodeStoreContext)!;
@@ -247,38 +245,17 @@ export default function FilePane({ item }: { item: FilePaneItem }) {
     const backendConnectionId = project?.backendConnectionId ?? LOCAL_BACKEND_CONNECTION_ID;
     const key = JSON.stringify([backendConnectionId, item.projectId, item.treeId, item.filePath, item.sourceReferencePath, reloadKey]);
     const loadPath = async (targetPath: string): Promise<Extract<LoadState, { phase: 'loaded' }>> => {
-      const electron = getElectron();
-      if (!/\.(png|jpe?g|gif|webp)$/i.test(targetPath) && isAbsoluteFilePath(targetPath) && electron?.readFile && !project?.backendConnectionId) {
-        const stat = await electron.statFile?.(targetPath);
-        if (stat && stat.size > MAX_FILE_BYTES) {
-          throw new Error(`File is too large (${(stat.size / 1024 / 1024).toFixed(1)} MB)`);
-        }
-        const result = await electron.readFile(targetPath);
-        if (!result) throw new Error('File is not readable');
-        const name = basename(targetPath);
-        const extension = name.includes('.') ? name.split('.').pop()?.toLowerCase() ?? '' : '';
-        return {
-          phase: 'loaded',
-          content: result.content,
-          size: result.size,
-          modifiedAt: result.modifiedAt,
-          extension,
-          resolvedFilePath: targetPath,
-          snapshot: await createFileReadSnapshot(result.content, {
-            backendConnectionId, projectId: item.projectId, treeId: item.treeId, resolvedFilePath: targetPath, size: result.size, modifiedAt: result.modifiedAt,
-          }),
-        };
-      }
-      const result = await fetchArtifactContent(item.projectId, targetPath, true);
+      const result = await readWorkspaceFile({ workspaceId: item.projectId, local: isLocalProject({ id: item.projectId, backendConnectionId: project?.backendConnectionId }), path: targetPath });
+      const content = result.kind === 'image' ? result.dataUrl : result.content;
       return {
         phase: 'loaded',
-        content: result.content,
-        imageMime: result.imageMime,
+        content,
+        image: result.kind === 'image',
         size: result.size,
         modifiedAt: result.modifiedAt,
-        extension: result.extension.toLowerCase(),
+        extension: result.extension,
         resolvedFilePath: targetPath,
-        snapshot: await createFileReadSnapshot(result.content, {
+        snapshot: await createFileReadSnapshot(content, {
           backendConnectionId, projectId: item.projectId, treeId: item.treeId, resolvedFilePath: targetPath, size: result.size, modifiedAt: result.modifiedAt,
         }),
       };
@@ -375,11 +352,7 @@ export default function FilePane({ item }: { item: FilePaneItem }) {
     ? state.extension
     : (basename(item.filePath).split('.').pop()?.toLowerCase() ?? '');
   const isMarkdown = MARKDOWN_EXTS.has(extension);
-  const absolutePath = useMemo(() => {
-    if (project?.backendConnectionId) return null;
-    if (isAbsoluteFilePath(resolvedFilePath)) return resolvedFilePath;
-    return project?.cwd ? `${project.cwd.replace(/\/$/, '')}/${resolvedFilePath}` : null;
-  }, [resolvedFilePath, project?.backendConnectionId, project?.cwd]);
+  const absolutePath = useMemo(() => hostPathFor(resolvedFilePath, project), [resolvedFilePath, project]);
 
   const openExternal = useCallback(() => {
     if (absolutePath) void getElectron()?.openPath?.(absolutePath);
@@ -390,14 +363,16 @@ export default function FilePane({ item }: { item: FilePaneItem }) {
       data-pane-id={item.id}
       data-pane-kind="file"
       className="terminal-pane"
-      onMouseDown={() => { focusPane(item.id); setFocusedNodeId(null); }}
+      onMouseDown={() => focusPane(item.id)}
       style={shellStyle}
     >
-      <div style={{ height: 36, padding: '0 12px', display: 'flex', alignItems: 'center', gap: 8, borderBottom: '1px solid var(--term-line)', flexShrink: 0 }}>
-        <span aria-hidden style={{ color: 'var(--term-accent)' }}>◇</span>
-        <span title={resolvedFilePath} style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontSize: 'var(--fs-md)', color: 'var(--term-mid)' }}>
-          {resolvedFilePath}{sourceLocation ? `:${sourceLocation.line}${sourceLocation.column != null ? `:${sourceLocation.column}` : ''}` : ''}
-        </span>
+      {/* The caption above already names the file and its kind; this row only
+          says where it lives. Its left edge matches the body text. */}
+      <div style={{ height: 36, padding: '0 8px 0 22px', display: 'flex', alignItems: 'center', gap: 8, borderBottom: '1px solid var(--term-line)', flexShrink: 0, color: 'var(--term-muted)' }}>
+        <PanePath
+          path={resolvedFilePath}
+          suffix={sourceLocation ? `:${sourceLocation.line}${sourceLocation.column != null ? `:${sourceLocation.column}` : ''}` : undefined}
+        />
         {state.phase === 'loaded' && state.sourceReferenceFallback ? (
           <span title="The literal link path was unreadable; opened as a source reference" style={{ color: 'var(--term-muted)', fontSize: 'var(--fs-xs)', whiteSpace: 'nowrap' }}>
             source reference
@@ -406,7 +381,7 @@ export default function FilePane({ item }: { item: FilePaneItem }) {
         {item.diskState === 'changed' ? (
           <button type="button" onClick={() => setReloadKey((value) => value + 1)} style={{ border: '1px solid var(--term-accent)', background: 'transparent', color: 'var(--term-accent)', padding: '2px 7px', fontFamily: 'var(--ui-font)', fontSize: 'var(--fs-xs)', cursor: 'pointer', whiteSpace: 'nowrap' }}>● Changed on disk · refresh</button>
         ) : null}
-        {item.diskState === 'removed' ? <span style={{ color: 'var(--term-danger)', fontSize: 'var(--fs-xs)' }}>⚠ Deleted on disk</span> : null}
+        {item.diskState === 'removed' ? <span style={{ color: 'var(--term-danger-text)', fontSize: 'var(--fs-xs)' }}>⚠ Deleted on disk</span> : null}
         {isMarkdown ? (
           <button
             type="button"
@@ -432,14 +407,14 @@ export default function FilePane({ item }: { item: FilePaneItem }) {
           getSelectionSourceLabel={getSelectionSourceLabel}
         />
         {state.phase === 'loading' ? <div style={{ color: 'var(--term-muted)', fontSize: 'var(--fs-sm)' }}>loading {basename(item.filePath)}…</div> : null}
-        {state.phase === 'error' ? <div style={{ color: 'var(--term-danger)', fontSize: 'var(--fs-sm)' }}>⚠ {state.message}</div> : null}
+        {state.phase === 'error' ? <div style={{ color: 'var(--term-danger-text)', fontSize: 'var(--fs-sm)' }}>⚠ {state.message}</div> : null}
         {state.phase === 'loaded' && isMarkdown && item.viewMode === 'rendered' ? (
           <MarkdownContent text={state.content} className={`prose prose-sm max-w-none wrap-break-word${isDark ? ' prose-invert' : ''}`} style={fileProseVars} />
         ) : null}
-        {state.phase === 'loaded' && state.imageMime ? (
+        {state.phase === 'loaded' && state.image ? (
           <img src={state.content} alt={basename(resolvedFilePath)} style={{ maxWidth: '100%', height: 'auto', objectFit: 'contain' }} />
         ) : null}
-        {state.phase === 'loaded' && !state.imageMime && (!isMarkdown || item.viewMode === 'source') ? (
+        {state.phase === 'loaded' && !state.image && (!isMarkdown || item.viewMode === 'source') ? (
           // eslint-disable-next-line no-restricted-syntax -- = --fs-md; measuredLineHeight reads it back from computed style
           <pre ref={sourcePreRef} style={{ margin: 0, minWidth: 'max-content', whiteSpace: 'pre', fontFamily: 'var(--message-code-font, monospace)', fontSize: 12, lineHeight: 1.6, color: 'var(--term-mid)', tabSize: 2 }}>
             {state.content}
@@ -447,9 +422,8 @@ export default function FilePane({ item }: { item: FilePaneItem }) {
         ) : null}
       </div>
       {state.phase === 'loaded' ? (
-        <div style={{ height: 24, padding: '0 12px', borderTop: '1px solid var(--term-line)', display: 'flex', alignItems: 'center', gap: 12, flexShrink: 0, fontSize: 'var(--fs-xs)', color: 'var(--term-muted)' }}>
-          <span>{basename(resolvedFilePath)}</span>
-          <span>{state.size < 1024 ? `${state.size} B` : `${(state.size / 1024).toFixed(1)} KB`}</span>
+        <div style={{ height: 24, padding: '0 22px', borderTop: '1px solid var(--term-line)', display: 'flex', alignItems: 'center', gap: 12, flexShrink: 0, fontSize: 'var(--fs-xs)', color: 'var(--term-muted)' }}>
+          <span>{formatBytes(state.size, { empty: '0 B' })}</span>
           <span>{new Date(state.modifiedAt).toLocaleTimeString()}</span>
         </div>
       ) : null}

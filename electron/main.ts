@@ -1,8 +1,11 @@
 import type {
-  BackgroundServiceStatus, BrowserSurfaceState, DesktopCommandContract, DesktopEventContract, DesktopInvokeContract,
-  DesktopInvokeArgs, DesktopInvokeResult, ScheduledRunTarget, TerminalSurfaceSnapshot,
+  BackgroundServiceStatus, BrowserSurfaceState, CompanionChangedEvent, CompanionNotice as SharedCompanionNotice,
+  CompanionTarget as SharedCompanionTarget, CompanionTrayDto, DesktopCommandContract, DesktopEventContract, DesktopInvokeContract,
+  DesktopBootstrapParam, DesktopInvokeArgs, DesktopInvokeResult, DesktopResidency, DesktopResidencyPatch, MichiBackendHealth,
+  ScheduledRunTarget, TerminalSurfaceSnapshot, VibrancyMaterial,
 } from 'michi-shared';
-import { app, BrowserWindow, Menu, Tray, WebContentsView, ipcMain, dialog, nativeImage, shell, nativeTheme, powerSaveBlocker, powerMonitor, Notification as ElectronNotification } from 'electron';
+import { app, BrowserWindow, Menu, Tray, WebContentsView, ipcMain, dialog, shell, nativeImage, nativeTheme, powerSaveBlocker, powerMonitor, Notification as ElectronNotification } from 'electron';
+import type { NativeImage } from 'electron';
 import type { MenuItemConstructorOptions } from 'electron';
 import * as pty from 'node-pty';
 import * as path from 'path';
@@ -19,8 +22,8 @@ import {
   startupTraceFileQuery,
   withStartupTraceQuery,
 } from './startupTrace';
-import { checkForUpdate, initAutoUpdate } from './autoUpdate';
-import { isClosePaneShortcut } from './paneShortcuts';
+import { checkForUpdate, getUpdateState, downloadUpdate, installUpdate, initAutoUpdate, stopAutoUpdate } from './autoUpdate';
+import { forwardedShellChord, isClosePaneShortcut } from './paneShortcuts';
 import { listWorkspaceDirectory, resolveAllowedDirectory } from './workspaceFiles';
 import { applyBrowserTheme, normalizeBrowserTheme, type BrowserTheme } from './browserTheme';
 import { toSurfaceBounds } from './browserBounds';
@@ -29,8 +32,11 @@ import { SIGN_IN_COMMANDS } from './remoteCredentials';
 import {
   appBundlePath,
   buildServiceLaunchSpec,
+  desktopBackendEnv,
   expectedServerId,
   installAndStartService,
+  michiDotenvPath,
+  readDotenvFile,
   readServiceState,
   runLaunchctl,
   serviceBuildStamp,
@@ -40,7 +46,6 @@ import {
 } from './backgroundService';
 import { planNoticeDelivery, ScheduledNotificationFeed, type ScheduledRunNotice } from './scheduledNotifications';
 import {
-  BACKGROUND_LAUNCH_ARG,
   HIDDEN_LAUNCH_ARG,
   PACKAGED_TRAY_ICON_NAME,
   TRAY_MENU,
@@ -48,8 +53,70 @@ import {
   isOwnedLifetimeSender,
   packagedTrayIconPath,
 } from './windowsLifecycle';
+import { createNotificationHolder, parseNotificationRequest } from './rendererNotifications';
+import {
+  COMPANION_READY_CHANNEL,
+  COMPANION_TARGET_PARAM,
+  CompanionNotificationFeed,
+  CompanionNotifier,
+  CompanionRenderers,
+  companionNoticeChannel,
+  type CompanionChangedFrame,
+  type CompanionNoticeChannel,
+  type CompanionTarget,
+} from './companionNotifications';
+import { appendLogLine, formatLogLine } from './logFile';
 import { mergeFeatureList, michiDisabledFeatures } from './chromiumFeatures';
+import { readWindowGlass, writeWindowGlass } from './windowGlass';
 import { backdropCaptureBounds, backdropImageWidth } from './backdropCapture';
+import {
+  APP_USER_MODEL_ID,
+  BACKGROUND_LAUNCH_ARG,
+  LOGIN_LAUNCH_ARG,
+  TrayController,
+  TrayIconSlot,
+  relaunchArgs,
+  startupMode,
+  startupModeAfterTray,
+  stillRunningHint,
+  trayClickBehavior,
+  trayGuid,
+  trayIconFile,
+  trayMenuTemplate,
+  trayTooltip,
+  windowAllClosedAction,
+  type TrayAction,
+  type TrayCompanionDto,
+} from './tray';
+import {
+  DESKTOP_SETTINGS_FILE,
+  applyResidencyPatch,
+  desktopResidency,
+  parseResidencyPatch,
+  readDesktopSettings,
+  traySupported,
+  writeDesktopSettings,
+  writeDesktopSettingsQuietly,
+  type DesktopSettings,
+  type Residency,
+  type ResidencyPatch,
+} from './desktopSettings';
+
+// The mirrors Electron main keeps of shared contracts (it loads no workspace
+// package at runtime) must still fit them: the tray reads every
+// CompanionTrayDto the backend sends, the notifier feed every change frame,
+// notice gate and target, and the residency is the bridge's.
+type Fits<T extends U, U> = T;
+type MirrorsFitTheirContracts = [
+  Fits<CompanionTrayDto, TrayCompanionDto>,
+  Fits<CompanionChangedEvent, CompanionChangedFrame>,
+  // The gate a notice came through, both ways: a gate the backend adds must reach this mirror.
+  Fits<NonNullable<SharedCompanionNotice['channel']>, CompanionNoticeChannel>,
+  Fits<CompanionNoticeChannel, NonNullable<SharedCompanionNotice['channel']>>,
+  Fits<SharedCompanionTarget, CompanionTarget>,
+  Fits<Residency, DesktopResidency>,
+  Fits<DesktopResidencyPatch, ResidencyPatch>,
+];
 
 // Patch PATH from the user's login shell so the forked backend can find
 // kiro-cli (common macOS issue when launched from Finder). fix-path v5 is
@@ -99,6 +166,16 @@ if (isDev && process.env.MICHI_ELECTRON_USER_DATA_DIR) {
 // assumes see-through the window doesn't have.
 const VIBRANCY_ENABLED = process.platform === 'darwin' && process.env.MICHI_NO_VIBRANCY !== '1';
 
+// Whether windows use that vibrancy now. Settings → Appearance → Window glass
+// switches it live and main saves it for the next launch (windowGlass.ts).
+// The renderer learns the starting state from `michiGlass=0` in the URL.
+function windowGlassFile(): string {
+  return path.join(app.getPath('userData'), 'window-glass.json');
+}
+let windowGlass = VIBRANCY_ENABLED && readWindowGlass(windowGlassFile());
+// The material the renderer last chose (Settings), kept while glass is off.
+let vibrancyMaterial: VibrancyMaterial = 'under-window';
+
 // Minimal skeleton HTML shown immediately while the backend starts. Matches
 // the app's warm light / dark background so the transition to the real UI is
 // seamless. Loaded via data: URL — no network, no disk read.
@@ -107,9 +184,27 @@ const SKELETON_HTML = `<!DOCTYPE html>
 <head><meta charset="utf-8"><title>Michi</title></head>
 <body style="margin:0;height:100%;display:flex;align-items:center;justify-content:center;
   font-family:-apple-system,BlinkMacSystemFont,system-ui,sans-serif;
-  background:${VIBRANCY_ENABLED ? 'transparent' : '#F5F2EE'};color:#8B7E74;font-size:13px">
+  background:${windowGlass ? 'transparent' : '#F5F2EE'};color:#8B7E74;font-size:13px">
 <div style="opacity:0.6">loading…</div>
 </body></html>`;
+
+// Replaces the skeleton once the backend has missed its first health
+// deadline (see BackendBoot). A window on this page still loads the UI if the
+// backend answers later, so the text promises nothing more than that.
+function backendFailedHtml(): string {
+  const escapeHtml = (text: string) => text.replace(/[&<>"']/g, (ch) => `&#${ch.charCodeAt(0)};`);
+  return `<!DOCTYPE html>
+<html style="margin:0;height:100%">
+<head><meta charset="utf-8"><title>Michi</title></head>
+<body style="margin:0;height:100%;display:flex;align-items:center;justify-content:center;
+  font-family:-apple-system,BlinkMacSystemFont,system-ui,sans-serif;
+  background:${VIBRANCY_ENABLED ? 'transparent' : '#F5F2EE'};color:#8B7E74;font-size:13px;line-height:1.5">
+<div style="max-width:440px;padding:24px">
+<p style="margin:0 0 6px;font-weight:600">Michi's backend did not start.</p>
+<p style="margin:0">If it starts later, Michi opens here. The logs are in ${escapeHtml(LOG_DIR)}.</p>
+</div>
+</body></html>`;
+}
 
 // Capture once at load — Electron may not chdir, but be defensive.
 // `bin/michi` forwards the shell's pwd via `open --env MICHI_LAUNCH_CWD=…`
@@ -154,19 +249,8 @@ try { fs.mkdirSync(LOG_DIR, { recursive: true }); } catch { /* falls back to std
 const ELECTRON_LOG = path.join(LOG_DIR, 'electron-main.log');
 
 function elog(level: 'INFO' | 'WARN' | 'ERROR', stage: string, msg: string, meta?: Record<string, unknown>): void {
-  const ts = new Date().toISOString();
-  let metaStr = '';
-  if (meta) {
-    const parts: string[] = [];
-    for (const [k, v] of Object.entries(meta)) {
-      if (v === undefined) continue;
-      const s = typeof v === 'string' ? v : JSON.stringify(v);
-      parts.push(`${k}=${s}`);
-    }
-    if (parts.length > 0) metaStr = ' ' + parts.join(' ');
-  }
-  const line = `${ts} ${level.padEnd(5, ' ')} ${stage.padEnd(10, ' ')} ${msg}${metaStr}\n`;
-  try { fs.appendFileSync(ELECTRON_LOG, line); } catch { /* best effort */ }
+  const line = formatLogLine(new Date().toISOString(), level, stage, msg, meta);
+  appendLogLine(ELECTRON_LOG, line);
   if (level === 'ERROR') process.stderr.write(line);
   else process.stdout.write(line);
 }
@@ -180,10 +264,60 @@ let resolvedBackendPort: number | null = null;
 /** child: forked with the app. service: launchd LaunchAgent. external: dev server. */
 let backendMode: 'child' | 'service' | 'external' = 'child';
 
+/**
+ * The backend's boot, as windows see it. `starting` until the backend has a
+ * port and first answers /api/health (dev and unbundled launches have no
+ * health to wait for); then `ready`. `failed` when startup threw, or when
+ * that first answer missed its deadline; watchBackendBoot then keeps
+ * checking, so a slow backend can still make it `ready`. Only
+ * setBackendBoot changes it, along BACKEND_BOOT_MOVES. A production window
+ * shows the skeleton, then the failure page, and loads the UI only once
+ * boot is `ready`: none loads the offline UI because the port is still
+ * unknown, nor a backend that does not answer yet.
+ */
+type BackendBoot = 'starting' | 'ready' | 'failed';
+const BACKEND_BOOT_MOVES: Record<BackendBoot, readonly BackendBoot[]> = {
+  starting: ['ready', 'failed'],
+  failed: ['ready'],
+  ready: [],
+};
+let backendBoot: BackendBoot = 'starting';
+const backendBootListeners = new Set<() => void>();
+
+function setBackendBoot(next: BackendBoot): void {
+  if (!BACKEND_BOOT_MOVES[backendBoot].includes(next)) return;
+  backendBoot = next;
+  for (const listener of [...backendBootListeners]) listener();
+}
+
+/** Resolves with boot's state once it is one of `states`. */
+function whenBackendBoot(states: readonly BackendBoot[]): Promise<BackendBoot> {
+  if (states.includes(backendBoot)) return Promise.resolve(backendBoot);
+  return new Promise((resolve) => {
+    const listener = () => {
+      if (!states.includes(backendBoot)) return;
+      backendBootListeners.delete(listener);
+      resolve(backendBoot);
+    };
+    backendBootListeners.add(listener);
+  });
+}
+
+/** False until boot has opened its own window (or decided on none); see the 'activate' handler. */
+let bootWindowDecided = false;
+
+/** Set at will-quit, once every window has closed and the app is really ending. */
+let appQuitting = false;
+
 // The background service launches the app with this flag so it can deliver
 // notifications without opening a window (see backend appLauncher.ts).
 const launchedInBackground = process.argv.includes(BACKGROUND_LAUNCH_ARG);
 const launchedHidden = process.argv.includes(HIDDEN_LAUNCH_ARG);
+/**
+ * A background launch the user has since touched (opened a window): from
+ * then on it is an ordinary instance, with the tray icon and no idle quit.
+ */
+let backgroundEngaged = false;
 /** Background launches quit after this long without any window. */
 const BACKGROUND_IDLE_QUIT_MS = 15 * 60_000;
 
@@ -365,17 +499,6 @@ onDesktopCommand('terminal:destroy', (event, surfaceId: unknown) => {
   if (validSurfaceId(surfaceId)) destroyTerminalSurface(surfaceKey(event.sender.id, surfaceId));
 });
 
-handleDesktopInvoke('terminal:listActive', (event) => {
-  const ownerId = event.sender.id;
-  const active: Array<{ surfaceId: string }> = [];
-  for (const [key, surface] of terminalSurfaces) {
-    if (surface.ownerId === ownerId && !surface.exited) {
-      active.push({ surfaceId: key.slice(`${ownerId}:`.length) });
-    }
-  }
-  return active;
-});
-
 handleDesktopInvoke('browser:create', async (event, surfaceId: unknown, projectId: unknown, rawUrl: unknown) => {
   if (!validSurfaceId(surfaceId)) throw new Error('Invalid browser surface id');
   const url = normalizeSurfaceUrl(rawUrl);
@@ -426,9 +549,19 @@ handleDesktopInvoke('browser:create', async (event, surfaceId: unknown, projectI
       if (!host.isDestroyed()) sendDesktopEvent(host.webContents, 'browser:focus', surfaceId);
     });
     view.webContents.on('before-input-event', (inputEvent, input) => {
-      if (!isClosePaneShortcut(input)) return;
+      if (isClosePaneShortcut(input)) {
+        inputEvent.preventDefault();
+        if (!host.isDestroyed()) sendDesktopEvent(host.webContents, 'browser:close-request', surfaceId);
+        return;
+      }
+      const chord = forwardedShellChord(input);
+      if (!chord) return;
       inputEvent.preventDefault();
-      if (!host.isDestroyed()) sendDesktopEvent(host.webContents, 'browser:close-request', surfaceId);
+      if (host.isDestroyed()) return;
+      // Each forwarded chord moves the user to the shell; the renderer's own
+      // focus() cannot take keyboard focus back from a native view.
+      host.webContents.focus();
+      sendDesktopEvent(host.webContents, 'browser:shortcut', surfaceId, chord);
     });
     view.webContents.on('did-fail-load', (_loadEvent, code, description, failedUrl, isMainFrame) => {
       if (!isMainFrame || code === -3) return;
@@ -644,6 +777,14 @@ async function chooseBackendPort(): Promise<number> {
   return port;
 }
 
+/** How long boot waits for the backend's first /api/health; MICHI_BACKEND_HEALTH_TIMEOUT_MS overrides it. */
+const BOOT_HEALTH_TIMEOUT_MS = parsePositiveInt(process.env.MICHI_BACKEND_HEALTH_TIMEOUT_MS) ?? 15_000;
+
+function parsePositiveInt(value: string | undefined): number | null {
+  const parsed = Number(value);
+  return Number.isInteger(parsed) && parsed > 0 ? parsed : null;
+}
+
 async function waitForBackend(port: number, timeoutMs = 15_000): Promise<void> {
   const deadline = Date.now() + timeoutMs;
 
@@ -674,33 +815,33 @@ async function waitForBackend(port: number, timeoutMs = 15_000): Promise<void> {
 }
 
 /**
- * Load a .env file into an object (does NOT pollute process.env).
- * Supports KEY=VALUE, KEY="VALUE", KEY='VALUE', comments (#), blank lines.
- * Returns an empty object if the file doesn't exist or is unreadable.
+ * Boot's wait for the backend's first answer: `ready` when it comes in time,
+ * `failed` at the deadline. A slow first start (a long migration, a cold
+ * disk) can still finish after that, so it keeps checking once a second
+ * until the backend answers or the app quits.
  */
-function loadDotenv(filePath: string): Record<string, string> {
-  const result: Record<string, string> = {};
-  let content: string;
+async function watchBackendBoot(port: number): Promise<void> {
+  startupMark('backend_health_wait_start', { port });
   try {
-    content = fs.readFileSync(filePath, 'utf8');
-  } catch {
-    return result;
+    await waitForBackend(port, BOOT_HEALTH_TIMEOUT_MS);
+    elog('INFO', 'boot', 'backend ready', { port });
+    startupMark('backend_health_ready', { port });
+    setBackendBoot('ready');
+    return;
+  } catch (err) {
+    elog('ERROR', 'boot', 'backend did not become ready', { port, err: (err as Error).message });
+    startupMark('backend_health_failed', { port, error: (err as Error).message });
+    setBackendBoot('failed');
   }
-  for (const line of content.split(/\r?\n/)) {
-    const trimmed = line.trim();
-    if (!trimmed || trimmed.startsWith('#')) continue;
-    const eqIdx = trimmed.indexOf('=');
-    if (eqIdx <= 0) continue;
-    const key = trimmed.slice(0, eqIdx).trim();
-    let value = trimmed.slice(eqIdx + 1).trim();
-    // Strip surrounding quotes
-    if ((value.startsWith('"') && value.endsWith('"')) ||
-        (value.startsWith("'") && value.endsWith("'"))) {
-      value = value.slice(1, -1);
+  while (!appQuitting && backendBoot === 'failed') {
+    await new Promise((resolve) => setTimeout(resolve, 1_000));
+    const current = resolvedBackendPort;
+    if (appQuitting || current === null) return;
+    if (await probeHealth(current, 1_000)) {
+      elog('INFO', 'boot', 'backend ready after its deadline', { port: current });
+      setBackendBoot('ready');
     }
-    result[key] = value;
   }
-  return result;
 }
 
 function resolveBackendEntry(): string | null {
@@ -726,37 +867,18 @@ async function forkBackend(): Promise<number | null> {
   }
   const port = await chooseBackendPort();
 
-  // Load ~/.michi/.env so users can persist runtime API keys in one place
-  // that works regardless of launch method (terminal, Dock, Spotlight).
-  // Values from this file do NOT override existing process.env entries —
-  // explicit env vars and launchctl setenv still take precedence.
-  const michiEnvPath = path.join(os.homedir(), '.michi', '.env');
-  const userDotenv = loadDotenv(michiEnvPath);
+  // ~/.michi/.env keeps runtime API keys in one place whatever launched the
+  // app (terminal, Dock, Spotlight). Explicit env vars and launchctl setenv
+  // still take precedence over it.
+  const userDotenv = readDotenvFile(michiDotenvPath());
   const userDotenvKeys = Object.keys(userDotenv);
   if (userDotenvKeys.length > 0) {
     elog('INFO', 'boot', 'loaded ~/.michi/.env', { keys: userDotenvKeys.length });
   }
 
   // Runtime selection belongs to the backend config and the user's setup choice.
-  const env: NodeJS.ProcessEnv = {
-    ...userDotenv,
-    ...process.env,
-    PORT: String(port),
-    MICHI_LOG_DIR: LOG_DIR,
-    MICHI_LAUNCH_CWD: LAUNCH_CWD,
-    // The child bundled with the desktop app is always the loopback gateway.
-    // Ignore remote-server flags inherited from a shell or ~/.michi/.env.
-    MICHI_REMOTE_ACCESS: '0',
-    MICHI_BIND_HOST: '127.0.0.1',
-  };
-  delete env.MICHI_REMOTE_TOKEN;
-  if (app.isPackaged) {
-    // Dev-renderer flags make the backend trust another local page's origin
-    // (backend/src/services/localOrigins.ts). The installed app serves its
-    // own UI, so drop them when a shell or ~/.michi/.env passes them on.
-    delete env.MICHI_DEV_RENDERER;
-    delete env.MICHI_RENDERER_URL;
-  }
+  const env = desktopBackendEnv({ base: process.env, dotenv: userDotenv, port, logDir: LOG_DIR, packaged: app.isPackaged });
+  env.MICHI_LAUNCH_CWD = LAUNCH_CWD;
   if (startupTraceEnabled()) {
     env.MICHI_STARTUP_TRACE = '1';
     env.MICHI_STARTUP_RUN_ID = startupRunId();
@@ -815,12 +937,7 @@ function serviceSupport(): { supported: boolean; reason?: string } {
   return { supported: true };
 }
 
-interface BackendHealth {
-  service?: string;
-  serverId?: string;
-  serviceMode?: boolean;
-  serviceBuild?: string | null;
-}
+type BackendHealth = Partial<MichiBackendHealth>;
 
 function probeHealth(port: number, timeoutMs = 1500): Promise<BackendHealth | null> {
   return new Promise((resolve) => {
@@ -844,7 +961,7 @@ function probeHealth(port: number, timeoutMs = 1500): Promise<BackendHealth | nu
 function isOurService(health: BackendHealth | null): boolean {
   return !!health
     && health.service === 'michi-backend'
-    && health.serverId === expectedServerId()
+    && health.serverId === expectedServerId({ ...readDotenvFile(michiDotenvPath()), ...process.env })
     && health.serviceMode === true;
 }
 
@@ -973,6 +1090,7 @@ async function setBackgroundServiceEnabled(enabled: boolean): Promise<Background
       if (state?.enabled) writeServiceState(SERVICE_PATHS.stateFile, { ...state, enabled: false });
     }
     notificationFeed.restart();
+    companionFeed.restart();
     return backgroundServiceStatus();
   })();
   serviceTransition = work;
@@ -985,7 +1103,8 @@ async function setBackgroundServiceEnabled(enabled: boolean): Promise<Background
 
 // ── Scheduled job notifications ────────────────────────────────────────────
 
-const liveNotifications = new Set<ElectronNotification>();
+// Window id 0 is no webContents id; a separate holder keeps renderer notices from evicting these.
+const scheduledBanners = createNotificationHolder<ElectronNotification>();
 let backgroundIdleTimer: ReturnType<typeof setTimeout> | null = null;
 
 function devBackendPort(): number {
@@ -1005,7 +1124,7 @@ function cancelBackgroundIdleQuit(): void {
 
 /** A hidden background launch exits again if the user never opens a window. */
 function armBackgroundIdleQuit(): void {
-  if (!launchedInBackground) return;
+  if (!launchedInBackground || backgroundEngaged) return;
   cancelBackgroundIdleQuit();
   backgroundIdleTimer = setTimeout(() => {
     if (windows.size === 0) {
@@ -1029,7 +1148,7 @@ function openScheduledRun(target: ScheduledRunTarget): void {
     existing.focus();
     sendDesktopEvent(existing.webContents, 'scheduled:open-run', target);
   } else {
-    void createWindow(resolvedBackendPort, undefined, target);
+    void createWindow(target);
   }
   if (process.platform === 'darwin') app.focus({ steal: true });
 }
@@ -1047,18 +1166,340 @@ function handleScheduledNotice(notice: ScheduledRunNotice): void {
   } else if (plan.kind === 'banner') {
     const { title, subtitle, body } = plan.content;
     const notification = new ElectronNotification({ title, subtitle, body });
-    // Hold a reference until the user acts on it, or its click handler can be collected.
-    liveNotifications.add(notification);
+    const release = scheduledBanners.hold(0, `scheduled:${notice.runId}`, notification);
     notification.on('click', () => {
-      liveNotifications.delete(notification);
+      release();
       openScheduledRun(target);
     });
-    notification.on('close', () => liveNotifications.delete(notification));
+    notification.on('close', release);
     notification.show();
   }
   if (plan.ack) notificationFeed.acknowledge(notice.runId);
   if (plan.kind === 'banner' || plan.kind === 'defer') armBackgroundIdleQuit();
 }
+
+// ── Companion notifications ────────────────────────────────────────────────
+
+/** Blurring a window precedes focusing the next: a held notice turns into a banner only if no Michi window has focus by then. */
+const COMPANION_BLUR_SETTLE_MS = 250;
+
+/** Whose renderer listens for Companion notices and clicks, and the click waiting for a window that is still loading. */
+const companionRenderers = new CompanionRenderers((windowId, target) => {
+  const win = [...windows].find((candidate) => !candidate.isDestroyed() && candidate.webContents.id === windowId);
+  if (win) sendDesktopEvent(win.webContents, 'companion:open', target);
+});
+
+/** Bring Michi forward with the Companion open at `target` (a Companion banner click). */
+function openCompanionTarget(target: CompanionTarget): void {
+  cancelBackgroundIdleQuit();
+  showDock();
+  const existing = BrowserWindow.getFocusedWindow() ?? [...windows].find((win) => !win.isDestroyed()) ?? null;
+  if (existing) {
+    if (existing.isMinimized()) existing.restore();
+    existing.show();
+    existing.focus();
+    // Sent once its renderer listens: a window that is still loading would drop the click.
+    companionRenderers.open(existing.webContents.id, target);
+  } else {
+    void createWindow(undefined, target);
+  }
+  if (process.platform === 'darwin') app.focus({ steal: true });
+}
+
+const companionNotifier = new CompanionNotifier({
+  Notification: ElectronNotification,
+  focusedWindow: () => {
+    const focused = BrowserWindow.getFocusedWindow();
+    if (!focused || !windows.has(focused) || focused.isDestroyed()) return null;
+    const contents = focused.webContents;
+    return {
+      listening: companionRenderers.listens(contents.id, 'notice'),
+      showNotice: (notice) => sendDesktopEvent(contents, 'companion:notice', notice),
+    };
+  },
+  open: (target) => openCompanionTarget(target),
+  acknowledge: (noticeId) => companionFeed.acknowledge(noticeId),
+  now: () => Date.now(),
+  onBackgroundDelivery: () => armBackgroundIdleQuit(),
+  onHandled: (notice, plan) => {
+    // Ids and outcomes only: notice text stays out of the log.
+    elog('INFO', 'companion', 'notice handled', { id: notice.id, channel: companionNoticeChannel(notice), delivery: plan.kind, ...(plan.kind === 'skip' ? { reason: plan.reason } : {}) });
+    // A notice means the agent's items moved, or (a `chat` notice) a
+    // conversation, the agent's own included, asked for an approval or an
+    // answer or finished a reply: the tray's Needs you and "<name> is waiting
+    // for you" follow.
+    trayController.scheduleRefresh();
+  },
+});
+
+const companionFeed = new CompanionNotificationFeed({
+  port: () => resolvedBackendPort ?? (backendMode === 'external' ? devBackendPort() : null),
+  onNotice: (notice) => { companionNotifier.deliver(notice); },
+  onConnected: () => {
+    // The backend replays every unacknowledged notice on a new connection, held ones included.
+    companionNotifier.dropHeld();
+    // Changes made while the feed was away sent no frame here.
+    trayController.scheduleRefresh();
+  },
+  // The tray's refresh signal (DESIGN-v2 §5.1). Main never subscribes to the
+  // agent's events stream (COMPANION_EVENTS_PATH): its subscribers are windows
+  // only, which is how the backend tells that no window is open (§5.2).
+  onChanged: () => trayController.scheduleRefresh(),
+  log: (level, message, meta) => elog(level, 'companion', message, meta),
+});
+
+// A window's preload reports when its renderer starts or stops listening for
+// Companion notices and clicks. Not a DesktopCommandContract channel: no
+// renderer code sends it (see COMPANION_READY_CHANNEL).
+ipcMain.on(COMPANION_READY_CHANNEL, (event, kind: unknown, listening: unknown) => {
+  const win = BrowserWindow.fromWebContents(event.sender);
+  if (!win || !windows.has(win)) return;
+  if (companionRenderers.report(event.sender.id, kind, listening)) companionNotifier.refresh();
+});
+
+// A held notice is shown in whichever Michi window has focus once its renderer listens, or becomes a banner when Michi loses focus.
+app.on('browser-window-focus', (_event, win) => {
+  if (windows.has(win)) lastFocusedWindow = win;
+  companionNotifier.refresh();
+});
+app.on('browser-window-blur', () => {
+  setTimeout(() => companionNotifier.refresh(), COMPANION_BLUR_SETTLE_MS);
+});
+
+// ── Menu-bar / notification-area icon (DESIGN-v2 §5.1) ─────────────────────
+
+/** The Michi window focused last: the tray's Open Michi brings it back. */
+let lastFocusedWindow: BrowserWindow | null = null;
+let desktopSettingsCache: DesktopSettings | null = null;
+
+function desktopSettingsFile(): string {
+  return path.join(app.getPath('userData'), DESKTOP_SETTINGS_FILE);
+}
+
+function desktopSettings(): DesktopSettings {
+  desktopSettingsCache ??= readDesktopSettings(desktopSettingsFile());
+  return desktopSettingsCache;
+}
+
+function saveDesktopSettings(next: DesktopSettings): void {
+  writeDesktopSettings(desktopSettingsFile(), next);
+  desktopSettingsCache = next;
+}
+
+/** "Open Michi at login" as the OS has it now (Windows, installed app only), with the argument its login item passes. */
+function loginItemOpensAtLogin(): boolean | null {
+  if (process.platform !== 'win32' || !app.isPackaged || isDev) return null;
+  return app.getLoginItemSettings({ args: [LOGIN_LAUNCH_ARG] }).openAtLogin;
+}
+
+function residencyEnv() {
+  return { platform: process.platform, packaged: app.isPackaged && !isDev };
+}
+
+function currentResidency(): DesktopResidency {
+  if (process.platform === 'win32') {
+    const status = windowsLifetime.status();
+    return {
+      tray: { supported: status.supported, enabled: status.keepInBackground },
+      hideDock: { supported: false, enabled: false },
+      openAtLogin: { supported: status.supported, enabled: status.openAtLogin },
+      ...(status.reason ? { reason: status.reason } : {}),
+    };
+  }
+  return desktopResidency(desktopSettings(), { ...residencyEnv(), openAtLogin: loginItemOpensAtLogin() });
+}
+
+function setResidency(raw: unknown): DesktopResidency {
+  const patch = parseResidencyPatch(raw);
+  if (process.platform === 'win32') {
+    if (patch.hideDock !== undefined) throw new Error('Hiding the Dock is available on macOS.');
+    if (patch.tray !== undefined) {
+      const status = windowsLifetime.setKeepInBackground(patch.tray);
+      if (!status.canStartHidden) recoverVisibleWindows();
+    }
+    if (patch.openAtLogin !== undefined) windowsLifetime.setOpenAtLogin(patch.openAtLogin);
+    return currentResidency();
+  }
+  const change = applyResidencyPatch(desktopSettings(), patch, residencyEnv());
+  saveDesktopSettings(change.settings);
+  syncTray();
+  return currentResidency();
+}
+
+const TRAY_ICON_DIR = path.join(__dirname, '..', '..', 'assets', 'icons');
+
+/**
+ * The icon, when one is up. It holds only an icon that can be seen: a file
+ * that does not load (say, missing from app.asar) or a Tray the OS refuses
+ * leaves none, and Michi then behaves as before v2 (window-all-closed, the
+ * login launch below).
+ */
+const trayIcon = new TrayIconSlot<NativeImage, Tray>({
+  load: (file) => {
+    // A template image's @2x sibling loads with it (the asar archive included).
+    const image = nativeImage.createFromPath(path.join(TRAY_ICON_DIR, file));
+    if (process.platform === 'darwin' && !image.isEmpty()) image.setTemplateImage(true);
+    return image;
+  },
+  construct: (image, guid) => (guid ? new Tray(image, guid) : new Tray(image)),
+  log: (level, message, meta) => elog(level, 'tray', message, meta),
+});
+
+const trayController = new TrayController({
+  port: () => resolvedBackendPort ?? (backendMode === 'external' ? devBackendPort() : null),
+  onChange: () => renderTray(),
+  log: (level, message, meta) => elog(level, 'tray', message, meta),
+});
+
+/** The icon is up unless it is off, unsupported, or this is a background launch the user has not touched yet. */
+function trayWanted(): boolean {
+  return traySupported(process.platform) && desktopSettings().tray.enabled && (!launchedInBackground || backgroundEngaged);
+}
+
+/**
+ * The icon is an add-on: whatever goes wrong with it stays here, so startup,
+ * createWindow (a background launch the user opens) and setResidency go on
+ * without it.
+ */
+function syncTray(): void {
+  if (process.platform === 'win32') return; // WindowsLifetimeController owns the shared icon.
+  try {
+    if (trayWanted()) ensureTray();
+    else destroyTray();
+  } catch (err) {
+    elog('WARN', 'tray', 'tray icon failed; going on without it', { err: (err as Error).message });
+    destroyTray();
+  }
+}
+
+function ensureTray(): void {
+  if (trayIcon.current) return;
+  const file = trayIconFile(trayController.current(), process.platform, nativeTheme.shouldUseDarkColorsForSystemIntegratedUI);
+  const icon = trayIcon.show(file, trayGuid(process.platform, app.isPackaged && !isDev), (created) => {
+    const onClick = (click: 'click' | 'right-click' | 'double-click') => () => {
+      const behavior = trayClickBehavior(process.platform, click);
+      if (behavior === 'menu') popUpTrayMenu();
+      else if (behavior === 'open-michi') openMichiWindow();
+    };
+    created.on('click', onClick('click'));
+    created.on('right-click', onClick('right-click'));
+    created.on('double-click', onClick('double-click'));
+  });
+  // None came up (the reason is logged): no icon, as before v2.
+  if (!icon) return;
+  renderTray();
+  trayController.setActive(true);
+}
+
+/** Never throws: the controller stops fetching and the slot takes the icon down. */
+function destroyTray(): void {
+  trayController.setActive(false);
+  trayIcon.destroy();
+}
+
+function renderTray(): void {
+  const icon = trayIcon.current;
+  if (!icon) return;
+  try {
+    const data = trayController.current();
+    trayIcon.setFile(trayIconFile(data, process.platform, nativeTheme.shouldUseDarkColorsForSystemIntegratedUI));
+    icon.setToolTip(trayTooltip(data));
+  } catch (err) {
+    elog('WARN', 'tray', 'tray icon not updated', { err: (err as Error).message });
+  }
+}
+
+/**
+ * The menu from the cached data, at once: the feed's change frames and the
+ * controller's minute refresh keep the cache fresh, so a click never waits on
+ * the network. Never set as the tray's context menu, which would have to be
+ * rebuilt while it is open.
+ */
+function popUpTrayMenu(): void {
+  const icon = trayIcon.current;
+  if (!icon) return;
+  const menu = Menu.buildFromTemplate(trayMenuTemplate(trayController.menu(process.platform), dispatchTrayAction));
+  icon.popUpContextMenu(menu);
+  // Ages in the cached status ("checked 2m ago") are fresh again for the next click.
+  trayController.scheduleRefresh();
+}
+
+function dispatchTrayAction(action: TrayAction): void {
+  switch (action.kind) {
+    case 'open':
+      openCompanionTarget(action.target);
+      return;
+    case 'open-michi':
+      openMichiWindow();
+      return;
+    case 'check-now':
+      void trayController.checkNow();
+      return;
+    case 'set-paused':
+      void trayController.setPaused(action.paused);
+      return;
+    case 'quit':
+      app.quit();
+      return;
+  }
+}
+
+/** Bring back the Michi window focused last, or open one. */
+function openMichiWindow(): void {
+  cancelBackgroundIdleQuit();
+  showDock();
+  const existing = lastFocusedWindow && windows.has(lastFocusedWindow) && !lastFocusedWindow.isDestroyed()
+    ? lastFocusedWindow
+    : [...windows].find((win) => !win.isDestroyed()) ?? null;
+  if (existing) {
+    if (existing.isMinimized()) existing.restore();
+    existing.show();
+    existing.focus();
+  } else {
+    void createWindow();
+  }
+  if (process.platform === 'darwin') app.focus({ steal: true });
+}
+
+function hideDock(): void {
+  if (process.platform !== 'darwin' || dockHidden || !app.dock) return;
+  app.dock.hide();
+  dockHidden = true;
+}
+
+// Hold a reference until the user acts on it, or its click handler can be collected.
+const liveNotifications = new Set<ElectronNotification>();
+
+/** Said once, the first time the last window closes with the icon up. */
+function showStillRunningHint(): void {
+  const next: DesktopSettings = { tray: { ...desktopSettings().tray, hintShown: true } };
+  // Kept for this run even when the file cannot be written, so it still shows once.
+  desktopSettingsCache = next;
+  writeDesktopSettingsQuietly(desktopSettingsFile(), next, (err) => elog('WARN', 'tray', 'desktop settings not saved', { err: err.message }));
+  if (!ElectronNotification.isSupported()) return;
+  const { title, body } = stillRunningHint(process.platform);
+  const notification = new ElectronNotification({ title, body });
+  liveNotifications.add(notification);
+  notification.on('click', () => {
+    liveNotifications.delete(notification);
+    openMichiWindow();
+  });
+  notification.on('close', () => liveNotifications.delete(notification));
+  notification.show();
+}
+
+/** A background launch the user opened a window in becomes an ordinary instance: the icon appears, and it no longer quits when idle. */
+function engageBackgroundLaunch(): void {
+  if (!launchedInBackground || backgroundEngaged) return;
+  backgroundEngaged = true;
+  cancelBackgroundIdleQuit();
+  elog('INFO', 'boot', 'background launch engaged by the user');
+  syncTray();
+}
+
+handleDesktopInvoke('desktop:getResidency', () => currentResidency());
+
+handleDesktopInvoke('desktop:setResidency', (_ev, patch: unknown) => setResidency(patch));
 
 handleDesktopInvoke('service:getStatus', () => backgroundServiceStatus());
 
@@ -1066,6 +1507,11 @@ handleDesktopInvoke('service:setEnabled', (_ev, enabled: unknown) => {
   if (typeof enabled !== 'boolean') throw new Error('enabled must be a boolean');
   return setBackgroundServiceEnabled(enabled);
 });
+
+handleDesktopInvoke('app:getUpdateState', () => getUpdateState());
+handleDesktopInvoke('app:checkForUpdate', async () => { await checkForUpdate(); return getUpdateState(); });
+handleDesktopInvoke('app:downloadUpdate', async () => { await downloadUpdate(); return getUpdateState(); });
+handleDesktopInvoke('app:installUpdate', async () => { await installUpdate(); return getUpdateState(); });
 
 function lifetimePrefsFile(): string {
   return path.join(app.getPath('userData'), 'desktop-lifetime.json');
@@ -1077,58 +1523,18 @@ function findWindowById(id: number): BrowserWindow | undefined {
 
 function restoreLifetimeWindow(): void {
   const decision = windowsLifetime.handleSecondInstance([]);
-  if (decision.action === 'create-window') void createWindow(resolvedBackendPort);
+  if (decision.action === 'create-window') void createWindow();
 }
-
-function resolveTrayImage(): Electron.NativeImage | null {
-  const candidates = [
-    packagedTrayIconPath(process.resourcesPath),
-    path.join(path.dirname(process.execPath), PACKAGED_TRAY_ICON_NAME),
-    path.join(__dirname, '..', '..', 'assets', 'icons', PACKAGED_TRAY_ICON_NAME),
-    path.join(__dirname, '..', '..', 'assets', 'icons', 'icon.png'),
-  ];
-  for (const candidate of candidates) {
-    if (!fs.existsSync(candidate)) continue;
-    const image = nativeImage.createFromPath(candidate);
-    if (!image.isEmpty()) return image;
-  }
-  return null;
-}
-
-let windowsTray: Tray | null = null;
 
 function createWindowsTray(): boolean {
-  if (windowsTray && !windowsTray.isDestroyed()) return true;
-  try {
-    const image = resolveTrayImage();
-    if (!image) return false;
-    const tray = new Tray(image);
-    tray.setToolTip('Michi');
-    tray.setContextMenu(Menu.buildFromTemplate(TRAY_MENU.map((item) => ({
-      label: item.label,
-      click: () => {
-        if (item.id === 'show') restoreLifetimeWindow();
-        else {
-          windowsLifetime.beginQuit('user');
-          app.quit();
-        }
-      },
-    }))));
-    tray.on('click', () => restoreLifetimeWindow());
-    windowsTray = tray;
-    return !tray.isDestroyed();
-  } catch (err) {
+  try { ensureTray(); return trayIcon.current !== null; }
+  catch (err) {
     elog('WARN', 'lifetime', 'tray creation failed', { err: (err as Error).message });
-    windowsTray = null;
     return false;
   }
 }
 
-function destroyWindowsTray(): void {
-  if (!windowsTray) return;
-  try { if (!windowsTray.isDestroyed()) windowsTray.destroy(); } catch { /* already gone */ }
-  windowsTray = null;
-}
+function destroyWindowsTray(): void { destroyTray(); }
 
 const windowsLifetime = new WindowsLifetimeController(
   { platform: process.platform, isPackaged: app.isPackaged, isDev },
@@ -1274,7 +1680,7 @@ function buildAppMenu(): void {
         {
           label: 'New Window',
           accelerator: 'CmdOrCtrl+N',
-          click: () => { void createWindow(resolvedBackendPort); },
+          click: () => { void createWindow(); },
         },
         { type: 'separator' },
         isMac
@@ -1298,18 +1704,15 @@ function buildAppMenu(): void {
   Menu.setApplicationMenu(Menu.buildFromTemplate(template));
 }
 
-async function createWindow(
-  backendPort: number | null,
-  healthPromise?: Promise<void>,
-  openRun?: ScheduledRunTarget,
-  options?: { hidden?: boolean },
-): Promise<void> {
+async function createWindow(openRun?: ScheduledRunTarget, openCompanion?: CompanionTarget, options?: { hidden?: boolean }): Promise<void> {
+  // Every window a background launch opens is the user's doing (a banner, the Dock, `michi`).
+  engageBackgroundLaunch();
   showDock();
   const slot = nextWindowSlot++;
   const savedState = loadWindowState(slot);
   const cascade = slot * 32;
   const windowId = `win-${slot}`;
-  startupMark('browser_window_create_start', { backendPort, slot });
+  startupMark('browser_window_create_start', { backendPort: resolvedBackendPort, slot });
   const win = new BrowserWindow({
     width: savedState.width,
     height: savedState.height,
@@ -1332,9 +1735,9 @@ async function createWindow(
     // when Michi is in the background. This is the native NSVisualEffectView
     // behavior (Finder, Notes) and gives a clear focus cue in a multi-window
     // setup — the front window "glows" glassy, background ones recede.
-    ...(VIBRANCY_ENABLED
+    ...(windowGlass
       ? {
-          vibrancy: 'under-window' as const,
+          vibrancy: vibrancyMaterial,
           visualEffectState: 'followWindow' as const,
           backgroundColor: '#00000000',
         }
@@ -1357,7 +1760,15 @@ async function createWindow(
   windows.add(win);
   windowSlots.set(win, slot);
   const ownerWebContentsId = win.webContents.id;
-  startupMark('browser_window_created', { backendPort, slot });
+  // Before the first await: a window closed while it waits for the backend
+  // is forgotten at once, and the loads below check isDestroyed().
+  win.on('closed', () => {
+    destroyOwnedSurfaces(ownerWebContentsId);
+    windows.delete(win);
+    windowSlots.delete(win);
+    if (lastFocusedWindow === win) lastFocusedWindow = null;
+  });
+  startupMark('browser_window_created', { backendPort: resolvedBackendPort, slot });
   attachWindowSessionEnd(win);
 
   if (savedState.isMaximized) {
@@ -1435,6 +1846,25 @@ async function createWindow(
     }
   });
 
+  // The Companion sends notices and clicks only to a renderer that listens;
+  // a new document listens only once its preload says so.
+  const companionDocumentGone = (): void => {
+    if (companionRenderers.documentGone(ownerWebContentsId)) companionNotifier.refresh();
+  };
+  win.webContents.on('did-start-navigation', (details) => {
+    // A navigation main starts (loadURL, reload) replaces the document. One
+    // the page starts can still be refused by will-navigate, so it counts
+    // once it commits (did-navigate).
+    if (details.isMainFrame && !details.isSameDocument && !details.initiator) companionDocumentGone();
+  });
+  win.webContents.on('did-navigate', companionDocumentGone);
+  win.webContents.on('did-fail-load', (_event, _code, _description, _url, isMainFrame) => {
+    // An error page replaced the document.
+    if (isMainFrame) companionDocumentGone();
+  });
+  win.webContents.on('render-process-gone', companionDocumentGone);
+  win.webContents.once('destroyed', () => companionRenderers.forget(ownerWebContentsId));
+
   win.webContents.on('console-message', (_event, _level, message) => {
     if (isStartupTraceLine(message)) {
       process.stdout.write(`${message}\n`);
@@ -1465,17 +1895,21 @@ async function createWindow(
     routeLink(url);
   });
 
+  const bootstrapQuery: Partial<Record<DesktopBootstrapParam, string>> = {
+    michiWindowId: windowId,
+    ...(app.isPackaged ? { michiPackaged: '1' } : {}),
+    ...(VIBRANCY_ENABLED ? { michiVibrancy: '1' } : {}),
+    ...(VIBRANCY_ENABLED && !windowGlass ? { michiGlass: '0' } : {}),
+    // Read once by the preload; the renderer opens the run after hydration.
+    ...(openRun ? { michiOpenRun: openRun.runId, michiOpenJob: openRun.jobId, michiOpenWorkspace: openRun.workspaceId } : {}),
+    ...(openRun?.nodeId ? { michiOpenNode: openRun.nodeId } : {}),
+  };
   const withWindowId = (base: string): string => {
     const url = new URL(base);
-    url.searchParams.set('michiWindowId', windowId);
-    if (app.isPackaged) url.searchParams.set('michiPackaged', '1');
-    if (VIBRANCY_ENABLED) url.searchParams.set('michiVibrancy', '1');
-    if (openRun) {
-      // Read once by the preload; the renderer opens the run after hydration.
-      url.searchParams.set('michiOpenRun', openRun.runId);
-      url.searchParams.set('michiOpenJob', openRun.jobId);
-      url.searchParams.set('michiOpenWorkspace', openRun.workspaceId);
-      if (openRun.nodeId) url.searchParams.set('michiOpenNode', openRun.nodeId);
+    for (const [name, value] of Object.entries(bootstrapQuery)) url.searchParams.set(name, value);
+    if (openCompanion) {
+      // Read once by the preload (initialCompanionTarget); the renderer opens the Companion there.
+      url.searchParams.set(COMPANION_TARGET_PARAM, JSON.stringify(openCompanion));
     }
     return url.toString();
   };
@@ -1491,23 +1925,27 @@ async function createWindow(
     // DevTools only opens when explicitly requested. Set
     // ELECTRON_OPEN_DEVTOOLS=1 in the environment to auto-open; otherwise
     // use Cmd+Opt+I / View → Toggle Developer Tools.
-    if (process.env.ELECTRON_OPEN_DEVTOOLS === '1') {
+    if (process.env.ELECTRON_OPEN_DEVTOOLS === '1' && !win.isDestroyed()) {
       win.webContents.openDevTools({ mode: 'detach' });
     }
   } else {
-    if (backendPort) {
-      // In production the backend serves the frontend HTML. If we have a
-      // pending health promise, show a local skeleton immediately so the
-      // window appears while the backend is still starting, then navigate
-      // once the backend is ready.
-      if (healthPromise) {
-        startupMark('skeleton_load_start', { slot });
-        await win.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(SKELETON_HTML)}`);
-        startupMark('skeleton_load_done', { slot });
-        // Window is visible with the skeleton; now wait for the backend.
-        await healthPromise;
-      }
-      const url = withWindowId(`http://127.0.0.1:${backendPort}`);
+    // In production the backend serves the frontend HTML. While boot waits
+    // for it, the window shows a local skeleton, then the failure page if
+    // the first health deadline passes, and loads the UI once boot is ready.
+    if (backendBoot === 'starting') {
+      startupMark('skeleton_load_start', { slot });
+      await win.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(SKELETON_HTML)}`);
+      startupMark('skeleton_load_done', { slot });
+      await whenBackendBoot(['ready', 'failed']);
+    }
+    if (backendBoot === 'failed') {
+      if (win.isDestroyed()) return;
+      await win.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(backendFailedHtml())}`);
+      await whenBackendBoot(['ready']);
+    }
+    if (win.isDestroyed()) return;
+    if (resolvedBackendPort) {
+      const url = withWindowId(`http://127.0.0.1:${resolvedBackendPort}`);
       startupMark('renderer_load_start', { url, slot });
       await win.loadURL(withStartupTraceQuery(url));
       startupMark('renderer_load_done', { slot });
@@ -1515,22 +1953,11 @@ async function createWindow(
       const indexPath = path.join(app.getAppPath(), 'frontend', 'build', 'index.html');
       startupMark('renderer_load_start', { file: indexPath, slot });
       await win.loadFile(indexPath, {
-        query: {
-          ...(startupTraceFileQuery() ?? {}),
-          michiWindowId: windowId,
-          ...(app.isPackaged ? { michiPackaged: '1' } : {}),
-          ...(VIBRANCY_ENABLED ? { michiVibrancy: '1' } : {}),
-        },
+        query: { ...(startupTraceFileQuery() ?? {}), ...bootstrapQuery },
       });
       startupMark('renderer_load_done', { slot });
     }
   }
-
-  win.on('closed', () => {
-    destroyOwnedSurfaces(ownerWebContentsId);
-    windows.delete(win);
-    windowSlots.delete(win);
-  });
 }
 
 function pickerDefaultPath(): string {
@@ -1625,6 +2052,8 @@ handleDesktopInvoke('app:listDirectory', async (_ev, absPath: unknown, rawRoots:
   return listWorkspaceDirectory(absPath, rawRoots);
 });
 
+// Keep in step with imageMimeType (runtime/src/core/attachments.ts): main is compiled
+// without bundling and does not ship workspace packages, so it cannot import it.
 const IMAGE_MIME = new Map<string, string>([
   ['png', 'image/png'],
   ['jpg', 'image/jpeg'],
@@ -1675,22 +2104,6 @@ handleDesktopInvoke('app:listGitChanges', async (_ev, cwd: unknown, rawRoots: un
   });
 });
 
-// Read a file by absolute path. Used by ArtifactPane to open reference artifacts
-// that live outside the workspace cwd (bypassing the backend sandbox).
-// Security: Electron main process already has full disk access; this is no more
-// privileged than the existing openPath handler. Limited to text files < 512KB.
-handleDesktopInvoke('app:readFile', async (_ev, absPath: string) => {
-  try {
-    if (!absPath || !path.isAbsolute(absPath)) return null;
-    const stat = await fs.promises.stat(absPath);
-    if (!stat.isFile()) return null;
-    const content = await fs.promises.readFile(absPath, 'utf8');
-    return { content, size: stat.size, modifiedAt: stat.mtimeMs };
-  } catch {
-    return null;
-  }
-});
-
 handleDesktopInvoke('app:statFile', async (_ev, absPath: string) => {
   try {
     if (!absPath || !path.isAbsolute(absPath)) return null;
@@ -1702,23 +2115,47 @@ handleDesktopInvoke('app:statFile', async (_ev, absPath: string) => {
   }
 });
 
-// OS-level notification triggered from the renderer via preload bridge.
-onDesktopCommand('app:showNotification', (_ev, title: string, body: string) => {
-  const n = new ElectronNotification({ title, body });
+// OS-level notification triggered from the renderer via preload bridge. A
+// click focuses the window that raised it; with a target key it also reports
+// the key back so that window can open what the notification is about.
+const rendererNotifications = createNotificationHolder<ElectronNotification>();
+onDesktopCommand('app:showNotification', (event, title, body, target) => {
+  const request = parseNotificationRequest(title, body, target);
+  if (!request) return;
+  const sender = event.sender;
+  const n = new ElectronNotification({ title: request.title, body: request.body, ...(request.silent ? { silent: true } : {}) });
+  const release = rendererNotifications.hold(sender.id, request.key, n);
   n.on('click', () => {
-    focusedWindow()?.focus();
+    release();
+    const owner = sender.isDestroyed() ? null : BrowserWindow.fromWebContents(sender);
+    if (!owner || owner.isDestroyed()) {
+      focusedWindow()?.focus();
+      return;
+    }
+    if (owner.isMinimized()) owner.restore();
+    owner.show();
+    owner.focus();
+    if (process.platform === 'darwin') app.focus({ steal: true });
+    if (request.key) sendDesktopEvent(owner.webContents, 'app:attentionNotificationClicked', request.key);
   });
+  n.on('close', release);
   n.show();
 });
 
-// Relaunch the app (used after self-update). app.exit() skips before-quit,
-// so stop an app-owned backend first; otherwise the orphan keeps the port
-// and the relaunched app starts a second backend on the same data.
+// Relaunch the app (used after self-update). app.exit() skips the quit
+// events, will-quit included, so stop an app-owned backend first; otherwise
+// the orphan keeps the port and the relaunched app starts a second backend
+// on the same data.
 onDesktopCommand('app:relaunch', () => {
   void (async () => {
     notificationFeed.stop();
+    companionFeed.stop();
+    // app.exit() skips before-quit and will-quit: the icon goes now, or Windows leaves a ghost icon.
+    trayController.stop();
+    destroyTray();
     await stopBackend();
-    app.relaunch();
+    // Not as a login or background launch again, which would bring Michi back with no window.
+    app.relaunch({ args: relaunchArgs(process.argv) });
     app.exit(0);
   })();
 });
@@ -1736,19 +2173,49 @@ onDesktopCommand('app:setDarkMaterial', (_ev, dark: boolean, backgroundColor?: s
   currentBrowserTheme = normalizeBrowserTheme(dark, backgroundColor);
   nativeTheme.themeSource = currentBrowserTheme.colorScheme;
   for (const surface of browserSurfaces.values()) void syncBrowserTheme(surface);
+  // Without glass the window base shows wherever the page has not painted yet.
+  if (VIBRANCY_ENABLED && !windowGlass) {
+    for (const w of windows) if (!w.isDestroyed()) w.setBackgroundColor(currentBrowserTheme.backgroundColor);
+  }
 });
 
 // Runtime-switch the sidebar's NSVisualEffectView material so users can pick how
 // see-through / dense the desktop-vibrancy sidebar reads. macOS materials range
 // from 'under-window' (lightest, our default) to denser frosts ('sidebar',
 // 'menu', 'hud'). Applies to every open window. No-op unless vibrancy is on
-// (off macOS / MICHI_NO_VIBRANCY) or on an invalid material string.
-const VIBRANCY_MATERIALS = new Set(['under-window', 'sidebar', 'menu', 'hud']);
-onDesktopCommand('app:setVibrancy', (_ev, material: string) => {
-  if (!VIBRANCY_ENABLED || !VIBRANCY_MATERIALS.has(material)) return;
+// (off macOS / MICHI_NO_VIBRANCY) or on an invalid material string. With window
+// glass off it is only remembered for when glass comes back.
+// A copy of shared VIBRANCY_MATERIALS (main cannot load shared at runtime); tsc holds it to the type.
+const VIBRANCY_MATERIALS = { 'under-window': true, sidebar: true, menu: true, hud: true } satisfies Record<VibrancyMaterial, true>;
+onDesktopCommand('app:setVibrancy', (_ev, material) => {
+  if (!VIBRANCY_ENABLED || typeof material !== 'string' || !Object.hasOwn(VIBRANCY_MATERIALS, material)) return;
+  vibrancyMaterial = material;
+  if (!windowGlass) return;
   for (const w of windows) {
-    if (!w.isDestroyed()) w.setVibrancy(material as 'under-window' | 'sidebar' | 'menu' | 'hud');
+    if (!w.isDestroyed()) w.setVibrancy(vibrancyMaterial);
   }
+});
+
+// Settings → Appearance → Window glass. Off removes the material and gives the
+// window an opaque base in the palette's background; on brings both back.
+function applyWindowGlass(win: BrowserWindow): void {
+  if (windowGlass) {
+    win.setBackgroundColor('#00000000');
+    win.setVibrancy(vibrancyMaterial);
+  } else {
+    win.setVibrancy(null);
+    win.setBackgroundColor(currentBrowserTheme.backgroundColor);
+  }
+}
+onDesktopCommand('app:setWindowGlass', (_ev, enabled: boolean) => {
+  if (!VIBRANCY_ENABLED || typeof enabled !== 'boolean' || enabled === windowGlass) return;
+  windowGlass = enabled;
+  try {
+    writeWindowGlass(windowGlassFile(), enabled);
+  } catch (err) {
+    elog('WARN', 'window', 'failed to save window glass', { error: String(err) });
+  }
+  for (const w of windows) if (!w.isDestroyed()) applyWindowGlass(w);
 });
 
 // Frozen glass: one downscaled capture of the window, blurred by the renderer
@@ -1813,7 +2280,7 @@ async function installDevExtensions(): Promise<void> {
 // Chromium features must be switched off before the app is ready. Merge with
 // any --disable-features Michi was launched with: a second switch would
 // replace the first. See chromiumFeatures.ts for why each one is off.
-const disabledFeatures = michiDisabledFeatures(process.platform, process.env);
+const disabledFeatures = michiDisabledFeatures(process.platform, process.env, windowGlass);
 if (disabledFeatures.length > 0) {
   const value = mergeFeatureList(app.commandLine.getSwitchValue('disable-features'), disabledFeatures);
   app.commandLine.appendSwitch('disable-features', value);
@@ -1830,18 +2297,31 @@ if (!app.requestSingleInstanceLock()) {
 }
 
 app.on('second-instance', (_event, argv) => {
-  if (process.platform !== 'win32') {
-    if (argv.includes(BACKGROUND_LAUNCH_ARG)) return;
-    void createWindow(resolvedBackendPort);
-    return;
+  // A background wake while we are already running needs no window.
+  if (argv.includes(BACKGROUND_LAUNCH_ARG)) return;
+  if (process.platform === 'win32') {
+    const decision = windowsLifetime.handleSecondInstance(argv);
+    if (decision.action === 'ignore' || decision.action === 'restore') return;
   }
-  const decision = windowsLifetime.handleSecondInstance(argv);
-  if (decision.action === 'ignore' || decision.action === 'restore') return;
-  void createWindow(resolvedBackendPort);
+  void createWindow();
+});
+
+// Registered at import so the Dock icon works however boot ends; until boot
+// has opened its own window (or chosen none), boot owns the first window.
+app.on('activate', () => {
+  if (!bootWindowDecided || appQuitting) return;
+  // Michi's own windows: a window of anything else (a smoke host, a
+  // future tray popover) must not keep the Dock click from opening one.
+  if (windows.size === 0) {
+    cancelBackgroundIdleQuit();
+    void createWindow();
+  }
 });
 
 app.whenReady().then(async () => {
   powerMonitor.on('resume', () => {
+    // A sleep can outlast the feed's connection: the tray refreshes as it comes back.
+    trayController.scheduleRefresh();
     if (!resolvedBackendPort) return;
     // Ask the owning backend to check its forwards. A healthy SSH session
     // survives; repeated end-to-end failure triggers its bounded supervisor.
@@ -1854,6 +2334,14 @@ app.whenReady().then(async () => {
   elog('INFO', 'boot', 'app ready', { isDev, isPackaged: app.isPackaged, logDir: LOG_DIR, launchCwd: LAUNCH_CWD });
   startupMark('electron_app_ready', { isDev, isPackaged: app.isPackaged, logDir: LOG_DIR });
   applyPowerSaveBlocker();
+  // Windows shows and groups toasts under the app's id (package.json build.appId).
+  if (process.platform === 'win32') app.setAppUserModelId(APP_USER_MODEL_ID);
+  const requestedMode = startupMode({
+    argv: process.argv,
+    platform: process.platform,
+    wasOpenedAtLogin: process.platform === 'win32' && app.getLoginItemSettings({ args: [LOGIN_LAUNCH_ARG] }).wasOpenedAtLogin === true,
+    trayEnabled: traySupported(process.platform) && desktopSettings().tray.enabled,
+  });
   try {
     // In dev the bare `electron` binary uses Electron's default dock icon —
     // override it so `npm run electron:dev` matches the packaged app.
@@ -1862,83 +2350,113 @@ app.whenReady().then(async () => {
       if (fs.existsSync(devIcon)) app.dock.setIcon(devIcon);
     }
     buildAppMenu();
+    // The icon comes up before the backend answers ("Michi is starting…"); a
+    // background launch shows none until the user opens a window.
+    syncTray();
+    // A login launch whose icon did not come up opens a window instead.
+    const mode = startupModeAfterTray(requestedMode, trayIcon.current !== null);
+    // The Windows icon follows the taskbar's light or dark theme.
+    nativeTheme.on('updated', () => renderTray());
 
     // Fork the backend and get the port immediately (fast: ~50ms for port
-    // selection + fork), then create the window in parallel with the health
-    // wait. In dev mode forkBackend returns null (external Vite serves the
-    // frontend); in prod the backend serves the frontend HTML so the window
-    // initially loads a local skeleton and navigates once health passes.
+    // selection + fork), then open the window while watchBackendBoot waits
+    // for /api/health. In dev mode forkBackend returns null (external Vite
+    // serves the frontend); in prod the backend serves the frontend HTML, so
+    // the window shows a local skeleton until boot is ready (see BackendBoot).
     // A hidden background launch (woken by the service to deliver a
     // notification) keeps the Dock icon away until a window opens.
     if (launchedInBackground && process.platform === 'darwin' && app.dock) {
       app.dock.hide();
       dockHidden = true;
     }
-    const backendPort = await startBackend();
-    resolvedBackendPort = backendPort;
-
-    // Start backend health check and window creation in parallel.
-    const healthPromise = backendPort != null
-      ? (async () => {
-          try {
-            startupMark('backend_health_wait_start', { port: backendPort });
-            await waitForBackend(backendPort);
-            elog('INFO', 'boot', 'backend ready', { port: backendPort });
-            startupMark('backend_health_ready', { port: backendPort });
-          } catch (err) {
-            elog('ERROR', 'boot', 'backend did not become ready', { port: backendPort, err: (err as Error).message });
-            startupMark('backend_health_failed', { port: backendPort, error: (err as Error).message });
-            throw err;
-          }
-        })()
-      : Promise.resolve();
+    resolvedBackendPort = await startBackend();
+    if (resolvedBackendPort === null) setBackendBoot('ready');
+    else void watchBackendBoot(resolvedBackendPort);
 
     await installDevExtensions();
-    if (launchedInBackground) {
+    if (mode === 'background') {
       elog('INFO', 'boot', 'background launch; delivering notifications without a window', { backendMode });
       armBackgroundIdleQuit();
+    } else if (mode === 'tray' && process.platform !== 'win32') {
+      elog('INFO', 'boot', 'login launch; starting in the notification area', { backendMode });
     } else {
-      const ready = windowsLifetime.onAppReady({ launchedHidden });
-      if (ready.startHidden) elog('INFO', 'lifetime', 'hidden login start; keeping a real window for shutdown');
-      await createWindow(backendPort, healthPromise, undefined, { hidden: ready.startHidden });
+      const ready = windowsLifetime.onAppReady({ launchedHidden: launchedHidden || requestedMode === 'tray' });
+      void createWindow(undefined, undefined, { hidden: ready.startHidden }).catch((err) => {
+        elog('ERROR', 'boot', 'the first window did not load', { err: (err as Error).message });
+      });
     }
+    bootWindowDecided = true;
 
-    // Wait for backend health to finish (may already be resolved by now).
-    await healthPromise;
-    elog('INFO', 'boot', launchedInBackground ? 'backend ready (background)' : 'window created', { backendPort, backendMode });
-    notificationFeed.start();
-    initAutoUpdate({
-      isDev,
-      isPackaged: app.isPackaged,
-      sendToWindows: (channel, payload) => {
-        for (const w of windows) {
-          if (!w.isDestroyed()) w.webContents.send(channel, payload);
-        }
-      },
+    // The icon's state settles with boot: a backend that missed its first
+    // health deadline shows "Can't reach Michi's backend", not "starting…"
+    // forever; the controller's own polls and the feed's reconnect pick it up
+    // once it answers.
+    void whenBackendBoot(['ready', 'failed']).then(() => {
+      if (!appQuitting) trayController.start();
     });
-
-    app.on('activate', () => {
-      if (BrowserWindow.getAllWindows().length === 0) {
-        cancelBackgroundIdleQuit();
-        void createWindow(resolvedBackendPort);
-      }
+    void whenBackendBoot(['ready']).then(() => {
+      if (appQuitting) return;
+      elog('INFO', 'boot', 'starting the notification feed', { port: resolvedBackendPort, backendMode, mode });
+      notificationFeed.start();
+      companionFeed.start();
+      initAutoUpdate({ isDev, isPackaged: app.isPackaged, sendToWindows: (channel, payload) => {
+        for (const w of windows) if (!w.isDestroyed()) w.webContents.send(channel, payload);
+      } });
     });
   } catch (err) {
     elog('ERROR', 'boot', 'startup failed', { err: (err as Error).message, stack: (err as Error).stack });
+    // A window the Dock icon opens shows the failure page, not the skeleton.
+    setBackendBoot('failed');
+    bootWindowDecided = true;
+    // The icon's state settles all the same (a backend that never became
+    // healthy shows "Can't reach Michi's backend", not "starting…" forever),
+    // and each menu opening tries again.
+    trayController.start();
     throw err;
   }
 });
 
+if (process.platform === 'win32') {
+  app.on('before-quit', () => { windowsLifetime.beginQuit('user'); });
+}
+
 app.on('window-all-closed', () => {
-  if (process.platform === 'darwin') return;
-  if (!windowsLifetime.shouldQuitWhenNoWindows()) return;
-  void app.quit();
+  if (process.platform === 'win32') {
+    if (windowsLifetime.shouldQuitWhenNoWindows()) void app.quit();
+    return;
+  }
+  const settings = desktopSettings();
+  const action = windowAllClosedAction({
+    platform: process.platform,
+    trayShown: trayIcon.current !== null,
+    hideDockWhenNoWindows: settings.tray.hideDockWhenNoWindows,
+    hintShown: settings.tray.hintShown,
+  });
+  if (action.quit) {
+    void app.quit();
+    return;
+  }
+  if (action.hideDock) hideDock();
+  if (action.showHint) showStillRunningHint();
 });
 
-app.on('before-quit', async (ev) => {
+// Electron emits before-quit before it asks the windows to close, and a
+// window can still cancel the quit then (the running-terminals prompt does).
+// will-quit comes only once every window has closed, so the feeds, the icon
+// and the backend stop here, when the app really ends.
+app.on('will-quit', async (ev) => {
+  stopAutoUpdate();
+  appQuitting = true;
   windowsLifetime.beginQuit('user');
   destroyWindowsTray();
   notificationFeed.stop();
+  companionFeed.stop();
+  // The quit goes ahead (app.quit() emits no window-all-closed): the icon
+  // goes now, or Windows leaves a ghost icon in the notification area until
+  // the pointer passes over it.
+  trayController.stop();
+  destroyTray();
+
   // Only an app-owned backend stops with the app. The background service
   // (backendMode === 'service') deliberately keeps running.
   if (backendChild) {

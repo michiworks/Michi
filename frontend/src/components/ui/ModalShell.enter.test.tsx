@@ -3,7 +3,6 @@
  * modal, closes on the spot with no ghost. Real timers throughout: once a file
  * runs on fake timers, motion's frame loop waits on a timer that never fires.
  */
-import React from 'react';
 import { render, screen, waitFor } from '@testing-library/react';
 import { describe, expect, it } from 'vitest';
 import { ModalShell } from './ModalShell';

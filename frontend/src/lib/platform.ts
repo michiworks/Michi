@@ -1,9 +1,10 @@
 /**
  * Platform detection + keyboard-shortcut formatting.
  *
- * The actual key handlers use `e.metaKey || e.ctrlKey`, so both ⌘ and Ctrl
- * fire the same bindings — this module only exists to render the *display*
- * string in tooltips, the palette, and the Settings cheat sheet.
+ * The key handlers take ⌘ or Ctrl for the same bindings (the shell's main
+ * handler takes one but not both, leaving ⌃⌘ chords to macOS) — this module
+ * only exists to render the *display* string in tooltips, the palette, and
+ * the Settings cheat sheet.
  *
  * Mac convention:   '⌘K', '⌘↵', '⇧⌘F'      (glyphs, no separator)
  * Win/Linux:        'Ctrl+K', 'Ctrl+Enter', 'Ctrl+Shift+F'  (words, '+' separator)

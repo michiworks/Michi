@@ -1,32 +1,34 @@
 import { usePhoneLayout } from '../../../hooks/usePhoneLayout';
 import { prefersReducedMotion } from '../../../hooks/useReducedMotion';
-import React, { Suspense, lazy, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
-import { serverEntityId } from '../../../config/backendIdentity';
+import React, { Suspense, lazy, useCallback, useEffect, useLayoutEffect, useMemo, useRef } from 'react';
 import { useChatActions, useChatPanes, useChatProjects, useStructuralSelector, shallowArrayEqual } from '../../../state/chatStore';
 import { paneScopeKey } from '../../../state/paneState';
 import type { ChatNodeState } from '../../../state/chatTypes';
 import type { AgentRunPaneItem } from '../../../state/paneItems';
 import type { PagePaneItem } from '../../../state/paneItems';
+import { agentRunPaneId } from '../../../state/paneItems';
 import { agentResourceKey, identityOf } from '../../../state/agentIdentity';
 import type { WorkflowRunPaneItem } from '../../../state/paneItems';
 import { useOptionalWorkflowDomain, useWorkflowRunDetail } from '../../../state/workflowDomain';
 import { useAgentDomain } from '../../../state/agentDomain';
-import { createAgentRunNotificationTracker } from '../../../state/agentRunNotifications';
+import {
+  createAgentRunNotificationTracker, isAgentRunNotificationCurrent, isAgentRunNotificationServerDecided,
+} from '../../../state/agentRunNotifications';
+import { isPaneShownInWindow } from '../../../state/attention/targetVisibility';
 import { usePrefs } from '../../../state/prefs';
 import EmptyThreads from '../../EmptyThreads';
 import ResizeHandle from '../../ResizeHandle';
 import TPane from '../TPane';
-import { AssistantPaneScope } from '../assistant/AssistantLinks';
+import { setPaneDragWidth, usePaneDragWidth, withPaneDragWidth, type PaneDragWidth } from '../paneDragWidth';
 import DigestPane from '../DigestPane';
-import ArtifactPane from '../ArtifactPane';
 import PaneErrorBoundary from '../PaneErrorBoundary';
 import BrowserDock from '../BrowserDock';
 import TerminalHome from './Home';
-import { getElectron } from '../../../lib/electronBridge';
-import { getWebUploadCwd, importWorkspaceFileUpload, type UploadProgress } from '../../../services/api';
-import { notify } from '../../../services/notifications';
+import { attentionTargetKey, presentAttention } from '../../../services/attention/policy';
 import { toast } from 'sonner';
-import UploadProgressBar, { type UploadProgressViewState } from '../../UploadProgressBar';
+import { paneFileDropTarget } from '../paneFileDropTargets';
+import { isFileDrag, useFileDropZone } from '../useFileDropZone';
+import { FileDropOverlay } from '../PaneDragOverlays';
 import { usePaneLayout } from '../usePaneLayout';
 import { bindPaneCaptionScroll } from '../paneCaptionScroll';
 import { afterPaneMotion, scrollWithPaneLayout } from '../paneReveal';
@@ -35,8 +37,9 @@ import { isFreshBranch, playBranchPush } from '../branchMotion';
 import { PaneArrivalTabs, usePaneArrivals } from '../PaneArrivals';
 import { RetainedPaneContent, usePresentedPanes, usePresentedPaneFocus } from '../PanePresentation';
 
+const PANE_ZOOM_FADE_MS = 180;
+
 const FilePane = lazy(() => import('../FilePane'));
-const DiffPane = lazy(() => import('../DiffPane'));
 const TerminalPane = lazy(() => import('../TerminalPane'));
 const PaneChooser = lazy(() => import('../PaneChooser'));
 const FilesPane = lazy(() => import('../FilesPane'));
@@ -93,10 +96,18 @@ export function centeredPaneScrollLeft({
   return Math.max(0, Math.min(desired, maxScrollLeft));
 }
 
+// A chat pane takes a drop inside it itself (its root does not stop the
+// event, so the strip's handlers see it too).
+function insideChatPane(e: React.DragEvent): boolean {
+  return !!(e.target as HTMLElement | null)?.closest?.('.terminal-pane');
+}
+
 export default function TerminalDashboard() {
   const { activeProject, agentStatus } = useChatProjects();
-  const { openPanes: activePanes, pagePane, focusedPane, paneItems: activeItems = {} } = useChatPanes();
+  const { openPanes: activePanes, pagePane, focusedPane, zoomedPane, paneItems: activeItems = {} } = useChatPanes();
   const phone = usePhoneLayout();
+  // A phone already shows one pane at a time.
+  const zoomedId = phone ? null : zoomedPane ?? null;
   const visiblePhonePane = activePanes.includes(focusedPane ?? '') && activeItems[focusedPane ?? '']?.kind !== 'browser' ? focusedPane : activePanes.find(id => activeItems[id]?.kind !== 'browser');
   const paneScope = paneScopeKey(activeProject, pagePane);
   const { settleFocus } = usePresentedPaneFocus(focusedPane);
@@ -110,55 +121,6 @@ export default function TerminalDashboard() {
   const subscribeWorkflows = workflowDomain?.subscribeWorkspace;
   const { prefs } = usePrefs();
 
-  useEffect(() => {
-    let retryTimer: number | null = null;
-    let deadline = 0;
-    const revealTarget = (event: Event) => {
-      const detail = (event as CustomEvent<{
-        pageId: string; workspaceId: string; backendConnectionId: string;
-        resourceKind: 'page' | 'database'; resourceId: string; targetId: string;
-      }>).detail;
-      if (!detail) return;
-      deadline = Date.now() + 1200;
-      if (retryTimer !== null) window.clearInterval(retryTimer);
-      const attempt = () => {
-        const owners = Array.from(document.querySelectorAll<HTMLElement>('[data-native-page-pane]'))
-          .filter((element) => element.dataset.pageId === detail.pageId
-            && element.dataset.workspaceId === detail.workspaceId
-            && element.dataset.backendConnectionId === detail.backendConnectionId);
-        for (const owner of owners) {
-          const selector = detail.resourceKind === 'page' ? '[data-block-id]' : '[data-row-id]';
-          const target = Array.from(owner.querySelectorAll<HTMLElement>(selector))
-            .find((element) => {
-              if (detail.resourceKind === 'page') return element.dataset.blockId === detail.targetId;
-              return element.dataset.rowId === detail.targetId
-                && element.closest<HTMLElement>('[data-native-database]')?.dataset.databaseId === detail.resourceId;
-            }) ?? (detail.resourceKind === 'database'
-              && detail.targetId === serverEntityId(detail.resourceId, detail.backendConnectionId)
-              ? Array.from(owner.querySelectorAll<HTMLElement>('[data-native-database]'))
-                .find((element) => element.dataset.databaseId === detail.resourceId)
-              : undefined);
-          if (target) {
-            target.scrollIntoView({ behavior: prefersReducedMotion(prefs.reduceMotion) ? 'auto' : 'smooth', block: 'center', inline: 'nearest' });
-            if (retryTimer !== null) window.clearInterval(retryTimer);
-            retryTimer = null;
-            return;
-          }
-        }
-        if (Date.now() >= deadline && retryTimer !== null) {
-          window.clearInterval(retryTimer);
-          retryTimer = null;
-        }
-      };
-      attempt();
-      if (Date.now() < deadline) retryTimer = window.setInterval(attempt, 50);
-    };
-    window.addEventListener('michi:scroll-to-page-target', revealTarget);
-    return () => {
-      window.removeEventListener('michi:scroll-to-page-target', revealTarget);
-      if (retryTimer !== null) window.clearInterval(retryTimer);
-    };
-  }, [prefs.reduceMotion]);
   const selectPaneWidths = useCallback(
     (nodesMap: Record<string, ChatNodeState>) =>
       openPanes.map((id) => paneItems[id]?.width ?? nodesMap[id]?.paneWidth),
@@ -169,8 +131,13 @@ export default function TerminalDashboard() {
       openPanes.map((id) => nodesMap[id]?.kind ?? 'chat'),
     [openPanes],
   );
-  const widths = useStructuralSelector(selectPaneWidths, shallowArrayEqual);
+  const savedWidths = useStructuralSelector(selectPaneWidths, shallowArrayEqual);
   const paneKinds = useStructuralSelector(selectPaneKinds, shallowArrayEqual);
+  // A drag lays out from its live width (shared with the topbar's caption
+  // strip) and saves it once on release.
+  const dragWidth = usePaneDragWidth();
+  const dragWidthRef = useRef<PaneDragWidth>(null);
+  const widths = useMemo(() => withPaneDragWidth(savedWidths, openPanes, dragWidth), [savedWidths, openPanes, dragWidth]);
   const stripRef = useRef<HTMLDivElement>(null);
   const paneRefs = useRef<Record<string, HTMLDivElement | null>>({});
   const layout = usePaneLayout(stripRef, {
@@ -178,6 +145,7 @@ export default function TerminalDashboard() {
     defaultPaneWidth: phone ? 100_000 : prefs.defaultPaneWidth,
     enabled: !!activeProject && openPanes.length > 0,
     scope: paneScope,
+    zoomedId,
     appReduceMotion: phone || prefs.reduceMotion,
     onExitStart: holdExits,
     onExitComplete: finishExit,
@@ -188,6 +156,8 @@ export default function TerminalDashboard() {
     if (!strip || index < 0 || !layout.ready) return true;
     const left = layout.positions[index] - strip.scrollLeft;
     const width = layout.widths[index];
+    // Hidden behind a zoomed pane.
+    if (width <= 0) return false;
     return Math.min(left + width, strip.clientWidth) - Math.max(left, 0) >= width * 0.6;
   };
   const chatPanes = useMemo(() => activePanes.filter(id => activeItems[id]?.kind !== 'browser'), [activePanes, activeItems]);
@@ -221,16 +191,32 @@ export default function TerminalDashboard() {
     return subscribeWorkflows(activeProject.id);
   }, [activeProject?.id, subscribeWorkflows]);
 
+  // Read when a notification is due, after the attention policy's delay.
+  const latestRunsRef = useRef(agentDomain.state.runs);
+  latestRunsRef.current = agentDomain.state.runs;
+  const latestPanesRef = useRef(activePanes);
+  latestPanesRef.current = activePanes;
   useEffect(() => {
     const runs = Object.values(agentDomain.state.runs).filter((resource) => resource.value.workspaceId === activeProject?.id);
-    for (const item of notificationTracker.collect({ runs, focusedPaneId: focusedPane })) {
-      notify({
+    for (const item of notificationTracker.collect({ runs })) {
+      // Its backend announces it to every window once (chatStore presents server notices).
+      if (isAgentRunNotificationServerDecided(item)) continue;
+      const identity = identityOf(item.run);
+      const { workspaceId, effectiveDefinition } = item.run.value;
+      const target = { type: 'agent_run' as const, runId: identity.id, workspaceId, backendConnectionId: identity.backendConnectionId };
+      const paneId = agentRunPaneId(identity.backendConnectionId, identity.id);
+      presentAttention({
+        key: attentionTargetKey(target),
+        kind: item.attention,
         title: item.title,
         body: item.body,
-        onClick: () => openAgentRunPane(identityOf(item.run), item.run.value.workspaceId, item.run.value.effectiveDefinition.name),
+        target,
+        isTargetVisible: () => isPaneShownInWindow(paneId, latestPanesRef.current),
+        isStillCurrent: () => isAgentRunNotificationCurrent(item, latestRunsRef.current),
+        onOpen: () => openAgentRunPane(identity, workspaceId, effectiveDefinition.name),
       });
     }
-  }, [activeProject?.id, agentDomain.state.runs, focusedPane, openAgentRunPane]);
+  }, [activeProject?.id, agentDomain.state.runs, openAgentRunPane]);
 
   const clearPaneSelectionIsolation = useCallback(() => {
     stripRef.current?.classList.remove('selecting');
@@ -317,121 +303,32 @@ export default function TerminalDashboard() {
     return bindPaneCaptionScroll(strip, captions, !!layout.animationRef.current);
   }, [openPanes, exitingIds, activeProject?.id, activeProject?.activeTreeId, layout.gridTemplateColumns, layout.paddingRight, layout.settledVersion, layout.animationRef, layout.contentWidth, layout.padding]);
 
-  const dashDragDepthRef = useRef(0);
-  const [dashDropzoneVisible, setDashDropzoneVisible] = useState(false);
-  const [dashDroppedFileCount, setDashDroppedFileCount] = useState(0);
-  const [dashUploadProgress, setDashUploadProgress] = useState<UploadProgressViewState | null>(null);
-
-  const isFileDrag = (e: React.DragEvent) =>
-    Array.from(e.dataTransfer.types).includes('Files');
-
-  const handleDashDragEnter = useCallback((e: React.DragEvent) => {
-    if (!isFileDrag(e)) return;
-    // Don't activate the dashboard overlay if the drag is over a pane —
-    // pane events bubble up too. We rely on react's synthetic events: when a
-    // pane handles dragenter and calls preventDefault, the bubbling parent
-    // still sees the event, but we want to NOT show our overlay if the
-    // drag's actual target is inside a pane. Use composedPath / target to
-    // check.
-    const targetIsPane = (e.target as HTMLElement | null)?.closest?.('.terminal-pane');
-    if (targetIsPane) return;
-    e.preventDefault();
-    dashDragDepthRef.current += 1;
-    if (dashDragDepthRef.current === 1) {
-      setDashDropzoneVisible(true);
-      setDashDroppedFileCount(e.dataTransfer.items.length);
-    }
-  }, []);
-
-  const handleDashDragOver = useCallback((e: React.DragEvent) => {
-    if (!isFileDrag(e)) return;
-    const targetIsPane = (e.target as HTMLElement | null)?.closest?.('.terminal-pane');
-    if (targetIsPane) return;
-    e.preventDefault();
-    e.dataTransfer.dropEffect = 'copy';
-  }, []);
-
-  const handleDashDragLeave = useCallback((e: React.DragEvent) => {
-    if (!isFileDrag(e)) return;
-    dashDragDepthRef.current = Math.max(0, dashDragDepthRef.current - 1);
-    if (dashDragDepthRef.current === 0) setDashDropzoneVisible(false);
-  }, []);
-
-  const progressForFile = useCallback(
-    (fileName: string, fileIndex: number, fileCount: number) =>
-      (progress: UploadProgress) => {
-        setDashUploadProgress({
-          fileName,
-          fileIndex,
-          fileCount,
-          phase: progress.phase,
-          percent: progress.percent,
-        });
-      },
-    [],
-  );
+  const {
+    visible: dashDropzoneVisible,
+    fileCount: dashDroppedFileCount,
+    onDragEnter: handleDashDragEnter,
+    onDragOver: handleDashDragOver,
+    onDragLeave: handleDashDragLeave,
+    endDrag: endDashDrag,
+  } = useFileDropZone({ ignore: insideChatPane });
 
   const handleDashDrop = useCallback(async (e: React.DragEvent) => {
-    if (!isFileDrag(e)) return;
-    // If the drop landed inside a pane, let the pane handle it.
-    const targetIsPane = (e.target as HTMLElement | null)?.closest?.('.terminal-pane');
-    if (targetIsPane) return;
+    if (!isFileDrag(e) || insideChatPane(e)) return;
     e.preventDefault();
-    dashDragDepthRef.current = 0;
-    setDashDropzoneVisible(false);
+    endDashDrag();
 
     const files = Array.from(e.dataTransfer.files);
     if (files.length === 0) return;
-
-    const electron = getElectron();
-    const absPaths: string[] = [];
-    const errors: string[] = [];
-
-    for (const [fileIndex, file] of files.entries()) {
-      const path = electron?.getPathForFile?.(file) ?? null;
-      try {
-        if (path && !activeProject?.backendConnectionId) {
-          absPaths.push(path);
-          continue;
-        }
-        const cwd = activeProject?.cwd
-          ?? (activeProject?.id ? await getWebUploadCwd(activeProject.id) : null);
-        if (!cwd || !activeProject?.id) {
-          errors.push(`${file.name}: no workspace folder`);
-          continue;
-        }
-        const result = await importWorkspaceFileUpload(activeProject.id, cwd, file, {
-          onProgress: progressForFile(file.name, fileIndex, files.length),
-          subdir: '.attachments',
-        });
-        const abs = result.filePath.startsWith('/')
-          ? result.filePath
-          : `${cwd.replace(/\/$/, '')}/${result.filePath}`;
-        absPaths.push(abs);
-      } catch (err) {
-        errors.push(`${file.name}: ${(err as Error).message}`);
-      }
-    }
-    setDashUploadProgress(null);
-
-    if (absPaths.length > 0) {
-      // Forward to the focused pane (or first pane) so the chip lands on its
-      // composer just like clicking the pane's + button would.
-      window.dispatchEvent(new CustomEvent('michi:attach-paths', {
-        detail: { paths: absPaths },
-      }));
-    }
-
-    if (errors.length > 0) {
-      toast.error(
-        `${errors.length} file${errors.length === 1 ? '' : 's'} failed`,
-        { description: errors.join('\n'), style: { whiteSpace: 'pre-line' } },
-      );
-    }
-  }, [activeProject, progressForFile]);
+    // The chat pane under the cursor (its edge, outside its root), else the
+    // focused one. The pane imports the files as its own drop would.
+    const target = e.target as Node | null;
+    const underCursor = Object.keys(paneRefs.current).find((id) => paneRefs.current[id]?.contains(target));
+    const attach = paneFileDropTarget(underCursor) ?? paneFileDropTarget(focusedPane);
+    if (!attach || !(await attach(files))) toast.error('Drop files on a chat pane to attach them');
+  }, [endDashDrag, focusedPane]);
 
   const revealRef = useRef<(() => void) | null>(null);
-  const lastReveal = useRef<{ scope: string; focused: string | null; mode: string; ready: boolean; ids: string[]; width: number } | null>(null);
+  const lastReveal = useRef<{ scope: string; focused: string | null; zoomed: string | null; mode: string; ready: boolean; ids: string[]; width: number } | null>(null);
   useLayoutEffect(() => {
     if (layout.waitingForExit) {
       revealRef.current?.();
@@ -439,12 +336,14 @@ export default function TerminalDashboard() {
     }
     const scope = paneScope;
     const previous = lastReveal.current;
-    lastReveal.current = { scope, focused: focusedPane, mode: phone ? 'phone' : prefs.paneWidthMode, ready: layout.ready, ids: activePanes, width: stripRef.current?.clientWidth ?? 0 };
+    lastReveal.current = { scope, focused: focusedPane, zoomed: zoomedId, mode: phone ? 'phone' : prefs.paneWidthMode, ready: layout.ready, ids: activePanes, width: stripRef.current?.clientWidth ?? 0 };
     const strip = stripRef.current;
     const revealPane = phone ? visiblePhonePane : focusedPane;
     const index = revealPane ? openPanes.indexOf(revealPane) : -1;
     if (!strip || index < 0 || !layout.ready) return;
+    // Leaving a zoom brings the pane that was zoomed back to the middle.
     const requested = !previous || previous.scope !== scope || previous.focused !== focusedPane
+      || previous.zoomed !== zoomedId
       || previous.mode !== (phone ? 'phone' : prefs.paneWidthMode) || !previous.ready
       || (phone && previous.width !== strip.clientWidth);
     // Closing the focused pane reveals its predecessor on the same clock as
@@ -467,7 +366,7 @@ export default function TerminalDashboard() {
       strip.scrollTo({ left: target, behavior: 'instant' });
       mirror(strip.scrollLeft);
     }
-  }, [paneScope, focusedPane, openPanes, activePanes, prefs.paneWidthMode, phone, visiblePhonePane, layout]);
+  }, [paneScope, focusedPane, zoomedId, openPanes, activePanes, prefs.paneWidthMode, phone, visiblePhonePane, layout]);
 
   useLayoutEffect(() => () => { revealRef.current?.(); }, []);
 
@@ -484,7 +383,7 @@ export default function TerminalDashboard() {
     const scope = paneScope;
     const previous = previousEntrance.current;
     previousEntrance.current = { scope, ids: openPanes };
-    const reduced = phone || prefs.reduceMotion || (window.matchMedia?.('(prefers-reduced-motion: reduce)').matches);
+    const reduced = phone || prefersReducedMotion(prefs.reduceMotion);
     for (const [id, animation] of entrances.current) {
       if (!openPanes.includes(id) || previous.scope !== scope || reduced) {
         animation.cancel(); entrances.current.delete(id);
@@ -534,6 +433,23 @@ export default function TerminalDashboard() {
     return () => { for (const animation of running.values()) animation.cancel(); running.clear(); };
   }, []);
 
+  // Zooming in or out swaps the tracks at once; the panes that take the new
+  // tracks fade up from the dim focus level instead of snapping.
+  const previousZoom = useRef({ scope: paneScope, id: zoomedId });
+  useLayoutEffect(() => {
+    const previous = previousZoom.current;
+    previousZoom.current = { scope: paneScope, id: zoomedId };
+    if (previous.scope !== paneScope || previous.id === zoomedId) return;
+    if (phone || prefersReducedMotion(prefs.reduceMotion)) return;
+    // Zoom moving between panes, or a zoom ending: every pane on screen is new.
+    const shown = zoomedId ? [zoomedId] : openPanes;
+    for (const id of shown) {
+      const surface = paneRefs.current[id]?.querySelector<HTMLElement>('.pane-entry-surface');
+      if (!surface || typeof surface.animate !== 'function' || entrances.current.has(id)) continue;
+      surface.animate([{ opacity: 0.55 }, { opacity: 1 }], { duration: PANE_ZOOM_FADE_MS, easing: PANE_EASE });
+    }
+  }, [paneScope, zoomedId, openPanes, phone, prefs.reduceMotion]);
+
   // A resize or settled layout can bring an off-screen branch into view.
   useLayoutEffect(() => { recheckArrivals(); }, [layout.settledVersion, layout.contentWidth, recheckArrivals]);
 
@@ -581,7 +497,7 @@ export default function TerminalDashboard() {
     return <TerminalHome onSubmitted={() => {}} />;
   }
   const effContentWidth =
-    activePanes.length - browserItems.length === 1 && !layout.waitingForExit && prefs.singlePaneContentWidth !== null
+    (layout.zoomed || (activePanes.length - browserItems.length === 1 && !layout.waitingForExit)) && prefs.singlePaneContentWidth !== null
       ? prefs.singlePaneContentWidth
       : null;
   const { overflow, gridTemplateColumns } = layout;
@@ -592,7 +508,10 @@ export default function TerminalDashboard() {
     >
     <div
       ref={stripRef}
+      // state/attention/targetVisibility.ts measures panes against this strip.
+      data-pane-strip=""
       data-pane-width-mode={prefs.paneWidthMode}
+      data-pane-zoomed={layout.zoomed ? zoomedId ?? '' : undefined}
       data-phone-panes={phone || undefined}
       className={['terminal-dashboard', 'hide-sb'].join(' ')}
       onScroll={() => {
@@ -636,6 +555,7 @@ export default function TerminalDashboard() {
       }}
     >
       {openPanes.map((id, i) => {
+        const zoomHidden = layout.zoomHiddenIds.has(id);
         const wrapStyle: React.CSSProperties = {
           position: 'relative',
           minWidth: 0,
@@ -650,7 +570,7 @@ export default function TerminalDashboard() {
           background: 'var(--term-pane-bg)',
           overflow: 'clip',
           ...layout.paneStyles[i],
-          visibility: phone && id !== visiblePhonePane ? 'hidden' : undefined,
+          visibility: (phone && id !== visiblePhonePane) || zoomHidden ? 'hidden' : undefined,
         };
         return (
           <div
@@ -658,8 +578,8 @@ export default function TerminalDashboard() {
             ref={(el) => { paneRefs.current[id] = el; }}
             data-node-id={id}
             data-pane-exiting={exitingIds.has(id) ? '' : undefined}
-            aria-hidden={exitingIds.has(id) || (phone && id !== visiblePhonePane) || undefined}
-            inert={exitingIds.has(id) || (phone && id !== visiblePhonePane)}
+            aria-hidden={exitingIds.has(id) || (phone && id !== visiblePhonePane) || zoomHidden || undefined}
+            inert={exitingIds.has(id) || (phone && id !== visiblePhonePane) || zoomHidden}
             style={wrapStyle}
           >
             <div className="pane-entry-surface" style={{ display: 'flex', flexDirection: 'column', flex: 1, minWidth: 0, minHeight: 0 }}>
@@ -671,7 +591,6 @@ export default function TerminalDashboard() {
                     : paneItems[id].kind === 'files' ? <FilesPane item={paneItems[id]} />
                     : paneItems[id].kind === 'review' ? <ReviewPane item={paneItems[id]} />
                     : paneItems[id].kind === 'file' ? <FilePane item={paneItems[id]} />
-                    : paneItems[id].kind === 'diff' ? <DiffPane item={paneItems[id]} />
                     : paneItems[id].kind === 'terminal' ? <TerminalPane item={paneItems[id]} />
                     : paneItems[id].kind === 'agent-run' ? <AgentRunPaneSurface item={paneItems[id]} />
                     : paneItems[id].kind === 'page' ? <PagePane item={paneItems[id] as PagePaneItem} />
@@ -680,19 +599,23 @@ export default function TerminalDashboard() {
                 </Suspense>
               ) : paneKinds[i] === 'digest' ? (
                 <DigestPane nodeId={id} contentMaxWidth={effContentWidth} />
-              ) : paneKinds[i] === 'artifact' ? (
-                <ArtifactPane nodeId={id} contentMaxWidth={effContentWidth} />
               ) : (
-                <AssistantPaneScope nodeId={id}>
-                  <TPane nodeId={id} contentMaxWidth={effContentWidth} />
-                </AssistantPaneScope>
+                <TPane nodeId={id} contentMaxWidth={effContentWidth} />
               )}
             </PaneErrorBoundary>
             </RetainedPaneContent>
             </div>
-            {!phone && <ResizeHandle
+            {!phone && !layout.zoomed && <ResizeHandle
                 paneRef={{ current: paneRefs.current[id] ?? null }}
-                onResize={(w) => setPaneWidth(id, w)}
+                onResize={(w) => { dragWidthRef.current = { id, width: w }; setPaneDragWidth(dragWidthRef.current); }}
+                onResizeEnd={() => {
+                  const committed = dragWidthRef.current;
+                  dragWidthRef.current = null;
+                  // Save first, then drop the drag width: both land in one
+                  // render, with no frame at the old width in between.
+                  if (committed) setPaneWidth(committed.id, committed.width);
+                  setPaneDragWidth(null);
+                }}
                 onReset={() => setPaneWidth(id, undefined)}
               />}
           </div>
@@ -701,53 +624,7 @@ export default function TerminalDashboard() {
       {exitingIds.size > 0 && (
         <div aria-hidden data-pane-scroll-extent style={{ position: 'absolute', left: Math.max(0, layout.scrollExtent - 1), top: 0, width: 1, height: 1, pointerEvents: 'none' }} />
       )}
-      {dashDropzoneVisible && (
-        <div
-          style={{
-            position: 'absolute',
-            inset: 0,
-            border: '2px dashed var(--term-accent)',
-            background: 'color-mix(in srgb, var(--term-accent) 12%, transparent)',
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'center',
-            pointerEvents: 'none',
-            zIndex: 'var(--z-pane-overlay)',
-          }}
-        >
-          <div
-            style={{
-              background: 'var(--term-bg)',
-              border: '1px solid var(--term-accent)',
-              color: 'var(--term-accent)',
-              padding: '8px 18px',
-              fontFamily: 'var(--ui-font)',
-              fontSize: 'var(--fs-md)',
-              borderRadius: 'var(--ui-radius-sm)',
-            }}
-          >
-            drop {dashDroppedFileCount} file{dashDroppedFileCount === 1 ? '' : 's'} · attach to message
-          </div>
-        </div>
-      )}
-      {dashUploadProgress && (
-        <div
-          style={{
-            position: 'absolute',
-            left: '50%',
-            bottom: 24,
-            transform: 'translateX(-50%)',
-            width: 'min(420px, calc(100% - 48px))',
-            background: 'var(--term-bg)',
-            border: '1px solid var(--term-line)',
-            boxShadow: 'var(--ui-popover-shadow)',
-            zIndex: 'calc(var(--z-pane-overlay) + 1)',
-            pointerEvents: 'none',
-          }}
-        >
-          <UploadProgressBar progress={dashUploadProgress} compact />
-        </div>
-      )}
+      <FileDropOverlay visible={dashDropzoneVisible} fileCount={dashDroppedFileCount} />
     </div>
       {!phone && <PaneArrivalTabs ids={arrivals} onOpen={focusPane} />}
       {!phone && overflow && (

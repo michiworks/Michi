@@ -1,17 +1,13 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
-import type { PageBlock, PageComponentSource, PageComponentVersionSource } from 'michi-shared';
-import { readPageComponent, type ComponentHost } from '../../../../services/api/pageComponents';
+import type { ComponentHost, PageBlock, PageComponentSource } from 'michi-shared';
 import { subscribePageChanges } from '../../../../state/pages/pageEvents';
+import { backendEntityId } from '../../../../config/backendIdentity';
 import { SandboxFrame } from './SandboxFrame';
 import { ComponentSourceAttribution } from './ComponentSourceAttribution';
 import { useComponentCapability } from './useComponentCapability';
+import { useComponentSource } from './useComponentSource';
+import { startVisiblePoll } from '../../../../state/visiblePoll';
 import './components.css';
-
-function isMissingComponentVersion(cause: unknown): boolean {
-  if (!cause || typeof cause !== 'object') return false;
-  const failure = cause as { status?: unknown; code?: unknown; message?: unknown };
-  return failure.status === 401 || failure.status === 403 || (failure.status === 404 && failure.code === 'not_found');
-}
 
 export interface CustomBlockProps {
   block: Extract<PageBlock, { type: 'component' }>;
@@ -30,48 +26,16 @@ export function CustomBlock(props: CustomBlockProps) {
 
 function CustomBlockContent({ block, pageId, workspaceId, connectionId, onAskDraft, onNavigatePage, onOpenSource, readOnly = false }: CustomBlockProps) {
   const host = useMemo<ComponentHost>(() => ({ kind: 'page_block', pageId, blockId: block.id }), [block.id, pageId]);
-  const [source, setSource] = useState<{ code: string; name: string; version: number; provenance: PageComponentVersionSource } | null>(null);
+  const pauseCapabilityRef = React.useRef<(() => void) | null>(null);
+  const { source, error: sourceError } = useComponentSource({
+    componentId: block.componentId, version: block.pinnedVersion, workspaceId, connectionId, events: { pageId },
+    onMissing: () => pauseCapabilityRef.current?.(), fallbackError: 'This component version is unavailable',
+  });
   const [displayedSource, setDisplayedSource] = useState<typeof source>(null);
   const [data, setData] = useState<unknown>(null);
   const [dataVersion, setDataVersion] = useState<number | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [sourceError, setSourceError] = useState<string | null>(null);
   const [stopped, setStopped] = useState(false);
-  const pauseCapabilityRef = React.useRef<(() => void) | null>(null);
-  useEffect(() => {
-    let live = true;
-    let reading = false;
-    let readAgain = false;
-    let unavailable = false;
-    const load = async () => {
-      if (reading) { readAgain = true; return; }
-      reading = true;
-      try {
-        const result = await readPageComponent(block.componentId, workspaceId, connectionId, block.pinnedVersion);
-        if (!live) return;
-        if (!result.component?.enabled) { setSource(null); setSourceError('This component is disabled or unavailable.'); return; }
-        unavailable = false;
-        setSourceError(null);
-        setSource(previous => previous?.version === result.version.version && previous.code === result.version.code ? previous
-          : { code: result.version.code, name: result.component!.name, version: result.version.version, provenance: result.version.source });
-      } catch (cause) {
-        if (live) {
-          if (isMissingComponentVersion(cause)) {
-            unavailable = true;
-            pauseCapabilityRef.current?.();
-            setSource(null);
-          }
-          setSourceError(cause instanceof Error ? cause.message : 'This component version is unavailable');
-        }
-      } finally { reading = false; if (live && readAgain && !unavailable) { readAgain = false; void load(); } }
-    };
-    const unsubscribe = subscribePageChanges({ backendConnectionId: connectionId, workspaceId, pageId }, changed => {
-      if (!changed.componentId || changed.componentId === block.componentId) void load();
-    });
-    void load();
-    const timer = window.setInterval(() => { if (!unavailable) void load(); }, 10_000);
-    return () => { live = false; unsubscribe(); window.clearInterval(timer); };
-  }, [block.componentId, block.pinnedVersion, connectionId, pageId, workspaceId]);
   const props = useMemo(() => block.props, [block.props]);
   const capability = useComponentCapability({ connectionId, workspaceId, componentId: block.componentId, version: source?.version ?? block.pinnedVersion ?? 0, host, props, bindingKey: [block.rev, block.edit], enabled: source !== null && !stopped && !readOnly });
   pauseCapabilityRef.current = capability.pause;
@@ -105,12 +69,15 @@ function CustomBlockContent({ block, pageId, workspaceId, connectionId, onAskDra
         if (live && refreshAgain) { refreshAgain = false; void refresh(); }
       }
     };
+    // Events name databases by renderer id (remote:<connection>:<id>); props hold the server's.
+    const rendererId = (id: string) => { try { return backendEntityId(connectionId, id); } catch { return id; } };
+    const watched = new Set(databaseIds.map(rendererId));
     const unsubscribe = subscribePageChanges({ backendConnectionId: connectionId, workspaceId, pageId }, changed => {
-      if (changed.pageId === pageId || (changed.databaseId && databaseIds.includes(changed.databaseId))) void refresh();
+      if (changed.pageId === pageId || (changed.databaseId && watched.has(rendererId(changed.databaseId)))) void refresh();
     });
-    const timer = window.setInterval(() => { void refresh(); }, 10_000);
+    const stopPolling = startVisiblePoll(() => { void refresh(); }, { intervalMs: 10_000, focus: false });
     void refresh();
-    return () => { live = false; unsubscribe(); window.clearInterval(timer); };
+    return () => { live = false; unsubscribe(); stopPolling(); };
   }, [call, connectionId, databaseIds, pageId, source, state?.capability, workspaceId]);
   if (readOnly) return <div className="page-component-fallback" role="status"><strong>{source?.name ?? 'Component'}</strong><p>This page is read-only, so the component is paused.</p></div>;
   if (stopped) return <div className="page-component-fallback" role="status"><strong>{source?.name ?? 'Component'}</strong><p>This component was stopped. Reopen the page to run it again.</p></div>;

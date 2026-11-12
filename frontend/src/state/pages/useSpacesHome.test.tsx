@@ -1,7 +1,8 @@
 import { act, renderHook, waitFor } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { notifyPageChanged } from './pageEvents';
-import { useHomeSections, useSpacesHome, useWorkspaceHome } from './useSpacesHome';
+import { markRemoteFirstPaint, resetRemoteFirstPaint } from '../remoteFirstPaint';
+import { useHomeSections, useProgressCards, useSpacesHome, useWorkspaceHome } from './useSpacesHome';
 
 const api = vi.hoisted(() => ({
   fetchSpacesHome: vi.fn(),
@@ -76,5 +77,42 @@ describe('Spaces Home hooks', () => {
     await waitFor(() => expect(result.current.data?.waiting.total).toBe(5));
     await act(async () => { resolveFirst(sections(1)); await Promise.resolve(); });
     expect(result.current.data?.waiting.total).toBe(5);
+  });
+
+  it('lets a background progress reader wait for the remote to paint, but not the Spaces page', async () => {
+    api.fetchProgressCards.mockResolvedValue([]);
+    const background = renderHook(() => useProgressCards('remote-progress', { deferToFirstPaint: true }));
+    await act(async () => { await Promise.resolve(); });
+    expect(api.fetchProgressCards).not.toHaveBeenCalled();
+    background.unmount();
+    renderHook(() => useProgressCards('remote-progress'));
+    expect(api.fetchProgressCards).toHaveBeenCalledTimes(1);
+    resetRemoteFirstPaint();
+    const waiting = renderHook(() => useProgressCards('remote-progress-2', { deferToFirstPaint: true }));
+    await act(async () => { markRemoteFirstPaint('remote-progress-2'); });
+    await waitFor(() => expect(waiting.result.current.status).toBe('ready'));
+    expect(api.fetchProgressCards).toHaveBeenCalledTimes(2);
+    resetRemoteFirstPaint();
+  });
+
+  it('polls shared progress through the reader that does not wait for the remote', async () => {
+    vi.useFakeTimers();
+    try {
+      api.fetchProgressCards.mockResolvedValue([]);
+      const page = renderHook(() => useProgressCards('remote-progress-poll'));
+      const background = renderHook(() => useProgressCards('remote-progress-poll', { deferToFirstPaint: true }));
+      expect(api.fetchProgressCards).toHaveBeenCalledTimes(1);
+
+      // The background reader's own mount read gives up waiting after 1.5 s.
+      await act(async () => { await vi.advanceTimersByTimeAsync(15_000); });
+      expect(api.fetchProgressCards).toHaveBeenCalledTimes(3);
+      await act(async () => { await vi.advanceTimersByTimeAsync(2_000); });
+      expect(api.fetchProgressCards).toHaveBeenCalledTimes(3);
+      page.unmount();
+      background.unmount();
+    } finally {
+      vi.useRealTimers();
+      resetRemoteFirstPaint();
+    }
   });
 });

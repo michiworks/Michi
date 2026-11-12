@@ -21,7 +21,7 @@
 .trash-heading > .ui-btn { min-height: 34px; padding: 6px 11px; border-color: var(--trash-line); border-radius: var(--ui-radius); font-size: var(--fs-md); font-weight: 500; white-space: nowrap; }
 .trash-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 14px; margin-bottom: 22px; }
 .trash-search { display: flex; align-items: center; gap: 8px; width: 290px; min-width: 0; height: 36px; padding: 0 10px; color: var(--term-muted); background: var(--term-surface); border: 1px solid var(--term-line); border-radius: var(--ui-radius); }
-.trash-search:focus-within { outline: 2px solid color-mix(in srgb, var(--term-accent) 45%, transparent); outline-offset: 1px; }
+.trash-search:focus-within { outline: var(--focus-ring); outline-offset: 1px; }
 .trash-search input { width: 100%; min-width: 0; padding: 0; border: 0; outline: none; background: transparent; color: var(--term-fg); font: var(--fs-md) var(--ui-font); }
 .trash-search input::-webkit-search-cancel-button { display: none; }
 .trash-search input::placeholder { color: var(--term-muted); }
@@ -57,17 +57,14 @@ button.trash-group-heading { cursor: pointer; }
 .trash-icon-button[aria-expanded='true'] { color: var(--term-fg); background: var(--trash-hover); }
 .trash-danger { color: var(--term-danger); }
 .trash-deleted-workspaces.has-threads { margin-top: 30px; padding-top: 17px; border-top: 1px solid var(--trash-line); }
-.terminal-trash mark { color: inherit; background: color-mix(in srgb, var(--term-accent) 12%, transparent); border-radius: var(--ui-radius-sm); }
 .trash-empty { min-height: 300px; padding: 32px 16px; display: flex; flex-direction: column; justify-content: center; align-items: center; text-align: center; }
 .trash-empty > svg { color: var(--term-faint); stroke-width: 1.3; margin-bottom: 17px; }
 .trash-empty h2 { margin: 0; font-size: var(--fs-2xl); font-weight: 500; }
 .trash-empty p { max-width: 290px; margin: 7px 0 0; font-size: var(--fs-md); color: var(--term-muted); overflow-wrap: anywhere; }
 .trash-empty > .ui-btn { margin-top: 13px; }
-.trash-error { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 16px; padding: 8px 12px; border: 1px solid color-mix(in srgb, var(--term-danger) 30%, transparent); border-radius: var(--ui-radius); background: color-mix(in srgb, var(--term-danger) 5%, transparent); color: var(--term-danger); font-size: var(--fs-md); overflow-wrap: anywhere; }
 .trash-menu .ui-menu-item { display: flex; align-items: center; width: 100%; border: 0; background: transparent; color: var(--term-fg); text-align: left; cursor: pointer; transition: none; }
-.trash-menu .ui-menu-item[data-danger='true'] { color: var(--term-danger); }
+.trash-menu .ui-menu-item[data-danger='true'] { color: var(--term-danger-text); }
 .trash-menu .ui-menu-item:focus-visible { background: color-mix(in srgb, var(--term-fg) 5%, transparent); outline-offset: -2px; }
-.terminal-trash button:focus-visible, .terminal-trash select:focus-visible, .trash-preview button:focus-visible, .trash-menu button:focus-visible { outline: 2px solid var(--term-accent); outline-offset: 2px; }
 .trash-loading, .trash-preview-loading { display: grid; gap: 14px; padding: 16px 8px; }
 /* Faint bars, so the softer skeleton pulse (index.css) rather than the message skeleton's .3 low. */
 .trash-loading span, .trash-preview-loading span { display: block; height: 48px; border-radius: var(--ui-radius); background: color-mix(in srgb, var(--term-fg) 6%, transparent); animation: t-skeleton-pulse-soft var(--t-loop) ease-in-out infinite; }
@@ -89,7 +86,7 @@ button.trash-group-heading { cursor: pointer; }
 .trash-preview-message h4 { margin: 0 0 8px; font-size: var(--fs-sm); font-weight: 500; }
 .trash-preview-message p { margin: 0; color: var(--term-mid); font-size: var(--fs-md); line-height: 1.75; white-space: pre-wrap; overflow-wrap: anywhere; }
 .trash-preview-empty, .trash-preview-error { color: var(--term-muted); font-size: var(--fs-md); overflow-wrap: anywhere; }
-.trash-preview-error { color: var(--term-danger); }
+.trash-preview-error { color: var(--term-danger-text); }
 .trash-preview-nodes { list-style: none; margin: 0; padding: 0; }
 .trash-preview-nodes li { display: flex; align-items: center; gap: 9px; padding: 11px 0; border-top: 1px solid var(--term-line); color: var(--term-mid); font-size: var(--fs-md); }
 .trash-preview-nodes li > span, .trash-preview-nodes li > button { min-width: 0; overflow-wrap: anywhere; }
@@ -100,7 +97,7 @@ button.trash-group-heading { cursor: pointer; }
 @media (hover: hover) and (pointer: fine) {
   .trash-group-heading:hover, .terminal-trash .trash-row:hover, .trash-icon-button:hover { background: var(--trash-hover, color-mix(in srgb, var(--term-fg) 4%, transparent)); }
   .trash-row-actions .trash-icon-button:first-child:hover { background: var(--term-surface); color: var(--term-accent); }
-  .trash-heading > .ui-btn:not(:disabled):hover { color: var(--term-danger); border-color: color-mix(in srgb, var(--term-danger) 30%, transparent); background: color-mix(in srgb, var(--term-danger) 4%, transparent); }
+  .trash-heading > .ui-btn:not(:disabled):hover { color: var(--term-danger-text); border-color: color-mix(in srgb, var(--term-danger) 30%, transparent); background: color-mix(in srgb, var(--term-danger) 4%, transparent); }
   .trash-icon-button:active { transform: scale(.97); }
 }
 @container (max-width: 600px) {

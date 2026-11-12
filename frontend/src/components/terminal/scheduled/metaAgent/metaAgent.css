@@ -30,10 +30,10 @@
   text-transform: none;
 }
 .meta-sched__tag:is([data-state='paused'], [data-state='off']) { border-color: var(--term-line-s); color: var(--term-mid); }
-.meta-sched__tag[data-state='error'] { border-color: var(--term-danger); color: var(--term-danger); }
+.meta-sched__tag[data-state='error'] { border-color: var(--term-danger); color: var(--term-danger-text); }
 
 .meta-sched__line { margin: 2px 0 0; font-size: var(--fs-2xl); line-height: 1.6; color: var(--term-fg); }
-.meta-sched__status { margin: 0; font-size: var(--fs-lg); color: var(--term-danger-text, var(--term-danger)); }
+.meta-sched__status { margin: 0; font-size: var(--fs-lg); color: var(--term-danger-text); }
 .meta-sched__status:is([data-state='paused'], [data-state='off']) { color: var(--term-mid); }
 .meta-sched__status-detail { display: block; margin-top: 2px; font: 400 var(--fs-sm)/1.5 var(--font-mono); color: var(--term-muted); overflow-wrap: anywhere; }
 
@@ -52,7 +52,6 @@
   cursor: pointer;
 }
 .meta-sched__link:hover { color: var(--term-fg); }
-.meta-sched__link:focus-visible { outline: 2px solid color-mix(in srgb, var(--term-accent) 62%, transparent); outline-offset: 1px; }
 
 .meta-sched__metrics { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 18px 28px; margin: 0; padding: 4px 0; }
 .meta-sched__metric dt, .meta-sched__metric dd { margin: 0; font-size: var(--fs-md); color: var(--term-muted); }
@@ -79,6 +78,7 @@
 .meta-sched__table td { padding: 9px 10px; border-bottom: 1px solid var(--term-line); vertical-align: top; }
 .meta-sched__ws { display: flex; align-items: center; gap: 8px; font-weight: 500; }
 .meta-sched__dot { align-self: center; }
+.meta-sched__dot[data-tone='next'] { background: var(--term-accent); }
 .meta-sched__dot[data-tone='error'] { background: var(--term-danger); }
 .meta-sched__mono { font-family: var(--font-mono); font-variant-numeric: tabular-nums; }
 
@@ -101,7 +101,7 @@
 .meta-sched__run[data-tone='first']::before { border-color: var(--term-select); }
 .meta-sched__run[data-tone='summary']::before { border-color: var(--term-mauve); }
 .meta-sched__run[data-tone='attention']::before { border-color: var(--term-mauve); }
-.meta-sched__run[data-tone='running']::before { border-color: var(--term-accent); }
+.meta-sched__run[data-tone='running']::before { border-color: var(--term-run); }
 .meta-sched__run[data-tone='error']::before { border-color: var(--term-danger); }
 .meta-sched__run-title { font-size: var(--fs-xl); font-weight: 600; line-height: 1.5; }
 .meta-sched__time { margin-left: 8px; font: 400 var(--fs-sm) var(--font-mono); color: var(--term-muted); }

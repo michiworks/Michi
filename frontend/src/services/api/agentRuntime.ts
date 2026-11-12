@@ -8,10 +8,16 @@ export type {
   WebSearchProviderInfo, AgentRuntimeOption, AgentStatus, AgentModelInfo,
   AgentOptionsPatch, AgentModelsResponse, RuntimeCatalogResponse,
 } from 'michi-shared';
-import { activeBackendApiBase, backendApiBase } from '../../config/backendConnections';
+import { activeBackendApiBase, backendApiBase, LOCAL_BACKEND_CONNECTION_ID } from '../../config/backendConnections';
 import { backendConnectionGeneration } from '../../config/backendConnectionState';
 import { connectionIdFromApiUrl } from '../../config/backendIdentity';
 import { createCatalogRequestCache } from '../catalogRequestCache';
+import { remoteFirstPainted, whenRemoteFirstPaint } from '../../state/remoteFirstPaint';
+
+/** Resolves at once for local or already-painted connections; otherwise holds until the remote's first paint (bounded). */
+function afterRemoteFirstPaint(connectionId: string): Promise<void> | undefined {
+  return remoteFirstPainted(connectionId) ? undefined : whenRemoteFirstPaint(connectionId);
+}
 
 // === Agent runtime API ===
 
@@ -23,11 +29,67 @@ export interface VerifyProviderKeyResult {
   error?: string;
 }
 
+// One read per backend serves every caller that asks within a moment: the chat
+// store, the key gate and the composer all want the same /agent/status at boot,
+// and over a tunnel each duplicate costs a round trip. In-flight reads are shared
+// for every backend; a settled answer is reused briefly for remote backends only.
+// Anything that changes the status (saving options or a key, the reload event)
+// drops both, so a later read is always a real one.
+const STATUS_REUSE_MS = 2000;
+const statusInflight = new Map<string, Promise<AgentStatus>>();
+const statusSettled = new Map<string, { at: number; status: AgentStatus }>();
+
+export function invalidateAgentStatus(): void {
+  statusInflight.clear();
+  statusSettled.clear();
+}
+
+if (typeof window !== 'undefined') window.addEventListener('michi:reload-agent-status', invalidateAgentStatus);
+
+function abortable<T>(promise: Promise<T>, signal?: AbortSignal): Promise<T> {
+  if (!signal) return promise;
+  if (signal.aborted) return Promise.reject(signal.reason ?? new DOMException('Aborted', 'AbortError'));
+  return new Promise<T>((resolve, reject) => {
+    const onAbort = () => reject(signal.reason ?? new DOMException('Aborted', 'AbortError'));
+    signal.addEventListener('abort', onAbort, { once: true });
+    promise.then(
+      (value) => { signal.removeEventListener('abort', onAbort); resolve(value); },
+      (error: unknown) => { signal.removeEventListener('abort', onAbort); reject(error); },
+    );
+  });
+}
+
 export async function fetchAgentStatus(connectionId?: string, signal?: AbortSignal): Promise<AgentStatus> {
   const base = connectionId === undefined ? activeBackendApiBase() : backendApiBase(connectionId);
-  const res = await backendFetch(`${base}/agent/status`, { signal });
-  if (!res.ok) throw new Error(`fetchAgentStatus failed: ${res.status}`);
-  return normalizeAgentStatus(await res.json());
+  const remote = connectionIdFromApiUrl(base) !== LOCAL_BACKEND_CONNECTION_ID;
+  const settled = remote ? statusSettled.get(base) : undefined;
+  if (settled && Date.now() - settled.at < STATUS_REUSE_MS) return settled.status;
+  let pending = statusInflight.get(base);
+  if (!pending) {
+    // The shared read has no caller's signal; each caller leaves it by its own.
+    const started: Promise<AgentStatus> = (async () => {
+      const res = await backendFetch(`${base}/agent/status`);
+      if (!res.ok) throw new Error(`fetchAgentStatus failed: ${res.status}`);
+      return normalizeAgentStatus(await res.json());
+    })();
+    pending = started;
+    statusInflight.set(base, started);
+    started.then(
+      (status) => {
+        if (statusInflight.get(base) === started) statusSettled.set(base, { at: Date.now(), status });
+      },
+      () => {},
+    ).finally(() => { if (statusInflight.get(base) === started) statusInflight.delete(base); });
+  }
+  return abortable(pending, signal);
+}
+
+/** The boot read of /agent/status: a remote's waits for its first content to paint. */
+export async function fetchAgentStatusAfterFirstPaint(connectionId: string | undefined, signal?: AbortSignal): Promise<AgentStatus> {
+  const id = connectionId ?? connectionIdFromApiUrl(activeBackendApiBase());
+  const held = afterRemoteFirstPaint(id);
+  if (held) await abortable(held, signal);
+  return fetchAgentStatus(connectionId, signal);
 }
 
 export type ReadyStatus = 'pending' | 'ready' | 'failed';
@@ -51,11 +113,13 @@ export async function fetchReady(): Promise<ReadyResponse> {
 export async function saveAgentOptions(
   patch: AgentOptionsPatch,
 ): Promise<{ ok: true } | { ok: false; error: string }> {
+  invalidateAgentStatus();
   const res = await backendFetch(`${activeBackendApiBase()}/agent/options`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(patch),
   });
+  invalidateAgentStatus();
   if (!res.ok) {
     const body = await res.json().catch(() => ({ error: `status ${res.status}` }));
     return { ok: false, error: body.error ?? `status ${res.status}` };
@@ -72,6 +136,9 @@ export async function listAgentModels(opts?: { provider?: string; runtime?: stri
   if (opts?.provider) url.searchParams.set('provider', opts.provider);
   if (opts?.runtime) url.searchParams.set('expectedRuntime', opts.runtime);
   const load = async (): Promise<AgentModelsResponse> => {
+    // An explicit refresh is a click; the boot read waits for the remote's first paint.
+    const held = opts?.refresh ? undefined : afterRemoteFirstPaint(connectionIdFromApiUrl(base));
+    if (held) await held;
     const res = await backendFetch(url.toString());
     if (!res.ok) throw new Error(`listAgentModels failed: ${res.status}`);
     return normalizeAgentModels(await res.json());
@@ -96,6 +163,8 @@ export async function fetchRuntimeCatalog(runtimeId: string, provider?: string, 
   url.searchParams.set('runtime', runtimeId);
   if (provider) url.searchParams.set('provider', provider);
   return runtimeCatalogCache.load(JSON.stringify([base, generation, runtimeId, provider ?? '']), async () => {
+    const held = opts?.refresh ? undefined : afterRemoteFirstPaint(connectionIdFromApiUrl(base));
+    if (held) await held;
     const res = await backendFetch(url.toString());
     if (!res.ok) throw new Error(`fetchRuntimeCatalog failed: ${res.status}`);
     return normalizeRuntimeCatalog(await res.json());
@@ -106,11 +175,13 @@ export async function saveProviderKey(
   provider: string,
   key: string,
 ): Promise<{ ok: true } | { ok: false; error: string }> {
+  invalidateAgentStatus();
   const res = await backendFetch(`${activeBackendApiBase()}/agent/provider-key`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ provider, key }),
   });
+  invalidateAgentStatus();
   if (!res.ok) {
     const body = await res.json().catch(() => ({ error: `status ${res.status}` }));
     return { ok: false, error: body.error ?? `status ${res.status}` };
@@ -121,10 +192,12 @@ export async function saveProviderKey(
 export async function clearProviderKey(
   provider: string,
 ): Promise<{ ok: true } | { ok: false; error: string }> {
+  invalidateAgentStatus();
   const res = await backendFetch(
     `${activeBackendApiBase()}/agent/provider-key/${encodeURIComponent(provider)}`,
     { method: 'DELETE' },
   );
+  invalidateAgentStatus();
   if (!res.ok) {
     const body = await res.json().catch(() => ({ error: `status ${res.status}` }));
     return { ok: false, error: body.error ?? `status ${res.status}` };

@@ -2,7 +2,7 @@ import { test, expect } from '@playwright/test';
 import { installMockApi, bootWithWorkspace } from '../fixtures/mockApi';
 import { COMPOSER_EDITOR } from '../fixtures/shell';
 
-test('agent file artifacts group images and download arbitrary files without reading them as text', async ({ page }) => {
+test('agent file artifacts open images in the lightbox and download arbitrary files without reading them as text', async ({ page }) => {
   let textReads = 0;
   await installMockApi(page, {
     streamEvents: [
@@ -31,13 +31,12 @@ test('agent file artifacts group images and download arbitrary files without rea
   await expect(page.getByText('Saved both files.')).toBeVisible();
   await page.keyboard.press('ControlOrMeta+Shift+A');
   await expect(page.getByText('screenshot', { exact: true })).toBeVisible();
+  // A tap opens a row: the image in the lightbox, the arbitrary file as a download.
   await page.getByText('screenshot', { exact: true }).click();
-  await page.getByRole('button', { name: 'Open', exact: true }).click();
   await expect(page.locator('img[src*="shot.png"]')).toBeVisible();
   await page.keyboard.press('Escape');
-  await page.getByText('archive', { exact: true }).click();
   const download = page.waitForEvent('download');
-  await page.getByRole('button', { name: 'Open', exact: true }).click();
+  await page.getByText('archive', { exact: true }).click();
   expect((await download).suggestedFilename()).toBe('output.custom');
   expect(textReads).toBe(0);
 });

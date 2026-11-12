@@ -1,6 +1,8 @@
 import type { ChatNodeState, Project } from '../../../state/chatTypes';
-import { isVisibleConversationNode } from '../../../state/conversationVisibility';
-import { liveDigestSources } from '../../../state/digest';
+import { isListedThread, isVisibleConversationNode } from '../../../state/conversationVisibility';
+import { liveDigestSources, visibleDigestMarkdown } from '../../../state/digest';
+import { sortTrees } from '../../../state/sidebarSelectors';
+import { buildBranchChildrenOf, isBranchEdge } from '../../../state/tree';
 
 export interface HeaderCounts {
   chats: number;
@@ -42,7 +44,7 @@ export function deriveHeaderCounts(
     return acc + (isLiveChatNode(node) ? 1 : 0);
   }, 0);
   const artifacts = project.artifacts?.length ?? 0;
-  const branches = project.edges.filter((e) => (e.kind ?? 'branch') === 'branch' && isVisibleConversationNode(nodes[e.target])).length;
+  const branches = project.edges.filter((e) => isBranchEdge(e) && isVisibleConversationNode(nodes[e.target])).length;
   const lastActiveAt = project.trees.reduce((acc, t) => (isShownTree(t, nodes) ? Math.max(acc, t.lastActiveAt) : acc), 0);
   return { chats, artifacts, branches, lastActiveAt };
 }
@@ -54,32 +56,14 @@ export function deriveTreeRows(
 ): TreeRow[] {
   if (project.trees.length === 0) return [];
 
-  const childrenOf = new Map<string, string[]>();
-  for (const edge of project.edges) {
-    if ((edge.kind ?? 'branch') !== 'branch') continue;
-    const list = childrenOf.get(edge.source) ?? [];
-    list.push(edge.target);
-    childrenOf.set(edge.source, list);
-  }
+  const childrenOf = buildBranchChildrenOf(project.edges);
 
   const norm = filter.trim().toLowerCase();
   const rows: TreeRow[] = [];
 
-  // Pinned threads sort to the top (most recently pinned first); the rest
-  // sort by recent activity (lastActiveAt DESC), matching sidebar behavior.
-  const orderedTrees = [...project.trees].sort((a, b) => {
-    const ap = a.pinnedAt ?? 0;
-    const bp = b.pinnedAt ?? 0;
-    if (ap !== bp) return bp - ap;
-    const aRecent = a.lastActiveAt ?? a.createdAt ?? 0;
-    const bRecent = b.lastActiveAt ?? b.createdAt ?? 0;
-    return bRecent - aRecent;
-  });
-
-  for (const tree of orderedTrees) {
-    if (tree.archivedAt) continue;
+  for (const tree of sortTrees(project.trees, null)) {
     const rootNode = nodes[tree.rootNodeId];
-    if (!rootNode || rootNode.deletedAt || !isVisibleConversationNode(rootNode)) continue;
+    if (!rootNode || !isListedThread(tree, rootNode)) continue;
 
     const directBranchIds = (childrenOf.get(tree.rootNodeId) ?? []).filter((id) => isLiveChatNode(nodes[id]));
 
@@ -91,14 +75,13 @@ export function deriveTreeRows(
       }
     }
     if (deeperCount > 0) {
-      // eslint-disable-next-line no-console
       console.warn(
         `[WorkspaceManage] tree ${tree.id} has ${deeperCount} depth-2+ branches; rendering overflow row only`,
       );
     }
 
     if (norm) {
-      const titles: string[] = [rootNode.title ?? ''];
+      const titles: string[] = [tree.name ?? '', rootNode.title ?? ''];
       for (const id of directBranchIds) titles.push(nodes[id]?.title ?? '');
       const matched = titles.some((t) => t.toLowerCase().includes(norm));
       if (!matched) continue;
@@ -191,7 +174,7 @@ export function deriveDigests(
     if (!node || node.deletedAt) continue;
     if (node.kind !== 'digest') continue;
     const digest = node.digest;
-    const content = digest?.content?.trim() ?? '';
+    const content = visibleDigestMarkdown(digest?.content ?? '');
     const excerpt = content.replace(/\s+/g, ' ').slice(0, EXCERPT_LEN);
     out.push({
       nodeId: id,

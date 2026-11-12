@@ -10,6 +10,7 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { applySubagentActivity, mergeSubagentRoster, SUBAGENT_SESSION_ENDED_ERROR, type SubagentInfo } from 'michi-shared';
 import { CodexSession } from 'michi-runtime/internal/adapters/codex/CodexSession';
+import { codexChildThreadInfo } from 'michi-runtime/internal/adapters/codex/codexChildThreads';
 import { BackgroundSubagentRegistry, type EndedBackgroundSubagents } from '../src/services/backgroundSubagentRegistry';
 import { subagentSink } from './helpers/hostSinks';
 import { LOCAL_AGENT_OWNER_ID } from '../src/services/agentOwner';
@@ -112,6 +113,13 @@ describe('Codex collaboration subagents', () => {
     assert.equal(byId.d.outcome, undefined);
     // wait is not a spawn: it must not claim the chip link.
     assert.equal(byId.b.parentToolCallId, undefined);
+  });
+
+  it('a child thread starts with the first line of its preview as its question, cut as every runtime cuts it', () => {
+    const info = codexChildThreadInfo({ agentNickname: 'Ada', preview: `\n  Read   fixture.txt ${'x'.repeat(300)}\nthen report` }, 'child-1');
+    assert.equal(info.initialQuery.length, 200);
+    assert.match(info.initialQuery, /^Read fixture\.txt x+…$/);
+    assert.equal(codexChildThreadInfo({ preview: '' }, 'child-2').initialQuery, '');
   });
 
   it('keeps the child nickname when the spawn patch arrives after thread/started', () => {

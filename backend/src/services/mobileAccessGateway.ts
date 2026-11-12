@@ -1,9 +1,16 @@
 import { randomBytes, timingSafeEqual } from 'node:crypto';
-import { createServer, request, type IncomingMessage, type IncomingHttpHeaders } from 'node:http';
 import { createServer as createNetServer, type Server as NetServer, type Socket } from 'node:net';
+import type { ChildProcess } from 'node:child_process';
+import { once } from 'node:events';
+import { chmod, mkdtemp, rm } from 'node:fs/promises';
+import { createServer, request, type IncomingMessage, type IncomingHttpHeaders } from 'node:http';
+import os from 'node:os';
+import path from 'node:path';
 import type { Duplex } from 'node:stream';
 import { createGzip } from 'node:zlib';
 import type { MobileAccessLink } from 'michi-shared';
+import { isLoopbackHostname } from 'michi-runtime/internal/core/loopback';
+import { VIA_HEADER } from './accessLog';
 
 const HOP_HEADERS = new Set(['connection', 'keep-alive', 'transfer-encoding', 'upgrade', 'proxy-authorization', 'proxy-authenticate', 'trailer', 'te']);
 // Vite puts a content hash in every file name under /assets/, so a cached copy is never stale.
@@ -54,7 +61,7 @@ export function createMobileAccessGateway(options: {
   requestTimeoutMs?: number;
 }) {
   const target = new URL(options.target);
-  if (target.protocol !== 'http:' || !['127.0.0.1', '[::1]', 'localhost'].includes(target.hostname)) {
+  if (target.protocol !== 'http:' || !isLoopbackHostname(target.hostname)) {
     throw new Error('Mobile access requires a loopback Michi backend');
   }
   if (options.pathSecret !== undefined && !/^[A-Za-z0-9_-]{32,128}$/.test(options.pathSecret)) throw new Error('Invalid mobile access path secret');
@@ -97,13 +104,16 @@ export function createMobileAccessGateway(options: {
     const nominated = String(req.headers.connection ?? '').toLowerCase().split(',').map(v => v.trim());
     for (const [key, value] of Object.entries(req.headers)) {
       if (HOP_HEADERS.has(key) || nominated.includes(key) || key.startsWith('x-forwarded-')
-        || key.startsWith('tailscale-') || ['host', 'origin', 'cookie', 'authorization', 'forwarded'].includes(key)) continue;
+        || key.startsWith('tailscale-')
+        || ['host', 'origin', 'cookie', 'authorization', 'forwarded', VIA_HEADER].includes(key)) continue;
       headers[key] = value;
     }
     // Both ticket creation and WS upgrades use the same local origin. The
     // existing one-use stream tickets and all route guards still run.
     headers.host = target.host;
     headers.origin = target.origin;
+    // Labels the backend's access log only; a phone's own value was dropped above.
+    headers[VIA_HEADER] = 'phone';
     if (options.token) headers.authorization = `Bearer ${options.token}`;
     if (upgrade) { headers.connection = 'Upgrade'; headers.upgrade = 'websocket'; }
     return headers;
@@ -250,4 +260,59 @@ history.replaceState(null,'','/mobile-connect');location.replace('/');
       await new Promise<void>(resolve => listener.close(() => resolve()));
     },
   };
+}
+
+type MobileAccessGateway = ReturnType<typeof createMobileAccessGateway>;
+
+/** Serve the gateway on http.sock in a new directory that only this OS user
+ * can enter, so only the provider can reach the ingress that trusts its
+ * identity header. The mode is set before listening. Never fall back to TCP,
+ * where another local user could forge the owner header. On failure the
+ * gateway is closed and the directory removed. */
+async function listenPrivateIngress(gateway: MobileAccessGateway, prefix: string): Promise<{ endpoint: string; close(): Promise<void> }> {
+  let directory: string | undefined;
+  const close = async () => {
+    await gateway.close();
+    if (directory) await rm(directory, { recursive: true, force: true });
+  };
+  try {
+    directory = await mkdtemp(path.join(os.tmpdir(), prefix));
+    await chmod(directory, 0o700);
+    const socket = path.join(directory, 'http.sock');
+    gateway.server.listen(socket);
+    await once(gateway.server, 'listening');
+    return { endpoint: `unix:${socket}`, close };
+  } catch (error) {
+    await close();
+    throw error;
+  }
+}
+
+/** Calls onLine with each complete line of the child's stdout and stderr while
+ * isCurrent() holds. Only complete lines: a URL split across chunks must not be
+ * read as a shorter one. */
+function forEachOutputLine(child: ChildProcess, isCurrent: () => boolean, onLine: (line: string) => void): void {
+  for (const stream of [child.stdout, child.stderr]) {
+    let buffer = '';
+    stream?.on('data', (chunk: Buffer | string) => {
+      if (!isCurrent()) return;
+      buffer = (buffer + String(chunk)).slice(-8192);
+      let index: number;
+      while ((index = buffer.indexOf('\n')) >= 0) {
+        const line = buffer.slice(0, index);
+        buffer = buffer.slice(index + 1);
+        onLine(line);
+      }
+    });
+  }
+}
+
+/** SIGTERM, then SIGKILL after 2 s. kill sends a signal (default: to the child only). */
+async function stopChild(child: ChildProcess, kill = (signal: NodeJS.Signals) => { child.kill(signal); }): Promise<void> {
+  if (child.exitCode !== null || child.signalCode !== null) return;
+  await new Promise<void>(resolve => {
+    const timer = setTimeout(() => { kill('SIGKILL'); resolve(); }, 2000);
+    child.once('exit', () => { clearTimeout(timer); resolve(); });
+    kill('SIGTERM');
+  });
 }

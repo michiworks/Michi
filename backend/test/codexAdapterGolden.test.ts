@@ -6,7 +6,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import type { RuntimeHost } from 'michi-runtime';
-import { CodexRuntime, type CodexRuntimeTestSeams } from 'michi-runtime/internal/adapters/codex/CodexRuntime';
+import { CodexRuntime } from 'michi-runtime/internal/adapters/codex/CodexRuntime';
 import type { CodexSession } from 'michi-runtime/internal/adapters/codex/CodexSession';
 import type { CodexAppServerClient } from 'michi-runtime/internal/adapters/codex/CodexAppServerClient';
 import type { AgentSession, ChatMessage, NewAgentSessionOptions } from '../src/agents/types';
@@ -59,9 +59,8 @@ const pinnedEnv: Record<string, string | undefined> = {
   MICHI_CLOUD: undefined,
   MICHI_TITLE_MODEL_CODEX: undefined,
   MICHI_CODEX_TITLE_TIMEOUT_MS: undefined,
-  MICHI_FOLLOW_UPS_EXPERIMENT_MODE: undefined,
-  MICHI_CODEX_FOLLOW_UPS_HOOK_POC: undefined,
   MICHI_CODEX_MAX_CONCURRENT: undefined,
+  MICHI_DISABLE_MULTI_MODEL: undefined,
 };
 const savedEnv: Record<string, string | undefined> = {};
 
@@ -220,14 +219,12 @@ interface Harness {
   recordedNativeSessionIds: unknown[];
 }
 
-function harness(seams: Pick<CodexRuntimeTestSeams, 'followUpsHookPocEnabled' | 'followUpsExperimentMode'> = {}): Harness {
+function harness(): Harness {
   const client = recordingClient();
   const { registry, slots } = recordingRegistry();
   const recordedNativeSessionIds: unknown[] = [];
   const runtime = new CodexRuntime({ ...codexTestOptions({ host: recordingHost(recordedNativeSessionIds) }), bridge, mcpSlots: registry }, {
     client: client as unknown as CodexAppServerClient,
-    followUpsHookPocEnabled: seams.followUpsHookPocEnabled ?? false,
-    ...(seams.followUpsExperimentMode ? { followUpsExperimentMode: seams.followUpsExperimentMode } : {}),
   });
   return { runtime, client, slots, recordedNativeSessionIds };
 }
@@ -350,9 +347,10 @@ describe('Codex adapter golden', () => {
     const session = await h.runtime.forkSession({
       sessionId: 'chat-fork', cwd: CWD, model: 'gpt-golden', parentChatId: 'fork-parent',
       sourceNativeSessionId: 'thread-fork-parent',
-      branchContext: { parentNodeId: 'fork-parent', kind: 'exact', messages: [{ role: 'user', content: 'Forked from here' }] },
+      branchContext: { parentNodeId: 'fork-parent', kind: 'exact', messages: [{ role: 'user', content: 'Not sent: native history replaces it' }] },
     }) as CodexSession;
     const result = { nativeSessionId: session.nativeSessionId, turns: [await turn(h, session, 'Fork question')] };
+    assert.ok(!JSON.stringify(h.client.requests).includes('Not sent: native history replaces it'), 'thread/fork already copied the parent\'s history');
     assertGolden('chat-fork', await snapshot(h, result));
   });
 
@@ -415,31 +413,5 @@ describe('Codex adapter golden', () => {
     }) as CodexSession;
     turns.push(await turn(h, resumed, 'Run turn after resume'));
     assertGolden('agent-run', await snapshot(h, { nativeSessionId, turns }));
-  });
-
-  for (const mode of ['sentinel', 'hook-tool'] as const) {
-    test(`follow-ups Stop-hook experiment: ${mode}`, async () => {
-      const h = harness({ followUpsHookPocEnabled: true, followUpsExperimentMode: mode });
-      const result = await chatScenario(h, { sessionId: `hook-${mode}`, cwd: CWD, model: 'gpt-golden' }, ['Hook question', 'Hook follow-up']);
-      assertGolden(`hook-${mode}`, await snapshot(h, result));
-    });
-  }
-
-  test('follow-ups Stop-hook experiment: follow-ups disabled', async () => {
-    const h = harness({ followUpsHookPocEnabled: true, followUpsExperimentMode: 'hook-tool' });
-    const result = await chatScenario(h, { sessionId: 'hook-disabled', cwd: CWD, model: 'gpt-golden', enableFollowUps: false }, ['No follow-ups']);
-    assertGolden('hook-follow-ups-disabled', await snapshot(h, result));
-  });
-
-  test('follow-ups Stop-hook experiment: agent run', async () => {
-    const h = harness({ followUpsHookPocEnabled: true, followUpsExperimentMode: 'hook-tool' });
-    const session = await h.runtime.newSession({
-      sessionId: 'hook-attempt', cwd: CWD, model: 'gpt-golden',
-      owner: runOwner('hook-run', 'hook-attempt'),
-      toolProfile: { allowedToolNames: ['submit_agent_result'] },
-      bootstrapInstructions: 'Hook run bootstrap.',
-    }) as CodexSession;
-    const result = { nativeSessionId: session.nativeSessionId, turns: [await turn(h, session, 'Hook run turn')] };
-    assertGolden('hook-agent-run', await snapshot(h, result));
   });
 });

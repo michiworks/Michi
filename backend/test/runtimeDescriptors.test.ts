@@ -5,7 +5,6 @@ import fs from 'node:fs';
 import path from 'node:path';
 import type { RuntimeDescriptor, RuntimeRunFacet, RuntimeTopology } from 'michi-runtime/internal/contract/descriptor';
 import { descriptorOf, UNKNOWN_RUNTIME_DESCRIPTOR } from 'michi-runtime/internal/core/descriptors';
-import { describeRuntimeCapabilities } from '../src/agents/capabilityDescriptors';
 import { AcpAgentRuntime, type KiroAdapterOptions } from 'michi-runtime/internal/adapters/kiro/AcpAgentRuntime';
 import { ClaudeRuntime } from 'michi-runtime/internal/adapters/claude/ClaudeRuntime';
 import { CodexRuntime } from 'michi-runtime/internal/adapters/codex/CodexRuntime';
@@ -23,6 +22,7 @@ import type { AgentToolBridge } from '../src/agents/toolBridge';
 import type { McpSlotRegistry } from '../src/services/mcpServer';
 import { michiTestHost } from './helpers/michiTestHost';
 import { codexTestOptions } from './helpers/codexTestOptions';
+import { michiKiroRestrictedAgent } from '../src/agents/kiro/kiroMetaAgent';
 
 const bridge: AgentToolBridge = { spawnBranches: async () => [], saveContext: () => null, updateContext: () => null };
 const mcpRegistry = { create: () => ({ slotId: 'slot' }), dispose: async () => {}, get: () => undefined } as unknown as McpSlotRegistry;
@@ -117,10 +117,9 @@ function topologyAndRun(descriptor: RuntimeDescriptor | undefined) {
 }
 
 describe('runtime descriptors', () => {
-  test('each factory describes its runtime without an instance, as describeRuntimeCapabilities did', () => {
+  test('each factory describes its runtime without an instance', () => {
     for (const { id, staticDescriptor } of RUNTIME_FACTORIES) {
       assert.equal(staticRuntimeDescriptor(id), staticDescriptor, id);
-      assert.equal(JSON.stringify(staticDescriptor.harness), JSON.stringify(describeRuntimeCapabilities(id)), id);
     }
     // One table: every factory id and nothing else.
     assert.deepEqual(Object.keys(STATIC_RUNTIME_DESCRIPTORS).sort(), RUNTIME_FACTORIES.map(({ id }) => id).sort());
@@ -134,7 +133,8 @@ describe('runtime descriptors', () => {
       // Kiro starts v3 by default; its static descriptor stays the v2 table.
       if (id === 'kiro') {
         assert.equal(create(id).nativeEngine, 'v3');
-        assert.deepEqual(create(id).descriptor, kiro({ engine: 'v3' }, { mcp: true }).descriptor, id);
+        // The factory gives Kiro Michi's restricted agent, and with it check-ins.
+        assert.deepEqual(create(id).descriptor, kiro({ engine: 'v3', restrictedAgent: michiKiroRestrictedAgent }, { mcp: true }).descriptor, id);
         continue;
       }
       assert.deepEqual(create(id).descriptor, staticDescriptor, id);
@@ -145,7 +145,8 @@ describe('runtime descriptors', () => {
     const runtimes: AgentRuntime[] = [
       kiro({ engine: 'v2' }, { mcp: true }), kiro({ engine: 'v3' }, { mcp: true }),
       create('crew'),
-      track(new CodexRuntime({ ...codexTestOptions(), bridge, mcpSlots: mcpRegistry }, { client: codexClient, followUpsHookPocEnabled: false })),
+      create('antigravity'),
+      track(new CodexRuntime({ ...codexTestOptions(), bridge, mcpSlots: mcpRegistry }, { client: codexClient })),
       track(new ClaudeRuntime({ ...claudeTestOptions(), bridge, mcpSlots: mcpRegistry })),
       track(new PiRuntime(bridge)),
     ];
@@ -186,16 +187,31 @@ describe('runtime descriptors', () => {
   test('Codex, Claude and Pi topology', () => {
     assert.deepEqual(factory('codex').staticDescriptor.topology, {
       identityTiming: 'on-open', cancel: 'native-ack', toolDelivery: ['mcp-http'],
-      historyReplay: 'preamble', backgroundTurns: false, titles: 'in-stream',
+      historyReplay: 'preamble', backgroundTurns: false, titles: 'in-stream', ephemeralSessions: 'native',
     });
     assert.deepEqual(factory('claude').staticDescriptor.topology, {
       identityTiming: 'on-first-turn', cancel: 'native-ack', toolDelivery: ['mcp-http'],
-      historyReplay: 'preamble', backgroundTurns: true, titles: 'none',
+      historyReplay: 'preamble', backgroundTurns: true, titles: 'sidecar', ephemeralSessions: 'native',
     });
     assert.deepEqual(factory('pi').staticDescriptor.topology, {
       identityTiming: 'none', cancel: 'native-ack', toolDelivery: ['in-process'],
-      historyReplay: 'messages', backgroundTurns: false, titles: 'none',
+      historyReplay: 'messages', backgroundTurns: false, titles: 'none', ephemeralSessions: 'native',
     });
+  });
+
+  // DESIGN-v2 §8.1(b): declared per flavor, never through kiroDescriptor's shared topology.
+  test('only kiro-cli on v3 with Michi\'s check-in support declares ephemeral sessions; Crew and Antigravity never do', () => {
+    assert.equal(create('kiro').descriptor?.topology.ephemeralSessions, 'discard-after-release');
+    assert.equal(kiro({ engine: 'v3', restrictedAgent: michiKiroRestrictedAgent }, { mcp: true }).descriptor.topology.ephemeralSessions, 'discard-after-release');
+    assert.equal(kiro({ engine: 'v2', restrictedAgent: michiKiroRestrictedAgent }, { mcp: true }).descriptor.topology.ephemeralSessions, undefined, 'v2 was not probed');
+    assert.equal(kiro({ engine: 'v3' }, { mcp: true }).descriptor.topology.ephemeralSessions, undefined, 'no host support, no check-ins');
+    assert.equal(factory('kiro').staticDescriptor.topology.ephemeralSessions, undefined, 'the static table is v2');
+    for (const id of ['crew', 'antigravity']) {
+      assert.equal('ephemeralSessions' in factory(id).staticDescriptor.topology, false, id);
+      assert.equal('ephemeralSessions' in (create(id).descriptor?.topology ?? {}), false, id);
+      const underV3 = withEnv({ MICHI_KIRO_ENGINE: 'v3' }, () => track(factory(id).create({ bridge, mcpRegistry, mcpPort: 0, host: michiTestHost() })));
+      assert.equal('ephemeralSessions' in (underV3.descriptor?.topology ?? {}), false, `${id} under MICHI_KIRO_ENGINE=v3`);
+    }
   });
 
   test('run facets keep the Run adapters\' pre-descriptor values', () => {
@@ -231,6 +247,7 @@ describe('runtime descriptors', () => {
         'kiro-v3-cloud': topologyAndRun(kiro({ engine: 'v3' }, { mcp: true, cloud: true }).descriptor),
         'kiro-v3-without-mcp': topologyAndRun(kiro({ engine: 'v3' }).descriptor),
         'kiro-v3-isolated-worker': topologyAndRun(kiro({ engine: 'v3', isolatedSession: true }, { mcp: true }).descriptor),
+        'kiro-v3-with-checkins': topologyAndRun(kiro({ engine: 'v3', restrictedAgent: michiKiroRestrictedAgent }, { mcp: true }).descriptor),
         crew: topologyAndRun(create('crew').descriptor),
         'crew-without-mcp': topologyAndRun(create('crew', { mcpRegistry: undefined }).descriptor),
         codex: topologyAndRun(create('codex').descriptor),

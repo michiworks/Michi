@@ -48,6 +48,43 @@ export const SPRING = {
   pop: { type: 'spring', visualDuration: 0.4, bounce: 0.3 },
 } as const satisfies Record<string, Transition>;
 
+/**
+ * The on-screen keyboard's own move, approximately: iOS lowers it in about
+ * 350ms, fast at first with a long settle, and Safari carries the page down
+ * with it. What a phone send moves while the keyboard goes down (the thread's
+ * rise, the composer's rest) rides this curve, so the screen moves one way at
+ * once instead of the thread rising while the page falls.
+ */
+export const KEYBOARD_MOVE: { duration: number; ease: Bezier } = { duration: 0.35, ease: [0.38, 0.7, 0.125, 1] };
+
+/**
+ * The 'line' agent-block chrome (agentBlockMotion: LineSwap, LineGlyphSwap,
+ * useLineDrawer, LineFlash). Seconds; `shift` is px. Under reduced motion the
+ * same durations run opacity only, and the drawer only fades open.
+ */
+export const LINE_MOTION = {
+  /** Lead label swap: the old label rises out, the new one rises in. */
+  labelOut: 0.12,
+  labelIn: 0.18,
+  labelDelay: 0.04,
+  shift: 3,
+  /** The rest of the record dips: out in place, back once the lead settled. */
+  restOut: 0.09,
+  restIn: 0.17,
+  restDelay: 0.15,
+  /** Status glyph: opacity + scale .6 → 1. */
+  glyphOut: 0.1,
+  glyphIn: 0.18,
+  glyphFrom: 0.6,
+  /** Transform drawer: "expand soft, collapse fast". */
+  drawerOpen: DUR.expand,
+  drawerClose: 0.18,
+  drawerFadeIn: 0.14,
+  /** One danger tint, 12% → 0, when a failure arrives. */
+  flash: 0.7,
+  flashFrom: 0.12,
+} as const;
+
 /** Ready-made transitions for the common cases. */
 export const TRANSITION = {
   enter: { duration: DUR.enter, ease: EASE.out },

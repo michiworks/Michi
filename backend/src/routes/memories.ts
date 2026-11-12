@@ -1,28 +1,36 @@
 import express, { type Request, type Response } from 'express';
-import type { MemoryErrorResponse, MemoryStatus } from 'michi-shared';
-import { createSseObserver } from '../services/httpSse';
+import { SSE_HEARTBEAT_MS, isCheckinNodeId, type MemoryErrorResponse, type MemoryStatus } from 'michi-shared';
+import { beginSse } from '../services/httpSse';
 import { log } from '../services/logger';
+import { wakeMemoryExtraction } from '../services/memory/extractionService';
 import { subscribeMemoryChanges } from '../services/memory/memoryChangeFeed';
-import { memoryOwnerId } from '../services/memory/memoryOwner';
+import { requestAgentOwnerOrNull } from '../services/agentOwner';
 import {
   MemoryError,
   approveMemory,
   createMemory,
-  deleteMemory,
-  getMemorySettings,
+  forgetMemory,
+  getConversationMemoryMode,
   listMemories,
+  markNoticeSeen,
+  memorySettingsView,
   rejectMemory,
+  resetMemories,
+  setConversationMemoryMode,
   setMemorySettings,
   updateMemory,
   type MemoryCaller,
 } from '../services/memory/memoryService';
+import { forgetRecalledTurn, recalledTurnScope, replySourcesView } from '../services/memory/replySources';
+import { memoryProfileView, profileLineMemoryIds, requestProfileRebuild } from '../services/memory/userProfile';
 import { requireRequestAccess } from './middleware/sessionAccess';
 
 /**
- * Michi Memory REST API (C2), used by Settings → Memory. The owner is the
- * session's user in cloud mode and the local identity on the desktop, as for
- * the other owner-scoped routes; no request field can name another owner.
- * Another owner's memory or workspace answers 404, like a missing one.
+ * Michi Memory REST API (C2), used by Settings → Memory and a conversation's
+ * memory setting. The owner is the session's user in cloud mode and the
+ * local identity on the desktop, as for the other owner-scoped routes; no
+ * request field can name another owner. Another owner's memory, workspace or
+ * conversation answers 404, like a missing one.
  */
 
 class RequestError extends Error {}
@@ -36,7 +44,7 @@ const STATUS_FOR_CODE: Record<MemoryError['code'], number> = {
 };
 
 function caller(req: Request): MemoryCaller | null {
-  const ownerUserId = memoryOwnerId(req.user?.id);
+  const ownerUserId = requestAgentOwnerOrNull(req.user?.id);
   return ownerUserId ? { ownerUserId } : null;
 }
 
@@ -102,11 +110,29 @@ function memoryIdParam(req: Request): string {
   return String(req.params.id ?? '');
 }
 
-const CHANGE_STREAM_KEEPALIVE_MS = 25_000;
+function nodeIdParam(req: Request): string {
+  return String(req.params.nodeId ?? '');
+}
+
+/** GET /nodes/:nodeId/memory-sources takes 1 to MESSAGES_MAX assistant message ids, each 1 to MESSAGE_ID_MAX characters. */
+const MESSAGES_MAX = 100;
+const MESSAGE_ID_MAX = 200;
+
+function messageIdsParam(req: Request): string[] {
+  const raw = queryString(req, 'messages');
+  const parts = raw === undefined ? [] : raw.split(',').map((part) => part.trim());
+  if (parts.length === 0 || parts.some((part) => !part || part.length > MESSAGE_ID_MAX)) {
+    throw new RequestError(`messages must list 1 to ${MESSAGES_MAX} assistant message ids, comma-separated, each at most ${MESSAGE_ID_MAX} characters`);
+  }
+  const ids = [...new Set(parts)];
+  if (ids.length > MESSAGES_MAX) throw new RequestError(`messages must list at most ${MESSAGES_MAX} ids`);
+  return ids;
+}
 
 export function setupMemoryRoutes(): express.Router {
   const router = express.Router();
-  router.use(['/memories', '/memory-settings'], requireRequestAccess);
+  router.use(['/memories', '/memory-settings', '/memory-profile', '/nodes/:nodeId/memory-mode', '/nodes/:nodeId/memory-sources', '/memory-recall'],
+    requireRequestAccess);
 
   /**
    * Persistent SSE feed of the caller's memory changes (C4), one
@@ -120,17 +146,12 @@ export function setupMemoryRoutes(): express.Router {
       res.status(401).json(body);
       return;
     }
-    res.setHeader('Content-Type', 'text/event-stream');
-    res.setHeader('Cache-Control', 'no-cache, no-transform');
-    res.setHeader('Connection', 'keep-alive');
-    res.setHeader('X-Accel-Buffering', 'no');
-    res.flushHeaders?.();
-    const observer = createSseObserver(res);
+    const observer = beginSse(res);
     if (!observer.write(': connected\n\n')) return;
     observer.addCleanup(subscribeMemoryChanges(who.ownerUserId, (event) => {
       observer.write(`event: memory_changed\ndata: ${JSON.stringify(event)}\n\n`);
     }));
-    observer.heartbeat(': keepalive\n\n', CHANGE_STREAM_KEEPALIVE_MS);
+    observer.heartbeat(': keepalive\n\n', SSE_HEARTBEAT_MS.memoryChanges);
   });
 
   router.get('/memories', route((req, res, who) => {
@@ -148,11 +169,12 @@ export function setupMemoryRoutes(): express.Router {
 
   // Added by hand in Settings: always explicit and active.
   router.post('/memories', route((req, res, who) => {
-    const body = jsonBody(req, ['scope', 'kind', 'body']);
+    const body = jsonBody(req, ['scope', 'kind', 'body', 'topic']);
     const memory = createMemory(who, {
       scope: body.scope as never,
       kind: body.kind as never,
       body: body.body as string,
+      ...(body.topic !== undefined ? { topic: body.topic as string | null } : {}),
       status: 'active',
       origin: 'explicit',
     });
@@ -160,21 +182,32 @@ export function setupMemoryRoutes(): express.Router {
   }));
 
   router.patch('/memories/:id', route((req, res, who) => {
-    const body = jsonBody(req, ['body', 'scope', 'kind', 'expectedVersion']);
+    const body = jsonBody(req, ['body', 'scope', 'kind', 'topic', 'expectedVersion']);
     if (typeof body.expectedVersion !== 'number') throw new RequestError('expectedVersion is required');
     const memory = updateMemory(who, memoryIdParam(req), {
       ...(body.body !== undefined ? { body: body.body as string } : {}),
       ...(body.scope !== undefined ? { scope: body.scope as never } : {}),
       ...(body.kind !== undefined ? { kind: body.kind as never } : {}),
-    }, body.expectedVersion);
+      ...(body.topic !== undefined ? { topic: body.topic as string | null } : {}),
+    // The user edited it: the memory is theirs for consolidation, which never changes it.
+    }, body.expectedVersion, { byUser: true });
     res.json({ memory });
   }));
 
+  // As memory_delete: every version goes, with tombstones so extraction never saves it again; conversations are unchanged.
   router.delete('/memories/:id', route((req, res, who) => {
-    deleteMemory(who, memoryIdParam(req));
+    forgetMemory(who, memoryIdParam(req));
     res.status(204).end();
   }));
 
+  // "Delete all memories": the client confirms with the user first and says so here.
+  router.post('/memories/reset', route((req, res, who) => {
+    const body = jsonBody(req, ['confirm']);
+    if (body.confirm !== true) throw new RequestError('confirm must be true');
+    res.json(resetMemories(who));
+  }));
+
+  // Approve and reject serve older clients: this backend writes no pending memory and activates old ones at startup.
   router.post('/memories/:id/approve', route((req, res, who) => {
     res.json({ memory: approveMemory(who, memoryIdParam(req)) });
   }));
@@ -185,13 +218,95 @@ export function setupMemoryRoutes(): express.Router {
   }));
 
   router.get('/memory-settings', route((_req, res, who) => {
-    res.json(getMemorySettings(who.ownerUserId));
+    res.json(memorySettingsView(who.ownerUserId));
   }));
 
+  // The answer is the mode in effect: 'explicit' from an older client is stored and returned as 'auto'.
+  // noticeSeen: true records that the one-time notice was shown.
   router.put('/memory-settings', route((req, res, who) => {
+    const body = jsonBody(req, ['mode', 'noticeSeen']);
+    if (body.mode === undefined && body.noticeSeen === undefined) throw new RequestError('mode or noticeSeen is required');
+    if (body.noticeSeen !== undefined && body.noticeSeen !== true) throw new RequestError('noticeSeen can only be true');
+    if (body.mode !== undefined) setMemorySettings(who.ownerUserId, { mode: body.mode as never });
+    if (body.noticeSeen === true) markNoticeSeen(who.ownerUserId);
+    res.json(memorySettingsView(who.ownerUserId));
+  }));
+
+  // ── the profile of the user ("About the user") ──
+
+  router.get('/memory-profile', route((_req, res, who) => {
+    res.json(memoryProfileView(who.ownerUserId));
+  }));
+
+  // The next automatic memory run rebuilds it; the answer says a rebuild waits until it has.
+  router.post('/memory-profile/rebuild', route((req, res, who) => {
+    jsonBody(req, []);
+    requestProfileRebuild(who.ownerUserId, Date.now());
+    wakeMemoryExtraction();
+    res.status(202).json(memoryProfileView(who.ownerUserId));
+  }));
+
+  // Remove: the memories a line cites are deleted (the line goes with them), and the profile is rebuilt without them.
+  // version, when given, must be the profile's (GET /api/memory-profile) for the index to name the same line.
+  router.post('/memory-profile/remove-line', route((req, res, who) => {
+    const body = jsonBody(req, ['index', 'version']);
+    if (typeof body.index !== 'number' || !Number.isSafeInteger(body.index) || body.index < 0) throw new RequestError('index must be the index of a line');
+    if (body.version !== undefined) {
+      const version = memoryProfileView(who.ownerUserId).version;
+      if (body.version !== version) throw new MemoryError('version_conflict', 'The profile changed since it was read', version);
+    }
+    const ids = profileLineMemoryIds(who.ownerUserId, body.index);
+    if (!ids) throw new MemoryError('not_found', 'Profile line not found');
+    for (const id of ids) {
+      try {
+        forgetMemory(who, id);
+      } catch (error) {
+        // Removed with an earlier one's versions.
+        if (!(error instanceof MemoryError) || error.code !== 'not_found') throw error;
+      }
+    }
+    requestProfileRebuild(who.ownerUserId, Date.now());
+    wakeMemoryExtraction();
+    res.json(memoryProfileView(who.ownerUserId));
+  }));
+
+  // ── a conversation's memory setting ──
+
+  router.get('/nodes/:nodeId/memory-mode', route((req, res, who) => {
+    res.json({ mode: getConversationMemoryMode(who, nodeIdParam(req)) });
+  }));
+
+  // A check-in node (`n-cmph-…`) is the backend's alone, so no client writes its setting or reads its reply sources:
+  // refused before anything reads it, as the persistence routes refuse a node write (persistence.ts refuseReservedNodeParam).
+  const refuseCheckinNode = (req: Request, res: Response, next: express.NextFunction): void => {
+    const nodeId = nodeIdParam(req);
+    if (!isCheckinNodeId(nodeId)) {
+      next();
+      return;
+    }
+    res.status(400).json({ code: 'reserved_node_id', error: `node id ${nodeId} is reserved for Michi's check-ins` });
+  };
+  router.put('/nodes/:nodeId/memory-mode', refuseCheckinNode, route((req, res, who) => {
     const body = jsonBody(req, ['mode']);
-    setMemorySettings(who.ownerUserId, { mode: body.mode as never });
-    res.json(getMemorySettings(who.ownerUserId));
+    res.json(setConversationMemoryMode(who, nodeIdParam(req), body.mode));
+  }));
+
+  // ── what a reply was based on (services/memory/replySources.ts) ──
+
+  // The memories and past-conversation turns these assistant messages repeated (V's too); another owner's conversation answers 404.
+  router.get('/nodes/:nodeId/memory-sources', refuseCheckinNode, route((req, res, who) => {
+    res.json(replySourcesView(who, nodeIdParam(req), messageIdsParam(req)));
+  }));
+
+  // Don't recall: the turn is hidden from recall and barred from extraction; its conversation is unchanged.
+  router.post('/memory-recall/hide', route((req, res, who) => {
+    const body = jsonBody(req, ['docId']);
+    if (typeof body.docId !== 'number' || !Number.isSafeInteger(body.docId) || body.docId <= 0) {
+      throw new RequestError('docId must be the id of a past conversation turn');
+    }
+    const result = forgetRecalledTurn(recalledTurnScope(who.ownerUserId, body.docId));
+    if (!result) throw new MemoryError('not_found', 'Conversation turn not found');
+    res.json(result);
   }));
 
   return router;

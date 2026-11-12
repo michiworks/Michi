@@ -48,7 +48,8 @@ describe('task database API', () => {
     expect(activity.marks).toEqual([{ rowId: 'r1', kind: 'new', at: 5 }]);
     expect(activity.suggestions[0]!.target).toEqual({ kind: 'row', databaseId: 'remote:host:db-1', rowId: 'r1', columnIds: ['status'] });
     expect(activity.latestUpkeep?.source?.nodeId).toBe('remote:host:n1');
-    expect(await fetchTaskOrigin({ ...options, rowId: 'r1' })).toEqual({ by: 'meta-agent', conversations: 2, at: 3 });
+    // An older backend's 'meta-agent' actor reads as the agent's Pages upkeep (services/api/legacyActor.ts).
+    expect(await fetchTaskOrigin({ ...options, rowId: 'r1' })).toEqual({ by: { kind: 'companion', via: 'upkeep' }, conversations: 2, at: 3 });
     expect(String(fetchMock.mock.calls[1][0])).toContain('/databases/db-1/rows/r1/origin');
   });
 

@@ -1,7 +1,9 @@
-import { describe, expect, it, vi, beforeEach } from 'vitest';
+import { afterEach, describe, expect, it, vi, beforeEach } from 'vitest';
 import { act, renderHook, waitFor } from '@testing-library/react';
-import { setActiveBackendConnectionId } from '../config/backendConnections';
-import { readNodeSearchAnswer, useNodeSearch } from './useNodeSearch';
+import {
+  confirmBackendConnection, markBackendConnectionProvisional, markBackendConnectionReady, markBackendConnectionUnavailable,
+} from '../config/backendConnectionState';
+import { readNodeSearchAnswer, REMOTE_SEARCH_TIMEOUT_MS, useNodeSearch } from './useNodeSearch';
 
 const api = vi.hoisted(() => ({ searchNodesGrouped: vi.fn() }));
 vi.mock('../services/api', () => api);
@@ -59,8 +61,16 @@ describe('useNodeSearch', () => {
   it('shows no results, instead of crashing, when the answer has no results list', async () => {
     api.searchNodesGrouped.mockResolvedValue({ error: 'search index rebuilding' });
     const { result } = renderHook(() => useNodeSearch('schema'));
-    await waitFor(() => expect(result.current.loading).toBe(false));
-    expect(result.current).toEqual({ nodes: [], totalNodes: 0, loading: false });
+    await waitFor(() => expect(result.current.status).toBe('ready'));
+    expect(result.current).toEqual({ nodes: [], totalNodes: 0, status: 'ready' });
+  });
+
+  it('reports a failed search as failed, not as no results', async () => {
+    api.searchNodesGrouped.mockRejectedValue(new Error('backend unreachable'));
+    const { result } = renderHook(() => useNodeSearch('schema'));
+    expect(result.current.status).toBe('loading');
+    await waitFor(() => expect(result.current.status).toBe('error'));
+    expect(result.current.nodes).toEqual([]);
   });
 
   it('shows the hits of a well-formed answer', async () => {
@@ -72,18 +82,71 @@ describe('useNodeSearch', () => {
   });
 });
 
-it('reissues the same query when the active Backend changes and aborts the old scope', async () => {
-  let resolveOld!: (answer: unknown) => void;
-  api.searchNodesGrouped.mockImplementationOnce(() => new Promise((resolve) => { resolveOld = resolve; }))
-    .mockResolvedValueOnce({ results: [{ ...HIT, nodeId: 'remote-search-result' }], totalNodes: 1 });
-  const view = renderHook(() => useNodeSearch('schema'));
-  const oldSignal = api.searchNodesGrouped.mock.calls[0][3].signal as AbortSignal;
-  await act(async () => setActiveBackendConnectionId('search-b'));
-  expect(oldSignal.aborted).toBe(true);
-  await waitFor(() => expect(view.result.current.nodes[0]?.nodeId).toBe('remote-search-result'));
-  await act(async () => { resolveOld({ results: [HIT], totalNodes: 1 }); });
-  expect(view.result.current.nodes[0]?.nodeId).toBe('remote-search-result');
-  expect(api.searchNodesGrouped.mock.calls[1][3].connectionId).toBe('search-b');
-  view.unmount();
-  setActiveBackendConnectionId('local');
+describe('useNodeSearch across backends', () => {
+  const REMOTE_HIT = { ...HIT, nodeId: 'remote:r1:n9', workspaceId: 'remote:r1:w9', lastMessageAt: 9 };
+  const OLD_HIT = { ...HIT, nodeId: 'n0', lastMessageAt: 1 };
+  const calledBackends = () => api.searchNodesGrouped.mock.calls.map((call) => call[3].connectionId);
+
+  afterEach(() => { vi.useRealTimers(); });
+
+  it('asks the local backend and each connected remote once, and merges their hits by recency', async () => {
+    api.searchNodesGrouped.mockImplementation(async (_q: string, _w: unknown, _l: number, { connectionId }: { connectionId: string }) =>
+      connectionId === 'r1' ? { results: [REMOTE_HIT], totalNodes: 4 } : { results: [HIT, OLD_HIT], totalNodes: 2 });
+    const { result } = renderHook(() => useNodeSearch('schema', ['r1', 'local', 'r1']));
+    await waitFor(() => expect(result.current.status).toBe('ready'));
+    expect(calledBackends().sort()).toEqual(['local', 'r1']);
+    expect(result.current.nodes.map((r) => r.nodeId)).toEqual(['remote:r1:n9', 'n1', 'n0']);
+    expect(result.current.totalNodes).toBe(6);
+  });
+
+  it('never asks a remote that is not connected', async () => {
+    markBackendConnectionUnavailable('r-down');
+    markBackendConnectionProvisional('r-cached');
+    try {
+      api.searchNodesGrouped.mockResolvedValue({ results: [HIT], totalNodes: 1 });
+      const { result } = renderHook(() => useNodeSearch('schema', ['r-down', 'r-cached']));
+      await waitFor(() => expect(result.current.status).toBe('ready'));
+      expect(calledBackends()).toEqual(['local']);
+      expect(result.current.nodes.map((r) => r.nodeId)).toEqual(['n1']);
+    } finally {
+      markBackendConnectionReady('r-down');
+      confirmBackendConnection('r-cached');
+    }
+  });
+
+  it('shows the other hits, and no failure, when a remote fails', async () => {
+    api.searchNodesGrouped.mockImplementation(async (_q: string, _w: unknown, _l: number, { connectionId }: { connectionId: string }) => {
+      if (connectionId === 'r1') throw new Error('remote unreachable');
+      return { results: [], totalNodes: 0 };
+    });
+    const { result } = renderHook(() => useNodeSearch('schema', ['r1']));
+    await waitFor(() => expect(result.current.status).toBe('ready'));
+    expect(result.current.nodes).toEqual([]);
+  });
+
+  it('shows a remote\'s hits when only the local search failed', async () => {
+    api.searchNodesGrouped.mockImplementation(async (_q: string, _w: unknown, _l: number, { connectionId }: { connectionId: string }) => {
+      if (connectionId === 'local') throw new Error('local search failed');
+      return { results: [REMOTE_HIT], totalNodes: 1 };
+    });
+    const { result } = renderHook(() => useNodeSearch('schema', ['r1']));
+    await waitFor(() => expect(result.current.status).toBe('ready'));
+    expect(result.current.nodes.map((r) => r.nodeId)).toEqual(['remote:r1:n9']);
+  });
+
+  it('shows local hits while a remote is still answering, then leaves out a remote that never answers', async () => {
+    vi.useFakeTimers();
+    let remoteSignal: AbortSignal | undefined;
+    api.searchNodesGrouped.mockImplementation((_q: string, _w: unknown, _l: number, { connectionId, signal }: { connectionId: string; signal: AbortSignal }) => {
+      if (connectionId === 'local') return Promise.resolve({ results: [HIT], totalNodes: 1 });
+      remoteSignal = signal;
+      return new Promise((_resolve, reject) => signal.addEventListener('abort', () => reject(new DOMException('aborted', 'AbortError'))));
+    });
+    const { result } = renderHook(() => useNodeSearch('schema', ['r1']));
+    await act(async () => {});
+    expect(result.current).toEqual({ nodes: [HIT], totalNodes: 1, status: 'loading' });
+    await act(async () => { vi.advanceTimersByTime(REMOTE_SEARCH_TIMEOUT_MS); });
+    expect(remoteSignal?.aborted).toBe(true);
+    expect(result.current).toEqual({ nodes: [HIT], totalNodes: 1, status: 'ready' });
+  });
 });

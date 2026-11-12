@@ -1,4 +1,3 @@
-import React from 'react';
 import { useChatProjects } from '../../state/chatStore';
 
 /**

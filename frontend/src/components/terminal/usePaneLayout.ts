@@ -1,6 +1,7 @@
 import { useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type RefObject } from 'react';
 import { resolvePaneLayout, type PaneWidthMode } from '../../state/paneLayout';
 import { PANE_ENTER_MS, PANE_EXIT_MS, PANE_EASE, paneMotionTiming, type PaneMotion } from './paneMotion';
+import { prefersReducedMotion } from '../../hooks/useReducedMotion';
 
 const NO_EXITS: ReadonlySet<string> = new Set();
 type Clip = { left: number; right: number };
@@ -16,6 +17,8 @@ interface Options {
   enabled: boolean;
   scope: string;
   exitingIds?: ReadonlySet<string>;
+  /** The zoomed pane fills the strip; the others stay mounted, hidden at their own width. */
+  zoomedId?: string | null;
   motion?: PaneMotion;
   /** App-level reduce-motion pref (combines with OS media query). */
   appReduceMotion?: boolean;
@@ -25,7 +28,7 @@ interface Options {
 
 /** Final text widths are committed once; only the pane surfaces move. */
 export function usePaneLayout(ref: RefObject<HTMLDivElement | null>, options: Options) {
-  const { paneIds, customWidths, mode = 'adaptive', defaultPaneWidth, enabled, scope, exitingIds = NO_EXITS, motion, appReduceMotion, onExitStart, onExitComplete } = options;
+  const { paneIds, customWidths, mode = 'adaptive', defaultPaneWidth, enabled, scope, exitingIds = NO_EXITS, zoomedId = null, motion, appReduceMotion, onExitStart, onExitComplete } = options;
   const [geometry, setGeometry] = useState({ width: 0, gap: 0, padding: 0 });
   const [settledVersion, setSettledVersion] = useState(0);
   const animationRef = useRef<Animation | null>(null);
@@ -58,12 +61,18 @@ export function usePaneLayout(ref: RefObject<HTMLDivElement | null>, options: Op
     const prev = previous.current?.scope === scope ? previous.current : null;
     // Keep both tracks, including the survivor's text width, until exit finishes.
     const waitingForExit = activeIds.length === 1 && exitingIds.size > 0 && !!prev;
-    const active = resolvePaneLayout({
+    const zoomedIndex = waitingForExit || !zoomedId ? -1 : activeIds.indexOf(zoomedId);
+    const base = {
       viewportWidth: geometry.width, gap: geometry.gap, padding: geometry.padding,
       paneCount: waitingForExit ? paneIds.length : activeIds.length,
       customWidths: waitingForExit ? paneIds.map(id => prev.widths[prev.ids.indexOf(id)])
         : customWidths.filter((_, i) => !exitingIds.has(paneIds[i])), mode, defaultPaneWidth,
-    });
+    };
+    const active = resolvePaneLayout({ ...base, zoomedIndex });
+    const zoomed = active.widths.length > 1 && zoomedIndex >= 0;
+    // Panes behind a zoom keep the width they had, so their content never reflows.
+    const natural = zoomed ? resolvePaneLayout(base).widths : active.widths;
+    const zoomHiddenIds = new Set<string>();
     let index = 0;
     let left = geometry.padding;
     const positions: number[] = [];
@@ -79,18 +88,27 @@ export function usePaneLayout(ref: RefObject<HTMLDivElement | null>, options: Op
         paneStyles.push({ position: 'absolute', left: position, width, top: geometry.padding, bottom: geometry.padding, zIndex: 0 });
         return width;
       }
+      const naturalWidth = natural[index];
       const width = active.widths[index++];
+      if (zoomed && width === 0) {
+        // Out of the grid, under the zoomed pane: still mounted and laid out.
+        zoomHiddenIds.add(id);
+        positions.push(geometry.padding);
+        paneStyles.push({ position: 'absolute', left: geometry.padding, width: naturalWidth, top: geometry.padding, bottom: geometry.padding, zIndex: 0, pointerEvents: 'none' });
+        return 0;
+      }
       positions.push(left);
-      paneStyles.push({ gridColumn: index, gridRow: 1, ...(exitingIds.size ? { position: 'relative', zIndex: 1 } : {}) });
+      paneStyles.push({ gridColumn: zoomed ? 1 : index, gridRow: 1, ...(exitingIds.size || zoomed ? { position: 'relative', zIndex: 1 } : {}) });
       left += width + geometry.gap;
       return width;
     });
-    const contentWidth = active.widths.reduce((sum, width) => sum + width, 0)
-      + Math.max(0, active.widths.length - 1) * geometry.gap;
+    const trackWidths = zoomed ? active.widths.filter(width => width > 0) : active.widths;
+    const contentWidth = trackWidths.reduce((sum, width) => sum + width, 0)
+      + Math.max(0, trackWidths.length - 1) * geometry.gap;
     const finalExtent = geometry.padding + contentWidth + active.paddingRight;
     const scrollExtent = exitingIds.size ? Math.max(finalExtent, prev?.scrollExtent ?? 0) : finalExtent;
-    return { ...active, widths, positions, paneStyles, activeIds, contentWidth, scrollExtent, waitingForExit };
-  }, [geometry, paneIds, customWidths, exitingIds, mode, defaultPaneWidth, scope]);
+    return { ...active, widths, positions, paneStyles, activeIds, contentWidth, scrollExtent, waitingForExit, zoomed, zoomHiddenIds };
+  }, [geometry, paneIds, customWidths, exitingIds, mode, defaultPaneWidth, scope, zoomedId]);
 
   useLayoutEffect(() => {
     const element = ref.current;
@@ -151,7 +169,7 @@ export function usePaneLayout(ref: RefObject<HTMLDivElement | null>, options: Op
     const canAnimate = prev && prev.scope === scope && prev.geometry === geometry && geometry.width > 0
       && prev.defaultPaneWidth === defaultPaneWidth && (changedPanes || prev.mode !== mode || changedExits)
       && children.length > 0 && typeof children[0].animate === 'function'
-      && !appReduceMotion && !window.matchMedia?.('(prefers-reduced-motion: reduce)').matches;
+      && !prefersReducedMotion(appReduceMotion);
     if (!canAnimate) {
       if (wasAnimating) setSettledVersion(version => version + 1);
       for (const id of exitingIds) onExitComplete?.(id);
@@ -170,6 +188,7 @@ export function usePaneLayout(ref: RefObject<HTMLDivElement | null>, options: Op
       const width = layout.widths[i];
       const exiting = exitingIds.has(id);
       if (layout.waitingForExit && !exiting) continue;
+      if (layout.zoomHiddenIds.has(id)) continue;
       const start = exiting ? (oldPositions.get(id) ?? finalLeft)
         : Math.max(previousRight, oldPositions.get(id) ?? finalLeft);
       const delta = start - finalLeft;

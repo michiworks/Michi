@@ -4,12 +4,14 @@
  * substrings Michi reads as process death.
  */
 
+import { TOOL_PAYLOAD_MAX } from '../../../contract/toolPayload';
 import type { CrewChatFrame } from './gatewayTypes';
 
 export type AcpUpdate = Record<string, unknown> & { sessionUpdate: string };
 
 export const TOOL_TITLE_MAX = 120;
-export const TOOL_CONTENT_MAX = 16_000;
+/** Each tool field leaves this process with no more than Michi's chips keep. */
+export const TOOL_CONTENT_MAX = TOOL_PAYLOAD_MAX;
 
 export const RECEIPT_NOTICE =
     '\n\n> Kiro Crew is still running an earlier message in this session, so this one was ' +

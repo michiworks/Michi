@@ -1,12 +1,15 @@
-import React, { createContext, useContext, useState } from 'react';
+import { createContext, useContext, useState } from 'react';
 import { act, cleanup, fireEvent, render, screen } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { PrefsProvider, usePrefs } from '../../state/prefs';
 import Sidebar from './Sidebar';
 
-const mocks = vi.hoisted(() => ({ renders: vi.fn(), fetchPrefs: vi.fn(), savePrefs: vi.fn() }));
+const mocks = vi.hoisted(() => ({ renders: vi.fn(), fetchPrefs: vi.fn(), savePrefs: vi.fn(async () => true) }));
 vi.mock('../../services/api', () => ({ fetchPrefs: mocks.fetchPrefs, savePrefs: mocks.savePrefs }));
-vi.mock('../../state/chatStore', () => ({ useChatProjects: () => ({ activeProject: null }) }));
+vi.mock('../../state/chatStore', () => ({
+  useChatProjects: () => ({ activeProject: null, projects: [], focusedNodeId: null }),
+  useStructuralSelector: (select: (nodes: Record<string, unknown>) => unknown) => select({}),
+}));
 vi.mock('./ActivityView', () => ({ default: () => <ContentProbe /> }));
 vi.mock('./WorkspaceTree', () => ({ default: () => <ContentProbe /> }));
 vi.mock('./TreeSelectionBar', () => ({ default: () => null }));

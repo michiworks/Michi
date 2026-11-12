@@ -2,7 +2,7 @@ import { exec } from "node:child_process";
 import { promisify } from "node:util";
 import { log } from "./logger";
 const execAsync = promisify(exec);
-import type { BedrockCredentials } from "./bedrockCredentials";
+import { resolveBedrockCredentials, type BedrockCredentials } from "./bedrockCredentials";
 
 // ---------------------------------------------------------------------------
 // Configuration
@@ -28,7 +28,10 @@ interface RefreshState {
 const states = new Map<string, RefreshState>();
 let refreshTimeoutMs = REFRESH_TIMEOUT_MS;
 
-/** Test-only: forget earlier refreshes and optionally shorten the command timeout. */
+/**
+ * Test-only: forget earlier refreshes and optionally shorten the command timeout.
+ * @testonly
+ */
 export function __resetBedrockRefreshStateForTest(options: { timeoutMs?: number } = {}): void {
     states.clear();
     refreshTimeoutMs = options.timeoutMs ?? REFRESH_TIMEOUT_MS;
@@ -99,6 +102,34 @@ export async function refreshOnAuthFailure(
     if (now - state.lastRefreshAt < MIN_COOLDOWN_MS) return false;
 
     return executeRefresh(creds.authRefreshCommand);
+}
+
+export const BEDROCK_NOT_CONFIGURED =
+    "Amazon Bedrock credentials not configured — add them in Settings or set AWS_PROFILE + AWS_REGION env vars.";
+
+/** A Bedrock request's pi-ai stream options, and the refresh to try once after an auth error. */
+export interface BedrockAuth {
+    streamOptions: Record<string, unknown>;
+    authRetry: { isAuthError(ev: any): boolean; refresh(): Promise<boolean> };
+}
+
+/**
+ * The credentials a Bedrock request uses, chat turn or Settings › Verify:
+ * resolved, refreshed proactively (refreshBedrockCredentialsIfNeeded) and
+ * mapped to pi-ai's stream options. Null when none are configured.
+ */
+export async function prepareBedrockAuth(): Promise<BedrockAuth | null> {
+    const creds = resolveBedrockCredentials();
+    if (!creds) return null;
+    await refreshBedrockCredentialsIfNeeded(creds);
+    const streamOptions: Record<string, unknown> = { region: creds.region };
+    if (creds.bearerToken) streamOptions.bearerToken = creds.bearerToken;
+    if (creds.profile) streamOptions.profile = creds.profile;
+    if (creds.accessKeyId) {
+        streamOptions.accessKeyId = creds.accessKeyId;
+        streamOptions.secretAccessKey = creds.secretAccessKey;
+    }
+    return { streamOptions, authRetry: { isAuthError: isBedrockAuthError, refresh: () => refreshOnAuthFailure(creds) } };
 }
 
 /**

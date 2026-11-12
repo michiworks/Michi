@@ -105,7 +105,6 @@ function inMemoryProvider(baseUrl: string): McpSlotProvider {
     disposeSessionGroup() {},
     endpoint: (slotId) => endpointFor(`/mcp/${slotId}`),
     sessionEndpoint: (groupId) => endpointFor(`/mcp-session/${groupId}`),
-    hookEndpoint: (slotId, hook) => `${baseUrl}/hooks/${slotId}/${hook}`,
     rebind(slotId, patch: McpSlotRebindPatch) {
       const slot = slots.get(slotId);
       if (slot) Object.assign(slot, patch);

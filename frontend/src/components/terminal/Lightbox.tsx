@@ -3,6 +3,8 @@ import { createPortal } from 'react-dom';
 import { animate, motion, MotionGlobalConfig, type Transition } from 'motion/react';
 import { DUR, TRANSITION } from '../../motion/tokens';
 import { useOverlayFocus } from '../ui/useOverlayFocus';
+import { useBackLayer } from '../../lib/backStack';
+import { formatBytes } from '../../lib/formatBytes';
 
 const FADE_IN: Transition = { duration: DUR.soft, ease: 'easeOut' };
 
@@ -27,13 +29,6 @@ function fadeOutCopy(viewer: HTMLElement, opacity: string) {
   animate(copy, { opacity: 0 }, TRANSITION.exit).then(remove, remove);
 }
 
-function formatBytes(n: number | undefined): string {
-  if (typeof n !== 'number' || !Number.isFinite(n) || n <= 0) return '';
-  if (n < 1024) return `${n} B`;
-  if (n < 1024 * 1024) return `${Math.round(n / 1024)} KB`;
-  return `${(n / (1024 * 1024)).toFixed(1)} MB`;
-}
-
 export interface LightboxProps {
   src: string;
   /** Accessible name for the zoomed image (caption, if any). */
@@ -56,6 +51,7 @@ export interface LightboxProps {
 export function Lightbox({ src, alt, filename, mimeType, size, caption, onClose }: LightboxProps) {
   const panelRef = React.useRef<HTMLDivElement>(null);
   useOverlayFocus({ open: true, panelRef, restore: 'always' });
+  useBackLayer(true, { back: onClose });
   const [dims, setDims] = useState<{ w: number; h: number } | null>(null);
 
   useEffect(() => {

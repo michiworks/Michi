@@ -1,4 +1,4 @@
-import React, { createContext, useContext } from 'react';
+import { createContext, useContext } from 'react';
 import type { HomeSectionKey, MichiDbRow, ThreadCardItem, ThreadCardState } from 'michi-shared';
 import { conversationWaitsOnYou, taskThreadIds, TASK_COLUMN } from 'michi-shared';
 import { ThreadStateDot, type MichiDotKind } from '../ThreadStateDot';
@@ -49,9 +49,11 @@ export function threadCardKind(item: Pick<ThreadCardItem, 'state'>): MichiDotKin
 /**
  * The line a conversation shows for where it stands. A waiting summary is the
  * backend's own words, shown as is; `runningPrefix` only adds "Running · ".
+ * One archived out of its thread says so first.
  */
-export function threadNowLine(item: Pick<ThreadCardItem, 'state' | 'summary'>, { runningPrefix }: { runningPrefix: boolean }): string {
+export function threadNowLine(item: Pick<ThreadCardItem, 'state' | 'summary' | 'archived'>, { runningPrefix }: { runningPrefix: boolean }): string {
   const said = michiOneLine(item.summary);
+  if (item.archived) return said ? `Archived · ${said}` : 'Archived';
   if (item.state === 'waiting') return said || 'Waiting on you';
   if (item.state === 'running') return said ? (runningPrefix ? `Running · ${said}` : said) : 'Running';
   if (item.state === 'idle') return 'Not started yet';

@@ -1,4 +1,3 @@
-import React from 'react';
 import { render, screen, fireEvent, waitFor } from '@testing-library/react';
 import { vi, describe, it, expect, beforeEach } from 'vitest';
 import TreeSelectionBar from './TreeSelectionBar';
@@ -112,5 +111,28 @@ describe('TreeSelectionBar', () => {
     expect(callArg).toContain('n-1');
     expect(callArg).toContain('n-2');
     await waitFor(() => expect(clearTreeSelection).toHaveBeenCalledOnce());
+  });
+
+  // Owner decision 14 (F26): Activity selects threads across workspaces.
+  it('disables Merge with a hint when the selection holds a thread of another workspace', () => {
+    const createMergedChat = vi.fn();
+    mockHooks(makeStore({ treeSelection: new Set(['t-1', 't-2', 't-elsewhere']), createMergedChat }));
+
+    render(<TreeSelectionBar />);
+
+    expect(screen.getByText('3 selected')).toBeTruthy();
+    const mergeBtn = screen.getByRole('button', { name: /merge/i });
+    expect(mergeBtn.getAttribute('aria-disabled')).toBe('true');
+    expect(mergeBtn.getAttribute('title')).toBe('Only threads of the current workspace can be merged.');
+    fireEvent.click(mergeBtn);
+    expect(createMergedChat).not.toHaveBeenCalled();
+  });
+
+  it('shows that hint when every selected thread is in another workspace', () => {
+    mockHooks(makeStore({ treeSelection: new Set(['t-x', 't-y']) }));
+
+    render(<TreeSelectionBar />);
+
+    expect(screen.getByRole('button', { name: /merge/i }).getAttribute('aria-disabled')).toBe('true');
   });
 });

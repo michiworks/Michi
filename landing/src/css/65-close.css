@@ -1,0 +1,59 @@
+/* ==========================================================================
+   65-close.css (owner: verbs). #get, brief §3.11, §5.10, C1-C2: the tile and
+   the display heading beside the 640 x 300 Home replica >= 1280, stacked
+   below. The visitor caret uses the kit's .fx-blink3; 65-close.js adds it.
+   ========================================================================== */
+.get-grid { row-gap: 40px; }
+.get-lock, .get-fig { grid-column: 1 / -1; min-width: 0; }
+.get-lock { display: flex; align-items: flex-start; gap: 24px; }
+.get-copy { min-width: 0; }
+.get-cta { margin-top: 28px; }
+.get-meta { margin-top: 12px; }
+@media (min-width: 1280px) {
+  .get-grid { align-items: center; }
+  .get-lock { grid-column: 1 / 7; }
+  .get-fig { grid-column: 7 / -1; }
+}
+
+/* The rabbit tile (56 px). Its rounded clip (rx 236 of 1078) hides the body
+   while it is down; the radius here only shapes the focus ring. */
+.get-tile { flex: none; display: block; width: 56px; height: 56px; margin-top: 4px; border-radius: 12.3px; }
+.get-tile > svg { display: block; width: 100%; height: 100%; }
+.get-tile[role="button"] { cursor: pointer; }
+/* C2, about 820 ms: dip 160 (--ease-dip), hold 80, surface 320 (--ease-out),
+   then a 140 ms blink 120 after it surfaces. Click only. */
+#mark-eyes > circle { transform-box: fill-box; transform-origin: center; }
+@media (prefers-reduced-motion: no-preference) {
+  .get-tile.is-dip .get-body { animation: get-dip 560ms both; }
+  .get-tile.is-dip #mark-eyes > circle { animation: get-blink 140ms ease-in-out 680ms; }
+}
+@keyframes get-dip {
+  0% { transform: none; animation-timing-function: cubic-bezier(.55, 0, 1, .45); }
+  28.6% { transform: translateY(410px); animation-timing-function: linear; }
+  42.9% { transform: translateY(410px); animation-timing-function: cubic-bezier(.23, 1, .32, 1); }
+  to { transform: none; }
+}
+@keyframes get-blink { 50% { transform: scaleY(.12); } }
+
+/* Home replica. --k no-JS fallback per band, as the other replicas. */
+.get-fit { --k: .99; margin-inline: auto; }
+@media (min-width: 1280px) and (max-width: 1439px) { .get-fit { --k: .88; } }
+@media (max-width: 1279px) { .get-fit { --k: 1; } }
+.get-tray { display: none; }
+/* Below 768 a fluid Home. Its composer is under 480 px, so the app moves the
+   workspace and permission chips to the tray under it (Home.tsx
+   HOME_TRAY_BELOW, ManageComposer.css .composer-tray). */
+@media (max-width: 767px) {
+  .get-lock { flex-direction: column; gap: 20px; }
+  .get-fit { width: 100%; max-width: 640px; aspect-ratio: auto; }
+  .get-fit > .mk-canvas { position: relative; width: auto; height: auto; transform: none; }
+  .get-fit .mk-home { padding: 44px 16px 48px; }
+  .get-fit .mk-home-h { text-wrap: balance; }
+  .get-cw { align-self: stretch; }
+  .get-fit .mk-composer { width: auto; }
+  .get-tb, .get-fit .mk-tchip-effort { display: none; }
+  .get-tray { display: flex; align-items: center; margin: 0 8px; padding: 0 2px; background: var(--term-alt);
+    border: 1px solid var(--mk-tray-line); border-top: 0; border-radius: 0 0 8px 8px; }
+  .get-tray > :last-child { margin-left: auto; }
+  .get-ud { opacity: .55; }
+}

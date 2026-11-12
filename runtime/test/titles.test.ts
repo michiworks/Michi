@@ -1,6 +1,7 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import { cleanGeneratedTitle, fallbackTitleFromUserText } from '../src/core/titles';
+import { fallbackCodexTitle, parseGeneratedCodexTitle } from '../src/adapters/codex/codexTitleGenerator';
 
 describe('title helpers', () => {
   it('cleans the usual ways a model ignores "output only the title"', () => {
@@ -17,5 +18,13 @@ describe('title helpers', () => {
   it('falls back to the first sentence of the user text', () => {
     assert.equal(fallbackTitleFromUserText('/btw How do I fix this? And also that.'), 'How do I fix this');
     assert.equal(fallbackTitleFromUserText('看看 https://example.com/x 这个链接。然后呢'), '看看 这个链接');
+  });
+
+  it("cleans a Codex title as any other runtime's", () => {
+    const parse = (title: string) => parseGeneratedCodexTitle(JSON.stringify({ title }), 'Fallback text');
+    assert.equal(parse('Title: Fix flaky tests'), 'Fix flaky tests');
+    assert.equal(parse(''), 'Fallback text');
+    assert.equal(parseGeneratedCodexTitle('{"title": 3}', ''), 'New Codex Request');
+    assert.equal(fallbackCodexTitle('/btw How do I fix this? And also that.'), 'How do I fix this');
   });
 });

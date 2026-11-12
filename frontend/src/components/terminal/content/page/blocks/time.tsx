@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import { useState } from 'react';
 import type { BlockProps } from '../blockTypes';
 import { objects, str, timelineWhen } from '../michiPageModel';
 import { ThreadStateDot } from '../../ThreadStateDot';

@@ -6,7 +6,9 @@ import path from 'node:path';
 import { test, type TestContext } from 'node:test';
 import { applyTurnEvent, createDurableTurn, parseChatStreamEvent } from 'michi-shared';
 import { createCodexTranslator } from 'michi-runtime/internal/adapters/codex/codexEventTranslator';
-import { CODEX_SERVER_REQUESTS } from 'michi-runtime/internal/adapters/codex/codexProtocol';
+import {
+  CODEX_SERVER_REQUESTS, CODEX_SKILLS_CHANGED, CODEX_SKILLS_EXTRA_ROOTS_SET, CODEX_SKILLS_LIST,
+} from 'michi-runtime/internal/adapters/codex/codexProtocol';
 import { CodexRuntime } from 'michi-runtime/internal/adapters/codex/CodexRuntime';
 import type { CodexSession } from 'michi-runtime/internal/adapters/codex/CodexSession';
 import type { McpSlot } from '../src/services/mcpServer';
@@ -18,6 +20,7 @@ import { baselineDir, manifest, schema, assertSchema, validator, discriminants, 
 import { notifications, requests, items, consumedEnums, responseTypes, tsOnlyNotifications } from './contracts/codex/dispositions';
 import { activeWire, wireClient, tick, threadId, turnId, turnNotification } from './contracts/codex/wire';
 import { CODEX_EVENT_TRANSLATOR } from './helpers/adapterPaths';
+import { threadDeleteContract } from './contracts/codex/threadDelete';
 
 const registeredCases = new Set<string>();
 function contract(name: string, fn: (t: TestContext) => void | Promise<void>) {
@@ -138,6 +141,38 @@ contract('wire input', async (t) => {
     else wire.session.respondToUserInput(latest.requestId, [{ question: 'Same question?', answer: 'Yes' }]);
     await tick();
     assert.deepEqual(wire.response(mode, method).result, { answers: {} });
+  }
+});
+
+contract('wire elicitation', async (t) => {
+  const wire = await activeWire(t, true);
+  const method = 'mcpServer/elicitation/request';
+  const form = { mode: 'form', message: 'Required project', requestedSchema: { type: 'object', properties: { project: { type: 'string' } }, required: ['project'] } };
+  for (const answer of ['Michi', null]) {
+    const id = `form:${answer}`;
+    wire.send({ id, method, params: { threadId, turnId, serverName: 'fixture-mcp', _meta: null, ...form } }, 'ServerRequest');
+    await tick();
+    const card = wire.events.filter((event) => event.kind === 'user_input_request').at(-1);
+    assert.ok(card?.kind === 'user_input_request');
+    assert.deepEqual(card.questions, [{ question: 'Required project', header: 'fixture-mcp', options: [], multiSelect: false }]);
+    if (answer) wire.session.respondToUserInput(card.requestId, [{ question: 'Required project', answer }]);
+    else wire.session.skipUserInput(card.requestId);
+    await tick();
+    assert.deepEqual(wire.response(id, method).result, answer
+      ? { action: 'accept', content: { project: 'Michi' }, _meta: null }
+      : { action: 'cancel', content: null, _meta: null });
+  }
+  for (const params of [
+    { mode: 'form', message: 'Empty form', requestedSchema: { type: 'object', properties: {} } },
+    { mode: 'url', message: 'Verify', url: 'https://example.invalid/verify', elicitationId: 'elicit-1' },
+    { mode: 'openai/form', message: 'Untyped form', requestedSchema: { type: 'object', properties: { project: { type: 'string' } } } },
+  ]) {
+    const before = wire.events.filter((event) => event.kind === 'user_input_request').length;
+    const id = `elicitation:${params.message}`;
+    wire.send({ id, method, params: { threadId, turnId, serverName: 'fixture-mcp', _meta: null, ...params } }, 'ServerRequest');
+    await tick();
+    assert.deepEqual(wire.response(id, method).result, { action: 'decline', content: null, _meta: null });
+    assert.equal(wire.events.filter((event) => event.kind === 'user_input_request').length, before);
   }
 });
 
@@ -290,7 +325,7 @@ contract('collaboration modes', async (t) => {
   const wire = await wireClient(t, false);
   const runtime = new CodexRuntime({ ...codexTestOptions(), bridge: { spawnBranches: async () => [], saveContext: () => null, updateContext: () => null },
     mcpSlots: fakeMcpRegistry({ create: () => ({ slotId: 'contract-slot' }) as McpSlot, get: () => undefined }, { mcpPort: 0 }) },
-  { client: wire.client, followUpsHookPocEnabled: false, followUpsExperimentMode: 'sentinel', authFileMissing: 'no auth.json' });
+  { client: wire.client, authFileMissing: 'no auth.json' });
   t.after(() => runtime.shutdown());
   await runtime.listModes('');
   const session = await runtime.newSession({ sessionId: 'contract-modes', cwd: process.env.MICHI_DATA_DIR!, model: 'fixture-model', enableFollowUps: false }) as CodexSession;
@@ -316,6 +351,46 @@ contract('collaboration modes', async (t) => {
   assert.ok(events.some((event) => event.kind === 'chunk' && event.text === 'Proposed plan.'));
 });
 
+contract('skills', async (t) => {
+  const clientMethods = discriminants('ClientRequest', 'method');
+  for (const method of [CODEX_SKILLS_LIST, CODEX_SKILLS_EXTRA_ROOTS_SET]) assert.ok(clientMethods.includes(method), `unofficial runtime method: ${method}`);
+  assert.ok(discriminants('ServerNotification', 'method').includes(CODEX_SKILLS_CHANGED));
+  const cwd = process.env.MICHI_DATA_DIR!;
+  const review = { name: 'Plugin:review', description: 'Review a change', shortDescription: null, interface: null, dependencies: null,
+    path: path.join(cwd, 'plugins', 'review', 'SKILL.md'), scope: 'user', enabled: true, pluginId: 'plugin@market' };
+  const listing = { data: [{ cwd, skills: [review], errors: [] }] };
+  assertSchema('SkillsListResponse', listing);
+  const wire = await wireClient(t, false, { start: false, results: { [CODEX_SKILLS_LIST]: listing } });
+  const root = path.join(cwd, 'skill-mount');
+  const runtime = new CodexRuntime({ ...codexTestOptions({ skillRoots: () => [root] }), bridge: { spawnBranches: async () => [], saveContext: () => null, updateContext: () => null },
+    mcpSlots: fakeMcpRegistry({ create: () => ({ slotId: 'contract-slot' }) as McpSlot, get: () => undefined }, { mcpPort: 0 }) },
+  { client: wire.client });
+  t.after(() => runtime.shutdown());
+  const sent = (method: string) => wire.outgoing.filter((message) => message.method === method && message.id !== undefined);
+
+  assert.deepEqual((await runtime.listSkills({ cwd })).skills.map((skill) => [skill.name, skill.nativeName]), [['review', 'Plugin:review']]);
+  for (const method of [CODEX_SKILLS_EXTRA_ROOTS_SET, CODEX_SKILLS_LIST]) assertSchema('ClientRequest', sent(method)[0]);
+  assert.deepEqual(sent(CODEX_SKILLS_EXTRA_ROOTS_SET).map((message) => message.params), [{ extraRoots: [root] }]);
+  await runtime.listSkills({ cwd });
+  assert.equal(sent(CODEX_SKILLS_LIST).length, 1);
+  wire.send({ method: CODEX_SKILLS_CHANGED, params: {} }, 'ServerNotification');
+  await tick();
+  await runtime.listSkills({ cwd });
+  assert.equal(sent(CODEX_SKILLS_LIST).length, 2);
+
+  const session = await runtime.newSession({ sessionId: 'contract-skills', cwd, model: 'fixture-model', enableFollowUps: false }) as CodexSession;
+  const skill = { id: 'runtime:codex:user:Plugin:review', name: 'review', nativeName: 'Plugin:review', origin: 'runtime' as const, path: review.path, body: 'Review.', args: 'the diff' };
+  const drain = (async () => { for await (const _event of session.send('the diff', { skill })) { /* drain */ } })();
+  const turnStart = () => sent('turn/start').find((message) => message.params?.threadId === threadId);
+  for (let i = 0; i < 50 && !turnStart(); i += 1) await tick();
+  assertSchema('ClientRequest', turnStart());
+  const [text, ...rest] = turnStart()!.params.input;
+  assert.match(text.text, /\$Plugin:review the diff/);
+  assert.deepEqual(rest, [{ type: 'skill', name: 'Plugin:review', path: review.path }]);
+  wire.send(turnNotification('completed'), 'ServerNotification');
+  await drain;
+});
+
 contract('translator notifications', () => {
   const events: NormalizedEvent[] = [];
   const translator = createCodexTranslator((event) => events.push(event));
@@ -338,6 +413,8 @@ contract('translator notifications', () => {
   const usageEvent = events.find((event) => event.kind === 'context_usage')!;
   assert.equal(usageEvent.contextUsagePercentage, (60_000 - 12_000) / (120_000 - 12_000) * 100);
 });
+
+contract('thread delete', threadDeleteContract);
 
 contract('negative controls', () => {
   assert.equal(validator('ServerNotification')(itemNotification('item/started', { id: 'compact', type: 'contextCompacton' })), false);

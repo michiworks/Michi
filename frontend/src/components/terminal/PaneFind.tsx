@@ -1,24 +1,20 @@
-import React, { useEffect, useMemo, useRef, useState } from 'react';
-import type { ChatNodeState } from '../../state/chatTypes';
-import { visibleMessageText } from '../../state/assistantBlocks';
-
-export interface FindMatch {
-  messageId: string;
-  messageIdx: number;
-  start: number;
-  end: number;
-}
+import { useEffect, useRef, useState, type RefObject } from 'react';
+import { smoothScrollBehavior } from '../../hooks/useReducedMotion';
+import { isImeComposing } from '../../lib/ime';
+import { flashMatchOverlay, usePaneFindMatches } from './paneFindMatches';
 
 export interface PaneFindProps {
   open: boolean;
-  node: ChatNodeState;
+  /** The pane's transcript (TPane's scroll container); find searches its messages only. */
+  rootRef: RefObject<HTMLElement | null>;
   onClose: () => void;
   /**
-   * Navigate to a match. `occurrence` is the 0-based index of this hit *within
-   * its own message* (not the global list), and `query` is the active search
-   * term — together they let TPane re-find and flash that exact hit in the DOM.
+   * Brings a visited match into view and flashes it; returns what lets it
+   * go when the next one is visited. The chat pane passes its jumpToMessage,
+   * which holds the match while a streaming reply grows below it. Without
+   * it, the match is scrolled to once.
    */
-  onScrollToMatch: (match: FindMatch, occurrence: number, query: string) => void;
+  onVisitMatch?: (range: Range) => () => void;
   /**
    * Bumped by the parent on every ⌘F press. While `open` is already true,
    * incrementing this re-focuses + selects the existing input so the user
@@ -27,11 +23,17 @@ export interface PaneFindProps {
   focusNonce?: number;
 }
 
-export default function PaneFind({ open, node, onClose, onScrollToMatch, focusNonce }: PaneFindProps) {
+// One highlight name for every pane: find closes when its pane loses focus,
+// so two panes rarely paint at once, and then the latest wins.
+const HIGHLIGHT_NAME = 'pane-find';
+
+export default function PaneFind({ open, rootRef, onClose, onVisitMatch, focusNonce }: PaneFindProps) {
   const [query, setQuery] = useState('');
   const [debounced, setDebounced] = useState('');
   const [currentIdx, setCurrentIdx] = useState(0);
   const inputRef = useRef<HTMLInputElement>(null);
+  const cancelFlashRef = useRef<(() => void) | null>(null);
+  const matches = usePaneFindMatches(rootRef, open ? debounced : '');
 
   useEffect(() => {
     if (open) {
@@ -59,7 +61,7 @@ export default function PaneFind({ open, node, onClose, onScrollToMatch, focusNo
   useEffect(() => {
     if (!open) return;
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') {
+      if (e.key === 'Escape' && !isImeComposing(e)) {
         e.preventDefault();
         onClose();
       }
@@ -73,75 +75,46 @@ export default function PaneFind({ open, node, onClose, onScrollToMatch, focusNo
     return () => clearTimeout(t);
   }, [query]);
 
-  const matches = useMemo<FindMatch[]>(() => {
-    const q = debounced.trim().toLowerCase();
-    if (!q) return [];
-    const out: FindMatch[] = [];
-    for (let i = 0; i < node.messages.length; i++) {
-      const m = node.messages[i];
-      if (m.role !== 'user' && m.role !== 'assistant') continue;
-      const lower = visibleMessageText(m).toLowerCase();
-      let idx = 0;
-      while (idx < lower.length) {
-        const found = lower.indexOf(q, idx);
-        if (found === -1) break;
-        out.push({ messageId: m.id, messageIdx: i, start: found, end: found + q.length });
-        idx = found + q.length;
-      }
-    }
-    return out;
-  }, [node.messages, debounced]);
-
-  // Broadcast query changes so TPane can paint matching ranges via CSS
-  // Custom Highlight API. Fires on every debounced query change while open,
-  // and clears (sends empty query) when closed/unmounted.
+  // Painted with the CSS Custom Highlight API, apart from React render, so
+  // streaming and markdown rendering don't fight it.
   useEffect(() => {
-    if (!open) return;
-    window.dispatchEvent(
-      new CustomEvent('michi:pane-find-update', {
-        detail: { nodeId: node.nodeId, query: debounced },
-      }),
-    );
-  }, [open, debounced, node.nodeId]);
+    const highlights = typeof CSS === 'undefined' ? undefined : (CSS as unknown as { highlights?: Map<string, Highlight> }).highlights;
+    if (!highlights || typeof Highlight === 'undefined' || matches.length === 0) return;
+    highlights.set(HIGHLIGHT_NAME, new Highlight(...matches));
+    return () => { highlights.delete(HIGHLIGHT_NAME); };
+  }, [matches]);
 
-  useEffect(() => {
-    if (!open) {
-      window.dispatchEvent(
-        new CustomEvent('michi:pane-find-update', {
-          detail: { nodeId: node.nodeId, query: '' },
-        }),
-      );
-    }
-  }, [open, node.nodeId]);
+  useEffect(() => () => cancelFlashRef.current?.(), []);
 
-  // Reset cursor when matches change (typing, query edits).
-  // We deliberately do NOT scroll/flash here — that's reserved for user-driven
-  // navigation (Enter, prev/next buttons). Typing should only update the
-  // highlight overlay and counter; the viewport stays put.
+  // A new query starts from its first match. Typing only updates the
+  // highlight and counter; scrolling and the flash wait for Enter or the
+  // prev/next buttons. A transcript change (a streaming reply) keeps the place.
   useEffect(() => {
     setCurrentIdx(0);
-  }, [matches]);
+  }, [debounced]);
 
   if (!open) return null;
 
+  const current = Math.min(currentIdx, Math.max(matches.length - 1, 0));
+
   function go(delta: number) {
     if (matches.length === 0) return;
-    const next = (currentIdx + delta + matches.length) % matches.length;
+    const next = (current + delta + matches.length) % matches.length;
     setCurrentIdx(next);
-    const match = matches[next];
-    // Occurrence index of this hit within its own message (matches are in
-    // message order, so counting earlier same-message hits gives the position).
-    let occurrence = 0;
-    for (let i = 0; i < next; i++) {
-      if (matches[i].messageId === match.messageId) occurrence++;
+    const range = matches[next];
+    cancelFlashRef.current?.();
+    if (onVisitMatch) {
+      cancelFlashRef.current = onVisitMatch(range);
+      return;
     }
-    onScrollToMatch(match, occurrence, debounced);
+    range.startContainer.parentElement?.scrollIntoView({ block: 'center', behavior: smoothScrollBehavior() });
+    cancelFlashRef.current = flashMatchOverlay(range);
   }
 
   return (
     // Closes on any Esc while up: a layer the ⌘J panel's Esc yields to when
     // it is in the panel, or the page has focus ("pane": under the panel).
-    <div className="t-pane-find" data-escape-layer="pane" onMouseDown={(e) => e.stopPropagation()}>
+    <div className="t-pane-find" data-escape-layer="pane" data-notice-avoid onMouseDown={(e) => e.stopPropagation()}>
       <input
         ref={inputRef}
         value={query}
@@ -150,6 +123,7 @@ export default function PaneFind({ open, node, onClose, onScrollToMatch, focusNo
         className="t-pane-find-input"
         type="text"
         onKeyDown={(e) => {
+          if (isImeComposing(e)) return;
           if (e.key === 'Escape') {
             e.preventDefault();
             onClose();
@@ -162,7 +136,7 @@ export default function PaneFind({ open, node, onClose, onScrollToMatch, focusNo
       <button type="button" className="t-pane-find-nav" onClick={() => go(-1)} aria-label="prev">◀</button>
       <button type="button" className="t-pane-find-nav" onClick={() => go(1)} aria-label="next">▶</button>
       <span className="t-pane-find-counter">
-        {matches.length === 0 ? '0 / 0' : `${currentIdx + 1} / ${matches.length}`}
+        {matches.length === 0 ? '0 / 0' : `${current + 1} / ${matches.length}`}
       </span>
       <button type="button" className="t-pane-find-close" onClick={onClose} aria-label="close">×</button>
     </div>

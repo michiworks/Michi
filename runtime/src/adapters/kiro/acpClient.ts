@@ -1,6 +1,7 @@
 import { KiroSignedOutError, isKiroSignInError } from './kiroSignIn';
 import type { AcpPendingRequest } from '../acp/client';
-import { V3_COMMAND_METHODS, V3_COMPATIBILITY_METHODS, v3CommandNames, effortSelection } from './v3Commands';
+import type { AgentCommand } from 'michi-shared';
+import { V3_COMMAND_METHODS, V3_COMPATIBILITY_METHODS, kiroCommand, v3CommandNames, effortSelection } from './v3Commands';
 import { KiroSessionSnapshots } from './sessionSnapshots';
 import { nativeSessionExists, realCwd, type NativeSessionLookupOptions } from "./nativeSessionLookup";
 import type { RuntimeObservability } from "../../contract/host";
@@ -28,6 +29,8 @@ export type { AcpPromptBlock, AcpUpdate } from "../acp/types";
 import { AcpClient as AcpCoreClient, rpcErrorDataForLog } from "../acp/client";
 import { KiroAcpProfile, type AcpLaunch } from "./kiroAcpProfile";
 import { findKiroCli, type KiroCliLookup } from "./kiroCli";
+import path from "node:path";
+import { trackKiroStoreProcess } from "./kiroSessionFiles";
 import type { AcpAgentFlavor } from "./acpAgentFlavor";
 
 export type { AcpLaunch } from "./kiroAcpProfile";
@@ -54,6 +57,14 @@ export interface AcpProcessOptions {
     extraArgs?: string[];
     childEnv?: NodeJS.ProcessEnv;
     rejectPermissions?: boolean;
+    /**
+     * Ask kiro-cli at `initialize` to export none of its agent telemetry
+     * (`clientCapabilities._meta.kiro.telemetryEnabled: false`). kiro-cli 3.0
+     * otherwise exports OpenTelemetry metrics and traces to
+     * telemetry.<region>.kiro.dev even with `telemetry.enabled: false` in its
+     * settings (probe P1b). Ignored for a standardAcp launch. Default false.
+     */
+    telemetryOff?: boolean;
     onSignedOut?: (binary: string) => void;
     /** Where to look for kiro-cli, read each time it is looked up. Default: the fixed locations only. */
     kiroCli?: () => KiroCliLookup;
@@ -71,7 +82,7 @@ export interface AcpProcessOptions {
      * The environment a kiro-cli child would inherit, read at each spawn
      * (Michi: its own environment); kiroEnv adds Kiro's entries to it. Absent: the
      * child inherits this process's environment unchanged. Not used with a
-     * custom launch, whose child always inherits it.
+     * custom launch, which takes its own (AcpLaunch.env).
      */
     spawnEnv?: () => NodeJS.ProcessEnv;
     /**
@@ -98,6 +109,36 @@ export interface AcpClientOptions extends AcpProcessOptions {
     signIn?: AcpAgentFlavor['signIn'];
     /** The agent's name in user-visible errors of a standardAcp launch (KiroAcpProfileOptions.displayName). */
     displayName?: string;
+    /**
+     * The host's skill library folder its chat sessions open as an additional
+     * directory (KiroAdapterOptions.skillLibraryWorkspace). The skills Kiro
+     * loads from it are left out of the session's commands: the host lists
+     * its own library. Default: none.
+     */
+    skillLibraryWorkspace?: string;
+    /**
+     * Whether a session's state names the skills and prompts the agent
+     * advertises, read at each state report. A host that shows no skills of
+     * its machine (Michi's cloud mode) says false. Default: true.
+     */
+    advertiseSkills?: () => boolean;
+    /**
+     * The names of the skills the agent loads for a cwd, for an agent that
+     * advertises them as plain commands (AcpAgentFlavor.unmarkedSkills): a
+     * command it advertises with one of these names is reported as a skill.
+     * Read at each advertisement; the session's state is published again
+     * once they are read. Default: none.
+     */
+    skillCommandNames?: (cwd: string) => Promise<ReadonlySet<string>>;
+    /**
+     * The commands executeCommand runs on a V2 connection: Kiro's command
+     * RPC, or a relay adapter's own (AcpAgentRuntime.hostCommands). A
+     * session's state reports them as kind 'command', with what the agent
+     * advertises about each, so a chat with a session runs them as commands
+     * whatever else the host knows. A V3 session reports the commands of
+     * Michi's own interface instead. Default: none.
+     */
+    commandInterface?: readonly AgentCommand[];
 }
 
 /** What Kiro has published about one session's tools. */
@@ -118,12 +159,18 @@ export class AcpClient extends AcpCoreClient {
     private readonly rejectPermissions: boolean;
     private readonly onSignedOut?: (binary: string) => void;
     private readonly signIn?: AcpAgentFlavor['signIn'];
+    private readonly skillCommandNames?: (cwd: string) => Promise<ReadonlySet<string>>;
+    private readonly commandInterface: readonly AgentCommand[];
+    /** The KIRO_HOME the child runs with (resolved), when the host gave one; never for a launch override. */
+    private readonly kiroHome?: string;
 
     override start(): void {
         if (this.proc) return;
         this.signInFailed = false;
         this.stderrTail = '';
         super.start();
+        // A kiro-cli on a KIRO_HOME the host gave stays counted on that store until it exits.
+        if (this.kiroHome && this.proc) trackKiroStoreProcess(this.kiroHome, this);
     }
 
     protected override onChildStderr(text: string): void {
@@ -298,12 +345,16 @@ export class AcpClient extends AcpCoreClient {
         super(new KiroAcpProfile({
             binaryPath: launch?.bin ?? binaryPath ?? findKiroCli(options.kiroCli?.()),
             cwd, model, engine, launch, runtimeId, preloadTools: options.preloadTools, extraArgs: options.extraArgs, childEnv: options.childEnv,
-            displayName: options.displayName,
+            displayName: options.displayName, telemetryOff: options.telemetryOff,
         }), options);
         this.rejectPermissions = options.rejectPermissions === true;
         this.onSignedOut = options.onSignedOut;
         this.signIn = options.signIn;
-        this.snapshots = new KiroSessionSnapshots(runtimeId);
+        this.skillCommandNames = options.skillCommandNames;
+        this.commandInterface = engine === 'v3' ? [] : options.commandInterface ?? [];
+        const kiroHome = launch ? undefined : options.childEnv?.KIRO_HOME;
+        this.kiroHome = kiroHome ? path.resolve(kiroHome) : undefined;
+        this.snapshots = new KiroSessionSnapshots(runtimeId, { engine, standardAcp: launch?.standardAcp === true }, { libraryWorkspace: options.skillLibraryWorkspace, advertise: options.advertiseSkills });
         this.agentTurns = new AcpAgentTurns({
             reserve: (sessionId) => this.reserveSession(sessionId),
             sendCancel: (sessionId) => { void this.notify('session/cancel', { sessionId }).catch(() => {}); },
@@ -347,10 +398,27 @@ export class AcpClient extends AcpCoreClient {
     getSessionState(sessionId: string) {
         const state = this.snapshots.state(sessionId, this.sessionInfo.get(sessionId));
         state.nativeEngine = this.engine;
+        const advertised = state.commands ?? [];
+        const commands = new Map(advertised.filter((command) => !command.kind || command.kind === 'command')
+            .map((command) => [command.name, command]));
         if (this.engine === 'v3') {
-            const advertised = new Map(state.commands?.map((command) => [command.name, command]));
-            state.commands = v3CommandNames(this.sessionInfo.get(sessionId), (method) => this.supportsExtension(method))
-                .map((name) => advertised.get(name) ?? { name });
+            // Commands run through Michi's own V3 interface (executeCommand),
+            // so only those are offered as commands. The skills Kiro
+            // advertises run as prompt text, so they are kept as well. Its
+            // prompts are not: Kiro expands one only when its `/name` is the
+            // whole prompt, and Michi's context and reminders surround the
+            // user's text.
+            state.commands = [
+                ...v3CommandNames(this.sessionInfo.get(sessionId), (method) => this.supportsExtension(method))
+                    .map((name) => ({ ...kiroCommand(name), ...commands.get(name), kind: 'command' as const })),
+                ...advertised.filter((command) => command.kind === 'skill'),
+            ];
+        } else if (this.commandInterface.length) {
+            const own = new Set(this.commandInterface.map((command) => command.name));
+            state.commands = [
+                ...this.commandInterface.map((command) => ({ ...command, ...commands.get(command.name), kind: 'command' as const })),
+                ...advertised.filter((command) => !own.has(command.name) || command.kind === 'skill' || command.kind === 'prompt'),
+            ];
         }
         return state;
     }
@@ -367,6 +435,24 @@ export class AcpClient extends AcpCoreClient {
         });
     }
 
+    /**
+     * Which of the commands a session advertised are its cwd's skills
+     * (AcpClientOptions.skillCommandNames), published once read. A later
+     * advertisement, or the session's release, supersedes the read.
+     */
+    private async readSkillCommandNames(sessionId: string, commands: unknown[]): Promise<void> {
+        if (!this.skillCommandNames) return;
+        let names: ReadonlySet<string>;
+        try { names = await this.skillCommandNames(this.cwd); }
+        catch (error) {
+            this.observability.log('warn', 'acp', 'skill folders could not be read', { sessionId, error: error instanceof Error ? error.message : String(error) });
+            return;
+        }
+        if (this.snapshots.get(sessionId)?.commands !== commands) return;
+        this.snapshots.set(sessionId, { skillNames: names });
+        this.publishSessionState(sessionId);
+    }
+
     getLastUserMessageId(sessionId: string): string | undefined {
         return this.lastUserMessageId.get(sessionId);
     }
@@ -380,11 +466,20 @@ export class AcpClient extends AcpCoreClient {
         return false;
     }
 
-    /** A permission request of a turn Kiro started on its own waits on that turn. */
+    /**
+     * A permission request of a turn Kiro started on its own waits on that
+     * turn. A workflow watch's command spawn asks on the parent session,
+     * busy or idle; it goes to its run (an idle chat reads no queue).
+     */
     protected override routePermissionRequest(sessionId: string, update: AcpUpdate): 'delivered' | 'dropped' | 'none' {
         if (this.rejectPermissions && update.sessionUpdate === 'permission_request') {
             this.observability.log('warn', 'acp', 'kiro permission request rejected', { sessionId, tool: update.toolCall?.title });
             this.respondToPermissionKind(update.requestId, 'reject_once');
+            return 'delivered';
+        }
+        if (update.sessionUpdate === 'permission_request' && update._meta?.kiro?.workflowWatch
+            && this.routeWorkflowPermissionFor(sessionId, update.requestId, update.toolCall,
+                this.pendingPermissions.get(update.requestId)?.options ?? update.options, update._meta)) {
             return 'delivered';
         }
         return this.agentTurns.deliver(sessionId, update);
@@ -530,6 +625,7 @@ export class AcpClient extends AcpCoreClient {
         if (update.sessionUpdate === 'available_commands_update' && Array.isArray(update.availableCommands)) {
             this.snapshots.set(sid, { commands: update.availableCommands });
             this.publishSessionState(sid);
+            void this.readSkillCommandNames(sid, update.availableCommands);
             return true;
         }
         const nativeUserId = update._meta?.kiro?.userMessageId;
@@ -548,6 +644,10 @@ export class AcpClient extends AcpCoreClient {
                     // Kiro starting a turn while no prompt of ours runs: it
                     // woke the session itself (a workflow finished).
                     if (this.sessionQueues.has(sid)) this.agentTurns.start(sid);
+                    // A session Michi released: nobody sees this turn, and its
+                    // frames are dropped below. Idle release keeps sessions
+                    // whose workflows can wake them; say so if one got through.
+                    else this.observability.log('warn', 'acp', 'Kiro started a turn on a session Michi does not hold; its frames are discarded', { sessionId: sid, pid: this.proc?.pid });
                 } else if (this.promptTurnEnded.has(sid)) {
                     // After our prompt's own turn ended: see wakeCandidates.
                     this.wakeCandidates.add(sid);
@@ -1138,6 +1238,44 @@ export class AcpClient extends AcpCoreClient {
         return this.agentTurns.has(sessionId);
     }
 
+    /**
+     * Something still holds this session, so an idle release must leave it:
+     * a prompt or its reservation, a prompt the chat announced, a turn Kiro
+     * runs on its own (or one about to be taken as such), a compaction, a
+     * load or reopen, a steer, or a request, approval or question that has
+     * no answer yet.
+     */
+    isSessionBusy(sessionId: string): boolean {
+        return this.activePrompts.has(sessionId)
+            || this.sessionInFlight.has(sessionId)
+            || this.loadingSessions.has(sessionId)
+            || this.promptIntents.has(sessionId)
+            || this.agentTurns.has(sessionId)
+            || this.wakeCandidates.has(sessionId)
+            || this.compactingSessions.has(sessionId)
+            || this.reopeningSessions.has(sessionId)
+            || (this.steerRequests.get(sessionId)?.size ?? 0) > 0
+            || this.hasPendingSessionWork(sessionId);
+    }
+
+    /**
+     * Ask Kiro to drop an idle session from this process (its transcript,
+     * context and MCP children) and keep its stored record, so a later
+     * `session/load` opens it again: V3 `session/close`, V2
+     * `_kiro.dev/session/terminate`. Resolves false when this Kiro cannot;
+     * rejects when the request failed. Michi's own state is the caller's.
+     */
+    async closeNativeSession(sessionId: string, timeoutMs: number): Promise<boolean> {
+        if (!this.isAlive() || this.needsSessionRecovery(sessionId)) return false;
+        if (this.engine === 'v3') {
+            if (!this.capabilities?.sessionCapabilities?.close) return false;
+            await this.send('session/close', { sessionId }, timeoutMs, sessionId, true);
+            return true;
+        }
+        await this.send('_kiro.dev/session/terminate', { sessionId }, timeoutMs, sessionId, true);
+        return true;
+    }
+
     /** Stop a turn Kiro started on its own (see acpAgentTurns.ts). */
     async cancelAgentTurn(sessionId: string): Promise<boolean> {
         return this.agentTurns.cancel(sessionId);
@@ -1177,7 +1315,13 @@ export class AcpClient extends AcpCoreClient {
 
     /** A workflow step session's approval goes to its run; false to decline. */
     private routeWorkflowPermission(sessionId: unknown, requestId: number, toolCall: unknown, options: unknown, meta?: unknown): boolean {
-        if (typeof sessionId !== 'string' || !this.isWorkflowStepSession(sessionId) || !Array.isArray(options)) return false;
+        if (typeof sessionId !== 'string' || !this.isWorkflowStepSession(sessionId)) return false;
+        return this.routeWorkflowPermissionFor(sessionId, requestId, toolCall, options, meta);
+    }
+
+    /** Offer an approval to the workflow router; it decides which run (if any) takes it. */
+    private routeWorkflowPermissionFor(sessionId: string, requestId: unknown, toolCall: unknown, options: unknown, meta?: unknown): boolean {
+        if (typeof requestId !== 'number' || !Array.isArray(options)) return false;
         try {
             return this.workflowRouter?.requestPermission({
                 sessionId,
@@ -1391,6 +1535,32 @@ export class AcpClient extends AcpCoreClient {
             });
         }
         super.destroySession(sessionId);
+    }
+
+    /**
+     * Whether this client's kiro-cli may still be running: spawned and not
+     * seen to exit, stopping included (unlike isAlive, which turns false as
+     * soon as a shutdown begins).
+     */
+    processRunning(): boolean {
+        const proc = this.proc;
+        return !!proc && proc.pid !== undefined && proc.exitCode === null && proc.signalCode === null;
+    }
+
+    /** Kiro advertised `session/delete` (kiro-cli 3.0 does once signed in; probe P1). */
+    supportsSessionDelete(): boolean {
+        return !this.launch?.standardAcp && !!this.capabilities?.sessionCapabilities?.delete;
+    }
+
+    /**
+     * Deletes a native session from Kiro's store (`session/delete`): its
+     * session directory goes and its index records the removal (probe P1).
+     * Kiro answers it for a session it still has loaded too; the caller makes
+     * sure no Michi session is bound to it.
+     */
+    async deleteSession(sessionId: string, timeoutMs = 10_000): Promise<void> {
+        if (!this.supportsSessionDelete()) throw new ACPError('Kiro did not advertise session/delete');
+        await this.send('session/delete', { sessionId }, timeoutMs, undefined, true);
     }
 
     /** What Kiro has published about a session's tools so far. */

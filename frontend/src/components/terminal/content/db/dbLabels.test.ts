@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { columnName, databaseTitle, filterChipText, formatDateValue, groupName, optionName, sortLabel, viewName } from './dbLabels';
+import { columnName, databaseTitle, filterChipText, groupName, optionName, sortLabel, viewName } from './dbLabels';
 import { threadsDatabase, userDatabase } from './dbTestData';
 
 const threads = threadsDatabase([]);
@@ -44,14 +44,5 @@ describe('filter chips and sorts', () => {
     expect(sortLabel(user, ucol('c_due'), 'desc')).toBe('Newest first');
     expect(sortLabel(user, ucol('c_effort'), 'desc')).toBe('High → low');
     expect(sortLabel(user, ucol('c_name'), 'asc')).toBe('A → Z');
-  });
-});
-
-describe('dates', () => {
-  it('writes days and ranges short', () => {
-    const now = new Date(2026, 9, 21);
-    expect(formatDateValue({ start: '2026-10-25', end: '2026-10-27' }, now)).toBe('Oct 25 → 27');
-    expect(formatDateValue({ start: '2026-10-30', end: '2026-11-02' }, now)).toBe('Oct 30 → Nov 2');
-    expect(formatDateValue({ start: '2025-01-03' }, now)).toBe('Jan 3, 2025');
   });
 });

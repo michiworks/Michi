@@ -1,5 +1,4 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import React from 'react';
 import { act, cleanup, render } from '@testing-library/react';
 import { StreamActivityIndicator, deriveStreamActivity } from './StreamActivityIndicator';
 import type { AssistantBlock, ChatMessage, ChatNodeState, SubagentInfo, ToolCallState } from '../../state/chatTypes';
@@ -113,7 +112,6 @@ describe('deriveStreamActivity — Kiro plan steps', () => {
 
 describe('deriveStreamActivity — live thought header', () => {
   const card = { showThoughts: true, agentBlockStyle: 'card' as const };
-  const plain = { showThoughts: true, agentBlockStyle: 'plain' as const };
   const betweenSteps = () => node({
     messages: [assistant({
       blocks: [

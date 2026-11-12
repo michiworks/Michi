@@ -1,6 +1,6 @@
 import express, { type Request, type Response } from 'express';
 import type { MemoryErrorResponse } from 'michi-shared';
-import { LOCAL_AGENT_OWNER_ID } from '../services/agentOwner';
+import { requestAgentOwnerOrNull } from '../services/agentOwner';
 import { log } from '../services/logger';
 import {
   cancelMemoryExtraction, memoryExtractionStatus, setMemoryExtractionPaused, type MemoryExtractionScheduler,
@@ -19,8 +19,7 @@ import { requireRequestAccess } from './middleware/sessionAccess';
 class RequestError extends Error {}
 
 function ownerOf(req: Request): string | null {
-  const ownerUserId = process.env.MICHI_CLOUD === '1' ? req.user?.id?.trim() ?? '' : LOCAL_AGENT_OWNER_ID;
-  return ownerUserId || null;
+  return requestAgentOwnerOrNull(req.user?.id);
 }
 
 /** An optional { workspaceId } body and nothing else. */

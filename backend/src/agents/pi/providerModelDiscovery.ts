@@ -5,8 +5,9 @@
  * model a provider released after that publish can be neither listed nor
  * selected: `getModels(provider)` keeps answering with the snapshot baked into
  * the installed version. This module asks each provider's own `/models`
- * endpoint for the live catalog and caches it, mirroring the pattern
- * `openrouterModels.ts` established for OpenRouter.
+ * endpoint for the live catalog and caches it. The cache itself
+ * (`discoverCatalog`) also serves OpenRouter's richer catalog in
+ * `openrouterModels.ts`.
  *
  * The live answer is metadata-poor — ids, sometimes a display name and a
  * context length, never cost, thinking levels or compat flags. Discovery
@@ -45,23 +46,28 @@ const FAILURE_TTL_MS = 60 * 1000;
 const REQUEST_TIMEOUT_MS = 4_000;
 
 interface CacheEntry {
-    models: LiveProviderModel[];
+    models: unknown[];
     fetchedAt: number;
     /** Last failure, so an offline machine retries once a minute, not per call. */
     failedAt: number | null;
 }
 
 const cache = new Map<string, CacheEntry>();
-const inflight = new Map<string, Promise<LiveProviderModel[] | null>>();
+const inflight = new Map<string, Promise<unknown[] | null>>();
 
 /** Discovery is on unless the deployment opts out. */
 export function isModelDiscoveryEnabled(): boolean {
     return process.env.MICHI_MODEL_DISCOVERY !== "0";
 }
 
+/** Last good catalog under `key`, without touching the network. */
+export function cachedCatalog<T>(key: string): T[] | null {
+    return (cache.get(key)?.models as T[] | undefined) ?? null;
+}
+
 /** Last good live catalog for a provider, without touching the network. */
 export function cachedDiscoveredModels(provider: string): LiveProviderModel[] | null {
-    return cache.get(provider)?.models ?? null;
+    return cachedCatalog<LiveProviderModel>(provider);
 }
 
 /**
@@ -170,27 +176,36 @@ function parseDiscoveryBody(dialect: ModelDiscoveryDialect, body: unknown): Live
     }
 }
 
-async function fetchLiveModels(request: ModelDiscoveryRequest): Promise<LiveProviderModel[] | null> {
+async function fetchLiveModels(request: ModelDiscoveryRequest, signal: AbortSignal): Promise<LiveProviderModel[] | null> {
+    const apiKey = request.apiKey ?? "";
+    const res = await fetch(discoveryUrlFor(request.baseUrl), {
+        headers: apiKey ? headersFor(request.dialect, apiKey) : {},
+        signal,
+    });
+    if (!res.ok) {
+        console.warn(`[providerModelDiscovery] ${request.provider} /models returned ${res.status}`);
+        return null;
+    }
+    const models = parseDiscoveryBody(request.dialect, await res.json());
+    return models.length > 0 ? models : null;
+}
+
+async function readCatalog<T>(
+    key: string,
+    fetchRows: (signal: AbortSignal) => Promise<T[] | null>,
+    timeoutMs: number,
+): Promise<T[] | null> {
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+    // Bounds the background download, body included; callers bound their own wait.
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    timer.unref?.();
     try {
-        const apiKey = request.apiKey ?? "";
-        const res = await fetch(discoveryUrlFor(request.baseUrl), {
-            headers: apiKey ? headersFor(request.dialect, apiKey) : {},
-            signal: controller.signal,
-        });
-        if (!res.ok) {
-            console.warn(`[providerModelDiscovery] ${request.provider} /models returned ${res.status}`);
-            return null;
-        }
-        const body = await res.json();
-        const models = parseDiscoveryBody(request.dialect, body);
-        return models.length > 0 ? models : null;
+        return await fetchRows(controller.signal);
     } catch (err) {
-        if (err instanceof Error && err.name === "AbortError") {
-            console.warn(`[providerModelDiscovery] ${request.provider} /models timed out`);
+        if (controller.signal.aborted) {
+            console.warn(`[providerModelDiscovery] ${key} catalog timed out`);
         } else {
-            console.warn(`[providerModelDiscovery] ${request.provider} /models failed:`, err);
+            console.warn(`[providerModelDiscovery] ${key} catalog failed:`, err);
         }
         return null;
     } finally {
@@ -199,14 +214,18 @@ async function fetchLiveModels(request: ModelDiscoveryRequest): Promise<LiveProv
 }
 
 /**
- * Live catalog for a provider: cached for CACHE_TTL_MS, single-flight while a
- * request is in progress, and stale-on-error afterwards. Returns null when
- * nothing has ever been fetched, so callers can tell "no news" from "empty".
+ * A live catalog under `key`: cached for CACHE_TTL_MS, single-flight while a
+ * request is in progress, not retried for FAILURE_TTL_MS after a failure, and
+ * stale-on-error afterwards. `fetchRows` answers null (or throws) for a
+ * failure. Returns null when nothing has ever been fetched, so callers can
+ * tell "no news" from "empty". MICHI_MODEL_DISCOVERY=0 keeps it offline.
  */
-export async function discoverProviderModels(
-    request: ModelDiscoveryRequest,
-): Promise<LiveProviderModel[] | null> {
-    const entry = cache.get(request.provider);
+export async function discoverCatalog<T>(
+    key: string,
+    fetchRows: (signal: AbortSignal) => Promise<T[] | null>,
+    timeoutMs = REQUEST_TIMEOUT_MS,
+): Promise<T[] | null> {
+    const entry = cache.get(key) as { models: T[]; fetchedAt: number; failedAt: number | null } | undefined;
     const now = Date.now();
     if (entry && entry.models.length > 0 && now - entry.fetchedAt < CACHE_TTL_MS) {
         return entry.models;
@@ -216,17 +235,17 @@ export async function discoverProviderModels(
         return entry.models.length > 0 ? entry.models : null;
     }
 
-    const pending = inflight.get(request.provider);
+    const pending = inflight.get(key) as Promise<T[] | null> | undefined;
     if (pending) return pending;
 
     const task = (async () => {
-        const models = await fetchLiveModels(request);
+        const models = await readCatalog(key, fetchRows, timeoutMs);
         if (models) {
-            cache.set(request.provider, { models, fetchedAt: Date.now(), failedAt: null });
+            cache.set(key, { models, fetchedAt: Date.now(), failedAt: null });
             return models;
         }
-        const previous = cache.get(request.provider);
-        cache.set(request.provider, {
+        const previous = cache.get(key) as { models: T[]; fetchedAt: number } | undefined;
+        cache.set(key, {
             models: previous?.models ?? [],
             fetchedAt: previous?.fetchedAt ?? 0,
             failedAt: Date.now(),
@@ -234,10 +253,17 @@ export async function discoverProviderModels(
         return previous?.models.length ? previous.models : null;
     })();
 
-    inflight.set(request.provider, task);
+    inflight.set(key, task);
     try {
         return await task;
     } finally {
-        inflight.delete(request.provider);
+        inflight.delete(key);
     }
+}
+
+/** The live catalog of a provider's own `/models` endpoint (see discoverCatalog). */
+export function discoverProviderModels(
+    request: ModelDiscoveryRequest,
+): Promise<LiveProviderModel[] | null> {
+    return discoverCatalog(request.provider, (signal) => fetchLiveModels(request, signal));
 }

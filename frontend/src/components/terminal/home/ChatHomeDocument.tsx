@@ -1,4 +1,3 @@
-import React from 'react';
 import type { PageDto } from 'michi-shared';
 import { useBackendScope } from '../../../hooks/useBackendScope';
 import { useHomeDocument } from '../spaces/home/HomeDocument';

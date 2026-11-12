@@ -31,6 +31,7 @@ const child = spawn(process.execPath, ['--require', 'ts-node/register', 'src/ser
     MICHI_DATA_DIR: dataDir,
     MICHI_CONFIG_DIR: configDir,
     MICHI_LOG_DIR: path.join(disposable, 'logs'),
+    MICHI_DISABLE_COMPANION: '1',
   },
   stdio: ['ignore', 'ignore', 'pipe'],
 });

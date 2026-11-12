@@ -12,7 +12,10 @@
  */
 import { Worker } from 'node:worker_threads';
 import path from 'node:path';
-import type { EnsureDurableGraphNodeInput, EnsureDurableGraphNodeResult } from './graphCommands';
+import type { EnsureDurableGraphNodeInput, EnsureDurableGraphNodeResult, GraphNodePresence } from './graphCommands';
+import { graphNodePresence, recordEnsuredGraphNode } from './graphCommands';
+import type { TreeRowChange } from './graphCommandTypes';
+import { currentStructureOrigin, runWithStructureOrigin } from './structureEvents';
 import type { DurableTurnSnapshot } from 'michi-shared';
 import { DomainError, type SerializedDomainError } from './domainErrors';
 
@@ -146,7 +149,21 @@ export const dbWorker = {
     // The input type is already a plain data interface, but we round-trip
     // through JSON to be safe (e.g. undefined → null).
     const payload = JSON.parse(JSON.stringify(input));
-    return rpc<EnsureDurableGraphNodeResult>('ensureDurableGraphNode', payload);
+    let before: GraphNodePresence | null = null;
+    try { before = graphNodePresence(input); } catch { /* malformed input: the worker rejects it */ }
+    // A caller applying a window's own payload tags this write as it would a
+    // synchronous one; that scope has ended by the time the worker commits.
+    const origin = currentStructureOrigin();
+    return rpc<EnsureDurableGraphNodeResult & { treeChange: TreeRowChange | null }>(
+      'ensureDurableGraphNode', payload,
+    ).then(({ treeChange, ...result }) => {
+      // Resolved after the worker committed: tell other windows what it changed.
+      if (before) {
+        const presence = before;
+        try { runWithStructureOrigin(origin, () => recordEnsuredGraphNode(input, presence, treeChange)); } catch { /* best effort */ }
+      }
+      return result;
+    });
   },
 
   /**

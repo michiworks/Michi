@@ -1,7 +1,9 @@
+import type { MenuItem, MenuSection } from '../components/ContextMenu';
+import { confirmDialog } from '../components/ui/ConfirmDialog';
 import type { Project } from '../state/chatTypes';
 
-/** Stable names for the workspace actions, for surfaces that draw their own
- *  glyph per action (the phone action sheet). */
+/** The ids of the menu's items, for surfaces that pick items by action (the
+ *  phone page hides some for an archived workspace). */
 export type WorkspaceRowActionId =
   | 'manage'
   | 'folder'
@@ -12,18 +14,7 @@ export type WorkspaceRowActionId =
   | 'unarchive'
   | 'delete';
 
-export interface ContextMenuItem {
-  id?: WorkspaceRowActionId;
-  label: string;
-  onSelect: () => void;
-  danger?: boolean;
-  disabled?: boolean;
-  /** Single-letter keyboard accelerator (e.g. 'R'); displayed in the chip. */
-  keys?: string;
-}
-export interface ContextMenuSection {
-  items: ContextMenuItem[];
-}
+type WorkspaceRowMenuItem = MenuItem & { id: WorkspaceRowActionId };
 
 export interface WorkspaceRowActions {
   archiveProject: (projectId: string) => void;
@@ -38,7 +29,7 @@ export interface WorkspaceRowActions {
   /** Ask the desktop shell to bind a different absolute folder. */
   changeFolder?: (projectId: string) => void;
   /** Ask for confirmation in the caller's own UI; without it, Delete asks
-   *  through window.confirm and deletes. */
+   *  in the app's confirm dialog and deletes. */
   requestDelete?: (projectId: string) => void;
 }
 
@@ -49,23 +40,23 @@ export interface BuildWorkspaceRowArgs {
 
 export function buildWorkspaceRowContextMenu(
   args: BuildWorkspaceRowArgs,
-): ContextMenuSection[] {
+): MenuSection[] {
   const { project, actions } = args;
   const archived = !!project.archivedAt;
   const pinned = !!project.pinnedAt;
-  return [
+  const sections: Array<{ items: WorkspaceRowMenuItem[] }> = [
     {
       items: [
         {
           id: 'manage',
           label: 'Manage workspace',
           keys: 'M',
-          onSelect: () => actions.openManageWorkspace(project.id),
+          run: () => actions.openManageWorkspace(project.id),
         },
         ...(actions.changeFolder ? [{
           id: 'folder' as const,
           label: project.cwd ? 'Change folder…' : 'Link folder…',
-          onSelect: () => actions.changeFolder!(project.id),
+          run: () => actions.changeFolder!(project.id),
         }] : []),
       ],
     },
@@ -75,23 +66,23 @@ export function buildWorkspaceRowContextMenu(
           id: 'rename',
           label: 'Rename…',
           keys: 'R',
-          onSelect: () => actions.beginInlineRename(project.id),
+          run: () => actions.beginInlineRename(project.id),
         },
         pinned
-          ? { id: 'unpin', label: 'Unpin', keys: 'P', onSelect: () => actions.unpinProject(project.id) }
-          : { id: 'pin', label: 'Pin', keys: 'P', onSelect: () => actions.pinProject(project.id) },
+          ? { id: 'unpin', label: 'Unpin', keys: 'P', run: () => actions.unpinProject(project.id) }
+          : { id: 'pin', label: 'Pin', keys: 'P', run: () => actions.pinProject(project.id) },
         archived
           ? {
               id: 'unarchive',
               label: 'Unarchive',
               keys: 'A',
-              onSelect: () => actions.unarchiveProject(project.id),
+              run: () => actions.unarchiveProject(project.id),
             }
           : {
               id: 'archive',
               label: 'Archive',
               keys: 'A',
-              onSelect: () => actions.archiveProject(project.id),
+              run: () => actions.archiveProject(project.id),
             },
       ],
     },
@@ -102,21 +93,20 @@ export function buildWorkspaceRowContextMenu(
           label: 'Delete workspace…',
           danger: true,
           keys: 'D',
-          onSelect: () => {
+          run: () => {
             if (actions.requestDelete) {
               actions.requestDelete(project.id);
               return;
             }
-            if (
-              window.confirm(
-                `Delete "${project.name}" and all its threads? You can restore it from Trash.`,
-              )
-            ) {
-              actions.deleteProject(project.id);
-            }
+            void confirmDialog({
+              title: 'Delete workspace',
+              message: `Delete "${project.name}" and all its threads? You can restore it from Trash.`,
+              confirmLabel: 'Delete',
+            }).then((ok) => { if (ok) actions.deleteProject(project.id); });
           },
         },
       ],
     },
   ];
+  return sections;
 }

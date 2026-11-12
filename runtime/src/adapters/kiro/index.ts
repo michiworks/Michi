@@ -28,3 +28,6 @@ export type {
   AcpSessionOptions as KiroAcpSessionOptions,
 } from './kiroProtocol';
 export type { KiroCliLookup } from './kiroCli';
+
+export type { AcpPresetRuntimeOptions } from './acpPreset';
+export type { KiroPageTurnAttribution } from './kiroProtocol';

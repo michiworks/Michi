@@ -30,7 +30,7 @@ function renderRow(props: Partial<React.ComponentProps<typeof ContextList>> = {}
       onSelect={() => {}}
       onPin={() => {}}
       onDelete={() => {}}
-      onPreview={() => {}}
+      onOpen={() => {}}
       onAdd={() => {}}
       {...props}
     />,
@@ -58,7 +58,7 @@ describe('ContextList', () => {
         onSelect={() => {}}
         onPin={() => {}}
         onDelete={() => {}}
-        onPreview={() => {}}
+        onOpen={() => {}}
         onAdd={() => {}}
       />,
     );
@@ -82,7 +82,7 @@ describe('ContextList', () => {
         onSelect={() => {}}
         onPin={() => {}}
         onDelete={() => {}}
-        onPreview={() => {}}
+        onOpen={() => {}}
         onAdd={() => {}}
       />,
     );
@@ -123,7 +123,7 @@ describe('ContextList', () => {
         onSelect={() => {}}
         onPin={() => {}}
         onDelete={() => {}}
-        onPreview={() => {}}
+        onOpen={() => {}}
         onAdd={() => {}}
       />,
     );

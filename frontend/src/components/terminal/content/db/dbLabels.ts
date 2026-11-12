@@ -9,7 +9,8 @@ import type {
   MichiDbViewType,
   MichiThreadState,
 } from 'michi-shared';
-import { michiStateLabel } from '../michiFormat';
+import { formatDateValue, formatDay, michiStateLabel } from '../michiFormat';
+import { THREAD_STATE_TONE } from '../threadStateTone';
 import { isDateValue, isThreadsDb, NO_VALUE_OPS, optionLabel, type CellValue } from './dbModel';
 
 // What the database UI calls things. Michi names its built-in columns, default
@@ -96,10 +97,6 @@ export function databaseTitle(db: Pick<MichiDatabase, 'id' | 'kind' | 'title'>):
   return isThreadsDb(db) ? 'All threads' : db.title.trim() || 'Untitled';
 }
 
-export function databaseSummaryTitle(summary: { id: string; title: string }): string {
-  return summary.id === 'threads' ? 'All threads' : summary.title.trim() || 'Untitled';
-}
-
 /** An option as people read it. All threads' states use Michi's state names. */
 export function optionName(db: DbRef, column: MichiDbColumn, value: string, doneBy?: 'user' | 'agent'): string {
   if (isThreadsDb(db) && column.builtin && column.id === 'state') return michiStateLabel(value as MichiThreadState, doneBy);
@@ -117,33 +114,6 @@ export function groupName(db: DbRef, column: MichiDbColumn | undefined, key: str
 }
 
 // ── Dates ────────────────────────────────────────────────────────────
-
-const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
-
-/** `YYYY-MM-DD` is a local day; anything else is a time. Bad input gives null. */
-export function parseDay(s: string): Date | null {
-  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(s);
-  if (m) return new Date(+m[1], +m[2] - 1, +m[3]);
-  const t = Date.parse(s);
-  return Number.isNaN(t) ? null : new Date(t);
-}
-
-/** `Oct 21`; another year's day says its year. */
-export function formatDay(s: string, now: Date = new Date()): string {
-  const d = parseDay(s);
-  if (!d) return s;
-  const md = `${MONTHS[d.getMonth()]} ${d.getDate()}`;
-  return d.getFullYear() === now.getFullYear() ? md : `${md}, ${d.getFullYear()}`;
-}
-
-/** `Oct 25 → 27`, `Oct 30 → Nov 2`. */
-export function formatDateValue(v: { start: string; end?: string }, now: Date = new Date()): string {
-  if (!v.end) return formatDay(v.start, now);
-  const a = parseDay(v.start);
-  const b = parseDay(v.end);
-  if (a && b && a.getFullYear() === b.getFullYear() && a.getMonth() === b.getMonth()) return `${formatDay(v.start, now)} → ${b.getDate()}`;
-  return `${formatDay(v.start, now)} → ${formatDay(v.end, now)}`;
-}
 
 // ── Filters ──────────────────────────────────────────────────────────
 
@@ -214,17 +184,9 @@ export const OPTION_TONE: Record<MichiDbOptionColor, string> = {
   violet: 'var(--term-mauve)',
 };
 
-const STATE_TONE: Record<MichiThreadState, string> = {
-  waiting: 'var(--term-accent)',
-  doing: 'var(--term-mid)',
-  stalled: 'var(--term-mauve)',
-  done: 'var(--term-digest)',
-  idea: 'var(--term-faint)',
-};
-
 /** The colour an option shows in. A thread's state keeps Michi's state colours whatever its option says. */
 export function optionTone(db: DbRef, column: MichiDbColumn, value: string): string | undefined {
-  if (isThreadsDb(db) && column.builtin && column.id === 'state') return STATE_TONE[value as MichiThreadState];
+  if (isThreadsDb(db) && column.builtin && column.id === 'state') return THREAD_STATE_TONE[value as MichiThreadState];
   const color = column.options?.find((o) => o.value === value)?.color;
   return color ? OPTION_TONE[color] : undefined;
 }

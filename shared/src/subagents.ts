@@ -13,6 +13,8 @@
  * just the fields that changed. First-seen timestamps win.
  */
 
+import { ellipsize, oneLine } from "./text";
+
 export type SubagentStatus = "working" | "terminated";
 export type SubagentOutcome = "completed" | "failed" | "cancelled";
 export type SubagentSource = "claude" | "kiro" | "codex" | "crew" | "pi";
@@ -266,10 +268,13 @@ export function knownSubagentEnd(entry: unknown): SubagentEnd | null {
   }, "");
 }
 
+/** What a subagent was asked, as its roster entry shows it: the first non-blank line of its task, on one line. */
+export function subagentInitialQuery(task: string | undefined | null): string {
+  return oneLine(task?.split("\n").find((line) => line.trim()) ?? "", 200);
+}
+
 export function clampSubagentText(value: string | undefined, max: number): string | undefined {
-  if (typeof value !== "string") return undefined;
-  if (value.length <= max) return value;
-  return `${value.slice(0, Math.max(0, max - 1))}…`;
+  return typeof value === "string" ? ellipsize(value, max) : undefined;
 }
 
 function nonEmpty(value: string | undefined): string | undefined {

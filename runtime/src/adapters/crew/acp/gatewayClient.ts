@@ -9,7 +9,9 @@
  */
 import fs from 'node:fs/promises';
 import path from 'node:path';
-import { crewIntegrationStatus } from '../crewLaunch';
+import { isLoopbackHostname } from '../../../core/loopback';
+import { crewAppSecretPath, crewIntegrationStatus } from '../crewLaunch';
+import { sanitizeErrorMessage } from './crewFrames';
 import { CrewEventStream } from './gatewayEvents';
 import {
     CrewGatewayError,
@@ -31,27 +33,15 @@ const DEFAULT_REQUEST_TIMEOUT_MS = 30_000;
 const FOLDER_TIMEOUT_MS = 5_000;
 const IDLE_POLL_INTERVAL_MS = 100;
 const TOKEN_MAX_AGE_MS = 50 * 60 * 1000;
-const LOOPBACK_HOSTS = new Set(['127.0.0.1', 'localhost', '[::1]', '::1']);
 const APP_NAME_RE = /^[a-z0-9][a-z0-9-]{0,63}$/;
 
 /**
- * Michi treats these phrases as process death and respawns the adapter, so no
- * error this client raises may carry them, even when the Gateway's own text
- * does (e.g. `/api/models` answers 503 "model list timed out").
+ * Michi treats connection markers as process death and respawns the adapter,
+ * so no error this client raises may carry one, even when the Gateway's own
+ * text does (e.g. `/api/models` answers 503 "model list timed out").
  */
-const BANNED_PHRASES: ReadonlyArray<[RegExp, string]> = [
-    [/timed\s*out/gi, 'took too long'],
-    [/response stream/gi, 'reply stream'],
-    [/connection reset/gi, 'connection dropped'],
-    [/ECONNRESET/gi, 'connection dropped'],
-];
-
-export function neutralizeErrorText(text: string): string {
-    return BANNED_PHRASES.reduce((acc, [pattern, replacement]) => acc.replace(pattern, replacement), text);
-}
-
 function gatewayError(message: string, status?: number, code?: string): CrewGatewayError {
-    return new CrewGatewayError(neutralizeErrorText(message), status, code);
+    return new CrewGatewayError(sanitizeErrorMessage(message), status, code);
 }
 
 export interface CrewGatewayClientDeps {
@@ -101,19 +91,13 @@ export class CrewGatewayClient implements CrewGateway {
 
     close(): void { this.events.close(); }
 
+    /** Live installed state, as Michi reads it for readiness, not a cached token's former authority. */
     async approvalsAvailable(): Promise<boolean> {
-        // Live installed state, not a cached token's former authority.
-        try {
-            const dir = path.join(this.config.kirocrewHome, 'apps', this.config.appName);
-            const manifest = JSON.parse(await fs.readFile(path.join(dir, 'app.json'), 'utf8'));
-            const installed = JSON.parse(await fs.readFile(path.join(dir, 'installed.json'), 'utf8'));
-            return manifest.permissions?.sessionApproval === true && installed.enabled === true
-                && installed.sessionApprovalConsentPending !== true;
-        } catch { return false; }
+        return crewIntegrationStatus(this.config).approvals;
     }
 
     async mcpAvailable(): Promise<boolean> {
-        const status = crewIntegrationStatus({ kirocrewHome: this.config.kirocrewHome, appName: this.config.appName });
+        const status = crewIntegrationStatus(this.config);
         return !status.updateRequired && status.mcpDeclared && status.mcpRouted;
     }
 
@@ -435,16 +419,16 @@ export class CrewGatewayClient implements CrewGateway {
 
     /** Read on every exchange so a reinstalled app's new secret is picked up. */
     private async readSecret(): Promise<string> {
-        const { appName, kirocrewHome } = this.config;
+        const file = crewAppSecretPath(this.config);
         let secret = '';
         try {
-            secret = (await fs.readFile(path.join(kirocrewHome, 'apps', appName, '.app_secret'), 'utf8')).trim();
+            secret = (await fs.readFile(file, 'utf8')).trim();
         } catch {
             // Missing or unreadable: reported below without the path's contents.
         }
         if (!secret) {
             throw gatewayError(
-                `Crew app "${appName}" is not installed: no app secret under ${path.join(kirocrewHome, 'apps', appName)}. `
+                `Crew app "${this.config.appName}" is not installed: no app secret under ${path.dirname(file)}. `
                     + 'Install and enable the app in Kiro Crew first.',
             );
         }
@@ -466,7 +450,7 @@ function parseLoopbackUrl(baseUrl: string): URL {
     if (url.protocol !== 'http:' && url.protocol !== 'https:') {
         throw gatewayError(`Crew gateway URL must be http or https: ${url.protocol}`);
     }
-    if (!LOOPBACK_HOSTS.has(url.hostname)) {
+    if (!isLoopbackHostname(url.hostname)) {
         throw gatewayError(`Crew gateway must be on loopback (127.0.0.1, localhost or ::1), got ${url.hostname}`);
     }
     return url;

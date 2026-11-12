@@ -31,3 +31,25 @@ export interface ToolResult<TDetails = unknown> {
 export function errorResult<T = unknown>(message: string): ToolResult<T> {
     return { content: [{ type: "text", text: message }], isError: true };
 }
+
+/** A text-only tool result for an MCP tool callback, whose result type needs the index signature. */
+export interface McpTextResult {
+    [key: string]: unknown;
+    content: Array<{ type: "text"; text: string }>;
+    isError?: true;
+}
+
+/** A failure the model reads as `CODE: message`. */
+export class CodedToolError extends Error {
+    constructor(readonly code: string, message: string) {
+        super(message);
+    }
+}
+
+export function codedErrorResult(code: string, message: string): McpTextResult {
+    return { content: [{ type: "text", text: `${code}: ${message}` }], isError: true };
+}
+
+export function jsonResult(value: Record<string, unknown>): McpTextResult {
+    return { content: [{ type: "text", text: JSON.stringify(value) }] };
+}

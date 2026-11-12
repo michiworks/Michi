@@ -51,6 +51,11 @@ describe('claudeProjectsPath', () => {
     assert.equal(result, expected);
   });
 
+  test('an empty CLAUDE_CONFIG_DIR counts as unset, as it does for auth preflight and the CLI child', () => {
+    process.env.CLAUDE_CONFIG_DIR = '';
+    assert.equal(getClaudeProjectsDir(claude, '/Users/foo/bar'), path.join(os.homedir(), '.claude', 'projects', '-Users-foo-bar'));
+  });
+
   test('encodes underscores, spaces, and dots like the native CLI', () => {
     assert.equal(getClaudeProjectsDir(claude, '/tmp/my_project.v1/work dir'),
       path.join(os.homedir(), '.claude', 'projects', '-tmp-my-project-v1-work-dir'));

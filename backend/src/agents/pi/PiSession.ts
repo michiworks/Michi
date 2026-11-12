@@ -6,7 +6,15 @@ import fs from "fs";
 import path from "path";
 import os from "os";
 import { abortable, withDeadline } from '../runtimeLifecycle';
+import { HEARTBEAT_INTERVAL_MS } from '../../config/constants';
 import type { UserInputAnswer, UserInputQuestion } from 'michi-shared';
+import { expandSkillPrompt } from 'michi-runtime';
+import { skillHistoryText } from 'michi-runtime/internal/core/skills';
+import { turnContextPrefix } from 'michi-runtime/internal/core/turnText';
+import { permissionDetail } from 'michi-runtime/internal/core/permissionPrompt';
+import { assertPermissionAnswer, nextInteractionRequestId } from 'michi-runtime/internal/core/pendingInteractions';
+import { bindMaintenanceTurn, pageAttributionFor } from 'michi-runtime/internal/core/maintenanceTurn';
+import { LOCAL_AGENT_OWNER_ID } from '../../services/agentOwner';
 import type {
     AgentReasoning,
     AgentSession,
@@ -35,35 +43,27 @@ import { PiTodoList } from "./piTodoTool";
 import { PI_ASK_USER_INSTRUCTION, PI_ASK_USER_TOOL } from "./piAskUser";
 import { interruptedToolResult } from "./piToolInterruption";
 import type { PiExtensionUiHost } from "./piExtensionUi";
-import {
-    SEND_TO_THREAD_TOOL,
-    threadMessageApprovalTitle,
-    type ThreadMessageApprovalRequest,
-    type ThreadMessageApprovalResult,
-} from "../threadMessageTool";
-import {
-    scheduledJobApprovalPrompt,
-    type ScheduledJobApprovalRequest,
-    type ScheduledJobApprovalResult,
-} from "../scheduledJobTools";
 import { mapAgentEvent, type MapperContext } from "./eventMapper";
+import { streamSimpleWithFallback } from "./piStreamFallback";
 import type { MinimalAgentMessage } from "./historyAdapter";
 import { makeTurnImageQuota, type TurnImageQuota } from "../tools/read";
 import { chatPermissionMode } from "../permissionPolicy";
+import { approveTimeoutMs } from "../approveTimeout";
 import { isAssistantProfile, piAssistantToolDecision } from "../../assistant/policy";
 import { isMaintenanceProfile, META_AGENT_MAINTENANCE_TOOL_NAMES, maintenancePromptPrefix } from '../maintenancePolicy';
 import { isMemoryExtractionToolName } from '../../services/memory/extractionProfile';
 import { createMemoryExtractionTools } from '../../services/memory/extractionTools';
 import { assertMetaAgentToolCatalog, isMetaAgentProfile } from '../metaAgentGuard';
 import { createMaintenanceTools } from '../../services/pages/maintenanceTools';
-import { followUpReminder } from "../preamble";
+import { followUpReminder, SKILL_TURN_NOTE } from "../preamble";
 import { normalizeWorkspaceCwd } from "../tools/pathSandbox";
-import { resolveBedrockCredentials } from "../../services/bedrockCredentials";
-import { refreshBedrockCredentialsIfNeeded, refreshOnAuthFailure, isBedrockAuthError } from "../../services/bedrockCredentialManager";
+import { BEDROCK_NOT_CONFIGURED, prepareBedrockAuth, type BedrockAuth } from "../../services/bedrockCredentialManager";
 import { McpClientManager } from "../../services/mcpClientManager";
 import { readPiMcpServers } from "../../services/piMcpConfig";
 import { buildMcpToolsForPi, deferMcpTools, mcpInputSchemaToTypebox, PI_TOOL_SEARCH_TOOL_NAME, shouldDeferMcpTools } from "./mcpToolBridge";
 import type { PiSdkFeatures } from "./piSdkHarness";
+import { librarySkillDirs } from "../../services/skills/mounts";
+import { skillLibraryRoot, skillsAvailable } from "../../services/skills/paths";
 
 /**
  * pi-agent-core accepts images as `prompt(text, ImageContent[])` with
@@ -167,22 +167,6 @@ function openRawDump(sessionId: string): {
     };
 }
 
-// Question IDs must not repeat when a node gets a replacement Session, or
-// after a backend restart, so a renderer's stale reply never answers a newer
-// question. Same scheme as the Claude adapter's interaction IDs.
-let lastUserInputRequestId = Date.now() * 1_000;
-function nextUserInputRequestId(): number {
-    lastUserInputRequestId = Math.max(lastUserInputRequestId + 1, Date.now() * 1_000);
-    if (!Number.isSafeInteger(lastUserInputRequestId)) throw new Error('Pi user input request ID exhausted');
-    return lastUserInputRequestId;
-}
-
-/** How long ask_user waits for an answer; the other runtimes share MICHI_APPROVE_TIMEOUT_MS. */
-function userInputTimeoutMs(): number {
-    const parsed = Number.parseInt(process.env.MICHI_APPROVE_TIMEOUT_MS ?? '', 10);
-    return Number.isFinite(parsed) && parsed > 0 ? parsed : 5 * 60 * 1000;
-}
-
 function describeCompaction(result: { tokensBefore?: unknown; estimatedTokensAfter?: unknown } | undefined): string {
     const count = (value: unknown) => typeof value === 'number' && Number.isFinite(value) ? Math.round(value).toLocaleString('en-US') : null;
     const before = count(result?.tokensBefore);
@@ -222,6 +206,17 @@ export class PiSession implements AgentSession {
     public readonly owner: RuntimeSessionOwner;
     public readonly runtimeProfileHash: string | null;
     private readonly toolProfile: RuntimeToolProfile | undefined;
+    /**
+     * Restricted, Meta agent, maintenance and assistant sessions get only the
+     * host prompt: no project context files and no skill library.
+     */
+    private readonly hostPromptOnly: boolean;
+    /**
+     * Folders of the invoked skills this session's prompt names, and of any skill
+     * run here: its read-only file tools may open them. Rebuilt with each
+     * session, so a restored chat can still read a skill an earlier turn ran.
+     */
+    private readonly skillDirs = new Set<string>();
     private readonly permissionBroker: RuntimePermissionBroker | undefined;
     private readonly requestedProvider: string | null;
     private readonly requestedModel: string | null;
@@ -275,7 +270,7 @@ export class PiSession implements AgentSession {
     /**
      * Outstanding permission requests keyed by requestId. Resolved by
      * respondToPermission/cancelPermission, rejected on session destroy
-     * or 5-minute timeout.
+     * or approveTimeoutMs().
      */
     private readonly pendingPermissions = new Map<
         number,
@@ -283,11 +278,8 @@ export class PiSession implements AgentSession {
             resolve: (optionId: string | null) => void;
             timer: NodeJS.Timeout;
             toolName?: string;
-            /** Single-use approval a tool requested itself; grants never cover it. */
-            explicit?: boolean;
         }
     >();
-    private nextRequestId = 1;
     /** Outstanding ask_user questions keyed by requestId; answered, skipped, timed out or cancelled. */
     private readonly pendingUserInputs = new Map<number, {
         resolve: (answers: UserInputAnswer[] | null) => void;
@@ -328,6 +320,8 @@ export class PiSession implements AgentSession {
         this.owner = deps.owner ?? chatOwner(id);
         this.runtimeProfileHash = deps.profileHash ?? null;
         this.toolProfile = deps.toolProfile;
+        this.hostPromptOnly = deps.toolProfile?.restricted === true || isMetaAgentProfile(deps.toolProfile)
+            || isMaintenanceProfile(deps.toolProfile) || isAssistantProfile(deps.toolProfile);
         this.permissionBroker = deps.permissionBroker;
         this.requestedProvider = deps.requestedProvider ?? null;
         this.requestedModel = deps.requestedModel ?? null;
@@ -367,20 +361,10 @@ export class PiSession implements AgentSession {
     }
 
     private maintenanceContextForSend(input?: AgentTurnInput): MaintenanceExecutionContext | null {
-        if (!isMaintenanceProfile(this.toolProfile)) {
-            if (input?.maintenanceContext) throw new Error('Maintenance context supplied to a non-maintenance Pi session');
-            return null;
-        }
-        const context = input?.maintenanceContext;
-        if (!context || hostOwner(this.owner).kind !== 'chat_node' || !input?.turnId || !input.assistantMessageId
-            || context.workspaceId !== this.workspaceId
-            || context.ownerUserId !== (this.ownerUserId ?? 'local-user')
-            || !context.jobId || !context.runId || !context.claimedBy || !context.planId
-            || !Number.isSafeInteger(context.configRevision) || context.configRevision < 1
-            || !Array.isArray(context.sources)) {
-            throw new Error('Maintenance Pi send is missing a valid owner, workspace, or canonical turn binding');
-        }
-        return { ...context, execution: { nodeId: this.owner.key, turnId: input.turnId, assistantId: input.assistantMessageId, runId: context.runId } };
+        return bindMaintenanceTurn(input, {
+            maintenance: isMaintenanceProfile(this.toolProfile), owner: this.owner, workspaceId: this.workspaceId,
+            expectedOwnerUserId: this.ownerUserId ?? LOCAL_AGENT_OWNER_ID, runtimeLabel: 'Pi',
+        });
     }
 
     describeNativeState(): Record<string, unknown> {
@@ -407,10 +391,10 @@ export class PiSession implements AgentSession {
         this.turnPermissionMode = chatPermissionMode(this.owner, this.ownerUserId);
         const controller = new AbortController();
         this.turnAbort = controller;
-        const pageTurnAttribution = hostOwner(this.owner).kind === 'chat_node' && input?.turnId && input.assistantMessageId
-            ? { turnId: input.turnId, assistantId: input.assistantMessageId } : null;
+        const pageTurnAttribution = pageAttributionFor(input, this.owner);
 
-        this.history.push({ role: "user", content: rawUserText });
+        // A skill turn is kept as the command the person ran, like its stored display text, not the skill body.
+        this.history.push({ role: "user", content: input?.skill ? skillHistoryText(input.skill, '') : rawUserText });
 
         const buf: string[] = [];
         this.pendingAssistantBuf = buf;
@@ -473,25 +457,11 @@ export class PiSession implements AgentSession {
         // Resolve authentication: AWS credential chain for Bedrock, API key for everything else.
         const isAwsCred = providerUsesAwsCredentials(provider);
         let apiKey: string | null = null;
-        let bedrockStreamOpts: Record<string, unknown> = {};
-        let bedrockAuthRetry: Parameters<typeof streamSimpleWithFallback>[5];
+        let bedrock: BedrockAuth | null = null;
 
         if (isAwsCred) {
-            const creds = resolveBedrockCredentials();
-            if (!creds) {
-                throw new Error(
-                    "Amazon Bedrock credentials not configured — add them in Settings or set AWS_PROFILE + AWS_REGION env vars.",
-                );
-            }
-            await abortable(refreshBedrockCredentialsIfNeeded(creds), signal);
-            bedrockAuthRetry = { isAuthError: isBedrockAuthError, refresh: () => refreshOnAuthFailure(creds) };
-            bedrockStreamOpts = { region: creds.region };
-            if (creds.bearerToken) bedrockStreamOpts.bearerToken = creds.bearerToken;
-            if (creds.profile) bedrockStreamOpts.profile = creds.profile;
-            if (creds.accessKeyId) {
-                bedrockStreamOpts.accessKeyId = creds.accessKeyId;
-                bedrockStreamOpts.secretAccessKey = creds.secretAccessKey;
-            }
+            bedrock = await abortable(prepareBedrockAuth(), signal);
+            if (!bedrock) throw new Error(BEDROCK_NOT_CONFIGURED);
         } else {
             apiKey = deps.providerKeys.getProviderApiKey(provider, ownerUserId);
             if (!apiKey) {
@@ -528,7 +498,7 @@ export class PiSession implements AgentSession {
             // bearer token or inherit a prior provider's headers/environment.
             const { apiKey: _sdkKey, headers: _sdkHeaders, env: _sdkEnv, ...options } = o ?? {};
             return streamSimpleWithFallback(piMod, upstreamProvider, modelAttempts, c,
-                { ...options, ...(apiKey ? { apiKey } : {}), ...bedrockStreamOpts }, bedrockAuthRetry);
+                { ...options, ...(apiKey ? { apiKey } : {}), ...bedrock?.streamOptions }, bedrock?.authRetry);
         };
 
         // Reset the per-turn image budget before each LLM-driven loop.
@@ -568,8 +538,6 @@ export class PiSession implements AgentSession {
                 // Stable closure: tools are built once, but activePush is rebound
                 // each turn. show_image routes its inline image through here.
                 emitImage: (ev) => this.activePush?.(ev),
-                requestThreadMessageApproval: (request, signal) => this.requestThreadMessageApproval(request, signal),
-                requestScheduledJobApproval: (request, signal) => this.requestScheduledJobApproval(request, signal),
                 requestUserInput: (questions, signal) => this.requestUserInput(questions, signal),
                 agentRunTools: resolveAgentRunToolsForSession(this.bridge, {
                     runtimeId: this.runtimeId,
@@ -583,6 +551,7 @@ export class PiSession implements AgentSession {
                 toolProfile: this.toolProfile,
                 getActivePageTurnAttribution: () => this.getActivePageTurnAttribution(),
                 todoList: this.todoList,
+                skillReadRoots: () => this.skillReadRoots(),
             }).filter((tool) => this.isToolAllowed(tool.name));
 
             if (isMaintenanceProfile(this.toolProfile)) {
@@ -634,10 +603,10 @@ export class PiSession implements AgentSession {
                 .filter(Boolean)
                 .join("\n\n");
             this.hostTools = tools;
-            // Restricted, meta-agent and maintenance sessions get only the
-            // host prompt. Cloud cwd is not a user's project.
-            const projectContext = process.env.MICHI_CLOUD !== '1' && this.toolProfile?.restricted !== true
-                && !isMetaAgentProfile(this.toolProfile) && !isMaintenanceProfile(this.toolProfile) && !isAssistantProfile(this.toolProfile);
+            // Cloud cwd is not a user's project.
+            const projectContext = process.env.MICHI_CLOUD !== '1' && !this.hostPromptOnly;
+            // Read once per session: refreshing Pi's list takes a reload, which resets pi-ai's global providers.
+            const skillPaths = this.hostPromptOnly ? [] : librarySkillDirs();
             this.agent = await this.createHarness(piAgentCore, {
                 initialState: {
                     systemPrompt,
@@ -654,8 +623,8 @@ export class PiSession implements AgentSession {
                 ): Promise<{ block: boolean; reason?: string } | undefined> => {
                     signal?.throwIfAborted();
                     if (isAssistantProfile(this.toolProfile) && isMetaAgentProfile(this.toolProfile)) {
-                        // The assistant's tools enforce their own approvals; nothing else exists.
-                        return piAssistantToolDecision(bcCtx.toolCall.name) === "allow"
+                        // A check-in's tools enforce their own rules; only this session's allow-list runs (DESIGN-v2 §2.5).
+                        return piAssistantToolDecision(bcCtx.toolCall.name, this.toolProfile) === "allow"
                             ? undefined
                             : { block: true, reason: "The Michi assistant does not edit files, run commands or use other tools" };
                     }
@@ -699,7 +668,6 @@ export class PiSession implements AgentSession {
                         return { block: true, reason: "user denied" };
                     }
                     for (const [id, request] of this.pendingPermissions) {
-                        if (request.explicit) continue;
                         if (approvalCoversTool(decision, bcCtx.toolCall.name, request.toolName)) this.respondToPermission(id, 'allow_once');
                     }
                     return undefined;
@@ -709,7 +677,7 @@ export class PiSession implements AgentSession {
                 // restart or release is not reported as the user's Stop.
                 afterToolCall: (context: { result: unknown; isError: boolean }, signal?: AbortSignal) =>
                     interruptedToolResult(context, signal, this.destroyed ? 'session' : 'user') ?? piToolResultErrorOverride(context),
-            }, { projectContext });
+            }, { projectContext, skillPaths });
         }
 
         // Model configuration and credentials can change between turns. Never
@@ -724,9 +692,16 @@ export class PiSession implements AgentSession {
     private async *runTurn(rawText: string, signal: AbortSignal, input?: AgentTurnInput): AsyncIterableIterator<NormalizedEvent> {
         const { model } = yield* this.prepareTurn(signal);
 
-        const promptText = this.firstUserPrimed || !this.firstUserGlue
-            ? rawText
-            : `${this.firstUserGlue}\n\n${rawText}`;
+        // A skill turn opens the person's text with Pi's own skill block, the
+        // way Pi expands /skill:name; Michi's context still goes ahead of it.
+        // The skill's instructions decide the reply, so Michi's format glue
+        // and reminder stay out of it.
+        const skill = input?.skill;
+        if (skill?.path) this.skillDirs.add(path.dirname(skill.path));
+        const userText = skill ? expandSkillPrompt(skill, rawText) : rawText;
+        const promptText = this.firstUserPrimed || !this.firstUserGlue || skill
+            ? userText
+            : `${this.firstUserGlue}\n\n${userText}`;
         this.firstUserPrimed = true;
 
 
@@ -748,8 +723,10 @@ export class PiSession implements AgentSession {
             resolve?.();
         };
 
+        let lastEventAt = Date.now();
         const push = (ev: NormalizedEvent) => {
             queue.push(ev);
+            lastEventAt = Date.now();
             wake();
         };
         this.activePush = push;
@@ -787,13 +764,11 @@ export class PiSession implements AgentSession {
         // them natively) and non-image files were invisible. Images now go as
         // native blocks; everything else is named by path so the agent can open
         // it with Michi's read tool.
-        const { images, promptNote } = prepareAttachments(input?.attachments);
+        const { images, promptNote } = prepareAttachments(input?.attachments, promptText);
         const imageBlocks = buildPiImageBlocks(images);
         const textWithReminder =
-            maintenancePromptPrefix(input?.maintenanceContext)
-            + (input?.memoryContext ? `${input.memoryContext}\n\n---\n\n` : '')
-            + (input?.pageContext ? `${input.pageContext}\n\n---\n\n` : '')
-            + promptText + promptNote + followUpReminder(userTurnCount, this.enableFollowUps);
+            turnContextPrefix(maintenancePromptPrefix(input?.maintenanceContext), input)
+            + promptText + promptNote + (skill ? SKILL_TURN_NOTE : followUpReminder(userTurnCount, this.enableFollowUps));
 
         // Kick off the prompt; don't await it here — yield events as they arrive.
         signal.throwIfAborted();
@@ -820,6 +795,16 @@ export class PiSession implements AgentSession {
                 this.recoveryWork = undefined;
             }
         });
+
+        // Report silence the way the other runtimes do (the pane shows "Working"
+        // from it). Not after Stop: the flush below assumes nothing is queued then.
+        const heartbeat = setInterval(() => {
+            const idleMs = Date.now() - lastEventAt;
+            if (signal.aborted || done || idleMs < HEARTBEAT_INTERVAL_MS) return;
+            queue.push({ kind: "heartbeat", idleMs });
+            wake();
+        }, HEARTBEAT_INTERVAL_MS);
+        heartbeat.unref?.();
 
         try {
             while (true) {
@@ -852,6 +837,7 @@ export class PiSession implements AgentSession {
                 if (ev.kind === "tool_call") await new Promise((r) => setTimeout(r, 16));
             }
         } finally {
+            clearInterval(heartbeat);
             unsubscribe();
             if (!terminated) agent.abort();
             finish();
@@ -895,9 +881,15 @@ export class PiSession implements AgentSession {
         return !allowed || allowed.includes(toolName);
     }
 
+    /** The Michi library and the folders of skills run here; cloud mode keeps neither. */
+    private skillReadRoots(): string[] {
+        if (this.hostPromptOnly || !skillsAvailable()) return [];
+        return [skillLibraryRoot(), ...this.skillDirs];
+    }
+
     /**
      * Build a permission_request event, push it onto the active turn's
-     * queue, and await the user's decision (or 5-min timeout). Returns
+     * queue, and await the user's decision (or approveTimeoutMs()). Returns
      * the chosen optionId or null on timeout/abort/cancel.
      *
      * Called from beforeToolCall when policy === "ask". Honors the
@@ -908,22 +900,27 @@ export class PiSession implements AgentSession {
         toolName: string,
         args: unknown,
         signal: AbortSignal | undefined,
-        explicit?: { title: string; detail?: string; options: PermissionOption[] },
     ): Promise<string | null> {
-        if (!this.activePush || signal?.aborted) return null;
-        const requestId = this.nextRequestId++;
-        const options: PermissionOption[] = explicit?.options ?? (!isRunOwner(this.owner) ? chatApprovalOptions(toolName) : [
+        // The turn the request is pushed on, so its resolution reaches that turn.
+        const push = this.activePush;
+        if (!push || signal?.aborted) return null;
+        const requestId = nextInteractionRequestId();
+        const options: PermissionOption[] = !isRunOwner(this.owner) ? chatApprovalOptions(toolName) : [
             { optionId: "allow_once", name: "Allow once", kind: "allow_once" },
             { optionId: "reject_once", name: "Deny", kind: "reject_once" },
-        ]);
-        const title = explicit?.title ?? formatPermissionTitle(toolName, args);
+        ];
+        const title = formatPermissionTitle(toolName, args);
+        const detail = permissionDetail(toolName, args);
 
         return new Promise<string | null>((resolve) => {
             const timer = setTimeout(() => {
                 this.pendingPermissions.delete(requestId);
+                // Unanswered: the tool is denied. Say so, as Codex and Claude do, so the
+                // host clears the pending request and no late answer is offered.
+                push({ kind: "permission_resolved", requestId });
                 resolve(null);
-            }, 5 * 60 * 1000);
-            this.pendingPermissions.set(requestId, { resolve, timer, toolName, ...(explicit ? { explicit: true } : {}) });
+            }, approveTimeoutMs());
+            this.pendingPermissions.set(requestId, { resolve, timer, toolName });
 
             signal?.addEventListener(
                 "abort",
@@ -937,63 +934,19 @@ export class PiSession implements AgentSession {
                 { once: true },
             );
 
-            this.activePush!({
+            push({
                 kind: "permission_request",
                 requestId,
                 title,
-                ...(explicit?.detail ? { detail: explicit.detail } : {}),
+                ...(detail ? { detail } : {}),
                 options,
                 source: "michi_policy",
             });
         });
     }
 
-    /**
-     * send_to_thread's optional, explicitly requested approval. Independent of the chat's
-     * permission mode and grants: only an explicit "allow_once" approves, and
-     * no grant or session trust is recorded.
-     */
-    private async requestThreadMessageApproval(
-        request: ThreadMessageApprovalRequest,
-        signal: AbortSignal | undefined,
-    ): Promise<ThreadMessageApprovalResult> {
-        const { title, detail } = threadMessageApprovalTitle(request);
-        const answer = await this.requestPermission(SEND_TO_THREAD_TOOL, request, signal, {
-            title,
-            detail,
-            options: [
-                { optionId: "reject_once", name: "Don't send", kind: "reject_once" },
-                { optionId: "allow_once", name: "Send", kind: "allow_once" },
-            ],
-        });
-        if (answer === "allow_once") return { approved: true };
-        return { approved: false, reason: answer === null ? "no_answer" : "declined" };
-    }
-
-    /**
-     * A scheduled job change's own approval. Like send_to_thread it ignores
-     * the chat's permission mode and grants: only "allow_once" approves.
-     */
-    private async requestScheduledJobApproval(
-        request: ScheduledJobApprovalRequest,
-        signal: AbortSignal | undefined,
-    ): Promise<ScheduledJobApprovalResult> {
-        const { title, detail } = scheduledJobApprovalPrompt(request);
-        const answer = await this.requestPermission(request.toolName, request, signal, {
-            title,
-            detail,
-            options: [
-                { optionId: "reject_once", name: "Cancel", kind: "reject_once" },
-                { optionId: "allow_once", name: request.approveLabel, kind: "allow_once" },
-            ],
-        });
-        if (answer === "allow_once") return { approved: true };
-        return { approved: false, reason: answer === null ? "no_answer" : "declined" };
-    }
-
     respondToPermission(requestId: number, optionId: string): void {
-        if (isRunOwner(this.owner) && optionId === 'allow_session') throw new Error('Invalid permission option');
-        if (optionId !== 'allow_once' && optionId !== 'allow_always' && optionId !== 'allow_session' && optionId !== 'reject_once') throw new Error('Invalid permission option');
+        assertPermissionAnswer(this.owner, optionId);
         const entry = this.pendingPermissions.get(requestId);
         if (!entry) return;
         clearTimeout(entry.timer);
@@ -1029,7 +982,7 @@ export class PiSession implements AgentSession {
             const stopped = AbortSignal.any([turn, ...(signal ? [signal] : []), ...(dismiss ? [dismiss] : [])]);
             await abortable(previous, stopped).catch(() => {});
             if (stopped.aborted || this.activePush !== push) return null;
-            const requestId = nextUserInputRequestId();
+            const requestId = nextInteractionRequestId();
             const answers = await new Promise<UserInputAnswer[] | null>((resolve) => {
                 const stop = () => this.skipUserInput(requestId);
                 const finish = (value: UserInputAnswer[] | null) => {
@@ -1039,7 +992,7 @@ export class PiSession implements AgentSession {
                 const timer = setTimeout(() => {
                     this.pendingUserInputs.delete(requestId);
                     finish(null);
-                }, userInputTimeoutMs());
+                }, approveTimeoutMs());
                 this.pendingUserInputs.set(requestId, { resolve: finish, timer });
                 stopped.addEventListener('abort', stop, { once: true });
                 push({ kind: 'user_input_request', requestId, questions });
@@ -1324,101 +1277,6 @@ export class PiSession implements AgentSession {
             throw error;
         }
     }
-}
-
-/**
- * Model-fallback wrapper that returns a real AssistantMessageEventStream
- * (has both `[Symbol.asyncIterator]` AND `.result()`), satisfying
- * pi-agent-core's `StreamFn` contract.
- *
- * Pattern: synchronously return an outer EventStream, drive it from an
- * async IIFE — identical to pi-ai's own faux/lazyStream pattern.
- */
-export function streamSimpleWithFallback(
-    piMod: any,
-    upstreamProvider: string,
-    models: any[],
-    context: any,
-    options: any,
-    /** Bedrock: an auth error before any output refreshes credentials and retries the same model once. */
-    authRetry?: { isAuthError(ev: any): boolean; refresh(): Promise<boolean> },
-): any /* AssistantMessageEventStream */ {
-    const outer = piMod.createAssistantMessageEventStream();
-    const attempts = models.length > 0 ? models : [undefined];
-    let authRetried = false;
-    const fail = (error: unknown, modelId = '') => {
-        const aborted = options?.signal?.aborted || (error as { name?: string })?.name === 'AbortError';
-        outer.push({
-            type: 'error',
-            reason: aborted ? 'aborted' : 'error',
-            error: {
-                role: 'assistant', content: [], api: '', provider: upstreamProvider, model: modelId,
-                usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
-                stopReason: aborted ? 'aborted' : 'error',
-                errorMessage: error instanceof Error ? error.message : String(error),
-                timestamp: Date.now(),
-            },
-        });
-    };
-
-    void (async () => {
-        let lastError: any;
-
-        for (let i = 0; i < attempts.length; i += 1) {
-            const model = attempts[i];
-            const modelId = model?.id;
-            let yieldedAny = false;
-            let retrySameModel = false;
-
-            try {
-                options?.signal?.throwIfAborted();
-                const inner = piMod.streamSimple(model, context, options);
-                let terminalSeen = false;
-                for await (const ev of inner) {
-                    if (ev?.type === 'error' && (options?.signal?.aborted || ev.reason === 'aborted' || ev.error?.stopReason === 'aborted')) {
-                        outer.push({ ...ev, reason: 'aborted', error: { ...ev.error, stopReason: 'aborted' } });
-                        return;
-                    }
-                    if (ev?.type === 'error' && !yieldedAny && authRetry && !authRetried && authRetry.isAuthError(ev)) {
-                        authRetried = true;
-                        const refresh = authRetry.refresh();
-                        retrySameModel = options?.signal ? await abortable(refresh, options.signal) : await refresh;
-                        if (retrySameModel) break;
-                    }
-                    // Still no output + error + more models to try → switch
-                    if (ev?.type === "error" && !yieldedAny && i < attempts.length - 1) {
-                        lastError = ev;
-                        break;
-                    }
-                    yieldedAny = true;
-                    outer.push(ev);
-                    terminalSeen ||= ev?.type === 'done' || ev?.type === 'error';
-                    // push of done/error event auto-resolves outer.result()
-                }
-                if (retrySameModel) {
-                    i -= 1;
-                    continue;
-                }
-                if (terminalSeen) return;
-                if (yieldedAny) throw new Error('Pi provider stream ended without a terminal event');
-            } catch (err) {
-                if (options?.signal?.aborted || (err as { name?: string })?.name === 'AbortError' || yieldedAny || i === attempts.length - 1) {
-                    fail(err, modelId);
-                    return;
-                }
-                lastError = err;
-            }
-        }
-
-        // All attempts exhausted without yielding any content
-        if (lastError && typeof lastError === "object" && "type" in lastError) {
-            outer.push(lastError);
-        } else {
-            fail(lastError ?? new Error('All model attempts failed'));
-        }
-    })().catch((error) => fail(error));
-
-    return outer;
 }
 
 /**

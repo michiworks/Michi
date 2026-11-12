@@ -1,4 +1,4 @@
-import './helpers/claudeSdkFixture';
+import { untilSpawned } from './helpers/claudeSdkFixture';
 import { test, type TestContext } from 'node:test';
 import assert from 'node:assert/strict';
 import { claudeTestOptions } from './helpers/claudeTestOptions';
@@ -137,7 +137,7 @@ test('self-turn interrupt timeout retires the process before the next turn resum
   assert.deepEqual(h.children[0].signals, ['SIGINT', 'SIGKILL']);
 
   const next = drain(h.session.send('next'));
-  await tick();
+  await untilSpawned(() => h.spawns.length === 2);
   assert.equal(h.spawns[1].resumeSessionId, 'native-self');
   h.children[0].chunk('stale');
   h.children[0].result();
@@ -232,4 +232,66 @@ test('an early self-turn consumer return retires the unfinished native owner', a
   assert.equal(h.session.getState(), 'crashed');
   assert.deepEqual(h.children[0].signals, ['SIGINT', 'SIGKILL']);
   assert.equal(h.session.nativeSessionId, 'native-self');
+});
+
+test('a background frame during a host command waits for the command, then starts its self-turn', async (t) => {
+  const h = harness(t);
+  await h.session.spawnFresh();
+  h.children[0].init();
+  await tick();
+  // An idle pump that cannot claim the turn hands the frame back and pulls it
+  // again. If nothing parked it, that loop never yields and freezes the
+  // backend: count the hand-backs and stop the loop so a regression fails here.
+  const queue = (h.session as any).queue;
+  const pushFront = queue.pushFront.bind(queue);
+  let handBacks = 0;
+  queue.pushFront = (event: NormalizedEvent) => {
+    if (++handBacks > 100) throw new Error('the idle pump spun against a held turn');
+    pushFront(event);
+  };
+  let answer!: (status: unknown) => void;
+  (h.session as any).transport.query.mcpServerStatus = () => new Promise((resolve) => { answer = resolve; });
+  const command = h.session.executeCommand('mcp');
+  h.children[0].chunk('background');
+  await tick();
+  assert.equal(handBacks, 0, 'the frame waits in the queue while the command holds the turn');
+  assert.equal(h.selfEvents.length, 0);
+
+  answer([]);
+  assert.deepEqual(await command, { success: true, data: [] });
+  await tick();
+  assert.ok(h.selfEvents.some((event) => event.kind === 'chunk'), 'the frame starts a self-turn once the command ends');
+  h.children[0].result();
+  assert.deepEqual((await h.selfDone()).at(-1), { kind: 'turn_end', stopReason: 'end_turn' });
+  assert.equal(h.spawns.length, 1);
+});
+
+test('a Stop after Claude answered, while the reply still drains, keeps the process', async (t) => {
+  const h = harness(t);
+  await h.session.spawnFresh();
+  h.children[0].init();
+  await tick();
+  const turn = h.session.send('hello');
+  const first = turn.next();
+  await tick();
+  assert.match(h.children[0].stdin.read().toString(), /hello/);
+  h.children[0].chunk('answer');
+  assert.equal((await first).value?.kind, 'chunk');
+  // The result arrives while the consumer has not asked for more events yet.
+  h.children[0].result();
+  await tick();
+  const ack = await h.session.cancel();
+  assert.equal(ack.acknowledged, true);
+  assert.deepEqual(h.children[0].signals, [], 'the CLI that already answered is not killed');
+  const rest: NormalizedEvent[] = [];
+  for (let next = await turn.next(); !next.done; next = await turn.next()) rest.push(next.value);
+  assert.equal(rest.at(-1)?.kind, 'turn_end');
+
+  const again = drain(h.session.send('again'));
+  await tick();
+  assert.match(h.children[0].stdin.read().toString(), /again/);
+  h.children[0].result();
+  assert.equal((await again).at(-1)?.kind, 'turn_end');
+  assert.equal(h.spawns.length, 1);
+  assert.equal(h.session.getState(), 'idle');
 });

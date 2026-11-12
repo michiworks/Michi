@@ -1,6 +1,5 @@
 import { render } from '@testing-library/react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import React from 'react';
 import { PaneMessageList } from './PaneMessageList';
 import type { ChatMessage, ChatNodeState } from '../../state/chatTypes';
 import type { Prefs } from '../../state/prefs';
@@ -48,7 +47,6 @@ function renderList(node: ChatNodeState, onOpenBranch: (id: string) => void) {
       prefs={prefs}
       contentStyle={{}}
       streaming
-      viewportHeight={800}
       onRetryTurn={vi.fn()}
       onEditUserMessage={vi.fn()}
       onContinueFollowUp={vi.fn()}

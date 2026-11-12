@@ -220,8 +220,8 @@ function LaneRow({ node, events, streaming, isRoot, scale, now, onFocus }: LaneR
           <span style={{
             display: 'inline-block', marginTop: 7,
             fontFamily: 'var(--message-code-font)', fontSize: 'var(--fs-xs)', padding: '2px 8px',
-            color: streaming ? 'var(--term-accent)' : ACCENT_DARK,
-            background: 'var(--term-accent-f)',
+            color: streaming ? 'var(--term-run)' : ACCENT_DARK,
+            background: streaming ? 'var(--term-run-f)' : 'var(--term-accent-f)',
           }}>
             {streaming
               ? <><span className="map-card__live-dot">●</span> LIVE</>
@@ -297,7 +297,7 @@ function LaneRow({ node, events, streaming, isRoot, scale, now, onFocus }: LaneR
             >
               <div style={{
                 fontFamily: 'var(--message-code-font)', fontSize: 'var(--fs-2xs)',
-                color: live ? 'var(--term-accent)' : 'var(--term-muted)',
+                color: live ? 'var(--term-run)' : 'var(--term-muted)',
               }}>
                 {live && <span className="map-card__live-dot">● </span>}
                 {live ? 'now' : `${formatAxisLabel(e.resolvedAt, scale.end - scale.start)}${isForked ? ' · forked' : ''}`}

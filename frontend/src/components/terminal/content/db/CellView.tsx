@@ -1,16 +1,16 @@
 import React from 'react';
 import type { MichiDatabase, MichiDbColumn, DatabaseRowStatus } from 'michi-shared';
 import { ThreadStateDot } from '../ThreadStateDot';
-import { formatMichiAge } from '../michiFormat';
+import { formatDateValue, formatDay, formatMichiAge } from '../michiFormat';
 import { michiOneLine } from '../michiPlainText';
 import { cellText, isAgentOneLiner, isBlank, isDateValue, isThreadsDb, type CellValue } from './dbModel';
 import { loadableImageUrl } from '../../../../lib/pictureAddress';
 import { ThreadChips } from './liveThreads';
-import { formatDateValue, formatDay, optionName, optionTone } from './dbLabels';
+import { optionName, optionTone } from './dbLabels';
 
 type DbRef = Pick<MichiDatabase, 'id' | 'kind'>;
 
-const NUMBER = new Intl.NumberFormat(undefined, { maximumFractionDigits: 6 });
+const NUMBER = new Intl.NumberFormat('en-US', { maximumFractionDigits: 6 });
 
 /** Only a web page becomes a link; any other scheme shows as its words. */
 function webUrl(s: string): boolean {

@@ -1,6 +1,6 @@
-import { serverEntityId } from '../../config/backendIdentity';
+import { connectionIdFromApiUrl, serverEntityId } from '../../config/backendIdentity';
 import { backendFetch } from './backendRequest';
-import { responseError } from './httpError';
+import { jsonResponse, responseError } from './httpError';
 import {
   activeBackendApiBase,
   backendApiBase,
@@ -8,10 +8,12 @@ import {
   nodeBackendApiBase,
   workspaceBackendApiBase,
 } from '../../config/backendConnections';
-import { parseSessionState, type AgentSessionState, parseAgentDefinitionDtoV1, type AgentDefinitionDtoV1 } from 'michi-shared';
+import { parseSessionState, type AgentSessionState, parseAgentDefinitionDtoV1, type AgentDefinitionDtoV1, randomUuid, runtimeShortLabel } from 'michi-shared';
 import { startupMark } from '../startupTrace';
+import { abortableDelay } from '../../utils/sleep';
 import type { RuntimeId, AgentReasoning } from './agentRuntime';
 import { reportRemoteCredentialError } from '../../state/remoteAuthentication';
+import { remoteFirstPainted, whenRemoteFirstPaint } from '../../state/remoteFirstPaint';
 
 export interface SessionMode {
   id: string;
@@ -30,6 +32,9 @@ export async function listAgentModes(workspaceId?: string, signal?: AbortSignal)
   const route = workspaceId
     ? `/workspaces/${encodeURIComponent(serverEntityId(workspaceId))}/modes`
     : '/modes';
+  const connectionId = connectionIdFromApiUrl(base);
+  if (!remoteFirstPainted(connectionId)) await whenRemoteFirstPaint(connectionId);
+  if (signal?.aborted) throw signal.reason ?? new DOMException('Aborted', 'AbortError');
   const res = await backendFetch(`${base}${route}`, { signal });
   if (!res.ok) throw await responseError(res, 'listAgentModes');
   const body = await res.json();
@@ -58,6 +63,10 @@ export async function warmCwd(cwd: string, connectionId?: string, signal?: Abort
   startupMark('warm_request_start', { cwd });
   let res: Response;
   try {
+    // Warming is an optimisation: a remote's waits for its conversation to paint.
+    const remoteId = connectionIdFromApiUrl(backendApiBase(connectionId));
+    if (!remoteFirstPainted(remoteId)) await whenRemoteFirstPaint(remoteId);
+    if (signal?.aborted) throw signal.reason ?? new DOMException('Aborted', 'AbortError');
     res = await backendFetch(`${backendApiBase(connectionId)}/warm`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -119,7 +128,10 @@ export interface EnsureSessionOptions {
   model?: string;
   extraContexts?: Array<{ name: string; filePath: string; url?: string; size?: number; kind?: 'embedded' | 'reference' | 'symlink' }>;
   enableFollowUps?: boolean;
+  /** The workspace's pinned artifacts (at most 50), named in a new session's first message. */
   contextManifest?: Array<{ name: string; filePath: string; url?: string; kind?: 'embedded' | 'reference' | 'symlink' }>;
+  /** How many artifacts the workspace has in all; the agent finds the unpinned ones with its artifact tools. */
+  artifactCount?: number;
   priorMessages?: Array<{ role: 'user' | 'assistant'; text: string }>;
   runtimeId?: RuntimeId;
   providerId?: string | null;
@@ -169,17 +181,10 @@ export async function listPrimaryAgentDefinitions(
   signal?: AbortSignal,
 ): Promise<PrimaryAgentDefinitionOption[]> {
   const backendConnectionId = backendConnectionIdForWorkspace(workspaceId);
-  const response = await backendFetch(
+  const payload = await jsonResponse(await backendFetch(
     `${workspaceBackendApiBase(workspaceId)}/agents?workspaceId=${encodeURIComponent(serverEntityId(workspaceId))}&discover=enabled`,
     { signal },
-  );
-  const payload: unknown = await response.json().catch(() => null);
-  if (!response.ok) {
-    const message = payload && typeof payload === 'object' && 'error' in payload && typeof payload.error === 'string'
-      ? payload.error
-      : `listPrimaryAgentDefinitions failed: ${response.status}`;
-    throw new Error(message);
-  }
+  ), 'listPrimaryAgentDefinitions');
   const definitions = payload && typeof payload === 'object' && 'definitions' in payload && Array.isArray(payload.definitions)
     ? payload.definitions
     : [];
@@ -210,33 +215,18 @@ export interface EnsureSessionResult {
 }
 
 /**
- * Generate node IDs locally using `crypto.randomUUID()`. This is the same
+ * Generate node IDs locally using `randomUuid()`. This is the same
  * format the backend produces (`n-${randomUUID()}`) but avoids a network
  * round-trip, which is critical when the backend event loop is busy with
  * concurrent ensure-session / SQLite operations. UUID v4 collision probability
  * is ~2^-122, so local generation is safe.
  */
 export function allocateNodeIdsLocal(count = 1): string[] {
-  return Array.from({ length: count }, () => `n-${crypto.randomUUID()}`);
+  return Array.from({ length: count }, () => `n-${randomUuid()}`);
 }
 
 const TURN_ACTIVE_RETRY_START_MS = 150;
 const TURN_ACTIVE_RETRY_BUDGET_MS = 10_000;
-
-function waitBeforeRetry(ms: number, signal?: AbortSignal): Promise<void> {
-  return new Promise((resolve, reject) => {
-    if (signal?.aborted) {
-      reject(signal.reason);
-      return;
-    }
-    const timer = setTimeout(resolve, ms);
-    // A later abort after the wait ended is a no-op here.
-    signal?.addEventListener('abort', () => {
-      clearTimeout(timer);
-      reject(signal.reason);
-    }, { once: true });
-  });
-}
 
 export async function ensureSession(opts: EnsureSessionOptions): Promise<EnsureSessionResult> {
   const startedAt = Date.now();
@@ -251,6 +241,7 @@ export async function ensureSession(opts: EnsureSessionOptions): Promise<EnsureS
   if (opts.extraContexts && opts.extraContexts.length > 0) body.extraContexts = opts.extraContexts;
   if (opts.enableFollowUps === false) body.enableFollowUps = false;
   if (opts.contextManifest && opts.contextManifest.length > 0) body.contextManifest = opts.contextManifest;
+  if (opts.artifactCount !== undefined && opts.artifactCount > 0) body.artifactCount = opts.artifactCount;
   if (opts.priorMessages) body.priorMessages = opts.priorMessages;
   if (opts.runtimeId) body.runtimeId = opts.runtimeId;
   if (opts.modeId) body.modeId = opts.modeId;
@@ -301,14 +292,14 @@ export async function ensureSession(opts: EnsureSessionOptions): Promise<EnsureS
     }
     if (res.status !== 409 || payload?.code !== 'turn_active'
       || Date.now() - startedAt + retryDelay > TURN_ACTIVE_RETRY_BUDGET_MS) break;
-    await waitBeforeRetry(retryDelay, opts.signal);
+    await abortableDelay(retryDelay, opts.signal);
   }
   if (!res.ok) {
     if (payload?.code === 'RUNTIME_SESSIONS_BUSY' || payload?.code === 'CLAUDE_SESSIONS_BUSY') {
       startupMark('ensure_session_failed', { nodeId: opts.nodeId, status: res.status, code: payload.code, durMs: Date.now() - startedAt });
       // Older gateways use CLAUDE_SESSIONS_BUSY for every runtime.
       const runtimeId = payload.runtimeId ?? opts.runtimeId;
-      const label = ({ claude: 'Claude', codex: 'Codex', kiro: 'Kiro', pi: 'Pi', crew: 'Kiro Crew', antigravity: 'Antigravity' } as Record<string, string>)[runtimeId ?? ''] ?? 'Agent';
+      const label = (runtimeId && runtimeShortLabel(runtimeId)) || 'Agent';
       throw new Error(
         `${label} session capacity is full. Wait for an idle session to be released, then retry.`,
       );

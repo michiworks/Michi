@@ -1,7 +1,9 @@
 import React, { useState } from 'react';
-import { FileText, Home, MoreHorizontal, Plus, Table2 } from 'lucide-react';
+import { FileText, Home, Plus, Table2 } from 'lucide-react';
 import { pageBlockTitle, type PageBlock, type PageBlockType, type PageSummaryDto } from 'michi-shared';
 import { MichiMenu } from '../content/page/MichiMenu';
+import { RowKebab } from '../primitives';
+import { revealPageTarget } from '../../../state/pages/revealPageTarget';
 
 export interface SpaceOutlineProps {
   pages: PageSummaryDto[];
@@ -28,7 +30,10 @@ const capStyle: React.CSSProperties = {
   textTransform: 'uppercase',
 };
 
-/** The blocks "On this page" names besides headings: the ones drawn under a title of their own. Text is read, not outlined. */
+/**
+ * The blocks "On this page" names besides headings: the ones drawn under a title of their own. Text is read, not outlined;
+ * the Contents block (outline.ts) lists Markdown headings, and headings inside containers, by design.
+ */
 const OUTLINED: ReadonlySet<PageBlockType> = new Set<PageBlockType>([
   'callout', 'checklist', 'next-steps', 'timeline', 'plan-actual', 'compare', 'conflict', 'table', 'criteria', 'chart', 'gallery', 'forgot', 'threads',
 ]);
@@ -62,7 +67,7 @@ export function pageOutline(blocks: readonly PageBlock[]): PageOutlineEntry[] {
 }
 
 /** The card beside a Space page: its page tree, then the headings and titled blocks of the open page. */
-export function SpaceOutline({ pages, activePageId, rootId, blocks, readOnly, loading, error, onRetry, onOpen, onCreateChild, onRename, onMove, onTrash }: SpaceOutlineProps) {
+function SpaceOutline({ pages, activePageId, rootId, blocks, readOnly, loading, error, onRetry, onOpen, onCreateChild, onRename, onMove, onTrash }: SpaceOutlineProps) {
   const [menu, setMenu] = useState<{ page: PageSummaryDto; anchor: HTMLElement } | null>(null);
   const children = new Map<string | null, PageSummaryDto[]>();
   for (const page of pages) {
@@ -79,7 +84,9 @@ export function SpaceOutline({ pages, activePageId, rootId, blocks, readOnly, lo
     const Glyph = depth === 0 ? Home : page.title && /list|checklist|清单|行程|database/i.test(page.title) ? Table2 : FileText;
     return (
       <React.Fragment key={page.id}>
-        <div className="space-outline__row" data-current={current || undefined}>
+        <div className="space-outline__row t-reveal-host" data-current={current || undefined}
+          data-context-target={readOnly ? undefined : ''}
+          onContextMenu={readOnly ? undefined : (event) => { event.preventDefault(); setMenu({ page, anchor: event.currentTarget }); }}>
           <button
             type="button"
             className={`branches-directory__item space-outline__item${current ? ' is-current' : ''}`}
@@ -93,15 +100,8 @@ export function SpaceOutline({ pages, activePageId, rootId, blocks, readOnly, lo
             {page.pendingProposals > 0 && <span className="space-outline__count" aria-label={`${page.pendingProposals} waiting for you`}>{page.pendingProposals}</span>}
           </button>
           {!readOnly && (
-            <button
-              type="button"
-              className="space-outline__more"
-              aria-label={`Actions for ${page.title}`}
-              aria-haspopup="menu"
-              onClick={(event) => setMenu({ page, anchor: event.currentTarget })}
-            >
-              <MoreHorizontal size={14} strokeWidth={1.6} />
-            </button>
+            <RowKebab fader={false} open={menu?.page.id === page.id} ariaLabel={`Actions for ${page.title}`}
+              onOpen={(_point, button) => setMenu({ page, anchor: button })} />
           )}
         </div>
         {(children.get(page.id) ?? []).map((child) => row(child, depth + 1))}
@@ -135,7 +135,7 @@ export function SpaceOutline({ pages, activePageId, rootId, blocks, readOnly, lo
               data-depth={entry.depth}
               title={entry.text}
               style={{ padding: `6px 14px 6px ${entry.depth === 2 ? 30 : 14}px` }}
-              onClick={() => document.getElementById(`page-block-${entry.id}`)?.scrollIntoView({ behavior: 'smooth', block: 'start' })}
+              onClick={() => { revealPageTarget({ targetId: entry.id }); }}
             >
               <span className="space-outline__section-text">{entry.text}</span>
             </button>

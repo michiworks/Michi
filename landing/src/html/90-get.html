@@ -1,0 +1,39 @@
+<!-- 90-get.html (owner: verbs). The close (#get), brief §3.11, §5.10. The tile ships as an image;
+     with JS and motion allowed 65-close.js makes it a button (dip, surface, blink on click only).
+     The Home replica is static apart from the visitor caret, which blinks three times the first
+     time the close is half in view, then stays solid. The tray under the Home composer is the app's
+     narrow-composer layout (Home.tsx HOME_TRAY_BELOW) and only shows on phones. -->
+<section class="sec sec--m get" id="get" aria-labelledby="get-title">
+  <div class="wrap grid get-grid">
+    <div class="get-lock">
+      <span class="get-tile" role="img" aria-label="Michi"><svg viewBox="0 0 1078 1080" width="56" height="56" aria-hidden="true" focusable="false"><defs><clipPath id="mark-clip-get"><rect width="1078" height="1080" rx="236"/></clipPath></defs><g clip-path="url(#mark-clip-get)"><rect width="1078" height="1080" fill="#000000"/><g class="get-body"><path id="mark-blob" d="M307.0 1073.2 C280.7 1060.0 262.3 1046.4 238.5 1022.5 C217.0 1001.0 204.1 984.8 189.0 959.9 C156.0 905.4 136.7 841.3 131.0 767.1 C129.7 749.9 129.7 703.7 131.0 685.5 C139.0 573.9 173.9 457.8 229.6 357.2 C259.4 303.5 295.9 252.8 336.7 208.5 C379.1 162.4 412.3 139.7 449.2 131.4 C454.2 130.2 461.0 129.7 471.0 129.7 C483.4 129.7 487.0 130.1 495.5 132.4 C532.7 142.1 555.7 167.9 561.7 206.5 C566.2 236.2 557.5 274.9 538.7 308.5 C530.8 322.5 524.3 332.4 503.4 361.5 C481.0 392.9 470.2 409.8 462.6 425.4 C432.4 487.1 440.4 550.4 481.7 576.8 C496.3 586.1 510.6 589.5 531.4 588.7 C548.8 588.0 559.8 585.3 575.6 577.5 C589.3 570.9 600.0 562.9 611.2 551.1 C636.2 524.9 653.6 492.5 676.2 430.5 C687.3 399.7 692.0 388.4 700.6 371.0 C726.6 318.7 753.9 298.2 789.8 304.0 C811.7 307.6 828.4 317.7 839.4 334.3 C854.2 356.6 857.3 365.8 862.5 404.2 C867.7 442.7 867.7 471.8 862.8 539.0 C860.2 574.6 859.7 633.0 861.8 650.0 C865.4 678.7 872.1 701.8 883.6 725.0 C900.2 758.5 924.4 787.9 952.4 808.8 C976.9 827.0 1035.3 857.2 1074.4 872.0 C1077.2 873.0 1077.3 873.2 1076.6 878.3 C1076.3 881.1 1076.0 927.7 1076.0 981.8 L1076.0 1080.0 L698.2 1080.0 L320.4 1080.0 L307.0 1073.2 Z" fill="#F7F6EF"/><g id="mark-eyes" fill="#000000"><circle cx="377.5" cy="703.5" r="24.5"/><circle cx="637" cy="703.5" r="24.5"/></g><g fill="#000000"><rect x="479" y="724" width="58" height="14"/><rect x="501" y="738" width="14" height="43"/></g></g></g></svg></span>
+      <div class="get-copy">
+        <h2 class="display" id="get-title"><span class="claim">Take the detour.</span> <span class="consequence">Come back with what you found.</span></h2>
+        <div class="cta-row get-cta">
+          <a class="btn btn--primary" href="#todo-download" aria-keyshortcuts="D">Download for macOS<kbd class="kbd" aria-hidden="true">D</kbd></a>
+          <button type="button" class="btn btn--secondary touch-only js-only" data-copy-link><span class="xfade"><span>Copy link for your Mac</span><span aria-hidden="true">Link copied</span></span></button>
+        </div>
+        <p class="meta get-meta">macOS · No account needed to run locally</p>
+      </div>
+    </div>
+    <div class="get-fig">
+      <div class="mk-fit get-fit" data-w="640" data-h="300">
+        <div class="mk mk-canvas" aria-hidden="true">
+          <div class="mk-window">
+            <div class="mk-home">
+              <p class="mk-home-h"><span class="mk-home-mark">_ </span>Another road diverged in a yellow wood.</p>
+              <div class="get-cw">
+                <div class="mk-composer is-home is-focused">
+                  <div class="mk-cin"><span class="mk-prompt">›_</span><div class="mk-input"><i class="mk-caret"></i></div></div>
+                  <div class="mk-tools"><span class="mk-tchip is-ws get-tb"><svg class="i" width="12" height="12" viewBox="0 0 16 16" stroke-width="1.6"><path d="M2 4.5a1 1 0 0 1 1-1h3.2a1 1 0 0 1 .7.3l1 1a1 1 0 0 0 .7.3H13a1 1 0 0 1 1 1V12a1 1 0 0 1-1 1H3a1 1 0 0 1-1-1V4.5Z"/></svg>tokyo-rollout</span><span class="mk-tchip is-icon"><svg class="i" width="16" height="16" viewBox="0 0 24 24" stroke-width="2.4"><path d="M5 12h14"/><path d="M12 5v14"/></svg></span><span class="mk-tchip is-icon"><svg class="i" width="16" height="16" viewBox="0 0 24 24" stroke-width="2.4"><circle cx="12" cy="12" r="4"/><path d="M16 8v5a3 3 0 0 0 6 0v-1a10 10 0 1 0-4 8"/></svg></span><span class="mk-tools-gap"></span><span class="mk-tchip get-tb"><svg class="i" width="14" height="14" viewBox="0 0 16 16" stroke-width="1.6"><path d="M8 1.8l5 2v4.1c0 3-2.1 5.1-5 6.3-2.9-1.2-5-3.3-5-6.3V3.8z"/><path d="M5.8 8.1l1.6 1.6 3-3.1"/></svg>Ask</span><span class="mk-tchip is-model">Opus 5<span class="mk-tchip-effort">High</span><svg class="i i-r90 vb-chev" width="12" height="12" viewBox="0 0 16 16" stroke-width="1.6"><path d="M6 3l5 5-5 5"/></svg></span><span class="mk-send is-empty"><svg class="i when-send" width="14" height="14" viewBox="0 0 16 16" stroke-width="1.8"><path d="M8 13V3"/><path d="M3.5 7.5L8 3l4.5 4.5"/></svg></span></div>
+                </div>
+                <div class="get-tray"><span class="mk-tchip is-ws"><svg class="i" width="12" height="12" viewBox="0 0 16 16" stroke-width="1.6"><path d="M2 4.5a1 1 0 0 1 1-1h3.2a1 1 0 0 1 .7.3l1 1a1 1 0 0 0 .7.3H13a1 1 0 0 1 1 1V12a1 1 0 0 1-1 1H3a1 1 0 0 1-1-1V4.5Z"/></svg>tokyo-rollout<svg class="i get-ud" width="12" height="12" viewBox="0 0 16 16" stroke-width="1.6"><path d="M5 6.5l3-3 3 3M5 9.5l3 3 3-3"/></svg></span><span class="mk-tchip"><svg class="i" width="14" height="14" viewBox="0 0 16 16" stroke-width="1.6"><path d="M8 1.8l5 2v4.1c0 3-2.1 5.1-5 6.3-2.9-1.2-5-3.3-5-6.3V3.8z"/><path d="M5.8 8.1l1.6 1.6 3-3.1"/></svg>Ask<svg class="i get-ud" width="12" height="12" viewBox="0 0 16 16" stroke-width="1.6"><path d="M5 6.5l3-3 3 3M5 9.5l3 3 3-3"/></svg></span></div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+      <p class="sr-only">Michi’s Home screen: “Another road diverged in a yellow wood.” above an empty composer.</p>
+    </div>
+  </div>
+</section>

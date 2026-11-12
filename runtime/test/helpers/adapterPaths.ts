@@ -15,6 +15,3 @@ export const CREW_MCP_HOST = path.join(ADAPTERS, 'crew/crewMcpHost.ts');
 
 /** Source of Codex's event translator; codexContract reads its method and item literals. */
 export const CODEX_EVENT_TRANSLATOR = path.join(ADAPTERS, 'codex/codexEventTranslator.ts');
-
-/** The script Codex's Stop hook runs (build.mjs copies it into dist/). */
-export const CODEX_STOP_HOOK_RUNNER = path.join(ADAPTERS, 'codex/assets/codexStopHookRunner.cjs');

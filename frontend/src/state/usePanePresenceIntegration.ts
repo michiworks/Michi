@@ -10,7 +10,10 @@
  *  cross-backend global inspection/isolation feature here — this hook reports exactly one
  *  `PanePresenceBackendSlots` entry, for the ACTIVE project's backend connection, built from every
  *  open-pane slot belonging to that project (every tree, not just the visible one — `openPanesMap`
- *  is passed through read-only from `usePaneState`, not just the currently-focused slot). A window
+ *  is passed through read-only from `usePaneState`, not just the currently-focused slot). Only the
+ *  panes this window has on screen are reported `visible: true` (`useOnScreenPanes`): the server
+ *  suppresses and resolves notifications for what a focused window shows, and Pane Inspection
+ *  tells agents what the user can see. A window
  *  with no active project (`activeProjectId === null`) reports an empty `backends` array, which the
  *  reporter tears down to zero leases via its own empty-backends cleanup path — no special-casing
  *  needed here.
@@ -35,16 +38,14 @@
  *  allocation attempts for the same `{connection, workspace, uiPaneId}` triple (fast pane-state
  *  churn — e.g. two renders in quick succession before the first allocation resolves — must not
  *  fire two allocate calls for the same pane), and removes the mapping once its pane closes.
- *
- *  Deliberately NOT wired here: `attachPaneInspectionStore` (`./paneInspection.ts`). That module
- *  opens a `subscribePanes` feed and its own contract requires a real subscriber — there is no
- *  Inspector UI consuming it yet, so mounting it globally here would open a feed nothing reads.
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import type { SurfacePaneKind } from 'michi-shared';
 import type { Project } from './chatTypes';
 import type { PaneItem, PaneItemKind } from './paneItems';
 import { usePanePresenceDashboardVisible } from './panePresenceVisibility';
+import { panesShownInWindow } from './attention/targetVisibility';
 import {
   fetchPersistenceCapabilities,
   supportsPaneInspection,
@@ -52,13 +53,13 @@ import {
 import {
   allocateSurfaceRegistration,
   panePresenceTransport,
-  type SurfacePaneKind,
 } from '../services/api/panePresence';
 import {
   usePanePresenceReporter,
   type PanePresenceBackendSlots,
   type PanePresenceIdResolver,
   type PanePresenceViewSource,
+  type PresenceRequestOptions,
 } from './usePanePresenceReporter';
 
 /** Every non-persistent PaneItem kind, mapped 1:1 onto the backend's `SurfacePaneKind` union.
@@ -112,7 +113,7 @@ export interface UsePanePresenceIntegrationArgs {
    *  imported directly to avoid a circular import between this module and `chatStore.tsx`, which
    *  mounts this hook. */
   windowId: string;
-  /** Backend hydration barrier (R5 §7) — gates every submission, per
+  /** Backend hydration barrier (AGENTS.md, "Persistence and frontend") — gates every submission, per
    *  `usePanePresenceReporter`'s own `hydrated` doc comment. Also gates the capability probe
    *  itself: a probe fired before hydration completes would be asking the wrong question (the
    *  active project can still change during hydration), so the probe waits for `hydrated` too. */
@@ -128,6 +129,85 @@ export interface UsePanePresenceIntegrationArgs {
   /** Registered PaneItem objects, keyed by their `pane:*` id (or an agent-run's own id). Used to
    *  resolve every `openPanesMap` entry that isn't a bare nodeId. */
   paneItems: Readonly<Record<string, PaneItem>>;
+  /** The panes the active tree's layout displays: `usePaneState`'s `openPanes`, which single-page
+   *  mode reduces to its page. Of these, the ones on screen are reported `visible: true` (see
+   *  `useOnScreenPanes`). Absent: every pane of the active slot counts as on screen. */
+  displayedPanes?: readonly string[];
+}
+
+/** The pane strip settles (scrolling, a resize) for this long before presence measures what it
+ *  shows, so a scroll fling sends at most one presence update. */
+export const PRESENCE_ON_SCREEN_SETTLE_MS = 300;
+/** A second look after the displayed panes change, once the strip's open/close motion is over. */
+const PRESENCE_ON_SCREEN_RECHECK_MS = 1_000;
+
+function sameIds(a: readonly string[], b: readonly string[]): boolean {
+  return a.length === b.length && a.every((id, index) => id === b[index]);
+}
+
+/**
+ * The displayed panes this window has on screen right now, by the attention rule
+ * (`panesShownInWindow`, state/attention/targetVisibility.ts): the Dashboard is up and the strip
+ * paints the pane with at least 60% of it inside — not a background single-page tab, not a pane
+ * scrolled out of the strip. A pane that stops being displayed (closed, another tab, another
+ * tree) leaves at once; a newly displayed one counts as on screen until the strip has settled and
+ * it is measured. Strip scrolls (`michi:dashboard-scroll`), window resizes and size changes of the
+ * strip or its panes (a dragged pane width) re-measure, debounced. Measures only while `enabled`
+ * (presence is on).
+ */
+function useOnScreenPanes(
+  displayed: readonly string[] | undefined,
+  dashboardVisible: boolean,
+  enabled: boolean,
+): readonly string[] | undefined {
+  const [onScreen, setOnScreen] = useState<readonly string[]>(() => displayed ?? []);
+  const displayedRef = useRef(displayed);
+  displayedRef.current = displayed;
+  // What the last pass saw displayed, and whether the Dashboard was up: what is new since.
+  const seenRef = useRef<{ displayed: readonly string[]; dashboardVisible: boolean }>({ displayed: displayed ?? [], dashboardVisible });
+  const displayedKey = displayed ? displayed.join('\u0000') : null;
+
+  useEffect(() => {
+    const current = displayedRef.current;
+    if (!current || !enabled) return undefined;
+    const seen = seenRef.current;
+    const before = new Set(seen.dashboardVisible ? seen.displayed : []);
+    seenRef.current = { displayed: current, dashboardVisible };
+    setOnScreen((shown) => {
+      const kept = current.filter((id) => shown.includes(id) || !before.has(id));
+      return sameIds(kept, shown) ? shown : kept;
+    });
+    const measure = () => {
+      const next = panesShownInWindow(displayedRef.current ?? []);
+      setOnScreen((shown) => (sameIds(shown, next) ? shown : next));
+    };
+    const timers = [
+      setTimeout(measure, PRESENCE_ON_SCREEN_SETTLE_MS),
+      setTimeout(measure, PRESENCE_ON_SCREEN_RECHECK_MS),
+    ];
+    let settling: ReturnType<typeof setTimeout> | null = null;
+    const moved = () => {
+      if (settling) clearTimeout(settling);
+      settling = setTimeout(() => { settling = null; measure(); }, PRESENCE_ON_SCREEN_SETTLE_MS);
+    };
+    window.addEventListener('michi:dashboard-scroll', moved);
+    window.addEventListener('resize', moved);
+    const strip = document.querySelector<HTMLElement>('[data-pane-strip]');
+    const resizes = strip && typeof ResizeObserver !== 'undefined' ? new ResizeObserver(moved) : null;
+    if (strip && resizes) {
+      resizes.observe(strip);
+      for (const pane of Array.from(strip.children)) resizes.observe(pane);
+    }
+    return () => {
+      for (const timer of timers) clearTimeout(timer);
+      if (settling) clearTimeout(settling);
+      window.removeEventListener('michi:dashboard-scroll', moved);
+      window.removeEventListener('resize', moved);
+      resizes?.disconnect();
+    };
+  }, [displayedKey, dashboardVisible, enabled]);
+
+  return displayed ? onScreen : undefined;
 }
 
 /**
@@ -144,6 +224,7 @@ export function usePanePresenceIntegration({
   activeBackendConnectionId,
   openPanesMap,
   paneItems,
+  displayedPanes,
 }: UsePanePresenceIntegrationArgs): void {
   const dashboardVisible = usePanePresenceDashboardVisible();
   const activeProject = useMemo(
@@ -193,6 +274,7 @@ export function usePanePresenceIntegration({
   const paneInspectionEnabled = currentScopeKey !== null
     && capabilityProbe.key === currentScopeKey
     && capabilityProbe.supported;
+  const onScreenPanes = useOnScreenPanes(displayedPanes, dashboardVisible, paneInspectionEnabled);
 
   // ---------------------------------------------------------------------
   // Surface registration mappings — one per uiPaneId that needs a server-allocated id. Held in a
@@ -476,7 +558,6 @@ export function usePanePresenceIntegration({
       if (key.startsWith(prefix)) slots[key] = uiPaneIds;
     }
     return slots;
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [openPanesMap, activeProjectId]);
 
   const leaseScopeKey = activeProject ? `${activeBackendConnectionId}\u0000${activeProject.id}` : null;
@@ -488,8 +569,9 @@ export function usePanePresenceIntegration({
       workspaceId: activeProject.id,
       openPanesMap: activeProjectOpenPanesMap,
       activeSlotKey,
+      ...(onScreenPanes ? { visibleUiPaneIds: onScreenPanes } : {}),
     }];
-  }, [activeProject, paneInspectionEnabled, leaseScopeKey, activeProjectOpenPanesMap, activeSlotKey]);
+  }, [activeProject, paneInspectionEnabled, leaseScopeKey, activeProjectOpenPanesMap, activeSlotKey, onScreenPanes]);
 
   /** Un-mangles a lease-scope key (`${backendConnectionId}::${workspaceId}`) back to the real
    *  `backendConnectionId` for the real transport / for `onLeaseInvalidated` callers. The
@@ -504,10 +586,12 @@ export function usePanePresenceIntegration({
   const leaseScopedTransport = useMemo(() => ({
     submit: (leaseScope: string, workspaceId: string, req: Parameters<typeof panePresenceTransport.submit>[2]) =>
       panePresenceTransport.submit(unmangleConnectionId(leaseScope), workspaceId, req),
-    remove: (leaseScope: string, workspaceId: string, req: Parameters<typeof panePresenceTransport.remove>[2]) =>
-      panePresenceTransport.remove(unmangleConnectionId(leaseScope), workspaceId, req),
-    keepalive: (leaseScope: string, workspaceId: string, req: Parameters<typeof panePresenceTransport.keepalive>[2]) =>
-      panePresenceTransport.keepalive(unmangleConnectionId(leaseScope), workspaceId, req),
+    remove: (leaseScope: string, workspaceId: string, req: Parameters<typeof panePresenceTransport.remove>[2],
+      options?: PresenceRequestOptions) =>
+      panePresenceTransport.remove(unmangleConnectionId(leaseScope), workspaceId, req, options),
+    keepalive: (leaseScope: string, workspaceId: string, req: Parameters<typeof panePresenceTransport.keepalive>[2],
+      options?: PresenceRequestOptions) =>
+      panePresenceTransport.keepalive(unmangleConnectionId(leaseScope), workspaceId, req, options),
   }), [unmangleConnectionId]);
 
   const onLeaseInvalidated = useCallback((leaseScope: string, workspaceId: string) => {

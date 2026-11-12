@@ -36,7 +36,8 @@ beforeEach(() => {
   seedConversation({ nodeId: 'fresh', workspaceId: 'ws', title: 'Not started' });
   seedConversation({ nodeId: 'archived', workspaceId: 'ws', title: 'Old', nodeStatus: 'archived', turns: [{ status: 'completed', startedAt: NOW - 30 * DAY, reply: 'Wrapped up.' }] });
   seedConversation({ nodeId: 'scheduled', workspaceId: 'ws', title: 'Nightly', turns: [{ status: 'completed', startedAt: NOW - DAY, reply: 'All green.', scheduledJobId: 'job-1' }] });
-  seedConversation({ nodeId: 'gone', workspaceId: 'ws', title: 'Deleted', deletedAt: NOW, turns: [{ status: 'completed', startedAt: NOW - DAY }] });
+  seedConversation({ nodeId: 'gone', workspaceId: 'ws', title: 'Deleted', deletedAt: NOW, deletionGroupId: 'del-1', turns: [{ status: 'completed', startedAt: NOW - DAY }] });
+  seedConversation({ nodeId: 'branch', workspaceId: 'ws', title: 'Side idea', deletedAt: NOW, deletionGroupId: 'arch-1', turns: [{ status: 'completed', startedAt: NOW - DAY, reply: 'Should we split it?' }] });
   seedConversation({ nodeId: 'moved', workspaceId: 'other', title: 'Moved away', turns: [{ status: 'completed', startedAt: NOW - DAY, reply: 'Done.' }] });
 });
 
@@ -65,6 +66,15 @@ test('cards show archived and scheduled conversations, and leave out ones delete
   assert.deepEqual(Object.keys(cards(['archived', 'scheduled', 'gone', 'moved'])).sort(), ['archived', 'scheduled']);
   assert.deepEqual(Object.keys(cards(['moved'], 'other')), ['moved']);
   assert.deepEqual(cards([]), {});
+});
+
+test('a branch archived from its thread keeps its card, marked archived and never waiting on the person', () => {
+  const byNode = new Map(threadCards({ ownerUserId: OWNER, workspaceId: 'ws', nodeIds: ['branch', 'asked', 'archived'], now: NOW })
+    .map((card) => [card.nodeId, card]));
+  const branch = byNode.get('branch');
+  assert.deepEqual([branch?.state, branch?.summary, branch?.archived, branch?.messageId], ['done', 'Should we split it?', true, 'branch-t0-a']);
+  // An archived thread opens as before: only a branch archived into Settings › Archived is marked.
+  assert.deepEqual([byNode.get('asked')?.archived, byNode.get('archived')?.archived], [undefined, undefined]);
 });
 
 test('the thread cards route takes the page workspace and a bounded nodeIds list', async () => {

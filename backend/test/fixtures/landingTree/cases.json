@@ -1,0 +1,17 @@
+{
+  "about": "Where a workspace lands when its open thread leaves. Read by backend/test/moveTreeActiveTree.test.ts (moveTreeToWorkspace's SQL) and frontend/src/state/conversationVisibility.test.ts (pickLandingTreeId), so both sides pick the same thread.",
+  "leaving": "moving",
+  "trees": [
+    { "id": "moving", "lastActiveAt": 100 },
+    { "id": "older", "lastActiveAt": 10 },
+    { "id": "newer-b", "lastActiveAt": 20 },
+    { "id": "newer-a", "lastActiveAt": 20 },
+    { "id": "archived", "lastActiveAt": 90, "archived": true },
+    { "id": "trashed", "lastActiveAt": 80, "root": { "deleted": true } },
+    { "id": "purged", "lastActiveAt": 75, "root": { "deleted": true, "purged": true } },
+    { "id": "page-helper", "lastActiveAt": 70, "root": { "pageId": "pg-1" } },
+    { "id": "maintenance", "lastActiveAt": 60, "root": { "maintenanceJobId": "job-maint" } },
+    { "id": "scheduled-only", "lastActiveAt": 50, "root": { "scheduledOnlyJobId": "job-hidden" } }
+  ],
+  "lands": "newer-a"
+}

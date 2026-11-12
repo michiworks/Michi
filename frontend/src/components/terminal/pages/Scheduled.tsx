@@ -2,17 +2,20 @@ import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { CalendarClock, Clock3, Ellipsis, Folder, Layers, Loader2, Play, Plus, Search, Sparkles, Square, X } from 'lucide-react';
 import { toast } from 'sonner';
 import { AnimatePresence } from 'motion/react';
-import type { MetaAgentOverview, ScheduledJobDto, ScheduledJobRunDto } from 'michi-shared';
+import { plural, type MetaAgentOverview, type ScheduledJobDto, type ScheduledJobRunDto } from 'michi-shared';
 import { useChatActions, useChatProjects } from '../../../state/chatStore';
 import type { PageId } from '../../../state/commands';
 import type { Project } from '../../../state/chatTypes';
 import { pageBackground } from '../../../lib/pageBackground';
+import { useNow } from '../../../hooks/useNow';
+import { usePhoneLayout } from '../../../hooks/usePhoneLayout';
 import { workspaceAccent } from '../workspaceAccent';
 import { isSystemWorkspace } from '../../../state/assistant/systemWorkspace';
 import { confirmDialog } from '../../ui/ConfirmDialog';
 import { Button, Switch } from '../../ui/controls';
 import { HoverTip } from '../../ui/Popover';
-import { TrashHighlight, TrashIconButton } from './TrashControls';
+import { TrashIconButton } from './TrashControls';
+import { SearchHighlight } from '../../ui/SearchHighlight';
 import {
   getScheduledJobSettings,
   cancelScheduledJobRun,
@@ -24,32 +27,43 @@ import { useScheduledJobs } from '../scheduled/useScheduledJobs';
 import { useBackgroundService } from '../scheduled/useBackgroundService';
 import { ScheduledJobEditor, formValueFromJob, type JobFormValue } from '../scheduled/ScheduledJobEditor';
 import { ScheduledJobDetail, StatusDot } from '../scheduled/ScheduledJobDetail';
+import { ScheduledRunPage } from '../scheduled/ScheduledRunPage';
 import { ScheduledJobMenu } from '../scheduled/ScheduledJobMenu';
 import { ScheduledBlockedExecutions } from '../scheduled/ScheduledBlockedExecutions';
-import { ScheduledAgentChat } from '../scheduled/ScheduledAgentChat';
-import { openScheduledHome, requestScheduledJobDetail, useScheduledRoute } from '../scheduled/scheduledNav';
+import { fetchAssistant } from '../../../services/api/assistant';
+import { openCompanionPanel } from '../../../state/companion/companionPanel';
+import { useCompanionAssistant } from '../../../state/companion/companionStore';
+import { useCompanionName } from '../../../state/companion/companionName';
+import { publishCompanionScheduleWorkspace } from '../../../state/companion/companionScreen';
+import { startNewCompanionConversation } from '../../../state/commands';
+import { openScheduledHome, requestScheduledJobDetail, requestScheduledRun, useScheduledRoute } from '../scheduled/scheduledNav';
 import { RUN_STATUS_LABELS, defaultScheduleDraft, describeSchedule, relativePastTime, relativeTime } from '../scheduled/scheduleModel';
 import { openMetaAgentDetail } from '../scheduled/metaAgent/metaAgentNav';
-import { pauseMetaAgentMaintenance, useMetaAgentOverview } from '../scheduled/metaAgent/useMetaAgentOverview';
+import { pagesUpkeepTitle } from '../scheduled/metaAgent/metaAgentCopy';
+import { META_AGENT_PAGE_POLL_MS, pauseMetaAgentMaintenance, refreshMetaAgentOverview, useMetaAgentOverview } from '../../../state/metaAgent/useMetaAgentOverview';
+import { useMetaAgentSnapshot } from '../../../state/metaAgent/useMetaAgent';
+import { META_AGENT_ROW_WORD, metaAgentStatus, type MetaAgentStatusKind } from '../../../state/metaAgent/metaAgentStatus';
 import { RunSwap, SwapGlyph } from './ScheduledRunSwap';
 // Shared row, group, search and icon-button primitives.
 import './Trash.css';
 import './Scheduled.css';
 import '../rail/rail.css';
+import { isLocalProject } from '../../../config/backendConnections';
 
 type EditorState = { job: ScheduledJobDto | null; initial?: JobFormValue } | null;
 
-const SYSTEM_TASK_NAME = 'Meta agent · maintain Pages';
+/** "Create with agent": New job's conversational twin, in the agent's panel. */
+export const CREATE_WITH_AGENT_LABEL = 'Create with agent';
+/** The line "Create with agent" shows when it started a new conversation because the last one made a job (D6). */
+export const EARLIER_CONVERSATION_NOTE = 'Your earlier conversation is in History.';
 const NO_JOB_IDS: readonly string[] = [];
 
-function plural(count: number, word: string): string {
-  return `${count} ${word}${count === 1 ? '' : 's'}`;
-}
-
-function nextRunText(job: ScheduledJobDto, now: number): { text: string; tone?: 'danger' | 'active' } {
+function nextRunText(job: ScheduledJobDto, now: number, workspaceArchived: boolean): { text: string; tone?: 'danger' | 'active' } {
   if (job.activeRunId) return { text: 'Running now', tone: 'active' };
   if (job.autoPaused) return { text: 'Paused after repeated failures', tone: 'danger' };
   if (!job.enabled) return { text: 'Paused' };
+  // The backend skips its runs until the workspace is unarchived.
+  if (workspaceArchived) return { text: 'Workspace archived' };
   // A due run waits for the scheduler's next tick (or a backend to start).
   if (job.nextRunAt) return { text: job.nextRunAt <= now ? 'Due now' : `Next ${relativeTime(job.nextRunAt, now)}` };
   return { text: 'No upcoming run' };
@@ -60,8 +74,11 @@ export default function TerminalScheduled({ onNav }: { onNav?: (page: PageId) =>
   const { revealBackendNode } = useChatActions();
   const { jobs: allJobs, scheduler, loading, error, unavailable, refresh, upsert, remove } = useScheduledJobs();
   // Backend excludes maintenance execution records. Keep the ID filter for older backends.
-  const metaAgent = useMetaAgentOverview();
+  const metaAgent = useMetaAgentOverview(META_AGENT_PAGE_POLL_MS);
   const metaOverview = metaAgent.kind === 'ready' ? metaAgent.overview : null;
+  // The same status the Scheduled sidebar's row beside this list reads.
+  const metaInfo = useMetaAgentSnapshot().info;
+  const metaStatus = metaOverview ? metaAgentStatus({ info: metaInfo, overview: metaOverview }).kind : 'normal';
   const managedIds = metaOverview?.managedJobIds ?? NO_JOB_IDS;
   const jobs = useMemo(() => {
     const managed = new Set(managedIds);
@@ -74,19 +91,15 @@ export default function TerminalScheduled({ onNav }: { onNav?: (page: PageId) =>
   const [editor, setEditor] = useState<EditorState>(null);
   const scheduledRoute = useScheduledRoute();
   const detailId = scheduledRoute.kind === 'job' ? scheduledRoute.jobId : null;
+  const detailRunId = scheduledRoute.kind === 'job' ? scheduledRoute.runId ?? null : null;
   const [menu, setMenu] = useState<{ jobId: string; anchor: HTMLButtonElement } | null>(null);
   const [busyJobs, setBusyJobs] = useState<Set<string>>(new Set());
-  const [now, setNow] = useState(Date.now);
+  const now = useNow(30_000);
   const search = useRef<HTMLInputElement>(null);
-
-  useEffect(() => {
-    const timer = window.setInterval(() => setNow(Date.now()), 30_000);
-    return () => window.clearInterval(timer);
-  }, []);
 
   // The ⌘J assistant's hidden workspace is not a place to schedule work.
   const localProjects = useMemo(
-    () => projects.filter((project) => !project.deletedAt && !project.archivedAt && !project.backendConnectionId
+    () => projects.filter((project) => !project.deletedAt && !project.archivedAt && isLocalProject(project)
       && !isSystemWorkspace(project)),
     [projects],
   );
@@ -100,7 +113,8 @@ export default function TerminalScheduled({ onNav }: { onNav?: (page: PageId) =>
     if (!needle) return jobs;
     return jobs.filter((job) => job.name.toLocaleLowerCase().includes(needle) || job.prompt.toLocaleLowerCase().includes(needle));
   }, [jobs, needle]);
-  const systemShown = !!metaOverview && (!needle || SYSTEM_TASK_NAME.toLocaleLowerCase().includes(needle));
+  const companionName = useCompanionName();
+  const systemShown = !!metaOverview && (!needle || pagesUpkeepTitle(companionName).toLocaleLowerCase().includes(needle));
   const groups = useMemo(() => {
     const byWorkspace = new Map<string, ScheduledJobDto[]>();
     for (const job of filtered) {
@@ -114,7 +128,7 @@ export default function TerminalScheduled({ onNav }: { onNav?: (page: PageId) =>
   }, [filtered, projectById]);
 
   const detailJob = detailId ? jobs.find((job) => job.id === detailId) ?? null : null;
-  // A request for a maintenance job's details shows the Meta agent's page instead.
+  // A request for a maintenance job's details shows Pages upkeep's page instead.
   useEffect(() => {
     if (detailId && managedIds.includes(detailId)) {
       openMetaAgentDetail();
@@ -146,7 +160,9 @@ export default function TerminalScheduled({ onNav }: { onNav?: (page: PageId) =>
     // dialog can return focus to it. Only the delete request makes the row busy.
     const confirmed = await confirmDialog({
       title: 'Delete scheduled job?',
-      message: `Delete “${job.name}”? Threads from earlier runs stay in their workspace.`,
+      message: job.visibility === 'scheduled'
+        ? `Delete “${job.name}”? Its runs’ threads, which show only in Scheduled, are deleted with it. Threads you moved to the workspace stay.`
+        : `Delete “${job.name}”? Threads from earlier runs stay in their workspace.`,
       confirmLabel: 'Delete job',
     });
     if (!confirmed) return;
@@ -160,7 +176,7 @@ export default function TerminalScheduled({ onNav }: { onNav?: (page: PageId) =>
     setOpeningEditor(true);
     try {
       const defaults = await getScheduledJobSettings();
-      setEditor({ job: null, initial: formValueFromJob(null, { workspaceId: defaultWorkspaceId, ...defaults }) });
+      setEditor({ job: null, initial: formValueFromJob(null, { workspaceId: defaultWorkspaceId, sessionMode: defaults.sessionMode }) });
     } catch (reason) {
       toast.error(reason instanceof Error ? reason.message : 'Could not load scheduled job defaults');
     } finally {
@@ -174,6 +190,11 @@ export default function TerminalScheduled({ onNav }: { onNav?: (page: PageId) =>
   };
   const openRun = async (run: ScheduledJobRunDto) => {
     if (!run.nodeId) return;
+    // A Scheduled-only run's thread opens here, not among the workspace's conversations.
+    if (run.scheduledOnly) {
+      requestScheduledRun(run.jobId, run.id);
+      return;
+    }
     const opened = await revealBackendNode(run.workspaceId, run.nodeId);
     if (!opened) toast.error('That thread is no longer available');
     else openScheduledHome();
@@ -181,7 +202,7 @@ export default function TerminalScheduled({ onNav }: { onNav?: (page: PageId) =>
   const setMetaPaused = (paused: boolean) => {
     setMetaBusy(true);
     pauseMetaAgentMaintenance(paused)
-      .catch((reason: unknown) => { toast.error(reason instanceof Error ? reason.message : 'Something went wrong'); })
+      .catch((reason: unknown) => { toast.error(reason instanceof Error ? reason.message : 'Something went wrong'); void refreshMetaAgentOverview(); })
       .finally(() => setMetaBusy(false));
   };
   const enableService = async () => {
@@ -200,11 +221,52 @@ export default function TerminalScheduled({ onNav }: { onNav?: (page: PageId) =>
     ? 'Runs in the background, even when Michi is closed'
     : service.available ? 'Runs while Michi is open' : 'Runs while the Michi server is running';
 
-  // "Create with agent" is New job's conversational twin: offered wherever New job is.
-  const agentAvailable = hydrated && !loading && !unavailable && localProjects.length > 0;
+  // "Create with agent" is New job's conversational twin: offered wherever New
+  // job is, it opens the agent's one panel (DESIGN-v2 §1.2). Each message sent
+  // from here tells the agent which workspace a new job goes in by default:
+  // the one New job preselects (§1.3).
+  const assistant = useCompanionAssistant();
+  const agentAvailable = hydrated && !loading && !unavailable && localProjects.length > 0 && assistant.status !== 'unsupported';
+  const scheduleWorkspaceId = agentAvailable ? defaultWorkspaceId || null : null;
+  useEffect(() => {
+    publishCompanionScheduleWorkspace(scheduleWorkspaceId);
+    return () => publishCompanionScheduleWorkspace(undefined);
+  }, [scheduleWorkspaceId]);
+  const [startingAgent, setStartingAgent] = useState(false);
+  const startingAgentRef = useRef(false);
+  const createWithAgent = async () => {
+    if (startingAgentRef.current) return;
+    startingAgentRef.current = true;
+    setStartingAgent(true);
+    try {
+      // As on dev (DESIGN-v2 Q5): once a turn sent from Scheduled made a job
+      // (the backend's jobCreated, D6), the next "Create with agent" starts a
+      // new conversation; one quiet line says where the old one went.
+      const info = await fetchAssistant().catch(() => null);
+      if (info?.jobCreated) {
+        await startNewCompanionConversation(info.nodeId).then(
+          () => { toast(EARLIER_CONVERSATION_NOTE); },
+          (reason: unknown) => { toast.error(reason instanceof Error && reason.message ? reason.message : 'Couldn’t start a new conversation'); },
+        );
+      } else openCompanionPanel({ tab: 'chat', focusComposer: true });
+    } finally {
+      startingAgentRef.current = false;
+      setStartingAgent(false);
+    }
+  };
+
+  // A run opens as its conversation, in place of the list.
+  if (detailJob && detailRunId && !editor) {
+    return (
+      <div className="terminal-scheduled-run" style={{ background: pageBackground('scheduled') }}>
+        <ScheduledRunPage key={detailRunId} job={detailJob} runId={detailRunId} now={now}
+          onOpenJob={() => requestScheduledJobDetail(detailJob.id)} />
+      </div>
+    );
+  }
 
   return (
-    <ScheduledAgentChat enabled={agentAvailable} defaultWorkspaceId={defaultWorkspaceId || null}>
+    <>
       <div className="terminal-scheduled term-scrollbar" style={{ background: pageBackground('scheduled') }} aria-busy={loading || !hydrated}>
         <div className="sched-content">
           <header className="sched-heading">
@@ -212,9 +274,17 @@ export default function TerminalScheduled({ onNav }: { onNav?: (page: PageId) =>
               <div className="sched-heading-title"><h1>Scheduled</h1>{total > 0 && <span aria-label={plural(total, 'job')}>{total}</span>}</div>
               <p className="sched-subtitle"><Clock3 size={13} aria-hidden="true" />{subtitle}</p>
             </div>
-            <Button variant="primary" size="sm" disabled={unavailable || localProjects.length === 0 || openingEditor} onClick={() => void createJob()}>
-              <Plus size={14} aria-hidden="true" />New job
-            </Button>
+            <div className="sched-heading-actions" style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+              {agentAvailable && (
+                <Button size="sm" aria-busy={startingAgent || undefined} disabled={startingAgent} onClick={() => { void createWithAgent(); }}
+                  title={`Describe a job to ${companionName}: what to do, where, and when`}>
+                  <Sparkles size={14} aria-hidden="true" />{CREATE_WITH_AGENT_LABEL}
+                </Button>
+              )}
+              <Button variant="primary" size="sm" disabled={unavailable || localProjects.length === 0 || openingEditor} onClick={() => void createJob()}>
+                <Plus size={14} aria-hidden="true" />New job
+              </Button>
+            </div>
           </header>
 
           <ScheduledBlockedExecutions executions={scheduler?.blockedExecutions ?? []} jobs={jobs}
@@ -260,7 +330,7 @@ export default function TerminalScheduled({ onNav }: { onNav?: (page: PageId) =>
                 <span className="trash-group-name">All workspaces</span>
               </h2>
               <div className="trash-group-rows">
-                <SystemTaskRow overview={metaOverview} now={now} query={query} busy={metaBusy}
+                <SystemTaskRow overview={metaOverview} status={metaStatus} now={now} query={query} busy={metaBusy}
                   onOpen={() => openMetaAgentDetail()} onToggle={(on) => setMetaPaused(!on)} />
               </div>
             </section>
@@ -290,6 +360,7 @@ export default function TerminalScheduled({ onNav }: { onNav?: (page: PageId) =>
               <div className="trash-group-rows">
                 {group.jobs.map((job) => (
                   <JobRow key={job.id} job={job} now={now} query={query} busy={busyJobs.has(job.id)} runBlocked={runsBlocked}
+                    workspaceArchived={!!group.project?.archivedAt}
                     menuOpen={menu?.jobId === job.id}
                     onOpen={() => requestScheduledJobDetail(job.id)}
                     onRunNow={() => { void runNow(job); }}
@@ -304,7 +375,7 @@ export default function TerminalScheduled({ onNav }: { onNav?: (page: PageId) =>
         </div>
 
         {menu && menuJob && (
-          <ScheduledJobMenu anchor={menu.anchor} paused={!menuJob.enabled || menuJob.autoPaused} onClose={() => setMenu(null)} actions={{
+          <ScheduledJobMenu anchor={menu.anchor} row={menu.anchor.closest<HTMLElement>('.sched-row')} paused={!menuJob.enabled || menuJob.autoPaused} onClose={() => setMenu(null)} actions={{
             onEdit: () => setEditor({ job: menuJob }),
             onRuns: () => requestScheduledJobDetail(menuJob.id),
             onToggle: () => { void setEnabled(menuJob, !menuJob.enabled || menuJob.autoPaused); },
@@ -315,9 +386,10 @@ export default function TerminalScheduled({ onNav }: { onNav?: (page: PageId) =>
         {/* Closing fades each dialog out with the props it last had open;
             Edit hands the detail over to the editor in one cross-fade. */}
         <AnimatePresence>
-          {detailJob && !editor && (
+          {detailJob && !editor && !detailRunId && (
             <ScheduledJobDetail key="detail" job={detailJob} now={now} busy={busyJobs.has(detailJob.id)} runBlocked={runsBlocked}
               workspaceName={projectById.get(detailJob.workspaceId)?.name ?? 'Unavailable workspace'}
+              workspaceArchived={!!projectById.get(detailJob.workspaceId)?.archivedAt}
               onClose={() => openScheduledHome()}
               onEdit={() => setEditor({ job: detailJob })}
               onRunNow={() => { void runNow(detailJob); }}
@@ -340,7 +412,7 @@ export default function TerminalScheduled({ onNav }: { onNav?: (page: PageId) =>
           )}
         </AnimatePresence>
       </div>
-    </ScheduledAgentChat>
+    </>
   );
 }
 
@@ -351,12 +423,13 @@ function editorProjects(local: Project[], job: ScheduledJobDto | null, byId: Map
   return current ? [current, ...local] : local;
 }
 
-function JobRow({ job, now, query, busy, runBlocked, menuOpen, onOpen, onRunNow, onStop, onToggle, onMenu }: {
+function JobRow({ job, now, query, busy, runBlocked, workspaceArchived, menuOpen, onOpen, onRunNow, onStop, onToggle, onMenu }: {
   job: ScheduledJobDto;
   now: number;
   query: string;
   busy: boolean;
   runBlocked: boolean;
+  workspaceArchived: boolean;
   menuOpen: boolean;
   onOpen: () => void;
   onRunNow: () => void;
@@ -364,11 +437,18 @@ function JobRow({ job, now, query, busy, runBlocked, menuOpen, onOpen, onRunNow,
   onToggle: (enabled: boolean) => void;
   onMenu: (anchor: HTMLButtonElement) => void;
 }) {
-  const next = nextRunText(job, now);
+  const next = nextRunText(job, now, workspaceArchived);
   const running = !!job.activeRunId;
   const active = job.enabled && !job.autoPaused;
+  const phone = usePhoneLayout();
+  // On a phone a long press opens the row's ⋯ menu, as it does on a sidebar thread.
   return (
-    <article className="trash-row sched-row" data-paused={!active || undefined}>
+    <article className="trash-row sched-row" data-paused={!active || undefined} data-context-target={phone ? '' : undefined}
+      onContextMenu={phone ? (event) => {
+        event.preventDefault();
+        const more = event.currentTarget.querySelector<HTMLButtonElement>('button[aria-haspopup="menu"]');
+        if (more && !busy && !menuOpen) onMenu(more);
+      } : undefined}>
       <button type="button" className="trash-row-open" aria-label={`Open ${job.name}`} onClick={onOpen}>
         <span className="trash-row-icon">
           <RunSwap id={running ? 'running' : 'idle'} scale>
@@ -376,7 +456,7 @@ function JobRow({ job, now, query, busy, runBlocked, menuOpen, onOpen, onRunNow,
           </RunSwap>
         </span>
         <span className="trash-row-content">
-          <span className="trash-row-title"><TrashHighlight text={job.name} query={query} /></span>
+          <span className="trash-row-title"><SearchHighlight text={job.name} query={query} /></span>
           <span className="trash-row-meta">
             <span>{describeSchedule(job.schedule)}</span>
             <span className="sched-next" data-tone={next.tone}><span aria-hidden="true"> · </span>{next.text}</span>
@@ -412,9 +492,10 @@ function JobRow({ job, now, query, busy, runBlocked, menuOpen, onOpen, onRunNow,
   );
 }
 
-/** The Meta agent's background maintenance as one row: it can be paused, not run, edited or deleted here. */
-function SystemTaskRow({ overview, now, query, busy, onOpen, onToggle }: {
+/** The agent's background upkeep of Pages as one row: it can be paused, not run, edited or deleted here. */
+function SystemTaskRow({ overview, status, now, query, busy, onOpen, onToggle }: {
   overview: MetaAgentOverview;
+  status: MetaAgentStatusKind;
   now: number;
   query: string;
   busy: boolean;
@@ -424,21 +505,25 @@ function SystemTaskRow({ overview, now, query, busy, onOpen, onToggle }: {
   const active = overview.state !== 'paused';
   const workspaces = overview.cursors.length;
   const lastRun = overview.recentRuns[0] ?? null;
+  // The agent's background upkeep of Pages, as Scheduled lists it (DESIGN-v2 §1.5).
+  const name = pagesUpkeepTitle(useCompanionName());
+  // A pause reads first here, as the backend's overview puts it, while the sidebar puts a failed check first.
+  const word = META_AGENT_ROW_WORD[active ? status : 'paused'];
   return (
     <article className="trash-row sched-row" data-paused={!active || undefined} data-system="">
-      <button type="button" className="trash-row-open" aria-label={`Open ${SYSTEM_TASK_NAME}`} onClick={onOpen}>
+      <button type="button" className="trash-row-open" aria-label={`Open ${name}`} onClick={onOpen}>
         <span className="trash-row-icon">
           <RunSwap id={lastRun?.state === 'running' ? 'running' : 'idle'} scale>
             {lastRun?.state === 'running' ? <Loader2 size={16} className="sched-spin" aria-hidden="true" /> : <Sparkles size={16} aria-hidden="true" />}
           </RunSwap>
         </span>
         <span className="trash-row-content">
-          <span className="trash-row-title"><TrashHighlight text={SYSTEM_TASK_NAME} query={query} /> <span className="area-side__tag">System</span></span>
+          <span className="trash-row-title"><SearchHighlight text={name} query={query} /> <span className="area-side__tag">System</span></span>
           <span className="trash-row-meta">
             <span>Checks every 60 s · AI only for pending work</span>
-            <span className="sched-next" data-tone={overview.state === 'error' ? 'danger' : undefined}>
+            <span className="sched-next" data-tone={word?.tone}>
               <span aria-hidden="true"> · </span>
-              {overview.state === 'error' ? 'Error' : !active ? 'Paused' : workspaces === 0 ? 'No workspace yet' : plural(workspaces, 'workspace')}
+              {word?.text ?? (workspaces === 0 ? 'No workspace yet' : plural(workspaces, 'workspace'))}
             </span>
           </span>
         </span>

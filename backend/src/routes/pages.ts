@@ -1,8 +1,8 @@
 import { Router } from 'express';
-import type { NextFunction, Request, Response } from 'express';
+import type { Request } from 'express';
 import { LOCAL_AGENT_OWNER_ID } from '../services/agentOwner';
 import { getDb } from '../services/db';
-import { PageWriteError, requirePagesWorkspace, assertPageRequestSize } from '../services/pages/core';
+import { PageWriteError, requirePagesWorkspace } from '../services/pages/core';
 import {
   createDatabase, createPage, deletePage, getDatabase, getPage, listDatabases, listPageTrash,
   listPages, listSpaces, pageRecord, purgePageDeletionGroup, restorePageDeletionGroup,
@@ -18,49 +18,39 @@ import {
 } from '../services/pages/pageChanges';
 import { findTaskDatabaseId, openTaskDatabase } from '../services/pages/taskDatabase';
 import { taskActivity, taskOrigin } from '../services/pages/taskActivity';
+import { checkinSourceResolver, presentChange, presentPage } from '../services/pages/checkinSources';
 import { parsePageDatabaseOps, PAGE_TEMPLATES } from 'michi-shared';
-import type { PageActivitySeenRequest, PageChangeDto, PageDatabase } from 'michi-shared';
+import type { PageActivitySeenRequest, PageChangeDto, PageDatabase, PageWriteResult } from 'michi-shared';
+import { pageBody as body, pageErrors, pageId as id, pageQuery as query, route, type Obj } from './pageRouteKit';
 
-type Obj = Record<string, unknown>;
-const isObject = (value: unknown): value is Obj => typeof value === 'object' && value !== null && !Array.isArray(value);
-const ownKeys = (value: Obj, allowed: readonly string[]) => Object.keys(value).every((key) => allowed.includes(key));
 const owner = (req: Request): string => (req as Request & { user?: { id?: string } }).user?.id ?? LOCAL_AGENT_OWNER_ID;
-const id = (value: unknown, name = 'id'): string => {
-  if (typeof value !== 'string' || !value || value.length > 200) throw new PageWriteError(400, 'invalid', `Invalid ${name}`);
-  return value;
-};
 const integer = (value: unknown, name: string, min = 0, max = Number.MAX_SAFE_INTEGER): number => {
   const n = typeof value === 'string' && /^\d+$/.test(value) ? Number(value) : value;
   if (!Number.isSafeInteger(n) || (n as number) < min || (n as number) > max) throw new PageWriteError(400, 'invalid', `Invalid ${name}`);
   return n as number;
 };
-function body(req: Request, keys: readonly string[]): Obj {
-  if (req.body === undefined && keys.length === 0) return {};
-  if (!isObject(req.body) || !ownKeys(req.body, keys)) throw new PageWriteError(400, 'invalid', 'Invalid request body');
-  assertPageRequestSize(req.body);
-  return req.body;
-}
-function query(req: Request, allowed: readonly string[]): void {
-  if (!ownKeys(req.query as Obj, allowed)) throw new PageWriteError(400, 'invalid', 'Unknown query parameter');
-}
 function optionalString(value: unknown, name: string, max = 200): string | undefined {
   if (value === undefined) return undefined;
   if (typeof value !== 'string' || value.length > max) throw new PageWriteError(400, 'invalid', `Invalid ${name}`);
   return value;
 }
-function route(fn: (req: Request, res: Response) => unknown) {
-  return (req: Request, res: Response, next: NextFunction) => {
-    try { fn(req, res); } catch (error) { next(error); }
-  };
-}
-function errors(_error: unknown, _req: Request, res: Response, _next: NextFunction): void {
-  const error = _error instanceof PageWriteError ? _error : null;
-  if (error) { res.status(error.status).json({ error: { code: error.code, message: error.message } }); return; }
-  res.status(500).json({ error: { code: 'internal_error', message: 'Unable to complete Pages request' } });
-}
 function requireRequired<T>(value: T | undefined, name: string): T {
   if (value === undefined) throw new PageWriteError(400, 'invalid', `${name} is required`);
   return value;
+}
+
+/**
+ * What a page edit answers with, as the owner is shown it (DESIGN-v2 §2.7):
+ * a check-in's source in the page, and in the blocks the changes held before
+ * and after, opens the post its run made, not the check-in node purged after it.
+ */
+function presentedPageEdit(pageId: string, ownerUserId: string, changes: PageWriteResult) {
+  const resolver = checkinSourceResolver(ownerUserId);
+  const shown = (records: PageChangeDto[]) => records.map((change) => presentChange(change, ownerUserId, resolver));
+  return {
+    page: presentPage(getPage(pageId, ownerUserId), ownerUserId, resolver),
+    changes: { ...changes, applied: shown(changes.applied), proposed: shown(changes.proposed) },
+  };
 }
 
 /** Native Pages API. Mount at /api; authorization is always resolved from persisted ownership. */
@@ -98,7 +88,11 @@ export function setupPagesRoutes(): Router {
     requirePagesWorkspace(id(req.params.workspaceId, 'workspaceId'), owner(req));
     const limit = req.query.limit === undefined ? 50 : integer(req.query.limit, 'limit', 1, 100);
     const cursor = optionalString(req.query.cursor, 'cursor', 500);
-    res.json(listPageTrash(id(req.params.workspaceId, 'workspaceId'), owner(req), { limit, cursor }));
+    const ownerUserId = owner(req);
+    const trash = listPageTrash(id(req.params.workspaceId, 'workspaceId'), ownerUserId, { limit, cursor });
+    // A trashed page's root is a full page: its check-in sources go out presented, as GET /pages/:id sends them.
+    const resolver = checkinSourceResolver(ownerUserId);
+    res.json({ ...trash, items: trash.items.map((group) => ({ ...group, root: presentPage(group.root, ownerUserId, resolver) })) });
   }));
 
   router.get('/workspaces/:workspaceId/databases', route((req, res) => {
@@ -170,13 +164,13 @@ export function setupPagesRoutes(): Router {
     const data = body(req, ['revision', 'ops']);
     const pageId = id(req.params.pageId, 'pageId');
     const changes = applyUserPageEdits({ pageId, ownerUserId: owner(req), revision: integer(requireRequired(data.revision as number | undefined, 'revision'), 'revision', 1), ops: data.ops });
-    res.json({ page: getPage(pageId, owner(req)), changes });
+    res.json(presentedPageEdit(pageId, owner(req), changes));
   }));
   router.get('/pages/:pageId', route((req, res) => {
     query(req, ['since']);
     const page = getPage(id(req.params.pageId, 'pageId'), owner(req));
     if (req.query.since !== undefined && integer(req.query.since, 'since') === page.viewVersion) { res.status(204).end(); return; }
-    res.json(page);
+    res.json(presentPage(page, owner(req)));
   }));
   router.patch('/pages/:pageId', route((req, res) => {
     query(req, []);
@@ -187,7 +181,7 @@ export function setupPagesRoutes(): Router {
     if (data.color !== undefined) { if (data.color !== null && (typeof data.color !== 'string' || data.color.length > 100)) throw new PageWriteError(400, 'invalid', 'Invalid color'); patch.color = data.color as string | null; }
     if (data.parentId !== undefined) patch.parentId = data.parentId === null ? null : id(data.parentId, 'parentId');
     if (data.position !== undefined) patch.position = integer(data.position, 'position');
-    res.json(updatePageMetadata(id(req.params.pageId, 'pageId'), owner(req), patch, { expectedRevision: revision }));
+    res.json(presentPage(updatePageMetadata(id(req.params.pageId, 'pageId'), owner(req), patch, { expectedRevision: revision }), owner(req)));
   }));
   router.delete('/pages/:pageId', route((req, res) => {
     query(req, []);
@@ -222,6 +216,7 @@ export function setupPagesRoutes(): Router {
     const data = body(req, ['revision', 'ops']);
     const databaseId = id(req.params.databaseId, 'databaseId');
     const changes = applyUserDatabaseEdits({ databaseId, ownerUserId: owner(req), revision: integer(requireRequired(data.revision as number | undefined, 'revision'), 'revision', 1), ops: data.ops });
+    // Nothing here to present: rows, columns and views hold no block sources, and these changes are the person's own.
     res.json({ database: getDatabase(databaseId, owner(req)), changes });
   }));
   router.get('/databases/:databaseId/task-activity', route((req, res) => {
@@ -273,6 +268,6 @@ export function setupPagesRoutes(): Router {
   router.post('/page-batches/:batchId/revert', batchRoute('revert'));
   router.post('/page-batches/:batchId/redo', batchRoute('redo'));
 
-  router.use(errors);
+  router.use(pageErrors('Unable to complete Pages request'));
   return router;
 }

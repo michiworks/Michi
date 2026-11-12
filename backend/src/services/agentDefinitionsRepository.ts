@@ -1,4 +1,4 @@
-import { createHash, randomUUID } from 'node:crypto';
+import { randomUUID } from 'node:crypto';
 import {
   AgentDefinitionStatus,
   parseAgentDefinitionDtoV1,
@@ -7,6 +7,7 @@ import {
   type UpdateAgentDefinitionRequestV1,
 } from 'michi-shared';
 import { getDb, runInTransaction } from './db';
+import { withCommandReceipt } from './commandReceipts';
 import { workspaceOwnerMatches } from './agentOwner';
 import type { AgentCapabilityCatalog } from './agentCapabilityCatalog';
 import { assertAgentOwnerWritable } from './agentOwnerDeletionGate';
@@ -29,7 +30,7 @@ function requireOwner(ownerUserId: string): void {
   if (!ownerUserId?.trim()) throw new Error('ownerUserId is required');
 }
 
-function encodeList(values: readonly string[]): string {
+export function encodeList(values: readonly string[]): string {
   return JSON.stringify({ version: 1, values });
 }
 
@@ -52,8 +53,9 @@ function rowToDto(row: DefinitionRow): AgentDefinitionDtoV1 {
   });
 }
 
-function operationHash(payload: unknown): string {
-  return createHash('sha256').update(JSON.stringify(payload)).digest('hex');
+/** The receipt ledger of an owner's global Agent Definitions, which have no workspace. */
+export function agentDefinitionGlobalLedgerId(ownerUserId: string): string {
+  return `__agent_global__:${ownerUserId}`;
 }
 
 export class AgentDefinitionsRepository {
@@ -75,19 +77,10 @@ export class AgentDefinitionsRepository {
 
   private idempotent<T>(ownerUserId: string, workspaceId: string | null, operationId: string, payload: unknown, fn: () => T): T {
     if (!operationId?.trim()) throw new Error('operationId is required');
-    const ledgerWorkspace = workspaceId ?? `__agent_global__:${ownerUserId}`;
-    const key = `agent-definition:${operationId}`;
-    const hash = operationHash(payload);
-    const prior = getDb().prepare('SELECT payload_hash, result_json FROM command_receipts WHERE workspace_id = ? AND operation_id = ?')
-      .get(ledgerWorkspace, key) as { payload_hash: string; result_json: string } | undefined;
-    if (prior) {
-      if (prior.payload_hash !== hash) throw new Error(`operation ${operationId} was reused with a different payload`);
-      return JSON.parse(prior.result_json) as T;
-    }
-    const result = fn();
-    getDb().prepare('INSERT INTO command_receipts (workspace_id, operation_id, payload_hash, result_json, created_at) VALUES (?, ?, ?, ?, ?)')
-      .run(ledgerWorkspace, key, hash, JSON.stringify(result), this.now());
-    return result;
+    return withCommandReceipt({
+      ledgerId: workspaceId ?? agentDefinitionGlobalLedgerId(ownerUserId),
+      operationId: `agent-definition:${operationId}`, request: payload, now: this.now(),
+    }, fn);
   }
 
   create(ownerUserId: string, request: CreateAgentDefinitionRequestV1, operationId: string): AgentDefinitionDtoV1 {

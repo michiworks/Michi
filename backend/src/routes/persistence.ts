@@ -8,14 +8,15 @@ import { log } from '../services/logger';
 import { getDb, runInTransaction } from '../services/db';
 import { readPrefs, writePrefs, migrateFromSqlite } from '../services/prefsConfig';
 import { readChatPermissionSettings, writeChatPermissionSettings, writeNodePermissionMode, resolveChatPermissionMode, resolveChatApproveForMe } from '../services/chatPermissions';
-import { isChatPermissionMode, isChatPermissionSettings } from 'michi-shared';
+import { writeNodeUltracode } from '../services/chatUltracode';
+import { ATTENTION_PROTOCOL, LEAN_NODE_FIELDS, isChatPermissionMode, isChatPermissionSettings, isCheckinNodeId } from 'michi-shared';
 import { getNode } from '../services/dbRepository';
 import {
   listWorkspaces, getWorkspace, saveWorkspace, deleteWorkspace,
   listTrees, saveTree, listNodes, saveNode, updateNodeTitle,
   listEdges, saveEdge, listMessages, saveMessage, getMessageCount,
   listContexts, saveContext, loadFullWorkspace, loadAllWorkspaces,
-  loadAllWorkspacesMeta, loadTreeMessages, loadTreeMessagePage,
+  loadAllWorkspacesMeta, loadWorkspaceMeta, loadTreeMessageSnapshot, loadTreeMessagePage,
   deleteEdge, deleteTree, moveTreeToWorkspace, softDeleteNode, restoreNode, deleteContext,
   getAiGlobalContext, setAiGlobalContext,
   emptyWorkspaceTrash, purgeWorkspaceNodes,
@@ -25,8 +26,12 @@ import {
 import { normalizeIncomingMessageRow } from '../services/messageSerialization';
 import { requireWorkspaceOwner, requireNodeOwner } from './middleware/ownership';
 import { ensureDurableGraphNode } from '../services/graphCommands';
-import { applyWorkspaceCommands } from '../services/domainCommands';
+import { applyWorkspaceCommands, MAX_COMMANDS_PER_BATCH } from '../services/domainCommands';
+import { DomainError } from '../services/domainErrors';
+import { recordStructureChange, runWithStructureOrigin, structureEvents, structureOriginOf } from '../services/structureEvents';
 import { domainErrorResponse } from './domainErrorResponse';
+import { ensureRequestedGraphNode } from './graphPrerequisite';
+import { projectMessagesForTransport } from './toolOutputTransport';
 import { loadProfileActivity } from '../services/profileActivity';
 import { extractNodeTree, planNodeExtraction } from '../services/extractNodeTree';
 import { acquireSessionRestoreLock } from '../services/nativeResume';
@@ -38,11 +43,64 @@ import { getRuntime } from '../agents/registry';
 /** A node id as Michi mints them (and as assistant links carry them). */
 const NODE_ID_SHAPE = /^[A-Za-z0-9._:~@+=-]{1,128}$/;
 
+/**
+ * Check-in node ids (`n-cmph-…`, DESIGN-v2 §2.5) are the backend's alone:
+ * only createCheckinNode makes one, and no client may save, patch or write
+ * messages into one. The fields of a graph save that name a node.
+ */
+const NODE_ID_FIELDS = ['id', 'nodeId', 'node_id', 'rootNodeId', 'root_node_id', 'parentNodeId', 'parent_node_id',
+  'sourceNodeId', 'source_node_id', 'targetNodeId', 'target_node_id', 'originNodeId', 'origin_node_id'] as const;
+
+/** The first check-in node id a client's graph save names (its node, tree, edges or commands), or null. */
+function reservedNodeIdIn(value: unknown, depth = 0): string | null {
+  if (depth > 6 || !value || typeof value !== 'object') return null;
+  if (Array.isArray(value)) {
+    for (const entry of value.slice(0, 1000)) {
+      const found = reservedNodeIdIn(entry, depth + 1);
+      if (found) return found;
+    }
+    return null;
+  }
+  const record = value as Record<string, unknown>;
+  for (const field of NODE_ID_FIELDS) {
+    const id = record[field];
+    if (typeof id === 'string' && isCheckinNodeId(id)) return id;
+  }
+  for (const key of ['node', 'tree', 'edges', 'commands', 'payload']) {
+    const found = reservedNodeIdIn(record[key], depth + 1);
+    if (found) return found;
+  }
+  return null;
+}
+
+function refuseReservedNodeId(res: express.Response, id: string | null): boolean {
+  if (!id) return false;
+  res.status(400).json({ code: 'reserved_node_id', error: `node id ${id} is reserved for Michi's check-ins` });
+  return true;
+}
+
+/**
+ * `:nodeId` routes that write a node or its tree (messages, patch,
+ * permissions, extract, trim and restore): a check-in node is never a
+ * client's to write. Runs before the ownership check, so nothing reads it.
+ */
+function refuseReservedNodeParam<P extends { nodeId: string }>(req: express.Request<P>, res: express.Response, next: express.NextFunction): void {
+  if (refuseReservedNodeId(res, isCheckinNodeId(req.params.nodeId) ? req.params.nodeId : null)) return;
+  next();
+}
+
+/** A check-in node in this tree, or as its root (each check-in has a tree of its own), or null. */
+function reservedNodeInTree(treeId: string): string | null {
+  const rows = getDb().prepare('SELECT id FROM nodes WHERE tree_id = ? UNION SELECT root_node_id FROM trees WHERE id = ?')
+    .all(treeId, treeId) as Array<{ id: string | null }>;
+  return rows.map((row) => row.id).find((id): id is string => typeof id === 'string' && isCheckinNodeId(id)) ?? null;
+}
+
 export function setupPersistenceRoutes(): express.Router {
   const router = express.Router();
   router.use(requireRequestAccess);
 
-  router.post('/workspaces/:id/nodes/:nodeId/extract-tree', requireWorkspaceOwner, async (req, res) => {
+  router.post('/workspaces/:id/nodes/:nodeId/extract-tree', refuseReservedNodeParam, requireWorkspaceOwner, async (req, res) => {
     const { id: workspaceId, nodeId } = req.params;
     const treeId = req.body?.treeId;
     if (typeof treeId !== 'string' || !treeId.trim() || treeId.length > 128) {
@@ -62,7 +120,7 @@ export function setupPersistenceRoutes(): express.Router {
       if (current.affected.some(id => !plan.affected.includes(id))) throw new Error('Branch changed; try extracting again');
       const assertIdle = () => {
         for (const id of current.affected) {
-          if (chatHub.isActive(id) || chatHub.isOwnerTurnActive(id) || chatHub.hasPendingSelfTurn(id)) {
+          if (chatHub.isBusy(id)) {
             throw new Error('Wait for replies to finish before extracting this branch');
           }
         }
@@ -103,18 +161,17 @@ export function setupPersistenceRoutes(): express.Router {
     writeChatPermissionSettings(req.body, req.user?.id);
     res.json(readChatPermissionSettings(req.user?.id));
   });
-  router.put('/nodes/:nodeId/permissions', requireNodeOwner, (req, res) => {
+  router.put('/nodes/:nodeId/permissions', refuseReservedNodeParam, requireNodeOwner, async (req, res) => {
     if (process.env.MICHI_CLOUD === '1' && !req.user?.id) return res.status(401).json({ error: 'unauthorized' });
     const { nodeId } = req.params;
+    // The durable prerequisite this may create names no check-in node either (its tree, a parent).
+    if (refuseReservedNodeId(res, reservedNodeIdIn(req.body?.graphPrerequisite))) return;
     if (!isChatPermissionMode(req.body?.mode)) return res.status(400).json({ error: 'mode must be ask, trust, or yolo' });
     const approveForMe = req.body?.approveForMe;
     if (approveForMe !== undefined && typeof approveForMe !== 'boolean') return res.status(400).json({ error: 'approveForMe must be boolean' });
+    const missing = await ensureRequestedGraphNode(req, nodeId, req.body?.graphPrerequisite);
+    if (missing) return res.status(missing.status).json(missing.body);
     try {
-      if (!getNode(nodeId)) {
-        const prerequisite = req.body?.graphPrerequisite;
-        if (prerequisite?.node?.id !== nodeId) return res.status(409).json({ error: 'durable node prerequisite required' });
-        ensureDurableGraphNode({ ...prerequisite, ownerUserId: (requestOwnerUserId(req) ?? null) });
-      }
       writeNodePermissionMode(nodeId, req.body.mode, req.user?.id, false, approveForMe === true);
       res.json({ mode: req.body.mode, approveForMe: req.body.mode === 'ask' && approveForMe === true,
         effectiveMode: resolveChatPermissionMode(nodeId, req.user?.id), effectiveApproveForMe: resolveChatApproveForMe(nodeId, req.user?.id) });
@@ -122,6 +179,33 @@ export function setupPersistenceRoutes(): express.Router {
       const failure = domainErrorResponse(err);
       res.status(failure.status).json({ error: failure.error });
     }
+  });
+
+  // A chat's Ultracode choice: saved first (sessions read it at every spawn
+  // and turn), then applied to its live session, which reports what took effect.
+  router.put('/nodes/:nodeId/ultracode', refuseReservedNodeParam, requireNodeOwner, async (req, res) => {
+    if (process.env.MICHI_CLOUD === '1' && !req.user?.id) return res.status(401).json({ error: 'unauthorized' });
+    const { nodeId } = req.params;
+    // The durable prerequisite this may create names no check-in node either (its tree, a parent).
+    if (refuseReservedNodeId(res, reservedNodeIdIn(req.body?.graphPrerequisite))) return;
+    const enabled = req.body?.enabled;
+    if (typeof enabled !== 'boolean') return res.status(400).json({ error: 'enabled must be boolean' });
+    const missing = await ensureRequestedGraphNode(req, nodeId, req.body?.graphPrerequisite);
+    if (missing) return res.status(missing.status).json(missing.body);
+    try {
+      writeNodeUltracode(nodeId, enabled, req.user?.id);
+    } catch (err) {
+      const failure = domainErrorResponse(err);
+      return res.status(failure.status).json({ error: failure.error });
+    }
+    const session = getSessionForOwner(nodeId, chatOwner(nodeId), requestOwnerUserId(req) ?? null);
+    try {
+      await session?.setUltracode?.(enabled);
+    } catch (err) {
+      // Saved: the session takes it at its next turn or spawn.
+      log.warn('chat', 'ultracode could not be applied to the live session', { nodeId, enabled, error: (err as Error).message });
+    }
+    res.json({ enabled, ...(session?.getSessionState ? { sessionState: session.getSessionState() } : {}) });
   });
 
   router.get('/persistence/capabilities', (_req, res) => {
@@ -139,6 +223,24 @@ export function setupPersistenceRoutes(): express.Router {
       // ("supported, empty"). Bump only alongside a breaking contract change
       // in shared/src/paneInspection.ts.
       paneInspection: 'v1',
+      // Server attention (shared/src/attention.ts): this backend decides
+      // notifications and delivers them as attention_* frames on the
+      // background feed, so a window can leave its local triggers off.
+      attention: ATTENTION_PROTOCOL,
+      // Chat agents have list_artifacts and search_artifacts (agents/artifactTools.ts)
+      // and ensure-session reads artifactCount, so a frontend may name only
+      // the pinned artifacts in a first message. An older backend has neither:
+      // it gets the full list, at most 50 (frontend state/agentArtifacts.ts).
+      artifactTools: 'v1',
+      // POST /workspaces/:id/commands skips a context.upsert of a deleted
+      // artifact (goneContextIds) and one under a name another artifact holds
+      // (nameTakenContextIds) and commits the rest, where an older backend
+      // failed the batch (a 500 its sender retried). So a frontend may send
+      // an artifact's upsert only to ask which it is (state/workspacePersistence.ts
+      // probeArtifacts).
+      artifactWriteAnswers: 'v1',
+      // POST /workspaces/:id/commands rejects a larger batch (code too_many_commands).
+      maxCommandsPerBatch: MAX_COMMANDS_PER_BATCH,
     });
   });
 
@@ -185,13 +287,20 @@ export function setupPersistenceRoutes(): express.Router {
   // Bulk-load all workspaces in a single request.
   //   ?meta=1 → structure + per-node message_count, NO message bodies (the
   //             lazy-load hydration payload; bodies come per-tree below).
+  //   &lean=1 → rows also leave out the lean node fields that hold a value,
+  //             named in `leanNodeFields` (shared/leanNodeFields); tree pages
+  //             bring them.
   //   (default) → full snapshot including every message body (legacy path).
   router.get('/workspaces/all', (req, res) => {
     try {
       const userId: string | undefined = requestOwnerUserId(req);
       const meta = req.query.meta === '1' || req.query.meta === 'true';
-      const data = meta ? loadAllWorkspacesMeta(userId) : loadAllWorkspaces(userId);
-      res.json({ workspaces: data });
+      const lean = meta && (req.query.lean === '1' || req.query.lean === 'true');
+      // Taken before the read: a structure frame numbered past it may be
+      // missing from this snapshot, so the window re-reads (see structureEvents).
+      const structureCursor = structureEvents.cursor(userId);
+      const data = meta ? loadAllWorkspacesMeta(userId, { lean }) : loadAllWorkspaces(userId).map(projectMessagesForTransport);
+      res.json({ workspaces: data, structureCursor, ...(lean ? { leanNodeFields: LEAN_NODE_FIELDS } : {}) });
     } catch (err) {
       res.status(500).json({ error: (err as Error).message });
     }
@@ -215,23 +324,26 @@ export function setupPersistenceRoutes(): express.Router {
           return res.status(400).json({ error: 'Invalid message page parameters' });
         }
         res.setHeader('Cache-Control', 'no-store');
-        return res.json(loadTreeMessagePage(req.params.id, req.params.treeId,
-          { limit, nodeId, before: beforeSeq === undefined ? undefined : { seq: beforeSeq, id: beforeId! } }, userId));
+        return res.json(projectMessagesForTransport(loadTreeMessagePage(req.params.id, req.params.treeId,
+          { limit, nodeId, before: beforeSeq === undefined ? undefined : { seq: beforeSeq, id: beforeId! } }, userId)));
       }
-      const messages = loadTreeMessages(req.params.id, req.params.treeId, userId);
-      res.json({ messages });
+      // Tool outputs travel without inline images and, when long, as head + tail; the rows stay whole.
+      res.json(projectMessagesForTransport(loadTreeMessageSnapshot(req.params.id, req.params.treeId, userId)));
     } catch (err) {
       res.status(500).json({ error: (err as Error).message });
     }
   });
 
   // Get full workspace with all nested data
+  //   ?meta=1 → structure + per-node message_count, no message bodies (the
+  //             structure re-read after a workspace_structure_changed frame).
   router.get('/workspaces/:id', requireWorkspaceOwner, (req, res) => {
     try {
       const userId: string | undefined = requestOwnerUserId(req);
-      const data = loadFullWorkspace(req.params.id, userId);
+      const meta = req.query.meta === '1' || req.query.meta === 'true';
+      const data = meta ? loadWorkspaceMeta(req.params.id, userId) : loadFullWorkspace(req.params.id, userId);
       if (!data) return res.status(404).json({ error: 'Workspace not found' });
-      res.json(data);
+      res.json(meta ? data : projectMessagesForTransport(data));
     } catch (err) {
       res.status(500).json({ error: (err as Error).message });
     }
@@ -240,6 +352,7 @@ export function setupPersistenceRoutes(): express.Router {
   // Backend-first graph prerequisite. Creates only the workspace/tree/node
   // slice required by one chat-capable node; safe to retry with the same IDs.
   router.post('/workspaces/:id/graph/nodes/ensure', (req, res, next) => {
+    if (refuseReservedNodeId(res, reservedNodeIdIn(req.body))) return;
     if (process.env.MICHI_CLOUD === '1' && getWorkspace(req.params.id)) {
       return requireWorkspaceOwner(req, res, next);
     }
@@ -249,10 +362,10 @@ export function setupPersistenceRoutes(): express.Router {
       if (!req.body?.workspace || req.body.workspace.id !== req.params.id || !req.body?.node) {
         return res.status(400).json({ error: 'workspace and node are required and workspace.id must match the route' });
       }
-      const result = ensureDurableGraphNode({
+      const result = runWithStructureOrigin(structureOriginOf(req), () => ensureDurableGraphNode({
         ...req.body,
         ownerUserId: (requestOwnerUserId(req) ?? null),
-      });
+      }));
       res.json({ ok: true, ...result });
     } catch (err) {
       const failure = domainErrorResponse(err);
@@ -261,21 +374,37 @@ export function setupPersistenceRoutes(): express.Router {
   });
 
   router.post('/workspaces/:id/commands', (req, res, next) => {
+    if (refuseReservedNodeId(res, reservedNodeIdIn(req.body?.commands))) return;
     if (process.env.MICHI_CLOUD === '1' && getWorkspace(req.params.id)) {
       return requireWorkspaceOwner(req, res, next);
     }
     next();
   }, (req, res) => {
     try {
-      const result = applyWorkspaceCommands(req.params.id, {
+      // A window's own command batch: its store already shows every change in it.
+      const result = runWithStructureOrigin(structureOriginOf(req), () => applyWorkspaceCommands(req.params.id, {
         operationId: req.body?.operationId,
         commands: req.body?.commands,
         ownerUserId: (requestOwnerUserId(req) ?? null),
-      });
+        // A window that matches artifacts by id only (domainCommands.ts takenOver).
+        ...(req.body?.artifactIdentity === 'id' ? { artifactIdentity: 'id' as const } : {}),
+      }));
       res.json({ ok: true, ...result });
     } catch (err) {
       const failure = domainErrorResponse(err);
-      res.status(failure.status).json({ error: failure.error });
+      if (!(err instanceof DomainError)) return res.status(failure.status).json({ error: failure.error });
+      // The batch's shape only: never ids or payload content.
+      const commands: unknown = req.body?.commands;
+      const operationId: unknown = req.body?.operationId;
+      log.warn('workspace', 'workspace commands rejected', {
+        status: failure.status,
+        code: err.code,
+        commandIndex: err.details?.commandIndex,
+        commandCount: Array.isArray(commands) ? commands.length : undefined,
+        operationIdLength: typeof operationId === 'string' ? operationId.length : undefined,
+      });
+      // `code` (and where it applies the failing command, or maxCommands) lets a client act without parsing `error`.
+      res.status(failure.status).json({ ...err.details, error: failure.error, code: err.code });
     }
   });
 
@@ -312,7 +441,7 @@ export function setupPersistenceRoutes(): express.Router {
         // preserves the existing owner on UPDATE so this null is fine there.
         owner_user_id: (requestOwnerUserId(req) ?? null),
       };
-      saveWorkspace(ws);
+      runWithStructureOrigin(structureOriginOf(req), () => saveWorkspace(ws));
       log.info('workspace', existed ? 'updated' : 'created', { id: ws.id, name: ws.name, cwd: ws.cwd ?? undefined });
       res.json({ ok: true });
     } catch (err) {
@@ -462,6 +591,8 @@ export function setupPersistenceRoutes(): express.Router {
   router.delete('/workspaces/:id/nodes', requireWorkspaceOwner, (req, res) => {
     try {
       const nodeIds: string[] = Array.isArray(req.body?.nodeIds) ? req.body.nodeIds : [];
+      // A check-in purges its own node when its run ends (DESIGN-v2 §3.1); no client does.
+      if (refuseReservedNodeId(res, nodeIds.find((nodeId) => typeof nodeId === 'string' && isCheckinNodeId(nodeId)) ?? null)) return;
       if (nodeIds.length === 0) return res.json({ ok: true, purged: 0 });
       const purged = purgeWorkspaceNodes(req.params.id, nodeIds);
       log.info('workspace', 'nodes purged', { id: req.params.id, requested: nodeIds.length, purged });
@@ -483,6 +614,8 @@ export function setupPersistenceRoutes(): express.Router {
       if (!fromWorkspaceId || !toWorkspaceId) {
         return res.status(400).json({ error: 'fromWorkspaceId and toWorkspaceId required' });
       }
+      // A check-in's tree stays where the backend made it.
+      if (refuseReservedNodeId(res, reservedNodeInTree(treeId))) return;
       // Cloud-mode: caller must own BOTH source and target workspaces.
       if (process.env.MICHI_CLOUD === '1') {
         const userId = requestOwnerUserId(req);
@@ -528,7 +661,7 @@ export function setupPersistenceRoutes(): express.Router {
   });
 
   // Save a single message to a node
-  router.post('/nodes/:nodeId/messages', requireNodeOwner, (req, res) => {
+  router.post('/nodes/:nodeId/messages', refuseReservedNodeParam, requireNodeOwner, (req, res) => {
     try {
       const userId: string | undefined = requestOwnerUserId(req);
       saveMessage(normalizeIncomingMessageRow(
@@ -543,7 +676,7 @@ export function setupPersistenceRoutes(): express.Router {
   });
 
   // Update node fields (title, position, etc.)
-  router.patch('/nodes/:nodeId', requireNodeOwner, (req, res) => {
+  router.patch('/nodes/:nodeId', refuseReservedNodeParam, requireNodeOwner, (req, res) => {
     try {
       const { title, position_x, position_y, status, minimized, pane_width } = req.body;
       const db = getDb();
@@ -556,8 +689,15 @@ export function setupPersistenceRoutes(): express.Router {
       if (minimized !== undefined) { sets.push('minimized = ?'); params.push(minimized); }
       if (pane_width !== undefined) { sets.push('pane_width = ?'); params.push(pane_width); }
       if (sets.length === 0) return res.json({ ok: true });
+      const before = title !== undefined ? getNode(req.params.nodeId) : null;
       params.push(req.params.nodeId);
       db.prepare(`UPDATE nodes SET ${sets.join(', ')} WHERE id = ? AND purged_at IS NULL`).run(...params);
+      if (before && (before.title ?? null) !== (title ?? null)) {
+        runWithStructureOrigin(structureOriginOf(req), () => recordStructureChange({
+          entity: 'node', op: 'renamed', workspaceId: before.workspace_id, nodeId: before.id,
+          ...(before.tree_id ? { treeId: before.tree_id } : {}),
+        }));
+      }
       res.json({ ok: true });
     } catch (err) {
       res.status(500).json({ error: (err as Error).message });
@@ -569,7 +709,7 @@ export function setupPersistenceRoutes(): express.Router {
   // from the client (which is the source of truth for the trash UI). Returns
   // { trimmed: 1 } on success, { trimmed: 0 } if the node was not found in
   // the given workspace (e.g. already purged via a sibling tab).
-  router.post('/workspaces/:id/nodes/:nodeId/trim', requireWorkspaceOwner, (req, res) => {
+  router.post('/workspaces/:id/nodes/:nodeId/trim', refuseReservedNodeParam, requireWorkspaceOwner, (req, res) => {
     try {
       const deletedAt = Number(req.body?.deletedAt);
       const groupId = String(req.body?.groupId ?? '');
@@ -591,7 +731,7 @@ export function setupPersistenceRoutes(): express.Router {
   // node has no trim_snapshot (caller should fall back to /restore for
   // subtree-deleted nodes — that path is handled in chatStore today and
   // doesn't need its own backend hook).
-  router.post('/workspaces/:id/nodes/:nodeId/restore-trim', requireWorkspaceOwner, (req, res) => {
+  router.post('/workspaces/:id/nodes/:nodeId/restore-trim', refuseReservedNodeParam, requireWorkspaceOwner, (req, res) => {
     try {
       const result = restoreTrimmedNode(req.params.id, req.params.nodeId);
       log.info('workspace', 'node trim restored', { workspaceId: req.params.id, nodeId: req.params.nodeId, ...result });

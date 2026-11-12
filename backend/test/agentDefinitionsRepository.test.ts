@@ -7,6 +7,7 @@ import { AgentDefinitionStatus, type CreateAgentDefinitionRequestV1 } from 'mich
 import { closeDb, getDb, initDb } from '../src/services/db';
 import { AgentCapabilityCatalog } from '../src/services/agentCapabilityCatalog';
 import { AgentDefinitionsRepository } from '../src/services/agentDefinitionsRepository';
+import { DomainError } from '../src/services/domainErrors';
 
 let tmpDir: string;
 let nextId = 0;
@@ -52,6 +53,15 @@ describe('AgentDefinitionsRepository', () => {
     assert.throws(() => definitions.create('owner-a', request('ws-b'), 'wrong-workspace'), /workspace not found/);
     assert.equal((getDb().prepare("SELECT COUNT(*) AS count FROM command_receipts WHERE operation_id = 'agent-definition:wrong-workspace'").get() as { count: number }).count, 0);
     assert.throws(() => definitions.get('', created.id), /ownerUserId/);
+  });
+
+  test('replays a create sent again with its keys in another order', () => {
+    const definitions = repo();
+    const created = definitions.create('owner-a', request(null), 'create-global');
+    const reordered = Object.fromEntries(Object.entries(request(null)).reverse()) as CreateAgentDefinitionRequestV1;
+    assert.deepEqual(definitions.create('owner-a', reordered, 'create-global'), created);
+    assert.throws(() => definitions.create('owner-a', { ...request(null), name: 'Other' }, 'create-global'),
+      (error: unknown) => error instanceof DomainError && error.code === 'operation_id_reused');
   });
 
   test('uses optimistic revisions for edit and enable transitions', () => {

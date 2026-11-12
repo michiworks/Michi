@@ -5,7 +5,7 @@ import { setKnownBackendConnections } from '../config/backendConnections';
  * Cold-start hydration barrier.
  *
  * The dev/desktop norm: the renderer mounts (and this hook runs) BEFORE the
- * backend is listening, so the first `fetchAllWorkspaces()` rejects with
+ * backend is listening, so the first `fetchAllWorkspacesMeta()` rejects with
  * ECONNREFUSED. The bug this guards against: that thrown fetch was finalized as
  * an EMPTY database — `setHydrated(true)` with `projects: []` — which made the
  * shell auto-open the New Workspace dialog over a DB that actually holds every
@@ -26,7 +26,7 @@ import type { BackendConnectionSummary } from '../config/backendConnections';
 const apiMocks = vi.hoisted(() => ({
   fetchPersistenceCapabilities: vi.fn(),
   fetchAllWorkspacesMeta: vi.fn(),
-  fetchTreeMessages: vi.fn(async () => []),
+  fetchTreeMessageSnapshot: vi.fn(async () => ({ messages: [] })),
   fetchTreeMessagePage: vi.fn(async () => ({ messages: [] })),
   fetchWorkspaces: vi.fn(),
   fetchWorkspace: vi.fn(),
@@ -37,7 +37,7 @@ const apiMocks = vi.hoisted(() => ({
 vi.mock('../services/api', () => ({
   fetchPersistenceCapabilities: apiMocks.fetchPersistenceCapabilities,
   fetchAllWorkspacesMeta: apiMocks.fetchAllWorkspacesMeta,
-  fetchTreeMessages: apiMocks.fetchTreeMessages,
+  fetchTreeMessageSnapshot: apiMocks.fetchTreeMessageSnapshot,
   fetchTreeMessagePage: apiMocks.fetchTreeMessagePage,
   fetchWorkspaces: apiMocks.fetchWorkspaces,
   fetchWorkspace: apiMocks.fetchWorkspace,
@@ -46,7 +46,7 @@ vi.mock('../services/api', () => ({
 }));
 
 import { getRemoteRecoveryIssues, retryRemoteWorkspace } from './remoteRecovery';
-import { ACTIVE_TREE_EAGER_BUDGET_MS, LEGACY_STATE_KEY, useWorkspacePersistence } from './workspacePersistence';
+import { ACTIVE_TREE_EAGER_BUDGET_MS, activeProjectKey, LEGACY_STATE_KEY, useWorkspacePersistence } from './workspacePersistence';
 import { STATE_SCHEMA_VERSION } from './chatHydration';
 
 const V2_CAPABILITIES = {
@@ -79,7 +79,7 @@ const backendWorkspaceRow = {
  * flip it. The two existing hydration harnesses start hydrated=true, so they
  * never drive this transition — this one does.
  */
-function useHarness(initialActiveProjectId: string | null = null) {
+function useHarness(initialActiveProjectId: string | null = null, windowId?: string) {
   const [projects, setProjects] = useState<Project[]>([]);
   const [activeProjectId, setActiveProjectId] = useState<string | null>(initialActiveProjectId);
   const [nodes, setNodes] = useState<Record<string, ChatNodeState>>({});
@@ -87,11 +87,11 @@ function useHarness(initialActiveProjectId: string | null = null) {
   const [structureVersion] = useState(0);
   const nodesRef = useRef(nodes);
   nodesRef.current = nodes;
-  useWorkspacePersistence({
+  const { structureGuards } = useWorkspacePersistence({
     projects, activeProjectId, nodes, structureVersion, hydrated, nodesRef,
-    setProjects, setActiveProjectId, setNodes, setHydrated,
+    setProjects, setActiveProjectId, setNodes, setHydrated, windowId,
   });
-  return { hydrated, projects, projectsCount: projects.length, activeProjectId, nodes, setProjects, setNodes };
+  return { hydrated, projects, projectsCount: projects.length, activeProjectId, nodes, setProjects, setNodes, structureGuards };
 }
 
 describe('cold-start hydration barrier', () => {
@@ -100,7 +100,7 @@ describe('cold-start hydration barrier', () => {
     localStorage.clear();
     apiMocks.fetchPersistenceCapabilities.mockResolvedValue(V2_CAPABILITIES);
     apiMocks.fetchAllWorkspacesMeta.mockReset();
-    apiMocks.fetchTreeMessages.mockResolvedValue([]);
+    apiMocks.fetchTreeMessageSnapshot.mockResolvedValue({ messages: [] });
     apiMocks.fetchTreeMessagePage.mockResolvedValue({ messages: [] });
     apiMocks.fetchWorkspaces.mockResolvedValue([]);
     apiMocks.listBackendConnections.mockReset().mockResolvedValue([]);
@@ -232,6 +232,40 @@ describe('cold-start hydration barrier', () => {
     expect(result.current.activeProjectId).toBe(backendEntityId(connection.id, 'ws-r'));
   });
 
+  // The backend lists the most recently updated first: a workspace just
+  // trashed or archived comes before the live one.
+  const removedFirst = (column: 'deleted_at' | 'archived_at', prefix = 'ws') => [
+    { ...backendWorkspaceRow, workspace: { id: `${prefix}-gone`, name: 'Gone', created_at: 1, [column]: 200 }, nodes: [{ id: `${prefix}-n-gone`, created_at: 1 }] },
+    { ...backendWorkspaceRow, workspace: { id: `${prefix}-live`, name: 'Live', created_at: 1 }, nodes: [{ id: `${prefix}-n-live`, created_at: 1 }] },
+  ];
+
+  it.each(['deleted_at', 'archived_at'] as const)('opens a window with no saved workspace on a live one, not one with %s', async (column) => {
+    apiMocks.fetchAllWorkspacesMeta.mockResolvedValue(removedFirst(column));
+    const { result } = renderHook(() => useHarness());
+    await act(async () => { await vi.advanceTimersByTimeAsync(10); });
+    expect(result.current.hydrated).toBe(true);
+    expect(result.current.activeProjectId).toBe('ws-live');
+  });
+
+  it.each(['deleted_at', 'archived_at'] as const)('lets a landing remote snapshot pick a live workspace, not one with %s', async (column) => {
+    const connection = { id: 'remote-removed', name: 'Remote', transport: 'direct' as const, hasToken: true, createdAt: 1, updatedAt: 1 };
+    markBackendConnectionReady(connection.id);
+    const systemRow = {
+      ...backendWorkspaceRow,
+      workspace: { id: 'ws-sys', name: 'Assistant', created_at: 1, settings: JSON.stringify({ system: 'assistant' }) },
+      nodes: [{ id: 'n-sys', created_at: 1 }],
+    };
+    const remote = deferred<unknown[]>();
+    apiMocks.listBackendConnections.mockResolvedValue([connection]);
+    apiMocks.fetchAllWorkspacesMeta.mockImplementation(async (id?: string) => (id === connection.id ? remote.promise : [systemRow]));
+    const { result } = renderHook(() => useHarness());
+    await act(async () => { await vi.advanceTimersByTimeAsync(10); });
+    expect(result.current.activeProjectId).toBeNull();
+    remote.resolve(removedFirst(column, 'r'));
+    await act(async () => { await vi.advanceTimersByTimeAsync(10); });
+    expect(result.current.activeProjectId).toBe(backendEntityId(connection.id, 'r-live'));
+  });
+
   it('opens a saved local state on a user workspace when it was left on the assistant system workspace', async () => {
     const project = (id: string, nodeId: string, extra: Record<string, unknown> = {}) => ({
       id, name: id, chatIds: [nodeId], edges: [], artifacts: [], createdAt: 1,
@@ -251,6 +285,82 @@ describe('cold-start hydration barrier', () => {
     expect(result.current.hydrated).toBe(true);
     expect(result.current.projects.map(project => project.id)).toEqual(['ws-sys', 'ws-user']);
     expect(result.current.activeProjectId).toBe('ws-user');
+  });
+
+  const savedProject = (id: string, extra: Record<string, unknown> = {}) => ({
+    id, name: id, chatIds: [`n-${id}`], edges: [], artifacts: [], createdAt: 1,
+    trees: [{ id: `t-${id}`, rootNodeId: `n-${id}`, createdAt: 1, lastActiveAt: 1 }], activeTreeId: `t-${id}`, ...extra,
+  });
+  const savedNode = (projectId: string) => ({ nodeId: `n-${projectId}`, projectId, kind: 'chat', chatId: null, status: 'idle', followUps: [], messages: [] });
+
+  it('opens a saved local state with no saved workspace on a live one', async () => {
+    localStorage.setItem(LEGACY_STATE_KEY, JSON.stringify({
+      version: STATE_SCHEMA_VERSION,
+      activeProjectId: null,
+      projects: [savedProject('ws-gone', { deletedAt: 2 }), savedProject('ws-user')],
+      nodes: { 'n-ws-gone': savedNode('ws-gone'), 'n-ws-user': savedNode('ws-user') },
+    }));
+    apiMocks.fetchAllWorkspacesMeta.mockResolvedValue([]);
+    const { result } = renderHook(() => useHarness());
+    await act(async () => { await vi.advanceTimersByTimeAsync(10); });
+    expect(result.current.hydrated).toBe(true);
+    expect(result.current.activeProjectId).toBe('ws-user');
+  });
+
+  it('opens a saved local state on a live workspace while its remote preference loads, then restores it', async () => {
+    const connection = { id: 'remote-saved', name: 'Remote', transport: 'direct' as const, hasToken: true, createdAt: 1, updatedAt: 1 };
+    const remoteId = backendEntityId(connection.id, 'ws-r');
+    localStorage.setItem(LEGACY_STATE_KEY, JSON.stringify({
+      version: STATE_SCHEMA_VERSION,
+      activeProjectId: null,
+      projects: [savedProject('ws-user')],
+      nodes: { 'n-ws-user': savedNode('ws-user') },
+    }));
+    // This window was last on the remote workspace.
+    localStorage.setItem(activeProjectKey(LEGACY_STATE_KEY, 'win-a'), remoteId);
+    let remoteAttempts = 0;
+    apiMocks.listBackendConnections.mockResolvedValue([connection]);
+    apiMocks.fetchAllWorkspacesMeta.mockImplementation(async (id?: string) => {
+      if (id !== connection.id) return [];
+      remoteAttempts += 1;
+      if (remoteAttempts === 1) throw new Error('ECONNREFUSED');
+      return [{ ...backendWorkspaceRow, workspace: { id: 'ws-r', name: 'Remote', created_at: 1 }, nodes: [{ id: 'n-r', created_at: 1 }] }];
+    });
+    const { result } = renderHook(() => useHarness(null, 'win-a'));
+    await act(async () => { await vi.advanceTimersByTimeAsync(10); });
+    expect(result.current.hydrated).toBe(true);
+    expect(result.current.activeProjectId).toBe('ws-user');
+    await act(async () => { await vi.advanceTimersByTimeAsync(1_000); });
+    expect(result.current.activeProjectId).toBe(remoteId);
+  });
+
+  it('takes what it loaded from the backend as held there, and never a saved local state', async () => {
+    apiMocks.fetchAllWorkspacesMeta.mockResolvedValue([backendWorkspaceRow]);
+    const loaded = renderHook(() => useHarness());
+    await act(async () => { await vi.advanceTimersByTimeAsync(10); });
+    expect(loaded.result.current.hydrated).toBe(true);
+    const held = loaded.result.current.structureGuards.heldByBackendBefore;
+    expect(held('workspace', 'ws-1', Date.now())).toBe(true);
+    expect(held('node', 'n1', Date.now())).toBe(true);
+    loaded.unmount();
+
+    // The backend answers with nothing; a saved local state fills the store. A
+    // complete re-read lacking those workspaces must not take them as purged.
+    localStorage.setItem(LEGACY_STATE_KEY, JSON.stringify({
+      version: STATE_SCHEMA_VERSION,
+      activeProjectId: 'ws-local',
+      projects: [{ id: 'ws-local', name: 'Local', chatIds: ['n-local'], edges: [], artifacts: [], createdAt: 1,
+        trees: [{ id: 't-local', rootNodeId: 'n-local', createdAt: 1, lastActiveAt: 1 }], activeTreeId: 't-local' }],
+      nodes: { 'n-local': { nodeId: 'n-local', projectId: 'ws-local', kind: 'chat', chatId: null, status: 'idle', followUps: [], messages: [] } },
+    }));
+    apiMocks.fetchAllWorkspacesMeta.mockResolvedValue([]);
+    const restored = renderHook(() => useHarness());
+    await act(async () => { await vi.advanceTimersByTimeAsync(10); });
+    expect(restored.result.current.projects.map((project) => project.id)).toEqual(['ws-local']);
+    const restoredHeld = restored.result.current.structureGuards.heldByBackendBefore;
+    expect(restoredHeld('workspace', 'ws-local', Date.now())).toBe(false);
+    expect(restoredHeld('tree', 't-local', Date.now())).toBe(false);
+    expect(restoredHeld('node', 'n-local', Date.now())).toBe(false);
   });
 
   it('persists the first workspace created after an empty hydration', async () => {
@@ -595,9 +705,9 @@ describe('cold-start hydration barrier', () => {
     };
 
     it('paints with placeholders instead of waiting on a slow active tree', async () => {
-      const slowTree = deferred<unknown[]>();
+      const slowTree = deferred<{ messages: never[] }>();
       apiMocks.fetchAllWorkspacesMeta.mockResolvedValue([rowWithTree]);
-      apiMocks.fetchTreeMessages.mockReturnValue(slowTree.promise as Promise<never[]>);
+      apiMocks.fetchTreeMessageSnapshot.mockReturnValue(slowTree.promise);
 
       const { result } = renderHook(() => useHarness());
       await act(async () => { await vi.advanceTimersByTimeAsync(ACTIVE_TREE_EAGER_BUDGET_MS - 1); });
@@ -607,18 +717,18 @@ describe('cold-start hydration barrier', () => {
       expect(result.current.hydrated).toBe(true);
       expect(result.current.projectsCount).toBe(1);
       // The tree is left to the lazy loader — never a hard failure.
-      slowTree.resolve([]);
+      slowTree.resolve({ messages: [] });
       await act(async () => { await Promise.resolve(); });
     });
 
     it('waits for a fast active tree so first paint has real messages', async () => {
       apiMocks.fetchAllWorkspacesMeta.mockResolvedValue([rowWithTree]);
-      apiMocks.fetchTreeMessages.mockResolvedValue([]);
+      apiMocks.fetchTreeMessageSnapshot.mockResolvedValue({ messages: [] });
 
       const { result } = renderHook(() => useHarness());
       await act(async () => { await vi.advanceTimersByTimeAsync(10); });
 
-      expect(apiMocks.fetchTreeMessages).toHaveBeenCalledWith('ws-1', 't-1', undefined);
+      expect(apiMocks.fetchTreeMessageSnapshot).toHaveBeenCalledWith('ws-1', 't-1', undefined);
       expect(result.current.hydrated).toBe(true);
     });
   });

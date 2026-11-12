@@ -1,45 +1,20 @@
-import { serverEntityId } from '../../config/backendIdentity';
-import React, { useState } from 'react';
+import { useState } from 'react';
+import { artifactHasImagePreview } from 'michi-shared';
 import type { MessageAttachment } from '../../state/chatTypes';
-import { useOptionalChatProjects } from '../../state/chatStore';
-import { workspaceBackendApiBase } from '../../config/backendConnections';
+import { attachmentImageUrl } from '../../services/api/artifacts';
 import { Lightbox } from './Lightbox';
 
-const IMAGE_EXTS = new Set(['png', 'jpg', 'jpeg', 'gif', 'webp']);
-
 function isImageAttachment(a: MessageAttachment): boolean {
-  const ext = a.name.split('.').pop()?.toLowerCase() ?? '';
-  return IMAGE_EXTS.has(ext);
-}
-
-/** Build a servable image URL for an attachment. Always uses the backend
- *  /api/files route — file:// URLs are blocked by Chromium when the renderer
- *  is loaded from http:// (which is the case in both Electron dev and prod). */
-function imageUrl(a: MessageAttachment, workspaceId: string | undefined): string | null {
-  if (workspaceId && a.relPath) {
-    const encodedPath = a.relPath.split('/').map(encodeURIComponent).join('/');
-    return `${workspaceBackendApiBase(workspaceId)}/files/${encodeURIComponent(serverEntityId(workspaceId))}/${encodedPath}`;
-  }
-  // Fallback: derive relPath from absPath if it contains .attachments/
-  if (workspaceId && a.absPath) {
-    const marker = '/.attachments/';
-    const idx = a.absPath.indexOf(marker);
-    if (idx !== -1) {
-      const rel = '.attachments/' + a.absPath.slice(idx + marker.length);
-      const encodedPath = rel.split('/').map(encodeURIComponent).join('/');
-      return `${workspaceBackendApiBase(workspaceId)}/files/${encodeURIComponent(serverEntityId(workspaceId))}/${encodedPath}`;
-    }
-  }
-  return null;
+  return artifactHasImagePreview(a.name);
 }
 
 interface Props {
   items: MessageAttachment[];
+  /** The message's workspace, where its attachments were uploaded. */
+  workspaceId?: string;
 }
 
-export function AttachmentPills({ items }: Props) {
-  // Defensive: in test environments without ChatProvider, we gracefully degrade (no thumbnails).
-  const workspaceId = useOptionalChatProjects()?.activeProject?.id;
+export function AttachmentPills({ items, workspaceId }: Props) {
   const [zoom, setZoom] = useState<{ src: string; filename: string } | null>(null);
   const [broken, setBroken] = useState<ReadonlySet<string>>(() => new Set());
 
@@ -54,7 +29,7 @@ export function AttachmentPills({ items }: Props) {
       {imageItems.length > 0 && (
         <div className="t-att-thumbs" style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginBottom: fileItems.length > 0 ? 6 : 0 }}>
           {imageItems.map((a, i) => {
-            const src = imageUrl(a, workspaceId);
+            const src = attachmentImageUrl(workspaceId, a);
             if (!src || broken.has(src)) {
               // Fallback to pill if image can't be served
               return (
