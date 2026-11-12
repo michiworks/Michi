@@ -23,7 +23,17 @@ jobs:
           cache: npm
 
       - name: Install dependencies
-        run: npm ci
+        timeout-minutes: 12
+        run: bash scripts/ci/npm-ci.sh
+
+      - name: Upload failed dependency installation logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: npm-ci-logs-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/michi-npm-ci.*/attempt-*.log
+          if-no-files-found: ignore
+          retention-days: 7
 
       - name: Retry transient Apple ticket delivery failures
         run: |
