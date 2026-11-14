@@ -118,9 +118,10 @@ describe('the Companion header line', () => {
     expect(companionStatusLine(withStatus({ working: true }), NOW)).toEqual({ text: 'Working…', tone: 'working' });
     expect(companionStatusLine(withStatus({ state: 'quiet_hours' }), NOW).text).toBe(`Quiet hours until ${base.settings.quietHours.end}`);
     expect(companionStatusLine(withStatus({ auth: { valid: false, expiresAt: null, checkedAt: null } }), NOW).text).toBe('Auth expired — refresh your credentials');
-    expect(companionStatusLine(withStatus({ turnsToday: base.settings.dailyTurnBudget }), NOW).text).toBe('Budget used — resumes tomorrow');
-    expect(companionStatusLine(withStatus({ working: true }, { paused: true }), NOW).text).toBe('Paused');
-    expect(companionStatusLine(withStatus({ working: true }, { enabled: false }), NOW).text).toBe('Off');
+    expect(companionStatusLine(withStatus({ turnsToday: 500, lastCheckAt: null }), NOW).text, 'no daily turn budget').toBe('Watching · not checked yet');
+    expect(companionStatusLine(withStatus({ working: true }, { paused: true }), NOW).text).toBe('Off');
+    expect(companionStatusLine(withStatus({ state: 'off' }), NOW).text).toBe('Off');
+    expect(companionStatusLine(withStatus({}, { paused: true, pausedUntil: NOW + 3_600_000 }), NOW).text).toMatch(/^Paused until (tomorrow )?\d\d:\d\d$/);
   });
 
   it('words ages for people', () => {

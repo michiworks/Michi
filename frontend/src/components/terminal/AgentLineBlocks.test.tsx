@@ -160,13 +160,14 @@ describe('line chrome · failure and recovery', () => {
     expect(container.querySelector('.agent-line__ico .is-fail')).not.toBeNull();
   });
 
-  it('keeps the sentence when the run went on after a failure, counting it in danger text', () => {
+  it('keeps the sentence when the run went on after a failure, counting it calmly', () => {
     const tools = [...verify(), read('r1', 'e2e/specs/send-scroll.spec.ts', { startedAt: T0 + 131_000, endedAt: T0 + 132_000 })];
     const { container } = render(withStyle(<ToolCallGroup tools={tools} defaultExpanded={false} />));
     expect(shownLead(container)).toBe('Read send-scroll.spec.ts; send-scroll E2E failed, typecheck and a.test.ts passed');
     expect(container.querySelector('.agent-line__ico .is-fail')).toBeNull();
     const frag = container.querySelector('.agent-line__frag')!;
-    expect(frag.className).toContain('is-danger');
+    // Danger is for a run that ended failing; this one moved past it.
+    expect(frag.className).toContain('is-calm');
     expect(frag.textContent).toBe(`1${NB}failed`);
   });
 

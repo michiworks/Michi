@@ -10,6 +10,7 @@ import ContextMenu, { MenuPresence, menuOpenKey } from '../ContextMenu';
 import { PopoverSurface } from '../ui/Popover';
 import { branchMotionAllowed, branchMotionReduced, isFreshBranch, playBranchFlight, pulseBranchTarget, type BranchFlightOrigin } from './branchMotion';
 import { BranchIcon } from './icons';
+import { TemporaryChatGlyph } from './TemporaryChat';
 import './mobile.css';
 
 /** A tap this recent is the gesture that started the branch. */
@@ -47,6 +48,7 @@ export function MobilePaneSwitcher() {
   }, [activeProject, aliveIds, panes, paneItems]);
   const titles = useStructuralSelector(nodes => rows.map(row => paneTitle(nodes[row.id], paneItems[row.id]) || 'Untitled'), shallowArrayEqual);
   const statuses = useStructuralSelector(nodes => rows.map(row => nodes[row.id]?.status === 'streaming' && !nodes[row.id]?.visibleResponseComplete ? 'streaming' : nodes[row.id]?.status === 'error' ? 'error' : 'idle'), shallowArrayEqual);
+  const temporaries = useStructuralSelector(nodes => rows.map(row => !paneItems[row.id] && nodes[row.id]?.temporary === true), shallowArrayEqual);
   const dismiss = (restore = true) => { setOpen(false); if (restore) trigger.current?.focus({ preventScroll: true }); };
   useEffect(() => { setOpen(false); }, [activeProject?.id, activeProject?.activeTreeId]);
   useEffect(() => { if (!open) setRowMenu(null); }, [open]);
@@ -130,7 +132,7 @@ export function MobilePaneSwitcher() {
             style={{ '--pane-depth': Math.min(row.depth, 10) } as React.CSSProperties}
             aria-current={focusedPane === row.id ? 'page' : undefined}
             onClick={() => { if (isOpen) focusPane(row.id); else openPane(row.id); dismiss(); }}>
-            <span>{titles[index]}</span>
+            <span>{temporaries[index] && <TemporaryChatGlyph size={15} inline />}{titles[index]}</span>
             {statuses[index] !== 'idle' && <i className="mobile-pane-status" data-status={statuses[index]} aria-label={statuses[index] === 'streaming' ? 'Working' : 'Error'} />}
           </button>
           {/* The list stays open so several panes can be closed in a row; a

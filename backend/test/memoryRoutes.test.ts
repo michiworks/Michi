@@ -328,6 +328,31 @@ describe('memory routes (cloud)', () => {
     }
   });
 
+  test('a conversation\'s memory mode is chosen before it begins: after a message or a turn, or in a temporary chat\'s branch, a change is 409 memory_mode_locked', async () => {
+    const db = getDb();
+    const chat = (id: string, parent: string | null = null) => db.prepare(
+      "INSERT INTO nodes (id, workspace_id, parent_node_id, kind, status, created_at) VALUES (?, 'ws-alice', ?, 'chat', 'idle', 1)").run(id, parent);
+    chat('n-said');
+    db.prepare("INSERT INTO messages (id, node_id, role, content, seq, created_at) VALUES ('m-1', 'n-said', 'user', 'hi', 1, 1)").run();
+    chat('n-turn');
+    db.prepare(`INSERT INTO turns (turn_id, node_id, user_message_id, assistant_message_id, status, last_seq, started_at, updated_at)
+      VALUES ('t-1', 'n-turn', NULL, 'a-1', 'active', 0, 1, 1)`).run();
+    chat('n-temp');
+    db.prepare("UPDATE nodes SET memory_mode = 'off' WHERE id IN ('n-temp', 'n-turn')").run();
+    chat('n-branch', 'n-temp');
+    db.prepare("UPDATE nodes SET memory_mode = 'off' WHERE id = 'n-branch'").run();
+    for (const [nodeId, mode] of [['n-said', 'off'], ['n-said', 'use_only'], ['n-turn', 'learn'], ['n-branch', 'learn']] as const) {
+      const refused = await call('PUT', `/nodes/${nodeId}/memory-mode`, 'alice', { mode });
+      assert.equal(refused.status, 409, `${nodeId} ${mode}`);
+      assert.equal(refused.json.code, 'memory_mode_locked');
+    }
+    assert.deepEqual((await call('GET', '/nodes/n-said/memory-mode', 'alice')).json, { mode: 'learn' });
+    assert.deepEqual((await call('GET', '/nodes/n-turn/memory-mode', 'alice')).json, { mode: 'off' }, 'GET is unchanged');
+    assert.deepEqual((await call('PUT', '/nodes/n-said/memory-mode', 'alice', { mode: 'learn' })).json, { mode: 'learn', hiddenTurns: 0, removedMemories: 0 },
+      'the setting it has changes nothing');
+    assert.equal((await call('PUT', '/nodes/n-temp/memory-mode', 'alice', { mode: 'learn' })).status, 200, 'not begun yet, no temporary parent');
+  });
+
   test('reset deletes every memory of the owner, their profile and recall text, after an explicit confirm', async () => {
     getDb().prepare("INSERT INTO nodes (id, workspace_id, kind, status, created_at) VALUES ('n-1', 'ws-alice', 'chat', 'idle', 1)").run();
     indexTurn({ ownerUserId: 'alice', nodeId: 'n-1', turnId: 't-1', humanOrigin: true, userText: 'I moved to Nakano.', assistantText: 'Nice.', completedAt: 1 });

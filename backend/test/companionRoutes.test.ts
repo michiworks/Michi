@@ -6,7 +6,7 @@ import { enableSyntheticCompanionSources } from './helpers/companionSources';
  * `{ error, code }` refusals, item actions, settings, notes with their
  * revision, rules, reminders, demotions, goals, cards (Apply / Dismiss /
  * expired / failed), briefs, the injected service (check with its 409
- * not_owner, presence, welcome), Undo all of a check-in, "Ask before
+ * not_owner, presence), Get started (Start, Not now; no welcome turn), Undo all of a check-in, "Ask before
  * sending" for a followed conversation, the view with its "Since you left",
  * the local-only guard, and both SSE streams (current revision on connect,
  * notice replay with the backlog fold and acknowledgement, cleanup on close).
@@ -29,7 +29,7 @@ import {
   companionDelegationPath,
   companionPostId,
   companionStatusLine,
-  type CompanionCatchUpDto, type CompanionNotice, type CompanionPresenceInput, type CompanionSnapshotDto, type CompanionTrayDto,
+  type CompanionCatchUpDto, type CompanionPresenceInput, type CompanionSnapshotDto, type CompanionTrayDto,
 } from 'michi-shared';
 import { clearAllSessions } from '../src/agents/sessionRegistry';
 import { assistantPurposeOf, currentAssistantNodeId } from '../src/assistant/store';
@@ -37,14 +37,17 @@ import { createCompanionRouter } from '../src/routes/companion';
 import { createRemoteAccessMiddleware } from '../src/services/remoteAccess';
 import { closeDb, getDb, initDb } from '../src/services/db';
 import { proposeCompanionCard, proposePublicCompanionCard, applyPublicCompanionCard } from '../src/services/companion/cards';
-import { getChatNotificationLevel } from '../src/services/companion/chatNotices';
-import { CompanionEventBus, companionBacklogBody, enqueueCompanionNotice } from '../src/services/companion/delivery';
-import { notOwner } from '../src/services/companion/errors';
+import { getNotificationLevel as getChatNotificationLevel } from '../src/services/attention/notificationLevel';
+import { CompanionEventBus } from '../src/services/companion/delivery';
+import { CompanionError, notOwner } from '../src/services/companion/errors';
+import { companionGetStarted, spacesVisitMayStartFirstRun, startCompanionGetStarted } from '../src/services/companion/getStarted';
+import { getMetaAgentSettings } from '../src/services/metaAgent/settings';
 import {
   COMPANION_CARD_TTL_MS,
   addGoal,
   demoteSubtype,
   getBriefCurate,
+  getCompanionMetaNumber,
   getCompanionNotes,
   getCompanionNotesState,
   getCompanionRules,
@@ -56,7 +59,6 @@ import {
   isSubtypeDemoted,
   listGoals,
   listReminders,
-  pendingNotices,
   getRun,
   recordDelegation,
   recordRun,
@@ -72,9 +74,13 @@ import {
 import { getCompanionSettings, patchCompanionSettings } from '../src/services/companion/settings';
 import { createNoopCompanionService } from '../src/services/companion/service';
 import type { CompanionService, ItemDraft } from '../src/services/companion/types';
+import { turnCompanionOn } from './helpers/backgroundWork';
+import { getExtractionState } from '../src/services/memory/extractionRepository';
+import { michiPause, pauseMichi } from '../src/services/michiPause';
 
 const T0 = new Date(2026, 10, 5, 12, 0, 0, 0).getTime();
 const HOUR = 60 * 60 * 1000;
+const OUTSIDE = ['cr', 'pipeline', 'email', 'calendar'] as const;
 
 let tmpDir: string;
 let server: http.Server;
@@ -82,7 +88,7 @@ let base: string;
 let now = T0;
 let bus: CompanionEventBus;
 let service: CompanionService;
-let calls: { checkNow: Array<readonly string[] | undefined>; presence: CompanionPresenceInput[]; welcome: number };
+let calls: { checkNow: Array<readonly string[] | undefined>; presence: CompanionPresenceInput[]; welcome: number; firstRun: number; turnedOff: string[] };
 /** Conversations whose running turn waits on the user (the router's conversationWaiting). */
 let waiting: Set<string>;
 
@@ -187,16 +193,18 @@ describe('Companion routes', () => {
     delete process.env.MICHI_CLOUD;
     closeDb();
     initDb(); enableSyntheticCompanionSources();
+    turnCompanionOn();
     clearAllSessions();
     now = T0;
-    calls = { checkNow: [], presence: [], welcome: 0 };
+    calls = { checkNow: [], presence: [], welcome: 0, firstRun: 0, turnedOff: [] };
     service = fakeService();
     waiting = new Set();
     bus = new CompanionEventBus();
     const app = express();
     app.use(express.json());
     app.use('/api', createRemoteAccessMiddleware());
-    app.use('/api', createCompanionRouter({ service: () => service, events: bus, clock: { now: () => now }, conversationWaiting: (nodeId) => waiting.has(nodeId) }));
+    app.use('/api', createCompanionRouter({ service: () => service, events: bus, clock: { now: () => now }, conversationWaiting: (nodeId) => waiting.has(nodeId),
+      startFirstRun: () => { calls.firstRun += 1; }, turnedOff: (nodeId) => { calls.turnedOff.push(nodeId); } }));
     server = app.listen(0, '127.0.0.1');
     await once(server, 'listening');
     base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
@@ -362,7 +370,7 @@ describe('Companion routes', () => {
     await refused(raw('POST', '/companion/items/seen', { ids: [], all: true }), 400, 'invalid_request');
   });
 
-  test('presence (with composing) and welcome go to the service', async () => {
+  test('presence (with composing) goes to the service; the welcome no longer does', async () => {
     const back = await raw('POST', '/companion/presence', { active: true, companionFocused: false, lastInputAt: T0 - 5, composing: true });
     assert.deepEqual([back.status, back.body], [204, undefined], 'presence answers nothing: "Since you left" comes from the view');
     assert.equal((await raw('POST', '/companion/presence', { active: false, companionFocused: false, lastInputAt: null })).status, 204);
@@ -378,12 +386,12 @@ describe('Companion routes', () => {
     }
     assert.equal(calls.presence.length, 2);
 
-    assert.deepEqual((await raw('POST', '/companion/welcome')).body, { started: true });
-    assert.deepEqual((await raw('POST', '/companion/welcome', {})).body, { started: true });
+    // Get started's Start takes the welcome's place (D17): a window from before it still asks, and nothing starts.
+    assert.deepEqual((await raw('POST', '/companion/welcome')).body, { started: false });
+    assert.deepEqual((await raw('POST', '/companion/welcome', {})).body, { started: false });
     await refused(raw('POST', '/companion/welcome', { force: true }), 400, 'invalid_request');
-    assert.equal(calls.welcome, 2);
+    assert.equal(calls.welcome, 0);
     service = createNoopCompanionService({ conversationBusy: () => false });
-    assert.deepEqual((await raw('POST', '/companion/welcome')).body, { started: false }, 'the no-op service never welcomes');
     assert.equal((await raw('POST', '/companion/presence', { active: true, companionFocused: true, lastInputAt: null, composing: false })).status, 204);
     assert.deepEqual((await raw('POST', '/companion/check')).body, { queued: true }, 'without a lease check every check is accepted');
   });
@@ -608,6 +616,65 @@ describe('Companion routes', () => {
     await refused(raw('PATCH', companionDelegationPath('cmd-missing'), { autoSend: false }), 404, 'not_found');
   });
 
+  test('Get started (D17): offered until answered; Start applies the card, meets the user without a welcome turn and starts the first run', async () => {
+    const offered = (await raw('GET', '/companion')).body as CompanionSnapshotDto;
+    const nodeId = offered.conversation!.nodeId;
+    assert.deepEqual(offered.getStarted, { state: 'offer', at: null, nodeId, homes: null, watch: null, homesOn: true, firstRunDays: 30 });
+    for (const body of [{}, { homes: 'yes' }, { homes: true, watch: 1 }, { homes: true, budget: 5 }]) {
+      await refused(raw('POST', '/companion/get-started', body), 400, 'invalid_request', JSON.stringify(body));
+    }
+    await refused(raw('POST', '/companion/get-started/later', { homes: true }), 400, 'invalid_request');
+    assert.equal(calls.firstRun, 0);
+
+    // Not now starts nothing, and the card can still be started.
+    now = T0 + 1_000;
+    const later = (await raw('POST', '/companion/get-started/later')).body as CompanionSnapshotDto;
+    assert.deepEqual([later.getStarted?.state, later.getStarted?.at, later.welcome?.wanted, calls.firstRun], ['later', T0 + 1_000, true, 0]);
+
+    // Watch turns local conversations on; homes off becomes the setting, and the first run still enrols the upkeep.
+    // Michi is off until then (paused until resumed): Start is the turn-on. Automatic memory stays Settings › Memory's.
+    patchCompanionSettings({ sources: Object.fromEntries(OUTSIDE.map((kind) => [kind, { enabled: false }])) });
+    patchCompanionSettings({ sources: { michi: { enabled: false } } });
+    pauseMichi('local-user', null);
+    now = T0 + 2_000;
+    const started = await raw('POST', '/companion/get-started', { homes: false, watch: true });
+    assert.equal(started.status, 200);
+    const snapshot = started.body as CompanionSnapshotDto;
+    assert.deepEqual([snapshot.settings.paused, michiPause('local-user').paused], [false, false], 'Start resumes Michi');
+    assert.equal(getExtractionState('local-user').paused, true, 'and leaves automatic memory off');
+    assert.deepEqual(snapshot.getStarted, { state: 'started', at: T0 + 2_000, nodeId, homes: false, watch: true, homesOn: false, firstRunDays: 30 });
+    assert.deepEqual(OUTSIDE.map((kind) => snapshot.settings.sources[kind].enabled), [false, false, false, false]);
+    assert.equal(getMetaAgentSettings().writeWorkspaceHomes, false);
+    assert.equal(calls.firstRun, 1);
+    assert.deepEqual(calls.checkNow, [undefined], 'the sources just turned on look now');
+    assert.deepEqual([snapshot.welcome?.wanted, calls.welcome], [false, 0], 'Start counts as the welcome: no welcome turn, check-ins may begin');
+    assert.notEqual(getCompanionMetaNumber('companion:wake_cursor'), null, 'what came in before Start is not news');
+
+    // Not now after Start changes nothing; Start again with Watch left out leaves the sources as they are.
+    assert.equal(((await raw('POST', '/companion/get-started/later')).body as CompanionSnapshotDto).getStarted?.state, 'started');
+    const again = (await raw('POST', '/companion/get-started', { homes: true })).body as CompanionSnapshotDto;
+    assert.deepEqual([again.getStarted?.homes, again.getStarted?.watch, again.getStarted?.homesOn], [true, null, true]);
+    assert.equal(getMetaAgentSettings().writeWorkspaceHomes, true);
+    assert.deepEqual(OUTSIDE.map((kind) => again.settings.sources[kind].enabled), [false, false, false, false]);
+    assert.deepEqual([calls.firstRun, calls.checkNow.length], [2, 1]);
+    assert.equal(companionGetStarted('another-conversation'), null, 'a new conversation shows no card');
+  });
+
+  test('Get started: none for someone who met Michi before it; Start with homes needs scheduled jobs; Spaces waits for Start', async () => {
+    const nodeId = ((await raw('GET', '/companion')).body as CompanionSnapshotDto).conversation!.nodeId;
+    assert.equal(spacesVisitMayStartFirstRun(), false, 'opening Spaces waits for the card');
+    assert.throws(() => startCompanionGetStarted({ homes: true, watch: true }, { startFirstRun: null, nodeId, now }),
+      (error: unknown) => error instanceof CompanionError && error.code === 'scheduler_off');
+    assert.deepEqual(OUTSIDE.map((kind) => getCompanionSettings().sources[kind].enabled), [true, true, true, true], 'nothing changed');
+    startCompanionGetStarted({ homes: false }, { startFirstRun: null, nodeId, now });
+    assert.equal(companionGetStarted(nodeId)?.state, 'started', 'homes off needs no scheduler');
+    assert.equal(spacesVisitMayStartFirstRun(), true, 'after Start, opening Spaces wakes the first run as before');
+
+    getDb().prepare("DELETE FROM meta WHERE key = 'companion:get_started'").run();
+    assert.equal(companionGetStarted(nodeId), null, 'met (Start marked the welcome done) and no answer: an earlier user, no card');
+    assert.equal(spacesVisitMayStartFirstRun(), true, 'their first open of Spaces starts it, as before');
+  });
+
   test('GET /companion/tray: the panel\'s status line, badge and welcome rule, and five Needs you rows by title only; it makes no conversation', async () => {
     const empty = await raw('GET', '/companion/tray');
     assert.equal(empty.status, 200);
@@ -660,6 +727,28 @@ describe('Companion routes', () => {
     assert.equal(((await raw('GET', '/companion/tray')).body as CompanionTrayDto).conversationWaiting, false);
   });
 
+  test('POST /companion/off-notice records "Michi is off" once, and the snapshot says when (Q29)', async () => {
+    assert.equal(((await raw('GET', '/companion')).body as CompanionSnapshotDto).offNoticeAt, null);
+    assert.equal((await raw('POST', '/companion/off-notice', {})).status, 204);
+    assert.equal(((await raw('GET', '/companion')).body as CompanionSnapshotDto).offNoticeAt, T0);
+    now = T0 + 60_000;
+    assert.equal((await raw('POST', '/companion/off-notice', {})).status, 204);
+    assert.equal(((await raw('GET', '/companion')).body as CompanionSnapshotDto).offNoticeAt, T0, 'the first time stays');
+  });
+
+  test('turning Michi off stops what its conversation runs, once, at that moment (Q29)', async () => {
+    const nodeId = ((await raw('GET', '/companion')).body as CompanionSnapshotDto).conversation!.nodeId;
+    assert.equal((await raw('PATCH', '/companion/settings', { paused: true })).status, 200);
+    await until(() => calls.turnedOff.length === 1, 'the stop');
+    assert.deepEqual(calls.turnedOff, [nodeId]);
+    // Already off, another setting, or turned on: nothing more to stop.
+    for (const patch of [{ paused: true }, { displayName: 'Robin' }, { paused: false }]) {
+      assert.equal((await raw('PATCH', '/companion/settings', patch)).status, 200);
+    }
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    assert.deepEqual(calls.turnedOff, [nodeId]);
+  });
+
   test('PUT /companion/chat-notification-level keeps the renderer\'s level; anything else is refused', async () => {
     assert.equal(getChatNotificationLevel(), 'all');
     const put = await raw('PUT', '/companion/chat-notification-level', { level: 'approval-only' });
@@ -673,32 +762,9 @@ describe('Companion routes', () => {
     assert.equal(getChatNotificationLevel(), 'off');
   });
 
-  test('the notifier\'s feed counts as the notifier and carries a companion_changed per change for the tray; a renderer\'s feed is a window', async () => {
-    const chat = enqueueCompanionNotice({ title: 'Fix the build', body: 'Needs your approval: Run npm test', target: { kind: 'node', workspaceId: 'ws-1', nodeId: 'n-9' },
-      itemIds: [], channel: 'chat' }, T0, { bus })!;
-    const feed = await stream('/companion/notifications/stream');
-    try {
-      await feed.waitFor((frames) => framesOf(frames, 'companion_notice').length === 1, 'the replay');
-      assert.deepEqual(framesOf(feed.frames, 'companion_notice')[0], chat, 'a conversation\'s notice keeps its channel');
-      assert.equal(framesOf(feed.frames, 'companion_notice')[0].channel, 'chat');
-      await until(() => bus.hasNotifier(), 'the notifier is connected');
-      assert.equal(bus.windowCount(), 0, 'and is no window');
-      await raw('PUT', '/companion/notes', { notes: 'Changed' });
-      await feed.waitFor((frames) => framesOf(frames, 'companion_changed').length === 1, 'the change frame');
-      assert.equal(framesOf(feed.frames, 'companion_changed')[0].reason, 'notes');
-      assert.equal(framesOf(feed.frames, 'companion_changed')[0].type, 'companion_changed');
-    } finally {
-      feed.close();
-    }
-    await until(() => !bus.hasNotifier(), 'closing it detaches the notifier');
-    const window = await stream('/companion/events');
-    try {
-      await until(() => bus.windowCount() === 1, 'a renderer\'s feed counts as a window');
-      assert.equal(bus.hasNotifier(), false);
-    } finally {
-      window.close();
-    }
-    await until(() => bus.windowCount() === 0, 'closing it detaches the window');
+  test('no notice routes of its own: Michi\'s notices are attention records (routes/attention.ts)', async () => {
+    assert.equal((await raw('GET', '/companion/notifications/stream')).status, 404);
+    assert.equal((await raw('POST', '/companion/notifications/cmn-1/ack')).status, 404);
   });
 
   test('the events stream starts with the current revision and sends one frame per change', async () => {
@@ -717,98 +783,6 @@ describe('Companion routes', () => {
       await events.waitFor((frames) => framesOf(frames, 'companion_changed').some((event) => event.reason === 'items'), 'an items frame');
     } finally {
       events.close();
-    }
-  });
-
-  test('the events stream also carries each new notice, live, for a browser; it replays, acknowledges and folds nothing (A14)', async () => {
-    const item = upsertItem(draft(), T0).item;
-    const target = { kind: 'companion' as const, tab: 'today' as const, itemId: item.id };
-    const earlier = enqueueCompanionNotice({ title: 'Companion', body: 'Earlier', target, itemIds: [item.id] }, T0, { bus })!;
-    const events = await stream('/companion/events');
-    try {
-      await events.waitFor((frames) => framesOf(frames, 'companion_changed').length === 1, 'the connect frame');
-      assert.deepEqual(framesOf(events.frames, 'companion_notice'), [], 'the backlog is the desktop notifier\'s: nothing is replayed here');
-      assert.equal(bus.hasNotifier(), false, 'a renderer feed is no notifier');
-      const live: CompanionNotice = enqueueCompanionNotice({ title: 'Companion', body: 'MyService is blocked', target, itemIds: [item.id] }, T0 + 1, { bus })!;
-      await events.waitFor((frames) => framesOf(frames, 'companion_notice').length === 1, 'the live notice');
-      assert.deepEqual(framesOf(events.frames, 'companion_notice')[0], live, 'as stored, the item it points at included');
-      assert.deepEqual(pendingNotices(T0 + 2).map((notice) => notice.id), [earlier.id, live.id], 'neither consumed');
-    } finally {
-      events.close();
-    }
-    // Delivery is still the desktop notifier's: it gets both, folded.
-    const feed = await stream('/companion/notifications/stream');
-    try {
-      await feed.waitFor((frames) => framesOf(frames, 'companion_notice').length === 1, 'the fold');
-      assert.equal(framesOf(feed.frames, 'companion_notice')[0].body, companionBacklogBody(2));
-    } finally {
-      feed.close();
-    }
-  });
-
-  test('the notifications stream replays undelivered notices, pushes new ones, and stops replaying acknowledged ones', async () => {
-    const early = enqueueCompanionNotice({ title: 'Companion', body: 'MyService is blocked', target: { kind: 'companion', tab: 'today' }, itemIds: ['cmi-1'] }, T0, { bus })!;
-    const feed = await stream('/companion/notifications/stream');
-    try {
-      assert.equal(feed.status, 200);
-      await feed.waitFor((frames) => framesOf(frames, 'companion_notice').length === 1, 'the replay');
-      assert.deepEqual(framesOf(feed.frames, 'companion_notice')[0], early);
-      assert.equal(feed.frames[0], ': connected');
-      assert.equal(bus.hasNotifier(), true);
-      const late = enqueueCompanionNotice({ title: 'Companion', body: 'Your brief is ready', target: { kind: 'companion', tab: 'chat' }, itemIds: [] }, T0 + 1, { bus })!;
-      await feed.waitFor((frames) => framesOf(frames, 'companion_notice').length === 2, 'the pushed notice');
-      assert.deepEqual(framesOf(feed.frames, 'companion_notice')[1], late);
-      assert.equal((await raw('POST', `/companion/notifications/${early.id}/ack`)).status, 204);
-      assert.equal((await raw('POST', `/companion/notifications/${early.id}/ack`)).status, 204, 'acknowledging twice is fine');
-      await refused(raw('POST', '/companion/notifications/cmn-missing/ack'), 404, 'not_found');
-      await refused(raw('POST', `/companion/notifications/${late.id}/ack`, { shown: true }), 400, 'invalid_request');
-    } finally {
-      feed.close();
-    }
-    await until(() => !bus.hasNotifier(), 'closing the response detaches the notifier');
-    const again = await stream('/companion/notifications/stream');
-    try {
-      await again.waitFor((frames) => framesOf(frames, 'companion_notice').length === 1, 'the second replay');
-      assert.deepEqual(framesOf(again.frames, 'companion_notice').map((notice) => notice.body), ['Your brief is ready']);
-    } finally {
-      again.close();
-    }
-  });
-
-  test('a notifier that connects to a backlog gets one "While you were away" notice in its place (R2.7)', async () => {
-    const a = upsertItem(draft(), T0).item;
-    const b = upsertItem(draft({ itemKey: 'pipeline:Other' }), T0).item;
-    const c = upsertItem(draft({ itemKey: 'pipeline:Third' }), T0).item;
-    const target = { kind: 'url' as const, url: 'https://builds.example.com/pipelines/MyService' };
-    const first = enqueueCompanionNotice({ title: 'Companion', body: 'MyService is blocked', target, itemIds: [a.id] }, T0, { bus })!;
-    enqueueCompanionNotice({ title: 'Companion', body: 'Other is blocked', target, itemIds: [b.id] }, T0 + 1, { bus });
-    enqueueCompanionNotice({ title: 'Companion', body: 'Third is blocked', target, itemIds: [c.id] }, T0 + 2, { bus });
-    enqueueCompanionNotice({ title: 'Companion', body: 'Standup now', target, itemIds: [], expiresAt: T0 + 5 }, T0 + 3, { bus });
-    await raw('POST', `/companion/items/${c.id}`, { action: 'dismiss' });
-    now = T0 + 10;
-    const feed = await stream('/companion/notifications/stream');
-    let foldId = '';
-    try {
-      await feed.waitFor((frames) => framesOf(frames, 'companion_notice').length === 1, 'the fold');
-      const [fold] = framesOf(feed.frames, 'companion_notice');
-      assert.equal(fold.body, companionBacklogBody(2), 'the dismissed item\'s and the expired notices are not counted');
-      assert.equal(fold.body, 'While you were away: 2 updates');
-      assert.equal(fold.title, getCompanionSettings().displayName);
-      assert.deepEqual(fold.target, { kind: 'companion', tab: 'today' });
-      assert.deepEqual([...fold.itemIds].sort(), [a.id, b.id].sort());
-      foldId = fold.id;
-      assert.equal((await raw('POST', `/companion/notifications/${first.id}/ack`)).status, 204, 'a folded notice counts as delivered');
-    } finally {
-      feed.close();
-    }
-    await until(() => !bus.hasNotifier(), 'closing the response detaches the notifier');
-    const again = await stream('/companion/notifications/stream');
-    try {
-      await again.waitFor((frames) => framesOf(frames, 'companion_notice').length === 1, 'the fold replays until acknowledged');
-      assert.equal(framesOf(again.frames, 'companion_notice')[0].id, foldId);
-      assert.equal((await raw('POST', `/companion/notifications/${foldId}/ack`)).status, 204);
-    } finally {
-      again.close();
     }
   });
 });

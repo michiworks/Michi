@@ -208,29 +208,33 @@ function saveTree(tree: Record<string, SQLInputValue>, _userId?: string): TreeRo
  * The insert dbRepository.saveNode makes for a new node. Like it, the node
  * takes maintenance_job_id and scheduled_only_job_id from its stored parent,
  * never from the input, so a branch stays restricted and hidden where its
- * parent is. ensureDurableGraphNode calls this only for a node getNode does
- * not find, so the conflict clause does not run.
+ * parent is, and a temporary chat's branch is one too (memory_mode 'off',
+ * memory/temporaryChat.ts inheritedMemoryMode; that module reads the main
+ * thread's database, so this thread does not import it).
+ * ensureDurableGraphNode calls this only for a node getNode does not find, so
+ * the conflict clause does not run.
  */
 function saveNode(node: Record<string, SQLInputValue>, _userId?: string): void {
   const wsId = node.workspace_id as string;
   if (isWorkspaceTombstoned(wsId)) return;
   if (isNodeTombstoned(node.id as string)) return;
   const parentMarkers = node.parent_node_id
-    ? getRow('SELECT maintenance_job_id, scheduled_only_job_id FROM nodes WHERE id = ?', node.parent_node_id)
+    ? getRow('SELECT maintenance_job_id, scheduled_only_job_id, memory_mode FROM nodes WHERE id = ?', node.parent_node_id)
     : undefined;
   runNamed(`
     INSERT INTO nodes (
       id, workspace_id, tree_id, parent_node_id, kind, title, status, minimized,
-      spawned_by_agent, current_mode_id, composer_draft, created_at, maintenance_job_id, scheduled_only_job_id
+      spawned_by_agent, current_mode_id, composer_draft, created_at, maintenance_job_id, scheduled_only_job_id, memory_mode
     ) VALUES (
       @id, @workspace_id, @tree_id, @parent_node_id, @kind, @title, @status, @minimized,
-      @spawned_by_agent, @current_mode_id, @composer_draft, @created_at, @maintenance_job_id, @scheduled_only_job_id
+      @spawned_by_agent, @current_mode_id, @composer_draft, @created_at, @maintenance_job_id, @scheduled_only_job_id, @memory_mode
     )
     ON CONFLICT(id) DO NOTHING
   `, {
     ...node,
     maintenance_job_id: parentMarkers?.maintenance_job_id ?? null,
     scheduled_only_job_id: parentMarkers?.scheduled_only_job_id ?? null,
+    memory_mode: parentMarkers?.memory_mode === 'off' ? 'off' : null,
   });
 }
 

@@ -13,6 +13,7 @@ import { insertExtractionCursor } from '../src/services/memory/extractionReposit
 import { EXTRACTION_EXCLUSIONS } from '../src/services/memory/extractionPolicy';
 import type { MemoryExtractionScheduler } from '../src/services/memory/extractionService';
 import { setupMemoryExtractionRoutes } from '../src/routes/memoryExtraction';
+import { turnBackgroundWorkOn } from './helpers/backgroundWork';
 
 let dataDir: string;
 let server: ReturnType<typeof express.application.listen>;
@@ -63,6 +64,7 @@ function setup(cloud: boolean) {
     calls = [];
     closeDb();
     initDb();
+    turnBackgroundWorkOn();
   });
   afterEach(async () => {
     await new Promise<void>((resolve) => server.close(() => resolve()));
@@ -135,6 +137,7 @@ describe('memory extraction routes (cloud)', () => {
   test('every route needs an authenticated owner and sees only that owner\'s state', async () => {
     seedWorkspace('ws-alice', 'alice');
     seedWorkspace('ws-bob', 'bob');
+    turnBackgroundWorkOn(['alice', 'bob']);
     await start(fakeScheduler);
     for (const [method, route] of [['GET', '/memory-extraction/status'], ['POST', '/memory-extraction/pause'], ['POST', '/memory-extraction/resume'], ['POST', '/memory-extraction/cancel']] as const) {
       assert.equal((await call(method, route, null)).status, 401, `${method} ${route}`);

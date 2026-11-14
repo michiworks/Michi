@@ -7,8 +7,6 @@ import { MemoryApiError } from '../../../../services/api/memories';
 import { API_BASE_URL } from '../../../../config/env';
 import { resetMemoryNotifications, useMemoryNotifications } from '../../../../state/memory/memoryNotifications';
 import { noteMemoryOn } from '../../../../state/memory/conversationMemory';
-import { resetCompanionStoreForTests } from '../../../../state/companion/companionStore';
-import { companionSnapshot } from '../../../../test/companionFixtures';
 import { confirmDialog } from '../../../ui/ConfirmDialog';
 import { MemoryPane } from './MemoryPane';
 import { requestMemoryReveal } from './memoryReveal';
@@ -346,14 +344,17 @@ describe('Settings › Memory', () => {
     const toggle = await screen.findByRole('switch', { name: 'Use memory' }) as HTMLButtonElement;
     expect(toggle.getAttribute('aria-checked')).toBe('true');
     expect(screen.queryByRole('radio')).toBeNull();
-    expect(screen.getByText('Turning memory off doesn’t delete chat history. Conversations are kept as before.')).toBeTruthy();
+    // What it does is behind its “?”, not in paragraphs under it.
+    expect(document.querySelector('.settings-section__intro')).toBeNull();
+    const row = toggle.closest('.settings-row') as HTMLElement;
+    fireEvent.click(within(row).getByRole('button', { name: 'More about this setting' }));
+    expect(row.textContent).toContain('Agents read your memories and save what you tell them. Turning it off keeps saved memories and chat history. To keep one chat out of memory, start a temporary chat from Home.');
     fireEvent.click(toggle);
     await waitFor(() => expect(toggle.disabled).toBe(false));
     expect(api.saveMemorySettings).toHaveBeenCalledWith('off');
     expect(toggle.getAttribute('aria-checked')).toBe('false');
-    expect(screen.getByText('Agents don’t read or save memories. Saved memories stay here until you delete them.')).toBeTruthy();
     expect(savedBodies()).toHaveLength(3);
-    // Each chat's memory control in this window follows.
+    // What this window shows of memory under replies follows.
     expect(noteMemoryOn).toHaveBeenLastCalledWith(API_BASE_URL, false);
     fireEvent.click(toggle);
     await waitFor(() => expect(toggle.getAttribute('aria-checked')).toBe('true'));
@@ -370,73 +371,59 @@ describe('Settings › Memory', () => {
     expect(toggle.getAttribute('aria-checked')).toBe('true');
   });
 
-  it('keeps automatic memory’s status under a collapsed Details, read only once opened, with pause and resume', async () => {
-    backend.extraction = { enabled: true, paused: false, lastRunAt: Date.now() - 2 * 3600_000, lastError: 'model timed out', todayTokens: 1200, dailyTokenLimit: 50000 };
+  it('turns Learn from conversations on and off with its own switch, off by default (Q28), with its state under it while on', async () => {
+    backend.extraction = { enabled: true, paused: true, lastRunAt: Date.now() - 2 * 3600_000, lastError: null, todayTokens: 1200, dailyTokenLimit: 50000 };
     render(<MemoryPane />);
-    const details = await screen.findByRole('button', { name: 'Details' });
-    expect(details.getAttribute('aria-expanded')).toBe('false');
-    expect(api.fetchMemoryExtractionStatus).not.toHaveBeenCalled();
-    fireEvent.click(details);
-    const section = screen.getByRole('region', { name: 'Memory' });
-    await waitFor(() => expect(within(section).getByText('Running')).toBeTruthy());
-    expect(details.getAttribute('aria-expanded')).toBe('true');
-    expect(within(section).getByText('2h ago')).toBeTruthy();
-    expect(within(section).getByRole('alert').textContent).toBe('Last error: model timed out');
-    expect(within(section).getByText('1,200 of 50,000 tokens')).toBeTruthy();
-    fireEvent.click(within(section).getByRole('button', { name: 'Pause automatic memory' }));
-    await waitFor(() => expect(within(section).getByText('Paused')).toBeTruthy());
-    expect(api.setMemoryExtractionPaused).toHaveBeenCalledWith(true);
-    fireEvent.click(within(section).getByRole('button', { name: 'Resume automatic memory' }));
-    await waitFor(() => expect(within(section).getByText('Running')).toBeTruthy());
+    const learn = await screen.findByRole('switch', { name: 'Learn from conversations' });
+    expect(learn.getAttribute('aria-checked')).toBe('false');
+    const row = learn.closest('.settings-row') as HTMLElement;
+    expect(row.querySelector('.settings-row__desc')).toBeNull();
+    // Q17: usage is recorded, not shown; no Details to open.
+    expect(screen.queryByText(/tokens/)).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Details' })).toBeNull();
+    fireEvent.click(learn);
+    await waitFor(() => expect(learn.getAttribute('aria-checked')).toBe('true'));
     expect(api.setMemoryExtractionPaused).toHaveBeenLastCalledWith(false);
-    fireEvent.click(details);
-    expect(within(section).queryByText('Running')).toBeNull();
+    expect(row.querySelector('.settings-row__desc')?.textContent).toBe('Running · last run 2h ago');
+    backend.extraction = { ...backend.extraction, lastError: 'model timed out' };
+    fireEvent.click(learn);
+    await waitFor(() => expect(learn.getAttribute('aria-checked')).toBe('false'));
+    expect(api.setMemoryExtractionPaused).toHaveBeenLastCalledWith(true);
+    // An error from before it was turned off is not news while it is off.
+    expect(within(row).queryByRole('alert')).toBeNull();
   });
 
-  it('explains under Details why automatic memory is held, and offers resume only where it helps', async () => {
+  it('says why learning is held, offers Try again only where it helps, and has no switch where the backend can’t learn', async () => {
     const base = { enabled: true, paused: false, lastRunAt: null, lastError: null, todayTokens: 0, dailyTokenLimit: 1000 };
     backend.extraction = { ...base, state: 'stopped', stateReason: 'Runs stopped after 5 failures in “Docs”.' };
     const { unmount } = render(<MemoryPane />);
-    fireEvent.click(await screen.findByRole('button', { name: 'Details' }));
-    await waitFor(() => expect(screen.getByText('Stopped')).toBeTruthy());
-    expect(screen.getByText('Runs stopped after 5 failures in “Docs”.')).toBeTruthy();
-    fireEvent.click(screen.getByRole('button', { name: 'Resume automatic memory' }));
+    const learn = await screen.findByRole('switch', { name: 'Learn from conversations' });
+    const row = learn.closest('.settings-row') as HTMLElement;
+    await waitFor(() => expect(row.textContent).toContain('Stopped after repeated failures'));
+    expect(row.textContent).toContain('Runs stopped after 5 failures in “Docs”.');
+    fireEvent.click(within(row).getByRole('button', { name: 'Try again' }));
     expect(api.setMemoryExtractionPaused).toHaveBeenLastCalledWith(false);
     unmount();
 
+    backend.extraction = { ...base, state: 'budget_exhausted' };
+    const budget = render(<MemoryPane />);
+    expect((await screen.findByRole('switch', { name: 'Learn from conversations' })).closest('.settings-row')!.textContent).toContain('Daily limit reached · resumes tomorrow');
+    expect(screen.queryByRole('button', { name: 'Try again' })).toBeNull();
+    budget.unmount();
+
     backend.extraction = { ...base, state: 'unsupported', supported: false, stateReason: 'Kiro Crew can’t run the Meta agent.' };
     render(<MemoryPane />);
-    fireEvent.click(await screen.findByRole('button', { name: 'Details' }));
-    await waitFor(() => expect(screen.getByText('Unsupported')).toBeTruthy());
-    expect(screen.getByText('Kiro Crew can’t run the Meta agent.')).toBeTruthy();
-    expect(screen.queryByRole('button', { name: /automatic memory/ })).toBeNull();
+    expect(await screen.findByText('This backend can’t read conversations in the background.')).toBeTruthy();
+    expect(screen.queryByRole('switch', { name: 'Learn from conversations' })).toBeNull();
   });
 
-  it('says under Details that automatic memory waits for Pages upkeep under Settings › <name>, not the Meta agent', async () => {
-    const base = { enabled: true, paused: false, lastRunAt: null, lastError: null, todayTokens: 0, dailyTokenLimit: 1000 };
-    backend.extraction = { ...base, state: 'maintenance_paused' };
-    const named = companionSnapshot();
-    resetCompanionStoreForTests({ snapshot: { ...named, settings: { ...named.settings, displayName: 'Robin' } } });
-    try {
-      render(<MemoryPane />);
-      fireEvent.click(await screen.findByRole('button', { name: 'Details' }));
-      const section = screen.getByRole('region', { name: 'Memory' });
-      await waitFor(() => expect(within(section).getByText('Paused with Pages upkeep, under Settings › Robin › Pages upkeep.')).toBeTruthy());
-      expect(section.textContent).not.toMatch(/meta agent/i);
-      expect(within(section).queryByRole('button', { name: /automatic memory/ })).toBeNull();
-    } finally {
-      resetCompanionStoreForTests();
-    }
-  });
-
-  it('says so under Details on a backend without automatic memory, and hides Details while memory is off', async () => {
+  it('says so on a backend without automatic memory, and hides Learn from conversations while memory is off', async () => {
     backend.extraction = null;
     render(<MemoryPane />);
-    fireEvent.click(await screen.findByRole('button', { name: 'Details' }));
-    expect(await screen.findByText('This Michi backend can’t save memories in the background yet. Agents still save memories when you ask.')).toBeTruthy();
-    expect(screen.queryByRole('button', { name: /automatic memory/ })).toBeNull();
+    expect(await screen.findByText('This Michi backend can’t save memories in the background yet.')).toBeTruthy();
+    expect(screen.queryByRole('switch', { name: 'Learn from conversations' })).toBeNull();
     fireEvent.click(screen.getByRole('switch', { name: 'Use memory' }));
-    await waitFor(() => expect(screen.queryByRole('button', { name: 'Details' })).toBeNull());
+    await waitFor(() => expect(screen.queryByText('Learn from conversations')).toBeNull());
   });
 
   it('says so when this backend has no Memory at all', async () => {
@@ -511,8 +498,10 @@ describe('Settings › Memory: About the user, imported memories and deleting ev
     const { unmount } = render(<MemoryPane />);
     const about = await aboutSection();
     const rebuild = await within(about).findByRole('button', { name: 'Rebuild' }) as HTMLButtonElement;
+    // Beside the title, after when it was built.
+    expect(rebuild.closest('.settings-section__aside')!.textContent).toBe('Built 2h ago · Rebuild');
     fireEvent.click(rebuild);
-    await waitFor(() => expect(within(about).getByText('Rebuilding with automatic memory. This can take a minute.')).toBeTruthy());
+    await waitFor(() => expect(within(about).getByText('Rebuilding. This can take a minute.')).toBeTruthy());
     expect(rebuild.disabled).toBe(true);
     // Automatic memory rebuilds it; the next check shows the new lines.
     backend.profile = profile([{ topic: 'Work', text: 'Answers in Chinese, code in English', refs: ['mem-user'] }], { version: 4, builtAt: Date.now() });
@@ -525,8 +514,9 @@ describe('Settings › Memory: About the user, imported memories and deleting ev
     backend.mode = 'off';
     render(<MemoryPane />);
     const off = await aboutSection();
-    expect(((await within(off).findByRole('button', { name: 'Rebuild' })) as HTMLButtonElement).disabled).toBe(true);
-    expect(within(off).getByText('Turn memory on to rebuild it.')).toBeTruthy();
+    const offRebuild = (await within(off).findByRole('button', { name: 'Rebuild' })) as HTMLButtonElement;
+    expect(offRebuild.disabled).toBe(true);
+    expect(offRebuild.title).toBe('Turn memory on to rebuild it');
   });
 
   it('Delete all memories asks first, then deletes every memory and About the user', async () => {
@@ -548,13 +538,12 @@ describe('Settings › Memory: About the user, imported memories and deleting ev
     expect(await within(await aboutSection()).findByText('Nothing here right now. Michi writes it again as it learns more.')).toBeTruthy();
   });
 
-  it('names where an imported memory came from, and says deleting a conversation keeps what Michi learned', async () => {
+  it('names where an imported memory came from', async () => {
     backend.records.push(memory('mem-claude', 'Prefers pnpm over npm', { createdAt: 4, origin: 'extracted', importSource: 'claude', importRef: 'michi/feedback.md' }));
     render(<MemoryPane />);
     const row = await waitFor(() => item('Saved memories', 'Prefers pnpm over npm'));
     expect(row.querySelector('.memory-item__meta')?.textContent).toContain('PreferenceGlobalFrom Claude Code');
     expect(within(row).getByText('From Claude Code').getAttribute('title')).toBe('Imported from Claude Code’s memory: michi/feedback.md');
-    expect(screen.getByText('Deleting a conversation doesn’t delete what Michi learned from it. Delete those memories here.')).toBeTruthy();
   });
 });
 

@@ -56,6 +56,7 @@ import {
   withCompanionContext,
 } from '../src/services/companion/turnContext';
 import type { ItemDraft } from '../src/services/companion/types';
+import { turnCompanionOn } from './helpers/backgroundWork';
 
 const T0 = new Date(2026, 10, 5, 9, 12, 0, 0).getTime();
 const HOUR = 60 * 60_000;
@@ -140,6 +141,7 @@ describe('[COMPANION CONTEXT] ahead of the user\'s own message (§3.5)', () => {
     delete process.env.MICHI_CLOUD;
     closeDb();
     initDb(); enableSyntheticCompanionSources();
+    turnCompanionOn();
     companion = ensureAssistant();
     nextSeq = 1;
     setCompanionCardDeps({});
@@ -204,8 +206,8 @@ describe('[COMPANION CONTEXT] ahead of the user\'s own message (§3.5)', () => {
       assert.doesNotMatch(context().text, /SOURCES OFF/);
       patchCompanionSettings({ sources: { email: { enabled: false }, calendar: { enabled: false } } });
       assert.match(prefixOf(context().text), /\[SOURCES OFF IN SETTINGS\] email, calendar: Michi does not watch them/);
-      patchCompanionSettings({ sources: { email: { enabled: true }, calendar: { enabled: true } }, enabled: false });
-      assert.match(prefixOf(context().text), /\[SOURCES OFF IN SETTINGS\] Michi conversations, CRs, pipelines, email, calendar:/);
+      patchCompanionSettings({ sources: { email: { enabled: true }, calendar: { enabled: true } }, paused: true });
+      assert.doesNotMatch(prefixOf(context().text), /SOURCES OFF/, 'pausing Michi turns no source off');
     });
   });
 

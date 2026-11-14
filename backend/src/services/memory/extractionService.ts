@@ -4,7 +4,7 @@ import { LOCAL_AGENT_OWNER_ID, workspaceOwnerMatches } from '../agentOwner';
 import { conversationCompletionCounter } from '../conversationUpdates';
 import { getDb, runInTransaction } from '../db';
 import { log } from '../logger';
-import { resolveMetaAgentRuntime } from '../metaAgent/settings';
+import { resolveBackgroundRuntime } from '../metaAgent/settings';
 import { startOfLocalDay } from '../metaAgent/todayUsage';
 import { learnsInWorkspace } from './assistantConversation';
 import { EXTRACTION_EXCLUSIONS } from './extractionPolicy';
@@ -15,7 +15,7 @@ import {
   restartExtractionAt, setExtractionCursorJob, setExtractionPaused, setExtractionWorkspacePaused,
 } from './extractionRepository';
 import {
-  extractionHold, extractionLocalOnly, extractionPending, extractionWorkspace, globalMaintenancePaused, MEMORY_EXTRACTION_LIMITS,
+  extractionHold, extractionLocalOnly, extractionPending, extractionWorkspace, MEMORY_EXTRACTION_LIMITS,
 } from './extractionRun';
 import { listOwnersWithStoredMode, markMovedFromExplicit } from './memoryRepository';
 import {
@@ -245,7 +245,7 @@ export function memoryExtractionStatus(ownerUserId: string, now: number, schedul
   const runs = listRecentExtractionRuns(ownerUserId, 10, undefined, SHOWN_RUN_KINDS);
   const todayTokens = extractionTokensOn(ownerUserId, startOfLocalDay(now));
   const latest = runs.find((run) => run.state !== 'active') ?? null;
-  const availability = maintenanceRuntimeAvailability(resolveMetaAgentRuntime(ownerUserId).runtimeId);
+  const availability = maintenanceRuntimeAvailability(resolveBackgroundRuntime(ownerUserId).runtimeId);
   const stopped = jobs.find((job) => job.autoPaused);
   // A held consumer (paused, AI navigation off, the assistant's conversation on a runtime with no direct call) is skipped
   // quietly: its turns do not count as waiting.
@@ -257,7 +257,6 @@ export function memoryExtractionStatus(ownerUserId: string, now: number, schedul
   else if (!enabled) state = 'off';
   else if (!availability.available) { state = 'unsupported'; stateReason = availability.reason ?? 'The Pages upkeep runtime cannot run automatic memory'; }
   else if (owner.paused) state = 'paused';
-  else if (globalMaintenancePaused(ownerUserId)) { state = 'maintenance_paused'; stateReason = 'Pages upkeep is paused (Settings, under Pages upkeep)'; }
   else if (stopped) { state = 'stopped'; stateReason = stopped.lastError ?? 'Stopped after repeated failed runs; resume to try again'; }
   else if (exhausted) { state = 'budget_exhausted'; stateReason = `Today's automatic memory limit of ${MEMORY_EXTRACTION_LIMITS.dailyTokenLimit} tokens is reached; it continues tomorrow`; }
   else if (liveExtractionRunCount(ownerUserId, SHOWN_RUN_KINDS) > 0) state = 'running';

@@ -115,6 +115,19 @@ describe('ComposerShell on a phone', () => {
     expect(collapsed()).toBe(true);
   });
 
+  it('rests as one row beside an ambient pre-block, which shows once it opens', () => {
+    setWidth(390);
+    const { rerender } = render(<Shell preBlocks={<span data-composer-ambient="">On screen: Home</span>} />);
+    expect(collapsed()).toBe(true);
+    act(() => screen.getByRole('textbox').focus());
+    expect(collapsed()).toBe(false);
+    expect(screen.getByText('On screen: Home')).toBeTruthy();
+    fireEvent.pointerDown(screen.getByText('elsewhere'));
+    expect(collapsed()).toBe(true);
+    rerender(<Shell preBlocks={<><span data-composer-ambient="">On screen: Home</span><div>Queued: ship it</div></>} />);
+    expect(collapsed()).toBe(false);
+  });
+
   it('settles after a send: the field lets go and the composer rests as one row', () => {
     setWidth(390);
     const handle = React.createRef<ComposerShellHandle>();
@@ -143,9 +156,28 @@ describe('ComposerShell on a phone', () => {
     });
     beforeEach(() => {
       viewport.height = window.innerHeight;
+      viewport.offsetTop = 0;
       Object.defineProperty(window, 'visualViewport', { configurable: true, value: viewport });
     });
     afterEach(() => { delete (window as { visualViewport?: unknown }).visualViewport; });
+
+    it('stays open while iOS pans the page to the caret', () => {
+      setWidth(390);
+      render(<Shell />);
+      const field = screen.getByRole('textbox');
+      act(() => field.focus());
+      keyboard(300);
+      // The first keystroke pans the visual viewport to a caret the keyboard covered.
+      act(() => {
+        viewport.offsetTop = 280;
+        viewport.dispatchEvent(new Event('scroll'));
+      });
+      expect(collapsed()).toBe(false);
+      expect(document.activeElement).toBe(field);
+      act(() => { viewport.offsetTop = 0; });
+      keyboard(0);
+      expect(collapsed()).toBe(true);
+    });
 
     it('rests as one row even with a draft or pre-blocks, and lets go of the field', () => {
       setWidth(390);
@@ -395,6 +427,7 @@ describe('ComposerShell rest after a phone send', () => {
     setWidth(390);
     played = [];
     viewport.height = window.innerHeight;
+    viewport.offsetTop = 0;
     Object.defineProperty(window, 'visualViewport', { configurable: true, value: viewport });
     Element.prototype.animate = function animate(keyframes: Keyframe[], options: KeyframeAnimationOptions) {
       played.push({ keyframes, options });
@@ -424,6 +457,11 @@ describe('ComposerShell rest after a phone send', () => {
     const { lowered, frame } = send(300);
     expect(lowered).toBe(true);
     expect(frame).toMatchObject({ duration: 350, easing: 'cubic-bezier(0.38, 0.7, 0.125, 1)' });
+  });
+
+  it('reports a lowered keyboard when iOS has panned the page to the field', () => {
+    viewport.offsetTop = 300;
+    expect(send(300).lowered).toBe(true);
   });
 
   it('keeps the theme\'s timing when the keyboard was already down', () => {

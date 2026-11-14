@@ -17,8 +17,7 @@ import {
 import {
   FIRST_RUN_MAX_CONVERSATIONS, firstRunWindowDays, hasCompletedConversation, listHistoryConversations, setFirstRunWindowDays,
 } from './firstRunHistory';
-import { homeSummaryDue, homeSummaryInput, homeSummaryPrompt } from './globalSummary';
-import { generateHomeCards, refreshHomeCards } from './homeCardsGenerator';
+import { changedSummaryHomes, homeSummaryDue, homeSummaryInput, homeSummaryPrompt } from './globalSummary';
 import { HOME_WRITE_ORDER_NOTE } from './firstRunWriter';
 import { resolveMetaAgentBehaviour } from './settings';
 import { narrateFirstRunStart } from './firstRunNarration';
@@ -112,9 +111,11 @@ function enrollMissing(scheduler: ScheduledJobScheduler, ownerUserId: string, no
 }
 
 /**
- * Called when Spaces is opened. The first call on a connection queues every
- * workspace, newest activity first; later calls change nothing but wake
- * pending runs, so it is safe to call on every visit.
+ * Called by Get started's Start (companion/getStarted.ts, D17) and when
+ * Spaces is opened. The first call queues every workspace, newest activity
+ * first; later calls change nothing but wake pending runs, so it is safe to
+ * call on every visit. Opening Spaces makes the first call only where the
+ * card does not decide it (routes/spacesHomeRuns.ts visitMayStart).
  */
 export function startSpacesFirstRun(scheduler: ScheduledJobScheduler, ownerUserId: string, now = Date.now()): SpacesFirstRunStatus {
   ensureSpacesHomePageId(ownerUserId, now);
@@ -155,14 +156,13 @@ export function retrySpacesFirstRun(scheduler: ScheduledJobScheduler, ownerUserI
 
 /**
  * Periodic and model-free: queues a workspace created after Spaces was opened
- * once it has a conversation, and keeps date wording on the cards current.
+ * once it has a conversation.
  */
 export function sweepMetaAgentHome(scheduler: ScheduledJobScheduler, now = Date.now()): void {
   try {
     for (const ownerUserId of listHomeStateOwners()) {
       try {
         enrollMissing(scheduler, ownerUserId, now, true);
-        refreshHomeCards(ownerUserId, now);
         sweepFirstRunWindow(ownerUserId, now);
       } catch (error) {
         log.warn('scheduler', 'home sweep failed', { error: String(error) });
@@ -216,7 +216,22 @@ export type HomeRunPlan =
   | { kind: HomeRunKind; id: string; prompt: string; targetPageId: string }
   | { kind: 'refuse'; error: string };
 
-export interface PlanHomeRunInput { workspaceId: string; ownerUserId: string; jobId: string; runId: string; now: number }
+export interface PlanHomeRunInput {
+  workspaceId: string; ownerUserId: string; jobId: string; runId: string; now: number;
+  /** A person started this run (Run now, Retry): the Spaces Home summary skips its automatic cadence (homeSummaryDue). */
+  manual?: boolean;
+}
+
+/** Read-only eligibility check before reserving an AI execution; `manual` as for planHomeRun. */
+export function homeMaintenancePending(workspaceId: string, ownerUserId: string, now: number, manual = false): boolean {
+  const state = getHomeState(ownerUserId);
+  if (!state || state.haltedReason) return false;
+  const behaviour = resolveMetaAgentBehaviour(ownerUserId);
+  const progress = getFirstRun(workspaceId, ownerUserId);
+  if (behaviour.writeWorkspaceHomes && progress && IN_PROGRESS.has(progress.state)) return true;
+  return behaviour.maintainSpacesHome && !liveHomeRun('home-summary', ownerUserId)
+    && homeSummaryDue(state, homeSummaryInput(ownerUserId), now, manual);
+}
 
 /**
  * Decides what a managed maintenance run does before any batch is read: this
@@ -224,17 +239,6 @@ export interface PlanHomeRunInput { workspaceId: string; ownerUserId: string; jo
  * else (null) the ordinary incremental batch. The writing settings are read
  * here, so a run already started finishes as it began.
  */
-/** Read-only eligibility check before reserving an AI execution. */
-export function homeMaintenancePending(workspaceId: string, ownerUserId: string, now: number): boolean {
-  const state = getHomeState(ownerUserId);
-  if (!state || state.haltedReason) return false;
-  const behaviour = resolveMetaAgentBehaviour(ownerUserId);
-  const progress = getFirstRun(workspaceId, ownerUserId);
-  if (behaviour.writeWorkspaceHomes && progress && IN_PROGRESS.has(progress.state)) return true;
-  return behaviour.maintainSpacesHome && !liveHomeRun('home-summary', ownerUserId)
-    && homeSummaryDue(state, homeSummaryInput(ownerUserId), now);
-}
-
 export function planHomeRun(input: PlanHomeRunInput): HomeRunPlan | null {
   const state = getHomeState(input.ownerUserId);
   if (!state) return null;
@@ -258,7 +262,7 @@ export function planHomeRun(input: PlanHomeRunInput): HomeRunPlan | null {
   }
   if (!behaviour.maintainSpacesHome) return null;
   const summary = homeSummaryInput(input.ownerUserId);
-  if (!homeSummaryDue(state, summary, input.now) || liveHomeRun('home-summary', input.ownerUserId)) return null;
+  if (!homeSummaryDue(state, summary, input.now, input.manual) || liveHomeRun('home-summary', input.ownerUserId)) return null;
   // A summary that wrote its page but ended before it settled (a timeout) is not run again.
   if (finishedSummaryRun(input.ownerUserId, summary.fingerprint)) {
     completeSummary(summary.fingerprint, input.ownerUserId, null, input.now);
@@ -268,9 +272,10 @@ export function planHomeRun(input: PlanHomeRunInput): HomeRunPlan | null {
   const run = createHomeRun({ kind: 'home-summary', ownerUserId: input.ownerUserId, workspaceId: input.workspaceId, jobId: input.jobId,
     runId: input.runId, targetPageId: spacesHomePageId, fingerprint: summary.fingerprint, now: input.now });
   if (!run) return null;
+  const changed = changedSummaryHomes(input.ownerUserId, state, summary);
   return { kind: 'home-summary', id: run.id, targetPageId: spacesHomePageId,
     prompt: homeSummaryPrompt({ runId: run.id, spacesHomePageId, ownerUserId: input.ownerUserId, workspaces: summary.workspaces,
-      closesFirstRun: !firstRunClosed(input.ownerUserId) }) };
+      closesFirstRun: !firstRunClosed(input.ownerUserId), changed }) };
 }
 
 /** MetaAgentGuardError's message, and its older wording that stored rows keep. */
@@ -333,7 +338,6 @@ function completeSummary(fingerprint: string | null, ownerUserId: string, turnId
   const message = turnId
     ? getDb().prepare('SELECT assistant_message_id FROM turns WHERE turn_id=?').get(turnId) as { assistant_message_id: string } | undefined
     : undefined;
-  generateHomeCards(ownerUserId, message?.assistant_message_id ?? null, fingerprint, now);
   noteFirstRunSummary(ownerUserId, message?.assistant_message_id ?? null, now);
 }
 

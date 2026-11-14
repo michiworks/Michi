@@ -25,7 +25,6 @@ import {
   TURN_METADATA_TOOL_NAMES,
 } from '../src/assistant/policy';
 import { activeTurnRow, makeCheckinNode } from './helpers/checkinNodes';
-import { noteAssistantScheduleTurn } from '../src/assistant/identity';
 import { PAGE_TOOL_NAMES } from '../src/agents/pageToolNames';
 import { SCHEDULED_JOB_TOOL_NAMES, isScheduledJobToolName } from '../src/agents/scheduledJobToolNames';
 import { MEMORY_TOOL_NAMES, isMemoryToolName } from '../src/agents/memoryToolNames';
@@ -146,8 +145,8 @@ describe('Michi assistant MCP tools', () => {
     assert.deepEqual([...names].sort(), [...MAIN_TOOL_NAMES, ...TURN_METADATA_TOOL_NAMES].sort(), 'the whole catalog');
     assert.deepEqual(names.filter((n) => !(META_AGENT_CHAT_TOOL_NAMES as readonly string[]).includes(n)
       && !(TURN_METADATA_TOOL_NAMES as readonly string[]).includes(n)).sort(),
-      [...SCHEDULED_JOB_TOOL_NAMES, ...MEMORY_TOOL_NAMES, ...COMPANION_OWN_TOOL_NAMES.filter((name) => name !== 'nothing_to_do')].sort(),
-      'beyond ⌘J\'s: the scheduled-job tools, Memory and the agent\'s own, but nothing_to_do (DESIGN-v2 §2.3)');
+      [...SCHEDULED_JOB_TOOL_NAMES, ...MEMORY_TOOL_NAMES, ...COMPANION_OWN_TOOL_NAMES.filter((name) => name !== 'nothing_to_do' && name !== 'companion_headline')].sort(),
+      'beyond ⌘J\'s: the scheduled-job tools, Memory and the agent\'s own, but the check-in-only nothing_to_do and companion_headline (DESIGN-v2 §2.3)');
     assert.deepEqual(names.filter((n) => !(ASSISTANT_TOOL_NAMES as readonly string[]).includes(n)
       && !(PAGE_TOOL_NAMES as readonly string[]).includes(n) && !isScheduledJobToolName(n) && !isMemoryToolName(n)
       && !(COMPANION_OWN_TOOL_NAMES as readonly string[]).includes(n)).sort(),
@@ -257,7 +256,7 @@ describe('Michi assistant MCP tools', () => {
     assert.deepEqual(scheduling(closedSlotFor('n-a1', 'ws-a', {}, async () => null)), [], 'a closed slot elsewhere');
   });
 
-  test('V schedules only where the user lets it, the approval names the workspace, and only a job made in a turn sent from Scheduled marks V (jobCreated)', async () => {
+  test('V schedules only where the user lets it, and the approval names the workspace', async () => {
     const jobs: ScheduledJobDto[] = [];
     configureScheduledJobTools({
       scheduler: {
@@ -300,30 +299,16 @@ describe('Michi assistant MCP tools', () => {
     }
     assert.equal(questions.length, 0, 'the user is asked only about a job that can be created');
     assert.equal(jobs.length, 0);
-    assert.equal(ensureAssistant().jobCreated, false, 'a refused job leaves the conversation open');
 
-    // D6: a job made in a turn the user sent from Pages or the conversation area leaves V where it is.
     activeTurnRow(schedule.nodeId, 'turn-chat', 'a-turn-chat');
     const created = await call(slot, 'create_scheduled_job', { ...job, workspaceId: 'ws-a' });
     assert.equal(created.isError, false, created.text);
     assert.equal(JSON.parse(created.text).status, 'created');
-    assert.equal(ensureAssistant().jobCreated, false, 'a job made outside the Scheduled area does not move V to History');
     assert.equal(questions.length, 1);
     assert.match(questions[0], /^Create scheduled job “Digest”\?\nWorkspace: Project ws-a\n/);
     assert.equal(jobs[0].workspaceId, 'ws-a');
-
-    // A Scheduled-area turn that is not the running one does not count either.
-    noteAssistantScheduleTurn(schedule.nodeId, 'turn-earlier');
-    assert.equal((await call(slot, 'create_scheduled_job', { ...job, name: 'Digest 2', workspaceId: 'ws-a' })).isError, false);
-    assert.equal(ensureAssistant().jobCreated, false, 'only the turn the job is made in decides');
-
-    getDb().prepare("UPDATE turns SET status = 'completed' WHERE turn_id = 'turn-chat'").run();
-    activeTurnRow(schedule.nodeId, 'turn-sched', 'a-turn-sched');
-    noteAssistantScheduleTurn(schedule.nodeId, 'turn-sched');
-    assert.equal((await call(slot, 'create_scheduled_job', { ...job, name: 'Digest 3', workspaceId: 'ws-a' })).isError, false);
-    assert.equal(ensureAssistant().jobCreated, true, 'the next "Create with agent" starts a new conversation (DESIGN-v2 Q5)');
     assert.deepEqual(JSON.parse((await call(slot, 'list_scheduled_jobs')).text).jobs.map((each: any) => each.workspace),
-      [1, 2, 3].map(() => ({ id: 'ws-a', name: 'Project ws-a' })));
+      [{ id: 'ws-a', name: 'Project ws-a' }]);
   });
 
   test('ordinary chats still cannot message or inspect another workspace', async () => {

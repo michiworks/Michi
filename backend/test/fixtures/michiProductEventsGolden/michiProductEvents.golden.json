@@ -1,7 +1,7 @@
 {
   "claude-fresh": {
     "wire": [
-      "event: spawn_branches\ndata: {\"topics\":[{\"title\":\"Alpha\",\"prompt\":\"Explore alpha\",\"chatId\":\"claude-fresh-child-chat-1\",\"nodeId\":\"claude-fresh-child-node-1\"},{\"title\":\"Beta\",\"prompt\":\"Explore beta\",\"chatId\":\"claude-fresh-child-chat-2\",\"nodeId\":\"claude-fresh-child-node-2\"}]}\n\n",
+      "event: spawn_branches\ndata: {\"topics\":[{\"title\":\"Alpha\",\"chatId\":\"claude-fresh-child-chat-1\",\"nodeId\":\"claude-fresh-child-node-1\"},{\"title\":\"Beta\",\"chatId\":\"claude-fresh-child-chat-2\",\"nodeId\":\"claude-fresh-child-node-2\"}]}\n\n",
       "event: spawn_branches\ndata: {\"topics\":[]}\n\n",
       "event: artifact_saved\ndata: {\"contextId\":\"claude-fresh-ctx-1\",\"name\":\"notes\",\"filePath\":\".contexts/notes.md\",\"size\":10}\n\n",
       "event: artifact_updated\ndata: {\"name\":\"notes\",\"filePath\":\".contexts/notes.md\",\"size\":12}\n\n",
@@ -19,7 +19,7 @@
   },
   "claude-resume": {
     "wire": [
-      "event: spawn_branches\ndata: {\"topics\":[{\"title\":\"Alpha\",\"prompt\":\"Explore alpha\",\"chatId\":\"claude-resume-child-chat-1\",\"nodeId\":\"claude-resume-child-node-1\"},{\"title\":\"Beta\",\"prompt\":\"Explore beta\",\"chatId\":\"claude-resume-child-chat-2\",\"nodeId\":\"claude-resume-child-node-2\"}]}\n\n",
+      "event: spawn_branches\ndata: {\"topics\":[{\"title\":\"Alpha\",\"chatId\":\"claude-resume-child-chat-1\",\"nodeId\":\"claude-resume-child-node-1\"},{\"title\":\"Beta\",\"chatId\":\"claude-resume-child-chat-2\",\"nodeId\":\"claude-resume-child-node-2\"}]}\n\n",
       "event: spawn_branches\ndata: {\"topics\":[]}\n\n",
       "event: artifact_saved\ndata: {\"contextId\":\"claude-resume-ctx-1\",\"name\":\"notes\",\"filePath\":\".contexts/notes.md\",\"size\":10}\n\n",
       "event: artifact_updated\ndata: {\"name\":\"notes\",\"filePath\":\".contexts/notes.md\",\"size\":12}\n\n",
@@ -37,7 +37,7 @@
   },
   "codex": {
     "wire": [
-      "event: spawn_branches\ndata: {\"topics\":[{\"title\":\"Alpha\",\"prompt\":\"Explore alpha\",\"chatId\":\"codex-child-chat-1\",\"nodeId\":\"codex-child-node-1\"},{\"title\":\"Beta\",\"prompt\":\"Explore beta\",\"chatId\":\"codex-child-chat-2\",\"nodeId\":\"codex-child-node-2\"}]}\n\n",
+      "event: spawn_branches\ndata: {\"topics\":[{\"title\":\"Alpha\",\"chatId\":\"codex-child-chat-1\",\"nodeId\":\"codex-child-node-1\"},{\"title\":\"Beta\",\"chatId\":\"codex-child-chat-2\",\"nodeId\":\"codex-child-node-2\"}]}\n\n",
       "event: spawn_branches\ndata: {\"topics\":[]}\n\n",
       "event: artifact_saved\ndata: {\"contextId\":\"codex-ctx-1\",\"name\":\"notes\",\"filePath\":\".contexts/notes.md\",\"size\":10}\n\n",
       "event: artifact_updated\ndata: {\"name\":\"notes\",\"filePath\":\".contexts/notes.md\",\"size\":12}\n\n",
@@ -56,7 +56,7 @@
   },
   "kiro": {
     "wire": [
-      "event: spawn_branches\ndata: {\"topics\":[{\"title\":\"Alpha\",\"prompt\":\"Explore alpha\",\"chatId\":\"kiro-child-chat-1\",\"nodeId\":\"kiro-child-node-1\"},{\"title\":\"Beta\",\"prompt\":\"Explore beta\",\"chatId\":\"kiro-child-chat-2\",\"nodeId\":\"kiro-child-node-2\"}]}\n\n",
+      "event: spawn_branches\ndata: {\"topics\":[{\"title\":\"Alpha\",\"chatId\":\"kiro-child-chat-1\",\"nodeId\":\"kiro-child-node-1\"},{\"title\":\"Beta\",\"chatId\":\"kiro-child-chat-2\",\"nodeId\":\"kiro-child-node-2\"}]}\n\n",
       "event: spawn_branches\ndata: {\"topics\":[]}\n\n",
       "event: artifact_saved\ndata: {\"contextId\":\"kiro-ctx-1\",\"name\":\"notes\",\"filePath\":\".contexts/notes.md\",\"size\":10}\n\n",
       "event: artifact_updated\ndata: {\"name\":\"notes\",\"filePath\":\".contexts/notes.md\",\"size\":12}\n\n",
@@ -76,7 +76,7 @@
   },
   "pi": {
     "wire": [
-      "event: spawn_branches\ndata: {\"topics\":[{\"title\":\"Alpha\",\"prompt\":\"Explore alpha\",\"chatId\":\"pi-child-chat-1\",\"nodeId\":\"pi-child-node-1\"},{\"title\":\"Beta\",\"prompt\":\"Explore beta\",\"chatId\":\"pi-child-chat-2\",\"nodeId\":\"pi-child-node-2\"}]}\n\n",
+      "event: spawn_branches\ndata: {\"topics\":[{\"title\":\"Alpha\",\"chatId\":\"pi-child-chat-1\",\"nodeId\":\"pi-child-node-1\"},{\"title\":\"Beta\",\"chatId\":\"pi-child-chat-2\",\"nodeId\":\"pi-child-node-2\"}]}\n\n",
       "event: spawn_branches\ndata: {\"topics\":[]}\n\n",
       "event: artifact_saved\ndata: {\"contextId\":\"pi-ctx-1\",\"name\":\"notes\",\"filePath\":\".contexts/notes.md\",\"size\":10}\n\n",
       "event: artifact_updated\ndata: {\"name\":\"notes\",\"filePath\":\".contexts/notes.md\",\"size\":12}\n\n",

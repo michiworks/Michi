@@ -14,6 +14,7 @@ import { getMaintenanceWorkspaceView } from '../src/services/pages/maintenanceRo
 import { ScheduledJobEventBus } from '../src/services/scheduledJobs/events';
 import { ScheduledJobsRepository } from '../src/services/scheduledJobs/repository';
 import { ScheduledJobScheduler, type ScheduledJobExecutor } from '../src/services/scheduledJobs/scheduler';
+import { turnBackgroundWorkOn } from './helpers/backgroundWork';
 
 let dir: string;
 let priorDataDir: string | undefined;
@@ -29,6 +30,7 @@ beforeEach(() => {
   process.env.MICHI_DATA_DIR = dir;
   delete process.env.MICHI_CLOUD;
   closeDb(); initDb(); now = 100;
+  turnBackgroundWorkOn();
   getDb().prepare('INSERT INTO workspaces(id,name,owner_user_id,created_at,updated_at) VALUES (?,?,?,?,?)').run('ws', 'Workspace', 'local-user', now, now);
 });
 
@@ -44,7 +46,7 @@ afterEach(() => {
 function scheduler(): ScheduledJobScheduler {
   const executor: ScheduledJobExecutor = { start: async () => { throw new Error('not used'); } };
   return new ScheduledJobScheduler({ repository: new ScheduledJobsRepository(), executor,
-    events: new ScheduledJobEventBus(() => now), workspaceExists: () => true, runtimeExists: () => true,
+    events: new ScheduledJobEventBus(), workspaceExists: () => true, runtimeExists: () => true,
     clock: () => now, createId: () => 'maintenance-job' });
 }
 

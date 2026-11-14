@@ -3,9 +3,18 @@
  * workspace) opens an ordinary conversation in one of the user's workspaces
  * and sends its first message. The conversation runs on the user's global
  * runtime settings, exactly as one the user started; the agent's own
- * settings never reach it, and the agent does not do the work itself. The
- * user approves every start (an applied conversation.start card is that
- * approval, services/companion/service.ts).
+ * settings never reach it, and the agent does not do the work itself. A
+ * start in a turn the user sent themselves runs without a card, whatever the
+ * turn read (D19: a local, undoable change in the user's own turn); one in a
+ * turn Michi started (a note, a worker report, a thread reply) asks the user
+ * to approve it, and so does one whose turn cannot be read (turnGuard.ts
+ * userSentRunningTurn). An applied conversation.start card is that approval
+ * (services/companion/service.ts). The new conversation is Michi's work
+ * either way: what leaves the machine there asks.
+ *
+ * In a workspace whose folder is a git repository the conversation works on
+ * its own worktree and branch (services/workConversationWorktree.ts, D18,
+ * Q26), so its changes stay off the user's checkout.
  *
  * The agent then follows the conversation (DESIGN-v2 §4): every start from
  * V records a delegation (origin `start_conversation`; an applied card
@@ -34,10 +43,15 @@ import { workspaceIdKindHint } from '../idKindHint';
 import { ensureDurableGraphNode } from '../graphCommands';
 import { log } from '../logger';
 import { recordDelegation } from '../companion/repository';
+import { activeTurnTrust } from '../turnTrust';
+import { noteMichiStartedTurn, recordPassedOutsideContent, turnHoldsOutsideContent, userSentRunningTurn } from '../turnGuard';
+import { workConversationWorktrees, type WorkConversationWorktreePort } from '../workConversationWorktree';
 import { getPage } from '../pages/repository';
 import { recordStructureChange } from '../structureEvents';
 import { resolveNewThreadProfile } from '../threadProfile';
 import { createProgressCard } from '../pages/progressCards';
+import { startTemporaryConversation } from '../memory/memoryService';
+import { isTemporaryChat } from '../memory/temporaryChat';
 import { CodedToolError, codedErrorResult, jsonResult, type McpTextResult } from '../../agents/tools/types';
 
 export const START_CONVERSATION_TITLE_MAX_CHARS = 80;
@@ -161,6 +175,7 @@ export async function startConversationTool(
   args: StartConversationArgs,
   approve: ThreadMessageApprover,
   deps: ThreadMessagingDeps | null = threadMessagingDeps(),
+  worktrees: WorkConversationWorktreePort = workConversationWorktrees,
 ): Promise<McpTextResult> {
   let request: ReturnType<typeof parseArgs>;
   let ownerUserId: string;
@@ -176,7 +191,8 @@ export async function startConversationTool(
   if (!deps) return codedErrorResult('UNAVAILABLE', 'starting conversations is not configured on this backend');
 
   const nodeId = `n-${randomUUID()}`;
-  const approval = await approve({
+  // The user asked for it in their own turn: no card (2026-11-12). Any other turn asks.
+  const approval = userSentRunningTurn(caller.nodeId) ? { approved: true as const } : await approve({
     targetNodeId: nodeId,
     targetTitle: `New conversation · ${request.title}`,
     text: request.text,
@@ -216,24 +232,39 @@ export async function startConversationTool(
     edges: [],
     ownerUserId: workspace.owner_user_id ?? null,
   });
+  // What a temporary chat starts carries what it was told there: a temporary chat too.
+  if (isTemporaryChat(caller.nodeId)) startTemporaryConversation({ ownerUserId }, nodeId);
   // ensure-session opens a new conversation with the profile stored on its node.
   getDb().prepare('UPDATE nodes SET runtime_id = ?, provider_id = ?, model_id = ?, reasoning = ? WHERE id = ? AND acp_session_id IS NULL')
     .run(profile.runtimeId, profile.providerId, profile.modelId, profile.reasoning, nodeId);
+  // D18, Q26: in a git workspace the conversation works on its own worktree and branch; its sessions open there.
+  const worktree = await worktrees.prepare({ nodeId, workspaceCwd: workspace.cwd, title: request.title });
+  const undo = async () => {
+    if (worktree) await worktrees.discard(nodeId);
+    rollback(nodeId, workspace.id, treeId);
+  };
 
   let session: AgentSession | null;
   try {
     session = await deps.ensureSession({ ownerUserId, workspaceId: workspace.id, nodeId });
   } catch (error) {
-    rollback(nodeId, workspace.id, treeId);
+    await undo();
     return codedErrorResult('UNAVAILABLE', error instanceof Error ? error.message : String(error));
   }
   if (!session) {
-    rollback(nodeId, workspace.id, treeId);
+    await undo();
     return codedErrorResult('UNAVAILABLE', 'could not open a session for the new conversation');
   }
 
   const turnId = deps.newTurnId();
   const opened = session;
+  // D19: the conversation's first turn is Michi's, and starts from whatever outside content the starting turn held.
+  try {
+    markMichiStart(caller, { nodeId, turnId }, opened.runtimeId);
+  } catch (error) {
+    await undo();
+    return codedErrorResult('UNAVAILABLE', `could not mark the new conversation as Michi's work: ${error instanceof Error ? error.message : String(error)}`);
+  }
   const start = startUnderRestoreLock(await deps.acquireRestoreLock(nodeId), opened, deps.isLiveSession, () => deps.startTurn({
     chatId: opened.id, nodeId, ownerUserId, turnId, text: request.text, displayText: request.text, session: opened,
   }));
@@ -263,7 +294,9 @@ export async function startConversationTool(
     status: outcome.kind,
     conversation,
     ...(progressCard ? { progressCard } : {}),
+    ...(worktree ? { worktree: { branch: worktree.branch } } : {}),
     next: `The conversation runs on its own. Tell the user it started and link it as [${request.title.replace(/[[\]]/g, '')}](michi://node/${nodeId}); `
+      + (worktree ? `it works on its own branch \`${worktree.branch}\` in a separate worktree, so the user's checkout is untouched. ` : '')
       + 'they follow it from its progress card or the conversation page. Do not do its work yourself. '
       + (followed
         ? 'Its replies come back to you as worker reports; when it needs a next step the user asks for, send it with companion_session_send.'
@@ -272,14 +305,29 @@ export async function startConversationTool(
 }
 
 /**
+ * The new conversation's first turn is Michi's (services/turnGuard.ts
+ * michiDriven, before the delegation that says so durably is recorded), and
+ * when the starting turn held outside content the new turn starts from it
+ * (outsideSourced: its network and credential reads ask too). Throws when
+ * that cannot be recorded; nothing starts then.
+ */
+function markMichiStart(caller: StartConversationCaller, to: { nodeId: string; turnId: string }, runtimeId: string): void {
+  noteMichiStartedTurn(to.nodeId, to.turnId);
+  if (!caller.nodeId) return;
+  const from = activeTurnTrust(caller.nodeId);
+  if (!from || turnHoldsOutsideContent({ nodeId: caller.nodeId, turnId: from.turnId })) recordPassedOutsideContent(to, caller.nodeId, runtimeId);
+}
+
+/**
  * The agent follows a conversation its own conversation started (DESIGN-v2
  * §4): a delegation, origin `start_conversation`, recorded only for a caller
- * on V's open profile (purpose `main`), never for a closed one. A failed
- * record leaves the conversation started, unfollowed. Returns whether it is
- * followed.
+ * on V's open profile (purpose `main`), never for a closed one, nor for a
+ * temporary chat: worker reports would bring the started conversation's
+ * replies back into V's conversations. A failed record leaves the
+ * conversation started, unfollowed. Returns whether it is followed.
  */
 function followStartedConversation(caller: StartConversationCaller, started: { workspaceId: string; nodeId: string; title: string; now: number }): boolean {
-  if (!caller.nodeId || assistantPurposeOf(caller.nodeId) !== 'main') return false;
+  if (!caller.nodeId || assistantPurposeOf(caller.nodeId) !== 'main' || isTemporaryChat(caller.nodeId)) return false;
   try {
     recordDelegation({ ...started, origin: 'start_conversation' });
     return true;

@@ -61,7 +61,6 @@ vi.mock('../services/api', () => ({
   takeHydrationStructureCursor: () => ({ epoch: 'e1', seq: 0 }),
 }));
 
-vi.mock('../services/notifications', () => ({ notify: vi.fn() }));
 
 import { ChatProvider, useChatNodesSnapshot, useChatStore } from './chatStore';
 import { PrefsProvider } from './prefs';

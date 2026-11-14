@@ -81,7 +81,6 @@ describe('ScheduledJobScheduler', () => {
   let executor: FakeExecutor;
   let events: ScheduledJobEventBus;
   let published: ScheduledJobRunEvent[];
-  let wakes: number;
   let schedulers: ScheduledJobScheduler[];
 
   beforeEach(() => {
@@ -94,10 +93,9 @@ describe('ScheduledJobScheduler', () => {
     seedWorkspace('ws-a');
     seedWorkspace('ws-trashed', 5);
     executor = new FakeExecutor();
-    events = new ScheduledJobEventBus(() => now);
+    events = new ScheduledJobEventBus();
     published = [];
     events.subscribe({ send: (event) => published.push(event) });
-    wakes = 0;
     schedulers = [];
   });
 
@@ -114,12 +112,10 @@ describe('ScheduledJobScheduler', () => {
       events,
       workspaceExists: (id) => id === 'ws-a',
       runtimeExists: (id) => id === 'kiro' || id === 'pi',
-      launcher: { wake: () => { wakes += 1; return true; } },
       clock: () => now,
       instanceId: 'instance-a',
       createId: () => `job-${++nextId}`,
       pollIntervalMs: 60_000,
-      notifierGraceMs: 0,
       cancelGraceMs: 10,
       ...overrides,
     });
@@ -153,8 +149,6 @@ describe('ScheduledJobScheduler', () => {
     assert.equal(executor.started.length, 0);
     assert.equal(scheduler.getRun(run.id).status, 'succeeded');
     assert.equal(scheduler.getJob(job.id).conversationCursor, 1);
-    assert.equal(scheduler.pendingNotifications().length, 0);
-    assert.equal(wakes, 0);
     assert.equal(published.find(e => e.phase === 'finished')?.notify, false);
     assert.deepEqual(scheduler.validateUpdate(job.id, { conversationUpdates: true }), {});
   });
@@ -338,7 +332,6 @@ describe('ScheduledJobScheduler', () => {
     assert.equal(run.summary, 'All quiet.');
     assert.equal(run.nodeId, 'node-1');
     assert.equal(published.at(-1)?.phase, 'finished');
-    assert.equal(wakes, 1, 'no notifier connected, so the app is woken');
   });
 
   test('skips an occurrence that would overlap a running run', async () => {
@@ -512,22 +505,8 @@ describe('ScheduledJobScheduler', () => {
     assert.equal(scheduler.getRun('run-stale').status, 'interrupted');
   });
 
-  test('replays undelivered notifications until acknowledged', async () => {
-    const scheduler = makeScheduler();
-    executor.autoResolve = { status: 'succeeded', summary: 'Result', error: null };
-    const job = scheduler.createJob(baseJob);
-    const run = await scheduler.runNow(job.id);
-    await settle();
-    const pending = scheduler.pendingNotifications();
-    assert.equal(pending.length, 1);
-    assert.equal(pending[0].runId, run.id);
-    assert.equal(pending[0].phase, 'finished');
-    assert.equal(pending[0].summary, 'Result');
-    assert.equal(scheduler.acknowledgeNotification(run.id), true);
-    assert.deepEqual(scheduler.pendingNotifications(), []);
-  });
-
-  test('a run that needs approval publishes attention and wakes the app', async () => {
+  // The attention service turns these events into records and wakes a quit app for them (attentionScheduledRuns.test.ts).
+  test('a run that needs approval publishes attention', async () => {
     const scheduler = makeScheduler();
     const job = scheduler.createJob({ ...baseJob, notify: false });
     await scheduler.runNow(job.id);
@@ -535,85 +514,7 @@ describe('ScheduledJobScheduler', () => {
     executor.started[0].hooks.onAttention('approval');
     const attention = published.find((event) => event.phase === 'attention');
     assert.equal(attention?.attention, 'approval');
-    assert.equal(wakes, 1);
-    assert.equal(scheduler.pendingNotifications()[0]?.phase, 'attention');
-  });
-
-  test('does not wake the app while a notifier is connected', async () => {
-    const scheduler = makeScheduler();
-    events.subscribe({ notifier: true, send: () => {} });
-    executor.autoResolve = { status: 'succeeded', summary: null, error: null };
-    const job = scheduler.createJob(baseJob);
-    await scheduler.runNow(job.id);
-    await settle();
-    assert.equal(wakes, 0);
-  });
-
-  test('a notification inside the notifier grace wakes the app once the grace is up, if still nobody took it (H-review #2)', async () => {
-    const timers: Array<{ at: number; run: () => void; cancelled: boolean }> = [];
-    const setTimer = (run: () => void, delayMs: number) => {
-      const timer = { at: now + delayMs, run, cancelled: false };
-      timers.push(timer);
-      return () => { timer.cancelled = true; };
-    };
-    const advance = (ms: number) => {
-      now += ms;
-      for (const timer of [...timers]) if (!timer.cancelled && timer.at <= now) { timer.cancelled = true; timer.run(); }
-    };
-    const live = () => timers.filter((timer) => !timer.cancelled).length;
-    // The notifier just went away (the user quit Michi): its grace starts now.
-    events.subscribe({ notifier: true, send: () => {} })();
-    const scheduler = makeScheduler({ notifierGraceMs: 30_000, setTimer });
-    executor.autoResolve = { status: 'succeeded', summary: 'Done.', error: null };
-    const job = scheduler.createJob(baseJob);
-    advance(10_000);
-    const first = await scheduler.runNow(job.id);
-    await settle();
-    assert.equal(wakes, 0, 'inside the grace the notifier may be reconnecting');
-    assert.deepEqual(timers.map((timer) => timer.at - now), [20_000], 'one look again, for the time left');
-
-    // A second notification inside the grace arms nothing more.
-    await scheduler.runNow(job.id);
-    await settle();
-    assert.equal(live(), 1);
-    advance(19_999);
-    assert.equal(wakes, 0);
-    advance(1);
-    assert.equal(wakes, 1, 'nobody came back and the notifications still wait: the app is woken');
-    assert.equal(live(), 0);
-
-    // A notifier that came back and took the notification: nothing wakes.
-    events.subscribe({ notifier: true, send: () => {} })();
-    await scheduler.runNow(job.id);
-    await settle();
-    for (const event of scheduler.pendingNotifications()) scheduler.acknowledgeNotification(event.runId);
-    advance(30_000);
-    assert.equal(wakes, 1, 'no notification waits any more');
-
-    // One connected when the timer fires: nothing wakes, and nothing is armed again.
-    const unsubscribe = events.subscribe({ notifier: true, send: () => {} });
-    unsubscribe();
-    await scheduler.runNow(job.id);
-    await settle();
-    const connected = events.subscribe({ notifier: true, send: () => {} });
-    advance(30_000);
-    assert.equal(wakes, 1);
-    assert.equal(live(), 0);
-    connected();
-
-    // A notifier that came and went meanwhile restarts the grace; stop() cancels the look again.
-    await scheduler.runNow(job.id);
-    await settle();
-    advance(20_000);
-    events.subscribe({ notifier: true, send: () => {} })();
-    advance(10_000);
-    assert.equal(wakes, 1, 'its grace started over 10 s ago');
-    assert.equal(live(), 1);
-    await scheduler.stop();
-    assert.equal(live(), 0);
-    advance(30_000);
-    assert.equal(wakes, 1);
-    assert.ok(scheduler.getRun(first.id));
+    assert.equal(attention?.notify, false);
   });
 
   test('changing the agent profile starts a new persistent thread', async () => {

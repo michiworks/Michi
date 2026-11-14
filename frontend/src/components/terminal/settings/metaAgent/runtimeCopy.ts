@@ -1,21 +1,11 @@
-import { META_AGENT_RUNTIMES, runtimeShortLabel } from 'michi-shared';
+import { MICHI_AGENT_RUNTIMES, runtimeShortLabel } from 'michi-shared';
 
-// The runtime names and restriction lines of Pages upkeep, shared by
-// Settings › <name> › Pages upkeep and Scheduled › <name> · Pages upkeep.
+// The runtime names of Pages upkeep, shared by Settings › <name> › Pages upkeep and Pages.
 
-export type MetaAgentRuntimeId = typeof META_AGENT_RUNTIMES[number];
+export type MetaAgentRuntimeId = typeof MICHI_AGENT_RUNTIMES[number];
 
 const LABELS: Record<MetaAgentRuntimeId, string> = {
-  claude: 'Claude', pi: 'Pi', codex: 'Codex', kiro: 'Kiro', crew: 'Crew',
-};
-
-/** How each runtime is held to Pages upkeep's own tools, in plain words. */
-const RESTRICTIONS: Record<MetaAgentRuntimeId, string> = {
-  claude: 'Michi checks tool access; external tools are read-only',
-  pi: 'Michi checks tool access; external tools are read-only',
-  codex: 'Michi checks tool access; external tools are read-only',
-  kiro: 'Michi checks tool access; external tools are read-only',
-  crew: 'Pages upkeep can’t use Kiro Crew yet',
+  claude: 'Claude', pi: 'Pi', codex: 'Codex', kiro: 'Kiro',
 };
 
 export interface RuntimeUnavailableText {
@@ -48,24 +38,13 @@ export function runtimeUnavailableText(id: string, reason: string | null | undef
   return { text: `${label} can’t be used on this computer right now.`, install: [], detail: raw };
 }
 
-/** Runtimes listed for Pages upkeep but not offered in this version. */
-const UNSUPPORTED: ReadonlySet<string> = new Set(['crew']);
-
-export function isMetaAgentRuntimeSupported(id: string): boolean {
-  return !UNSUPPORTED.has(id);
-}
-
 export function isMetaAgentRuntime(id: string): id is MetaAgentRuntimeId {
-  return (META_AGENT_RUNTIMES as readonly string[]).includes(id);
+  return (MICHI_AGENT_RUNTIMES as readonly string[]).includes(id);
 }
 
 /** The Meta agent can follow the global runtime, which may be one it does not list. */
 export function metaAgentRuntimeLabel(id: string): string {
   return isMetaAgentRuntime(id) ? LABELS[id] : runtimeShortLabel(id) ?? id;
-}
-
-export function metaAgentRestriction(id: string): string | null {
-  return isMetaAgentRuntime(id) ? RESTRICTIONS[id] : null;
 }
 
 export interface MetaAgentProfile { runtimeId: string; modelId: string | null; reasoning: string | null }

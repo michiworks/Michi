@@ -6,7 +6,7 @@
  * The data is `GET /api/companion/tray` (CompanionTrayDto, computed by the
  * backend: Electron main loads no workspace package at runtime). It is
  * fetched again, debounced, after each `companion_changed` frame on the
- * notifier feed main already holds (companionNotifications.ts), and once a
+ * desktop feed main already holds (attentionNotifications.ts), and once a
  * minute with no frame (its status line carries an age), so a click pops the
  * menu up from the cached copy at once, without fetching first.
  *
@@ -15,7 +15,7 @@
  * in Node (scripts/electron-tray.test.mjs).
  */
 import * as http from 'node:http';
-import { parseCompanionTarget, type CompanionTarget } from './companionNotifications';
+import { parseCompanionTarget, type CompanionTarget } from './attentionNotifications';
 
 // ── How Michi starts and what closing its last window does ──────────────────
 
@@ -280,27 +280,33 @@ function item(label: string, action: TrayAction | null, enabled = action !== nul
 
 /**
  * The menu (DESIGN-v2 §5.1), top to bottom: the status row; Needs you (≤5),
- * View all in Today and Today's brief; Chat with <name>, Check now,
- * Pause/Resume check-ins; Open Michi, Settings…, Quit Michi. It names the
- * agent by its display name and marks no shortcut (⌘J is a window shortcut,
- * not a global one). Item titles only, never a summary.
+ * View all in Today and Today's brief; Chat with <name>, Check now, Turn
+ * <name> off; Open Michi, Settings…, Quit Michi. While the agent is off
+ * (Pause Michi until resumed, Q29/Q30) it offers none of its own entries,
+ * only Turn <name> on. It names the agent by its display name and marks no
+ * shortcut (⌘J is a window shortcut, not a global one). Item titles only,
+ * never a summary.
  */
 export function trayMenuModel(data: TrayData, env: TrayMenuEnv): TrayMenuEntry[] {
   const name = menuText(nameOf(data), env.platform);
   const menu: TrayMenuEntry[] = [];
   const dto = data.kind === 'ready' ? data.dto : null;
+  // `enabled` is false only on an older backend whose off switch Settings turns on.
+  const off = !!dto && (dto.paused || !dto.enabled);
 
   let status: TrayMenuEntry | null;
   if (env.transientStatus) status = item(env.transientStatus, null);
   else if (data.kind === 'loading') status = item('Michi is starting…', null);
   else if (data.kind === 'unreachable') status = item("Can't reach Michi's backend", null);
   else if (!dto) status = null;
-  // The conversation still answers with check-ins off, so its wait comes first.
+  // Off, its panel does not open: the row only says so.
+  else if (off) status = item(`${name} · ${menuText(dto.statusLine.text, env.platform)}`, null);
+  // The conversation still answers with check-ins quiet, so its wait comes first.
   else if (dto.conversationWaiting) status = item(`${name} is waiting for you`, { kind: 'open', target: CHAT });
   // welcomeWanted is the panel's "not met yet"; like the panel (CompanionChatTab's
-  // maySpeak) the tray offers the hello only while the agent may speak, since the
-  // backend starts no welcome while it is off or paused (coordinator welcomeBlocked).
-  else if (dto.enabled && !dto.paused && dto.welcomeWanted) status = item(`Say hello to ${name}`, { kind: 'open', target: CHAT });
+  // maySpeak) the tray offers the hello only while the agent is on, since the
+  // backend starts no welcome while it is off (coordinator welcomeBlocked).
+  else if (dto.welcomeWanted) status = item(`Say hello to ${name}`, { kind: 'open', target: CHAT });
   else {
     // A warning ("Auth expired — refresh your credentials", a source degraded) opens Settings,
     // where it is fixed (E-map §2.4); any other status is only read.
@@ -309,7 +315,7 @@ export function trayMenuModel(data: TrayData, env: TrayMenuEnv): TrayMenuEntry[]
   }
   if (status) menu.push(status);
 
-  if (dto?.enabled) {
+  if (dto && !off) {
     if (dto.needsYou.length > 0) {
       menu.push(item('Needs you', null));
       for (const row of dto.needsYou) {
@@ -321,21 +327,18 @@ export function trayMenuModel(data: TrayData, env: TrayMenuEnv): TrayMenuEntry[]
   }
   if (menu.length > 0) menu.push({ type: 'separator' });
 
-  menu.push(item(`Chat with ${name}`, { kind: 'open', target: CHAT }));
-  if (dto) {
-    if (dto.enabled) {
+  if (dto && off) {
+    menu.push(dto.enabled ? item(`Turn ${name} on`, { kind: 'set-paused', paused: false }) : item(`Turn ${name} on…`, { kind: 'open', target: SETTINGS }));
+  } else {
+    menu.push(item(`Chat with ${name}`, { kind: 'open', target: CHAT }));
+    if (dto) {
       menu.push(item('Check now', { kind: 'check-now' }));
-      menu.push(dto.paused
-        ? item('Resume check-ins', { kind: 'set-paused', paused: false })
-        : item('Pause check-ins', { kind: 'set-paused', paused: true }));
-    } else {
-      // Check-ins are off: the switch lives in Settings.
-      menu.push(item('Turn on check-ins…', { kind: 'open', target: SETTINGS }));
+      menu.push(item(`Turn ${name} off`, { kind: 'set-paused', paused: true }));
+    } else if (data.kind !== 'unsupported') {
+      // Starting, or the backend does not answer: shown, but nothing to act on yet.
+      menu.push(item('Check now', { kind: 'check-now' }, false));
+      menu.push(item(`Turn ${name} off`, { kind: 'set-paused', paused: true }, false));
     }
-  } else if (data.kind !== 'unsupported') {
-    // Starting, or the backend does not answer: shown, but nothing to act on yet.
-    menu.push(item('Check now', { kind: 'check-now' }, false));
-    menu.push(item('Pause check-ins', { kind: 'set-paused', paused: true }, false));
   }
   menu.push({ type: 'separator' });
   menu.push(item('Open Michi', { kind: 'open-michi' }));

@@ -14,13 +14,14 @@
   color: var(--term-fg);
   font-family: var(--ui-font);
 }
-/* A narrow window has no room beside the page: the panel covers it. */
+/* A narrow window has no room beside the page: the panel covers it, and the
+   phone drawer (its scrim and sidebar) opens over it. */
 .companion-panel[data-layout='overlay'] {
   position: absolute;
   inset: 0;
   width: auto;
   max-width: none;
-  z-index: calc(var(--z-drawer-scrim) - 2);
+  z-index: calc(var(--z-sidebar-scrim) - 1);
   border-left: 0;
 }
 .companion-panel__resize {
@@ -109,11 +110,24 @@
 .companion-icon-btn:hover { background: var(--term-alt); color: var(--term-fg); }
 .companion-icon-btn:disabled { opacity: 0.4; cursor: default; }
 .companion-icon-btn[aria-pressed='true'] { color: var(--term-accent); }
+.companion-head__bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
 .companion-tabs {
   display: flex;
   gap: 2px;
   margin-left: -6px;
 }
+.companion-head__bar .companion-needs-pill { margin-left: auto; align-self: center; }
+/* A phone's one row (CompanionHeader compact): the tabs' underline sits on the header's line. */
+.companion-head[data-compact] { padding-top: 2px; }
+.companion-head[data-compact] .companion-head__name { max-width: 30%; }
+.companion-head[data-compact] .companion-tabs { margin-left: 4px; }
+.companion-head[data-compact] .companion-needs-pill { margin-left: auto; align-self: center; }
+.companion-head[data-compact] .companion-head__status { margin-left: 4px; text-align: right; }
 .companion-tab {
   position: relative;
   padding: 6px 8px 7px;
@@ -511,6 +525,10 @@
   line-height: 1.5;
 }
 .companion-settings-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 6px; }
+.companion-settings-editor { display: flex; flex-direction: column; gap: 6px; margin-top: 4px; }
+.companion-settings-inline { display: inline-flex; align-items: center; gap: 6px; }
+/* A rule's or note's first line under its row: one line, cut short. */
+.companion-settings-preview { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .companion-workdays { display: flex; flex-wrap: wrap; gap: 4px; }
 .companion-workday {
   min-width: 34px;
@@ -528,7 +546,17 @@
 .companion-runs { margin: 4px 0 0; padding: 0; list-style: none; font-size: var(--fs-sm); }
 .companion-runs li { display: flex; gap: 8px; padding: 3px 0; color: var(--term-mid); }
 .companion-runs li > span:first-child { flex-shrink: 0; width: 72px; font-family: var(--font-mono); color: var(--term-faint); }
-.companion-runs li > span:last-child { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.companion-runs li > span:last-child { min-width: 0; overflow-wrap: anywhere; }
+/* The panel's Activity (its ⋯ menu): runs, then the conversations the agent follows. */
+.companion-activity-sheet { max-height: min(50vh, 420px); overflow-y: auto; padding-top: 4px; }
+.companion-activity-sheet__following { margin-top: 10px; padding-top: 8px; border-top: 1px solid var(--term-line); }
+.companion-activity-sheet__head { display: flex; flex-wrap: wrap; align-items: center; gap: 0 6px; margin-bottom: 6px; }
+.companion-activity-sheet__head h3 { margin: 0; font-size: 12px; font-weight: 600; color: var(--term-fg); }
+.companion-activity-sheet__head .info-tip__text { font-size: var(--fs-sm); }
+.companion-activity-sheet__follow { flex-wrap: wrap; }
+.companion-activity-sheet__follow-title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.companion-activity-sheet__ask { display: inline-flex; align-items: center; gap: 6px; color: var(--term-muted); font-size: var(--fs-sm); }
+.companion-activity-sheet__error { flex-basis: 100%; color: var(--term-danger-text); font-size: var(--fs-sm); }
 
 /* v2 (DESIGN-v2 §1.1–§3.8): the header menu and History, posts' receipts, the lines under a user message. */
 .companion-head__menu { position: relative; display: inline-flex; }
@@ -570,7 +598,9 @@
 .companion-receipt__reason { color: var(--term-faint); }
 .companion-receipt__actions { display: flex; justify-content: flex-end; margin-top: 4px; }
 .companion-receipt__done { color: var(--term-faint); }
-.companion-turn-notes { display: flex; flex-direction: column; align-items: flex-end; margin: -8px 0 10px; }
+/* Below the bubble, never under it: the bubble is positioned and the hover
+   actions no longer hold a row (5b737b9ec), so a negative top margin hides these lines. */
+.companion-turn-notes { display: flex; flex-direction: column; align-items: flex-end; margin: 4px 0 0; }
 .companion-turn-note { margin: 0; font-size: 11px; color: var(--term-muted); }
 .companion-upgrade-note {
   display: flex;
@@ -583,3 +613,21 @@
   border: 1px solid var(--term-line);
   border-radius: 6px;
 }
+/* Get started (D17): the model-free introduction and its card at the start of V. */
+.companion-get-started { display: flex; flex-direction: column; gap: 8px; margin: 2px 0 14px; }
+.companion-get-started__intro,
+.companion-get-started__later { margin: 0; font-size: var(--fs-md); line-height: 1.5; color: var(--term-mid); }
+.companion-get-started__later { color: var(--term-muted); }
+.companion-get-started__card { gap: 8px; padding: 10px 12px; }
+.companion-get-started__title { margin: 0; font-size: var(--fs-md); font-weight: 600; color: var(--term-fg); }
+.companion-get-started__rows { display: flex; flex-direction: column; gap: 4px; margin: 0; padding: 0; list-style: none; font-size: var(--fs-md); line-height: 1.45; }
+.companion-get-started__choice { display: inline-flex; align-items: baseline; gap: 6px; color: var(--term-fg); }
+.companion-get-started__choice input { margin: 0; accent-color: var(--term-accent); transform: translateY(1px); }
+.companion-get-started__choice[data-off] { color: var(--term-muted); }
+.companion-get-started__mark { flex: none; align-self: center; color: var(--term-faint); }
+.companion-get-started__mark[data-on] { color: var(--term-accent); }
+/* The facts line up with the choices' text, past the box. */
+.companion-get-started__fact { padding-left: 19px; color: var(--term-muted); }
+.companion-get-started__hint { color: var(--term-muted); }
+.companion-get-started__progress { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin: 0; font-size: var(--fs-sm); color: var(--term-muted); }
+.companion-get-started__progress[data-tone='done'] { color: var(--term-mid); }

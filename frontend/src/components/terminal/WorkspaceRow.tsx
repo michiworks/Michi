@@ -293,6 +293,8 @@ export default function WorkspaceRow({
   return (
     <div
       data-testid={`workspace-row-${project.id}`}
+      // Two folded workspaces in a row stack as a list (sidebar.css).
+      data-ws-open={workspaceExpanded || forceExpand ? 'true' : 'false'}
       draggable={dnd?.draggable ?? false}
       onDragStart={dnd?.onDragStart}
       onDragOver={dnd?.onDragOver}
@@ -327,7 +329,9 @@ export default function WorkspaceRow({
         // click does, ←/→ fold it (sidebar/rowKeyboard).
         role="button"
         tabIndex={0}
-        className="t-row-focus"
+        // ws-head: the name runs to the row's edge and ⋯ / + sit over its end (sidebar.css).
+        className={geom.workspaceAsHeader ? 't-row-focus ws-head' : 't-row-focus'}
+        data-menu-open={menu ? '' : undefined}
         // Its name, not the ⋯ and + buttons inside it.
         aria-label={project.name}
         aria-expanded={workspaceExpanded || forceExpand}
@@ -379,8 +383,10 @@ export default function WorkspaceRow({
                 // Vertical padding is SYMMETRIC so the name and the folder glyph
                 // share one centre line. marginTop keeps 17px of air above the
                 // name; the 3px below binds the header to the threads it heads.
+                // A folded workspace under a folded one takes 2px instead.
                 padding: `3px ${spinePadding(geom, geom.rightGap)} 3px ${spinePadding(geom, geom.titleX)}`,
-                marginTop: 14,
+                marginTop: 'var(--sb-ws-head-gap, 14px)',
+                ['--ws-head-right' as string]: spinePadding(geom, geom.rightGap),
                 // Same size as the thread titles it heads — at 11.5px it read as
                 // a different tier of thing entirely. The folder glyph and the
                 // indent of its threads are what set it apart from a thread, so
@@ -459,6 +465,7 @@ export default function WorkspaceRow({
         ) : (
           <>
             <span
+              className="ws-head__name"
               style={{
                 flex: 1,
                 minWidth: 0,
@@ -637,30 +644,16 @@ export default function WorkspaceRow({
               aria-expanded={threadVisibleLimit > threadPreviewLimit}
               onClick={() => setThreadVisibleLimit((v) => v + THREAD_PAGE_SIZE)}
               style={{
-                width: '100%',
-                display: 'inline-flex',
-                alignItems: 'center',
-                gap: 4,
                 // `.sb-flush` rides the container inset (no negative margin), so
                 // spinePadding lands it on the same spine as the thread titles
                 // it pages in.
                 padding: geom.isCard
-                  ? `5px ${spinePadding(geom, geom.rightGap)} 5px ${spinePadding(geom, geom.titleX + geom.workspaceIconSlot)}`
-                  : '5px 8px 5px 25px',
-                background: 'transparent',
-                border: 0,
-                textAlign: 'left',
-                color: 'var(--term-muted)',
-                fontFamily: 'var(--ui-font)',
-                fontSize: 'var(--fs-md)',
-                cursor: 'pointer',
-                textDecoration: 'underline',
-                textDecorationStyle: 'dotted',
-                textUnderlineOffset: '3px',
-                textDecorationColor: 'var(--term-faint)',
+                  ? `0 ${spinePadding(geom, geom.rightGap)} 0 ${spinePadding(geom, geom.titleX + geom.workspaceIconSlot)}`
+                  : '0 8px 0 25px',
               }}
             >
-              Show more
+              {/* The number the click brings in, not the number still hidden. */}
+              Show {Math.min(THREAD_PAGE_SIZE, unpinnedTrees.length - threadVisibleLimit)} more
             </button>
           )}
 

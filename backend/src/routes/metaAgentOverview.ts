@@ -6,6 +6,7 @@ import { log } from '../services/logger';
 import { MetaAgentPauseError, metaAgentOverview, setMetaAgentPaused } from '../services/metaAgent/overview';
 import { PageWriteError } from '../services/pages/core';
 import type { ScheduledJobScheduler } from '../services/scheduledJobs/scheduler';
+import { companionEvents } from '../services/companion/delivery';
 
 const metaAgentLocalOnly = localOnlyGuard('Pages upkeep requires local or authenticated remote access', { allowAuthenticatedRemote: true });
 
@@ -14,8 +15,8 @@ const metaAgentLocalOnly = localOnlyGuard('Pages upkeep requires local or authen
  * beside routes/metaAgent.ts for local and authenticated remote access, never in cloud mode.
  *
  *   GET  /api/meta-agent/overview → MetaAgentOverview
- *   POST /api/meta-agent/pause    → MetaAgentOverview (every workspace's maintenance paused)
- *   POST /api/meta-agent/resume   → MetaAgentOverview
+ *   POST /api/meta-agent/pause    → MetaAgentOverview (Pause Michi until resumed)
+ *   POST /api/meta-agent/resume   → MetaAgentOverview (Pause Michi ends)
  */
 export function setupMetaAgentOverviewRoutes(deps: { scheduler: ScheduledJobScheduler | null; clock?: () => number }): Router {
   const router = Router();
@@ -50,6 +51,8 @@ export function setupMetaAgentOverviewRoutes(deps: { scheduler: ScheduledJobSche
     if (!deps.scheduler) { res.status(404).json({ error: 'Scheduled jobs are unavailable' }); return; }
     try {
       setMetaAgentPaused({ scheduler: deps.scheduler, ownerUserId: LOCAL_AGENT_OWNER_ID, paused, clock: deps.clock });
+      // Pause Michi is the Companion's pause too: its panel and tray follow.
+      companionEvents.emitChanged('settings');
       res.json(await overview());
     } catch (err) {
       fail(res, err, paused ? 'pause' : 'resume');

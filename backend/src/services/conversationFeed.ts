@@ -1,6 +1,7 @@
 import { ConversationUpdatesError } from 'michi-shared';
 import { getDb } from './db';
 import { liveConversationSql, liveNodeSql } from './nodeLifecycleSql';
+import { notTemporaryChatSql } from './memory/temporaryChat';
 
 export function conversationCompletionCounter(workspaceId: string): number {
   const row = getDb().prepare('SELECT value FROM meta WHERE key = ?')
@@ -10,13 +11,14 @@ export function conversationCompletionCounter(workspaceId: string): number {
   return value;
 }
 
-// Archived, trashed and purged nodes, archived trees and Scheduled-only run threads are excluded.
+// Archived, trashed and purged nodes, archived trees, Scheduled-only run threads and
+// temporary chats (no reader of the feed is the temporary chat itself) are excluded.
 const readableFrom = (live: string) => `FROM turns t JOIN nodes n ON n.id = t.node_id
   JOIN workspaces w ON w.id = n.workspace_id LEFT JOIN trees tr ON tr.id = n.tree_id
   WHERE n.workspace_id = ? AND w.deleted_at IS NULL AND w.purged_at IS NULL
     AND (? = 0 OR w.owner_user_id = ?) AND n.kind = 'chat'
     AND ${live}
-    AND n.scheduled_only_job_id IS NULL
+    AND n.scheduled_only_job_id IS NULL AND ${notTemporaryChatSql('n')}
     AND t.status = 'completed' AND t.user_message_id IS NOT NULL`;
 const READABLE_FROM = readableFrom(liveConversationSql({ node: 'n', tree: 'tr' }));
 const READABLE_IN_ANY_TREE = readableFrom(liveNodeSql('n'));

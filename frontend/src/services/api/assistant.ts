@@ -38,8 +38,6 @@ export interface AssistantInfo {
   supportedRuntimes: RuntimeId[];
   /** Where the conversation moved to another runtime, oldest first. Absent from older backends. */
   runtimeSwitches?: MichiAssistantRuntimeSwitch[];
-  /** The Scheduled window's conversation created a job: opening the window starts a new one. Absent from older backends. */
-  jobCreated?: boolean;
   /**
    * The conversation held the user's own messages before the v2 merge
    * (`v2_merged_at`): they used ⌘J before, so the panel shows the one-time

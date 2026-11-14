@@ -21,6 +21,7 @@ import { InlineRenameInput } from '../ui/InlineRenameInput';
 import { formatMichiAge } from './content/michiFormat';
 import { PROVISIONAL_LABEL_STYLE, rowLabel } from './sidebar/rowLabel';
 import { rowKeyDown } from './sidebar/rowKeyboard';
+import { TemporaryChatGlyph } from './TemporaryChat';
 
 const EMPTY_EDGES: readonly ProjectEdge[] = [];
 
@@ -135,7 +136,12 @@ export default function ThreadRow({
   // It never fills n.title, so the main response can still provide the first
   // durable title while the user sees a useful sidebar label.
   const { text: label, provisional } = rowLabel(tree.name, n);
+  const temporary = n?.temporary === true;
   const geom = rowGeom(prefs.sidebarRowStyle, prefs.sidebarInset);
+  // The current row keeps its ⋯ showing; its right padding keeps its title and
+  // workspace lines from running under it. (A caret, when there is one,
+  // already keeps that room.)
+  const paddingClearsKebab = geom.isCard && isActive && !!subtitle && !hasBranches;
   // The star ends the row and takes the caret's place, so it clears the ⋯.
   const pinTakesEnd = !!tree.pinnedAt && geom.isCard && !hasBranches && !prefs.showSidebarTimestamps && !selected;
   const newPanePulse = useNewPanePulse(tree.rootNodeId);
@@ -193,7 +199,7 @@ export default function ThreadRow({
         tabIndex={0}
         className="t-row-focus"
         // Its title (and workspace), not the ⋯ inside it.
-        aria-label={subtitle ? `${label}, ${subtitle}` : label}
+        aria-label={[label, subtitle, temporary && 'temporary chat'].filter(Boolean).join(', ')}
         aria-current={isActive ? 'true' : undefined}
         aria-expanded={hasBranches ? expanded : undefined}
         active={isActive || selected}
@@ -233,11 +239,8 @@ export default function ThreadRow({
                 paddingTop: 'var(--sb-row-py, 4px)',
                 paddingBottom: 'calc(var(--sb-row-py, 4px) + 1px)',
                 paddingLeft: rowPadding(geom, indent).paddingLeft,
-                // The current row keeps its ⋯ showing; keep its title and
-                // workspace lines from running under it. (A caret, when there
-                // is one, already keeps that room.)
-                paddingRight: isActive && subtitle && !hasBranches
-                  ? `calc(${rowPadding(geom, indent).paddingRight} + ${caretKebabClearance(geom)}px + var(--row-kebab-extra, 0px))`
+                paddingRight: paddingClearsKebab
+                  ? `calc(${rowPadding(geom, indent).paddingRight} + ${caretKebabClearance(geom)}px)`
                   : rowPadding(geom, indent).paddingRight,
               }
             : {
@@ -323,7 +326,8 @@ export default function ThreadRow({
               padding: '1px 4px',
             }}
           />
-        ) : (
+        ) : (<>
+          {temporary && <TemporaryChatGlyph size={13} />}
           <span
             data-provisional={provisional || undefined}
             style={{
@@ -339,9 +343,9 @@ export default function ThreadRow({
           >
             {label}
           </span>
-        )}
+        </>)}
         {tree.pinnedAt && (
-          <PinMark endMargin={pinTakesEnd ? pinMarkEndMargin(geom, 5) : undefined} />
+          <PinMark endMargin={pinTakesEnd ? pinMarkEndMargin(geom, 5, paddingClearsKebab) : undefined} />
         )}
         {prefs.showSidebarTimestamps && (
           <span style={{ color: 'var(--term-muted)', fontSize: 'var(--sb-ts-fs, var(--fs-sm))', marginRight: 2 }}>

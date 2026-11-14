@@ -14,9 +14,10 @@ import {
     workspaceSessionCwd,
     ownedSandboxCwd,
 } from "../services/workspaceSandbox";
+import { workConversationCwd } from "../services/workConversationWorktree";
 import { randomUUID } from "node:crypto";
 import { CheckinSessionError, ChatManager, ExtraContext, PrimaryAgentBindingError, primaryAgentSessionOptions } from "../services/chatManager";
-import { assistantPurposeOf, assistantTargetWorkspace, isAssistantNode, noteAssistantScheduleTurn } from "../assistant/identity";
+import { assistantPurposeOf, assistantTargetWorkspace, isAssistantNode } from "../assistant/identity";
 import { companionStartTaint } from "../assistant/startTaint";
 import { sessionReplayHistory } from "../agents/sessionReplayView";
 import { getCompanionSettings } from "../services/companion/settings";
@@ -60,7 +61,9 @@ import { isCrewMemoryMode } from 'michi-shared';
 // getSessionForUser enforces ownership in cloud mode; getSession is for internal callers.
 const { getSessionForUser } = sessionRegistry;
 import type { AgentSession } from "../agents/types";
-import { LOCAL_AGENT_OWNER_ID } from "../services/agentOwner";
+import { LOCAL_AGENT_OWNER_ID, requestAgentOwnerOrNull } from "../services/agentOwner";
+import { startTemporaryConversation } from "../services/memory/memoryService";
+import { crewMemoryModeFor } from "../services/crewMemory";
 import {
     getAiGlobalContext,
     getNode,
@@ -539,6 +542,8 @@ function parseEnsureSessionBody(body: Record<string, unknown>): {
     contextManifest?: ExtraContext[];
     artifactCount?: number;
     enableFollowUps: boolean;
+    /** A temporary chat, chosen before the first turn (startTemporaryConversation). */
+    temporary: boolean;
 } | { invalid: Record<string, unknown> } {
     const invalid = (error: string) => ({ invalid: { error } });
     if (process.env.MICHI_CLOUD !== "1" && body.cwd !== undefined) {
@@ -577,6 +582,7 @@ function parseEnsureSessionBody(body: Record<string, unknown>): {
     if (body.enableFollowUps !== undefined && typeof body.enableFollowUps !== "boolean") {
         return invalid("enableFollowUps must be a boolean");
     }
+    if (body.temporary !== undefined && typeof body.temporary !== "boolean") return invalid("temporary must be a boolean");
     return {
         cwd: body.cwd as string | undefined,
         model: body.model as string | undefined,
@@ -587,6 +593,7 @@ function parseEnsureSessionBody(body: Record<string, unknown>): {
         contextManifest,
         ...(artifactCount !== undefined ? { artifactCount } : {}),
         enableFollowUps: body.enableFollowUps !== false,
+        temporary: body.temporary === true,
     };
 }
 
@@ -927,7 +934,8 @@ export function setupMichiRoutes(chatManager: ChatManager) {
                 if ("error" in owned) return res.status(owned.status).json({ error: owned.error });
                 cwd = owned.cwd;
             } else {
-                cwd = bodyCwd as string;
+                // A work conversation with its own worktree reopens there (D18, Q26).
+                cwd = workConversationCwd(resolvedNodeId) ?? bodyCwd as string;
             }
             const primaryAgent = row?.workspace_id ? await chatManager.resolvePrimaryAgentBinding({
                 ownerUserId: req.user?.id ?? LOCAL_AGENT_OWNER_ID,
@@ -1083,6 +1091,13 @@ export function setupMichiRoutes(chatManager: ChatManager) {
         if (body.workspaceId && body.workspaceId !== durableNode.workspace_id) {
             return res.status(409).json({ code: 'IDENTITY_MISMATCH', error: 'node and workspace do not match' });
         }
+        // A temporary chat is chosen before its first turn (a synced first
+        // message does not count); every later send carries the flag again
+        // and changes nothing (startTemporaryConversation).
+        const memoryOwner = parsed.temporary ? requestAgentOwnerOrNull(req.user?.id) : null;
+        if (memoryOwner) startTemporaryConversation({ ownerUserId: memoryOwner }, nodeId);
+        // A temporary chat's Crew sessions keep nothing either, whatever the client asked for.
+        const crewMemoryMode = crewMemoryModeFor(nodeId, isCrewMemoryMode(body.crewMemoryMode) ? body.crewMemoryMode : undefined);
         writeNodePermissionMode(nodeId, isChatPermissionMode(body.permissionMode) ? body.permissionMode : 'ask', req.user?.id, true, body.approveForMe === true);
 
         // In cloud mode, derive cwd server-side from the node's workspace ownership.
@@ -1109,6 +1124,8 @@ export function setupMichiRoutes(chatManager: ChatManager) {
         } else if (parsed.cwd !== undefined) {
             cwd = parsed.cwd;
         }
+        // A work conversation with its own worktree opens there, whatever folder the client sends (D18, Q26).
+        if (process.env.MICHI_CLOUD !== "1") cwd = workConversationCwd(nodeId) ?? cwd;
         cwd = normalizeWorkspaceCwd(cwd);
 
         const existingChatId = normalizeSignaturePart(body.chatId);
@@ -1346,7 +1363,7 @@ export function setupMichiRoutes(chatManager: ChatManager) {
                     ...mergeContexts,
                 ];
                 session = await runtime.newSession({
-                    ...(isCrewMemoryMode(body.crewMemoryMode) ? { crewMemoryMode: body.crewMemoryMode } : {}),
+                    ...(crewMemoryMode ? { crewMemoryMode } : {}),
                     cwd,
                     parentChatId: effectiveParentChatId,
                     ...(branchContext === undefined ? {} : { branchContext }),
@@ -1586,8 +1603,6 @@ export function setupMichiRoutes(chatManager: ChatManager) {
         let companionContext: CompanionTurnContext | null = null;
         if (assistantMain) {
             turnId ??= randomUUID();
-            // A job this turn creates is one "Create with agent" starts over for (w2-fix D6).
-            if (area?.kind === 'schedule') noteAssistantScheduleTurn(nodeId, turnId);
             const composed = withAssistantTurnContext(text, { area, nodeId, session, now: Date.now() });
             companionContext = composed.companion;
             wireText = composed.text;
@@ -1598,7 +1613,7 @@ export function setupMichiRoutes(chatManager: ChatManager) {
             const companionTurn: CompanionTurnMetadata = {
                 ...(companionContext.rulesUnavailable ? { rulesUnavailable: true as const } : {}),
                 ...(startTaint ? { startTaint } : {}),
-                // "Tools ask before running this turn: this conversation read check-in material earlier."
+                // "Anything that would leave this machine asks first: this conversation read check-in material earlier."
                 ...(carriedTaint && !startTaint ? { carriedTaint } : {}),
             };
             if (Object.keys(companionTurn).length > 0) userMetadata = { ...(userMetadata ?? {}), companionTurn };

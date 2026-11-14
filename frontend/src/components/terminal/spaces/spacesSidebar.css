@@ -14,3 +14,6 @@
 .spaces-assistant-history__row:disabled { opacity: .5; cursor: default; }
 .spaces-assistant-history__more { margin: 4px 0 4px 38px; padding: 2px 0; border: 0; background: transparent; color: var(--term-muted); font: inherit; font-size: var(--fs-sm); cursor: pointer; }
 .spaces-assistant-history__more:hover { color: var(--term-fg); }
+/* A row's suggestion count gives way to its menu (RowKebab), which takes the row's right end while it shows:
+   under the menu's fade the count would sit against the ⋯. */
+.spaces-side .area-side__row.t-row-hover:is(:hover, :focus-within, [data-menu-open], :has(> .row-kebab.is-open)) > .area-side__count { visibility: hidden; }

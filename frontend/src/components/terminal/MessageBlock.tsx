@@ -25,6 +25,7 @@ import { CardSpinner, SparkleIcon, LiveTimerLabel } from './AgentBlockVariants';
 import { GlyphSwap, LabelSwap, Reveal } from './agentBlockMotion';
 import type { PlanEntry } from '../../services/api';
 import MarkdownContent from '../MarkdownContent';
+import { MarkdownTableLiveContext } from '../MarkdownFeatureTable';
 import { QuoteChip } from './QuoteChip';
 import { AttachmentPills } from './AttachmentPills';
 import { CommentChips } from './CommentChips';
@@ -1050,9 +1051,9 @@ function CarriedTaintNote({ message }: { message: Pick<ChatMessage, 'role' | 'co
     <p
       role="note"
       className="terminal-message-turn-note"
-      style={{ margin: '-4px 0 8px', textAlign: 'right', fontFamily: 'var(--ui-font)', fontSize: 'var(--fs-sm)', color: 'var(--term-muted)' }}
+      style={{ margin: '4px 0 0', textAlign: 'right', fontFamily: 'var(--ui-font)', fontSize: 'var(--fs-sm)', color: 'var(--term-muted)' }}
     >
-      Tools ask before running this turn: this conversation read check-in material earlier.
+      Anything that would leave this machine asks first: this conversation read check-in material earlier.
     </p>
   );
 }
@@ -2734,6 +2735,8 @@ function MessageBlockInner({
           }}
         >
           <AgentTurnContext.Provider value={agentTurn}>
+          {/* Only a streaming reply's tables wait to settle (MarkdownFeatureTable). */}
+          <MarkdownTableLiveContext.Provider value={!!m.streaming}>
           {showThoughts && m.plan && m.plan.length > 0 && (
             <TermPlanBlock entries={m.plan} />
           )}
@@ -2764,6 +2767,7 @@ function MessageBlockInner({
               onSmoothingChange={onVisibleSmoothingChange}
             />
           )}
+          </MarkdownTableLiveContext.Provider>
           </AgentTurnContext.Provider>
         </div>
       )}

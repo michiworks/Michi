@@ -3,13 +3,18 @@ import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import MarkdownContent from '../../MarkdownContent';
 import { AssistantLinkScope, MichiLinkScope } from './AssistantLinks';
+import { MichiLinkConnectionContext } from './linkConnection';
 
 const revealNode = vi.hoisted(() => vi.fn((_nodeId: string, _opts?: { workspaceId?: string; messageId?: string }) => true));
 const store = vi.hoisted(() => ({
-  nodes: { n7: { nodeId: 'n7', projectId: 'w1', title: 'S7 thread' } } as Record<string, unknown>,
+  nodes: {
+    n7: { nodeId: 'n7', projectId: 'w1', title: 'S7 thread' },
+    'remote:build-box:n4': { nodeId: 'remote:build-box:n4', projectId: 'remote:build-box:w4', title: 'Phone layout' },
+  } as Record<string, unknown>,
   projects: [
     { id: 'w1', name: 'A', chatIds: ['n7'] },
     { id: 'sys', name: 'Assistant', system: 'assistant', chatIds: ['n-sys'] },
+    { id: 'remote:build-box:w4', name: 'Build box', chatIds: ['remote:build-box:n4'] },
   ] as Array<{ id: string; name: string; system?: string; chatIds: string[] }>,
   installWorkspaceSnapshot: vi.fn((_raw: unknown, _readStartedAt?: number) => true),
   listeners: new Set<() => void>(),
@@ -21,8 +26,10 @@ const store = vi.hoisted(() => ({
   },
 }));
 const persistence = vi.hoisted(() => ({ fetchNodeWorkspace: vi.fn(), fetchWorkspaceStructure: vi.fn() }));
+const pages = vi.hoisted(() => ({ openSpacesPage: vi.fn(async (_target: unknown) => 'opened' as const) }));
 
 vi.mock('../../../services/api/persistence', () => persistence);
+vi.mock('../../../state/metaChat/spacesPages', () => pages);
 vi.mock('../../../state/chatStore', () => ({
   useChatNode: (id: string) => React.useSyncExternalStore(store.subscribe, () => store.nodes[id]),
   // The real reader sees an install at once, before any re-render.
@@ -38,6 +45,7 @@ beforeEach(() => {
   persistence.fetchNodeWorkspace.mockReset();
   persistence.fetchWorkspaceStructure.mockReset();
   store.installWorkspaceSnapshot.mockReset().mockReturnValue(true);
+  pages.openSpacesPage.mockClear();
 });
 
 describe('assistant answer chips', () => {
@@ -180,5 +188,48 @@ describe('assistant answer chips', () => {
     render(<MichiLinkScope><MarkdownContent text={ANSWER} /></MichiLinkScope>);
     fireEvent.click(screen.getByRole('button', { name: 'S7' }));
     expect(revealNode).toHaveBeenCalledWith('n7', { workspaceId: 'w1' });
+  });
+});
+
+describe("links in a remote machine's content", () => {
+  // An agent on the remote machine writes its own ids.
+  const onBuildBox = (text: string) => (
+    <MichiLinkScope>
+      <MichiLinkConnectionContext.Provider value="build-box"><MarkdownContent text={text} /></MichiLinkConnectionContext.Provider>
+    </MichiLinkScope>
+  );
+
+  it('opens the thread on that connection', () => {
+    render(onBuildBox('See [Phone layout](michi://node/n4).'));
+    fireEvent.click(screen.getByRole('button', { name: 'Phone layout' }));
+    expect(revealNode).toHaveBeenCalledWith('remote:build-box:n4', { workspaceId: 'remote:build-box:w4' });
+    expect(persistence.fetchNodeWorkspace).not.toHaveBeenCalled();
+  });
+
+  it('never asks this machine about one of its threads the store lacks', async () => {
+    render(onBuildBox('See [Made since](michi://node/n3).'));
+    const chip = screen.getByRole('button', { name: /Made since/ });
+    fireEvent.click(chip);
+    await waitFor(() => expect(chip.textContent).toContain("couldn't load"));
+    expect(chip.textContent).not.toContain('not found');
+    expect(persistence.fetchNodeWorkspace).not.toHaveBeenCalled();
+  });
+
+  it("leaves a link to another connection's thread as its words", () => {
+    render(onBuildBox('Was on [their laptop](michi://node/remote:laptop:n1).'));
+    expect(screen.queryByRole('button')).toBeNull();
+    expect(document.querySelector('a')).toBeNull();
+    expect(screen.getByText(/their laptop/)).toBeTruthy();
+  });
+
+  it('opens a page on the backend its id names', () => {
+    render(<>
+      {onBuildBox('See [Leftovers](michi://page/pg-6).')}
+      <MichiLinkScope><MarkdownContent text={'And [Plan](michi://page/remote:build-box:pg-7?block=b2).'} /></MichiLinkScope>
+    </>);
+    fireEvent.click(screen.getByRole('button', { name: 'Leftovers' }));
+    expect(pages.openSpacesPage).toHaveBeenLastCalledWith({ pageId: 'remote:build-box:pg-6', backendConnectionId: 'build-box' });
+    fireEvent.click(screen.getByRole('button', { name: 'Plan' }));
+    expect(pages.openSpacesPage).toHaveBeenLastCalledWith({ pageId: 'remote:build-box:pg-7', backendConnectionId: 'build-box', blockId: 'b2' });
   });
 });

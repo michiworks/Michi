@@ -1,13 +1,13 @@
 /**
- * The agent's reasoning level (DESIGN-v2 §6): V, without a composer pick,
- * runs at Settings › <name> › Reasoning, by default the lower of the global
- * level and high (a user turn at the global xhigh took 69 s; check-ins stop
- * after 3 minutes); a level the user picks in V's composer wins for V only,
- * and a new conversation follows the setting again. A check-in runs on V's
- * runtime and model, V's pick included, always at the setting, never at the
- * chip's level. The binding every session path uses and the info the
- * composer chips show agree. Temp MICHI_DATA_DIR per test; the runtimes are
- * fakes.
+ * The agent's reasoning level (DESIGN-v2 §6) and what a check-in runs on
+ * (unification §D8): V, without a composer pick, runs at the lower of the
+ * global level and high (a user turn at the global xhigh took 69 s;
+ * check-ins stop after 3 minutes); a level the user picks in V's composer
+ * wins for V only, and a new conversation follows the global settings again.
+ * A check-in runs on Background work (the Meta agent record), never on V's
+ * pick: its own reasoning when Custom has one, else the agent's level. The
+ * binding every session path uses and the info the composer chips show
+ * agree. Temp MICHI_DATA_DIR per test; the runtimes are fakes.
  */
 
 // Must stay first: agentConfig would otherwise persist test settings to ~/.michi/config.json.
@@ -24,7 +24,7 @@ import { registerRuntime } from '../src/agents/registry';
 import { resolveAssistantBinding } from '../src/assistant/binding';
 import { COMPANION_DEFAULT_REASONING_MAX, ensureAssistant, resetAssistant, updateAssistantSettings } from '../src/assistant/store';
 import { updateAgentConfig } from '../src/services/agentConfig';
-import { patchCompanionSettings } from '../src/services/companion/settings';
+import { updateMetaAgentSettings } from '../src/services/metaAgent/settings';
 import { closeDb, getDb, initDb } from '../src/services/db';
 import { makeCheckinNode } from './helpers/checkinNodes';
 
@@ -99,21 +99,21 @@ describe('the agent\'s reasoning level (DESIGN-v2 §6)', () => {
     assert.equal(boundReasoning(s), 'high');
   });
 
-  test('Settings › Reasoning replaces the default for V and its check-ins; null goes back to it', () => {
+  test('Background work, set to Custom, is what a check-in runs on, its reasoning included; V stays on the global settings', () => {
     setGlobal('claude', 'xhigh');
     const v = ensureAssistant();
     const s = makeCheckinNode(v.workspaceId);
-    patchCompanionSettings({ reasoning: 'max' });
-    assert.equal(boundReasoning(v.nodeId), 'max', 'the user may choose more than high');
-    assert.equal(boundReasoning(s), 'max');
-    patchCompanionSettings({ reasoning: 'low' });
-    assert.equal(ensureAssistant().conversation.reasoning, 'low');
-    assert.equal(boundReasoning(s), 'low');
-    patchCompanionSettings({ reasoning: null });
-    assert.equal(boundReasoning(v.nodeId), 'high');
+    updateMetaAgentSettings({ runtimeId: 'codex', modelId: 'gpt-bg', reasoning: 'max' });
+    assert.deepEqual([boundProfile(s).runtimeId, boundProfile(s).modelId, boundProfile(s).reasoning], ['codex', 'gpt-bg', 'max'],
+      'the user may choose more than high for background work');
+    assert.deepEqual([boundProfile(v.nodeId).runtimeId, boundProfile(v.nodeId).reasoning], ['claude', 'high'], 'V is not background work');
+    updateMetaAgentSettings({ reasoning: null });
+    assert.equal(boundReasoning(s), 'high', 'Custom without a level: the agent\'s level on that runtime');
+    updateMetaAgentSettings({ runtimeId: null });
+    assert.deepEqual([boundProfile(s).runtimeId, boundProfile(s).reasoning], ['claude', 'high'], 'Same as your chats');
   });
 
-  test('V\'s composer pick wins for V alone: a check-in keeps V\'s runtime and model but the setting\'s level, and a new conversation follows the setting', () => {
+  test('V\'s composer pick wins for V alone: a check-in stays on Background work, and a new conversation follows the global settings', () => {
     setGlobal('claude', 'xhigh');
     const v = ensureAssistant();
     const s = makeCheckinNode(v.workspaceId);
@@ -127,13 +127,12 @@ describe('the agent\'s reasoning level (DESIGN-v2 §6)', () => {
     const picked = updateAssistantSettings({ nodeId: v.nodeId, reasoning: 'max' });
     assert.equal(picked.conversation.reasoning, 'max', 'the user\'s own pick');
     assert.deepEqual([boundProfile(v.nodeId).runtimeId, boundProfile(v.nodeId).modelId, boundProfile(v.nodeId).reasoning], ['codex', 'gpt-x', 'max']);
-    assert.deepEqual([boundProfile(s).runtimeId, boundProfile(s).modelId], ['codex', 'gpt-x'], 'a check-in follows V\'s runtime and model');
-    assert.equal(boundProfile(s).reasoning, 'high', 'never the chip\'s level: a check-in has 3 minutes');
-    // A pick stored under a check-in node's own key is never read (E-review #14): the check-in still runs on V's.
+    assert.deepEqual([boundProfile(s).runtimeId, boundProfile(s).reasoning], ['claude', 'high'], 'a check-in never follows V\'s pick');
+    // A pick stored under a check-in node's own key is never read (E-review #14): the check-in still runs on Background work.
     const stray = makeCheckinNode(v.workspaceId, 'run-stray');
     getDb().prepare('INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)')
-      .run(`assistant_conversation_runtime:${stray}`, JSON.stringify({ runtimeId: 'claude', providerId: null, modelId: 'opus', reasoning: 'max' }));
-    assert.deepEqual([boundProfile(stray).runtimeId, boundProfile(stray).modelId, boundProfile(stray).reasoning], ['codex', 'gpt-x', 'high']);
+      .run(`assistant_conversation_runtime:${stray}`, JSON.stringify({ runtimeId: 'codex', providerId: null, modelId: 'opus', reasoning: 'max' }));
+    assert.deepEqual([boundProfile(stray).runtimeId, boundProfile(stray).reasoning], ['claude', 'high']);
     setGlobal('codex', 'low');
     assert.equal(boundReasoning(v.nodeId), 'max', 'a pick is not affected by global');
 

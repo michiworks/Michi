@@ -244,14 +244,14 @@ export type MemoryExtractionScopeHint = 'workspace' | 'maybe_global';
 /**
  * What automatic extraction is doing now, most blocking first:
  * off (memory mode is not auto), unsupported (this backend or the Meta agent
- * runtime cannot run it; see stateReason), paused (POST pause),
- * maintenance_paused (the Meta agent's global maintenance pause), stopped
+ * runtime cannot run it; see stateReason), paused (POST pause), stopped
  * (a workspace's runs stopped after repeated failures; resume restarts them),
  * budget_exhausted (the daily token limit is reached), running, waiting
- * (new turns not yet processed) and idle (up to date).
+ * (new turns not yet processed) and idle (up to date). The Meta agent's
+ * pause does not hold it.
  */
 export type MemoryExtractionState =
-  | 'off' | 'unsupported' | 'paused' | 'maintenance_paused' | 'stopped' | 'budget_exhausted' | 'running' | 'waiting' | 'idle';
+  | 'off' | 'unsupported' | 'paused' | 'stopped' | 'budget_exhausted' | 'running' | 'waiting' | 'idle';
 
 export interface MemoryExtractionRunSummary {
   id: string;

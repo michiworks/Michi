@@ -11,6 +11,8 @@ export interface ClaudeHostApprovalRequest {
   toolName: string;
   /** The bare name of a host tool, or null for any other tool. */
   hostToolName: string | null;
+  /** The call's arguments, for a host that decides by what the call does. */
+  input?: Record<string, unknown>;
 }
 
 /**

@@ -58,6 +58,7 @@ export interface GlobalContextProvider {
   searchMessages(sessionWorkspaceId: string | null, ownerUserId: string | null | undefined,
                  query: string, scope?: "current" | "all", limit?: number,
                  options?: { includeScheduledRuns?: boolean }): GlobalContextResultLike;
+  /** `readerNodeId`: the calling conversation, the one temporary chat it may read. */
   readNode(sessionWorkspaceId: string | null, ownerUserId: string | null | undefined,
            nodeId: string, opts?: {
              role?: "user" | "assistant";
@@ -66,9 +67,9 @@ export interface GlobalContextProvider {
              limit?: number;
              messageId?: string;
              charOffset?: number;
-           }): GlobalContextResultLike;
+           }, readerNodeId?: string | null): GlobalContextResultLike;
   readNodeOverview(sessionWorkspaceId: string | null, ownerUserId: string | null | undefined,
-                   nodeId: string): GlobalContextResultLike;
+                   nodeId: string, readerNodeId?: string | null): GlobalContextResultLike;
 }
 
 /** Resolves provider API keys. Default impl reads env only. */

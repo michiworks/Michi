@@ -4,19 +4,22 @@ import { act, fireEvent, render, screen, within } from '@testing-library/react';
 import TerminalShell from './TerminalShell';
 import { PrefsProvider } from '../../state/prefs';
 import { OPEN_NATIVE_PAGE_EVENT } from './spaces/SpacesPage';
-import { OPEN_SETTINGS_SECTION_EVENT, closeMetaAgentDetail } from './scheduled/metaAgent/metaAgentNav';
+import { OPEN_SETTINGS_SECTION_EVENT } from './scheduled/metaAgent/metaAgentNav';
+import { openScheduledHome } from './scheduled/scheduledNav';
 
 vi.mock('./pages/Home', () => ({ default: () => <div>Conversation home</div> }));
 // With no workspace the shell offers New workspace on load; its modal would hold the shortcuts these tests press.
 vi.mock('../NewWorkspaceDialog', () => ({ default: () => null }));
 vi.mock('./NewWorkspaceAutoOpen', () => ({ NewWorkspaceAutoOpen: () => null }));
 vi.mock('./pages/Dashboard', () => ({ default: () => <div>Conversation dashboard</div> }));
-vi.mock('./pages/Scheduled', () => ({ default: () => <div>Scheduled page</div> }));
-vi.mock('./scheduled/metaAgent/MetaAgentDetail', () => ({ default: () => <div>Meta agent detail page</div> }));
+vi.mock('./pages/Scheduled', async () => {
+  const nav = await vi.importActual<typeof import('./scheduled/scheduledNav')>('./scheduled/scheduledNav');
+  return { default: () => (nav.useScheduledRoute().kind === 'job' ? <div>Job detail page</div> : <div>Scheduled page</div>) };
+});
 vi.mock('./spaces/SpaceView', () => ({ default: () => <div>Space view</div> }));
 vi.mock('./pages/settings/AppearancePane', () => ({ AppearancePane: () => <div>Appearance pane</div> }));
 vi.mock('./pages/settings/ModelPane', () => ({ ModelPane: () => <div>Model pane</div> }));
-vi.mock('./scheduled/useScheduledJobs', () => ({ useScheduledJobs: () => ({ jobs: [], loading: false, unavailable: false }) }));
+vi.mock('./scheduled/useScheduledJobs', () => ({ useScheduledJobs: () => ({ jobs: [{ id: 'job-1', name: 'Digest', workspaceId: 'w1', activeRunId: null, schedule: { kind: 'every', everySeconds: 3600 } }], loading: false, unavailable: false }) }));
 vi.mock('../../state/pages/useSpaces', () => ({ useSpaces: () => ({ spaces: [], status: 'ready', error: null, refresh: vi.fn() }) }));
 vi.mock('../../state/chatStore', async () => {
   const actual = await vi.importActual<any>('../../state/chatStore');
@@ -47,7 +50,7 @@ const rail = (name: string) => screen.getByRole('navigation', { name: 'Areas' })
 
 describe('TerminalShell areas', () => {
   beforeEach(() => {
-    closeMetaAgentDetail();
+    openScheduledHome();
     sessionStorage.clear();
     localStorage.setItem('michi:v1:prefs', JSON.stringify({ onboardingCompletedAt: 1, sidebarCollapsed: false, reduceMotion: true }));
   });
@@ -100,7 +103,8 @@ describe('TerminalShell areas', () => {
 
     fireEvent.click(rail('scheduled'));
     expect(await screen.findByText('Scheduled page')).toBeTruthy();
-    expect(screen.getByText('Michi · Pages upkeep')).toBeTruthy();
+    // Pages upkeep runs when conversations go quiet, not on a schedule: Scheduled does not list it (Q8).
+    expect(screen.queryByText('Michi · Pages upkeep')).toBeNull();
   });
 
   it('toggles the drawer with Cmd+, while preserving the page and its shortcuts underneath', async () => {
@@ -149,8 +153,8 @@ describe('TerminalShell areas', () => {
     render(<PrefsProvider><TerminalShell /></PrefsProvider>);
     fireEvent.click(rail('scheduled'));
     expect(await screen.findByText('Scheduled page')).toBeTruthy();
-    fireEvent.click(screen.getByText('Michi · Pages upkeep'));
-    expect(await screen.findByText('Meta agent detail page')).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: 'Digest' }));
+    expect(await screen.findByText('Job detail page')).toBeTruthy();
     fireEvent.click(screen.getByRole('button', { name: 'Navigate back' }));
     expect(await screen.findByText('Scheduled page')).toBeTruthy();
     fireEvent.click(screen.getByRole('button', { name: 'Navigate back' }));
@@ -158,37 +162,30 @@ describe('TerminalShell areas', () => {
     fireEvent.keyDown(window, { key: ']', metaKey: true });
     expect(await screen.findByText('Scheduled page')).toBeTruthy();
     fireEvent.keyDown(window, { key: ']', metaKey: true });
-    expect(await screen.findByText('Meta agent detail page')).toBeTruthy();
+    expect(await screen.findByText('Job detail page')).toBeTruthy();
     fireEvent.click(rail('conversations'));
     expect(await screen.findByText('Conversation home')).toBeTruthy();
     fireEvent.click(screen.getByRole('button', { name: 'Navigate back' }));
-    expect(await screen.findByText('Meta agent detail page')).toBeTruthy();
-    fireEvent.click(screen.getByRole('button', { name: 'SCHEDULED' }));
-    expect(await screen.findByText('Scheduled page')).toBeTruthy();
-    fireEvent.click(screen.getByRole('button', { name: 'Navigate back' }));
-    expect(await screen.findByText('Meta agent detail page')).toBeTruthy();
+    expect(await screen.findByText('Job detail page')).toBeTruthy();
     fireEvent.click(rail('scheduled'));
     expect(await screen.findByText('Scheduled page')).toBeTruthy();
-    expect(screen.queryByText('Meta agent detail page')).toBeNull();
+    expect(screen.queryByText('Job detail page')).toBeNull();
   });
 
-  it('opens <name> · Pages upkeep from the pinned Scheduled row, its crumb under the agent’s name, and Settings from its link event', async () => {
-    closeMetaAgentDetail();
+  it('opens a job from the Scheduled sidebar under its crumb, and Settings from its link event', async () => {
     render(<PrefsProvider><TerminalShell /></PrefsProvider>);
     fireEvent.click(rail('scheduled'));
     expect(await screen.findByText('Scheduled page')).toBeTruthy();
     expect(crumb()).toBe('SCHEDULED');
-    fireEvent.click(screen.getByText('Michi · Pages upkeep'));
-    expect(await screen.findByText('Meta agent detail page')).toBeTruthy();
-    expect(screen.queryByText('Scheduled page')).toBeNull();
-    expect(crumb()).toBe('SCHEDULED›Michi · Pages upkeep');
+    fireEvent.click(screen.getByRole('button', { name: 'Digest' }));
+    expect(await screen.findByText('Job detail page')).toBeTruthy();
 
     act(() => { window.dispatchEvent(new CustomEvent(OPEN_SETTINGS_SECTION_EVENT, { detail: { section: 'runtime' } })); });
     expect(await screen.findByText('Model pane')).toBeTruthy();
     expect(screen.getByRole('dialog', { name: 'Settings' })).toBeTruthy();
     act(() => { window.dispatchEvent(new CustomEvent('michi:nav-page', { detail: { page: 'settings' } })); });
     expect(screen.getByRole('dialog', { name: 'Settings' })).toBeTruthy();
-    expect(crumb()).toBe('SCHEDULED›Michi · Pages upkeep');
-    closeMetaAgentDetail();
+    expect(screen.getByText('Job detail page')).toBeTruthy();
+    openScheduledHome();
   });
 });

@@ -26,7 +26,7 @@ describe('notification preferences', () => {
     fireEvent.click(sounds);
     expect(setAttentionPreferences).toHaveBeenLastCalledWith({ level: 'approval-only', sounds: false });
 
-    fireEvent.click(screen.getByRole('radio', { name: 'Off' }));
+    fireEvent.change(screen.getByRole('combobox', { name: 'Notify me' }), { target: { value: 'off' } });
     expect(setAttentionPreferences).toHaveBeenLastCalledWith({ level: 'off', sounds: false });
     // Nothing to sound with notifications off.
     expect(sounds.disabled).toBe(true);

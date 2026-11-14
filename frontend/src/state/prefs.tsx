@@ -701,6 +701,18 @@ function chatNotificationLevelSync(write: (level: ChatNotificationLevel) => Prom
 /** How long the level settles (a backend hydration, a quick change of mind) before it is sent. */
 const CHAT_NOTIFICATION_LEVEL_SYNC_MS = 500;
 
+/** Each mounted provider's read of the backend's prefs (noteNotificationLevelChanged). */
+const notificationLevelReaders = new Set<() => void>();
+
+/**
+ * The backend changed the user's level (Michi's companion_set_notifications,
+ * `companion_changed` `notifications`, state/companion/companionFeed.ts):
+ * every mounted provider reads its prefs again and takes the level.
+ */
+export function noteNotificationLevelChanged(): void {
+  for (const read of notificationLevelReaders) read();
+}
+
 interface PrefsContextValue {
   prefs: Prefs;
   setPref<K extends keyof Prefs>(key: K, value: Prefs[K]): void;
@@ -789,10 +801,21 @@ export function PrefsProvider({ children }: { children: React.ReactNode }) {
 
   useEffect(() => {
     let disposed = false;
+    // The level the backend holds, when it is not the one this window last knew there (Michi's
+    // companion_set_notifications, or another window): taken, unless a change made here is unsaved.
+    const adoptLevel = (remote: Record<string, unknown>) => {
+      const level = remote.notifications;
+      const known = savedRef.current.notifications;
+      if (!isChatNotificationLevel(level) || level === known) return;
+      savedRef.current = { ...savedRef.current, notifications: level };
+      setPrefs((prev) => (prev.notifications === known ? { ...prev, notifications: level } : prev));
+    };
     const refresh = () => {
       const revision = permissionWriteRevision.current;
       void fetchPrefs().then((remote) => {
-        if (disposed || !remote || revision !== permissionWriteRevision.current) return;
+        if (disposed || !remote) return;
+        adoptLevel(remote);
+        if (revision !== permissionWriteRevision.current) return;
         // An incomplete answer is not the backend's setting.
         if (typeof remote.globalPermissions !== 'boolean' || !isChatPermissionMode(remote.permissionMode)) return;
         const next = normalizePermissionPrefs(remote);
@@ -803,7 +826,13 @@ export function PrefsProvider({ children }: { children: React.ReactNode }) {
     const onStorage = (event: StorageEvent) => { if (event.key === PREFS_KEY) refresh(); };
     window.addEventListener('focus', refresh);
     window.addEventListener('storage', onStorage);
-    return () => { disposed = true; window.removeEventListener('focus', refresh); window.removeEventListener('storage', onStorage); };
+    notificationLevelReaders.add(refresh);
+    return () => {
+      disposed = true;
+      window.removeEventListener('focus', refresh);
+      window.removeEventListener('storage', onStorage);
+      notificationLevelReaders.delete(refresh);
+    };
   }, []);
 
   useEffect(() => {

@@ -20,7 +20,6 @@ import {
   isChatNotificationLevel,
   isCheckinNodeId,
   isCompanionActor,
-  isCompanionNotice,
   parseCompanionPostMetadata,
   parseCompanionTurnRefs,
   COMPANION_CHECKIN_TURN_PREFIX,
@@ -33,7 +32,6 @@ import {
   companionCheckinTurnId,
   companionCheckinTurnRunId,
   companionDelegationPath,
-  companionNoticeChannel,
   companionRunUndoPath,
   companionSendTurnId,
   companionSendTurnRunId,
@@ -43,7 +41,6 @@ import {
   parseCompanionTurnMetadata,
   type BlockSource,
   type CompanionCheckinKind,
-  type CompanionNotice,
   type CompanionRunKind,
   type CompanionSessionSendCardPayload,
 } from '../src/index';
@@ -248,24 +245,7 @@ describe('names and sources the v2 migration and renderers rely on (W0 review #1
   });
 });
 
-describe('notices and the chat notification level (DESIGN-v2 §5.2)', () => {
-  const notice: CompanionNotice = { id: 'cmn-1', title: 'Michi', body: 'Needs your approval', target: { kind: 'companion', tab: 'chat' }, itemIds: [], createdAt: 1, expiresAt: 2 };
-
-  test('a notice may name the gate it came through', () => {
-    assert.equal(isCompanionNotice(notice), true);
-    assert.equal(isCompanionNotice({ ...notice, channel: 'companion' }), true);
-    assert.equal(isCompanionNotice({ ...notice, channel: 'chat' }), true);
-    assert.equal(isCompanionNotice({ ...notice, channel: 'email' }), false);
-  });
-
-  test('a null channel is the Companion gate, so a nullable column does not drop old notices (W0 review #15)', () => {
-    assert.equal(isCompanionNotice({ ...notice, channel: null }), true);
-    assert.equal(companionNoticeChannel(notice), 'companion');
-    assert.equal(companionNoticeChannel({ channel: null }), 'companion');
-    assert.equal(companionNoticeChannel({ channel: 'companion' }), 'companion');
-    assert.equal(companionNoticeChannel({ channel: 'chat' }), 'chat');
-  });
-
+describe('the notification level (Settings › Notifications)', () => {
   test('the chat level takes the renderer pref values, All by default', () => {
     assert.deepEqual([...CHAT_NOTIFICATION_LEVELS], ['all', 'approval-only', 'off']);
     assert.equal(DEFAULT_CHAT_NOTIFICATION_LEVEL, 'all');

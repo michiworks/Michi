@@ -18,11 +18,13 @@ import {
   noteCompanionViewed,
   scheduleCompanionRefresh,
   setCompanionPanelVisible,
+  companionIsOff,
   useCompanion,
   useCompanionAssistant,
 } from '../../../state/companion/companionStore';
 import {
   closeCompanionPanel,
+  getCompanionPanelState,
   noteCompanionScreen,
   openCompanionPanel,
   setCompanionHistoryOpen,
@@ -40,6 +42,7 @@ import { PAGE_HELPER_DRAFT_EVENT, type PageHelperDraftRequest } from '../../../s
 import { AssistantApiError, MICHI_ASSISTANT_RESET_EVENT, resetAssistant, type AssistantInfo } from '../../../services/api/assistant';
 import type { CompanionSnapshot } from '../../../services/api/companion';
 import { AssistantHistory } from '../spaces/AssistantHistory';
+import { CompanionActivity } from './CompanionActivity';
 import { CompanionChatTab } from './CompanionChatTab';
 import { CompanionToday } from './CompanionToday';
 import { openCompanionSettings, useOpenCompanionTarget } from './companionTargets';
@@ -99,10 +102,11 @@ async function startNewConversation(nodeId: string): Promise<void> {
  * panel leaves Esc to any `[data-escape-layer]`); Esc or a press outside
  * closes it and gives focus back to the More button (F1a-review #15).
  */
-function PanelMenu({ nodeId, answering, onHistory, onClose, anchorRef }: {
+function PanelMenu({ nodeId, answering, onHistory, onActivity, onClose, anchorRef }: {
   nodeId: string | null;
   answering: boolean;
   onHistory(): void;
+  onActivity(): void;
   onClose(options?: { refocus?: boolean }): void;
   anchorRef: React.RefObject<HTMLElement | null>;
 }) {
@@ -131,17 +135,20 @@ function PanelMenu({ nodeId, answering, onHistory, onClose, anchorRef }: {
       <button type="button" role="menuitem" className="companion-menu__item" disabled={!nodeId || answering || starting}
         aria-busy={starting || undefined} onClick={() => { void newConversation(); }}>New conversation</button>
       <button type="button" role="menuitem" className="companion-menu__item" disabled={!nodeId} onClick={() => { onHistory(); onClose(); }}>History…</button>
+      <button type="button" role="menuitem" className="companion-menu__item" onClick={() => { onActivity(); onClose(); }}>Activity…</button>
       <button type="button" role="menuitem" className="companion-menu__item" onClick={() => { openCompanionSettings(); onClose(); }}>Settings</button>
     </div>
   );
 }
 
-function CompanionHeader({ snapshot, tab, nodeId, onClose, onHistory, todayRef }: {
+function CompanionHeader({ snapshot, tab, nodeId, compact, onClose, onHistory, onActivity, todayRef }: {
   snapshot: CompanionSnapshot | null;
   tab: CompanionTab;
   nodeId: string | null;
+  compact: boolean;
   onClose(): void;
   onHistory(): void;
+  onActivity(): void;
   todayRef: React.RefObject<HTMLButtonElement | null>;
 }) {
   const clock = useMinuteClock(true);
@@ -149,7 +156,8 @@ function CompanionHeader({ snapshot, tab, nodeId, onClose, onHistory, todayRef }
   // One status line for the panel, the Topbar and the tray (DESIGN-v2 §3.8, §5.1): "Checking in… ·
   // Stop" for a check-in, "Saying hello…" without Stop for the welcome (F4), "Taking a first look…".
   const line = snapshot ? companionStatusLine(snapshot, clock) : null;
-  const needsYou = snapshot ? itemsInBucket(snapshot.items, 'needs_you').filter((item) => item.status === 'new').length : 0;
+  const waiting = snapshot ? itemsInBucket(snapshot.items, 'needs_you') : [];
+  const needsYou = waiting.filter((item) => item.status === 'new').length;
   const unread = snapshot?.counts.unreadMessages ?? 0;
   const answering = useStructuralSelector(useCallback(
     (nodes: Record<string, ChatNodeState>) => !!nodeId && nodes[nodeId]?.status === 'streaming', [nodeId]));
@@ -159,44 +167,79 @@ function CompanionHeader({ snapshot, tab, nodeId, onClose, onHistory, todayRef }
     setMenuOpen(false);
     if (options.refocus) moreRef.current?.focus({ preventScroll: true });
   }, []);
+  const status = line && (
+    <span className="companion-head__status" data-tone={line.tone} title={line.text} role="status">
+      {line.text}
+      {line.stoppable && (
+        <>
+          <span aria-hidden="true"> · </span>
+          <button type="button" className="companion-link-btn" onClick={() => preemptCompanionTurn()}>Stop</button>
+        </>
+      )}
+    </span>
+  );
+  const tabs = (
+    <div className="companion-tabs" role="tablist" aria-label={`${name} views`}>
+      <button type="button" role="tab" className="companion-tab" aria-selected={tab === 'chat'} onClick={() => setCompanionPanelTab('chat')}>
+        Chat{unread > 0 && <span className="companion-tab__count" aria-label={`${unread} new`}>{unread}</span>}
+      </button>
+      <button ref={todayRef} type="button" role="tab" className="companion-tab" aria-selected={tab === 'today'} onClick={() => setCompanionPanelTab('today')}>
+        Today{needsYou > 0 && <span className="companion-tab__count" aria-label={`${needsYou} need you`}>{needsYou}</span>}
+      </button>
+    </div>
+  );
+  // Beside the tabs rather than a row of its own above the Chat, which a phone has no height for.
+  const needsPill = tab === 'chat' && waiting.length > 0 && (
+    <button type="button" className="companion-needs-pill" onClick={() => setCompanionPanelTab('today')}>
+      Needs you ({waiting.length})
+    </button>
+  );
+  const actions = (
+    <>
+      <span className="companion-head__menu">
+        <button ref={moreRef} type="button" className="companion-icon-btn" aria-label={`${name} menu`} aria-haspopup="menu" aria-expanded={menuOpen}
+          title="More" onClick={() => setMenuOpen((open) => !open)}>
+          <MoreHorizontal size={13} strokeWidth={1.7} aria-hidden="true" />
+        </button>
+        {menuOpen && <PanelMenu nodeId={nodeId} answering={answering} onHistory={onHistory} onActivity={onActivity} onClose={closeMenu} anchorRef={moreRef} />}
+      </span>
+      <button type="button" className="companion-icon-btn" aria-label={`Close ${name}`} title="Close" onClick={onClose}>×</button>
+    </>
+  );
+  if (compact) {
+    // A phone: one row, the name then the tabs. The dot keeps the status's tone; its words show
+    // only for a check-in (its Stop) or a warning, in the place of Needs you.
+    const notable = !!line && (!!line.stoppable || line.tone === 'warn');
+    return (
+      <header className="companion-head" data-compact="">
+        <div className="companion-head__top">
+          <span className="companion-avatar" data-tone={line?.tone ?? 'off'} aria-hidden="true" />
+          <span className="companion-head__name" title={name}>{name}</span>
+          {tabs}
+          {notable ? status : needsPill}
+          {line && !notable && <span className="sr-only" role="status">{line.text}</span>}
+          {actions}
+        </div>
+      </header>
+    );
+  }
   return (
     <header className="companion-head">
       <div className="companion-head__top">
         <span className="companion-avatar" data-tone={line?.tone ?? 'off'} aria-hidden="true" />
         <span className="companion-head__name" title={name}>{name}</span>
-        {line && (
-          <span className="companion-head__status" data-tone={line.tone} title={line.text} role="status">
-            {line.text}
-            {line.stoppable && (
-              <>
-                <span aria-hidden="true"> · </span>
-                <button type="button" className="companion-link-btn" onClick={() => preemptCompanionTurn()}>Stop</button>
-              </>
-            )}
-          </span>
-        )}
-        <span className="companion-head__menu">
-          <button ref={moreRef} type="button" className="companion-icon-btn" aria-label={`${name} menu`} aria-haspopup="menu" aria-expanded={menuOpen}
-            title="More" onClick={() => setMenuOpen((open) => !open)}>
-            <MoreHorizontal size={13} strokeWidth={1.7} aria-hidden="true" />
-          </button>
-          {menuOpen && <PanelMenu nodeId={nodeId} answering={answering} onHistory={onHistory} onClose={closeMenu} anchorRef={moreRef} />}
-        </span>
-        <button type="button" className="companion-icon-btn" aria-label={`Close ${name}`} title="Close" onClick={onClose}>×</button>
+        {status}
+        {actions}
       </div>
-      <div className="companion-tabs" role="tablist" aria-label={`${name} views`}>
-        <button type="button" role="tab" className="companion-tab" aria-selected={tab === 'chat'} onClick={() => setCompanionPanelTab('chat')}>
-          Chat{unread > 0 && <span className="companion-tab__count" aria-label={`${unread} new`}>{unread}</span>}
-        </button>
-        <button ref={todayRef} type="button" role="tab" className="companion-tab" aria-selected={tab === 'today'} onClick={() => setCompanionPanelTab('today')}>
-          Today{needsYou > 0 && <span className="companion-tab__count" aria-label={`${needsYou} need you`}>{needsYou}</span>}
-        </button>
+      <div className="companion-head__bar">
+        {tabs}
+        {needsPill}
       </div>
     </header>
   );
 }
 
-function CompanionPanel({ narrow, page }: { narrow: boolean; page?: PageId }) {
+function CompanionPanel({ narrow, page, covered }: { narrow: boolean; page?: PageId; covered: boolean }) {
   const { snapshot, stale, catchUp, arrivals } = useCompanion();
   const assistant = useCompanionAssistant();
   const panel = useCompanionPanel();
@@ -207,11 +250,13 @@ function CompanionPanel({ narrow, page }: { narrow: boolean; page?: PageId }) {
   // History is panel state, so Settings can open it (openCompanionPanel({ history: true })).
   const historyOpen = panel.historyOpen;
   const setHistoryOpen = setCompanionHistoryOpen;
+  // Activity (Q31): what check-ins did, with Undo all, and the conversations the agent follows.
+  const [activityOpen, setActivityOpen] = useState(false);
   const openTarget = useOpenCompanionTarget();
   const nodeId = assistant.info?.nodeId ?? null;
   // Over the page in a narrow window the panel is a layer: Back closes it, as Esc does
-  // (History first, when it is open).
-  useBackLayer(narrow, { back: () => (historyOpen ? setHistoryOpen(false) : closeCompanionPanel()) });
+  // (History or Activity first, when one is open).
+  useBackLayer(narrow, { back: () => (historyOpen ? setHistoryOpen(false) : activityOpen ? setActivityOpen(false) : closeCompanionPanel()) });
 
   // ⇧⌘J lands in the panel on Today, so a second ⇧⌘J closes it (§1.2).
   useEffect(() => {
@@ -301,15 +346,17 @@ function CompanionPanel({ narrow, page }: { narrow: boolean; page?: PageId }) {
       data-companion-panel=""
       data-assistant-panel=""
       data-layout={narrow ? 'overlay' : 'docked'}
-      style={narrow ? undefined : { '--companion-panel-width': `${width}px` } as React.CSSProperties}
+      // Under the open phone drawer nothing here takes a touch, as on the page beside it (TerminalShell's content column).
+      style={narrow ? (covered ? { pointerEvents: 'none' } : undefined) : { '--companion-panel-width': `${width}px` } as React.CSSProperties}
       onKeyDown={onKeyDown}
     >
       {!narrow && (
         <button type="button" className="companion-panel__resize" aria-label={`Resize the ${name} panel`}
           title="Drag to resize · Double-click to reset" onPointerDown={startResize} onKeyDown={resizeByKey} onDoubleClick={resetWidth} />
       )}
-      <CompanionHeader snapshot={snapshot} tab={panel.tab} nodeId={nodeId} onClose={closeCompanionPanel}
-        onHistory={() => setHistoryOpen(true)} todayRef={todayRef} />
+      <CompanionHeader snapshot={snapshot} tab={panel.tab} nodeId={nodeId} compact={narrow} onClose={closeCompanionPanel}
+        onHistory={() => { setActivityOpen(false); setHistoryOpen(true); }} onActivity={() => { setHistoryOpen(false); setActivityOpen(true); }}
+        todayRef={todayRef} />
       {historyOpen && (
         <div className="companion-history" data-escape-layer="" role="dialog" aria-label="History"
           onKeyDown={(event) => { if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); setHistoryOpen(false); } }}>
@@ -318,6 +365,16 @@ function CompanionPanel({ narrow, page }: { narrow: boolean; page?: PageId }) {
             <button type="button" className="companion-icon-btn" aria-label="Close history" onClick={() => setHistoryOpen(false)}>×</button>
           </div>
           <AssistantHistory visible onOpenAssistant={() => { setHistoryOpen(false); setCompanionPanelTab('chat'); }} />
+        </div>
+      )}
+      {activityOpen && !historyOpen && (
+        <div className="companion-history" data-escape-layer="" role="dialog" aria-label="Activity"
+          onKeyDown={(event) => { if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); setActivityOpen(false); } }}>
+          <div className="companion-history__head">
+            <span>Activity</span>
+            <button type="button" className="companion-icon-btn" aria-label="Close activity" onClick={() => setActivityOpen(false)}>×</button>
+          </div>
+          <CompanionActivity snapshot={snapshot} name={name} />
         </div>
       )}
       {stale && snapshot && <p className="companion-stale" role="status">Can’t reach {name} right now — this is what it last showed.</p>}
@@ -360,8 +417,14 @@ function usePageHelperDrafts(): void {
  * has no assistant. `page` (the shell's page) lets the Chat follow the screen
  * ("On screen: …"); without it the panel names the focused pane, if any.
  */
-export function CompanionPanelHost({ narrow, page }: { narrow: boolean; page?: PageId }) {
-  const { availability, snapshot } = useCompanion();
+export function CompanionPanelHost({ narrow, page, covered = false }: { narrow: boolean; page?: PageId; covered?: boolean }) {
+  const companion = useCompanion();
+  const { availability, snapshot } = companion;
+  // Off (Q29), the panel opens only from Pages' Ask and the links into its conversation (its button,
+  // ⌘J and notices open nothing). Turning Michi off closes an open panel; one opened while off stays.
+  const off = companionIsOff(companion);
+  const onOff: 'unknown' | 'on' | 'off' = !snapshot || availability !== 'available' ? 'unknown' : off ? 'off' : 'on';
+  const previousOnOff = useRef(onOff);
   const assistant = useCompanionAssistant();
   const panel = useCompanionPanel();
   // Until the backend first answers, the panel waits a moment before it shows: one without an
@@ -374,6 +437,11 @@ export function CompanionPanelHost({ narrow, page }: { narrow: boolean; page?: P
     return () => window.clearTimeout(timer);
   }, [probing]);
   const shown = panel.open && assistant.status !== 'unsupported' && (!probing || probeShown);
+  useEffect(() => {
+    const turnedOff = previousOnOff.current === 'on' && onOff === 'off';
+    previousOnOff.current = onOff;
+    if (turnedOff && getCompanionPanelState().open) closeCompanionPanel();
+  }, [onOff]);
   usePageHelperDrafts();
 
   // A block target is about the screen it was set on: another area or Pages view lets it go (F1a-review #9).
@@ -404,5 +472,5 @@ export function CompanionPanelHost({ narrow, page }: { narrow: boolean; page?: P
     return () => window.removeEventListener('focus', onFocus);
   }, [shown, available]);
 
-  return shown ? <CompanionPanel narrow={narrow} page={page} /> : null;
+  return shown ? <CompanionPanel narrow={narrow} page={page} covered={covered} /> : null;
 }

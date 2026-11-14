@@ -19,8 +19,9 @@
  * - when Michi could not read the user's rules for the turn (the route
  *   marked the user message `companionTurn.rulesUnavailable`, or they cannot
  *   be read now) the action tools refuse (§1.3);
- * - companion_set_name and mute change things only in a turn the user
- *   started, also one that read untrusted material (D19);
+ * - companion_set_name, companion_set_notifications and mute change things
+ *   only in a turn the user started, also one that read untrusted material
+ *   (D19);
  *   companion_update_item and companion_edit_goal also in a check-in,
  *   which may snooze, dismiss or restore (never an item the user muted) at
  *   most ten items and change at most three goals, each with a reason,
@@ -81,6 +82,7 @@
  */
 
 import {
+  CHAT_NOTIFICATION_LEVELS,
   COMPANION_BUCKETS,
   COMPANION_CONFIGURABLE_SOURCES,
   COMPANION_LIMITS,
@@ -91,6 +93,7 @@ import {
   isCheckinNodeId,
   parseCompanionPostMetadata,
   parseCompanionTurnMetadata,
+  type ChatNotificationLevel,
   type CompanionCardKind,
   type CompanionConfigurableSource,
   type CompanionItemAction,
@@ -105,9 +108,11 @@ import type { ParamField, ParamSpec } from '../../agents/builtinTools';
 import type { AssistantPurpose, CompanionOwnToolName } from '../../assistant/policy';
 import type { AssistantTool, AssistantToolContext, AssistantToolResult } from '../../assistant/tools';
 import { assistantPurposeOf, isAssistantNode } from '../../assistant/identity';
+import { changeUserNotificationLevel } from '../attention/notificationLevel';
 import { getDb } from '../db';
 import { log } from '../logger';
 import { activeTurnTrust, recordCompanionTaint, turnTaintOf } from '../turnTrust';
+import { turnHoldsOutsideContent } from '../turnGuard';
 import { COMPANION_CARD_KINDS, COMPANION_MAX_PENDING_CARDS, proposePublicCompanionCard as proposeCompanionCard } from './cards';
 import { CHECKIN_WITHDRAWN_MESSAGE, checkinMemoryHolds } from './checkinNode';
 import { checkinWritesOf, noteCheckinWrite } from './checkinWrites';
@@ -155,8 +160,6 @@ import {
 } from './repository';
 import {
   COMPANION_SEND_CARD_INSTEAD,
-  COMPANION_SEND_TAINT_ASK_REASON,
-  COMPANION_SEND_UNTRUSTED_ASK_REASON,
   CompanionSendRefusal,
   checkCompanionSend,
   companionAutoSendAskReason,
@@ -237,6 +240,9 @@ interface HiddenTurn {
   quietNote: string | null;
   /** nothing_to_do was accepted: the turn ends quiet, whatever stray text the model wrote around the call. */
   quietEnd: boolean;
+  /** companion_headline's last line, or the headline of the brief it published: Michi's latest line once the turn ran (Q45). */
+  headline: string | null;
+  briefHeadline: string | null;
 }
 
 /** Turns this process keeps in its small per-turn maps. */
@@ -263,15 +269,16 @@ function remember<V>(map: Map<string, V>, key: string, value: V): void {
 
 /** conversation.ts: a hidden turn of this kind is about to start under this chat turn id. */
 export function beginCompanionHiddenTurn(turnId: string, info: { kind: CompanionTurnKind; runId: string }): void {
-  remember(hiddenTurns, turnId, { kind: info.kind, runId: info.runId, quietNote: null, quietEnd: false });
+  remember(hiddenTurns, turnId, { kind: info.kind, runId: info.runId, quietNote: null, quietEnd: false, headline: null, briefHeadline: null });
 }
 
 /**
  * conversation.ts: the hidden turn is over. quietEnd: it ended with an
  * accepted nothing_to_do, so it is quiet even when the model also wrote
- * something; quietNote: what that call noted for the Activity log.
+ * something; quietNote: what that call noted for the Activity log;
+ * headline: the line it wrote for Home (its own, else its brief's).
  */
-export function endCompanionHiddenTurn(turnId: string): { quietNote: string | null; quietEnd: boolean } {
+export function endCompanionHiddenTurn(turnId: string): { quietNote: string | null; quietEnd: boolean; headline: string | null } {
   const turn = hiddenTurns.get(turnId);
   hiddenTurns.delete(turnId);
   proposalsByTurn.delete(turnId);
@@ -281,7 +288,7 @@ export function endCompanionHiddenTurn(turnId: string): { quietNote: string | nu
   sessionSendsByTurn.delete(turnId);
   checkinSendsByTurn.delete(turnId);
   checkinSentByTurn.delete(turnId);
-  return { quietNote: turn?.quietNote ?? null, quietEnd: turn?.quietEnd ?? false };
+  return { quietNote: turn?.quietNote ?? null, quietEnd: turn?.quietEnd ?? false, headline: turn?.headline ?? turn?.briefHeadline ?? null };
 }
 
 // ── Who started the turn ────────────────────────────────────────────────────
@@ -1112,6 +1119,27 @@ const setNameTool = companionTool({
   },
 });
 
+/** Each level as Settings › Notifications shows it (NotificationsPane.tsx NOTIFICATION_OPTIONS). */
+const NOTIFICATION_LEVEL_LABELS: Readonly<Record<ChatNotificationLevel, string>> = Object.freeze({
+  all: 'All', 'approval-only': 'Only when something needs me', off: 'Off',
+});
+
+/** The user's one level (Settings › Notifications), for every window and the desktop notifier. */
+const setNotificationsTool = companionTool({
+  name: 'companion_set_notifications',
+  label: () => 'Change notifications',
+  description: fill('tool.companion_set_notifications'),
+  parameters: { object: { level: f('string', { enum: CHAT_NOTIFICATION_LEVELS }) } },
+  sequential: true,
+  run: ({ args, turn }) => {
+    requireUserTurn(turn(), 'companion_set_notifications');
+    const { level } = parse(arg.object({ level: arg.oneOf(CHAT_NOTIFICATION_LEVELS) }), args);
+    const previous = changeUserNotificationLevel(level);
+    emit('notifications');
+    return fill('result.notificationsSet', { level: NOTIFICATION_LEVEL_LABELS[level], previous: NOTIFICATION_LEVEL_LABELS[previous] });
+  },
+});
+
 // ── The Companion's own state ───────────────────────────────────────────────
 
 const saveNotesTool = companionTool({
@@ -1279,14 +1307,14 @@ const sessionSendTool = companionTool({
     };
     const { target, body } = asRefusal(() => checkCompanionSend(sendInput()));
     remember(sessionSendsByTurn, current.turnId!, used + 1);
-    // D3: a turn that read untrusted material (check-in or collector material, or other outside content) always asks,
-    // "stop asking" or not; no runtime prompt comes for this tool. The reason it gives says which.
-    const taint = turnTaintOf({ nodeId: ctx.nodeId!, turnId: current.turnId! });
     // D22: "stop asking" holds only while the conversation runs no wider than when the user chose it, and never when Michi cannot read how it runs.
     const widened = target.delegation.autoSend ? companionAutoSendAskReason(target.delegation.autoSendChoice, target.permission) : null;
-    if (!target.delegation.autoSend || taint !== null || widened !== null) {
-      const taintReason = taint === 'untrusted' ? COMPANION_SEND_UNTRUSTED_ASK_REASON : taint ? COMPANION_SEND_TAINT_ASK_REASON : null;
-      const askReason = target.delegation.autoSend ? (taintReason ?? widened) : null;
+    // D19 (replaces D3): a turn that read outside content no longer asks for that alone; a message it sends unasked
+    // carries that content to the conversation, whose network and credential reads then ask (services/turnGuard.ts).
+    const asks = !target.delegation.autoSend || widened !== null;
+    const passedOutside = !asks && turnHoldsOutsideContent({ nodeId: ctx.nodeId!, turnId: current.turnId! });
+    if (asks) {
+      const askReason = target.delegation.autoSend ? widened : null;
       const approval = await ctx.approveThreadMessage({
         targetNodeId: target.node.id,
         targetTitle: target.title,
@@ -1312,6 +1340,7 @@ const sessionSendTool = companionTool({
       // What the user approved: the conversation as it was asked about, in a mode no wider than the question named.
       sent = await deliverCompanionMessage({
         ...sendInput(),
+        ...(passedOutside ? { passedOutside } : {}),
         afterMessageId: target.latestReplyId,
         ...(target.permission ? { notWiderThan: target.permission } : {}),
       });
@@ -1362,6 +1391,7 @@ const publishBriefTool = companionTool({
       if (!own) refuse(fill('result.unknownTurn', { tool: 'companion_publish_brief' }));
       if (!checkinMemoryHolds(own!.runId)) refuse(`WITHDRAWN: ${CHECKIN_WITHDRAWN_MESSAGE}`);
     }
+    const own = call.purpose === 'checkin' ? checkinTurnOf(call) : null;
     const brief = insertBrief({
       date: localDateKey(at),
       headline: input.headline,
@@ -1371,10 +1401,34 @@ const publishBriefTool = companionTool({
       now: at,
     });
     if (!brief) refuse(fill('result.briefExists'));
+    const hidden = own ? hiddenTurns.get(own.turnId) : undefined;
+    if (hidden) hidden.briefHeadline = materialLine(input.headline, COMPANION_LIMITS.maxHeadlineChars) || null;
     // The user's "Tomorrow, focus on…" was for this brief.
     if (turn().kind === 'brief') setBriefCurate('');
     emit('brief');
     return fill('result.briefPublished', { cards: plural(brief!.cards.length, 'card') });
+  },
+});
+
+// ── Michi's line for Home ───────────────────────────────────────────────────
+
+const headlineTool = companionTool({
+  name: 'companion_headline',
+  label: 'Headline',
+  description: fill('tool.companion_headline', { max: COMPANION_LIMITS.maxHeadlineChars }),
+  parameters: { object: {
+    text: f('string', { description: `One line, at most ${COMPANION_LIMITS.maxHeadlineChars} characters.` }),
+  } },
+  run: ({ args, turn }) => {
+    const { text } = parse(arg.object({ text: arg.string() }), args);
+    const current = turn();
+    // Only a check-in writes it: V's turns answer the user, who reads them there.
+    const hidden = current.origin === 'hidden' && current.turnId ? hiddenTurns.get(current.turnId) : undefined;
+    if (!hidden) refuse(fill('result.unknownTurn', { tool: 'companion_headline' }));
+    const line = materialLine(text, COMPANION_LIMITS.maxHeadlineChars);
+    if (!line) refuse('INVALID_ARGUMENT: text: one line');
+    hidden!.headline = line;
+    return fill('result.headline');
   },
 });
 
@@ -1425,7 +1479,9 @@ export const COMPANION_OWN_TOOLS: readonly AssistantTool[] = Object.freeze([
   proposeTool,
   publishBriefTool,
   setNameTool,
+  setNotificationsTool,
   readTool,
   sessionSendTool,
+  headlineTool,
   nothingToDoTool,
 ]);

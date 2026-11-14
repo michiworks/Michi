@@ -257,6 +257,7 @@ fi`;
 
 // Build in a new checkout while the current service stays available. The old
 // installation remains intact for rollback; data and credentials stay in place.
+// Once the new build serves, older releases and failed attempts are removed.
 // bin/michi remote_update is the command-line twin.
 export function buildRemoteUpdateScript(info: { repo: string; dataDir: string; token: string; port: number }, sourceUrl: string, ref: string, revision: string, attemptId: string): string {
   if (!/^[a-f0-9]{40}$/i.test(revision) || !/^[a-zA-Z0-9-]+$/.test(attemptId)) throw new Error('Invalid update identity');
@@ -295,6 +296,7 @@ if ! (cd "$repo" && "$node_bin" scripts/remote-control.mjs launch --no-setup --d
   tail -c 32000 "$log"; echo MICHI_ERROR:update_start; exit 1
 fi
 "$node_bin" -e 'const fs=require("node:fs"),p=require("node:path");const file=p.join(process.argv[1],"remote-installation.json");fs.writeFileSync(file+".tmp",JSON.stringify({serverPath:p.join(process.argv[2],"backend/dist/server.js")}),{mode:0o600});fs.renameSync(file+".tmp",file)' "$data" "$repo"
+(cd "$repo" && "$node_bin" scripts/remote-control.mjs prune-releases --keep "$old_repo") >>"$log" 2>&1 || true
 ${inspectRemoteScript({ token: info.token, port: info.port }, info.dataDir)}`;
 }
 

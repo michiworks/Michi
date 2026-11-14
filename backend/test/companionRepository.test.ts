@@ -26,7 +26,6 @@ import {
   isOpenCompanionItem,
   type CompanionChangedEvent,
   type CompanionItemStatus,
-  type CompanionNotice,
   type MichiAssistantInfo,
 } from 'michi-shared';
 import { closeDb, getDb, initDb, runInTransaction } from '../src/services/db';
@@ -34,7 +33,6 @@ import { CompanionError } from '../src/services/companion/errors';
 import {
   COMPANION_CARD_TTL_MS,
   COMPANION_OWNER,
-  ackNotice,
   addGoal,
   editGoal,
   applyItemAction,
@@ -91,11 +89,9 @@ import {
   markCompanionWelcomeDone,
   markItemsNotified,
   markItemsSeen,
-  markNoticesDelivered,
   markRunDiscarded,
   notifiedVersionOf,
   parseCompanionTarget,
-  pendingNotices,
   pruneRuns,
   recordCheckinSend,
   recordDelegation,
@@ -117,25 +113,20 @@ import {
   setRunCheckinNode,
   setRunTurnId,
   snapshotDto,
+  setCompanionHeadline,
+  companionHeadline,
   startRun,
   updateGoal,
   upsertItem,
   wakeSnoozedItems,
 } from '../src/services/companion/repository';
 import { applyCompanionCard, dismissCompanionCard, proposeCompanionCard } from '../src/services/companion/cards';
-import {
-  CompanionEventBus,
-  acknowledgeCompanionNotice,
-  companionBacklogBody,
-  encodeCompanionChangedEvent,
-  encodeCompanionNotice,
-  enqueueCompanionNotice,
-  replayCompanionNotices,
-} from '../src/services/companion/delivery';
+import { CompanionEventBus, encodeCompanionChangedEvent } from '../src/services/companion/delivery';
 import { getCompanionSettings, patchCompanionSettings } from '../src/services/companion/settings';
 import { localDayStart } from '../src/services/companion/clock';
 import type { ItemDraft } from '../src/services/companion/types';
 import { seedConversation } from './helpers/homeConversations';
+import { turnCompanionOn } from './helpers/backgroundWork';
 
 const T0 = new Date(2026, 10, 5, 12, 0, 0, 0).getTime();
 const MINUTE = 60_000;
@@ -202,6 +193,7 @@ describe('Companion repository', () => {
     process.env.MICHI_DATA_DIR = tmpDir;
     closeDb();
     initDb(); enableSyntheticCompanionSources();
+    turnCompanionOn();
   });
 
   afterEach(() => {
@@ -212,8 +204,8 @@ describe('Companion repository', () => {
   test('the migration creates every Companion table, owned by the local agent owner', () => {
     const tables = (getDb().prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name LIKE 'companion_%' ORDER BY name").all() as Array<{ name: string }>)
       .map((row) => row.name);
-    assert.deepEqual(tables, ['companion_briefs', 'companion_cards', 'companion_delegations', 'companion_events', 'companion_goals',
-      'companion_items', 'companion_notices', 'companion_reminders', 'companion_run_changes', 'companion_runs', 'companion_snapshots']);
+    assert.deepEqual(tables, ['companion_briefs', 'companion_cards', 'companion_checkin_jobs', 'companion_checkin_shadow', 'companion_delegations',
+      'companion_events', 'companion_goals', 'companion_items', 'companion_notices', 'companion_reminders', 'companion_run_changes', 'companion_runs', 'companion_snapshots']);
     assert.ok(getDb().prepare("SELECT 1 FROM schema_migrations WHERE version = '0081_companion'").get());
     assert.ok(getDb().prepare("SELECT 1 FROM schema_migrations WHERE version = '0082_companion_v2'").get(), 'v2 is purely additive (DESIGN-v2 §7)');
     assert.equal(COMPANION_OWNER, 'local-user');
@@ -513,15 +505,9 @@ describe('Companion repository', () => {
       assert.deepEqual(parseCompanionTarget({ kind: 'companion', tab: 'chat', itemId: 'cmi-1' }), { kind: 'companion', tab: 'chat' }, 'Today only');
       assert.equal(parseCompanionTarget({ kind: 'companion', tab: 'feed', itemId: 'cmi-1' }), null);
 
-      // Stored and read back with items and notices alike.
+      // Stored and read back with the item.
       const pointing = upsertItem(draft({ itemKey: 'reminder:r-1', source: 'system', subtype: 'reminder_due', target: { kind: 'companion', tab: 'today', itemId: 'cmi-1' } }), T0).item;
       assert.deepEqual(getItem(pointing.id)!.target, { kind: 'companion', tab: 'today', itemId: 'cmi-1' });
-      const target = { kind: 'companion' as const, tab: 'today' as const, itemId: pointing.id };
-      const notice = enqueueCompanionNotice({ title: 'Companion', body: 'One thing', target, itemIds: [pointing.id] }, T0)!;
-      assert.deepEqual(notice.target, target);
-      assert.deepEqual(pendingNotices(T0 + 1).map((pending) => pending.target), [target]);
-      const odd = enqueueCompanionNotice({ title: 'Companion', body: 'Odd', target: { kind: 'companion', tab: 'today', itemId: '../x' } as never, itemIds: [] }, T0)!;
-      assert.deepEqual(odd.target, { kind: 'companion', tab: 'today' });
     });
 
     test('the open list, its filters and the badge counts', () => {
@@ -698,13 +684,12 @@ describe('Companion repository', () => {
       const existing = addGoal('Old goal', T0);
       assert.equal(proposeCompanionCard({ kind: 'goal.update', payload: { goalId: existing.id, text: 'New goal' } }, T0).summary, 'Change the goal "Old goal" to "New goal"');
       assert.equal(proposeCompanionCard({ kind: 'goal.remove', payload: { goalId: existing.id } }, T0).summary, 'Remove the goal "Old goal"');
-      assert.equal(proposeCompanionCard({ kind: 'checkins.update', payload: { heartbeat: { intervalMinutes: 120 }, brief: { enabled: false } } }, T0).summary,
-        'Check in every 2 hours; Turn off the morning brief');
+      assert.equal(proposeCompanionCard({ kind: 'goal.add', payload: { text: 'Second goal' } }, T0).summary, 'Add a goal: "Second goal"');
       assert.equal(proposeCompanionCard({ kind: 'source.update', payload: { source: 'email', enabled: false } }, T0).summary, 'Stop watching email');
       assert.equal(proposeCompanionCard({ kind: 'pipeline.watch', payload: { add: ['MyService'], remove: ['Old'] } }, T0).summary,
         'Watch the pipeline MyService; Stop watching Old');
-      assert.equal(proposeCompanionCard({ kind: 'quiet_hours.update', payload: { enabled: true, start: '21:00' } }, T0).summary, 'Quiet hours from 21:00 to 08:00');
-      assert.equal(proposeCompanionCard({ kind: 'quiet_hours.update', payload: { enabled: false } }, T0).summary, 'Turn off quiet hours');
+      assert.equal(proposeCompanionCard({ kind: 'goal.add', payload: { text: 'Third goal' } }, T0).summary, 'Add a goal: "Third goal"');
+      assert.equal(proposeCompanionCard({ kind: 'goal.add', payload: { text: 'Fourth goal' } }, T0).summary, 'Add a goal: "Fourth goal"');
       assert.equal(countPendingCards(T0), 8);
       assert.throws(() => proposeCompanionCard({ kind: 'goal.add', payload: { text: 'Ninth' } }, T0), companionError(409, 'limit_reached'));
 
@@ -715,15 +700,14 @@ describe('Companion repository', () => {
         [{ kind: 'goal.add', payload: {} }, 400, 'invalid_request'],
         [{ kind: 'goal.add', payload: 'x' }, 400, 'invalid_request'],
         [{ kind: 'goal.update', payload: { goalId: 'cmg-missing', text: 'x' } }, 404, 'not_found'],
-        [{ kind: 'checkins.update', payload: {} }, 400, 'invalid_request'],
-        [{ kind: 'checkins.update', payload: { heartbeat: {} } }, 400, 'invalid_request'],
-        [{ kind: 'checkins.update', payload: { heartbeat: { intervalMinutes: 45 } } }, 400, 'invalid_request'],
+        // Gone in P3: there is no heartbeat, and no quiet hours.
+        [{ kind: 'checkins.update', payload: { brief: { enabled: false } } }, 400, 'invalid_request'],
+        [{ kind: 'quiet_hours.update', payload: { enabled: false } }, 400, 'invalid_request'],
         [{ kind: 'source.update', payload: { source: 'system', enabled: true } }, 400, 'invalid_request'],
         [{ kind: 'source.update', payload: { source: 'email', enabled: 'no' } }, 400, 'invalid_request'],
         [{ kind: 'pipeline.watch', payload: {} }, 400, 'invalid_request'],
         [{ kind: 'pipeline.watch', payload: { add: ['bad name'] } }, 400, 'invalid_request'],
         [{ kind: 'pipeline.watch', payload: { add: Array.from({ length: 26 }, (_, i) => `P${i}`) } }, 400, 'invalid_request'],
-        [{ kind: 'quiet_hours.update', payload: { enabled: true, start: '08:00' } }, 400, 'invalid_request'],
         [{ kind: 'goal.add', payload: { text: 'x' }, reason: 'r'.repeat(501) }, 400, 'invalid_request'],
         [{ kind: 'goal.add', payload: { text: 'x' }, reason: 5 }, 400, 'invalid_request'],
       ] as const) {
@@ -741,16 +725,12 @@ describe('Companion repository', () => {
       assert.equal((await applyCompanionCard(add.id, T0 + 2)).outcome, 'not_pending');
       assert.equal(listGoals().length, 1, 'a second Apply changes nothing');
 
-      const settings = proposeCompanionCard({ kind: 'checkins.update', payload: { heartbeat: { intervalMinutes: 240 }, brief: { time: '08:15' } } }, T0);
-      assert.deepEqual((await applyCompanionCard(settings.id, T0 + 1)).changed, ['settings']);
-      assert.deepEqual([getCompanionSettings().heartbeat.intervalMinutes, getCompanionSettings().brief.time], [240, '08:15']);
-      await applyCompanionCard(proposeCompanionCard({ kind: 'source.update', payload: { source: 'calendar', enabled: false } }, T0).id, T0 + 1);
+      const source = proposeCompanionCard({ kind: 'source.update', payload: { source: 'calendar', enabled: false } }, T0);
+      assert.deepEqual((await applyCompanionCard(source.id, T0 + 1)).changed, ['settings']);
       assert.equal(getCompanionSettings().sources.calendar.enabled, false);
       patchCompanionSettings({ sources: { pipeline: { watch: ['Keep', 'Drop'] } } });
       await applyCompanionCard(proposeCompanionCard({ kind: 'pipeline.watch', payload: { add: ['New', 'Keep'], remove: ['Drop'] } }, T0).id, T0 + 1);
       assert.deepEqual(getCompanionSettings().sources.pipeline.watch, ['Keep', 'New']);
-      await applyCompanionCard(proposeCompanionCard({ kind: 'quiet_hours.update', payload: { enabled: true, start: '22:00', end: '07:00' } }, T0).id, T0 + 1);
-      assert.deepEqual(getCompanionSettings().quietHours, { enabled: true, start: '22:00', end: '07:00' });
 
       // The goal went before the user pressed Apply.
       const goal = listGoals()[0];
@@ -818,86 +798,7 @@ describe('Companion repository', () => {
     }
   });
 
-  describe('notices and the bus (R2.7)', () => {
-    const notice = (body: string, itemIds: string[], extra: { expiresAt?: number } = {}) => ({
-      title: 'Companion', body, target: { kind: 'companion' as const, tab: 'today' as const }, itemIds, ...extra,
-    });
-
-    test('the outbox publishes what it stores, with the items\' versions, an expiry, and replays until acknowledged', () => {
-      const bus = new CompanionEventBus();
-      const seen: CompanionNotice[] = [];
-      const off = bus.subscribe({ notifier: true, notice: (published) => seen.push(published) });
-      assert.equal(bus.hasNotifier(), true);
-      const cr = upsertItem(draft(), T0).item;
-      const first = enqueueCompanionNotice({ ...notice('CR-1 needs you', [cr.id, cr.id, 'cmi-missing']), target: { kind: 'url', url: 'https://reviews.example.com/reviews/CR-1' } }, T0, { bus })!;
-      const reply = enqueueCompanionNotice(notice('Your brief is ready', []), T0 + 1, { bus })!;
-      assert.deepEqual(seen.map((published) => published.id), [first.id, reply.id], 'published as they are stored');
-      assert.match(first.id, /^cmn-/);
-      assert.deepEqual(first.itemIds, [cr.id], 'de-duplicated; an unknown item is left out');
-      assert.equal(first.expiresAt, T0 + COMPANION_LIMITS.noticeTtlMs, 'two hours by default');
-      const meeting = enqueueCompanionNotice(notice('Standup in 10 minutes', [], { expiresAt: T0 + 10 * MINUTE }), T0 + 2, { bus })!;
-      assert.equal(meeting.expiresAt, T0 + 10 * MINUTE);
-      assert.deepEqual(pendingNotices(T0 + 3).map((pending) => pending.id), [first.id, reply.id, meeting.id]);
-      assert.deepEqual(pendingNotices(T0 + 10 * MINUTE).map((pending) => pending.id), [first.id, reply.id], 'an expired notice is not replayed');
-      assert.deepEqual(pendingNotices(T0 + 1 + COMPANION_LIMITS.noticeTtlMs), [], 'nor any after two hours');
-      assert.equal(acknowledgeCompanionNotice(first.id, T0 + 3), 'acked');
-      assert.equal(acknowledgeCompanionNotice(first.id, T0 + 4), 'already');
-      assert.equal(acknowledgeCompanionNotice('cmn-missing', T0), 'missing');
-      assert.deepEqual(pendingNotices(T0 + 5).map((pending) => pending.id), [reply.id, meeting.id]);
-      assert.equal(ackNotice(reply.id, T0 + 6), 'acked');
-      off();
-      assert.equal(bus.hasNotifier(), false);
-      assert.match(encodeCompanionNotice(reply), /^event: companion_notice\ndata: \{.*\}\n\n$/);
-      assert.throws(() => enqueueCompanionNotice({ title: '', body: 'x', target: { kind: 'settings' }, itemIds: [] }, T0, { bus }));
-      assert.throws(() => enqueueCompanionNotice({ title: 'x', body: 'x', target: { kind: 'url', url: 'file:///etc/passwd' }, itemIds: [] }, T0, { bus }));
-    });
-
-    test('a notice stops replaying once none of its items is still open at the version it was about', () => {
-      const bus = new CompanionEventBus();
-      const a = upsertItem(draft({ itemKey: 'cr:a:mine' }), T0).item;
-      const b = upsertItem(draft({ itemKey: 'cr:b:mine' }), T0).item;
-      const both = enqueueCompanionNotice(notice('Two CRs need you', [a.id, b.id]), T0, { bus })!;
-      const onlyA = enqueueCompanionNotice(notice('CR a needs you', [a.id]), T0, { bus })!;
-      upsertItem(draft({ itemKey: 'cr:a:mine', version: 'v2' }), T0 + MINUTE);
-      assert.deepEqual(pendingNotices(T0 + 2 * MINUTE).map((pending) => pending.id), [both.id], 'b is still as it was; a changed');
-      applyItemAction(b.id, { action: 'dismiss' }, T0 + 3 * MINUTE);
-      assert.deepEqual(pendingNotices(T0 + 4 * MINUTE), [], 'and the user dismissed b');
-      assert.ok(onlyA);
-    });
-
-    test('a backlog of more than one is folded into one "While you were away" notice that replays until acknowledged', () => {
-      const bus = new CompanionEventBus();
-      patchCompanionSettings({ displayName: 'Robin' });
-      assert.deepEqual(replayCompanionNotices(T0), [], 'nothing pending');
-      const a = upsertItem(draft({ itemKey: 'cr:a:mine' }), T0).item;
-      const single = enqueueCompanionNotice(notice('CR a needs you', [a.id]), T0, { bus })!;
-      assert.deepEqual(replayCompanionNotices(T0 + 1).map((replayed) => replayed.id), [single.id], 'one is sent as it is');
-      const b = upsertItem(draft({ itemKey: 'cr:b:mine' }), T0).item;
-      const second = enqueueCompanionNotice(notice('CR b needs you', [b.id], { expiresAt: T0 + 5 * HOUR }), T0 + 2, { bus })!;
-      const third = enqueueCompanionNotice(notice('Your brief is ready', []), T0 + 3, { bus })!;
-      const [fold, ...rest] = replayCompanionNotices(T0 + 4);
-      assert.deepEqual(rest, []);
-      assert.equal(fold.title, 'Robin');
-      assert.equal(fold.body, companionBacklogBody(3));
-      assert.equal(fold.body, 'While you were away: 3 updates');
-      assert.deepEqual(fold.target, { kind: 'companion', tab: 'today' });
-      assert.deepEqual(fold.itemIds.sort(), [a.id, b.id].sort());
-      assert.equal(fold.expiresAt, T0 + 5 * HOUR, 'as long as the latest of them');
-      assert.deepEqual(pendingNotices(T0 + 5).map((pending) => pending.id), [fold.id], 'the folded ones count as delivered');
-      assert.deepEqual(replayCompanionNotices(T0 + 6).map((replayed) => replayed.id), [fold.id], 'the fold replays until acknowledged');
-      assert.equal(acknowledgeCompanionNotice(fold.id, T0 + 7), 'acked');
-      assert.deepEqual(replayCompanionNotices(T0 + 8), []);
-      assert.equal(markNoticesDelivered([single.id, second.id, third.id], T0 + 9), 0, 'already delivered');
-    });
-
-    test('the delivery policy seam can hold a notice back', () => {
-      const bus = new CompanionEventBus();
-      const held = enqueueCompanionNotice({ title: 'Companion', body: 'Quiet hours', target: { kind: 'settings' }, itemIds: [] }, T0,
-        { bus, policy: { admit: () => false } });
-      assert.equal(held, null);
-      assert.deepEqual(pendingNotices(T0), []);
-    });
-
+  describe('the bus', () => {
     test('emitChanged bumps the stored revision and reaches every subscriber, whatever one of them does', () => {
       const bus = new CompanionEventBus();
       const seen: CompanionChangedEvent[] = [];
@@ -1071,6 +972,21 @@ describe('Companion repository', () => {
   });
 
   describe('snapshot', () => {
+    test('Michi\'s latest line (Q45): none until a check-in writes one, then the newest; a malformed stored one reads as none', () => {
+      const conversation = { workspaceId: ASSISTANT.workspaceId, nodeId: ASSISTANT.nodeId, assistant: ASSISTANT };
+      assert.equal(snapshotDto({ now: T0, conversation }).headline, null);
+      const revision = snapshotDto({ now: T0, conversation }).revision;
+      setCompanionHeadline({ text: 'Watching the release pipeline', at: T0, kind: 'heartbeat' });
+      setCompanionHeadline({ text: 'CR-1 is ready for your review', at: T0 + MINUTE, kind: 'wake' });
+      const snapshot = snapshotDto({ now: T0 + MINUTE, conversation });
+      assert.deepEqual(snapshot.headline, { text: 'CR-1 is ready for your review', at: T0 + MINUTE, kind: 'wake' });
+      assert.ok(snapshot.revision > revision);
+      for (const bad of ['not json', JSON.stringify({ text: '', at: 1, kind: 'wake' }), JSON.stringify({ text: 'x', at: 1, kind: 'poll' })]) {
+        setCompanionMeta('companion:headline', bad);
+        assert.equal(companionHeadline(), null, bad);
+      }
+    });
+
     test('assembles the window: open items, counts, today\'s brief, pending cards, goals, notes, rules, reminders, activity, revision', () => {
       const conversation = { workspaceId: ASSISTANT.workspaceId, nodeId: ASSISTANT.nodeId, assistant: ASSISTANT };
       const empty = snapshotDto({ now: T0, conversation });
@@ -1167,7 +1083,7 @@ describe('Companion repository', () => {
       assert.equal(stopDelegationAutoSend('cmd-missing'), null);
     });
 
-    test('the default status follows the settings, today\'s runs, the last heartbeat and the brief time', () => {
+    test('the default status follows the settings, today\'s runs and the brief time', () => {
       const noon = new Date(2026, 10, 5, 12, 0, 0, 0).getTime();
       const settings = getCompanionSettings();
       const status = defaultCompanionStatus({ settings, now: noon, working: false });
@@ -1193,7 +1109,7 @@ describe('Companion repository', () => {
       assert.equal(defaultCompanionStatus({ settings, now: friday, working: false }).nextBriefAt, new Date(2026, 10, 9, 9, 0, 0, 0).getTime(), 'Monday after Friday\'s');
       assert.equal(defaultCompanionStatus({ settings, now: new Date(2026, 10, 7, 8, 0).getTime(), working: false }).nextBriefAt,
         new Date(2026, 10, 9, 9, 0, 0, 0).getTime(), 'none on Saturday');
-      assert.equal(later.nextHeartbeatAt, noon + 50 * MINUTE);
+      assert.equal(later.nextHeartbeatAt, null, 'there is no heartbeat (D3)');
       assert.equal(later.turnsToday, 1, 'the welcome does not count against the budget');
       assert.equal(later.working, true);
       assert.equal(later.nextCheckAt, noon + MINUTE);
@@ -1212,14 +1128,15 @@ describe('Companion repository', () => {
       const degraded = defaultCompanionStatus({ settings, now: noon, working: false, sources: { email: { state: 'unavailable', detail: 'Auth session expired - refresh your credentials' } } });
       assert.equal(degraded.state, 'degraded');
       assert.equal(defaultCompanionStatus({ settings, now: noon, working: false, auth: { valid: false, expiresAt: noon - 1, checkedAt: noon } }).state, 'degraded');
-      assert.equal(defaultCompanionStatus({ settings, now: new Date(2026, 10, 5, 22, 0).getTime(), working: false }).state, 'quiet_hours');
+      assert.equal(defaultCompanionStatus({ settings, now: new Date(2026, 10, 5, 22, 0).getTime(), working: false }).state, 'ok', 'no quiet hours (D5)');
 
       const off = patchCompanionSettings({ sources: { email: { enabled: false } }, paused: true });
       const paused = defaultCompanionStatus({ settings: off, now: noon, working: false, sources: { cr: { nextPollAt: noon + 1 } } });
       assert.equal(paused.state, 'paused');
       assert.equal(paused.sources.find((s) => s.kind === 'email')?.state, 'disabled');
       assert.deepEqual([paused.nextCheckAt, paused.nextHeartbeatAt, paused.nextBriefAt], [null, null, null], 'nothing is scheduled while paused');
-      assert.equal(defaultCompanionStatus({ settings: { ...off, enabled: false }, now: noon, working: false }).state, 'off');
+      assert.equal(defaultCompanionStatus({ settings: { ...off, enabled: false }, now: noon, working: false }).state, 'paused',
+        'the old off switch is Pause Michi: there is no "off" of its own');
 
       // B2: with every source behind the Auth check off, a stale "expired" is nobody's business.
       const expired = { valid: false, expiresAt: noon - 1, checkedAt: noon };

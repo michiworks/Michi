@@ -8,10 +8,9 @@ import {
 } from 'michi-shared';
 import type { SpacesFirstRunStatus } from '../../../../services/api/spacesHome';
 import type { MetaAgentUpdateState } from '../../../../state/metaAgent/metaAgentUpdate';
-import { firstRunProgress } from '../../../../state/metaAgent/spacesFirstRun';
+import { firstRunProgress, isFirstRunInProgress } from '../../../../state/metaAgent/spacesFirstRun';
 import { UPKEEP_HEADLINE } from '../../../../state/metaAgent/metaAgentStatus';
 import { formatMichiAgo } from '../../content/michiFormat';
-import { navPageEvent } from '../../../../state/appEvents';
 import { useCompanionName } from '../../../../state/companion/companionName';
 import './metaAgentStatus.css';
 
@@ -29,15 +28,15 @@ export interface MetaAgentHomeStatus {
 export const DEFAULT_META_STATUS: MetaAgentHomeStatus = { intervalSeconds: 60 };
 
 /**
- * `offline`: the backend did not answer; `not-running`: nothing can run on
- * that backend (with `reason`); `unavailable`: the Meta agent cannot run on
- * its runtime (with `reason`, and a way to Settings); `stopped`: errors
- * stopped background maintenance (with `stop`); `paused`: the user paused it;
- * `first-run`: the first read of the history is in progress; `just-read`: it
- * ended while this window watched. The Spaces Home takes the mode from
+ * `offline`: the backend did not answer; `not-running`: nothing can run on that backend (with `reason`);
+ * `unavailable`: the Meta agent cannot run on its runtime (with `reason`, and
+ * a way to Settings); `stopped`: errors stopped background maintenance (with
+ * `stop`); `paused`: the user paused it; `first-run`: the first read of the
+ * history is in progress; `normal`: shown only for a failed Update or a
+ * workspace it is retrying (Q8). The Spaces Home takes the mode from
  * state/metaAgent/metaAgentStatus.ts, like every other Meta agent status.
  */
-export type MetaAgentLineMode = 'normal' | 'just-read' | 'first-run' | 'paused' | 'stopped' | 'not-running' | 'unavailable' | 'offline';
+export type MetaAgentLineMode = 'normal' | 'first-run' | 'paused' | 'stopped' | 'not-running' | 'unavailable' | 'offline';
 
 export interface MetaAgentStatusLineProps {
   status: MetaAgentHomeStatus;
@@ -57,7 +56,6 @@ export interface MetaAgentStatusLineProps {
   update?: MetaAgentUpdateState;
   /** After the first run: the Spaces Home summary is being rewritten in the background. */
   homeUpdating?: boolean;
-  onOpenScheduled?(): void;
   onOpenSettings?(): void;
   onResume?(): void;
   /** Retry after a stop: restart the stopped workspaces and run one round now. */
@@ -65,8 +63,6 @@ export interface MetaAgentStatusLineProps {
   onOpenWorkspace?(workspaceId: string): void;
   onRetryWorkspace?(workspaceId: string): void;
 }
-
-const goToScheduled = () => navPageEvent.dispatch({ page: 'scheduled' });
 
 /** Where a workspace stands, in words: the cursor number itself is for Scheduled › Meta agent. */
 function cursorState(row: MetaAgentCursorRow): string {
@@ -109,13 +105,14 @@ function continuesFrom(startSeq: number): string {
   return startSeq > 0 ? `continues from #${startSeq}` : 'continues with new conversations';
 }
 
-function summaryText(firstRun: SpacesFirstRunStatus, homes: number): string {
+/** `reading`: a first read is still in progress. Once every home is written, only the hourly cadence holds the summary. */
+function summaryText(firstRun: SpacesFirstRunStatus, homes: number, reading: boolean): string {
   if (firstRun.haltedReason) return 'Stopped until the restriction check passes';
   switch (firstRun.summary.state) {
     case 'done': return `Written · read ${plural(homes, 'workspace home')}, not conversations`;
     case 'running': return `Reading ${plural(homes, 'workspace home')}`;
     case 'due': return 'Starts on the next round';
-    case 'waiting': return 'Waits for every workspace home';
+    case 'waiting': return reading || homes === 0 ? 'Waits for every workspace home' : 'Updates within the hour';
   }
 }
 
@@ -141,6 +138,7 @@ function DetailList({ workspaces, firstRun, cursors, recentRuns, clock, days, sh
   onRetryWorkspace?(workspaceId: string): void;
 }) {
   const done = workspaces.filter((workspace) => workspace.firstRun?.state === 'done').length;
+  const reading = workspaces.some((workspace) => isFirstRunInProgress(workspace.firstRun));
   const globalDone = firstRun?.summary.state === 'done';
   return (
     <ul className="spaces-home-status__list" aria-label="Pages upkeep per workspace">
@@ -167,7 +165,7 @@ function DetailList({ workspaces, firstRun, cursors, recentRuns, clock, days, sh
             : firstRun.summary.state === 'running' ? <span className="agent-spinner" role="img" aria-label="In progress" />
               : <span className="spaces-home-status__queued" aria-hidden="true">·</span>}
           <span className="spaces-home-status__name">Home (global)</span>
-          <span className="spaces-home-status__mono">{summaryText(firstRun, done)}</span>
+          <span className="spaces-home-status__mono">{summaryText(firstRun, done, reading)}</span>
           <span />
         </li>
       )}
@@ -232,10 +230,10 @@ const Spinner = () => <span className="agent-spinner spaces-home-status__spin" a
 /** One line on what Pages upkeep does and did last, with its per-workspace detail on request. */
 export function MetaAgentStatusLine({
   status, workspaces, clock, showLastWrite = true, mode = 'normal', reason, stop = null, firstRunDays, firstRun = null, cursors, recentRuns, update, homeUpdating = false,
-  onOpenScheduled = goToScheduled, onOpenSettings, onResume, onRetry, onOpenWorkspace, onRetryWorkspace,
+  onOpenSettings, onResume, onRetry, onOpenWorkspace, onRetryWorkspace,
 }: MetaAgentStatusLineProps) {
   const name = useCompanionName();
-  const firstRunOpen = mode === 'first-run' || mode === 'just-read';
+  const firstRunOpen = mode === 'first-run';
   const [open, setOpen] = React.useState(firstRunOpen);
   const opened = React.useRef(firstRunOpen);
   React.useEffect(() => {
@@ -247,7 +245,6 @@ export function MetaAgentStatusLine({
   const live = firstRun?.workspaces ?? workspaces ?? [];
   const shown = live.filter((workspace) => workspace.hiddenAt === null);
   const toggle = <button type="button" className="spaces-home-link" aria-expanded={open} onClick={() => setOpen((value) => !value)}>{open ? 'Hide' : 'Details'}</button>;
-  const scheduled = <button type="button" className="spaces-home-link" onClick={onOpenScheduled}>Scheduled</button>;
   const list = open && <DetailList workspaces={shown} firstRun={firstRun} cursors={cursors ?? []} recentRuns={recentRuns ?? []} clock={clock}
     days={firstRunDaysOf(recentRuns, firstRunDays)}
     showNote={firstRunOpen} onOpenWorkspace={onOpenWorkspace} onRetryWorkspace={onRetryWorkspace} />;
@@ -261,7 +258,7 @@ export function MetaAgentStatusLine({
     return <div className="spaces-home-status" data-mode={mode} role="status">
       <Line mark={<Dot tone="warn" />}>
         {UPKEEP_HEADLINE['not-running']}{reason ? ` · ${reason}` : ''}
-        {mode === 'unavailable' && onOpenSettings && <><Sep /><button type="button" className="spaces-home-link" onClick={onOpenSettings}>Settings › {name} › Pages upkeep</button></>}
+        {mode === 'unavailable' && onOpenSettings && <><Sep /><button type="button" className="spaces-home-link" onClick={onOpenSettings}>Settings › {name} › Background work</button></>}
       </Line>
     </div>;
   }
@@ -272,7 +269,6 @@ export function MetaAgentStatusLine({
         {onRetry && <><Sep /><RetryButton onRetry={onRetry} /></>}
         {onOpenSettings && RUNTIME_REASONS.has(stop.reason) && <><Sep /><button type="button" className="spaces-home-link" onClick={onOpenSettings}>Change runtime</button></>}
         <Sep />{toggle}
-        <Sep />{scheduled}
       </Line>
       {list}
     </div>;
@@ -282,7 +278,6 @@ export function MetaAgentStatusLine({
       <Line mark={<Dot tone="off" />}>
         {UPKEEP_HEADLINE.paused}
         {onResume && <><Sep /><button type="button" className="spaces-home-link" onClick={onResume}>Resume</button></>}
-        <Sep />{scheduled}
       </Line>
     </div>;
   }
@@ -305,15 +300,8 @@ export function MetaAgentStatusLine({
     </div>;
   }
 
-  const parts: string[] = [];
-  if (mode === 'just-read') {
-    const homes = firstRunProgress(firstRun).done;
-    parts.push(`Pages upkeep just read the history; from now on it checks new conversations every ${status.intervalSeconds} s`);
-    parts.push(`wrote ${plural(homes, 'workspace home')} and this page`);
-  } else {
-    parts.push(`Pages upkeep checks new conversations every ${status.intervalSeconds} s`);
-    if (showLastWrite && status.lastWrite) parts.push(`wrote ${status.lastWrite.workspaceName} ${formatMichiAgo(status.lastWrite.at, clock)}`);
-  }
+  const parts: string[] = [`Pages upkeep checks new conversations every ${status.intervalSeconds} s`];
+  if (showLastWrite && status.lastWrite) parts.push(`wrote ${status.lastWrite.workspaceName} ${formatMichiAgo(status.lastWrite.at, clock)}`);
   const runtime = runtimePart(status);
   if (runtime) parts.push(runtime);
   const roundNote = updateNote(update);
@@ -325,7 +313,6 @@ export function MetaAgentStatusLine({
       <Line mark={working ? <Spinner /> : <Dot />}>
         {parts.join(' · ')}
         <Sep />{toggle}
-        <Sep />{scheduled}
         {note && <><Sep /><span role="status" className={update?.phase === 'failed' ? 'spaces-home-status__error' : undefined}>{note}</span></>}
         {!note && retrying && <><Sep /><span className="spaces-home-status__error">{retrying.message} · retrying</span></>}
       </Line>

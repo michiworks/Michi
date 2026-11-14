@@ -4,7 +4,7 @@ import { ChatCommandResult } from './ChatCommandResult';
 import { effectiveChatPermissionChoice, usePermissionPreferences } from '../../hooks/usePermissionPreferences';
 import { backendConnectionIdForWorkspace, LOCAL_BACKEND_CONNECTION_ID, workspaceBackendApiBase } from '../../config/backendConnections';
 import { ComposerPermissionControl } from './ComposerPermissionControl';
-import { ConversationMemoryControl } from './ConversationMemoryControl';
+import { TemporaryChatNote } from './TemporaryChat';
 import { approveForMeRuntimeIds } from '../../lib/chatPermissionModes';
 import { mergeContextQuote } from '../../state/assistant/assistantContext';
 import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
@@ -174,10 +174,12 @@ export interface PaneRestoreTarget {
    * unseen — anchorId is the first message newer than the saved lastSeen
    *          horizon; park it at UNSEEN_TOP_FRACTION of the viewport height
    *          (offset is unused and 0).
-   * bottom — pin to the bottom (first visit on this device, left-at-bottom,
-   *          or no unseen messages).
+   * anchor — anchorId is the message that topped the viewport when the pane
+   *          was left mid-history; put its top back at the saved offset.
+   * bottom — pin to the bottom (first visit on this device, left at the
+   *          bottom, or the saved anchor message is gone).
    */
-  kind: 'unseen' | 'bottom';
+  kind: 'unseen' | 'anchor' | 'bottom';
   anchorId?: string;
   offset: number;
 }
@@ -187,8 +189,9 @@ export interface PaneRestoreTarget {
  * entry saved when it was last left and the node's current messages.
  * Returns null when there is nothing to position over (no messages).
  *
- * Two outcomes: unseen (messages arrived after the user last saw this
- * pane → park at first unseen) or bottom (everything else).
+ * In order: unseen (messages arrived after the user last saw this pane →
+ * park at the first unseen), anchor (left mid-history → back where they
+ * were reading), bottom (everything else).
  */
 export function resolvePaneRestore(
   saved: PaneScrollEntry | undefined,
@@ -198,6 +201,10 @@ export function resolvePaneRestore(
   if (saved && saved.lastSeen > 0) {
     const firstUnseen = messages.find((m) => (m.createdAt ?? 0) > saved.lastSeen);
     if (firstUnseen) return { kind: 'unseen', anchorId: firstUnseen.id, offset: 0 };
+  }
+  if (saved && !saved.atBottom && saved.anchorId) {
+    const { anchorId, offset } = saved;
+    if (messages.some((m) => m.id === anchorId)) return { kind: 'anchor', anchorId, offset };
   }
   return { kind: 'bottom', offset: 0 };
 }
@@ -610,12 +617,15 @@ function TPane({ nodeId, contentMaxWidth, embedded = false, draftRequest = null,
   const liveSessionState = n?.sessionState?.runtimeId === resolvedBinding.runtime ? n.sessionState : undefined;
   const ultracode = n && !isAssistantConversation && !n.maintenanceJobId && !(liveSessionState && !liveSessionState.ultracode)
     ? { enabled: n.ultracode === true, available: liveSessionState?.ultracode?.available } : undefined;
-  // Memory learns only from the user's own chats, never the assistant's, a
-  // page's, a Meta agent run's or a Scheduled-only run's, so those (and an
-  // embedded helper) offer no memory setting.
-  // TODO(companion-memory): V (the 'main' assistant conversation) and check-ins fall under "the assistant's" here; decide what V offers and learns.
-  const memorySetting = !!n && !embedded && !isAssistantConversation && n.kind === 'chat'
-    && !n.pageId && !n.maintenanceJobId && !n.scheduledOnlyJobId;
+  // Memory learns from the user's own chats and from the agent's current
+  // conversation V (in its panel or as a pane), never from a page's, a Meta
+  // agent run's, a Scheduled-only run's, a check-in's or an earlier V's, so
+  // those (and an embedded helper) show no "Based on". V always learns and
+  // uses memory, so only the user's own chats offer the memory setting. A
+  // temporary chat uses no memory, so it shows none either.
+  const memorySetting = !!n && n.kind === 'chat' && !n.pageId && !n.maintenanceJobId && !n.scheduledOnlyJobId && !embedded && !isAssistantConversation
+    && !n.temporary;
+  const replySources = memorySetting || (!!n && n.kind === 'chat' && currentAssistant);
   const composerEffort = resolveComposerReasoning(resolvedBinding, agentStatus, catalogCapabilities, providerModels, catalogProviders);
   // Snapshot the composer's runtime/model/effort for a send or retry, and
   // clear the pending chip override that this call consumes.
@@ -889,23 +899,91 @@ function TPane({ nodeId, contentMaxWidth, embedded = false, draftRequest = null,
     }, 250);
   }, [savePaneScroll]);
 
+  // Put an idle pane's viewport on the target resolvePaneRestore() picked,
+  // and hold it there. A single scrollTop assignment cannot work: message
+  // frames use content-visibility:auto, so heights inflate from 72px
+  // estimates to real values progressively after mount — and each write
+  // moves the viewport, which makes the browser render more frames near it,
+  // which shifts the anchor again. With overflow-anchor:none on the
+  // container, nothing compensates for that drift, so the restore keeps
+  // re-deriving the target from the anchor's live rect (ResizeObserver on
+  // the content) until the layout goes quiet, the hard cap elapses, or the
+  // user scrolls. The first pass runs synchronously, so a caller in a layout
+  // effect positions the pre-paint frame. Only refs are read, so the mount
+  // effect's first-render closure stays valid.
+  const holdPaneRestore = useCallback((el: HTMLDivElement, restore: PaneRestoreTarget) => {
+    // Follow mode stays on only when we land at the bottom — otherwise the
+    // streaming-follow / resize pins would yank the restored position back
+    // down (this is what previously sent every followUps-bearing pane to
+    // the bottom on open). The bottom case keeps follow ON, so the
+    // existing follow pins take over once this restore finishes.
+    followRef.current = restore.kind === 'bottom';
+    const targetFor = (): number => {
+      if (restore.kind !== 'bottom' && restore.anchorId) {
+        const msgEl = el.querySelector<HTMLElement>(`[data-msg-id="${restore.anchorId}"]`);
+        if (msgEl) {
+          const wanted = restore.kind === 'unseen'
+            ? el.clientHeight * UNSEEN_TOP_FRACTION
+            : restore.offset;
+          const delta = msgEl.getBoundingClientRect().top - el.getBoundingClientRect().top;
+          return Math.max(0, el.scrollTop + delta - wanted);
+        }
+        // Anchor message gone (deleted/trimmed) — fall through to bottom.
+      }
+      return el.scrollHeight - el.clientHeight;
+    };
+    let done = false;
+    let ro: ResizeObserver | null = null;
+    let quietTimer: ReturnType<typeof setTimeout> | null = null;
+    let capTimer: ReturnType<typeof setTimeout> | null = null;
+    restoreInFlightRef.current = true;
+    const finish = () => {
+      if (done) return;
+      done = true;
+      restoreInFlightRef.current = false;
+      ro?.disconnect();
+      if (quietTimer != null) clearTimeout(quietTimer);
+      if (capTimer != null) clearTimeout(capTimer);
+      el.removeEventListener('wheel', finish);
+      el.removeEventListener('touchstart', finish);
+      el.removeEventListener('pointerdown', finish);
+    };
+    cancelScrollRestoreRef.current = finish;
+    const armQuiet = () => {
+      if (quietTimer != null) clearTimeout(quietTimer);
+      quietTimer = setTimeout(finish, RESTORE_QUIET_MS);
+    };
+    const apply = () => {
+      if (done) return;
+      const target = targetFor();
+      if (Math.abs(el.scrollTop - target) > 1) {
+        // Our own writes emit scroll events; keep the follow-mode
+        // direction detector from reading them as user intent.
+        programmaticScrollUntilRef.current = performance.now() + PROGRAMMATIC_SCROLL_WINDOW_MS;
+        el.scrollTop = target;
+        prevScrollTopRef.current = el.scrollTop;
+        armQuiet();
+      }
+    };
+    apply();
+    armQuiet();
+    capTimer = setTimeout(finish, RESTORE_MAX_MS);
+    if (typeof ResizeObserver !== 'undefined') {
+      ro = new ResizeObserver(() => apply());
+      ro.observe(el);
+      if (el.firstElementChild) ro.observe(el.firstElementChild);
+    }
+    el.addEventListener('wheel', finish, { passive: true });
+    el.addEventListener('touchstart', finish, { passive: true });
+    el.addEventListener('pointerdown', finish);
+  }, []);
+
   // Position the viewport on mount. Streaming panes are handled by follow
   // mode; idle panes land on the target picked by resolvePaneRestore()
-  // (unseen message → bottom).
-  // A single scrollTop assignment cannot work here: message frames use
-  // content-visibility:auto, so heights inflate from 72px estimates to real
-  // values progressively after mount — and each write moves the viewport,
-  // which makes the browser render more frames near it, which shifts the
-  // anchor again. With overflow-anchor:none on the container, nothing
-  // compensates for that drift, so the restore keeps re-deriving the target
-  // from the anchor's live rect (ResizeObserver on the content) until the
-  // layout goes quiet, the hard cap elapses, or the user scrolls. The first
-  // pass runs synchronously inside the layout effect so the pre-paint frame
-  // is already positioned.
+  // (unseen message → saved anchor → bottom), held by holdPaneRestore.
   useLayoutEffect(() => {
     const el = scrollRef.current;
     if (!el) return;
-    let finishRestore: (() => void) | null = null;
     let liveTrustRaf: number | null = null;
     const live = n?.status === 'streaming' || !!n?.followUpsGenerating;
     const restore = live
@@ -913,68 +991,7 @@ function TPane({ nodeId, contentMaxWidth, embedded = false, draftRequest = null,
       : resolvePaneRestore(paneScrollCache.get(nodeId), n?.messages ?? []);
     if (restore) {
       didRestoreRef.current = true;
-      // Follow mode stays on only when we land at the bottom — otherwise the
-      // streaming-follow / resize pins would yank the restored position back
-      // down (this is what previously sent every followUps-bearing pane to
-      // the bottom on open). The bottom case keeps follow ON, so the
-      // existing follow pins take over once this restore finishes.
-      followRef.current = restore.kind === 'bottom';
-      const targetFor = (): number => {
-        if (restore.kind === 'unseen' && restore.anchorId) {
-          const msgEl = el.querySelector<HTMLElement>(`[data-msg-id="${restore.anchorId}"]`);
-          if (msgEl) {
-            const delta = msgEl.getBoundingClientRect().top - el.getBoundingClientRect().top;
-            return Math.max(0, el.scrollTop + delta - el.clientHeight * UNSEEN_TOP_FRACTION);
-          }
-          // Anchor message gone (deleted/trimmed) — fall through to bottom.
-        }
-        return el.scrollHeight - el.clientHeight;
-      };
-      let done = false;
-      let ro: ResizeObserver | null = null;
-      let quietTimer: ReturnType<typeof setTimeout> | null = null;
-      let capTimer: ReturnType<typeof setTimeout> | null = null;
-      restoreInFlightRef.current = true;
-      const finish = () => {
-        if (done) return;
-        done = true;
-        restoreInFlightRef.current = false;
-        ro?.disconnect();
-        if (quietTimer != null) clearTimeout(quietTimer);
-        if (capTimer != null) clearTimeout(capTimer);
-        el.removeEventListener('wheel', finish);
-        el.removeEventListener('touchstart', finish);
-        el.removeEventListener('pointerdown', finish);
-      };
-      finishRestore = finish;
-      cancelScrollRestoreRef.current = finish;
-      const armQuiet = () => {
-        if (quietTimer != null) clearTimeout(quietTimer);
-        quietTimer = setTimeout(finish, RESTORE_QUIET_MS);
-      };
-      const apply = () => {
-        if (done) return;
-        const target = targetFor();
-        if (Math.abs(el.scrollTop - target) > 1) {
-          // Our own writes emit scroll events; keep the follow-mode
-          // direction detector from reading them as user intent.
-          programmaticScrollUntilRef.current = performance.now() + PROGRAMMATIC_SCROLL_WINDOW_MS;
-          el.scrollTop = target;
-          prevScrollTopRef.current = el.scrollTop;
-          armQuiet();
-        }
-      };
-      apply();
-      armQuiet();
-      capTimer = setTimeout(finish, RESTORE_MAX_MS);
-      if (typeof ResizeObserver !== 'undefined') {
-        ro = new ResizeObserver(() => apply());
-        ro.observe(el);
-        if (el.firstElementChild) ro.observe(el.firstElementChild);
-      }
-      el.addEventListener('wheel', finish, { passive: true });
-      el.addEventListener('touchstart', finish, { passive: true });
-      el.addEventListener('pointerdown', finish);
+      holdPaneRestore(el, restore);
     } else {
       // Live pane (streaming / follow-ups generating) or no messages yet:
       // there is no restore pass, but StrictMode's dev double-mount still
@@ -995,7 +1012,7 @@ function TPane({ nodeId, contentMaxWidth, embedded = false, draftRequest = null,
       // half-restored position would overwrite the entry this restore was
       // reading, and the stale entry is strictly better data.
       const restoreWasActive = restoreInFlightRef.current;
-      finishRestore?.();
+      cancelScrollRestoreRef.current?.();
       if (liveTrustRaf != null) {
         cancelAnimationFrame(liveTrustRaf);
         restoreInFlightRef.current = false;
@@ -1016,39 +1033,25 @@ function TPane({ nodeId, contentMaxWidth, embedded = false, draftRequest = null,
   // `messages-loaded` installs the real message bodies (messagesLoaded flips
   // to true and messages.length > 0), this effect runs the restore that the
   // mount effect couldn't. It only fires once (guarded by didRestoreRef) and
-  // applies the same unseen-or-bottom logic.
+  // holds the same target the mount restore would have.
   const messagesLoaded = n?.messagesLoaded || !!n?.historyBefore;
   const messagesLen = n?.messages.length ?? 0;
   useLayoutEffect(() => {
     if (didRestoreRef.current) return;
     if (!n || messagesLoaded === false || messagesLen === 0) return;
     didRestoreRef.current = true;
+    // The history that just arrived is not a send: its newest user message
+    // would otherwise start the send glide (below), which runs after this
+    // layout effect and carries the restored viewport to the bottom.
+    for (let i = n.messages.length - 1; i >= 0; i--) {
+      if (n.messages[i].role === 'user') { prevSentMsgIdRef.current = sentMessageKey(n.messages[i]); break; }
+    }
     const el = scrollRef.current;
     if (!el) return;
     const live = n.status === 'streaming' || !!n.followUpsGenerating;
     if (live) return; // follow-mode handles live panes
     const restore = resolvePaneRestore(paneScrollCache.get(nodeId), n.messages);
-    if (!restore || restore.kind === 'bottom') {
-      programmaticScrollUntilRef.current = performance.now() + PROGRAMMATIC_SCROLL_WINDOW_MS;
-      el.scrollTop = el.scrollHeight - el.clientHeight;
-      prevScrollTopRef.current = el.scrollTop;
-      followRef.current = true;
-    } else if (restore.kind === 'unseen' && restore.anchorId) {
-      followRef.current = false;
-      const msgEl = el.querySelector<HTMLElement>(`[data-msg-id="${restore.anchorId}"]`);
-      if (msgEl) {
-        programmaticScrollUntilRef.current = performance.now() + PROGRAMMATIC_SCROLL_WINDOW_MS;
-        const delta = msgEl.getBoundingClientRect().top - el.getBoundingClientRect().top;
-        el.scrollTop = Math.max(0, el.scrollTop + delta - el.clientHeight * UNSEEN_TOP_FRACTION);
-        prevScrollTopRef.current = el.scrollTop;
-      } else {
-        // Anchor message not in DOM — fall back to bottom
-        programmaticScrollUntilRef.current = performance.now() + PROGRAMMATIC_SCROLL_WINDOW_MS;
-        el.scrollTop = el.scrollHeight - el.clientHeight;
-        prevScrollTopRef.current = el.scrollTop;
-        followRef.current = true;
-      }
-    }
+    if (restore) holdPaneRestore(el, restore);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [messagesLoaded, messagesLen]);
 
@@ -2286,6 +2289,7 @@ function TPane({ nodeId, contentMaxWidth, embedded = false, draftRequest = null,
           )}
         </div>
       )}
+      {n.temporary && <TemporaryChatNote contentMaxWidth={contentMaxWidth ?? null} />}
 
       <div style={{ position: 'relative', flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column' }}>
         {!readOnly && <SelectionActions
@@ -2429,7 +2433,7 @@ function TPane({ nodeId, contentMaxWidth, embedded = false, draftRequest = null,
           onTestConnection={handleTestConnection}
           readOnly={readOnly}
           planStep={planStep}
-          replySources={memorySetting}
+          replySources={replySources}
         />
       </div>
       {phone && (
@@ -2600,9 +2604,6 @@ function TPane({ nodeId, contentMaxWidth, embedded = false, draftRequest = null,
         }
         toolbarRight={
           <>
-          {memorySetting && (
-            <ConversationMemoryControl apiBase={workspaceBackendApiBase(n.projectId)} nodeId={nodeId} toolbarTier={toolbarTier} disabled={streaming} />
-          )}
           {permissionControl && !permissionPreferences.global && <ComposerPermissionControl apiBase={workspaceBackendApiBase(n.projectId)}
             mode={effectiveChatPermissionChoice(permissionPreferences, n)}
             runtimeIds={[resolvedBinding.runtime]} approveForMeRuntimeIds={approveForMeRuntimeIds(agentStatus)}

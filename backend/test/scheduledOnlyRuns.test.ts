@@ -132,7 +132,7 @@ describe('Scheduled-only jobs in the scheduler', () => {
     now = Date.parse('2026-11-06T12:00:00Z');
     let ids = 0;
     published = [];
-    const events = new ScheduledJobEventBus(() => now);
+    const events = new ScheduledJobEventBus();
     events.subscribe({ send: (event) => published.push(event) });
     scheduler = new ScheduledJobScheduler({
       repository: new ScheduledJobsRepository(), executor: new InstantExecutor(() => now), events,

@@ -1,8 +1,9 @@
-import { getToolApproval, requestToolApproval } from './toolApprovals';
 import { AjvJsonSchemaValidator } from '@modelcontextprotocol/sdk/validation/ajv-provider.js';
-/** Shared unattended access boundary: Michi state is writable; external MCP
- * calls require a read-only declaration or saved human approval. Native shell/exec and delegation to
- * unconstrained workers are deliberately not an alternative call path. */
+/** Shared unattended access boundary: Michi state is writable; an external MCP
+ * tool is usable only when it declares itself read-only (readOnlyHint, not
+ * destructive). Nobody is there to approve anything else, so nothing else is
+ * offered. Native shell/exec and delegation to unconstrained workers are
+ * deliberately not an alternative call path. */
 import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 import { McpClientManager, type McpToolInfo, type McpServerConfig } from '../mcpClientManager';
 import { readPiMcpServers } from '../piMcpConfig';
@@ -92,44 +93,36 @@ export function createMaintenanceAccessTools(
   return [
     {
       name: MAINTENANCE_ACCESS_TOOL_NAMES[0],
-      description: 'Discover writable Michi tools and external read-only MCP tools. With no server, lists Michi tools and configured external server names. With server, lists tools with their access status. Calling an unapproved tool requests persistent user approval without executing it. Follow nextOffset to read more schemas.',
+      description: 'List writable Michi tools and configured external server names; with server, that server\'s read-only tools. Follow nextOffset for more.',
       parameters: schema({ server: textSchema, offset: { type: 'integer', minimum: 0 } }, []),
       execute: execute(async (args, context, signal) => {
         const offset = args.offset ?? 0;
         if (!Number.isSafeInteger(offset) || (offset as number) < 0) throw new Error('offset must be a non-negative integer');
-        let entries: Array<{ name: string; description?: string; inputSchema: Record<string, unknown>; access?: string }>;
+        let entries: Array<{ name: string; description?: string; inputSchema: Record<string, unknown> }>;
         let servers: string[] | undefined;
         if (typeof args.server === 'string') {
-          entries = await withServer(args.server, context, signal, async (_manager, tools, config) => tools.map(tool => ({ ...tool, access: isExternalReadOnlyTool(tool) ? 'read-only' : getToolApproval(config, tool, context.ownerUserId)?.state ?? 'needs-approval' })));
+          entries = await withServer(args.server, context, signal, async (_manager, tools) => tools.filter(isExternalReadOnlyTool));
         } else {
           entries = internal(context);
           servers = process.env.MICHI_CLOUD === '1' ? [] : (deps.servers ?? readPiMcpServers)().map(s => s.serverName);
         }
         const page = entries.slice(offset as number, (offset as number) + 10)
-          .map(({ name, description, inputSchema, access }) => ({ name, description, inputSchema, access }));
+          .map(({ name, description, inputSchema }) => ({ name, description, inputSchema }));
         const end = (offset as number) + page.length;
         return result({ scope: args.server ? 'external' : 'michi', server: args.server, servers, tools: page, nextOffset: end < entries.length ? end : null });
       }),
     },
     {
       name: MAINTENANCE_ACCESS_TOOL_NAMES[1],
-      description: 'Call a tool discovered by maintenance_list_tools. Omit server for Michi tools; specify server for external read-only calls. External tools not declared read-only require persistent human approval. When approval is needed, continue with permitted alternatives or tell the user to review Tool approvals under Pages upkeep in Michi’s Settings. Do not claim the blocked work completed. Arbitrary code/shell execution and launching unrestricted workers are unavailable. Existing maintenance writers remain the receipt path for source-batch page/database decisions.',
+      description: 'Call a tool maintenance_list_tools listed. Omit server for Michi tools; name it for an external read-only tool.',
       parameters: schema({ server: textSchema, tool: textSchema, arguments: { type: 'object', additionalProperties: true } }, ['tool', 'arguments']),
       execute: execute(async (args, context, signal) => {
         if (typeof args.tool !== 'string' || !args.arguments || typeof args.arguments !== 'object' || Array.isArray(args.arguments)) throw new Error('tool and arguments are required');
         const input = args.arguments as Record<string, unknown>;
-        if (typeof args.server === 'string') return withServer(args.server, context, signal, async (manager, tools, config) => {
+        if (typeof args.server === 'string') return withServer(args.server, context, signal, async (manager, tools) => {
           const tool = tools.find(t => t.name === args.tool);
           const alternatives = tools.filter(isExternalReadOnlyTool).map(t => t.name);
-          if (!tool) return result({ status: 'unavailable', message: 'Tool not found. Try another listed tool.', alternatives });
-          if (tool.execution?.taskSupport === 'required') return result({ status: 'unavailable', message: 'This tool requires unsupported task execution. Try another tool.', alternatives });
-          if (!isExternalReadOnlyTool(tool) && getToolApproval(config, tool, context.ownerUserId)?.state !== 'approved') {
-            const request = requestToolApproval(config, tool, context.ownerUserId);
-            if (!request) return result({ status: 'unavailable', message: 'The saved tool approval limit has been reached. Try permitted alternatives and tell the user this tool was not executed.', alternatives });
-            return result({ status: request?.state === 'denied' || request?.state === 'revoked' ? request.state : 'approval_required',
-              requestId: request?.id, server: config.serverName, tool: tool.name, alternatives,
-              message: 'This tool was not executed. Try permitted alternatives. If needed, tell the user to review Tool approvals under Pages upkeep in Michi’s Settings. Do not claim the blocked work completed.' });
-          }
+          if (!tool || !isExternalReadOnlyTool(tool)) return result({ status: 'unavailable', message: 'Not a read-only tool of this server; it was not run.', alternatives });
           // Fresh discovery per call prevents a previous list from authorizing a changed catalog.
           check(context);
           validateInput(tool.inputSchema, input);

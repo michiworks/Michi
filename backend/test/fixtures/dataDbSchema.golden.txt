@@ -464,16 +464,17 @@ table assistant_runtime_switches
 index idx_assistant_runtime_switches_node on assistant_runtime_switches; origin c (node_id, id)
   | CREATE INDEX idx_assistant_runtime_switches_node ON assistant_runtime_switches(node_id, id)
 table attention_notifications
-  | CREATE TABLE attention_notifications (
+  | CREATE TABLE "attention_notifications" (
   | id TEXT PRIMARY KEY,
   | owner_user_id TEXT NOT NULL,
   | workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
-  | target_type TEXT NOT NULL CHECK (target_type IN ('node', 'agent_run')),
+  | target_type TEXT NOT NULL CHECK (target_type IN ('node', 'agent_run', 'agent', 'scheduled_run')),
   | target_id TEXT NOT NULL,
+  | target_detail TEXT CHECK (target_detail IS NULL OR json_valid(target_detail)),
   | key TEXT NOT NULL,
   | fact TEXT NOT NULL,
   | kind TEXT NOT NULL CHECK (kind IN ('needs_input', 'finished', 'failed')),
-  | reason TEXT NOT NULL CHECK (reason IN ('approval', 'question', 'completed', 'error', 'run_completed', 'run_failed')),
+  | reason TEXT NOT NULL CHECK (reason IN ('approval', 'question', 'completed', 'error', 'run_completed', 'run_failed', 'needs_you', 'update')),
   | title TEXT NOT NULL,
   | body TEXT NOT NULL DEFAULT '',
   | created_at INTEGER NOT NULL,
@@ -484,25 +485,27 @@ table attention_notifications
   | resolved_at INTEGER,
   | CHECK ((status = 'active') = (resolved_at IS NULL)),
   | CHECK ((status = 'active') = (resolve_reason IS NULL)),
-  | CHECK ((claimed_by_window_id IS NULL) = (claimed_at IS NULL))
+  | CHECK ((claimed_by_window_id IS NULL) = (claimed_at IS NULL)),
+  | CHECK ((target_type IN ('agent', 'scheduled_run')) = (target_detail IS NOT NULL))
   | )
   column 0 id TEXT; pk 1
   column 1 owner_user_id TEXT; not null
   column 2 workspace_id TEXT; not null
   column 3 target_type TEXT; not null
   column 4 target_id TEXT; not null
-  column 5 key TEXT; not null
-  column 6 fact TEXT; not null
-  column 7 kind TEXT; not null
-  column 8 reason TEXT; not null
-  column 9 title TEXT; not null
-  column 10 body TEXT; not null; default ''
-  column 11 created_at INTEGER; not null
-  column 12 status TEXT; not null; default 'active'
-  column 13 resolve_reason TEXT
-  column 14 claimed_by_window_id TEXT
-  column 15 claimed_at INTEGER
-  column 16 resolved_at INTEGER
+  column 5 target_detail TEXT
+  column 6 key TEXT; not null
+  column 7 fact TEXT; not null
+  column 8 kind TEXT; not null
+  column 9 reason TEXT; not null
+  column 10 title TEXT; not null
+  column 11 body TEXT; not null; default ''
+  column 12 created_at INTEGER; not null
+  column 13 status TEXT; not null; default 'active'
+  column 14 resolve_reason TEXT
+  column 15 claimed_by_window_id TEXT
+  column 16 claimed_at INTEGER
+  column 17 resolved_at INTEGER
   foreign key 0.0 workspace_id -> workspaces(id); on update NO ACTION; on delete CASCADE; match NONE
 index idx_attention_active_key on attention_notifications; unique; origin c; partial (owner_user_id, key)
   | CREATE UNIQUE INDEX idx_attention_active_key
@@ -612,6 +615,30 @@ table companion_cards
   column 10 expires_at INTEGER; not null
   column 11 reported_at INTEGER
 index sqlite_autoindex_companion_cards_1 on companion_cards; unique; origin pk (id)
+table companion_checkin_jobs
+  | CREATE TABLE companion_checkin_jobs (
+  | owner_user_id TEXT PRIMARY KEY DEFAULT 'local-user',
+  | job_id TEXT NOT NULL UNIQUE,
+  | created_at INTEGER NOT NULL
+  | )
+  column 0 owner_user_id TEXT; pk 1; default 'local-user'
+  column 1 job_id TEXT; not null
+  column 2 created_at INTEGER; not null
+index sqlite_autoindex_companion_checkin_jobs_1 on companion_checkin_jobs; unique; origin pk (owner_user_id)
+index sqlite_autoindex_companion_checkin_jobs_2 on companion_checkin_jobs; unique; origin u (job_id)
+table companion_checkin_shadow
+  | CREATE TABLE companion_checkin_shadow (
+  | id INTEGER PRIMARY KEY AUTOINCREMENT,
+  | owner_user_id TEXT NOT NULL DEFAULT 'local-user',
+  | kind TEXT NOT NULL,
+  | planned_at INTEGER NOT NULL
+  | )
+  column 0 id INTEGER; pk 1
+  column 1 owner_user_id TEXT; not null; default 'local-user'
+  column 2 kind TEXT; not null
+  column 3 planned_at INTEGER; not null
+index idx_companion_checkin_shadow_at on companion_checkin_shadow; origin c (owner_user_id, planned_at)
+  | CREATE INDEX idx_companion_checkin_shadow_at ON companion_checkin_shadow(owner_user_id, planned_at)
 table companion_delegations
   | CREATE TABLE companion_delegations (
   | id TEXT PRIMARY KEY,
@@ -849,7 +876,7 @@ table companion_runs
   | message_id TEXT,
   | started_at INTEGER NOT NULL,
   | finished_at INTEGER
-  | , checkin_node_id TEXT, runtime_id TEXT, native_session_id TEXT, checkin_cwd TEXT, profile_hash TEXT, posted_message_id TEXT, posted_at INTEGER, told_at INTEGER, discarded_at INTEGER, delegation_id TEXT, reply_chars INTEGER, changes_json TEXT, undone_at INTEGER, native_kept_at INTEGER)
+  | , checkin_node_id TEXT, runtime_id TEXT, native_session_id TEXT, checkin_cwd TEXT, profile_hash TEXT, posted_message_id TEXT, posted_at INTEGER, told_at INTEGER, discarded_at INTEGER, delegation_id TEXT, reply_chars INTEGER, changes_json TEXT, undone_at INTEGER, native_kept_at INTEGER, usage_json TEXT)
   column 0 id TEXT; pk 1
   column 1 owner_user_id TEXT; not null; default 'local-user'
   column 2 kind TEXT; not null
@@ -874,6 +901,7 @@ table companion_runs
   column 21 changes_json TEXT
   column 22 undone_at INTEGER
   column 23 native_kept_at INTEGER
+  column 24 usage_json TEXT
 index idx_companion_runs_checkin on companion_runs; origin c; partial (owner_user_id, checkin_node_id)
   | CREATE INDEX idx_companion_runs_checkin ON companion_runs(owner_user_id, checkin_node_id) WHERE checkin_node_id IS NOT NULL
 index idx_companion_runs_owner on companion_runs; origin c (owner_user_id, started_at)
@@ -1816,12 +1844,13 @@ table meta_agent_maintenance_state
   | last_checked_at INTEGER,
   | check_day_start INTEGER,
   | check_count INTEGER NOT NULL DEFAULT 0
-  | )
+  | , paused_until INTEGER)
   column 0 owner_user_id TEXT; pk 1
   column 1 paused INTEGER; not null; default 0
   column 2 last_checked_at INTEGER
   column 3 check_day_start INTEGER
   column 4 check_count INTEGER; not null; default 0
+  column 5 paused_until INTEGER
 index sqlite_autoindex_meta_agent_maintenance_state_1 on meta_agent_maintenance_state; unique; origin pk (owner_user_id)
 table meta_agent_watch_decisions
   | CREATE TABLE meta_agent_watch_decisions (
@@ -3325,6 +3354,25 @@ table user_provider_keys
 index idx_user_provider_keys_user on user_provider_keys; origin c (user_id)
   | CREATE INDEX idx_user_provider_keys_user ON user_provider_keys(user_id)
 index sqlite_autoindex_user_provider_keys_1 on user_provider_keys; unique; origin pk (user_id, provider)
+table work_conversation_worktrees
+  | CREATE TABLE work_conversation_worktrees (
+  | node_id TEXT PRIMARY KEY REFERENCES nodes(id) ON DELETE CASCADE,
+  | worktree_path TEXT NOT NULL,
+  | session_cwd TEXT NOT NULL,
+  | branch TEXT NOT NULL,
+  | repository_root TEXT NOT NULL,
+  | base_commit TEXT NOT NULL,
+  | created_at INTEGER NOT NULL
+  | )
+  column 0 node_id TEXT; pk 1
+  column 1 worktree_path TEXT; not null
+  column 2 session_cwd TEXT; not null
+  column 3 branch TEXT; not null
+  column 4 repository_root TEXT; not null
+  column 5 base_commit TEXT; not null
+  column 6 created_at INTEGER; not null
+  foreign key 0.0 node_id -> nodes(id); on update NO ACTION; on delete CASCADE; match NONE
+index sqlite_autoindex_work_conversation_worktrees_1 on work_conversation_worktrees; unique; origin pk (node_id)
 table workflow_runs
   | CREATE TABLE "workflow_runs" (
   | id TEXT PRIMARY KEY,

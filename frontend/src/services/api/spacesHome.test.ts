@@ -6,7 +6,6 @@ import {
   fetchHomeConversations,
   fetchThreadStates,
   fetchHomeSections,
-  markSpacesHomeLooked,
   fetchProgressCards,
   fetchSpaceActivity,
   fetchSpacesHome,
@@ -97,12 +96,11 @@ describe('Spaces Home API', () => {
     expect('conversationTotal' in sections).toBe(false);
   });
 
-  it('lists All threads for one state, and records the Spaces Home look', async () => {
+  it('lists All threads for one state', async () => {
     const fetchMock = vi.fn()
       .mockResolvedValueOnce(ok({ total: 3, items: [{ id: 'conversation:n1', kind: 'conversation', workspaceId: 'ws', workspaceName: 'w', title: 't', at: 1,
         summary: '', agentClaim: false, state: 'stalled', target: { kind: 'conversation', nodeId: 'n1', workspaceId: 'ws', messageId: null } }] }))
-      .mockResolvedValueOnce(ok({ total: 0, items: [] }))
-      .mockResolvedValueOnce(ok({ lookedAt: 9 }));
+      .mockResolvedValueOnce(ok({ total: 0, items: [] }));
     vi.stubGlobal('fetch', fetchMock);
     const list = await fetchHomeConversations('host', { state: 'stalled', limit: 5 });
     expect(String(fetchMock.mock.calls[0][0])).toMatch(/\/spaces-home\/conversations\?state=stalled&limit=5$/);
@@ -110,9 +108,6 @@ describe('Spaces Home API', () => {
     expect(list.items[0]).toMatchObject({ state: 'stalled', target: { kind: 'conversation', nodeId: 'remote:host:n1', workspaceId: 'remote:host:ws' } });
     await fetchHomeConversations('local');
     expect(String(fetchMock.mock.calls[1][0])).toMatch(/\/spaces-home\/conversations$/);
-    expect(await markSpacesHomeLooked('local')).toEqual({ lookedAt: 9 });
-    expect(String(fetchMock.mock.calls[2][0])).toMatch(/\/spaces-home\/look$/);
-    expect((fetchMock.mock.calls[2][1] as RequestInit).method).toBe('POST');
   });
 
   it('keeps the layout rules that shaped a section', async () => {

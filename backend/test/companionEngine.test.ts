@@ -6,12 +6,12 @@ import { enableSyntheticCompanionSources } from './helpers/companionSources';
  * MCP server's sources in turn, different servers at once; the intervals each
  * source asks for), backoff and the system_source_error item, the Auth gate
  * with the system_auth item, the baseline poll, the two-poll resolution and
- * reopening, item notices out of the gate (a calendar conflict once, two
+ * reopening, item notices handed to attention (a calendar conflict once, two
  * hours ahead), Check now (also while paused), the scheduler lease, the daily
  * retention pass (tool outputs in the Companion's conversations too) and its
  * run log cap, runs a restart left behind (and ones whose chat turn never
  * ends), conversation.start cards it left starting, reminders and watches
- * (one due in quiet hours notifies once they end), the live status and the
+ * (one due at night notifies at once: no quiet hours), the live status and the
  * "Since you left" the service hands the snapshot.
  * Model turns: companionEngineTurns.test.ts. Fake sources, Auth and clock;
  * no timers (autoTick false); temp MICHI_DATA_DIR per test.
@@ -22,13 +22,14 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { checkinNodeId, type CompanionBucket, type CompanionItemSubtype, type CompanionNotice, type CompanionSeverity, type CompanionSourceKind } from 'michi-shared';
+import { checkinNodeId, type CompanionBucket, type CompanionItemSubtype, type CompanionSeverity, type CompanionSourceKind } from 'michi-shared';
 import { assistantPurposeKey } from '../src/assistant/identity';
 import { closeDb, getDb, initDb } from '../src/services/db';
 import { COMPANION_ABANDONED_START_ERROR } from '../src/services/companion/cards';
 import { COMPANION_RUN_LOG_CAP, runDailyCleanup } from '../src/services/companion/cleanup';
 import { startCompanion, type CompanionCoordinator, type CompanionCoordinatorDeps } from '../src/services/companion/coordinator';
 import { CompanionEventBus } from '../src/services/companion/delivery';
+import { captureCompanionAttention, type CapturedCompanionNotice, type CompanionAttentionCapture } from './helpers/companionAttention';
 import { CompanionError } from '../src/services/companion/errors';
 import {
   COMPANION_OWNER,
@@ -43,13 +44,11 @@ import {
   getReminder,
   getRun,
   insertCard,
-  insertNotice,
   latestEventSeq,
   listItemEvents,
   listRuns,
   listUnreportedCards,
   markCompanionWelcomeDone,
-  pendingNotices,
   recordCompanionView,
   recordRun,
   setCompanionMetaNumber,
@@ -62,6 +61,7 @@ import { AUTH_EXPIRED_DETAIL } from '../src/services/companion/sources/common';
 import type { CompanionAuthStatus } from '../src/services/companion/sources/auth';
 import type { CompanionPollContext, CompanionSource, CompanionDraftInput, ItemDraft, SourcePollResult } from '../src/services/companion/types';
 import { seedConversation } from './helpers/homeConversations';
+import { turnCompanionOn } from './helpers/backgroundWork';
 
 const MINUTE = 60_000;
 const HOUR = 60 * MINUTE;
@@ -154,7 +154,8 @@ describe('Companion engine: polls, notices and the lease', () => {
   let cr: FakeSource;
   let pipeline: FakeSource;
   let auth: FakeAuth;
-  let notices: CompanionNotice[];
+  let notices: CapturedCompanionNotice[];
+  let capture: CompanionAttentionCapture;
   let bus: CompanionEventBus;
   let started: CompanionCoordinator[];
   let coordinator: CompanionCoordinator;
@@ -186,19 +187,21 @@ describe('Companion engine: polls, notices and the lease', () => {
     process.env.MICHI_DATA_DIR = tmpDir;
     closeDb();
     initDb(); enableSyntheticCompanionSources();
+    turnCompanionOn();
     now = T0;
     cr = new FakeSource('cr', 5 * MINUTE);
     pipeline = new FakeSource('pipeline', 10 * MINUTE);
     auth = new FakeAuth();
-    notices = [];
     bus = new CompanionEventBus();
-    bus.subscribe({ notifier: true, notice: (notice) => notices.push(notice) });
+    capture = captureCompanionAttention();
+    notices = capture.notices;
     started = [];
     coordinator = engine();
   });
 
   afterEach(async () => {
     for (const made of started) await made.stop();
+    capture.restore();
     closeDb();
     fs.rmSync(tmpDir, { recursive: true, force: true });
   });
@@ -280,10 +283,10 @@ describe('Companion engine: polls, notices and the lease', () => {
     cr.objects.set('cr:B:mine', { version: 'v1', title: 'CR-B needs attention' });
     await at(T0 + 5 * MINUTE);
     assert.equal(getItemByKey('cr:B:mine')!.status, 'new');
-    assert.equal(notices.length, 0, 'batched for 30 seconds');
+    assert.equal(notices.length, 1, 'handed to attention at once: no batch of its own');
+    assert.deepEqual([notices[0]!.body, notices[0]!.reason, notices[0]!.kind], ['CR-B needs attention', 'needs_you', 'needs_input']);
     await at(T0 + 5 * MINUTE + 30_000);
-    assert.equal(notices.length, 1);
-    assert.equal(notices[0]!.body, 'CR-B needs attention');
+    assert.equal(notices.length, 1, 'once per version');
   });
 
   test('two ok and complete polls without an object resolve it; one that comes back reopens as it was', async () => {
@@ -385,7 +388,9 @@ describe('Companion engine: polls, notices and the lease', () => {
 
   test('the daily retention pass runs once per local day, in the lease holder, even with the Companion off', async () => {
     patchCompanionSettings({ enabled: false });
-    insertNotice({ title: 'C', body: 'old', target: { kind: 'companion', tab: 'chat' }, itemIds: [], now: T0 - 10 * DAY, expiresAt: T0 - 9 * DAY });
+    // A notice an older build left in the retired outbox.
+    getDb().prepare(`INSERT INTO companion_notices (id, owner_user_id, title, body, target_json, item_ids_json, item_versions_json, created_at, expires_at)
+      VALUES ('cmn-old', ?, 'C', 'old', '{"kind":"companion","tab":"chat"}', '[]', '{}', ?, ?)`).run(COMPANION_OWNER, T0 - 10 * DAY, T0 - 9 * DAY);
     const nodeId = companionConversation();
     companionMessage(nodeId, 'm-read', 'You have mail.', T0 - 8 * DAY, [{ id: 'c-1', title: 'companion_email_search', status: 'completed', output: 'Email from Alice — Re: salary' }]);
     await at(T0);
@@ -397,7 +402,7 @@ describe('Companion engine: polls, notices and the lease', () => {
     assert.equal(getCompanionMetaNumber('companion:last_purge_at'), T0, 'once a day');
     await at(T0 + DAY);
     assert.equal(getCompanionMetaNumber('companion:last_purge_at'), T0 + DAY);
-    assert.equal(pendingNotices(T0 + DAY).length, 0);
+    assert.equal((getDb().prepare('SELECT COUNT(*) AS n FROM companion_notices').get() as { n: number }).n, 0, 'the retired outbox empties');
   });
 
   test('turns a previous process left running end as errors; one whose chat turn still runs is waited for', async () => {
@@ -453,17 +458,15 @@ describe('Companion engine: polls, notices and the lease', () => {
     assert.equal(getDb().prepare("SELECT 1 FROM companion_runs WHERE message_id = 'm-spoke'").get(), undefined);
   });
 
-  test('a reminder that comes due in quiet hours is notified once they end (B9)', async () => {
+  test('a reminder that comes due at night is notified at once: notices keep no quiet hours (D5)', async () => {
     welcomed(T0 - DAY);
     const night = createReminder({ text: 'Call home', at: localAt(5, 21, 0) }, T0);
     await at(localAt(5, 21, 0));
     await at(localAt(5, 21, 1));
-    await at(localAt(6, 7, 59));
     const due = getItemByKey(`reminder:${night.id}`)!;
-    assert.deepEqual([due.status, notices.length], ['new', 0], 'due, and quiet');
-    await at(localAt(6, 8, 0));
-    await at(localAt(6, 8, 1));
     assert.deepEqual(notices.map((notice) => [notice.body, notice.itemIds]), [[`Call home — ${due.summary}`, [due.id]]]);
+    await at(localAt(6, 8, 0));
+    assert.equal(notices.length, 1, 'once');
   });
 
   test('reminders fire on time, daily ones once a workday after their time, watches when their item gets there', async () => {

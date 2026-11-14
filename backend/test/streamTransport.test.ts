@@ -248,8 +248,9 @@ test('forwards the memory change feed as GET, and nothing else under memories', 
 });
 
 // The Companion's renderer feed (routes/companion.ts): only its exact path is allowlisted, and
-// the route keeps its own local-only guard. The notifications stream is read by the Electron
-// main process over plain HTTP, so it is deliberately not reachable through the multiplexer.
+// the route keeps its own local-only guard. The desktop notifier's feed (routes/attention.ts) is
+// read by the Electron main process over plain HTTP, so it is deliberately not reachable through
+// the multiplexer; nor is the retired Companion notifications stream.
 test('forwards the Companion\'s events feed as GET, and nothing else under companion', async (t) => {
   const f = await fixture(t);
   const { socket, frames } = await f.connect();
@@ -265,6 +266,8 @@ test('forwards the Companion\'s events feed as GET, and nothing else under compa
     { path: '/api/companion/view', method: 'POST' },
     { path: '/api/companion/notifications/cmn-1/ack', method: 'POST' },
     { path: '/api/companion/events/extra', method: 'GET' },
+    { path: '/api/attention/desktop/stream', method: 'GET' },
+    { path: '/api/attention/desktop/notifications/attn-1/claim', method: 'POST' },
   ];
   rejected.forEach((open, i) => socket.send(JSON.stringify({ type: 'open', id: `no-${i}`, ...open })));
   await until(() => frames.filter((frame) => frame.type === 'error').length === rejected.length);

@@ -5,7 +5,7 @@ import { log } from '../services/logger';
 import {
   cancelMemoryExtraction, memoryExtractionStatus, setMemoryExtractionPaused, type MemoryExtractionScheduler,
 } from '../services/memory/extractionService';
-import { MemoryError } from '../services/memory/memoryService';
+import { MemoryError, type MemoryServiceErrorResponse } from '../services/memory/memoryService';
 import { requireRequestAccess } from './middleware/sessionAccess';
 
 /**
@@ -51,7 +51,7 @@ export function setupMemoryExtractionRoutes(deps: { scheduler: MemoryExtractionS
     } catch (error) {
       if (error instanceof RequestError || error instanceof MemoryError) {
         const code = error instanceof MemoryError ? error.code : 'invalid_argument';
-        const body: MemoryErrorResponse = { error: error.message, code };
+        const body: MemoryServiceErrorResponse = { error: error.message, code };
         res.status(code === 'not_found' ? 404 : 400).json(body);
         return;
       }

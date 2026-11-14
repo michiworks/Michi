@@ -10,8 +10,13 @@
  * migrateCompanionSettingsV2 turns the MVP's stored default name into the v2
  * one, once, when the assistant's v2 data migration runs (DESIGN-v2 §8.1(c)).
  *
- * Turning a source on (or the Companion itself) forgets that source's
- * baseline, so its next successful poll is a baseline again (DESIGN R2.5):
+ * `enabled`, `paused` and `pausedUntil` are not stored here: they read Pause
+ * Michi (services/michiPause.ts), which a patch's `paused` (true: until
+ * resumed; false: resume) or `pauseFor` sets. migrateCompanionPause turned the
+ * stored `enabled`/`paused` into it once; they stay stored, unread, for a
+ * version to go back to.
+ *
+ * Turning a source on forgets that source's baseline, so its next successful poll is a baseline again (DESIGN R2.5):
  * what it finds then is what was already there, never news. Changing what a
  * source watches does the same for what the change brings into view (A5):
  * the CR source watching another account starts over (its snapshots go too),
@@ -32,13 +37,16 @@ import {
   isReasoningLevel,
   type CompanionConfigurableSource,
   type CompanionHeartbeatMinutes,
-  type CompanionNotificationLevel,
   type CompanionSettings,
   type CompanionSourceKind,
+  type MichiPauseFor,
   type RuntimeReasoning,
+  MICHI_PAUSE_FOR,
+  michiPauseEnd,
 } from 'michi-shared';
 import { LOCAL_AGENT_OWNER_ID } from '../agentOwner';
 import { getDb } from '../db';
+import { michiPause, pauseMichi, resumeMichi } from '../michiPause';
 import { CompanionError } from './errors';
 
 const SETTINGS_KEY = 'companion:settings';
@@ -76,25 +84,26 @@ export function parseCompanionBaselineValue(value: string): CompanionBaselineRec
   return { at: Number.isFinite(at) ? at : 0, open };
 }
 
-/** A change to some settings: nested objects merge, `sources.pipeline.watch` and `workdays` replace the list. */
+/** A change to some settings: nested objects merge, `sources.pipeline.watch`, `brief.days` and `workdays` replace the list. */
 export interface CompanionSettingsPatch {
-  enabled?: boolean;
+  /** Pause Michi: true until resumed, false resumes. */
   paused?: boolean;
+  /** The Companion's old off switch, for one version: false pauses Michi until resumed, true resumes. */
+  enabled?: boolean;
+  /** Pause Michi for a while (michiPauseEnd). */
+  pauseFor?: MichiPauseFor;
   displayName?: string;
   sources?: { [K in CompanionConfigurableSource]?: Partial<CompanionSettings['sources'][K]> };
   pollMinutes?: number;
   heartbeat?: Partial<CompanionSettings['heartbeat']>;
   brief?: Partial<CompanionSettings['brief']>;
   quietHours?: Partial<CompanionSettings['quietHours']>;
-  notifications?: CompanionNotificationLevel;
-  dailyTurnBudget?: number;
   workdays?: number[];
   /** DESIGN-v2 §6: the reasoning check-ins and new conversations use; null: the default (the lower of the global one and high). */
   reasoning?: RuntimeReasoning | null;
 }
 
 export const COMPANION_NAME_MAX_CHARS = 40;
-const NOTIFICATION_LEVELS: readonly CompanionNotificationLevel[] = ['all', 'important', 'off'];
 /** A code review account name: it becomes part of a URL path, so nothing else gets in. */
 const ALIAS = /^[a-z0-9][a-z0-9._-]{0,63}$/;
 /** A pipeline name: it reaches a tool argument and a builds.example.com URL. */
@@ -196,7 +205,7 @@ export function parsePipelineNames(value: unknown, path = 'sources.pipeline.watc
 
 /**
  * Local weekdays (0 = Sunday … 6 = Saturday), de-duplicated and in week
- * order; at least one, or the Companion would never work.
+ * order; at least one (the brief's days: off is brief.enabled).
  */
 export function parseCompanionWorkdays(value: unknown, path = 'workdays'): number[] {
   if (!Array.isArray(value)) throw invalid(`${path} must be a list of weekdays (0 = Sunday … 6 = Saturday)`);
@@ -212,8 +221,6 @@ export function parseCompanionWorkdays(value: unknown, path = 'workdays'): numbe
 }
 
 const SETTINGS = group({
-  enabled: bool,
-  paused: bool,
   displayName: (value, path) => parseCompanionName(value, path),
   sources: group({
     michi: group({ enabled: bool }),
@@ -224,10 +231,8 @@ const SETTINGS = group({
   }),
   pollMinutes: wholeNumber(COMPANION_LIMITS.minPollMinutes, COMPANION_LIMITS.maxPollMinutes),
   heartbeat: group({ enabled: bool, intervalMinutes: oneOf<CompanionHeartbeatMinutes>(COMPANION_HEARTBEAT_MINUTES) }),
-  brief: group({ enabled: bool, time: clock }),
+  brief: group({ enabled: bool, time: clock, days: (value, path) => parseCompanionWorkdays(value, path) }),
   quietHours: group({ enabled: bool, start: clock, end: clock }),
-  notifications: oneOf(NOTIFICATION_LEVELS),
-  dailyTurnBudget: wholeNumber(0, COMPANION_LIMITS.maxDailyTurnBudget),
   workdays: (value, path) => parseCompanionWorkdays(value, path),
   reasoning,
 });
@@ -298,27 +303,119 @@ export function migrateCompanionSettingsV2(): void {
   if (changed) getDb().prepare('INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)').run(SETTINGS_KEY, JSON.stringify(settings));
 }
 
+const SOURCE_DEFAULTS_KEY = 'companion:source_defaults_v2';
+/** The outside sources a new user starts without (D17): the Get started card's Watch turns them on. */
+const OUTSIDE_SOURCES = ['cr', 'pipeline', 'email', 'calendar'] as const;
+
 /**
- * The sources Michi does not watch now (conv-3): every configurable source
- * when watching is off as a whole (`enabled: false`), else those turned off.
+ * Once, at boot before anything polls (server.ts): someone who has not met Michi yet
+ * (no welcome, no message of theirs in V) and never saved a setting starts
+ * with the outside sources off, so nothing outside Michi is read before Get
+ * started's Start (unification design D17). Someone who met it keeps
+ * watching what they watched. Later boots change nothing.
+ */
+export function settleCompanionSourceDefaults(met: boolean, now: number = Date.now()): void {
+  const db = getDb();
+  if (db.prepare('SELECT 1 FROM meta WHERE key = ?').get(SOURCE_DEFAULTS_KEY)) return;
+  if (!met && stored() === undefined) {
+    const settings = structuredClone(DEFAULT_COMPANION_SETTINGS);
+    for (const kind of OUTSIDE_SOURCES) settings.sources[kind].enabled = false;
+    db.prepare('INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)').run(SETTINGS_KEY, JSON.stringify(settings));
+  }
+  db.prepare('INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)').run(SOURCE_DEFAULTS_KEY, String(Math.floor(now)));
+}
+
+/**
+ * DESIGN §5 P2: the Companion's own off switch and pause become Pause Michi,
+ * once (guarded by PAUSE_MERGED_KEY): stored `enabled: false` or `paused:
+ * true` pauses Michi until resumed. A Michi that is already paused stays so.
+ */
+const PAUSE_MERGED_KEY = 'companion:pause_merged_at';
+
+export function migrateCompanionPause(now: number = Date.now()): void {
+  const db = getDb();
+  if (db.prepare('SELECT 1 FROM meta WHERE key = ?').get(PAUSE_MERGED_KEY)) return;
+  const raw = stored() as { enabled?: unknown; paused?: unknown } | undefined;
+  db.exec('SAVEPOINT companion_pause_merge');
+  try {
+    if (raw && typeof raw === 'object' && (raw.enabled === false || raw.paused === true)
+      && !michiPause(LOCAL_AGENT_OWNER_ID, now).paused) pauseMichi(LOCAL_AGENT_OWNER_ID, null);
+    db.prepare('INSERT INTO meta (key, value) VALUES (?, ?)').run(PAUSE_MERGED_KEY, String(Math.floor(now)));
+    db.exec('RELEASE SAVEPOINT companion_pause_merge');
+  } catch (error) {
+    db.exec('ROLLBACK TO SAVEPOINT companion_pause_merge');
+    db.exec('RELEASE SAVEPOINT companion_pause_merge');
+    throw error;
+  }
+}
+
+/**
+ * The sources Michi does not watch now (conv-3): those turned off.
  * [COMPANION CONTEXT], the hidden notes and companion_items / check_now say so
  * instead of answering for them as if there were nothing there.
  */
-export function companionSourcesOff(settings: Pick<CompanionSettings, 'enabled' | 'sources'>): CompanionConfigurableSource[] {
-  return COMPANION_CONFIGURABLE_SOURCES.filter((kind) => !settings.enabled || !settings.sources[kind].enabled);
+export function companionSourcesOff(settings: Pick<CompanionSettings, 'sources'>): CompanionConfigurableSource[] {
+  return COMPANION_CONFIGURABLE_SOURCES.filter((kind) => !settings.sources[kind].enabled);
 }
 
-/** The current settings: the defaults with every valid stored field applied. A fresh copy each call. */
-export function getCompanionSettings(): CompanionSettings {
+/**
+ * The brief's days as stored, or null when there are none to read (P3:
+ * settings from before them read the old workdays as the brief's days).
+ */
+function storedBriefDays(raw: unknown): number[] | null {
+  const brief = raw && typeof raw === 'object' ? (raw as { brief?: unknown }).brief : undefined;
+  const days = brief && typeof brief === 'object' ? (brief as { days?: unknown }).days : undefined;
+  if (days === undefined) return null;
+  try {
+    return parseCompanionWorkdays(days);
+  } catch {
+    return null;
+  }
+}
+
+/** The current settings: the defaults with every valid stored field applied, and Pause Michi at `now`. A fresh copy each call. */
+export function getCompanionSettings(now: number = Date.now()): CompanionSettings {
   const settings = structuredClone(DEFAULT_COMPANION_SETTINGS);
-  apply(settings as unknown as Record<string, unknown>, stored(), SETTINGS, '', false);
-  return settings;
+  const raw = stored();
+  apply(settings as unknown as Record<string, unknown>, raw, SETTINGS, '', false);
+  if (storedBriefDays(raw) === null) settings.brief.days = [...settings.workdays];
+  const pause = michiPause(LOCAL_AGENT_OWNER_ID, now);
+  return { ...settings, enabled: true, paused: pause.paused, pausedUntil: pause.until };
+}
+
+/**
+ * A patch's Pause Michi change: undefined for none, null to resume, else when
+ * it ends (`until` null: when resumed). Pausing wins over resuming, so the old
+ * off switch (`enabled: false`) holds whatever `paused` says.
+ */
+function pauseOf(patch: Record<string, unknown>, now: number): { until: number | null } | null | undefined {
+  const { paused, enabled, pauseFor } = patch;
+  if (paused !== undefined && typeof paused !== 'boolean') throw invalid('paused must be true or false');
+  if (enabled !== undefined && typeof enabled !== 'boolean') throw invalid('enabled must be true or false');
+  if (pauseFor !== undefined && !(MICHI_PAUSE_FOR as readonly unknown[]).includes(pauseFor)) {
+    throw invalid(`pauseFor must be one of: ${MICHI_PAUSE_FOR.join(', ')}`);
+  }
+  if (pauseFor !== undefined) return { until: michiPauseEnd(pauseFor as MichiPauseFor, now) };
+  if (paused === true || enabled === false) return { until: null };
+  if (paused === false || enabled === true) return null;
+  return undefined;
+}
+
+function splitPatch(patch: unknown, now: number): { rest: Record<string, unknown>; pause: { until: number | null } | null | undefined } {
+  if (!patch || typeof patch !== 'object' || Array.isArray(patch)) throw invalid('settings must be an object');
+  const { paused: _paused, enabled: _enabled, pauseFor: _pauseFor, ...rest } = patch as Record<string, unknown>;
+  return { rest, pause: pauseOf(patch as Record<string, unknown>, now) };
 }
 
 /** The settings with `patch` applied; throws CompanionError (invalid_settings) without writing anything. */
-export function previewCompanionSettings(patch: unknown): CompanionSettings {
-  const next = getCompanionSettings();
-  apply(next as unknown as Record<string, unknown>, patch, SETTINGS, '', true);
+export function previewCompanionSettings(patch: unknown, now: number = Date.now()): CompanionSettings {
+  const { rest, pause } = splitPatch(patch, now);
+  const next = getCompanionSettings(now);
+  apply(next as unknown as Record<string, unknown>, rest, SETTINGS, '', true);
+  if (pause !== undefined) {
+    next.paused = pause !== null;
+    next.pausedUntil = pause?.until ?? null;
+  }
   const quiet = (patch as { quietHours?: Record<string, unknown> }).quietHours;
   if ((quiet?.start !== undefined || quiet?.end !== undefined) && next.quietHours.start === next.quietHours.end) {
     throw invalid('quietHours.start and quietHours.end must differ');
@@ -326,14 +423,9 @@ export function previewCompanionSettings(patch: unknown): CompanionSettings {
   return next;
 }
 
-/**
- * The sources whose baseline a change from `before` to `after` forgets: each
- * source turned on, and every source when the Companion itself is turned on.
- */
+/** The sources whose baseline a change from `before` to `after` forgets: each source turned on. */
 export function sourcesTurnedOn(before: CompanionSettings, after: CompanionSettings): CompanionConfigurableSource[] {
-  const wholeCompanion = !before.enabled && after.enabled;
-  return COMPANION_CONFIGURABLE_SOURCES.filter((kind) => after.sources[kind].enabled
-    && (wholeCompanion || !before.sources[kind].enabled));
+  return COMPANION_CONFIGURABLE_SOURCES.filter((kind) => after.sources[kind].enabled && !before.sources[kind].enabled);
 }
 
 /**
@@ -368,15 +460,23 @@ export function sourcesWidened(before: CompanionSettings, after: CompanionSettin
  * (repository.applySourcePoll), unless a baseline is still to come anyway.
  */
 export function patchCompanionSettings(patch: unknown, now: number = Date.now()): CompanionSettings {
-  const before = getCompanionSettings();
-  const next = previewCompanionSettings(patch);
+  const before = getCompanionSettings(now);
+  const next = previewCompanionSettings(patch, now);
+  const { pause } = splitPatch(patch, now);
+  // Pause Michi is not stored here; what an older version reads as its own switches stays as it was.
+  const { enabled: _enabled, paused: _paused, pausedUntil: _until, ...kept } = next;
+  const raw = stored() as Record<string, unknown> | undefined;
+  const legacy = raw && typeof raw === 'object' && !Array.isArray(raw)
+    ? Object.fromEntries((['enabled', 'paused'] as const).filter((key) => key in raw).map((key) => [key, raw[key]])) : {};
   const db = getDb();
   const forget = db.prepare('DELETE FROM meta WHERE key = ?');
   // Only a baseline that exists reopens: without one, the next poll is a whole baseline anyway.
   const reopen = db.prepare('UPDATE meta SET value = ? WHERE key = ?');
   db.exec('SAVEPOINT companion_settings');
   try {
-    db.prepare('INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)').run(SETTINGS_KEY, JSON.stringify(next));
+    db.prepare('INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)').run(SETTINGS_KEY, JSON.stringify({ ...kept, ...legacy }));
+    if (pause === null) resumeMichi(LOCAL_AGENT_OWNER_ID);
+    else if (pause !== undefined) pauseMichi(LOCAL_AGENT_OWNER_ID, pause.until);
     for (const kind of sourcesTurnedOn(before, next)) forget.run(companionBaselineMetaKey(kind));
     if (crAccountChanged(before, next)) {
       forget.run(companionBaselineMetaKey('cr'));

@@ -93,6 +93,7 @@ import {
   markRunNativeKept,
   readCompanionRules,
   recordRunSession,
+  setCompanionHeadline,
   setRunReplyChars,
   userWroteInConversation,
 } from './repository';
@@ -353,8 +354,8 @@ function itemFeedbackByKind(now: number): CompanionItemFeedback[] {
 
 function workspaceNamesOf(request: CompanionTurnRequest): Map<string, string> {
   const names = new Map<string, string>();
-  for (const report of request.material.reports) {
-    const id = report.delegation.workspaceId;
+  for (const delegation of [...request.material.reports.map((report) => report.delegation), ...(request.material.following ?? [])]) {
+    const id = delegation.workspaceId;
     const name = names.has(id) ? null : getWorkspace(id)?.name;
     if (name) names.set(id, name);
   }
@@ -371,6 +372,8 @@ interface TurnResult {
   outcome: CompanionTurnOutcome;
   reply: string | null;
   followUps?: string[];
+  /** The line it wrote for Home (companion_headline, or its brief's headline). */
+  headline?: string | null;
 }
 
 export function createCompanionTurnRunner(deps: CompanionTurnRunnerDeps): CompanionTurnRunner {
@@ -413,7 +416,7 @@ export function createCompanionTurnRunner(deps: CompanionTurnRunnerDeps): Compan
    * text stays in the Activity detail.
    */
   function completedResult(request: CompanionTurnRequest, nodeId: string, turnId: string, messageId: string): TurnResult {
-    const { quietNote, quietEnd } = endCompanionHiddenTurn(turnId);
+    const { quietNote, quietEnd, headline } = endCompanionHiddenTurn(turnId);
     const status = deps.chatHub.requestedTurnStatus(turnId);
     if (status === 'error') return { outcome: { outcome: 'error', detail: turnError(turnId) || 'The runtime reported an error', turnId }, reply: null };
     if (status === 'cancelled') return { outcome: { outcome: 'preempted', detail: 'Stopped before it finished', turnId }, reply: null };
@@ -422,13 +425,14 @@ export function createCompanionTurnRunner(deps: CompanionTurnRunnerDeps): Compan
     const visible = stored ? visibleText(stored.content) : '';
     if (!visible || quietEnd) {
       const reason = quietNote ? `Quiet: ${quietNote}` : 'Nothing worth a message';
-      if (!visible) return { outcome: { outcome: 'quiet', detail: reason, turnId }, reply: null };
+      if (!visible) return { outcome: { outcome: 'quiet', detail: reason, turnId }, reply: null, headline };
       log.warn('chat', 'companion quiet check-in also wrote text; it is not posted', { runId: request.runId, kind: request.kind, chars: visible.length });
-      return { outcome: { outcome: 'quiet', detail: `${reason} · it also wrote: "${clipped(visible, STRAY_TEXT_CHARS)}"`, turnId }, reply: null };
+      return { outcome: { outcome: 'quiet', detail: `${reason} · it also wrote: "${clipped(visible, STRAY_TEXT_CHARS)}"`, turnId }, reply: null, headline };
     }
     return {
       outcome: { outcome: 'spoke', messageText: Array.from(visible).slice(0, MESSAGE_TEXT_CHARS).join(''), turnId },
       reply: visible,
+      headline,
       // Stored apart from the text once chatHub finalized it; still in it otherwise.
       followUps: stored!.followUps?.length ? stored!.followUps : extractTurnMetadata(stored!.content).followUps ?? [],
     };
@@ -478,7 +482,6 @@ export function createCompanionTurnRunner(deps: CompanionTurnRunnerDeps): Compan
       kind: request.kind,
       material: { ...request.material, cardResults },
       otherItems: otherItemsOf(request, briefs.flatMap((past) => past.cards.flatMap((card) => card.itemIds))),
-      heartbeatMinutes: settings.heartbeat.intervalMinutes,
       // §3.6: what the user and the agent said in V lately (their words and its replies only); conv-3: what Michi does not watch.
       recentConversation: recentConversationExcerpt(conversation.nodeId),
       offSources: companionSourcesOff(settings),
@@ -534,6 +537,20 @@ export function createCompanionTurnRunner(deps: CompanionTurnRunnerDeps): Compan
    * error run: COMPANION_WITHDRAWN_NOTE).
    */
   async function settle(request: CompanionTurnRequest, conversation: CompanionConversationRef, result: TurnResult, startedAt: number): Promise<CompanionTurnOutcome> {
+    const outcome = await settleOutcome(request, conversation, result, startedAt);
+    // Q45: a check-in that ran (spoke, quiet, or one the user's message superseded) leaves its line for Home; one
+    // that failed, was stopped or withdrawn leaves the last one standing.
+    if (result.headline && (outcome.outcome === 'spoke' || outcome.outcome === 'quiet' || outcome.outcome === 'superseded')) {
+      try {
+        setCompanionHeadline({ text: result.headline, at: clock.now(), kind: request.kind });
+      } catch (error) {
+        log.warn('chat', 'companion headline not saved', { runId: request.runId, error: message(error) });
+      }
+    }
+    return outcome;
+  }
+
+  async function settleOutcome(request: CompanionTurnRequest, conversation: CompanionConversationRef, result: TurnResult, startedAt: number): Promise<CompanionTurnOutcome> {
     if (result.outcome.outcome === 'skipped') return result.outcome;
     const withdrawn: CompanionTurnOutcome = { outcome: 'error', detail: COMPANION_WITHDRAWN_NOTE, turnId: result.outcome.turnId };
     let outcome: CompanionTurnOutcome = result.outcome;

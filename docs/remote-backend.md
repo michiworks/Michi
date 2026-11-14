@@ -1,6 +1,6 @@
 # Remote Michi backend
 
-Applies to: self-hosted remote backends connected to the desktop app; Unix shell examples and Linux systemd service steps. Source reviewed: October 16, 2026. This review does not certify a new live deployment or every operating system.
+Applies to: self-hosted remote backends connected to the desktop app; Unix shell examples and Linux systemd service steps. Source reviewed: November 12, 2026. This review does not certify a new live deployment or every operating system.
 
 Michi can keep its desktop UI on one machine while running agent sessions and
 filesystem tools on another. A workspace is permanently associated with one
@@ -16,8 +16,9 @@ npm run remote:launch
 
 This command:
 
-1. installs only the remote-safe backend/shared dependencies;
-2. builds the Backend;
+1. installs only the remote-safe `backend`, `shared`, `runtime` and `frontend`
+   workspaces (`npm run remote:setup`);
+2. builds the Backend and its Web UI;
 3. generates a strong token, or reuses the previously generated token;
 4. writes the configuration to `~/.michi/remote.env` with mode `0600`;
 5. starts the Backend as a detached background process;
@@ -29,7 +30,7 @@ The final output includes a copyable line:
 MICHI_REMOTE_TOKEN=...
 ```
 
-Paste that value into **Settings → Machines → Manual setup…** in the local Michi app.
+Paste that value into **Settings → Machines → Manual setup** in the local Michi app.
 
 To register Michi as a systemd user service instead of using a detached
 process:
@@ -57,7 +58,8 @@ npm run remote:service:remove
 
 These run against the checkout they are typed in, so after an update they must
 be run from the release that is serving. Each launch for the default data
-directory instead points `~/.local/bin/michi` at its build, and `michi`
+directory instead points `~/.local/bin/michi` at its build and
+`~/.local/share/michi/devdesktop/current` at its checkout, and `michi`
 always acts on the build that serves the data directory:
 
 ```bash
@@ -74,7 +76,11 @@ builds in a new directory under `~/.local/share/michi/devdesktop/releases/`
 while the current backend keeps running, stops that backend from its own
 checkout, starts the new build with the same data directory, port and token,
 restarts the old build if the new one does not start, and checks the running
-revision. It shares the desktop update's lock, so the two cannot run at once.
+revision. It then removes older releases and failed attempts, keeping the new
+build and the one it replaced for rollback. It also keeps any release that
+`~/.local/bin/michi`, `current` or a registered Kiro Crew App names, or that a
+running process uses. It shares the desktop update's lock, so the two cannot
+run at once.
 `MICHI_REMOTE_SOURCE_URL` and `MICHI_REMOTE_SOURCE_REF` select another source,
 and `--data-dir` another installation.
 
@@ -170,16 +176,19 @@ WantedBy=multi-user.target
 In **New workspace → machine → Connect remote SSH…**, enter an SSH alias
 such as `build+`, a hostname, or `user@hostname`, then choose **Connect**. Pasting
 `ssh build+` works too. The same flow is available in **Settings → Machines → Connect
-remote**. Manual SSH and Direct URL settings are under **Manual setup…**.
+remote**. Manual SSH and Direct URL settings are under **Manual setup**.
 
 If Michi is already healthy, the local gateway retrieves its connection token
 over SSH, verifies the forwarded API and saves the connection. A stopped existing
 installation is started using its saved data directory, token and port. If no
 usable build is found,
 **Install and connect** fetches source from the public Michi GitHub repository's
-`main` branch, installs only backend/shared dependencies, builds on the remote
-machine and starts the existing background launcher. It prepares Node.js 22
-when needed, with a checksum verified against the official Node distribution.
+`main` branch, installs only the remote-safe workspaces (`remote:setup`), builds
+on the remote machine and starts the existing background launcher. Node.js is
+chosen after the checkout, by that checkout's `engines.node` minimum; when the
+machine has none that qualifies, setup downloads the latest release of that
+major version (Node.js 22 today), with a checksum verified against the official
+Node distribution.
 Repeated connections reuse the installation; connecting does not upgrade it.
 
 ### Update a connected machine
@@ -195,7 +204,7 @@ health checks, independent of subsequent changes to their source checkout.
 
 Clicking update fetches the exact local build's commit from the gateway's trusted
 source repository/ref (the same overrides used for installation), installs only
-backend/shared dependencies, and builds in a fresh checkout under
+the remote-safe workspaces, and builds in a fresh checkout under
 `~/.local/share/michi/devdesktop/releases/`. That commit must already be published
 on the configured source branch. A local-only or unavailable commit produces a
 source error and leaves the running installation in place. Direct URL connections
@@ -207,7 +216,8 @@ The current service stays running until the build succeeds. Michi then switches
 the installation and restarts the remote service, interrupting running chats. It
 preserves the selected data directory, database, port and token. A failed build
 does not stop the existing service; a failed launch attempts to restore the old
-installation. Both checkouts are retained. Local source changes block the update,
+installation. The new build and the one it replaced are kept; older releases
+are then removed as `michi update` does. Local source changes block the update,
 and concurrent setup/recovery cannot switch the same installation. After startup,
 the local gateway checks the running service's revision before reporting success.
 
@@ -266,12 +276,19 @@ create the workspace. Paths are resolved on the remote machine, including
 symlinks and `~`. Existing remote workspaces are imported without reloading the
 app; late imports preserve newly created workspaces and current focus.
 
-**Settings → Machines** reads each machine's current workspace list from its
-remote backend whenever the pane opens. **Refresh workspaces** reads it again;
-the list and count are not inferred from locally hydrated workspaces or saved as
-a local inventory. While reading, the pane shows progress. A failed or timed-out
-read shows an error and **Retry workspaces**, without displaying a stale list or
-claiming the machine has zero workspaces. Each connection loads independently.
+**Settings → Machines** lists one row per machine: its address and workspace
+count, its status on the right (**Connected**, **Connecting**, **Offline**,
+**Connects when needed**, or **Direct URL**), and **Refresh workspaces**,
+**Edit** and **Remove** in its ⋯ menu. Choosing the count lists the
+workspaces under the row. The pane reads each machine's current workspace list
+from its remote backend whenever it opens; **Refresh workspaces** reads it
+again. The list and count are not inferred from locally hydrated workspaces or
+saved as a local inventory. While reading, the row shows **Reading
+workspaces…**. A machine Michi cannot reach says so in its row in one sentence
+(**Can't reach** or **Can't sign in to** the machine, with a likely cause when
+the log shows one), with **Retry**, **Edit** and the log behind **Show log**,
+without displaying a stale list or claiming the machine has zero workspaces.
+Each connection loads independently.
 This list refresh does not replace open conversations or drafts. Newly discovered
 workspaces are listed immediately; workspace links are available once that
 workspace has been loaded from the matching remote connection.
@@ -372,7 +389,7 @@ gateway environment variables, not renderer inputs.
 
 1. In Terminal on the desktop machine, run `ssh HOST` once. Complete any
    first-login authentication and accept the server host key.
-2. Open **Settings → Machines**, choose **Manual setup…**, and set
+2. Open **Settings → Machines**, choose **Manual setup**, and set
    **Connection type** to **SSH tunnel**.
 3. Enter the SSH host or `~/.ssh/config` alias. The SSH user and SSH port are
    optional; blank values use your SSH config/defaults.
@@ -404,11 +421,12 @@ private network, an HTTPS reverse proxy, or an approved tunnel service. Example
 URLs include `https://michi.example.com` and `http://100.64.0.10:3000`.
 
 The server must listen on the interface that URL reaches. Remote mode binds
-loopback by default, so set `MICHI_BIND_HOST` to that interface's address (for
-example the Tailscale address `100.64.0.10`), or use `remote:launch -- --public`
-to bind every interface. Prefer the specific address, and keep the port behind
-a firewall or private network. A reverse proxy on the same host can keep the
-loopback default.
+loopback by default. A reverse proxy on the same host can keep that default.
+Otherwise use `remote:launch -- --public` to bind every interface, and keep the
+port behind a firewall or private network. Setting `MICHI_BIND_HOST` to one
+non-loopback address instead (for example the Tailscale address `100.64.0.10`)
+serves the URL, but the backend can then no longer reach itself over loopback:
+its agents get no Michi tools, and phone access and page previews are off.
 
 Connection tokens and non-secret SSH connection settings are stored by the local bundled backend in
 `~/.michi/config.json` with file mode `0600`. They are not returned to the
@@ -426,8 +444,21 @@ proxy, which adds the token server-side.
   SSH tunnel processes. It does not send a cancel request and does not stop the
   remote backend. Reopening the app recreates tunnels on demand, loads the
   durable remote state, and reattaches to turns that are still running.
-- The native Terminal and raw folder browser remain local-only. In a remote
-  workspace, use agent shell tools and chat artifacts to work with server files.
+- A Terminal pane in a remote workspace runs its shell on the remote machine,
+  as the remote backend's user, starting in the workspace folder. The remote
+  needs a build with backend terminals and node-pty; otherwise New pane shows
+  Terminal as unavailable on that machine. See
+  [Phone terminals](mobile-access.md#phone-terminals) for how such shells are
+  shared and closed. The raw folder browser remains local-only; in a remote
+  workspace, use a terminal, agent shell tools and chat artifacts to work with
+  server files.
+- The command palette's message search asks this computer's backend and every
+  remote whose live data this window holds (not one shown from the local copy
+  or under recovery) and merges their hits, at most 30. A remote that fails or
+  has not answered within 5 seconds is left out without an error.
+- The Pages sidebar lists a remote workspace's pages, read and opened through
+  its connection. Its databases are not listed under Databases or All tasks,
+  and Pages upkeep runs only for this computer's workspaces.
 
 ### Background workspace recovery
 
@@ -436,11 +467,19 @@ cursors in memory. After metadata becomes available, the event feed resumes
 from those cursors; a replay gap uses an authoritative server snapshot. A single
 failed request is confirmed with a bounded health check before the connection
 is marked unavailable. Saved connection edits invalidate the old cache and
-pending responses, including token-only edits. A renderer reload still needs
-the remote to answer: remote conversation bodies are not stored in localStorage
-or copied into the Local database.
+pending responses, including token-only edits.
 
-Remote trees initially fetch the newest 50 messages per node. **Load older
+The app keeps a local copy of what each remote last answered: its workspace
+metadata, plus the first pages of the five remote threads read most recently.
+The copy lives in the app's browser storage (IndexedDB), per user and
+connection, not in localStorage or the Local database. When a window that was
+showing a remote workspace reloads, it shows that workspace from the copy
+before the remote answers. Until the remote's own metadata arrives, sends and
+other changes to it wait, for up to 10 seconds; that metadata then replaces the
+copy, keeping only what you changed in the meantime. A copy is dropped when its
+connection is edited or removed, and every copy is cleared on sign-out.
+
+Remote trees initially fetch the newest 15 messages per node. **Load older
 messages** reads the preceding page and keeps the reader's position. Sending,
 retrying, editing, digest generation and export fetch any required missing
 history before using it as full context. Older servers that do not support
@@ -478,6 +517,7 @@ processes remain entirely on the server.
 
 ## Phone access
 
-For an owner-authenticated HTTPS tunnel, QR pairing and the mobile pane switcher,
-see [Phone access](mobile-access.md) (`mobile-access`). The remote Web UI
-is included by `remote:setup`; the backend remains bound to loopback.
+For an owner-authenticated HTTPS tunnel, QR pairing, the mobile pane switcher
+and phone terminals, see [Phone access](mobile-access.md) (`mobile-access`).
+The remote Web UI is included by `remote:setup`; the backend remains bound to
+loopback.

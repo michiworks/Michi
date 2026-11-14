@@ -181,6 +181,7 @@ function ConnectionWorkspaces({ connectionId, workspaces, current, expanded, onT
     const tone: Tone = written ? 'calm' : 'pending';
     return (
       <WorkspaceRow key={key} workspace={workspace} connectionId={connectionId} spaces={own} tone={tone} open={expanded.has(key)} run={run}
+        proposals={home?.pendingProposals ?? 0}
         hidden={hidden} current={current} onToggle={() => onToggle(key)} onOpenWorkspace={onOpenWorkspace} onOpenPage={onOpenPage}
         onSetHidden={(next) => setHidden(workspace.id, next)} />
     );
@@ -207,7 +208,13 @@ function ConnectionWorkspaces({ connectionId, workspaces, current, expanded, onT
   </>;
 }
 
-function WorkspaceRow({ workspace, connectionId, spaces, tone, open, run, hidden, current, onToggle, onOpenWorkspace, onOpenPage, onSetHidden }: {
+/** Suggestions waiting for review on a page (Q20: the page itself and this count are where they show). */
+function ProposalCount({ count }: { count: number }) {
+  if (count <= 0) return null;
+  return <span className="area-side__count" aria-label={`${count} ${count === 1 ? 'suggestion' : 'suggestions'} to review`}>{count}</span>;
+}
+
+function WorkspaceRow({ workspace, connectionId, spaces, tone, open, run, proposals, hidden, current, onToggle, onOpenWorkspace, onOpenPage, onSetHidden }: {
   workspace: Project;
   connectionId: string;
   spaces: SpaceSummaryDto[];
@@ -215,6 +222,8 @@ function WorkspaceRow({ workspace, connectionId, spaces, tone, open, run, hidden
   open: boolean;
   /** The workspace home's first read, while the Meta agent writes it. */
   run: FirstRunProgressDto | null;
+  /** Suggestions waiting for review on the workspace home. */
+  proposals: number;
   /** Hidden from Spaces: listed only under the hidden row, with a way to show it again. */
   hidden: boolean;
   current: SpacesSidebarCurrent;
@@ -242,6 +251,7 @@ function WorkspaceRow({ workspace, connectionId, spaces, tone, open, run, hidden
         <span className="area-side__label">{workspace.name}</span>
         <WorkspaceFirstRunBadge run={run} />
       </button>
+      <ProposalCount count={proposals} />
       <RowKebab open={!!menu} onOpen={point => setMenu(open => open ? null : point)} ariaLabel={`Actions for ${workspace.name}`} />
     </div>
     <MenuPresence>{menu && <ContextMenu key={menuOpenKey(menu)} x={menu.x} y={menu.y} sections={sections} onClose={() => setMenu(null)} />}</MenuPresence>
@@ -293,6 +303,7 @@ function WorkspacePages({ workspaceId, connectionId, spaces, current, onOpenPage
             <FileText size={14} strokeWidth={1.5} aria-hidden="true" />
             <span className="area-side__label">{page.title || 'Untitled page'}</span>
           </button>
+          <ProposalCount count={page.pendingProposals} />
           <RowKebab open={menu?.page.id === page.id} onOpen={point => setMenu(open => open?.page.id === page.id ? null : { page, ...point })} ariaLabel={`Actions for ${page.title || 'Untitled page'}`} />
         </div>
         {(children.get(page.id) ?? []).filter((child) => !seen.has(child.id)).map((child) => row(child, depth + 1, nextSeen))}

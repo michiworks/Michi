@@ -1,5 +1,6 @@
 import express from 'express';
 import { getDb } from '../services/db';
+import { notTemporaryChatSql } from '../services/memory/temporaryChat';
 
 export interface SearchResult {
   id: string;
@@ -82,6 +83,59 @@ function sanitizeFtsQuery(raw: string): string {
     .join(' ');
 }
 
+// ── Substring matching for CJK queries ─────────────────────────────────────
+// messages_fts and nodes_fts use the unicode61 tokenizer, which splits only at
+// whitespace and punctuation: a run of Chinese or Japanese text is one token,
+// so "海报" never matches "两版海报都已更新" or the title "审阅海报改回三折页风格的建议".
+// A query containing CJK characters therefore matches substrings with LIKE
+// (every whitespace-separated term must occur), newest first. Other queries
+// keep FTS and its ranking.
+
+const CJK = /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}]/u;
+
+function usesSubstringMatch(query: string): boolean {
+  return CJK.test(query);
+}
+
+function queryTerms(query: string): string[] {
+  return query.split(/\s+/u).filter(Boolean);
+}
+
+/** LIKE pattern for a literal substring, with ESCAPE '\'. */
+function likePattern(term: string): string {
+  return `%${term.replace(/[\\%_]/g, (c) => `\\${c}`)}%`;
+}
+
+/** `column LIKE ? AND …` for every term; pushes the patterns onto params. */
+function substringClause(column: string, terms: string[], params: (string | number)[]): string {
+  params.push(...terms.map(likePattern));
+  return terms.map(() => `${column} LIKE ? ESCAPE '\\'`).join(' AND ');
+}
+
+const SNIPPET_BEFORE = 30;
+const SNIPPET_LENGTH = 120;
+
+/**
+ * The stretch of `content` around the first term it contains, with every term
+ * wrapped in <mark> like FTS5 snippet(): plain text, not HTML.
+ */
+function substringSnippet(content: string, terms: string[]): string {
+  const pattern = new RegExp(terms.map(escapeRegex).join('|'), 'giu');
+  const first = content.search(pattern);
+  let start = Math.max(0, (first === -1 ? 0 : first) - SNIPPET_BEFORE);
+  let end = Math.min(content.length, start + SNIPPET_LENGTH);
+  // Do not cut a surrogate pair in half.
+  if (start > 0 && isLowSurrogate(content.charCodeAt(start))) start -= 1;
+  if (end < content.length && isLowSurrogate(content.charCodeAt(end))) end += 1;
+  const window = content.slice(start, end).replace(/\s+/gu, ' ');
+  const marked = window.replace(pattern, (hit) => `<mark>${hit}</mark>`);
+  return `${start > 0 ? '…' : ''}${marked}${end < content.length ? '…' : ''}`;
+}
+
+function isLowSurrogate(code: number): boolean {
+  return code >= 0xdc00 && code <= 0xdfff;
+}
+
 /**
  * System workspaces (`settings.system`, e.g. the Michi assistant's hidden
  * one) are not search material: every search that names no workspace leaves
@@ -106,25 +160,42 @@ export interface KeywordSearchOptions {
   excludeNavigationDisabled?: boolean;
   /** Also search the threads of Scheduled-only jobs (an agent asked about such a job's results). */
   includeScheduledRuns?: boolean;
+  /** Leave out temporary chats (memory/temporaryChat.ts): an agent's search. The user's own search finds them. */
+  excludeTemporaryChats?: boolean;
 }
 
 const NAVIGATION_ALLOWED = "(CASE WHEN json_valid(w.settings) THEN json_type(w.settings, '$.aiGlobalContext') END) IS NOT 'false'";
 
 export function keywordSearch(query: string, workspaceId?: string, limit = 20, userId?: string, opts: KeywordSearchOptions = {}): SearchResult[] {
   const db = getDb();
-  const ftsQuery = sanitizeFtsQuery(query);
-  let sql = `
-    SELECT m.id, m.node_id, m.role, m.created_at,
-           snippet(messages_fts, 0, '<mark>', '</mark>', '…', 48) as snippet,
-           n.title as node_title, n.workspace_id, n.tree_id,
-           w.name as workspace_name
-    FROM messages_fts
-    JOIN messages m ON messages_fts.rowid = m.rowid
-    JOIN nodes n ON m.node_id = n.id
-    JOIN workspaces w ON n.workspace_id = w.id
-    WHERE messages_fts MATCH ?
-  `;
-  const params: (string | number)[] = [ftsQuery];
+  const substring = usesSubstringMatch(query);
+  const terms = queryTerms(query);
+  const params: (string | number)[] = [];
+  let sql: string;
+  if (substring) {
+    sql = `
+      SELECT m.id, m.node_id, m.role, m.created_at, m.content,
+             n.title as node_title, n.workspace_id, n.tree_id,
+             w.name as workspace_name
+      FROM messages m
+      JOIN nodes n ON m.node_id = n.id
+      JOIN workspaces w ON n.workspace_id = w.id
+      WHERE ${substringClause('m.content', terms, params)}
+    `;
+  } else {
+    sql = `
+      SELECT m.id, m.node_id, m.role, m.created_at,
+             snippet(messages_fts, 0, '<mark>', '</mark>', '…', 48) as snippet,
+             n.title as node_title, n.workspace_id, n.tree_id,
+             w.name as workspace_name
+      FROM messages_fts
+      JOIN messages m ON messages_fts.rowid = m.rowid
+      JOIN nodes n ON m.node_id = n.id
+      JOIN workspaces w ON n.workspace_id = w.id
+      WHERE messages_fts MATCH ?
+    `;
+    params.push(sanitizeFtsQuery(query));
+  }
   sql += workspaceScope(workspaceId, params);
   // In cloud mode, always scope FTS to the authenticated user's workspaces only.
   // There is no cross-user FTS path.
@@ -135,10 +206,14 @@ export function keywordSearch(query: string, workspaceId?: string, limit = 20, u
   if (opts.excludeDeletedWorkspaces) sql += ' AND w.deleted_at IS NULL';
   if (opts.excludeNavigationDisabled) sql += ` AND ${NAVIGATION_ALLOWED}`;
   if (!opts.includeScheduledRuns) sql += ' AND n.scheduled_only_job_id IS NULL';
+  if (opts.excludeTemporaryChats) sql += ` AND ${notTemporaryChatSql('n')}`;
   sql += ' AND n.page_id IS NULL';
-  sql += ' AND n.deleted_at IS NULL AND n.page_id IS NULL AND n.maintenance_job_id IS NULL AND n.kind != \'digest\' ORDER BY rank LIMIT ?';
+  sql += ' AND n.deleted_at IS NULL AND n.page_id IS NULL AND n.maintenance_job_id IS NULL AND n.kind != \'digest\'';
+  sql += substring ? ' ORDER BY m.created_at DESC LIMIT ?' : ' ORDER BY rank LIMIT ?';
   params.push(limit);
-  return db.prepare(sql).all(...params) as unknown as SearchResult[];
+  if (!substring) return db.prepare(sql).all(...params) as unknown as SearchResult[];
+  const rows = db.prepare(sql).all(...params) as unknown as Array<Omit<SearchResult, 'snippet'> & { content: string }>;
+  return rows.map(({ content, ...row }) => ({ ...row, snippet: substringSnippet(content, terms) }));
 }
 
 // ── Node-grouped search ────────────────────────────────────────────────────
@@ -165,6 +240,123 @@ export function nodeGroupedSearch(
   userId?: string,
 ): NodeGroupedResult[] {
   const db = getDb();
+  const rows = usesSubstringMatch(query)
+    ? substringGroupedRows(db, queryTerms(query), workspaceId, limit, userId)
+    : ftsGroupedRows(db, query, workspaceId, limit, userId);
+
+  // Group flat rows into NodeGroupedResult entries.
+  const nodeMap = new Map<string, NodeGroupedResult>();
+  const nodeOrder: string[] = [];
+  for (const row of rows) {
+    let entry = nodeMap.get(row.node_id);
+    if (!entry) {
+      entry = {
+        nodeId: row.node_id,
+        nodeTitle: row.node_title,
+        workspaceId: row.workspace_id,
+        workspaceName: row.workspace_name,
+        treeId: row.tree_id,
+        lastMessageAt: row.last_message_at,
+        totalMatches: row.total_matches,
+        breadcrumb: [],
+        snippets: [],
+      };
+      nodeMap.set(row.node_id, entry);
+      nodeOrder.push(row.node_id);
+    }
+    entry.snippets.push({
+      messageId: row.message_id,
+      role: row.role === 'assistant' ? 'assistant' : 'user',
+      snippet: row.snippet,
+    });
+  }
+
+  // ── Title-match pass ─────────────────────────────────────────────────────
+  // Find nodes whose title contains the query tokens but whose messages
+  // did NOT match the FTS query above.  This catches the common case where
+  // a user searches for words that appear only in the thread title.
+  if (nodeMap.size < limit) {
+    const titleResults = searchNodesByTitle(db, query, workspaceId, userId, limit - nodeMap.size, nodeMap);
+    for (const entry of titleResults) {
+      if (!nodeMap.has(entry.nodeId)) {
+        nodeMap.set(entry.nodeId, entry);
+        nodeOrder.push(entry.nodeId);
+      }
+    }
+  }
+
+  // Build breadcrumbs by walking parent_node_id up to root for each node.
+  const results = nodeOrder.map((id) => nodeMap.get(id)!);
+  if (results.length > 0) {
+    buildBreadcrumbs(db, results);
+  }
+  return results;
+}
+
+/**
+ * Substring counterpart of ftsGroupedRows for CJK queries: the same filters,
+ * matching nodes newest first, and each node's three newest matching messages.
+ */
+function substringGroupedRows(
+  db: ReturnType<typeof getDb>,
+  terms: string[],
+  workspaceId: string | undefined,
+  limit: number,
+  userId: string | undefined,
+): RawGroupedRow[] {
+  const params: (string | number)[] = [];
+  let sql = `
+    WITH hits AS (
+      SELECT m.id, m.node_id, m.role, m.created_at, m.content
+      FROM messages m
+      JOIN nodes n ON m.node_id = n.id
+      JOIN workspaces w ON n.workspace_id = w.id
+      WHERE ${substringClause('m.content', terms, params)}
+        AND n.deleted_at IS NULL AND n.page_id IS NULL AND n.maintenance_job_id IS NULL AND n.scheduled_only_job_id IS NULL AND n.kind != 'digest'
+  `;
+  sql += workspaceScope(workspaceId, params);
+  if (process.env.MICHI_CLOUD === '1' && userId) {
+    sql += ' AND w.owner_user_id = ?';
+    params.push(userId);
+  }
+  sql += `
+    ),
+    node_matches AS (
+      SELECT node_id, MAX(created_at) AS last_message_at, COUNT(*) AS total_matches
+      FROM hits
+      GROUP BY node_id
+      ORDER BY last_message_at DESC
+      LIMIT ?
+    ),
+    ranked AS (
+      SELECT h.id, h.node_id, h.role, h.content,
+             ROW_NUMBER() OVER (PARTITION BY h.node_id ORDER BY h.created_at DESC) AS rn
+      FROM hits h
+      WHERE h.node_id IN (SELECT node_id FROM node_matches)
+    )
+    SELECT r.node_id, r.id AS message_id, r.role, r.content,
+           nm.last_message_at, nm.total_matches,
+           n.title AS node_title, n.workspace_id, n.tree_id,
+           w.name AS workspace_name
+    FROM ranked r
+    JOIN node_matches nm ON r.node_id = nm.node_id
+    JOIN nodes n ON r.node_id = n.id
+    JOIN workspaces w ON n.workspace_id = w.id
+    WHERE r.rn <= 3
+    ORDER BY nm.last_message_at DESC, r.node_id, r.rn
+  `;
+  params.push(limit);
+  const rows = db.prepare(sql).all(...params) as unknown as Array<Omit<RawGroupedRow, 'snippet'> & { content: string }>;
+  return rows.map(({ content, ...row }) => ({ ...row, snippet: substringSnippet(content, terms) }));
+}
+
+function ftsGroupedRows(
+  db: ReturnType<typeof getDb>,
+  query: string,
+  workspaceId: string | undefined,
+  limit: number,
+  userId: string | undefined,
+): RawGroupedRow[] {
   const ftsQuery = sanitizeFtsQuery(query);
 
   // Two-layer CTE:
@@ -218,55 +410,7 @@ export function nodeGroupedSearch(
   params.push(ftsQuery);
   params.push(ftsQuery); // outer SELECT MATCH for snippet() highlighting
 
-  const rows = db.prepare(sql).all(...params) as unknown as RawGroupedRow[];
-
-  // Group flat rows into NodeGroupedResult entries.
-  const nodeMap = new Map<string, NodeGroupedResult>();
-  const nodeOrder: string[] = [];
-  for (const row of rows) {
-    let entry = nodeMap.get(row.node_id);
-    if (!entry) {
-      entry = {
-        nodeId: row.node_id,
-        nodeTitle: row.node_title,
-        workspaceId: row.workspace_id,
-        workspaceName: row.workspace_name,
-        treeId: row.tree_id,
-        lastMessageAt: row.last_message_at,
-        totalMatches: row.total_matches,
-        breadcrumb: [],
-        snippets: [],
-      };
-      nodeMap.set(row.node_id, entry);
-      nodeOrder.push(row.node_id);
-    }
-    entry.snippets.push({
-      messageId: row.message_id,
-      role: row.role === 'assistant' ? 'assistant' : 'user',
-      snippet: row.snippet,
-    });
-  }
-
-  // ── Title-match pass ─────────────────────────────────────────────────────
-  // Find nodes whose title contains the query tokens but whose messages
-  // did NOT match the FTS query above.  This catches the common case where
-  // a user searches for words that appear only in the thread title.
-  if (nodeMap.size < limit) {
-    const titleResults = searchNodesByTitle(db, query, workspaceId, userId, limit - nodeMap.size, nodeMap);
-    for (const entry of titleResults) {
-      if (!nodeMap.has(entry.nodeId)) {
-        nodeMap.set(entry.nodeId, entry);
-        nodeOrder.push(entry.nodeId);
-      }
-    }
-  }
-
-  // Build breadcrumbs by walking parent_node_id up to root for each node.
-  const results = nodeOrder.map((id) => nodeMap.get(id)!);
-  if (results.length > 0) {
-    buildBreadcrumbs(db, results);
-  }
-  return results;
+  return db.prepare(sql).all(...params) as unknown as RawGroupedRow[];
 }
 
 /**
@@ -328,6 +472,10 @@ function searchNodesByTitle(
   existingNodes: Map<string, NodeGroupedResult>,
 ): NodeGroupedResult[] {
   if (limit <= 0) return [];
+  // unicode61 indexes a CJK title as one token: match its substrings instead.
+  if (usesSubstringMatch(rawQuery)) {
+    return searchNodesByTitleLike(db, rawQuery, workspaceId, userId, limit, existingNodes);
+  }
 
   const ftsQuery = sanitizeFtsQuery(rawQuery);
   if (!ftsQuery) return [];
@@ -436,8 +584,8 @@ function searchNodesByTitleLike(
   if (tokens.length === 0 || limit <= 0) return [];
 
   // Build LIKE clauses — every token must appear in the title.
-  const likeClauses = tokens.map(() => 'n.title LIKE ?');
-  const likeParams = tokens.map((t) => `%${t}%`);
+  const likeParams: (string | number)[] = [];
+  const likeClause = substringClause('n.title', tokens, likeParams);
 
   // Exclude node IDs already covered by FTS results.
   const excludeIds = [...existingNodes.keys()];
@@ -455,7 +603,7 @@ function searchNodesByTitleLike(
     WHERE n.deleted_at IS NULL AND n.page_id IS NULL AND n.maintenance_job_id IS NULL AND n.scheduled_only_job_id IS NULL AND n.kind != 'digest'
       AND n.purged_at IS NULL AND w.purged_at IS NULL
       AND n.title IS NOT NULL AND TRIM(n.title) != ''
-      AND ${likeClauses.join(' AND ')}
+      AND ${likeClause}
   `;
   const params: (string | number)[] = [...likeParams];
 
@@ -521,7 +669,7 @@ function escapeRegex(s: string): string {
 function semanticSearch(query: string, workspaceId?: string, limit = 20, userId?: string): SearchResult[] {
   const db = getDb();
   const tokens = query.split(/\s+/).filter(t => t.length > 1);
-  if (tokens.length === 0) return keywordSearch(query, workspaceId, limit, userId);
+  if (tokens.length === 0 || usesSubstringMatch(query)) return keywordSearch(query, workspaceId, limit, userId);
 
   const ftsQuery = tokens.map(t => `"${t.replace(/"/g, '""')}"`).join(' OR ');
   const candidateLimit = limit * 3;

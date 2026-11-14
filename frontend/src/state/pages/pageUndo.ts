@@ -1,3 +1,4 @@
+import type { PageEditOp } from 'michi-shared';
 import { revertPageBatch } from '../../services/api/pages';
 import { notifyPageChanged, type PageEventIdentity } from './pageEvents';
 
@@ -37,4 +38,34 @@ export function batchOutcomeNotice(outcome: BatchOutcome, verb: 'undone' | 'rest
   if (outcome.conflicts === 0) return null;
   if (outcome.done > 0) return `Not all of it was ${verb}: some of it changed again since.`;
   return `Not ${verb}: it changed again since.${hint ? ` ${hint}` : ''}`;
+}
+
+const PAGE_OP_LABEL: Record<PageEditOp['op'], string> = {
+  insert: 'Added a block',
+  update: 'Edited a block',
+  delete: 'Deleted a block',
+  move: 'Moved a block',
+  release: 'Changed a block',
+};
+
+/** What a user's page edit did, for its undo entry: `Edited a block in “Plan”`. */
+export function pageEditLabel(ops: readonly PageEditOp[], pageTitle?: string): string {
+  const kinds = new Set(ops.map((op) => op.op));
+  const [only] = kinds;
+  const what = kinds.size === 1 && ops.length === 1 ? PAGE_OP_LABEL[only] : 'Changed blocks';
+  const title = pageTitle?.trim();
+  return title ? `${what} in “${title}”` : what;
+}
+
+/** The batch ids a user write made, each once. */
+export function writtenBatchIds(changes: { applied?: ReadonlyArray<{ batchId?: string | null }> } | null | undefined): string[] {
+  return [...new Set((changes?.applied ?? []).flatMap((change) => change.batchId ? [change.batchId] : []))];
+}
+
+/**
+ * The undo-history reversal of a user write (state/undoStack.ts): its
+ * batches put back, or the notice for what changed again since and stayed.
+ */
+export function undoPageBatches(backendConnectionId: string, batches: readonly PageBatchToUndo[], hint?: string): () => Promise<true | string> {
+  return async () => batchOutcomeNotice(await revertPageBatches(backendConnectionId, batches), 'undone', hint) ?? true;
 }

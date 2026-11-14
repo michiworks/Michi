@@ -488,19 +488,48 @@ describe('permissions', () => {
     expectDelegation(t, permissionPolicy, 'permissionOwnerUserId', () => permissions.resolveOwnerUserId(chat, null), [chat, null]);
   });
 
-  it('decide → permissionPolicy.resolveChatPolicy', (t) => {
+  it('decide → permissionPolicy.resolveChatPolicy, with the call\'s detail last (none: {})', (t) => {
     expectDelegation(t, permissionPolicy, 'resolveChatPolicy',
       () => permissions.decide({ owner: chat, ownerUserId: 'u1', toolName: 'bash', nativeRequest: true, mode: 'trust' }),
-      [chat, 'u1', 'bash', true, 'trust', undefined]);
+      [chat, 'u1', 'bash', true, 'trust', undefined, {}]);
     t.mock.restoreAll();
     expectDelegation(t, permissionPolicy, 'resolveChatPolicy',
       () => permissions.decide({ owner: chat, ownerUserId: null, toolName: 'Read' }),
-      [chat, null, 'Read', undefined, undefined, undefined]);
+      [chat, null, 'Read', undefined, undefined, undefined, {}]);
     t.mock.restoreAll();
     // Claude's mark that a bare name is a tool of Michi's own server.
     expectDelegation(t, permissionPolicy, 'resolveChatPolicy',
       () => permissions.decide({ owner: chat, ownerUserId: null, toolName: 'delete_artifact', nativeRequest: true, hostTool: true }),
-      [chat, null, 'delete_artifact', true, undefined, true]);
+      [chat, null, 'delete_artifact', true, undefined, true, {}]);
+    t.mock.restoreAll();
+    // D19: what the call carries (its arguments, ACP kind, MCP annotations) reaches the policy as the runtime sent it.
+    const call = { input: { command: 'git push origin HEAD' }, kind: 'execute', annotations: { readOnlyHint: false } };
+    expectDelegation(t, permissionPolicy, 'resolveChatPolicy',
+      () => permissions.decide({ owner: chat, ownerUserId: 'u1', toolName: 'execute_bash', nativeRequest: true, mode: 'yolo', call }),
+      [chat, 'u1', 'execute_bash', true, 'yolo', undefined, call]);
+  });
+
+  it('forced → permissionPolicy.forcedChatDecision, its reason only (D19)', (t) => {
+    const call = { input: { command: 'git push' } };
+    const forced = t.mock.method(permissionPolicy, 'forcedChatDecision',
+      () => ({ decision: 'ask' as const, reason: 'Leaves this machine.', verdict: { consequence: 'egress' as const } }));
+    assert.deepEqual(permissions.forced!({ owner: chat, ownerUserId: 'u1', toolName: 'Bash', nativeRequest: true, hostTool: false, call }),
+      { reason: 'Leaves this machine.' });
+    assert.deepEqual(forced.mock.calls[0].arguments, [chat, 'Bash', call, true, false]);
+    forced.mock.mockImplementation(() => null);
+    assert.equal(permissions.forced!({ owner: chat, ownerUserId: null, toolName: 'Read' }), null);
+    assert.deepEqual(forced.mock.calls[1].arguments, [chat, 'Read', {}, false, false]);
+  });
+
+  it('turnGuard → permissionPolicy.chatTurnGuard: none, egress, or work for Michi\'s own', (t) => {
+    const guard = (michiDriven: boolean) => ({ michiDriven, outsideContent: true, outsideSourced: false, background: false });
+    const read = t.mock.method(permissionPolicy, 'chatTurnGuard', () => null);
+    assert.equal(permissions.turnGuard!(chat, 'u1'), 'none');
+    read.mock.mockImplementation(() => guard(false));
+    assert.equal(permissions.turnGuard!(chat, 'u1'), 'egress');
+    read.mock.mockImplementation(() => guard(true));
+    assert.equal(permissions.turnGuard!(chat, 'u1'), 'work');
+    assert.deepEqual(read.mock.calls[0].arguments, [chat]);
   });
 
   it('grant → permissionPolicy.grantChatPermission', (t) => {

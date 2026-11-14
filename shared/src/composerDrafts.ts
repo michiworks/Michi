@@ -37,25 +37,11 @@ export function mergeLegacyComposerDraft(raw: string | null | undefined, draft: 
 }
 
 /**
- * The agent-spawn outbox: a child thread's first prompt, kept in its
- * composer_draft until the child's turn starts, so hydration can restart it.
+ * Drops a legacy agent-spawn outbox (a child's first prompt, which windows
+ * once sent themselves), blank included, and keeps window drafts; undefined
+ * when there is no outbox. The backend starts a spawned child's first turn
+ * now, so only rows written before that carry one.
  */
-export function spawnOutboxComposerDraft(prompt: string): string {
-  return JSON.stringify({ [PENDING_SPAWN_PROMPT]: prompt });
-}
-
-/** The outbox prompt a stored draft carries; a blank prompt is no outbox. */
-export function readPendingSpawnPrompt(raw: unknown): string | undefined {
-  if (typeof raw !== 'string' || !raw.includes(PENDING_SPAWN_PROMPT)) return undefined;
-  const prompt = parseObject(raw)[PENDING_SPAWN_PROMPT];
-  return typeof prompt === 'string' && prompt.trim().length > 0 ? prompt : undefined;
-}
-
-export function composerDraftHasPendingSpawnPrompt(raw: unknown): boolean {
-  return readPendingSpawnPrompt(raw) !== undefined;
-}
-
-/** Drops the outbox, blank included, and keeps window drafts; undefined when there is no outbox. */
 export function clearSpawnPromptFromComposerDraft(raw: string): string | null | undefined {
   const current = parseObject(raw);
   if (typeof current[PENDING_SPAWN_PROMPT] !== 'string') return undefined;

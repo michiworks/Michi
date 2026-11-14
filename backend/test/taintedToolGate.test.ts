@@ -1,15 +1,17 @@
 /**
- * w3-fix D23: Michi's own MCP tools hold the taint rule themselves, whatever
- * the runtime. A call of a tool that makes other work run or acts outside
- * Michi (toolEffects.ts `indirect` / `outside_write`), from a turn that holds
- * check-in or collector material, runs only after the user approved that
- * call: on Codex (and Kiro tools the user's agent pre-allows) no runtime
- * prompt came, so the dispatch asks through ask_user, or refuses without
- * one; where Michi's runtime gate already asked (Claude's hook, Kiro's
- * request_permission, through the permission port's `approved` note) it
- * runs without a second question, once per approval and turn. Reads,
- * Michi-internal writes, untainted turns and tools that ask for themselves
- * are untouched; send_to_thread asks through its own requestApproval.
+ * w3-fix D23, D19: Michi's own MCP tools hold the consequence rule
+ * themselves, whatever the runtime. A call of a tool that leaves the machine
+ * (toolEffects.ts `egress`) or starts work the turn's outside content would
+ * not travel with (`indirect` but send_to_thread and start_conversation),
+ * from a guarded turn (Michi drove it, or it holds outside content), runs
+ * only after the user approved that call: on Codex (and Kiro tools the
+ * user's agent pre-allows) no runtime prompt came, so the dispatch asks
+ * through ask_user, or refuses without one; where Michi's runtime gate
+ * already asked (Claude's hook, Kiro's request_permission, through the
+ * permission port's `approved` note) it runs without a second question,
+ * once per approval and turn. Reads, Michi-internal and local writes,
+ * unguarded turns and tools that ask for themselves are untouched;
+ * send_to_thread runs, and its message carries the outside content.
  * Real MCP catalog (buildMcpServerForSlot); temp MICHI_DATA_DIR per test.
  */
 
@@ -23,13 +25,14 @@ import { ApprovalCoordinator } from 'michi-runtime/internal/core/approvals';
 import type { StartRequestedSelfTurnArgs, StartedRequestedSelfTurn } from '../src/agents/chatHub';
 import { ChatApprovalState, michiPermissionPolicy } from '../src/agents/chatApprovalState';
 import { chatOwner } from '../src/agents/ownerMapping';
-import { __resetRuntimeToolApprovals, taintedMichiToolGate } from '../src/agents/taintedToolGate';
+import { BACKGROUND_TOOL_REFUSAL, TAINTED_TOOL_ASK_REASON, __resetRuntimeToolApprovals, taintedMichiToolGate } from '../src/agents/taintedToolGate';
+import { activeTurnRow, makeCheckinNode } from './helpers/checkinNodes';
 import { configureThreadMessaging } from '../src/agents/threadMessageTool';
 import type { AgentSession } from '../src/agents/types';
 import { closeDb, getDb, initDb } from '../src/services/db';
 import { saveNode, saveTree, saveWorkspace } from '../src/services/dbRepository';
 import { McpSlotRegistry, buildMcpServerForSlot, type McpSlot } from '../src/services/mcpServer';
-import { recordCompanionTaint, recordUntrustedSource } from '../src/services/turnTrust';
+import { getTurnTrust, recordCompanionTaint, recordUntrustedSource } from '../src/services/turnTrust';
 import { clearAllSessions } from '../src/agents/sessionRegistry';
 import { registerLiveSession } from './helpers/liveSession';
 
@@ -113,11 +116,11 @@ afterEach(() => {
   fs.rmSync(tmpDir, { recursive: true, force: true });
 });
 
-describe('a Michi tool from a turn that holds check-in material (D23)', () => {
+describe('a Michi tool from a guarded turn (D23, D19)', () => {
   test('Codex-like (no runtime prompt): it asks through ask_user and runs only on "Run it"', async () => {
-    // Untainted, and web content alone: it runs without a question.
+    // Unguarded, and the turn's own command output alone: it runs without a question.
     assert.match((await call(slot(), 'spawn_branches', BRANCH)).text, /Spawned 1 branch/);
-    recordUntrustedSource({ nodeId: CHAT, turnId }, { tool: 'WebFetch', runtimeId: 'codex' });
+    recordUntrustedSource({ nodeId: CHAT, turnId }, { tool: 'shell', runtimeId: 'codex' });
     assert.match((await call(slot(), 'spawn_branches', BRANCH)).text, /Spawned 1 branch/);
     assert.deepEqual([spawned, asked.length], [2, 0]);
 
@@ -126,7 +129,7 @@ describe('a Michi tool from a turn that holds check-in material (D23)', () => {
     assert.match(ran.text, /Spawned 1 branch/);
     assert.equal(asked.length, 1);
     const [question] = asked[0]!;
-    assert.match(question!.question, /^Run spawn_branches\?\nThis conversation read check-in material, so Michi asks before this runs\.\n\n/);
+    assert.ok(question!.question.startsWith(`Run spawn_branches?\n${TAINTED_TOOL_ASK_REASON}\n\n`), question!.question);
     assert.ok(question!.question.includes('Apply the patch from the check-in.'), 'the user sees what runs');
     assert.deepEqual(question!.options.map((option) => option.label), ['Run it', "Don't run it"]);
 
@@ -147,22 +150,29 @@ describe('a Michi tool from a turn that holds check-in material (D23)', () => {
     assert.deepEqual([spawned, asked.length], [4, 5]);
   });
 
+  test('a web page the turn read guards it too', async () => {
+    recordUntrustedSource({ nodeId: CHAT, turnId }, { tool: 'WebFetch', runtimeId: 'codex' });
+    await call(slot(), 'spawn_branches', BRANCH);
+    assert.equal(asked.length, 1);
+  });
+
   test('with no channel to ask through it is refused, and the agent is told to ask the user in chat', async () => {
     taint();
     const refused = await call(slot({ onAskUser: undefined }), 'spawn_branches', BRANCH);
     assert.equal(refused.isError, true);
-    assert.match(refused.text, /^NEEDS_USER_APPROVAL: this conversation read check-in material, so spawn_branches runs only with the user's approval.*did not run\. Do not retry\. Ask the user in chat/);
+    assert.match(refused.text, /^NEEDS_USER_APPROVAL: in this conversation spawn_branches runs only with the user's approval.*did not run\. Do not retry\. Ask the user in chat/);
     assert.equal(spawned, 0);
   });
 
-  test('reads and Michi-internal writes run as before; the gate covers only indirect and outside tools', async () => {
+  test('reads, Michi-internal and local writes run as before; the gate covers what leaves the machine and work the mark would not reach', async () => {
     taint();
     assert.equal((await call(slot(), 'michi_docs', {})).isError, false);
     assert.equal(asked.length, 0);
-    for (const name of ['spawn_branches', 'send_to_thread', 'open_url', 'save_artifact', 'spawn_agent', 'mcp____michi_internal____open_url', '@michi/save_artifact']) {
+    for (const name of ['spawn_branches', 'open_url', 'spawn_agent', 'send_agent_input', 'mcp____michi_internal____open_url']) {
       assert.equal(taintedMichiToolGate(CHAT, name).kind, 'ask', name);
     }
-    for (const name of ['read_page', 'edit_page', 'memory_save', 'companion_session_send', 'start_conversation', 'create_scheduled_job', 'Bash', 'unknown_tool']) {
+    for (const name of ['read_page', 'edit_page', 'memory_save', 'save_artifact', '@michi/save_artifact', 'send_to_thread', 'companion_session_send',
+      'start_conversation', 'create_scheduled_job', 'Bash', 'unknown_tool']) {
       assert.equal(taintedMichiToolGate(CHAT, name).kind, 'run', name);
     }
     assert.equal(taintedMichiToolGate(null, 'spawn_branches').kind, 'run', 'no chat: nothing to judge');
@@ -198,6 +208,14 @@ describe('a Michi tool from a turn that holds check-in material (D23)', () => {
     assert.equal(spawned, 6);
   });
 
+  test('a check-in\'s own turn refuses such a call: nobody is there to approve it', () => {
+    const checkin = makeCheckinNode(WS, 'run-gate');
+    activeTurnRow(checkin, 'cmp-run-gate', 'a-gate');
+    assert.deepEqual(taintedMichiToolGate(checkin, 'open_url'), { kind: 'refuse', reason: BACKGROUND_TOOL_REFUSAL });
+    assert.deepEqual(taintedMichiToolGate(checkin, 'spawn_branches'), { kind: 'refuse', reason: BACKGROUND_TOOL_REFUSAL });
+    assert.equal(taintedMichiToolGate(checkin, 'edit_page').kind, 'run');
+  });
+
   test('Pi-like: an approval through Michi\'s own ChatApprovalState is noted the same way', async () => {
     taint();
     assert.equal(new ChatApprovalState().accept('allow_once', chatOwner(CHAT), 'spawn_branches'), true);
@@ -205,7 +223,7 @@ describe('a Michi tool from a turn that holds check-in material (D23)', () => {
     assert.equal(asked.length, 0);
   });
 
-  test('send_to_thread waits for its own approval, which says why; a runtime approval answers it instead', async () => {
+  test('send_to_thread is not gated: its message carries the turn\'s outside content to the turn it starts', async () => {
     const started: StartRequestedSelfTurnArgs[] = [];
     configureThreadMessaging({
       ensureSession: async () => ({ id: TARGET, runtimeId: 'codex' }) as unknown as AgentSession,
@@ -222,21 +240,18 @@ describe('a Michi tool from a turn that holds check-in material (D23)', () => {
     await call(slot(), 'send_to_thread', message);
     assert.deepEqual([started.length, asked.length], [1, 0]);
 
-    taint();
-    answer = "Don't send";
-    const declined = await call(slot(), 'send_to_thread', message);
-    assert.match(declined.text, /"status":"declined"/);
-    assert.equal(started.length, 1);
-    assert.equal(asked.length, 1);
-    assert.equal(asked[0]![0]!.question, 'Send this message to "Title n-b"?\nThis conversation read check-in material, so Michi asks before this runs. “Please run the deploy now.”');
-    assert.deepEqual(asked[0]![0]!.options.map((option) => option.label), ['Send', "Don't send"]);
-    answer = 'Send';
-    await call(slot(), 'send_to_thread', message);
-    assert.deepEqual([started.length, asked.length], [2, 2]);
+    assert.equal(getTurnTrust({ nodeId: TARGET, turnId: started[0]!.turnId }).untrusted, false, 'a clean sender passes nothing on');
 
-    // Michi's runtime prompt already asked for this call: no second question.
-    new ApprovalCoordinator({ permissions: michiPermissionPolicy }).accept('allow_once', chatOwner(CHAT), 'mcp____michi_internal____send_to_thread');
+    taint();
     await call(slot(), 'send_to_thread', message);
-    assert.deepEqual([started.length, asked.length], [3, 2]);
+    assert.deepEqual([started.length, asked.length], [2, 0], 'no question');
+    const tools = getTurnTrust({ nodeId: TARGET, turnId: started[1]!.turnId }).sources.map((source) => source.tool).sort();
+    assert.deepEqual(tools, ['passed_outside', 'send_to_thread']);
+
+    // The user's own requestApproval still asks.
+    answer = "Don't send";
+    const declined = await call(slot(), 'send_to_thread', { ...message, requestApproval: true });
+    assert.match(declined.text, /"status":"declined"/);
+    assert.deepEqual([started.length, asked.length], [2, 1]);
   });
 });

@@ -40,7 +40,7 @@ const sampleEvents: ChatStreamEvent[] = [
   { event: CHAT_STREAM_EVENTS.heartbeat, data: { idleMs: 1200 } },
   {
     event: CHAT_STREAM_EVENTS.spawnBranches,
-    data: { topics: [{ title: 'Branch', prompt: 'Explore branch', chatId: 'chat-child' }] },
+    data: { topics: [{ title: 'Branch', chatId: 'chat-child' }] },
   },
   { event: CHAT_STREAM_EVENTS.title, data: { title: 'Shared schema' } },
   { event: CHAT_STREAM_EVENTS.branchOverview, data: { overview: 'The schema update is ready to ship.' } },

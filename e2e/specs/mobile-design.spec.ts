@@ -162,16 +162,17 @@ test('resizing to desktop restores its original design without losing the draft'
   await boot(page);
   const editor = page.getByRole('textbox', { name: 'Message' });
   await editor.fill('Keep this draft through resize');
-  await expect(page.locator('.home-default-headline')).toBeVisible();
+  await expect(page.locator('.home-greeting__text')).toBeVisible();
   await page.setViewportSize({ width: 1280, height: 900 });
-  await expect(page.locator('.home-default-headline')).toBeVisible();
-  await expect(page.locator('.home-page h1')).toHaveText('_ Another road diverged in a yellow wood.');
+  await expect(page.locator('.home-greeting__text')).toBeVisible();
+  await expect(page.locator('.home-page h1')).toHaveText(/^_ Good (morning|afternoon|evening)$/);
+  await expect(page.getByRole('region', { name: 'Jump back in' }).getByTestId('home-recent')).toHaveText(/A quieter way to work/);
   await expect(editor).toHaveText('Keep this draft through resize');
   await expect(page.locator('.terminal-composer__input')).toHaveCSS('padding', '10px 12px 4px');
   await expect(page.locator('.terminal-composer__toolbar')).toHaveCSS('padding', '4px 10px 8px');
   await expect(page.locator('.mention-editor-placeholder')).toBeHidden();
   await page.setViewportSize({ width: 390, height: 844 });
-  await expect(page.locator('.home-default-headline')).toBeVisible();
+  await expect(page.locator('.home-greeting__text')).toBeVisible();
   await expect(editor).toHaveText('Keep this draft through resize');
 });
 
@@ -181,7 +182,7 @@ for (const palette of ['bone', 'monokai']) {
     const page = await context.newPage();
     try {
       await boot(page, palette, true);
-      await expect(page.locator('.home-default-headline')).toHaveCSS('animation-name', 'none');
+      await expect(page.locator('.home-greeting__text')).toHaveCSS('animation-name', 'none');
       const composer = page.locator('.home-compose .terminal-composer');
       const bounds = (await composer.boundingBox())!;
       for (const control of await composer.locator('.t-toolbar-chip, .t-action-btn').all()) {

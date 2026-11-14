@@ -6,6 +6,7 @@
 import { fireEvent, render, screen, within } from '@testing-library/react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import CommandPalette from './CommandPalette';
+import { paletteRow } from '../../test/paletteRow';
 
 const store = vi.hoisted(() => {
   const tree = (id: string, rootNodeId: string, lastActiveAt: number, extra: Record<string, unknown> = {}) =>
@@ -159,6 +160,19 @@ describe('CommandPalette — Recent', () => {
     render(<CommandPalette activePage="home" setPage={vi.fn()} onClose={vi.fn()} />);
     fireEvent.change(input(), { target: { value: 'Small' } });
     expect(screen.queryByRole('list', { name: 'Recent' })).toBeNull();
-    expect(screen.getByText('Small talk · Michi')).toBeTruthy();
+    // Shaped as its Recent row was: the name, then its workspace at the row's end.
+    const row = screen.getByText(paletteRow('Small talk')).closest('li')!;
+    expect(row.querySelector('.michi-menu-where')?.textContent).toBe('Michi');
+  });
+
+  it('shows a mouse that has not moved no highlight: the palette opening under it keeps the first row', () => {
+    render(<CommandPalette activePage="home" setPage={vi.fn()} onClose={vi.fn()} />);
+    const rows = recentRows();
+    // A pointer lying still over the list gets mouse events where it already is as the rows appear.
+    fireEvent.mouseMove(rows[3], { screenX: 300, screenY: 300 });
+    fireEvent.mouseMove(rows[3], { screenX: 300, screenY: 300 });
+    expect(activeRow()).toBe(rows[0]);
+    fireEvent.mouseMove(rows[3], { screenX: 304, screenY: 302 });
+    expect(activeRow()).toBe(rows[3]);
   });
 });

@@ -33,13 +33,27 @@ test('new pane opens an in-pane chooser and transforms the same slot', async ({ 
   const sideChatLauncher = page.locator('[data-pane-kind="launcher"]');
   const paneWrappers = page.locator('.terminal-dashboard').locator(':scope > [data-node-id]');
   const paneCountBeforeSideChat = await paneWrappers.count();
-  await sideChatLauncher.getByRole('button', { name: 'Side chat' }).click();
+  await sideChatLauncher.getByRole('button', { name: 'Blank branch' }).click();
   await expect(page.locator('[data-pane-kind="launcher"]')).toHaveCount(0);
   await expect(paneWrappers).toHaveCount(paneCountBeforeSideChat);
 
   await expect(page.locator('[data-pane-kind="browser"]')).toHaveCount(0);
   await expect(page.locator('[data-pane-kind="terminal"]')).toHaveCount(1);
   await expect(page.locator('[data-pane-kind="files"]')).toHaveCount(1);
+
+  // The keyboard: the chooser takes it on opening, and Esc closes it back to the +.
+  const plus = page.getByRole('button', { name: 'New pane', exact: true });
+  await plus.click();
+  const keyLauncher = page.locator('[data-pane-kind="launcher"]');
+  await expect(keyLauncher.getByRole('button', { name: 'Review' })).toBeFocused();
+  await page.keyboard.press('ArrowDown');
+  await expect(keyLauncher.getByRole('button', { name: 'Terminal' })).toBeFocused();
+  await page.keyboard.press('Escape');
+  await expect(page.locator('[data-pane-kind="launcher"]')).toHaveCount(0);
+  await expect(plus).toBeFocused();
+  // The pane that took over does not take the focus back a moment later.
+  await page.waitForTimeout(300);
+  await expect(plus).toBeFocused();
 });
 
 

@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { CompanionEventsSubscription } from '../../services/api/companion';
 import { SseHttpError } from '../../services/api/sseParser';
 import { companionSnapshot, jsonResponse } from '../../test/companionFixtures';
-import { resetCompanionFeedForTests, startCompanionFeed, subscribeCompanionNotices } from './companionFeed';
+import { resetCompanionFeedForTests, startCompanionFeed } from './companionFeed';
 import { loadCompanion, resetCompanionStoreForTests } from './companionStore';
 
 const feed = vi.hoisted(() => ({
@@ -17,10 +17,14 @@ vi.mock('../../services/api/companion', async (importOriginal) => ({
   },
 }));
 
+const prefs = vi.hoisted(() => ({ noteNotificationLevelChanged: vi.fn() }));
+vi.mock('../prefs', () => prefs);
+
 const latest = () => feed.subscriptions[feed.subscriptions.length - 1];
 
 beforeEach(() => {
   feed.subscriptions.length = 0;
+  prefs.noteNotificationLevelChanged.mockReset();
   resetCompanionFeedForTests();
   resetCompanionStoreForTests({ snapshot: companionSnapshot() });
 });
@@ -118,25 +122,6 @@ describe('the Companion change feed', () => {
     release();
   });
 
-  it('hands the notices the backend’s gate sends on to whoever listens, and stops for one that left', () => {
-    const release = startCompanionFeed();
-    const first = vi.fn();
-    const second = vi.fn(() => { throw new Error('a broken listener'); });
-    const third = vi.fn();
-    const stopFirst = subscribeCompanionNotices(first);
-    subscribeCompanionNotices(second);
-    subscribeCompanionNotices(third);
-    const notice = { id: 'cmn-1', title: 'Companion', body: 'CR-1', target: { kind: 'companion' as const, tab: 'today' as const }, itemIds: [], createdAt: 1, expiresAt: 2 };
-    latest().onNotice?.(notice);
-    expect(first).toHaveBeenCalledWith(notice);
-    expect(third).toHaveBeenCalledWith(notice);
-    stopFirst();
-    latest().onNotice?.({ ...notice, id: 'cmn-2' });
-    expect(first).toHaveBeenCalledTimes(1);
-    expect(third).toHaveBeenCalledTimes(2);
-    release();
-  });
-
   it('opens before the first snapshot is in, and only once', async () => {
     resetCompanionStoreForTests();
     vi.stubGlobal('fetch', vi.fn(async () => jsonResponse(companionSnapshot())));
@@ -144,6 +129,15 @@ describe('the Companion change feed', () => {
     expect(feed.subscriptions).toHaveLength(1);
     await loadCompanion();
     expect(feed.subscriptions).toHaveLength(1);
+    release();
+  });
+
+  it('has the prefs read the notification level again when Michi changed it, and only then', () => {
+    const release = startCompanionFeed();
+    latest().onEvent({ type: 'companion_changed', revision: 2, reason: 'settings' });
+    expect(prefs.noteNotificationLevelChanged).not.toHaveBeenCalled();
+    latest().onEvent({ type: 'companion_changed', revision: 3, reason: 'notifications' });
+    expect(prefs.noteNotificationLevelChanged).toHaveBeenCalledTimes(1);
     release();
   });
 });

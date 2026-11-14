@@ -1,5 +1,5 @@
 import React from 'react';
-import { render, screen, fireEvent, waitFor } from '@testing-library/react';
+import { act, render, screen, fireEvent, waitFor } from '@testing-library/react';
 import { vi, describe, it, expect, beforeEach } from 'vitest';
 import AskUserNotice from './AskUserNotice';
 import type { ChatNodeState } from '../../state/chatTypes';
@@ -10,11 +10,13 @@ vi.mock('../../state/chatStore', async () => {
     isAssistantConversation: actual.isAssistantConversation,
     useChatProjects: vi.fn(),
     useChatActions: vi.fn(),
+    useChatPanes: vi.fn(),
     useStructuralSelector: vi.fn(),
   };
 });
 
 import * as chatStore from '../../state/chatStore';
+import { setPanePresenceDashboardVisible } from '../../state/panePresenceVisibility';
 
 const actions = { revealNode: vi.fn() };
 
@@ -49,6 +51,32 @@ describe('AskUserNotice', () => {
     sessionStorage.clear();
     vi.mocked(chatStore.useChatActions).mockReturnValue(actions as never);
     vi.mocked(chatStore.useChatProjects).mockReturnValue({ projects: [] } as never);
+    vi.mocked(chatStore.useChatPanes).mockReturnValue({ focusedPane: null } as never);
+    setPanePresenceDashboardVisible(false);
+  });
+
+  it('leaves out the conversation the user is in, and brings it back once they leave unanswered', async () => {
+    withNodes({
+      child: askingNode('child', 'A', 1),
+      root: askingNode('root', 'B', 2),
+    });
+    vi.mocked(chatStore.useChatPanes).mockReturnValue({ focusedPane: 'child' } as never);
+    act(() => setPanePresenceDashboardVisible(true));
+    const { container, rerender } = render(<AskUserNotice />);
+    const card = screen.getByRole('region', { name: 'Agent question' });
+    expect(card.textContent).toContain('Pick one for B?');
+    expect(card.textContent).not.toContain('+1 more');
+
+    // Answer took the user to the last one: the notice has nothing left to say.
+    vi.mocked(chatStore.useChatPanes).mockReturnValue({ focusedPane: 'root' } as never);
+    withNodes({ root: askingNode('root', 'B', 2) });
+    rerender(<AskUserNotice />);
+    expect(screen.queryByRole('region', { name: 'Agent question' })).toBeNull();
+    await waitFor(() => expect(container.querySelector('.ask-notice')).toBeNull());
+
+    // Off the Dashboard page the pane is not in front of the user.
+    act(() => setPanePresenceDashboardVisible(false));
+    expect((await screen.findByRole('region', { name: 'Agent question' })).textContent).toContain('Pick one for B?');
   });
 
   it('counts the extra asks beyond the first', () => {

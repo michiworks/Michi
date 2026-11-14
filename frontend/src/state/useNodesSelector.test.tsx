@@ -22,7 +22,6 @@ vi.mock('../services/api', () => ({
   hydrateBackendWorkspaces: vi.fn().mockResolvedValue([]),
 }));
 
-vi.mock('../services/notifications', () => ({ notify: vi.fn() }));
 vi.mock('../lib/electronBridge', () => ({ getElectron: () => null }));
 
 const wrapper = ({ children }: { children: React.ReactNode }) => (

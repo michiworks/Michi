@@ -1,6 +1,6 @@
 # Troubleshoot Michi
 
-Applies to: desktop/web and local/remote backends. Source checked: 2026-11-08. The entries are diagnostic paths, not proof of the cause on your machine. Use actual runtime, backend, timestamp and first failing error.
+Applies to: desktop/web and local/remote backends. Source checked: 2026-11-12. The entries are diagnostic paths, not proof of the cause on your machine. Use actual runtime, backend, timestamp and first failing error.
 
 ## Find your symptom
 
@@ -18,9 +18,9 @@ Applies to: desktop/web and local/remote backends. Source checked: 2026-11-08. T
 | Forgot a detail, @ did not read everything | Wrong files, broken attachment or forgotten context | `concepts-and-context` |
 | Chats disappeared, empty workspace | Missing history or unexpected restore behavior | `data-and-backups` |
 | Crew setup required, Sync, command changed | Crew setup, Sync or missing caller identity | `crew` |
-| Remote unreachable, SSH / token error | Remote backend or SSH cannot connect | `remote-backend` |
+| Remote unreachable, machine offline, SSH / token error | Remote backend or SSH cannot connect | `remote-backend` |
 | Agents page absent, Run waiting/failed | Agents missing or Run waiting/failed | `custom-agents` |
-| Page not updating, preference conflict, component mismatch, remote Pages unavailable | Pages, maintenance and generated components | `pages-and-components`, `pages-maintenance`, `page-component-design` |
+| Page not updating, preference conflict, component mismatch, remote workspace home unavailable | Pages, maintenance and generated components | `pages-and-components`, `pages-maintenance`, `page-component-design` |
 
 ## Startup: app/backend will not start or exits
 
@@ -66,7 +66,7 @@ Crew's default template already carries fixed instructions. Crew busy input queu
 
 Reopen the original chat and restore its backend connection first. Renderer disconnection can leave the durable turn running. A stream `410` alone does not establish a failed runtime or deleted history.
 
-A confirmed `409` with code `turn_active` means the turn is busy; Michi handles the supported same-request retry. Other conflicts/network failures are not a reason to manually resend copies. Check original task status and effects before continuing.
+A confirmed `409` with code `turn_active` means the turn is busy; Michi handles the supported same-request retry. Other conflicts/network failures are not a reason to manually resend copies. Check original task status and effects before continuing. After a restart, an update or expired credentials, the corner notice lists interrupted tasks with **Resume**, which carries a turn on rather than resending it; see **Interrupted tasks notice** in `sessions-and-recovery`.
 
 If activity is unclear, collect adjacent logs and IDs instead of deleting the chat. A visible answer and runtime cleanup are separate boundaries; brief normal cleanup does not require a new branch.
 
@@ -75,6 +75,8 @@ If activity is unclear, collect adjacent logs and IDs instead of deleting the ch
 Confirm effective global/per-chat permissions and that an actual tool request occurred. Read-only operations can be automatic. An upstream allowlist/global YOLO may already approve a request, leaving no pending request for Michi to display.
 
 In Crew, missing sessionApproval is incomplete setup and blocks new turns. Follow `crew`, including enabled App, required consent and approved Stub / Routed command.
+
+A turn that holds your agent's check-in material (for example a follow-up a check-in sent into the chat) runs as Ask whatever the chat's mode, and grants do not apply; see **Check-in material** in `permissions`.
 
 Trust does not install tools, supply credentials or override an upstream denial/sandbox. Consult `permissions` for grant lifetimes and revocation. An Ask User question is a separate interaction and still needs an answer.
 
@@ -106,13 +108,15 @@ Markdown export is not portable JSON import; neither replaces a complete project
 
 Use the canonical `crew` guide's exact one-time steps. Use the `crew-app` folder in your built installation checkout; standalone bundles and custom/old generated sources use the guide's preparation procedure.
 
+A Linux remote backend can prepare its App with `crew-setup.cjs` from `~/.local/share/michi/devdesktop/current`.
+
 After updating your installation, Sync the existing Crew App. Reload MCP Management and approve the current launch if it says `command changed`; saved Stub opt-in alone is not launch approval. Restart the Gateway when required, after finishing/stopping active work. Do not uninstall the App to update it.
 
 Check Gateway running, App enabled, required sessionApproval, approved Stub / Routed and shared binding directory. A source-only local commit does not update an installed desktop app. Do not infer cross-platform acceptance from the macOS verification record.
 
 ## Remote backend or SSH cannot connect
 
-Check the connection's **Test connection** result in Settings → Machines, remote service status, host/port and token without exposing the token. The path belongs to the server. For SSH, complete a normal `ssh HOST` connection once so authentication/known-host setup works.
+Open Settings → Machines (the sidebar's *offline* chip opens it). A machine Michi cannot reach says so in its row, with **Retry**, **Edit** and **Show log**; **Edit** (also in a reachable machine's ⋯ menu) opens its form with **Test connection**. Check the remote service status, host/port and token without exposing the token. The path belongs to the server. For SSH, complete a normal `ssh HOST` connection once so authentication/known-host setup works.
 
 A tunnel and the remote service have different lifetimes. For a saved SSH connection, a failed request makes Michi check the existing tunnel first. If the service is down, Michi starts the existing remote build over SSH, reusing its saved data directory, port and token. It does not install, upgrade or accept changed credentials. A missing installation needs **Connect remote**, then **Install and connect**. Direct-URL connections cannot be started this way. Follow `remote-backend` for lifecycle and secure network setup. Avoid switching to a public bind as a generic workaround.
 
@@ -124,8 +128,8 @@ For a Run, inspect its capability snapshot, effective permissions, environment, 
 
 ## Pages, maintenance and generated components
 
-- **Remote page unavailable:** the current Pages and Pages upkeep interface supports the local backend only. The unavailable message is a product limitation, not a reason to reset the connection or database.
-- **Page not updated:** check workspace maintenance enablement, page-tree exclusion, backend/scheduler availability, Settings → Michi → Pages upkeep (the Settings page named after your agent), and whether the input was an eligible new completion. Inspect Needs attention, the suggestions waiting for review and View automatic maintenance; Up to date can include explicit no-change decisions or unaccepted proposals. See `pages-maintenance`.
+- **Remote workspace home unavailable:** a remote connection's pages are listed in the Pages sidebar and open through that connection, but this computer's Pages upkeep, workspace homes, Databases and All tasks cover only its local workspaces, so a remote workspace's home says *Pages doesn't support remote connections yet*. The message is a product limitation, not a reason to reset the connection or database.
+- **Page not updated:** check workspace maintenance enablement, page-tree exclusion, backend/scheduler availability, Settings → Michi → Pages and Model → Background work (the Settings page named after your agent), and whether the input was an eligible new completion. Inspect Needs attention, the suggestions waiting for review and View automatic maintenance; Up to date can include explicit no-change decisions or unaccepted proposals. See `pages-maintenance`.
 - **Preferences did not rearrange content:** they apply on the next relevant update. They are per-page and do not override section limits. On a revision conflict, Use latest discards the draft; Keep my draft retains it against the new base and still requires Save preferences.
 - **Per-item Sources missing:** old or uncited content has no inferred mapping, and complex Markdown may use whole-block Sources. Text edits remove stale mappings. Never manufacture message IDs to make the control appear.
 - **Component saved but absent:** a new library component needs attachment to a Page block/custom database view. Check enabled state, pinned/active version, host access and error UI. Already attached unpinned hosts can update on save; saving is not draft-only.

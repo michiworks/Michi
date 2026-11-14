@@ -3,7 +3,7 @@ import type { LegacyDesktopBridge } from 'michi-shared';
 export type {
   AppUpdateState, AppUpdateStatus, ChooseFolderResult, ChooseFoldersResult, SaveMarkdownResult, VibrancyMaterial,
   BrowserSurfaceState, TerminalSurfaceSnapshot, FileTreeEntry, GitChangeEntry,
-  DesktopLifetimeStatus, FilePreviewResult, BackgroundServiceStatus, ScheduledRunTarget, ScheduledNotice,
+  DesktopLifetimeStatus, FilePreviewResult, BackgroundServiceStatus, ScheduledRunTarget,
   DesktopNotificationTarget, DesktopResidency, DesktopResidencyPatch,
 } from 'michi-shared';
 

@@ -72,12 +72,12 @@ describe('MaintenanceStatus', () => {
       expect(screen.getByText(/Runs on Pages upkeep’s runtime: Claude · claude-opus-5.5 · reasoning high \(follows global\)/)).toBeTruthy();
       expect(screen.queryByText('Runtime profile')).toBeNull();
       expect(screen.queryByRole('textbox', { name: 'Runtime' })).toBeNull();
-      fireEvent.click(screen.getByRole('button', { name: 'Change in Settings › Michi › Pages upkeep' }));
+      fireEvent.click(screen.getByRole('button', { name: 'Change in Settings › Michi › Background work' }));
       expect(sections).toEqual(['meta-agent']);
       expect(pages).toEqual(['settings']);
       unmount();
       render(<MaintenanceStatus backendConnectionId="remote-a" workspaceId="w1" />);
-      expect(screen.queryByRole('button', { name: 'Change in Settings › Michi › Pages upkeep' })).toBeNull();
+      expect(screen.queryByRole('button', { name: 'Change in Settings › Michi › Background work' })).toBeNull();
       expect(screen.getByText(/set in Pages upkeep’s settings on that machine/)).toBeTruthy();
     } finally {
       window.removeEventListener('michi:open-settings-section', onSection);

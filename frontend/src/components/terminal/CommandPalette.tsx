@@ -2,7 +2,8 @@ import React, { useEffect, useMemo, useRef, useState, useCallback } from 'react'
 import { useChatStore, useChatNodesSnapshot, selectAllChats } from '../../state/chatStore';
 import { isVisibleConversationNode } from '../../state/conversationVisibility';
 import { threadDisplayTitle } from '../../state/displayTitle';
-import { buildCommands, filterCommands, selectRecentThreads, startNewCompanionConversation, Command, CommandGroup, PageId, type CompanionCommands } from '../../state/commands';
+import { buildCommands, filterCommands, matchRange, selectRecentThreads, startNewCompanionConversation, Command, CommandGroup, PageId, type CompanionCommands } from '../../state/commands';
+import { addToHomeDraft } from '../../state/homeDraft';
 import { useNodeSearch } from '../../state/useNodeSearch';
 import { type NodeGroupedResult } from '../../services/api';
 import { relativeTime } from '../../lib/relativeTime';
@@ -25,6 +26,7 @@ import { useBackendConnections } from '../../state/useBackendConnections';
 import { backendConnectionIdForWorkspace } from '../../config/backendConnections';
 import { workspaceRemoteNote } from '../WorkspaceLocation';
 import { exportPanelEvent } from '../../state/appEvents';
+import { setTemporaryChatDraft } from '../../state/temporaryChatDraft';
 import { isImeComposing } from '../../lib/ime';
 
 function renderSnippetWithMark(text: string, range: [number, number]) {
@@ -113,13 +115,15 @@ const PALETTE_HINTS: Array<[keys: string[], label: string]> = [
 
 // The palette's sections, in the order they show: render, highlight, ↑/↓,
 // ⌘1–9 and Enter all follow it. An empty query shows Recent, Navigate and
-// Actions; typing shows the rest and hides Recent.
+// Actions; typing shows the rest and hides Recent. Words that match nothing
+// get the last section alone.
 const SECTIONS: ReadonlyArray<readonly [CommandGroup, string]> = [
   ['recent', 'Recent'],
   ['nav', 'Navigate'],
   ['action', 'Actions'],
   ['workspace', 'Workspaces'],
   ['chat', 'Chats'],
+  ['fallback', 'Use it anyway'],
 ];
 
 // ── Node-grouped search result styles ────────────────────────────────────
@@ -339,8 +343,8 @@ export default function CommandPalette({
         onClose();
         patchCompanionSettings({ paused: !companionPaused }).then((snapshot) => {
           adoptCompanionSnapshot(snapshot);
-          toast(snapshot.settings.paused ? `${name}: check-ins paused` : `${name}: check-ins resumed`);
-        }, (error: unknown) => { toast.error(`Couldn’t ${companionPaused ? 'resume' : 'pause'} check-ins: ${error instanceof Error ? error.message : 'unknown error'}`); });
+          toast(snapshot.settings.paused ? `${name} is off` : `${name} is on`);
+        }, (error: unknown) => { toast.error(`Couldn’t turn ${name} ${companionPaused ? 'on' : 'off'}: ${error instanceof Error ? error.message : 'unknown error'}`); });
       },
     } } : {}),
   }), [assistant.status, snapshotLoaded, companionPaused, conversationNodeId, name, onClose]);
@@ -421,6 +425,7 @@ export default function CommandPalette({
           onClose();
         },
         createThread: () => { setPage('home'); onClose(); },
+        createTemporaryChat: () => { setTemporaryChatDraft(true); setPage('home'); onClose(); },
         recentThreads,
         openThread,
         activateTree: (treeId) => { activateTree(treeId); onClose(); },
@@ -437,7 +442,7 @@ export default function CommandPalette({
   );
   // In the order the rows show, section by section: the highlight, ↑/↓, the
   // ⌘1–9 numbers and Enter all index this list.
-  const visible = useMemo(() => {
+  const matched = useMemo(() => {
     const q = query.trim();
     const base = q ? filterCommands(cmds, query) : cmds;
     const shown = base.filter((c) => {
@@ -454,6 +459,27 @@ export default function CommandPalette({
     return SECTIONS.flatMap(([group]) => shown.filter((c) => c.group === group));
   }, [cmds, query]);
   const showRecents = !query.trim();
+  // Messages are searched once typing pauses; until they answer, nothing is known not to match.
+  const searching = debouncedQuery !== query || nodeSearch.status === 'loading';
+  const nothingFound = !showRecents && matched.length === 0 && nodeResults.length === 0 && !searching;
+  // Words that found nothing can still start something: a thread, or a
+  // question to the agent, with the words left in the composer to review.
+  const hasActiveProject = !!activeProject;
+  const fallbackRows = useMemo<Command[]>(() => {
+    const words = query.trim();
+    if (!nothingFound || !words) return [];
+    return [
+      ...(hasActiveProject ? [{
+        id: 'fallback.thread', group: 'fallback', icon: 'plus', label: `New thread: “${words}”`,
+        run: () => { addToHomeDraft(words); setPage('home'); },
+      } satisfies Command] : []),
+      ...(companion ? [{
+        id: 'fallback.ask', group: 'fallback', icon: 'chat', label: `Ask ${companion.name}: “${words}”`,
+        run: () => openCompanionPanel({ tab: 'chat', draft: words, focusComposer: true }),
+      } satisfies Command] : []),
+    ];
+  }, [nothingFound, query, hasActiveProject, companion, setPage]);
+  const visible = fallbackRows.length > 0 ? fallbackRows : matched;
 
   const totalRows = visible.length + (showRecents ? 0 : nodeResults.length);
   const prefetchTree = React.useContext(TreePrefetchContext);
@@ -491,14 +517,27 @@ export default function CommandPalette({
   }, [totalRows, active]);
 
   const listRef = useRef<HTMLDivElement>(null);
-  // Suppress hover-driven `setActive` for a beat after a keyboard nav so the
-  // scrollIntoView doesn't immediately snap `active` back to whichever row
-  // landed under the mouse pointer post-scroll.
-  const kbdNavAt = useRef(0);
-  const hoverSetActive = useCallback((i: number) => {
-    if (Date.now() - kbdNavAt.current < 200) return;
+  // The highlight follows a pointer that moves. One lying still also gets
+  // mouse events, at the place it already was, when rows appear or scroll
+  // under it: the palette opening, or ↑/↓ bringing a row into view. Those
+  // must not take the highlight (Enter would run whatever row sat there).
+  const pointerAt = useRef<{ x: number; y: number } | null>(null);
+  const pointerSetActive = useCallback((i: number, e: React.MouseEvent) => {
+    const was = pointerAt.current;
+    pointerAt.current = { x: e.screenX, y: e.screenY };
+    if (!was || (was.x === e.screenX && was.y === e.screenY)) return;
     setActive(i);
   }, []);
+  // Rows cut off at the list's lower edge fade out there (Menu.css).
+  const syncClipped = useCallback(() => {
+    const list = listRef.current;
+    if (list) list.toggleAttribute('data-clipped', list.scrollHeight - list.clientHeight - list.scrollTop > 1);
+  }, []);
+  useEffect(() => {
+    syncClipped();
+    window.addEventListener('resize', syncClipped);
+    return () => window.removeEventListener('resize', syncClipped);
+  }, [syncClipped, totalRows, query]);
   // Only the highlighted MenuItem carries data-active.
   useEffect(() => {
     const el = listRef.current?.querySelector<HTMLElement>('[data-active="true"]');
@@ -553,11 +592,9 @@ export default function CommandPalette({
     }
     if (e.key === 'ArrowDown') {
       e.preventDefault();
-      kbdNavAt.current = Date.now();
       setActive((i) => Math.min(totalRows - 1, i + 1));
     } else if (e.key === 'ArrowUp') {
       e.preventDefault();
-      kbdNavAt.current = Date.now();
       setActive((i) => Math.max(0, i - 1));
     } else if (e.key === 'Enter') {
       e.preventDefault();
@@ -595,7 +632,15 @@ export default function CommandPalette({
           style={{ flex: 1, minHeight: 0, overflowY: 'auto' }}
           className="hide-sb michi-menu-scope"
           data-menu="palette"
+          onScroll={syncClipped}
         >
+          {matched.length === 0 && nodeResults.length === 0 && (
+            <div className="palette-empty" role="status">
+              {showRecents ? 'No commands available'
+                : searching ? 'Searching…'
+                  : nodeSearch.status === 'error' ? 'Couldn’t search messages' : `No matches for “${query.trim()}”`}
+            </div>
+          )}
           {SECTIONS.map(([g, label]) => {
             const rows = visible.filter((c) => c.group === g);
             if (rows.length === 0) return null;
@@ -606,19 +651,22 @@ export default function CommandPalette({
                   const idx = visible.indexOf(c);
                   const quickKey = !showRecents && idx < 9 ? kbd('mod', String(idx + 1)) : null;
                   const keys = quickKey ?? c.keys;
-                  // A recent thread names its workspace at the row's end.
-                  const where = g === 'recent' ? c.meta : undefined;
+                  // One shape for every row: its name, then at the row's end
+                  // the workspace it lives in, or what it is.
+                  const where = c.where ?? (g === 'workspace' ? 'workspace' : undefined);
+                  // A fallback row quotes the words; it did not match them.
+                  const hit = showRecents || g === 'fallback' ? null : matchRange(c.label, query);
                   return (
                     <MenuItem
                       key={c.id}
                       active={idx === active}
-                      onMouseEnter={() => hoverSetActive(idx)}
+                      onMouseMove={(e) => pointerSetActive(idx, e)}
                       onClick={() => { c.run(); onClose(); }}
                     >
                       <span className="michi-menu-glyph" aria-hidden="true"><CommandIconGlyph name={c.icon} /></span>
                       <span className="michi-menu-label">
-                        {c.label}
-                        {c.meta && !where ? <span className="michi-menu-caption michi-menu-sublabel">{c.meta}</span> : null}
+                        {hit ? <>{c.label.slice(0, hit[0])}<mark className="palette-match">{c.label.slice(hit[0], hit[1])}</mark>{c.label.slice(hit[1])}</> : c.label}
+                        {c.meta ? <span className="michi-menu-caption michi-menu-sublabel">{c.meta}</span> : null}
                       </span>
                       {where ? <span className="michi-menu-caption michi-menu-where">{where}</span> : null}
                       {keys ? <span className="michi-menu-keys">{keys}</span> : null}
@@ -628,14 +676,6 @@ export default function CommandPalette({
               </ul>
             );
           })}
-          {visible.length === 0 && nodeResults.length === 0 && (
-            <div className="michi-menu-caption" style={{ padding: 'var(--m-rowY) var(--m-rowX)' }}>
-              {showRecents ? 'No commands available'
-                // Messages are searched once typing pauses; until they answer, nothing is known not to match.
-                : debouncedQuery !== query || nodeSearch.status === 'loading' ? 'Searching…'
-                  : nodeSearch.status === 'error' ? 'Couldn’t search messages' : 'No matches'}
-            </div>
-          )}
           {/* Node-grouped search results — deduped by node, time-sorted, with breadcrumbs */}
           {!showRecents && nodeResults.length > 0 && (
             <ul className="michi-menu-list" aria-label="Messages">
@@ -649,7 +689,7 @@ export default function CommandPalette({
                   <MenuItem
                     key={nr.nodeId}
                     active={rowIdx === active}
-                    onMouseEnter={() => hoverSetActive(rowIdx)}
+                    onMouseMove={(e) => pointerSetActive(rowIdx, e)}
                     onClick={() => navigateToNodeResult(nr)}
                     style={NODE_ROW_STYLE}
                   >

@@ -26,6 +26,7 @@ import { getCompanionSettings } from './companion/settings';
 import { sessionReplayHistory } from '../agents/sessionReplayView';
 import { chatOwner } from '../agents/ownerMapping';
 import { workspaceSessionCwd } from './workspaceSandbox';
+import { workConversationCwd } from './workConversationWorktree';
 import { createHash } from "node:crypto";
 import {
     MAINTENANCE_BOOTSTRAP_INSTRUCTIONS,
@@ -602,7 +603,8 @@ export class ChatManager {
         }
         const workspace = getWorkspace(input.workspaceId, input.ownerUserId);
         if (!workspace) return null;
-        const cwd = workspaceSessionCwd(workspace, input.ownerUserId, this.defaultCwd);
+        // A work conversation with its own worktree opens there (D18, Q26), on a resume too.
+        const cwd = workConversationCwd(input.nodeId) ?? workspaceSessionCwd(workspace, input.ownerUserId, this.defaultCwd);
         const configured = getAgentConfig(process.env.MICHI_CLOUD === "1" ? input.ownerUserId : undefined);
         const primaryAgent = input.maintenance ? null : await this.resolvePrimaryAgentBinding({
             ownerUserId: input.ownerUserId,

@@ -9,6 +9,7 @@ import { spacesSupportsConnection } from '../../../../state/metaAgent/remoteSpac
 import { backendConnectionIdForWorkspace, LOCAL_BACKEND_CONNECTION_ID } from '../../../../config/backendConnections';
 import { firstRunOpensWindow, noteFirstRunOpenedWindow } from '../../../../state/metaChat/firstRunWindow';
 import { openCompanionPanel } from '../../../../state/companion/companionPanel';
+import { companionIsOff } from '../../../../state/companion/companionStore';
 import { publishCompanionSpacesScreen } from '../../../../state/companion/companionScreen';
 import { subscribePageChanges } from '../../../../state/pages/pageEvents';
 import { namesRemoteEntity } from '../../../../config/backendIdentity';
@@ -65,10 +66,10 @@ export function SpacesMetaChat({ active, view, children }: {
   // A block target belongs to the screen it was set on: the panel host lets it go when the shell's
   // page or Pages' view changes, leaving Pages included (companionScreenKey, F1a-review #9).
 
-  // A first run opens the panel once, when it starts while Pages is on screen.
+  // A first run opens the panel once, when it starts while Pages is on screen; not while the agent is off (Q29).
   const firstRun = useSpacesFirstRun(LOCAL_BACKEND_CONNECTION_ID);
   useEffect(() => {
-    if (!active || !firstRunOpensWindow(LOCAL_BACKEND_CONNECTION_ID, firstRun.data)) return;
+    if (!active || companionIsOff() || !firstRunOpensWindow(LOCAL_BACKEND_CONNECTION_ID, firstRun.data)) return;
     noteFirstRunOpenedWindow(LOCAL_BACKEND_CONNECTION_ID, firstRun.data!.requestedAt!);
     openCompanionPanel({ tab: 'chat', focusComposer: false });
   }, [active, firstRun.data]);

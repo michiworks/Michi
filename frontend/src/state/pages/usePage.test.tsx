@@ -2,6 +2,7 @@ import { act, renderHook, waitFor } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { usePage } from './usePage';
 import { notifyPageChanged, subscribePageChanges } from './pageEvents';
+import { newestUndoAt, resetUndoStackForTests, undoLatest } from '../undoStack';
 
 const api = vi.hoisted(() => ({
   acknowledgePageActivity: vi.fn(),
@@ -327,6 +328,21 @@ describe('usePage apply', () => {
     let answer: unknown;
     await act(async () => { answer = await result.current.apply([], 3); });
     expect(answer).toBe('failed');
+  });
+
+  it('puts the batch of a saved edit on the undo history, which ⌘Z reverts', async () => {
+    resetUndoStackForTests();
+    const { result } = await ready('apply-undo');
+    api.editPage.mockResolvedValue({
+      page: { id: 'apply-undo', workspaceId: 'ws-apply-undo', title: 'Plan', revision: 4, viewVersion: 4, blocks: [] },
+      changes: { applied: [{ batchId: 'b-9' }, { batchId: 'b-9' }], proposed: [], rejected: [] },
+    });
+    api.revertPageBatch.mockResolvedValue({ reverted: ['c1', 'c2'], conflicts: [] });
+    await act(async () => { await result.current.apply([{ op: 'delete', id: 'blk-1' }], 3); });
+    expect(newestUndoAt()).not.toBeNull();
+    await act(async () => { expect(await undoLatest()).toBe('undone'); });
+    expect(api.revertPageBatch).toHaveBeenCalledTimes(1);
+    expect(api.revertPageBatch).toHaveBeenCalledWith('b-9', { backendConnectionId: 'local', workspaceId: 'ws-apply-undo' });
   });
 
   it('calls an edit made against an older revision stale without sending it', async () => {

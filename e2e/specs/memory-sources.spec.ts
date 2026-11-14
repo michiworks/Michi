@@ -6,7 +6,7 @@ import { CONVERSATION_COMPOSER, openThreadFromSidebar, settingsMain } from '../f
 
 // What a reply was based on, against the mock API: no backend, SQLite or
 // agent. The line under a reply that repeated what Michi gave the model;
-// Forget, Edit and Don't recall; a phone's first tap; a chat set to Off; and
+// Forget, Edit and Don't recall; a phone's first tap; a temporary chat; and
 // a streamed reply that asks once it is done, without moving what is read.
 
 const PNPM = memoryRecord('mem-pnpm', 'Use pnpm, never npm, in this repo.', { kind: 'convention' });
@@ -44,7 +44,7 @@ async function boot(page: Page, memory: MemoryMockController, turns = 2): Promis
 const reply = (page: Page, id: string) => page.locator(`[data-msg-id="${id}"]`);
 
 test('only the reply with sources shows the line; Forget asks first, then deletes and says so; the keyboard opens and closes it', async ({ page }, info) => {
-  const memory = createMemoryMock({ records: [PNPM], sources: { 'chat-a2': based() }, conversations: true });
+  const memory = createMemoryMock({ records: [PNPM], sources: { 'chat-a2': based() } });
   await boot(page, memory);
   const line = reply(page, 'chat-a2').getByRole('region', { name: REGION });
   await expect(line).toBeVisible();
@@ -83,7 +83,7 @@ test('only the reply with sources shows the line; Forget asks first, then delete
 });
 
 test('Edit opens Settings › Memory with the memory marked', async ({ page }) => {
-  const memory = createMemoryMock({ records: [PNPM, memoryRecord('mem-other', 'Answer in Chinese')], sources: { 'chat-a2': based() }, conversations: true });
+  const memory = createMemoryMock({ records: [PNPM, memoryRecord('mem-other', 'Answer in Chinese')], sources: { 'chat-a2': based() } });
   await boot(page, memory);
   const line = reply(page, 'chat-a2').getByRole('region', { name: REGION });
   await line.locator('.t-reply-sources-toggle').click();
@@ -103,7 +103,7 @@ test('on a phone the first tap opens it, reveals none of the message\'s actions,
   try {
     // An earlier reply: on touch the pane's latest reply shows its actions at rest (actionsAtRest), an earlier
     // one only once the message is tapped, so here a tap that revealed them would show.
-    const memory = createMemoryMock({ records: [PNPM], sources: { 'chat-a1': based() }, conversations: true });
+    const memory = createMemoryMock({ records: [PNPM], sources: { 'chat-a1': based() } });
     await boot(page, memory);
     // boot opens the chat with clicks, and their mouse stays over the transcript; a phone has no such pointer.
     await page.mouse.move(0, 0);
@@ -128,21 +128,39 @@ test('on a phone the first tap opens it, reveals none of the message\'s actions,
   }
 });
 
-test('a chat switched to Off shows no line under its replies', async ({ page }) => {
-  const memory = createMemoryMock({ records: [PNPM], sources: { 'chat-a1': based(), 'chat-a2': based() }, conversations: true });
-  await boot(page, memory);
-  await expect(page.getByRole('region', { name: REGION })).toHaveCount(2);
-  await page.getByRole('button', { name: 'Memory: Learn' }).click();
-  await page.getByRole('menu', { name: 'Memory for this chat' }).getByRole('menuitemradio', { name: /^Off/ }).click();
-  await expect(page.getByRole('button', { name: 'Memory: Off' })).toBeVisible();
+test('a temporary chat, as the backend stores it (memory_mode off), shows no line under its replies and asks for none', async ({ page }) => {
+  const memory = createMemoryMock({ records: [PNPM], sources: { 'chat-a1': based(), 'chat-a2': based() }, temporaryChats: ['chat'] });
+  const messages = [1, 2].flatMap((i) => [
+    { id: `chat-q${i}`, node_id: 'chat', role: 'user', content: `Question ${i}: how do I install the dependencies?`, seq: i * 2 - 2, created_at: i * 2 - 1 },
+    { id: `chat-a${i}`, node_id: 'chat', role: 'assistant', content: `Answer ${i}: install them with pnpm, as this repo does.`, seq: i * 2 - 1, created_at: i * 2 },
+  ]);
+  await installMockApi(page, {
+    custom: memory.handle,
+    workspaces: [{
+      workspace: { id: 'ws', name: 'Alpha', active_tree_id: 'tree', created_at: 1 },
+      trees: [{ id: 'tree', workspace_id: 'ws', root_node_id: 'chat', name: 'Repo setup', created_at: 1, last_active_at: 2 }],
+      nodes: [{ id: 'chat', kind: 'chat', workspace_id: 'ws', tree_id: 'tree', acp_session_id: 'chat', runtime_id: 'mock',
+        title: 'Repo setup', status: 'idle', created_at: 1, memory_mode: 'off' }],
+      edges: [], messages, artifacts: [],
+    }],
+  });
+  await page.addInitScript(() => {
+    localStorage.clear();
+    sessionStorage.clear();
+    localStorage.setItem('michi:migrated', '1');
+    localStorage.setItem('michi:v1:prefs', JSON.stringify({ onboardingCompletedAt: 1, reduceMotion: true }));
+  });
+  await page.goto('/');
+  await openThreadFromSidebar(page, 'Repo setup');
+  await expect(reply(page, 'chat-a2')).toBeVisible();
+  await expect(page.getByRole('note').filter({ hasText: 'Memory is off here' })).toBeVisible();
+  await expect(page.locator('.terminal-sidebar [data-sidebar-row] [data-temporary-chat-mark]')).toHaveCount(1);
   await expect(page.getByRole('region', { name: REGION })).toHaveCount(0);
-  // The lines leave at once; their replies then ask again (batched), and the chat answers none.
-  await expect.poll(() => memory.sourceRequests.length).toBeGreaterThanOrEqual(2);
-  await expect(page.getByRole('region', { name: REGION })).toHaveCount(0);
+  expect(memory.sourceRequests).toEqual([]);
 });
 
 test('a streamed reply asks once it is done; lines loading for history above keep the reading position', async ({ page }) => {
-  const memory = createMemoryMock({ records: [PNPM], sources: { 'chat-a1': based() }, conversations: true, sourcesDelayMs: 500 });
+  const memory = createMemoryMock({ records: [PNPM], sources: { 'chat-a1': based() }, sourcesDelayMs: 500 });
   await boot(page, memory, 12);
   const newest = reply(page, 'chat-a12');
   await expect(newest).toBeVisible();

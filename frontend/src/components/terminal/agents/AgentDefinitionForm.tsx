@@ -235,12 +235,12 @@ function CapabilityPicker({ value, capabilities, onChange }: { value: AgentDefin
           return (
             <span key={key} data-testid={unresolved ? 'capability-chip-unresolved' : 'capability-chip'} title={title} style={{
               display: 'inline-flex', alignItems: 'center', gap: 6, fontSize: 'var(--fs-sm)', padding: '3px 8px',
-              border: `1px solid ${unresolved ? 'var(--term-select)' : ref.kind === 'skill' ? 'var(--term-mauve)' : 'var(--term-line)'}`,
-              background: unresolved ? 'var(--term-select-f)' : ref.kind === 'skill' ? 'var(--term-mauve-f)' : 'var(--term-surface)',
-              color: unresolved ? 'var(--term-fg)' : ref.kind === 'skill' ? 'var(--term-mauve)' : 'var(--term-fg)',
+              border: `1px solid ${unresolved ? 'var(--term-select)' : ref.kind === 'skill' ? 'var(--term-accent)' : 'var(--term-line)'}`,
+              background: unresolved ? 'var(--term-select-f)' : ref.kind === 'skill' ? 'var(--term-accent-f)' : 'var(--term-surface)',
+              color: unresolved ? 'var(--term-fg)' : ref.kind === 'skill' ? 'var(--term-accent)' : 'var(--term-fg)',
               fontFamily: unresolved ? 'var(--font-mono)' : 'var(--ui-font)',
             }}>
-              {unresolved ? '⚠' : <span aria-hidden style={{ width: 4, height: 4, background: ref.kind === 'skill' ? 'var(--term-mauve)' : 'var(--term-digest)' }} />}
+              {unresolved ? '⚠' : <span aria-hidden style={{ width: 4, height: 4, background: ref.kind === 'skill' ? 'var(--term-accent)' : 'var(--term-digest)' }} />}
               {ref.kind === 'tool' ? ref.id : `${KIND_LABEL[ref.kind]}: ${ref.id}`}
               <button type="button" aria-label={`Remove capability ${ref.id}`} onClick={() => remove(ref)}
                 style={{ border: 0, padding: 0, background: 'transparent', color: 'var(--term-faint)', cursor: 'pointer', fontSize: 'var(--fs-md)', lineHeight: 1 }}>×</button>

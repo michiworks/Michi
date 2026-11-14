@@ -8,6 +8,7 @@ import { describeRunningWork, type RunningWorkCounts } from '../../state/backgro
 import { openBackgroundWork } from './backgroundWork/backgroundWorkEvents';
 import { HoverTip } from '../ui/Popover';
 import type { PaneItemKind } from '../../state/paneItems';
+import { TemporaryChatGlyph } from './TemporaryChat';
 
 const PANE_DRAG_MIME = 'application/x-michi-pane-id';
 const PANE_ZOOM_KEYS = kbd('shift', 'mod', 'enter');
@@ -32,6 +33,8 @@ interface Props {
   /** Running subagents and workflows of this conversation (chat panes). */
   backgroundWork?: RunningWorkCounts;
   kind?: PaneItemKind | 'chat' | 'digest';
+  /** A temporary chat (ChatNodeState.temporary): a ghost before its title. */
+  temporary?: boolean;
   onFocus: (id: string) => void;
   onClose: (id: string) => void;
   onCloseOthers: (keepId: string) => void;
@@ -56,6 +59,7 @@ export default function PaneCaption({
   isNew = false,
   backgroundWork,
   kind = 'chat',
+  temporary = false,
   onFocus,
   onClose,
   onCloseOthers,
@@ -105,7 +109,7 @@ export default function PaneCaption({
   return (
     <>
       <div
-        aria-label={`${title} pane${focused ? ', focused' : ''}`}
+        aria-label={`${title} pane${temporary ? ', temporary chat' : ''}${focused ? ', focused' : ''}`}
         draggable
         onDragStart={(e) => {
           e.dataTransfer.effectAllowed = 'move';
@@ -167,6 +171,7 @@ export default function PaneCaption({
             §
           </span>
         )}
+        {temporary && <TemporaryChatGlyph size={14} />}
         <span
           style={{
             minWidth: 0,

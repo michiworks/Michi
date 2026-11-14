@@ -6,9 +6,9 @@ import path from 'node:path';
 import express from 'express';
 import { once } from 'node:events';
 import type { AddressInfo } from 'node:net';
-import { closeDb, initDb } from '../src/services/db';
+import { closeDb, getDb, initDb } from '../src/services/db';
 import { saveNode, saveWorkspace, getNode } from '../src/services/dbRepository';
-import { defaultCrewMemory, saveDefaultCrewMemory, pinCrewMemory } from '../src/services/crewMemory';
+import { crewMemoryModeFor, defaultCrewMemory, saveDefaultCrewMemory, pinCrewMemory, withTemporaryCrewMemory } from '../src/services/crewMemory';
 import { crewRoutes } from '../src/routes/crew';
 
 const saved = { MICHI_DATA_DIR: process.env.MICHI_DATA_DIR, MICHI_CLOUD: process.env.MICHI_CLOUD, MICHI_CREW_MEMORY_MODE: process.env.MICHI_CREW_MEMORY_MODE };
@@ -37,6 +37,20 @@ test('memory defaults persist and graph saves cannot overwrite a native session 
   assert.equal(defaultCrewMemory(), 'temporary');
   saveNode({ id: 'chat', workspace_id: 'ws', kind: 'chat', status: 'idle', minimized: 0, spawned_by_agent: 0, created_at: 1, crew_memory_mode: 'persistent' });
   assert.equal(getNode('chat')?.crew_memory_mode, 'incognito');
+});
+
+test('a temporary chat\'s new Crew sessions are Off whatever was asked for, also from a path that names no mode', () => {
+  pinCrewMemory('chat', 'persistent');
+  assert.equal(crewMemoryModeFor('chat', 'persistent'), 'persistent');
+  assert.equal(crewMemoryModeFor('chat', undefined), undefined);
+  assert.equal(withTemporaryCrewMemory(getNode('chat'))?.crew_memory_mode, 'persistent');
+  getDb().prepare("UPDATE nodes SET memory_mode = 'off' WHERE id = 'chat'").run();
+  assert.equal(crewMemoryModeFor('chat', 'persistent'), 'temporary');
+  assert.equal(crewMemoryModeFor('chat', undefined), 'temporary');
+  // The runtime host's nodeBinding: the Crew adapter's pinned mode for a session opened without one.
+  assert.equal(withTemporaryCrewMemory(getNode('chat'))?.crew_memory_mode, 'temporary');
+  assert.equal(getNode('chat')?.crew_memory_mode, 'persistent', 'the stored row is unchanged');
+  assert.equal(withTemporaryCrewMemory(null), null);
 });
 
 test('memory API isolates cloud defaults, validates input and hides foreign nodes', async () => {

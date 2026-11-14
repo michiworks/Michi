@@ -5,7 +5,7 @@ import { getAiGlobalContext } from '../services/dbRepository';
 import { queueMaintenanceCatchup, queueMaintenanceReconsider, setInitialSpaceMaintenanceExcluded, setSpaceMaintenanceExcluded } from '../services/pages/maintenanceRepository';
 import { getMaintenanceWorkspaceView } from '../services/pages/maintenanceRouting';
 import { MaintenanceRuntimeUnavailableError, PageMaintenanceConfigService } from '../services/pages/maintenanceConfig';
-import { createWatch, deleteWatch, requestWatchRun, saveWorkspaceInstructions, updateWatch } from '../services/metaAgent/watches';
+import { deleteWatch, requestWatchRun, saveWorkspaceInstructions, updateWatch } from '../services/metaAgent/watches';
 import type { ScheduledJobScheduler } from '../services/scheduledJobs/scheduler';
 import { JobValidationError, ScheduledJobConflictError, ScheduledJobNotFoundError } from '../services/scheduledJobs/scheduler';
 import { pageBody, pageErrors, pageId as id, route, type Obj } from './pageRouteKit';
@@ -158,16 +158,6 @@ export function setupPageMaintenanceRoutes(deps: { scheduler: ScheduledJobSchedu
     if (!Number.isSafeInteger(data.expectedRevision) || (data.expectedRevision as number) < 0) throw new PageWriteError(400, 'invalid', 'expectedRevision must be a non-negative integer');
     saveWorkspaceInstructions({ workspaceId, ownerUserId, text: data.text, expectedRevision: data.expectedRevision as number, now: now() });
     res.json(view(workspaceId, ownerUserId));
-  }));
-
-  router.post('/workspaces/:workspaceId/maintenance/watches', route((req, res) => {
-    const { workspaceId, ownerUserId } = writableWorkspace(req);
-    const data = checkBody(req, ['title', 'instructions', 'intervalMinutes', 'enabled']);
-    if (!configs().get(workspaceId, ownerUserId)) throw new PageWriteError(409, 'stale_revision', 'Enable updates for this workspace before adding a watch');
-    createWatch({ workspaceId, ownerUserId, title: data.title, instructions: data.instructions, intervalMinutes: data.intervalMinutes,
-      enabled: data.enabled, now: now() });
-    scheduler().wakeJobs([]);
-    res.status(201).json(view(workspaceId, ownerUserId));
   }));
 
   router.patch('/workspaces/:workspaceId/maintenance/watches/:watchId', route((req, res) => {

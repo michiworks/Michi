@@ -23,6 +23,9 @@
  *    allow" grants and session trust never approve a change that asks.
  *  - Agent Runs and the turn of a scheduled run itself are refused: nobody is
  *    there to approve, and a job must not create or start jobs.
+ *  - A temporary chat (services/memory/temporaryChat.ts) creates no job and
+ *    changes none but to pause it: the job would carry what was said there
+ *    into runs that are ordinary conversations.
  *  - Inputs go through the same validation and limits as the Scheduled page.
  */
 
@@ -47,6 +50,7 @@ import {
 } from "../services/scheduledJobs/scheduler";
 import type { ParsedJobFields } from "../services/scheduledJobs/validation";
 import { activeCompanionTaint, activeTurnTrust } from "../services/turnTrust";
+import { isTemporaryChat } from "../services/memory/temporaryChat";
 
 import { askUserApprover, type HostApprovalRequest, type HostApprovalResult, type HostApprover } from "./hostApproval";
 import { type ScheduledJobToolName } from "./scheduledJobToolNames";
@@ -328,15 +332,11 @@ export interface AssistantScheduledJobCaller {
    * archived one, whose existing jobs stay reachable.
    */
   workspace(workspaceId: string, use: "create" | "existing"): ScheduleWorkspace | ScheduleWorkspaceRefusal;
-  /** The approved job was saved. */
-  jobCreated?(): void;
 }
 
 /** Which jobs a caller sees and where a new one goes. */
 interface JobScope {
   nodeId: string;
-  /** The approved job was saved. */
-  jobCreated?(): void;
   /** The checked workspace for a new job. Throws CodedToolError when the caller may not use it. */
   createWorkspace(args: Record<string, unknown>): { id: string; name: string | null };
   /** True for a job the caller may see and change; any other reads as missing. */
@@ -387,7 +387,6 @@ function assistantScope(caller: AssistantScheduledJobCaller): JobScope {
   };
   return {
     nodeId: caller.nodeId,
-    jobCreated: caller.jobCreated,
     createWorkspace: (args) => {
       const id = typeof args.workspaceId === "string" ? args.workspaceId.trim() : "";
       if (!id) throw new CodedToolError("INVALID_ARGUMENT", "workspaceId is required: the workspace the job runs in, from list_workspaces");
@@ -580,9 +579,17 @@ function readOutsideContent(nodeId: string): boolean {
 /** Why a create asks although the user's setting does not. */
 const OUTSIDE_CONTENT_LINE = "Michi asks because this conversation read content from outside it.";
 
+/** A temporary chat's job would carry what was said in it into runs that are ordinary conversations. */
+function refuseInTemporaryChat(scope: JobScope, what: string): void {
+  if (isTemporaryChat(scope.nodeId)) {
+    throw new CodedToolError("UNSUPPORTED", `This is a temporary chat: a scheduled job would carry what was said here into other conversations, so ${what}.`);
+  }
+}
+
 async function createJob(
   deps: ScheduledJobToolDeps, scope: JobScope, args: Record<string, unknown>, env: Env, approve: ScheduledJobApprover,
 ): Promise<McpTextResult> {
+  refuseInTemporaryChat(scope, "no job was created");
   const workspace = scope.createWorkspace(args);
   const input = { ...pickFields(args), workspaceId: workspace.id };
   // Validate first so the user is never asked to approve something invalid,
@@ -605,7 +612,6 @@ async function createJob(
     scope.createWorkspace(args);
   }
   const job = deps.scheduler.createJob(input);
-  scope.jobCreated?.();
   const note = schedulerNote(deps, scope, env);
   return jsonResult({
     status: "created",
@@ -631,6 +637,7 @@ async function updateJob(
   // Pausing only reduces what runs unattended, so it needs no approval.
   const pauseOnly = keys.length === 1 && changed.enabled === false;
   if (!pauseOnly) {
+    refuseInTemporaryChat(scope, "the job was not changed");
     const approval = await approve({
       toolName: "update_scheduled_job",
       action: "update",

@@ -32,7 +32,8 @@ import {
 import { indexTurn } from '../src/services/memory/recallIndex';
 import { recordTypedText, releaseTypedText } from '../src/services/memory/typedText';
 import { commitProfilePayload, readUserProfile } from '../src/services/memory/userProfile';
-import { pauseMaintenanceCoordinator } from '../src/services/metaAgent/maintenanceCoordinator';
+import { pauseMichi, resumeMichi } from '../src/services/michiPause';
+import { turnBackgroundWorkOn } from './helpers/backgroundWork';
 
 const ME = LOCAL_AGENT_OWNER_ID;
 const MINUTE = 60_000;
@@ -165,6 +166,7 @@ beforeEach(() => {
   delete process.env.MICHI_CLOUD;
   closeDb();
   initDb();
+  turnBackgroundWorkOn();
   now = START;
   serial = 0;
   mock.method(Date, 'now', () => now);
@@ -206,7 +208,7 @@ describe('when it runs', () => {
     assert.equal(consolidationDue(ME, now + DAY, holds()), false, 'nothing waits');
   });
 
-  test('never while anything holds it: memory off, paused, maintenance paused, the cloud, the budget, its own limits, a live or recent run, a backoff, a turn', () => {
+  test('never while anything holds it: memory off, paused, the cloud, the budget, its own limits, a live or recent run, a backoff, a turn; the Meta agent pause does not', () => {
     note('The user lives in Meguro, Tokyo.');
     assert.equal(consolidationDue(ME, now, consolidationHolds(ME, now)), true);
     setMemorySettings(ME, { mode: 'off' });
@@ -215,9 +217,9 @@ describe('when it runs', () => {
     setExtractionPaused(ME, true, now);
     assert.equal(consolidationDue(ME, now, consolidationHolds(ME, now)), false, 'automatic memory paused');
     setExtractionPaused(ME, false, now);
-    pauseMaintenanceCoordinator(ME, true);
-    assert.equal(consolidationDue(ME, now, consolidationHolds(ME, now)), false, 'maintenance paused');
-    pauseMaintenanceCoordinator(ME, false);
+    pauseMichi(ME, null);
+    assert.equal(consolidationDue(ME, now, consolidationHolds(ME, now)), true, 'the Meta agent pause is not memory\'s');
+    resumeMichi(ME);
     process.env.MICHI_CLOUD = '1';
     assert.equal(consolidationDue(ME, now, consolidationHolds(ME, now)), false, 'cloud');
     delete process.env.MICHI_CLOUD;

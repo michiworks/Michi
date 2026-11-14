@@ -53,6 +53,11 @@ export interface MetaChatDecorations {
    * DESIGN-v2 §3.8.)
    */
   hideMessage?: (message: ChatMessage, index: number, messages: readonly ChatMessage[]) => boolean;
+  /**
+   * Shown at the start of the conversation, above its first message, once
+   * no older messages are left to load (the agent's Get started card, D17).
+   */
+  leading?: ReactNode;
 }
 
 export const MetaChatDecorationsContext = createContext<MetaChatDecorations | null>(null);

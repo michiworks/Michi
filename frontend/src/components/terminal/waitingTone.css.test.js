@@ -16,7 +16,6 @@ it('draws waiting on you in --term-waiting, leaving the accent to selection', ()
     '.michi-card__attention',
     ".michi-task-status[data-status='waiting']",
     ".area-side__dot[data-tone='waiting']",
-    ".spaces-home tr[data-home-tone='waiting'] > td:first-child::before",
   ]);
   for (const { selector, body } of waiting) {
     expect(body, selector).toContain('var(--term-waiting)');

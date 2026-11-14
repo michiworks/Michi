@@ -3,13 +3,14 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { ChatNodeState, Project } from '../../../../state/chatTypes';
 import { ArchivedPane } from './ArchivedPane';
 import { buildArchiveEntries, groupArchiveEntries } from './archiveModel';
+import { resetUndoStackForTests, undoLatest } from '../../../../state/undoStack';
 
 const state = vi.hoisted(() => ({
   nodes: {} as Record<string, ChatNodeState>,
   projects: [] as Project[],
   hydrated: true,
-  restoreDeletion: vi.fn(), moveDeletionGroupLane: vi.fn(), unarchiveTree: vi.fn(), deleteTree: vi.fn(),
-  openPane: vi.fn(), revealNode: vi.fn(() => true), selectProject: vi.fn(), activateTree: vi.fn(), success: vi.fn(), fetchWorkspaceStructure: vi.fn(),
+  restoreDeletion: vi.fn(), moveDeletionGroupLane: vi.fn(), unarchiveTree: vi.fn(), deleteTree: vi.fn(), archiveTree: vi.fn(), archiveNode: vi.fn(),
+  openPane: vi.fn(), revealNode: vi.fn(() => true), selectProject: vi.fn(), activateTree: vi.fn(), success: vi.fn(), toast: vi.fn(), fetchWorkspaceStructure: vi.fn(),
 }));
 vi.mock('../../../../state/chatStore', () => ({
   useChatStore: () => state,
@@ -17,7 +18,9 @@ vi.mock('../../../../state/chatStore', () => ({
   chatLabel: () => '',
 }));
 vi.mock('../../../../services/api', () => ({ fetchWorkspaceStructure: (...args: unknown[]) => state.fetchWorkspaceStructure(...args) }));
-vi.mock('sonner', () => ({ toast: { success: (...args: unknown[]) => state.success(...args) } }));
+vi.mock('sonner', () => ({
+  toast: Object.assign((...args: unknown[]) => state.toast(...args), { success: (...args: unknown[]) => state.success(...args), error: vi.fn(), dismiss: vi.fn() }),
+}));
 
 const now = Date.now();
 const day = 86_400_000;
@@ -54,6 +57,7 @@ function fixture() {
 const rowKeys = () => Array.from(document.querySelectorAll('[data-history-key]')).map(row => row.getAttribute('data-history-key'));
 beforeEach(() => {
   vi.clearAllMocks();
+  resetUndoStackForTests();
   fixture();
   state.hydrated = true;
   state.restoreDeletion.mockImplementation((id: string) => Object.values(state.nodes).find(item => item.deletionGroupId === id)?.nodeId ?? null);
@@ -134,10 +138,22 @@ describe('Settings › Archived', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Move to Trash' }));
     expect(state.moveDeletionGroupLane).toHaveBeenCalledWith('arch-1', 'trash');
     expect(state.deleteTree).toHaveBeenCalledWith('plan-tree');
-    expect(state.success.mock.calls[0][0]).toBe('2 items moved to Trash');
-    state.success.mock.calls[0][1].action.onClick();
+    expect(state.toast.mock.calls[0][0]).toBe('2 items moved to Trash');
+    state.toast.mock.calls[0][1].action.onClick();
     expect(state.restoreDeletion).toHaveBeenCalledWith('del-new');
     expect(state.moveDeletionGroupLane).toHaveBeenLastCalledWith('trim-1', 'archive', now - 2 * day);
+  });
+
+  it('archives again what ⌘Z takes back out of Archived', async () => {
+    state.restoreDeletion.mockReturnValueOnce('haiku');
+    render(<ArchivedPane />);
+    fireEvent.click(screen.getByRole('button', { name: 'Unarchive Canvas removal plan' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Unarchive Try Haiku for titles' }));
+    expect(await undoLatest()).toBe('undone');
+    expect(state.archiveNode).toHaveBeenCalledWith('haiku');
+    expect(state.archiveTree).not.toHaveBeenCalled();
+    expect(await undoLatest()).toBe('undone');
+    expect(state.archiveTree).toHaveBeenCalledWith('plan-tree');
   });
 
   it('opens an item read-only with its conversation, and returns to the list', () => {

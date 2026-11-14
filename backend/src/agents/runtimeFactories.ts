@@ -2,6 +2,7 @@ import { AntigravityRuntime } from "./antigravity";
 import { CursorRuntime } from "./cursor/CursorRuntime";
 import { GrokRuntime } from "./grok/GrokRuntime";
 import { michiKiroRestrictedAgent } from './kiro/kiroMetaAgent';
+import { michiKiroGuardedAgent } from './kiro/kiroGuardedAgent';
 import os from "node:os";
 import path from "node:path";
 import type { AgentRuntime, ProviderEnvBinding } from "./types";
@@ -85,6 +86,8 @@ export const RUNTIME_FACTORIES: readonly RuntimeFactory[] = [
             ...kiroEnvOptions(),
             ...kiroSkillOptions(),
             restrictedAgent: michiKiroRestrictedAgent,
+            // A turn Michi guards runs on a copy of the chat's agent that pre-approves only reads (lane D, Q26).
+            guardedAgent: michiKiroGuardedAgent,
             startClient: (launch) => {
                 const cli = probeKiroCli();
                 if (!cli.installed) throw new Error('kiro-cli not found. Install Kiro CLI before starting a session.');

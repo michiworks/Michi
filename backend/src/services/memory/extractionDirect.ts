@@ -1,6 +1,5 @@
 import type { AgentRuntime, StructuredCompletion } from '../../agents/types';
 import { log } from '../logger';
-import { getMetaAgentSettings } from '../metaAgent/settings';
 import { CONSOLIDATION_PAYLOAD_SCHEMA } from './consolidationPolicy';
 import { getExtractionRun, recordExtractionInvalidCall, type ExtractionRunKind } from './extractionRepository';
 import { estimateTokens } from 'michi-shared';
@@ -22,9 +21,10 @@ import { PROFILE_PAYLOAD_SCHEMA } from './userProfile';
  * scheduler settles the run either way (settleMemoryExtractionRun), with the
  * tokens the calls reported.
  *
- * The model: MICHI_MEMORY_MODEL when set, else the Meta agent's own model
- * choice, else the runtime's cheap model (its title model, or a small one
- * the account lists).
+ * The model: MICHI_MEMORY_MODEL when set, else the runtime's cheap model (its
+ * title model, or a small one the account lists), never Background work's
+ * model choice: a large model chosen for check-ins and Pages does not make
+ * memory dearer.
  */
 
 export interface MemoryDirectAnswer {
@@ -81,16 +81,10 @@ export function createMemoryDirectAnswerer(deps: {
   runtime(runtimeId: string): AgentRuntime | undefined;
   /** MICHI_MEMORY_MODEL; null: none set. */
   model?(): string | null;
-  /** The Meta agent's own model choice (Settings › Meta agent), not the chat default it otherwise follows. */
-  metaAgentModel?(ownerUserId: string): { modelId: string | null; providerId: string | null };
   now?(): number;
 }): MemoryDirectAnswerer {
   const now = deps.now ?? Date.now;
   const configuredModel = deps.model ?? (() => process.env.MICHI_MEMORY_MODEL?.trim() || null);
-  const metaAgentModel = deps.metaAgentModel ?? ((ownerUserId: string) => {
-    const settings = getMetaAgentSettings(ownerUserId);
-    return { modelId: settings.modelId ?? null, providerId: settings.providerId ?? null };
-  });
   return {
     supports: (runtimeId) => answersMemoryDirectly(deps.runtime(runtimeId)),
     answer: async (input) => {
@@ -100,9 +94,8 @@ export function createMemoryDirectAnswerer(deps: {
       try {
         const runtime = structured(deps.runtime(input.profile.runtimeId));
         if (!runtime) return { status: 'failed', error: `Runtime "${input.profile.runtimeId}" cannot answer automatic memory directly`, tokens: null };
-        const chosen = metaAgentModel(input.ownerUserId);
-        const model = configuredModel() || chosen.modelId || null;
-        const provider = chosen.modelId ? chosen.providerId ?? input.profile.providerId : input.profile.providerId;
+        const model = configuredModel();
+        const provider = input.profile.providerId;
         let prompt = input.prompt;
         for (;;) {
           input.signal.throwIfAborted();

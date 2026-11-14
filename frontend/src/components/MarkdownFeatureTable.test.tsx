@@ -1,17 +1,56 @@
 import { act, fireEvent, render } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import MarkdownFeatureTable from './MarkdownFeatureTable';
+import MarkdownFeatureTable, { MarkdownTableLiveContext } from './MarkdownFeatureTable';
 
 afterEach(() => vi.useRealTimers());
+
+const rows = (
+  <>
+    <thead><tr><th>Ticket</th><th>Owner</th></tr></thead>
+    <tbody><tr><td>B-1</td><td>alex</td></tr><tr><td>A-2</td><td>sam</td></tr></tbody>
+  </>
+);
+
+describe('MarkdownFeatureTable settling', () => {
+  it('mounts a complete message’s table settled, so its columns never move on open', () => {
+    vi.useFakeTimers();
+    const { container } = render(<MarkdownFeatureTable>{rows}</MarkdownFeatureTable>);
+    const table = container.querySelector('table')!;
+    expect(table.className).toBe('michi-table-settled');
+    expect(table.hasAttribute('data-cards')).toBe(true);
+  });
+
+  it('keeps a streaming table fixed until its content rests, then settles it', () => {
+    vi.useFakeTimers();
+    const { container } = render(
+      <MarkdownTableLiveContext.Provider value><MarkdownFeatureTable>{rows}</MarkdownFeatureTable></MarkdownTableLiveContext.Provider>,
+    );
+    const table = container.querySelector('table')!;
+    expect(table.className).toBe('');
+    act(() => { vi.advanceTimersByTime(300); });
+    expect(table.className).toBe('');
+    act(() => { vi.advanceTimersByTime(200); });
+    expect(table.className).toBe('michi-table-settled');
+  });
+
+  it('settles a streaming table as soon as its message finishes', () => {
+    vi.useFakeTimers();
+    const view = (live: boolean) => (
+      <MarkdownTableLiveContext.Provider value={live}><MarkdownFeatureTable>{rows}</MarkdownFeatureTable></MarkdownTableLiveContext.Provider>
+    );
+    const { container, rerender } = render(view(true));
+    const table = container.querySelector('table')!;
+    expect(table.className).toBe('');
+    rerender(view(false));
+    expect(table.className).toBe('michi-table-settled');
+  });
+});
 
 describe('MarkdownFeatureTable cards', () => {
   it('labels each cell with its column once the table settles', () => {
     vi.useFakeTimers();
     const { container } = render(
-      <MarkdownFeatureTable>
-        <thead><tr><th>Ticket</th><th>Owner</th></tr></thead>
-        <tbody><tr><td>B-1</td><td>alex</td></tr><tr><td>A-2</td><td>sam</td></tr></tbody>
-      </MarkdownFeatureTable>,
+      <MarkdownTableLiveContext.Provider value><MarkdownFeatureTable>{rows}</MarkdownFeatureTable></MarkdownTableLiveContext.Provider>,
     );
     const table = container.querySelector('table')!;
     expect(table.hasAttribute('data-cards')).toBe(false);

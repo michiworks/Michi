@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { execFileSync, spawnSync } from 'node:child_process';
-import { chmodSync, copyFileSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, readlinkSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
@@ -71,12 +71,20 @@ async function installation() {
   return { root, home, work, old, first, env, michi, cleanup: () => { michi('stop'); rmSync(root, { recursive: true, force: true }); } };
 }
 
+const currentLink = (home) => path.join(home, '.local/share/michi/devdesktop/current');
+
+function releaseRevisions(home) {
+  return readdirSync(path.join(home, '.local/share/michi/devdesktop/releases')).map((name) => name.slice(0, 40)).sort();
+}
+
 test('michi update builds the new revision beside the running backend and switches to it', { skip: process.platform !== 'linux' }, async () => {
   const fixture = await installation();
   try {
     assert.equal(readlinkSync(path.join(fixture.home, '.local/bin/michi')), path.join(fixture.old, 'bin/michi'));
+    assert.equal(readlinkSync(currentLink(fixture.home)), fixture.old);
     assert.match(fixture.michi('status').stdout, new RegExp(`revision: ${fixture.first}`));
     const second = commit(fixture.work, SERVER, 'second');
+    mkdirSync(path.join(fixture.home, `.local/share/michi/devdesktop/releases/${'f'.repeat(40)}-failed-attempt`), { recursive: true });
 
     const updated = fixture.michi('update');
     assert.equal(updated.status, 0, updated.stderr);
@@ -86,7 +94,26 @@ test('michi update builds the new revision beside the running backend and switch
     assert.match(path.basename(path.dirname(path.dirname(link))), new RegExp(`^${second}-`));
     const record = JSON.parse(readFileSync(path.join(fixture.home, '.michi/remote-installation.json'), 'utf8'));
     assert.equal(record.serverPath, path.join(path.dirname(path.dirname(link)), 'backend/dist/server.js'));
+    assert.equal(readlinkSync(currentLink(fixture.home)), path.dirname(path.dirname(link)), 'current follows the running build');
     assert.match(fixture.michi('update').stdout, /already at dev/);
+    assert.deepEqual(releaseRevisions(fixture.home), [second], 'the stale attempt is removed');
+    assert.ok(existsSync(fixture.old), 'the replaced build stays for rollback');
+
+    // A Crew App registered to the current link does not keep old releases.
+    mkdirSync(path.join(fixture.home, '.kiro/agents'), { recursive: true });
+    writeFileSync(path.join(fixture.home, '.kiro/agents/kirocrew.json'), JSON.stringify({
+      mcpServers: { 'michi-crew-runtime:michi': { env: { MICHI_CREW_INSTALL_DIR: currentLink(fixture.home) } } },
+    }));
+    const third = commit(fixture.work, SERVER, 'third');
+    const again = fixture.michi('update');
+    assert.equal(again.status, 0, again.stderr);
+    assert.match(again.stdout, /No old Michi releases to remove/);
+    assert.match(fixture.michi('status').stdout, new RegExp(`revision: ${third}`));
+    const fourth = commit(fixture.work, SERVER, 'fourth');
+    const last = fixture.michi('update');
+    assert.equal(last.status, 0, last.stderr);
+    assert.match(last.stdout, /Removed 1 old Michi release\./);
+    assert.deepEqual(releaseRevisions(fixture.home), [third, fourth].sort(), 'only the running build and its rollback remain');
   } finally {
     fixture.cleanup();
   }
@@ -125,6 +152,7 @@ test('michi update restarts the old build when the new one does not start', { ti
     assert.match(updated.stderr, /did not start; restarted/);
     assert.match(fixture.michi('status').stdout, new RegExp(`revision: ${fixture.first}`));
     assert.equal(readlinkSync(path.join(fixture.home, '.local/bin/michi')), path.join(fixture.old, 'bin/michi'));
+    assert.equal(readlinkSync(currentLink(fixture.home)), fixture.old);
   } finally {
     fixture.cleanup();
   }

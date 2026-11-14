@@ -24,8 +24,8 @@ export type CompanionRunKind =
    * One follow-up delivered into a delegated conversation, from
    * companion_session_send, an applied `session.send` card or (Q1) a
    * check-in's direct send to a target whose permission choice is exactly
-   * `ask` (DESIGN-v2 §4). Not a model turn of the agent's own and outside
-   * dailyTurnBudget; its turn in the target is `cms-<runId>`
+   * `ask` (DESIGN-v2 §4). Not a model turn of the agent's own; its turn in
+   * the target is `cms-<runId>`
    * (companionSendTurnId). W3-G2 records it; Activity (W2-F2) lists it.
    */
   | 'send';
@@ -220,14 +220,15 @@ export const COMPANION_TAINT_DETAILS: readonly CompanionTaintDetail[] = Object.f
  * - `rulesUnavailable`: "<name> couldn't read your rules, so it won't act on
  *   its own this turn." The turn ran without [COMPANION CONTEXT] and the
  *   agent's action tools refused (§1.3).
- * - `startTaint`: "Tools ask before running this turn: it includes check-in
- *   material." The message referred to check-in or collector material
- *   (metaAgentContext.refs, a reply to a post), so the turn runs in Ask
- *   (T4); `checkin` when it referred to both.
- * - `carriedTaint`: "Tools ask before running this turn: this conversation
- *   read check-in material earlier." An earlier turn on the same live
- *   session took such material in, so this one runs in Ask too (w2-fix D1).
- *   Set only when `startTaint` is not.
+ * - `startTaint`: "Anything that would leave this machine asks first: this
+ *   turn includes check-in material." The message referred to check-in or
+ *   collector material (metaAgentContext.refs, a reply to a post), so the
+ *   turn is guarded (T4, D19): what leaves the machine asks whatever the
+ *   mode; `checkin` when it referred to both.
+ * - `carriedTaint`: "Anything that would leave this machine asks first: this
+ *   conversation read check-in material earlier." An earlier turn on the same
+ *   live session took such material in, so this one is guarded too (w2-fix
+ *   D1). Set only when `startTaint` is not.
  * W2-E (routes/michi.ts) writes it on the user message it hands to
  * chatHub.startTurn, so turn_start.userMetadata carries it to every window
  * and the stored row keeps it; the route drops a client's own

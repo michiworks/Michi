@@ -3,6 +3,7 @@
 
 import type { DatabaseSync } from 'node:sqlite';
 import { parseBranchOverviewEntries } from 'michi-shared';
+import { isTemporaryMemoryMode } from './memory/temporaryChat';
 
 export interface TopologyResult {
   topology: string;
@@ -28,10 +29,12 @@ interface NodeRecord {
   deleted_at: number | null;
   branch_overview: string | null;
   scheduled_only_job_id?: string | null;
+  memory_mode?: string | null;
 }
 
 interface TreeRecord {
   id: string;
+  root_node_id: string;
   name: string | null;
   archived_at: number | null;
   node_count: number;
@@ -117,7 +120,8 @@ function buildNodeJson(
  * inside a `nodes` array and every thread entry has `node_count`. read_node
  * accepts only node ids; the JSON makes that boundary obvious.
  *
- * Excludes deleted nodes and digest-kind nodes. Skips digest-source edges.
+ * Excludes deleted nodes, digest-kind nodes and temporary chats other than
+ * `currentNodeId` (memory/temporaryChat.ts). Skips digest-source edges.
  * Threads of Scheduled-only jobs are left out unless `includeScheduledRuns`
  * (the current thread is always listed).
  * If the full output exceeds SIZE_CAP, the current thread keeps its `nodes`
@@ -140,31 +144,36 @@ export function buildTopology(
   }
 
   const allTrees = db
-    .prepare('SELECT id, name, archived_at FROM trees WHERE workspace_id = ? ORDER BY last_active_at DESC')
-    .all(workspaceId) as unknown as Array<Pick<TreeRecord, 'id' | 'name' | 'archived_at'>>;
+    .prepare('SELECT id, root_node_id, name, archived_at FROM trees WHERE workspace_id = ? ORDER BY last_active_at DESC')
+    .all(workspaceId) as unknown as Array<Pick<TreeRecord, 'id' | 'root_node_id' | 'name' | 'archived_at'>>;
 
-  const listedNodes = db
+  const storedNodes = db
     .prepare(`
-      SELECT id, parent_node_id, kind, title, tree_id, deleted_at, branch_overview, scheduled_only_job_id
+      SELECT id, parent_node_id, kind, title, tree_id, deleted_at, branch_overview, scheduled_only_job_id, memory_mode
       FROM nodes
       WHERE workspace_id = ? AND deleted_at IS NULL AND kind != 'digest'
       ORDER BY created_at ASC
     `)
     .all(workspaceId) as unknown as NodeRecord[];
+  // Another conversation's temporary chat is not listed, nor named by an edge or a thread title.
+  const hidden = new Set(storedNodes.filter((n) => isTemporaryMemoryMode(n.memory_mode) && n.id !== currentNodeId).map((n) => n.id));
+  const temporaryTrees = new Set(storedNodes.filter((n) => hidden.has(n.id) && n.tree_id).map((n) => n.tree_id!));
+  const listedNodes = storedNodes.filter((n) => !hidden.has(n.id));
   const currentTree = currentNodeId ? listedNodes.find((n) => n.id === currentNodeId)?.tree_id ?? null : null;
   const allNodes = options.includeScheduledRuns
     ? listedNodes
     : listedNodes.filter((n) => !n.scheduled_only_job_id || (currentTree !== null && n.tree_id === currentTree));
   const scheduledRunTrees = new Set(listedNodes.filter((n) => n.scheduled_only_job_id && n.tree_id).map((n) => n.tree_id!));
 
-  const allEdges = db
+  const allEdges = (db
     .prepare(`
       SELECT source_node_id, target_node_id, kind
       FROM edges
       WHERE workspace_id = ?
         AND kind IN ('branch', 'merge', 'link')
     `)
-    .all(workspaceId) as unknown as EdgeRecord[];
+    .all(workspaceId) as unknown as EdgeRecord[])
+    .filter((e) => !hidden.has(e.source_node_id) && !hidden.has(e.target_node_id));
 
   let currentTreeId: string | null = null;
   if (currentNodeId) {
@@ -198,11 +207,11 @@ export function buildTopology(
   for (const tree of allTrees) {
     const isCurrent = tree.id === currentTreeId;
     const nodeCount = nodeCountByTree.get(tree.id) ?? 0;
-    // A Scheduled-only run's thread left out above.
-    if (nodeCount === 0 && scheduledRunTrees.has(tree.id)) continue;
+    // A Scheduled-only run's thread, or a temporary chat's, left out above.
+    if (nodeCount === 0 && (scheduledRunTrees.has(tree.id) || temporaryTrees.has(tree.id))) continue;
     const treeNodes = allNodes.filter((n) => n.tree_id === tree.id);
     const rootNode = treeNodes.find((n) => !n.parent_node_id);
-    const resolvedTitle = tree.name ?? rootNode?.title ?? null;
+    const resolvedTitle = hidden.has(tree.root_node_id) ? null : tree.name ?? rootNode?.title ?? null;
     const t: ThreadJson = {
       id: tree.id,
       title: resolvedTitle,

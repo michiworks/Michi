@@ -2,11 +2,11 @@ import { contextBridge, ipcRenderer, webUtils } from 'electron';
 
 import type {
   AppUpdateState, DesktopLifetimeStatus, BackdropRect, BackgroundServiceStatus, BrowserShellChord, BrowserSurfaceState, ChooseFolderResult, ChooseFoldersResult,
-  CompanionNotice, CompanionTarget,
+  CompanionTarget,
   DesktopBootstrapParam, DesktopBridge, DesktopCommandContract, DesktopEventContract, DesktopInvokeContract, DesktopInvokeArgs,
   DesktopResidency, DesktopResidencyPatch,
   DesktopInvokeResult, DesktopNotificationTarget, FilePreviewResult, FileTreeEntry, GitChangeEntry,
-  RemoteAuthenticationTarget, SaveMarkdownResult, ScheduledNotice, ScheduledRunTarget,
+  RemoteAuthenticationTarget, SaveMarkdownResult, ScheduledRunTarget,
   TerminalSurfaceSnapshot, VibrancyMaterial,
 } from 'michi-shared';
 
@@ -44,9 +44,9 @@ const initialScheduledRun: ScheduledRunTarget | null = param('michiOpenRun') && 
     }
   : null;
 
-// A window opened from a Companion notification carries the notice's target
-// (JSON, set by main.ts as COMPANION_TARGET_PARAM in companionNotifications.ts);
-// the renderer opens the Companion there once the workspace has hydrated.
+// A window opened from a notification's click carries its target (JSON, set
+// by main.ts as COMPANION_TARGET_PARAM in attentionNotifications.ts); the
+// renderer opens it once the workspace has hydrated.
 const initialCompanionTarget: CompanionTarget | null = companionTargetFrom(_qs.get('michiCompanionTarget'));
 
 /** A well-formed Companion target from its URL form, or null. Preload may load only 'electron', so this mirrors parseCompanionTarget. */
@@ -83,30 +83,26 @@ function companionTargetFrom(raw: string | null): CompanionTarget | null {
   }
 }
 
-// Main sends Companion notices and notification clicks only to a renderer
-// that listens for them (Electron drops a message nothing listens for, and
-// the renderer subscribes only once the workspace has loaded), so this
-// document reports when it starts and stops listening, as [kind, listening].
-// The name is COMPANION_READY_CHANNEL in companionNotifications.ts; the
-// renderer bridge has no method for it.
+// Main sends notification clicks only to a renderer that listens for them
+// (Electron drops a message nothing listens for, and the renderer subscribes
+// only once the workspace has loaded), so this document reports when it
+// starts and stops listening, as [kind, listening]. The name is
+// COMPANION_READY_CHANNEL in attentionNotifications.ts; the renderer bridge
+// has no method for it.
 const COMPANION_READY_CHANNEL = 'companion:ready';
-const companionListeners = { notice: 0, open: 0 };
+let companionOpenListeners = 0;
 
-function onCompanion<K extends 'companion:notice' | 'companion:open'>(
-  channel: K,
-  kind: keyof typeof companionListeners,
-  handler: (...args: DesktopEventContract[K]) => void,
-): () => void {
-  const detach = on(channel, handler);
-  companionListeners[kind] += 1;
-  if (companionListeners[kind] === 1) ipcRenderer.send(COMPANION_READY_CHANNEL, kind, true);
+function onCompanionOpen(handler: (...args: DesktopEventContract['companion:open']) => void): () => void {
+  const detach = on('companion:open', handler);
+  companionOpenListeners += 1;
+  if (companionOpenListeners === 1) ipcRenderer.send(COMPANION_READY_CHANNEL, 'open', true);
   let attached = true;
   return () => {
     if (!attached) return;
     attached = false;
     detach();
-    companionListeners[kind] -= 1;
-    if (companionListeners[kind] === 0) ipcRenderer.send(COMPANION_READY_CHANNEL, kind, false);
+    companionOpenListeners -= 1;
+    if (companionOpenListeners === 0) ipcRenderer.send(COMPANION_READY_CHANNEL, 'open', false);
   };
 }
 
@@ -205,13 +201,9 @@ const electronBridge = {
     return invoke('desktop:setResidency', patch);
   },
   initialScheduledRun,
-  /** A scheduled-run notification was clicked while this window exists. */
+  /** A scheduled run's notification was clicked while this window exists. */
   onScheduledRunOpen(handler: (target: ScheduledRunTarget) => void): () => void {
     return on('scheduled:open-run', handler);
-  },
-  /** A scheduled run finished (or needs attention) while this window is focused. */
-  onScheduledNotice(handler: (notice: ScheduledNotice) => void): () => void {
-    return on('scheduled:notice', handler);
   },
   getUpdateState(): Promise<AppUpdateState> {
     return invoke('app:getUpdateState');
@@ -229,13 +221,9 @@ const electronBridge = {
     return on('app:update-state', listener);
   },
   initialCompanionTarget,
-  /** A Companion notification was clicked while this window exists. */
+  /** A notification whose target is a conversation or Michi's panel was clicked (or a tray row), while this window exists. */
   onCompanionOpen(handler: (target: CompanionTarget) => void): () => void {
-    return onCompanion('companion:open', 'open', handler);
-  },
-  /** A Companion notice arrived while this window is focused (shown as a toast). */
-  onCompanionNotice(handler: (notice: CompanionNotice) => void): () => void {
-    return onCompanion('companion:notice', 'notice', handler);
+    return onCompanionOpen(handler);
   },
   chooseFiles(): Promise<{ canceled: boolean; paths?: string[] }> {
     return invoke('app:chooseFiles');

@@ -1,18 +1,24 @@
-import type { HomeSectionKey } from 'michi-shared';
-import { HomeSectionBlock } from './HomeSections';
-import { useSpacesHomeSections } from './homeCounts';
-import { useHomeNavigation } from './useHomeNavigation';
-import { useMinuteClock } from '../../content/home/useMinuteClock';
-import { requestWorkspaceHome } from '../../../../state/pages/workspaceHomeNav';
+import { LOCAL_BACKEND_CONNECTION_ID } from '../../../../config/backendConnections';
+import { openCompanionPanel } from '../../../../state/companion/companionPanel';
+import { companionIsOff, useCompanion } from '../../../../state/companion/companionStore';
 
-/** Live content inside the ordinary persisted page block frame. */
-export function NativeHomeSection({ section, connectionId, pageId, readOnly }: {
-  section: HomeSectionKey; connectionId: string; pageId: string; readOnly: boolean;
-}) {
-  const resource = useSpacesHomeSections(connectionId);
-  const clock = useMinuteClock(true);
-  const nav = useHomeNavigation(connectionId, pageId);
-  return <HomeSectionBlock section={section} data={resource.data?.[section] ?? null} clock={clock}
-    connectionId={readOnly ? undefined : connectionId} onAct={nav.openSectionItem}
-    onOpenWorkspace={workspaceId => requestWorkspaceHome({ workspaceId, backendConnectionId: connectionId })} />;
+/**
+ * A page's `home-section` block (the Pages Home's Waiting, Stalled or Done
+ * before D13): Today is the one list of what needs you (Q12), so the block
+ * is one line that counts it and opens it. Today is this computer's agent's,
+ * so a remote page's block shows nothing, and neither does one while the
+ * agent is off (Q29): Today is in its panel.
+ */
+export function NativeHomeSection({ connectionId }: { connectionId: string }) {
+  const companion = useCompanion();
+  const { snapshot } = companion;
+  if (connectionId !== LOCAL_BACKEND_CONNECTION_ID || !snapshot || companionIsOff(companion)) return null;
+  const count = snapshot.counts.needsYou;
+  return (
+    <p className="spaces-home-needs-you" role="status">
+      {count === 0 ? 'Nothing needs you right now' : `${count} ${count === 1 ? 'thing needs' : 'things need'} you`}
+      {' · '}
+      <button type="button" className="spaces-home-link" onClick={() => openCompanionPanel({ tab: 'today' })}>Open Today</button>
+    </p>
+  );
 }

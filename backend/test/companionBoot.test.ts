@@ -32,13 +32,14 @@ import { stableHash } from '../src/services/companion/observations';
 import type { CompanionMvpDiscard } from '../src/services/companion/cleanup';
 import type { CompanionTurnChatHub, CompanionTurnChatManager } from '../src/services/companion/conversation';
 import {
-  finishRun, getItem, getRun, insertNotice, listRuns, listUnnotifiedNowItems, markItemsNotified, pendingNotices, recordRunSession, setRunCheckinNode,
+  finishRun, getItem, getRun, listRuns, listUnnotifiedNowItems, markItemsNotified, recordRunSession, setRunCheckinNode,
   startRun, upsertItem,
 } from '../src/services/companion/repository';
 import type { CompanionExternalSources } from '../src/services/companion/sources';
 import type { CompanionAuthStatus } from '../src/services/companion/sources/auth';
 import { COMPANION_OWN_TOOLS } from '../src/services/companion/tools';
 import type { CompanionPollContext, CompanionSource, SourcePollResult } from '../src/services/companion/types';
+import { turnCompanionOn } from './helpers/backgroundWork';
 
 const T0 = new Date(2026, 10, 5, 12, 0, 0, 0).getTime();
 
@@ -111,6 +112,7 @@ describe('the Companion as the server runs it', () => {
     delete process.env.MICHI_CLOUD;
     closeDb();
     initDb(); enableSyntheticCompanionSources();
+    turnCompanionOn();
     cr = new HeldSource();
     lease = true;
     disposed = 0;

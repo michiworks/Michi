@@ -33,6 +33,7 @@ class FakeResponse extends EventEmitter {
   writableEnded = false;
   destroyed = false;
   writableLength = 0;
+  locals: Record<string, unknown> = {};
   status(code: number) { this.statusCode = code; return this; }
   json(body: unknown) { this.body = body; this.end(); return this; }
   setHeader(name: string, value: string) { this.headers[name.toLowerCase()] = value; }
@@ -51,9 +52,11 @@ class FakeResponse extends EventEmitter {
 }
 
 /** Runs one request through a router; resolves when it answered, or on the next turn for a stream. */
-async function invoke(router: express.Router, method: string, url: string, options: { body?: unknown; user?: string } = {}) {
+async function invoke(router: express.Router, method: string, url: string,
+  options: { body?: unknown; user?: string; host?: string; remoteAddress?: string } = {}) {
   const req = Object.assign(new EventEmitter(), {
-    method, url, originalUrl: url, headers: { 'content-type': 'application/json' }, body: options.body ?? {},
+    method, url, originalUrl: url, headers: { 'content-type': 'application/json', ...(options.host ? { host: options.host } : {}) },
+    body: options.body ?? {}, socket: { remoteAddress: options.remoteAddress ?? '127.0.0.1' },
     ...(options.user ? { user: { id: options.user } } : {}),
   });
   const res = new FakeResponse();
@@ -121,6 +124,71 @@ describe('POST /attention/notifications/:id/claim', () => {
     assert.equal(bob.statusCode, 404, 'another account\'s record looks like no record');
     const alice = await invoke(router, 'POST', '/attention/notifications/attn-alice/claim', { body: { windowId: 'w-1' }, user: 'alice' });
     assert.deepEqual([alice.statusCode, (alice.body as { claimed: boolean }).claimed], [200, true]);
+  });
+});
+
+describe('the desktop notifier feed (Electron main)', () => {
+  const LOCAL = { host: '127.0.0.1:3000' };
+
+  test('only this machine\'s app reaches it: a loopback Host from a loopback address, never in the cloud', async () => {
+    const feed = new AttentionFeed();
+    const attention = service();
+    const router = setupAttentionRoutes(attention, { feed });
+    assert.equal((await invoke(router, 'GET', '/attention/desktop/stream', { host: 'michi.example.com:3000' })).statusCode, 403, 'DNS rebinding');
+    assert.equal((await invoke(router, 'GET', '/attention/desktop/stream', { ...LOCAL, remoteAddress: '10.0.0.8' })).statusCode, 403, 'another machine');
+    assert.equal((await invoke(router, 'POST', '/attention/desktop/notifications/attn-1/claim', { host: 'michi.example.com' })).statusCode, 403);
+    process.env.MICHI_CLOUD = '1';
+    assert.equal((await invoke(router, 'GET', '/attention/desktop/stream', LOCAL)).statusCode, 404);
+  });
+
+  test('a snapshot and live frames by the level, every resolution, the tray\'s changes; open, it is the notifier', async () => {
+    let level: 'all' | 'approval-only' | 'off' = 'approval-only';
+    const clock = manualClock();
+    const feed = new AttentionFeed(() => clock.now());
+    const attention = new AttentionService({ presence: { isTargetVisibleInFocusedWindow: () => false }, feed, clock, level: () => level });
+    attention.start();
+    const tray: Array<(frame: string) => void> = [];
+    const router = setupAttentionRoutes(attention, { feed, desktopFrames: (write) => { tray.push(write); return () => { tray.length = 0; }; } });
+    getDb().prepare("INSERT INTO nodes(id,workspace_id,kind,status,title,created_at) VALUES ('n-1','ws-1','chat','idle','Fix the build',1)").run();
+    seedRecord('attn-1', 'local-user');
+    const res = await invoke(router, 'GET', '/attention/desktop/stream', LOCAL);
+    assert.equal(res.headers['content-type'], 'text/event-stream');
+    assert.equal(res.chunks[0], ': connected\n\n');
+    assert.deepEqual(res.frames().map((frame) => [frame.event, frame.data.notifications?.map((item: { id: string }) => item.id)]),
+      [['attention_snapshot', ['attn-1']]]);
+    assert.equal(feed.desktopAbsentForMs(), 0, 'it is the notifier while open');
+
+    attention.observeChatEvent(turnStart('n-1', 't1'));
+    completeTurn('n-1', 'ws-1', 't1');
+    attention.observeChatEvent(done('n-1', 't1'));
+    clock.advance(1_000);
+    assert.deepEqual(res.frames().map((frame) => frame.event), ['attention_snapshot'], 'a completion is not for "Only when something needs me"');
+    attention.observeChatEvent(turnStart('n-1', 't2'));
+    attention.observeChatEvent({ event: 'permission_request', data: { nodeId: 'n-1', chatId: 'n-1', turnId: 't2', requestId: 1, title: 'Run ls', options: [] } } as never);
+    clock.advance(1_000);
+    attention.observeChatEvent({ event: 'permission_resolved', data: { nodeId: 'n-1', chatId: 'n-1', turnId: 't2', requestId: 1 } } as never);
+    assert.deepEqual(res.frames().map((frame) => [frame.event, frame.data.reason]), [
+      ['attention_snapshot', undefined], ['attention_resolved', 'stale'], ['attention_notification', 'approval'], ['attention_resolved', 'answered'],
+    ], 'the new turn left the completion stale; an approval passes, and so does every resolution');
+    tray[0]!('event: companion_changed\ndata: {"type":"companion_changed","revision":3,"reason":"items"}\n\n');
+    assert.equal(res.frames().at(-1)!.event, 'companion_changed');
+
+    res.hangUp();
+    assert.equal(tray.length, 0, 'closing it detaches the tray\'s frames');
+    clock.advance(5_000);
+    assert.equal(feed.desktopAbsentForMs(), 5_000);
+    level = 'all';
+    attention.stop();
+  });
+
+  test('POST /attention/desktop/notifications/:id/claim claims a record for the notifier', async () => {
+    seedRecord('attn-1', 'local-user');
+    const router = setupAttentionRoutes(service());
+    const claimed = await invoke(router, 'POST', '/attention/desktop/notifications/attn-1/claim', LOCAL);
+    assert.deepEqual([claimed.statusCode, claimed.body], [200, { claimed: true, claimedByWindowId: 'desktop-notifier', status: 'active' }]);
+    const window = await invoke(router, 'POST', '/attention/notifications/attn-1/claim', { body: { windowId: 'w-1' } });
+    assert.deepEqual(window.body, { claimed: false, claimedByWindowId: 'desktop-notifier', status: 'active' });
+    assert.equal((await invoke(router, 'POST', '/attention/desktop/notifications/attn-404/claim', LOCAL)).statusCode, 404);
   });
 });
 

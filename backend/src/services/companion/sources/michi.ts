@@ -16,8 +16,9 @@
  * Left out, as everywhere an agent reads Michi: hidden system workspaces (the
  * Companion's own conversation is in one), workspaces whose "Let AI navigate
  * this workspace" is off, archived and deleted conversations and workspaces,
- * background maintenance chats, and scheduled-job runs (their job's item says
- * when one failed). A conversation waiting longer than a month is abandoned,
+ * background maintenance chats, temporary chats (memory/temporaryChat.ts), and
+ * scheduled-job runs (their job's item says when one failed). A conversation
+ * waiting longer than a month is abandoned,
  * not stalled. A conversation the Companion delegated is not "done" while
  * its worker report covers it (SYNTHESIS D5).
  *
@@ -35,6 +36,7 @@
 import { COMPANION_LIMITS, isAssistantWorkspaceSettings, isSystemWorkspaceSettings, type CompanionSettings, type CompanionTarget } from 'michi-shared';
 import { LOCAL_AGENT_OWNER_ID } from '../../agentOwner';
 import { getDb } from '../../db';
+import { notTemporaryChatSql } from '../../memory/temporaryChat';
 import { lastQuestion, serverLiveWait, STALLED_AFTER_MS, type HomeLiveWaitReader } from '../../pages/homeSections';
 import { stableHash } from '../observations';
 import { listDelegationsSince } from '../repository';
@@ -102,6 +104,7 @@ const ownerParams = (owner: string) => [owner, owner, process.env.MICHI_CLOUD ??
 const TRAILING_QUESTION_SQL = "substr(rtrim(COALESCE(a.content,''),' '||char(9)||char(10)||char(13)),-1) IN ('?','？')";
 const SCHEDULED_SQL = "COALESCE(json_extract(CASE WHEN json_valid(um.metadata) THEN um.metadata ELSE '{}' END,'$.scheduledJobId'),'')";
 const LIVE_SQL = `n.kind='chat' AND n.deleted_at IS NULL AND n.purged_at IS NULL AND n.status<>'archived' AND n.maintenance_job_id IS NULL
+    AND ${notTemporaryChatSql('n')}
     AND tr.archived_at IS NULL AND w.deleted_at IS NULL AND w.purged_at IS NULL AND w.archived_at IS NULL`;
 
 const CONVERSATION_SELECT = `SELECT t.turn_id,n.id AS node_id,n.workspace_id,n.title,n.created_at AS node_created_at,n.viewed_at,

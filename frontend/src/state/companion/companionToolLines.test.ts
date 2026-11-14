@@ -16,6 +16,31 @@ const tool = (title: string, input: unknown = {}, status = 'completed'): ToolCal
 });
 
 describe('the Companion’s tool calls in plain words', () => {
+  it('words a memory write by what it did: a save that was not made says so, never "Remembered"', () => {
+    const answered = (title: string, input: unknown, output: unknown, status = 'completed'): ToolCallState =>
+      ({ ...tool(title, input, status), output: JSON.stringify(output) });
+    const body = { body: 'Prefers short answers', kind: 'preference', userAsked: true };
+    expect([
+      companionToolLine(answered('@michi/memory_save', body, { status: 'saved', ref: 'm:1' }), names),
+      companionToolLine(answered('@michi/memory_save', body, { status: 'not_saved', reason: 'deleted_before', deletedOn: '2026-11-01' }), names),
+      companionToolLine(answered('@michi/memory_save', body, { status: 'not_saved', reason: 'companion_material' }), names),
+      companionToolLine(answered('@michi/memory_update', { ref: 'm:1', body: 'x' }, { status: 'not_saved', reason: 'companion_material' }), names),
+      companionToolLine(answered('@michi/memory_update', { ref: 'm:1', body: 'x' }, { status: 'updated' }), names),
+      companionToolLine(answered('@michi/memory_delete', { ref: 'm:1' }, { status: 'deleted' }), names),
+      companionToolLine(answered('@michi/memory_delete', { ref: 'm:1' }, 'Go to Settings → Memory', 'failed'), names),
+      companionToolLine(tool('@michi/memory_save', body, 'running'), names),
+    ]).toEqual([
+      'Remembered “Prefers short answers”',
+      'Didn’t save it: you removed it before',
+      'Didn’t save it: this turn read check-in material',
+      'Didn’t save it: this turn read check-in material',
+      'Updated a memory',
+      'Forgot a memory',
+      'Couldn’t forget a memory',
+      'Saving a memory',
+    ]);
+  });
+
   it('words each of its own tools, never by its raw name', () => {
     const lines: Array<[ToolCallState, string]> = [
       [tool('@michi/companion_items'), 'Looked at Today’s items'],
@@ -32,6 +57,9 @@ describe('the Companion’s tool calls in plain words', () => {
       [tool('@michi/companion_propose', { kind: 'something.new', payload: {} }), 'Suggested a change'],
       [tool('@michi/companion_publish_brief', { headline: 'x', cards: [], closing: 'y' }), 'Wrote today’s brief'],
       [tool('@michi/companion_set_name', { name: 'Sidekick' }), 'Changed its name to “Sidekick”'],
+      [tool('@michi/companion_set_notifications', { level: 'off' }), 'Turned off notifications'],
+      [tool('@michi/companion_set_notifications', { level: 'approval-only' }), 'Set notifications to only what needs you'],
+      [tool('@michi/companion_set_notifications', { level: 'all' }), 'Turned on all notifications'],
       [tool('@michi/companion_cr_detail', { cr: 'https://reviews.example.com/reviews/CR-123456/revisions/2' }), 'Read CR-123456'],
       [tool('@michi/companion_cr_detail', { cr: '654321' }), 'Read CR-654321'],
       [tool('@michi/companion_cr_detail', { cr: 'the big one' }), 'Read a CR'],

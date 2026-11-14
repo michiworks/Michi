@@ -1,5 +1,5 @@
 import { useCallback, useMemo } from 'react';
-import type { HomeSectionItem, HomeWorkspaceCounts, SpacesHomeSectionsDto } from 'michi-shared';
+import type { HomeSectionItem, SpacesHomeSectionsDto } from 'michi-shared';
 import { useOptionalChatProjects, useStructuralSelector } from '../../../../state/chatStore';
 import type { ChatNodeState } from '../../../../state/chatTypes';
 import { useHomeSections, type HomeResource } from '../../../../state/pages/useSpacesHome';
@@ -53,11 +53,4 @@ export function useSpacesHomeSections(connectionId: string): HomeResource<Spaces
 /** The "Waiting on you" total: conversations waiting for a reply plus page suggestions waiting for review. */
 export function homeWaitingTotal(sections: SpacesHomeSectionsDto | null | undefined): number {
   return sections?.waiting.total ?? 0;
-}
-
-const NO_COUNTS: HomeWorkspaceCounts = { waiting: 0, stalled: 0 };
-
-/** One workspace's Waiting and Stalled counts, for its row in the Spaces sidebar. */
-export function homeWorkspaceCounts(sections: SpacesHomeSectionsDto | null | undefined, workspaceId: string): HomeWorkspaceCounts {
-  return sections?.byWorkspace?.[workspaceId] ?? NO_COUNTS;
 }

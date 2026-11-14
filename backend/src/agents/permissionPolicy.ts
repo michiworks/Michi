@@ -1,16 +1,28 @@
 /** Ordinary chats resolve Ask / Trust / YOLO on the backend for each turn.
  * Native approval requests are gated by mode; Pi also checks tools before
  * execution. Always-allow grants belong to one chat and are revocable.
+ *
+ * On top of the mode, Michi asks by consequence (design D19, Q26; lane D,
+ * 2026-11-12), the same on every runtime that brings the call here:
+ * - in a turn Michi drove (a work conversation) or that holds outside
+ *   content (services/turnGuard.ts), whatever leaves the machine, or that
+ *   Michi cannot read, asks, whatever the mode, grants or session trust say
+ *   (forcedChatDecision); a Michi-driven conversation that started from
+ *   content someone else wrote asks for network and credential reads too;
+ * - in a Michi-driven turn everything else runs without asking: the work
+ *   conversation's local, undoable work, in its own worktree;
+ * - in a turn that only holds outside content, everything else follows the
+ *   chat's mode, as in any other turn.
+ * Reading outside content no longer sends the whole turn to Ask.
  */
 
-import { randomUUID } from 'node:crypto';
 import { getRuntimeDeps } from "./runtimeDeps";
 import type { RuntimeDeps } from './runtimeDeps';
 import type { RuntimeSessionOwner } from './types';
 import type { ChatPermissionMode } from 'michi-shared';
 import { chatNodeOf } from './ownerMapping';
-import { activeCompanionTaint } from '../services/turnTrust';
-import { michiBareToolName, michiToolEffect } from '../assistant/toolEffects';
+import { isGuarded, turnGuard, type TurnGuard } from '../services/turnGuard';
+import { callConsequence, type CallAnnotations, type CallVerdict } from './callConsequence';
 import { ARTIFACT_READ_TOOL_NAMES } from './artifactToolNames';
 import { noteRuntimeToolApproval } from './taintedToolGate';
 
@@ -23,36 +35,32 @@ export function permissionNodeId(owner: RuntimeSessionOwner | undefined): string
 }
 
 /**
- * The chat's permission mode for the turn now starting. A turn that started
- * with check-in or collector material (DESIGN-v2 §2.8 T4: the route records
- * it before the turn begins; a check-in's direct send records it on its
- * `cms-` turn, w3-fix D15), or that runs on the chat's live session after an
- * earlier turn took some in (sticky: w2-fix D1 for V, w3-fix D17 for every
- * chat; turnTrust.ts activeCompanionTaint), runs in Ask, on every runtime,
- * since each one reads this when its turn starts; the stored mode is left as
- * it is. A taint that cannot be read counts as one.
+ * The chat's permission mode for the turn now starting: the stored one. A
+ * turn that holds outside content keeps it (D19: by consequence, not by
+ * what it read); what must ask in such a turn asks through
+ * forcedChatDecision, whatever the mode.
  */
 export function chatPermissionMode(owner: RuntimeSessionOwner | undefined, ownerUserId?: string | null): ChatPermissionMode {
     const nodeId = permissionNodeId(owner);
     if (nodeId === undefined) return 'ask';
     const deps = permissionDeps();
     if (!deps?.chatPermissions) return 'ask';
-    if (activeCompanionTaint(nodeId)) return 'ask';
     const userId = permissionOwnerUserId(owner!, ownerUserId);
     return deps.chatPermissions?.getMode(nodeId, userId) ?? 'ask';
 }
 
 /**
  * Approve for me is on for this chat's turn: Ask, with the runtime's trust
- * classifier; never while the turn holds check-in material, its own or what
- * its live session took in on an earlier turn (D17), so Kiro reopens the
- * session without the classifier preset before such a turn's prompt
+ * classifier; never in a guarded turn (services/turnGuard.ts: Michi drove
+ * it, or it holds outside content), whose classifier would approve calls
+ * before they reach Michi's consequence rules, so Kiro reopens the session
+ * without the classifier preset before such a turn's prompt
  * (AcpAgentSession reconcilePolicyPresets, K-review #4).
  */
 export function chatApproveForMe(owner: RuntimeSessionOwner | undefined, ownerUserId?: string | null): boolean {
     const nodeId = permissionNodeId(owner);
     if (nodeId === undefined) return false;
-    if (activeCompanionTaint(nodeId)) return false;
+    if (isGuarded(turnGuard(nodeId))) return false;
     const deps = permissionDeps();
     if (!deps?.chatPermissions?.getApproveForMe) return false;
     return deps.chatPermissions.getApproveForMe(nodeId, permissionOwnerUserId(owner!, ownerUserId)) === true;
@@ -67,15 +75,14 @@ export function permissionOwnerUserId(owner: RuntimeSessionOwner, ownerUserId?: 
 }
 
 /**
- * The permission port's reset token while the chat holds check-in or
- * collector material (DESIGN-v2 §2.8: its turn read some, or its live
- * session did earlier, w2-fix D1 / w3-fix D17): a new one on every read, so "Trust all
- * tools for this session", given before or during it, never matches and
- * each call goes to the policy, which asks. Undefined otherwise: the chat
- * permission store's token applies (chatApprovalState.ts).
+ * The rules of the chat's running turn (services/turnGuard.ts); unguarded
+ * for an Agent Run owner, which has its own broker.
  */
-export function companionTaintResetToken(nodeId: string): string | undefined {
-    return activeCompanionTaint(nodeId) ? `checkin-material:${randomUUID()}` : undefined;
+export function chatTurnGuard(owner: RuntimeSessionOwner | undefined): TurnGuard | null {
+    const nodeId = permissionNodeId(owner);
+    if (nodeId === undefined) return null;
+    const guard = turnGuard(nodeId);
+    return isGuarded(guard) ? guard : null;
 }
 
 /** Embedders without the optional chat permission port keep Ask semantics. */
@@ -103,8 +110,9 @@ function michiToolNames(names: readonly string[]): Set<string> {
 }
 
 // The tool enforces its workspace/owner scope and optional requestApproval.
-// Do not add a second runtime prompt, including for the known native MCP names,
-// except in a turn that holds check-in material, where it asks (resolveChatPolicy, D15).
+// Do not add a second runtime prompt, including for the known native MCP names.
+// A message from a turn that holds outside content carries that to the turn
+// it starts (threadMessageWakes.ts), whose own rules then hold (D19).
 const THREAD_MESSAGE_TOOLS = michiToolNames(['send_to_thread']);
 
 // Michi's question card, which the user answers or skips: no permission card
@@ -139,12 +147,11 @@ const TURN_METADATA_TOOLS = michiToolNames([
     'set_branch_overview', 'set_follow_ups', 'report_conversation_no_change',
 ]);
 
-/** Michi's own tools a chat runs without a prompt in every mode; a turn that
- * holds check-in material runs only the reads and Michi-internal writes among
- * them without one (resolveChatPolicy). Tools that write pages, artifacts or
- * files, reach the web, show images, open links or start branches, Agent Runs
- * or scheduled jobs are not here; nor are the Artifacts tools, which are
- * matched as Michi's own only (isMichiTool). */
+/** Michi's own tools a chat runs without a prompt in every mode, guarded
+ * turns included. Tools that write pages, artifacts or files, reach the web,
+ * show images, open links or start branches, Agent Runs or scheduled jobs
+ * are not here; nor are the Artifacts tools, which are matched as Michi's
+ * own only (isMichiTool). */
 const CHAT_SELF_SCOPED_TOOLS: ReadonlySet<string> = new Set([
     ...THREAD_MESSAGE_TOOLS, ...QUESTION_TOOLS, ...MEMORY_SELF_SCOPED_TOOLS, ...MICHI_READ_ONLY_TOOLS, ...TURN_METADATA_TOOLS,
 ]);
@@ -174,13 +181,15 @@ function isMichiTool(names: ReadonlySet<string>, toolName: string, nativeRequest
 // (it lists only pinned ones), which it used to read without a card.
 const ARTIFACT_READ_TOOLS: ReadonlySet<string> = new Set<string>(ARTIFACT_READ_TOOL_NAMES);
 
-// Tools that ask the user themselves, every time and in every mode, through
-// their own single-use card (agents/hostApproval.ts): delete_artifact. A
-// runtime prompt in front would be a second card for the same call, and
-// Trust, YOLO or a grant must not stand in for the card, so the runtime
-// lets them through and the tool's card decides. Michi's own only
-// (isMichiTool): another server's delete_artifact asks as any tool does.
-const OWN_APPROVAL_TOOLS: ReadonlySet<string> = new Set<string>(['delete_artifact']);
+// Tools that decide themselves whether to ask the user, in every mode,
+// through their own single-use card (agents/hostApproval.ts): delete_artifact
+// for every deletion; start_conversation outside a turn the user sent (in
+// the user's own turn it starts without a card, 2026-11-12). A runtime prompt
+// in front would be a second card for the same call, and Trust, YOLO or a
+// grant must not stand in for the card, so the runtime lets them through and
+// the tool decides. Michi's own only (isMichiTool): another server's tool of
+// the same name asks as any tool does.
+const OWN_APPROVAL_TOOLS: ReadonlySet<string> = new Set<string>(['delete_artifact', 'start_conversation']);
 
 // The plan card is the consent: proposing runs nothing, and the list is read-only.
 const MULTI_MODEL_TOOLS = new Set(['propose_multi_model_plan', 'list_ready_models']
@@ -197,67 +206,107 @@ const HOST_METADATA_TOOLS = new Set(['set_branch_overview', 'set_follow_ups', 's
 // no runtime prompt is added on top, as for scoped thread messaging above.
 const COMPANION_SELF_GATED_TOOLS = new Set(['companion_items', 'companion_item', 'companion_check_now',
     'companion_update_item', 'companion_save_notes', 'companion_goal_progress', 'companion_edit_goal', 'companion_propose',
-    'companion_publish_brief', 'companion_set_name', 'companion_read', 'companion_pipeline_detail',
-    'companion_session_send', 'nothing_to_do']
+    'companion_publish_brief', 'companion_set_name', 'companion_set_notifications', 'companion_read', 'companion_pipeline_detail',
+    'companion_session_send', 'companion_headline', 'nothing_to_do']
     .flatMap((name) => [name, `mcp____michi_internal____${name}`, `@michi/${name}`]));
 
-/** Native tools that only read the session's own folder: they may run in a turn that holds check-in material. */
-const LOCAL_READ_TOOLS = new Set(['read', 'ls', 'grep', 'find', 'Read', 'Glob', 'Grep']);
+/** What a call carries beyond its name, for its consequence (agents/callConsequence.ts). */
+export interface ChatCallDetail {
+    input?: unknown;
+    /** The call's ACP tool kind, when the runtime gives one. */
+    kind?: string;
+    annotations?: CallAnnotations;
+}
+
+/** Michi's own tools that gate themselves or only record, ask or read: no consequence rule stands in front of them. */
+function selfGated(owner: RuntimeSessionOwner, toolName: string, nativeRequest: boolean, hostTool: boolean): boolean {
+    if (permissionNodeId(owner) === undefined) return false;
+    return COMPANION_SELF_GATED_TOOLS.has(toolName) || CHAT_SELF_SCOPED_TOOLS.has(toolName)
+        || isMichiTool(ARTIFACT_READ_TOOLS, toolName, nativeRequest, hostTool)
+        || isMichiTool(OWN_APPROVAL_TOOLS, toolName, nativeRequest, hostTool)
+        || MULTI_MODEL_TOOLS.has(toolName) || HOST_METADATA_TOOLS.has(toolName);
+}
+
+/** Why a forced ask asks, in the card the user sees. */
+export interface ForcedAsk { decision: 'ask'; reason: string; verdict: CallVerdict }
+
+const WHY_DRIVEN = 'Michi is doing this work for you';
+const WHY_OUTSIDE = 'this conversation read content from outside';
+const WHY_SOURCED = 'this work started from content someone else wrote';
 
 /**
- * What a turn that holds check-in or collector material may still run
- * (§2.8 T5): local read-only native tools, and Michi's own tools the effect
- * register (assistant/toolEffects.ts) classes as reads or Michi-internal
- * writes. The web, commands, file writes, other MCP servers and anything that
- * starts other work ask.
+ * A decision no mode, always-allow grant or session trust overrides (D19,
+ * Q26): in a guarded turn (services/turnGuard.ts), a call that leaves the
+ * machine, or that Michi cannot read, asks; in a Michi-driven conversation
+ * that started from content someone else wrote, network and credential
+ * reads ask too. Null otherwise: the mode decides. Michi's self-gated tools
+ * are never forced (their own rules hold).
  */
-function runsWithCheckinMaterial(toolName: string): boolean {
-    if (LOCAL_READ_TOOLS.has(toolName)) return true;
-    const bare = michiBareToolName(toolName);
-    const effect = bare ? michiToolEffect(bare) : null;
-    return effect === 'read' || effect === 'michi_write';
+export function forcedChatDecision(owner: RuntimeSessionOwner, toolName: string, detail: ChatCallDetail = {}, nativeRequest = false,
+    hostTool = false): ForcedAsk | null {
+    if (selfGated(owner, toolName, nativeRequest, hostTool)) return null;
+    const guard = chatTurnGuard(owner);
+    // A check-in's own turn has nobody to ask: backgroundRefusal refuses instead.
+    if (!guard || guard.background) return null;
+    const verdict = callConsequence({ toolName, input: detail.input, hostTool, kind: detail.kind, annotations: detail.annotations });
+    const because = guard.outsideSourced ? WHY_SOURCED : guard.michiDriven ? WHY_DRIVEN : WHY_OUTSIDE;
+    const what = verdict.why ?? toolName;
+    if (verdict.consequence === 'egress') return { decision: 'ask', reason: `Leaves this machine (${what}), and ${because}.`, verdict };
+    if (verdict.consequence === 'unclear') return { decision: 'ask', reason: `Michi cannot tell whether this leaves the machine (${what}), and ${because}.`, verdict };
+    if (guard.outsideSourced && (verdict.consequence === 'network_read' || verdict.consequence === 'credential_read')) {
+        const reads = verdict.consequence === 'network_read' ? 'Reaches the network' : 'Reads credentials';
+        return { decision: 'ask', reason: `${reads} (${what}), and ${because}.`, verdict };
+    }
+    return null;
+}
+
+/**
+ * Why a call from a check-in's own turn (services/turnGuard.ts background:
+ * check-ins and the work heartbeat, however the scheduler started them) is
+ * refused, or null: nobody is there to answer, so anything but a read or a
+ * local, Michi-internal change is refused rather than asked. Its closed
+ * toolset holds no such tool; this is the backstop. Michi's self-gated tools
+ * (the agent's own, whose deep reads a check-in keeps) hold their own rules.
+ */
+export function backgroundRefusal(owner: RuntimeSessionOwner, toolName: string, detail: ChatCallDetail = {}, nativeRequest = false,
+    hostTool = false): string | null {
+    if (selfGated(owner, toolName, nativeRequest, hostTool)) return null;
+    if (!chatTurnGuard(owner)?.background) return null;
+    const verdict = callConsequence({ toolName, input: detail.input, hostTool, kind: detail.kind, annotations: detail.annotations });
+    if (verdict.consequence === 'read' || verdict.consequence === 'local') return null;
+    return `A check-in runs with nobody to ask, so Michi refuses this (${verdict.why ?? toolName}).`;
 }
 
 /** Ordinary chat approvals ignore legacy workspace-wide grants. Apart from
  * Michi's own self-scoped tools, its Artifact reads, tools that ask the user
  * themselves, the agent's own tools, multi-model plans and Michi's reply
  * metadata, native requests ask in Ask mode; Pi also gates unknown/MCP tools
- * before execution. A turn that holds check-in or collector
- * material (§2.8 T5; a check-in's direct send, D15; sticky, D1 / D17) is never
- * wider than Ask, whatever mode it started in: always-allow grants are
- * ignored, session trust never matches (companionTaintResetToken), and a tool
- * that would otherwise run without asking does so only if
- * runsWithCheckinMaterial. So send_to_thread, start_conversation,
- * spawn_branches, scheduled jobs and Agent Runs (the register's `indirect`
- * tools: they make another turn run) ask, on every runtime that brings the
- * call here; of the self-scoped tools, Michi's reads, Memory and reply
- * metadata still run, and the question card and multi-model plans ask.
- * `hostTool`: PermissionDecisionRequest.hostTool. */
+ * before execution. In a guarded turn (D19, Q26), forcedChatDecision asks
+ * first; what it lets through runs without asking in a Michi-driven turn (a
+ * work conversation), and by the chat's mode in a turn that only holds
+ * outside content. `hostTool`: PermissionDecisionRequest.hostTool. */
 export function resolveChatPolicy(owner: RuntimeSessionOwner, ownerUserId: string | null, toolName: string, nativeRequest = false,
-    mode = chatPermissionMode(owner, ownerUserId), hostTool = false): PermissionDecision {
+    mode = chatPermissionMode(owner, ownerUserId), hostTool = false, detail: ChatCallDetail = {}): PermissionDecision {
     const nodeId = permissionNodeId(owner);
-    if (nodeId !== undefined && COMPANION_SELF_GATED_TOOLS.has(toolName)) return 'allow';
-    const tainted = nodeId !== undefined && activeCompanionTaint(nodeId) !== null;
-    const decision = untaintedChatPolicy(owner, ownerUserId, toolName, nativeRequest, hostTool, mode, nodeId, !tainted);
-    return tainted && decision === 'allow' && !runsWithCheckinMaterial(toolName) ? 'ask' : decision;
+    if (selfGated(owner, toolName, nativeRequest, hostTool)) return 'allow';
+    if (backgroundRefusal(owner, toolName, detail, nativeRequest, hostTool)) return 'deny';
+    if (forcedChatDecision(owner, toolName, detail, nativeRequest, hostTool)) return 'ask';
+    if (chatTurnGuard(owner)?.michiDriven) return 'allow';
+    return modePolicy(owner, ownerUserId, toolName, nativeRequest, mode, nodeId);
 }
 
-function untaintedChatPolicy(owner: RuntimeSessionOwner, ownerUserId: string | null, toolName: string, nativeRequest: boolean,
-    hostTool: boolean, mode: ChatPermissionMode, nodeId: string | undefined, grants: boolean): PermissionDecision {
-    if (nodeId !== undefined && (CHAT_SELF_SCOPED_TOOLS.has(toolName)
-        || isMichiTool(ARTIFACT_READ_TOOLS, toolName, nativeRequest, hostTool)
-        || isMichiTool(OWN_APPROVAL_TOOLS, toolName, nativeRequest, hostTool)
-        || MULTI_MODEL_TOOLS.has(toolName) || HOST_METADATA_TOOLS.has(toolName))) return 'allow';
+function modePolicy(owner: RuntimeSessionOwner, ownerUserId: string | null, toolName: string, nativeRequest: boolean,
+    mode: ChatPermissionMode, nodeId: string | undefined): PermissionDecision {
     if (mode !== 'ask') return 'allow';
-    if (grants && nodeId !== undefined && permissionDeps()?.chatPermissions?.hasGrant(nodeId, michiGrantKey(toolName), permissionOwnerUserId(owner, ownerUserId))) return 'allow';
+    if (nodeId !== undefined && permissionDeps()?.chatPermissions?.hasGrant(nodeId, michiGrantKey(toolName), permissionOwnerUserId(owner, ownerUserId))) return 'allow';
     return !nativeRequest && READ_TOOLS.has(toolName) ? 'allow' : 'ask';
 }
 
 /**
  * The permission port's note that the user approved this one call through
  * Michi's prompt (ApprovalCoordinator.accept): Michi's own tool, when the
- * call reaches its MCP dispatch from a turn that holds check-in material,
- * does not ask a second time (agents/taintedToolGate.ts, w3-fix D23).
+ * call reaches its MCP dispatch from a guarded turn, does not ask a second
+ * time (agents/taintedToolGate.ts, w3-fix D23).
  */
 export function noteChatToolApproval(owner: RuntimeSessionOwner, toolName: string): void {
     const nodeId = permissionNodeId(owner);

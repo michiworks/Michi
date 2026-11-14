@@ -52,6 +52,7 @@ import {
   type CompanionCatchUpDto,
   type CompanionCheckinChangeDto,
   type CompanionCheckinKind,
+  type CompanionHeadlineDto,
   type CompanionConfigurableSource,
   type CompanionConversationDto,
   type CompanionDelegationClosedReason,
@@ -65,7 +66,6 @@ import {
   type CompanionItemDto,
   type CompanionItemStatus,
   type CompanionItemSubtype,
-  type CompanionNotice,
   type CompanionPostChange,
   type CompanionPostChangeAction,
   type CompanionReminderDto,
@@ -85,7 +85,7 @@ import {
 import { LOCAL_AGENT_OWNER_ID } from '../agentOwner';
 import { getDb } from '../db';
 import { nextCompanionBriefAt } from './briefSchedule';
-import { isInQuietHours, localClockText, localDateKey, localDayStart } from './clock';
+import { localClockText, localDateKey, localDayStart } from './clock';
 import { CompanionError, invalidRequest, limitReached, notFound, notesConflict } from './errors';
 import { diffObservations, type ObservationDiff } from './observations';
 import {
@@ -2094,112 +2094,10 @@ export function setBriefCardFeedback(id: string, index: number, feedback: Compan
   });
 }
 
-// ── Notices (desktop notification outbox) ───────────────────────────────────
-
-interface NoticeRow {
-  id: string;
-  title: string;
-  body: string;
-  target_json: string;
-  item_ids_json: string;
-  item_versions_json: string;
-  created_at: number;
-  expires_at: number;
-  delivered_at: number | null;
-}
-
-function toNotice(row: NoticeRow): CompanionNotice {
-  const itemIds = parseJson(row.item_ids_json);
-  return {
-    id: row.id,
-    title: row.title,
-    body: row.body,
-    target: parseCompanionTarget(parseJson(row.target_json)) ?? { kind: 'companion', tab: 'chat' },
-    itemIds: Array.isArray(itemIds) ? itemIds.filter((id): id is string => typeof id === 'string') : [],
-    createdAt: row.created_at,
-    expiresAt: row.expires_at,
-  };
-}
-
-export interface CompanionNoticeInsert {
-  title: string;
-  body: string;
-  target: CompanionTarget;
-  /** The feed items it is about; their current versions are recorded with it. Unknown ids are left out. */
-  itemIds: readonly string[];
-  now: number;
-  /** When it goes stale; default `now` + COMPANION_LIMITS.noticeTtlMs (a meeting's: its start). */
-  expiresAt?: number;
-}
-
-/** Stores a notice in the outbox (delivery.ts publishes it). */
-export function insertNotice(input: CompanionNoticeInsert): CompanionNotice {
-  const title = typeof input.title === 'string' ? clip(oneLine(input.title), 120) : '';
-  const body = typeof input.body === 'string' ? clip(input.body, 500) : '';
-  if (!title || !body) throw new Error('a notice needs a title and a body');
-  const target = parseCompanionTarget(input.target);
-  if (!target) throw new Error('notice target is malformed');
-  const now = requireTime(input.now, 'now');
-  const expiresAt = input.expiresAt === undefined ? now + COMPANION_LIMITS.noticeTtlMs : requireTime(input.expiresAt, 'expiresAt');
-  const wanted = [...new Set(input.itemIds)].filter(ID);
-  const versions: Record<string, string> = {};
-  if (wanted.length > 0) {
-    const rows = getDb().prepare(`SELECT id, version FROM companion_items WHERE owner_user_id = ? AND id IN (${placeholders(wanted.length)})`)
-      .all(OWNER, ...wanted) as Array<{ id: string; version: string }>;
-    for (const row of rows) versions[row.id] = row.version;
-  }
-  const itemIds = wanted.filter((id) => versions[id] !== undefined);
-  const id = newId('cmn');
-  getDb().prepare(`INSERT INTO companion_notices (id, owner_user_id, title, body, target_json, item_ids_json, item_versions_json, created_at, expires_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(id, OWNER, title, body, JSON.stringify(target), JSON.stringify(itemIds), JSON.stringify(versions), now, expiresAt);
-  return toNotice(getDb().prepare('SELECT * FROM companion_notices WHERE id = ?').get(id) as unknown as NoticeRow);
-}
-
-/**
- * Whether a notice is still worth showing (R2.7): it has not expired, and it
- * is about nothing in particular (a Companion reply) or at least one of its
- * items is still open at the version it was about.
- */
-function noticeStillValid(row: NoticeRow, now: number, hidden: HiddenItems): boolean {
-  if (row.expires_at <= now) return false;
-  const versions = parseJson(row.item_versions_json);
-  const ids = Object.keys(isRecord(versions) ? versions : {});
-  if (ids.length === 0) return true;
-  return ids.some((id) => {
-    const item = itemRow(id);
-    return !!item && item.version === (versions as Record<string, unknown>)[id] && isOpenCompanionItem(toItemDto(item), now) && !isHiddenItem(item, hidden);
-  });
-}
-
-/** Undelivered notices still worth showing, oldest first: what a notifier that connects gets (delivery.ts folds a backlog). */
-export function pendingNotices(now: number, limit = 50): CompanionNotice[] {
-  const rows = getDb().prepare(`SELECT * FROM companion_notices WHERE owner_user_id = ? AND delivered_at IS NULL AND expires_at > ?
-      ORDER BY created_at ASC, id ASC`).all(OWNER, now) as unknown as NoticeRow[];
-  const hidden = hiddenItems();
-  return rows.filter((row) => noticeStillValid(row, now, hidden)).slice(0, Math.max(1, Math.floor(limit))).map(toNotice);
-}
-
-/** These notices are done with without being shown on their own (folded into one). Returns how many changed. */
-export function markNoticesDelivered(ids: readonly string[], now: number): number {
-  if (ids.length === 0) return 0;
-  const changed = getDb().prepare(`UPDATE companion_notices SET delivered_at = ? WHERE owner_user_id = ? AND delivered_at IS NULL
-      AND id IN (${placeholders(ids.length)})`).run(now, OWNER, ...ids);
-  return Number(changed.changes);
-}
-
-/** A notifier showed it: `acked` the first time, `already` after, `missing` for an unknown id. */
-export function ackNotice(id: string, now: number): 'acked' | 'already' | 'missing' {
-  const changed = getDb().prepare('UPDATE companion_notices SET delivered_at = ? WHERE owner_user_id = ? AND id = ? AND delivered_at IS NULL')
-    .run(now, OWNER, id);
-  if (Number(changed.changes) > 0) return 'acked';
-  return getDb().prepare('SELECT 1 FROM companion_notices WHERE owner_user_id = ? AND id = ?').get(OWNER, id) ? 'already' : 'missing';
-}
-
-/** Notices created since `since` (the delivery caps). */
-export function countNoticesSince(since: number): number {
-  const row = getDb().prepare('SELECT COUNT(*) AS n FROM companion_notices WHERE owner_user_id = ? AND created_at >= ?').get(OWNER, since) as { n: number };
-  return Number(row.n);
-}
+// ── Notices ─────────────────────────────────────────────────────────────────
+// The notice outbox (companion_notices) is no longer written: Michi's notices
+// go to the attention service (notices.ts). Daily cleanup still deletes the
+// rows an older build left; the table is dropped later (DESIGN P7).
 
 // ── Delegations (conversations the Companion started) ───────────────────────
 
@@ -2725,8 +2623,14 @@ export type CompanionMetaKey =
   | 'companion:last_purge_at'
   | 'companion:catch_up'
   | 'companion:welcome_done'
+  /** The Get started card's answer (getStarted.ts, D17). */
+  | 'companion:get_started'
+  /** When "Michi is off" was told once, or Michi was found on (Q29). */
+  | 'companion:off_notice_at'
   /** Who last wrote the notes (CompanionTextOrigin; absent: `user`). */
   | 'companion:notes_origin'
+  /** Michi's latest line (CompanionHeadlineDto as JSON, Q45). */
+  | 'companion:headline'
   | 'companion:revision'
   | `companion:demoted:${CompanionItemSubtype}`
   /** When the user last undid the subtype's demotion: its too_noisy count starts again there (conv-1). */
@@ -2757,6 +2661,16 @@ export function getCompanionMetaNumber(key: CompanionMetaKey): number | null {
 export function setCompanionMetaNumber(key: CompanionMetaKey, value: number): void {
   if (!Number.isSafeInteger(value)) throw new Error(`${key} must be a whole number`);
   setCompanionMeta(key, String(value));
+}
+
+/** When "Michi is off · Turn it on in Settings" was told, or Michi was found on: null until then (Q29). */
+export function companionOffNoticeAt(): number | null {
+  return getCompanionMetaNumber('companion:off_notice_at');
+}
+
+/** Records the notice once; later calls keep the first time. */
+export function markCompanionOffNotice(now: number): void {
+  if (companionOffNoticeAt() === null) setCompanionMetaNumber('companion:off_notice_at', now);
 }
 
 // ── The first welcome (R2.6) ────────────────────────────────────────────────
@@ -3091,8 +3005,9 @@ export function purgeExpired(now: number): CompanionPurgeResult {
   const privacyCutoff = now - COMPANION_PRIVACY_TTL_MS;
   const recordCutoff = now - COMPANION_RECORD_RETENTION_MS;
   const noticeCutoff = now - COMPANION_NOTICE_RETENTION_MS;
-  const settings = getCompanionSettings();
-  const unwatched = (['email', 'calendar'] as const).filter((kind) => !settings.enabled || !settings.sources[kind].enabled);
+  const settings = getCompanionSettings(now);
+  // While Michi is paused nobody looks either: its email and calendar words go a week after the last look.
+  const unwatched = (['email', 'calendar'] as const).filter((kind) => settings.paused || !settings.sources[kind].enabled);
   return companionTransaction(() => {
     const db = getDb();
     const stale = db.prepare(`SELECT id, source FROM companion_items WHERE owner_user_id = ? AND source IN ('email','calendar')
@@ -3190,6 +3105,26 @@ export function currentRevision(): number {
   return getCompanionMetaNumber('companion:revision') ?? 0;
 }
 
+/** Michi's latest line (Q45), or null when none was written yet. */
+export function companionHeadline(): CompanionHeadlineDto | null {
+  const raw = getCompanionMeta('companion:headline');
+  if (raw === null) return null;
+  try {
+    const value = JSON.parse(raw) as Partial<CompanionHeadlineDto>;
+    if (typeof value.text !== 'string' || !value.text || typeof value.at !== 'number'
+      || !(COMPANION_CHECKIN_KINDS as readonly unknown[]).includes(value.kind)) return null;
+    return { text: value.text, at: value.at, kind: value.kind as CompanionCheckinKind };
+  } catch {
+    return null;
+  }
+}
+
+/** A check-in's line becomes Michi's latest (conversation.ts, when the check-in ran); the snapshot moves on. */
+export function setCompanionHeadline(headline: CompanionHeadlineDto): void {
+  setCompanionMeta('companion:headline', JSON.stringify(headline));
+  bumpRevision();
+}
+
 export function bumpRevision(): number {
   const row = getDb().prepare(`INSERT INTO meta (key, value) VALUES ('companion:revision', '1')
       ON CONFLICT (key) DO UPDATE SET value = CAST(CAST(value AS INTEGER) + 1 AS TEXT) RETURNING value`).get() as { value: string };
@@ -3213,16 +3148,16 @@ const UNKNOWN_AUTH: CompanionStatusDto['auth'] = Object.freeze({ valid: null, ex
 /**
  * A status from settings and storage alone, for when no coordinator reports
  * a live one (and the one the coordinator's live view is built with): state
- * from enabled/paused/quiet hours (degraded when a given source failed or
- * Auth expired), last check and today's budgeted turns from the runs, the
- * next heartbeat from the last one, the next brief by the engine's own rule
+ * from Pause Michi (degraded when a given source failed or
+ * Auth expired), last check and today's turns from the runs, the next
+ * brief by the engine's own rule
  * (briefSchedule.ts). With every source behind the Auth check off, the
  * session is nobody's business: Auth reads as unknown (B2), as its item is
  * out of sight then.
  */
 export function defaultCompanionStatus(input: CompanionStatusInput): CompanionStatusDto {
   const { settings, now } = input;
-  const active = settings.enabled && !settings.paused;
+  const active = !settings.paused;
   const needsAuth = AUTH_SOURCES.some((kind) => settings.sources[kind].enabled);
   const auth = needsAuth ? input.auth ?? { ...UNKNOWN_AUTH } : { ...UNKNOWN_AUTH };
   const sources: CompanionSourceStatus[] = COMPANION_CONFIGURABLE_SOURCES.map((kind) => {
@@ -3237,12 +3172,9 @@ export function defaultCompanionStatus(input: CompanionStatusInput): CompanionSt
     };
   });
   const failing = auth.valid === false || sources.some((source) => source.state === 'error' || source.state === 'unavailable');
-  const state: CompanionStatusDto['state'] = !settings.enabled ? 'off'
-    : settings.paused ? 'paused'
-      : isInQuietHours(settings, now) ? 'quiet_hours'
-        : failing ? 'degraded' : 'ok';
+  // No quiet hours any more (D5): nothing holds a check-in by the clock.
+  const state: CompanionStatusDto['state'] = settings.paused ? 'paused' : failing ? 'degraded' : 'ok';
   const nextPolls = sources.map((source) => source.nextPollAt).filter((at): at is number => at !== null);
-  const lastHeartbeatAt = getCompanionMetaNumber('companion:last_heartbeat_at');
   const today = localDateKey(now);
   // A poll that ran fine and changed nothing records no run (coordinator.ts keeps only failures, changes and
   // baselines, or each source's latest quiet look), so the live engine's last good poll of each source counts too.
@@ -3254,8 +3186,8 @@ export function defaultCompanionStatus(input: CompanionStatusInput): CompanionSt
     sources,
     lastCheckAt: checks.length > 0 ? Math.max(...checks) : null,
     nextCheckAt: nextPolls.length > 0 ? Math.min(...nextPolls) : null,
-    nextHeartbeatAt: active && settings.heartbeat.enabled && lastHeartbeatAt !== null
-      ? lastHeartbeatAt + settings.heartbeat.intervalMinutes * 60_000 : null,
+    // There is no heartbeat any more (unification D3); the field stays for readers from before.
+    nextHeartbeatAt: null,
     nextBriefAt: nextCompanionBriefAt({ settings, now, welcomeAt: companionWelcomeDoneAt(), briefToday: briefForDate(today) !== null }),
     turnsToday: countTurnsSince(localDayStart(now)),
     working: input.working,
@@ -3302,5 +3234,6 @@ export function snapshotDto(options: CompanionSnapshotOptions): CompanionSnapsho
     delegations: listFollowedDelegations(),
     notesOrigin: notes.origin,
     checkinChanges: listCheckinChanges(),
+    headline: companionHeadline(),
   };
 }

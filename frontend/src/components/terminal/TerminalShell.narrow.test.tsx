@@ -4,23 +4,37 @@ import { act, fireEvent, render, screen, waitFor, within } from '@testing-librar
 import { backTarget } from '../../lib/backStack';
 import TerminalShell from './TerminalShell';
 import { PrefsProvider } from '../../state/prefs';
+import { openCompanionPanel, resetCompanionPanelForTests } from '../../state/companion/companionPanel';
 
 const topbar = vi.hoisted(() => ({ rail: [] as Array<boolean | undefined>, phoneBack: undefined as (() => void) | undefined }));
 
 vi.mock('./Topbar', () => ({
-  default: ({ sidebarRail, onToggleSidebar, phoneBack }: { sidebarRail?: boolean; onToggleSidebar: () => void; phoneBack?: () => void }) => {
+  default: ({ sidebarRail, onToggleSidebar, onNewThread, phoneBack }: { sidebarRail?: boolean; onToggleSidebar: () => void; onNewThread?: () => void; phoneBack?: () => void }) => {
     topbar.rail.push(sidebarRail);
     topbar.phoneBack = phoneBack;
-    return <button type="button" data-sidebar-rail={String(!!sidebarRail)} onClick={onToggleSidebar}>toggle sidebar</button>;
+    return <>
+      <button type="button" data-sidebar-rail={String(!!sidebarRail)} onClick={onToggleSidebar}>toggle sidebar</button>
+      <button type="button" onClick={onNewThread}>new chat</button>
+    </>;
   },
 }));
+vi.mock('./companion/CompanionPanel', async () => {
+  const { useCompanionPanel } = await vi.importActual<typeof import('../../state/companion/companionPanel')>('../../state/companion/companionPanel');
+  return {
+    CompanionPanelHost: ({ covered }: { covered?: boolean }) => (
+      useCompanionPanel().open ? <aside aria-label="Michi panel" data-covered={String(!!covered)} /> : null
+    ),
+  };
+});
 vi.mock('./pages/Home', () => ({ default: () => <div>Conversation home</div> }));
 vi.mock('./pages/Dashboard', () => ({ default: () => <div>Conversation dashboard</div> }));
-vi.mock('./pages/Scheduled', () => ({ default: () => <div>Scheduled page</div> }));
-vi.mock('./scheduled/metaAgent/MetaAgentDetail', () => ({ default: () => <div>Meta agent detail page</div> }));
+vi.mock('./pages/Scheduled', async () => {
+  const nav = await vi.importActual<typeof import('./scheduled/scheduledNav')>('./scheduled/scheduledNav');
+  return { default: () => (nav.useScheduledRoute().kind === 'job' ? <div>Job detail page</div> : <div>Scheduled page</div>) };
+});
 vi.mock('./pages/settings/AppearancePane', () => ({ AppearancePane: () => <div>Appearance pane</div> }));
 vi.mock('./pages/settings/ModelPane', () => ({ ModelPane: () => <div>Model pane</div> }));
-vi.mock('./scheduled/useScheduledJobs', () => ({ useScheduledJobs: () => ({ jobs: [], loading: false, unavailable: false }) }));
+vi.mock('./scheduled/useScheduledJobs', () => ({ useScheduledJobs: () => ({ jobs: [{ id: 'job-1', name: 'Digest', workspaceId: 'w1', activeRunId: null, schedule: { kind: 'every', everySeconds: 3600 } }], loading: false, unavailable: false }) }));
 vi.mock('../../state/pages/useSpaces', () => ({ useSpaces: () => ({ spaces: [], status: 'ready', error: null, refresh: vi.fn() }) }));
 vi.mock('../../state/chatStore', async () => {
   const actual = await vi.importActual<any>('../../state/chatStore');
@@ -50,10 +64,12 @@ const wideWidth = window.innerWidth;
 const areas = () => screen.queryByRole('navigation', { name: 'Areas' });
 const rail = (name: string) => screen.getByRole('navigation', { name: 'Areas' }).querySelector<HTMLButtonElement>(`[data-area="${name}"]`)!;
 const toggle = () => screen.getByRole('button', { name: 'toggle sidebar' });
+const panel = () => screen.queryByRole('complementary', { name: 'Michi panel' });
 
 describe('TerminalShell in a narrow window', () => {
   beforeEach(() => {
     sessionStorage.clear();
+    resetCompanionPanelForTests();
     topbar.rail = [];
     localStorage.setItem('michi:v1:prefs', JSON.stringify({ onboardingCompletedAt: 1, sidebarCollapsed: false }));
     Object.defineProperty(window, 'innerWidth', { configurable: true, value: 390 });
@@ -165,15 +181,54 @@ describe('TerminalShell in a narrow window', () => {
     await waitFor(() => expect(reopened.querySelector('.terminal-settings--drawer')?.getAttribute('data-view')).toBe('menu'));
   });
 
-  it('keeps the drawer open on the Scheduled list and closes it when the Pages upkeep row is picked', async () => {
+  it('keeps the drawer open on the Scheduled list and closes it when a job is picked', async () => {
     render(<PrefsProvider><TerminalShell /></PrefsProvider>);
     fireEvent.click(toggle());
     fireEvent.click(rail('scheduled'));
     expect(await screen.findByText('Scheduled page')).toBeTruthy();
     expect(rail('scheduled').getAttribute('aria-current')).toBe('page');
-    fireEvent.click(screen.getByText('Michi · Pages upkeep'));
-    expect(await screen.findByText('Meta agent detail page')).toBeTruthy();
-    await waitFor(() => expect(screen.queryByText('Michi · Pages upkeep')).toBeNull());
+    fireEvent.click(screen.getByRole('button', { name: 'Digest' }));
+    expect(await screen.findByText('Job detail page')).toBeTruthy();
+    await waitFor(() => expect(screen.queryByRole('button', { name: 'Digest' })).toBeNull());
+  });
+
+  // The Michi panel lies over the page here, so what opens a page closes it.
+  it('closes the panel over the page for the topbar + and Home', async () => {
+    render(<PrefsProvider><TerminalShell /></PrefsProvider>);
+    await screen.findByText('Conversation home');
+    act(() => openCompanionPanel());
+    expect(panel()).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: 'new chat' }));
+    expect(panel()).toBeNull();
+
+    act(() => openCompanionPanel());
+    act(() => { window.dispatchEvent(new CustomEvent('michi:goto-home')); });
+    expect(panel()).toBeNull();
+  });
+
+  it('opens the drawer over the panel, which a dismissal keeps and a choice in the drawer closes', async () => {
+    render(<PrefsProvider><TerminalShell /></PrefsProvider>);
+    await screen.findByText('Conversation home');
+    act(() => openCompanionPanel());
+    fireEvent.click(toggle());
+    expect(areas()).toBeTruthy();
+    expect(panel()?.getAttribute('data-covered')).toBe('true');
+    fireEvent.click(toggle());
+    await waitFor(() => expect(areas()).toBeNull());
+    expect(panel()?.getAttribute('data-covered')).toBe('false');
+
+    // An area swaps the page under the panel.
+    fireEvent.click(toggle());
+    fireEvent.click(rail('scheduled'));
+    expect(await screen.findByText('Scheduled page')).toBeTruthy();
+    expect(panel()).toBeNull();
+    expect(areas()).toBeTruthy();
+
+    // A row that opens something in the main column: a scheduled job.
+    act(() => openCompanionPanel());
+    fireEvent.click(screen.getByRole('button', { name: 'Digest' }));
+    expect(await screen.findByText('Job detail page')).toBeTruthy();
+    expect(panel()).toBeNull();
   });
 
   it('keeps the overlay open when the window is wide, where there is none', async () => {

@@ -1092,6 +1092,22 @@ export class AcpClient extends AcpCoreClient {
         }
     }
 
+    /**
+     * Selects an agent and confirms Kiro applied it, for a switch that must not
+     * silently miss (a guarded copy, lane D): v3 answers session/set_mode with
+     * `{}` for any id, one it has no agent for included (probed on kiro-cli
+     * 3.2.1, 2026-11-12), so on v3 the session's mode config option is set
+     * instead, whose answer names the value applied (setConfigOption throws on
+     * any other); v2 answers an unknown agent with an error.
+     */
+    async selectAgentVerified(sessionId: string, agent: string): Promise<void> {
+        const option = this.sessionInfo.get(sessionId)?.configOptions?.find((c) => c.id === 'mode' || c.category === 'mode');
+        if (this.engine !== 'v3' || !option) return this.setMode(sessionId, agent);
+        await this.setConfigOption(sessionId, option.id, agent);
+        const info = this.sessionInfo.get(sessionId);
+        if (info?.modes) this.rememberSessionInfo(sessionId, { ...info, modes: { ...info.modes, currentModeId: agent } });
+    }
+
     async setConfigOption(sessionId: string, configId: string, value: string | boolean, timeoutMs?: number): Promise<AcpConfigOption[]> {
         if (this.engine !== 'v3' && !this.launch?.standardAcp) throw new ACPError('Generic config options require Kiro v3');
         const result = await this.send('session/set_config_option', { sessionId, configId, value }, timeoutMs, sessionId, timeoutMs !== undefined);

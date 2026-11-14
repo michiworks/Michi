@@ -70,15 +70,27 @@ export function companionAgo(at: number, now: number): string {
  * "Saying hello…" for the welcome (no Stop, F4), "Checking in…" for any
  * other check-in (stoppable), "Taking a first look…" before the welcome
  * (status.firstLook), or "Working…" when nothing tells which (DESIGN-v2
- * §3.8); then Quiet hours until 08:00, Auth expired — refresh your credentials, Budget
- * used — resumes tomorrow, or Watching · checked 2m ago (warn while a source
+ * §3.8); then Quiet hours until 08:00, Auth expired — refresh your credentials, or
+ * Watching · checked 2m ago (warn while a source
  * is degraded). A running check-in counts only while status.working agrees
  * (as the MVP Chat tab required), so a stale `running` row alone shows nothing.
  */
+/**
+ * "Off": paused until resumed, which is what Settings' switch and the
+ * palette's Turn <name> off set (Q30). "Paused until 14:30" / "Paused until
+ * tomorrow 08:00" only for an older timed pause that ends by itself.
+ */
+function pausedText(until: number | null, now: number): string {
+  if (until === null || until <= now) return 'Off';
+  const end = new Date(until);
+  const clock = `${String(end.getHours()).padStart(2, '0')}:${String(end.getMinutes()).padStart(2, '0')}`;
+  return new Date(now).toDateString() === end.toDateString() ? `Paused until ${clock}` : `Paused until tomorrow ${clock}`;
+}
+
 export function companionStatusLine(snapshot: CompanionStatusLineInput, now: number): CompanionStatusLine {
   const { settings, status } = snapshot;
-  if (!settings.enabled || status.state === 'off') return { text: 'Off', tone: 'off' };
-  if (settings.paused || status.state === 'paused') return { text: 'Paused', tone: 'off' };
+  if (status.state === 'off') return { text: 'Off', tone: 'off' };
+  if (settings.paused || status.state === 'paused') return { text: pausedText(settings.pausedUntil ?? null, now), tone: 'off' };
   const checkin = status.working ? companionCheckinRunning(snapshot.activity) : null;
   if (checkin === 'welcome') return { text: 'Saying hello…', tone: 'working' };
   if (checkin) return { text: 'Checking in…', tone: 'working', stoppable: true };
@@ -86,7 +98,6 @@ export function companionStatusLine(snapshot: CompanionStatusLineInput, now: num
   if (status.working) return { text: 'Working…', tone: 'working' };
   if (status.state === 'quiet_hours') return { text: `Quiet hours until ${settings.quietHours.end}`, tone: 'quiet' };
   if (status.auth.valid === false) return { text: 'Auth expired — refresh your credentials', tone: 'warn' };
-  if (status.turnsToday >= settings.dailyTurnBudget) return { text: 'Budget used — resumes tomorrow', tone: 'quiet' };
   const checked = status.lastCheckAt === null ? 'not checked yet' : `checked ${companionAgo(status.lastCheckAt, now)}`;
   return { text: `Watching · ${checked}`, tone: status.state === 'degraded' ? 'warn' : 'ok' };
 }

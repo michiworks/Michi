@@ -168,13 +168,14 @@ describe('SpacesSidebar', () => {
     expect(JSON.parse(localStorage.getItem('michi.spaces-sidebar.expanded')!)).toEqual(['local:ws-a']);
   });
 
-  it('keeps workspace navigation neutral despite suggestions and hides system workspaces', () => {
+  it('counts a page’s suggestions beside it (Q20), keeps the dots calm and hides system workspaces', () => {
     renderSidebar();
     const alpha = screen.getByRole('button', { name: 'Alpha' });
     expect(alpha.querySelector('[data-tone="calm"]')).not.toBeNull();
     expect(screen.getByRole('button', { name: 'Home' }).querySelector('.area-side__count')).toBeNull();
     fireEvent.click(screen.getByRole('button', { name: 'Expand Alpha' }));
-    expect(screen.getByRole('button', { name: 'Release' }).querySelector('.area-side__count')).toBeNull();
+    expect(screen.getByRole('button', { name: 'Release' }).closest('.area-side__row')!.querySelector('.area-side__count')?.textContent).toBe('1');
+    expect(screen.getByLabelText('1 suggestion to review')).toBeTruthy();
     expect(screen.queryByLabelText(/waiting/)).toBeNull();
     expect(screen.getByRole('button', { name: 'Beta' }).querySelector('[data-tone="calm"]')).not.toBeNull();
     expect(screen.queryByRole('button', { name: 'Assistant workspace' })).toBeNull();
@@ -316,7 +317,7 @@ describe('SpacesSidebar', () => {
     expect(screen.getByRole('button', { name: 'Beta' })).toBeTruthy();
   });
 
-  it('keeps workspace navigation neutral when its home has pending suggestions', () => {
+  it('counts a workspace home’s suggestions beside its row, with a calm dot', () => {
     data.spaces = [];
     const homes = status(run('ws-a', 'done', 1, 1), run('ws-b', 'done', 1, 1), 'done') as { workspaces: Array<Record<string, unknown>> };
     homes.workspaces[1]!.pendingProposals = 2;
@@ -325,6 +326,8 @@ describe('SpacesSidebar', () => {
     renderSidebar();
     expect(screen.getByRole('button', { name: /^Alpha/ }).querySelector('[data-tone="calm"]')).not.toBeNull();
     expect(screen.getByRole('button', { name: /^Beta/ }).querySelector('[data-tone="calm"]')).not.toBeNull();
+    expect(screen.getByRole('button', { name: /^Beta/ }).closest('.area-side__row')!.querySelector('.area-side__count')?.textContent).toBe('2');
+    expect(screen.getByRole('button', { name: /^Alpha/ }).closest('.area-side__row')!.querySelector('.area-side__count')).toBeNull();
   });
 
   it('hides a workspace from Spaces through its row menu and lists it under Hidden, where it can be shown again', async () => {

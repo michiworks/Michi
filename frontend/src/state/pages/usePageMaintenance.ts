@@ -1,6 +1,5 @@
 import React from 'react';
 import {
-  createMaintenanceWatch,
   deleteMaintenanceWatch,
   getPageMaintenance,
   queuePageMaintenanceCatchUp,
@@ -31,7 +30,6 @@ export interface PageMaintenanceState {
   reconsider: (planId: string, sourceTurnIds: string[]) => Promise<void>;
   catchUp: (spaceId: string, after: number, through: number) => Promise<{ requestId: string; after: number; through: number; queued: true }>;
   saveInstructions: (text: string) => Promise<void>;
-  addWatch: (input: MaintenanceWatchInput) => Promise<void>;
   /** Saved against the watch's revision as last loaded. */
   changeWatch: (watchId: string, patch: Partial<MaintenanceWatchInput>) => Promise<void>;
   removeWatch: (watchId: string) => Promise<void>;
@@ -111,7 +109,6 @@ export function usePageMaintenance(identity: PageMaintenanceIdentity): PageMaint
   const instructionsRevision = value?.instructions?.revision ?? 0;
   const saveInstructions = React.useCallback((text: string) => mutate((options) =>
     saveMaintenanceInstructions(text, instructionsRevision, options)), [instructionsRevision, mutate]);
-  const addWatch = React.useCallback((input: MaintenanceWatchInput) => mutate((options) => createMaintenanceWatch(input, options)), [mutate]);
   const watches = value?.watches;
   const changeWatch = React.useCallback((watchId: string, patch: Partial<MaintenanceWatchInput>) => mutate((options) =>
     updateMaintenanceWatch(watchId, { ...patch, expectedRevision: watches?.find((watch) => watch.id === watchId)?.revision ?? 0 }, options)), [mutate, watches]);
@@ -119,5 +116,5 @@ export function usePageMaintenance(identity: PageMaintenanceIdentity): PageMaint
   const runWatch = React.useCallback((watchId: string) => mutate((options) => runMaintenanceWatch(watchId, options)), [mutate]);
 
   return { value, loading, busy, error, refresh, update, setSpaceExcluded, runNow, reconsider, catchUp,
-    saveInstructions, addWatch, changeWatch, removeWatch, runWatch };
+    saveInstructions, changeWatch, removeWatch, runWatch };
 }

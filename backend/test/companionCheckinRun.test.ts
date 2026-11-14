@@ -134,7 +134,7 @@ function material(now: number): CompanionMaterial {
   };
 }
 
-function request(kind: CompanionTurnKind = 'heartbeat'): CompanionTurnRequest {
+function request(kind: CompanionTurnKind = 'wake'): CompanionTurnRequest {
   const run = startRun({ kind, trigger: 'schedule', startedAt: Date.now() });
   return { kind, trigger: 'schedule', runId: run.id, material: material(Date.now()) };
 }
@@ -276,7 +276,7 @@ describe('a check-in on the real chatHub', () => {
     const message = getDb().prepare('SELECT content, metadata FROM messages WHERE id = ? AND node_id = ?').get(companionPostId(req.runId), V) as { content: string; metadata: string };
     assert.equal(message.content, 'I moved 3 tasks to Done.');
     assert.deepEqual(JSON.parse(message.metadata).companionPost, {
-      runId: req.runId, kind: 'heartbeat', changes: [{ kind: 'page', id: page.id, title: 'Plan', applied: 1, proposed: 0 }],
+      runId: req.runId, kind: 'wake', changes: [{ kind: 'page', id: page.id, title: 'Plan', applied: 1, proposed: 0 }],
     }, 'the receipt under the reply, from what storage says it changed');
     assert.deepEqual(JSON.parse((getDb().prepare('SELECT follow_ups FROM nodes WHERE id = ?').get(V) as { follow_ups: string }).follow_ups), ['Show them', 'Later']);
     assert.equal((getDb().prepare('SELECT status FROM turns WHERE turn_id = ?').get(companionPostId(req.runId)) as { status: string }).status, 'completed');
@@ -566,7 +566,7 @@ describe('a check-in on the real chatHub', () => {
     /** A check-in a stopped Michi left: its run still running, S with its memory pack (unless `memory: false`) and its turn (and reply) as chatHub left them. */
     function leftBehind(options: { startedAgo: number; endedAgo?: number; status: 'active' | 'completed'; reply?: string; memory?: false }): { runId: string; S: string } {
       const startedAt = Date.now() - options.startedAgo;
-      const run = startRun({ kind: 'heartbeat', trigger: 'schedule', startedAt });
+      const run = startRun({ kind: 'wake', trigger: 'schedule', startedAt });
       const { nodeId } = createCheckinNode(run.id, assistantWorkspace, startedAt);
       if (options.memory !== false) startCheckinMemory(run.id);
       const turnId = companionCheckinTurnId(run.id);
@@ -667,7 +667,7 @@ describe('a check-in on the real chatHub', () => {
 
     test('a run that had posted before Michi stopped ends as what it posted, and nothing is posted again (G1a-review #8)', async () => {
       const tasks = createPage({ workspaceId: 'ws', ownerUserId: OWNER, title: 'Tasks', now: Date.now() - 10 * MINUTE });
-      const post = async (runId: string, text: string | null) => postCompanionMessage({ runId, kind: 'heartbeat', nodeId: V, text },
+      const post = async (runId: string, text: string | null) => postCompanionMessage({ runId, kind: 'wake', nodeId: V, text },
         { chatHub: hub, clock: { now: () => Date.now() }, events: { emitChanged: () => {} } as never });
       const spoke = leftBehind({ startedAgo: 6 * MINUTE, endedAgo: 5 * MINUTE, status: 'completed', reply: 'CR-1 needs you.' });
       await post(spoke.runId, 'CR-1 needs you.');
@@ -698,7 +698,7 @@ describe('a check-in on the real chatHub', () => {
     });
 
     test('S gone: its native record is discarded from what the run recorded; deferred keeps the run pending, never gone', async () => {
-      const gone = startRun({ kind: 'heartbeat', trigger: 'schedule', startedAt: Date.now() - MINUTE });
+      const gone = startRun({ kind: 'wake', trigger: 'schedule', startedAt: Date.now() - MINUTE });
       setRunCheckinNode(gone.id, checkinNodeId(gone.id));
       recordRunSession(gone.id, SESSION_RECORD);
       finishRun(gone.id, { outcome: 'quiet', finishedAt: Date.now(), detail: 'Quiet' });
@@ -715,17 +715,17 @@ describe('a check-in on the real chatHub', () => {
     });
 
     test('unsupported is final (D11): the run records that its runtime keeps the transcript, says so once, is never asked again; past retention its row keeps only that note', async () => {
-      const kept = startRun({ kind: 'heartbeat', trigger: 'schedule', startedAt: Date.now() - MINUTE });
+      const kept = startRun({ kind: 'wake', trigger: 'schedule', startedAt: Date.now() - MINUTE });
       setRunCheckinNode(kept.id, checkinNodeId(kept.id));
       recordRunSession(kept.id, SESSION_RECORD);
       recordRunPost(kept.id, { messageId: companionPostId(kept.id), at: Date.now(), changes: [{ kind: 'page' as const, id: 'pg-tasks', title: 'Tasks', applied: 2, proposed: 0 }] });
       finishRun(kept.id, { outcome: 'quiet', finishedAt: Date.now(), detail: 'Quiet' });
-      const deferred = startRun({ kind: 'heartbeat', trigger: 'schedule', startedAt: Date.now() - MINUTE });
+      const deferred = startRun({ kind: 'wake', trigger: 'schedule', startedAt: Date.now() - MINUTE });
       setRunCheckinNode(deferred.id, checkinNodeId(deferred.id));
       recordRunSession(deferred.id, SESSION_RECORD);
       recordRunPost(deferred.id, { messageId: companionPostId(deferred.id), at: Date.now(), changes: [{ kind: 'page' as const, id: 'pg-plan', title: 'Plan', applied: 1, proposed: 0 }] });
       finishRun(deferred.id, { outcome: 'quiet', finishedAt: Date.now(), detail: 'Quiet' });
-      const done = startRun({ kind: 'heartbeat', trigger: 'schedule', startedAt: Date.now() - MINUTE });
+      const done = startRun({ kind: 'wake', trigger: 'schedule', startedAt: Date.now() - MINUTE });
       setRunCheckinNode(done.id, checkinNodeId(done.id));
       finishRun(done.id, { outcome: 'quiet', finishedAt: Date.now(), detail: 'Quiet' });
       markRunDiscarded(done.id, Date.now());
@@ -751,7 +751,7 @@ describe('a check-in on the real chatHub', () => {
 
     test('only runs ∩ the assistant workspace: a node merely named like S, or a run\'s node elsewhere, is left alone; a running turn of another process is skipped', async () => {
       getDb().prepare("INSERT INTO nodes(id,workspace_id,kind,status,created_at) VALUES ('n-cmph-stray',?,'chat','idle',1)").run(assistantWorkspace);
-      const elsewhere = startRun({ kind: 'heartbeat', trigger: 'schedule', startedAt: Date.now() - MINUTE });
+      const elsewhere = startRun({ kind: 'wake', trigger: 'schedule', startedAt: Date.now() - MINUTE });
       setRunCheckinNode(elsewhere.id, checkinNodeId(elsewhere.id));
       getDb().prepare("INSERT INTO nodes(id,workspace_id,kind,status,created_at) VALUES (?,'ws','chat','idle',1)").run(checkinNodeId(elsewhere.id));
       const alive = leftBehind({ startedAgo: MINUTE, status: 'active' });

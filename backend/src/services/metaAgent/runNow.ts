@@ -1,4 +1,4 @@
-import { maintenanceHasWork, maintenanceCoordinatorState } from './maintenanceCoordinator';
+import { maintenanceHasWork } from './maintenanceCoordinator';
 import type {
   MetaAgentRoundStatus, MetaAgentRunNowResponse, MetaAgentRunNowSkip, MetaAgentRunNowWorkspace,
 } from 'michi-shared';
@@ -6,7 +6,7 @@ import { maintenanceRuntimeAvailability } from '../../agents/maintenancePolicy';
 import { conversationCompletionCounter } from '../conversationUpdates';
 import type { ScheduledJobScheduler } from '../scheduledJobs/scheduler';
 import { getMetaAgentGuardStatus, metaAgentGuardStatusMessage } from './guardStatus';
-import { resolveMetaAgentRuntime } from './settings';
+import { resolveBackgroundRuntime } from './settings';
 import { listMaintenanceConfigs, type MaintenanceConfigRow } from './todayUsage';
 
 const unread = (config: MaintenanceConfigRow) => Math.max(0, conversationCompletionCounter(config.workspace_id) - config.completion_cursor);
@@ -15,7 +15,7 @@ const unread = (config: MaintenanceConfigRow) => Math.max(0, conversationComplet
  * global coordinator. Empty checks create neither runs nor model sessions. */
 export function runMetaAgentRoundNow(input: { scheduler: ScheduledJobScheduler; ownerUserId: string }): MetaAgentRunNowResponse {
   const { scheduler, ownerUserId } = input;
-  const runtime = resolveMetaAgentRuntime(ownerUserId);
+  const runtime = resolveBackgroundRuntime(ownerUserId);
   const availability = maintenanceRuntimeAvailability(runtime.runtimeId);
   const guard = availability.available ? getMetaAgentGuardStatus('maintenance', () => runtime, ownerUserId) : null;
   const queued: string[] = [];
@@ -24,7 +24,8 @@ export function runMetaAgentRoundNow(input: { scheduler: ScheduledJobScheduler; 
     const skipped = (skip: MetaAgentRunNowSkip, reason: string): MetaAgentRunNowWorkspace => ({ ...base, outcome: 'skipped', skip, reason });
     if (!availability.available) return skipped('unsupported_runtime', availability.reason ?? `Pages upkeep cannot run on ${runtime.runtimeId}`);
     if (guard?.state === 'failed') return skipped('guard_hold', metaAgentGuardStatusMessage(guard));
-    if (maintenanceCoordinatorState(ownerUserId).paused || config.paused === 1) return skipped('paused', 'Maintenance is paused in this workspace');
+    // Pause Michi holds only the automatic path: Run now still reads.
+    if (config.paused === 1) return skipped('paused', 'Maintenance is paused in this workspace');
     if (config.auto_paused === 1) return skipped('stopped', config.last_error ? `Stopped after repeated failures: ${config.last_error}` : 'Stopped after repeated failures');
     if (!maintenanceHasWork(config.workspace_id, ownerUserId, scheduler.now())) return { ...base, outcome: 'no_new' };
     try {
@@ -46,18 +47,18 @@ export function runMetaAgentRoundNow(input: { scheduler: ScheduledJobScheduler; 
   return { workspaces };
 }
 
-/** Where each maintained workspace stands while a round runs. */
+/** Where each maintained workspace stands while a round runs: running, or about to start (asked, or due on its own). */
 export function metaAgentRoundStatus(input: { scheduler: ScheduledJobScheduler; ownerUserId: string; now: number }): MetaAgentRoundStatus {
   return {
     workspaces: listMaintenanceConfigs(input.ownerUserId).map((config) => {
       let running = false;
       try {
         const job = input.scheduler.getJob(config.job_id);
-        const runtime = resolveMetaAgentRuntime(input.ownerUserId);
+        const runtime = resolveBackgroundRuntime(input.ownerUserId);
         const held = getMetaAgentGuardStatus('maintenance', () => runtime, input.ownerUserId)?.state === 'failed';
         running = job.activeRunId !== null || (job.enabled && !job.autoPaused && !held
           && maintenanceRuntimeAvailability(runtime.runtimeId).available
-          && maintenanceHasWork(config.workspace_id, input.ownerUserId, input.now));
+          && (input.scheduler.manualStartWaiting(config.job_id) || maintenanceHasWork(config.workspace_id, input.ownerUserId, input.now, true)));
       } catch {
         // A config whose job is gone runs nothing.
       }

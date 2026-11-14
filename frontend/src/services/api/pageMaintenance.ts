@@ -156,10 +156,6 @@ export function saveMaintenanceInstructions(text: string, expectedRevision: numb
   return workspaceRequest(maintenanceUrl(options, '/instructions'), options, { method: 'PUT', body: { expectedRevision, text } });
 }
 
-export function createMaintenanceWatch(input: MaintenanceWatchInput, options: PageMaintenanceIdentity): Promise<PageMaintenanceWorkspace> {
-  return workspaceRequest(maintenanceUrl(options, '/watches'), options, { method: 'POST', body: input });
-}
-
 export function updateMaintenanceWatch(watchId: string, patch: Partial<MaintenanceWatchInput> & { expectedRevision: number }, options: PageMaintenanceIdentity): Promise<PageMaintenanceWorkspace> {
   return workspaceRequest(watchUrl(watchId, options), options, { method: 'PATCH', body: patch });
 }

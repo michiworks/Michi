@@ -1,6 +1,6 @@
 # Runtime capabilities in Michi
 
-Applies to: registered Kiro CLI, Crew, Pi, Claude and Codex integrations, and Antigravity when it is turned on. Source checked: 2026-11-08. Upstream behavior notes follow the versions the adapters were probed against: kiro-cli 2.35.1, Crew Gateway 0.11.0.1 and agy 1.4.12. This is an integration reference, not a claim that every upstream version/model has passed live acceptance.
+Applies to: registered Kiro CLI, Crew, Pi, Claude and Codex integrations, and Antigravity when it is turned on. Source checked: 2026-11-12. Upstream behavior notes follow the versions the adapters were probed against: kiro-cli 2.35.1, Crew Gateway 0.11.0.1 and agy 1.4.12. This is an integration reference, not a claim that every upstream version/model has passed live acceptance.
 
 ## Read this table
 
@@ -28,17 +28,19 @@ Native means Michi connects to a runtime facility. Michi-managed means the appli
 
 ## Shared Michi features
 
-Workspace history, panes, branches, Artifacts, source references, search, digests, ordinary queues and durable turn recovery belong to Michi. They do not imply identical native runtime state or filesystem isolation. A native subagent roster, a Michi conversation branch and an Agent Run are different objects.
+Workspace history, panes, branches, Artifacts, source references, search, digests, ordinary queues and durable turn recovery belong to Michi. They do not imply identical native runtime state or filesystem isolation. A native subagent roster, a Michi conversation branch and an Agent Run are different objects. A conversation's native subagents show as one line of counts (working, done, failed, stopped) under its newest reply; **Details** opens the Background work drawer, which lists each agent and its result.
 
-Michi Memory (**Settings → Memory**) is also Michi's own: its memory tools reach chat threads and Pages Assistant conversations on every runtime (what the Assistant saves applies to every workspace), not Agent Runs, check-ins or background maintenance. Crew Memory is separate and has its own controls.
+Multi-model plans are Michi's too: an ordinary chat on any runtime, Crew and Antigravity included, can propose one (`list_ready_models`, then `propose_multi_model_plan`), and you start it from its plan card; its branches run on the ready runtimes and models the card keeps. Agent Runs, the Pages Assistant and maintenance do not get these tools, a plan's branches and threads shown only under Scheduled cannot propose one, and `MICHI_DISABLE_MULTI_MODEL=1` turns the feature off.
+
+Michi Memory (**Settings → Memory**) is also Michi's own: its memory tools reach chat threads and Pages Assistant conversations on every runtime (what the Assistant saves applies to every workspace), not Agent Runs, check-ins or background maintenance. In the sessions Michi starts, Claude Code's auto memory and Codex memories are off; what Claude Code, Codex and Kiro already remembered is imported into Michi Memory (see `concepts-and-context`). Crew Memory is separate and has its own controls.
 
 Tool availability also depends on configuration and capability allowlists. A selected template may omit tools. Trust cannot expose a missing tool; native provider authentication is independent of Michi permission mode.
 
 ## Pages Assistant and automatic maintenance
 
-Restricted background runs (Pages upkeep's maintenance and memory extraction) use **Settings → Michi → Pages upkeep** (Follow global settings or Custom; the Settings page is named after your agent: Michi unless you renamed it). They run on Pi, Claude, Codex or Kiro; Crew and Antigravity are refused. Each such run must pass a runtime tool-catalog check, and on Codex it cannot use sub-agents: Codex refuses the spawn, and if a sub-agent starts anyway Michi stops the turn and the sub-agent and reports an error. A configured runtime can still fail startup or provider authentication.
+Restricted background runs (Pages upkeep's maintenance and memory extraction) use **Settings → Michi → Model → Background work** (Same as conversations or Custom; the Settings page is named after your agent: Michi unless you renamed it). They run on Pi, Claude, Codex or Kiro; Crew and Antigravity are refused. On Claude, Codex and Pi, memory extraction is one direct model call with no tools (`MICHI_MEMORY_DIRECT=0` uses a maintenance session instead). Each maintenance session must pass a runtime tool-catalog check, and on Codex it cannot use sub-agents: Codex refuses the spawn, and if a sub-agent starts anyway Michi stops the turn and the sub-agent and reports an error. A configured runtime can still fail startup or provider authentication.
 
-The interactive Pages Assistant is not restricted this way. It follows the global runtime settings (**Settings → Runtime & model**), or the runtime picked in its composer for that conversation; when the global runtime cannot host it (Crew or Antigravity), it uses the first registered of Claude, Codex, Pi and Kiro, in that order. It uses the runtime's ordinary tools, MCP configuration and approvals, except that Kiro's Approve for me does not apply to it.
+The interactive Pages Assistant, the conversation with your agent that ⌘J / Ctrl+J and a page's Ask open, is not restricted this way. It follows the global runtime settings (**Settings → Runtime & model**), or the runtime picked in its composer for that conversation; when the global runtime cannot host it (Crew or Antigravity), it uses the first registered of Claude, Codex, Pi and Kiro, in that order. It uses the runtime's ordinary tools, MCP configuration and approvals, except that Kiro's Approve for me does not apply to it. Its check-ins (watching, in **Settings → Michi**) run unattended on the conversation's runtime, in throwaway sessions whose native transcript Michi discards afterwards, with only Michi's read tools, guarded Michi writes and the agent's own tools; Claude, Codex, Pi and Kiro V3 can run them, Kiro V2 cannot.
 
 The current Pages and Pages upkeep interface supports only the local backend. Ordinary workspace Page tools, the Assistant catalog and maintenance tools are separate capabilities; Agent Runs do not automatically inherit them. See `pages-and-components` and `pages-maintenance`.
 

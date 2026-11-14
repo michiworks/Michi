@@ -100,13 +100,14 @@ export function useTrashActions({
     setSelection,
   ]);
 
-  const deleteNode = useCallback((nodeId: string) => {
+  /** Returns the deletion group id, or null when nothing moved to Trash. */
+  const deleteNode = useCallback((nodeId: string): string | null => {
     const project = projects.find((p) => p.chatIds.includes(nodeId));
-    if (!project) return;
+    if (!project) return null;
     const rootOfActive = activeTreeRootNodeId(project);
-    if (rootOfActive === nodeId) return;
-    if (project.trees.some((t) => t.rootNodeId === nodeId)) return;
-    deleteSubtree(project, nodeId);
+    if (rootOfActive === nodeId) return null;
+    if (project.trees.some((t) => t.rootNodeId === nodeId)) return null;
+    return deleteSubtree(project, nodeId);
   }, [activeTreeRootNodeId, deleteSubtree, projects]);
 
   /**
@@ -129,11 +130,11 @@ export function useTrashActions({
    * `gidPrefix` decides the lane: `'trim'` → Trash, `'arch'` → Archived. Both
    * lanes share this exact algorithm; see `ARCHIVE_GROUP_PREFIX`.
    */
-  const pruneNode = useCallback((nodeId: string, gidPrefix: 'trim' | 'arch') => {
+  const pruneNode = useCallback((nodeId: string, gidPrefix: 'trim' | 'arch'): string | null => {
     const project = projects.find((p) => p.chatIds.includes(nodeId));
-    if (!project) return;
+    if (!project) return null;
     const x = nodesRef.current[nodeId];
-    if (!x || x.deletedAt) return;
+    if (!x || x.deletedAt) return null;
 
     cancelFns.current[nodeId]?.();
 
@@ -259,6 +260,7 @@ export function useTrashActions({
       nextSel.delete(nodeId);
       return nextSel;
     });
+    return gid;
   }, [
     bumpStructureVersion,
     cancelFns,

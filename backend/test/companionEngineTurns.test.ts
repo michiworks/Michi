@@ -6,12 +6,12 @@ import { enableSyntheticCompanionSources } from './helpers/companionSources';
  * at a source just checked) and then is the first turn; a composing beacon
  * never stops the welcome, and one that did not speak is asked for again on
  * the next open of the Companion (at most three tries, never once the user
- * wrote); quiet hours, workdays and away mode; the wake's minute of batching
- * and ten-minute spacing, with no heartbeat meanwhile; the heartbeat's
- * material rules (digest alone waits for the brief) and its skip without a
- * model, and its reply's notice at level important; no turn hearing of a
- * source the user turned off; the brief once a workday with Michi's fallback,
- * by the rule status.nextBriefAt follows; the budget tiers;
+ * wrote); no heartbeat, goals cadence, quiet hours or off days (D3, D5), and
+ * away mode; the wake (interrupting and needs-you items) with its minute of
+ * batching and ten-minute spacing, digest alone waiting for the brief, and
+ * its reply's notice; no turn hearing of a source the user turned off; the
+ * brief on its days with Michi's fallback, by the rule status.nextBriefAt
+ * follows; no daily turn budget;
  * preemption by a composing beacon; "working" as the Companion's own work;
  * worker reports and closing delegations (on the real Michi source), and a
  * "Worker finished" notice the gate holds back; the user's rules failing
@@ -27,12 +27,13 @@ import os from 'node:os';
 import path from 'node:path';
 import {
   companionPostId,
-  type CompanionBucket, type CompanionItemSubtype, type CompanionNotice, type CompanionPresenceInput, type CompanionSeverity, type CompanionSourceKind,
+  type CompanionBucket, type CompanionItemSubtype, type CompanionPresenceInput, type CompanionSeverity, type CompanionSourceKind,
 } from 'michi-shared';
 import type { CompanionCheckinCleanupResult } from '../src/services/companion/cleanup';
 import { closeDb, getDb, initDb } from '../src/services/db';
 import { startCompanion, type CompanionCoordinator, type CompanionCoordinatorDeps } from '../src/services/companion/coordinator';
 import { CompanionEventBus } from '../src/services/companion/delivery';
+import { captureCompanionAttention, type CapturedCompanionNotice, type CompanionAttentionCapture } from './helpers/companionAttention';
 import {
   addGoal,
   briefForDate,
@@ -76,6 +77,7 @@ import type {
   SourcePollResult,
 } from '../src/services/companion/types';
 import { seedConversation } from './helpers/homeConversations';
+import { turnCompanionOn } from './helpers/backgroundWork';
 
 const MINUTE = 60_000;
 const HOUR = 60 * MINUTE;
@@ -174,7 +176,8 @@ describe('Companion engine: model turns', () => {
   let cr: FakeSource;
   let email: FakeSource;
   let runner: FakeRunner;
-  let notices: CompanionNotice[];
+  let notices: CapturedCompanionNotice[];
+  let capture: CompanionAttentionCapture;
   let bus: CompanionEventBus;
   let started: CompanionCoordinator[];
   let coordinator: CompanionCoordinator;
@@ -213,7 +216,12 @@ describe('Companion engine: model turns', () => {
   function welcomed(when: number): void {
     markCompanionWelcomeDone(when);
     for (const key of ['companion:wake_cursor', 'companion:heartbeat_cursor', 'companion:brief_cursor'] as const) setCompanionMetaNumber(key, latestEventSeq());
-    setCompanionMetaNumber('companion:last_heartbeat_at', when);
+    // The hourly work heartbeat has its own test (holdHeartbeat(false)); in the others it stays a year away.
+    holdHeartbeat();
+  }
+
+  function holdHeartbeat(hold = true): void {
+    setCompanionMetaNumber('companion:last_heartbeat_at', hold ? now + 365 * DAY : now);
   }
 
   beforeEach(() => {
@@ -221,19 +229,21 @@ describe('Companion engine: model turns', () => {
     process.env.MICHI_DATA_DIR = tmpDir;
     closeDb();
     initDb(); enableSyntheticCompanionSources();
+    turnCompanionOn();
     now = T0;
     cr = new FakeSource('cr', 5 * MINUTE);
     email = new FakeSource('email', 5 * MINUTE);
     runner = new FakeRunner();
-    notices = [];
     bus = new CompanionEventBus();
-    bus.subscribe({ notifier: true, notice: (notice) => notices.push(notice) });
+    capture = captureCompanionAttention();
+    notices = capture.notices;
     started = [];
     coordinator = engine();
   });
 
   afterEach(async () => {
     for (const made of started) await made.stop();
+    capture.restore();
     closeDb();
     fs.rmSync(tmpDir, { recursive: true, force: true });
   });
@@ -437,24 +447,29 @@ describe('Companion engine: model turns', () => {
     assert.equal(watched.service.status!().working, false);
   });
 
-  test('no heartbeat while a wake is batching: one turn and one notice for one interrupting item (B5)', async () => {
-    patchCompanionSettings({ brief: { enabled: false }, heartbeat: { enabled: true, intervalMinutes: 30 } });
-    await at(T0);
-    welcomed(T0);
-    runner.respond = (request) => ({ outcome: 'spoke', messageText: `${request.kind}: CR-N needs you.` });
-    cr.objects.set('cr:N:mine', { version: 'v1', title: 'CR-N needs attention' });
-    // First seen on the very tick the heartbeat comes due.
-    for (const time of [T0 + 30 * MINUTE, T0 + 30 * MINUTE + 30_000, T0 + 31 * MINUTE, T0 + 31 * MINUTE + 30_000]) await at(time);
-    assert.deepEqual(kinds(runner), ['wake'], 'the wake has it; the heartbeat after it finds nothing new');
-    assert.deepEqual(notices.map((notice) => notice.body), ['CR-N needs attention'], 'the item\'s own notice only');
+  test('no turn of their own (D3): a digest change, a goal and a decided card start none; a new needs-you item is the wake\'s, and they ride along', async () => {
+    patchCompanionSettings({ brief: { enabled: false } });
+    const B = localAt(5, 8, 0);
+    await at(B);
+    welcomed(B);
+    email.objects.set('email:1', { version: 'v1', bucket: 'update', severity: 'digest' });
+    addGoal('Ship the Companion', B);
+    const card = insertCard({ kind: 'goal.add', payload: { text: 'Keep CRs moving' }, summary: 'Add a goal: "Keep CRs moving"', reason: null, now: B + MINUTE });
+    decideCard(card.id, 'dismissed', B + 2 * MINUTE);
+    for (const minutes of [5, 60, 240, 300]) await at(B + minutes * MINUTE);
+    assert.equal(runner.requests.length, 0, 'nothing of it is worth a turn of its own');
+    assert.equal(listRuns(50).some((run) => run.kind === 'heartbeat'), false, 'no heartbeat run, not even a skipped one');
 
-    // The next item arrives while the ten minutes between wakes hold the wake back, and the heartbeat comes due then.
-    setCompanionMetaNumber('companion:last_heartbeat_at', T0 + 7 * MINUTE);
-    cr.objects.set('cr:M:mine', { version: 'v1', title: 'CR-M needs attention' });
-    for (const minutes of [35, 36, 38, 40, 41, 42]) await at(T0 + minutes * MINUTE);
-    assert.deepEqual(kinds(runner), ['wake', 'wake'], 'no heartbeat takes the item the wake is waiting for');
-    assert.deepEqual(runner.requests[1]!.material.changes.map((event) => event.itemId), [getItemByKey('cr:M:mine')!.id]);
-    assert.equal(listRuns(50).find((run) => run.kind === 'heartbeat')?.outcome, 'skipped', 'and the heartbeat after it finds nothing new');
+    cr.objects.set('cr:R:review', { version: 'v1', subtype: 'cr_review_requested', bucket: 'needs_you', severity: 'digest' });
+    for (const minutes of [305, 306, 307]) await at(B + minutes * MINUTE);
+    assert.deepEqual(kinds(runner), ['wake'], 'a new item that needs the user wakes the agent, as an interrupting one does');
+    const wake = runner.requests[0]!.material;
+    assert.deepEqual(wake.changes.map((event) => event.itemId), [getItemByKey('cr:R:review')!.id]);
+    assert.deepEqual(wake.cardResults.map((result) => [result.id, result.status]), [[card.id, 'dismissed']], 'the decided card rides along');
+    assert.deepEqual(wake.goals.map((goal) => goal.text), ['Ship the Companion']);
+    cr.objects.set('cr:R:review', { version: 'v2', subtype: 'cr_review_stale', bucket: 'stalled', severity: 'digest' });
+    for (const minutes of [320, 330, 400]) await at(B + minutes * MINUTE);
+    assert.deepEqual(kinds(runner), ['wake'], 'an item entering stalled is digest: it waits for the brief');
   });
 
   test('a wake waits a minute to batch interrupting items and keeps ten minutes between wakes', async () => {
@@ -484,31 +499,22 @@ describe('Companion engine: model turns', () => {
     assert.deepEqual(runner.requests[1]!.material.changes.map((event) => event.itemId), [getItemByKey('cr:M:mine')!.id]);
   });
 
-  test('quiet hours, off days and away mode hold heartbeat and wake; what came in then is no wake later', async () => {
-    patchCompanionSettings({ brief: { enabled: false }, heartbeat: { enabled: true, intervalMinutes: 30 } });
+  test('no quiet hours and no off days for turns (D5): a wake at night and on Saturday', async () => {
+    patchCompanionSettings({ brief: { enabled: false } });
     await at(T0);
     welcomed(T0);
-    // Quiet hours (20:00-08:00).
     cr.objects.set('cr:Q:mine', { version: 'v1' });
     await at(localAt(5, 21, 0));
     await at(localAt(5, 21, 5));
-    await at(localAt(5, 23, 0));
-    assert.equal(runner.requests.length, 0);
-    // The next morning: no wake for the night's item; the heartbeat brings it up instead.
-    await at(localAt(6, 8, 0));
-    await at(localAt(6, 8, 2));
-    assert.deepEqual(kinds(runner), ['heartbeat']);
+    assert.deepEqual(kinds(runner), ['wake']);
     assert.deepEqual(runner.requests[0]!.material.changes.map((event) => event.itemId), [getItemByKey('cr:Q:mine')!.id]);
-
-    // Saturday is not a workday.
     cr.objects.set('cr:S:mine', { version: 'v1' });
     await at(localAt(7, 12, 0));
-    await at(localAt(7, 12, 2));
-    await at(localAt(7, 14, 0));
-    assert.deepEqual(kinds(runner), ['heartbeat']);
+    await at(localAt(7, 12, 5));
+    assert.deepEqual(kinds(runner), ['wake', 'wake']);
   });
 
-  test('away mode: two hours without an active beacon, then polls only; back, the heartbeat catches up', async () => {
+  test('away mode: two hours without an active beacon, then polls only; back, what came in meanwhile is no wake (Since you left has it)', async () => {
     patchCompanionSettings({ brief: { enabled: false } });
     await at(T0);
     welcomed(T0);
@@ -516,62 +522,19 @@ describe('Companion engine: model turns', () => {
     await at(T0 + 2 * HOUR + 5 * MINUTE, { away: true });
     await at(T0 + 2 * HOUR + 7 * MINUTE, { away: true });
     await at(T0 + 3 * HOUR, { away: true });
-    assert.equal(runner.requests.length, 0, 'away: no wake, no heartbeat');
+    assert.equal(runner.requests.length, 0, 'away: no wake');
     assert.ok(cr.polls.length >= 2, 'polling goes on');
     await at(T0 + 3 * HOUR + MINUTE);
-    assert.deepEqual(kinds(runner), ['heartbeat'], 'back: no stale wake, the heartbeat has it');
+    await at(T0 + 3 * HOUR + 3 * MINUTE);
+    assert.equal(runner.requests.length, 0, 'back: no stale wake');
+    cr.objects.set('cr:B:mine', { version: 'v1' });
+    await at(T0 + 3 * HOUR + 5 * MINUTE);
+    await at(T0 + 3 * HOUR + 7 * MINUTE);
+    assert.deepEqual(kinds(runner), ['wake'], 'what comes in once the user is back wakes it as usual');
+    assert.deepEqual(runner.requests[0]!.material.changes.map((event) => event.itemId), [getItemByKey('cr:B:mine')!.id]);
   });
 
-  test('heartbeat: digest-only changes skip it without a model; needs-you changes, goals and card results are material (B19)', async () => {
-    patchCompanionSettings({ brief: { enabled: false } });
-    const B = localAt(5, 8, 0);
-    await at(B);
-    welcomed(B);
-    email.objects.set('email:1', { version: 'v1', bucket: 'update', severity: 'digest' });
-    await at(B + 5 * MINUTE);
-    await at(B + 60 * MINUTE);
-    assert.equal(runner.requests.length, 0);
-    const skipped = listRuns(50).find((run) => run.kind === 'heartbeat')!;
-    assert.deepEqual([skipped.outcome, skipped.detail], ['skipped', 'no new material']);
-    assert.equal(getCompanionMetaNumber('companion:last_heartbeat_at'), B + 60 * MINUTE);
-
-    cr.objects.set('cr:R:review', { version: 'v1', subtype: 'cr_review_requested', bucket: 'needs_you', severity: 'digest' });
-    await at(B + 65 * MINUTE);
-    await at(B + 100 * MINUTE);
-    assert.equal(runner.requests.length, 0, 'not before the interval');
-    await at(B + 120 * MINUTE);
-    assert.deepEqual(kinds(runner), ['heartbeat']);
-    assert.deepEqual(runner.requests[0]!.material.changes.map((event) => event.itemId), [getItemByKey('cr:R:review')!.id]);
-    await at(B + 180 * MINUTE);
-    assert.deepEqual(kinds(runner), ['heartbeat'], 'the cursor moved past it');
-
-    cr.objects.set('cr:R:review', { version: 'v2', subtype: 'cr_review_stale', bucket: 'stalled', severity: 'digest' });
-    await at(B + 185 * MINUTE);
-    await at(B + 240 * MINUTE);
-    assert.deepEqual(kinds(runner), ['heartbeat'], 'an item entering stalled alone is digest: it waits for the brief');
-    const digestOnly = listRuns(50).find((run) => run.kind === 'heartbeat')!;
-    assert.deepEqual([digestOnly.outcome, digestOnly.detail], ['skipped', 'only digest changes: they wait for the brief']);
-    assert.equal(getCompanionMetaNumber('companion:heartbeat_cursor'), latestEventSeq(), 'the heartbeat moved past it');
-
-    addGoal('Ship the Companion', B);
-    await at(B + 300 * MINUTE);
-    assert.equal(runner.requests.length, 1, 'goals: only four hours after the last heartbeat that ran');
-    await at(B + 360 * MINUTE);
-    assert.deepEqual(kinds(runner), ['heartbeat', 'heartbeat']);
-    assert.deepEqual(runner.requests[1]!.material.changes, []);
-    assert.deepEqual(runner.requests[1]!.material.goals.map((goal) => goal.text), ['Ship the Companion']);
-
-    // A card the user decided that the Companion has not heard of yet is worth a look of its own.
-    const card = insertCard({ kind: 'goal.add', payload: { text: 'Keep CRs moving' }, summary: 'Add a goal: "Keep CRs moving"', reason: null, now: B + 380 * MINUTE });
-    decideCard(card.id, 'dismissed', B + 390 * MINUTE);
-    await at(B + 420 * MINUTE);
-    assert.deepEqual(kinds(runner), ['heartbeat', 'heartbeat', 'heartbeat']);
-    assert.deepEqual(runner.requests[2]!.material.cardResults.map((result) => [result.id, result.status]), [[card.id, 'dismissed']]);
-    await at(B + 480 * MINUTE);
-    assert.equal(runner.requests.length, 3, 'once it was told');
-  });
-
-  test('the brief: once a workday at its time, heartbeats only after it, Michi\'s fallback when the Companion\'s fails', async () => {
+  test('the brief: once a workday at its time, Michi\'s fallback when the Companion\'s fails', async () => {
     cr.objects.set('cr:A:mine', { version: 'v1' });
     await at(localAt(5, 7, 0));
     welcomed(localAt(4, 8, 0));
@@ -584,7 +547,7 @@ describe('Companion engine: model turns', () => {
     };
     await at(localAt(5, 8, 30));
     await at(localAt(5, 8, 59));
-    assert.equal(runner.requests.filter((request) => request.kind !== 'wake').length, 0, 'no heartbeat before the day\'s brief');
+    assert.equal(runner.requests.filter((request) => request.kind !== 'wake').length, 0, 'nothing but wakes before the day\'s brief');
     await at(localAt(5, 9, 0));
     const brief = runner.requests.find((request) => request.kind === 'brief')!;
     assert.equal(brief.trigger, 'schedule');
@@ -630,30 +593,53 @@ describe('Companion engine: model turns', () => {
     assert.deepEqual(kinds(runner), ['brief']);
   });
 
-  test('budget tiers: with the day\'s budget used, no wake, a skipped heartbeat, the fallback brief; the welcome still runs', async () => {
-    patchCompanionSettings({ dailyTurnBudget: 1 });
+  test('the work heartbeat (Q24): an hour after the last, whatever changed, away and at night too; nothing_to_do ends it quiet; paused, none; after the other kinds', async () => {
+    patchCompanionSettings({ brief: { enabled: false } });
+    await at(T0);
+    welcomed(T0);
+    holdHeartbeat(false);
+    recordDelegation({ workspaceId: 'ws-work', nodeId: 'n-follow', title: 'Fix the build', now: T0 - HOUR, origin: 'start_conversation' });
+    const heartbeats = () => runner.requests.filter((request) => request.kind === 'heartbeat');
+    await at(T0 + 30 * MINUTE);
+    assert.equal(heartbeats().length, 0, 'not before its hour');
+    await at(T0 + HOUR);
+    assert.deepEqual(runner.requests.map((request) => [request.kind, request.trigger]), [['heartbeat', 'schedule']], 'nothing changed: it runs all the same');
+    const first = heartbeats()[0]!;
+    assert.deepEqual(first.material.following?.map((delegation) => delegation.nodeId), ['n-follow'], 'with the work in hand');
+    assert.ok(first.material.goals !== undefined && first.material.open !== undefined, 'and Today and the goals');
+    assert.deepEqual([getRun(first.runId)?.outcome, getCompanionMetaNumber('companion:last_heartbeat_at')], ['quiet', T0 + HOUR], 'nothing_to_do: quiet');
+
+    await at(T0 + HOUR + 30 * MINUTE);
+    assert.equal(heartbeats().length, 1);
+    await at(T0 + 4 * HOUR, { away: true });
+    assert.equal(heartbeats().length, 2, 'away too: it may move work while the user is gone');
+
+    // Due with a wake at the same tick: the wake goes first, the heartbeat at the next.
+    cr.objects.set('cr:N:mine', { version: 'v1' });
+    await at(T0 + 4 * HOUR + 50 * MINUTE);
+    assert.equal(runner.requests.length, 2, 'the wake batches; the heartbeat is not due yet');
+    await at(T0 + 5 * HOUR);
+    assert.deepEqual(runner.requests.slice(2).map((request) => request.kind), ['wake']);
+    await at(T0 + 5 * HOUR + MINUTE);
+    assert.deepEqual(runner.requests.slice(2).map((request) => request.kind), ['wake', 'heartbeat']);
+
+    patchCompanionSettings({ paused: true });
+    await at(T0 + 7 * HOUR, { away: true });
+    assert.equal(heartbeats().length, 3, 'paused: none');
+  });
+
+  test('no daily turn budget: after more turns than the old budget allowed, the brief and a wake are still turns of their own', async () => {
     await at(T0);
     welcomed(localAt(4, 8, 0));
-    recordRun({ kind: 'heartbeat', trigger: 'schedule', startedAt: T0 - MINUTE, outcome: 'spoke', finishedAt: T0 - MINUTE + 1 });
-    recordRun({ kind: 'worker_report', trigger: 'delegation', startedAt: T0 - MINUTE, outcome: 'spoke', finishedAt: T0 - MINUTE + 1 });
+    for (let i = 0; i < 40; i += 1) {
+      recordRun({ kind: 'heartbeat', trigger: 'schedule', startedAt: T0 - HOUR + i, outcome: 'spoke', finishedAt: T0 - HOUR + i + 1 });
+    }
     cr.objects.set('cr:A:mine', { version: 'v1' });
     await at(T0 + 5 * MINUTE);
     await at(T0 + 7 * MINUTE);
-    assert.equal(runner.requests.length, 0);
-    assert.equal(briefForDate('2026-11-05')!.origin, 'fallback');
-    const briefRun = listRuns(50).find((run) => run.kind === 'brief')!;
-    assert.deepEqual([briefRun.outcome, briefRun.detail], ['skipped', 'Daily turn budget used: Michi wrote the brief']);
-    cr.objects.set('cr:B:mine', { version: 'v1' });
-    await at(T0 + 10 * MINUTE);
-    await at(T0 + 2 * HOUR);
-    assert.equal(listRuns(50).find((run) => run.kind === 'heartbeat' && run.outcome === 'skipped')?.detail, 'Daily turn budget used');
-    assert.equal(runner.requests.length, 0);
-
-    const fresh = engine();
-    clearCompanionWelcomeDone();
-    assert.deepEqual(await fresh.service.requestWelcome(), { started: true }, 'the welcome is exempt');
-    await fresh.idle();
-    assert.deepEqual(kinds(runner), ['welcome']);
+    await at(T0 + 20 * MINUTE);
+    assert.deepEqual(kinds(runner), ['brief', 'wake']);
+    assert.equal(listRuns(50).some((run) => run.outcome === 'skipped' && /budget/i.test(run.detail ?? '')), false);
   });
 
   test('a composing beacon preempts the running hidden turn; its material waits for the next turn', async () => {
@@ -727,43 +713,16 @@ describe('Companion engine: model turns', () => {
     assert.deepEqual([error.outcome, error.detail], ['error', 'Your rules could not be read; the Companion stays quiet until they can']);
   });
 
-  test('a reply notifies through the gate (heartbeat); a heartbeat after a wake does not bring the wake\'s items up again', async () => {
-    // At level all: at important a heartbeat about digest items alone stays in the chat (B19, the next test).
-    patchCompanionSettings({ brief: { enabled: false }, heartbeat: { enabled: true, intervalMinutes: 30 }, notifications: 'all' });
+  test('a wake\'s reply notifies through the gate, naming the items its run was about (D6)', async () => {
+    patchCompanionSettings({ brief: { enabled: false } });
     await at(T0);
     welcomed(T0);
     runner.respond = (request) => ({ outcome: 'spoke', messageText: `${request.kind} says hi` });
-    cr.objects.set('cr:A:mine', { version: 'v1' });
+    cr.objects.set('cr:R:review', { version: 'v1', subtype: 'cr_review_requested', bucket: 'needs_you', severity: 'digest' });
     await at(T0 + 5 * MINUTE);
     await at(T0 + 6 * MINUTE);
     assert.deepEqual(kinds(runner), ['wake']);
-    cr.objects.set('cr:B:mine', { version: 'v1', severity: 'digest' });
-    await at(T0 + 10 * MINUTE);
-    await at(T0 + 31 * MINUTE);
-    assert.deepEqual(kinds(runner), ['wake', 'heartbeat']);
-    assert.deepEqual(runner.requests[1]!.material.changes.map((event) => event.itemId), [getItemByKey('cr:B:mine')!.id]);
-    // D6: a check-in reply's notice names the items its run was about, never what the model wrote.
-    assert.ok(notices.some((notice) => notice.body === `Michi: ${getItemByKey('cr:B:mine')!.title}` && notice.target.kind === 'companion'));
-  });
-
-  test('at level important a heartbeat about digest items alone stays in the chat; one about an interrupting item notifies (B19)', async () => {
-    patchCompanionSettings({ brief: { enabled: false }, heartbeat: { enabled: true, intervalMinutes: 30 } });
-    await at(T0);
-    welcomed(T0);
-    runner.respond = (request) => ({ outcome: 'spoke', messageText: `${request.kind} says hi` });
-    cr.objects.set('cr:R:review', { version: 'v1', subtype: 'cr_review_requested', severity: 'digest' });
-    await at(T0 + 5 * MINUTE);
-    await at(T0 + 30 * MINUTE);
-    assert.deepEqual(kinds(runner), ['heartbeat'], 'a review request is heartbeat material (R2.8)');
-    assert.equal(notices.length, 0, 'but its reply is no notice: "Important" is only what needs the user now');
-
-    // An interrupting item that came in while no wake could run (quiet hours) reaches the next morning's heartbeat.
-    cr.objects.set('cr:Q:mine', { version: 'v1', title: 'CR-Q needs attention' });
-    await at(localAt(5, 21, 0));
-    await at(localAt(6, 8, 0));
-    assert.deepEqual(kinds(runner), ['heartbeat', 'heartbeat']);
-    assert.deepEqual(runner.requests[1]!.material.changes.map((event) => event.itemId), [getItemByKey('cr:Q:mine')!.id]);
-    assert.deepEqual(notices.map((notice) => notice.body), ['Michi: CR-Q needs attention'], 'about an item that interrupts: it notifies, naming it (D6)');
+    assert.ok(notices.some((notice) => notice.body === `Michi: ${getItemByKey('cr:R:review')!.title}` && notice.target.kind === 'companion'));
   });
 
   test('turning email and calendar off takes their items and events out of every turn\'s material, without resolving them (B15)', async () => {
@@ -786,11 +745,11 @@ describe('Companion engine: model turns', () => {
       ...request.material.open.map((item) => item.source),
     ].filter((source) => source === 'email' || source === 'calendar');
     await at(T0 + 7 * MINUTE, { target: watching });
-    assert.deepEqual(kinds(runner), [], 'no wake for the email: it is out of sight');
-    assert.equal(notices.length, 0, 'and its notice, already waiting in the batch, never goes out');
-    await at(T0 + 30 * MINUTE, { target: watching });
-    assert.deepEqual(kinds(runner), ['heartbeat'], 'the review request still is material');
-    assert.deepEqual(offSources(runner.requests[0]!), [], 'the heartbeat hears nothing of email or calendar');
+    assert.deepEqual(kinds(runner), ['wake'], 'the review request wakes it; the email, out of sight, does not');
+    assert.deepEqual(offSources(runner.requests[0]!), [], 'the wake hears nothing of email or calendar');
+    assert.deepEqual(notices.filter((notice) => notice.reason === 'needs_you').map((notice) => notice.itemIds), [[alice.id]],
+      'the email\'s Needs you went out as it came in');
+    assert.deepEqual(capture.resolved, [`agent:item:${alice.id}`], 'and goes once its source is off');
     assert.deepEqual(runner.requests[0]!.material.changes.map((event) => event.itemId), [getItemByKey('cr:R:review')!.id]);
 
     await at(localAt(6, 9, 0), { target: watching });
@@ -800,7 +759,7 @@ describe('Companion engine: model turns', () => {
     assert.ok(brief.material.changes.some((event) => event.itemId === getItemByKey('cr:R:review')!.id));
     assert.deepEqual([getItem(alice.id)!.status, getItem(conflict.id)!.status], ['new', 'new'], 'out of sight, not resolved');
     assert.equal(getReminder(watch.id)!.status, 'active', 'so no watch fires for them');
-    assert.equal(notices.length, 0);
+    assert.equal(notices.length, 1, 'nothing more than the email\'s Needs you before its source went off');
   });
 
   test('the engine writes the brief exactly when status.nextBriefAt says it is due: one rule for both (B24)', async () => {
@@ -822,9 +781,9 @@ describe('Companion engine: model turns', () => {
     assert.equal(await agrees(localAt(6, 8, 30)), false);
     assert.equal(await agrees(localAt(6, 9, 0)), true, 'Friday 09:00');
     assert.equal(await agrees(localAt(6, 11, 0)), false, 'one a day');
-    assert.equal(await agrees(localAt(7, 10, 0)), false, 'Saturday is no workday');
-    patchCompanionSettings({ workdays: [1, 2, 3, 4, 5, 6] });
-    assert.equal(await agrees(localAt(7, 10, 30)), true, 'unless the user works Saturdays');
+    assert.equal(await agrees(localAt(7, 10, 0)), false, 'Saturday is none of its days');
+    patchCompanionSettings({ brief: { days: [1, 2, 3, 4, 5, 6] } });
+    assert.equal(await agrees(localAt(7, 10, 30)), true, 'unless the user wants it on Saturdays');
     patchCompanionSettings({ brief: { enabled: false } });
     assert.equal(await agrees(localAt(9, 9, 30)), false, 'the brief turned off');
     patchCompanionSettings({ brief: { enabled: true } });
@@ -950,44 +909,50 @@ describe('Companion engine: model turns', () => {
       assert.deepEqual([getDelegation('w-mvp')!.state, getDelegation('w-mvp')!.lastReportedMessageId], ['closed', null], 'the MVP\'s delegation stays closed and unreported');
     });
 
-    test('with the budget used up, a finished worker becomes a "Worker finished" notice instead', async () => {
-      patchCompanionSettings({ dailyTurnBudget: 0 });
+    test('a report that fails twice becomes a "Worker finished" notice instead', async () => {
+      patchCompanionSettings({ brief: { enabled: false }, heartbeat: { enabled: false } });
+      runner.respond = () => ({ outcome: 'error', detail: 'The runtime reported an error' });
       welcomed(T0 - DAY);
       worker('w-1', { status: 'completed', reply: 'All done.' });
       await at(T0, { target: michiEngine });
-      assert.equal(runner.requests.length, 0);
-      assert.ok(notices.some((notice) => notice.body === 'Worker finished: Worker w-1'));
+      await at(T0 + 11 * MINUTE, { target: michiEngine });
+      assert.deepEqual(kinds(runner), ['worker_report', 'worker_report']);
+      assert.ok(notices.some((notice) => notice.body === 'Worker w-1 finished'));
       assert.equal(getDelegation('w-1')!.state, 'following', 'reported by its notice, and still followed');
       assert.equal(getDelegation('w-1')!.lastReportedMessageId, 'w-1-t0-a', 'the notice reported it');
-      assert.equal(listRuns(50).find((run) => run.kind === 'worker_report')!.outcome, 'skipped');
+      assert.equal(listRuns(50).find((run) => run.kind === 'worker_report' && run.outcome === 'skipped')?.detail?.startsWith('The report failed twice'), true);
     });
 
-    test('a "Worker finished" notice the gate holds back (an off day) leaves the reply to Today and the brief (B6), and the agent keeps following (D18)', async () => {
-      patchCompanionSettings({ dailyTurnBudget: 0 });
+    test('a "Worker finished" notice held back (the conversation is on screen) leaves the reply to Today and the brief (B6), and the agent keeps following (D18)', async () => {
+      patchCompanionSettings({ brief: { enabled: false }, heartbeat: { enabled: false } });
+      const onScreen = engine({ michiSource: createMichiSource({ live: () => null }), sources: [], isPaneVisible: (nodeId) => nodeId === 'w-sat' });
+      runner.respond = () => ({ outcome: 'error', detail: 'The runtime reported an error' });
       const saturday = localAt(7, 12, 0);
       welcomed(saturday - DAY);
       seedConversation({ nodeId: 'w-sat', workspaceId: 'ws', title: 'Worker w-sat', turns: [{ status: 'completed', reply: 'All done.', startedAt: saturday - HOUR }] });
       recordDelegation({ workspaceId: 'ws', nodeId: 'w-sat', title: 'Worker w-sat', now: saturday - 2 * HOUR, origin: 'start_conversation' });
-      await at(saturday, { target: michiEngine });
-      assert.equal(notices.length, 0, 'no notice on an off day');
+      await at(saturday - 11 * MINUTE, { target: onScreen });
+      await at(saturday, { target: onScreen });
+      assert.equal(notices.length, 0, 'no notice while the user has it on screen');
       const delegation = getDelegation('w-sat')!;
       assert.deepEqual([delegation.state, delegation.closedAt, delegation.closedReason], ['following', null, null], 'still followed, never closed for this');
       assert.equal(delegation.lastReportedMessageId, null, 'nothing reported it');
       assert.equal(delegation.leftToTodayMessageId, 'w-sat-t0-a', 'its reply is Today\'s');
       assert.match(listRuns(50).find((run) => run.kind === 'worker_report')!.detail ?? '', /one left to Today and the brief$/);
-      await at(saturday + MINUTE, { target: michiEngine });
+      await at(saturday + MINUTE, { target: onScreen });
       const done = getItemByKey('michi:node:w-sat');
       assert.ok(done, 'the next look at Michi shows the finished conversation');
       assert.deepEqual([done.subtype, done.status], ['michi_done', 'new']);
-      await at(saturday + 5 * MINUTE, { target: michiEngine });
-      assert.equal(listRuns(50).filter((run) => run.kind === 'worker_report').length, 1, 'once: the reply left to Today is not reported again');
+      await at(saturday + 5 * MINUTE, { target: onScreen });
+      assert.equal(listRuns(50).filter((run) => run.kind === 'worker_report' && run.outcome === 'skipped').length, 1, 'once: the reply left to Today is not reported again');
       assert.equal(getDelegation('w-sat')!.state, 'following');
       // A follow-up the agent sends hands the conversation back to it: its answer is reported, not left to Today.
-      patchCompanionSettings({ dailyTurnBudget: 5 });
+      runner.respond = () => ({ outcome: 'quiet' });
+      runner.requests.length = 0;
       markDelegationSent(delegation.id, saturday + 10 * MINUTE);
       assert.equal(getDelegation('w-sat')!.leftToTodayMessageId, null);
       answeredFollowUp('w-sat', saturday + 10 * MINUTE, 'Changelog updated.');
-      await at(saturday + 12 * MINUTE, { target: michiEngine });
+      await at(saturday + 12 * MINUTE, { target: onScreen });
       const reports = runner.requests.filter((request) => request.kind === 'worker_report');
       assert.deepEqual(reports.map((request) => request.material.reports.map((report) => report.messageId)), [['w-sat-f-a']]);
     });

@@ -67,7 +67,7 @@ describe('scheduled execution admission and ownership', () => {
     closeDb(); initDb();
     getDb().prepare("INSERT INTO workspaces (id, name, created_at, updated_at) VALUES ('w', 'W', 1, 1)").run();
     now = Date.parse('2026-10-23T00:00:00Z'); jobSeq = 0;
-    executor = new PendingExecutor(); repo = new ScheduledJobsRepository(); events = new ScheduledJobEventBus(() => now);
+    executor = new PendingExecutor(); repo = new ScheduledJobsRepository(); events = new ScheduledJobEventBus();
     published = []; events.subscribe({ send: event => published.push(event) });
     schedulers = []; releaseGates = [];
   });

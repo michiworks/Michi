@@ -1,6 +1,6 @@
 # Optional interactions in Michi Pages
 
-Applies to: native Pages in this backend source. Source checked: 2026-11-08.
+Applies to: native Pages in this backend source. Source checked: 2026-11-12.
 
 Pages can support research, comparison, reading, visualization or tasks. Use interaction capabilities when they help the person's current activity. Static pages are valid: there is no requirement to make every number clickable or to add a task table.
 
@@ -37,11 +37,11 @@ The following uses illustrative block IDs. Replace them with IDs returned by the
 
 The same action can be attached as `interaction:{label,action}` to any content block: a comparison can offer “Read the evidence”, a chart “Explore this dataset”, or a task-related block “Background”. Existing controls keep their own behavior. A metric item can carry `action` directly to make its value the entry; other metric items may remain static.
 
-Markdown text can use `[Read the evidence](#view/why-a)` or `[Show details](#view/why-a?presentation=inline)`. These links resolve only in the current native page. External HTTPS links keep their usual behavior. A missing target is shown as unavailable; content from another page is never substituted.
+Markdown text can use `[Read the evidence](#view/why-a)` or `[Show details](#view/why-a?presentation=inline)`. These links resolve only in the current native page. External HTTPS links keep their usual behavior. A missing target is shown as unavailable; content from another page is never substituted. To link another page or a conversation, use `michi://page/<pageId>` (optionally `?block=<blockId>`) or `michi://node/<nodeId>` (optionally `?message=<messageId>`): they show as chips that open it in Michi, here as in any Markdown Michi renders.
 
 ## Behavior and limits
 
-Detail content mounts only when opened. Back keeps earlier views mounted so local input, selection and scroll can survive; the navigation path is bounded to ten views. Closing discards transient detail state and returns focus to the entry. Saved content and native data remain in their ordinary stores, and live updates can refresh an open view. Different page/workspace/backend identities have separate interaction state.
+Detail content mounts only when opened. Back keeps earlier views mounted so local input, selection and scroll can survive; the navigation path is bounded to ten views. Closing discards transient detail state and returns focus to the entry. A drawer resizes from its left edge (double-click resets it), except on a phone. Saved content and native data remain in their ordinary stores, and live updates can refresh an open view. Different page/workspace/backend identities have separate interaction state.
 
 View content retains its original edit and Sources actions. Read-only pages stay read-only. Referenced databases and components use the page's existing host bindings, versions and disabled-state checks. A count is not automatically recalculated merely because it opens a list: use a live native database/task view where appropriate, and keep static claims tied to their evidence and time.
 

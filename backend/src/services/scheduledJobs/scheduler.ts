@@ -1,5 +1,7 @@
-import { MaintenanceCoordinator, maintenanceExecutionHasWork, maintenanceCoordinatorState } from '../metaAgent/maintenanceCoordinator';
+import { MaintenanceCoordinator, maintenanceExecutionHasWork } from '../metaAgent/maintenanceCoordinator';
+const authRenewedAt = (): number | null => null;
 import { isMemoryExtractionJob } from '../memory/extractionRepository';
+import { isCheckinIdentityJob } from '../companion/checkinIdentity';
 import type { MemoryDirectAnswerer, MemoryDirectRun } from '../memory/extractionDirect';
 import {
   MEMORY_EXTRACTION_LIMITS, combineSettledExtractions, failMemoryExtractionRun, planMemoryExtractionRun, settleMemoryExtractionRun,
@@ -28,7 +30,7 @@ import { getMaintenanceConfig, listMaintenanceBacklog, createMaintenancePlan, cl
   maintenancePlanWaitsOnEditLeases,
 } from '../pages/maintenanceRepository';
 import { maintenanceRuntimeAvailability } from '../../agents/maintenancePolicy';
-import { resolveMetaAgentRuntime } from '../metaAgent/settings';
+import { resolveBackgroundRuntime } from '../metaAgent/settings';
 import {
   getMetaAgentGuardStatus, metaAgentGuardFailureOf, metaAgentGuardOwnerKey, metaAgentGuardStatusMessage,
   onMetaAgentGuardRetry, recordMetaAgentGuardCheck,
@@ -41,7 +43,6 @@ import {
 } from './scheduledOnly';
 import { LOCAL_AGENT_OWNER_ID } from '../agentOwner';
 import { log } from '../logger';
-import { NOTIFIER_GRACE_MS, type AppLauncher } from './appLauncher';
 import type { ScheduledJobEventBus } from './events';
 import {
   toJobDto,
@@ -117,7 +118,7 @@ export interface ScheduledJobExecutor {
 
 export class ScheduledJobNotFoundError extends Error {}
 export class ScheduledJobConflictError extends Error {}
-export type ScheduledJobStartRefusal = 'running' | 'capacity' | 'unresolved_execution' | 'lease_lost' | 'stopping' | 'no_work' | 'paused';
+export type ScheduledJobStartRefusal = 'running' | 'capacity' | 'unresolved_execution' | 'lease_lost' | 'stopping' | 'no_work';
 export { JobValidationError };
 
 export interface ScheduledJobSchedulerDeps {
@@ -138,7 +139,6 @@ export interface ScheduledJobSchedulerDeps {
    */
   workspaceArchived?(workspaceId: string): boolean;
   runtimeExists(runtimeId: string): boolean;
-  launcher?: AppLauncher;
   clock?: () => number;
   instanceId?: string;
   createId?: () => string;
@@ -146,10 +146,6 @@ export interface ScheduledJobSchedulerDeps {
   pollIntervalMs?: number;
   leaseTtlMs?: number;
   maxConcurrentRuns?: number;
-  /** How long a notifier must be gone before the app is woken (default NOTIFIER_GRACE_MS, 30 s). */
-  notifierGraceMs?: number;
-  /** Runs `callback` once after `delayMs`; returns a cancel (default: an unref'd setTimeout). Tests pass a fake clock's. */
-  setTimer?: (callback: () => void, delayMs: number) => () => void;
   /** Extra time a cancelled/timed-out turn gets to settle. */
   cancelGraceMs?: number;
   /**
@@ -158,6 +154,25 @@ export interface ScheduledJobSchedulerDeps {
    * for another runtime, the run opens a maintenance session.
    */
   memoryDirect?: MemoryDirectAnswerer;
+  /** When this computer's sign-in was last seen renewed (default: authStatus.ts); a sign-in stop older than that runs again at once. */
+  signInRenewedAt?: () => number | null;
+  /**
+   * The check-in lane (companion/checkinLane.ts: unification D11, P6), looked
+   * at each tick after the jobs that are due and before the maintenance slot:
+   * it keeps its execution identity and, while the Companion's engine is the
+   * scheduler, starts check-ins (startCheckin), which `run` then runs.
+   */
+  checkinLane?: {
+    tick(scheduler: ScheduledJobScheduler, now: number): void;
+    run(input: { runId: string; signal: AbortSignal; cancel: () => void }): Promise<ScheduledCheckinOutcome>;
+  };
+}
+
+/** How a check-in the lane ran ended: a preempted one is cancelled, never a failure. */
+export interface ScheduledCheckinOutcome {
+  status: 'succeeded' | 'failed' | 'cancelled';
+  summary: string | null;
+  error: string | null;
 }
 
 interface ActiveRun {
@@ -173,6 +188,8 @@ interface ActiveRun {
   executionEnded: boolean;
   /** Its claim was released after its time limit plus grace; it holds no slot while its handle settles. */
   released?: boolean;
+  /** A check-in lane run: it holds none of the maxConcurrentRuns. */
+  checkin?: boolean;
   conversationBatch?: ConversationUpdates;
   maintenanceConfigRevision?: number;
   maintenancePlan?: MaintenancePlan;
@@ -187,16 +204,9 @@ interface ActiveRun {
   memoryAnswered?: boolean;
 }
 
-const NOTIFICATION_REPLAY_WINDOW_MS = 24 * 3_600_000;
 const MIN_TIMER_DELAY_MS = 1_000;
 /** How often runs that aged out of retention lose their Scheduled-only threads. */
 const SCHEDULED_ONLY_SWEEP_MS = 10 * 60_000;
-
-function unrefTimer(callback: () => void, delayMs: number): () => void {
-  const timer = setTimeout(callback, delayMs);
-  timer.unref?.();
-  return () => clearTimeout(timer);
-}
 
 /**
  * The turns of a claimed plan the feed can still read, without the sources
@@ -225,12 +235,8 @@ export class ScheduledJobScheduler {
   private readonly pollIntervalMs: number;
   private readonly leaseTtlMs: number;
   private readonly maxConcurrentRuns: number;
-  private readonly notifierGraceMs: number;
-  private readonly setTimer: (callback: () => void, delayMs: number) => () => void;
-  /** Cancels the one look again maybeWakeApp set while a notifier's grace runs; null when none is set. */
-  private cancelWakeCheck: (() => void) | null = null;
   private readonly cancelGraceMs: number;
-  private readonly maintenance = new MaintenanceCoordinator();
+  private readonly maintenance: MaintenanceCoordinator;
   private readonly active = new Map<string, ActiveRun>();
   private timer: ReturnType<typeof setTimeout> | null = null;
   private ticking: Promise<void> | null = null;
@@ -256,9 +262,8 @@ export class ScheduledJobScheduler {
     this.pollIntervalMs = deps.pollIntervalMs ?? 30_000;
     this.leaseTtlMs = deps.leaseTtlMs ?? 90_000;
     this.maxConcurrentRuns = Math.max(1, Math.floor(deps.maxConcurrentRuns ?? 2));
-    this.notifierGraceMs = deps.notifierGraceMs ?? NOTIFIER_GRACE_MS;
-    this.setTimer = deps.setTimer ?? unrefTimer;
     this.cancelGraceMs = deps.cancelGraceMs ?? 15_000;
+    this.maintenance = new MaintenanceCoordinator(deps.signInRenewedAt ?? authRenewedAt);
   }
 
   private registerWorkspacePurge(): void {
@@ -293,8 +298,6 @@ export class ScheduledJobScheduler {
     this.unsubscribeGuardRetry = null;
     if (this.timer) clearTimeout(this.timer);
     this.timer = null;
-    this.cancelWakeCheck?.();
-    this.cancelWakeCheck = null;
     await this.ticking?.catch(() => {});
     for (const active of this.active.values()) {
       this.finalize(active, 'interrupted', null, 'Michi stopped while this run was in progress', this.clock());
@@ -600,18 +603,28 @@ export class ScheduledJobScheduler {
     if (this.stopped) return refuse('stopping', 'The scheduler is stopping');
     const now = this.clock();
     if (found.record.executionKind === 'maintenance') {
-      const owner = found.record.ownerUserId ?? LOCAL_AGENT_OWNER_ID;
-      if (maintenanceCoordinatorState(owner).paused) return refuse('paused', 'Automatic maintenance is paused');
+      // Only the check-in lane starts a check-in.
+      if (isCheckinIdentityJob(found.record.id)) return refuse('no_work', 'Michi starts its check-ins itself');
+      // A person's start runs while Michi is paused: Pause Michi holds only the automatic path (maintenanceHasWork).
       if (found.activeRunId) return refuse('running', 'Already updating this workspace');
       if (!maintenanceExecutionHasWork(found.record, now)) return refuse('no_work', 'Already up to date');
     }
     if (!this.acquireOwnership(now)) return refuse('lease_lost', 'Another Michi process owns scheduled execution');
     const result = this.launch(found.record, 'manual', now);
     if (result.run) return { run: summaryOf(result.run) };
-    if (result.reason === 'capacity') return refuse('capacity', 'The scheduled job concurrency limit is reached');
+    if (result.reason === 'capacity') {
+      // Pages maintenance with no free slot starts once one frees up, still as this manual start.
+      if (found.record.executionKind === 'maintenance' && !isMemoryExtractionJob(found.record.id)) this.maintenance.ask(found.record.id);
+      return refuse('capacity', 'The scheduled job concurrency limit is reached');
+    }
     if (result.reason === 'unresolved_execution') return refuse('unresolved_execution', 'A previous scheduled execution has not confirmed it stopped');
     if (result.reason === 'lease_lost') return refuse('lease_lost', 'Scheduler ownership changed; try again after it recovers');
     return refuse('running', 'This job is already running');
+  }
+
+  /** A manual start of this maintenance job is still to come: startNow found no free slot, or its manual run went to the Spaces Home summary. */
+  manualStartWaiting(jobId: string): boolean {
+    return this.maintenance.asks(jobId);
   }
 
   /** Wake the global coordinator. Durable cursors and plans retain the work. */
@@ -632,6 +645,28 @@ export class ScheduledJobScheduler {
     return cancelled;
   }
 
+  /**
+   * The check-in lane starts its identity's run (P6b): admitted apart
+   * (repository.claimRun), with the identity's own 240 s limit. False when it
+   * did not start: no lease, already running, or a claim still unconfirmed.
+   */
+  startCheckin(jobId: string, now: number): boolean {
+    if (this.stopped || !this.running || !this.lease || !isCheckinIdentityJob(jobId)) return false;
+    const job = this.repo.getJob(jobId)?.record;
+    if (!job || job.executionKind !== 'maintenance') return false;
+    return !!this.launch(job, 'scheduled', now).run;
+  }
+
+  /**
+   * Once the Companion has cleaned up what a stopped Michi left of its
+   * check-ins (their S), the check-in claims that process left are released
+   * at once, not after their time limit and grace. Returns how many.
+   */
+  releaseSettledCheckinClaims(now: number): number {
+    if (!this.lease) return 0;
+    return this.repo.releaseForeignCheckinClaims(this.lease, now);
+  }
+
   confirmExecutionStopped(runId: string, raw: unknown): void {
     if (!raw || typeof raw !== 'object' || (raw as { executionStopped?: unknown }).executionStopped !== true) {
       throw new JobValidationError('Confirm that the previous Michi process and its agent execution have stopped');
@@ -640,23 +675,6 @@ export class ScheduledJobScheduler {
     if (result === 'missing') throw new ScheduledJobNotFoundError('Execution reservation not found');
     if (result === 'active') throw new ScheduledJobConflictError('The previous Michi process may still start or run this execution. Stop that process and its agent before confirming.');
     this.rearm();
-  }
-
-  /** Undelivered desktop notifications, replayed when a notifier connects. */
-  pendingNotifications(): ScheduledJobRunEvent[] {
-    const since = this.clock() - NOTIFICATION_REPLAY_WINDOW_MS;
-    const events: ScheduledJobRunEvent[] = [];
-    for (const run of this.repo.pendingNotifications(since)) {
-      const job = this.repo.getJob(run.jobId)?.record;
-      if (!job) continue;
-      const phase: ScheduledJobRunEventPhase = run.notifyKind === 'attention' ? 'attention' : 'finished';
-      events.push(this.eventFor(phase, job, run, run.attention ?? undefined));
-    }
-    return events;
-  }
-
-  acknowledgeNotification(runId: string): boolean {
-    return this.repo.markNotified(runId);
   }
 
   // ── Scheduling loop ─────────────────────────────────────────────────────
@@ -711,9 +729,16 @@ export class ScheduledJobScheduler {
           this.repo.updateJob(job.id, { nextRunAt: this.nextAfterScheduledRun(job, now), updatedAt: now });
         }
       }
-      this.maintenance.check(now, this.repo.listMaintenanceExecutions(), (record) => {
+      if (this.deps.checkinLane) {
+        try {
+          this.deps.checkinLane.tick(this, now);
+        } catch (error) {
+          log.warn('scheduler', 'the check-in lane failed', { error: error instanceof Error ? error.message : String(error) });
+        }
+      }
+      this.maintenance.check(now, this.repo.listMaintenanceExecutions(), (record, manual) => {
         if (this.activeCount() >= this.maxConcurrentRuns || this.heldByMetaAgentGuard(record)
-          || !maintenanceRuntimeAvailability(resolveMetaAgentRuntime(record.ownerUserId ?? LOCAL_AGENT_OWNER_ID).runtimeId).available) return false;
+          || !maintenanceRuntimeAvailability(resolveBackgroundRuntime(record.ownerUserId ?? LOCAL_AGENT_OWNER_ID).runtimeId).available) return false;
         // A sign-in stop due for another try (maintenanceCoordinator.ts): the
         // run goes ahead unpaused, and its failure count, already past the
         // threshold, stops it again on one more failure.
@@ -721,7 +746,7 @@ export class ScheduledJobScheduler {
         if (retried) this.repo.updateJob(record.id, { autoPaused: false });
         let started = false;
         try {
-          started = !!this.launch(retried ? { ...record, autoPaused: false } : record, 'scheduled', now).run;
+          started = !!this.launch(retried ? { ...record, autoPaused: false } : record, manual ? 'manual' : 'scheduled', now).run;
         } finally {
           if (retried && !started) this.repo.updateJob(record.id, { autoPaused: true });
         }
@@ -751,7 +776,7 @@ export class ScheduledJobScheduler {
 
   private activeCount(): number {
     let count = 0;
-    for (const active of this.active.values()) if (!active.released) count++;
+    for (const active of this.active.values()) if (!active.released && !active.checkin) count++;
     return count;
   }
 
@@ -810,7 +835,7 @@ export class ScheduledJobScheduler {
   private heldByMetaAgentGuard(job: ScheduledJobRecord): string | null {
     const owner = job.ownerUserId ?? LOCAL_AGENT_OWNER_ID;
     if (getMaintenanceConfig(job.workspaceId, owner)?.jobId !== job.id) return null;
-    const status = getMetaAgentGuardStatus('maintenance', () => resolveMetaAgentRuntime(owner), owner);
+    const status = getMetaAgentGuardStatus('maintenance', () => resolveBackgroundRuntime(owner), owner);
     return status?.state === 'failed' ? metaAgentGuardStatusMessage(status) : null;
   }
 
@@ -859,6 +884,7 @@ export class ScheduledJobScheduler {
     const active: ActiveRun = {
       run: result.run, lease: this.lease, controller: new AbortController(),
       jobId: job.id, handle: null, stopCause: null, finalized: false, executionEnded: false,
+      ...(job.executionKind === 'maintenance' && isCheckinIdentityJob(job.id) ? { checkin: true } : {}),
     };
     this.active.set(result.run.id, active);
     void this.execute(job, active);
@@ -884,6 +910,23 @@ export class ScheduledJobScheduler {
         graceTimer.unref?.();
       }, job.timeoutSeconds * 1000);
       timeoutTimer.unref?.();
+      if (active.checkin) {
+        // The Companion runs it (companion/checkinLane.ts): its own ephemeral session, no node of the run's.
+        // A stop asked for (cancel, timeout, lost lease, shutdown) aborts the signal, which preempts the turn.
+        const lane = this.deps.checkinLane;
+        if (!lane) throw new Error('The check-in lane is not running');
+        const done = lifetime = lane.run({ runId: run.id, signal: active.controller.signal, cancel: () => { this.cancelActiveRun(job.id); } })
+          .then((outcome): ScheduledRunOutcome => outcome, (error: unknown): ScheduledRunOutcome => ({
+            status: 'failed', summary: null, error: error instanceof Error ? error.message : String(error),
+          }));
+        const outcome = await done;
+        if (active.finalized) return;
+        const status: ScheduledJobRunStatus = active.stopCause ?? outcome.status;
+        const error = status === 'timed_out' ? `Timed out after ${Math.round(job.timeoutSeconds / 60)} min`
+          : status === 'failed' ? outcome.error ?? 'The check-in failed' : null;
+        this.finalize(active, status, outcome.summary, error, this.clock());
+        return;
+      }
       const config = getMaintenanceConfig(job.workspaceId, job.ownerUserId ?? LOCAL_AGENT_OWNER_ID);
       const managedMaintenance = config?.jobId === job.id ? config : null;
       if (managedMaintenance && (job.conversationCursor == null || job.sessionMode !== 'fresh' || job.permissionMode !== 'trust'
@@ -900,7 +943,7 @@ export class ScheduledJobScheduler {
         active.memoryExtraction = true;
         const ownerUserId = job.ownerUserId ?? LOCAL_AGENT_OWNER_ID;
         // Resolved once per run, like maintenance: the Meta agent's runtime, model and credentials.
-        const { followsGlobal: _followsGlobal, ...profile } = resolveMetaAgentRuntime(ownerUserId);
+        const { followsGlobal: _followsGlobal, ...profile } = resolveBackgroundRuntime(ownerUserId);
         const availability = maintenanceRuntimeAvailability(profile.runtimeId);
         if (!availability.available) throw new Error(availability.reason ?? `Runtime "${profile.runtimeId}" is unavailable for automatic memory`);
         const direct = this.deps.memoryDirect?.supports(profile.runtimeId) === true;
@@ -924,9 +967,12 @@ export class ScheduledJobScheduler {
         }
       }
       if (managedMaintenance) {
+        const manual = run.trigger === 'manual';
         const plan = planHomeRun({ workspaceId: job.workspaceId, ownerUserId: job.ownerUserId ?? LOCAL_AGENT_OWNER_ID,
-          jobId: job.id, runId: run.id, now: this.clock() });
+          jobId: job.id, runId: run.id, now: this.clock(), manual });
         if (plan?.kind === 'refuse') throw new Error(plan.error);
+        // The owner's summary took this manual run: the workspace's own work follows it, manually too.
+        if (manual && plan?.kind === 'home-summary') this.maintenance.ask(job.id);
         if (plan) active.homeRun = plan;
         // A due watch check runs before conversation work; its interval counts from this start.
         else active.watchRun = planWatchRun({ workspaceId: job.workspaceId, ownerUserId: job.ownerUserId ?? LOCAL_AGENT_OWNER_ID,
@@ -934,7 +980,7 @@ export class ScheduledJobScheduler {
       }
       if (managedMaintenance) {
         // Resolved once per run: a settings change applies from the next run, never to this one.
-        const { followsGlobal: _followsGlobal, ...profile } = resolveMetaAgentRuntime(job.ownerUserId ?? LOCAL_AGENT_OWNER_ID);
+        const { followsGlobal: _followsGlobal, ...profile } = resolveBackgroundRuntime(job.ownerUserId ?? LOCAL_AGENT_OWNER_ID);
         const availability = maintenanceRuntimeAvailability(profile.runtimeId);
         if (!availability.available) throw new Error(availability.reason ?? `Runtime "${profile.runtimeId}" is unavailable for maintenance`);
         active.runtimeProfile = profile;
@@ -1223,8 +1269,8 @@ export class ScheduledJobScheduler {
       return;
     }
     if (!this.repo.ownsLease(active.lease, this.clock())) { this.loseOwnership(active, this.clock()); return; }
+    // The attention service turns it into a record, and wakes a quit app for it (services/attention).
     this.publish('attention', job, active.run, kind);
-    this.maybeWakeApp();
   }
 
   private finalize(
@@ -1266,7 +1312,8 @@ export class ScheduledJobScheduler {
 
     const failed = status === 'failed' || status === 'timed_out';
     const failures = status === 'succeeded' ? 0 : failed ? job.consecutiveFailures + 1 : job.consecutiveFailures;
-    const pauseNow = failed && !job.autoPaused && failures >= SCHEDULED_JOB_LIMITS.autoPauseThreshold;
+    // A check-in never pauses its lane: each one stands alone, and the planner's retry spaces them (P6).
+    const pauseNow = failed && !active.checkin && !job.autoPaused && failures >= SCHEDULED_JOB_LIMITS.autoPauseThreshold;
     const update: JobUpdate = {
       lastStatus: status,
       lastError: status === 'succeeded' ? null : error,
@@ -1294,51 +1341,7 @@ export class ScheduledJobScheduler {
     const latestRun = this.repo.getRun(active.run.id) ?? { ...active.run, status, finishedAt: now, summary, error };
     if (!this.repo.ownsLease(active.lease, this.clock())) return;
     this.publish('finished', { ...job, notify: job.notify && !(consumed && active.conversationBatch?.totalTurns === 0) }, latestRun);
-    if (job.notify && status !== 'interrupted' && status !== 'cancelled'
-      && !(consumed && active.conversationBatch?.totalTurns === 0)) this.maybeWakeApp();
     this.rearm();
-  }
-
-  /**
-   * A notification just went out (a run finished with notify on, or asks for
-   * approval or input): when no notifier has been connected for the grace,
-   * the launcher starts the app hidden and its notifier gets it from the
-   * replay. Within the grace the notifier may only be reconnecting (a feed's
-   * backoff, a backend restart, the first 30 s after boot), so nothing wakes
-   * yet; but the notification must not be left there either (the same gap
-   * as companion/delivery.ts wakeForNotice, H-review #2). One look again is
-   * set for when the grace is up: if no notifier has come back by then and a
-   * notification still waits, the app is woken.
-   */
-  private maybeWakeApp(): void {
-    if (!this.deps.launcher) return;
-    if (this.deps.events.hasNotifier()) return;
-    const absentFor = this.deps.events.notifierAbsentForMs();
-    if (absentFor < this.notifierGraceMs) {
-      this.lookAgainForWake(this.notifierGraceMs - absentFor);
-      return;
-    }
-    this.deps.launcher.wake();
-  }
-
-  private lookAgainForWake(delayMs: number): void {
-    if (this.cancelWakeCheck || this.stopped) return;
-    this.cancelWakeCheck = this.setTimer(() => {
-      this.cancelWakeCheck = null;
-      const launcher = this.deps.launcher;
-      if (this.stopped || !launcher || this.deps.events.hasNotifier()) return;
-      const absentFor = this.deps.events.notifierAbsentForMs();
-      // A notifier came and went meanwhile: its grace starts over.
-      if (absentFor < this.notifierGraceMs) {
-        this.lookAgainForWake(this.notifierGraceMs - absentFor);
-        return;
-      }
-      try {
-        if (this.pendingNotifications().length > 0) launcher.wake();
-      } catch (error) {
-        log.warn('scheduler', 'could not look again for a notification to wake the app for', { error: String(error) });
-      }
-    }, Math.max(1, delayMs));
   }
 
   private eventFor(

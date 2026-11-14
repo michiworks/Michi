@@ -17,7 +17,9 @@ export type CompanionErrorCode =
   /** companion_save_notes passed a notes revision that is no longer current (R2.9). */
   | 'notes_conflict'
   /** A fired or cancelled reminder cannot be paused or resumed. */
-  | 'reminder_closed';
+  | 'reminder_closed'
+  /** Get started's workspace homes need scheduled jobs, which are off in this backend (MICHI_SCHEDULED_JOBS=0). */
+  | 'scheduler_off';
 
 export class CompanionError extends Error {
   constructor(

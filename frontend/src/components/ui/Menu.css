@@ -142,6 +142,15 @@
    (overscroll-behavior: contain), so the palette never moved. */
 .michi-menu-scope .michi-menu-list { overflow: visible; overscroll-behavior: auto; }
 .michi-menu-scope[data-menu='palette'] { overscroll-behavior: contain; }
+/* Rows cut off at the palette's lower edge fade out there, until scrolled to the end. */
+.michi-menu-scope[data-menu='palette'][data-clipped] {
+  -webkit-mask-image: linear-gradient(to bottom, #000 calc(100% - 36px), transparent);
+  mask-image: linear-gradient(to bottom, #000 calc(100% - 36px), transparent);
+}
+/* The palette's one line when nothing shows: searching, or what found nothing. */
+.palette-empty { padding: 10px var(--m-rowX) 6px; color: var(--term-mid); font-size: var(--m-fontSize); }
+/* The typed words inside a row's name. */
+.palette-match { background: none; color: var(--term-accent); font-weight: 500; }
 .michi-menu-divider { height: 1px; margin: 4px var(--m-separatorInset); background: var(--term-line); list-style: none; }
 .michi-menu-section { padding: 6px var(--m-rowX) 4px; color: var(--term-muted); font-size: var(--m-captionSize); list-style: none; }
 .michi-menu-label { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

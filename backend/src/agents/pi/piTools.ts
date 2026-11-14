@@ -296,7 +296,7 @@ export function buildPiTools(opts: BuildPiToolsOpts): any[] {
     // none, it gets no tools at all.
     if (purpose === "checkin") return [];
     const { bridge, cwd, parentChatId, workspaceId, enableFollowUps, imageQuota, seenPaths, Type, ownerUserId, emitImage } = opts;
-    // A conversation whose memory setting is off reads no other conversation (globalContext.temporaryChatRefuses).
+    // A temporary chat reads no other conversation, and no other reads it (globalContext.temporaryChatRefuses).
     const callerNodeId = chatNodeOf(opts.owner) ?? null;
     const temporaryChat = () => ({ content: [{ type: "text", text: TEMPORARY_CHAT_MESSAGE }], details: { status: "temporary_chat" } });
     const skillRoots = () => opts.skillReadRoots?.() ?? [];
@@ -305,6 +305,7 @@ export function buildPiTools(opts: BuildPiToolsOpts): any[] {
         workspaceId,
         runOwnerRunId: runIdOfOwner(opts.owner),
         backendConnectionId: 'local',
+        callerNodeId,
     };
 
     const builtinTools = listEnabledBuiltinTools().map((t): any => {
@@ -602,7 +603,7 @@ export function buildPiTools(opts: BuildPiToolsOpts): any[] {
                         if (typeof args?.messageId === "string") opts.messageId = args.messageId;
                         if (typeof args?.charOffset === "number") opts.charOffset = args.charOffset;
                         const hasOpts = Object.keys(opts).length > 0;
-                        const result = gc.readNode(workspaceId, ownerUserId ?? null, String(args?.nodeId ?? ""), hasOpts ? opts : undefined);
+                        const result = gc.readNode(workspaceId, ownerUserId ?? null, String(args?.nodeId ?? ""), hasOpts ? opts : undefined, callerNodeId);
                         return { content: [{ type: "text", text: result.text }], details: result };
                     },
                 };
@@ -632,7 +633,7 @@ export function buildPiTools(opts: BuildPiToolsOpts): any[] {
                     parameters,
                     execute: async (_id: string, args: any) => {
                         if (temporaryChatRefuses(callerNodeId, [String(args?.nodeId ?? "")])) return temporaryChat();
-                        const result = gc.readNodeOverview(workspaceId, ownerUserId ?? null, String(args?.nodeId ?? ""));
+                        const result = gc.readNodeOverview(workspaceId, ownerUserId ?? null, String(args?.nodeId ?? ""), callerNodeId);
                         return { content: [{ type: "text", text: result.text }], details: result };
                     },
                 };
@@ -687,6 +688,7 @@ export function buildPiTools(opts: BuildPiToolsOpts): any[] {
                     description: t.description,
                     parameters,
                     execute: async (_id: string, args: any) => {
+                        if (temporaryChatRefuses(callerNodeId)) return temporaryChat();
                         const result = listPanesTool(paneBinding, {
                             treeId: typeof args?.treeId === "string" ? args.treeId : undefined,
                             kind: args?.kind,

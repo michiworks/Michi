@@ -139,7 +139,7 @@ export function useMetaAgentSettingsAlert(): boolean {
   const agent = useMetaAgentSnapshot();
   const overview = useMetaAgentOverview();
   const firstRun = useSpacesFirstRun(LOCAL_BACKEND_CONNECTION_ID);
-  return !!agent.info?.toolApprovals?.some(request => request.state === 'pending') || metaAgentStatus({
+  return metaAgentStatus({
     info: agent.info, infoStatus: agent.status, firstRun, overview: overview.kind === 'ready' ? overview.overview : null,
   }).settingsAlert;
 }

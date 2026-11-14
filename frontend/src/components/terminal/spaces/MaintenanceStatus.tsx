@@ -131,7 +131,7 @@ export function MaintenanceStatus({ backendConnectionId, workspaceId, pendingPro
       <p style={{ margin: '12px 0 0', color: 'var(--term-muted)', fontSize: 'var(--fs-xs)' }}>
         Runs on Pages upkeep’s runtime{value?.runtime ? `: ${metaAgentResolvedText(value.runtime)}` : ''}.{' '}
         {backendConnectionId === LOCAL_BACKEND_CONNECTION_ID
-          ? <button type="button" onClick={requestMetaAgentSettings}>Change in Settings › {name} › Pages upkeep</button>
+          ? <button type="button" onClick={requestMetaAgentSettings}>Change in Settings › {name} › Background work</button>
           : 'It is set in Pages upkeep’s settings on that machine.'}
       </p>
 

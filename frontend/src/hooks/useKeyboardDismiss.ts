@@ -1,7 +1,7 @@
 import { useEffect, useRef } from 'react';
-import { KEYBOARD_UP_PX, keyboardInsetOf } from './useKeyboardInset';
+import { KEYBOARD_UP_PX, keyboardHeightOf } from './useKeyboardInset';
 
-/** Below this inset it has gone down again (the gap avoids flicker mid-animation). */
+/** Below this height it has gone down again (the gap avoids flicker mid-animation). */
 const KEYBOARD_DOWN_PX = 60;
 /** After a file picker closes, the keyboard's moves still belong to it for this long. */
 const PICKER_SETTLE_MS = 800;
@@ -68,10 +68,10 @@ export function useKeyboardDismiss(active: boolean, owns: () => boolean, onDismi
         return;
       }
       if (Math.abs(viewport.scale - 1) > 0.01) return;
-      const inset = keyboardInsetOf(viewport);
-      if (inset >= KEYBOARD_UP_PX) {
+      const height = keyboardHeightOf(viewport);
+      if (height >= KEYBOARD_UP_PX) {
         if (!up && ownsRef.current()) up = true;
-      } else if (up && inset <= KEYBOARD_DOWN_PX) {
+      } else if (up && height <= KEYBOARD_DOWN_PX) {
         up = false;
         if (!filePickerHoldsKeyboard()) onDismissRef.current();
       }

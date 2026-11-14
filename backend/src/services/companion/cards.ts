@@ -89,7 +89,7 @@ import {
 } from './sessionSend';
 
 export const COMPANION_CARD_KINDS: readonly CompanionCardKind[] = Object.freeze([
-  'goal.add', 'goal.update', 'goal.remove', 'checkins.update', 'source.update', 'pipeline.watch', 'quiet_hours.update',
+  'goal.add', 'goal.update', 'goal.remove', 'source.update', 'pipeline.watch',
   'conversation.start', 'reminder.add', 'watch.add', 'rules.update', 'session.send',
 ]);
 
@@ -175,19 +175,9 @@ function quoted(text: string, max = 80): string {
   return `"${chars.length > max ? `${chars.slice(0, max - 1).join('')}…` : text}"`;
 }
 
-function everyMinutes(minutes: number): string {
-  return minutes % 60 === 0 ? `every ${minutes / 60 === 1 ? 'hour' : `${minutes / 60} hours`}` : `every ${minutes} minutes`;
-}
-
 /** The settings change a settings card means. */
 function settingsPatchOf(kind: CompanionCardKind, payload: Payload): CompanionSettingsPatch {
   switch (kind) {
-    case 'checkins.update': {
-      const patch: CompanionSettingsPatch = {};
-      if (payload.heartbeat !== undefined) patch.heartbeat = payload.heartbeat as CompanionSettingsPatch['heartbeat'];
-      if (payload.brief !== undefined) patch.brief = payload.brief as CompanionSettingsPatch['brief'];
-      return patch;
-    }
     case 'source.update':
       return { sources: { [payload.source as CompanionConfigurableSource]: { enabled: payload.enabled as boolean } } };
     case 'pipeline.watch': {
@@ -196,8 +186,6 @@ function settingsPatchOf(kind: CompanionCardKind, payload: Payload): CompanionSe
       for (const name of (payload.add as string[] | undefined) ?? []) if (!watch.includes(name)) watch.push(name);
       return { sources: { pipeline: { watch: parsePipelineNames(watch) } } };
     }
-    case 'quiet_hours.update':
-      return { quietHours: payload as CompanionSettingsPatch['quietHours'] };
     default:
       throw new Error(`${kind} is not a settings card`);
   }
@@ -245,18 +233,6 @@ function validatePayload(kind: CompanionCardKind, raw: unknown, now: number): Pa
       const payload = fields(raw, ['goalId']);
       return { goalId: goalId(payload.goalId) };
     }
-    case 'checkins.update': {
-      const payload = fields(raw, [], ['heartbeat', 'brief']);
-      if (payload.heartbeat === undefined && payload.brief === undefined) throw invalidRequest('payload: heartbeat or brief is required');
-      const result: Payload = {};
-      for (const key of ['heartbeat', 'brief'] as const) {
-        if (payload[key] === undefined) continue;
-        if (!isRecord(payload[key]) || Object.keys(payload[key] as object).length === 0) throw invalidRequest(`payload: ${key} must name what changes`);
-        result[key] = payload[key];
-      }
-      previewSettings(() => settingsPatchOf(kind, result));
-      return result;
-    }
     case 'source.update': {
       const payload = fields(raw, ['source', 'enabled']);
       if (!COMPANION_CONFIGURABLE_SOURCES.includes(payload.source as CompanionConfigurableSource)) {
@@ -273,14 +249,6 @@ function validatePayload(kind: CompanionCardKind, raw: unknown, now: number): Pa
       const result: Payload = {};
       if (add.length > 0) result.add = add;
       if (remove.length > 0) result.remove = remove;
-      previewSettings(() => settingsPatchOf(kind, result));
-      return result;
-    }
-    case 'quiet_hours.update': {
-      const payload = fields(raw, ['enabled'], ['start', 'end']);
-      const result: Payload = { enabled: payload.enabled };
-      if (payload.start !== undefined) result.start = payload.start;
-      if (payload.end !== undefined) result.end = payload.end;
       previewSettings(() => settingsPatchOf(kind, result));
       return result;
     }
@@ -403,22 +371,6 @@ function summarize(kind: CompanionCardKind, payload: Payload): string {
       return `Change the goal ${quoted(getGoal(payload.goalId as string)?.text ?? '')} to ${quoted(payload.text as string)}`;
     case 'goal.remove':
       return `Remove the goal ${quoted(getGoal(payload.goalId as string)?.text ?? '')}`;
-    case 'checkins.update': {
-      const parts: string[] = [];
-      const heartbeat = payload.heartbeat as { enabled?: boolean; intervalMinutes?: number } | undefined;
-      if (heartbeat) {
-        if (heartbeat.enabled === false) parts.push('Turn off check-ins');
-        else if (heartbeat.intervalMinutes !== undefined) parts.push(`Check in ${everyMinutes(heartbeat.intervalMinutes)}`);
-        else parts.push('Turn on check-ins');
-      }
-      const brief = payload.brief as { enabled?: boolean; time?: string } | undefined;
-      if (brief) {
-        if (brief.enabled === false) parts.push('Turn off the morning brief');
-        else if (brief.time !== undefined) parts.push(`Send the morning brief at ${brief.time}`);
-        else parts.push('Turn on the morning brief');
-      }
-      return parts.join('; ');
-    }
     case 'source.update': {
       const label = SOURCE_LABELS[payload.source as CompanionConfigurableSource];
       return payload.enabled ? `Watch ${label}` : `Stop watching ${label}`;
@@ -430,11 +382,6 @@ function summarize(kind: CompanionCardKind, payload: Payload): string {
       if (add.length > 0) parts.push(`Watch ${add.length === 1 ? 'the pipeline' : 'pipelines'} ${add.join(', ')}`);
       if (remove.length > 0) parts.push(`Stop watching ${remove.join(', ')}`);
       return parts.join('; ');
-    }
-    case 'quiet_hours.update': {
-      if (payload.enabled === false) return 'Turn off quiet hours';
-      const current = getCompanionSettings().quietHours;
-      return `Quiet hours from ${(payload.start as string | undefined) ?? current.start} to ${(payload.end as string | undefined) ?? current.end}`;
     }
     case 'conversation.start': {
       const workspace = getWorkspace(payload.workspaceId as string)?.name.replace(/\s+/g, ' ').trim() || 'Untitled';
@@ -540,10 +487,8 @@ function applyEffect(kind: CompanionCardKind, payload: Payload, now: number): Co
     case 'rules.update':
       setCompanionRules(payload.rules);
       return ['rules'];
-    case 'checkins.update':
     case 'source.update':
     case 'pipeline.watch':
-    case 'quiet_hours.update':
       patchCompanionSettings(settingsPatchOf(kind, payload));
       return ['settings'];
     default:

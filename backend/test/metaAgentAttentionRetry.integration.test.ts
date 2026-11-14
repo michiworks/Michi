@@ -19,6 +19,8 @@ import { ScheduledJobEventBus } from '../src/services/scheduledJobs/events';
 import type { ScheduledJobRecord, ScheduledJobRunRecord } from '../src/services/scheduledJobs/repository';
 import { ScheduledJobsRepository } from '../src/services/scheduledJobs/repository';
 import { ScheduledJobScheduler, type ScheduledJobExecutor, type ScheduledRunHandle, type ScheduledRunHooks, type ScheduledRunOutcome } from '../src/services/scheduledJobs/scheduler';
+import { turnBackgroundWorkOn } from './helpers/backgroundWork';
+import { pauseMichi, resumeMichi } from '../src/services/michiPause';
 
 const OWNER = 'local-user';
 
@@ -86,6 +88,7 @@ beforeEach(() => {
   delete process.env.MICHI_CLOUD;
   closeDb();
   initDb();
+  turnBackgroundWorkOn();
   now = Date.parse('2026-10-23T02:00:00Z');
   mock.method(Date, 'now', () => now);
   nextId = 0;
@@ -101,7 +104,7 @@ afterEach(() => {
 test('Retry queues a batch held for attention again, and the next run resumes that batch', async () => {
   const executor = new Executor();
   const scheduler = new ScheduledJobScheduler({ repository: new ScheduledJobsRepository(), executor,
-    events: new ScheduledJobEventBus(() => now), workspaceExists: () => true, runtimeExists: (runtimeId) => runtimeId === 'pi',
+    events: new ScheduledJobEventBus(), workspaceExists: () => true, runtimeExists: (runtimeId) => runtimeId === 'pi',
     clock: () => now, instanceId: 'attention-test-worker', createId: () => `job-${++nextId}`, pollIntervalMs: 60_000 });
   const job = scheduler.createJob({ workspaceId: 'ws', name: 'Space maintenance', prompt: 'Maintain relevant spaces',
     schedule: { kind: 'every', everySeconds: 60 }, permissionMode: 'trust', sessionMode: 'fresh', conversationUpdates: true, notify: false });
@@ -137,10 +140,10 @@ test('Retry queues a batch held for attention again, and the next run resumes th
   await until(() => scheduler.getJob(job.id).activeRunId === null);
 });
 
-function maintenanceScheduler(executor: Executor) {
+function maintenanceScheduler(executor: Executor, signInRenewedAt: () => number | null = () => null) {
   const scheduler = new ScheduledJobScheduler({ repository: new ScheduledJobsRepository(), executor,
-    events: new ScheduledJobEventBus(() => now), workspaceExists: () => true, runtimeExists: (runtimeId) => runtimeId === 'pi',
-    clock: () => now, instanceId: 'attention-test-worker', createId: () => `job-${++nextId}`, pollIntervalMs: 60_000 });
+    events: new ScheduledJobEventBus(), workspaceExists: () => true, runtimeExists: (runtimeId) => runtimeId === 'pi',
+    clock: () => now, instanceId: 'attention-test-worker', createId: () => `job-${++nextId}`, pollIntervalMs: 60_000, signInRenewedAt });
   const job = scheduler.createJob({ workspaceId: 'ws', name: 'Space maintenance', prompt: 'Maintain relevant spaces',
     schedule: { kind: 'every', everySeconds: 60 }, permissionMode: 'trust', sessionMode: 'fresh', conversationUpdates: true, notify: false });
   createMaintenanceConfig({ workspaceId: 'ws', ownerUserId: OWNER, jobId: job.id, now, enabled: true });
@@ -296,6 +299,72 @@ test('a sign-in stop is tried again after an hour: a success clears it, a failur
     const recovered = scheduler.getJob(job.id);
     assert.deepEqual([recovered.autoPaused, recovered.consecutiveFailures, recovered.lastStatus], [false, 0, 'succeeded']);
     assert.equal(metaAgentOverview({ ownerUserId: OWNER, now }).stopped, null);
+  } finally {
+    await scheduler.stop();
+  }
+});
+
+test('a renewed sign-in runs a sign-in stop at once; one more failure waits an hour again', async () => {
+  const executor = new Executor();
+  let renewedAt: number | null = null;
+  const { scheduler, job } = maintenanceScheduler(executor, () => renewedAt);
+  completeSource('turn-a');
+  stopAfterFailures(job.id, SIGN_IN_STOP);
+  scheduler.start();
+  try {
+    now += 5 * 60_000;
+    await scheduler.tick();
+    assert.equal(executor.started.length, 0, 'held: nothing was renewed');
+
+    renewedAt = now;
+    now += 60_000;
+    await scheduler.tick();
+    await until(() => executor.started.length === 1);
+    executor.started[0].resolve({ status: 'failed', summary: null, error: 'Claude authentication failed. Refresh the CLI credentials and retry; the original session is retained.' });
+    await until(() => scheduler.getJob(job.id).activeRunId === null);
+    assert.equal(scheduler.getJob(job.id).autoPaused, true);
+
+    now += 5 * 60_000;
+    await scheduler.tick();
+    assert.equal(executor.started.length, 1, 'the renewal came before this failure, so it holds again');
+  } finally {
+    await scheduler.stop();
+  }
+});
+
+test('while Michi is off, a renewed sign-in starts nothing; once it is turned on, the sign-in stop runs', async () => {
+  const executor = new Executor();
+  const { scheduler, job } = maintenanceScheduler(executor, () => now);
+  completeSource('turn-a');
+  stopAfterFailures(job.id, SIGN_IN_STOP);
+  pauseMichi(OWNER, null);
+  scheduler.start();
+  try {
+    now += 2 * 60_000;
+    await scheduler.tick();
+    await flush();
+    assert.equal(executor.started.length, 0, 'Pause Michi holds it: no retry for the renewal');
+    assert.equal(metaAgentOverview({ ownerUserId: OWNER, now }).stopped, null, 'and nothing asks for attention for it');
+    resumeMichi(OWNER);
+    now += 60_000;
+    await scheduler.tick();
+    await until(() => executor.started.length === 1);
+  } finally {
+    await scheduler.stop();
+  }
+});
+
+test('a renewed sign-in does not lift any other stop', async () => {
+  const executor = new Executor();
+  const { scheduler, job } = maintenanceScheduler(executor, () => now);
+  completeSource('turn-a');
+  stopAfterFailures(job.id, 'The model call failed: Claude\'s structured answer timed out after 180000 ms. Paused after 5 failed runs in a row.');
+  scheduler.start();
+  try {
+    now += 2 * 60_000;
+    await scheduler.tick();
+    await flush();
+    assert.equal(executor.started.length, 0);
   } finally {
     await scheduler.stop();
   }

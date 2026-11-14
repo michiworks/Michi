@@ -88,6 +88,23 @@ describe('Undo all of a check-in', () => {
   /** The page's text blocks (a new page starts with an empty one). */
   const blockTexts = (pageId: string) => getPage(pageId, OWNER).blocks.map((block) => (block as { text?: string }).text).filter(Boolean);
 
+  test('the run keeps what S\'s replies used once S is purged (Q17): by charge, credits or uncached tokens, never a total alone', () => {
+    const run = checkin();
+    const reply = (id: string, usage: unknown) => getDb().prepare(`INSERT INTO messages(id,node_id,role,content,seq,created_at,metadata)
+      VALUES (?,?,'assistant','ok',0,?,?)`).run(id, run.nodeId, T0, JSON.stringify({ usageSummary: usage }));
+    reply('m-1', { charge: { amount: 18, unit: 'credits', provenance: 'native_metering' } });
+    reply('m-2', { inputTokens: 5_000, cachedInputTokens: 4_800, outputTokens: 120, totalTokens: 9_999 });
+    reply('m-3', { totalTokens: 7_000 });
+    over(run.runId);
+    const row = getDb().prepare('SELECT usage_json FROM companion_runs WHERE id = ?').get(run.runId) as { usage_json: string | null };
+    assert.deepEqual(JSON.parse(row.usage_json!), { credits: 18, tokens: 320 });
+
+    const quiet = checkin(T0 + 1);
+    over(quiet.runId);
+    assert.equal((getDb().prepare('SELECT usage_json FROM companion_runs WHERE id = ?').get(quiet.runId) as { usage_json: string | null }).usage_json, null,
+      'a run whose replies reported nothing records nothing');
+  });
+
   test('puts back its page edits, Today changes and goal edits after S is gone, newest first; the run is then undone', async () => {
     const page = createPage({ workspaceId: 'ws', ownerUserId: OWNER, title: 'Tasks', now: T0 - HOUR });
     const item = upsertItem(draft('cr:CR-1:mine'), T0).item;

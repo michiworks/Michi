@@ -8,6 +8,7 @@ import { claudeSpawnPolicy as runtimeClaudeSpawnPolicy, type ClaudeSpawnPolicyIn
  * runtime.
  */
 
+import { MICHI_AGENT_RUNTIMES } from 'michi-shared';
 import { createHash } from 'node:crypto';
 import type { RuntimeToolProfile } from '../agents/types';
 import { PAGE_TOOL_NAMES } from '../agents/pageToolNames';
@@ -81,8 +82,8 @@ export const META_AGENT_CHAT_TOOL_NAMES: readonly string[] = Object.freeze([
 
 /**
  * The agent's own tools (services/companion/tools.ts COMPANION_OWN_TOOLS):
- * its feed, a fresh check, item and name changes, notes, goal readings and
- * edits, cards, today's brief, the allow-listed deep reads, reading what its
+ * its feed, a fresh check, item, name and notification level changes, notes,
+ * goal readings and edits, cards, today's brief, the allow-listed deep reads, reading what its
  * check-ins wrote (companion_read), follow-ups into the conversations it
  * started (companion_session_send, §4: V only, asking the user for the exact
  * text itself) and the quiet end of a check-in. Every one enforces its own
@@ -99,20 +100,22 @@ export const COMPANION_OWN_TOOL_NAMES = Object.freeze([
   'companion_propose',
   'companion_publish_brief',
   'companion_set_name',
+  'companion_set_notifications',
   'companion_read',
   'companion_session_send',
+  'companion_headline',
   'nothing_to_do',
 ] as const);
 
 export type CompanionOwnToolName = typeof COMPANION_OWN_TOOL_NAMES[number];
 
 /**
- * V's Michi tools (§2.3, 58 with preview_page): everything ⌘J had, the
+ * V's Michi tools (§2.3, 59 with preview_page and companion_set_notifications): everything ⌘J had, the
  * Scheduled window's job tools (updating, running or deleting a job on its
  * own approval card, creating too when the user's setting asks for it or the
  * turn read outside content: agents/scheduledJobTools.ts), Michi Memory's four
  * tools with the user scope as V's own (assistant/tools.ts), and the agent's
- * own tools but nothing_to_do, which only a check-in ends with
+ * own tools but nothing_to_do and companion_headline, which only a check-in uses
  * (companion_session_send included: V's only). Native and user MCP tools come
  * on top, under the user's permission mode and §2.8.
  */
@@ -120,7 +123,7 @@ export const MAIN_TOOL_NAMES: readonly string[] = Object.freeze([
   ...META_AGENT_CHAT_TOOL_NAMES,
   ...SCHEDULED_JOB_TOOL_NAMES,
   ...MEMORY_TOOL_NAMES,
-  ...COMPANION_OWN_TOOL_NAMES.filter((name) => name !== 'nothing_to_do'),
+  ...COMPANION_OWN_TOOL_NAMES.filter((name) => name !== 'nothing_to_do' && name !== 'companion_headline'),
 ]);
 
 /**
@@ -165,6 +168,7 @@ export const CHECKIN_TOOL_NAMES: readonly string[] = Object.freeze([
   'companion_edit_goal',
   'companion_propose',
   'companion_publish_brief',
+  'companion_headline',
   'nothing_to_do',
 ]);
 
@@ -272,8 +276,8 @@ export function assistantProfileHash(runtimeProfile: unknown, purpose: Assistant
 
 // ── Runtimes ────────────────────────────────────────────────────────────────
 
-/** Runtimes that can host the assistant, in default-preference order. */
-export const ASSISTANT_RUNTIMES = ['claude', 'codex', 'pi', 'kiro'] as const;
+/** Runtimes that can host the assistant, in default-preference order: Michi's one list. */
+export const ASSISTANT_RUNTIMES = MICHI_AGENT_RUNTIMES;
 
 export function isAssistantRuntime(runtimeId: string): boolean {
   return (ASSISTANT_RUNTIMES as readonly string[]).includes(runtimeId);

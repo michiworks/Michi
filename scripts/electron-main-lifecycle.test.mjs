@@ -17,10 +17,19 @@ const ts = require('typescript');
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const { michiDisabledFeatures } = require('../electron/dist/chromiumFeatures.js');
 const { SIGN_IN_COMMANDS } = require('../electron/dist/remoteCredentials.js');
-const { COMPANION_READY_CHANNEL } = require('../electron/dist/companionNotifications.js');
+const { COMPANION_READY_CHANNEL } = require('../electron/dist/attentionNotifications.js');
 
-const STREAM = 'GET /api/scheduled-jobs/notifications/stream';
-const COMPANION_STREAM = 'GET /api/companion/notifications/stream';
+/** Electron main's one notification subscription: the attention desktop feed. */
+const STREAM = 'GET /api/attention/desktop/stream';
+
+/** A Scheduled Job run's attention record, as the backend sends it on the desktop feed. */
+function runRecord(runId, extra = {}) {
+  return {
+    id: `attn-${runId}`, key: `scheduled_run:${runId}`, kind: 'finished', reason: 'run_completed', title: 'Digest', body: 'All quiet',
+    target: { type: 'scheduled_run', runId, jobId: 'job-1', nodeId: 'n-1', workspaceId: 'ws-1' }, createdAt: Date.now(),
+    claimedByWindowId: null, claimedAt: null, ...extra,
+  };
+}
 const isMac = process.platform === 'darwin';
 // A test body that stops making progress fails instead of stalling test:contracts.
 // node:test does not apply this to t.after hooks, so cleanup must not wait on open sockets.
@@ -250,10 +259,7 @@ test('a banner clicked with no window open gives the index.html window the run t
   const win = await firstWindow(main);
   await waitFor(() => main.backend.streams.size === 1, 'the notification feed');
   win.close();
-  main.backend.pushNotice({
-    phase: 'finished', runId: 'run-1', jobId: 'job-1', jobName: 'Digest', workspaceId: 'ws-1', nodeId: 'n-1', treeId: 't-1',
-    status: 'succeeded', summary: 'All quiet', error: null, notify: true, at: 1,
-  });
+  main.backend.pushRecord(runRecord('run-1'));
   const banner = await waitFor(() => main.notifications[0], 'the banner');
   banner.emit('click');
   const reopened = await waitFor(() => main.windows[1]?.loads.length && main.windows[1], 'a window for the run');
@@ -309,9 +315,8 @@ test('a background launch subscribes to notices only once the backend is healthy
   main.ready();
   await waitFor(() => main.backend.requests.filter((request) => request === 'GET /api/health').length >= 2, 'health polling');
   assert.equal(main.backend.requests.includes(STREAM), false);
-  assert.equal(main.backend.requests.includes(COMPANION_STREAM), false);
   main.backend.setHealthy(true);
-  await waitFor(() => main.backend.requests.includes(STREAM) && main.backend.requests.includes(COMPANION_STREAM), 'both notification feeds');
+  await waitFor(() => main.backend.requests.includes(STREAM), 'the notification feed');
   assert.equal(main.windows.length, 0);
 });
 
@@ -498,71 +503,61 @@ test('a shell chord pressed in a Browser pane goes to the renderer with keyboard
   assertKnownEvents(main);
 });
 
-test('scheduled notices: a toast when a window is focused, an OS banner otherwise, no acknowledgement when neither can show', BOUNDED, async (t) => {
+test('attention records: windows present them while one is open; with none, a claim and then a banner whose click opens the target', BOUNDED, async (t) => {
   const main = await startMain(t, { mode: 'dev' });
   const win = await firstWindow(main);
   await waitFor(() => main.backend.streams.size === 1, 'the notification feed');
-  const notice = (runId, extra = {}) => ({
-    phase: 'finished', runId, jobId: 'job-1', jobName: 'Digest', workspaceId: 'ws-1', nodeId: 'n-1', treeId: 't-1',
-    status: 'succeeded', summary: 'All quiet', error: null, notify: true, at: 1, ...extra,
-  });
-  const target = (runId) => ({ runId, jobId: 'job-1', workspaceId: 'ws-1', nodeId: 'n-1' });
-  const acked = (runId) => main.backend.requests.includes(`POST /api/scheduled-jobs/runs/${runId}/notified`);
+  const claimed = (id) => main.backend.requests.includes(`POST /api/attention/desktop/notifications/${id}/claim`);
 
+  // A window is open (focused or not): it presents the record itself.
   win.focus();
-  main.backend.pushNotice(notice('run-1'));
-  await waitFor(() => acked('run-1'), 'the run-1 acknowledgement');
-  assert.deepEqual(sentOn(win.webContents, 'scheduled:'), [
-    ['scheduled:notice', { title: 'Digest', subtitle: 'Scheduled job finished', body: 'All quiet', target: target('run-1') }],
-  ]);
-  assert.equal(main.notifications.length, 0);
-
+  main.backend.pushRecord(runRecord('run-1'));
   main.state.focused = null;
-  main.backend.pushNotice(notice('run-2', { status: 'failed', error: 'boom' }));
-  await waitFor(() => acked('run-2'), 'the run-2 acknowledgement');
-  const [banner] = main.notifications;
-  assert.deepEqual([banner.options, banner.shown], [{ title: 'Digest', subtitle: 'Scheduled job failed', body: 'boom' }, true]);
-  banner.emit('click');
-  assert.equal(main.state.focused, win);
-  assert.deepEqual(sentOn(win.webContents, 'scheduled:open-run'), [['scheduled:open-run', target('run-2')]]);
+  main.backend.pushRecord(runRecord('run-2'));
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  assert.deepEqual([claimed('attn-run-1'), claimed('attn-run-2'), main.notifications.length], [false, false, 0]);
+  assert.deepEqual(sentOn(win.webContents, 'scheduled:'), [], 'no toast from main');
 
-  // Nothing can show run-3, so it stays pending for replay; 'started' carries nothing to acknowledge.
-  main.state.focused = null;
-  main.state.notificationsSupported = false;
-  main.backend.pushNotice(notice('run-3'));
-  main.backend.pushNotice(notice('run-4', { phase: 'started' }));
-  main.backend.pushNotice(notice('run-5', { notify: false }));
-  await waitFor(() => acked('run-5'), 'the run-5 acknowledgement');
-  assert.deepEqual([acked('run-3'), acked('run-4'), main.notifications.length], [false, false, 1]);
-
-  // With no window left, clicking a banner opens one on the run.
-  main.state.notificationsSupported = true;
+  // No window: claimed, then a banner; its click opens a window on the run.
   win.close();
-  main.backend.pushNotice(notice('run-6'));
-  const opener = await waitFor(() => main.notifications[1], 'the run-6 banner');
-  opener.emit('click');
+  main.backend.pushRecord(runRecord('run-3', { kind: 'failed', reason: 'run_failed', body: 'Failed: boom' }));
+  const banner = await waitFor(() => main.notifications[0], 'the run-3 banner');
+  assert.equal(claimed('attn-run-3'), true);
+  assert.deepEqual([banner.options, banner.shown], [{ title: 'Digest', body: 'Failed: boom' }, true]);
+
+  // A claim another window won, or no OS notifications: nothing.
+  main.backend.claims.won = false;
+  main.backend.pushRecord(runRecord('run-4'));
+  await waitFor(() => claimed('attn-run-4'), 'the run-4 claim');
+  main.backend.claims.won = true;
+  main.state.notificationsSupported = false;
+  main.backend.pushRecord(runRecord('run-5'));
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  assert.deepEqual([claimed('attn-run-5'), main.notifications.length], [false, 1]);
+  main.state.notificationsSupported = true;
+
+  banner.emit('click');
   const reopened = await waitFor(() => main.windows[1]?.loads.length && main.windows[1], 'a window for the run');
   assert.deepEqual(reopened.loads,
-    ['http://127.0.0.1:3001/?michiWindowId=win-1&michiOpenRun=run-6&michiOpenJob=job-1&michiOpenWorkspace=ws-1&michiOpenNode=n-1']);
+    ['http://127.0.0.1:3001/?michiWindowId=win-1&michiOpenRun=run-3&michiOpenJob=job-1&michiOpenWorkspace=ws-1&michiOpenNode=n-1']);
   assertKnownEvents(main);
 });
 
-test('a newer banner for a scheduled run replaces its older one', BOUNDED, async (t) => {
+test('a resolved record takes its banner down; a newer record of the key gets its own', BOUNDED, async (t) => {
   const main = await startMain(t, { mode: 'dev' });
-  await firstWindow(main);
+  const win = await firstWindow(main);
   await waitFor(() => main.backend.streams.size === 1, 'the notification feed');
-  const notice = (runId, extra) => ({
-    phase: 'attention', attention: 'approval', runId, jobId: 'job-1', jobName: 'Digest', workspaceId: 'ws-1', nodeId: 'n-1',
-    treeId: 't-1', status: 'running', summary: null, error: null, notify: true, at: 1, ...extra,
-  });
-  main.state.focused = null;
-  main.backend.pushNotice(notice('run-1'));
-  main.backend.pushNotice(notice('run-2'));
-  main.backend.pushNotice(notice('run-1', { phase: 'finished', status: 'succeeded', summary: 'Done' }));
-  await waitFor(() => main.notifications.length === 3, 'three banners');
+  win.close();
+  main.backend.pushRecord(runRecord('run-1', { kind: 'needs_input', reason: 'approval', body: 'Needs your approval' }));
+  main.backend.pushRecord(runRecord('run-2', { kind: 'needs_input', reason: 'approval' }));
+  await waitFor(() => main.notifications.length === 2, 'two banners');
+  // The approval was answered; the run then finished (a newer record of its key).
+  main.backend.pushResolved('attn-run-1');
+  main.backend.pushRecord(runRecord('run-1', { id: 'attn-run-1-done', body: 'Done' }));
+  await waitFor(() => main.notifications.length === 3, 'the finished banner');
   const [approval, other, finished] = main.notifications;
   assert.deepEqual([approval.closed, other.closed, finished.closed], [true, false, false]);
-  assert.equal(finished.options.subtitle, 'Scheduled job finished');
+  assert.equal(finished.options.body, 'Done');
 });
 
 test('renderer notifications focus the window that raised them and report their key back', BOUNDED, async (t) => {

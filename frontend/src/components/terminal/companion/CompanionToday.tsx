@@ -228,7 +228,7 @@ export function CompanionToday({ snapshot, catchUp, arrivals, onOpenItem, onAsk,
 
 function ActivityLine({ snapshot, clock, onOpenSettings }: { snapshot: CompanionSnapshot; clock: number; onOpenSettings(): void }) {
   const [checking, setChecking] = useState(false);
-  const { status, settings } = snapshot;
+  const { status } = snapshot;
   const check = async () => {
     setChecking(true);
     try {
@@ -245,9 +245,7 @@ function ActivityLine({ snapshot, clock, onOpenSettings }: { snapshot: Companion
   return (
     <div className="companion-activity" aria-label="Activity">
       <span>{status.lastCheckAt === null ? 'Not checked yet' : `Last check ${companionAgo(status.lastCheckAt, clock)}`}</span>
-      <span aria-hidden="true">·</span>
-      <span>{status.turnsToday} of {settings.dailyTurnBudget} turns today</span>
-      <button type="button" className="companion-link-btn" disabled={checking || !settings.enabled || settings.paused} onClick={() => { void check(); }}>Check now</button>
+      <button type="button" className="companion-link-btn" disabled={checking} onClick={() => { void check(); }}>Check now</button>
       <button type="button" className="companion-link-btn" onClick={onOpenSettings}>Activity & settings</button>
     </div>
   );

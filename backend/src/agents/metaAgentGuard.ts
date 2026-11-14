@@ -9,7 +9,7 @@
  * allow-list. Never degrade or skip the check.
  */
 
-import type { MetaAgentToolset } from 'michi-shared';
+import { MICHI_AGENT_RUNTIMES, type MetaAgentToolset } from 'michi-shared';
 import type { RuntimeToolProfile } from './types';
 
 export type { MetaAgentToolset };
@@ -20,20 +20,21 @@ export interface MetaAgentRuntimeAvailability {
 }
 
 /**
- * Runtimes that can host both Meta agent toolsets. A positive list: adding a
- * runtime needs a launch-time catalog check in its adapter first.
+ * Runtimes that can host Michi's agent, both toolsets included
+ * (MICHI_AGENT_RUNTIMES). A positive list: adding a runtime needs a
+ * launch-time catalog check in its adapter first.
  */
-const META_AGENT_RUNNABLE_RUNTIMES: ReadonlySet<string> = new Set(['claude', 'pi', 'codex', 'kiro']);
+const RUNNABLE: ReadonlySet<string> = new Set(MICHI_AGENT_RUNTIMES);
 
-const META_AGENT_REFUSALS: Readonly<Record<string, string>> = {
-  crew: 'Pages upkeep does not run on Kiro Crew yet. Choose another runtime for it under Pages upkeep in Settings.',
-  antigravity: 'Pages upkeep does not run on Antigravity yet. Choose another runtime for it under Pages upkeep in Settings.',
+const REFUSALS: Readonly<Record<string, string>> = {
+  crew: 'Michi does not run on Kiro Crew yet. Choose another runtime for Background work in Settings › Michi.',
+  antigravity: 'Michi does not run on Antigravity yet. Choose another runtime for Background work in Settings › Michi.',
 };
 
-/** Whether a runtime can host the Meta agent; the same answer for both toolsets. */
+/** Whether a runtime can host Michi's agent; the same answer for both toolsets. */
 export function metaAgentRuntimeAvailability(runtimeId: string): MetaAgentRuntimeAvailability {
-  if (META_AGENT_RUNNABLE_RUNTIMES.has(runtimeId)) return { available: true };
-  return { available: false, reason: META_AGENT_REFUSALS[runtimeId] ?? `Runtime "${runtimeId}" is not approved for Pages upkeep.` };
+  if (RUNNABLE.has(runtimeId)) return { available: true };
+  return { available: false, reason: REFUSALS[runtimeId] ?? `Michi does not run on "${runtimeId}".` };
 }
 
 /** The toolset a profile runs with, or null for an ordinary session. */

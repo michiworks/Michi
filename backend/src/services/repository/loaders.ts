@@ -1,6 +1,6 @@
 // Hydration reads: whole-workspace loads, the lean meta payload and tree message pages,
 // with each error node's latest turn receipt.
-import { composerDraftHasPendingSpawnPrompt, LEAN_NODE_FIELD_COLUMNS } from 'michi-shared';
+import { LEAN_NODE_FIELD_COLUMNS } from 'michi-shared';
 import { getDb, runInTransaction } from '../db';
 import { getWorkspace, listWorkspaces, type WorkspaceRow } from './workspaces';
 import { listTrees, type TreeRow } from './trees';
@@ -178,9 +178,8 @@ function mergeSourceChains(edges: readonly EdgeRow[]): Set<string> {
 
 /**
  * A meta row without the lean fields that hold a value (shared/leanNodeFields).
- * A tree page brings them with its bodies. Kept: a draft holding the spawn
- * outbox (auto-spawn reads it before any body loads) and the overview of a
- * node a merge thread shows from another tree.
+ * A tree page brings them with its bodies. Kept: the overview of a node a
+ * merge thread shows from another tree.
  */
 function leanMetaNodeRow(row: NodeRowWithCount, keepOverview: ReadonlySet<string>): NodeRowWithCount {
   const lean: Partial<NodeRowWithCount> = { ...row };
@@ -188,7 +187,7 @@ function leanMetaNodeRow(row: NodeRowWithCount, keepOverview: ReadonlySet<string
   if (row.follow_ups != null || row.follow_ups_source_message_id != null) {
     for (const column of LEAN_NODE_FIELD_COLUMNS.follow_ups) delete lean[column as keyof NodeRowWithCount];
   }
-  if (row.composer_draft != null && !composerDraftHasPendingSpawnPrompt(row.composer_draft)) delete lean.composer_draft;
+  if (row.composer_draft != null) delete lean.composer_draft;
   return lean as NodeRowWithCount;
 }
 

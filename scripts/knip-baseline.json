@@ -28,8 +28,6 @@
     "exports\tfrontend/src/components/terminal/content/db/dbOps.ts\tchunkEditOps",
     "exports\tfrontend/src/components/terminal/content/page/MichiBlock.tsx\trendererFor",
     "exports\tfrontend/src/components/terminal/pages/Dashboard.tsx\tcenteredPaneScrollLeft",
-    "exports\tfrontend/src/components/terminal/source/SourceNav.tsx\tSourceBackBar",
-    "exports\tfrontend/src/components/terminal/spaces/conversation/SpaceConversationSlot.tsx\tSpaceConversationSlot",
     "exports\tfrontend/src/components/terminal/spaces/home/homeCounts.ts\thomeWaitingTotal",
     "exports\tfrontend/src/components/terminal/spaces/home/homeFormat.ts\tblockAuthor",
     "exports\tfrontend/src/components/terminal/toolCallGrouping.ts\tfindOwningSubagent",

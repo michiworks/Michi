@@ -1,4 +1,3 @@
-import { requestToolApproval, listToolApprovals } from '../src/services/metaAgent/toolApprovals';
 import { UNKNOWN_RUNTIME_DESCRIPTOR } from 'michi-runtime';
 // Must stay first: agentConfig would otherwise persist these fixtures to ~/.michi/config.json.
 import './isolatedConfigDir';
@@ -28,7 +27,7 @@ import {
   getMetaAgentGuardStatus, metaAgentGuardFailureOf, onMetaAgentGuardRetry, recordMetaAgentGuardCheck, retryMetaAgentGuard,
   type MetaAgentRunProfile,
 } from '../src/services/metaAgent/guardStatus';
-import { metaAgentInfo, resolveMetaAgentRuntime, updateMetaAgentSettings } from '../src/services/metaAgent/settings';
+import { metaAgentInfo, resolveBackgroundRuntime, updateMetaAgentSettings } from '../src/services/metaAgent/settings';
 import { ChatScheduledJobExecutor } from '../src/services/scheduledJobs/chatExecutor';
 import type { ScheduledJobRecord, ScheduledJobRunRecord } from '../src/services/scheduledJobs/repository';
 import { chatStreamErrorCode, createChatStreamError, toChatStreamEvent } from '../src/routes/chatStreamEvents';
@@ -130,7 +129,7 @@ describe('Meta agent restriction check results', () => {
 
   describe('MetaAgentInfo.guard', () => {
     const resolvedNow = () => {
-      const { followsGlobal: _f, ...run } = resolveMetaAgentRuntime();
+      const { followsGlobal: _f, ...run } = resolveBackgroundRuntime();
       return run;
     };
 
@@ -192,7 +191,7 @@ describe('Meta agent restriction check results', () => {
     }
 
     function seedFailures(): void {
-      const { followsGlobal: _f, ...run } = resolveMetaAgentRuntime();
+      const { followsGlobal: _f, ...run } = resolveBackgroundRuntime();
       recordMetaAgentGuardCheck({ toolset: 'maintenance', profile: run, failure: failureOf(VIOLATIONS[3]) });
       recordMetaAgentGuardCheck({ toolset: 'chat', profile: run, failure: failureOf(VIOLATIONS[4]) });
     }
@@ -224,17 +223,8 @@ describe('Meta agent restriction check results', () => {
       assert.equal((await call('POST', '/api/meta-agent/retry', {})).body.guard.maintenance, null);
     });
 
-    test('tool approvals require local control and persist approve, deny and revoke decisions', async () => {
-      const request = requestToolApproval({ serverName: 'mail', command: 'mail-mcp' }, { name: 'send', inputSchema: { type: 'object' } })!;
-      const path = `/api/meta-agent/tool-approvals/${request.id}`;
-      assert.equal((await call('POST', path, { state: 'approved' }, { origin: 'https://evil.example' })).status, 403);
-      assert.equal(listToolApprovals()[0].state, 'pending');
-      assert.equal((await call('POST', path, { state: 'anything' })).status, 400);
-      for (const state of ['approved', 'revoked', 'denied']) {
-        const response = await call('POST', path, { state });
-        assert.equal(response.status, 200);
-        assert.equal(response.body.toolApprovals[0].state, state);
-      }
+    test('the info lists no tool approvals: background work uses read-only tools only', async () => {
+      assert.equal('toolApprovals' in (await call('GET', '/api/meta-agent')).body, false);
     });
 
     test('a settings change through PUT clears a failure' , async () => {
@@ -288,7 +278,7 @@ describe('Meta agent restriction check results', () => {
       getDb().prepare("INSERT INTO nodes(id,workspace_id,kind,status,created_at) VALUES('plain-node','ws-plain','chat','idle',1)").run();
       const guardError = new MetaAgentGuardError({ runtimeId: 'kiro', toolset: 'chat', unexpectedTools: ['fs_write'] });
 
-      recordMetaAgentGuardCheck({ toolset: 'chat', profile: resolveMetaAgentRuntime(), failure: { runtimeId: 'kiro', unexpectedTools: ['fs_write'] } });
+      recordMetaAgentGuardCheck({ toolset: 'chat', profile: resolveBackgroundRuntime(), failure: { runtimeId: 'kiro', unexpectedTools: ['fs_write'] } });
       assert.equal(metaAgentInfo().guard.chat, null, 'legacy chat failures do not block the unrestricted Assistant');
       assert.equal(metaAgentInfo().guard.maintenance, null);
     });

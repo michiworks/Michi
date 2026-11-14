@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Archive, ArchiveRestore, Eye, GitBranch, MessageSquare, Search, Trash2 } from 'lucide-react';
 import { toast } from 'sonner';
 import { useChatStore, useChatNodesSnapshot } from '../../../../state/chatStore';
+import { collectUndo, recordUndo } from '../../../../state/undoStack';
 import type { PageId } from '../../../../state/commands';
 import { withoutSystemWorkspaces } from '../../../../state/assistant/systemWorkspace';
 import { nodeMessageCount } from '../../../../state/nodeMessageCount';
@@ -26,7 +27,7 @@ const noun = (entry: ArchiveEntry) => entry.kind === 'tree' ? 'Thread' : 'Node';
  * back, and Move to Trash hands it to Trash's retention.
  */
 export function ArchivedPane({ onNav }: { onNav?: (page: PageId) => void }) {
-  const { projects, hydrated, restoreDeletion, moveDeletionGroupLane, unarchiveTree, deleteTree, revealNode, selectProject, activateTree } = useChatStore();
+  const { projects, hydrated, restoreDeletion, moveDeletionGroupLane, unarchiveTree, archiveTree, archiveNode, deleteTree, revealNode, selectProject, activateTree } = useChatStore();
   const nodes = useChatNodesSnapshot();
   const phone = useSettingsPhone();
   const now = useNow(60_000);
@@ -94,12 +95,21 @@ export function ArchivedPane({ onNav }: { onNav?: (page: PageId) => void }) {
 
   const unarchive = (items: readonly ArchiveEntry[]) => {
     if (!items.length) return;
-    const restored = items.map(entry => {
+    // One undo for the lot, which archives each again (a branch under a new group).
+    const { result: restored } = collectUndo(() => items.map(entry => {
       if (entry.kind === 'tree') { unarchiveTree(entry.treeId); return entry.root?.nodeId ?? null; }
       return restoreDeletion(entry.groupId);
-    });
+    }));
     leave(items.map(entry => entry.key));
     const [only] = items;
+    recordUndo({
+      label: items.length > 1 ? `Unarchived ${plural(items.length, 'item')}` : `Unarchived “${only.title}”`,
+      undo: () => items.forEach((entry, index) => {
+        const root = restored[index];
+        if (entry.kind === 'tree') archiveTree(entry.treeId);
+        else if (root) archiveNode(root);
+      }),
+    });
     if (items.length > 1) { toast.success(`${plural(items.length, 'item')} unarchived`); return; }
     toast.success(`${noun(only)} unarchived`, onNav ? {
       action: { label: 'Open', onClick: () => {
@@ -115,20 +125,25 @@ export function ArchivedPane({ onNav }: { onNav?: (page: PageId) => void }) {
   };
   /** Trash keeps it for its retention period; Undo puts it back in Archived. */
   const moveToTrash = (items: readonly ArchiveEntry[]) => {
-    const moved = items.flatMap(entry => {
+    // Its own undo, back to Archived, stands for what deleteTree records.
+    const { result: moved } = collectUndo(() => items.flatMap(entry => {
       const groupId = entry.kind === 'tree' ? deleteTree(entry.treeId) : moveDeletionGroupLane(entry.groupId, 'trash');
       return groupId ? [{ entry, groupId }] : [];
-    });
+    }));
     if (!moved.length) return;
     leave(moved.map(({ entry }) => entry.key));
-    toast.success(moved.length === 1 ? 'Moved to Trash' : `${plural(moved.length, 'item')} moved to Trash`, {
-      action: { label: 'Undo', onClick: () => {
+    recordUndo({
+      label: moved.length === 1 ? 'Moved to Trash' : `${plural(moved.length, 'item')} moved to Trash`,
+      toast: true,
+      undo: () => {
         // A thread keeps its archived mark while in Trash, so restoring it lands in Archived.
+        let any = false;
         for (const { entry, groupId } of moved) {
-          if (entry.kind === 'tree') restoreDeletion(groupId);
-          else moveDeletionGroupLane(groupId, 'archive', entry.archivedAt);
+          const back = entry.kind === 'tree' ? restoreDeletion(groupId) : moveDeletionGroupLane(groupId, 'archive', entry.archivedAt);
+          if (back) any = true;
         }
-      } },
+        return any;
+      },
     });
   };
 

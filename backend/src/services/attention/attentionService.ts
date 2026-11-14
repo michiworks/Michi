@@ -1,6 +1,7 @@
 import {
   AgentRunStatus,
   approvalAttentionCopy,
+  attentionLevelAllows,
   CHAT_STREAM_EVENTS,
   completionAttentionCopy,
   DEFAULT_COMPANION_NAME,
@@ -12,19 +13,23 @@ import {
   type AgentRunDtoV1,
   type AttentionClaimResultV1,
   type AttentionKind,
+  type AttentionLevel,
   type AttentionNotificationV1,
   type AttentionReason,
   type AttentionResolveReason,
   type AttentionTargetV1,
   type ChatStreamEvent,
+  type CompanionTarget,
   type DurableMessageMetadata,
   type PaneTarget,
+  type ScheduledJobRunEvent,
   type WorkflowApprovalDto,
   type WorkflowRunDtoV1,
   type WorkspaceStructureChangedEvent,
   type WorkspaceStructureOp,
 } from 'michi-shared';
 import { BACKEND_RESTARTED_ERROR } from '../turnPersistence.recipes';
+import { NOTIFIER_GRACE_MS, type AppLauncher } from '../scheduledJobs/appLauncher';
 import type { NodeCompletionSeen, PermissionAnswered } from '../attentionSignals';
 import { log } from '../logger';
 import {
@@ -48,27 +53,35 @@ import { AttentionWakeFacts } from './attentionWakeFacts';
  * when answered, seen or stale, and expire after `maxAgeMs`; every change is
  * published on the owner's background feeds (attentionFeed.ts).
  *
+ * It is the one place that decides whether to call the user (DESIGN P4):
+ * every producer below proposes facts here, and nothing else notifies.
+ *
  * Producers: chat turn events (permission and user input requests, a turn
  * that completed with an answer, a genuine failure; never a cancellation or a
- * backend restart), Agent Run watches in notify mode (agentRunNotifier), and
- * the tool approvals workflow runs wait on (observeWorkflowRun): a Claude
+ * backend restart), Agent Run watches in notify mode (agentRunNotifier), the
+ * tool approvals workflow runs wait on (observeWorkflowRun): a Claude
  * workflow agent asking between turns, a Kiro workflow step. Those never
  * reach the chat as a permission request. A multi-model run's approvals are
  * copies of its branches' chat requests, which notify by themselves.
- * Turns sent by a Scheduled Job and maintenance transcripts are left to the
- * scheduler's own notices, and so is the end of each woken reply in a wake
- * chain such a turn began. The posts Michi makes into the agent's own
- * conversation (a check-in's post, first-run narration) are left to the
- * Companion's notice gate: they neither make a record nor leave the
- * conversation's record stale. That conversation's records speak under the
- * agent's name (`assistantName`).
+ * Scheduled Job runs (observeScheduledRun, from the scheduler's events): a
+ * run that asks for an approval or input, and one that finished with its
+ * job's Notify on, under `scheduled_run:<runId>`; the turns such a run sends,
+ * and the end of each woken reply in a wake chain one began, make no chat
+ * record of their own, and maintenance transcripts none at all. Michi itself
+ * (proposeAgent, from services/companion/notices.ts): its Today's Needs you
+ * (`agent:item:<itemId>`), its posts in its conversation (`agent:chat`) and
+ * a conversation it delegated that finished (`agent:node:<nodeId>`); the
+ * post turns themselves (a check-in's post, first-run narration) neither make
+ * a chat record nor leave the conversation's record stale. That
+ * conversation's records speak under the agent's name (`assistantName`).
  *
- * The desktop notifier. While no window is open, the Companion's chat
- * notices (services/companion/chatNotices.ts) raise approvals, questions and
- * replies from Electron main. They ask shownInWindow first and report
- * shownByDesktop after, which claims the event's record for the notifier
- * (DESKTOP_NOTIFIER_WINDOW_ID), now or once it is decided: a window that
- * opens later lists it but raises no second OS notification.
+ * The desktop notifier. Electron main subscribes to the feed as the desktop
+ * notifier (routes/attention.ts) and shows the records the user's level lets
+ * through while no Michi window is open, claiming each first
+ * (DESKTOP_NOTIFIER_WINDOW_ID): a window that opens later lists it but
+ * raises no second OS notification. When a record the level lets through is
+ * decided while no notifier has been connected for the grace, the app is
+ * woken to show it (configureDesktopWake; the macOS background service only).
  *
  * Seen. A view mark (nodeCompletionSeen) resolves only a completion it
  * covers: marks reach the server seconds late, so one for an earlier
@@ -93,12 +106,15 @@ import { AttentionWakeFacts } from './attentionWakeFacts';
  * status, once it is purged: they carry thread titles and tool, question and
  * error text (structureChanged; reconciled at startup the same way).
  *
- * Keys: `node:<nodeId>`, `agent_run:<runId>` or `workflow:<nodeId>:<approval>`
+ * Keys: `node:<nodeId>`, `agent_run:<runId>`, `workflow:<nodeId>:<approval>`
  * (a node's chat turns do not end what its workflows wait on, and Claude
- * shows one approval on every running workflow of the chat), one active
- * record per key. Facts: `permission:<turn>:<request>`, `input:<turn>:<request>`,
+ * shows one approval on every running workflow of the chat),
+ * `scheduled_run:<runId>` and `agent:…`, one active record per key. Facts:
+ * `permission:<turn>:<request>`, `input:<turn>:<request>`,
  * `completion:<completion_seq>`, `failed:<turn>`, `run:<status>`,
- * `approval:<requestedAt>` (Claude numbers approvals per session).
+ * `approval:<requestedAt>` (Claude numbers approvals per session),
+ * `attention:<approval|input>:<at>` for a scheduled run, and the producer's own
+ * for Michi's.
  */
 
 /** Read-only presence: does a focused window show this target right now (panePresence.ts)? */
@@ -142,6 +158,10 @@ export interface AttentionServiceOptions {
   isHandOffTurn?: (turnId: string) => boolean;
   /** The agent's name, read at decision time (the Companion's displayName); DEFAULT_COMPANION_NAME without it. */
   assistantName?: () => string;
+  /** The agent's panel is open and focused in some window: its conversation's updates are seen there. */
+  agentPanelFocused?: () => boolean;
+  /** The user's notification level, for the desktop notifier and its wake (default `all`). */
+  level?: () => AttentionLevel;
   clock?: AttentionClock;
   /** How long a fact must stay current before it becomes a record. */
   decisionDelayMs?: number;
@@ -153,21 +173,31 @@ export interface AttentionServiceOptions {
   onError?: (message: string, error: unknown) => void;
 }
 
-/** The window id a record is claimed under once the desktop notifier raised its event (shownByDesktop). */
+/** The window id a record is claimed under once Electron main, the desktop notifier, shows it (claimForDesktop). */
 export const DESKTOP_NOTIFIER_WINDOW_ID = 'desktop-notifier';
 
-/** One chat event the desktop notifier raises while no window is open (services/companion/chatNotices.ts). */
-export interface DesktopChatNotice {
-  nodeId: string;
-  turnId: string;
-  kind: 'approval' | 'question' | 'reply';
-  /** The approval's or question's request id; none for a reply. */
-  requestId?: number;
+/** The title of a record from the agent's own conversation, in the agent's name. */
+function agentNoticeTitle(name: string, kind: 'approval' | 'question' | 'reply'): string {
+  return kind === 'approval' ? `${name}: needs your approval` : kind === 'question' ? `${name}: has a question` : `${name} replied`;
 }
 
-/** The title of a notice from the agent's own conversation, in the agent's name (chatNotices.ts says it the same way). */
-export function agentNoticeTitle(name: string, kind: DesktopChatNotice['kind']): string {
-  return kind === 'approval' ? `${name}: needs your approval` : kind === 'question' ? `${name}: has a question` : `${name} replied`;
+/**
+ * One fact of Michi's own (services/companion/notices.ts proposes them):
+ * an item of its Today that needs the user (`needs_you`), or a post of its
+ * own (`update`). `isCurrent` is asked again when it is decided.
+ */
+export interface AgentAttentionProposal {
+  key: string;
+  fact: string;
+  kind: AttentionKind;
+  reason: Extract<AttentionReason, 'needs_you' | 'update'>;
+  title: string;
+  body: string;
+  /** The slot the target names (`chat`, `item:<id>`, `node:<id>`). */
+  ref: string;
+  /** Where a click takes the user. */
+  open: CompanionTarget;
+  isCurrent?: () => boolean;
 }
 
 export const ATTENTION_DECISION_DELAY_MS = 1_000;
@@ -185,8 +215,6 @@ interface Candidate {
   build(): NewAttention | null;
   /** Called once the candidate is decided or replaced (Run watches await it). */
   settle(): void;
-  /** The event as the desktop notifier names it (desktopKey), when it can raise this one. */
-  desktopKey?: string;
 }
 
 interface PendingDecision {
@@ -222,32 +250,16 @@ function workflowApprovalKey(nodeId: string, approvalId: string): string {
   return `${WORKFLOW_KEY_PREFIX}${encodeURIComponent(nodeId)}:${encodeURIComponent(approvalId)}`;
 }
 
-function paneTargetKey(target: PaneTarget): string | null {
-  if (target.kind === 'node') return nodeKey(target.nodeId);
-  if (target.kind === 'agent_run') return runKey(target.runId);
-  return null;
+function scheduledRunKey(runId: string): string {
+  return `scheduled_run:${runId}`;
 }
+
+const AGENT_KEY_PREFIX = 'agent:';
 
 function interactionFact(kind: 'permission' | 'input', turnId: string, requestId: number): string {
   return `${kind}:${encodeURIComponent(turnId)}:${requestId}`;
 }
 
-/** A chat event as both the attention records and the desktop notifier name it: its request's fact, or the turn's reply. */
-function desktopKey(nodeId: string, event: { fact: string } | { replyOf: string }): string {
-  return 'fact' in event ? `${nodeId}\u0000${event.fact}` : `${nodeId}\u0000reply\u0000${event.replyOf}`;
-}
-
-/** The fact of the approval or question a desktop notice is about; null for a reply (its completion is counted at decision time). */
-function requestFactOf(notice: DesktopChatNotice): string | null {
-  if (notice.kind === 'reply' || notice.requestId === undefined) return null;
-  return interactionFact(notice.kind === 'approval' ? 'permission' : 'input', notice.turnId, notice.requestId);
-}
-
-function desktopKeyOf(notice: DesktopChatNotice): string | null {
-  if (notice.kind === 'reply') return desktopKey(notice.nodeId, { replyOf: notice.turnId });
-  const fact = requestFactOf(notice);
-  return fact === null ? null : desktopKey(notice.nodeId, { fact });
-}
 
 /** First-run narration's turn ids (services/metaAgent/firstRunNarration.ts). */
 const NARRATION_TURN_PREFIX = 'mna-';
@@ -256,7 +268,7 @@ const NARRATION_TURN_PREFIX = 'mna-';
  * A post Michi makes into the agent's conversation as a complete turn of its
  * own (chatHub.postSelfMessage): a check-in's post (`cmp-post-<runId>`) or
  * first-run narration. No user message, nothing to approve or answer, and no
- * reply to anyone: the Companion's notice gate decides about it.
+ * reply to anyone: Michi's notices propose it as an update (proposeAgent).
  */
 function isCompanionPost(data: Extract<ChatStreamEvent, { event: 'turn_start' }>['data']): boolean {
   return data.selfInitiated === true && !data.userText
@@ -269,16 +281,34 @@ function completionSeqOf(fact: string): number | null {
   return match ? Number(match[1]) : null;
 }
 
+/** One pane as a string: what paneTargetOf names, to match records against a window's panes. */
+function paneTargetId(target: PaneTarget): string | null {
+  if (target.kind === 'node') return `node:${target.nodeId}`;
+  if (target.kind === 'agent_run') return `agent_run:${target.runId}`;
+  return null;
+}
+
 /** Whether a focused window showing the target means the user saw it (not a question or a workflow's approval: see the header). */
 function seenWhenShown(record: Pick<StoredAttention, 'reason' | 'key'>): boolean {
   return record.reason !== 'question' && !record.key.startsWith(WORKFLOW_KEY_PREFIX);
 }
 
-function paneTargetOf(target: AttentionTargetV1): PaneTarget {
-  return target.type === 'node'
-    ? { kind: 'node', nodeId: target.nodeId }
-    : { kind: 'agent_run', runId: target.runId };
+/** A scheduled run's needs-input fact (observeScheduledRun). */
+function scheduledAttentionFact(kind: 'approval' | 'input', at: number): string {
+  return `attention:${kind}:${at}`;
 }
+
+/** The pane that shows a target, if one can: an `agent` record about its own conversation is asked about the panel instead. */
+function paneTargetOf(target: AttentionTargetV1): PaneTarget | null {
+  switch (target.type) {
+    case 'node': return { kind: 'node', nodeId: target.nodeId };
+    case 'agent_run': return { kind: 'agent_run', runId: target.runId };
+    case 'scheduled_run': return target.nodeId ? { kind: 'node', nodeId: target.nodeId } : null;
+    case 'agent': return target.open.kind === 'node' ? { kind: 'node', nodeId: target.open.nodeId } : null;
+  }
+}
+
+
 
 /** Insertion-ordered map that forgets its oldest entries past `limit`. */
 function remember<V>(map: Map<string, V>, key: string, value: V): void {
@@ -295,6 +325,8 @@ export class AttentionService {
   private readonly getRun?: (ownerUserId: string, runId: string) => AgentRunDtoV1 | null;
   private readonly isHandOffTurn?: (turnId: string) => boolean;
   private readonly assistantName?: () => string;
+  private readonly agentPanelFocused?: () => boolean;
+  private readonly level: () => AttentionLevel;
   private readonly clock: AttentionClock;
   private readonly decisionDelayMs: number;
   private readonly maxAgeMs: number;
@@ -315,8 +347,14 @@ export class AttentionService {
   private readonly scheduledTurns = new Map<string, boolean>();
   /** The turns of Michi's posts (isCompanionPost) until their done: their frames are no news about the conversation. */
   private readonly posts = new Map<string, true>();
-  /** Events the desktop notifier raised before their record was decided (desktopKey). */
-  private readonly desktopShown = new Map<string, true>();
+  /** A scheduled run's thread → the run's key, while the run may wait on the user there (observeScheduledRun). */
+  private readonly scheduledRunNodes = new Map<string, string>();
+  /** How a decided record wakes the quit app (configureDesktopWake); null: it never does. */
+  private desktopWake: { launcher: AppLauncher; graceMs: number; setTimer: (callback: () => void, delayMs: number) => () => void } | null = null;
+  /** The one look again once the desktop notifier's grace is up; null while none is armed. */
+  private cancelWakeCheck: (() => void) | null = null;
+  /** Records decided since the look again was armed may wake the app when it fires. */
+  private wakeCheckSince = 0;
   /** Approvals workflow runs wait on, by record key: the runs that show each. */
   private readonly workflowApprovals = new Map<string, Set<string>>();
   /** The approval keys each run showed when last observed. */
@@ -339,6 +377,8 @@ export class AttentionService {
     this.getRun = options.getRun;
     this.isHandOffTurn = options.isHandOffTurn;
     this.assistantName = options.assistantName;
+    this.agentPanelFocused = options.agentPanelFocused;
+    this.level = options.level ?? (() => 'all');
     this.clock = options.clock ?? systemClock;
     this.decisionDelayMs = options.decisionDelayMs ?? ATTENTION_DECISION_DELAY_MS;
     this.maxAgeMs = options.maxAgeMs ?? ATTENTION_MAX_AGE_MS;
@@ -374,6 +414,7 @@ export class AttentionService {
     this.stopped = true;
     if (this.sweepTimer !== null) this.clock.clearInterval(this.sweepTimer);
     this.sweepTimer = null;
+    this.configureDesktopWake(null);
     for (const entry of [...this.pending.values()]) {
       this.clock.clearTimeout(entry.timer);
       this.decide(entry);
@@ -428,7 +469,7 @@ export class AttentionService {
           reason: 'approval',
           ...approvalAttentionCopy(event.data.title),
           ...(facts.assistant ? { title: agentNoticeTitle(this.agentName(), 'approval') } : {}),
-        } : null), desktopKey(nodeId, { fact }));
+        } : null));
         return;
       }
       case CHAT_STREAM_EVENTS.userInputRequest: {
@@ -443,16 +484,18 @@ export class AttentionService {
           reason: 'question',
           ...questionAttentionCopy(question),
           ...(facts.assistant ? { title: agentNoticeTitle(this.agentName(), 'question') } : {}),
-        } : null), desktopKey(nodeId, { fact }));
+        } : null));
         return;
       }
       case CHAT_STREAM_EVENTS.permissionResolved: {
         const { nodeId, turnId, requestId } = event.data;
+        if (nodeId) this.scheduledRunAnswered(nodeId);
         if (nodeId && turnId) this.answerInteraction(nodeId, turnId, interactionFact('permission', turnId, requestId));
         return;
       }
       case CHAT_STREAM_EVENTS.userInputResolved: {
         const { nodeId, turnId, requestId } = event.data;
+        if (nodeId) this.scheduledRunAnswered(nodeId);
         if (nodeId && turnId) this.answerInteraction(nodeId, turnId, interactionFact('input', turnId, requestId));
         return;
       }
@@ -480,7 +523,7 @@ export class AttentionService {
             reason: 'completed',
             ...completionAttentionCopy(facts.assistant ? agentNoticeTitle(this.agentName(), 'reply') : facts.title),
           };
-        }, desktopKey(nodeId, { replyOf: turnId }));
+        });
         return;
       }
       case CHAT_STREAM_EVENTS.error: {
@@ -616,6 +659,137 @@ export class AttentionService {
     });
   }
 
+  /**
+   * A Scheduled Job run's lifecycle event (the scheduler's event bus). A run
+   * waiting on the user (an approval or input) is a needs-input record, whatever
+   * its job's Notify; it resolves once the request is answered in the run's
+   * thread or the run ends. A run that finished notifies only with Notify on,
+   * succeeded or failed (a timeout is a failure); any other end leaves
+   * nothing. Click opens the run, wherever its thread shows.
+   */
+  observeScheduledRun(event: ScheduledJobRunEvent): void {
+    if (this.stopped) return;
+    try {
+      this.handleScheduledRun(event);
+    } catch (error) {
+      this.onError('attention could not observe a scheduled run', error);
+    }
+  }
+
+  private handleScheduledRun(event: ScheduledJobRunEvent): void {
+    const key = scheduledRunKey(event.runId);
+    const target: AttentionTargetV1 = {
+      type: 'scheduled_run', runId: event.runId, jobId: event.jobId, nodeId: event.nodeId, workspaceId: event.workspaceId,
+    };
+    if (event.phase === 'started') return;
+    if (event.phase === 'attention') {
+      const kind = event.attention === 'input' ? 'input' : 'approval';
+      if (event.nodeId) remember(this.scheduledRunNodes, event.nodeId, key);
+      this.proposeScheduled(key, target, {
+        fact: scheduledAttentionFact(kind, event.at),
+        kind: 'needs_input',
+        reason: kind === 'input' ? 'question' : 'approval',
+        title: event.jobName,
+        body: kind === 'input' ? 'Needs your input: the scheduled run is waiting' : 'Needs your approval: the scheduled run is waiting',
+      }, () => this.scheduledRunNodes.get(event.nodeId ?? '') === key);
+      return;
+    }
+    if (event.nodeId && this.scheduledRunNodes.get(event.nodeId) === key) this.scheduledRunNodes.delete(event.nodeId);
+    const succeeded = event.status === 'succeeded';
+    const failed = event.status === 'failed' || event.status === 'timed_out';
+    if (!event.notify || (!succeeded && !failed)) {
+      // Nothing to say; whatever the run waited on is moot now.
+      this.dropPending(key);
+      const active = this.active.get(key);
+      if (active) this.resolveRecord(active, 'stale');
+      return;
+    }
+    this.proposeScheduled(key, target, {
+      fact: `run:${event.status}`,
+      kind: succeeded ? 'finished' : 'failed',
+      reason: succeeded ? 'run_completed' : 'run_failed',
+      title: event.jobName,
+      body: succeeded
+        ? event.summary || 'Scheduled job finished'
+        : event.error ? `Failed: ${event.error}` : 'Scheduled job failed',
+    });
+  }
+
+  private proposeScheduled(key: string, target: Extract<AttentionTargetV1, { type: 'scheduled_run' }>, spec: NodeFactSpec,
+    isCurrent: () => boolean = () => true): void {
+    this.propose({
+      key,
+      settle: () => {},
+      build: () => {
+        if (!isCurrent()) return null;
+        const ownerUserId = this.repository.workspaceOwner(target.workspaceId);
+        if (!ownerUserId || this.repository.workspaceState(target.workspaceId) !== 'live') return null;
+        return { ownerUserId, key, ...spec, target, createdAt: this.clock.now() };
+      },
+    });
+  }
+
+  /** An approval or question was answered in a thread: a scheduled run's record of it is moot. */
+  private scheduledRunAnswered(nodeId: string): void {
+    const key = this.scheduledRunNodes.get(nodeId);
+    if (!key) return;
+    this.scheduledRunNodes.delete(nodeId);
+    this.dropPending(key);
+    const active = this.active.get(key);
+    if (active?.kind === 'needs_input') this.resolveRecord(active, 'answered');
+  }
+
+  /**
+   * A fact of Michi's own (services/companion/notices.ts): it becomes the
+   * active record of its key, in the agent's (system) workspace, unless it is
+   * no longer current when decided or the user is looking at it.
+   */
+  proposeAgent(proposal: AgentAttentionProposal, workspaceId: string, ownerUserId: string): void {
+    if (this.stopped) return;
+    if (!proposal.key.startsWith(AGENT_KEY_PREFIX)) throw new Error(`an agent record's key starts with ${AGENT_KEY_PREFIX}`);
+    try {
+      this.propose({
+        key: proposal.key,
+        settle: () => {},
+        build: () => {
+          if (proposal.isCurrent && !proposal.isCurrent()) return null;
+          if (this.repository.workspaceState(workspaceId) === 'gone') return null;
+          return {
+            ownerUserId,
+            key: proposal.key,
+            fact: proposal.fact,
+            kind: proposal.kind,
+            reason: proposal.reason,
+            title: proposal.title,
+            body: proposal.body,
+            target: { type: 'agent', ref: proposal.ref, open: proposal.open, workspaceId },
+            createdAt: this.clock.now(),
+          };
+        },
+      });
+    } catch (error) {
+      this.onError('attention could not take an agent notice', error);
+    }
+  }
+
+  /** The active records of Michi's own whose keys start with `prefix` (which must start with `agent:`). */
+  activeAgentRecords(prefix: string): Array<{ key: string; fact: string }> {
+    if (!prefix.startsWith(AGENT_KEY_PREFIX)) return [];
+    return [...this.active.values()].filter((record) => record.key.startsWith(prefix)).map((record) => ({ key: record.key, fact: record.fact }));
+  }
+
+  /** A fact of Michi's no longer holds (an item resolved, snoozed or changed): its pending decision and its record go. */
+  resolveAgent(key: string): void {
+    if (this.stopped || !key.startsWith(AGENT_KEY_PREFIX)) return;
+    try {
+      this.dropPending(key);
+      const active = this.active.get(key);
+      if (active) this.resolveRecord(active, 'stale');
+    } catch (error) {
+      this.onError('attention could not resolve an agent notice', error);
+    }
+  }
+
   // ── Resolution inputs ────────────────────────────────────────────────────
 
   /**
@@ -669,9 +843,7 @@ export class AttentionService {
     try {
       for (const record of this.recordsShowing(targets)) {
         if (record.ownerUserId !== ownerUserId || !seenWhenShown(record)) continue;
-        if (this.presence.isTargetVisibleInFocusedWindow(ownerUserId, paneTargetOf(record.target))) {
-          this.resolveRecord(record, 'seen');
-        }
+        if (this.shownNow(record)) this.resolveRecord(record, 'seen');
       }
     } catch (error) {
       this.onError('attention could not apply a presence change', error);
@@ -715,59 +887,90 @@ export class AttentionService {
   // ── The desktop notifier ─────────────────────────────────────────────────
 
   /**
-   * Whether a window already raised this chat event (a window holds its
-   * record's claim): the desktop notifier then stays quiet about it.
+   * Where a decided record wakes the quit app (DESIGN-v2 §5.1: the macOS
+   * background service runs the backend, and its launcher starts the app
+   * hidden; Electron main then gets the record from its feed's snapshot);
+   * null: never (the default, and every backend but the service's).
    */
-  shownInWindow(notice: DesktopChatNotice): boolean {
+  configureDesktopWake(config: { launcher: AppLauncher; graceMs?: number; setTimer?: (callback: () => void, delayMs: number) => () => void } | null): void {
+    this.cancelWakeCheck?.();
+    this.cancelWakeCheck = null;
+    this.desktopWake = config ? {
+      launcher: config.launcher,
+      graceMs: config.graceMs ?? NOTIFIER_GRACE_MS,
+      setTimer: config.setTimer ?? ((callback, delayMs) => {
+        const handle = this.clock.setTimeout(callback, delayMs);
+        return () => this.clock.clearTimeout(handle);
+      }),
+    } : null;
+  }
+
+  /** The level lets the record through to the desktop notifier (attentionLevelAllows); a level that cannot be read counts as `all`. */
+  desktopAccepts(record: Pick<AttentionNotificationV1, 'kind' | 'reason'>): boolean {
+    let level: AttentionLevel = 'all';
     try {
-      const record = this.recordOf(notice);
-      // Windows claim through the route, which writes the store only.
-      const claimant = record ? this.repository.get(record.ownerUserId, record.id)?.claimedByWindowId ?? null : null;
-      return claimant !== null && claimant !== DESKTOP_NOTIFIER_WINDOW_ID;
-    } catch (error) {
-      this.onError('attention could not read a record for a desktop notice', error);
-      return false;
+      level = this.level();
+    } catch {
+      level = 'all';
     }
+    return attentionLevelAllows(level, record.kind, record.reason);
+  }
+
+  /** POST /attention/desktop/notifications/:id/claim: Electron main shows the record; null when it is not this owner's. */
+  claimForDesktop(ownerUserId: string, id: string): AttentionClaimResultV1 | null {
+    return this.claim(ownerUserId, id, DESKTOP_NOTIFIER_WINDOW_ID);
   }
 
   /**
-   * The desktop notifier raised this chat event while no window was open:
-   * its record is claimed for the notifier now, or as it is decided, so a
-   * window that opens later lists it without raising it again.
+   * A record went out: when no desktop notifier has been connected for the
+   * grace and the level lets it through, the app is woken. Within the grace
+   * the notifier may only be reconnecting (a backoff, a backend restart, the
+   * first moments after boot): one look again when the grace is up wakes it
+   * if a record decided since is still active and unclaimed then.
    */
-  shownByDesktop(notice: DesktopChatNotice): void {
-    if (this.stopped) return;
-    try {
-      const record = this.recordOf(notice);
-      if (record) {
-        this.claimForDesktop(record);
+  private wakeDesktopFor(record: StoredAttention): void {
+    const wake = this.desktopWake;
+    if (!wake || !this.desktopAccepts(record)) return;
+    const absentFor = this.feed.desktopAbsentForMs();
+    if (absentFor === 0) return;
+    if (absentFor >= wake.graceMs) {
+      this.launch(wake.launcher);
+      return;
+    }
+    this.lookAgainForWake(wake, wake.graceMs - absentFor, record.createdAt);
+  }
+
+  private lookAgainForWake(wake: NonNullable<AttentionService['desktopWake']>, delayMs: number, since: number): void {
+    if (this.cancelWakeCheck) return;
+    this.wakeCheckSince = since;
+    this.cancelWakeCheck = wake.setTimer(() => {
+      this.cancelWakeCheck = null;
+      if (this.desktopWake !== wake || this.stopped) return;
+      const absentFor = this.feed.desktopAbsentForMs();
+      if (absentFor === 0) return;
+      // A notifier came and went meanwhile: its grace starts over.
+      if (absentFor < wake.graceMs) {
+        this.lookAgainForWake(wake, wake.graceMs - absentFor, this.wakeCheckSince);
         return;
       }
-      const key = desktopKeyOf(notice);
-      if (key) remember(this.desktopShown, key, true);
+      // Read from the store: claims through the routes write only there.
+      let waiting = false;
+      try {
+        waiting = this.repository.listAllActive().some((record) => record.createdAt >= this.wakeCheckSince
+          && record.claimedByWindowId === null && this.desktopAccepts(record));
+      } catch (error) {
+        this.onError('attention could not look for a record to wake the app for', error);
+      }
+      if (waiting) this.launch(wake.launcher);
+    }, Math.max(1, delayMs));
+  }
+
+  private launch(launcher: AppLauncher): void {
+    try {
+      launcher.wake();
     } catch (error) {
-      this.onError('attention could not note a desktop notice', error);
+      this.onError('attention could not wake the app', error);
     }
-  }
-
-  /** The node's active record when it is this event's: the request's, or the turn's own completion. */
-  private recordOf(notice: DesktopChatNotice): StoredAttention | null {
-    const active = this.active.get(nodeKey(notice.nodeId));
-    if (!active) return null;
-    if (notice.kind !== 'reply') return active.fact === requestFactOf(notice) ? active : null;
-    const seq = completionSeqOf(active.fact);
-    if (seq === null) return null;
-    const facts = this.repository.nodeFacts(notice.nodeId);
-    return facts?.lastCompletedTurnId === notice.turnId && facts.completionSeq === seq ? active : null;
-  }
-
-  /** Claims the record for the desktop notifier; the record as it is afterwards. */
-  private claimForDesktop(record: StoredAttention): StoredAttention {
-    const now = this.clock.now();
-    if (!this.repository.claim(record.ownerUserId, record.id, DESKTOP_NOTIFIER_WINDOW_ID, now)?.claimed) return record;
-    const claimed = { ...record, claimedByWindowId: DESKTOP_NOTIFIER_WINDOW_ID, claimedAt: record.claimedAt ?? now };
-    if (this.active.get(record.key)?.id === record.id) this.active.set(record.key, claimed);
-    return claimed;
   }
 
   // ── Delivery ─────────────────────────────────────────────────────────────
@@ -824,7 +1027,8 @@ export class AttentionService {
    * workspace carries it along.
    */
   private revalidate(record: StoredAttention): void {
-    if (record.target.type === 'agent_run') {
+    // A Run's, a scheduled run's and Michi's own records live as long as their workspace.
+    if (record.target.type !== 'node') {
       const state = this.repository.workspaceState(record.target.workspaceId);
       if (state === 'gone') this.forgetTarget(record);
       else if (state === 'hidden') this.resolveRecord(record, 'stale');
@@ -861,16 +1065,31 @@ export class AttentionService {
     }
   }
 
-  /** The active records of these targets (all, without a list). */
+  /** The active records these panes show (all, without a list). */
   private recordsShowing(targets: readonly PaneTarget[] | undefined): StoredAttention[] {
     if (!targets) return [...this.active.values()];
-    const records = new Map<string, StoredAttention>();
-    for (const target of targets) {
-      const key = paneTargetKey(target);
-      const record = key ? this.active.get(key) : undefined;
-      if (record) records.set(record.id, record);
+    const shown = new Set(targets.map(paneTargetId).filter((id): id is string => id !== null));
+    return [...this.active.values()].filter((record) => {
+      const pane = paneTargetOf(record.target);
+      const id = pane ? paneTargetId(pane) : null;
+      return id !== null && shown.has(id);
+    });
+  }
+
+  /**
+   * The user has the record's target in front of them now: a focused window
+   * shows its pane, or (an update in the agent's own conversation) the
+   * agent's panel has focus.
+   */
+  private shownNow(record: Pick<StoredAttention, 'ownerUserId' | 'target'>): boolean {
+    const pane = paneTargetOf(record.target);
+    if (pane) return this.presence.isTargetVisibleInFocusedWindow(record.ownerUserId, pane);
+    if (record.target.type !== 'agent' || record.target.open.kind !== 'companion' || record.target.open.tab !== 'chat') return false;
+    try {
+      return this.agentPanelFocused?.() ?? false;
+    } catch {
+      return false;
     }
-    return [...records.values()];
   }
 
   /** A thread message's turn began: remember the sender's turn that was running then, if any. */
@@ -938,12 +1157,11 @@ export class AttentionService {
     if (active && facts.has(active.fact)) this.resolveRecord(active, 'stale');
   }
 
-  private proposeNodeFact(nodeId: string, turnId: string, describe: (facts: NodeAttentionFacts) => NodeFactSpec | null, desktop?: string): void {
+  private proposeNodeFact(nodeId: string, turnId: string, describe: (facts: NodeAttentionFacts) => NodeFactSpec | null): void {
     const key = nodeKey(nodeId);
     this.propose({
       key,
       settle: () => {},
-      ...(desktop !== undefined ? { desktopKey: desktop } : {}),
       build: () => {
         const facts = this.repository.nodeFacts(nodeId);
         if (!facts || facts.hidden) return null;
@@ -971,6 +1189,15 @@ export class AttentionService {
     return scheduled;
   }
 
+  /** The key's pending decision, if any, is dropped undecided. */
+  private dropPending(key: string): void {
+    const entry = this.pending.get(key);
+    if (!entry) return;
+    this.pending.delete(key);
+    this.clock.clearTimeout(entry.timer);
+    entry.candidate.settle();
+  }
+
   /** A newer candidate for a key replaces the pending one: only the latest fact is decided. */
   private propose(candidate: Candidate): void {
     const previous = this.pending.get(candidate.key);
@@ -993,11 +1220,9 @@ export class AttentionService {
     if (this.pending.get(candidate.key) !== entry) return;
     this.pending.delete(candidate.key);
     try {
-      // Whatever is decided, the desktop notifier's word on this event is used up here.
-      const raisedByDesktop = candidate.desktopKey !== undefined && this.desktopShown.delete(candidate.desktopKey);
       const record = candidate.build();
       if (!record) return;
-      if (seenWhenShown(record) && this.presence.isTargetVisibleInFocusedWindow(record.ownerUserId, paneTargetOf(record.target))) {
+      if (seenWhenShown(record) && this.shownNow(record)) {
         // The user is looking at it: nothing to call them to, including an older record.
         const active = this.active.get(record.key);
         if (active && seenWhenShown(active)) this.resolveRecord(active, 'seen');
@@ -1006,10 +1231,9 @@ export class AttentionService {
       const result = this.repository.insertReplacing(record);
       if (!result) return;
       this.active.set(record.key, result.created);
-      // Raised already, from Electron main: windows list it, and none raises it again.
-      const created = raisedByDesktop ? this.claimForDesktop(result.created) : result.created;
       if (result.superseded) this.feed.publishResolved(record.ownerUserId, toAttentionResolved(result.superseded));
-      this.feed.publishNotification(record.ownerUserId, toAttentionNotification(created));
+      this.feed.publishNotification(record.ownerUserId, toAttentionNotification(result.created));
+      this.wakeDesktopFor(result.created);
     } catch (error) {
       this.onError('attention could not decide a notification', error);
     } finally {

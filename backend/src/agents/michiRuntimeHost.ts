@@ -129,7 +129,7 @@ export function createMichiRuntimeHost(): RuntimeHost {
         : new assistantPolicy.AssistantRuntimeUnsupportedError(runtimeId),
     },
     bindings: {
-      nodeBinding: (nodeId) => dbRepository.getNode(nodeId),
+      nodeBinding: (nodeId) => crewMemory.withTemporaryCrewMemory(dbRepository.getNode(nodeId)),
       workspace: (workspaceId) => dbRepository.getWorkspace(workspaceId),
       edges: (workspaceId) => dbRepository.listEdges(workspaceId),
       recordNativeSessionId: (owner, nativeSessionId) => dbRepository.setNodeExternalSessionId(boundChatNode(owner), nativeSessionId),

@@ -9,7 +9,7 @@ import { getDb, runInTransaction } from '../db';
 import { getAiGlobalContext } from '../dbRepository';
 import { log } from '../logger';
 import { stripSentinelsStreamingSafe } from '../messageSerialization';
-import { resolveMetaAgentRuntime } from '../metaAgent/settings';
+import { resolveBackgroundRuntime } from '../metaAgent/settings';
 import { startOfLocalDay } from '../metaAgent/todayUsage';
 import { ownsUnattendedRun } from '../scheduledJobs/repository';
 import { companionTaintOf, getTurnTrust } from '../turnTrust';
@@ -179,11 +179,6 @@ export function extractionWorkspace(workspaceId: string, ownerUserId: string): W
   return row;
 }
 
-export function globalMaintenancePaused(ownerUserId: string): boolean {
-  const row = getDb().prepare('SELECT paused FROM meta_agent_maintenance_state WHERE owner_user_id = ?').get(ownerUserId) as { paused: number } | undefined;
-  return row?.paused === 1;
-}
-
 /** Tokens left today for the owner's extraction, after the floor that still starts an execution. */
 export function extractionBudgetLeft(ownerUserId: string, now: number): number {
   return MEMORY_EXTRACTION_LIMITS.dailyTokenLimit - extractionTokensOn(ownerUserId, startOfLocalDay(now));
@@ -202,16 +197,19 @@ export function answersMemoryDirectly(runtime: Pick<AgentRuntime, 'completeStruc
   return process.env.MICHI_MEMORY_DIRECT !== '0' && typeof runtime?.completeStructured === 'function';
 }
 
-export type ExtractionHold = 'off' | 'unsupported' | 'paused' | 'workspace_paused' | 'maintenance_paused' | 'budget_exhausted'
+export type ExtractionHold = 'off' | 'unsupported' | 'paused' | 'workspace_paused' | 'budget_exhausted'
   | 'workspace_unavailable' | 'navigation_off' | 'session_only';
 
-/** Why this consumer may not start an execution now, or null. Database reads only (and the registered runtimes). */
+/**
+ * Why this consumer may not start an execution now, or null. Database reads only (and the
+ * registered runtimes). Only Settings › Memory holds it (memory off, its pause, a workspace's
+ * pause): the Meta agent's pause does not.
+ */
 export function extractionHold(cursor: ExtractionCursor, now: number): ExtractionHold | null {
   if (!extractionLocalOnly()) return 'unsupported';
   if (getMemorySettings(cursor.ownerUserId).mode !== 'auto') return 'off';
   if (getExtractionState(cursor.ownerUserId).paused) return 'paused';
   if (cursor.paused) return 'workspace_paused';
-  if (globalMaintenancePaused(cursor.ownerUserId)) return 'maintenance_paused';
   const workspace = extractionWorkspace(cursor.workspaceId, cursor.ownerUserId);
   if (!workspace) return 'workspace_unavailable';
   // AI navigation off: its conversations are not read, quietly (not a failure); the turns wait.
@@ -219,7 +217,7 @@ export function extractionHold(cursor: ExtractionCursor, now: number): Extractio
   // The assistant's workspace holds no maintenance session (every chat there runs as the assistant), so V waits, quietly,
   // for a runtime that answers directly.
   if (isSystemWorkspaceSettings(workspace.settings)
-    && !answersMemoryDirectly(getRuntime(resolveMetaAgentRuntime(cursor.ownerUserId).runtimeId))) return 'session_only';
+    && !answersMemoryDirectly(getRuntime(resolveBackgroundRuntime(cursor.ownerUserId).runtimeId))) return 'session_only';
   if (extractionBudgetLeft(cursor.ownerUserId, now) < MEMORY_EXTRACTION_LIMITS.minExecutionBudget) return 'budget_exhausted';
   return null;
 }
@@ -371,8 +369,7 @@ export function designatedConsolidationJob(ownerUserId: string, now: number): st
 export function consolidationHolds(ownerUserId: string, now: number): ConsolidationHolds {
   const hold = !extractionLocalOnly() ? 'unsupported'
     : getMemorySettings(ownerUserId).mode !== 'auto' ? 'off'
-      : getExtractionState(ownerUserId).paused ? 'paused'
-        : globalMaintenancePaused(ownerUserId) ? 'maintenance_paused' : null;
+      : getExtractionState(ownerUserId).paused ? 'paused' : null;
   return { hold, budgetLeft: extractionBudgetLeft(ownerUserId, now), minBudget: MEMORY_EXTRACTION_LIMITS.minExecutionBudget, bootAt };
 }
 
@@ -555,7 +552,7 @@ function extractionIdle(ownerUserId: string, now: number): boolean {
  */
 export function profileRebuildDue(ownerUserId: string, now: number): boolean {
   if (!extractionLocalOnly() || getMemorySettings(ownerUserId).mode !== 'auto') return false;
-  if (getExtractionState(ownerUserId).paused || globalMaintenancePaused(ownerUserId)) return false;
+  if (getExtractionState(ownerUserId).paused) return false;
   if (extractionBudgetLeft(ownerUserId, now) < MEMORY_EXTRACTION_LIMITS.minExecutionBudget) return false;
   const state = profileRebuildState(ownerUserId);
   if (state.requestedAt !== null) return true;
@@ -940,7 +937,6 @@ function holdSummary(hold: ExtractionHold): string {
     case 'unsupported': return 'Skipped: automatic memory runs only on the local backend';
     case 'paused': return 'Skipped: automatic memory is paused';
     case 'workspace_paused': return 'Skipped: automatic memory is paused for this workspace';
-    case 'maintenance_paused': return 'Skipped: Pages upkeep is paused';
     case 'budget_exhausted': return 'Skipped: today\'s automatic memory token limit is reached';
     case 'workspace_unavailable': return 'Skipped: the workspace is archived, deleted or not a local workspace';
     case 'navigation_off': return 'Skipped: AI access to this workspace\'s conversations is turned off';

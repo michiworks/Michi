@@ -1,7 +1,6 @@
 import React from 'react';
-import type { HomeSectionItem, HomeSectionKey, SpaceActivityItem } from 'michi-shared';
+import type { SpaceActivityItem } from 'michi-shared';
 import { openSpacesPage } from '../../../../state/metaChat/spacesPages';
-import { homeRowAction } from './homeFormat';
 import { useSpacesSourceNav } from './homeLinks';
 
 /** A Michi conversation a home row names, and the message to show when the row is about one. */
@@ -36,16 +35,10 @@ export function useHomeNavigation(backendConnectionId: string, currentPageId: st
     });
   }, [backendConnectionId, currentPageId]);
 
-  const openSectionItem = React.useCallback((item: HomeSectionItem, section: HomeSectionKey | null) => {
-    const target = item.target;
-    if (target.kind === 'page') openPage(target.pageId, item.workspaceId, target.blockId);
-    else void openThread({ nodeId: target.nodeId, workspaceId: target.workspaceId, messageId: target.messageId, focus: homeRowAction(section, item) === 'Continue' });
-  }, [openPage, openThread]);
-
   const openActivity = React.useCallback((item: SpaceActivityItem) => {
     if (item.kind === 'conversation') void openThread({ nodeId: item.threadNodeId, workspaceId: item.workspaceId });
     else openPage(item.pageId, item.workspaceId, null);
   }, [openPage, openThread]);
 
-  return { openThread, openPage, openSectionItem, openActivity };
+  return { openThread, openPage, openActivity };
 }

@@ -52,20 +52,23 @@ function createBackend() {
   const streams = new Set();
   const servers = new Map();
   let healthy = true;
+  /** Whether the desktop notifier wins the claims it makes. */
+  const claims = { won: true };
   const handler = (req, res) => {
     requests.push(`${req.method} ${req.url}`);
     if (req.method === 'GET' && req.url === '/api/health') {
       res.writeHead(healthy ? 200 : 503, { 'content-type': 'application/json' });
       res.end(JSON.stringify({ service: 'michi-backend' }));
-    } else if (req.method === 'GET' && req.url === '/api/scheduled-jobs/notifications/stream') {
+    } else if (req.method === 'GET' && req.url === '/api/attention/desktop/stream') {
+      // Electron main's one subscription (attentionNotifications.ts).
       res.writeHead(200, { 'content-type': 'text/event-stream' });
       res.flushHeaders();
       streams.add(res);
       res.on('close', () => streams.delete(res));
-    } else if (req.method === 'GET' && req.url === '/api/companion/notifications/stream') {
-      // The Companion's feed connects and stays quiet; `streams` holds the scheduled one only.
-      res.writeHead(200, { 'content-type': 'text/event-stream' });
-      res.flushHeaders();
+    } else if (req.method === 'POST' && /^\/api\/attention\/desktop\/notifications\/[^/]+\/claim$/.test(req.url)) {
+      req.resume();
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ claimed: claims.won, claimedByWindowId: claims.won ? 'desktop-notifier' : 'a-window', status: 'active' }));
     } else {
       req.resume();
       res.writeHead(req.method === 'POST' ? 200 : 404);
@@ -88,8 +91,14 @@ function createBackend() {
       servers.set(bound, server);
       return bound;
     },
-    pushNotice(notice) {
-      for (const res of streams) res.write(`event: scheduled_job_run\ndata: ${JSON.stringify(notice)}\n\n`);
+    claims,
+    /** An attention record the backend decided (attention_notification on the desktop feed). */
+    pushRecord(record) {
+      for (const res of streams) res.write(`event: attention_notification\ndata: ${JSON.stringify(record)}\n\n`);
+    },
+    /** A record that is no longer active. */
+    pushResolved(id) {
+      for (const res of streams) res.write(`event: attention_resolved\ndata: ${JSON.stringify({ id, reason: 'answered' })}\n\n`);
     },
     async close() {
       const closing = [...servers.values()];

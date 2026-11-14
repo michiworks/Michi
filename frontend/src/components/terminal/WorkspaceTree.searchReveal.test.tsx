@@ -32,7 +32,6 @@ vi.mock('../../services/api', () => ({
   ensureSession: vi.fn(() => Promise.resolve({ chatId: 'fake-chat', currentModeId: null, resumeStrategy: 'fresh' })),
   streamMessage: vi.fn(() => () => {}),
 }));
-vi.mock('../../services/notifications', () => ({ notify: vi.fn() }));
 
 import { ChatProvider, useChatStore } from '../../state/chatStore';
 import { PrefsProvider, usePrefs } from '../../state/prefs';

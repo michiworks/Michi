@@ -135,7 +135,7 @@ describe('the Today tab', () => {
     expect(screen.getByText(/3 updates, 1 needs you\./).textContent).toContain('Since you left');
     const activity = screen.getByLabelText('Activity');
     expect(activity.textContent).toContain('Not checked yet');
-    expect(activity.textContent).toContain('0 of 30 turns today');
+    expect(activity.textContent).not.toContain('turns today');
     fireEvent.click(within(activity).getByRole('button', { name: 'Check now' }));
     await waitFor(() => expect(mocks.toast.error).toHaveBeenCalledWith('Another Michi window is doing the checking'));
     fireEvent.click(within(activity).getByRole('button', { name: 'Activity & settings' }));

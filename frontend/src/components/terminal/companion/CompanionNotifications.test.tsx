@@ -1,11 +1,11 @@
 import React from 'react';
 import { act, fireEvent, render, screen } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import type { CompanionNotice, CompanionTarget } from 'michi-shared';
+import type { CompanionTarget } from 'michi-shared';
+import { requestOpenCompanionTarget } from '../../../state/attentionOpenRequests';
 import {
   closeCompanionPanel,
   getCompanionPanelState,
-  openCompanionPanel,
   resetCompanionPanelForTests,
   subscribeCompanionPanel,
 } from '../../../state/companion/companionPanel';
@@ -15,27 +15,18 @@ import { CompanionNotifications, resetCompanionNotificationsForTests } from './C
 import { CompanionTopbarButton } from './CompanionTopbarButton';
 
 const mocks = vi.hoisted(() => ({
-  notify: vi.fn(),
   electron: null as null | Record<string, unknown>,
   stopFeed: vi.fn(),
   stopPresence: vi.fn(),
-  noticeListeners: new Set<(notice: CompanionNotice) => void>(),
   revealBackendNode: vi.fn(async () => true),
   openUrl: vi.fn(),
 }));
-vi.mock('../../../services/notifications', () => ({ notify: mocks.notify }));
 vi.mock('../../../services/openUrl', () => ({ openPreferredUrl: mocks.openUrl }));
 vi.mock('../../../lib/electronBridge', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../../../lib/electronBridge')>()),
   getElectron: () => mocks.electron,
 }));
-vi.mock('../../../state/companion/companionFeed', () => ({
-  startCompanionFeed: () => mocks.stopFeed,
-  subscribeCompanionNotices: (listener: (notice: CompanionNotice) => void) => {
-    mocks.noticeListeners.add(listener);
-    return () => { mocks.noticeListeners.delete(listener); };
-  },
-}));
+vi.mock('../../../state/companion/companionFeed', () => ({ startCompanionFeed: () => mocks.stopFeed }));
 vi.mock('../../../state/companion/companionPresence', () => ({ startCompanionPresence: () => mocks.stopPresence }));
 vi.mock('../../../state/chatStore', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../../../state/chatStore')>()),
@@ -49,24 +40,18 @@ function next(overrides: Parameters<typeof companionSnapshot>[0]) {
   act(() => adoptCompanionSnapshot({ ...current, ...overrides, revision: current.revision + 1 }));
 }
 
-/** A notice about one item, as the backend sends it (delivery.ts itemNoticeDraft): Today, at that item. */
-const notice = (id: string, overrides: Partial<CompanionNotice> = {}): CompanionNotice => ({
-  id, title: 'Companion', body: 'CR-9 needs attention — 1 unresolved comment', target: { kind: 'companion', tab: 'today', itemId: 'cr' },
-  itemIds: ['cr'], createdAt: 1, expiresAt: Date.now() + 60_000, ...overrides,
-});
-
 /**
- * Every notice shape the backend sends, and where its click must land: a
- * single item opens Today at it; a conversation waiting 30 minutes, or a
- * finished worker, opens the conversation; a batch or "while you were away"
- * fold opens Today; a reply opens Chat.
+ * Every target Michi's records open (services/companion/notices.ts), and
+ * where a click must land: a Needs you item opens Today at it; a conversation
+ * waiting 30 minutes, or a finished delegation, opens the conversation; a
+ * post opens Chat.
  */
-const SHAPES: Array<{ notice: CompanionNotice; lands: 'today-at-item' | 'conversation' | 'today' | 'chat' }> = [
-  { notice: notice('one-item'), lands: 'today-at-item' },
-  { notice: notice('waiting-30-min', { target: { kind: 'node', workspaceId: 'ws-1', nodeId: 'n-9' }, itemIds: ['cmi-michi'] }), lands: 'conversation' },
-  { notice: notice('batch', { target: { kind: 'companion', tab: 'today' }, itemIds: ['a', 'b'] }), lands: 'today' },
-  { notice: notice('reply', { target: { kind: 'companion', tab: 'chat' }, itemIds: [] }), lands: 'chat' },
-  { notice: notice('worker-finished', { target: { kind: 'node', workspaceId: 'ws-1', nodeId: 'n-9' }, itemIds: [] }), lands: 'conversation' },
+const SHAPES: Array<{ id: string; target: CompanionTarget; lands: 'today-at-item' | 'conversation' | 'today' | 'chat' }> = [
+  { id: 'needs-you', target: { kind: 'companion', tab: 'today', itemId: 'cr' }, lands: 'today-at-item' },
+  { id: 'waiting-30-min', target: { kind: 'node', workspaceId: 'ws-1', nodeId: 'n-9' }, lands: 'conversation' },
+  { id: 'today', target: { kind: 'companion', tab: 'today' }, lands: 'today' },
+  { id: 'post', target: { kind: 'companion', tab: 'chat' }, lands: 'chat' },
+  { id: 'finished-delegation', target: { kind: 'node', workspaceId: 'ws-1', nodeId: 'n-9' }, lands: 'conversation' },
 ];
 
 /** Where the user is after a click: the panel (tab, the item asked for) and the conversation revealed. */
@@ -85,18 +70,11 @@ const EXPECTED = {
   chat: { panel: { tab: 'chat', item: null }, revealed: [] },
 } as const;
 
-/** A notice the backend's gate sent over the change feed. */
-function fromFeed(value: CompanionNotice) {
-  act(() => { for (const listener of [...mocks.noticeListeners]) listener(value); });
-}
-
 let hasFocus: ReturnType<typeof vi.spyOn>;
 beforeEach(() => {
-  mocks.notify.mockReset();
   mocks.revealBackendNode.mockClear();
   mocks.openUrl.mockReset();
   mocks.electron = null;
-  mocks.noticeListeners.clear();
   resetCompanionNotificationsForTests();
   resetCompanionPanelForTests();
   resetCompanionStoreForTests({ snapshot: first });
@@ -108,97 +86,53 @@ afterEach(() => {
   window.history.replaceState(null, '', '/');
 });
 
-describe('Companion notices in a browser', () => {
-  it('shows the notices the backend’s gate sends over the feed, once each, and none that expired', () => {
+describe('where a click on one of Michi\'s notifications lands', () => {
+  it('a toast or OS notification this window raised opens its record\'s target, for every shape', async () => {
     render(<CompanionNotifications />);
-    fromFeed(notice('n-1'));
-    fromFeed(notice('n-1'));
-    fromFeed(notice('n-2', { expiresAt: Date.now() - 1 }));
-    expect(mocks.notify).toHaveBeenCalledTimes(1);
-    expect(mocks.notify).toHaveBeenCalledWith(expect.objectContaining({ title: 'Companion', body: 'CR-9 needs attention — 1 unresolved comment' }));
-    // A click opens where the notice points: Today, at its item.
-    act(() => mocks.notify.mock.calls[0][0].onClick());
-    expect(getCompanionPanelState()).toMatchObject({ open: true, tab: 'today', focusItem: { id: 'cr' } });
-  });
-
-  it('opens exactly the notice’s target on a click, for every shape the backend sends', async () => {
-    render(<CompanionNotifications />);
-    for (const { notice: value, lands } of SHAPES) {
+    for (const { id, target, lands } of SHAPES) {
       act(() => resetCompanionPanelForTests());
       mocks.revealBackendNode.mockClear();
-      mocks.notify.mockReset();
-      fromFeed(value);
-      await act(async () => { mocks.notify.mock.calls[0][0].onClick(); });
-      expect(landing(), value.id).toEqual(EXPECTED[lands]);
+      await act(async () => { requestOpenCompanionTarget(target); });
+      expect(landing(), id).toEqual(EXPECTED[lands]);
     }
+    expect(mocks.openUrl).not.toHaveBeenCalled();
   });
 
   it('never makes a notice of its own from the snapshot: new urgent items and unread messages alone stay quiet', () => {
     render(<CompanionNotifications />);
-    // Before the welcome, on an off day or past the caps the gate sends nothing, so neither does this window.
-    next({ items: [companionItem('cr', { title: 'CR-9 needs changes', summary: '1 comment' }), ...first.items] });
-    next({
-      counts: { ...first.counts, unreadMessages: 1 },
-      activity: [{ id: 'run-1', kind: 'brief', trigger: 'schedule', outcome: 'spoke', detail: 'Your brief is ready', startedAt: 1, finishedAt: 2 }],
-    });
-    expect(mocks.notify).not.toHaveBeenCalled();
+    next({ items: [companionItem('a', { severity: 'now' }), ...first.items] });
   });
 
-  it('does not announce what the open panel already shows, but does the rest', () => {
+  it('opens no panel while the agent is off (Q29): a notice from before leads nowhere; a conversation still opens', async () => {
+    const off = companionSnapshot({ settings: { ...companionSnapshot().settings, paused: true } });
+    resetCompanionStoreForTests({ snapshot: off });
     render(<CompanionNotifications />);
-    act(() => openCompanionPanel({ tab: 'today' }));
-    fromFeed(notice('n-1'));
-    expect(mocks.notify).not.toHaveBeenCalled();
-    fromFeed(notice('n-2', { target: { kind: 'companion', tab: 'chat' }, itemIds: [], body: 'Your pipeline recovered' }));
-    fromFeed(notice('n-3', { target: { kind: 'node', workspaceId: 'ws-1', nodeId: 'n-9' }, itemIds: [], body: 'Worker finished: Fix the build' }));
-    expect(mocks.notify.mock.calls.map(([options]) => options.body)).toEqual(['Your pipeline recovered', 'Worker finished: Fix the build']);
+    for (const target of [{ kind: 'companion', tab: 'chat' }, { kind: 'companion', tab: 'today', itemId: 'cr' }] as CompanionTarget[]) {
+      await act(async () => { requestOpenCompanionTarget(target); });
+      expect(getCompanionPanelState().open, JSON.stringify(target)).toBe(false);
+    }
+    await act(async () => { requestOpenCompanionTarget({ kind: 'node', workspaceId: 'ws-1', nodeId: 'n-1' }); });
+    expect(mocks.revealBackendNode).toHaveBeenCalledWith('ws-1', 'n-1');
   });
 
-  it('stops listening when it unmounts', () => {
+  it('stops listening when it unmounts', async () => {
     const view = render(<CompanionNotifications />);
-    expect(mocks.noticeListeners.size).toBe(1);
     view.unmount();
-    expect(mocks.noticeListeners.size).toBe(0);
+    expect(mocks.stopFeed).toHaveBeenCalled();
+    await act(async () => { requestOpenCompanionTarget({ kind: 'companion', tab: 'chat' }); });
+    expect(getCompanionPanelState().open).toBe(false);
   });
 });
 
-describe('Companion notices in the desktop app', () => {
+describe('clicks on Electron main\'s banners', () => {
   function electron(initialCompanionTarget: CompanionTarget | null = null) {
-    const handlers: { notice?: (notice: CompanionNotice) => void; open?: (target: CompanionTarget) => void } = {};
+    const handlers: { open?: (target: CompanionTarget) => void } = {};
     mocks.electron = {
       initialCompanionTarget,
-      onCompanionNotice: (handler: (notice: CompanionNotice) => void) => { handlers.notice = handler; return () => {}; },
       onCompanionOpen: (handler: (target: CompanionTarget) => void) => { handlers.open = handler; return () => {}; },
     };
     return handlers;
   }
-
-  it('shows the toasts Electron sends while the window has focus, once each, and none that expired', () => {
-    const handlers = electron();
-    render(<CompanionNotifications />);
-    const pipeline = notice('n-1', { title: 'Pipeline blocked', body: 'MyService', target: { kind: 'companion', tab: 'today', itemId: 'pipe' }, itemIds: ['pipe'] });
-    handlers.notice!(pipeline);
-    handlers.notice!(pipeline);
-    handlers.notice!(notice('n-2', { expiresAt: Date.now() - 1 }));
-    expect(mocks.notify).toHaveBeenCalledTimes(1);
-    act(() => mocks.notify.mock.calls[0][0].onClick());
-    expect(getCompanionPanelState()).toMatchObject({ open: true, tab: 'today', focusItem: { id: 'pipe' } });
-    // Electron toasts for this window: it neither toasts new items itself nor takes the feed's notices.
-    next({ items: [companionItem('a'), ...first.items] });
-    expect(mocks.noticeListeners.size).toBe(0);
-    expect(mocks.notify).toHaveBeenCalledTimes(1);
-  });
-
-  it('shows a notice once in the desktop app, though the change feed carries it too', () => {
-    const handlers = electron();
-    render(<CompanionNotifications />);
-    // Main shows it as this window's toast (or a banner); the renderer feed's copy is not shown again.
-    handlers.notice!(notice('n-1'));
-    fromFeed(notice('n-1'));
-    fromFeed(notice('n-2', { body: 'Only on the feed' }));
-    expect(mocks.notify).toHaveBeenCalledTimes(1);
-    expect(mocks.notify.mock.calls[0][0].body).toBe('CR-9 needs attention — 1 unresolved comment');
-  });
 
   it('opens what a banner click points at', () => {
     const handlers = electron();
@@ -207,25 +141,20 @@ describe('Companion notices in the desktop app', () => {
     expect(getCompanionPanelState()).toMatchObject({ open: true, tab: 'chat' });
   });
 
-  it('lands a toast click where the banner click lands, for every shape the backend sends', async () => {
+  it('lands a banner click where this window\'s own click lands, for every shape', async () => {
     const handlers = electron();
     render(<CompanionNotifications />);
-    for (const { notice: value, lands } of SHAPES) {
-      // The window has focus: a toast.
+    for (const { id, target, lands } of SHAPES) {
       act(() => resetCompanionPanelForTests());
       mocks.revealBackendNode.mockClear();
-      mocks.notify.mockReset();
-      handlers.notice!(value);
-      await act(async () => { mocks.notify.mock.calls[0][0].onClick(); });
-      const byToast = landing();
-      // Michi in the background: a banner, whose click main hands to this window.
+      await act(async () => { requestOpenCompanionTarget(target); });
+      const byWindow = landing();
       act(() => resetCompanionPanelForTests());
       mocks.revealBackendNode.mockClear();
-      await act(async () => { handlers.open!(value.target); });
-      expect(byToast, value.id).toEqual(landing());
-      expect(byToast, value.id).toEqual(EXPECTED[lands]);
+      await act(async () => { handlers.open!(target); });
+      expect(byWindow, id).toEqual(landing());
+      expect(byWindow, id).toEqual(EXPECTED[lands]);
     }
-    expect(mocks.openUrl).not.toHaveBeenCalled();
   });
 
   it('opens the target a banner click opened the window with once, and drops it from the URL so a reload does not', () => {
@@ -289,6 +218,15 @@ describe('the Topbar button (DESIGN-v2 §1.2)', () => {
     resetCompanionStoreForTests({ assistant: ready, availability: 'unavailable' });
     render(<CompanionTopbarButton />);
     expect(screen.getByRole('button', { name: 'Michi' }).textContent).toBe('');
+  });
+
+  it('is absent while the agent is off (Q29), and back at once when it is turned on', () => {
+    const settings = companionSnapshot().settings;
+    resetCompanionStoreForTests({ assistant: ready, snapshot: companionSnapshot({ settings: { ...settings, paused: true }, counts: { needsYou: 2, newItems: 2, unreadMessages: 1 } }) });
+    const { container } = render(<CompanionTopbarButton />);
+    expect(container.innerHTML).toBe('');
+    act(() => adoptCompanionSnapshot({ ...getCompanionState().snapshot!, settings: { ...settings, paused: false }, revision: 99 }));
+    expect(screen.getByRole('button', { name: /^Michi/ })).toBeTruthy();
   });
 
   it('is absent when this backend has no assistant', () => {

@@ -298,9 +298,14 @@ export function reduceNodes(
         ? { ...nodes, [action.nodeId]: { ...node, ultracode: action.enabled ? true : undefined } } : nodes;
     }
     case 'create': {
+      // A branch of a temporary chat is one too, marked before the backend
+      // (which derives it from the parent) says so.
+      const temporary = action.temporary === true
+        || (!!action.parentNodeId && nodes[action.parentNodeId]?.temporary === true);
       return {
         ...nodes,
         [action.nodeId]: {
+          ...(temporary ? { temporary: true } : {}),
           nodeId: action.nodeId,
           kind: 'chat',
           chatId: null,
@@ -1461,7 +1466,6 @@ export function reduceNodes(
           titleNeedsPersistence: true,
           status: 'idle',
           spawnedByAgent: true,
-          pendingSpawnPrompt: spawned.prompt,
         };
       }
       const parent = copy[action.parentNodeId] ?? nodes[action.parentNodeId];
@@ -1488,12 +1492,6 @@ export function reduceNodes(
         copy[action.parentNodeId] = { ...parent, messages: msgs };
       }
       return copy;
-    }
-    case 'spawn-prompt-started': {
-      const n = nodes[action.nodeId];
-      if (!n?.pendingSpawnPrompt) return nodes;
-      const { pendingSpawnPrompt: _pendingSpawnPrompt, ...started } = n;
-      return { ...nodes, [action.nodeId]: started };
     }
     case 'subagent-list-update': {
       const n = nodes[action.nodeId];

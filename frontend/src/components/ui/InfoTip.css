@@ -1,0 +1,18 @@
+/* InfoTip: a small "?" beside a name, its text in a tooltip or, pressed, on the next line. */
+.info-tip {
+  display: inline-grid;
+  place-items: center;
+  width: 15px;
+  height: 15px;
+  padding: 0;
+  border: 1px solid var(--term-line);
+  border-radius: 50%;
+  background: none;
+  color: var(--term-muted);
+  font: 600 10px/1 var(--ui-font);
+  cursor: help;
+}
+.info-tip:hover, .info-tip[aria-expanded='true'] { border-color: var(--term-muted); color: var(--term-fg); }
+.info-tip:focus-visible { outline: var(--focus-ring); outline-offset: 2px; }
+.info-tip__bubble { display: block; max-width: 300px; white-space: normal; line-height: 1.45; }
+.info-tip__text { flex-basis: 100%; margin-top: 2px; color: var(--term-muted); font-size: var(--fs-md); line-height: 1.55; text-wrap: pretty; }

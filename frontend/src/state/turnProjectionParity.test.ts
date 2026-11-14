@@ -52,7 +52,11 @@ describe('frontend canonical turn projection parity', () => {
     expect(durable.assistantMessage.content).toBe(marker);
   });
 
-  it.each(['`[BRANCH-OVERVIEW:`', '[BRANCH-OVERVIEW:', '`[TITLE:`', '[TITLE:'])('keeps the answer after a quoted %s, live and durably', (quoted) => {
+  it.each([
+    '`[BRANCH-OVERVIEW:`', '[BRANCH-OVERVIEW:', '`[TITLE:`', '[TITLE:',
+    // A follow-up with text before it on its line is prose.
+    '[FOLLOW-UP 1/3: q?]', '[FOLLOW-UP 1/3: q?] inline', '`[FOLLOW-UP 1/3: q?]`',
+  ])('keeps the answer after a quoted %s, live and durably', (quoted) => {
     const assistantId = 'a-quoted-prefix';
     let nodes: Record<string, ChatNodeState> = {
       'node-1': {

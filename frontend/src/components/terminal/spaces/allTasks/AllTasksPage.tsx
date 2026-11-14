@@ -1,11 +1,11 @@
 import { useCallback, useMemo, useRef, useState } from 'react';
-import { toast } from 'sonner';
 import type { MichiDbEditOp, MichiDbRow, ThreadCardItem } from 'michi-shared';
 import { ALL_TASKS_COLUMN, taskThreadIds, TASK_COLUMN, TASK_VIEW } from 'michi-shared';
 import { editPageDatabase, pageEditFailure } from '../../../../services/api/pages';
 import { fetchTaskOrigin, saveAllTasksViews } from '../../../../services/api/taskDatabase';
 import { notifyPageChanged } from '../../../../state/pages/pageEvents';
-import { batchOutcomeNotice, revertPageBatches, UNDO_FAILED } from '../../../../state/pages/pageUndo';
+import { undoPageBatches } from '../../../../state/pages/pageUndo';
+import { recordUndo } from '../../../../state/undoStack';
 import { openConversationFromSpaces, openThreadCard } from '../../../../state/sourceNav/sourceNav';
 import { DatabaseView } from '../../content/db/DatabaseView';
 import { LiveThreadsContext, type LiveThreads } from '../../content/db/liveThreads';
@@ -69,20 +69,23 @@ export default function AllTasksPage() {
   // All tasks says who made a task; the Meta agent's marks and suggestions stay on each workspace's board.
   const activity = useMemo<TaskActivityView>(() => ({ loadOrigin }), [loadOrigin]);
 
-  const undo = useCallback(async (batches: readonly WrittenBatch[]) => {
-    try {
-      const outcome = await revertPageBatches(LOCAL_BACKEND_CONNECTION_ID, batches.map((batch) => ({
-        batchId: batch.batchId,
-        workspaceId: batch.workspaceId,
-        changed: [{ backendConnectionId: LOCAL_BACKEND_CONNECTION_ID, workspaceId: batch.workspaceId, databaseId: batch.databaseId }],
-      })));
-      const notice = batchOutcomeNotice(outcome, 'undone', 'Change it back yourself.');
-      if (notice) toast.error(notice);
-    } catch {
-      toast.error(UNDO_FAILED);
-    }
-    refresh();
-  }, [refresh]);
+  // The undo-history entry for what an edit wrote: each workspace's batch put back, then All tasks read again.
+  const refreshRef = useRef(refresh);
+  refreshRef.current = refresh;
+  const undoWritten = useCallback((batches: readonly WrittenBatch[]) => {
+    const revert = undoPageBatches(LOCAL_BACKEND_CONNECTION_ID, batches.map((batch) => ({
+      batchId: batch.batchId,
+      workspaceId: batch.workspaceId,
+      changed: [{ backendConnectionId: LOCAL_BACKEND_CONNECTION_ID, workspaceId: batch.workspaceId, databaseId: batch.databaseId }],
+    })), 'Change it back yourself.');
+    return async () => {
+      try {
+        return await revert();
+      } finally {
+        refreshRef.current();
+      }
+    };
+  }, []);
 
   // View saves go one at a time, each on the revision the one before it answered.
   const viewsRevision = useRef(0);
@@ -126,13 +129,14 @@ export default function AllTasksPage() {
     } catch (cause) {
       const conflict = pageEditFailure(cause) === 'stale';
       setNotice(conflict ? 'All tasks just changed, so it was refreshed. Try again.' : cause instanceof Error ? cause.message : "Couldn't save that just now.");
-      if (written.length) toast('Only part of it was saved', { action: { label: 'Undo', onClick: () => { void undo(written); } } });
+      if (written.length) recordUndo({ label: 'Only part of it was saved', undo: undoWritten(written), toast: true });
       refresh();
       return false;
     }
-    if (options?.undo && written.length) toast(label, { action: { label: 'Undo', onClick: () => { void undo(written); } } });
+    // A move or a delete takes a task out of where it was, so its toast offers Undo.
+    if (written.length) recordUndo({ label, undo: undoWritten(written), toast: options?.undo === true || ops.some((op) => op.op.endsWith('.delete')) });
     return true;
-  }, [refresh, replace, saveViews, undo]);
+  }, [refresh, replace, saveViews, undoWritten]);
 
   const services = useMemo(() => ({
     notice: (message: string) => setNotice(message),

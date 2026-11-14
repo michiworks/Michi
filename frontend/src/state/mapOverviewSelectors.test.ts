@@ -28,12 +28,7 @@ describe('branchRibbonText', () => {
     expect(branchRibbonText(n)).toBe('会不会是 Gatekeeper');
   });
 
-  it('uses pendingSpawnPrompt for fanout branches without quotedText', () => {
-    const n = node({ spawnedByAgent: true, pendingSpawnPrompt: '验证 fix-path 方案', messages: [] });
-    expect(branchRibbonText(n)).toBe('验证 fix-path 方案');
-  });
-
-  it('uses first user message text when no quote and no spawn prompt', () => {
+  it('uses first user message text when there is no quote, a fanout branch\'s prompt included', () => {
     const n = node({ messages: [{ id: 'm1', role: 'user', text: '换个思路试试', toolCalls: [] }] as any });
     expect(branchRibbonText(n)).toBe('换个思路试试');
   });

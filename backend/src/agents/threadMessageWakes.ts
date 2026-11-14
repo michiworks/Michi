@@ -81,6 +81,7 @@ import {
 } from "../services/threadMessageWakeStore";
 import { BACKEND_RESTARTED_ERROR } from "../services/turnPersistence.recipes";
 import { getTurnTrust, recordUntrustedSource, type TurnRef } from "../services/turnTrust";
+import { recordPassedOutsideContent, turnHoldsOutsideContent } from "../services/turnGuard";
 import { buildPaneInspectionCaller } from "./paneInspectionTools";
 import { startUnderRestoreLock } from "./requestedTurnStart";
 import type { ThreadMessagingDeps } from "./threadMessageTool";
@@ -360,6 +361,7 @@ function deliverableSender(record: ThreadWakeRecord): { caller: PaneInspectionCa
       workspaceId: record.workspaceId,
       runOwnerRunId: null,
       backendConnectionId: "local",
+      callerNodeId: record.callerNodeId,
     });
     const authorized = authorizeCaller(caller, { kind: "node", nodeId: record.callerNodeId });
     if (authorized.kind !== "node") return "sender_not_chat";
@@ -411,6 +413,8 @@ export function carrySenderTrust(fromNodeId: string, fromTurnId: string | null, 
   try {
     if (fromTurnId && !getTurnTrust({ nodeId: fromNodeId, turnId: fromTurnId }).untrusted) return;
     recordUntrustedSource(to, { tool: "send_to_thread", runtimeId, detail: `thread:${fromNodeId}` });
+    // D19: the target then works from content someone else wrote (services/turnGuard.ts outsideSourced).
+    if (!fromTurnId || turnHoldsOutsideContent({ nodeId: fromNodeId, turnId: fromTurnId })) recordPassedOutsideContent(to, fromNodeId, runtimeId);
   } catch (error) {
     log.warn("chat", "thread message trust record failed", { fromTurnId, toTurnId: to.turnId, error: errorMessage(error) });
   }

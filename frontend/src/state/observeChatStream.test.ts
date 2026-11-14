@@ -63,7 +63,7 @@ describe('createBackgroundTurnBinding', () => {
       event: CHAT_STREAM_EVENTS.spawnBranches,
       data: {
         ...envelope(1),
-        topics: [{ chatId: 'child-chat', nodeId: 'child-node', title: 'Child', prompt: 'go' }],
+        topics: [{ chatId: 'child-chat', nodeId: 'child-node', title: 'Child' }],
       },
     };
     dispatchChatStreamEvent(spawn, handlers);

@@ -170,7 +170,7 @@ const MICHI_LABELS = [
   'card results', 'change card results', 'companion context', 'collector data', 'untrusted material', 'recent conversation',
   'what changed', 'just happened', 'still open', 'open items', 'items\\s*—', 'item\\s*\\]', 'history\\b', 'sources michi', 'sources off',
   'not read yet', 'today[\'’]?s brief', 'check-ins since',
-  'reminders and watches', 'current focus', 'feedback\\b', 'what the user asked', 'who you are', 'what you see', 'how you work',
+  'reminders and watches', 'current focus', 'conversations you follow', 'feedback\\b', 'what the user asked', 'who you are', 'what you see', 'how you work',
   'follow-ups?\\b', 'follow-up\\s*\\d', 'options\\s*:', 'title\\s*:', 'branch-overview', 'spaces context', 'scheduled context',
   'how to answer', 'system\\b', 'instructions?\\b', 'important instructions', 'admin\\b', 'developer\\b',
   'assistant\\s*[\\]:]', 'user\\s*[\\]:]', 'human\\s*[\\]:]', 'think\\]', 'steering\\b',

@@ -11,7 +11,7 @@ import type { AgentRuntime, MaintenanceExecutionContext, StructuredCompletion, S
 import { memoryTool } from '../src/agents/memoryTools';
 import { registerRuntime } from '../src/agents/registry';
 import { updateMetaAgentSettings } from '../src/services/metaAgent/settings';
-import { pauseMaintenanceCoordinator } from '../src/services/metaAgent/maintenanceCoordinator';
+import { pauseMichi, resumeMichi } from '../src/services/michiPause';
 import { metaAgentUsageToday, startOfLocalDay } from '../src/services/metaAgent/todayUsage';
 import { beginTurn, deleteWorkspace, finalizeTurn, setAiGlobalContext } from '../src/services/dbRepository';
 import { closeDb, getDb, initDb } from '../src/services/db';
@@ -42,6 +42,7 @@ import {
 } from '../src/services/scheduledJobs/scheduler';
 import { forEachFenceBreak } from './helpers/unattendedRunFence';
 import { loadExtractionFixtures, type ExtractionFixtureCase, type ExtractionFixtureTurn } from './helpers/memoryExtractionFixtures';
+import { turnBackgroundWorkOn } from './helpers/backgroundWork';
 
 const OWNER = 'local-user';
 const MINUTE = 60_000;
@@ -154,7 +155,7 @@ class FakeModel implements ScheduledJobExecutor {
       let result: ScriptResult = undefined;
       try { result = await this.script(modelRun); } catch (error) { this.errors.push(error); }
       if (result?.usage !== undefined) {
-        turn = applyTurnEvent(turn, { event: 'usage_summary', data: { seq: 1, totalTokens: result.usage } } as unknown as ChatStreamEvent);
+        turn = applyTurnEvent(turn, { event: 'usage_summary', data: { seq: 1, inputTokens: result.usage, outputTokens: 0 } } as unknown as ChatStreamEvent);
       }
       turn = applyTurnEvent(turn, { event: 'chunk', data: { seq: 2, text: result?.reply ?? 'done' } } as ChatStreamEvent);
       finalizeTurn(applyTurnEvent(turn, { event: 'done', data: { seq: 3, stopReason: wasCancelled ? 'cancelled' : 'end_turn' } } as ChatStreamEvent));
@@ -175,7 +176,7 @@ async function until(predicate: () => boolean, label: string): Promise<void> {
 
 function scheduler(model: FakeModel, extra: { memoryDirect?: ReturnType<typeof createMemoryDirectAnswerer> } = {}): ScheduledJobScheduler {
   const created = new ScheduledJobScheduler({ repository: new ScheduledJobsRepository(), executor: model,
-    events: new ScheduledJobEventBus(() => now), workspaceExists: () => true, runtimeExists: (id) => id === 'pi',
+    events: new ScheduledJobEventBus(), workspaceExists: () => true, runtimeExists: (id) => id === 'pi',
     clock: () => now, instanceId: 'memory-test', createId: () => `job-${++jobSeq}`, pollIntervalMs: 600_000, maxConcurrentRuns: 2, cancelGraceMs: 5,
     ...extra });
   created.start();
@@ -250,6 +251,7 @@ beforeEach(() => {
   delete process.env.MICHI_CLOUD;
   closeDb();
   initDb();
+  turnBackgroundWorkOn();
   now = Date.parse('2026-11-03T09:00:00Z');
   mock.method(Date, 'now', () => now);
   jobSeq = 0;
@@ -927,16 +929,24 @@ test('turning memory off cancels a running extraction', async () => {
   } finally { detach(); }
 });
 
-test('the Meta agent global maintenance pause also holds extraction', async () => {
+test('the Meta agent pause does not hold extraction: only Settings › Memory does', async () => {
   const model = new FakeModel();
   const sched = scheduler(model);
   const jobId = await enrolled(sched);
   completeTurn({ turnId: 't-1', user: 'This repo uses pnpm.', reply: 'OK.' });
-  pauseMaintenanceCoordinator(OWNER, true);
-  assert.equal(refusal(sched.startNow(jobId)), 'paused');
-  assert.equal(memoryExtractionStatus(OWNER, now, sched).state, 'maintenance_paused');
-  pauseMaintenanceCoordinator(OWNER, false);
+  pauseMichi(OWNER, null);
   assert.equal(memoryExtractionStatus(OWNER, now, sched).state, 'waiting');
+  setMemoryExtractionPaused({ ownerUserId: OWNER, paused: true, now, scheduler: sched });
+  assert.equal(refusal(sched.startNow(jobId)), 'no_work', 'memory\'s own pause holds it');
+  assert.equal(memoryExtractionStatus(OWNER, now, sched).state, 'paused');
+  setMemoryExtractionPaused({ ownerUserId: OWNER, paused: false, now, scheduler: sched });
+  now += EXTRACTION_QUIET_MS;
+  await sched.tick();
+  await until(() => model.started.length === 1 && sched.getJob(jobId).activeRunId === null, 'the coordinator to read the turn while maintenance is paused');
+  assert.deepEqual(model.started[0]!.turns.map((turn) => turn.turn), ['t-1']);
+  assert.equal(lastRun(sched, jobId).status, 'succeeded');
+  completeTurn({ turnId: 't-2', user: 'Commit messages are in English.', reply: 'OK.' });
+  assert.deepEqual((await runOnce(sched, model, jobId)).turns.map((turn) => turn.turn), ['t-2'], 'a manual start is not refused either');
 });
 
 test('the daily token limit holds extraction without a model call and is visible', async () => {
@@ -1547,7 +1557,7 @@ test('a run on a runtime with direct calls is answered without a session: the JS
   const model = new FakeModel();
   let answer: (opts: StructuredCompletionOptions, call: number) => Partial<StructuredCompletion> = () => ({});
   const { runtime, calls } = structuredRuntime((opts, call) => answer(opts, call));
-  const sched = scheduler(model, { memoryDirect: createMemoryDirectAnswerer({ runtime: () => runtime, model: () => null, metaAgentModel: () => ({ modelId: null, providerId: null }) }) });
+  const sched = scheduler(model, { memoryDirect: createMemoryDirectAnswerer({ runtime: () => runtime, model: () => null }) });
   const jobId = await enrolled(sched);
   completeTurn({ turnId: 't-1', user: '我上周搬到了中野，这个仓库统一用 pnpm。', reply: '好的。' });
   completeTurn({ turnId: 't-2', user: '记住：回复都用中文。', reply: '好的。' });
@@ -1595,7 +1605,7 @@ test('a direct answer that stays invalid past its repairs skips the batch as unr
   const model = new FakeModel();
   let answer: (opts: StructuredCompletionOptions, call: number) => Partial<StructuredCompletion> = () => ({});
   const { runtime, calls } = structuredRuntime((opts, call) => answer(opts, call));
-  const sched = scheduler(model, { memoryDirect: createMemoryDirectAnswerer({ runtime: () => runtime, model: () => 'small-1', metaAgentModel: () => ({ modelId: null, providerId: null }) }) });
+  const sched = scheduler(model, { memoryDirect: createMemoryDirectAnswerer({ runtime: () => runtime, model: () => 'small-1' }) });
   const jobId = await enrolled(sched);
   completeTurn({ turnId: 't-1', user: 'This repo uses pnpm.', reply: 'OK.' });
   answer = () => { throw new Error('model unavailable'); };
@@ -1647,7 +1657,7 @@ test('a direct run reads several conversations, a few at once, each its own batc
         text: '', model: 'cheap-model', usage: { inputTokens: 100, outputTokens: 10 } };
     },
   } as AgentRuntime;
-  const sched = scheduler(model, { memoryDirect: createMemoryDirectAnswerer({ runtime: () => runtime, model: () => null, metaAgentModel: () => ({ modelId: null, providerId: null }) }) });
+  const sched = scheduler(model, { memoryDirect: createMemoryDirectAnswerer({ runtime: () => runtime, model: () => null }) });
   const jobId = await enrolled(sched);
   for (let i = 1; i <= 5; i += 1) completeTurn({ turnId: `k-${i}`, user: `Deploy note number ${i}.`, reply: 'OK.', nodeId: `chat-${i}` });
   now += EXTRACTION_QUIET_MS;

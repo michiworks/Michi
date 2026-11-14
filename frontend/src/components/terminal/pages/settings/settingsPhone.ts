@@ -31,6 +31,9 @@ export function useSettingsTarget(): string | null {
   return useContext(SettingsTargetContext);
 }
 
+/** The page's title (its h1), so a group named the same need not say it again (SettingsSection). */
+export const SettingsPageLabelContext = createContext<string | null>(null);
+
 /**
  * A level inside a Settings page, such as an item opened from Trash. On a
  * phone the shell's header Back closes it before it leaves the page, so a

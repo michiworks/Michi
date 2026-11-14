@@ -123,12 +123,12 @@ for (const palette of ['bone', 'monokai']) test(`Space settings and component pr
   await expect(page.getByRole('region', { name: 'Built-in components' }).getByRole('article')).toHaveCount(builtinCount);
   await expect(page.getByLabel('Workspace', { exact: true })).toBeVisible();
   await page.screenshot({ path: resolve(evidence, `settings-components-${palette}.png`) });
-  // Settings › Meta agent is part of Settings › <name> now (DESIGN-v2 §1.5).
-  await openSettings(page, 'Michi');
-  const meta = page.locator('.meta-set');
-  await expect(meta.getByRole('heading', { name: 'Runtime', exact: true })).toBeVisible();
-  await expect(meta.getByLabel('First-run range')).toBeVisible();
-  for (const row of await meta.locator('.meta-set__radio').all()) {
+  // Settings › Meta agent is part of Settings › <name> now (DESIGN-v2 §1.5): Background work under Model, First read under Pages.
+  const agent = await openSettings(page, 'Michi');
+  const model = agent.getByRole('region', { name: 'Model', exact: true });
+  await expect(model.getByRole('combobox', { name: 'Background work', exact: true })).toBeVisible();
+  await expect(agent.getByRole('region', { name: 'Pages', exact: true }).getByRole('combobox', { name: 'First read' })).toBeVisible();
+  for (const row of await model.locator('.settings-row').all()) {
     await expect(row).toHaveCSS('background-color', 'rgba(0, 0, 0, 0)');
   }
   await page.screenshot({ path: resolve(evidence, `settings-meta-agent-${palette}.png`) });

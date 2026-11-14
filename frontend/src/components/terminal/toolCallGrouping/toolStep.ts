@@ -53,8 +53,12 @@ export interface StepView {
   /** The muted rest: what the step touched, or the error line that replaced it. */
   rest?: string;
   restKind: 'cmd' | 'error';
-  /** How it ended when not plainly: "exit 1", "rerun passed", "denied", "stopped". */
-  frag: { tone: 'calm' | 'danger'; text: string } | null;
+  /**
+   * How it ended when not plainly: "exit 1", "rerun passed", "denied", "stopped".
+   * `srOnly`: a bare "failed" beside the error line that already says so is
+   * read to screen readers (the × icon is hidden from them) but not shown.
+   */
+  frag: { tone: 'calm' | 'danger'; text: string; srOnly?: boolean } | null;
   /** A failure no rerun recovered: the row is marked failed. */
   loud: boolean;
 }
@@ -75,7 +79,8 @@ export function stepView(tool: ToolCallState, recovered: boolean): StepView {
       : !failed ? null
         : recovered ? { tone: 'calm', text: 'rerun passed' }
           : denied ? { tone: 'calm', text: 'denied' }
-            : { tone: 'danger', text: code !== undefined ? `exit${NBSP}${code}` : 'failed' },
+            : code !== undefined ? { tone: 'danger', text: `exit${NBSP}${code}` }
+              : { tone: 'danger', text: 'failed', ...(error ? { srOnly: true } : {}) },
     loud,
   };
 }

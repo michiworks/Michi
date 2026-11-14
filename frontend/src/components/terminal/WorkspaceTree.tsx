@@ -401,7 +401,8 @@ export default function WorkspaceTree({
               activeProjectId, now: Date.now(), nodes: nodesSnapshot, openPaneIds: openPanes, workRunning,
             });
         const earlierOpen = prefs.sidebarExpanded.groups?.[EARLIER_GROUP_KEY] === true;
-        // "All N ›" rides the Projects header, or Pinned's when every workspace is pinned.
+        // "All N ›" rides the top header, Pinned's when there is one, so it is
+        // in view without scrolling past every pinned workspace.
         const allLink = onOpenWorkspaces && liveProjects.length > 0 ? (
           <AllWorkspacesLink count={liveProjects.length} current={workspacesPageOpen} onOpen={onOpenWorkspaces} />
         ) : null;
@@ -409,7 +410,7 @@ export default function WorkspaceTree({
           <>
             {showPinnedSection && (
               <>
-                <SectionLabel label="Pinned" action={unpinned.length === 0 ? allLink : null} />
+                <SectionLabel label="Pinned" action={allLink} />
                 <div className="sb-section-items">
                   {pinned.map((p) => renderProject(p, { dnd: dndForProject(p.id) }))}
                 </div>
@@ -417,7 +418,7 @@ export default function WorkspaceTree({
             )}
             {unpinned.length > 0 && (
               <>
-                <SectionLabel label="Projects" action={allLink} />
+                <SectionLabel label="Projects" action={showPinnedSection ? null : allLink} />
                 <div className="sb-section-items">
                   {recent.map((p) => renderProject(p, { dnd: dndForProject(p.id) }))}
                   {earlier.length > 0 && (
@@ -437,19 +438,6 @@ export default function WorkspaceTree({
                 </div>
               </>
             )}
-            <SectionLabel label="Chats" />
-            <div className="sb-section-items">
-              <div
-                style={{
-                  padding: '4px 6px 4px 6px',
-                  fontSize: 'var(--fs-sm)',
-                  color: 'var(--term-muted)',
-                  fontFamily: 'var(--ui-font)',
-                }}
-              >
-                No project chats
-              </div>
-            </div>
           </>
         );
       })()}
@@ -752,26 +740,9 @@ function MergedGroupsSection({
           aria-label="Show more merged threads"
           aria-expanded={mergedVisibleLimit > MERGED_PREVIEW_LIMIT}
           onClick={() => setMergedVisibleLimit((v) => v + MERGED_PAGE_SIZE)}
-          style={{
-            width: '100%',
-            display: 'inline-flex',
-            alignItems: 'center',
-            gap: 4,
-            padding: '5px 8px 5px 25px',
-            background: 'transparent',
-            border: 0,
-            textAlign: 'left',
-            color: 'var(--term-muted)',
-            fontFamily: 'var(--ui-font)',
-            fontSize: 'var(--fs-md)',
-            cursor: 'pointer',
-            textDecoration: 'underline',
-            textDecorationStyle: 'dotted',
-            textUnderlineOffset: '3px',
-            textDecorationColor: 'var(--term-faint)',
-          }}
+          style={{ padding: '0 8px 0 25px' }}
         >
-          Show more
+          Show {Math.min(MERGED_PAGE_SIZE, visibleGroups.length - mergedVisibleLimit)} more
         </button>
       )}
 

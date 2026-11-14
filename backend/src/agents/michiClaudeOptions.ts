@@ -7,9 +7,7 @@ import {
 } from 'michi-runtime/internal/adapters/claude/claudeAdapterOptions';
 import { claudeConfigRoot } from 'michi-runtime/internal/adapters/claude/claudeBinary';
 import * as agentConfig from '../services/agentConfig';
-import * as turnTrust from '../services/turnTrust';
 import * as assistantPolicy from '../assistant/policy';
-import { michiToolEffect } from '../assistant/toolEffects';
 import * as skillMounts from '../services/skills/mounts';
 import * as skillEvents from '../services/skills/events';
 import * as skillPaths from '../services/skills/paths';
@@ -24,7 +22,7 @@ import * as permissionPolicy from './permissionPolicy';
  * the runtime the factory registers, Michi's environment settings, read here
  * so the adapter reads none itself (an unset one takes the package's
  * default), and Michi's config directory, assistant tool verdicts, the
- * approval gate of a turn that holds check-in material, skill library and
+ * approval gate of a guarded turn, skill library and
  * product text. Each setting is read when the adapter used to read it: the
  * limits now, the other functions on every call. Calls go through the module
  * objects, so test stubs of those functions (t.mock.method) still apply.
@@ -44,7 +42,7 @@ export function michiClaudeAdapterOptions(host: RuntimeHost, modelCatalog?: Clau
     configDir: (userId) => agentConfig.resolveClaudeConfigDir(userId ?? undefined),
     // A check-in's own Michi tools: only its session profile's allow-list (assistant/policy.ts, DESIGN-v2 §2.5).
     restrictedToolApproval: (hostToolName, profile) => assistantPolicy.claudeAssistantApproval(hostToolName, profile),
-    // A turn that holds check-in material asks Michi before its tools run, whatever the user's Claude settings allow (D4).
+    // In a guarded turn, what leaves the machine asks Michi, whatever the user's Claude settings allow (D19, D4).
     requireHostApproval: (request) => claudeCallNeedsMichiApproval(request),
     // The library as the additional folder `michi`, at one path for every process; none in cloud mode.
     skillLibraryDir: () => skillMounts.skillMountRoot('claude', 'claude-add-dir', { leaveOut: claudePersonalCommandNames }),
@@ -73,49 +71,25 @@ function claudePersonalCommandNames(): string[] {
 }
 
 /**
- * Claude built-ins a turn that holds check-in material may still run on the
- * CLI's own say (D4): reads of the session's folder and of its background
- * output, and tools that change nothing outside the session or only talk to
- * the user. The web, commands, file writes, subagents, skills and other MCP
- * servers' tools are not here.
- */
-const CLAUDE_TAINT_FREE_BUILTINS: ReadonlySet<string> = new Set([
-  'Read', 'Glob', 'Grep', 'LS', 'NotebookRead', 'TaskOutput', 'BashOutput',
-  'ToolSearch', 'TodoWrite', 'AskUserQuestion', 'EnterPlanMode', 'ExitPlanMode',
-]);
-
-/**
- * Whether a Michi tool may run in a tainted turn without forcing Michi's
- * approval: the agent's own tools (D3: each enforces its own rules; a
- * rename runs in the user's own turn whatever it read, D19), and what the
- * effect register classes as a read or a Michi-internal write (D2: those
- * page writes pass the remote-content check in the write path). Unknown
- * names, outside reads and writes, indirect work and channels are not.
- */
-function michiToolRunsTainted(hostToolName: string): boolean {
-  if ((assistantPolicy.COMPANION_OWN_TOOL_NAMES as readonly string[]).includes(hostToolName)) return true;
-  const effect = michiToolEffect(hostToolName);
-  return effect === 'read' || effect === 'michi_write';
-}
-
-/**
- * ClaudeAdapterOptions.requireHostApproval for Michi (DESIGN-v2 §2.8, D4):
- * any chat whose current turn holds check-in or collector material
- * (turnTrust.activeCompanionTaint: V or any other chat, a check-in's direct
- * send into a worker included, w3-fix D15; sticky per D1 / D17) sends every
- * tool call through Michi's approval, except Claude's read-only built-ins
- * and the Michi tools such a turn may run. A Claude chat loads the user's
- * own Claude settings, whose allow rules and PreToolUse hooks would
- * otherwise approve Bash, WebFetch or Write before canUseTool, Michi's
- * policy, is asked (YOLO's bypassPermissions skips it too). A turn without
- * that material, or an owner with no chat, keeps the CLI's own flow.
- * turnTrust.companionRuntimeGateAuthoritative relies on this.
+ * ClaudeAdapterOptions.requireHostApproval for Michi (D19, Q26; DESIGN-v2
+ * §2.8, D4): in a guarded turn (services/turnGuard.ts: Michi drove it, or it
+ * holds outside content), a call Michi's consequence rules force to ask
+ * (permissionPolicy.forcedChatDecision: it leaves the machine, Michi cannot
+ * read it, or it reads the network or credentials in work that started from
+ * someone else's content) goes through Michi's approval. A Claude chat loads
+ * the user's own Claude settings, whose allow rules and PreToolUse hooks
+ * would otherwise approve Bash, WebFetch or Write before canUseTool, Michi's
+ * policy, is asked (YOLO's bypassPermissions skips it too). Every other call
+ * keeps the CLI's own flow. turnTrust.companionRuntimeGateAuthoritative
+ * relies on this.
  */
 export function claudeCallNeedsMichiApproval(request: ClaudeHostApprovalRequest): boolean {
-  const nodeId = permissionPolicy.permissionNodeId(request.owner);
-  if (nodeId === undefined || turnTrust.activeCompanionTaint(nodeId) === null) return false;
-  if (request.hostToolName !== null) return !michiToolRunsTainted(request.hostToolName);
-  return !CLAUDE_TAINT_FREE_BUILTINS.has(request.toolName);
+  const hostTool = request.hostToolName !== null;
+  const toolName = request.hostToolName ?? request.toolName;
+  const detail = { input: request.input };
+  // A check-in's refusal goes through canUseTool too, where the policy denies it.
+  return permissionPolicy.forcedChatDecision(request.owner, toolName, detail, true, hostTool) !== null
+    || permissionPolicy.backgroundRefusal(request.owner, toolName, detail, true, hostTool) !== null;
 }
 
 /** A switch in the environment: `unset` while the variable is unset, else what `read` makes of its value. */

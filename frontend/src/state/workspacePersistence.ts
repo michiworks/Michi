@@ -27,7 +27,7 @@ import {
   type SavedState,
 } from './chatHydration';
 import { messageForPersistence } from './assistantBlocks';
-import { serializeBranchOverviewEntries, spawnOutboxComposerDraft } from 'michi-shared';
+import { serializeBranchOverviewEntries } from 'michi-shared';
 import { noteServerAttentionCapabilities } from '../services/serverAttentionStore';
 import type { ChatNodeState, Project, ProjectEdge } from './chatTypes';
 import {
@@ -452,8 +452,7 @@ export function serializeNodeRow(
 ) {
   const n = nodes[nid];
   if (!n) return null;
-  // The spawn outbox is this window's own value: it always travels.
-  const draftDeferred = !n.pendingSpawnPrompt && isNodeFieldDeferred(n, 'composer_draft');
+  const draftDeferred = isNodeFieldDeferred(n, 'composer_draft');
   return {
     id: nid,
     workspace_id: project.id,
@@ -487,12 +486,8 @@ export function serializeNodeRow(
     resume_fingerprint: n.resumeFingerprint ?? null,
     last_applied_turn_id: n.lastAppliedTurnId ?? null,
     last_applied_seq: n.lastAppliedSeq ?? null,
-    // Keep an agent-spawn outbox entry durable until the stream's turn_start
-    // arrives. Ordinary composer persistence must not erase it before send.
     ...(draftDeferred ? {} : {
-      composer_draft: n.pendingSpawnPrompt
-        ? spawnOutboxComposerDraft(n.pendingSpawnPrompt)
-        : n.composerDraft ? JSON.stringify(n.composerDraft) : null,
+      composer_draft: n.composerDraft ? JSON.stringify(n.composerDraft) : null,
     }),
     trim_snapshot: n.trimSnapshot ? JSON.stringify(n.trimSnapshot) : null,
     pinned_at: n.pinnedAt ?? null,
@@ -777,7 +772,7 @@ function nodeCommandPatch(
     digest: row.digest,
     ...('composer_draft' in row && !withoutDraft ? {
       composer_draft: row.composer_draft,
-      ...(windowId && !node.pendingSpawnPrompt ? { composer_draft_window_id: windowId } : {}),
+      ...(windowId ? { composer_draft_window_id: windowId } : {}),
     } : {}),
     deleted_at: row.deleted_at,
     deletion_group_id: row.deletion_group_id,
@@ -848,7 +843,7 @@ export function buildExplicitWorkspaceCommands(
     // by the draft-only patch below.
     if (known !== undefined && 'composer_draft' in patch
       && known === JSON.stringify(nodeCommandPatch(row, nodes[nodeId], windowId, true))) continue;
-    const draftWindow = 'composer_draft' in row && windowId && !nodes[nodeId].pendingSpawnPrompt;
+    const draftWindow = 'composer_draft' in row && windowId;
     commands.push({ type: 'node.upsert', payload: { ...row, ...(draftWindow ? { composer_draft_window_id: windowId } : {}) } });
     commands.push({ type: 'node.patch', payload: patch });
     nodeProjectionUpdates.set(nodeId, projection);
@@ -861,7 +856,7 @@ export function buildExplicitWorkspaceCommands(
     if (nodeProjectionUpdates.has(nodeId) || !members.has(nodeId)) continue;
     const node = nodes[nodeId];
     // A deferred draft has no value here to write.
-    if (!node || node.pendingSpawnPrompt || node.deletedAt || isNodeFieldDeferred(node, 'composer_draft')) continue;
+    if (!node || node.deletedAt || isNodeFieldDeferred(node, 'composer_draft')) continue;
     commands.push({ type: 'node.patch', payload: {
       id: nodeId,
       composer_draft: node.composerDraft ? JSON.stringify(node.composerDraft) : null,

@@ -22,10 +22,11 @@ import { clearAllSessions, getSession, registerSession } from '../src/agents/ses
 import { subscribeSessionStates } from '../src/agents/sessionStateFeed';
 import { resolveAssistantBinding, type AssistantSessionBinding } from '../src/assistant/binding';
 import { assistantPurposeKey } from '../src/assistant/identity';
-import { ensureAssistant, updateAssistantSettings } from '../src/assistant/store';
+import { ensureAssistant } from '../src/assistant/store';
 import { LOCAL_AGENT_OWNER_ID } from '../src/services/agentOwner';
 import { ChatManager, CheckinSessionError } from '../src/services/chatManager';
 import { closeDb, getDb, initDb } from '../src/services/db';
+import { updateMetaAgentSettings } from '../src/services/metaAgent/settings';
 import { getNode } from '../src/services/dbRepository';
 import { UNKNOWN_RUNTIME_DESCRIPTOR } from 'michi-runtime/internal/core/descriptors';
 
@@ -94,8 +95,9 @@ let workspaceId: string;
 
 /**
  * A check-in node as W2-G1a's createCheckinNode makes one: its own tree in the
- * assistant workspace, recorded closed. A check-in runs on V's runtime
- * (assistant/store.ts), so `runtimeId` is V's composer pick, as the user makes one.
+ * assistant workspace, recorded closed. A check-in runs on Background work
+ * (assistant/store.ts checkinRuntime), so `runtimeId` is its Custom runtime, as
+ * the user picks one in Settings › Michi › Model.
  */
 function createCheckinNode(nodeId: string, runtimeId = 'eph-test'): void {
   const treeId = `t-${nodeId}`;
@@ -103,7 +105,8 @@ function createCheckinNode(nodeId: string, runtimeId = 'eph-test'): void {
   getDb().prepare(`INSERT INTO nodes (id,workspace_id,tree_id,kind,status,minimized,spawned_by_agent,created_at)
     VALUES (?,?,?,'chat','idle',0,0,1)`).run(nodeId, workspaceId, treeId);
   getDb().prepare('INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)').run(assistantPurposeKey(nodeId), 'companion');
-  updateAssistantSettings({ nodeId: ensureAssistant().nodeId, runtimeId });
+  ensureAssistant();
+  updateMetaAgentSettings({ runtimeId });
 }
 
 const open = (manager: ChatManager, nodeId = S) => manager.openEphemeralSession({ ownerUserId: LOCAL_AGENT_OWNER_ID, workspaceId, nodeId });

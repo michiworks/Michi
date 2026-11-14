@@ -50,7 +50,11 @@ vi.mock('../../services/api', async (importOriginal) => ({
   ensureSession: vi.fn(() => Promise.reject(new Error('offline in tests'))),
   streamMessage: vi.fn(() => () => {}),
 }));
-vi.mock('../../services/notifications', () => ({ notify: vi.fn() }));
+const MEMORY = vi.hoisted(() => ({ settings: vi.fn() }));
+vi.mock('../../services/api/memories', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../services/api/memories')>()),
+  fetchMemorySettings: MEMORY.settings,
+}));
 vi.mock('../../services/api/assistant', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../../services/api/assistant')>()),
   updateAssistantSettings: vi.fn(),
@@ -113,6 +117,7 @@ function Harness() {
 
 beforeAll(() => {
   vi.stubGlobal('fetch', vi.fn(() => Promise.reject(new Error('offline in tests'))));
+  MEMORY.settings.mockRejectedValue(new Error('offline in tests'));
 });
 afterAll(() => {
   vi.unstubAllGlobals();
@@ -168,6 +173,19 @@ describe('TPane — the assistant runs on its conversation\'s own settings', () 
     expect(request.providerId ?? null).toBeNull();
     expect(request.modelId ?? null).toBeNull();
     expect(request.reasoning ?? null).toBeNull();
+    shown = null;
+  });
+
+  it('offers V no memory setting: Michi’s own conversation always learns and uses memory', async () => {
+    MEMORY.settings.mockResolvedValue({ mode: 'auto' });
+    shown = 'n-sys';
+    const view = render(<PrefsProvider><ChatProvider><Harness /></ChatProvider></PrefsProvider>);
+    await waitFor(() => expect(store.hydrated).toBe(true));
+    act(() => { actions.installWorkspaceSnapshot(SYSTEM); });
+    act(() => resetCompanionStoreForTests({ assistant: { status: 'ready', info: INFO, error: null } }));
+    view.rerender(<PrefsProvider><ChatProvider><Harness /></ChatProvider></PrefsProvider>);
+    expect(await screen.findByRole('button', { name: /^Model settings: / })).toBeTruthy();
+    expect(screen.queryByRole('button', { name: /^Memory: / })).toBeNull();
     shown = null;
   });
 });

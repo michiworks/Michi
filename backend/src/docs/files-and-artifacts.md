@@ -1,6 +1,6 @@
 # Files, Artifacts, attachments and the browser
 
-Applies to: desktop/web with local or remote workspaces. Source checked: 2026-11-08. Native dialogs, raw folder browsing, Terminal and the Browser pane require desktop support; attachment interpretation depends on runtime/model.
+Applies to: desktop/web with local or remote workspaces. Source checked: 2026-11-12. Native dialogs, raw folder browsing, Terminal and the Browser pane require desktop support; attachment interpretation depends on runtime/model.
 
 ## Where did the agent write my file?
 
@@ -23,7 +23,7 @@ The workspace's Artifacts tab lists Documents, Files, Images and Links; its + Ad
 
 ## Save and reuse a document
 
-1. Ask: “Save the reviewed decision as an Artifact named `decision`, including source links and unresolved questions.” It is written to `.contexts/decision.md`; Artifact names may contain only letters, digits, `_` and `-`.
+1. Ask: “Save the reviewed decision as an Artifact named `decision`, including source links and unresolved questions.” It is written to `.contexts/decision.md`; Artifact names may contain only letters, digits, `_` and `-`, and names that differ only in case name one Artifact, so saving `Decision` replaces the shelf entry `decision`.
 2. Confirm a successful tool result and find it in the workspace's Artifacts tab.
 3. Open its preview to inspect the contents.
 4. In another chat, choose/type its `@` mention and ask the agent to read the relevant part.

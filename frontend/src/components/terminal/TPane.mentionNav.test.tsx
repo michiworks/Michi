@@ -24,7 +24,6 @@ vi.mock('../../services/api', async (importOriginal) => ({
   ensureSession: vi.fn(() => Promise.reject(new Error('offline in tests'))),
   streamMessage: vi.fn(() => () => {}),
 }));
-vi.mock('../../services/notifications', () => ({ notify: vi.fn() }));
 const list = vi.hoisted(() => ({ onMentionClick: null as null | ((name: string, kind: string, nodeId?: string) => void) }));
 vi.mock('./PaneMessageList', () => ({
   PaneMessageList: (props: { onMentionClick: (name: string, kind: string, nodeId?: string) => void }) => {

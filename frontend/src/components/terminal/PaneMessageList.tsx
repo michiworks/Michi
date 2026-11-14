@@ -27,6 +27,7 @@ import { turnOwnSubagents } from '../../state/turnSubagents';
 import { usePhoneLayout } from '../../hooks/usePhoneLayout';
 import { unclaimedSubagents } from './subagents/subagentPresentation';
 import { BackgroundWorkNodeContext, openWorkflowRunDrawer } from './backgroundWork/backgroundWorkEvents';
+import { MichiLinkConnectionContext } from './assistant/linkConnection';
 import { selectParentRunCards } from './agentRuns/agentRunSelectors';
 import { agentResourceKey, type AgentResourceIdentity } from '../../state/agentIdentity';
 import { useSourceReference } from '../../state/sourceNav/sourceNav';
@@ -151,8 +152,9 @@ interface PaneMessageListProps {
    */
   planStep?: MultiModelBranchControls;
   /**
-   * An ordinary chat that learns from and reads memory (TPane's memory setting rule): its replies show what they were
-   * based on (ReplyMemorySources). Never the assistant's, a page's, a Meta agent run's or a Scheduled-only thread.
+   * A chat that learns from and reads memory (TPane's memory setting rule: an ordinary chat, or the agent's current
+   * conversation V): its replies show what they were based on (ReplyMemorySources). Never a page's, a Meta agent run's,
+   * a check-in's or a Scheduled-only thread.
    */
   replySources?: boolean;
 }
@@ -321,13 +323,16 @@ function PaneMessageListInner({
   );
   // A window may leave messages out (the Companion's quiet turns); a hidden
   // last message takes its live activity row and reply space along.
-  const hideMessage = useMetaChatDecorations()?.hideMessage;
+  const decorations = useMetaChatDecorations();
+  const hideMessage = decorations?.hideMessage;
   const tailHidden = !!hideMessage && !!tailMessage && hideMessage(tailMessage, node.messages.length - 1, node.messages);
 
   return (
     <NodeUserInputContext.Provider value={userInputCtx}>
     <BackgroundWorkNodeContext.Provider value={nodeId}>
     <ReplySourcesContext.Provider value={replySourcesTarget}>
+    {/* An agent on the thread's backend wrote its michi:// links in that backend's ids. */}
+    <MichiLinkConnectionContext.Provider value={backendConnectionId}>
     <div style={contentStyle}>
       {node.historyBefore && onLoadOlder && (
         <button type="button" disabled={loadingOlder} onClick={onLoadOlder}
@@ -336,6 +341,7 @@ function PaneMessageListInner({
         </button>
       )}
       <MergeSourcesNotice node={node} sourceLabels={mergeSourceLabels} />
+      {!node.historyBefore && !isPlaceholder && decorations?.leading}
 
       {isPlaceholder && (
         <MessagesLoadingPlaceholder key={node.nodeId} nodeId={node.nodeId} connectionId={backendConnectionId}
@@ -573,6 +579,7 @@ function PaneMessageListInner({
         />
       )}
     </div>
+    </MichiLinkConnectionContext.Provider>
     </ReplySourcesContext.Provider>
     </BackgroundWorkNodeContext.Provider>
     </NodeUserInputContext.Provider>

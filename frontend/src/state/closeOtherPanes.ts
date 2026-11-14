@@ -1,6 +1,7 @@
 import { useCallback } from 'react';
 import { useChatActions, useChatPanes } from './chatStore';
 import type { PaneItem } from './paneItems';
+import { recordUndoGroup } from './undoStack';
 
 /**
  * What Close Others closes for `keepId`: every other pane in the tree's slot
@@ -20,7 +21,8 @@ export function useCloseOtherPanes(): { closeOtherPanes: (keepId: string) => voi
   const panes = useChatPanes();
   const { closePane, focusPane, setPaneWidth } = useChatActions();
   const closeOtherPanes = useCallback((keepId: string) => {
-    for (const id of closeOthersTargets(keepId, panes)) closePane(id);
+    // One ⌘Z reopens them all.
+    recordUndoGroup(() => { for (const id of closeOthersTargets(keepId, panes)) closePane(id); }, (n) => `Closed ${n} panes`);
     focusPane(keepId);
     // A lone pane with no width of its own fills the window.
     setPaneWidth(keepId, undefined);

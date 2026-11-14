@@ -77,7 +77,9 @@ import { isNodeShownInWindow, isPaneShownInWindow } from './attention/targetVisi
 import { isServerAttentionActive, subscribeServerAttention, type AttentionIntent as ServerAttentionIntent } from '../services/serverAttention';
 import { activeServerAttentionRecord } from '../services/serverAttentionStore';
 import { getCompanionAssistant, isCompanionNodeId, noteCompanionTurnEnded } from './companion/companionStore';
-import { openCompanionPanel, useCompanionPanelShownNodeIds } from './companion/companionPanel';
+import { getCompanionPanelState, openCompanionPanel, useCompanionPanelShownNodeIds } from './companion/companionPanel';
+import { requestOpenCompanionTarget, requestOpenScheduledRun } from './attentionOpenRequests';
+import { isAwaitingUserInput } from './askUserSelectors';
 import { companionNameNow } from './companion/companionName';
 import { companionPostRunId, isCheckinNodeId } from 'michi-shared';
 import { captureMetaAgentTurnContext, mergeMetaAgentTurnContexts, withCarriedRefs } from '../services/api/assistant';
@@ -88,6 +90,7 @@ import { useContextActions } from './contextActions';
 import { useProjectActions, useTreeActions } from './projectTreeActions';
 import { useExtractNodeTree } from './extractNodeTree';
 import { useTrashActions } from './trashActions';
+import { useUndoableActions } from './undoableActions';
 import { attentionTargetKey, dismissAttention, presentAttention, type AttentionIntent } from '../services/attention/policy';
 import {
   indexBackendProjects,
@@ -439,6 +442,7 @@ export function ChatProvider({ children, userId }: { children: React.ReactNode; 
     setViewMode,
     retainProjectPaneKeys,
     setPaneSlot,
+    restorePaneInSlot,
     ensurePaneSlot,
     openPaneInTree,
     appendPaneInTree,
@@ -729,8 +733,10 @@ export function ChatProvider({ children, userId }: { children: React.ReactNode; 
   // started on a phone or another machine): handlers for it, while it installs.
   const unknownBackendChatRef = useRef<(connectionId: string, chatId: string, nodeId?: string) => StreamHandlers>(() => ({}));
   const discoveredTurnEndRef = useRef<(nodeId: string) => void>(() => {});
-  const desktopOwnsScheduledNotice = (nodeId: string): boolean =>
-    scheduledNodeIdsRef.current.has(nodeId) && !!getElectron()?.onScheduledNotice;
+  /** installBackendNode, for stream handlers made before it is defined. */
+  const installBackendNodeRef = useRef<(workspaceId: string, nodeId: string, refresh: boolean) => Promise<boolean>>(
+    async () => false,
+  );
   const commandsInFlightRef = useRef(new Set<string>());
   const sendMessageRef = useRef<(nodeId: string, text: string, meta?: UserSendMeta) => void>(() => {});
 
@@ -859,7 +865,7 @@ export function ChatProvider({ children, userId }: { children: React.ReactNode; 
     setFocusedNodeIdState(paneId && nodesRef.current[paneId] ? paneId : null);
   }, []);
 
-  const closePane = useCallback((paneId: string) => {
+  const closePaneRaw = useCallback((paneId: string) => {
     const item = paneItemsRef.current[paneId];
     if (item?.kind === 'terminal') {
       const target = terminalTargetForPane(item);
@@ -1471,7 +1477,7 @@ export function ChatProvider({ children, userId }: { children: React.ReactNode; 
     dispatch({ type: 'mark-all-read', viewedAt: Date.now() });
   }, [dispatch]);
 
-  const renameNode = useCallback(
+  const renameNodeRaw = useCallback(
     (nodeId: string, title: string) => {
       const trimmed = title.trim();
       if (!trimmed) return;
@@ -1484,14 +1490,14 @@ export function ChatProvider({ children, userId }: { children: React.ReactNode; 
     [dispatch, setProjects],
   );
 
-  const pinNode = useCallback(
+  const pinNodeRaw = useCallback(
     (nodeId: string) => {
       dispatch({ type: 'pin-node', nodeId, now: Date.now() });
     },
     [dispatch],
   );
 
-  const unpinNode = useCallback(
+  const unpinNodeRaw = useCallback(
     (nodeId: string) => {
       dispatch({ type: 'unpin-node', nodeId });
     },
@@ -1511,7 +1517,7 @@ export function ChatProvider({ children, userId }: { children: React.ReactNode; 
   // shows the node and has the user's attention.
   const presentNodeAttention = useCallback((
     nodeId: string,
-    notice: Pick<AttentionIntent, 'kind' | 'title' | 'body' | 'isStillCurrent'>,
+    notice: Pick<AttentionIntent, 'kind' | 'title' | 'body' | 'isStillCurrent' | 'showToast'>,
   ) => {
     const node = nodesRef.current[nodeId];
     const project = node ? projectsRef.current.find((candidate) => candidate.id === node.projectId) : undefined;
@@ -1540,19 +1546,65 @@ export function ChatProvider({ children, userId }: { children: React.ReactNode; 
     const localTarget = (target: ServerAttentionIntent['target']) => {
       const conn = target.backendConnectionId;
       const workspaceId = backendEntityId(conn, target.workspaceId);
-      return target.type === 'node'
-        ? { type: 'node' as const, nodeId: backendEntityId(conn, target.nodeId), workspaceId, backendConnectionId: conn }
-        : { type: 'agent_run' as const, runId: target.runId, workspaceId, backendConnectionId: conn };
+      switch (target.type) {
+        case 'node':
+          return { type: 'node' as const, nodeId: backendEntityId(conn, target.nodeId), workspaceId, backendConnectionId: conn };
+        case 'agent_run':
+          return { type: 'agent_run' as const, runId: target.runId, workspaceId, backendConnectionId: conn };
+        case 'agent':
+          return { type: 'agent' as const, ref: target.ref, open: target.open, workspaceId, backendConnectionId: conn };
+        case 'scheduled_run':
+          return { type: 'scheduled_run' as const, runId: target.runId, jobId: target.jobId,
+            nodeId: target.nodeId ? backendEntityId(conn, target.nodeId) : null, workspaceId, backendConnectionId: conn };
+      }
     };
-    const inView = (target: ReturnType<typeof localTarget>) => (target.type === 'node'
-      ? isNodeShownInWindow(target.nodeId, openPanesRef.current)
-      : isPaneShownInWindow(agentRunPaneId(target.backendConnectionId, target.runId), openPanesRef.current));
+    const inView = (target: ReturnType<typeof localTarget>): boolean => {
+      switch (target.type) {
+        case 'node':
+          return isNodeShownInWindow(target.nodeId, openPanesRef.current);
+        case 'agent_run':
+          return isPaneShownInWindow(agentRunPaneId(target.backendConnectionId, target.runId), openPanesRef.current);
+        case 'scheduled_run':
+          return target.nodeId !== null && isNodeShownInWindow(target.nodeId, openPanesRef.current);
+        case 'agent': {
+          // Michi's own: its panel on the tab the record opens (this window's backend only), or the conversation it names.
+          const { open } = target;
+          if (open.kind === 'node') return isNodeShownInWindow(backendEntityId(target.backendConnectionId, open.nodeId), openPanesRef.current);
+          if (open.kind !== 'companion' || target.backendConnectionId !== LOCAL_BACKEND_CONNECTION_ID) return false;
+          const panel = getCompanionPanelState();
+          return panel.open && panel.tab === open.tab;
+        }
+      }
+    };
+    /** Michi's and a scheduled run's records open through the shell's own openers; another backend's, where this window can. */
+    const openTarget = (target: ReturnType<typeof localTarget>, serverTarget: ServerAttentionIntent['target']) => {
+      if (target.type === 'node') {
+        revealNodeRef.current(target.nodeId);
+        return;
+      }
+      const local = target.backendConnectionId === LOCAL_BACKEND_CONNECTION_ID;
+      if (target.type === 'agent') {
+        if (local) requestOpenCompanionTarget(target.open);
+        else if (target.open.kind === 'node') revealNodeRef.current(backendEntityId(target.backendConnectionId, target.open.nodeId));
+        return;
+      }
+      if (target.type === 'scheduled_run' && serverTarget.type === 'scheduled_run') {
+        if (local) requestOpenScheduledRun({ runId: serverTarget.runId, jobId: serverTarget.jobId, workspaceId: serverTarget.workspaceId, nodeId: serverTarget.nodeId });
+        else if (target.nodeId) revealNodeRef.current(target.nodeId);
+        return;
+      }
+      if (target.type !== 'agent_run') return;
+      // The pane is named for its agent (the notice's title says what happened), else the default.
+      const run = { backendConnectionId: target.backendConnectionId, id: target.runId };
+      openAgentRunPaneRef.current(run, target.workspaceId, knownAgentRunName(run));
+    };
     return subscribeServerAttention((intent, presentation) => {
       const target = localTarget(intent.target);
       const key = attentionTargetKey(target);
       presentAttention({
         key,
         kind: intent.kind,
+        reason: intent.reason,
         title: intent.title,
         body: intent.body,
         target,
@@ -1561,15 +1613,12 @@ export function ChatProvider({ children, userId }: { children: React.ReactNode; 
         osNotification: presentation.claimed ? 'auto' : 'never',
         isTargetVisible: () => inView(target),
         isStillCurrent: () => activeServerAttentionRecord(target.backendConnectionId, intent.serverId) !== undefined,
+        // A question this window holds is in AskUserNotice already: no toast saying it again.
+        showToast: () => !(intent.reason === 'question' && target.type === 'node'
+          && isAwaitingUserInput(nodesRef.current[target.nodeId])),
         onOpen: () => {
           try {
-            if (target.type === 'node') {
-              revealNodeRef.current(target.nodeId);
-              return;
-            }
-            // The pane is named for its agent (the notice's title says what happened), else the default.
-            const run = { backendConnectionId: target.backendConnectionId, id: target.runId };
-            openAgentRunPaneRef.current(run, target.workspaceId, knownAgentRunName(run));
+            openTarget(target, intent.target);
           } catch (error) {
             // Its workspace is not loaded in this window (openAgentRunPane selects a loaded one itself).
             console.warn('[attention] could not open the notice target', error);
@@ -1636,7 +1685,6 @@ export function ChatProvider({ children, userId }: { children: React.ReactNode; 
         nodeId: topic.nodeId ?? topic.chatId,
         chatId: topic.chatId,
         title: topic.title,
-        prompt: topic.prompt,
         runtimeId: parent.runtimeId,
       }));
       const lastAssistantId = [...parent.messages]
@@ -1667,6 +1715,13 @@ export function ChatProvider({ children, userId }: { children: React.ReactNode; 
       if (treeId) {
         for (const child of spawned) appendPaneInTree(projectId, treeId, child.nodeId);
       }
+      // The backend started each child's first turn before this frame, so its
+      // turn_start may have come while this window did not have the child yet.
+      // An empty child is read as the backend has it; a running turn is read when it ends.
+      for (const child of spawned) {
+        if ((nodesRef.current[child.nodeId]?.messages.length ?? 0) > 0) continue;
+        void installBackendNodeRef.current(projectId, child.nodeId, true).catch(() => {});
+      }
     },
     onPermissionResolved: (data) => {
       dispatch({ type: 'permission-resolved', nodeId, requestId: data.requestId });
@@ -1674,7 +1729,6 @@ export function ChatProvider({ children, userId }: { children: React.ReactNode; 
     },
     onPermissionRequest: (data) => {
       dispatch({ type: 'permission-request', nodeId, permission: data });
-      if (desktopOwnsScheduledNotice(nodeId)) return;
       // The agent's conversation V notifies like any other, under its name (DESIGN-v2 §1.5).
       presentNodeAttention(nodeId, {
         kind: 'needs_input',
@@ -1693,9 +1747,9 @@ export function ChatProvider({ children, userId }: { children: React.ReactNode; 
       // The ask card renders inline in one pane's transcript, invisible when
       // that pane is closed or in another thread; the policy speaks unless
       // the node is in front of the user (the panel showing V counts, see
-      // targetVisibility.ts). The AskUserNotice carries the reminder from
-      // then on. V's ask carries the agent's name (DESIGN-v2 §1.5).
-      if (desktopOwnsScheduledNotice(nodeId)) return;
+      // targetVisibility.ts) — as a tone and OS notification: in the window,
+      // the AskUserNotice already shows the question, so no toast repeats it.
+      // V's ask carries the agent's name (DESIGN-v2 §1.5).
       presentNodeAttention(nodeId, {
         kind: 'needs_input',
         ...questionAttentionCopy(data.questions[0]?.question),
@@ -1705,6 +1759,7 @@ export function ChatProvider({ children, userId }: { children: React.ReactNode; 
           return !!nodesRef.current[nodeId]
             && !(pending?.requestId === data.requestId && (pending.resolved || pending.interrupted));
         },
+        showToast: () => !isAwaitingUserInput(nodesRef.current[nodeId]),
       });
     },
     onUserInputResolved: (data) => {
@@ -1997,6 +2052,9 @@ export function ChatProvider({ children, userId }: { children: React.ReactNode; 
           permissionMode: meta?.permissionMode ?? n.permissionMode,
           approveForMe: meta?.permissionMode ? meta.approveForMe === true : n.permissionApproveForMe === true,
           crewMemoryMode: meta?.crewMemoryMode,
+          // A temporary chat's first session is created as one; a retry
+          // after a failed first send asks again (the node keeps its mark).
+          temporary: !n.chatId && (meta?.temporary === true || n.temporary === true) ? true : undefined,
           modeId: n.chatId ? undefined : n.currentModeId ?? undefined,
           graphPrerequisite: durableNodePrerequisite(owningProject, nodesRef.current, nodesRef.current[nodeId] ?? n),
           signal,
@@ -2206,41 +2264,20 @@ export function ChatProvider({ children, userId }: { children: React.ReactNode; 
     [createSharedStreamHandlers, dispatch, handleTurnEnd, refreshAgentStatus, ensureCompleteHistory],
   );
 
-  // A spawn frame can be missed after its short replay window. The backend
-  // writes this outbox first, so hydration can submit exactly the same first
-  // child turn through the normal foreground path. `user-send` flips status
-  // synchronously, making StrictMode/effect re-entry harmless; `turn_start`
-  // then clears the outbox only after the backend committed the provisional
-  // turn rows.
-  useEffect(() => {
-    if (!hydrated) return;
-    for (const node of Object.values(nodesRef.current)) {
-      if (
-        !node.spawnedByAgent
-        || !node.pendingSpawnPrompt
-        || !node.chatId
-        || node.status !== 'idle'
-        || node.messages.length !== 0
-        || (node.messageCount ?? 0) !== 0
-      ) continue;
-      void startStream(node.nodeId, node.pendingSpawnPrompt);
-    }
-  }, [hydrated, nodes, startStream]);
-
   const {
     createProject,
     enterChatsWorkspace,
-    renameProject,
+    renameProject: renameProjectRaw,
     setProjectCwd,
     addFolder,
     removeFolder,
     updateFolderLabel,
     setProjectInstructions,
-    deleteProject,
-    restoreProject,
+    deleteProject: deleteProjectRaw,
+    restoreProject: restoreProjectRaw,
     purgeProject,
-    archiveProject,
-    unarchiveProject,
+    archiveProject: archiveProjectRaw,
+    unarchiveProject: unarchiveProjectRaw,
     selectProject,
   } = useProjectActions({
     projects,
@@ -3162,6 +3199,26 @@ export function ChatProvider({ children, userId }: { children: React.ReactNode; 
     });
   }, [activeProjectId, revealPane]);
 
+  /** A conversation takes a launcher's slot and width, with focus; the launcher goes. */
+  const takeLauncherSlot = useCallback((paneId: string, nodeId: string, width: number | undefined) => {
+    setOpenPanes((previous) => {
+      const withoutNode = previous.filter((id) => id !== nodeId);
+      return withoutNode.map((id) => id === paneId ? nodeId : id);
+    });
+    setFocusedPane(nodeId);
+    setFocusedNodeIdState(nodeId);
+    if (width !== undefined) setPaneWidth(nodeId, width);
+    removePaneItem(paneId);
+  }, [removePaneItem, setFocusedPane, setOpenPanes, setPaneWidth]);
+
+  const openNodeInLauncherPane = useCallback((paneId: string, nodeId: string) => {
+    const launcher = paneItemsRef.current[paneId];
+    if (!launcher || launcher.kind !== 'launcher') return;
+    const node = nodesRef.current[nodeId];
+    if (!node || node.deletedAt || node.projectId !== launcher.projectId) return;
+    takeLauncherSlot(paneId, nodeId, launcher.width);
+  }, [takeLauncherSlot]);
+
   const activateLauncherPane = useCallback(async (paneId: string, choice: PaneLauncherChoice): Promise<string> => {
     const launcher = paneItemsRef.current[paneId];
     if (!launcher || launcher.kind !== 'launcher') throw new Error('Pane launcher is no longer available');
@@ -3216,16 +3273,9 @@ export function ChatProvider({ children, userId }: { children: React.ReactNode; 
       : activeTreeRootNodeId(project);
     if (!anchorNodeId) throw new Error('No chat is available to branch from');
     const nodeId = await createBlankChild(anchorNodeId);
-    setOpenPanes((previous) => {
-      const withoutCreated = previous.filter((id) => id !== nodeId);
-      return withoutCreated.map((id) => id === paneId ? nodeId : id);
-    });
-    setFocusedPane(nodeId);
-    setFocusedNodeIdState(nodeId);
-    if (launcher.width !== undefined) setPaneWidth(nodeId, launcher.width);
-    removePaneItem(paneId);
+    takeLauncherSlot(paneId, nodeId, launcher.width);
     return nodeId;
-  }, [createBlankChild, removePaneItem, replacePaneItem, setFocusedPane, setOpenPanes, setPaneWidth]);
+  }, [createBlankChild, replacePaneItem, takeLauncherSlot]);
 
   /** Move an existing detached terminal into the slot currently held by a launcher pane. */
   const adoptTerminalPane = useCallback((launcherPaneId: string, terminalPaneId: string) => {
@@ -3275,9 +3325,9 @@ export function ChatProvider({ children, userId }: { children: React.ReactNode; 
   const bumpStructureVersion = useCallback(() => { structureVersionRef.current += 1; }, []);
   const {
     deleteSubtree,
-    deleteNode,
-    trimNode,
-    archiveNode,
+    deleteNode: deleteNodeRaw,
+    trimNode: trimNodeRaw,
+    archiveNode: archiveNodeRaw,
     restoreDeletion,
     moveDeletionGroupLane,
     purgeDeletion,
@@ -3317,25 +3367,22 @@ export function ChatProvider({ children, userId }: { children: React.ReactNode; 
 
   const {
     createThread,
-    archiveTree,
-    unarchiveTree,
-    pinTree,
-    unpinTree,
-    pinProject,
-    unpinProject,
-    renameTree,
+    archiveTree: archiveTreeRaw,
+    unarchiveTree: unarchiveTreeRaw,
+    pinTree: pinTreeRaw,
+    unpinTree: unpinTreeRaw,
+    pinProject: pinProjectRaw,
+    unpinProject: unpinProjectRaw,
+    renameTree: renameTreeRaw,
     activateTree,
-    deleteTree,
-    moveTreeToWorkspace,
-    bulkArchiveTrees,
-    bulkDeleteTrees,
-    bulkUnarchiveTrees,
+    deleteTree: deleteTreeRaw,
+    moveTreeToWorkspace: moveTreeToWorkspaceRaw,
   } = useTreeActions({
     projects,
     activeProjectId,
     nodesRef,
     dispatch,
-    renameNode,
+    renameNode: renameNodeRaw,
     newNodeId,
     setProjects,
     setNodes,
@@ -3344,8 +3391,6 @@ export function ChatProvider({ children, userId }: { children: React.ReactNode; 
     setFocusedNodeId: setFocusedNodeIdState,
     selectProject,
     deleteSubtree,
-    treeSelection,
-    setTreeSelection,
     sidebarExpanded: prefs.sidebarExpanded,
     setSidebarExpanded: setSidebarExpandedPref,
     runWorkspaceMutation,
@@ -3390,6 +3435,64 @@ export function ChatProvider({ children, userId }: { children: React.ReactNode; 
     return true;
   }, [activateTree, openPane, openPaneInTree, selectProject, setFocusedNodeId]);
   revealNodeRef.current = revealNode;
+
+  // The user's actions as the app exposes them, each recording its undo on
+  // the window's undo history; the raw ones above stay for the store's own use.
+  const {
+    archiveTree,
+    unarchiveTree,
+    deleteTree,
+    moveTreeToWorkspace,
+    renameNode,
+    renameTree,
+    pinTree,
+    unpinTree,
+    pinNode,
+    unpinNode,
+    pinProject,
+    unpinProject,
+    deleteNode,
+    trimNode,
+    archiveNode,
+    renameProject,
+    archiveProject,
+    unarchiveProject,
+    deleteProject,
+    restoreProject,
+    bulkArchiveTrees,
+    bulkDeleteTrees,
+    bulkUnarchiveTrees,
+    closePane,
+  } = useUndoableActions({
+    archiveTree: archiveTreeRaw,
+    unarchiveTree: unarchiveTreeRaw,
+    deleteTree: deleteTreeRaw,
+    restoreDeletion,
+    moveTreeToWorkspace: moveTreeToWorkspaceRaw,
+    renameNode: renameNodeRaw,
+    renameTree: renameTreeRaw,
+    pinTree: pinTreeRaw,
+    unpinTree: unpinTreeRaw,
+    pinNode: pinNodeRaw,
+    unpinNode: unpinNodeRaw,
+    pinProject: pinProjectRaw,
+    unpinProject: unpinProjectRaw,
+    deleteNode: deleteNodeRaw,
+    trimNode: trimNodeRaw,
+    archiveNode: archiveNodeRaw,
+    renameProject: renameProjectRaw,
+    archiveProject: archiveProjectRaw,
+    unarchiveProject: unarchiveProjectRaw,
+    deleteProject: deleteProjectRaw,
+    restoreProject: restoreProjectRaw,
+    closePane: closePaneRaw,
+    restorePaneInSlot,
+    registerPaneItem,
+    revealNode,
+    selectProject,
+    activateTree,
+    clearTreeSelection,
+  }, { projectsRef, nodesRef, activeProjectIdRef, paneItemsRef, slotPanes, focusedPane, treeSelection });
 
   // A multi-model run's branches next to the chat that started it. Defined
   // after the tree actions (activateTree), unlike fanoutBranches.
@@ -3517,6 +3620,7 @@ export function ChatProvider({ children, userId }: { children: React.ReactNode; 
     backendNodeInstallsRef.current.set(key, work);
     return work;
   }, [commitBackendInstall, nodeBusy, structureGuards]);
+  installBackendNodeRef.current = installBackendNode;
 
   /** Open a backend-created thread (from a notification), installing it first if needed. */
   const revealBackendNode = useCallback(async (workspaceId: string, nodeId: string): Promise<boolean> => {
@@ -3851,6 +3955,7 @@ export function ChatProvider({ children, userId }: { children: React.ReactNode; 
       activateLauncherPane,
       adoptTerminalPane,
       adoptBackendTerminal,
+      openNodeInLauncherPane,
       openFilePane,
       openBrowserPane,
       openAgentRunPane,
@@ -3992,6 +4097,7 @@ export function ChatProvider({ children, userId }: { children: React.ReactNode; 
       activateLauncherPane,
       adoptTerminalPane,
       adoptBackendTerminal,
+      openNodeInLauncherPane,
       openFilePane,
       openBrowserPane,
       openAgentRunPane,
@@ -4142,6 +4248,7 @@ export function ChatProvider({ children, userId }: { children: React.ReactNode; 
       activateLauncherPane,
       adoptTerminalPane,
       adoptBackendTerminal,
+      openNodeInLauncherPane,
       openFilePane,
       openBrowserPane,
       openAgentRunPane,
@@ -4235,6 +4342,7 @@ export function ChatProvider({ children, userId }: { children: React.ReactNode; 
       activateLauncherPane,
       adoptTerminalPane,
       adoptBackendTerminal,
+      openNodeInLauncherPane,
       openFilePane,
       openBrowserPane,
       openAgentRunPane,

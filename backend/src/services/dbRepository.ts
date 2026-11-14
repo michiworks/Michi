@@ -68,6 +68,7 @@ export const markNodeMaintenanceJob = nodes.markNodeMaintenanceJob;
 export const updateNodeTitle = nodes.updateNodeTitle;
 export const updateNodeBranchOverview = nodes.updateNodeBranchOverview;
 export const setNodeForkProvenance = nodes.setNodeForkProvenance;
+export const restoreNodeMemoryMode = nodes.restoreNodeMemoryMode;
 
 export type { TrimSnapshot } from './repository/nodeTrash';
 export const softDeleteNode = nodeTrash.softDeleteNode;
@@ -83,13 +84,12 @@ export const saveEdge = edges.saveEdge;
 export const setEdgeForkProvenance = edges.setEdgeForkProvenance;
 export const deleteEdge = edges.deleteEdge;
 
-export type { MessageRow, NodeMetadataBatchEntry, TurnHistoryCoverage } from './repository/messages';
+export type { MessageRow, TurnHistoryCoverage } from './repository/messages';
 export const listMessages = messages.listMessages;
 export const saveMessage = messages.saveMessage;
 export const getMessageCount = messages.getMessageCount;
 export const getMessageCountsByNode = messages.getMessageCountsByNode;
 export const getCompletedTurnCount = messages.getCompletedTurnCount;
-export const getNodesMetadataByIds = messages.getNodesMetadataByIds;
 
 export type { TurnRow } from './repository/turns';
 export const beginTurn = turns.beginTurn;

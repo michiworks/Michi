@@ -16,7 +16,7 @@ vi.mock('../../../../state/chatStore', () => ({
   useStructuralSelector: (select: (nodes: unknown) => unknown) => select(mocks.nodes),
 }));
 
-import { homeWaitingTotal, homeWorkspaceCounts, openedSinceDone, useSpacesHomeSections, withoutOpenedDone } from './homeCounts';
+import { homeWaitingTotal, openedSinceDone, useSpacesHomeSections, withoutOpenedDone } from './homeCounts';
 
 const done = (nodeId: string, at: number | null): HomeSectionItem => ({
   id: `conversation:${nodeId}`, kind: 'conversation', workspaceId: 'ws', workspaceName: 'w', title: nodeId, at, summary: '', agentClaim: false,
@@ -47,9 +47,6 @@ describe('Spaces Home counts', () => {
     expect(after.waiting).toBe(sections.waiting);
     expect(withoutOpenedDone(sections, new Set())).toBe(sections);
     expect(homeWaitingTotal(after)).toBe(3);
-    expect(homeWorkspaceCounts(after, 'ws')).toEqual({ waiting: 3, stalled: 0 });
-    expect(homeWorkspaceCounts(after, 'other')).toEqual({ waiting: 0, stalled: 0 });
-    expect(homeWorkspaceCounts(null, 'ws')).toEqual({ waiting: 0, stalled: 0 });
   });
 
   it('gives every reader the same sections, already without the rows you opened', () => {

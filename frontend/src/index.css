@@ -228,6 +228,11 @@
   --message-cjk-font: 'Hiragino Kaku Gothic ProN', 'Noto Sans JP', 'Yu Gothic', sans-serif;
 }
 
+/* The transcript reads at a looser leading than the composer: its lines run
+   the whole column, and CJK text needs the room to find the next line. Blocks
+   that set their own leading (thoughts, folded work) keep it. */
+.terminal-pane__transcript { --message-body-leading: 1.65; }
+
 /* Shared base used by both message bubbles' .prose and
    .terminal-message-user. Applied via the .terminal-message class. */
 .terminal-message {
@@ -339,8 +344,9 @@
 }
 /* Prose carries only leading margins, so a thought/agent block right after a
    paragraph would sit flush against it. Mirror the block's own 8px bottom
-   margin above it. The reinterpret wrapper is the streaming-time root. */
-.terminal-message-assistant > :is(.prose, [data-markdown-reinterpret-strategy]) + [data-agent-block] {
+   margin above it. The reinterpret wrapper is the streaming-time root. A line
+   run keeps its own distance from the prose (AgentLineBlocks.css). */
+.terminal-message-assistant > :is(.prose, [data-markdown-reinterpret-strategy]) + [data-agent-block]:not(.agent-line-run) {
   margin-block-start: 8px;
 }
 :is(.terminal-message-assistant, .terminal-message-user) .prose table {
@@ -378,16 +384,29 @@
   line-height: 1.55;
 }
 :is(.terminal-message-assistant, .terminal-message-user) .prose :not(pre) > code {
-  font-size: calc(var(--message-body-size) * 0.9);
+  font-size: calc(var(--message-body-size) * 0.875);
   font-weight: 400;
   line-height: 1;
-  background: color-mix(in srgb, currentColor 5%, transparent);
-  border: 0.5px solid color-mix(in srgb, currentColor 15%, transparent);
-  border-radius: 0.4em;
-  padding: 0.0625em 0.25em;
+  background: color-mix(in srgb, currentColor 8%, transparent);
+  border-radius: var(--ui-radius);
+  padding: 0.1em 0.3em;
   white-space: pre-wrap;
   overflow-wrap: break-word;
 }
+/* A file link is a link, not a code chip: no chip or glyph, and the same quiet
+   underline as every other prose link, so it is not told from body text by
+   colour alone (in Bone the accent is rust, which alone reads as an error). */
+:is(.terminal-message-assistant, .terminal-message-user) .prose :not(pre) > code:has(> a[data-file-link]) {
+  background: none;
+  padding: 0;
+}
+:is(.terminal-message-assistant, .terminal-message-user) .prose code > a[data-file-link] {
+  text-decoration-line: underline;
+  text-decoration-color: color-mix(in srgb, currentColor 40%, transparent);
+  text-underline-offset: 3px;
+}
+:is(.terminal-message-assistant, .terminal-message-user) .prose code > a[data-file-link]:is(:hover, :focus-visible) { text-decoration-color: currentColor; }
+:is(.terminal-message-assistant, .terminal-message-user) .prose code > a[data-file-link] > .michi-file-link__glyph { display: none; }
 
 /* Focus dim. An unfocused pane is covered by a black veil at --pane-dim
    (usePaneShellStyle, which every .terminal-pane root spreads): the same
@@ -786,20 +805,22 @@
   border-bottom: 1px solid var(--term-line, var(--line));
 }
 
-/* Pointer devices: the controls sit just outside the box, above its top-right
-   corner, and appear on hover or keyboard focus. They overlap the space above
-   the table instead of covering the header row or reserving a strip. */
+/* Pointer devices: the controls sit just outside the box, under its
+   bottom-right corner, and appear on hover or keyboard focus. They overlap the
+   space below the table instead of covering a row or reserving a strip. Below,
+   not above: a table follows its lead-in at the tight paragraph gap, where the
+   controls would cover that line's end; the gap after a table is the wider one. */
 @media (hover: hover) {
   .michi-table-controls {
     position: absolute;
     /* Offsets resolve against the padding box; 1px clears the box border so
        the right edges line up and the gap is measured from the border. */
-    bottom: calc(100% + 1px);
+    top: calc(100% + 1px);
     right: -1px;
     z-index: 1;
     /* The gap is padding, not an offset, so the pointer stays inside the
        controls (and :hover on the table) while crossing it. */
-    padding: 0 0 4px;
+    padding: 2px 0 0;
     border-bottom: 0;
     opacity: 0;
     /* Hidden controls must not catch clicks, selection or hover meant for
@@ -2285,12 +2306,28 @@ html[data-vibrancy="on"],
   outline-offset: -2px;
 }
 
-/* Show-more toggle: dotted underline goes solid + color becomes readable on hover. */
+/* Show N more: a quiet row under the threads it pages in, lit like a row on hover. */
+.show-more-toggle {
+  display: flex;
+  align-items: center;
+  width: 100%;
+  min-height: 28px;
+  border: 0;
+  background: transparent;
+  color: var(--term-muted);
+  font-family: var(--ui-font);
+  font-size: var(--fs-md);
+  text-align: left;
+  cursor: pointer;
+  transition: background var(--t-quick) var(--t-ease), color var(--t-quick) var(--t-ease);
+}
 .show-more-toggle:hover {
-  color: var(--color-fg) !important;
-  text-decoration-style: solid !important;
-  text-decoration-color: var(--color-fg) !important;
-  background: transparent !important;
+  background: var(--term-hover-bg, var(--term-alt));
+  color: var(--term-fg);
+}
+.show-more-toggle:focus-visible {
+  outline: var(--focus-ring);
+  outline-offset: -2px;
 }
 
 /* Section label → first workspace row: collapse the inter-workspace gap so
@@ -3220,6 +3257,15 @@ html[data-vibrancy="on"],
   background: var(--term-hover-bg, var(--term-alt));
   color: var(--term-fg);
 }
+/* The pane chooser's keyboard row: the hover frame, a shade firmer. It shows
+   from the moment the chooser opens (data-keys), until the pointer is used in it. */
+.pane-chooser-row:focus-visible,
+.pane-chooser[data-keys] .pane-chooser-row:focus {
+  outline: none;
+  border-color: var(--term-line-s);
+  background: var(--term-hover-bg, var(--term-alt));
+  color: var(--term-fg);
+}
 
 /* Danger-outlined button (a failed turn's retry and connection test): tinted
    on hover, and not while disabled for a running check. */
@@ -3634,8 +3680,8 @@ html[data-vibrancy="on"],
   overflow-wrap: anywhere;
   line-height: normal;
   margin-block: -1px;
-  background: color-mix(in srgb, var(--term-mauve) 12%, transparent);
-  color: var(--term-mauve);
+  background: color-mix(in srgb, var(--term-accent) 12%, transparent);
+  color: var(--term-accent);
   border-radius: var(--ui-radius-sm);
   padding: 1px 6px;
   font-weight: 500;
@@ -3644,8 +3690,8 @@ html[data-vibrancy="on"],
   transition: box-shadow var(--t-enter) ease, background var(--t-enter) ease;
 }
 .mention-chip:hover {
-  background: color-mix(in srgb, var(--term-mauve) 18%, transparent);
-  box-shadow: 0 0 3px color-mix(in srgb, var(--term-mauve) 30%, transparent);
+  background: color-mix(in srgb, var(--term-accent) 18%, transparent);
+  box-shadow: 0 0 3px color-mix(in srgb, var(--term-accent) 30%, transparent);
 }
 /* Picked from the @ menu (see mentionEnter.ts): the chip grows out of the
    query it replaces. Its first frame is the typed `@query`, plain and in

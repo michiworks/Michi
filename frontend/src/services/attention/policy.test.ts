@@ -148,6 +148,16 @@ describe('when the policy speaks', () => {
     expect(presentations().map((item) => item.title)).toEqual(allowed);
   });
 
+  it('"Only when something needs me" reads the reason too: Needs you and a failed task pass, an update or a turn\'s error does not', () => {
+    setAttentionPreferences({ level: 'approval-only', sounds: true });
+    presentAttention(intent({ key: 'agent:needs-you', kind: 'needs_input', reason: 'needs_you', title: 'needs you' }));
+    presentAttention(intent({ key: 'run:failed', kind: 'failed', reason: 'run_failed', title: 'task failed' }));
+    presentAttention(intent({ key: 'agent:update', kind: 'finished', reason: 'update', title: 'update' }));
+    presentAttention(intent({ key: 'node:error', kind: 'failed', reason: 'error', title: 'turn error' }));
+    vi.advanceTimersByTime(1000);
+    expect(presentations().map((item) => item.title)).toEqual(['needs you', 'task failed']);
+  });
+
   it('applies the prefs in force when the notification is due', () => {
     presentAttention(intent({ kind: 'finished' }));
     setAttentionPreferences({ level: 'off', sounds: true });
@@ -240,6 +250,17 @@ describe('one notification per target', () => {
     expect(attentionTargetKey({ type: 'agent_run', runId: 'r1', backendConnectionId: 'box' }))
       .not.toBe(attentionTargetKey({ type: 'agent_run', runId: 'r1' }));
   });
+
+  it('keys Michi\'s records by their slot and a scheduled run by its run, each on its backend', () => {
+    const chat = { type: 'agent' as const, ref: 'chat', open: { kind: 'companion' as const, tab: 'chat' as const } };
+    // The slot, not where it opens.
+    expect(attentionTargetKey(chat)).toBe(attentionTargetKey({ ...chat, open: { kind: 'companion', tab: 'today' } }));
+    expect(attentionTargetKey(chat)).not.toBe(attentionTargetKey({ ...chat, ref: 'item:cmi-1' }));
+    expect(attentionTargetKey(chat)).not.toBe(attentionTargetKey({ ...chat, backendConnectionId: 'box' }));
+    const run = { type: 'scheduled_run' as const, runId: 'run-1', jobId: 'job-1', nodeId: null };
+    expect(attentionTargetKey(run)).toBe(attentionTargetKey({ ...run, nodeId: 'n-1' }));
+    expect(attentionTargetKey(run)).not.toBe(attentionTargetKey({ type: 'agent_run', runId: 'run-1' }));
+  });
 });
 
 describe('OS notifications', () => {
@@ -286,6 +307,15 @@ describe('OS notifications', () => {
     vi.advanceTimersByTime(1000);
     expect(presentations()).toHaveLength(3);
     expect(electron.showNotification.mock.calls.map((call) => call[2].key)).toEqual(['node:repeat']);
+  });
+
+  it('skips the toast a standing notice already shows, still chiming and notifying the OS', () => {
+    hasFocus.mockReturnValue(false);
+    presentAttention(intent({ key: 'node:asked', title: 'Asked', showToast: () => false }));
+    vi.advanceTimersByTime(1000);
+    expect(presentations()).toHaveLength(0);
+    expect(playAttentionSound).toHaveBeenCalledWith('needs_input');
+    expect(electron.showNotification.mock.calls).toEqual([['Asked', 'Which database?', { key: 'node:asked', silent: true }]]);
   });
 
   it('keeps the server copy’s claim when the same event also comes from this window', () => {

@@ -249,6 +249,16 @@ describe('Companion Michi source', () => {
     ]);
   });
 
+  test('a temporary chat is never an item nor in focus, whatever its state', async () => {
+    const failed = chat({ status: 'error', error: 'secret failure', startedAt: NOW - 2 * HOUR }, { title: 'Secret plan' });
+    const asked = chat({ status: 'completed', reply: 'Should I send it?', startedAt: NOW - 10 * MINUTE });
+    const ordinary = chat({ status: 'error', error: 'boom', startedAt: NOW - HOUR });
+    getDb().prepare("UPDATE nodes SET memory_mode = 'off' WHERE id IN (?, ?)").run(failed, asked);
+    const { drafts } = await poll();
+    assert.deepEqual([...byNode(drafts).keys()], [ordinary]);
+    assert.deepEqual(createMichiSource({ live: () => null }).focusSnapshot(NOW).map((entry) => entry.nodeId), [ordinary]);
+  });
+
   test('worker states: the reply, when it ended, whether the user saw it or wrote in it', () => {
     const worker = chat({ status: 'completed', reply: 'Here is the fix.', startedAt: NOW - HOUR }, { title: 'Fix it' });
     const busy = chat({ status: 'active', startedAt: NOW - MINUTE });

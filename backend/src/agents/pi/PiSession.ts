@@ -1,6 +1,7 @@
 import { createMaintenanceAccessTools } from '../../services/metaAgent/maintenanceAccess';
 import { hostOwner } from '../ownerMapping';
 import { ChatApprovalState, chatApprovalOptions, approvalCoversTool } from '../chatApprovalState';
+import { forcedApprovalOptions } from 'michi-runtime/internal/core/approvals';
 import { chatNodeOf, chatOwner, isRunOwner } from '../ownerMapping';
 import fs from "fs";
 import path from "path";
@@ -278,6 +279,8 @@ export class PiSession implements AgentSession {
             resolve: (optionId: string | null) => void;
             timer: NodeJS.Timeout;
             toolName?: string;
+            /** Michi's consequence rules forced this ask: another card's answer never covers it. */
+            forced?: boolean;
         }
     >();
     /** Outstanding ask_user questions keyed by requestId; answered, skipped, timed out or cancelled. */
@@ -659,16 +662,18 @@ export class PiSession implements AgentSession {
                     }
                     // Michi's user channel, like send_to_thread: no permission card in front of a question.
                     if (bcCtx.toolCall.name === PI_ASK_USER_TOOL) return undefined;
-                    const policy = this.approvals.policy(this.owner, this.ownerUserId, bcCtx.toolCall.name, false, this.turnPermissionMode);
+                    const call = { input: bcCtx.args };
+                    const policy = this.approvals.policy(this.owner, this.ownerUserId, bcCtx.toolCall.name, false, this.turnPermissionMode, undefined, call);
                     if (policy === "allow") return undefined;
                     if (policy === "deny") return { block: true, reason: "denied by policy" };
-                    const decision = await this.requestPermission(bcCtx.toolCall.name, bcCtx.args, signal);
+                    const forced = this.approvals.forcedAsk(this.owner, this.ownerUserId, bcCtx.toolCall.name, false, undefined, call);
+                    const decision = await this.requestPermission(bcCtx.toolCall.name, bcCtx.args, signal, forced?.reason);
                     signal?.throwIfAborted();
                     if (!this.approvals.accept(decision, this.owner, bcCtx.toolCall.name, this.ownerUserId)) {
                         return { block: true, reason: "user denied" };
                     }
                     for (const [id, request] of this.pendingPermissions) {
-                        if (approvalCoversTool(decision, bcCtx.toolCall.name, request.toolName)) this.respondToPermission(id, 'allow_once');
+                        if (!request.forced && approvalCoversTool(decision, bcCtx.toolCall.name, request.toolName)) this.respondToPermission(id, 'allow_once');
                     }
                     return undefined;
                 },
@@ -896,21 +901,25 @@ export class PiSession implements AgentSession {
      * pi-agent-core abort signal so cancelling a turn unblocks the
      * blocked tool call.
      */
+    /** `forcedReason`: Michi's consequence rules forced this ask (forcedApprovalOptions; another answer never covers it). */
     private async requestPermission(
         toolName: string,
         args: unknown,
         signal: AbortSignal | undefined,
+        forcedReason?: string,
     ): Promise<string | null> {
         // The turn the request is pushed on, so its resolution reaches that turn.
         const push = this.activePush;
         if (!push || signal?.aborted) return null;
         const requestId = nextInteractionRequestId();
-        const options: PermissionOption[] = !isRunOwner(this.owner) ? chatApprovalOptions(toolName) : [
-            { optionId: "allow_once", name: "Allow once", kind: "allow_once" },
-            { optionId: "reject_once", name: "Deny", kind: "reject_once" },
-        ];
+        const options: PermissionOption[] = forcedReason !== undefined ? forcedApprovalOptions()
+            : !isRunOwner(this.owner) ? chatApprovalOptions(toolName) : [
+                { optionId: "allow_once", name: "Allow once", kind: "allow_once" },
+                { optionId: "reject_once", name: "Deny", kind: "reject_once" },
+            ];
         const title = formatPermissionTitle(toolName, args);
-        const detail = permissionDetail(toolName, args);
+        const formatted = permissionDetail(toolName, args);
+        const detail = forcedReason !== undefined ? [forcedReason, formatted].filter(Boolean).join("\n\n") : formatted;
 
         return new Promise<string | null>((resolve) => {
             const timer = setTimeout(() => {
@@ -920,7 +929,7 @@ export class PiSession implements AgentSession {
                 push({ kind: "permission_resolved", requestId });
                 resolve(null);
             }, approveTimeoutMs());
-            this.pendingPermissions.set(requestId, { resolve, timer, toolName });
+            this.pendingPermissions.set(requestId, { resolve, timer, toolName, ...(forcedReason !== undefined ? { forced: true } : {}) });
 
             signal?.addEventListener(
                 "abort",

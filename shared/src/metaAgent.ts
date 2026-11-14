@@ -10,8 +10,13 @@
 
 import type { RuntimeReasoning } from './reasoning';
 
-/** Every runtime the Meta agent can be configured to use. */
-export const META_AGENT_RUNTIMES = ['claude', 'pi', 'codex', 'kiro', 'crew'] as const;
+/**
+ * The runtimes Michi's own agent runs on: V, check-ins and background work
+ * (Pages upkeep, memory), in the order a default is picked from. The one list:
+ * the backend refuses the others (Crew, Antigravity) and the Settings picker
+ * offers only these.
+ */
+export const MICHI_AGENT_RUNTIMES = ['claude', 'codex', 'pi', 'kiro'] as const;
 
 /** How many days of history a workspace's first read covers. */
 export const META_AGENT_FIRST_RUN_DAYS = [7, 30, 90] as const;
@@ -99,25 +104,23 @@ export interface MetaAgentInfo {
   guard: { maintenance: MetaAgentGuardStatus | null; chat: MetaAgentGuardStatus | null };
   /** Background maintenance since local midnight; null when it could not be counted (absent from an older backend). */
   usageToday?: MetaAgentUsageToday | null;
-  toolApprovals?: MetaAgentToolApproval[];
 }
+
+/**
+ * The units background usage is counted in, each on its own and never
+ * converted: a runtime's charge (USD or credits), its legacy credits, or
+ * uncached input plus output tokens (backend services/backgroundUsage.ts).
+ */
+export type BackgroundUsageUnit = 'USD' | 'credits' | 'tokens';
+export type BackgroundUsageAmounts = Partial<Record<BackgroundUsageUnit, number>>;
 
 export interface MetaAgentUsageToday {
   /** Maintenance runs started, including those that found nothing new. */
   checks: number;
   /** Runs that opened a model session. */
   modelCalls: number;
-  /** Tokens the runtimes reported for those sessions; null when none reported a count. */
+  /** The `tokens` of usage.pages and usage.memory together; null when none reported a count. */
   tokens: number | null;
-}
-
-/** Persistent permission for one external tool definition and connection configuration. */
-export interface MetaAgentToolApproval {
-  id: string;
-  server: string;
-  tool: string;
-  description: string;
-  state: 'pending' | 'approved' | 'denied' | 'revoked';
-  requestedAt: number;
-  updatedAt: number;
+  /** What each kind of background work used today, by unit. Recorded only: nothing shows or limits it (Q17). */
+  usage?: Record<'pages' | 'memory' | 'checkins', BackgroundUsageAmounts>;
 }

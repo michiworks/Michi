@@ -4,9 +4,9 @@ import { chatHub } from '../../agents/chatHub';
 import { ensureAssistant } from '../../assistant/store';
 import { getDb } from '../db';
 import { log } from '../logger';
+import { notTemporaryChatSql } from '../memory/temporaryChat';
 import { getPage } from '../pages/repository';
 import { listWorkspaceHomes } from '../pages/homePages';
-import { extractCardsJson } from './homeCardsGenerator';
 import { firstRunWindowDays } from './firstRunHistory';
 import { getHomeState } from './firstRunStore';
 import { resolveMetaAgentBehaviour } from './settings';
@@ -164,8 +164,8 @@ export function firstRunEndPosted(ownerUserId: string): boolean {
 /** Added to the Spaces Home summary prompt while the first run's closing message is still to come. */
 export function firstRunEndPrompt(): string {
   return [
-    '5. This summary closes the first-time generation. In the same json block add a "firstRun" field:',
-    '   {"wrote":"…","lookFirst":"…","question":"…","options":["…","…"],"continueIn":{"nodeId":"…","label":"…","draft":"…"}}',
+    '4. This summary closes the first-time generation. End your final reply with one ```json block holding a "firstRun" field:',
+    '   {"firstRun":{"wrote":"…","lookFirst":"…","question":"…","options":["…","…"],"continueIn":{"nodeId":"…","label":"…","draft":"…"}}}',
     '   wrote: one sentence on what was written (how many workspace homes, the global part of the Spaces Home).',
     '   lookFirst: one sentence on what the user should look at first today; link a page as [title](michi://page/<pageId>).',
     '   question: one thing you are unsure about that only the user can settle, for example a workspace that has not moved for two weeks: still waiting for review, or dropped?',
@@ -176,20 +176,28 @@ export function firstRunEndPrompt(): string {
 }
 
 type Obj = Record<string, unknown>;
+
+/** The last ```json block of a reply. */
+function lastJsonBlock(reply: string): unknown {
+  const last = [...reply.matchAll(/```json\s*([\s\S]*?)```/g)].at(-1)?.[1];
+  if (!last) return null;
+  try { return JSON.parse(last); } catch { return null; }
+}
+
 const isObject = (value: unknown): value is Obj => typeof value === 'object' && value !== null && !Array.isArray(value);
 const str = (value: unknown, max: number): string | null =>
   typeof value === 'string' && value.trim() ? oneLine(value, max) : null;
 
 function conversationWorkspace(nodeId: string, ownerUserId: string): string | null {
-  const row = getDb().prepare("SELECT workspace_id FROM nodes WHERE id=? AND kind='chat' AND deleted_at IS NULL AND maintenance_job_id IS NULL AND scheduled_only_job_id IS NULL")
-    .get(nodeId) as { workspace_id: string } | undefined;
+  const row = getDb().prepare(`SELECT workspace_id FROM nodes WHERE id=? AND kind='chat' AND deleted_at IS NULL AND maintenance_job_id IS NULL
+    AND scheduled_only_job_id IS NULL AND ${notTemporaryChatSql('nodes')}`).get(nodeId) as { workspace_id: string } | undefined;
   if (!row) return null;
   return listWorkspaceHomes(ownerUserId).some((home) => home.workspaceId === row.workspace_id) ? row.workspace_id : null;
 }
 
 /** The closing message the summary reply carries, or null when it has none that holds. */
 export function parseFirstRunEnd(reply: string, ownerUserId: string): { text: string; options: NarrationOption[] } | null {
-  const json = extractCardsJson(reply);
+  const json = lastJsonBlock(reply);
   const value = isObject(json) && isObject(json.firstRun) ? json.firstRun : null;
   if (!value) return null;
   const wrote = str(value.wrote, TEXT_MAX);

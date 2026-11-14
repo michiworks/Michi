@@ -821,13 +821,13 @@ a.michi-doc-link-card:hover { background: var(--term-alt); }
 /* ── Ask popover ─────────────────────────────────────────────── */
 .michi-ask { display: flex; flex-direction: column; gap: 10px; padding: 10px; }
 .michi-ask__about { display: flex; align-items: center; gap: 6px; min-width: 0; color: var(--term-muted); font-size: var(--fs-sm); }
-.michi-ask__about-glyph { display: inline-flex; color: var(--term-mauve); }
+.michi-ask__about-glyph { display: inline-flex; color: var(--term-accent); }
 .michi-ask__chip {
   min-width: 0;
   padding: 1px 6px;
   overflow: hidden;
   border-radius: 2px;
-  background: var(--term-mauve-f);
+  background: var(--term-accent-f);
   color: var(--term-fg);
   text-overflow: ellipsis;
   white-space: nowrap;

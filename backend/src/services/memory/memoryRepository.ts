@@ -685,6 +685,14 @@ export function writeConversationMemoryMode(nodeId: string, mode: ConversationMe
   getDb().prepare('UPDATE nodes SET memory_mode = ? WHERE id = ?').run(mode === 'learn' ? null : mode, nodeId);
 }
 
+/** Whether a conversation holds a message, whether it has a turn, and the node it branched from. */
+export function conversationStart(nodeId: string): { hasMessage: boolean; hasTurn: boolean; parentNodeId: string | null } {
+  const row = getDb().prepare(`SELECT n.parent_node_id,
+      EXISTS (SELECT 1 FROM messages m WHERE m.node_id = n.id) AS has_message, EXISTS (SELECT 1 FROM turns t WHERE t.node_id = n.id) AS has_turn
+    FROM nodes n WHERE n.id = ?`).get(nodeId) as { parent_node_id: string | null; has_message: number; has_turn: number } | undefined;
+  return { hasMessage: row?.has_message === 1, hasTurn: row?.has_turn === 1, parentNodeId: row?.parent_node_id ?? null };
+}
+
 /** A chat conversation's workspace, while it is neither purged nor in Trash; null otherwise. */
 export function conversationWorkspaceId(nodeId: string): string | null {
   const row = getDb().prepare(`SELECT workspace_id FROM nodes WHERE id = ? AND kind = 'chat' AND purged_at IS NULL AND deleted_at IS NULL`)

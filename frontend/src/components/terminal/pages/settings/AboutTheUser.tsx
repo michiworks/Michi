@@ -156,10 +156,16 @@ export function AboutTheUser({ memoryOn, reloadKey, onShowMemory }: {
   const groups = view ? byTopic(view.lines) : [];
   return (
     <SettingsSection title="About the user" className="memory-profile"
-      aside={view?.builtAt ? (
-        <time dateTime={new Date(view.builtAt).toISOString()} title={new Date(view.builtAt).toLocaleString()}>{builtText(view.builtAt)}</time>
-      ) : undefined}
-      intro="A short summary Michi writes from the memories it saved about you. Agents read it at the start of every conversation.">
+      aside={view && (
+        <span className="memory-profile__aside">
+          {view.builtAt && <>
+            <time dateTime={new Date(view.builtAt).toISOString()} title={new Date(view.builtAt).toLocaleString()}>{builtText(view.builtAt)}</time>
+            <span aria-hidden="true"> · </span>
+          </>}
+          <button type="button" className="settings-row__link" disabled={!memoryOn || requested || requesting}
+            title={memoryOn ? 'Write it again from your memories now' : 'Turn memory on to rebuild it'} onClick={() => { void rebuild(); }}>Rebuild</button>
+        </span>
+      )}>
       {state.status === 'loading' && <p className="settings-section__status" role="status">Loading…</p>}
       {state.status === 'error' && (
         <p className="settings-section__error" role="alert">
@@ -183,14 +189,7 @@ export function AboutTheUser({ memoryOn, reloadKey, onShowMemory }: {
           </ul>
         </div>
       ))}
-      {view && (
-        <div className="memory-profile__rebuild">
-          <Button size="sm" disabled={!memoryOn || requested || requesting} onClick={() => { void rebuild(); }}>Rebuild</Button>
-          <span className="settings-row__state" role="status">
-            {!memoryOn ? 'Turn memory on to rebuild it.' : requested ? 'Rebuilding with automatic memory. This can take a minute.' : ''}
-          </span>
-        </div>
-      )}
+      {view && requested && memoryOn && <p className="settings-section__status" role="status">Rebuilding. This can take a minute.</p>}
       {rebuildError && <p className="memory-item__notice is-error" role="alert">{rebuildError}</p>}
     </SettingsSection>
   );

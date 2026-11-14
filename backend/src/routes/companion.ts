@@ -5,7 +5,6 @@ import {
   COMPANION_CONFIGURABLE_SOURCES,
   COMPANION_DELEGATIONS_PATH,
   COMPANION_EVENTS_PATH,
-  COMPANION_NOTIFICATIONS_PATH,
   COMPANION_TRAY_PATH,
   CHAT_NOTIFICATION_LEVELS,
   isChatNotificationLevel,
@@ -20,29 +19,29 @@ import {
 } from 'michi-shared';
 import { currentAssistantNodeId, ensureAssistant } from '../assistant/store';
 import { applyPublicCompanionCard as applyCompanionCard, dismissCompanionCard, type CompanionCardDecision } from '../services/companion/cards';
-import { setChatNotificationLevel } from '../services/companion/chatNotices';
+import { setNotificationLevel } from '../services/attention/notificationLevel';
 import { systemCompanionClock } from '../services/companion/clock';
 import {
-  acknowledgeCompanionNotice,
   companionEvents,
   companionTrayDto,
   encodeCompanionChangedEvent,
-  encodeCompanionNotice,
-  replayCompanionNotices,
   type CompanionEventBus,
 } from '../services/companion/delivery';
 import { CompanionError, invalidRequest, notFound } from '../services/companion/errors';
+import { companionGetStarted, parseGetStartedInput, postponeCompanionGetStarted, startCompanionGetStarted } from '../services/companion/getStarted';
 import { undoCompanionRun } from '../services/companion/posts';
 import {
   addGoal,
   applyItemAction,
   cancelReminder,
   clearSubtypeDemotion,
+  companionOffNoticeAt,
   companionWelcomeState,
   createReminder,
   getCompanionMetaNumber,
   getReminder,
   isCompanionItemSubtype,
+  markCompanionOffNotice,
   markItemsSeen,
   recordCompanionView,
   reminderDto,
@@ -56,7 +55,7 @@ import {
   stopDelegationAutoSend,
   updateGoal,
 } from '../services/companion/repository';
-import { patchCompanionSettings } from '../services/companion/settings';
+import { getCompanionSettings, patchCompanionSettings } from '../services/companion/settings';
 import type { CompanionClock, CompanionService } from '../services/companion/types';
 import { createSseObserver } from '../services/httpSse';
 import { log } from '../services/logger';
@@ -186,22 +185,41 @@ export interface CompanionRouterDeps {
    * you"; without it, never.
    */
   conversationWaiting?: (nodeId: string) => boolean;
+  /**
+   * A settings change resumed Michi (`paused: false`): server.ts retries the
+   * Pages upkeep that stopped itself, as POST /meta-agent/resume does.
+   */
+  resumed?: () => void;
+  /**
+   * A settings change turned Michi off (`paused: true`, Q29): server.ts stops
+   * the turn its conversation `nodeId` runs, denying an approval it waits for.
+   */
+  turnedOff?: (nodeId: string) => Promise<unknown> | void;
+  /**
+   * Get started's Start begins the Pages first run through this
+   * (metaAgent/firstRun.ts startSpacesFirstRun for this machine's owner);
+   * absent without scheduled jobs, where Start with workspace homes is refused.
+   */
+  startFirstRun?: () => void;
 }
 
 /**
  * The Companion (shared/src/companion.ts, DESIGN R2.17): its feed, goals,
- * notes, rules, reminders, cards, brief and settings, and its two streams.
+ * notes, rules, reminders, cards, brief and settings, and its change stream.
  * Mounted under /api after the access middleware, in the desktop app only
  * (never in cloud mode).
  *
  *   GET    /companion                           → CompanionSnapshotDto; its conversation is V, the assistant's (created on first use)
- *   PATCH  /companion/settings                  partial CompanionSettings → snapshot
+ *   PATCH  /companion/settings                  partial CompanionSettings (Pause Michi: paused, pauseFor) → snapshot
  *   POST   /companion/check                     {sources?} → 202 {queued: true}; 409 not_owner in a process without the scheduler lease
  *   POST   /companion/items/seen                {ids ≤ 100} → 204
  *   POST   /companion/items/:id                 CompanionItemAction → CompanionItemDto
- *   POST   /companion/presence                  CompanionPresenceInput → 204
+ *   POST   /companion/presence                  CompanionPresenceInput (a window's), or {systemIdleSeconds} (Electron main's) → 204
  *   POST   /companion/view                      {} → {catchUp} (the panel opened: messages read; "Since you left" after 30 min away)
- *   POST   /companion/welcome                   → {started}
+ *   POST   /companion/welcome                   → {started: false}: there is no welcome turn any more (D17); kept for older windows
+ *   POST   /companion/get-started               CompanionGetStartedInput → snapshot (Get started's Start); 409 scheduler_off
+ *   POST   /companion/get-started/later         {} → snapshot (Not now)
+ *   POST   /companion/off-notice                {} → 204: "Michi is off" was told (or Michi was found on), once
  *   POST   /companion/cards/:id/apply|dismiss   → CompanionCardDto; 409 card_not_pending / card_expired (with `card`); a failed Apply is 200 status failed
  *   PUT    /companion/notes                     {notes} → {notes, notesRevision} (the user's write, whatever the revision)
  *   PUT    /companion/rules                     {rules ≤ 2000} → {rules}
@@ -214,15 +232,13 @@ export interface CompanionRouterDeps {
  *   POST   /companion/runs/:runId/undo          {} → CompanionRunUndoResult (Undo all of a check-in's changes; 404 for any other run)
  *   PATCH  /companion/delegations/:id           {autoSend: false} → CompanionDelegationDto (404 when there is none)
  *   GET    /companion/tray                      → CompanionTrayDto: the tray menu's data, titles only (DESIGN-v2 §5.1)
- *   PUT    /companion/chat-notification-level   {level: all|approval-only|off} → {level} (the renderer's pref, for the
- *                                               notices the backend sends while no window is open, DESIGN-v2 §5.2)
- *   GET    /companion/events                    SSE `companion_changed`; the first frame carries the current revision (reason `status`);
- *                                               and `companion_notice` for each new notice the gate sends (live only: no backlog).
- *                                               Each connection counts as an open window (CompanionEventBus.windowCount)
- *   GET    /companion/notifications/stream      SSE for the Electron notifier: `companion_notice`, the still-valid backlog
- *                                               (the agent's own folded into one when there is more than one), then new ones;
- *                                               and `companion_changed` per change, for the tray. It counts as the notifier
- *   POST   /companion/notifications/:id/ack     → 204
+ *   PUT    /companion/chat-notification-level   {level: all|approval-only|off} → {level} (the renderer's pref, Settings ›
+ *                                               Notifications: what the desktop notifier is sent, services/attention/notificationLevel.ts)
+ *   GET    /companion/events                    SSE `companion_changed`; the first frame carries the current revision (reason `status`)
+ *
+ * Michi's notices are attention records (services/companion/notices.ts):
+ * windows get them on the background feed, Electron main on its desktop feed
+ * (routes/attention.ts), which also carries `companion_changed` for the tray.
  *
  * Bodies are validated strictly: unknown fields, bad values and oversized
  * text are refused with 400 `{ error, code }`.
@@ -246,9 +262,10 @@ export function createCompanionRouter(deps: CompanionRouterDeps): Router {
 
   const snapshot = (): CompanionSnapshotDto => {
     const service = deps.service();
-    return snapshotDto({
+    const current = conversation();
+    const dto = snapshotDto({
       now: clock.now(),
-      conversation: conversation(),
+      conversation: current,
       status: service.status?.(),
       // No live status: the engine does not run here, so no work of the Companion's own does either (B4). The
       // user's own reply in its conversation is not "Working…": nothing would tell this snapshot when it ends.
@@ -256,6 +273,7 @@ export function createCompanionRouter(deps: CompanionRouterDeps): Router {
       // Without a live one, the snapshot shows the latest stored "Since you left".
       catchUp: service.catchUp?.(),
     });
+    return { ...dto, getStarted: companionGetStarted(current?.nodeId ?? null), offNoticeAt: companionOffNoticeAt() };
   };
 
   router.get('/companion', handle((_req, res) => {
@@ -288,19 +306,34 @@ export function createCompanionRouter(deps: CompanionRouterDeps): Router {
     res.json(tray);
   }));
 
-  // The renderer's chat notification level, so the backend notifies by it while no window is open (DESIGN-v2 §5.2).
+  // The renderer's notification level, so the desktop notifier shows by it while no window is open (DESIGN P4).
   router.put(COMPANION_CHAT_NOTIFICATION_LEVEL_PATH, handle((req, res) => {
     const input = body(req, ['level']);
     if (!isChatNotificationLevel(input.level)) throw invalidRequest(`level must be one of: ${CHAT_NOTIFICATION_LEVELS.join(', ')}`);
-    setChatNotificationLevel(input.level);
+    setNotificationLevel(input.level);
     res.json({ level: input.level });
   }));
 
   router.patch('/companion/settings', handle((req, res) => {
     if (!isRecord(req.body)) throw invalidRequest('Request body must be a JSON object of settings');
     assertPublicCompanionSettingsPatch(req.body);
-    patchCompanionSettings(req.body);
+    const wasPaused = getCompanionSettings(clock.now()).paused;
+    patchCompanionSettings(req.body, clock.now());
     events.emitChanged('settings');
+    // Turned off just now: what its conversation runs stops at that moment, and only then (Q29).
+    const nodeId = conversation()?.nodeId;
+    if (req.body.paused === true && !wasPaused && nodeId && deps.turnedOff) {
+      void Promise.resolve().then(() => deps.turnedOff!(nodeId)).catch((error: unknown) => {
+        log.warn('http', 'stopping the conversation of Michi turned off failed', { err: error instanceof Error ? error.message : String(error) });
+      });
+    }
+    if ((req.body.paused === false || req.body.enabled === true) && !getCompanionSettings(clock.now()).paused && deps.resumed) {
+      try {
+        deps.resumed();
+      } catch (error) {
+        log.warn('http', 'resuming Pages upkeep failed', { err: error instanceof Error ? error.message : String(error) });
+      }
+    }
     res.json(snapshot());
   }));
 
@@ -330,16 +363,29 @@ export function createCompanionRouter(deps: CompanionRouterDeps): Router {
   }));
 
   router.post('/companion/presence', handle(async (req, res) => {
-    const input = body(req, ['active', 'companionFocused', 'lastInputAt', 'composing']);
+    // Electron main's system beacon: only how long the computer has been idle (DESIGN §3.2).
+    if (isRecord(req.body) && 'systemIdleSeconds' in req.body) {
+      const input = body(req, ['systemIdleSeconds']);
+      const idle = input.systemIdleSeconds;
+      if (typeof idle !== 'number' || !Number.isFinite(idle) || idle < 0) throw invalidRequest('systemIdleSeconds must be a number of seconds');
+      await deps.service().onPresence({ active: false, companionFocused: false, lastInputAt: null, composing: false, systemIdleSeconds: idle });
+      res.status(204).end();
+      return;
+    }
+    const input = body(req, ['active', 'companionFocused', 'lastInputAt', 'composing', 'windowId']);
     const lastInputAt = input.lastInputAt;
     if (lastInputAt !== null && (typeof lastInputAt !== 'number' || !Number.isSafeInteger(lastInputAt) || lastInputAt < 0)) {
       throw invalidRequest('lastInputAt must be a time in epoch ms or null');
+    }
+    if (input.windowId !== undefined && (typeof input.windowId !== 'string' || !input.windowId || input.windowId.length > 200)) {
+      throw invalidRequest('windowId must be a non-empty string of at most 200 characters');
     }
     await deps.service().onPresence({
       active: bool(input.active, 'active'),
       companionFocused: bool(input.companionFocused, 'companionFocused'),
       lastInputAt: lastInputAt as number | null,
       composing: input.composing === undefined ? false : bool(input.composing, 'composing'),
+      ...(typeof input.windowId === 'string' ? { windowId: input.windowId } : {}),
     });
     res.status(204).end();
   }));
@@ -351,9 +397,36 @@ export function createCompanionRouter(deps: CompanionRouterDeps): Router {
     res.json({ catchUp: view.catchUp });
   }));
 
-  router.post('/companion/welcome', handle(async (req, res) => {
+  // Get started's Start (D17) takes the welcome's place; a window from before it still asks here, and nothing starts.
+  router.post('/companion/welcome', handle((req, res) => {
     body(req, []);
-    res.json(await deps.service().requestWelcome());
+    res.json({ started: false });
+  }));
+
+  router.post('/companion/get-started', handle((req, res) => {
+    const input = parseGetStartedInput(body(req, ['homes', 'watch']));
+    const now = clock.now();
+    startCompanionGetStarted(input, { startFirstRun: deps.startFirstRun ?? null, nodeId: conversation()?.nodeId ?? null, now });
+    events.emitChanged('settings');
+    // The outside sources just turned on take their first look now, not at the next poll.
+    if (input.watch) {
+      try { deps.service().checkNow(); } catch { /* another Michi process checks: its next poll looks */ }
+    }
+    res.json(snapshot());
+  }));
+
+  // Michi is off, said once (Q29), or it was found on: either way the notice never shows again, in any window.
+  router.post('/companion/off-notice', handle((_req, res) => {
+    markCompanionOffNotice(clock.now());
+    events.emitChanged('settings');
+    res.status(204).end();
+  }));
+
+  router.post('/companion/get-started/later', handle((req, res) => {
+    body(req, []);
+    postponeCompanionGetStarted(conversation()?.nodeId ?? null, clock.now());
+    events.emitChanged('settings');
+    res.json(snapshot());
   }));
 
   const decide = (decision: (id: string, now: number) => CompanionCardDecision | Promise<CompanionCardDecision>) => handle(async (req, res) => {
@@ -493,63 +566,15 @@ export function createCompanionRouter(deps: CompanionRouterDeps): Router {
    * one `companion_changed` frame per change. Closing the response only
    * detaches this subscriber. Reachable over the stream transport
    * (streamTransport.ts STREAM_PATH).
-   *
-   * Also each new notice the single gate sends, as a `companion_notice`
-   * frame (A14): a plain browser has no Electron notifier and shows these
-   * itself; an Electron window ignores them (its main process gets its own,
-   * below). This feed is not a notifier: it never acknowledges, marks
-   * delivered or folds a notice, and it replays no backlog on connect, since
-   * nothing here could ever acknowledge one: every reconnect and reload would
-   * show the same notices again until they expire. A browser that was away
-   * sees the rest in the panel, the badge and "Since you left". Delivery
-   * stays the desktop notifier's (GET /companion/notifications/stream).
-   *
-   * Every connection is a window (DESIGN-v2 §5.2): while none is open, the
-   * backend notifies conversations in the renderer's place (chatNotices.ts).
-   * Electron main never opens this feed, so it never counts as one.
    */
   router.get(COMPANION_EVENTS_PATH, handle((_req, res) => {
     const revision = events.currentRevision();
     const observer = openSse(res);
     if (!observer.write(encodeCompanionChangedEvent({ type: 'companion_changed', revision, reason: 'status' }))) return;
     observer.addCleanup(events.subscribe({
-      client: 'window',
-      changed: (event) => { observer.write(encodeCompanionChangedEvent(event)); },
-      notice: (notice) => { observer.write(encodeCompanionNotice(notice)); },
-    }));
-    observer.heartbeat(': keepalive\n\n', KEEPALIVE_MS);
-  }));
-
-  /**
-   * The desktop notifier's feed (the Electron main process, over plain HTTP:
-   * not in the stream transport's allowlist). On connect, the notices still
-   * worth showing (unexpired, an item still open at its version), the
-   * agent's own folded into one when there is more than one; then each new
-   * one. The notifier acknowledges each notice it shows. Also a
-   * `companion_changed` frame per change, after which the tray fetches GET
-   * /companion/tray again (DESIGN-v2 §5.1). It is the notifier: while it is
-   * connected no notice wakes the app.
-   */
-  router.get(COMPANION_NOTIFICATIONS_PATH, handle((_req, res) => {
-    const replay = replayCompanionNotices(clock.now());
-    const observer = openSse(res);
-    if (!observer.write(': connected\n\n')) return;
-    for (const notice of replay) {
-      if (!observer.write(encodeCompanionNotice(notice))) return;
-    }
-    observer.addCleanup(events.subscribe({
-      client: 'notifier',
-      notice: (notice) => { observer.write(encodeCompanionNotice(notice)); },
       changed: (event) => { observer.write(encodeCompanionChangedEvent(event)); },
     }));
     observer.heartbeat(': keepalive\n\n', KEEPALIVE_MS);
-  }));
-
-  router.post('/companion/notifications/:id/ack', handle((req, res) => {
-    const id = idParam(req);
-    body(req, []);
-    if (acknowledgeCompanionNotice(id, clock.now()) === 'missing') throw notFound('Notice not found');
-    res.status(204).end();
   }));
 
   return router;

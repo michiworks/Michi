@@ -53,6 +53,8 @@ import { isSystemWorkspace } from '../../state/assistant/systemWorkspace';
 import { useCompanionName } from '../../state/companion/companionName';
 import { DARK_PALETTES } from './tokens';
 import { prefersReducedMotion } from '../../hooks/useReducedMotion';
+import { resetTemporaryChatDraft, setTemporaryChatDraft, useTemporaryChatDraft } from '../../state/temporaryChatDraft';
+import { TemporaryChatGlyph } from './TemporaryChat';
 
 export const TOPBAR_HEIGHT = 44;
 /** The breadcrumb's bold title (active thread, Michi project). */
@@ -186,6 +188,10 @@ export default function TerminalTopbar({
   );
   const paneKinds = useStructuralSelector(
     (nodesMap) => openPanes.map((id) => paneItems[id]?.kind ?? nodesMap[id]?.kind ?? 'chat'),
+    shallowArrayEqual,
+  );
+  const paneTemporary = useStructuralSelector(
+    (nodesMap) => openPanes.map((id) => !paneItems[id] && nodesMap[id]?.temporary === true),
     shallowArrayEqual,
   );
   // Running subagents and workflows per chat pane (the caption badge);
@@ -355,6 +361,12 @@ export default function TerminalTopbar({
   // until one is.
   const showsHome = page === 'home' || dashboardShowsHome;
   const showWorkspaceControls = page !== 'scheduled' && page !== 'spaces' && page !== 'space' && !showsHome;
+  // Home's temporary-chat switch is for the chat Home starts next: leaving
+  // Home turns it off, so a later chat is never temporary by accident.
+  const temporaryChat = useTemporaryChatDraft();
+  useEffect(() => { if (!showsHome) resetTemporaryChatDraft(); }, [showsHome]);
+  // The pane a phone's title names.
+  const phoneTitlePane = Math.max(0, openPanes.indexOf(focusedPane ?? ''));
   // Michi pages are global, not thread-scoped: All threads is a bare label, a
   // workspace document gets a ‹ back crumb plus the Michi project's title
   // (MichiProjectCrumb, the only part of the topbar that follows Michi data).
@@ -648,7 +660,8 @@ export default function TerminalTopbar({
             }}
           >
             {/* Another pane's name only when the focused one is not open here. */}
-            {paneTitles[Math.max(0, openPanes.indexOf(focusedPane ?? ''))] || 'Michi'}
+            {paneTemporary[phoneTitlePane] && <TemporaryChatGlyph size={16} inline />}
+            {paneTitles[phoneTitlePane] || 'Michi'}
           </div>
         )}
         <MenuPresence>{titleMenu && phone && (() => {
@@ -767,6 +780,7 @@ export default function TerminalTopbar({
                     isNew={isCellNew}
                     backgroundWork={paneBackgroundWork(i)}
                     kind={paneKinds[i]}
+                    temporary={paneTemporary[i]}
                     onFocus={focusPane}
                     onClose={closePane}
                     onCloseOthers={closeOtherPanes}
@@ -1022,6 +1036,19 @@ export default function TerminalTopbar({
             </TopbarIconButton>
           )}
           </ResponsiveToolbar>}
+          {/* Every area: a machine's sign-in is not a workspace's. Hidden until a session has an hour left. */}
+          {/* Home only: the chat it starts next is temporary (memory off), chosen before its first message. */}
+          {showsHome && (
+            <TopbarIconButton
+              onClick={() => setTemporaryChatDraft(!temporaryChat)}
+              active={temporaryChat}
+              label={temporaryChat ? 'Turn off temporary chat' : 'Temporary chat'}
+              tooltip={temporaryChat ? 'Turn off temporary chat' : 'Temporary chat'}
+              className="topbar-temporary-chat"
+            >
+              <TemporaryChatGlyph size={14} />
+            </TopbarIconButton>
+          )}
           {/* Every area, with or without a workspace: the Companion is global. */}
           <CompanionTopbarButton />
           {phone && workspaceReady && page === 'dashboard' && <MobilePaneSwitcher />}

@@ -116,6 +116,12 @@ export interface UserSendMeta {
   /** Restore transient composer attachments/comments after a rejected start. */
   onRejected?: () => void;
   crewMemoryMode?: import('michi-shared').CrewMemoryMode;
+  /**
+   * Home's first message of a temporary chat (ChatNodeState.temporary): the
+   * ensure-session that creates its session asks for it. Ignored once the
+   * chat has a session.
+   */
+  temporary?: boolean;
   permissionMode?: import('michi-shared').ChatPermissionMode;
   /** Approve for me on top of `permissionMode: 'ask'` (Kiro V3). */
   approveForMe?: boolean;
@@ -384,6 +390,14 @@ export interface ChatNodeState {
   /** Server-owned: the Scheduled-only job whose run made this thread; it shows
    * only on the Scheduled page until moved to the workspace (cleared). */
   scheduledOnlyJobId?: string | null;
+  /**
+   * Server-owned: a temporary chat (nodes.memory_mode 'off'), chosen on Home
+   * before its first message and never changed after. It reads and writes no
+   * memory, and other chats can't read it. Hydrated read-only, never written
+   * back by workspace sync; a branch made here takes its parent's at once
+   * (the backend derives it durably).
+   */
+  temporary?: boolean;
   permissionMode?: import('michi-shared').ChatPermissionMode;
   /** Approve for me on top of `permissionMode: 'ask'` (Kiro V3). Server-owned, like permissionMode. */
   permissionApproveForMe?: boolean;
@@ -541,11 +555,6 @@ export interface ChatNodeState {
   multiModelRunId?: string;
   /** Server-owned: the branch got only its prompt, not the parent's history (nodes.fresh_context). */
   freshContext?: true;
-  /**
-   * Server-durable first prompt for an agent-spawned child. This is a one-shot
-   * outbox item, not a user composer draft; clear it only after turn_start.
-   */
-  pendingSpawnPrompt?: string;
   /**
    * Unix ms when this node was soft-deleted. Presence means it's in the
    * trash - renderers / tree walkers skip it. Absent = live. Cleared on
@@ -843,7 +852,8 @@ export interface Project {
 }
 
 export type ChatAction =
-  | { type: 'create'; nodeId: string; projectId: string; parentNodeId?: string; mergeSources?: string[]; modeId?: string }
+  /** `temporary`: Home started it as a temporary chat; a branch takes its parent's. */
+  | { type: 'create'; nodeId: string; projectId: string; parentNodeId?: string; mergeSources?: string[]; modeId?: string; temporary?: boolean }
   | { type: 'set-permission-mode'; nodeId: string; mode: import('michi-shared').ChatPermissionMode; approveForMe?: boolean }
   | { type: 'set-ultracode'; nodeId: string; enabled: boolean }
   | {
@@ -994,9 +1004,8 @@ export type ChatAction =
       type: 'agent-spawn';
       parentNodeId: string;
       projectId: string;
-      nodes: Array<{ nodeId: string; chatId: string; title: string; prompt: string; runtimeId?: RuntimeId }>;
+      nodes: Array<{ nodeId: string; chatId: string; title: string; runtimeId?: RuntimeId }>;
     }
-  | { type: 'spawn-prompt-started'; nodeId: string }
   | { type: 'permission-request'; nodeId: string; permission: PermissionRequest }
   | { type: 'permission-resolved'; nodeId: string; requestId?: number }
   | { type: 'user-input-request'; nodeId: string; assistantId?: string; userInput: UserInputRequest }
@@ -1204,7 +1213,7 @@ export interface ChatContextValue {
    * surface instead of Trash and exempt from trash-only purge flows.
    */
   archiveNode: (nodeId: string) => void;
-  /** Restore the most-recently-deleted group. Returns the root nodeId of the restored subtree, or null if nothing to restore. Cmd+Z binds to this. */
+  /** Restore the most-recently-deleted group. Returns the root nodeId of the restored subtree, or null if nothing to restore. ⌘Z uses the window's undo history (state/undoStack.ts) instead. */
   restoreLastDeletion: () => string | null;
   /** Restore a specific deletion group. Returns the root nodeId, or null. */
   restoreDeletion: (groupId: string) => string | null;
@@ -1284,6 +1293,8 @@ export interface ChatContextValue {
   adoptTerminalPane: (launcherPaneId: string, terminalPaneId: string) => void;
   /** Show a terminal a backend already runs in a launcher slot. */
   adoptBackendTerminal: (launcherPaneId: string, terminal: { terminalId: string; cwd: string }, connectionId: string) => void;
+  /** Show a conversation of the launcher's workspace in its slot. */
+  openNodeInLauncherPane: (launcherPaneId: string, nodeId: string) => void;
   /** Open a standalone file viewer without inserting it into the chat graph. */
   openFilePane: (filePath: string, options?: { parseSourceLocation?: boolean }) => string;
   /** Open a workspace-owned native Page beside chat in the active pane slot. */
@@ -1327,7 +1338,8 @@ export interface ChatContextValue {
   selection: ReadonlySet<string>;
   toggleSelection: (nodeId: string) => void;
   clearSelection: () => void;
-  createThread: (modeId?: string) => string | null;
+  /** `temporary`: a temporary chat (Home's switch), marked as one at once. */
+  createThread: (modeId?: string, options?: { temporary?: boolean }) => string | null;
   setChatPermissionMode: (nodeId: string, choice: import('michi-shared').ChatPermissionChoice) => Promise<void>;
   /** Save the chat's Ultracode choice; its live session takes it at once. */
   setChatUltracode: (nodeId: string, enabled: boolean) => Promise<void>;
@@ -1556,6 +1568,7 @@ export type ChatActionsValue = Pick<
   | 'activateLauncherPane'
   | 'adoptTerminalPane'
   | 'adoptBackendTerminal'
+  | 'openNodeInLauncherPane'
   | 'openFilePane'
   | 'openPagePane'
   | 'openBrowserPane'

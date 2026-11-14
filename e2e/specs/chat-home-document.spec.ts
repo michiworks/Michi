@@ -46,13 +46,17 @@ test('Chat Home renders and edits a native Page below its working composer, surv
   });
   await page.goto('/');
   const home = page.locator('.home-page');
-  await expect(home).toHaveAttribute('data-default-layout', 'true');
-  await expect(page.getByRole('heading', { name: 'Another road diverged in a yellow wood.', exact: false })).toBeVisible();
+  await expect(home).toHaveAttribute('aria-busy', 'true');
+  await expect(page.locator('.home-card-skeleton')).toHaveCount(3);
   await page.locator(COMPOSER_EDITOR).first().fill('A draft while Pages loads');
+  // Home's composer stays where it is in every state below, loading included.
+  const composerTop = async () => (await page.locator('.home-compose').boundingBox())!.y;
+  const loadingTop = await composerTop();
   releaseHome();
   const body = page.getByRole('region', { name: 'Home content' });
   await expect(body.getByRole('heading', { name: 'My weekly focus' })).toBeVisible();
-  await expect(home).not.toHaveAttribute('data-default-layout');
+  await expect(home).not.toHaveAttribute('aria-busy');
+  expect(await composerTop()).toBe(loadingTop);
   await expect(page.locator(COMPOSER_EDITOR).first()).toContainText('A draft while Pages loads');
   const links = body.locator('[data-region-id="links"]');
   const todos = body.locator('[data-region-id="todos"]');
@@ -91,6 +95,7 @@ test('Chat Home renders and edits a native Page below its working composer, surv
   await page.reload();
   await expect(body).toHaveCount(0);
   await expect(page.getByRole('heading', { name: 'Another road diverged in a yellow wood.', exact: false })).toBeVisible();
+  expect(await composerTop()).toBe(loadingTop);
   await expect(page.locator('.terminal-sidebar').getByRole('button', { name: /^All threads/ })).toHaveCount(0);
   await openArea(page, 'settings');
   await settings.getByRole('button', { name: 'Appearance', exact: true }).click();
@@ -102,8 +107,10 @@ test('Chat Home renders and edits a native Page below its working composer, surv
   contentMode = 'hidden';
   await page.reload();
   await expect(page.locator('.home-page')).toBeVisible();
-  await expect(home).not.toHaveAttribute('data-default-layout');
+  await expect(home).not.toHaveAttribute('aria-busy');
+  await expect(page.locator('.home-default-headline')).toHaveCount(0);
   await expect(body).toHaveCount(0);
+  expect(await composerTop()).toBe(loadingTop);
   await expect(page.locator('[data-testid="home-card"]')).toHaveCount(0);
   contentMode = 'default';
   await page.reload();

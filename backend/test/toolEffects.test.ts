@@ -41,8 +41,8 @@ import { makeCheckinNode } from './helpers/checkinNodes';
 const CHECKIN = assistantToolProfile('checkin');
 /** The three deep reads a check-in keeps (Q2): outside reads, but only of the user's own services. */
 const CHECKIN_DEEP_READ_TOOLS: readonly string[] = [];
-/** The channels a check-in keeps: cards the user applies, and the quiet end. */
-const CHECKIN_CHANNEL_TOOLS: readonly string[] = ['companion_propose', 'nothing_to_do'];
+/** The channels a check-in keeps: cards the user applies, its line for Home, and the quiet end. */
+const CHECKIN_CHANNEL_TOOLS: readonly string[] = ['companion_propose', 'companion_headline', 'nothing_to_do'];
 
 /** A slot as the runtimes open one, every callback a runtime can give. */
 function slotFor(nodeId: string, workspaceId: string, extra: Record<string, unknown> = {}): McpSlot {
@@ -138,12 +138,12 @@ describe('the tool effects register (DESIGN-v2 §2.9)', () => {
     });
     assert.deepEqual(outside, []);
     assert.deepEqual(CHECKIN_DEEP_READ_TOOLS.map((name) => MICHI_TOOL_EFFECTS[name]), []);
-    assert.deepEqual(CHECKIN_CHANNEL_TOOLS.map((name) => MICHI_TOOL_EFFECTS[name]), ['channel', 'channel']);
+    assert.deepEqual(CHECKIN_CHANNEL_TOOLS.map((name) => MICHI_TOOL_EFFECTS[name]), ['channel', 'channel', 'channel']);
     for (const absent of ['ask_user', 'start_conversation', 'send_to_thread', 'companion_session_send', 'companion_check_now', 'companion_set_name',
       'create_scheduled_job', 'spawn_branches', 'spawn_agent', 'open_url', 'save_artifact', 'web_search', 'fetch_content', 'bash', 'write']) {
       assert.ok(!(CHECKIN_TOOL_NAMES as readonly string[]).includes(absent), absent);
     }
-    assert.equal(CHECKIN_TOOL_NAMES.length, 29);
+    assert.equal(CHECKIN_TOOL_NAMES.length, 30);
     assert.equal(new Set(CHECKIN_TOOL_NAMES).size, CHECKIN_TOOL_NAMES.length);
   });
 

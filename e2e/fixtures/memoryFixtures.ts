@@ -1,16 +1,22 @@
 import type { Route } from '@playwright/test';
 import type {
-  ConversationMemoryMode, MemoryChangedEvent, MemoryMode, MemoryProfileResponse, MemoryRecord, MemoryScope, ReplyMemorySource,
+  MemoryChangedEvent, MemoryMode, MemoryProfileResponse, MemoryRecord, MemoryScope, ReplyMemorySource,
 } from '../../shared/src/memory';
 
 /**
  * Browser-only Michi Memory: /api/memories (with reset), /api/memory-settings,
- * the change feed, automatic memory's status, the profile of the user and a
- * conversation's memory setting, answered from in-memory state.
- * installMockApi uses an empty instance by default; a spec that needs data
- * seeds its own and passes `handle` as `custom`. No backend or SQLite. With
- * `sources`, what each reply was based on (GET /nodes/:id/memory-sources)
- * and Don't recall (POST /memory-recall/hide) answer too.
+ * the change feed, automatic memory's status and the profile of the user,
+ * answered from in-memory state. installMockApi uses an empty instance by
+ * default; a spec that needs data seeds its own and passes `handle` as
+ * `custom`. No backend or SQLite. With `sources`, what each reply was based
+ * on (GET /nodes/:id/memory-sources) and Don't recall (POST
+ * /memory-recall/hide) answer too.
+ *
+ * Temporary chats (nodes.memory_mode 'off'): the controller notes every
+ * ensure-session and its `temporary`, leaving the answer to installMockApi,
+ * and a chat that asked for one is temporary from then on, as are the ids in
+ * `temporaryChats` (a seeded row with memory_mode 'off'). Their replies were
+ * based on nothing.
  *
  * The change feed answers each request at once with the changes queued by
  * `announce` and then ends, so the app reconnects (after its backoff) for the
@@ -26,11 +32,11 @@ export interface MemoryMockOptions {
   notice?: { migratedFromExplicit: boolean; noticeSeen: boolean };
   /** About the user, each line's refs naming seeded records by id; omitted answers as a backend without it. */
   profile?: { lines: Array<{ topic: string; text: string; refs: string[] }>; builtAt: number; version: number };
-  /** Answer GET/PUT /api/nodes/:id/memory-mode (every chat starts in learn); omitted, chats show no memory control. */
-  conversations?: boolean;
+  /** Node ids of seeded temporary chats (rows with memory_mode 'off'). */
+  temporaryChats?: string[];
   /**
-   * What each reply was based on, by assistant message id: GET /api/nodes/:id/memory-sources answers these (a chat set
-   * to Off answers none, a forgotten memory leaves them). Omitted, the route answers as a backend without it.
+   * What each reply was based on, by assistant message id: GET /api/nodes/:id/memory-sources answers these (a
+   * temporary chat answers none, a forgotten memory leaves them). Omitted, the route answers as a backend without it.
    */
   sources?: Record<string, ReplyMemorySource[]>;
   /** How long GET memory-sources waits before it answers (ms). */
@@ -47,8 +53,10 @@ export interface MemoryMockController {
   readonly writes: string[];
   /** The JSON bodies of those writes, in the same order (null for none). */
   readonly writeBodies: unknown[];
-  /** Each conversation's memory setting by node id, as the last request left it. */
-  readonly conversationModes: Record<string, ConversationMemoryMode>;
+  /** Every ensure-session, in order: the node and whether it asked for a temporary chat. */
+  readonly ensureSessions: Array<{ nodeId: string; temporary: boolean }>;
+  /** The temporary chats' node ids: seeded, or asked for by an ensure-session. */
+  readonly temporaryChats: ReadonlySet<string>;
   /** The message ids each GET memory-sources asked about, in order. */
   readonly sourceRequests: string[][];
   /** Queues changes for the next change feed request. */
@@ -85,10 +93,11 @@ export function createMemoryMock(options: MemoryMockOptions = {}): MemoryMockCon
     mode: stored(options.mode ?? 'auto'),
     notice: options.notice ? { ...options.notice } : null,
     profile: options.profile ? { ...options.profile, lines: [...options.profile.lines], rebuildRequested: false } : null,
-    conversations: {} as Record<string, ConversationMemoryMode>,
+    temporaryChats: new Set(options.temporaryChats ?? []),
   };
   const writes: string[] = [];
   const writeBodies: unknown[] = [];
+  const ensureSessions: Array<{ nodeId: string; temporary: boolean }> = [];
   const sourceRequests: string[][] = [];
   const hiddenDocs = new Set<number>();
   let queued: MemoryChangedEvent[] = [];
@@ -113,11 +122,19 @@ export function createMemoryMock(options: MemoryMockOptions = {}): MemoryMockCon
     const url = new URL(request.url());
     const path = url.pathname.replace(/^.*?\/api/, '');
     const method = request.method();
-    const conversation = /^\/nodes\/([^/]+)\/memory-mode$/.exec(path);
-    if (conversation && !options.conversations) return false;
+    const ensure = method === 'POST' ? /^\/nodes\/([^/]+)\/ensure-session$/.exec(path) : null;
+    if (ensure) {
+      // Noted only: installMockApi answers it.
+      const nodeId = decodeURIComponent(ensure[1]);
+      let temporary = false;
+      try { temporary = (request.postDataJSON() as { temporary?: unknown } | null)?.temporary === true; } catch { temporary = false; }
+      ensureSessions.push({ nodeId, temporary });
+      if (temporary) state.temporaryChats.add(nodeId);
+      return false;
+    }
     const replySources = /^\/nodes\/([^/]+)\/memory-sources$/.exec(path);
     if ((replySources || path === '/memory-recall/hide') && !options.sources) return false;
-    if (!conversation && !replySources && path !== '/memory-recall/hide' && path !== '/memory-settings' && path !== '/memories'
+    if (!replySources && path !== '/memory-recall/hide' && path !== '/memory-settings' && path !== '/memories'
       && !path.startsWith('/memories/') && !path.startsWith('/memory-extraction/') && !path.startsWith('/memory-profile')) return false;
     if (method !== 'GET') {
       writes.push(`${method} ${path}`);
@@ -145,7 +162,7 @@ export function createMemoryMock(options: MemoryMockOptions = {}): MemoryMockCon
       const ids = (url.searchParams.get('messages') ?? '').split(',').filter(Boolean);
       sourceRequests.push(ids);
       if (options.sourcesDelayMs) await new Promise((resolve) => setTimeout(resolve, options.sourcesDelayMs));
-      const off = state.conversations[nodeId] === 'off' || state.mode === 'off';
+      const off = state.temporaryChats.has(nodeId) || state.mode === 'off';
       const live = (source: ReplyMemorySource) => (source.kind === 'memory' ? !!find(source.memoryId) : !hiddenDocs.has(source.docId));
       const messages = off ? [] : ids.flatMap((messageId) => {
         const listed = (options.sources?.[messageId] ?? []).filter(live);
@@ -158,18 +175,6 @@ export function createMemoryMock(options: MemoryMockOptions = {}): MemoryMockCon
       const { docId } = request.postDataJSON() as { docId: number };
       hiddenDocs.add(docId);
       await json(route, { hidden: true });
-      return true;
-    }
-    if (conversation) {
-      const nodeId = decodeURIComponent(conversation[1]);
-      const previous = state.conversations[nodeId] ?? 'learn';
-      if (method === 'PUT') {
-        const mode = (request.postDataJSON() as { mode: ConversationMemoryMode }).mode;
-        state.conversations[nodeId] = mode;
-        await json(route, { mode, hiddenTurns: 0, removedMemories: previous === 'learn' && mode !== 'learn' ? 1 : 0 });
-        return true;
-      }
-      await json(route, { mode: previous });
       return true;
     }
     if (path.startsWith('/memory-profile')) {
@@ -261,7 +266,8 @@ export function createMemoryMock(options: MemoryMockOptions = {}): MemoryMockCon
     get mode() { return state.mode; },
     writes,
     writeBodies,
-    get conversationModes() { return state.conversations; },
+    ensureSessions,
+    get temporaryChats() { return state.temporaryChats; },
     sourceRequests,
     announce(...events) { queued.push(...events); },
     feedRequests: () => feeds,

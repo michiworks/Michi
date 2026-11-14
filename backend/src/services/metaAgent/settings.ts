@@ -1,4 +1,3 @@
-import { listToolApprovals } from './toolApprovals';
 /**
  * The one Meta agent settings record (shared/src/metaAgent.ts). Background
  * maintenance resolves it at the start of every run; nothing copies its
@@ -223,11 +222,13 @@ export function resolveMetaAgentBehaviour(ownerUserId?: string | null): MetaAgen
 }
 
 /**
- * What a run starting now uses: each field of the record, else the global
- * settings read at this moment for the resolved runtime. Call it once at the
- * start of a run and use that answer for the whole run.
+ * Background work (Settings › Michi › Model): what a check-in, a Pages
+ * upkeep run or the Spaces Home summary starting now uses. Each field of the
+ * record, else the global settings read at this moment for the resolved
+ * runtime; never a conversation's composer pick. Call it once at the start of
+ * a run and use that answer for the whole run.
  */
-export function resolveMetaAgentRuntime(ownerUserId?: string | null): MetaAgentResolvedRuntime {
+export function resolveBackgroundRuntime(ownerUserId?: string | null): MetaAgentResolvedRuntime {
   const settings = getMetaAgentSettings(ownerUserId);
   const userId = isCloud() ? ownerUserId ?? undefined : undefined;
   const runtimeId = settings.runtimeId ?? getAgentConfig(userId).runtime;
@@ -237,7 +238,7 @@ export function resolveMetaAgentRuntime(ownerUserId?: string | null): MetaAgentR
 
 /** GET /api/meta-agent. */
 export function metaAgentInfo(ownerUserId?: string | null, now = Date.now(), usage?: MetaAgentUsageToday | null): MetaAgentInfo {
-  const resolved = resolveMetaAgentRuntime(ownerUserId);
+  const resolved = resolveBackgroundRuntime(ownerUserId);
   const availability = maintenanceRuntimeAvailability(resolved.runtimeId);
   const guard = (toolset: MetaAgentToolset) => getMetaAgentGuardStatus(toolset, () => resolved, ownerUserId);
   return {
@@ -246,7 +247,6 @@ export function metaAgentInfo(ownerUserId?: string | null, now = Date.now(), usa
     availability: { available: availability.available, reason: availability.available ? null : availability.reason ?? null },
     guard: { maintenance: guard('maintenance'), chat: null },
     usageToday: usage === undefined ? usageToday(ownerUserId, now) : usage,
-    toolApprovals: listToolApprovals(ownerUserId),
   };
 }
 

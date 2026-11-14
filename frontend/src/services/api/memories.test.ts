@@ -4,7 +4,6 @@ import {
   MemoryApiError,
   createMemory,
   deleteMemory,
-  fetchConversationMemoryMode,
   fetchMemoryExtractionStatus,
   fetchMemoryProfile,
   fetchReplyMemorySources,
@@ -16,7 +15,6 @@ import {
   markMemoryNoticeSeen,
   removeMemoryProfileLine,
   resetMemories,
-  saveConversationMemoryMode,
   saveMemorySettings,
   setMemoryExtractionPaused,
   subscribeMemoryChanges,
@@ -129,9 +127,7 @@ describe('what a reply was based on', () => {
   });
 });
 
-describe('the profile, reset, the notice and a conversation’s setting', () => {
-  const BASE = 'http://localhost:3000/api';
-
+describe('the profile, reset and the notice', () => {
   it('keeps each profile line’s place in the backend’s list, and reads a backend without a profile as none', async () => {
     answer(200, {
       lines: [
@@ -165,20 +161,6 @@ describe('the profile, reset, the notice and a conversation’s setting', () => 
     answer(200, { mode: 'auto', migratedFromExplicit: true, noticeSeen: true });
     expect(await markMemoryNoticeSeen()).toEqual({ mode: 'auto', migratedFromExplicit: true, noticeSeen: true });
     expect(JSON.parse(String(lastCall().init?.body))).toEqual({ noticeSeen: true });
-  });
-
-  it('reads and saves a conversation’s setting on its backend, telling a chat it lacks from a backend without the setting', async () => {
-    answer(200, { mode: 'use_only' });
-    expect(await fetchConversationMemoryMode(BASE, 'n/1')).toBe('use_only');
-    expect(lastCall().url.pathname).toBe('/api/nodes/n%2F1/memory-mode');
-    answer(200, { mode: 'off', hiddenTurns: 3, removedMemories: 2 });
-    expect(await saveConversationMemoryMode(BASE, 'n-1', 'off')).toEqual({ mode: 'off', removedMemories: 2 });
-    expect(lastCall().init?.method).toBe('PUT');
-    expect(JSON.parse(String(lastCall().init?.body))).toEqual({ mode: 'off' });
-    answer(404, { error: 'Conversation not found', code: 'not_found' });
-    expect(isMemoryNotFound(await fetchConversationMemoryMode(BASE, 'n-new').catch((error: unknown) => error))).toBe(true);
-    answer(200, { __unmocked: '/nodes/n-1/memory-mode' });
-    expect(isMemoryUnavailable(await fetchConversationMemoryMode(BASE, 'n-1').catch((error: unknown) => error))).toBe(true);
   });
 });
 

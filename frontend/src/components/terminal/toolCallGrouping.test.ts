@@ -398,6 +398,12 @@ describe('step rows', () => {
     expect(stepView(bash('3', 'sleep 60', 'Wait', 'interrupted'), false).frag).toEqual({ tone: 'calm', text: 'stopped' });
     const edit = file('4', 'edit', 'frontend/src/components/terminal/MessageBlock.tsx', 'failed', 'Error: old_string not found in file');
     expect(stepView(edit, false)).toMatchObject({ lead: 'Edit MessageBlock.tsx', rest: 'old_string not found in file', frag: { tone: 'danger', text: 'failed' } });
+    // The red error line already says it failed: the bare word is left to screen
+    // readers. An exit code adds information and stays shown, as does "failed"
+    // when there is no error line to say it.
+    expect(stepView(edit, false).frag).toEqual({ tone: 'danger', text: 'failed', srOnly: true });
+    expect(stepView(e2e, false).frag).toEqual({ tone: 'danger', text: `exit${NB}1` });
+    expect(stepView(file('4b', 'edit', 'a.ts', 'failed'), false).frag).toEqual({ tone: 'danger', text: 'failed' });
     // Kiro wraps output as JSON.
     expect(toolErrorLine(bash('5', 'ls /nope', undefined, 'failed', '{"output":"ls: cannot access /nope: No such file\\nmore"}'))).toBe('ls: cannot access /nope: No such file');
     // An error that opens JSON goes on to say what was wrong.

@@ -27,6 +27,7 @@ import { getDb } from '../db';
 import { log } from '../logger';
 import { buildMemoryPack, memoryPackSignature, type BuildMemoryPackInput } from '../memory/contextBuilder';
 import { companionTransaction, setRunCheckinNode } from './repository';
+import { usageOfSummaries } from '../backgroundUsage';
 
 export interface CheckinNode {
   workspaceId: string;
@@ -81,13 +82,21 @@ function tablesWithNodeId(): string[] {
 /**
  * Hard-deletes S and every row that names it (see the module comment); only
  * a check-in node, never any other. Its tree's other nodes, if anything ever
- * put one there, go too. Returns whether S's row was there.
+ * put one there, go too. What its replies used is kept on its run first
+ * (companion_runs.usage_json, Q17): nowhere else holds it once S is gone.
+ * Returns whether S's row was there.
  */
 export function purgeCheckinNode(nodeId: string): boolean {
   if (!isCheckinNodeId(nodeId)) throw new Error(`${nodeId} is not a check-in node`);
   const tables = tablesWithNodeId();
   return companionTransaction(() => {
     const db = getDb();
+    const replies = db.prepare(`SELECT json_extract(CASE WHEN json_valid(metadata) THEN metadata ELSE '{}' END, '$.usageSummary') AS usage
+      FROM messages WHERE node_id = ? AND role = 'assistant'`).all(nodeId) as Array<{ usage: string | null }>;
+    const usage = usageOfSummaries(replies.map((reply) => reply.usage));
+    if (Object.keys(usage).length > 0) {
+      db.prepare('UPDATE companion_runs SET usage_json = ? WHERE checkin_node_id = ? AND usage_json IS NULL').run(JSON.stringify(usage), nodeId);
+    }
     const node = db.prepare('SELECT tree_id FROM nodes WHERE id = ?').get(nodeId) as { tree_id: string | null } | undefined;
     const treeIds = new Set<string>(node?.tree_id ? [node.tree_id] : []);
     for (const row of db.prepare('SELECT id FROM trees WHERE root_node_id = ?').all(nodeId) as Array<{ id: string }>) treeIds.add(row.id);

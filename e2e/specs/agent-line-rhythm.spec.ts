@@ -3,8 +3,8 @@ import { installMockApi } from '../fixtures/mockApi';
 
 /**
  * The line chrome's rhythm in a real layout (jsdom has none): a run is set a
- * size below the prose and sits 16px from it on either side, its rows are
- * 28px (36px, 32px for a step, on touch), and an opened run shows twelve step
+ * size below the prose and sits 22px under the prose before it and 4px over
+ * the prose that reports it, its rows are 28px (36px, 32px for a step, on touch), and an opened run shows twelve step
  * rows under its words (six on a phone), scrolling the rest, with the hidden
  * edge faded. The
  * turn is finished, so its work sits in a Work fold above the final answer:
@@ -129,12 +129,12 @@ async function openSteps(page: Page) {
   });
 }
 
-test('a run sits 16px from the prose, a size below it, and opens to twelve step rows that scroll', async ({ page }) => {
+test('a run sits loose above and tight below the prose, a size below it, and opens to twelve step rows that scroll', async ({ page }) => {
   await openChat(page);
-  expect(await measureFold(page)).toEqual({ rowHeight: 28, below: 16 });
+  expect(await measureFold(page)).toEqual({ rowHeight: 28, below: 4 });
   await openWork(page);
   const m = await measure(page);
-  expect(m.runs).toEqual([{ above: 16, below: 16 }, { above: 16, below: null }]);
+  expect(m.runs).toEqual([{ above: 22, below: 4 }, { above: 22, below: null }]);
   // The folded prose is a step quieter than the final answer below it.
   expect(m.noteColor).toBe(m.colors.mid);
   expect(m.noteColor).not.toBe(m.finalColor);
@@ -171,7 +171,7 @@ test('on a phone, rows are 36px and steps 32px, and the step area shows six', as
     const m = await measure(page);
     test.skip(!m.coarse, 'this browser does not report a coarse pointer under touch emulation');
     expect(m.rowHeight).toBe(36);
-    expect(m.runs).toEqual([{ above: 16, below: 16 }, { above: 16, below: null }]);
+    expect(m.runs).toEqual([{ above: 22, below: 4 }, { above: 22, below: null }]);
     const area = await openSteps(page);
     expect(area).toMatchObject({ stepHeight: 32, height: 6 * 32 + 4, overflows: true });
   } finally {

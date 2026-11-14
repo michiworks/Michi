@@ -1,4 +1,4 @@
-export { SourceBackBar, SourcePopoverHost } from './SourceNav';
+export { SourcePopoverHost } from './SourceNav';
 export { SourceReferenceMark } from './SourceReferenceMark';
 export { SourcePopover, runtimeLabel } from './SourcePopover';
 export {

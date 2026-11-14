@@ -2,8 +2,9 @@ import { fireEvent, render, screen, waitFor, within } from '@testing-library/rea
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { PageSummaryDto } from 'michi-shared';
 import { usePageActions } from './usePageActions';
+import { resetUndoStackForTests, undoLatest } from '../../../state/undoStack';
 
-const api = vi.hoisted(() => ({ createPage: vi.fn(), deletePage: vi.fn(), fetchPage: vi.fn(), patchPage: vi.fn(), notify: vi.fn() }));
+const api = vi.hoisted(() => ({ createPage: vi.fn(), deletePage: vi.fn(), restorePage: vi.fn(), fetchPage: vi.fn(), patchPage: vi.fn(), notify: vi.fn() }));
 vi.mock('../../../services/api/pages', () => api);
 vi.mock('../../../state/pages/pageEvents', () => ({ notifyPageChanged: api.notify }));
 
@@ -29,6 +30,7 @@ function Harness({ readOnly = false }: { readOnly?: boolean }) {
 describe('shared page actions', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    resetUndoStackForTests();
     api.fetchPage.mockResolvedValue({ ...pages[1], revision: 9 });
     api.patchPage.mockResolvedValue({});
     api.createPage.mockResolvedValue({ id: 'new-child' });
@@ -44,6 +46,28 @@ describe('shared page actions', () => {
     expect(api.notify).toHaveBeenCalledWith({ ...identity, pageId: 'child' });
     expect(onChanged).toHaveBeenCalledWith('child');
     expect(onOpen).not.toHaveBeenCalled();
+  });
+
+  it('undoes a rename at the revision the page has then', async () => {
+    render(<Harness />);
+    fireEvent.click(screen.getByText('Rename'));
+    fireEvent.change(screen.getByLabelText('Name'), { target: { value: 'Updated notes' } });
+    fireEvent.click(screen.getByText('Save'));
+    await waitFor(() => expect(api.patchPage).toHaveBeenCalledTimes(1));
+    api.fetchPage.mockResolvedValue({ ...pages[1], title: 'Updated notes', revision: 10 });
+    expect(await undoLatest()).toBe('undone');
+    expect(api.patchPage).toHaveBeenLastCalledWith('child', { revision: 10, title: 'Notes' }, identity);
+  });
+
+  it('undoes moving a page to trash by restoring it', async () => {
+    render(<Harness />);
+    fireEvent.click(screen.getByText('Trash'));
+    fireEvent.click(screen.getByRole('button', { name: 'Move to trash' }));
+    await waitFor(() => expect(api.deletePage).toHaveBeenCalledWith('child', identity));
+    api.restorePage.mockResolvedValue({});
+    expect(await undoLatest()).toBe('undone');
+    expect(api.restorePage).toHaveBeenCalledWith('child', identity);
+    expect(api.notify).toHaveBeenLastCalledWith({ ...identity, pageId: 'child' });
   });
 
   it('creates under the selected page and opens the saved child', async () => {

@@ -1,6 +1,6 @@
 import type { ChatPermissionMode, PermissionOption } from 'michi-shared';
 import { ownerMode, type RuntimeSessionOwner } from '../contract/types';
-import type { HostPermissionDecision, PermissionPolicyPort } from '../contract/host';
+import type { ForcedPermissionAsk, HostPermissionDecision, HostTurnGuard, PermissionCallDetail, PermissionPolicyPort } from '../contract/host';
 
 // ---------------------------------------------------------------------------
 // Chat approvals
@@ -30,6 +30,14 @@ export function approvalCoversTool(
 ): boolean {
   return choice === 'allow_session' || (choice === 'allow_always' && !!approvedTool && !!pendingTool
     && canonicalize(approvedTool) === canonicalize(pendingTool));
+}
+
+/** A forced ask's options: the answer approves this one call, never the tool or the session. */
+export function forcedApprovalOptions(): PermissionOption[] {
+  return [
+    { optionId: 'reject_once', name: 'Deny', kind: 'reject_once' },
+    { optionId: 'allow_once', name: 'Allow Once', kind: 'allow_once' },
+  ];
 }
 
 /** The host keeps grants; providers receive only single-use approvals. A request without a tool name cannot be granted. */
@@ -83,16 +91,38 @@ export class ApprovalCoordinator {
   }
 
   /**
-   * Session trust while it holds for this owner and user, otherwise the
-   * host's policy. `hostTool`: see PermissionDecisionRequest.
+   * The host's forced ask for this call (PermissionPolicyPort.forced), or
+   * null. A port that throws counts as forcing one: the call asks.
+   */
+  forcedAsk(owner: RuntimeSessionOwner, ownerUserId: string | null, toolName: string, nativeRequest: boolean,
+    hostTool?: boolean, call?: PermissionCallDetail): ForcedPermissionAsk | null {
+    if (!this.permissions.forced) return null;
+    try {
+      return this.permissions.forced({ owner, ownerUserId, toolName, nativeRequest, ...(hostTool ? { hostTool } : {}), ...(call ? { call } : {}) });
+    } catch {
+      return { reason: 'Michi could not check what this call does, so it asks.' };
+    }
+  }
+
+  /** The host's guard of the owner's running turn (PermissionPolicyPort.turnGuard); `none` when absent or unreadable. */
+  turnGuard(owner: RuntimeSessionOwner | undefined, ownerUserId?: string | null): HostTurnGuard {
+    try { return this.permissions.turnGuard?.(owner, ownerUserId) ?? 'none'; }
+    catch { return 'egress'; }
+  }
+
+  /**
+   * A forced ask first (no trust or grant stands in for it), then session
+   * trust while it holds for this owner and user, otherwise the host's
+   * policy. `hostTool`, `call`: see PermissionDecisionRequest.
    */
   policy(owner: RuntimeSessionOwner, ownerUserId: string | null, toolName: string, nativeRequest: boolean,
-    mode?: ChatPermissionMode, hostTool?: boolean): HostPermissionDecision {
+    mode?: ChatPermissionMode, hostTool?: boolean, call?: PermissionCallDetail): HostPermissionDecision {
+    if (this.forcedAsk(owner, ownerUserId, toolName, nativeRequest, hostTool, call)) return 'ask';
     if (this.sessionTrust && (ownerMode(owner) !== 'interactive' || this.sessionTrust.ownerKey !== trustKey(owner)
       || this.sessionTrust.ownerUserId !== (this.permissions.resolveOwnerUserId(owner, ownerUserId) ?? null)
       || this.sessionTrust.resetToken !== this.resetToken(owner, ownerUserId))) this.sessionTrust = undefined;
     if (ownerMode(owner) === 'interactive' && this.sessionTrust) return 'allow';
-    return this.permissions.decide({ owner, ownerUserId, toolName, nativeRequest, mode, ...(hostTool ? { hostTool } : {}) });
+    return this.permissions.decide({ owner, ownerUserId, toolName, nativeRequest, mode, ...(hostTool ? { hostTool } : {}), ...(call ? { call } : {}) });
   }
 
   /**
@@ -125,8 +155,8 @@ export class ApprovalCoordinator {
     return false;
   }
 
-  /** approvalCoversTool with this coordinator's canonical names. */
-  covers(choice: string | null, approvedTool?: string, pendingTool?: string): boolean {
-    return approvalCoversTool(choice, approvedTool, pendingTool, this.canonicalize);
+  /** approvalCoversTool with this coordinator's canonical names; a forced pending request is never covered. */
+  covers(choice: string | null, approvedTool?: string, pendingTool?: string, pendingForced = false): boolean {
+    return !pendingForced && approvalCoversTool(choice, approvedTool, pendingTool, this.canonicalize);
   }
 }

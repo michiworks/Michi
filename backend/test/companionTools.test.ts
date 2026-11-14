@@ -81,6 +81,9 @@ import {
   type CompanionToolDeps,
 } from '../src/services/companion/tools';
 import type { CompanionTurnKind, ItemDraft } from '../src/services/companion/types';
+import { turnCompanionOn } from './helpers/backgroundWork';
+import { getNotificationLevel, setNotificationLevel } from '../src/services/attention/notificationLevel';
+import { readPrefs } from '../src/services/prefsConfig';
 
 const T0 = new Date(2026, 10, 5, 9, 12, 0, 0).getTime();
 const HOUR = 60 * 60_000;
@@ -238,6 +241,7 @@ describe('the Companion\'s own tools', () => {
     delete process.env.MICHI_CLOUD;
     closeDb();
     initDb(); enableSyntheticCompanionSources();
+    turnCompanionOn();
     companion = ensureAssistant();
     nextSeq = 1;
     emitted = [];
@@ -407,6 +411,33 @@ describe('the Companion\'s own tools', () => {
       assert.equal(refused.isError, true);
       assert.match(refused.text, /^REFUSED: companion_set_name is only for a change the user just asked for/);
       assert.equal(getCompanionSettings().displayName, 'Michi');
+    });
+
+    test('companion_set_notifications sets the user\'s one level, the pref windows read and its copy, only in the user\'s own turn, also one that read untrusted material (D19)', async () => {
+      setNotificationLevel('approval-only');
+      for (const [attribution, message] of [
+        [hiddenTurn(), /^REFUSED: companion_set_notifications is only for a change the user just asked for/],
+        [UNATTRIBUTED, /^REFUSED: Michi cannot tell which turn this call belongs to, so companion_set_notifications did nothing/],
+      ] as const) {
+        const refused = await call('companion_set_notifications', ctx(attribution), { level: 'off' });
+        assert.equal(refused.isError, true);
+        assert.match(refused.text, message);
+      }
+      assert.equal(getNotificationLevel(), 'approval-only');
+      assert.equal(readPrefs()?.notifications, undefined);
+
+      const read = userTurn('turn-user-1');
+      assert.equal((await call('companion_items', ctx(read), {})).isError, false);
+      assert.deepEqual(await call('companion_set_notifications', ctx(read), { level: 'off' }),
+        { text: 'Notifications are now "Off" (Settings › Notifications); they were "Only when something needs me".', isError: false },
+        'before any window saved its pref, the level replaced is the copy');
+      assert.deepEqual([readPrefs()?.notifications, getNotificationLevel(), emitted], ['off', 'off', ['notifications']]);
+      assert.deepEqual(await call('companion_set_notifications', ctx(userTurn('turn-user-2')), { level: 'all' }),
+        { text: 'Notifications are now "All" (Settings › Notifications); they were "Off".', isError: false });
+      const wrong = await call('companion_set_notifications', ctx(userTurn('turn-user-3')), { level: 'quiet' });
+      assert.equal(wrong.isError, true);
+      assert.match(wrong.text, /^INVALID_ARGUMENT: level/);
+      assert.equal(readPrefs()?.notifications, 'all');
     });
 
     test('tool rows name the agent by its name, never "Companion" (§1.5)', () => {
@@ -1102,10 +1133,10 @@ describe('the Companion\'s own tools', () => {
       assert.match(every.text, /\[SOURCES OFF IN SETTINGS — not watched, so nothing from them is listed\] email, calendar\n/);
       assert.deepEqual(asked, [['cr'], undefined]);
 
-      // The agent turned off: every source is off.
-      patchCompanionSettings({ enabled: false });
-      assert.match((await call('companion_check_now', user, {})).text, /^Michi did not check Michi conversations, CRs, pipelines, email, calendar: off in settings/);
-      assert.equal(checks, 2);
+      // Michi paused: its sources stay on, and Check now still checks them.
+      patchCompanionSettings({ paused: true });
+      assert.doesNotMatch((await call('companion_check_now', user, {})).text, /^Michi did not check/);
+      assert.equal(checks, 3);
     });
   });
 
@@ -1114,14 +1145,14 @@ describe('the Companion\'s own tools', () => {
       const hidden = hiddenTurn();
       const quiet = await call('nothing_to_do', ctx(hidden), { note: 'No change worth\na message' });
       assert.deepEqual(quiet, { text: 'Ending quietly. Write nothing more and call no other tool.', isError: false });
-      assert.deepEqual(endCompanionHiddenTurn(hidden.turnId), { quietNote: 'No change worth a message', quietEnd: true });
-      assert.deepEqual(endCompanionHiddenTurn(hidden.turnId), { quietNote: null, quietEnd: false }, 'the turn is over');
+      assert.deepEqual(endCompanionHiddenTurn(hidden.turnId), { quietNote: 'No change worth a message', quietEnd: true, headline: null });
+      assert.deepEqual(endCompanionHiddenTurn(hidden.turnId), { quietNote: null, quietEnd: false, headline: null }, 'the turn is over');
 
       // Without a note the turn still ends quiet.
       const bare = hiddenTurn();
       assert.equal((await call('nothing_to_do', ctx(bare), {})).isError, false);
-      assert.deepEqual(endCompanionHiddenTurn(bare.turnId), { quietNote: null, quietEnd: true });
-      assert.deepEqual(endCompanionHiddenTurn('cmp-run-never'), { quietNote: null, quietEnd: false }, 'a turn that never called it');
+      assert.deepEqual(endCompanionHiddenTurn(bare.turnId), { quietNote: null, quietEnd: true, headline: null });
+      assert.deepEqual(endCompanionHiddenTurn('cmp-run-never'), { quietNote: null, quietEnd: false, headline: null }, 'a turn that never called it');
     });
 
     test('is refused when a person is waiting, and in the first welcome; a refused call ends nothing', async () => {
@@ -1131,10 +1162,37 @@ describe('the Companion\'s own tools', () => {
       const welcome = await call('nothing_to_do', ctx(welcomeTurn), { note: 'skip' });
       assert.equal(welcome.isError, true);
       assert.match(welcome.text, /^REFUSED: this is your first welcome/);
-      assert.deepEqual(endCompanionHiddenTurn(welcomeTurn.turnId), { quietNote: null, quietEnd: false });
+      assert.deepEqual(endCompanionHiddenTurn(welcomeTurn.turnId), { quietNote: null, quietEnd: false, headline: null });
       // A turn Michi cannot attribute is not proof a person is waiting, nor a hidden turn that may end quiet.
       assert.equal((await call('nothing_to_do', ctx(UNATTRIBUTED), {})).isError, false);
-      assert.deepEqual(endCompanionHiddenTurn(UNATTRIBUTED.turnId), { quietNote: null, quietEnd: false });
+      assert.deepEqual(endCompanionHiddenTurn(UNATTRIBUTED.turnId), { quietNote: null, quietEnd: false, headline: null });
+    });
+  });
+
+  describe('companion_headline (Q45)', () => {
+    test('a check-in keeps its last line for Home, on one line; V\'s turns and an empty line write none', async () => {
+      const hidden = hiddenTurn();
+      assert.deepEqual(await call('companion_headline', ctx(hidden), { text: 'Reading the build failure' }),
+        { text: 'Saved: Home shows it once this check-in ends.', isError: false });
+      assert.equal((await call('companion_headline', ctx(hidden), { text: 'Fixed the flaky test\nand reran it' })).isError, false);
+      assert.equal(endCompanionHiddenTurn(hidden.turnId).headline, 'Fixed the flaky test and reran it', 'the last call counts');
+      assert.equal((await call('companion_headline', ctx(userTurn('turn-user-headline')), { text: 'Hello' })).isError, true, 'never in V');
+      assert.equal((await call('companion_headline', ctx(UNATTRIBUTED), { text: 'Hello' })).isError, true);
+      const blank = hiddenTurn();
+      assert.equal((await call('companion_headline', ctx(blank), { text: '  \n ' })).isError, true);
+      assert.equal(endCompanionHiddenTurn(blank.turnId).headline, null);
+      assert.match(toolNamed('companion_headline').description, /120 characters, never how many things need them/);
+    });
+
+    test('a brief the check-in published gives its headline as the line, unless the check-in wrote its own', async () => {
+      const brief = hiddenTurn('brief');
+      assert.equal((await call('companion_publish_brief', ctx(brief), { headline: 'A quiet Thursday', cards: [], closing: 'That is all.' })).isError, false);
+      assert.equal(endCompanionHiddenTurn(brief.turnId).headline, 'A quiet Thursday');
+      clockNow += DAY;
+      const own = hiddenTurn('brief');
+      await call('companion_publish_brief', ctx(own), { headline: 'Friday', cards: [], closing: 'Done.' });
+      await call('companion_headline', ctx(own), { text: 'Wrapping up the release notes' });
+      assert.equal(endCompanionHiddenTurn(own.turnId).headline, 'Wrapping up the release notes');
     });
   });
 
@@ -1183,7 +1241,7 @@ describe('the Companion\'s own tools', () => {
         text: 'REFUSED: this check-in dismissed 1 item, and the user must hear about it: say in one line what you changed instead of ending quietly.',
         isError: true,
       });
-      assert.deepEqual(endCompanionHiddenTurn(checkin.turnId), { quietNote: null, quietEnd: false }, 'a refused call ends nothing');
+      assert.deepEqual(endCompanionHiddenTurn(checkin.turnId), { quietNote: null, quietEnd: false, headline: null }, 'a refused call ends nothing');
 
       // A page write the check-in page guard noted (W2-E) counts the same.
       const pages = hiddenTurn();
@@ -1196,7 +1254,7 @@ describe('the Companion\'s own tools', () => {
       assert.equal((await call('companion_save_notes', ctx(own), { notes: 'Watch CR-1', expectedRevision: 0 })).isError, false);
       assert.equal((await call('companion_goal_progress', ctx(own), { goalId: goal.id, progress: 'Halfway' })).isError, false);
       assert.equal((await call('nothing_to_do', ctx(own), {})).isError, false);
-      assert.deepEqual(endCompanionHiddenTurn(own.turnId), { quietNote: null, quietEnd: true });
+      assert.deepEqual(endCompanionHiddenTurn(own.turnId), { quietNote: null, quietEnd: true, headline: null });
     });
   });
 

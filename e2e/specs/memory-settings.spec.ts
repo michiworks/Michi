@@ -1,12 +1,12 @@
 import { expect, test, type Page } from '@playwright/test';
-import { bootWithWorkspace, installMockApi } from '../fixtures/mockApi';
+import { installMockApi } from '../fixtures/mockApi';
 import { CONVERSATION_COMPOSER, openSettings, settingsMain } from '../fixtures/shell';
 import { createMemoryMock, memoryChange, memoryRecord, type MemoryMockController } from '../fixtures/memoryFixtures';
 
-// Settings › Memory, its notices and a chat's memory setting against the mock
-// API: no backend, SQLite or agent runtime. The change feed answers with
-// queued changes, the way the backend forwards an agent's or automatic
-// memory's writes.
+// Settings › Memory, its notices and a temporary chat started from Home
+// against the mock API: no backend, SQLite or agent runtime. The change feed
+// answers with queued changes, the way the backend forwards an agent's or
+// automatic memory's writes.
 
 const WORKSPACES = [{ workspace: { id: 'a', name: 'Alpha', created_at: 1 }, trees: [], nodes: [], edges: [], messages: [], contexts: [], artifacts: [] }];
 
@@ -113,7 +113,7 @@ test('About the user: a line’s memories open under Saved memories, Rebuild ask
   await boot(page, memory);
   const settings = await openSettings(page, 'Memory');
   const about = settings.getByRole('region', { name: 'About the user' });
-  await expect(about.getByText('Built 3h ago')).toBeVisible();
+  await expect(about.locator('.settings-section__aside')).toHaveText('Built 3h ago · Rebuild');
   await expect(about.getByRole('heading', { level: 3 })).toHaveText(['Work', 'Home']);
   await expect(settings.getByRole('listitem', { name: 'Prefers pnpm over npm' })).toContainText('From Claude Code');
 
@@ -126,7 +126,7 @@ test('About the user: a line’s memories open under Saved memories, Rebuild ask
 
   const rebuild = about.getByRole('button', { name: 'Rebuild' });
   await rebuild.click();
-  await expect(about.getByText('Rebuilding with automatic memory. This can take a minute.')).toBeVisible();
+  await expect(about.getByText('Rebuilding. This can take a minute.')).toBeVisible();
   await expect(rebuild).toBeDisabled();
 
   const home = about.getByRole('listitem').filter({ hasText: 'Cooks with only an air fryer' });
@@ -144,7 +144,6 @@ test('Delete all memories asks first, then deletes every memory', async ({ page 
   await boot(page, memory);
   const settings = await openSettings(page, 'Memory');
   await expect(settings.getByRole('list', { name: 'Saved memories' }).getByRole('listitem')).toHaveCount(2);
-  await expect(settings.getByText('Deleting a conversation doesn’t delete what Michi learned from it. Delete those memories here.')).toBeVisible();
 
   await settings.getByRole('button', { name: 'Delete all…' }).click();
   const confirm = page.getByRole('dialog', { name: 'Delete all memories?' });
@@ -174,40 +173,86 @@ test('a one-time notice tells someone whose explicit-only memory became on, with
   expect(memory.writeBodies).toEqual([{ noticeSeen: true }]);
 });
 
-test('a chat’s memory setting opens from the keyboard, and a chat that stops learning says so', async ({ page }, info) => {
-  const memory = createMemoryMock({ conversations: true });
-  await page.addInitScript(() => {
-    localStorage.setItem('michi:v1:prefs', JSON.stringify({ onboardingCompletedAt: 1, reduceMotion: true }));
-  });
-  await installMockApi(page, { custom: memory.handle });
-  await bootWithWorkspace(page, 'Memory chat');
-  const composer = page.locator(CONVERSATION_COMPOSER).first();
-  await composer.locator('[contenteditable="true"]').fill('Plan the trip');
-  await composer.getByRole('button', { name: 'Send (Enter)', exact: true }).click();
+test('a temporary chat starts from Home: the ghost changes Home, the first message asks for one, and the chat says so', async ({ page }, info) => {
+  const memory = createMemoryMock();
+  await boot(page, memory);
+  const home = page.locator('.home-page');
+  const ghost = page.getByRole('button', { name: 'Temporary chat', exact: true });
+  await expect(ghost).toBeVisible();
+  await ghost.click();
+  await expect(page.getByRole('button', { name: 'Turn off temporary chat', exact: true })).toBeVisible();
+  await expect(home.locator('.michi-home-eyebrow')).toHaveText('Temporary chat');
+  await expect(home.getByRole('heading', { level: 1 })).toHaveText('_ Nothing here goes into memory.');
+  await expect(home.getByText('Michi won’t use your memories, and other chats can’t read this one. It stays in your history. This can’t be changed after you send.')).toBeVisible();
+  const homeComposer = home.locator(CONVERSATION_COMPOSER);
+  await expect(homeComposer).toHaveCSS('border-top-style', 'dashed');
+  await expect(homeComposer.locator('.mention-editor-placeholder')).toHaveText('Ask in a temporary chat');
+  await page.screenshot({ path: info.outputPath('home-temporary-chat.png') });
+  // The ghost turns it back off, and on again.
+  await page.getByRole('button', { name: 'Turn off temporary chat', exact: true }).click();
+  await expect(home.getByText('Nothing here goes into memory.')).toHaveCount(0);
+  await expect(homeComposer).toHaveCSS('border-top-style', 'solid');
+  await ghost.click();
+
+  await homeComposer.locator('[contenteditable="true"]').fill('Compare two job offers');
+  await homeComposer.getByRole('button', { name: 'Send (Enter)', exact: true }).click();
   await expect(page.getByText('Hello from mock kiro.').first()).toBeVisible();
+  expect(memory.ensureSessions.map((call) => call.temporary)).toEqual([true]);
 
-  const learn = page.getByRole('button', { name: 'Memory: Learn' });
-  await learn.focus();
-  await page.keyboard.press('Enter');
-  const menu = page.getByRole('menu', { name: 'Memory for this chat' });
-  await expect(menu.getByRole('menuitemradio', { name: /^Learn/ })).toBeFocused();
-  await expect(menu.getByRole('menuitemradio', { name: /^Learn/ })).toHaveAttribute('aria-checked', 'true');
-  await page.keyboard.press('ArrowDown');
-  await expect(menu.getByRole('menuitemradio', { name: /^Use only/ })).toBeFocused();
-  await page.screenshot({ path: info.outputPath('chat-memory-menu.png') });
-  await page.keyboard.press('Enter');
+  // The chat says so: a note at the top of its pane, a ghost on its sidebar row and its title.
+  await expect(page.getByRole('note').filter({ hasText: 'Memory is off here' }))
+    .toHaveText('Temporary chat · Memory is off here, and other chats can’t read it.');
+  await expect(page.locator('.terminal-sidebar [data-sidebar-row] [data-temporary-chat-mark]')).toHaveCount(1);
+  await expect(page.locator('[data-pane-caption-id] [data-temporary-chat-mark], [role="tab"] [data-temporary-chat-mark]')).toHaveCount(1);
+  await page.screenshot({ path: info.outputPath('chat-temporary.png') });
 
-  const useOnly = page.getByRole('button', { name: 'Memory: Use only' });
-  await expect(useOnly).toBeFocused();
-  await expect(useOnly).toHaveText('Use only');
-  await composer.screenshot({ path: info.outputPath('chat-memory-use-only.png') });
-  await expect(page.locator('[data-sonner-toast]').filter({ hasText: 'Forgot 1 memory Michi had learned from this chat' })).toBeVisible();
-  expect(Object.values(memory.conversationModes)).toEqual(['use_only']);
+  // Its next message asks for nothing: it is temporary from its first one on.
+  const composer = page.locator(CONVERSATION_COMPOSER).first();
+  await composer.locator('[contenteditable="true"]').fill('And over ten years?');
+  await composer.getByRole('button', { name: 'Send (Enter)', exact: true }).click();
+  await expect(page.getByText('Hello from mock kiro.')).toHaveCount(2);
+  expect(memory.ensureSessions.map((call) => call.temporary)).toEqual([true, false]);
 
-  await page.keyboard.press('ArrowDown');
-  await expect(menu.getByRole('menuitemradio', { name: /^Use only/ })).toBeFocused();
-  await page.keyboard.press('Escape');
-  await expect(menu).toHaveCount(0);
-  await expect(useOnly).toBeFocused();
-  expect(memory.writes.filter((write) => write.startsWith('PUT /nodes/'))).toHaveLength(1);
+  // Home's switch was for that chat only.
+  await page.getByRole('button', { name: 'New chat', exact: true }).click();
+  await expect(home).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Temporary chat', exact: true })).toBeVisible();
+  await expect(home.getByText('Nothing here goes into memory.')).toHaveCount(0);
+  await expect(page.locator(CONVERSATION_COMPOSER).first().locator('.mention-editor-placeholder')).toHaveText('What would you like to explore?');
+
+  // Settings › Memory says where one chat is kept out of memory, behind the switch's “?”.
+  const settings = await openSettings(page, 'Memory');
+  const row = settings.locator('.settings-row').filter({ has: page.getByRole('switch', { name: 'Use memory' }) });
+  await row.getByRole('button', { name: 'More about this setting' }).click();
+  await expect(row).toContainText('To keep one chat out of memory, start a temporary chat from Home.');
+});
+
+test('on a phone, the ghost starts a temporary chat too, and its note wraps inside the screen', async ({ browser, baseURL }, info) => {
+  const context = await browser.newContext({ baseURL, viewport: { width: 390, height: 844 }, hasTouch: true, isMobile: true });
+  const page = await context.newPage();
+  try {
+    const memory = createMemoryMock();
+    await boot(page, memory);
+    await page.getByRole('button', { name: 'Temporary chat', exact: true }).tap();
+    const home = page.locator('.home-page');
+    await expect(home.getByRole('heading', { level: 1 })).toHaveText('_ Nothing here goes into memory.');
+    await page.screenshot({ path: info.outputPath('phone-home-temporary-chat.png') });
+    const homeComposer = home.locator(CONVERSATION_COMPOSER);
+    await homeComposer.locator('[contenteditable="true"]').fill('Compare two job offers');
+    await homeComposer.getByRole('button', { name: 'Send (Enter)', exact: true }).tap();
+    await expect(page.getByText('Hello from mock kiro.').first()).toBeVisible();
+    expect(memory.ensureSessions.map((call) => call.temporary)).toEqual([true]);
+
+    const note = page.getByRole('note').filter({ hasText: 'Memory is off here' });
+    await expect(note).toBeVisible();
+    const box = (await note.boundingBox())!;
+    expect(box.x).toBeGreaterThanOrEqual(0);
+    expect(box.x + box.width).toBeLessThanOrEqual(390);
+    await expect(page.locator('.mobile-pane-title [data-temporary-chat-mark]')).toHaveCount(1);
+    // No switch beside a chat.
+    await expect(page.getByRole('button', { name: /temporary chat/i })).toHaveCount(0);
+    await page.screenshot({ path: info.outputPath('phone-chat-temporary.png') });
+  } finally {
+    await context.close();
+  }
 });

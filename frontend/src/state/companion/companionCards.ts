@@ -44,7 +44,7 @@ export interface CompanionCardContext {
   items: readonly Pick<CompanionItemDto, 'id' | 'title'>[];
   rules: string;
   /** `displayName` names the agent in the leads (DESIGN-v2 §1.5); the default name without it. */
-  settings: Pick<CompanionSettings, 'heartbeat' | 'brief' | 'quietHours' | 'sources'> & Partial<Pick<CompanionSettings, 'displayName'>>;
+  settings: Pick<CompanionSettings, 'sources'> & Partial<Pick<CompanionSettings, 'displayName'>>;
   workspaceName(id: string): string | null;
 }
 
@@ -76,27 +76,6 @@ type Payload = Record<string, unknown>;
 const isString = (value: unknown): value is string => typeof value === 'string';
 const isRecord = (value: unknown): value is Payload => !!value && typeof value === 'object' && !Array.isArray(value);
 const isStringList = (value: unknown): value is string[] => Array.isArray(value) && value.every(isString);
-/** Each field present has the type it must have. */
-const typed = (value: Payload, types: Record<string, 'boolean' | 'number' | 'string'>): boolean => (
-  Object.entries(types).every(([key, type]) => value[key] === undefined || typeof value[key] === type)
-);
-
-function everyMinutes(minutes: number): string {
-  if (minutes % 60 !== 0) return `Every ${minutes} min`;
-  return minutes === 60 ? 'Every hour' : `Every ${minutes / 60} hours`;
-}
-
-function checkIns(value: { enabled: boolean; intervalMinutes: number }): string {
-  return value.enabled ? everyMinutes(value.intervalMinutes) : 'Off';
-}
-
-function briefAt(value: { enabled: boolean; time: string }): string {
-  return value.enabled ? `At ${value.time}` : 'Off';
-}
-
-function quietHours(value: { enabled: boolean; start: string; end: string }): string {
-  return value.enabled ? `${value.start} to ${value.end}` : 'Off';
-}
 
 /** A one-off reminder's moment, as a date and a time in this window's locale. */
 function moment(at: number): string {
@@ -233,24 +212,6 @@ export function companionCardPreview(card: Pick<CompanionCardDto, 'kind' | 'payl
         { kind: 'text', label: null, text: itemTitle(context, itemId) },
       ]);
     }
-    case 'checkins.update': {
-      const { heartbeat, brief } = payload;
-      if ((heartbeat !== undefined && !(isRecord(heartbeat) && typed(heartbeat, { enabled: 'boolean', intervalMinutes: 'number' })))
-        || (brief !== undefined && !(isRecord(brief) && typed(brief, { enabled: 'boolean', time: 'string' })))
-        || (!heartbeat && !brief)) return raw(payload);
-      const rows: Array<{ label: string; value: string }> = [];
-      if (heartbeat) {
-        const now = context.settings.heartbeat;
-        const after = { ...now, ...heartbeat } as typeof now;
-        rows.push({ label: 'Check-ins', value: `${checkIns(now)} → ${checkIns(after)}` });
-      }
-      if (brief) {
-        const now = context.settings.brief;
-        const after = { ...now, ...brief } as typeof now;
-        rows.push({ label: 'Morning brief', value: `${briefAt(now)} → ${briefAt(after)}` });
-      }
-      return preview([{ kind: 'lead', text: `Changes when ${agentName(context)} speaks:` }, { kind: 'fields', rows }]);
-    }
     case 'source.update': {
       const { source, enabled } = payload;
       const name = isString(source) ? SOURCE_NAMES.get(source) : undefined;
@@ -287,16 +248,6 @@ export function companionCardPreview(card: Pick<CompanionCardDto, 'kind' | 'payl
         { kind: 'text', label: 'Message', text: send.text },
         { kind: 'note', text: `It arrives marked as from ${name}, with your approval. Nothing is sent if the conversation has moved on or now runs with wider permissions.` },
       ], companionCardButtonLabel('session.send'));
-    }
-    case 'quiet_hours.update': {
-      const { enabled, start, end } = payload;
-      if (typeof enabled !== 'boolean' || !typed(payload, { start: 'string', end: 'string' })) return raw(payload);
-      const now = context.settings.quietHours;
-      const after = { ...now, enabled, ...(isString(start) ? { start } : {}), ...(isString(end) ? { end } : {}) };
-      return preview([
-        { kind: 'lead', text: 'Changes your quiet hours:' },
-        { kind: 'fields', rows: [{ label: 'Quiet hours', value: `${quietHours(now)} → ${quietHours(after)}` }] },
-      ]);
     }
     default:
       return raw(payload);

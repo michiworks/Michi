@@ -9,7 +9,9 @@ import {
   lstatSync,
   mkdirSync,
   openSync,
+  readdirSync,
   readFileSync,
+  readlinkSync,
   realpathSync,
   renameSync,
   rmSync,
@@ -48,6 +50,7 @@ Usage:
   npm run remote:stop
   npm run remote:restart [-- --service] [options]
   npm run remote:service:remove
+  node scripts/remote-control.mjs prune-releases [--keep PATH]
 
 Options:
   --service             Register/start a systemd user service
@@ -57,6 +60,7 @@ Options:
   --port PORT           Backend port (default: 3000)
   --data-dir PATH       Michi data directory (default: ~/.michi)
   --token TOKEN         Explicit token (prefer MICHI_REMOTE_TOKEN to avoid shell history)
+  --keep PATH           prune-releases: also keep this checkout (repeatable)
   --help                 Show this help
 `;
 }
@@ -70,7 +74,7 @@ function takeValue(argv, index, flag) {
 export function parseArgs(argv) {
   const args = [...argv];
   const action = args[0] && !args[0].startsWith('--') ? args.shift() : 'launch';
-  const allowedActions = new Set(['launch', 'status', 'stop', 'restart', 'remove-service']);
+  const allowedActions = new Set(['launch', 'status', 'stop', 'restart', 'remove-service', 'prune-releases']);
   if (!allowedActions.has(action)) throw new Error(`unknown action: ${action}`);
 
   const options = {
@@ -82,6 +86,7 @@ export function parseArgs(argv) {
     port: undefined,
     dataDir: undefined,
     token: undefined,
+    keep: [],
     help: false,
   };
 
@@ -99,6 +104,8 @@ export function parseArgs(argv) {
     else if (arg.startsWith('--data-dir=')) options.dataDir = arg.slice('--data-dir='.length);
     else if (arg === '--token') options.token = takeValue(args, index++, arg);
     else if (arg.startsWith('--token=')) options.token = arg.slice('--token='.length);
+    else if (arg === '--keep') options.keep.push(takeValue(args, index++, arg));
+    else if (arg.startsWith('--keep=')) options.keep.push(arg.slice('--keep='.length));
     else throw new Error(`unknown option: ${arg}`);
   }
 
@@ -584,13 +591,12 @@ function removeService() {
   return true;
 }
 
-// Keeps one `michi` on PATH across releases: it follows the build serving the
-// default data directory. `michi --data-dir` reaches other installations.
-function linkLauncher(config, homeDir = os.homedir()) {
-  const target = path.join(config.repoRoot, 'bin', 'michi');
-  const link = path.join(homeDir, '.local', 'bin', 'michi');
-  const real = (file) => { try { return realpathSync(file); } catch { return path.resolve(file); } };
-  if (real(config.dataDir) !== real(path.join(homeDir, '.michi')) || !existsSync(target)) return false;
+function realPath(file) {
+  try { return realpathSync(file); } catch { return path.resolve(file); }
+}
+
+// Points a symlink at target in one rename. Leaves anything else at that path.
+function replaceSymlink(link, target) {
   try {
     if (!lstatSync(link).isSymbolicLink()) return false;
   } catch (error) {
@@ -604,9 +610,110 @@ function linkLauncher(config, homeDir = os.homedir()) {
   return true;
 }
 
+// Keeps one `michi` on PATH across releases: it follows the build serving the
+// default data directory. `michi --data-dir` reaches other installations.
+// For a remote installation, <devdesktop>/current follows the same build, so
+// the Kiro Crew App can be registered once to that path (crew-setup.cjs).
+function linkCurrentBuild(config, homeDir = os.homedir()) {
+  const launcher = path.join(config.repoRoot, 'bin', 'michi');
+  if (realPath(config.dataDir) !== realPath(path.join(homeDir, '.michi')) || !existsSync(launcher)) return;
+  replaceSymlink(path.join(homeDir, '.local', 'bin', 'michi'), launcher);
+  const remoteRoot = realPath(path.join(homeDir, '.local', 'share', 'michi', 'devdesktop'));
+  if (realPath(config.repoRoot).startsWith(remoteRoot + path.sep)) replaceSymlink(path.join(remoteRoot, 'current'), realPath(config.repoRoot));
+}
+
+// `michi update` names each checkout <revision>-<attempt id>.
+const RELEASE_NAME = /^[0-9a-f]{40}-[0-9A-Za-z-]+$/;
+
+// Working directories and absolute command-line paths of live processes.
+// Entries this user cannot read are skipped; such processes cannot use the
+// user's private release directories.
+function pathsInUse(procDir) {
+  const paths = [];
+  for (const pid of readdirSync(procDir)) {
+    if (!/^\d+$/.test(pid)) continue;
+    try { paths.push(readlinkSync(path.join(procDir, pid, 'cwd'))); } catch { /* gone or not ours */ }
+    try {
+      for (const arg of readFileSync(path.join(procDir, pid, 'cmdline'), 'utf8').split('\0')) {
+        if (arg.startsWith('/')) paths.push(realPath(arg));
+      }
+    } catch { /* gone or not ours */ }
+  }
+  return paths;
+}
+
+// Installations the Kiro Crew App starts Michi's MCP from: MICHI_CREW_INSTALL_DIR
+// in the App's registered source and in the agents Crew generates on Sync.
+// Apps prepared before <devdesktop>/current existed pin one release, which
+// Crew keeps using after Michi updates.
+function crewInstallations(homeDir, env) {
+  const manifests = [];
+  const crewHome = env.KIROCREW_HOME || path.join(homeDir, '.kiro', 'crew');
+  try {
+    const { source } = JSON.parse(readFileSync(path.join(crewHome, 'apps', 'michi-crew-runtime', 'installed.json'), 'utf8'));
+    if (typeof source === 'string') manifests.push(path.join(source, 'app.json'));
+  } catch { /* no Crew App */ }
+  const agents = path.join(homeDir, '.kiro', 'agents');
+  try {
+    for (const name of readdirSync(agents)) if (name.endsWith('.json')) manifests.push(path.join(agents, name));
+  } catch { /* no Kiro agents */ }
+  const dirs = [];
+  for (const file of manifests) {
+    try {
+      for (const server of Object.values(JSON.parse(readFileSync(file, 'utf8')).mcpServers ?? {})) {
+        const dir = server?.env?.MICHI_CREW_INSTALL_DIR;
+        if (typeof dir === 'string' && dir) dirs.push(dir);
+      }
+    } catch { /* unreadable or not JSON */ }
+  }
+  return dirs;
+}
+
+/**
+ * Removes the release checkouts beside this one that nothing needs any more:
+ * older builds and failed update attempts. Keeps this checkout, the `keep`
+ * paths (the build an update replaced, for rollback), the builds that
+ * ~/.local/bin/michi and <devdesktop>/current name, the build Kiro Crew is
+ * registered to, and any release a live process uses. Acts only from a
+ * checkout inside a `releases` directory, so running it from a source
+ * checkout cannot touch the directories beside that.
+ */
+export function pruneReleases({ repoRoot = REPO_ROOT, keep = [], homeDir = os.homedir(), procDir = '/proc', env = process.env } = {}) {
+  const releasesDir = path.dirname(realPath(repoRoot));
+  if (path.basename(releasesDir) !== 'releases') return { removed: [], failed: [], skipped: 'this checkout is not a release' };
+  if (!existsSync(procDir)) return { removed: [], failed: [], skipped: 'running processes cannot be listed' };
+  const links = [path.join(homeDir, '.local', 'bin', 'michi'), path.join(path.dirname(releasesDir), 'current')];
+  const needed = [repoRoot, ...keep, ...links, ...crewInstallations(homeDir, env)]
+    .map(realPath).concat(pathsInUse(procDir));
+  const removed = [], failed = [];
+  for (const name of readdirSync(releasesDir)) {
+    const dir = path.join(releasesDir, name);
+    if (!RELEASE_NAME.test(name) || !lstatSync(dir, { throwIfNoEntry: false })?.isDirectory()) continue;
+    if (needed.some((file) => file === dir || file.startsWith(dir + path.sep))) continue;
+    try {
+      rmSync(dir, { recursive: true, force: true });
+      removed.push(name);
+    } catch {
+      failed.push(name);
+    }
+  }
+  return { removed, failed };
+}
+
+function pruneReleasesCommand(options) {
+  const keep = options.keep.map((file) => path.resolve(expandHome(file, os.homedir())));
+  const { removed, failed, skipped } = pruneReleases({ keep });
+  if (skipped) console.log(`Kept every release: ${skipped}.`);
+  else console.log(removed.length ? `Removed ${removed.length} old Michi release${removed.length === 1 ? '' : 's'}.` : 'No old Michi releases to remove.');
+  if (failed.length) {
+    console.error(`Could not remove: ${failed.join(', ')}`);
+    process.exitCode = 1;
+  }
+}
+
 function printConnection(config, mode, extra = {}) {
   writeSecureFile(path.join(config.dataDir, 'remote-installation.json'), `${JSON.stringify({ serverPath: config.serverPath })}\n`);
-  if (process.platform === 'linux') linkLauncher(config);
+  if (process.platform === 'linux') linkCurrentBuild(config);
   console.log('');
   console.log('Michi remote backend is running.');
   console.log(`Mode: ${mode}`);
@@ -697,6 +804,7 @@ export async function main(argv = process.argv.slice(2)) {
   if (options.action === 'launch') return launch(options);
   if (options.action === 'stop') return stop(options);
   if (options.action === 'status') return status(options);
+  if (options.action === 'prune-releases') return pruneReleasesCommand(options);
   if (options.action === 'remove-service') {
     console.log(removeService() ? 'Michi systemd user service removed.' : 'Michi systemd user service is not installed.');
     return;

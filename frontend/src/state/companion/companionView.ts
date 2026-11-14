@@ -96,7 +96,7 @@ export interface CompanionBriefSchedule {
 
 /**
  * When the next brief comes, from the backend's `status.nextBriefAt` alone
- * (the engine's rule knows workdays and the welcome day; this window does
+ * (the engine's rule knows the brief's days and the welcome day; this window does
  * not guess them). Off or paused: briefs resume once the Companion is on or
  * resumed. No next brief: nothing is promised. Today: its time, or "on its
  * way" once that time has passed (the brief is being written, or waits for

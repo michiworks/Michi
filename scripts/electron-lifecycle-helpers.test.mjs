@@ -1,7 +1,9 @@
 // Characterization tests for the helper modules electron/main.ts uses to
-// supervise the backend: startup tracing, the scheduled notification feed and
-// the macOS background service. scripts/electron-background-service.test.mjs
-// covers the rest of the last two. Run `npm run electron:build-main` first.
+// supervise the backend: startup tracing, the attention desktop feed's
+// lifecycle and the macOS background service.
+// scripts/electron-attention-notifications.test.mjs and
+// scripts/electron-background-service.test.mjs cover the rest of the last
+// two. Run `npm run electron:build-main` first.
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
@@ -13,8 +15,7 @@ import test from 'node:test';
 
 const require = createRequire(import.meta.url);
 const service = require('../electron/dist/backgroundService.js');
-const { ScheduledNotificationFeed, SCHEDULED_JOB_RUN_EVENT, isScheduledRunNotice } = require('../electron/dist/scheduledNotifications.js');
-const shared = require('michi-shared');
+const { AttentionDesktopFeed, ATTENTION_DESKTOP_STREAM_PATH } = require('../electron/dist/attentionNotifications.js');
 const startupTracePath = require.resolve('../electron/dist/startupTrace.js');
 
 // ── Startup tracing (env is read when metrics.ts loads, so each case runs in its own process) ──
@@ -98,7 +99,7 @@ test('MICHI_FRAME_METRICS tags the URL with its window but does not echo console
   assert.equal(result.childRunId, null);
 });
 
-// ── Scheduled notification feed lifecycle (start after health, restart on handoff, stop on quit) ──
+// ── Attention desktop feed lifecycle (start after health, restart on handoff, stop on quit) ──
 
 async function feedServer(t, respond = (res) => { res.writeHead(200, { 'content-type': 'text/event-stream' }); res.flushHeaders(); }) {
   const requests = [];
@@ -118,7 +119,7 @@ async function feedServer(t, respond = (res) => { res.writeHead(200, { 'content-
     server.closeAllConnections();
     await new Promise((resolve) => server.close(resolve));
   });
-  const streams = () => requests.filter((request) => request === 'GET /api/scheduled-jobs/notifications/stream').length;
+  const streams = () => requests.filter((request) => request === `GET ${ATTENTION_DESKTOP_STREAM_PATH}`).length;
   return { port: server.address().port, requests, open, streams };
 }
 
@@ -132,38 +133,23 @@ async function until(predicate, message) {
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
-const notice = {
-  phase: 'finished', runId: 'run-1', jobId: 'job-1', jobName: 'Digest', workspaceId: 'ws-1',
-  nodeId: null, treeId: null, status: 'succeeded', summary: null, error: null, notify: true, at: 1,
+const noop = { onSnapshot() {}, onNotification() {}, onResolved() {} };
+const record = {
+  id: 'attn-1', key: 'node:n-1', kind: 'needs_input', reason: 'approval', title: 'Fix the build', body: 'Run npm test',
+  target: { type: 'node', nodeId: 'n-1', workspaceId: 'ws-1' }, createdAt: 1, claimedByWindowId: null, claimedAt: null,
 };
 
-test('the feed reads the event and notice shape shared defines', () => {
-  assert.equal(SCHEDULED_JOB_RUN_EVENT, shared.SCHEDULED_JOB_RUN_EVENT);
-  const cases = [
-    notice,
-    { ...notice, phase: 'attention', attention: 'approval', status: 'running', nodeId: 'n-1' },
-    { ...notice, scheduledOnly: true },
-    { ...notice, phase: 'queued' },
-    { ...notice, runId: 1 },
-    { ...notice, nodeId: undefined },
-    { ...notice, jobName: null },
-    null,
-    'notice',
-  ];
-  for (const value of cases) assert.equal(isScheduledRunNotice(value), shared.isScheduledJobRunEvent(value), JSON.stringify(value));
-  // A status this build does not know is still passed on (and acknowledged unshown); shared rejects it.
-  const unknownStatus = { ...notice, status: 'paused' };
-  assert.deepEqual([isScheduledRunNotice(unknownStatus), shared.isScheduledJobRunEvent(unknownStatus)], [true, false]);
-});
-
-test('the feed waits for a backend port and passes on only well-formed notices', async (t) => {
+test('the feed waits for a backend port and passes on only well-formed frames', async (t) => {
   const backend = await feedServer(t);
   let port = null;
   const seen = [];
   const logs = [];
-  const feed = new ScheduledNotificationFeed({
+  const feed = new AttentionDesktopFeed({
     port: () => port,
-    onNotice: (value) => seen.push(value.runId),
+    onSnapshot: (records) => seen.push(['snapshot', records.map((item) => item.id)]),
+    onNotification: (item) => seen.push(['notification', item.id]),
+    onResolved: (id) => seen.push(['resolved', id]),
+    onChanged: (event) => seen.push(['changed', event.reason]),
     log: (level, message, meta) => logs.push([level, message, meta]),
     reconnectBaseMs: 5,
     reconnectMaxMs: 20,
@@ -175,16 +161,21 @@ test('the feed waits for a backend port and passes on only well-formed notices',
   port = backend.port;
   await until(() => backend.open.size === 1, 'the stream');
   const [res] = backend.open;
-  res.write('event: other\ndata: {"runId":"x"}\n\n');
-  res.write('event: scheduled_job_run\ndata: {not json\n\n');
-  res.write(`event: scheduled_job_run\ndata: ${JSON.stringify({ ...notice, phase: 'queued' })}\n\n`);
-  res.write(`event: scheduled_job_run\ndata: ${JSON.stringify(notice)}\n\n`);
-  await until(() => seen.length === 1, 'the notice');
-  assert.deepEqual(seen, ['run-1']);
-  assert.deepEqual(logs, [['INFO', 'scheduled notification feed connected', { port: backend.port }]]);
+  res.write(`event: attention_snapshot\ndata: ${JSON.stringify({ protocol: 'v1', notifications: [record, { id: 'bad' }] })}\n\n`);
+  res.write(`event: attention_snapshot\ndata: ${JSON.stringify({ protocol: 'v2', notifications: [record] })}\n\n`);
+  res.write('event: attention_notification\ndata: {not json\n\n');
+  res.write(`event: attention_notification\ndata: ${JSON.stringify({ ...record, target: { type: 'elsewhere', workspaceId: 'ws-1' } })}\n\n`);
+  res.write(`event: attention_notification\ndata: ${JSON.stringify({ ...record, id: 'attn-2' })}\n\n`);
+  res.write(`event: attention_resolved\ndata: ${JSON.stringify({ id: 'attn-1', key: 'node:n-1', reason: 'answered' })}\n\n`);
+  res.write('event: companion_changed\ndata: {"type":"companion_changed","revision":2,"reason":"items"}\n\n');
+  res.write('event: other\ndata: {"id":"x"}\n\n');
+  await until(() => seen.length === 4, 'the frames');
+  assert.deepEqual(seen, [['snapshot', ['attn-1']], ['notification', 'attn-2'], ['resolved', 'attn-1'], ['changed', 'items']],
+    'a snapshot of another protocol and a target this build cannot place are dropped');
+  assert.deepEqual(logs, [['INFO', 'attention desktop feed connected', { port: backend.port }]]);
 });
 
-test('a rejected stream is retried until the backend accepts it', async (t) => {
+test('a refused stream is retried until the backend accepts it, logged once per status', async (t) => {
   const backend = await feedServer(t, (res, attempt) => {
     if (attempt <= 2) {
       res.writeHead(404);
@@ -195,26 +186,29 @@ test('a rejected stream is retried until the backend accepts it', async (t) => {
     }
   });
   const logs = [];
-  const feed = new ScheduledNotificationFeed({
+  let connected = 0;
+  const feed = new AttentionDesktopFeed({
     port: () => backend.port,
-    onNotice() {},
+    ...noop,
+    onConnected: () => { connected += 1; },
     log: (level, message, meta) => logs.push([level, message, meta]),
     reconnectBaseMs: 5,
+    refusedRetryMs: 5,
   });
   t.after(() => feed.stop());
   feed.start();
   await until(() => logs.some(([level]) => level === 'INFO'), 'the connection');
   assert.equal(backend.streams(), 3);
+  assert.equal(connected, 1);
   assert.deepEqual(logs.map(([level, message, meta]) => [level, message, meta.status ?? meta.port]), [
-    ['WARN', 'scheduled notification feed rejected', 404],
-    ['WARN', 'scheduled notification feed rejected', 404],
-    ['INFO', 'scheduled notification feed connected', backend.port],
+    ['WARN', 'attention desktop feed refused', 404],
+    ['INFO', 'attention desktop feed connected', backend.port],
   ]);
 });
 
 test('start is idempotent, restart reconnects once at once, and stop ends the stream for good', async (t) => {
   const backend = await feedServer(t);
-  const feed = new ScheduledNotificationFeed({ port: () => backend.port, onNotice() {}, reconnectBaseMs: 5 });
+  const feed = new AttentionDesktopFeed({ port: () => backend.port, ...noop, reconnectBaseMs: 5 });
   t.after(() => feed.stop());
   feed.start();
   feed.start();
@@ -236,15 +230,14 @@ test('start is idempotent, restart reconnects once at once, and stop ends the st
   await until(() => backend.streams() === 3, 'a new stream');
 });
 
-test('acknowledge posts the encoded run id, and does nothing without a backend port', async (t) => {
+test('a claim posts the encoded record id and reads the answer; without a backend port, or on a refusal, it is no claim', async (t) => {
   const backend = await feedServer(t);
   let port = null;
-  const feed = new ScheduledNotificationFeed({ port: () => port, onNotice() {} });
-  feed.acknowledge('run-0');
+  const feed = new AttentionDesktopFeed({ port: () => port, ...noop });
+  assert.equal(await feed.claim('attn-0'), false);
   port = backend.port;
-  feed.acknowledge('run/1 x');
-  await until(() => backend.requests.length === 1, 'the acknowledgement');
-  assert.deepEqual(backend.requests, ['POST /api/scheduled-jobs/runs/run%2F1%20x/notified']);
+  assert.equal(await feed.claim('attn/1 x'), false, 'the test server answers {} : not claimed');
+  assert.deepEqual(backend.requests, ['POST /api/attention/desktop/notifications/attn%2F1%20x/claim']);
 });
 
 // ── Background service (macOS LaunchAgent) ──

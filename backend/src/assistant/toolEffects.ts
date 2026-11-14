@@ -11,13 +11,15 @@
  * - michi_write: changes Michi's own state (Pages, tasks, Today, goals, notes, turn metadata);
  * - indirect: makes another agent turn run later, with its own tools (a new conversation,
  *   a message into one, a scheduled job, a branch, an Agent Run);
- * - outside_write: writes files, runs commands or opens something outside Michi;
+ * - local_write: writes files on this machine (artifacts, Pi's write and edit);
+ * - command: runs a shell command, judged by what the command does (agents/callConsequence.ts);
+ * - egress: sends or opens something outside this machine (a page in the user's browser);
  * - channel: speaks to the user or ends the turn (a question, a card the user applies, the quiet end).
  */
 
 import { AGENT_RUN_TOOL_NAMES } from 'michi-runtime/internal/contract/tools';
 
-export type MichiToolEffect = 'read' | 'outside_read' | 'michi_write' | 'indirect' | 'outside_write' | 'channel';
+export type MichiToolEffect = 'read' | 'outside_read' | 'michi_write' | 'indirect' | 'local_write' | 'command' | 'egress' | 'channel';
 
 const of = (effect: MichiToolEffect, names: readonly string[]): Array<[string, MichiToolEffect]> => names.map((name) => [name, effect]);
 
@@ -60,9 +62,9 @@ export const MICHI_TOOL_EFFECTS: Readonly<Record<string, MichiToolEffect>> = Obj
   ...of('outside_read', ['companion_check_now']),
   ...of('michi_write', [
     'companion_update_item', 'companion_save_notes', 'companion_goal_progress', 'companion_edit_goal',
-    'companion_publish_brief', 'companion_set_name',
+    'companion_publish_brief', 'companion_set_name', 'companion_set_notifications',
   ]),
-  ...of('channel', ['companion_propose', 'nothing_to_do', 'ask_user', 'submit_agent_result']),
+  ...of('channel', ['companion_propose', 'companion_headline', 'nothing_to_do', 'ask_user', 'submit_agent_result']),
   // Michi Memory: the user's own memories.
   ...of('read', ['memory_search']),
   ...of('michi_write', ['memory_save', 'memory_update', 'memory_delete']),
@@ -76,10 +78,12 @@ export const MICHI_TOOL_EFFECTS: Readonly<Record<string, MichiToolEffect>> = Obj
   // Artifacts are files; open_url opens a page in the user's browser. Removing an artifact keeps its file.
   ...of('read', ['list_artifacts', 'search_artifacts']),
   ...of('michi_write', ['delete_artifact']),
-  ...of('outside_write', ['save_artifact', 'update_artifact', 'open_url']),
+  ...of('local_write', ['save_artifact', 'update_artifact']),
+  ...of('egress', ['open_url']),
   // Pi's native tools.
   ...of('read', ['read', 'ls', 'grep', 'find']),
-  ...of('outside_write', ['write', 'edit', 'bash']),
+  ...of('local_write', ['write', 'edit']),
+  ...of('command', ['bash']),
   // Background Pages maintenance.
   ...of('read', [
     'maintenance_read_source', 'maintenance_list_resources', 'maintenance_read_page', 'maintenance_read_database',

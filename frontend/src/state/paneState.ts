@@ -264,6 +264,21 @@ export function usePaneState({ projects, activeProjectId, singlePage = false }: 
     [],
   );
 
+  /** Puts a closed pane back where it was in its slot (Undo of a close), focused when it was. */
+  const restorePaneInSlot = useCallback(
+    (slot: { projectId: string; treeId: string | null }, paneId: string, index: number, focused: boolean) => {
+      const key = paneSlotKey(slot.projectId, slot.treeId);
+      setOpenPanesMap((prev) => {
+        const cur = prev[key] ?? [];
+        if (cur.includes(paneId)) return prev;
+        const at = Math.max(0, Math.min(index, cur.length));
+        return { ...prev, [key]: [...cur.slice(0, at), paneId, ...cur.slice(at)] };
+      });
+      if (focused) setFocusedPaneMap((prev) => ({ ...prev, [key]: paneId }));
+    },
+    [],
+  );
+
   const ensurePaneSlot = useCallback((projectId: string, treeId: string, rootNodeId: string) => {
     const key = `${projectId}::${treeId}`;
     setOpenPanesMap((prev) => (prev[key]?.length ? prev : { ...prev, [key]: [rootNodeId] }));
@@ -517,6 +532,7 @@ export function usePaneState({ projects, activeProjectId, singlePage = false }: 
     setViewMode,
     retainProjectPaneKeys,
     setPaneSlot,
+    restorePaneInSlot,
     ensurePaneSlot,
     prunePaneIds,
   };

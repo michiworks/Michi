@@ -107,7 +107,8 @@ test('update chooses Node from the revision it checks out', linuxOnly, () => {
   stubNode(pathNode(), '30.2.0');
   const result = run(buildRemoteUpdateScript({ repo: oldRepo, dataDir: data, token: 'token', port: 4444 }, source, 'dev', revision, 'attempt'));
   assert.equal(result.status, 0, result.stdout + result.stderr);
-  assert.deepEqual(result.ran, ['30.2.0 stop', '30.2.0 launch']);
+  // Removing older releases after the switch runs the new checkout with the same Node.
+  assert.deepEqual(result.ran, ['30.2.0 stop', '30.2.0 launch', '30.2.0 prune-releases']);
 });
 
 test('install clones first and chooses Node from the cloned engines.node', linuxOnly, () => {

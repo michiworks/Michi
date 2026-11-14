@@ -186,6 +186,21 @@ describe('exports and tombstones', () => {
     assert.deepEqual(purged, ['ws-deleted', 'ws-replaced']);
   });
 
+  test('a restored temporary chat stays temporary, and one set to Use only stays so', async () => {
+    seedWorkspace('ws-keep', 'owner-a');
+    for (const id of ['n-learn', 'n-temp', 'n-use']) seedNode('ws-keep', id);
+    getDb().prepare("UPDATE nodes SET memory_mode = 'off' WHERE id = 'n-temp'").run();
+    getDb().prepare("UPDATE nodes SET memory_mode = 'use_only' WHERE id = 'n-use'").run();
+    await startApp();
+    const exported = await request('GET', '/api/backup/export');
+    assert.equal(exported.response.status, 200, JSON.stringify(exported.body));
+    const imported = await request('POST', '/api/backup/import', exported.body);
+    assert.equal(imported.response.status, 200, JSON.stringify(imported.body));
+    const restored = getDb().prepare("SELECT title, memory_mode FROM nodes WHERE workspace_id <> 'ws-keep' ORDER BY title")
+      .all() as Array<{ title: string; memory_mode: string | null }>;
+    assert.deepEqual(restored.map((row) => [row.title, row.memory_mode]), [['n-learn', null], ['n-temp', 'off'], ['n-use', 'use_only']]);
+  });
+
   test('node PATCH does not write to a purged node', async () => {
     seedOwnerWithTombstones();
     await startApp();

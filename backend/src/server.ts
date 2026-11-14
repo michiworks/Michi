@@ -21,15 +21,21 @@ import { readMobileAccessChoice, readPhoneTerminalChoice, saveMobileAccessChoice
 import { createMobileAccess, defaultMobileAccessProvider } from './services/mobileAccessManager';
 import { setupAssistantRoutes } from './routes/assistant';
 import { isAssistantWorkspace } from './assistant/identity';
-import { currentAssistantNodeId, migrateAssistantV2 } from './assistant/store';
+import { currentAssistantNodeId, findAssistantWorkspace, migrateAssistantV2 } from './assistant/store';
 import { createCompanionRouter } from './routes/companion';
 import { bootCompanion, type RunningCompanion } from './services/companion/boot';
+import { settleNewUserSourceDefaults, spacesVisitMayStartFirstRun } from './services/companion/getStarted';
+import { stopConversationTurn } from './services/companion/turnedOff';
+import { clearSummaryHomeCards } from './services/homeCards/repository';
+import { startSpacesFirstRun } from './services/metaAgent/firstRun';
+import { LOCAL_AGENT_OWNER_ID } from './services/agentOwner';
 import { setCompanionCardDeps } from './services/companion/cards';
-import { startChatNotices, type RunningChatNotices } from './services/companion/chatNotices';
-import { companionEvents } from './services/companion/delivery';
+import { watchConversationWaiting } from './services/companion/conversationWaiting';
+import { companionEvents, encodeCompanionChangedEvent } from './services/companion/delivery';
+import { setCompanionAttention } from './services/companion/notices';
 import { CompanionPresence } from './services/companion/presence';
 import { createNoopCompanionService, startCompanionDelegation } from './services/companion/service';
-import { getCompanionSettings } from './services/companion/settings';
+import { getCompanionSettings, migrateCompanionPause } from './services/companion/settings';
 import type { CompanionService } from './services/companion/types';
 import { setupMetaAgentRoutes } from './routes/metaAgent';
 import { setupMetaAgentOverviewRoutes } from './routes/metaAgentOverview';
@@ -46,8 +52,7 @@ import { setupSpacesHomeRoutes } from './routes/spacesHome';
 import { chatHubLiveWait, configureHomeLiveWait } from './services/pages/homeSections';
 import { setupHomeCardsRoutes } from './routes/homeCards';
 import { setupSpacesHomeRunRoutes } from './routes/spacesHomeRuns';
-import { configureHomeCardsSink } from './services/metaAgent/homeCardsGenerator';
-import { repositoryHomeCardsSink } from './services/metaAgent/homeCardsSink';
+import { retryStoppedMaintenance } from './services/metaAgent/overview';
 import { chatHubLiveTurn, configureProgressCardLiveTurns } from './services/pages/progressCards';
 import { configurePagePreview, createPagePreviewMiddleware } from './services/pages/pagePreview';
 import { setupPageHelperRoutes } from './routes/pageHelpers';
@@ -145,6 +150,7 @@ import {
 } from './services/memory/extractionService';
 import { watchConversationSwitches } from './services/memory/typedText';
 import { activateLegacyPendingMemories } from './services/memory/activateLegacyPending';
+import { turnBackgroundWorkOffOnce } from './services/backgroundWorkOff';
 import { indexTurn, startRecallBackfill } from './services/memory/recallIndex';
 import { attributeTurn } from './services/memory/replySources';
 import { startNativeMemoryImport } from './services/memory/nativeMemoryImport';
@@ -162,6 +168,7 @@ import { configureScheduledJobTools } from './agents/scheduledJobTools';
 import { scheduledJobCreateNeedsApproval } from './services/scheduledJobs/settings';
 import { CustomAgentsFeatureGate } from './services/customAgentsFeatureGate';
 import { AttentionService } from './services/attention/attentionService';
+import { getNotificationLevel } from './services/attention/notificationLevel';
 import { setupAttentionRoutes } from './routes/attention';
 import { setupInterruptedTurnRoutes } from './routes/interruptedTurns';
 import { subscribeNodeCompletionSeen, subscribePermissionAnswered } from './services/attentionSignals';
@@ -258,6 +265,9 @@ if (interruptedTurns > 0) {
 // view marks that record a completion as seen; every window of the owner
 // receives them on the background feed. Subscribed before any turn starts.
 const attentionRuns = new AgentRunsRepository();
+// V shows in the Companion panel, which reports no pane presence: the panel's own beacons (fed below, at the Companion
+// routes) say when it has focus, and V counts as shown while it does, as a visible pane for any other conversation.
+const companionPanel = new CompanionPresence(Date.now());
 const attentionService = new AttentionService({
   presence: panePresenceRegistry,
   getRun: (ownerUserId, runId) => attentionRuns.getRun(ownerUserId, runId),
@@ -265,6 +275,10 @@ const attentionService = new AttentionService({
   isHandOffTurn: isMultiModelStepTurn,
   // The agent's own conversation speaks under the name the user gave it.
   assistantName: () => getCompanionSettings().displayName,
+  // Michi's posts are seen where its panel has focus.
+  agentPanelFocused: () => companionPanel.isPanelFocused(Date.now()),
+  // Settings › Notifications, for Electron main's banners and the wake of a quit app.
+  level: getNotificationLevel,
 });
 chatHub.subscribeBackground({
   includeForeground: true,
@@ -278,6 +292,8 @@ subscribePermissionAnswered((event) => attentionService.permissionAnswered(event
 workflowRunHub.subscribe((_ownerUserId, run) => attentionService.observeWorkflowRun(run));
 // Trash, archive, moves and purges reach the records of their targets.
 structureEvents.subscribe({ send: (frame) => attentionService.structureChanged(frame) });
+// A Scheduled Job run that waits on the user, or finished with Notify on.
+scheduledJobEvents.subscribe({ send: (event) => attentionService.observeScheduledRun(event) });
 attentionService.start();
 // Before any agent session starts: the background subagents stored as still
 // waiting for an outcome ran in processes the previous backend owned, which
@@ -334,7 +350,8 @@ sessionRegistry.configureRuntimeManager(runtimeHost);
 // Register the enabled runtimes (filtered by MICHI_ENABLED_RUNTIMES, or
 // all of them locally) through a single factory loop. Each factory
 // creates its runtime with a bridge whose createChild opens a
-// spawn_branches child (services/spawnChild.ts) in that runtime. Provider
+// spawn_branches child (services/spawnChild.ts) in that runtime and starts
+// its first turn. Provider
 // env bindings are collected here and pushed into secrets.ts after
 // registration.
 const allEnvBindings: ProviderEnvBinding[] = [];
@@ -343,7 +360,10 @@ let agentRunAssembly: AgentRunAssembly | null = null;
 for (const factory of getEnabledFactories()) {
     let runtime!: AgentRuntime;
     const bridge = createAgentToolBridge({
-        createChild: (args) => createSpawnChild(runtime, args),
+        createChild: (args) => createSpawnChild(runtime, args, {
+            startTurn: (turn) => chatHub.startRequestedSelfTurn(turn),
+            isLiveSession: isRegisteredLiveSession,
+        }),
         persistContext: ({ chatId, ownerUserId, name, filePath, size }) => {
             const userId = ownerUserId ?? undefined;
             const binding = getNodeSessionBinding(chatId, userId);
@@ -397,6 +417,23 @@ if (process.env.MICHI_CLOUD !== '1') {
   } catch (error) {
     log.error('boot', 'assistant v2 merge failed', { error: (error as Error).message });
   }
+  try {
+    migrateCompanionPause();
+  } catch (error) {
+    log.error('boot', 'the Companion pause merge failed', { error: (error as Error).message });
+  }
+  // Before anything polls or a route answers: someone who has not met Michi starts with the outside sources off (D17).
+  try {
+    settleNewUserSourceDefaults();
+  } catch (error) {
+    log.warn('boot', 'companion source defaults not settled', { error: (error as Error).message });
+  }
+}
+// The Spaces Home summary no longer writes the chat Home's greeting and cards (D13): what it wrote goes, once.
+try {
+  clearSummaryHomeCards();
+} catch (error) {
+  log.warn('boot', 'summary Home cards not cleared', { error: (error as Error).message });
 }
 
 // kiroRuntime may be undefined in Pi-only / Claude-only deployments;
@@ -513,9 +550,8 @@ const agentRunRecoveryPromise = agentRunAssembly.start()
 // notification path, so the scheduler stays off there.
 const SCHEDULED_JOBS_ENABLED = scheduledJobsFeatureEnabled();
 // The one launcher that wakes a quit app to show what it missed (only the
-// macOS background service may: createDesktopAppLauncher). The scheduler and
-// the Companion's notices share it, so one wake a minute between them
-// (DESIGN-v2 §5.1).
+// macOS background service may: createDesktopAppLauncher). The attention
+// service wakes it for every record, so one wake a minute (DESIGN-v2 §5.1).
 const appLauncher = createDesktopAppLauncher();
 const scheduledJobExecutor = SCHEDULED_JOBS_ENABLED
   ? new ChatScheduledJobExecutor({
@@ -537,10 +573,14 @@ const scheduledJobScheduler = scheduledJobExecutor
       maintenanceWorkspaceExists: (id) => isAssistantWorkspace(id),
       workspaceArchived: (id) => getWorkspace(id)?.archived_at != null,
       runtimeExists: (id) => !!getRuntime(id),
-      launcher: appLauncher,
       serviceMode: SERVICE_MODE,
       // Automatic memory answers with one direct structured call where the Meta agent's runtime has one.
       memoryDirect: createMemoryDirectAnswerer({ runtime: (id) => getRuntime(id) }),
+      // The check-in lane (companion/checkinLane.ts): the Companion's, once it started (startCompanionEngine).
+      checkinLane: {
+        tick: (scheduler, now) => companion?.checkinLane.tick(scheduler, now),
+        run: (input) => companion?.checkinLane.run(input) ?? Promise.resolve({ status: 'failed', summary: null, error: 'The Companion is not running' }),
+      },
     })
   : null;
 // Tombstones for deleted/rejected memories are written on every backend; extraction runs only with the scheduler.
@@ -560,6 +600,13 @@ try {
 } catch (error) {
   log.warn('boot', 'memory: legacy pending activation failed', { error: (error as Error).message });
 }
+// Michi's agent and background work stay off until Settings turns them on: once per database, what older versions
+// left on is turned off, before the scheduler and the Companion start. A failure is retried at the next start.
+try {
+  if (turnBackgroundWorkOffOnce()) log.info('boot', 'background work turned off until Settings turns it on');
+} catch (error) {
+  log.warn('boot', 'turning background work off failed', { error: (error as Error).message });
+}
 // Each completed human turn becomes searchable for recall in other conversations.
 chatHub.onTurnFinalized(indexTurn);
 // Then what its reply repeated of the memories and past chats it was given is stored for the line under it.
@@ -567,9 +614,6 @@ chatHub.onTurnFinalized((turn) => { attributeTurn(turn); });
 // Automatic extraction reads a conversation once it is quiet, or once the user left it (no window shows it, or
 // they typed in another one); what waited when the last process stopped is read now.
 markExtractionBoot(Date.now());
-// V shows in the Companion panel, which reports no pane presence: the panel's own beacons (fed below, at the Companion
-// routes) say when it has focus, and V counts as shown while it does, as a visible pane for any other conversation.
-const companionPanel = new CompanionPresence(Date.now());
 watchConversationPresence((nodeId) => panePresenceRegistry.getPresence({ kind: 'node', nodeId }).views.some((view) => view.visible)
   || (companionPanel.isPanelFocused(Date.now()) && nodeId === currentAssistantNodeId()));
 // Leaving a conversation wakes extraction at once rather than at its next check: no window shows it any more, or the
@@ -595,8 +639,8 @@ const listeningPromise = new Promise<void>((resolve) => { markListening = resolv
 // without a scheduler (MICHI_SCHEDULED_JOBS=0) it does not start at all. Until
 // it runs, the Companion's routes answer from storage (createNoopCompanionService).
 let companion: RunningCompanion | null = null;
-// The conversations' notices while no window is open (services/companion/chatNotices.ts); the desktop app only.
-let chatNotices: RunningChatNotices | null = null;
+// The tray's "<name> is waiting for you" follows V's requests (services/companion/conversationWaiting.ts); the desktop app only.
+let stopConversationWaiting: (() => void) | null = null;
 function startCompanionEngine(): void {
   const scheduler = scheduledJobScheduler;
   if (process.env.MICHI_CLOUD === '1' || process.env.MICHI_DISABLE_COMPANION === '1' || !scheduler || shuttingDown || companion) return;
@@ -983,7 +1027,10 @@ app.use('/api', setupDiffRoutes());
 app.use('/api', setupMichiRoutes(chatManager));
 app.use('/api', setupDigestRoutes(chatManager));
 app.use('/api', setupPersistenceRoutes());
-app.use('/api', setupAttentionRoutes(attentionService));
+app.use('/api', setupAttentionRoutes(attentionService, {
+  // The tray refreshes on the desktop feed (DESIGN-v2 §5.1): Electron main subscribes to nothing else.
+  desktopFrames: (write) => companionEvents.subscribe({ changed: (event) => write(encodeCompanionChangedEvent(event)) }),
+}));
 app.use('/api', setupInterruptedTurnRoutes());
 configurePaneInspectionEventBus(agentRunAssembly.enabled ? agentRunAssembly.coordinator.events : undefined);
 app.use('/api', setupPaneInspectionRoutes({ agentRunEvents: agentRunAssembly.enabled ? agentRunAssembly.coordinator.events : undefined }));
@@ -993,10 +1040,11 @@ app.use('/api', setupSpacesHomeRoutes({ liveWait: (nodeId) => chatHubLiveWait(ch
 app.use('/api', setupHomeCardsRoutes());
 app.use('/api', setupPageHelperRoutes());
 app.use('/api', setupPageComponentRoutes());
-configureHomeCardsSink(repositoryHomeCardsSink);
 configureProgressCardLiveTurns((nodeId) => chatHubLiveTurn(chatHub, nodeId));
 configureHomeLiveWait((nodeId) => chatHubLiveWait(chatHub, nodeId));
-app.use('/api', setupSpacesHomeRunRoutes({ scheduler: scheduledJobScheduler }));
+// Opening Spaces no longer starts a first run that Get started's Start is to start (D17); cloud has no card.
+app.use('/api', setupSpacesHomeRunRoutes({ scheduler: scheduledJobScheduler,
+  ...(process.env.MICHI_CLOUD === '1' ? {} : { visitMayStart: spacesVisitMayStartFirstRun }) }));
 // Before the local-only /meta-agent routes: a remote connection's Update reaches its own Meta agent.
 app.use('/api', setupMetaAgentRunNowRoutes({ scheduler: scheduledJobScheduler }));
 app.use('/api', setupPageMaintenanceRoutes({ scheduler: scheduledJobScheduler }));
@@ -1024,25 +1072,35 @@ if (process.env.MICHI_CLOUD !== '1') {
       const service = companion?.service ?? idleCompanionService;
       // Every beacon also tells automatic memory whether the panel still shows V (companionPanel); leaving it wakes extraction.
       return { ...service, onPresence: (input) => {
-        if (companionPanel.update(input, Date.now()).leftPanel) wakeMemoryExtraction();
+        const update = companionPanel.update(input, Date.now());
+        if (update.leftPanel) wakeMemoryExtraction();
+        // Michi's posts are seen once its panel has focus.
+        if (update.enteredPanel) attentionService.presenceChanged(LOCAL_AGENT_OWNER_ID);
         return service.onPresence(input);
       } };
     },
     // The tray's "<name> is waiting for you": V's running turn asks for an approval or an answer.
     conversationWaiting: (nodeId) => chatHub.getPendingPermission(nodeId) !== null || chatHub.getPendingUserInput(nodeId) !== null,
+    resumed: scheduledJobScheduler ? () => retryStoppedMaintenance({ scheduler: scheduledJobScheduler, ownerUserId: LOCAL_AGENT_OWNER_ID }) : undefined,
+    // Local only, like this router: the session lookup checks no owner here.
+    turnedOff: (nodeId) => stopConversationTurn(nodeId, null),
+    // Get started's Start begins the Pages first run (D17), as opening Spaces did.
+    ...(scheduledJobScheduler ? { startFirstRun: () => { startSpacesFirstRun(scheduledJobScheduler, LOCAL_AGENT_OWNER_ID); } } : {}),
   }));
-  // A notice stored while no notifier has been connected for 30 s wakes the quit app (DESIGN-v2 §5.1).
-  companionEvents.configureWake({ launcher: appLauncher });
-  // While no window is open, conversations' approvals, questions and replies are notified from here (DESIGN-v2 §5.2).
-  // The attention service's records of the same events keep it to one OS notification each: what a window raised
-  // is not notified here, and what is notified here no window raises again.
-  chatNotices = startChatNotices({
-    hub: chatHub,
-    isScheduledRun: (nodeId) => scheduledJobExecutor?.isRunningOn(nodeId) ?? false,
-    attention: attentionService,
+  // Michi's Needs you, posts and finished delegations are attention records in its own workspace (DESIGN P4).
+  setCompanionAttention({
+    propose: (proposal) => {
+      const workspaceId = findAssistantWorkspace()?.id;
+      if (workspaceId) attentionService.proposeAgent(proposal, workspaceId, LOCAL_AGENT_OWNER_ID);
+    },
+    active: (prefix) => attentionService.activeAgentRecords(prefix),
+    resolve: (key) => attentionService.resolveAgent(key),
   });
+  // A record decided while no desktop notifier has been connected for 30 s wakes the quit app (DESIGN-v2 §5.1).
+  attentionService.configureDesktopWake({ launcher: appLauncher });
+  stopConversationWaiting = watchConversationWaiting({ hub: chatHub });
 }
-app.use('/api', setupScheduledJobRoutes({ scheduler: scheduledJobScheduler, events: scheduledJobEvents }));
+app.use('/api', setupScheduledJobRoutes({ scheduler: scheduledJobScheduler }));
 app.use('/api', setupMemoryRoutes());
 app.use('/api', setupSkillRoutes());
 app.use('/api', setupMemoryExtractionRoutes({ scheduler: scheduledJobScheduler }));
@@ -1132,9 +1190,9 @@ const gracefulShutdown = async (): Promise<void> => {
   const companionStopped = companion?.stop().catch((error) => {
     log.warn('boot', 'companion stop failed', { err: error instanceof Error ? error.message : String(error) });
   });
-  chatNotices?.stop();
-  chatNotices = null;
-  companionEvents.configureWake(null);
+  stopConversationWaiting?.();
+  stopConversationWaiting = null;
+  setCompanionAttention(null);
   chatHub.prepareForShutdown();
   // Decides pending notifications while the database is open; ignores teardown.
   attentionService.stop();

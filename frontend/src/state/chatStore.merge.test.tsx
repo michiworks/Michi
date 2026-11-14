@@ -33,7 +33,6 @@ vi.mock('../services/api', () => ({
   moveTreeToWorkspace: () => Promise.resolve({ ok: true }),
 }));
 
-vi.mock('../services/notifications', () => ({ notify: vi.fn() }));
 
 // jsdom lacks matchMedia
 Object.defineProperty(window, 'matchMedia', {

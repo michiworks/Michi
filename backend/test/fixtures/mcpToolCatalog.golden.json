@@ -3828,7 +3828,7 @@
       },
       {
         "name": "start_conversation",
-        "description": "Start a new ordinary conversation in one of the user's workspaces and send its first message, when the user asks for work to be done there. It runs on the user's own global runtime settings, not yours, and you do not do its work yourself. The user approves every start; if they decline, do not retry unless they ask. Never use it to continue an existing conversation: offer to open that conversation instead, and the user sends from there. Returns the new conversation's node id; link it as [title](michi://node/<nodeId>).",
+        "description": "Start a new ordinary conversation in one of the user's workspaces and send its first message, when the user asks for work to be done there. It runs on the user's own global runtime settings, not yours, and you do not do its work yourself. Never use it to continue an existing conversation: offer to open that conversation instead, and the user sends from there. Returns the new conversation's node id; link it as [title](michi://node/<nodeId>).",
         "inputSchema": {
           "type": "object",
           "properties": {
@@ -4485,7 +4485,7 @@
       },
       {
         "name": "companion_propose",
-        "description": "Propose a change on a card the user decides with its button or Dismiss: the button reads Send on a session.send card, Start conversation on a conversation.start card and Apply on the rest. Nothing changes when you call this: the user sees the card and decides, and the outcome reaches you at the start of your next turn as [CARD RESULTS]. Write one reply that refers to the card and end your turn. At most 2 cards in a turn and 8 waiting at once. Kinds and their payloads:\n- goal.add {text}, goal.update {goalId, text}, goal.remove {goalId}: the user's goals (goalId from [YOUR GOALS]);\n- checkins.update {heartbeat?: {enabled?, intervalMinutes?: 30|60|120|240}, brief?: {enabled?, time?: \"HH:MM\"}};\n- source.update {source: michi, enabled}: watching local Michi conversations;\nExternal code-review, pipeline, email and calendar collectors are not included in this build. Do not propose enabling them or watching pipelines.\n- quiet_hours.update {enabled, start?: \"HH:MM\", end?: \"HH:MM\"};\n- reminder.add {text, at?: a local time \"YYYY-MM-DD HH:MM\" or a time from now such as \"+90m\", \"+3h\" or \"+2d\", dailyAt?: \"HH:MM\", itemId?} (exactly one of at and dailyAt) and watch.add {itemId, until: answered}: only when the user asked for a reminder or a watch in their own words;\n- rules.update {rules}: replaces the user's whole rules for you; only when the user asked;\n- conversation.start {workspaceId, title, text}: a separate Michi conversation for long work the user asked for or would clearly want done for them, never for routine follow-up and never twice for one thing; workspaceId: the workspace the work belongs to (that of its Michi conversation, from CURRENT FOCUS or read_node, else from list_workspaces), and when none is clearly right, ask the user which one instead of picking; text is its first message, a self-contained brief, since it cannot see this conversation.\n- session.send {nodeId, text, afterMessageId?}: a follow-up into a conversation you started and still follow (nodeId from its michi://node/ link; afterMessageId: the id of its reply you read, which Michi fills in when you leave it out), text the exact message the user approves, at most 4000 characters, written so that conversation can act on it alone. A check-in makes at most one: Michi sends it at once when every tool that conversation runs asks the user first (it runs in Ask, on a runtime where Michi holds that approval) and shows it as a card otherwise. Never one that answers an approval or a question that conversation asks the user, and never for a conversation the user started;\nreminder.add, watch.add, rules.update and conversation.start only answer the user's own message: in a note from Michi they are refused.\nreason: one sentence for the card, why you propose it.",
+        "description": "Propose a change on a card the user decides with its button or Dismiss: the button reads Send on a session.send card, Start conversation on a conversation.start card and Apply on the rest. Nothing changes when you call this: the user sees the card and decides, and the outcome reaches you at the start of your next turn as [CARD RESULTS]. Write one reply that refers to the card and end your turn. At most 2 cards in a turn and 8 waiting at once. Kinds and their payloads:\n- goal.add {text}, goal.update {goalId, text}, goal.remove {goalId}: the user's goals (goalId from [YOUR GOALS]);\n- source.update {source: michi, enabled}: watching local Michi conversations;\nExternal code-review, pipeline, email and calendar collectors are not included in this build. Do not propose enabling them or watching pipelines.\n- reminder.add {text, at?: a local time \"YYYY-MM-DD HH:MM\" or a time from now such as \"+90m\", \"+3h\" or \"+2d\", dailyAt?: \"HH:MM\", itemId?} (exactly one of at and dailyAt) and watch.add {itemId, until: answered}: only when the user asked for a reminder or a watch in their own words;\n- rules.update {rules}: replaces the user's whole rules for you; only when the user asked;\n- conversation.start {workspaceId, title, text}: a separate Michi conversation for long work the user asked for or would clearly want done for them, never for routine follow-up and never twice for one thing; workspaceId: the workspace the work belongs to (that of its Michi conversation, from CURRENT FOCUS or read_node, else from list_workspaces), and when none is clearly right, ask the user which one instead of picking; text is its first message, a self-contained brief, since it cannot see this conversation.\n- session.send {nodeId, text, afterMessageId?}: a follow-up into a conversation you started and still follow (nodeId from its michi://node/ link; afterMessageId: the id of its reply you read, which Michi fills in when you leave it out), text the exact message the user approves, at most 4000 characters, written so that conversation can act on it alone. A check-in makes at most one: Michi sends it at once when every tool that conversation runs asks the user first (it runs in Ask, on a runtime where Michi holds that approval) and shows it as a card otherwise. Never one that answers an approval or a question that conversation asks the user, and never for a conversation the user started;\nreminder.add, watch.add, rules.update and conversation.start only answer the user's own message: in a note from Michi they are refused.\nreason: one sentence for the card, why you propose it.",
         "inputSchema": {
           "type": "object",
           "properties": {
@@ -4495,10 +4495,8 @@
                 "goal.add",
                 "goal.update",
                 "goal.remove",
-                "checkins.update",
                 "source.update",
                 "pipeline.watch",
-                "quiet_hours.update",
                 "conversation.start",
                 "reminder.add",
                 "watch.add",
@@ -4603,6 +4601,27 @@
           },
           "required": [
             "name"
+          ],
+          "$schema": "http://json-schema.org/draft-07/schema#"
+        }
+      },
+      {
+        "name": "companion_set_notifications",
+        "description": "Set the user's notifications (Settings › Notifications): all, approval-only (only when something needs them) or off. Only when the user just asked for it in their own words, in this conversation; it is refused in a note from Michi.",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "level": {
+              "type": "string",
+              "enum": [
+                "all",
+                "approval-only",
+                "off"
+              ]
+            }
+          },
+          "required": [
+            "level"
           ],
           "$schema": "http://json-schema.org/draft-07/schema#"
         }

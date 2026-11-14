@@ -1,5 +1,6 @@
 import React, { useState } from 'react';
 import { FileText } from 'lucide-react';
+import { remoteEntityIdentity } from '../../../../config/backendIdentity';
 import { openSpacesPage } from '../../../../state/metaChat/spacesPages';
 import { useMetaChatRevealPage } from './metaChatRevealPage';
 
@@ -8,6 +9,15 @@ function textOf(children: React.ReactNode): string {
   if (Array.isArray(children)) return children.map(textOf).join('');
   if (React.isValidElement<{ children?: React.ReactNode }>(children)) return textOf(children.props.children);
   return '';
+}
+
+/** The remote connection a page id names, if it names one. */
+function remoteConnectionOf(id: string): string | undefined {
+  try {
+    return remoteEntityIdentity(id)?.connectionId;
+  } catch {
+    return undefined;
+  }
 }
 
 /** A `michi://page/<id>[?block=<id>]` link in an assistant reply: opens the page and flashes the block. */
@@ -24,7 +34,9 @@ export function PageLinkChip({ id, blockId, children }: { id: string; blockId?: 
       title={gone ? `${label} — deleted` : label}
       onClick={() => {
         if (!gone) revealPage?.();
-        void openSpacesPage({ pageId: id, ...(blockId ? { blockId } : {}) }).then((result) => { if (result === 'deleted') setGone(true); });
+        const backendConnectionId = remoteConnectionOf(id);
+        void openSpacesPage({ pageId: id, ...(backendConnectionId ? { backendConnectionId } : {}), ...(blockId ? { blockId } : {}) })
+          .then((result) => { if (result === 'deleted') setGone(true); });
       }}
     >
       <span className="assistant-cite__icon" aria-hidden="true"><FileText size={11} /></span>

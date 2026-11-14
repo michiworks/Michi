@@ -17,10 +17,13 @@ import { ScheduledJobEventBus } from '../src/services/scheduledJobs/events';
 import { ScheduledJobsRepository } from '../src/services/scheduledJobs/repository';
 import { ScheduledJobScheduler, type ScheduledJobExecutor, type ScheduledRunOutcome } from '../src/services/scheduledJobs/scheduler';
 import { recordMetaAgentGuardCheck } from '../src/services/metaAgent/guardStatus';
-import { resolveMetaAgentRuntime } from '../src/services/metaAgent/settings';
+import { resolveBackgroundRuntime } from '../src/services/metaAgent/settings';
 import { metaAgentRoundStatus, runMetaAgentRoundNow } from '../src/services/metaAgent/runNow';
+import { CONSOLIDATION_LIMITS } from '../src/services/memory/consolidationPolicy';
+import { recordTypedText, releaseTypedText } from '../src/services/memory/typedText';
 import { setupMetaAgentRunNowRoutes } from '../src/routes/metaAgentRunNow';
 import { setupMetaAgentRoutes } from '../src/routes/metaAgent';
+import { turnBackgroundWorkOn } from './helpers/backgroundWork';
 
 const LOCAL = 'local-user';
 
@@ -39,6 +42,7 @@ beforeEach(() => {
   process.env.MICHI_DATA_DIR = dir;
   delete process.env.MICHI_CLOUD;
   closeDb(); initDb();
+  turnBackgroundWorkOn();
   updateAgentConfig({ runtime: 'claude', modelByRuntime: { claude: 'claude-opus-5.5' }, reasoningByRuntime: { claude: 'high' } });
   now = 1_800_000_000_000;
   ids = 0;
@@ -67,7 +71,7 @@ function scheduler(maxConcurrentRuns = 4): ScheduledJobScheduler {
     },
   };
   return new ScheduledJobScheduler({ repository: new ScheduledJobsRepository(), executor,
-    events: new ScheduledJobEventBus(() => now), workspaceExists: () => true, runtimeExists: () => true,
+    events: new ScheduledJobEventBus(), workspaceExists: () => true, runtimeExists: () => true,
     clock: () => now, createId: () => `job-${++ids}`, maxConcurrentRuns });
 }
 
@@ -135,7 +139,7 @@ describe('Meta agent run-now', () => {
   test('a failed restriction check holds every workspace, as on the schedule', async () => {
     const jobs = scheduler();
     maintained(jobs, 'ws-a', 1, 3);
-    const { followsGlobal: _f, ...profile } = resolveMetaAgentRuntime(LOCAL);
+    const { followsGlobal: _f, ...profile } = resolveBackgroundRuntime(LOCAL);
     recordMetaAgentGuardCheck({ toolset: 'maintenance', profile, ownerUserId: LOCAL, now,
       failure: { runtimeId: profile.runtimeId, unexpectedTools: ['fs_write'] } });
     const result = runMetaAgentRoundNow({ scheduler: jobs, ownerUserId: LOCAL });
@@ -174,6 +178,21 @@ describe('Meta agent run-now', () => {
     assert.equal(again.workspaces[0].reason, 'Already reading');
     await settle();
     assert.deepEqual(started, ['ws-a']);
+  });
+
+  test('in a round, a workspace nobody started counts as running only when its work is due on its own', (t) => {
+    t.mock.method(Date, 'now', () => now);
+    const jobs = scheduler();
+    maintained(jobs, 'ws-a', 1, 1);
+    recordTypedText('node-typing', 'turn-typing', 'Still working');
+    const running = () => metaAgentRoundStatus({ scheduler: jobs, ownerUserId: LOCAL, now }).workspaces.map((row) => row.running);
+    try {
+      assert.deepEqual(running(), [false], 'the user is active, so the new turn waits');
+      now += CONSOLIDATION_LIMITS.oldestWaitingMs;
+      assert.deepEqual(running(), [true], 'it waited two hours');
+    } finally {
+      releaseTypedText('node-typing', 'turn-typing');
+    }
   });
 
   test('queued work counts as something to read', () => {

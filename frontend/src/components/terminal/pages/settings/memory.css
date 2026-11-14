@@ -1,25 +1,5 @@
 /* Settings › Memory. Sections, rows and notes come from SettingsSection. */
 
-/* Details: a quiet row under the switch; the whole row opens automatic memory's status below it. */
-.memory-details { position: relative; }
-.memory-details__toggle {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  padding: 0;
-  border: 0;
-  background: none;
-  color: var(--term-muted);
-  font: inherit;
-  font-size: var(--fs-md);
-  cursor: pointer;
-}
-.memory-details__toggle::after { content: ''; position: absolute; inset: 0; }
-.memory-details__toggle svg { transition: transform var(--t-soft) ease; }
-.memory-details__toggle[aria-expanded='true'] svg { transform: rotate(90deg); }
-@media (hover: hover) and (pointer: fine) { .memory-details:hover .memory-details__toggle { color: var(--term-fg); } }
-.memory-details__toggle:focus-visible { outline: var(--focus-ring); outline-offset: 2px; }
-
 .memory-toolbar { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
 .memory-toolbar .settings-row__select { flex: none; }
 .memory-toolbar__search.ui-input { flex: 1 1 200px; width: auto; min-width: 0; }
@@ -80,8 +60,8 @@
 .memory-profile__confirm { color: var(--term-muted); font-size: var(--fs-md); }
 .memory-profile__cites { display: flex; flex-direction: column; gap: 4px; list-style: none; margin: 6px 0 0; padding: 0 0 0 16px; }
 .memory-profile__cite.settings-row__link { font-size: var(--fs-md); line-height: 1.5; text-align: left; overflow-wrap: anywhere; }
-.memory-profile__rebuild { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin-top: 12px; }
-.memory-profile__rebuild .settings-row__state { white-space: normal; }
+.memory-profile__aside { display: inline-flex; align-items: baseline; gap: 0; white-space: nowrap; }
+.memory-profile__aside .settings-row__link:disabled { color: var(--term-faint); cursor: default; text-decoration: none; }
 @media (prefers-reduced-motion: reduce) { .memory-profile__cites-toggle svg { transition: none; } }
 
 /* A phone stacks the controls under the text, full width. */

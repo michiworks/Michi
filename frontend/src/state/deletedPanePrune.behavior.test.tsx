@@ -36,7 +36,6 @@ vi.mock('../services/api', () => ({
   syncWorkspace: () => Promise.resolve({ ok: true }),
 }));
 
-vi.mock('../services/notifications', () => ({ notify: vi.fn() }));
 
 import { ChatProvider, useChatStore, useChatNodesSnapshot } from './chatStore';
 import { PrefsProvider } from './prefs';

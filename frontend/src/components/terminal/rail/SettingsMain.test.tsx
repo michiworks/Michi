@@ -317,7 +317,7 @@ describe('Settings › <name>', () => {
     // Searching the old names finds the agent's page, by its name.
     fireEvent.change(screen.getByRole('searchbox', { name: 'Search settings' }), { target: { value: 'meta agent' } });
     const results = screen.getByRole('region', { name: 'Search results' });
-    expect(within(results).getAllByText('Agent › Kit › Pages upkeep').length).toBeGreaterThan(0);
+    expect(within(results).getAllByText('Agent › Kit › Pages').length).toBeGreaterThan(0);
     expect(results.querySelector('.settings-window__hits')!.textContent).not.toMatch(/meta agent/i);
   });
 
@@ -352,7 +352,7 @@ describe('Settings list on a phone', () => {
     expect(within(agent).getAllByRole('button').map((item) => item.getAttribute('aria-label'))).toEqual(['Runtime & model', 'Michi', 'Memory', 'Skills']);
     expect(description(row('Runtime & model'))).toBe('Claude · Opus 5.5');
     expect(description(row('Appearance'))).toBe('Bone · Rust');
-    expect(description(row('Notifications'))).toBe('Approval only');
+    expect(description(row('Notifications'))).toBe('Only when something needs me');
     expect(description(row('Links'))).toBe('Michi Browser');
     expect(description(row('Machines'))).toBe('This machine');
     expect(description(row('Trash'))).toBe('2');
@@ -393,12 +393,12 @@ describe('Settings list on a phone', () => {
     expect(document.activeElement).toBe(row('Notifications'));
   });
 
-  it('opens a request for the old Meta agent page at Settings › <name> › Pages upkeep', async () => {
+  it('opens a request for the old Meta agent page at Settings › <name> › Background work', async () => {
     render(<Host stacked />);
     fireEvent.click(screen.getByRole('button', { name: 'Host request' }));
     expect(root().getAttribute('data-view')).toBe('section');
     expect(screen.getByRole('heading', { level: 1, name: 'Michi' })).toBeTruthy();
-    expect(await screen.findByText('Agent settings, pointing at Pages upkeep')).toBeTruthy();
+    expect(await screen.findByText('Agent settings, pointing at Background work')).toBeTruthy();
   });
 
   it('opens Trash in the drawer, and the header Back closes an item open in it before the page', async () => {

@@ -4,7 +4,7 @@ import { useSyncExternalStore } from 'react';
  * One visible destination shared by the shell, sidebar, list and notifications.
  * A job with `runId` shows that run's thread (a Scheduled-only job's run).
  */
-export type ScheduledRoute = { kind: 'list' } | { kind: 'meta-agent' } | { kind: 'job'; jobId: string; runId?: string };
+export type ScheduledRoute = { kind: 'list' } | { kind: 'job'; jobId: string; runId?: string };
 export const SCHEDULED_HOME: ScheduledRoute = { kind: 'list' };
 let route: ScheduledRoute = SCHEDULED_HOME;
 const listeners = new Set<() => void>();

@@ -219,14 +219,25 @@ const TOOL_CALL_NAMES_PER_TURN = 256;
  */
 export class KiroToolCallNames {
     private readonly names = new Map<string, string>();
+    /** The call's ACP kind and arguments, which Kiro sends on its tool_call update and leaves out of the permission request. */
+    private readonly calls = new Map<string, { kind?: string; rawInput?: unknown }>();
 
     constructor(private readonly limit = TOOL_CALL_NAMES_PER_TURN, private readonly resolveName?: KiroToolNameResolver) {}
 
-    /** A tool_call or tool_call_update; one without a name changes nothing. */
+    /** A tool_call or tool_call_update; one without a name changes no name. */
     remember(update: any): void {
         const toolCallId = update?.toolCallId;
+        if (typeof toolCallId !== 'string' || !toolCallId) return;
+        const known = this.calls.get(toolCallId) ?? {};
+        const kind = typeof update?.kind === 'string' ? update.kind : known.kind;
+        const rawInput = update?.rawInput !== undefined ? update.rawInput : known.rawInput;
+        if (kind !== undefined || rawInput !== undefined) {
+            this.calls.delete(toolCallId);
+            this.calls.set(toolCallId, { ...(kind !== undefined ? { kind } : {}), ...(rawInput !== undefined ? { rawInput } : {}) });
+            if (this.calls.size > this.limit) this.calls.delete(this.calls.keys().next().value!);
+        }
         const name = agentToolName(update, this.resolveName) ?? update?._meta?.kiro?.toolName;
-        if (typeof toolCallId !== 'string' || !toolCallId || typeof name !== 'string' || !name.trim()) return;
+        if (typeof name !== 'string' || !name.trim()) return;
         this.names.delete(toolCallId);
         this.names.set(toolCallId, name.trim());
         if (this.names.size > this.limit) this.names.delete(this.names.keys().next().value!);
@@ -234,5 +245,10 @@ export class KiroToolCallNames {
 
     get(toolCallId: unknown): string | undefined {
         return typeof toolCallId === 'string' ? this.names.get(toolCallId) : undefined;
+    }
+
+    /** What the call's earlier updates said it does: its ACP kind and arguments. */
+    call(toolCallId: unknown): { kind?: string; rawInput?: unknown } {
+        return (typeof toolCallId === 'string' ? this.calls.get(toolCallId) : undefined) ?? {};
     }
 }

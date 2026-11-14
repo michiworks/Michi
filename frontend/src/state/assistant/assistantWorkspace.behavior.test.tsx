@@ -26,7 +26,6 @@ vi.mock('../../services/api', async (importOriginal) => ({
   streamMessage: vi.fn(() => () => {}),
   getSavedTurn: vi.fn(async () => null),
 }));
-vi.mock('../../services/notifications', () => ({ notify: vi.fn() }));
 vi.mock('../../services/attention/policy', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../../services/attention/policy')>()),
   presentAttention: vi.fn(),

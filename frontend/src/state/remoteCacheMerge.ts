@@ -45,7 +45,7 @@ const MESSAGE_STATE_KEYS = new Set<string>([
 const LEAN_FIELD_STATE_KEYS: Readonly<Record<LeanNodeField, readonly string[]>> = {
   branch_overview: ['branchOverview', 'branchOverviewEntries'],
   follow_ups: ['followUps', 'followUpsSourceMessageId'],
-  composer_draft: ['composerDraft', 'pendingSpawnPrompt'],
+  composer_draft: ['composerDraft'],
 };
 
 /**

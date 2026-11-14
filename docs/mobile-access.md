@@ -85,25 +85,38 @@ References: [Tailscale Serve](https://tailscale.com/docs/features/tailscale-serv
 [Serve identity headers](https://github.com/tailscale/tailscale/blob/main/ipn/ipnlocal/serve.go),
 [Windows service process](https://github.com/tailscale/tailscale/blob/main/cmd/tailscaled/tailscaled_windows.go).
 
+## Phone text size
+
+In the phone layout, **Settings → Appearance → Text size** chooses **Small**
+(15 px messages, the default), **Medium** (16 px) or **Large** (18 px); Medium
+and Large also step up the rest of the phone's interface. It takes the place
+of the desktop's text size, density and composer size settings on the phone and
+does not change them. The choice is saved with the machine's settings, so
+phones that open the same machine share it.
+
 ## Phone terminals
 
 Phones, browsers and the desktop's remote workspaces use terminals that the
 backend runs (`backend/src/services/terminalHost.ts`); Electron's local
-workspaces keep their own PTY. Several windows can show one shell, so a
-terminal opened on the desktop appears under **Running terminals** in a
-phone's New pane. The window that typed last sets the terminal's size. Output
-is numbered; a phone that reconnects after sleep or a network change receives
-only what it missed, and input whose delivery is uncertain is dropped rather
-than sent twice. Closing a pane ends the shell only when no other window shows
+workspaces keep their own PTY, which a phone cannot see. Several windows can
+show one backend shell, so a terminal that a desktop remote workspace or a
+browser opened on a machine appears under **Running terminals** in New pane
+on a phone that opens the same machine. The window that typed last sets the
+terminal's size. Output is numbered; a phone that reconnects after sleep or a
+network change receives only what it missed, and input whose delivery is
+uncertain is dropped rather than sent twice. Closing a pane ends the shell only when no other window shows
 it; a terminal no window has opened for 24 hours is closed.
 
 A shell runs any command as the backend's user, so phones get terminals only
-after **Settings → Phone access → Terminal** is turned on, on the computer.
-It is off by default, asks for confirmation before turning on, and turning it
-off disconnects the phones while the shells keep running. The setting is
-stored per machine in `phone-terminal.json` in the data directory. The phone
-gateway refuses every `/mobile-access` path, so a phone cannot change it.
-Requests through the gateway carry `x-michi-via: phone`, which may only
+after **Settings → Machines → Phone access → Terminal** is turned on, on the
+computer, for the machine chosen in the phone access machine menu. It is off
+by default, asks for confirmation before turning on, and turning it off
+disconnects the phones while the shells keep running. The setting is stored
+per machine in `phone-terminal.json` in the data directory; a machine whose
+build has no backend terminals shows no Terminal row. The phone gateway
+refuses every `/mobile-access` path, so a phone cannot change it. While it is
+off, a phone's New pane shows Terminal as off and says why. Requests through
+the gateway carry `x-michi-via: phone`, which may only
 remove access: the gateway always sets it, and the desktop proxy keeps it when
 it forwards a phone's request to a remote machine, whose own setting then
 applies. Signed-in and multi-user backends (`MICHI_REQUIRE_AUTH`,

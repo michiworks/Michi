@@ -62,6 +62,7 @@ import { getWorkspace, type NodeRow } from '../dbRepository';
 import { log } from '../logger';
 import { serverLiveWait, type HomeLiveWait } from '../pages/homeSections';
 import { companionRuntimeGateAuthoritative, recordCompanionTaint } from '../turnTrust';
+import { recordPassedOutsideContent } from '../turnGuard';
 import { CHECKIN_WITHDRAWN_MESSAGE, checkinMemoryHolds } from './checkinNode';
 import { localDayStart } from './clock';
 import {
@@ -214,20 +215,6 @@ export function companionTargetPermissionLine(choice: ChatPermissionChoice | nul
   }
 }
 
-/**
- * Why a follow-up asks although the user chose "Send, and stop asking" for
- * its conversation (DESIGN-v2 §4, D3): the turn read check-in or collector
- * material, so what it sends may come from that text.
- */
-export const COMPANION_SEND_TAINT_ASK_REASON = 'This turn read check-in material, so Michi asks even though you said to stop asking for this conversation.';
-
-/**
- * The same, for a turn that read no check-in or collector material but other
- * content from outside Michi (turnTrust.turnTaintOf 'untrusted'): the web, a
- * command's output, another MCP server.
- */
-export const COMPANION_SEND_UNTRUSTED_ASK_REASON = 'This turn read content from outside Michi (the web or a command\'s output), so Michi asks even though you said to stop asking for this conversation.';
-
 const CHOICE_LABEL: Record<ChatPermissionChoice, string> = { ask: 'Ask', approve: 'Ask with Approve for me', trust: 'Trust', yolo: 'YOLO' };
 
 /**
@@ -362,6 +349,12 @@ interface CompanionSendInput {
   notWiderThan?: ChatPermissionChoice;
   /** Via `checkin`: the check-in's run, whose receipt lists the follow-up once it went (D21). */
   checkinRunId?: string;
+  /**
+   * The text comes from a turn that held outside content and the user did not
+   * approve it as written ("Send, and stop asking"): the target's turn starts
+   * from content someone else wrote (D19; services/turnGuard.ts outsideSourced).
+   */
+  passedOutside?: boolean;
 }
 
 export interface CompanionSendResult {
@@ -479,6 +472,15 @@ export async function deliverCompanionMessage(input: CompanionSendInput): Promis
       } catch (error) {
         log.warn('chat', 'companion follow-up not marked as check-in material; not sent', { nodeId: target.node.id, turnId, error: errorText(error) });
         fail('TAINT_UNRECORDED', 'Michi could not mark that turn as started by a check-in, so nothing was sent; this one gets a card.');
+      }
+    }
+    if (input.via !== 'checkin' && input.passedOutside) {
+      // D19: the target's turn starts from content someone else wrote, so its network and credential reads ask too.
+      try {
+        recordPassedOutsideContent({ nodeId: target.node.id, turnId }, caller.nodeId, session.runtimeId);
+      } catch (error) {
+        log.warn('chat', 'companion follow-up not marked as carrying outside content; not sent', { nodeId: target.node.id, turnId, error: errorText(error) });
+        fail('TAINT_UNRECORDED', 'Michi could not mark that turn as starting from outside content, so nothing was sent.');
       }
     }
     start = deps!.startTurn({

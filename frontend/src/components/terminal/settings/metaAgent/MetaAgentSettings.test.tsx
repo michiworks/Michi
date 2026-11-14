@@ -7,10 +7,9 @@ import type { AgentCapabilities, AgentModelInfo } from '../../../../services/api
 import { MetaAgentApiError } from '../../../../services/api/metaAgent';
 import { resetMetaAgentStore } from '../../../../state/metaAgent/useMetaAgent';
 import { resetMetaAgentOverviewStore } from '../../../../state/metaAgent/useMetaAgentOverview';
-import { PagesUpkeepSettings } from './MetaAgentSettings';
+import { BackgroundWorkSettings, PagesUpkeepSettings } from './MetaAgentSettings';
 
 const api = vi.hoisted(() => ({
-  decideMetaAgentToolApproval: vi.fn(),
   fetchMetaAgent: vi.fn(),
   updateMetaAgentSettings: vi.fn(),
   retryMetaAgentGuard: vi.fn(),
@@ -34,7 +33,6 @@ const catalog = vi.hoisted(() => ({
 
 vi.mock('../../../../services/api/metaAgent', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../../../../services/api/metaAgent')>()),
-  decideMetaAgentToolApproval: api.decideMetaAgentToolApproval,
   fetchMetaAgent: api.fetchMetaAgent,
   updateMetaAgentSettings: api.updateMetaAgentSettings,
   retryMetaAgentGuard: api.retryMetaAgentGuard,
@@ -99,15 +97,24 @@ const overview = (state: 'running' | 'paused' | 'error') => ({
 
 const flush = () => act(async () => { for (let i = 0; i < 6; i++) await Promise.resolve(); });
 
-async function mount(info: MetaAgentInfo | Error = FOLLOW) {
+/** Settings › <name>: Background work under Model, and the Pages upkeep section; `only` renders one of them. */
+async function mount(info: MetaAgentInfo | Error = FOLLOW, only?: 'runtime' | 'pages') {
   if (info instanceof Error) api.fetchMetaAgent.mockRejectedValue(info);
   else api.fetchMetaAgent.mockResolvedValue(info);
-  render(<PagesUpkeepSettings />);
+  render(<>{only !== 'pages' && <BackgroundWorkSettings />}{only !== 'runtime' && <PagesUpkeepSettings />}</>);
   await flush();
 }
 
-const runtimeSection = () => screen.getByRole('region', { name: 'Runtime' });
+const choice = () => screen.getByRole('combobox', { name: 'Background work' }) as HTMLSelectElement;
+const chooseCustom = () => fireEvent.change(choice(), { target: { value: 'custom' } });
+const runtimeChoice = () => screen.getByRole('combobox', { name: 'Background work runtime' }) as HTMLSelectElement;
 const lastPatch = () => api.updateMetaAgentSettings.mock.calls.at(-1)?.[0];
+/** A row by its name, as Settings shows it. */
+const row = (label: string) => {
+  const name = Array.from(document.querySelectorAll('.settings-row__label')).find((element) => element.textContent?.trim() === label);
+  if (!name) throw new Error(`No row ${label}`);
+  return name.closest('.settings-row') as HTMLElement;
+};
 
 beforeEach(() => {
   for (const fn of Object.values(api)) fn.mockReset();
@@ -120,29 +127,29 @@ beforeEach(() => {
 });
 afterEach(() => cleanup());
 
-describe('Settings › <name> › Pages upkeep runtime', () => {
-  it('follows the global settings by default and says what it runs on now', async () => {
-    await mount();
-    const section = runtimeSection();
-    expect(within(section).getByRole('radio', { name: /Follow global settings/ })).toHaveProperty('checked', true);
-    expect(within(section).getByRole('radio', { name: /Custom/ })).toHaveProperty('checked', false);
-    expect(section.textContent).toContain('Now Claude · claude-opus-5.5 · reasoning high. Change the global settings and Pages upkeep follows from its next run.');
-    expect(within(section).queryByRole('group', { name: 'Pages upkeep runtime' })).toBeNull();
+describe('Settings › <name> › Model › Background work', () => {
+  it('is Same as conversations by default: one row, no runtime, model or reasoning of its own', async () => {
+    await mount(FOLLOW, 'runtime');
+    expect(choice().value).toBe('same');
+    expect(Array.from(choice().options).map((option) => option.textContent)).toEqual(['Same as conversations', 'Custom']);
+    expect(screen.queryByRole('combobox', { name: 'Background work runtime' })).toBeNull();
+    expect(screen.queryByRole('combobox', { name: 'Background work model' })).toBeNull();
+    // No "Saved" tick and no descriptions under the choices.
+    expect(document.body.textContent).not.toMatch(/Saved|Same as your chats|follow it from their next run/);
   });
 
-  it('pins what it runs on now when Custom is chosen, then lists the supported available runtimes', async () => {
+  it('pins what it runs on now when Custom is chosen, then offers the supported available runtimes as rows', async () => {
     await mount();
     api.updateMetaAgentSettings.mockResolvedValue({
       ...FOLLOW, settings: { runtimeId: 'claude', providerId: null, modelId: 'claude-opus-5.5', reasoning: 'high' },
       resolved: { ...FOLLOW.resolved, followsGlobal: false },
     });
-    fireEvent.click(screen.getByRole('radio', { name: /Custom/ }));
+    chooseCustom();
     await flush();
     expect(lastPatch()).toEqual({ runtimeId: 'claude', providerId: null, modelId: 'claude-opus-5.5', reasoning: 'high' });
-    const chips = within(screen.getByRole('group', { name: 'Pages upkeep runtime' })).getAllByRole('button');
-    expect(chips.map((chip) => chip.textContent)).toEqual(['Claude', 'Pi', 'Codex', 'Kiro']);
-    expect(chips.map((chip) => (chip as HTMLButtonElement).disabled)).toEqual([false, false, false, false]);
-    expect(chips[0].getAttribute('aria-pressed')).toBe('true');
+    expect(Array.from(runtimeChoice().options).map((option) => option.textContent)).toEqual(['Claude', 'Codex', 'Pi', 'Kiro']);
+    expect(runtimeChoice().value).toBe('claude');
+    for (const label of ['Runtime', 'Model']) expect(row(label)).toBeTruthy();
   });
 
   it('switches the custom runtime with the new runtime’s defaults', async () => {
@@ -151,10 +158,10 @@ describe('Settings › <name> › Pages upkeep runtime', () => {
       ...CUSTOM_CODEX, settings: { runtimeId: 'kiro', providerId: null, modelId: null, reasoning: null },
       resolved: { runtimeId: 'kiro', providerId: null, modelId: null, reasoning: null, followsGlobal: false },
     });
-    fireEvent.click(screen.getByRole('button', { name: 'Kiro' }));
+    fireEvent.change(runtimeChoice(), { target: { value: 'kiro' } });
     await flush();
     expect(lastPatch()).toEqual({ runtimeId: 'kiro', providerId: null, modelId: null, reasoning: null });
-    expect(screen.getByRole('button', { name: 'Kiro' }).getAttribute('aria-pressed')).toBe('true');
+    expect(runtimeChoice().value).toBe('kiro');
   });
 
   it('says what each “Default” stands for', async () => {
@@ -164,20 +171,20 @@ describe('Settings › <name> › Pages upkeep runtime', () => {
       resolved: { runtimeId: 'codex', providerId: null, modelId: 'gpt-5.5-codex', reasoning: 'high', followsGlobal: false },
     });
     const first = (name: string) => (screen.getByRole('combobox', { name }) as HTMLSelectElement).options[0]!.textContent;
-    expect(first('Pages upkeep model')).toBe('Default (GPT 5.5 Codex)');
-    expect(first('Pages upkeep reasoning')).toBe('Default (High)');
+    expect(first('Background work model')).toBe('Default (GPT 5.5 Codex)');
+    expect(first('Background work reasoning')).toBe('Default (High)');
     cleanup();
 
     // A value picked by hand needs no explanation.
     await mount(CUSTOM_CODEX);
-    expect(first('Pages upkeep model')).toBe('Default');
-    expect(first('Pages upkeep reasoning')).toBe('Default');
+    expect(first('Background work model')).toBe('Default');
+    expect(first('Background work reasoning')).toBe('Default');
   });
 
   it('explains when the runtime it follows cannot run it, and switches to the first runtime that can', async () => {
     const reason = 'The Meta agent does not run on Kiro Crew yet. Choose another runtime for it in Settings › Meta agent.';
-    await mount({ ...followOn('crew'), availability: { available: false, reason } });
-    const notice = within(runtimeSection()).getByRole('status');
+    await mount({ ...followOn('crew'), availability: { available: false, reason } }, 'runtime');
+    const notice = within(row('Background work')).getByRole('status');
     expect(notice.textContent).toContain(reason);
     api.updateMetaAgentSettings.mockResolvedValue({
       ...CUSTOM_CODEX, settings: { runtimeId: 'claude', providerId: null, modelId: null, reasoning: null },
@@ -186,7 +193,7 @@ describe('Settings › <name> › Pages upkeep runtime', () => {
     fireEvent.click(within(notice).getByRole('button', { name: 'Use a custom runtime' }));
     await flush();
     expect(lastPatch()).toEqual({ runtimeId: 'claude', providerId: null, modelId: null, reasoning: null });
-    expect(within(runtimeSection()).queryByRole('status')).toBeNull();
+    expect(within(row('Background work')).queryByRole('status')).toBeNull();
   });
 
   it('hides unavailable runtime choices while retaining diagnostics for an unavailable saved selection', async () => {
@@ -197,60 +204,52 @@ describe('Settings › <name> › Pages upkeep runtime', () => {
         : runtime.id === 'kiro' ? { ...runtime, available: false, unavailableReason: 'kiro-cli not found' } : runtime),
     });
     await mount({ ...CUSTOM_CODEX, settings: { ...CUSTOM_CODEX.settings, runtimeId: 'claude' } });
-    const choices = screen.getByRole('group', { name: 'Pages upkeep runtime' });
-    expect(within(choices).getAllByRole('button').map((chip) => chip.textContent)).toEqual(['Pi', 'Codex']);
-    expect(screen.getByText('Claude isn’t installed on this computer.')).toBeTruthy();
+    // The saved choice stays listed so the select shows it; the others that can't run are left out.
+    expect(Array.from(runtimeChoice().options).map((option) => option.textContent)).toEqual(['Claude', 'Codex', 'Pi']);
+    expect(within(row('Runtime')).getByText('Claude isn’t installed on this computer.')).toBeTruthy();
     expect(screen.queryByText('Kiro isn’t installed on this computer.')).toBeNull();
     fireEvent.click(screen.getByRole('button', { name: 'How to install' }));
     expect(screen.getByText('npm install -g @anthropic-ai/claude-code', { selector: 'code' })).toBeTruthy();
-    // No Pi explanation; with nothing unavailable to explain, no hint list.
+    // No Pi explanation; with nothing unavailable to explain, no note under Runtime.
     expect(screen.queryByText(/Pi runs inside Michi/)).toBeNull();
     cleanup();
     await mount(CUSTOM_CODEX);
-    expect(screen.getByRole('group', { name: 'Pages upkeep runtime' }).nextElementSibling?.classList.contains('meta-set__hints')).toBe(false);
+    expect(row('Runtime').querySelector('.settings-row__note')).toBeNull();
   });
 
-  it('sends nulls for every field when going back to the global settings', async () => {
+  it('sends nulls for every field when going back to the conversations’ settings', async () => {
     await mount(CUSTOM_CODEX);
     api.updateMetaAgentSettings.mockResolvedValue(FOLLOW);
-    // In Custom mode the follow-global row still describes the global settings.
-    expect(runtimeSection().textContent).toContain('Now Claude · claude-opus-5.5 · reasoning high.');
-    fireEvent.click(screen.getByRole('radio', { name: /Follow global settings/ }));
+    expect(choice().value).toBe('custom');
+    fireEvent.change(choice(), { target: { value: 'same' } });
     await flush();
     expect(lastPatch()).toEqual({ runtimeId: null, providerId: null, modelId: null, reasoning: null });
-    expect(screen.getByRole('radio', { name: /Follow global settings/ })).toHaveProperty('checked', true);
+    expect(choice().value).toBe('same');
   });
 
   it('saves the custom model and reasoning through the runtime catalog', async () => {
     await mount(CUSTOM_CODEX);
     expect(catalog.calls.at(-1)).toMatchObject({ runtime: 'codex', connectionId: 'local' });
     api.updateMetaAgentSettings.mockResolvedValue(CUSTOM_CODEX);
-    fireEvent.change(screen.getByRole('combobox', { name: 'Pages upkeep model' }), { target: { value: '' } });
+    fireEvent.change(screen.getByRole('combobox', { name: 'Background work model' }), { target: { value: '' } });
     await flush();
     expect(lastPatch()).toEqual({ modelId: null });
-    fireEvent.change(screen.getByRole('combobox', { name: 'Pages upkeep reasoning' }), { target: { value: 'low' } });
+    fireEvent.change(screen.getByRole('combobox', { name: 'Background work reasoning' }), { target: { value: 'low' } });
     await flush();
     expect(lastPatch()).toEqual({ reasoning: 'low' });
     // A model without reasoning drops the explicit level.
-    fireEvent.change(screen.getByRole('combobox', { name: 'Pages upkeep model' }), { target: { value: 'gpt-mini' } });
+    fireEvent.change(screen.getByRole('combobox', { name: 'Background work model' }), { target: { value: 'gpt-mini' } });
     await flush();
     expect(lastPatch()).toEqual({ modelId: 'gpt-mini', reasoning: null });
   });
 
   it('shows a save failure and keeps the stored choice', async () => {
-    await mount();
+    await mount(FOLLOW, 'runtime');
     api.updateMetaAgentSettings.mockRejectedValue(new MetaAgentApiError(400, 'Unknown runtime'));
-    fireEvent.click(screen.getByRole('radio', { name: /Custom/ }));
+    chooseCustom();
     await flush();
     expect(screen.getByRole('alert').textContent).toBe('Unknown runtime');
-    expect(screen.getByRole('radio', { name: /Follow global settings/ })).toHaveProperty('checked', true);
-  });
-});
-
-describe('Settings › <name> › Pages upkeep follow-global line', () => {
-  it('names the resolved runtime in the follow-global line', async () => {
-    await mount(followOn('kiro', 'kiro_default'));
-    expect(runtimeSection().textContent).toContain('Now Kiro · kiro_default. Change the global settings');
+    expect(choice().value).toBe('same');
   });
 });
 
@@ -292,7 +291,7 @@ describe('Settings › <name> › Pages upkeep guard failure', () => {
     expect(alert.textContent).toMatch(/Kiro · checked [A-Z][a-z]{2} \d{1,2}, \d{2}:41/);
 
     fireEvent.click(within(alert).getByRole('button', { name: 'Change runtime' }));
-    expect(document.activeElement).toBe(screen.getByRole('radio', { name: /Custom/ }));
+    expect(document.activeElement).toBe(choice());
   });
 
   it('has no red box while every check passed', async () => {
@@ -341,7 +340,7 @@ describe('Settings › <name> › Pages upkeep stopped by errors', () => {
     expect(alert.textContent).toContain('Codex is not installed on this computer.');
     expect(within(alert).queryByRole('button', { name: 'Retry' })).toBeNull();
     fireEvent.click(within(alert).getByRole('button', { name: 'Change runtime' }));
-    expect(document.activeElement).toBe(screen.getByRole('radio', { name: /Custom/ }));
+    expect(document.activeElement).toBe(choice());
   });
 
   it('leaves a failed tool check to its own red box', async () => {
@@ -352,183 +351,93 @@ describe('Settings › <name> › Pages upkeep stopped by errors', () => {
   });
 });
 
-describe('Settings › <name> › Pages upkeep background updates', () => {
-  const row = () => screen.getByRole('switch', { name: 'Background updates' }).closest('.meta-set__row') as HTMLElement;
-
-  it('pauses and resumes them through the same switch as Scheduled, and says the chat window still works', async () => {
-    await mount();
-    expect(row().textContent).toContain('Checks every workspace for new conversations every 60 seconds');
-    expect(within(row()).getByText('On')).toBeTruthy();
-    expect(screen.getByRole('switch', { name: 'Background updates' }).getAttribute('aria-checked')).toBe('true');
-
-    api.setPaused.mockResolvedValue(overview('paused'));
-    fireEvent.click(screen.getByRole('switch', { name: 'Background updates' }));
-    await flush();
-    expect(api.setPaused).toHaveBeenCalledWith(true);
-    expect(within(row()).getByText('Paused')).toBeTruthy();
-    expect(row().textContent).toContain('Your conversation with Michi still works.');
-    expect(screen.getByRole('heading', { name: 'Reading' }).parentElement!.textContent).toBe('ReadingSaved');
-
-    api.setPaused.mockResolvedValue(overview('running'));
-    fireEvent.click(screen.getByRole('switch', { name: 'Background updates' }));
-    await flush();
-    expect(api.setPaused).toHaveBeenLastCalledWith(false);
-    expect(within(row()).getByText('On')).toBeTruthy();
-  });
-
-  it('shows a failed change in its section and reads the state again', async () => {
-    await mount();
-    api.setPaused.mockRejectedValue(new Error('Scheduler is off'));
-    fireEvent.click(screen.getByRole('switch', { name: 'Background updates' }));
-    await flush();
-    expect(screen.getByRole('alert').textContent).toBe('Scheduler is off');
-    expect(screen.getByRole('alert').closest('section')!.querySelector('h3')!.textContent).toBe('Reading');
-    expect(api.fetchOverview.mock.calls.length).toBeGreaterThan(1);
-    expect(within(row()).getByText('On')).toBeTruthy();
-  });
-});
-
-describe('Settings › <name> › Pages upkeep reading, writing and usage', () => {
-  it('shows the fixed rows, the locked rule, the defaults and today’s usage', async () => {
-    await mount({ ...FOLLOW, usageToday: { checks: 342, modelCalls: 9, tokens: 41_200 } });
-    expect(await screen.findByText(/Checks every workspace for new conversations every 60 seconds/)).toBeTruthy();
-    expect(screen.getByText('Last 30 days of conversations, up to 1,000')).toBeTruthy();
-    expect(screen.getByText('Scheduled-job output, your conversation with Michi, and archived or deleted conversations')).toBeTruthy();
-    const range = screen.getByRole('combobox', { name: 'First-run range' }) as HTMLSelectElement;
+describe('Settings › <name> › Pages', () => {
+  it('is three rows with their defaults; no Reading or Writing heads, Never read or Blocks you edited, no pause switch or usage', async () => {
+    await mount({ ...FOLLOW, usageToday: { checks: 342, modelCalls: 9, tokens: 41_200 } }, 'pages');
+    expect(Array.from(document.querySelectorAll('.settings-row__label')).map((label) => label.textContent))
+      .toEqual(['Keep workspace homes up to date', 'Keep the Pages Home up to date', 'First read']);
+    expect(screen.queryByRole('switch', { name: 'Background updates' }), 'turning Michi off stops it').toBeNull();
+    expect(screen.queryByRole('heading')).toBeNull();
+    const range = screen.getByRole('combobox', { name: 'First read' }) as HTMLSelectElement;
     expect(range.disabled).toBe(false);
     expect(range.value).toBe('30');
-    expect([...range.options].map((option) => option.value)).toEqual(['7', '30', '90']);
-    for (const name of ['Write workspace homes', 'Maintain the Pages home']) {
+    expect([...range.options].map((option) => option.textContent)).toEqual(['7 days', '30 days', '90 days']);
+    for (const name of ['Keep workspace homes up to date', 'Keep the Pages Home up to date']) {
       const control = screen.getByRole('switch', { name });
       expect(control.getAttribute('aria-checked'), `${name} is on by default`).toBe('true');
       expect(control).toHaveProperty('disabled', false);
     }
-    const locked = screen.getByRole('switch', { name: 'Human-edited blocks only get suggestions' });
-    expect(locked.getAttribute('aria-checked')).toBe('true');
-    expect(locked).toHaveProperty('disabled', true);
-    expect(screen.getByText('Today: 342 checks, 9 AI calls, about 41k tokens.')).toBeTruthy();
-    expect(document.body.textContent).not.toMatch(/\bFixed\b|cursor|runtime\b|model call|same as Michi/);
+    expect(document.body.textContent).not.toMatch(/\bOn\b|\bOff\b|Never read|Blocks you edited|Always on/);
   });
 
-  it('says “Saved” beside the section that changed, for a moment, and not after a failed save', async () => {
-    vi.useFakeTimers();
-    try {
-      await mount();
-      const head = (title: string) => screen.getByRole('heading', { name: title }).parentElement!;
-      api.updateMetaAgentSettings.mockResolvedValue({ ...FOLLOW, settings: { ...FOLLOW.settings, writeWorkspaceHomes: false } });
-      fireEvent.click(screen.getByRole('switch', { name: 'Write workspace homes' }));
-      await flush();
-      expect(head('Writing').textContent).toBe('WritingSaved');
-      expect(head('Reading').textContent).toBe('Reading');
-      expect(head('Runtime').textContent).toBe('Runtime');
-
-      api.updateMetaAgentSettings.mockResolvedValue({ ...CUSTOM_CODEX });
-      fireEvent.click(screen.getByRole('radio', { name: /Custom/ }));
-      await flush();
-      expect(head('Runtime').textContent).toBe('RuntimeSaved');
-      expect(head('Writing').textContent).toBe('Writing');
-      act(() => { vi.advanceTimersByTime(2_000); });
-      expect(head('Runtime').textContent).toBe('Runtime');
-
-      api.updateMetaAgentSettings.mockRejectedValue(new MetaAgentApiError(400, 'Unknown runtime'));
-      fireEvent.click(screen.getByRole('button', { name: 'Kiro' }));
-      await flush();
-      expect(head('Runtime').textContent).toBe('Runtime');
-      expect(screen.getByRole('alert').textContent).toBe('Unknown runtime');
-    } finally {
-      vi.useRealTimers();
-    }
-  });
-
-  it('saves the write switches and the first-run range', async () => {
-    await mount();
-    api.updateMetaAgentSettings.mockResolvedValue({ ...FOLLOW, settings: { ...FOLLOW.settings, writeWorkspaceHomes: false } });
-    fireEvent.click(screen.getByRole('switch', { name: 'Write workspace homes' }));
-    await flush();
-    expect(lastPatch()).toEqual({ writeWorkspaceHomes: false });
-    expect(screen.getByRole('switch', { name: 'Write workspace homes' }).getAttribute('aria-checked')).toBe('false');
-
-    api.updateMetaAgentSettings.mockResolvedValue({ ...FOLLOW, settings: { ...FOLLOW.settings, writeWorkspaceHomes: false, maintainSpacesHome: false } });
-    fireEvent.click(screen.getByRole('switch', { name: 'Maintain the Pages home' }));
-    await flush();
-    expect(lastPatch()).toEqual({ maintainSpacesHome: false });
-    expect(screen.getByRole('switch', { name: 'Maintain the Pages home' }).getAttribute('aria-checked')).toBe('false');
-
-    api.updateMetaAgentSettings.mockResolvedValue({ ...FOLLOW, settings: { ...FOLLOW.settings, firstRunDays: 7 } });
-    fireEvent.change(screen.getByRole('combobox', { name: 'First-run range' }), { target: { value: '7' } });
-    await flush();
-    expect(lastPatch()).toEqual({ firstRunDays: 7 });
-    expect(screen.getByText('Last 7 days of conversations, up to 1,000')).toBeTruthy();
-    expect((screen.getByRole('combobox', { name: 'First-run range' }) as HTMLSelectElement).value).toBe('7');
-  });
-
-  it('keeps the reading and writing settings when going back to the global runtime', async () => {
-    await mount({ ...CUSTOM_CODEX, settings: { ...CUSTOM_CODEX.settings, writeWorkspaceHomes: false, firstRunDays: 90 } });
-    api.updateMetaAgentSettings.mockResolvedValue(FOLLOW);
-    fireEvent.click(screen.getByRole('radio', { name: /Follow global settings/ }));
-    await flush();
-    expect(lastPatch()).toEqual({ runtimeId: null, providerId: null, modelId: null, reasoning: null });
-  });
-
-  it('says when tokens were not reported, and when usage could not be counted', async () => {
-    await mount({ ...FOLLOW, usageToday: { checks: 1, modelCalls: 0, tokens: null } });
-    expect(screen.getByText('Today: 1 check, 0 AI calls; the AI service didn’t say how many tokens it used.')).toBeTruthy();
-    cleanup();
-    resetMetaAgentStore();
-    await mount({ ...FOLLOW, usageToday: null });
-    expect(screen.getByText('Today’s usage could not be counted.')).toBeTruthy();
-  });
-});
-
-describe('Settings › <name> › Pages upkeep without a backend', () => {
-  it('shows a quiet notice on 404', async () => {
-    await mount(new MetaAgentApiError(404, 'Not found'));
-    expect(screen.getByRole('status').textContent).toContain('does not run Pages upkeep yet');
-    expect(screen.queryByRole('radio')).toBeNull();
-    expect(screen.queryByRole('alert')).toBeNull();
-  });
-
-  it('reports other failures with a retry', async () => {
-    await mount(new MetaAgentApiError(500, 'Database is locked'));
-    expect(screen.getByRole('alert').textContent).toContain('Couldn’t load Pages upkeep: Database is locked.');
-    api.fetchMetaAgent.mockReset();
-    api.fetchMetaAgent.mockResolvedValue(FOLLOW);
-    fireEvent.click(screen.getByRole('button', { name: 'Try again' }));
-    await flush();
-    expect(screen.getByRole('radio', { name: /Follow global settings/ })).toBeTruthy();
-  });
-});
-
-it('shows pending tool approval and saves persistent approval, then revokes it', async () => {
-  const request = { id: 'abc', server: 'mail', tool: 'send', description: 'Send a message', state: 'pending' as const, requestedAt: 1, updatedAt: 1 };
-  await mount({ ...FOLLOW, toolApprovals: [request] });
-  expect(screen.getByText('Needs approval')).toBeTruthy();
-  expect(screen.getByText(/A tool is waiting for your approval/)).toBeTruthy();
-  api.decideMetaAgentToolApproval.mockResolvedValue({ ...FOLLOW, toolApprovals: [{ ...request, state: 'approved' }] });
-  fireEvent.click(screen.getByRole('button', { name: 'Always allow' })); await flush();
-  expect(screen.queryByText(/A tool is waiting for your approval/)).toBeNull();
-  expect(api.decideMetaAgentToolApproval).toHaveBeenLastCalledWith('abc', 'approved');
-  api.decideMetaAgentToolApproval.mockResolvedValue({ ...FOLLOW, toolApprovals: [{ ...request, state: 'revoked' }] });
-  fireEvent.click(screen.getByRole('button', { name: 'Revoke' })); await flush();
-  expect(api.decideMetaAgentToolApproval).toHaveBeenLastCalledWith('abc', 'revoked');
-});
-
-describe('Settings › <name> › Pages upkeep names the agent', () => {
-  it('says the agent’s name where it acts, and never the Meta agent', async () => {
+  it('says what First read never reads behind its “?”, with the agent’s name', async () => {
     const { resetCompanionStoreForTests } = await import('../../../../state/companion/companionStore');
     const { companionSnapshot } = await import('../../../../test/companionFixtures');
     const snapshot = companionSnapshot();
     resetCompanionStoreForTests({ snapshot: { ...snapshot, settings: { ...snapshot.settings, displayName: 'Robin' } } });
     try {
-      await mount();
-      expect(screen.getByText('Scheduled-job output, your conversation with Robin, and archived or deleted conversations')).toBeTruthy();
-      expect(screen.getByText('Robin suggests a change and you accept it. On home pages it updates its own blocks directly, also after you tick or edit them')).toBeTruthy();
+      await mount(FOLLOW, 'pages');
+      fireEvent.click(within(row('First read')).getByRole('button', { name: 'More about this setting' }));
+      expect(row('First read').textContent).toContain('It never reads scheduled-job output, your conversation with Robin, or archived and deleted conversations.');
       expect(document.body.textContent).not.toMatch(/meta agent/i);
-      // Subsections sit under Settings › <name>'s "Pages upkeep" heading.
-      expect(screen.getAllByRole('heading', { level: 3 }).map((heading) => heading.textContent)).toEqual(expect.arrayContaining(['Runtime', 'Reading', 'Writing', 'Usage']));
-      expect(screen.queryAllByRole('heading', { level: 2 })).toEqual([]);
     } finally {
       resetCompanionStoreForTests();
     }
+  });
+
+  it('saves the write switches and the first-read range', async () => {
+    await mount(FOLLOW, 'pages');
+    api.updateMetaAgentSettings.mockResolvedValue({ ...FOLLOW, settings: { ...FOLLOW.settings, writeWorkspaceHomes: false } });
+    fireEvent.click(screen.getByRole('switch', { name: 'Keep workspace homes up to date' }));
+    await flush();
+    expect(lastPatch()).toEqual({ writeWorkspaceHomes: false });
+    expect(screen.getByRole('switch', { name: 'Keep workspace homes up to date' }).getAttribute('aria-checked')).toBe('false');
+
+    api.updateMetaAgentSettings.mockResolvedValue({ ...FOLLOW, settings: { ...FOLLOW.settings, writeWorkspaceHomes: false, maintainSpacesHome: false } });
+    fireEvent.click(screen.getByRole('switch', { name: 'Keep the Pages Home up to date' }));
+    await flush();
+    expect(lastPatch()).toEqual({ maintainSpacesHome: false });
+    expect(screen.getByRole('switch', { name: 'Keep the Pages Home up to date' }).getAttribute('aria-checked')).toBe('false');
+
+    api.updateMetaAgentSettings.mockResolvedValue({ ...FOLLOW, settings: { ...FOLLOW.settings, firstRunDays: 7 } });
+    fireEvent.change(screen.getByRole('combobox', { name: 'First read' }), { target: { value: '7' } });
+    await flush();
+    expect(lastPatch()).toEqual({ firstRunDays: 7 });
+    expect((screen.getByRole('combobox', { name: 'First read' }) as HTMLSelectElement).value).toBe('7');
+  });
+
+  it('shows a failed save under the row', async () => {
+    await mount(FOLLOW, 'pages');
+    api.updateMetaAgentSettings.mockRejectedValue(new MetaAgentApiError(400, 'firstRunDays must be 7, 30 or 90'));
+    fireEvent.change(screen.getByRole('combobox', { name: 'First read' }), { target: { value: '7' } });
+    await flush();
+    expect(within(row('First read')).getByRole('alert').textContent).toBe('firstRunDays must be 7, 30 or 90');
+  });
+
+  it('keeps the Pages settings when Background work goes back to the conversations’ settings', async () => {
+    await mount({ ...CUSTOM_CODEX, settings: { ...CUSTOM_CODEX.settings, writeWorkspaceHomes: false, firstRunDays: 90 } });
+    api.updateMetaAgentSettings.mockResolvedValue(FOLLOW);
+    fireEvent.change(choice(), { target: { value: 'same' } });
+    await flush();
+    expect(lastPatch()).toEqual({ runtimeId: null, providerId: null, modelId: null, reasoning: null });
+  });
+});
+
+describe('Settings › <name> › Pages upkeep without a backend', () => {
+  it('shows a quiet notice on 404', async () => {
+    await mount(new MetaAgentApiError(404, 'Not found'), 'runtime');
+    expect(screen.getByRole('status').textContent).toContain('does not run Pages upkeep yet');
+    expect(screen.queryByRole('combobox')).toBeNull();
+    expect(screen.queryByRole('alert')).toBeNull();
+  });
+
+  it('reports other failures with a retry', async () => {
+    await mount(new MetaAgentApiError(500, 'Database is locked'), 'runtime');
+    expect(screen.getByRole('alert').textContent).toContain('Couldn’t load Pages upkeep: Database is locked.');
+    api.fetchMetaAgent.mockReset();
+    api.fetchMetaAgent.mockResolvedValue(FOLLOW);
+    fireEvent.click(screen.getByRole('button', { name: 'Try again' }));
+    await flush();
+    expect(choice()).toBeTruthy();
   });
 });

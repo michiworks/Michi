@@ -1,7 +1,7 @@
 import React from 'react';
-import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import type { FirstRunProgressDto, HomeSectionItem, MetaAgentOverview, PageBlock, PageChangeDto, PageDto, SpacesHomeSectionsDto, WorkspaceHomeSummaryDto } from 'michi-shared';
+import type { FirstRunProgressDto, MetaAgentOverview, PageBlock, PageChangeDto, PageDto, WorkspaceHomeSummaryDto } from 'michi-shared';
 import type { MetaAgentInfo } from '../../../../services/api/metaAgent';
 import type { SpacesFirstRunStatus } from '../../../../services/api/spacesHome';
 import type { FirstRunSnapshot } from '../../../../state/metaAgent/spacesFirstRun';
@@ -10,9 +10,7 @@ import type { MetaAgentOverviewLoad } from '../../../../state/metaAgent/useMetaA
 
 const mocks = vi.hoisted(() => ({
   page: null as unknown as PageDto,
-  fetchHomeConversations: vi.fn(),
   changes: [] as unknown[],
-  sections: null as unknown,
   activity: [] as unknown[],
   revealBackendNode: vi.fn(),
   sourceNav: {
@@ -36,14 +34,8 @@ const mocks = vi.hoisted(() => ({
   toastError: vi.fn(),
   runUpdate: vi.fn(),
   retryStopped: vi.fn(),
-  openDetail: vi.fn(),
   openSettings: vi.fn(),
   requestWorkspaceHome: vi.fn(),
-  markLooked: vi.fn(),
-  nodes: {} as Record<string, { viewedAt?: number; lastAssistantAt?: number }>,
-  focusedNodeId: null as string | null,
-  layoutRules: [] as unknown[],
-  spaces: [] as unknown[],
 }));
 
 const resource = (data: unknown) => {
@@ -53,13 +45,11 @@ const resource = (data: unknown) => {
 };
 
 vi.mock('../../../../state/pages/useSpacesHome', () => ({
-  useSpacesHome: () => resource({ role: 'spaces-home', page: mocks.page, layoutRules: mocks.layoutRules }),
+  useSpacesHome: () => resource({ role: 'spaces-home', page: mocks.page, layoutRules: [] }),
   useSpacesHomeWorkspaces: () => resource([{ workspaceId: 'ws-1', workspaceName: 'sample-project', homePageId: 'wh', hiddenAt: null, firstRun: null }]),
-  useHomeSections: () => resource(mocks.sections),
   useSpaceActivity: () => resource(mocks.activity),
   useProgressCards: () => resource([]),
 }));
-vi.mock('../../../../state/pages/useSpaces', () => ({ useSpaces: () => ({ spaces: mocks.spaces, status: 'ready', error: null, refresh: vi.fn() }) }));
 vi.mock('../../../../state/pages/usePage', () => ({
   usePage: () => ({
     page: mocks.page, changes: mocks.changes, status: 'ready', error: null, stale: false, lastSeenChangeSeq: 0,
@@ -75,13 +65,6 @@ vi.mock('../../../../services/api/pages', async (importOriginal) => ({
 vi.mock('../../../../state/chatStore', () => ({
   useChatActions: () => ({ revealBackendNode: mocks.revealBackendNode }),
   useChatNodesSnapshot: () => ({ 'src-node': { title: '排查公证失败' } }),
-  useOptionalChatProjects: () => ({ focusedNodeId: mocks.focusedNodeId }),
-  useStructuralSelector: (select: (nodes: unknown) => unknown) => select(mocks.nodes),
-}));
-vi.mock('../../../../services/api/spacesHome', async (importOriginal) => ({
-  ...(await importOriginal<typeof import('../../../../services/api/spacesHome')>()),
-  markSpacesHomeLooked: mocks.markLooked,
-  fetchHomeConversations: mocks.fetchHomeConversations,
 }));
 vi.mock('../SpacesPage', () => ({ openNativePageRoute: mocks.openNativePageRoute }));
 vi.mock('../../../../state/pages/nativePageRoute', () => ({ openNativePageRoute: mocks.openNativePageRoute }));
@@ -100,7 +83,7 @@ vi.mock('../../../../state/metaAgent/useMetaAgentOverview', () => ({
 }));
 vi.mock('sonner', () => ({ toast: { error: mocks.toastError } }));
 vi.mock('../../../../state/metaAgent/metaAgentUpdate', () => ({ useMetaAgentUpdate: () => mocks.update, runMetaAgentUpdate: mocks.runUpdate, retryStoppedMetaAgent: mocks.retryStopped }));
-vi.mock('../../scheduled/metaAgent/metaAgentNav', () => ({ openMetaAgentDetail: mocks.openDetail, requestMetaAgentSettings: mocks.openSettings }));
+vi.mock('../../scheduled/metaAgent/metaAgentNav', () => ({ requestMetaAgentSettings: mocks.openSettings }));
 vi.mock('../../../../state/pages/workspaceHomeNav', () => ({ requestWorkspaceHome: mocks.requestWorkspaceHome }));
 vi.mock('../NativeDatabase', () => ({ default: () => null }));
 vi.mock('../PageChangeTargets', () => ({
@@ -128,7 +111,7 @@ vi.mock('../NativePageDocument', () => ({
   default: ({ page, visibleBlocks = page.blocks, renderDecorations }: { page: PageDto; visibleBlocks?: readonly PageBlock[]; renderDecorations?: (block: PageBlock) => React.ReactNode }) => (
     <div data-testid="segment">
       {visibleBlocks.map((block) => <div key={block.id} id={`page-block-${block.id}`} className="michi-doc-block" data-block-id={block.id} data-testid="page-block">
-        {block.type === 'home-section' ? <NativeHomeSection section={block.section} connectionId="local" pageId={page.id} readOnly={false} /> : block.id.startsWith('tbl') ? <table><tbody><tr><td>sample-project</td><td>Release next week</td></tr><tr><td>Unknown</td><td>-</td></tr></tbody></table> : 'text' in block ? block.text : block.id}
+        {block.type === 'home-section' ? <NativeHomeSection connectionId="local" /> : block.id.startsWith('tbl') ? <table><tbody><tr><td>sample-project</td><td>Release next week</td></tr><tr><td>Unknown</td><td>-</td></tr></tbody></table> : 'text' in block ? block.text : block.id}
         {renderDecorations?.(block)}
       </div>)}
       {!page.blocks.length && <div data-testid="empty-editor" />}
@@ -139,16 +122,15 @@ vi.mock('../NativePageDocument', () => ({
 import { NativeHomeSection } from './NativeHomeSection';
 import SpacesHomeView from './SpacesHome';
 import { resetSpacesPagesForTests } from '../../../../state/metaChat/spacesPages';
+import { resetCompanionStoreForTests } from '../../../../state/companion/companionStore';
+import { getCompanionPanelState, resetCompanionPanelForTests } from '../../../../state/companion/companionPanel';
+import { companionItem, companionSnapshot } from '../../../../test/companionFixtures';
 
 const source = [{ nodeId: 'n', turnId: 't', assistantId: 'a' }];
 const block = (id: string, extra: Partial<PageBlock> = {}) => ({ id, rev: 1, type: 'markdown', text: `Block ${id}`, sources: source, ...extra }) as PageBlock;
 const homePage = (blocks: PageBlock[]): PageDto => ({
   id: 'home', workspaceId: 'sys', parentId: null, position: 0, title: 'Home', color: null, updatedAt: 1, updatedBy: 'agent',
   pendingProposals: 0, helperNodeId: null, revision: 2, viewVersion: 2, blocks,
-});
-const row = (id: string, extra: Partial<HomeSectionItem> = {}): HomeSectionItem => ({
-  id, kind: 'conversation', workspaceId: 'ws-1', workspaceName: 'sample-project', title: `Thread ${id}`, at: Date.now() - 60_000, summary: `About ${id}`, agentClaim: false,
-  target: { kind: 'conversation', nodeId: `node-${id}`, workspaceId: 'ws-1', messageId: null }, ...extra,
 });
 const INFO: MetaAgentInfo = {
   settings: { runtimeId: null, providerId: null, modelId: null, reasoning: null },
@@ -179,14 +161,10 @@ const midRun = (over: Partial<SpacesFirstRunStatus> = {}): SpacesFirstRunStatus 
 const snapshot = (data: SpacesFirstRunStatus | null, extra: Partial<FirstRunSnapshot> = {}): FirstRunSnapshot => ({
   load: 'ready', data, error: null, unreachable: false, schedulerOff: false, justFinished: false, ...extra,
 });
-const sections = (over: Partial<SpacesHomeSectionsDto> = {}): SpacesHomeSectionsDto => ({
-  waiting: { items: [row('w1')], total: 1 }, stalled: { items: [], total: 0 }, done: { items: [], total: 0 }, conversations: { available: true }, ...over,
-});
 
 beforeEach(() => {
   mocks.page = homePage([block('a'), { id: 'waiting', rev: 1, type: 'home-section', section: 'waiting' }, ...['b', 'c', 'd', 'e'].map((id) => block(id))]);
   mocks.changes = [];
-  mocks.sections = sections();
   mocks.activity = [];
   mocks.lastSeen = 0;
   mocks.refreshes = [];
@@ -198,34 +176,32 @@ beforeEach(() => {
   mocks.agent = { status: 'ready', info: INFO, error: null };
   mocks.overview = { kind: 'loading' };
   mocks.update = { phase: 'idle', workspaces: 0, error: null };
-  for (const fn of [mocks.retryFirstRun, mocks.retryGuard, mocks.resume, mocks.refreshOverview, mocks.toastError, mocks.runUpdate, mocks.retryStopped, mocks.openDetail, mocks.openSettings, mocks.requestWorkspaceHome]) fn.mockReset();
+  for (const fn of [mocks.retryFirstRun, mocks.retryGuard, mocks.resume, mocks.refreshOverview, mocks.toastError, mocks.runUpdate, mocks.retryStopped, mocks.openSettings, mocks.requestWorkspaceHome]) fn.mockReset();
   mocks.resume.mockResolvedValue(undefined);
-  mocks.markLooked.mockReset().mockResolvedValue({ lookedAt: 1 });
-  mocks.nodes = {};
-  mocks.focusedNodeId = null;
-  mocks.spaces = [];
   mocks.retryGuard.mockResolvedValue(undefined);
   mocks.retryFirstRun.mockResolvedValue(undefined);
   // The home ids a row's page is checked against; seeded, so no test reads them from a backend.
   resetSpacesPagesForTests({ home: { id: 'home', title: 'Home' }, workspaces: {} });
+  // The page's home-section block counts what needs you from Today's snapshot.
+  resetCompanionStoreForTests({ snapshot: companionSnapshot() });
+  resetCompanionPanelForTests();
 });
 afterEach(() => { document.body.innerHTML = ''; });
 
 const before = (a: Element, b: Element) => Boolean(a.compareDocumentPosition(b) & Node.DOCUMENT_POSITION_FOLLOWING);
 
 describe('Spaces Home', () => {
-  it('reads top to bottom: lead, Waiting, longer blocks, activity, workspaces, Stalled and Done, the rest; no agenda', () => {
+  it('reads top to bottom: lead, the line to Today, longer blocks, activity, workspaces, the rest; no agenda and no counted lists', () => {
     render(<SpacesHomeView now={new Date(2026, 9, 23)} />);
     expect(screen.getByRole('heading', { level: 1, name: 'Home' })).toBeTruthy();
     expect(screen.queryByText(/^Across all workspaces · kept up to date by/)).toBeNull();
     expect(document.querySelector('.spaces-home-status')).toBeNull();
     expect(screen.queryByRole('group', { name: "Today's agenda" })).toBeNull();
     const text = (value: string) => screen.getByText(value);
-    const order = [text('Block a'), screen.getByRole('heading', { name: 'Waiting on you' }),
-      text('Block b'), text('Block c'), screen.getByRole('heading', { name: 'Page activity' }), text('Block d'),
-      screen.getByRole('heading', { name: 'Stalled' }), screen.getByRole('heading', { name: 'Just done' }), text('Block e')];
+    const order = [text('Block a'), screen.getByRole('button', { name: 'Open Today' }),
+      text('Block b'), text('Block c'), screen.getByRole('heading', { name: 'Page activity' }), text('Block d'), text('Block e')];
     for (let index = 1; index < order.length; index += 1) expect(before(order[index - 1], order[index])).toBe(true);
-    expect(screen.getAllByText('Counted from your chats')).toHaveLength(3);
+    for (const name of ['Waiting on you', 'Stalled', 'Just done']) expect(screen.queryByRole('heading', { name })).toBeNull();
   });
 
   it('keeps agent and person blocks free of repeated maintenance labels', () => {
@@ -276,109 +252,24 @@ describe('Spaces Home', () => {
     expect(mocks.acknowledge).toHaveBeenCalledWith(9);
   });
 
-  it('shows placeholders without recreating a deleted Waiting block', () => {
+  it('shows placeholders without recreating a deleted home-section block', () => {
     mocks.page = homePage([]);
     render(<SpacesHomeView />);
     expect(screen.getAllByText('Michi writes this after it has written each workspace home.')).toHaveLength(4);
     expect(screen.getByRole('region', { name: 'This week’s focus' })).toBeTruthy();
     expect(screen.getByRole('region', { name: 'Workspaces' })).toBeTruthy();
     expect(screen.getByRole('region', { name: 'Cross-workspace decisions' })).toBeTruthy();
-    expect(screen.queryByRole('heading', { name: 'Waiting on you' })).toBeNull();
-    expect(screen.queryByText('About w1')).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Open Today' })).toBeNull();
     expect(screen.getByTestId('empty-editor')).toBeTruthy();
   });
 
-  it('marks a section a layout rule shaped, under its rows', () => {
-    mocks.layoutRules = [{
-      id: 'rule-1', text: 'Stalled: only the last 3 days', createdBy: 'agent', createdAt: Date.now(),
-      sourceMessage: null, sectionLimit: { section: 'stalled', maxAgeDays: 3 },
-    }];
-    mocks.sections = sections({ stalled: { items: [row('s1')], total: 4, ruleIds: ['rule-1'] } });
+  it('says on the page’s home-section block how many things need you and opens Today', () => {
+    resetCompanionStoreForTests({ snapshot: companionSnapshot({ items: [companionItem('cr-1'), companionItem('cr-2')] }) });
     render(<SpacesHomeView />);
-    const stalled = screen.getByRole('region', { name: 'Stalled' });
-    expect(within(stalled).getByTestId('layout-rule-mark').getAttribute('title')).toBe('Layout rule: Stalled: only the last 3 days');
-    expect(within(screen.getByRole('region', { name: 'Waiting on you' })).queryByTestId('layout-rule-mark')).toBeNull();
-    mocks.layoutRules = [];
-  });
-
-  it('expands additional rows in place without opening All threads', async () => {
-    const items = Array.from({ length: 10 }, (_, index) => row(`s${index}`));
-    mocks.sections = sections({ stalled: { items: items.slice(0, 8), total: 10 } });
-    mocks.fetchHomeConversations.mockResolvedValue({ items, total: 10 });
-    const nav = vi.fn();
-    window.addEventListener('michi:nav-page', nav);
-    render(<SpacesHomeView />);
-    const stalled = screen.getByRole('region', { name: 'Stalled' });
-    expect(within(stalled).getAllByTestId('spaces-home-row')).toHaveLength(8);
-    fireEvent.click(within(stalled).getByRole('button', { name: /View all/ }));
-    await waitFor(() => expect(within(stalled).getAllByTestId('spaces-home-row')).toHaveLength(10));
-    expect(mocks.fetchHomeConversations).toHaveBeenCalledWith('local', expect.objectContaining({ state: 'stalled', limit: 500 }));
-    expect(nav).not.toHaveBeenCalled();
-    fireEvent.click(within(stalled).getByRole('button', { name: /Show less/ }));
-    expect(within(stalled).getAllByTestId('spaces-home-row')).toHaveLength(8);
-    window.removeEventListener('michi:nav-page', nav);
-  });
-
-  it('keeps the section available when expansion fails and retries in place', async () => {
-    const items = Array.from({ length: 9 }, (_, index) => row(`retry${index}`));
-    mocks.sections = sections({ stalled: { items: items.slice(0, 8), total: 9 } });
-    mocks.fetchHomeConversations.mockRejectedValueOnce(new Error('Connection unavailable')).mockResolvedValueOnce({ items, total: 9 });
-    render(<SpacesHomeView />);
-    const stalled = screen.getByRole('region', { name: 'Stalled' });
-    fireEvent.click(within(stalled).getByRole('button', { name: /View all/ }));
-    expect((await within(stalled).findByRole('alert')).textContent).toContain('Connection unavailable');
-    expect(within(stalled).getAllByTestId('spaces-home-row')).toHaveLength(8);
-    fireEvent.click(within(stalled).getByRole('button', { name: 'Retry' }));
-    await waitFor(() => expect(within(stalled).getAllByTestId('spaces-home-row')).toHaveLength(9));
-    expect(within(stalled).queryByRole('alert')).toBeNull();
-  });
-
-  it('keeps already read Just done conversations out of expanded rows', async () => {
-    const items = Array.from({ length: 10 }, (_, index) => row(`done${index}`));
-    mocks.sections = sections({ done: { items: items.slice(0, 8), total: 10 } });
-    const read = items[8]!;
-    if (read.target.kind !== 'conversation') throw new Error('Expected conversation fixture');
-    mocks.nodes = { [read.target.nodeId]: { viewedAt: Date.now() + 1_000_000 } };
-    mocks.fetchHomeConversations.mockResolvedValue({ items, total: 10 });
-    render(<SpacesHomeView />);
-    const done = screen.getByRole('region', { name: 'Just done' });
-    fireEvent.click(within(done).getByRole('button', { name: /View all/ }));
-    await waitFor(() => expect(within(done).getAllByTestId('spaces-home-row')).toHaveLength(9));
-    expect(within(done).queryByText(read.title)).toBeNull();
-  });
-
-  it('counts leaving the Home as having looked, once it showed the sections', async () => {
-    const { unmount } = render(<SpacesHomeView />);
-    expect(mocks.markLooked).not.toHaveBeenCalled();
-    unmount();
-    await Promise.resolve();
-    expect(mocks.markLooked).toHaveBeenCalledTimes(1);
-    expect(mocks.markLooked).toHaveBeenCalledWith('local');
-
-    mocks.sections = null;
-    const unread = render(<SpacesHomeView />);
-    unread.unmount();
-    await Promise.resolve();
-    expect(mocks.markLooked).toHaveBeenCalledTimes(1);
-  });
-
-  it('says when a section is empty', () => {
-    mocks.sections = sections({ waiting: { items: [], total: 0 } });
-    render(<SpacesHomeView />);
-    expect(screen.getByText('Nothing is waiting on you.')).toBeTruthy();
-    expect(screen.getByText('Nothing has stalled.')).toBeTruthy();
-    expect(screen.getByText('Nothing finished since you last looked.')).toBeTruthy();
-  });
-
-  it('drops a Just done row once you opened its conversation after it finished, as the sidebar dot clears', () => {
-    const at = Date.now() - 60_000;
-    mocks.sections = sections({ done: { items: [row('d1', { at }), row('d2', { at }), row('d3', { at }), row('d4', { at })], total: 6 } });
-    mocks.nodes = { 'node-d1': { viewedAt: at + 1 }, 'node-d2': { viewedAt: at - 1 }, 'node-d4': { viewedAt: at + 5, lastAssistantAt: at + 10 } };
-    mocks.focusedNodeId = 'node-d3';
-    render(<SpacesHomeView />);
-    const done = screen.getByRole('region', { name: 'Just done' });
-    expect(within(done).getAllByTestId('spaces-home-row').map((el) => el.textContent?.match(/Thread d\d/)?.[0])).toEqual(['Thread d2', 'Thread d4']);
-    expect(done.querySelector('.spaces-home-count')?.textContent).toBe('4');
+    const open = screen.getByRole('button', { name: 'Open Today' });
+    expect(open.closest('p')?.textContent).toBe('2 things need you · Open Today');
+    fireEvent.click(open);
+    expect(getCompanionPanelState()).toMatchObject({ open: true, tab: 'today' });
   });
 
   it('opens the new-chat sheet above the title and lists every page’s progress cards alongside the saved blocks', () => {
@@ -392,21 +283,7 @@ describe('Spaces Home', () => {
     expect(JSON.parse(cards.getAttribute('data-scope')!)).toEqual(scope);
     expect(cards.getAttribute('data-every')).toBe('true');
     expect(before(screen.getByText('Block a'), cards)).toBe(true);
-    expect(before(screen.getByRole('heading', { name: 'Waiting on you' }), cards)).toBe(true);
-  });
-
-  it('opens a row’s conversation at its message with a way back, the cursor in the composer only for Continue', async () => {
-    const target = { kind: 'conversation' as const, nodeId: 'node-s1', workspaceId: 'ws-1', messageId: 'msg-1' };
-    mocks.sections = sections({ stalled: { items: [row('s1', { target })], total: 1 } });
-    render(<SpacesHomeView />);
-    fireEvent.click(screen.getByRole('button', { name: 'Back to chat: Thread w1' }));
-    expect(mocks.sourceNav.openConversationFromSpaces).toHaveBeenLastCalledWith({
-      backendConnectionId: 'local', workspaceId: 'ws-1', nodeId: 'node-w1', messageId: null, focus: false,
-    });
-    fireEvent.click(screen.getByRole('button', { name: 'Continue: Thread s1' }));
-    expect(mocks.sourceNav.openConversationFromSpaces).toHaveBeenLastCalledWith({
-      backendConnectionId: 'local', workspaceId: 'ws-1', nodeId: 'node-s1', messageId: 'msg-1', focus: true,
-    });
+    expect(before(screen.getByRole('button', { name: 'Open Today' }), cards)).toBe(true);
   });
 
   it('opens a block change’s source in the source popover, naming the Home as the page that cites it', () => {
@@ -436,86 +313,15 @@ describe('Spaces Home', () => {
     expect(screen.getByTestId('from-c2').textContent).toBe('排查公证失败');
   });
 
-  it('tags a done the agent claims and opens rows where they live', async () => {
-    mocks.sections = sections({
-      waiting: { items: [row('w1')], total: 1 },
-      done: { items: [row('d1', { agentClaim: true })], total: 1 },
-    });
-    render(<SpacesHomeView />);
-    const done = screen.getByRole('region', { name: 'Just done' });
-    expect(within(done).getByText('Agent says')).toBeTruthy();
-
-    fireEvent.click(screen.getByRole('button', { name: 'Back to chat: Thread w1' }));
-    await waitFor(() => expect(mocks.revealBackendNode).toHaveBeenCalledWith('ws-1', 'node-w1'));
-  });
-
-  it('opens a waiting suggestion on its page and flashes the block once it renders', async () => {
-    vi.useFakeTimers();
-    try {
-      mocks.sections = sections({ waiting: { items: [row('p1', {
-        kind: 'proposal', title: 'Release', target: { kind: 'page', pageId: 'release', blockId: 'risk', changeId: 'chg' },
-      })], total: 1 } });
-      const view = render(<SpacesHomeView />);
-      fireEvent.click(screen.getByRole('button', { name: 'Review: Release' }));
-      await act(async () => { await vi.advanceTimersByTimeAsync(0); });
-      expect(mocks.openNativePageRoute).toHaveBeenCalledWith({ pageId: 'release', workspaceId: 'ws-1', backendConnectionId: 'local' });
-      // Opening the page replaces the Home; the block shows up once that page has loaded.
-      view.unmount();
-      act(() => { vi.advanceTimersByTime(1000); });
-      const target = document.createElement('div');
-      target.className = 'michi-doc-block';
-      target.dataset.blockId = 'risk';
-      document.body.appendChild(target);
-      act(() => { vi.advanceTimersByTime(150); });
-      expect(target.hasAttribute('data-reveal-flash')).toBe(true);
-      act(() => { vi.advanceTimersByTime(1700); });
-      expect(target.hasAttribute('data-reveal-flash')).toBe(false);
-    } finally {
-      vi.useRealTimers();
-    }
-  });
-
-  it('flashes a suggestion on the Home itself without reopening it', () => {
-    mocks.sections = sections({ waiting: { items: [row('p2', {
-      kind: 'proposal', title: 'Home', target: { kind: 'page', pageId: 'home', blockId: 'b', changeId: 'chg' },
-    })], total: 1 } });
-    render(<SpacesHomeView />);
-    fireEvent.click(screen.getByRole('button', { name: 'Review: Home' }));
-    expect(mocks.openNativePageRoute).not.toHaveBeenCalled();
-    expect(document.getElementById('page-block-b')?.hasAttribute('data-reveal-flash')).toBe(true);
-  });
-
-  it('opens a workspace home from Space activity and from a waiting suggestion as that workspace\'s home, not as a plain page', async () => {
+  it('opens a workspace home from Space activity as that workspace\'s home, not as a plain page', async () => {
     resetSpacesPagesForTests({ home: { id: 'home', title: 'Home' }, workspaces: { 'ws-1': 'wh' } });
     mocks.activity = [
       { kind: 'page-change', batchId: 'b1', pageId: 'wh', pageTitle: 'sample-project', workspaceId: 'ws-1', workspaceName: 'sample-project', at: Date.now(), count: 1, pending: 0, ops: ['update'], summary: 'Status updated', actor: 'agent', sourceKind: 'chat', sourceNodeId: 'n1' },
     ];
-    mocks.sections = sections({ waiting: { items: [row('p3', {
-      kind: 'proposal', title: 'sample-project', target: { kind: 'page', pageId: 'wh', blockId: 'b', changeId: 'chg' },
-    })], total: 1 } });
     render(<SpacesHomeView />);
     fireEvent.click(screen.getByText(/Agent changed/).closest('button')!);
-    fireEvent.click(screen.getByRole('button', { name: 'Review: sample-project' }));
-    await waitFor(() => expect(mocks.requestWorkspaceHome).toHaveBeenCalledTimes(2));
-    expect(mocks.requestWorkspaceHome).toHaveBeenCalledWith({ workspaceId: 'ws-1', backendConnectionId: 'local' });
+    await waitFor(() => expect(mocks.requestWorkspaceHome).toHaveBeenCalledWith({ workspaceId: 'ws-1', backendConnectionId: 'local' }));
     expect(mocks.openNativePageRoute).not.toHaveBeenCalled();
-  });
-
-  it('a Spaces Home suggestion in a waiting list on another page opens the Spaces Home, never a page with no workspace', async () => {
-    mocks.sections = sections({ waiting: { items: [row('p4', {
-      kind: 'proposal', workspaceId: null, title: 'Home', target: { kind: 'page', pageId: 'home', blockId: 'b', changeId: 'chg' },
-    })], total: 1 } });
-    const navs: unknown[] = [];
-    const onNav = (event: Event) => navs.push((event as CustomEvent).detail);
-    window.addEventListener('michi:nav-page', onNav);
-    try {
-      render(<NativeHomeSection section="waiting" connectionId="local" pageId="release" readOnly={false} />);
-      fireEvent.click(screen.getByRole('button', { name: 'Review: Home' }));
-      await waitFor(() => expect(navs).toEqual([{ page: 'spaces' }]));
-      expect(mocks.openNativePageRoute).not.toHaveBeenCalled();
-    } finally {
-      window.removeEventListener('michi:nav-page', onNav);
-    }
   });
 
   it('opens Space activity rows', async () => {
@@ -600,13 +406,12 @@ describe('Spaces Home', () => {
     expect(mocks.retryFirstRun).toHaveBeenCalledWith('local', 'ws-4');
   });
 
-  it('says the history was just read once the first run ends, with the list still open', () => {
+  it('shows no line once the first run ends: only pauses, failures and the first run have one (Q8)', () => {
     const done = midRun({ summary: { state: 'done', summarizedAt: 5 } });
     done.workspaces = done.workspaces.map((item) => ({ ...item, firstRun: run(item.workspaceId, 'done', item.firstRun!.total, item.firstRun!.total) }));
     mocks.firstRun = snapshot(done, { justFinished: true });
     render(<SpacesHomeView />);
-    expect(screen.getByText(/Pages upkeep just read the history; from now on it checks new conversations every 60 s · wrote 5 workspace homes and this page · Claude \(follows global\)/)).toBeTruthy();
-    expect(within(screen.getByRole('list', { name: 'Pages upkeep per workspace' })).getByText('Written · read 5 workspace homes, not conversations')).toBeTruthy();
+    expect(document.querySelector('.spaces-home-status')).toBeNull();
   });
 
   it('after the first run, a workspace home change updates the Home in the background, not as a first run', () => {
@@ -677,7 +482,7 @@ describe('Spaces Home', () => {
       recentRuns: [] } as unknown as MetaAgentOverview };
     render(<SpacesHomeView />);
     const line = document.querySelector('.spaces-home-status[data-mode="stopped"]')!;
-    expect(line.textContent).toBe('Pages upkeep stopped: Codex is not installed on this computer·Retry·Change runtime·Details·Scheduled');
+    expect(line.textContent).toBe('Pages upkeep stopped: Codex is not installed on this computer·Retry·Change runtime·Details');
     expect(screen.queryByText(/checks new conversations/)).toBeNull();
     fireEvent.click(screen.getByRole('button', { name: 'Details' }));
     expect(within(screen.getByRole('list', { name: 'Pages upkeep per workspace' })).getByText('Stopped: Codex is not installed on this computer')).toBeTruthy();
@@ -703,7 +508,7 @@ describe('Spaces Home', () => {
     mocks.agent = { status: 'ready', info: { ...INFO, resolved: { ...INFO.resolved, runtimeId: 'crew' }, availability: { available: false, reason: 'Pages upkeep does not run on Kiro Crew yet.' } }, error: null };
     render(<SpacesHomeView />);
     expect(screen.getByText('Pages upkeep isn’t running · Pages upkeep does not run on Kiro Crew yet.')).toBeTruthy();
-    fireEvent.click(screen.getByRole('button', { name: 'Settings › Michi › Pages upkeep' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Settings › Michi › Background work' }));
     expect(mocks.openSettings).toHaveBeenCalledTimes(1);
   });
 
@@ -712,7 +517,7 @@ describe('Spaces Home', () => {
     render(<SpacesHomeView />);
     expect(screen.getByText('Pages upkeep isn’t running · Scheduled jobs are off on this backend')).toBeTruthy();
     // Settings cannot turn scheduled jobs on.
-    expect(screen.queryByRole('button', { name: 'Settings › Michi › Pages upkeep' })).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Settings › Michi › Background work' })).toBeNull();
   });
 
   it('says not running when the overview reports scheduled jobs off, though the first-run start never answered 409', () => {
@@ -730,12 +535,9 @@ describe('Spaces Home', () => {
     expect((screen.getByRole('button', { name: 'Update' }) as HTMLButtonElement).disabled).toBe(true);
   });
 
-  it('opens a workspace’s home from its name on a row and from a table row naming it', () => {
-    mocks.page = homePage([block('a'), { id: 'waiting', rev: 1, type: 'home-section', section: 'waiting' }, block('tbl-ws')]);
+  it('opens a workspace’s home from a table row naming it', () => {
+    mocks.page = homePage([block('a'), block('tbl-ws')]);
     render(<SpacesHomeView />);
-    fireEvent.click(screen.getByRole('button', { name: 'sample-project' }));
-    expect(mocks.requestWorkspaceHome).toHaveBeenLastCalledWith({ workspaceId: 'ws-1', backendConnectionId: 'local' });
-    mocks.requestWorkspaceHome.mockReset();
     fireEvent.click(screen.getByText('Unknown'));
     expect(mocks.requestWorkspaceHome).not.toHaveBeenCalled();
     fireEvent.click(screen.getByText('Release next week'));
@@ -760,17 +562,15 @@ describe('Spaces Home', () => {
     expect(mocks.requestWorkspaceHome).toHaveBeenCalledWith({ workspaceId: 'ws-1', backendConnectionId: 'local' });
   });
 
-  it('starts a table row naming a workspace with that workspace’s sidebar dot', () => {
+  it('starts a table row naming a workspace with that workspace’s sidebar dot: calm, or pending until its home is written', () => {
     mocks.page = homePage([block('a'), block('tbl-ws', { text: '#### 各 workspace\n\n| Workspace | 现在 |\n|---|---|\n| sample-project | Release next week |' })]);
-    mocks.sections = sections({ byWorkspace: { 'ws-1': { waiting: 0, stalled: 2 } } });
     const view = render(<SpacesHomeView />);
     const linked = () => screen.getByText('Release next week').closest('tr')!;
-    expect(linked().getAttribute('data-home-tone')).toBe('stalled');
+    expect(linked().getAttribute('data-home-tone')).toBe('calm');
     expect(screen.getByText('Unknown').closest('tr')!.hasAttribute('data-home-tone')).toBe(false);
-    // A suggestion waiting in one of its Spaces makes it a workspace waiting on you, as in the sidebar.
-    mocks.spaces = [{ id: 'sp', workspaceId: 'ws-1', pendingProposals: 1 }];
+    mocks.firstRun = snapshot(midRun({ workspaces: [home('ws-1', 'sample-project', run('ws-1', 'reading', 12, 38))] }));
     view.rerender(<SpacesHomeView />);
-    expect(linked().getAttribute('data-home-tone')).toBe('waiting');
+    expect(linked().getAttribute('data-home-tone')).toBe('pending');
   });
 
   it('keeps the normal Home free of maintenance status overrides', () => {

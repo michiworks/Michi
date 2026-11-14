@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { HomeSectionItem, PageBlock, PageChangeDto, SpaceActivityItem } from 'michi-shared';
-import { blockAuthor, homeChangesShown, homeDateLabel, homeRowAction, latestAgentWrite, splitHomeBlocks } from './homeFormat';
+import { blockAuthor, homeChangesShown, homeDateLabel, latestAgentWrite, splitHomeBlocks } from './homeFormat';
 import { useZhCnDefaultLocale } from '../../../../test/zhCnLocale';
 
 const block = (id: string, extra: Partial<PageBlock> = {}) => ({ id, rev: 1, type: 'markdown', text: id, ...extra }) as PageBlock;
@@ -48,15 +48,6 @@ describe('home layout helpers', () => {
   it('marks only what changed since the last visit, plus suggestions still waiting', () => {
     const shown = homeChangesShown([change(1), change(2, 'pending'), change(3, 'dismissed'), change(5), change(6, 'dismissed')], 4);
     expect(shown.map((c) => c.seq)).toEqual([2, 5, 6]);
-  });
-
-  it('names each row’s action by section and target', () => {
-    const thread = item({ kind: 'conversation', nodeId: 'n', workspaceId: 'w', messageId: null });
-    expect(homeRowAction('waiting', thread)).toBe('Back to chat');
-    expect(homeRowAction('stalled', thread)).toBe('Continue');
-    expect(homeRowAction('done', thread)).toBe('View chat');
-    expect(homeRowAction(null, thread)).toBe('Open chat');
-    expect(homeRowAction('waiting', item({ kind: 'page', pageId: 'p', blockId: null, changeId: 'c' }))).toBe('Review');
   });
 
   it('reads the last agent write from Space activity', () => {

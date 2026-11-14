@@ -100,7 +100,7 @@ describe('scheduled job agent tools', () => {
     seedWorkspace('ws-a', 'Research');
     seedWorkspace('ws-b');
     executor = new FakeExecutor();
-    const events = new ScheduledJobEventBus(() => NOW);
+    const events = new ScheduledJobEventBus();
     changes = [];
     events.subscribe({ send: () => {}, sendChange: (event) => changes.push(event) });
     nextId = 0;
@@ -149,6 +149,23 @@ describe('scheduled job agent tools', () => {
     assert.equal(job.workspaceId, 'ws-a');
     assert.equal(job.permissionMode, 'trust');
     assert.deepEqual(changes.map((change) => change.change), ['created']);
+  });
+
+  test('a temporary chat creates no job and changes one only to pause it, asking no one', async () => {
+    getDb().prepare("INSERT INTO nodes (id, workspace_id, kind, status, minimized, created_at, memory_mode) VALUES ('n-temp', 'ws-a', 'chat', 'idle', 0, 1, 'off')").run();
+    const temporary: ScheduledJobToolCaller = { ...caller, nodeId: 'n-temp' };
+    assert.match(errorText(await call('create_scheduled_job', hourly, temporary)), /^UNSUPPORTED: This is a temporary chat: .*no job was created\./);
+    assert.equal(scheduler.listJobs().length, 0);
+    assert.equal(asked.length, 0);
+    parse(await call('create_scheduled_job', hourly));
+    const [job] = scheduler.listJobs();
+    asked = [];
+    assert.match(errorText(await call('update_scheduled_job', { jobId: job.id, prompt: 'Something said here.' }, temporary)),
+      /^UNSUPPORTED: This is a temporary chat: .*the job was not changed\./);
+    assert.equal(asked.length, 0);
+    assert.equal(scheduler.getJob(job.id).prompt, hourly.prompt);
+    assert.equal(parse(await call('update_scheduled_job', { jobId: job.id, enabled: false }, temporary)).status, 'paused');
+    assert.equal(parse(await call('list_scheduled_jobs', {}, temporary)).count, 1);
   });
 
   test('every card quotes the prompt whole, line breaks kept, as its last line', async () => {

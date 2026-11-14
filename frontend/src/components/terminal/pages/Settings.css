@@ -183,6 +183,8 @@
   line-height: 1.5;
   color: var(--term-fg);
 }
+.settings-row__head { display: flex; flex-wrap: wrap; align-items: center; gap: 0 6px; }
+.settings-row__head > .settings-row__label { display: inline; }
 .settings-row__desc {
   margin-top: 2px;
   color: var(--term-muted);
@@ -212,6 +214,8 @@
   cursor: pointer;
 }
 .settings-row__link:hover { text-decoration: underline; }
+/* Beside a control it reads at the size of a row's state, not of its name. */
+.settings-row__control .settings-row__link { font-size: var(--fs-md); white-space: nowrap; }
 .settings-row__link:focus-visible { outline: var(--focus-ring); outline-offset: 2px; }
 .settings-row fieldset { min-width: 0; margin: 0; padding: 0; border: 0; }
 
@@ -283,11 +287,12 @@
 .settings-segmented__input { position: absolute; inset: 0; width: 100%; height: 100%; margin: 0; opacity: 0; cursor: inherit; }
 @media (hover: hover) and (pointer: fine) { .settings-segmented__option:not(:has(:disabled)):hover { color: var(--term-fg); } }
 
-/* Switch: a 34×18 square track; off is a faint well with a faint knob, on is
-   the accent with the knob 16px over in the colour that sits on accent. */
+/* Switch: a 36×20 square track; off is a faint well with a faint knob, on is
+   the accent with the knob 16px over in the colour that sits on accent. It
+   says on or off itself, so no word sits beside it. */
 .terminal-settings .ui-switch {
-  width: 34px;
-  height: 18px;
+  width: 36px;
+  height: 20px;
   border: 0;
   border-radius: var(--ui-radius-sm);
   background: var(--term-alt2);
@@ -296,13 +301,13 @@
 }
 .terminal-settings .ui-switch[aria-checked='true'] { background: var(--term-accent); box-shadow: none; }
 .terminal-settings .ui-switch .ui-switch__knob {
-  top: 3px;
-  left: 3px;
+  top: 4px;
+  left: 4px;
   border-radius: 1px;
   background: var(--term-faint);
   transition: transform var(--t-soft) var(--t-ease), background var(--t-soft) var(--t-ease);
 }
-.terminal-settings .ui-switch[aria-checked='true'] .ui-switch__knob { left: 3px; transform: translateX(16px); background: var(--on-accent); }
+.terminal-settings .ui-switch[aria-checked='true'] .ui-switch__knob { left: 4px; transform: translateX(16px); background: var(--on-accent); }
 .terminal-settings .ui-switch:focus-visible { outline: var(--focus-ring); outline-offset: 2px; }
 :root[data-reduce-motion='on'] .terminal-settings .ui-switch .ui-switch__knob { transition: none; }
 
@@ -524,6 +529,16 @@
   line-height: 1.5;
   text-transform: uppercase;
 }
+/* A group named as its page, or as its one row, is not named twice (SettingsSection). */
+.terminal-settings[data-cards] .settings-section[data-title-repeats] > .settings-section__head:not(:has(.settings-section__aside)) { margin-bottom: 0; }
+.terminal-settings[data-cards] .settings-section[data-title-repeats] > .settings-section__head > .settings-section__title {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
 /* A page with one group already names it in its title. */
 .terminal-settings[data-cards] .terminal-settings-content > .settings-section:only-of-type > .settings-section__head:not(:has(.settings-section__aside)) { margin-bottom: 0; }
 .terminal-settings[data-cards] .terminal-settings-content > .settings-section:only-of-type .settings-section__title,
@@ -586,7 +601,6 @@
 .terminal-settings[data-cards] .settings-radio__label { color: var(--term-fg); font-size: var(--fs-lg); }
 .terminal-settings[data-cards] .settings-section__body > .settings-section__block:has(> .settings-radio) { margin: 0; }
 
-
 /* Legacy inline-sized controls never push a page sideways. A row's select
    keeps its own minimum (min(132px, 100%)), which already fits. */
 .terminal-settings[data-cards] .terminal-settings-content select:not(.settings-row__select),
@@ -594,62 +608,6 @@
   max-width: 100%;
   min-width: 0 !important;
 }
-
-/* Meta agent: a quieter lede, then its sections as headed cards. */
-.terminal-settings[data-cards] .meta-set { gap: 24px; }
-.terminal-settings[data-cards] .meta-set__lede { margin: -8px 4px 0; color: var(--term-muted); font-size: var(--fs-lg); line-height: 1.5; }
-.terminal-settings[data-cards] .meta-set__sec { gap: 0; padding-top: 0; border-top: 0; }
-.terminal-settings[data-cards] .meta-set__sec > h2,
-.terminal-settings[data-cards] .meta-set__head > h2 {
-  margin: 0;
-  color: var(--term-muted);
-  font-size: var(--fs-sm);
-  font-weight: 500;
-  letter-spacing: var(--ls-caps-wide);
-  text-transform: uppercase;
-}
-.terminal-settings[data-cards] .meta-set__sec > h2,
-.terminal-settings[data-cards] .meta-set__head { margin: 0 4px 7px; }
-.terminal-settings[data-cards] .meta-set__body {
-  display: flex;
-  flex-direction: column;
-  padding: 0 var(--settings-inset);
-  border: 1px solid var(--term-line);
-  background: var(--settings-card);
-}
-.terminal-settings[data-cards] .meta-set__body > :not(.meta-set__row, .meta-set__radio) { margin-block: 12px; }
-.terminal-settings[data-cards] .meta-set__body > :not(.meta-set__row, .meta-set__radio) + :not(.meta-set__row, .meta-set__radio) { margin-top: 0; }
-/* A setting: its name over what it does, the control on the right. */
-.terminal-settings[data-cards] .meta-set__row {
-  grid-template-columns: minmax(0, 1fr) auto;
-  gap: 2px 16px;
-  padding: 12px 0;
-  border-bottom: 0;
-}
-.terminal-settings[data-cards] .meta-set__row + .meta-set__row { border-top: 1px solid var(--term-line); }
-.terminal-settings[data-cards] .meta-set__row-k { grid-column: 1; color: var(--term-fg); font-size: var(--fs-lg); font-weight: 500; line-height: 1.5; }
-.terminal-settings[data-cards] .meta-set__row-v { grid-column: 1; grid-row: 2; color: var(--term-muted); font-size: var(--fs-md); line-height: 1.55; text-wrap: pretty; }
-.terminal-settings[data-cards] .meta-set__ctl { grid-column: 2; grid-row: 1 / span 2; }
-.terminal-settings[data-cards] .meta-set__state,
-.terminal-settings[data-cards] .meta-set__saved,
-.terminal-settings[data-cards] .meta-set__chip-note,
-.terminal-settings[data-cards] .meta-set__catalog { font-size: var(--fs-md); }
-.terminal-settings[data-cards] .meta-set__tag { font-size: var(--fs-sm); }
-/* The runtime choice: the radio list of the other pages. */
-.terminal-settings[data-cards] .meta-set__radio { border-bottom: 0; }
-.terminal-settings[data-cards] .meta-set__radio + .meta-set__radio { border-top: 1px solid var(--term-line); }
-.terminal-settings[data-cards] .meta-set__radio-head { gap: 12px; padding: 10px 0; }
-.terminal-settings[data-cards] .meta-set__radio-head input {
-  width: 16px;
-  height: 16px;
-  margin-top: 1px;
-  border: 1px solid var(--term-line-s);
-  background: var(--term-surface-glass);
-}
-.terminal-settings[data-cards] .meta-set__radio-head input:checked { border-color: var(--term-accent); background: var(--term-accent); box-shadow: inset 0 0 0 4px var(--term-surface); }
-.terminal-settings[data-cards] .meta-set__radio-t { font-size: var(--fs-lg); font-weight: 400; line-height: 1.4; }
-.terminal-settings[data-cards] .meta-set__radio-d { margin-top: 2px; line-height: 1.55; }
-.terminal-settings[data-cards] .meta-set__custom { padding-left: 28px; }
 
 /* A setting a search result opened is outlined for a moment. */
 .terminal-settings [data-search-hit] {
@@ -830,17 +788,12 @@
 .terminal-settings--drawer[data-stacked] .settings-radio__input { width: 18px; height: 18px; }
 .terminal-settings--drawer[data-stacked] .settings-radio__label { font-size: var(--fs-md); }
 .terminal-settings--drawer[data-stacked] .settings-radio__description { font-size: var(--fs-sm); }
-.terminal-settings--drawer[data-stacked] .meta-set__body > .meta-set__row { min-height: 52px; padding: 10px 0; }
-.terminal-settings--drawer[data-stacked] .meta-set__row-k { font-size: var(--fs-md); font-weight: 400; line-height: 1.35; }
-.terminal-settings--drawer[data-stacked] .meta-set__radio-head { min-height: 48px; }
-.terminal-settings--drawer[data-stacked] .meta-set__radio-head input { width: 18px; height: 18px; }
-.terminal-settings--drawer[data-stacked] .meta-set__radio-t { font-size: var(--fs-md); }
 /* On the drawer's scale, intros, descriptions and notes sit one step below
    the body (--fs-md), and the uppercase group labels at --fs-xs. */
 .terminal-settings--drawer[data-stacked] :is(.settings-section__intro, .settings-section__intro p, .settings-backup__intro p, .settings-section__status,
-  .settings-row__note, .settings-history__empty p, .meta-set__lede, .meta-set__row-v,
-  .meta-set__radio-d, .meta-set__usage, .remote-machine__sub, .remote-machine__status, .remote-connections__hint) { font-size: var(--fs-sm); }
-.terminal-settings--drawer[data-stacked] :is(.settings-section__title, .meta-set__sec > h2, .meta-set__head > h2) { font-size: var(--fs-xs); }
+  .settings-row__note, .settings-history__empty p, .info-tip__text, .remote-machine__sub, .remote-machine__status,
+  .remote-connections__hint) { font-size: var(--fs-sm); }
+.terminal-settings--drawer[data-stacked] .settings-section__title { font-size: var(--fs-xs); }
 
 /* ── Window ───────────────────────────────────────────────────────
    On a desktop Settings is a window over the app (ModalShell): search and the
@@ -956,12 +909,44 @@
 }
 .terminal-settings--window .terminal-settings-heading { margin: 0 4px 14px; font-size: var(--fs-4xl); }
 
+/* On this page (SettingsToc): a long page's groups in a third column, on the
+   page column's lifted glass, the one in view marked as the navigation marks its page. */
+.terminal-settings--window:has(> .settings-toc) { grid-template-columns: 236px minmax(0, 1fr) 196px; }
+.settings-toc {
+  min-height: 0;
+  overflow-y: auto;
+  padding: 26px 18px 20px 0;
+  background: color-mix(in srgb, var(--term-fg) 3%, transparent);
+  overscroll-behavior-y: contain;
+}
+.settings-toc__title { margin: 0 0 8px 12px; color: var(--term-muted); font-size: var(--fs-sm); font-weight: 500; line-height: 1.4; }
+.settings-toc__item {
+  display: block;
+  width: 100%;
+  padding: 4px 0 4px 12px;
+  border: 0;
+  border-left: 1px solid var(--term-line);
+  background: transparent;
+  color: var(--term-muted);
+  font: inherit;
+  font-size: var(--fs-md);
+  line-height: 1.4;
+  text-align: left;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  cursor: pointer;
+}
+.settings-toc__item[data-sub] { padding-left: 24px; }
+.settings-toc__item[aria-current] { border-left-color: var(--term-accent); color: var(--term-fg); }
+.settings-toc__item:focus-visible { outline: var(--focus-ring); outline-offset: -2px; }
+@media (hover: hover) and (pointer: fine) { .settings-toc__item:hover { color: var(--term-fg); } }
+
 /* Rows: under each group's heading its settings are rows divided by hairlines,
    the name and what it does on the left and the control on the right, with
    no card around them. The rows line up with the headings' 4px inset. Trash
    and Archived keep their lists in cards (history.css). */
 .terminal-settings--window[data-cards] .settings-section__body,
-.terminal-settings--window[data-cards] .meta-set__body,
 .terminal-settings--window[data-cards] .settings-backup__card {
   border: 0;
   background: transparent;
@@ -969,14 +954,14 @@
 }
 .terminal-settings--window[data-cards] .settings-backup__card { padding-block: 2px 0; }
 .terminal-settings--window[data-cards] .settings-section__head { margin-bottom: 2px; }
-.terminal-settings--window[data-cards] .meta-set__sec > h2,
-.terminal-settings--window[data-cards] .meta-set__head { margin-bottom: 2px; }
 /* Something between rows (a radio list, a note) is divided from the row after it as rows are. */
 .terminal-settings--window[data-cards] .settings-section__body > :not(.settings-row) + .settings-row { border-top: 1px solid var(--term-line); }
-/* A radio list's options are rows too, flush with the names above them. */
-.terminal-settings--window[data-cards] .settings-radio { margin-inline: 0; }
-.terminal-settings--window[data-cards] .settings-radio__option { padding-inline: 0; }
-.terminal-settings--window[data-cards] .settings-radio__option + .settings-radio__option::before { right: 0; left: 28px; }
+/* A radio list is one setting, flush with the names above it: its options sit
+   together with no rule between them, and the rows around it divide it from
+   the rest. */
+.terminal-settings--window[data-cards] .settings-radio { margin-inline: 0; padding-block: 4px 8px; }
+.terminal-settings--window[data-cards] .settings-radio__option { min-height: 0; padding: 8px 0; }
+.terminal-settings--window[data-cards] .settings-radio__option + .settings-radio__option::before { content: none; }
 
 /* Search results: where each setting is, its name and what it does. */
 .settings-window__count { margin: 0 4px 12px; color: var(--term-muted); font-size: var(--fs-md); }
@@ -1066,10 +1051,6 @@
 
 /* Focus lands on the section's heading when it opens; it is not a control. */
 .terminal-settings-heading:focus { outline: none; }
-
-@container (max-width: 740px) {
-  .terminal-settings--drawer .meta-set__notice { flex-wrap: wrap; }
-}
 
 .settings-backup { margin-top: 24px; padding-top: 20px; border-top: 1px solid var(--term-line); }
 .settings-backup h2 { margin: 0 0 12px; font-size: var(--fs-lg); font-weight: 600; }

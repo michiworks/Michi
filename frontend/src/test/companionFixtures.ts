@@ -12,13 +12,13 @@ export function companionItem(id: string, overrides: Partial<CompanionItemDto> =
   };
 }
 
-/** The wire snapshot (CompanionSnapshotDto) with R2.16 fields. */
+/** The wire snapshot (CompanionSnapshotDto) with R2.16 fields, of a Michi the user turned on (Resume: it starts paused). */
 export function companionSnapshotDto(overrides: Partial<CompanionSnapshotDto> = {}): CompanionSnapshotDto {
   const settings = structuredClone(DEFAULT_COMPANION_SETTINGS);
   for (const source of Object.values(settings.sources)) source.enabled = true;
   const runs = { runtimeId: 'claude', providerId: null, modelId: null, reasoning: null };
   return {
-    settings,
+    settings: { ...settings, enabled: true, paused: false },
     status: {
       state: 'ok', auth: { valid: true, expiresAt: null, checkedAt: null }, sources: [], lastCheckAt: null, nextCheckAt: null,
       nextHeartbeatAt: null, nextBriefAt: null, turnsToday: 0, working: false,

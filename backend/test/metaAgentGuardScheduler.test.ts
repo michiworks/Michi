@@ -18,6 +18,7 @@ import { createMaintenanceConfig } from '../src/services/pages/maintenanceReposi
 import { ScheduledJobEventBus } from '../src/services/scheduledJobs/events';
 import { ScheduledJobsRepository, type ScheduledJobRecord, type ScheduledJobRunRecord } from '../src/services/scheduledJobs/repository';
 import { ScheduledJobScheduler, type ScheduledJobExecutor, type ScheduledRunHandle, type ScheduledRunHooks } from '../src/services/scheduledJobs/scheduler';
+import { turnBackgroundWorkOn } from './helpers/backgroundWork';
 
 const OWNER = 'local-user';
 
@@ -97,6 +98,7 @@ describe('scheduled maintenance and the Meta agent restriction check', () => {
     delete process.env.MICHI_CLOUD;
     closeDb();
     initDb();
+    turnBackgroundWorkOn();
     now = Date.parse('2026-10-23T02:00:00Z');
     mock.method(Date, 'now', () => now);
     getDb().prepare('INSERT INTO workspaces(id,name,created_at,updated_at) VALUES(?,?,?,?)').run('ws', 'Workspace', now, now);
@@ -114,7 +116,7 @@ describe('scheduled maintenance and the Meta agent restriction check', () => {
     const executor = new ScriptedExecutor();
     let nextJob = 0;
     const scheduler = new ScheduledJobScheduler({ repository: new ScheduledJobsRepository(), executor,
-      events: new ScheduledJobEventBus(() => now), workspaceExists: () => true, runtimeExists: () => true,
+      events: new ScheduledJobEventBus(), workspaceExists: () => true, runtimeExists: () => true,
       clock: () => now, instanceId: 'guard-test-worker', createId: () => `job-${++nextJob}`, pollIntervalMs: 600_000 });
     const job = scheduler.createJob({ workspaceId: 'ws', name: 'Space maintenance', prompt: 'Maintain relevant spaces',
       schedule: { kind: 'every', everySeconds: 60 }, permissionMode: 'trust', sessionMode: 'fresh',

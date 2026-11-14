@@ -621,7 +621,7 @@ describe('message-level roster', () => {
     expect(unclaimed.map((entry) => entry.sessionId)).toEqual(['crew-1']);
 
     const { getByTestId } = render(<MessageSubagents subagents={unclaimed} />);
-    expect(getByTestId('message-subagents').textContent).toBe('subagents1 working');
+    expect(getByTestId('message-subagents').textContent).toBe('Subagents1 working');
   });
 
   it('counts the agents by state on one line, without their results', () => {
@@ -634,7 +634,7 @@ describe('message-level roster', () => {
     ];
     const { getByTestId, queryAllByTestId, getByRole } = render(<MessageSubagents subagents={roster} />);
     // An agent in background still works; an interrupted one reads stopped.
-    expect(getByTestId('message-subagents').textContent).toBe('subagents2 working·1 done·1 failed·1 stopped');
+    expect(getByTestId('message-subagents').textContent).toBe('Subagents2 working·1 done·1 failed·1 stopped');
     expect(queryAllByTestId('subagent-row')).toHaveLength(0);
     expect(getByRole('region', { name: '5 subagents' })).toBeTruthy();
     // Outside a conversation there is no drawer to open.

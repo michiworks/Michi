@@ -17,9 +17,9 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 
-import { AgentPolicyCategory, AgentPolicyDecision, AgentRunEventType, AgentRunStatus, createDurableTurn, applyTurnEvent, PANE_KINDS, PaneInspectionError, type ChatStreamEvent, type EffectiveAgentDefinitionV1, type PaneFeedEventV1, type SurfacePaneKind } from 'michi-shared';
+import { AgentPolicyCategory, AgentPolicyDecision, AgentRunEventType, AgentRunStatus, createDurableTurn, applyTurnEvent, PANE_KINDS, PaneInspectionError, type ChatStreamEvent, type EffectiveAgentDefinitionV1, type SurfacePaneKind } from 'michi-shared';
 import { closeDb, initDb, getDb } from '../src/services/db';
-import { beginTurn, finalizeTurn, saveEdge, saveNode, saveTree, saveWorkspace, updateNodeTitle, saveMessage, getCompletedTurnCount, getMessageCountsByNode, getNodesMetadataByIds, type NodeRow } from '../src/services/dbRepository';
+import { beginTurn, finalizeTurn, saveEdge, saveNode, saveTree, saveWorkspace, updateNodeTitle, saveMessage, getCompletedTurnCount, getMessageCountsByNode, type NodeRow } from '../src/services/dbRepository';
 
 import { AgentRunsRepository } from '../src/services/agentRunsRepository';
 import { LOCAL_AGENT_OWNER_ID } from '../src/services/agentOwner';
@@ -28,7 +28,7 @@ import { contentEquals, paneInspectionRing } from '../src/services/paneInspectio
 import { PanePresenceRegistry } from '../src/services/panePresence';
 import { readOutput } from '../src/services/paneInspectionOutput';
 import { waitPane } from '../src/services/paneInspectionWait';
-import { PaneFeed, systemPaneSubscribeClock, configurePaneInspectionEventBus } from '../src/services/paneInspectionSubscribe';
+import { configurePaneInspectionEventBus } from '../src/services/paneInspectionSubscribe';
 import { AgentRunEventBus } from '../src/agents/runs/agentRunEventBus';
 import { buildPaneInspectionCaller } from '../src/agents/paneInspectionTools';
 import { McpSlotRegistry, buildMcpServerForSlot } from '../src/services/mcpServer';
@@ -216,22 +216,16 @@ describe('PaneInspectionService.inspect', () => {
     await assert.rejects(() => tools.inspect_pane.handler({ nodeId: 'ignored' }), /not exposed/);
   });
 
-  test('Run message-context denial applies to previews, output, and resumed feeds', () => {
+  test('Run message-context denial applies to previews and output', () => {
     seedNode('restricted-target');
     seedCompletedTurn('restricted-target', 'restricted-turn');
     const run = createRun(new AgentRunsRepository(), 'restricted-caller');
     const restricted = caller({ runOwner: { runId: run.id } });
-    const before = inspect(restricted, { locator: { nodeId: 'restricted-target' } });
+    inspect(restricted, { locator: { nodeId: 'restricted-target' } });
     const definition = { ...run.effectiveDefinition, contextPolicy: { ...run.effectiveDefinition.contextPolicy, allowMessageContext: false } };
     getDb().prepare('UPDATE agent_runs SET effective_definition = ? WHERE id = ?').run(JSON.stringify(definition), run.id);
     assert.throws(() => inspect(restricted, { locator: { nodeId: 'restricted-target' } }), /context policy/);
     assert.throws(() => readOutput(restricted, { locator: { nodeId: 'restricted-target' }, selection: 'latest', limitBytes: 1024 }), /context policy/);
-    const events: PaneFeedEventV1[] = [];
-    const feed = new PaneFeed({ clock: systemPaneSubscribeClock, ring: paneInspectionRing });
-    try {
-      feed.subscribe(restricted, before.ref.paneId, before.observation.cursor, { emit: (event) => { events.push(event); } });
-      assert.deepEqual(events.map((event) => event.type), ['access_revoked']);
-    } finally { feed.stop(); }
   });
 
   test('persisted previews and first-start survive a new empty turn without misattributing output', () => {
@@ -267,39 +261,26 @@ describe('PaneInspectionService.inspect', () => {
     }
   });
 
-  test('mixed legacy history remains partial in both individual and batch metadata', () => {
+  test('mixed legacy history remains partial in metadata', () => {
     seedNode('legacy-node');
     saveMessage({ id: 'legacy-answer', node_id: 'legacy-node', role: 'assistant', content: 'old answer', seq: 0, created_at: 1 });
     seedCompletedTurn('legacy-node', 'modern-turn');
     assert.deepEqual(getCompletedTurnCount('legacy-node', OWNER), { count: null, coverage: 'partial' });
-    assert.deepEqual(getNodesMetadataByIds(['legacy-node'], OWNER).get('legacy-node')?.completedTurns, { count: null, coverage: 'partial' });
     assert.equal(inspect(caller(), { locator: { nodeId: 'legacy-node' } }).timeline.firstExecutionStartedAt, null);
   });
 
-  test('individual and batch metadata count messages and turns alike', () => {
+  test('one-node metadata counts messages and turns per owner', () => {
     seedNode('counted');
     seedCompletedTurn('counted', 'counted-turn');
     saveMessage({ id: 'counted-note', node_id: 'counted', role: 'system', content: 'note', seq: 5, created_at: 1 });
-    seedNode('empty');
-    seedNode('mixed');
-    saveMessage({ id: 'mixed-legacy', node_id: 'mixed', role: 'assistant', content: 'old', seq: 0, created_at: 1 });
-    seedCompletedTurn('mixed', 'mixed-turn');
     getDb().prepare('UPDATE workspaces SET owner_user_id = ? WHERE id = ?').run(OWNER, WORKSPACE);
-    const ids = ['counted', 'empty', 'mixed'];
-    const individually = (userId: string) => Object.fromEntries(ids.map((id) => [id,
-      { messageCounts: getMessageCountsByNode(id, userId), completedTurns: getCompletedTurnCount(id, userId) }]));
-    const batched = (userId: string) => Object.fromEntries([...getNodesMetadataByIds(ids, userId)]
-      .map(([id, entry]) => [id, { messageCounts: entry.messageCounts, completedTurns: entry.completedTurns }]));
+    const counts = (userId: string) => ({ messageCounts: getMessageCountsByNode('counted', userId), completedTurns: getCompletedTurnCount('counted', userId) });
     try {
-      for (const cloud of [false, true]) {
-        if (cloud) process.env.MICHI_CLOUD = '1';
-        assert.deepEqual(batched(OWNER), individually(OWNER), cloud ? 'cloud' : 'local');
-      }
-      assert.deepEqual(individually(OWNER).counted, {
+      process.env.MICHI_CLOUD = '1';
+      assert.deepEqual(counts(OWNER), {
         messageCounts: { total: 3, user: 1, assistant: 1 }, completedTurns: { count: 1, coverage: 'complete' } });
-      assert.deepEqual(individually('other-owner').counted, {
+      assert.deepEqual(counts('other-owner'), {
         messageCounts: { total: 0, user: 0, assistant: 0 }, completedTurns: { count: 0, coverage: 'complete' } });
-      assert.deepEqual(batched('other-owner'), {});
     } finally { delete process.env.MICHI_CLOUD; }
   });
 
@@ -399,25 +380,19 @@ describe('PaneInspectionService.inspect', () => {
     assert.notEqual(after.presence.views[0]?.lastSeenAt, before.presence.views[0]?.lastSeenAt, 'the keepalive moved lastSeenAt');
   });
 
-  test('real inspect, wait and resumed feed preserve intervening changes and usable replay cursors', async () => {
+  test('real inspect and wait preserve intervening changes and usable replay cursors', async () => {
     seedNode('resumed-node');
     const before = inspect(caller(), { locator: { nodeId: 'resumed-node' } });
     updateNodeTitle('resumed-node', 'renamed before wait');
     const waited = await waitPane(caller(), { locator: { nodeId: 'resumed-node' }, until: 'changed', cursor: before.observation.cursor, timeoutMs: 10 });
     assert.equal(waited.reason, 'changed');
-    const events: PaneFeedEventV1[] = [];
-    const feed = new PaneFeed({ clock: systemPaneSubscribeClock, ring: paneInspectionRing });
-    try {
-      feed.subscribe(caller(), before.ref.paneId, before.observation.cursor, { emit: (event) => { events.push(event); } });
-      assert.ok(events.some((event) => 'descriptor' in event && event.descriptor?.title === 'renamed before wait'));
-      const replay = paneInspectionRing.resolveCursor(before.observation.cursor, scopeForCaller(caller()));
-      assert.ok(replay.ok && replay.replay.length > 0);
-      if (replay.ok) for (const retained of replay.replay) {
-        const payload = retained.event.payload as PaneFeedEventV1;
-        assert.ok(payload.cursor);
-        assert.equal(paneInspectionRing.resolveCursor(payload.cursor, scopeForCaller(caller())).ok, true);
-      }
-    } finally { feed.stop(); }
+    const replay = paneInspectionRing.resolveCursor(before.observation.cursor, scopeForCaller(caller()));
+    assert.ok(replay.ok && replay.replay.length > 0);
+    if (replay.ok) for (const retained of replay.replay) {
+      const payload = retained.event.payload as { cursor: string };
+      assert.ok(payload.cursor);
+      assert.equal(paneInspectionRing.resolveCursor(payload.cursor, scopeForCaller(caller())).ok, true);
+    }
   });
 
   test('run output pages past 1000 events and preserves old attempt output identities', () => {
@@ -454,7 +429,7 @@ describe('PaneInspectionService.inspect', () => {
       { outputId: `run-attempt:${attempt.id}`, text: 'HelloWorld', partial: true });
   });
 
-  test('production event-bus configuration wakes default waits immediately and sends the final descriptor', async () => {
+  test('production event-bus configuration wakes default waits immediately', async () => {
     const repo = new AgentRunsRepository();
     const run = createRun(repo, 'live-run');
     repo.appendEventAndProject(OWNER, run.id, 0, { type: AgentRunEventType.RunStatusChanged,
@@ -463,21 +438,12 @@ describe('PaneInspectionService.inspect', () => {
       payload: { version: 1, from: AgentRunStatus.Preparing, to: AgentRunStatus.Running } }, { status: AgentRunStatus.Running, startedAt: run.createdAt });
     const bus = new AgentRunEventBus();
     configurePaneInspectionEventBus(bus);
-    const events: PaneFeedEventV1[] = [];
-    const feed = new PaneFeed({ clock: systemPaneSubscribeClock, ring: paneInspectionRing });
-    try {
-      feed.subscribe(caller(), `run:${run.id}`, undefined, { emit: (event) => { events.push(event); } });
-      const waiting = waitPane(caller(), { locator: { runId: run.id }, until: 'terminal', executionRef: { kind: 'agent_run', runId: run.id }, timeoutMs: 500 });
-      const event = repo.appendEventAndProject(OWNER, run.id, 2, {
-        type: AgentRunEventType.RunStatusChanged, payload: { version: 1, from: AgentRunStatus.Running, to: AgentRunStatus.Completed },
-      }, { status: AgentRunStatus.Completed, completedAt: run.createdAt + 100 });
-      bus.publishCommitted(event);
-      assert.equal((await waiting).reason, 'terminal');
-      const final = events.find((entry) => entry.type === 'execution_settled');
-      assert.ok(final?.type === 'execution_settled');
-      assert.equal(final.descriptor?.activity, 'idle');
-      assert.equal(final.descriptor?.observation.cursor, final.cursor);
-    } finally { feed.stop(); }
+    const waiting = waitPane(caller(), { locator: { runId: run.id }, until: 'terminal', executionRef: { kind: 'agent_run', runId: run.id }, timeoutMs: 500 });
+    const event = repo.appendEventAndProject(OWNER, run.id, 2, {
+      type: AgentRunEventType.RunStatusChanged, payload: { version: 1, from: AgentRunStatus.Running, to: AgentRunStatus.Completed },
+    }, { status: AgentRunStatus.Completed, completedAt: run.createdAt + 100 });
+    bus.publishCommitted(event);
+    assert.equal((await waiting).reason, 'terminal');
   });
 
   test('a deleted (purged) node does not leak content or lineage — NOT_FOUND', () => {

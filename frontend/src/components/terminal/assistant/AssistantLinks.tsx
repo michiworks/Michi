@@ -1,9 +1,11 @@
 import React, { useEffect, useRef, useState } from 'react';
+import { MessageSquare } from 'lucide-react';
 import { MarkdownLinkRendererContext, type MarkdownLinkRenderer } from '../../markdownLinkRenderer';
 import { useChatActions, useChatNode, useChatNodeReader, useChatProjects } from '../../../state/chatStore';
 import { parseAssistantLink, type AssistantLink } from '../../../state/assistant/assistantLinks';
 import { fetchWorkspaceHoldingNode } from '../../../state/assistant/locateNode';
 import { AssistantScopeContext } from './assistantScope';
+import { useMichiLinkEntityId } from './linkConnection';
 import { PageLinkChip } from '../spaces/metaChat/PageLinkChip';
 import './assistant.css';
 
@@ -98,6 +100,7 @@ function NodeChip({ id, messageId, children }: { id: string; messageId?: string;
       title={missing ? `${label} — not found in Michi` : failed ? `${label} — couldn't load it; click to try again` : label}
       onClick={open}
     >
+      <span className="assistant-cite__icon" aria-hidden="true"><MessageSquare size={11} /></span>
       <span className="assistant-cite__text">{label}</span>
       {missing && <span className="assistant-cite__note">not found</span>}
       {failed && <span className="assistant-cite__note">couldn't load</span>}
@@ -106,8 +109,11 @@ function NodeChip({ id, messageId, children }: { id: string; messageId?: string;
 }
 
 export function AssistantLinkChip({ link, children }: { link: AssistantLink; children: React.ReactNode }) {
-  if (link.kind === 'node') return <NodeChip id={link.id} messageId={link.messageId}>{children}</NodeChip>;
-  if (link.kind === 'page') return <PageLinkChip id={link.id} blockId={link.blockId}>{children}</PageLinkChip>;
+  const id = useMichiLinkEntityId(link.id);
+  // A link that can name nothing here stays its words.
+  if (id === null) return <>{children}</>;
+  if (link.kind === 'node') return <NodeChip id={id} messageId={link.messageId}>{children}</NodeChip>;
+  if (link.kind === 'page') return <PageLinkChip id={id} blockId={link.blockId}>{children}</PageLinkChip>;
 }
 
 const ASSISTANT_LINKS: MarkdownLinkRenderer = {

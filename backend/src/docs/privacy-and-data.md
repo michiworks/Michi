@@ -1,6 +1,6 @@
 # Where data goes and how access works
 
-Applies to: local desktop/web, self-hosted remote and hosted deployments. Source checked: 2026-11-08 against storage/auth/telemetry/memory documentation and implementation. Native providers, MCP servers and Crew have their own policies; this guide is not a universal retention or compliance guarantee.
+Applies to: local desktop/web, self-hosted remote and hosted deployments. Source checked: 2026-11-12 against storage/auth/telemetry/memory/agent documentation and implementation. Native providers, MCP servers and Crew have their own policies; this guide is not a universal retention or compliance guarantee.
 
 ## Data locations
 
@@ -8,6 +8,7 @@ Applies to: local desktop/web, self-hosted remote and hosted deployments. Source
 | --- | --- |
 | Workspace/chat/turn records, chat permission modes and tool grants | Selected backend's SQLite `data.db` |
 | Michi Memory (memories, the profile of the user, the index it recalls conversations from) | Selected backend's `data.db` |
+| Your agent's conversation, Today items, notes, goals, rules and settings | Local backend's `data.db`; the conversation sits in a hidden system workspace |
 | Sign-in/sign-out/sign-up and admin audit events | Backend's `audit.db` |
 | Pre-migration snapshots of `data.db`/`audit.db` | `backups/` in the data directory (default `~/.michi/backups/`); they keep content deleted or purged later until retention removes them |
 | Project files, Artifacts, uploads | Workspace filesystem on that backend; `.contexts/` and `.attachments/` where applicable |
@@ -25,7 +26,9 @@ Defaults can change through deployment/directory configuration. The public sourc
 
 The selected runtime/provider receives model input and tool results needed for a request. Reading a file with an agent can send its contents into model context; so does running a skill, or an agent reading one with `michi_skills`. Calling an external MCP or website can send that tool's arguments and associated data to its service. With Pi web search configured, search queries go to the chosen search provider (Jina or Tavily), and `fetch_content` requests public pages from the backend machine.
 
-Unless Settings → Memory is Off, Michi Memory adds notes (yours, Michi's own and its profile of you, the current workspace's) and what you typed in your recent other conversations to chat turns' model context on every runtime, within a size budget, and agents can search memories and past conversations with `memory_search`. A local backend also reads finished conversations in the background on the Pages upkeep runtime and saves what is worth remembering, without an approval step; these are model requests no user turn starts. Settings → Memory lists every memory, which you can correct or delete. Off stops agents reading or saving memories; saved ones stay until deleted.
+Unless Settings → Memory is Off, Michi Memory adds to chat turns' model context on every runtime, within a size budget, notes (yours, Michi's own and its profile of you, the current workspace's), what you typed in your recent other conversations and, beside the top related notes, what you wrote in the turn they came from; agents can search memories and past conversations with `memory_search`. A local backend also reads finished conversations in the background on the Background work runtime (Settings → Michi → Model) and saves what is worth remembering, without an approval step; these are model requests no user turn starts (off until you turn on Settings → Memory → **Learn from conversations**). It also imports, read-only, what Claude Code, Codex and Kiro remembered in their own memory files; `MICHI_MEMORY_IMPORT=0` turns that off. Settings → Memory lists every memory, which you can correct or delete. Off stops agents reading or saving memories; saved ones stay until deleted.
+
+On a local backend, your agent (Michi unless renamed; see `concepts-and-context`) also checks sources on its own, read-only: Michi's own records. External code-review, pipeline, email and calendar collectors are not bundled. What they return is stored in `data.db` and goes into the model context of your conversation with the agent when it looks something up, and of check-ins and the morning brief: model requests no user turn starts, on **Background work** (Settings → Michi → Model). What they use is recorded, not limited. None of this runs until you turn your agent on (Get started's **Start**, or its switch in Settings → Michi; the page is named after your agent); turn sources off, or turn it off, there too; `MICHI_DISABLE_COMPANION=1` keeps the watcher from starting. Hosted deployments do not run it.
 
 Local-first history does not mean all inference is offline. An available model, a tool permission and a service's data policy are separate questions. Review the actual provider/tool configuration for sensitive work.
 

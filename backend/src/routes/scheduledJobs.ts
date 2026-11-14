@@ -1,8 +1,6 @@
 import { getScheduledJobSettings, updateScheduledJobSettings } from '../services/scheduledJobs/settings';
-import { beginSse } from '../services/httpSse';
 import { Router, type Request, type Response } from 'express';
 import { requireLocalControlRequest } from './middleware/localControl';
-import { encodeScheduledJobEvent, type ScheduledJobEventBus } from '../services/scheduledJobs/events';
 import {
   JobValidationError,
   ScheduledJobConflictError,
@@ -10,8 +8,6 @@ import {
   type ScheduledJobScheduler,
 } from '../services/scheduledJobs/scheduler';
 import { log } from '../services/logger';
-
-const KEEPALIVE_MS = 15_000;
 
 function errorStatus(error: unknown): number {
   if (error instanceof ScheduledJobNotFoundError) return 404;
@@ -36,8 +32,6 @@ function handle(fn: (req: Request, res: Response) => Promise<void> | void) {
   };
 }
 
-const encodeEvent = encodeScheduledJobEvent;
-
 /**
  * Scheduled Jobs API. Desktop-only: every route requires a loopback request
  * from the local renderer (or a process without an Origin, such as Electron
@@ -45,7 +39,6 @@ const encodeEvent = encodeScheduledJobEvent;
  */
 export function setupScheduledJobRoutes(deps: {
   scheduler: ScheduledJobScheduler | null;
-  events: ScheduledJobEventBus;
 }): Router {
   const router = Router();
   router.use('/scheduled-jobs', (req, res, next) => {
@@ -75,28 +68,6 @@ export function setupScheduledJobRoutes(deps: {
 
   router.post('/scheduled-jobs/preview', handle((req, res) => {
     res.json(scheduler().preview(req.body?.schedule));
-  }));
-
-  /**
-   * Desktop notification feed for the Electron main process. Replays
-   * undelivered notifications on connect; the client acknowledges each one.
-   */
-  router.get('/scheduled-jobs/notifications/stream', (_req, res) => {
-    const observer = beginSse(res);
-    for (const event of scheduler().pendingNotifications()) {
-      if (!observer.write(encodeEvent(event))) return;
-    }
-    observer.addCleanup(deps.events.subscribe({
-      notifier: true,
-      send: (event) => {
-        if (event.phase !== 'started') observer.write(encodeEvent(event));
-      },
-    }));
-    observer.heartbeat(': keepalive\n\n', KEEPALIVE_MS);
-  });
-
-  router.post('/scheduled-jobs/runs/:runId/notified', handle((req, res) => {
-    res.json({ acknowledged: scheduler().acknowledgeNotification(String(req.params.runId)) });
   }));
 
   router.post('/scheduled-jobs/executions/:runId/confirm-stopped', handle((req, res) => {

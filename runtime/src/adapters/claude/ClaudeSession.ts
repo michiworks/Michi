@@ -1,5 +1,5 @@
 import { assertToolCatalog, catalogUnavailable, guardError } from '../../core/restrictedCatalog';
-import { ApprovalCoordinator, chatApprovalOptions } from '../../core/approvals';
+import { ApprovalCoordinator, chatApprovalOptions, forcedApprovalOptions } from '../../core/approvals';
 import { assertPermissionAnswer, nextInteractionRequestId } from '../../core/pendingInteractions';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
@@ -375,7 +375,7 @@ export class ClaudeSession implements AgentSession {
   // Permission state
   private readonly pendingPermissions = new Map<
     number,
-    { resolve: (optionId: string | null) => void; timer: NodeJS.Timeout; toolName?: string }
+    { resolve: (optionId: string | null) => void; timer: NodeJS.Timeout; toolName?: string; forced?: boolean }
   >();
   private readonly pendingUserInputs = new Map<
     number,
@@ -2418,11 +2418,11 @@ export class ClaudeSession implements AgentSession {
    * (ClaudeAdapterOptions.requireHostApproval). A callback that throws asks:
    * the approval policy then decides.
    */
-  private hostRequiresApproval(name: string): boolean {
+  private hostRequiresApproval(name: string, input: Record<string, unknown>): boolean {
     const check = this.options.requireHostApproval;
     if (!check) return false;
     try {
-      return check({ owner: this.owner, ownerUserId: this.ownerUserId, toolName: name, hostToolName: michiMcpToolName(name) }) === true;
+      return check({ owner: this.owner, ownerUserId: this.ownerUserId, toolName: name, hostToolName: michiMcpToolName(name), input }) === true;
     } catch (error) {
       this.host.observability.log('warn', 'chat', 'claude host approval check failed; the call asks', {
         nodeId: this.nodeId, toolName: name, error: error instanceof Error ? error.message : String(error),
@@ -2445,7 +2445,7 @@ export class ClaudeSession implements AgentSession {
     if (!this.isToolAllowed(toolName)) return { behavior: 'deny', message: 'tool is not enabled for this Agent Run' };
     if (toolName === 'ToolSearch' && this.toolProfile && !this.host.profile.isMaintenance?.(this.toolProfile)) return { behavior: 'allow', updatedInput: input };
     if (this.permissionBroker) return this.authorizeSdkTool(toolName, input, id, signal);
-    if (this.hostRequiresApproval(name)) return { behavior: 'ask', message: HOST_APPROVAL_REQUIRED };
+    if (this.hostRequiresApproval(name, input)) return { behavior: 'ask', message: HOST_APPROVAL_REQUIRED };
     return undefined;
   }
 
@@ -2616,15 +2616,19 @@ export class ClaudeSession implements AgentSession {
       // A turn decides under the mode it started with. Background work asking
       // between turns (a workflow agent) follows the chat's current mode, so
       // moving the chat to Ask holds a running workflow's next tool call.
+      const call = { input: params.input };
       const policy = this.approvals.policy(this.owner, this.ownerUserId, params.toolName, true,
-        this.turn ? this.turnPermissionMode : undefined, params.hostTool === true);
+        this.turn ? this.turnPermissionMode : undefined, params.hostTool === true, call);
       if (policy === 'allow') return { behavior: 'allow', updatedInput: params.input };
       if (policy === 'deny') return { behavior: 'deny', message: 'policy denied' };
 
-      // 'ask': push permission_request, await user decision
-      const options = chatApprovalOptions(params.toolName);
+      // 'ask': push permission_request, await user decision. A forced ask (the
+      // host's consequence rules) approves this one call only.
+      const forced = this.approvals.forcedAsk(this.owner, this.ownerUserId, params.toolName, true, params.hostTool === true, call);
+      const options = forced ? forcedApprovalOptions() : chatApprovalOptions(params.toolName);
       const title = `Approve ${params.toolName}?`;
-      const detail = formatPermissionDetail(params.toolName, params.input);
+      const formatted = formatPermissionDetail(params.toolName, params.input);
+      const detail = forced ? [forced.reason, formatted].filter(Boolean).join('\n\n') : formatted;
 
       // Queuing a background asker's request would open a self-turn that
       // holds the chat until the workflow ends, so the running workflows
@@ -2659,7 +2663,7 @@ export class ClaudeSession implements AgentSession {
           options,
           source: 'claude_prompt_tool',
         });
-        result = await this.awaitPermission(requestId, params.toolName, signal);
+        result = await this.awaitPermission(requestId, params.toolName, signal, forced !== null);
         if (!isActive()) {
           return { behavior: 'deny', message: 'permission request is no longer active' };
         }
@@ -2669,7 +2673,7 @@ export class ClaudeSession implements AgentSession {
         for (const [id, request] of this.pendingPermissions) {
           // A grant never answers a plan review.
           if (request.toolName === 'ExitPlanMode') continue;
-          if (this.approvals.covers(result, params.toolName, request.toolName)) this.respondToPermission(id, 'allow_once');
+          if (this.approvals.covers(result, params.toolName, request.toolName, request.forced === true)) this.respondToPermission(id, 'allow_once');
         }
         this.workflowTap.answerCovered((toolName) => this.approvals.covers(result, params.toolName, toolName), 'allow_once');
         return { behavior: 'allow', updatedInput: params.input };
@@ -2734,7 +2738,7 @@ export class ClaudeSession implements AgentSession {
     };
   }
 
-  private awaitPermission(requestId: number, toolName?: string, signal?: AbortSignal): Promise<string | null> {
+  private awaitPermission(requestId: number, toolName?: string, signal?: AbortSignal, forced = false): Promise<string | null> {
     if (signal?.aborted) return Promise.resolve(null);
     const abort = () => this.cancelPermission(requestId);
     signal?.addEventListener('abort', abort, { once: true });
@@ -2748,7 +2752,7 @@ export class ClaudeSession implements AgentSession {
         queue.push({ kind: 'permission_resolved', requestId });
         resolve(null);
       }, this.options.limits.approveTimeoutMs);
-      this.pendingPermissions.set(requestId, { resolve, timer, toolName });
+      this.pendingPermissions.set(requestId, { resolve, timer, toolName, ...(forced ? { forced } : {}) });
     }).finally(() => signal?.removeEventListener('abort', abort));
   }
 

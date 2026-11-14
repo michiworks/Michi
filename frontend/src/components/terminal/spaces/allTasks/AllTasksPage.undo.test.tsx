@@ -1,5 +1,6 @@
 import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { toast } from 'sonner';
+import { resetUndoStackForTests } from '../../../../state/undoStack';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { AllTasksDto, PageDatabase } from 'michi-shared';
 import { taskDatabaseColumns, taskDatabaseViews } from 'michi-shared';
@@ -44,6 +45,7 @@ beforeEach(() => {
   vi.mocked(revertPageBatch).mockReset();
   vi.mocked(toast).mockClear();
   vi.mocked(toast.error).mockClear();
+  resetUndoStackForTests();
 });
 
 async function dropAndUndo() {
@@ -58,12 +60,12 @@ describe('Undo on All tasks', () => {
   it('says when only part of it went back', async () => {
     vi.mocked(revertPageBatch).mockResolvedValue({ reverted: ['c1'], conflicts: ['c2'] } as never);
     await dropAndUndo();
-    await waitFor(() => expect(toast.error).toHaveBeenCalledWith('Not all of it was undone: some of it changed again since.'));
+    await waitFor(() => expect(toast.error).toHaveBeenCalledWith('Not all of it was undone: some of it changed again since.', { description: 'Moved a card' }));
   });
 
   it('says when none of it went back', async () => {
     vi.mocked(revertPageBatch).mockResolvedValue({ reverted: [], conflicts: ['c2'] } as never);
     await dropAndUndo();
-    await waitFor(() => expect(toast.error).toHaveBeenCalledWith('Not undone: it changed again since. Change it back yourself.'));
+    await waitFor(() => expect(toast.error).toHaveBeenCalledWith('Not undone: it changed again since. Change it back yourself.', { description: 'Moved a card' }));
   });
 });

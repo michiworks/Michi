@@ -18,6 +18,8 @@ import {
   type SubagentSummaryTone,
   type SubagentTone,
 } from './subagentPresentation';
+// MessageSubagents takes the line chrome's classes.
+import '../AgentLineBlocks.css';
 
 const MONO = 'var(--font-mono)';
 
@@ -247,28 +249,12 @@ function subagentCountParts(counts: Readonly<Record<SubagentTone, number>>) {
     .filter((group) => group.count > 0);
 }
 
-const countLineStyle: React.CSSProperties = {
-  display: 'flex',
-  alignItems: 'center',
-  gap: 10,
-  // The hover fill bleeds past the text column, so the label stays on it.
-  width: 'calc(100% + 12px)',
-  minHeight: 28,
-  margin: '10px -6px 6px',
-  padding: '3px 6px',
-  boxSizing: 'border-box',
-  borderRadius: 'var(--ui-radius)',
-  fontFamily: 'var(--ui-font)',
-  fontSize: 'var(--fs-sm)',
-  color: 'var(--term-mid)',
-  textAlign: 'left',
-};
-
 /**
  * Subagents in a message that no tool chip claims, as one line of counts:
- * "SUBAGENTS ● 1 working · 6 done · 2 stopped  Details ›". The line opens
- * the Background work drawer, which lists each agent; the transcript does
- * not repeat their results.
+ * "✦ Subagents  1 working · 6 done · 2 stopped  Details ›". It takes the line
+ * chrome's grid and type (AgentLineBlocks.css), so its words start where a
+ * run's words do. The line opens the Background work drawer, which lists each
+ * agent; the transcript does not repeat their results.
  */
 export function MessageSubagents({ subagents }: { subagents: readonly SubagentInfo[] }) {
   const nodeId = useBackgroundWorkNodeId();
@@ -280,50 +266,57 @@ export function MessageSubagents({ subagents }: { subagents: readonly SubagentIn
   const parts = subagentCountParts(counts);
   const content = (
     <>
-      <span style={{ flexShrink: 0, fontSize: 'var(--fs-2xs)', letterSpacing: 'var(--ls-caps-wide)', textTransform: 'uppercase', color: 'var(--term-muted)', fontWeight: 500 }}>
-        subagents
+      <span className="agent-line__ico">
+        {/* The line chrome's agent glyph (AgentLineBlocks PATHS.agent). */}
+        <svg width={16} height={16} viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth={1.5} strokeLinecap="round" strokeLinejoin="round" aria-hidden focusable="false">
+          <path d="M8 2.25 9.3 6.7 13.75 8 9.3 9.3 8 13.75 6.7 9.3 2.25 8 6.7 6.7z" />
+        </svg>
       </span>
-      {/* A count that changes fades to its new value. */}
-      <span style={{ ...ellipsis, flex: '0 1 auto' }}>
-        {parts.map((part, index) => (
-          <React.Fragment key={part.label}>
-            {index > 0 && <span aria-hidden style={{ margin: '0 8px', color: 'var(--term-faint)' }}>·</span>}
-            <FadeOnChange
-              k={`${part.label}:${part.count}`}
-              style={{ display: 'inline-flex', alignItems: 'baseline', gap: 6, color: part.color }}
-            >
-              {part.label === 'working' && <span aria-hidden className="term-dot-i term-dot-i--run" style={{ alignSelf: 'center' }} />}
-              <span style={{ fontFamily: MONO }}>{part.count}</span> {part.label}
-            </FadeOnChange>
-          </React.Fragment>
-        ))}
+      <span className="agent-line__txt">
+        <span className="agent-line__lead"><span className="agent-line__layer">Subagents</span></span>
+        {/* A count that changes fades to its new value. */}
+        <span className="agent-line__rest">
+          <span className="agent-line__layer">
+            {parts.map((part, index) => (
+              <React.Fragment key={part.label}>
+                {index > 0 && <span aria-hidden style={{ margin: '0 8px', color: 'var(--term-faint)' }}>·</span>}
+                <FadeOnChange
+                  k={`${part.label}:${part.count}`}
+                  style={{ display: 'inline-flex', alignItems: 'baseline', gap: 6, color: part.color }}
+                >
+                  {part.label === 'working' && <span aria-hidden className="term-dot-i term-dot-i--run" style={{ alignSelf: 'center' }} />}
+                  <span>{part.count}</span> {part.label}
+                </FadeOnChange>
+              </React.Fragment>
+            ))}
+          </span>
+        </span>
       </span>
     </>
   );
   if (!nodeId) {
     return (
-      <section aria-label={`${subagents.length} subagents`} data-testid="message-subagents" style={countLineStyle}>
-        {content}
+      <section aria-label={`${subagents.length} subagents`} data-testid="message-subagents" className="agent-line-run agent-line-run--roster">
+        <div className="agent-line">{content}</div>
       </section>
     );
   }
   return (
-    <section aria-label={`${subagents.length} subagents`}>
+    <section aria-label={`${subagents.length} subagents`} className="agent-line-run agent-line-run--roster">
       <button
         type="button"
         data-testid="message-subagents"
         aria-haspopup="dialog"
         aria-describedby={hintId}
         title="Show in background work"
-        className="t-hover-bg-alt"
+        className="agent-line"
         onClick={() => openBackgroundWork({ nodeId })}
-        // No inline background: Tailwind's preflight leaves buttons transparent, and the class fills it on hover.
-        style={{ border: 0, color: 'inherit', font: 'inherit', cursor: 'pointer', ...countLineStyle }}
       >
         {content}
-        <span aria-hidden style={{ flexShrink: 0, marginLeft: 'auto', fontSize: 'var(--fs-xs)', color: 'var(--term-muted)' }}>
-          {phone ? '›' : 'Details ›'}
-        </span>
+        <span aria-hidden className="agent-line__meta">{phone ? null : 'Details'}</span>
+        <svg className="agent-line__chev" width={12} height={12} viewBox="0 0 12 12" aria-hidden focusable="false">
+          <path d="M4.5 3 7.5 6 4.5 9" fill="none" stroke="currentColor" strokeWidth={1.5} strokeLinecap="round" strokeLinejoin="round" />
+        </svg>
         <span id={hintId} hidden>Show in background work</span>
       </button>
     </section>

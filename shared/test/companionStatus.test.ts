@@ -15,6 +15,9 @@ import {
   type CompanionStatusLineInput,
 } from '../src/index';
 
+/** A Michi the user turned on (Resume): it starts paused. */
+const TURNED_ON = { ...DEFAULT_COMPANION_SETTINGS, paused: false };
+
 // The same cases as the frontend's companionView and companionStore tests, so
 // the panel, the backend and the tray menu keep saying the same thing.
 
@@ -28,7 +31,7 @@ const STATUS: CompanionStatusDto = {
 };
 
 function line(status: Partial<CompanionStatusDto> = {}, settings: Partial<CompanionSettings> = {}) {
-  return companionStatusLine({ settings: { ...DEFAULT_COMPANION_SETTINGS, ...settings }, status: { ...STATUS, ...status } }, NOW);
+  return companionStatusLine({ settings: { ...TURNED_ON, ...settings }, status: { ...STATUS, ...status } }, NOW);
 }
 
 function item(id: string, overrides: Partial<CompanionItemDto>): CompanionItemDto {
@@ -48,11 +51,12 @@ describe('the status line', () => {
     assert.deepEqual(line({ working: true }), { text: 'Working…', tone: 'working' });
     assert.deepEqual(line({ state: 'quiet_hours' }), { text: `Quiet hours until ${DEFAULT_COMPANION_SETTINGS.quietHours.end}`, tone: 'quiet' });
     assert.deepEqual(line({ auth: { valid: false, expiresAt: null, checkedAt: null } }), { text: 'Auth expired — refresh your credentials', tone: 'warn' });
-    assert.deepEqual(line({ turnsToday: DEFAULT_COMPANION_SETTINGS.dailyTurnBudget }), { text: 'Budget used — resumes tomorrow', tone: 'quiet' });
-    assert.deepEqual(line({ working: true }, { paused: true }), { text: 'Paused', tone: 'off' });
-    assert.deepEqual(line({ state: 'paused' }), { text: 'Paused', tone: 'off' });
-    assert.deepEqual(line({ working: true }, { enabled: false }), { text: 'Off', tone: 'off' });
+    assert.equal(line({ turnsToday: 500 }).text, 'Watching · not checked yet', 'no daily turn budget');
+    assert.deepEqual(line({ working: true }, { paused: true }), { text: 'Off', tone: 'off' });
+    assert.deepEqual(line({ state: 'paused' }), { text: 'Off', tone: 'off' });
     assert.deepEqual(line({ state: 'off' }), { text: 'Off', tone: 'off' });
+    assert.deepEqual(line({}, { paused: true, pausedUntil: NOW + HOUR }), { text: 'Paused until 15:30', tone: 'off' });
+    assert.deepEqual(line({}, { paused: true, pausedUntil: new Date(2026, 10, 6, 8, 0).getTime() }), { text: 'Paused until tomorrow 08:00', tone: 'off' });
   });
 
   test('words ages for people', () => {
@@ -69,7 +73,7 @@ describe('the status line', () => {
 describe('the status line while the agent works (DESIGN-v2 §3.8, W0 review #3)', () => {
   const running = (kind: CompanionRunKind): Pick<CompanionRunDto, 'kind' | 'outcome'> => ({ kind, outcome: 'running' });
   const working = (activity: Pick<CompanionRunDto, 'kind' | 'outcome'>[], status: Partial<CompanionStatusDto> = {}, settings: Partial<CompanionSettings> = {}) =>
-    companionStatusLine({ settings: { ...DEFAULT_COMPANION_SETTINGS, ...settings }, status: { ...STATUS, working: true, ...status }, activity }, NOW);
+    companionStatusLine({ settings: { ...TURNED_ON, ...settings }, status: { ...STATUS, working: true, ...status }, activity }, NOW);
 
   test('says Checking in…, with Stop, for every check-in but the welcome', () => {
     for (const kind of ['heartbeat', 'wake', 'brief', 'worker_report', 'catch_up'] as const) {
@@ -94,8 +98,8 @@ describe('the status line while the agent works (DESIGN-v2 §3.8, W0 review #3)'
   });
 
   test('keeps Off and Paused first, and reads as before v2 without activity or a first look', () => {
-    assert.deepEqual(working([running('heartbeat')], {}, { paused: true }), { text: 'Paused', tone: 'off' });
-    assert.deepEqual(working([running('welcome')], { firstLook: true }, { enabled: false }), { text: 'Off', tone: 'off' });
+    assert.deepEqual(working([running('heartbeat')], {}, { paused: true }), { text: 'Off', tone: 'off' });
+    assert.deepEqual(working([running('welcome')], { firstLook: true, state: 'off' }), { text: 'Off', tone: 'off' });
     assert.deepEqual(line({ working: true }), { text: 'Working…', tone: 'working' });
     assert.equal('stoppable' in line({ working: true }), false);
   });

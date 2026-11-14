@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { createContext, useContext, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { AnimatePresence } from 'motion/react';
 import { ModalShell } from './ui/ModalShell';
 import { copyText } from '../lib/clipboard';
@@ -35,6 +35,13 @@ function tableAsMarkdown(table: HTMLTableElement): string {
  * A short delay avoids switching prematurely between rapid streaming batches.
  */
 const SETTLE_DELAY_MS = 400;
+
+/**
+ * Whether the message around a table is still streaming. Only a live table
+ * starts fixed and waits to settle; one whose message is complete (opened from
+ * history, or finished) mounts settled, so its columns never move on open.
+ */
+export const MarkdownTableLiveContext = createContext(false);
 
 /* ------------------------------------------------------------------ */
 /*  TableLightbox — portal-based fullscreen table viewer              */
@@ -88,22 +95,28 @@ export default function MarkdownFeatureTable({
 }: React.TableHTMLAttributes<HTMLTableElement>) {
   const tableRef = useRef<HTMLTableElement | null>(null);
   const [fullscreen, setFullscreen] = useState(false);
+  const live = useContext(MarkdownTableLiveContext);
 
   // false = streaming phase (table-layout: fixed, stable columns)
   // true  = settled phase  (table-layout: auto, content-aware columns)
-  const [settled, setSettled] = useState(false);
-  const settledRef = useRef(false);
+  const [settled, setSettled] = useState(() => !live);
+  const settledRef = useRef(settled);
 
   /**
    * Observe the table's subtree for mutations. While content is changing
    * (streaming), the table stays `table-layout: fixed` so column widths
-   * don't jump. Once content stops changing for SETTLE_DELAY_MS, flip to
-   * `table-layout: auto` so the browser recalculates column widths based
-   * on all content — a one-time auto-fit.
+   * don't jump. Once content stops changing for SETTLE_DELAY_MS, or the
+   * message stops streaming, flip to `table-layout: auto` so the browser
+   * recalculates column widths based on all content — a one-time auto-fit.
    */
   useEffect(() => {
     const table = tableRef.current;
     if (!table || settledRef.current) return;
+    if (!live) {
+      settledRef.current = true;
+      setSettled(true);
+      return;
+    }
 
     let settleTimer: ReturnType<typeof setTimeout> | null = null;
 
@@ -125,18 +138,19 @@ export default function MarkdownFeatureTable({
       characterData: true,
     });
 
-    // If the table is already complete (non-streaming message, hydrated),
-    // there may be no mutations at all. Schedule an initial settle.
+    // A live table may already be complete (its rows arrived before a pause
+    // in the stream), so there may be no further mutations. Schedule a settle.
     settleTimer = setTimeout(settle, SETTLE_DELAY_MS);
 
     return () => {
       if (settleTimer !== null) clearTimeout(settleTimer);
       observer.disconnect();
     };
-  }, []);
+  }, [live]);
 
   // Phones lay a settled table out as cards: label each cell with its column.
-  useEffect(() => {
+  // Before paint, so a table that mounts settled never shows as columns first.
+  useLayoutEffect(() => {
     const table = tableRef.current;
     if (!settled || !table) return;
     const head = table.tHead?.rows[0] ?? table.rows[0];

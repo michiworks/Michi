@@ -6,7 +6,7 @@ import type { ChatMessage } from '../../state/chatTypes';
 import { MetaChatDecorationsContext, type MetaChatDecorations } from '../../state/metaChat/metaChatDecorations';
 
 const noop = () => {};
-const LINE = 'Tools ask before running this turn: this conversation read check-in material earlier.';
+const LINE = 'Anything that would leave this machine asks first: this conversation read check-in material earlier.';
 
 function show(message: Partial<ChatMessage>, decorations: MetaChatDecorations | null = null) {
   const block = (

@@ -19,34 +19,19 @@ export interface ScheduledJobEventSubscriber {
   send(event: ScheduledJobRunEvent): void;
   /** Job definition changes; only renderer feeds subscribe to these. */
   sendChange?(event: ScheduledJobsChangedEvent): void;
-  /**
-   * Desktop notifiers (the Electron main process) deliver OS notifications.
-   * Renderer feeds only refresh their view and are not counted.
-   */
-  notifier?: boolean;
 }
 
 /**
- * In-process fan-out for scheduled run lifecycle events. The renderer
- * background feed and the Electron notification feed both subscribe here.
+ * In-process fan-out for scheduled run lifecycle events: the renderer
+ * background feeds, and the attention service, which alone decides the
+ * notifications they deserve (services/attention, observeScheduledRun).
  */
 export class ScheduledJobEventBus {
   private readonly subscribers = new Set<ScheduledJobEventSubscriber>();
-  private lastNotifierSeenAt: number;
-
-  constructor(private readonly clock: () => number = Date.now) {
-    // Treat boot as "recently seen" so a notifier that is reconnecting after a
-    // backend restart is not mistaken for an absent app.
-    this.lastNotifierSeenAt = clock();
-  }
 
   subscribe(subscriber: ScheduledJobEventSubscriber): () => void {
     this.subscribers.add(subscriber);
-    if (subscriber.notifier) this.lastNotifierSeenAt = this.clock();
-    return () => {
-      if (!this.subscribers.delete(subscriber)) return;
-      if (subscriber.notifier) this.lastNotifierSeenAt = this.clock();
-    };
+    return () => { this.subscribers.delete(subscriber); };
   }
 
   publish(event: ScheduledJobRunEvent): void {
@@ -67,16 +52,6 @@ export class ScheduledJobEventBus {
         // One broken stream must not stop the others.
       }
     }
-  }
-
-  hasNotifier(): boolean {
-    for (const subscriber of this.subscribers) if (subscriber.notifier) return true;
-    return false;
-  }
-
-  /** Milliseconds since a notifier was last connected (0 while one is connected). */
-  notifierAbsentForMs(): number {
-    return this.hasNotifier() ? 0 : Math.max(0, this.clock() - this.lastNotifierSeenAt);
   }
 }
 

@@ -54,13 +54,11 @@ import {
   updateCompanionSnapshot,
   useCompanion,
   useCompanionAssistant,
-  wantCompanionWelcome,
 } from '../../../state/companion/companionStore';
 import {
   dropCompanionRequests,
   getCompanionPanelState,
   openCompanionSource,
-  setCompanionPanelTab,
   setCompanionTarget,
   subscribeCompanionPanel,
   takeCompanionFocusMessage,
@@ -86,9 +84,9 @@ import {
   type CompanionCardPart,
 } from '../../../state/companion/companionCards';
 import { CompanionVisibleText } from './CompanionVisibleText';
+import { CompanionGetStartedSlot } from './CompanionGetStarted';
 import { companionItemUrls, companionLinkVerdict } from '../../../state/companion/companionLinks';
 import { companionToolLine, companionWorkLine, type CompanionToolLineNames } from '../../../state/companion/companionToolLines';
-import { itemsInBucket } from '../../../state/companion/companionView';
 
 function errorText(error: unknown): string {
   return error instanceof Error && error.message ? error.message : 'unknown error';
@@ -446,9 +444,9 @@ function CompanionTurnNotes({ message, name }: { message: ChatMessage; name: str
   return (
     <div className="companion-turn-notes">
       {turn.rulesUnavailable && <p className="companion-turn-note" role="note">{name} couldn’t read your rules, so it won’t act on its own this turn.</p>}
-      {turn.startTaint && <p className="companion-turn-note" role="note">Tools ask before running this turn: it includes check-in material.</p>}
+      {turn.startTaint && <p className="companion-turn-note" role="note">Anything that would leave this machine asks first: this turn includes check-in material.</p>}
       {!turn.startTaint && turn.carriedTaint && (
-        <p className="companion-turn-note" role="note">Tools ask before running this turn: this conversation read check-in material earlier.</p>
+        <p className="companion-turn-note" role="note">Anything that would leave this machine asks first: this conversation read check-in material earlier.</p>
       )}
     </div>
   );
@@ -526,7 +524,7 @@ function UpgradeNote({ name, onDismiss }: { name: string; onDismiss(): void }) {
  * Chat (DESIGN-v2 §1.1–§1.3): the one visible conversation V in a normal
  * composer (TPane), with the proposals waiting on the user above it. It needs
  * only `/assistant` (V's node), never the Companion snapshot, which adds the
- * cards, the welcome and the receipts' titles when it is there. Each message
+ * cards, the Get started card and the receipts' titles when it is there. Each message
  * carries what is on screen when it is sent; posted check-ins render as
  * posts (speaker, receipt, allow-listed links, chips that only fill the
  * composer); nothing in V is hidden.
@@ -596,10 +594,6 @@ export function CompanionChatTab({ snapshot, page }: { snapshot: CompanionSnapsh
   // Each message's context (area, target, refs) is read when it is sent by state/companion/companionTurnSource.ts,
   // registered at module level, so a send that goes out after this tab unmounted still carries it (§1.3).
 
-  // The welcome (§3.8): asked for while the Chat shows and the snapshot says it is wanted.
-  const wantsWelcome = ready && !!snapshot?.welcome?.wanted && snapshot.settings.enabled && !snapshot.settings.paused;
-  useEffect(() => (wantsWelcome && nodeId ? wantCompanionWelcome(nodeId) : undefined), [wantsWelcome, nodeId]);
-
   // Leaving the tab ends any composing the backend was told about.
   useEffect(() => () => noteCompanionComposing(false), []);
 
@@ -639,6 +633,7 @@ export function CompanionChatTab({ snapshot, page }: { snapshot: CompanionSnapsh
       toolLine: (tool) => companionToolLine(tool, toolNames) ?? metaAgentToolLine(tool, toolNames),
       workLine: (tools) => companionWorkLine(tools, toolNames),
       toolCards: (tools) => <MetaChatCards tools={tools} context={cardsContext} />,
+      leading: <CompanionGetStartedSlot />,
       afterMessage: (message) => {
         const post = companionPostOf(message);
         const change = byMessage.get(message.id);
@@ -692,7 +687,8 @@ export function CompanionChatTab({ snapshot, page }: { snapshot: CompanionSnapsh
     <>
       {showUpgradeNote && <UpgradeNote name={name} onDismiss={dismissNote} />}
       {onScreen && nodeId && (
-        <span className="meta-chat-panel__target" data-on-screen="">
+        // On a phone the composer rests as one row without it; opening the composer shows it again.
+        <span className="meta-chat-panel__target" data-on-screen="" data-composer-ambient="">
           On screen: {onScreen}
           <button type="button" aria-label="Don’t send what’s on screen" onClick={() => dismissAssistantPage(nodeId)}><X size={11} aria-hidden /></button>
         </span>
@@ -728,7 +724,6 @@ export function CompanionChatTab({ snapshot, page }: { snapshot: CompanionSnapsh
 
   const now = Date.now();
   const cards = snapshot ? snapshot.cards.filter((card) => card.status === 'pending' && card.expiresAt > now) : [];
-  const needsYou = snapshot ? itemsInBucket(snapshot.items, 'needs_you').length : 0;
 
   let body: React.ReactNode;
   if (assistant.status === 'error') {
@@ -774,13 +769,8 @@ export function CompanionChatTab({ snapshot, page }: { snapshot: CompanionSnapsh
 
   return (
     <div className="companion-chat" role="tabpanel" aria-label="Chat">
-      {snapshot && (cards.length > 0 || needsYou > 0) && (
+      {snapshot && cards.length > 0 && (
         <div className="companion-strip">
-          {needsYou > 0 && (
-            <button type="button" className="companion-needs-pill" onClick={() => setCompanionPanelTab('today')}>
-              Needs you ({needsYou})
-            </button>
-          )}
           <CardStrip cards={cards} snapshot={snapshot} />
         </div>
       )}

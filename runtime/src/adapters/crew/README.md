@@ -14,7 +14,7 @@ For an installed Michi application, including the public installer at `~/Michi`,
 1. 启动官方 Kiro Crew。在 Michi composer 的 Runtime 中选择 **Kiro Crew**。
    新对话默认使用 App 自带的 **michi-crew** 模板；固定指令放在 Agent 中，
    用户消息只携带必要上下文和简短格式说明。明确选择的模板和旧会话身份保持不变。
-2. 在 **Settings → Model → Memory** 选择新对话的记忆模式；此选项仅在
+2. 在 **Settings → Runtime & model → Memory** 选择新对话的记忆模式；此选项仅在
    当前 Runtime 为 **Kiro Crew** 时显示，位于 **FOLLOW-UPS** 上方：
    - **Read & learn**：读取已有记忆，也允许保存可复用偏好。
    - **Read only**：读取记忆，不新增或修改记忆。
@@ -24,7 +24,7 @@ For an installed Michi application, including the public installer at `~/Michi`,
    负责从 Michi 的对话里学习，Crew 只读它已有的记忆，不再另记一份。之前建的对话保持原模式。
 3. 已创建对话的模式固定，fork 继承原模式；想换模式请调整 Settings 后新建对话。
 4. 普通聊天、文件工具、模型与模板选择、恢复和历史分叉可以直接用。
-   审批模式在 **Michi Settings → Model → Permissions** 选择。
+   审批模式在 **Michi Settings → Runtime & model → Permissions** 选择。
    **Use global permissions** 开启时统一选择，composer 隐藏审批开关；
    关闭后可以在各对话的 composer 选择 **Ask / Trust**。变更从下一轮生效。
    审批卡在 Michi 显示，Crew 只提供后端。
@@ -82,7 +82,7 @@ For a default installer checkout, install directly from the complete **~/.michi/
 4. Restart the Gateway after first installation or migration from an App older than 0.6.0, after active work finishes. Sync alone can retain the old broker launch.
 5. For updates, use **michi update → Crew App Sync**. Michi reports outdated manifests. The live host reloads compatible relay handlers on the same connection, preserving in-flight calls and the last valid generation during rebuilds. Host/API changes require a new process.
 
-Old generated sources and custom checkouts retain `backend/scripts/crew-setup.cjs`; refresh their exact registered source before Sync. Do not overwrite the canonical source folder with generated files. See section 9 of the getting-started guide.
+A remote Linux backend is not a default installer checkout: run `backend/scripts/crew-setup.cjs` from `~/.local/share/michi/devdesktop/current`, which follows the running release, so the App keeps working across `michi update` without a new Sync. Old generated sources and custom checkouts retain `backend/scripts/crew-setup.cjs`; refresh their exact registered source before Sync. Do not overwrite the canonical source folder with generated files. See section 9 of the getting-started guide.
 
 After setup, use Michi for chats and approvals. Offline readiness requires both
 approval consent and declared/routed MCP. Missing setup blocks new work with a

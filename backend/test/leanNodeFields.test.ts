@@ -18,7 +18,7 @@ import { setupPersistenceRoutes } from '../src/routes/persistence';
 const OVERVIEW = JSON.stringify([{ at: 1, text: 'First' }, { at: 2, text: 'Second' }]);
 const FOLLOW_UPS = JSON.stringify(['Why?', 'What next?']);
 const DRAFT = JSON.stringify({ __michiWindowDrafts: { 'win-1': JSON.stringify({ value: 'half typed', mentions: [] }) } });
-const SPAWN = JSON.stringify({ __michiPendingSpawnPrompt: 'Look into the flaky test' });
+const LEGACY_SPAWN_OUTBOX = JSON.stringify({ __michiPendingSpawnPrompt: 'Look into the flaky test' });
 
 function node(id: string, treeId: string, fields: Partial<NodeRow> = {}): NodeRow {
   return {
@@ -105,7 +105,7 @@ describe('lean node fields', () => {
 
     beforeEach(() => {
       saveNode(node('root', 'tree-a', heavy()));
-      saveNode(node('child', 'tree-a', { parent_node_id: 'root', branch_overview: OVERVIEW, composer_draft: SPAWN }));
+      saveNode(node('child', 'tree-a', { parent_node_id: 'root', branch_overview: OVERVIEW, composer_draft: LEGACY_SPAWN_OUTBOX }));
       saveNode(node('empty', 'tree-a', { parent_node_id: 'root', follow_ups: FOLLOW_UPS }));
       saveNode(node('plain', 'tree-a', { parent_node_id: 'root' }));
       saveNode(node('merge', 'tree-m', { branch_overview: OVERVIEW }));
@@ -131,9 +131,8 @@ describe('lean node fields', () => {
           .filter(key => key in rows.get(id)!);
         assert.deepEqual(keys('root'), [], 'every heavy value deferred');
         assert.equal(rows.get('root')!.message_count, 2);
-        // A spawn outbox stays: auto-spawn reads it before any body loads.
-        assert.deepEqual(keys('child'), ['follow_ups', 'follow_ups_source_message_id', 'composer_draft']);
-        assert.equal(rows.get('child')!.composer_draft, SPAWN);
+        // A legacy spawn outbox is a draft like any other: no window sends it any more.
+        assert.deepEqual(keys('child'), ['follow_ups', 'follow_ups_source_message_id']);
         // A merge source and its branch ancestors keep their overviews for the merge thread's Map.
         assert.ok(keys('src-child').includes('branch_overview') && keys('src').includes('branch_overview'));
         assert.equal(rows.get('root')!.title, 'root');

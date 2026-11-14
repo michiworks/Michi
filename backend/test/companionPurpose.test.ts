@@ -28,7 +28,7 @@ import { COMPANION_LIMITS, MICHI_ASSISTANT_MARKER, checkinNodeId } from 'michi-s
 import type { AgentSession } from '../src/agents/types';
 import { clearAllSessions, registerSession } from '../src/agents/sessionRegistry';
 import { resolveAssistantBinding } from '../src/assistant/binding';
-import { assistantPurposeKey, isAssistantScheduleTurn } from '../src/assistant/identity';
+import { assistantPurposeKey } from '../src/assistant/identity';
 import { assistantInstructionsFor, assistantToolProfile } from '../src/assistant/policy';
 import {
   AssistantSettingsError,
@@ -188,9 +188,6 @@ describe('assistant purposes: main and checkin (DESIGN-v2 §2.2)', () => {
       await schedule.text();
       assert.ok(sent[2].startsWith('[Scheduled context'));
       assert.ok(sent[2].indexOf('[COMPANION CONTEXT') < sent[2].indexOf('Make a daily job'));
-      // A job this turn creates is one "Create with agent" starts over for; the Spaces turn's is not (w2-fix D6).
-      assert.equal(isAssistantScheduleTurn(v.nodeId, 'turn-schedule'), true);
-      assert.equal(isAssistantScheduleTurn(v.nodeId, 'turn-spaces'), false);
       assert.deepEqual(userRows(v.nodeId).map((row) => row.content), ['What needs me?', 'Tidy this page', 'Make a daily job'], 'the bubbles show what the user wrote');
     });
 

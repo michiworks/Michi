@@ -51,8 +51,9 @@ vi.mock('../../../services/api/homeCards', async () => ({
 vi.mock('../HomeWorkspaceChip', () => ({ HomeWorkspaceChip: () => null }));
 vi.mock('sonner', () => ({ toast: { error: vi.fn() } }));
 
+// A card the user chose (edit_home): the cards Home still shows from the backend.
 const answer: HomeCardsDto = {
-  greeting: null, generatedAt: 1, inputFingerprint: 'fp',
+  greeting: null, generatedAt: 1, inputFingerprint: 'fp', cardsCustomized: true,
   sets: [{ cards: [{ id: 'c1', kind: 'continue', label: '接着做 · rabbitholes', source: { workspaceId: 'p1' }, title: '增量读取停在边界验证',
     reason: '两个用例还没跑。', buttonText: '接着做', prompt: '把事务回滚和跨工作区移动两个用例跑完。', workspaceId: 'p1' }] }],
 };

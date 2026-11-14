@@ -128,6 +128,11 @@ const SCENARIOS: Record<string, Step[]> = {
     { sql: "UPDATE nodes SET maintenance_job_id = 'job-m', scheduled_only_job_id = 'job-s' WHERE id = 'marked-root'" },
     { ensure: childOf('marked', 'child') },
   ],
+  'a child of a temporary chat': [
+    { ensure: rootOf('temporary') },
+    { sql: "UPDATE nodes SET memory_mode = 'off' WHERE id = 'temporary-root'" },
+    { ensure: childOf('temporary', 'child') },
+  ],
   'a link edge across trees': [
     { ensure: rootOf('cross-link') },
     { ensure: { ...rootOf('cross-link'),
@@ -166,6 +171,7 @@ const EXPECTED_DIFFERENCES: Record<string, string[]> = {
   'a tombstoned node replayed': [],
   'a tombstoned root replayed': [],
   'a child of a maintenance, Scheduled-only parent': [],
+  'a child of a temporary chat': [],
   'a link edge across trees': [],
   'a tree replayed with another root': [],
   'resume bindings': [],
@@ -316,6 +322,8 @@ test('graph write paths: the scenarios write what they describe', () => {
     { maintenance: markedChild.maintenance_job_id, scheduledOnly: markedChild.scheduled_only_job_id },
     { maintenance: 'job-m', scheduledOnly: 'job-s' },
   );
+  assert.equal(worker.get('a child of a temporary chat')!.rows.nodes.get('temporary-child')!.memory_mode, 'off');
+  assert.equal(create.rows.nodes.get('create-child')!.memory_mode, null, 'a learning parent\'s child learns');
   assert.deepEqual(
     worker.get('a new node in a renamed, archived and pinned tree')!.changes.filter((change) => change.startsWith('tree ')),
     ['tree archived tree-update-tree', 'tree created tree-update-tree', 'tree renamed tree-update-tree'],

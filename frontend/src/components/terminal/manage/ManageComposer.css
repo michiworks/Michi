@@ -55,3 +55,11 @@
   text-overflow: ellipsis;
   cursor: default;
 }
+
+/* A temporary chat about to start (Home's switch, the temporary prop): the
+   composer's frame is dashed, at rest and while typing. Set on the composer
+   itself, as its own border variables are. */
+[data-temporary-chat] .terminal-composer {
+  --term-composer-border: 1px dashed color-mix(in srgb, var(--term-fg) 55%, transparent);
+  --term-composer-border-focus: 1px dashed color-mix(in srgb, var(--term-fg) 70%, transparent);
+}

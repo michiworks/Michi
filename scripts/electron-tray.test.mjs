@@ -19,8 +19,9 @@ import { fileURLToPath } from 'node:url';
 const require = createRequire(import.meta.url);
 const tray = require('../electron/dist/tray.js');
 const desktop = require('../electron/dist/desktopSettings.js');
-const companion = require('../electron/dist/companionNotifications.js');
+const companion = require('../electron/dist/attentionNotifications.js');
 const sharedCompanion = require('../shared/dist/companion.js');
+const sharedAttention = require('../shared/dist/attention.js');
 const sharedStatus = require('../shared/dist/companionStatus.js');
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -195,16 +196,15 @@ test('an extra legacy welcomeDone (an older backend\'s) is ignored: the DTO read
 
 // ── The shared contract the mirrors follow (shared/dist) ─────────────────────
 
-test('contract: the tray and the notifier feed call the shared paths under /api, never the windows\' events stream', () => {
+test('contract: the tray and the desktop feed call the shared paths under /api, never the windows\' events stream', () => {
   assert.equal(tray.TRAY_DATA_PATH, `/api${sharedCompanion.COMPANION_TRAY_PATH}`);
-  assert.equal(companion.COMPANION_NOTIFICATIONS_STREAM_PATH, `/api${sharedCompanion.COMPANION_NOTIFICATIONS_PATH}`);
-  assert.notEqual(companion.COMPANION_NOTIFICATIONS_STREAM_PATH, `/api${sharedCompanion.COMPANION_EVENTS_PATH}`);
+  assert.equal(companion.ATTENTION_DESKTOP_STREAM_PATH, `/api${sharedAttention.ATTENTION_DESKTOP_STREAM_PATH}`);
+  assert.notEqual(companion.ATTENTION_DESKTOP_STREAM_PATH, `/api${sharedCompanion.COMPANION_EVENTS_PATH}`);
 });
 
-test('contract: the backend names the notifier feed\'s frames as the feed reads them', () => {
+test('contract: the backend names the desktop feed\'s change frames as the feed reads them', () => {
   const delivery = read('backend/src/services/companion/delivery.ts');
   assert.match(delivery, new RegExp(`export const COMPANION_CHANGED_SSE_EVENT = '${companion.COMPANION_CHANGED_EVENT}';`));
-  assert.match(delivery, new RegExp(`export const COMPANION_NOTICE_SSE_EVENT = '${companion.COMPANION_NOTICE_EVENT}';`));
   // Every reason of the shared CompanionChangedEvent (read from its source) is a frame the shared guard and the feed take, with the same fields.
   const shared = read('shared/src/companion.ts');
   const union = /export interface CompanionChangedEvent \{[^}]*?reason:([^;]+);/.exec(shared);
@@ -230,15 +230,14 @@ function statusInput({ settings = {}, status = {}, activity } = {}) {
 test('contract: every status line shared companionStatusLine gives reaches the menu as the panel shows it; warnings open Settings', () => {
   const now = 1_800_000_000_000;
   const cases = [
-    [statusInput({ settings: { enabled: false } }), 'Off', 'off'],
-    [statusInput({ settings: { paused: true } }), 'Paused', 'off'],
+    [statusInput({ status: { state: 'off' } }), 'Off', 'off'],
+    [statusInput({ settings: { paused: true } }), 'Off', 'off'],
     [statusInput({ status: { working: true }, activity: [{ kind: 'welcome', outcome: 'running' }] }), 'Saying hello…', 'working'],
-    [statusInput({ status: { working: true }, activity: [{ kind: 'heartbeat', outcome: 'running' }] }), 'Checking in…', 'working'],
+    [statusInput({ status: { working: true }, activity: [{ kind: 'wake', outcome: 'running' }] }), 'Checking in…', 'working'],
     [statusInput({ status: { working: true, firstLook: true } }), 'Taking a first look…', 'working'],
     [statusInput({ status: { working: true } }), 'Working…', 'working'],
     [statusInput({ status: { state: 'quiet_hours' } }), 'Quiet hours until 08:00', 'quiet'],
     [statusInput({ status: { auth: { valid: false, expiresAt: null, checkedAt: null } } }), 'Auth expired — refresh your credentials', 'warn'],
-    [statusInput({ status: { turnsToday: 30 } }), 'Budget used — resumes tomorrow', 'quiet'],
     [statusInput({ status: { lastCheckAt: now - 120_000 } }), 'Watching · checked 2m ago', 'ok'],
     [statusInput({ status: { state: 'degraded' } }), 'Watching · not checked yet', 'warn'],
   ];
@@ -255,20 +254,6 @@ test('contract: every status line shared companionStatusLine gives reaches the m
   }
   // The one line with a Stop in the panel.
   assert.equal(sharedStatus.companionStatusLine(cases[3][0], now).stoppable, true);
-});
-
-test('contract: the notice gate reads as shared companionNoticeChannel does, and every notice the shared guard takes is shown', () => {
-  const base = { id: 'cmn-1', title: 'Robin: needs your approval', body: 'Run tests?', target: CHAT, itemIds: [], createdAt: 1, expiresAt: 2 };
-  for (const channel of [undefined, null, 'companion', 'chat', 'CHAT', 'scheduled', 0, {}]) {
-    assert.equal(companion.companionNoticeChannel({ channel }), sharedCompanion.companionNoticeChannel({ channel }), JSON.stringify(channel));
-  }
-  for (const channel of [undefined, null, 'companion', 'chat']) {
-    const notice = channel === undefined ? base : { ...base, channel };
-    assert.equal(sharedCompanion.isCompanionNotice(notice), true);
-    const parsed = companion.parseCompanionNotice(notice);
-    assert.ok(parsed, `a notice with channel ${JSON.stringify(channel)} is shown`);
-    assert.equal(companion.companionNoticeChannel(parsed), sharedCompanion.companionNoticeChannel(notice));
-  }
 });
 
 test('the DTO: a malformed core is refused; the rest falls back so the menu still works', () => {
@@ -325,7 +310,7 @@ test('menu: the full menu, top to bottom, named by the display name, with no sho
     '—',
     'Chat with Robin',
     'Check now',
-    'Pause check-ins',
+    'Turn Robin off',
     '—',
     'Open Michi',
     'Settings…',
@@ -342,7 +327,7 @@ test('menu: the full menu, top to bottom, named by the display name, with no sho
   assert.deepEqual(entry(menu, "Today's brief").action, { kind: 'open', target: TODAY });
   assert.deepEqual(entry(menu, 'Chat with Robin').action, { kind: 'open', target: CHAT });
   assert.deepEqual(entry(menu, 'Check now').action, { kind: 'check-now' });
-  assert.deepEqual(entry(menu, 'Pause check-ins').action, { kind: 'set-paused', paused: true });
+  assert.deepEqual(entry(menu, 'Turn Robin off').action, { kind: 'set-paused', paused: true });
   assert.deepEqual(entry(menu, 'Open Michi').action, { kind: 'open-michi' });
   assert.deepEqual(entry(menu, 'Settings…').action, { kind: 'open', target: SETTINGS });
   assert.deepEqual(entry(menu, 'Quit Michi').action, { kind: 'quit' });
@@ -357,27 +342,27 @@ test('menu: before the welcome the status row says hello; while the conversation
   const waiting = tray.trayMenuModel(ready({ conversationWaiting: true, welcomeWanted: true }), { platform: 'darwin' });
   assert.deepEqual(entry(waiting, 'Robin is waiting for you').action, { kind: 'open', target: CHAT });
   assert.equal(labels(waiting)[0], 'Robin is waiting for you');
-  // The conversation answers with check-ins off, so its wait still shows.
-  const off = tray.trayMenuModel(ready({ enabled: false, conversationWaiting: true }), { platform: 'darwin' });
-  assert.equal(labels(off)[0], 'Robin is waiting for you');
+  // Off (Q29), its panel does not open: the row only says it is off.
+  const off = tray.trayMenuModel(ready({ paused: true, conversationWaiting: true, statusLine: { text: 'Off', tone: 'off' } }), { platform: 'darwin' });
+  assert.deepEqual(off[0], { type: 'item', label: 'Robin · Off', enabled: false, action: null });
 });
 
-test('menu: paused offers Resume; off hides Needs you and Check now and points to Settings', () => {
-  const paused = tray.trayMenuModel(ready({ paused: true, statusLine: { text: 'Paused', tone: 'off' } }), { platform: 'darwin' });
-  assert.equal(labels(paused)[0], 'Robin · Paused');
-  assert.deepEqual(entry(paused, 'Resume check-ins').action, { kind: 'set-paused', paused: false });
-  assert.equal(entry(paused, 'Pause check-ins'), undefined);
+test('menu: off (Q29) offers only Turn <name> on: no Needs you, brief, Chat with or Check now', () => {
+  const off = tray.trayMenuModel(ready({ paused: true, statusLine: { text: 'Off', tone: 'off' }, needsYou: needs(2), needsYouTotal: 2, briefReady: true, welcomeWanted: true }), { platform: 'darwin' });
+  assert.deepEqual(labels(off), ['Robin · Off', '—', 'Turn Robin on', '—', 'Open Michi', 'Settings…', '—', 'Quit Michi']);
+  assert.deepEqual(entry(off, 'Turn Robin on').action, { kind: 'set-paused', paused: false });
 
-  const off = tray.trayMenuModel(ready({ enabled: false, statusLine: { text: 'Off', tone: 'off' }, needsYou: needs(2), needsYouTotal: 2, briefReady: true, welcomeWanted: true }), { platform: 'darwin' });
-  assert.deepEqual(labels(off), ['Robin · Off', '—', 'Chat with Robin', 'Turn on check-ins…', '—', 'Open Michi', 'Settings…', '—', 'Quit Michi']);
-  assert.deepEqual(entry(off, 'Turn on check-ins…').action, { kind: 'open', target: SETTINGS });
+  // An older backend's own off switch is in its Settings.
+  const older = tray.trayMenuModel(ready({ enabled: false, statusLine: { text: 'Off', tone: 'off' } }), { platform: 'darwin' });
+  assert.deepEqual(labels(older), ['Robin · Off', '—', 'Turn Robin on…', '—', 'Open Michi', 'Settings…', '—', 'Quit Michi']);
+  assert.deepEqual(entry(older, 'Turn Robin on…').action, { kind: 'open', target: SETTINGS });
 });
 
 test('menu: while the backend starts or does not answer, the status says so and Check now and Pause are disabled', () => {
   const starting = tray.trayMenuModel({ kind: 'loading' }, { platform: 'darwin' });
-  assert.deepEqual(labels(starting), ['Michi is starting…', '—', 'Chat with Michi', 'Check now', 'Pause check-ins', '—', 'Open Michi', 'Settings…', '—', 'Quit Michi']);
+  assert.deepEqual(labels(starting), ['Michi is starting…', '—', 'Chat with Michi', 'Check now', 'Turn Michi off', '—', 'Open Michi', 'Settings…', '—', 'Quit Michi']);
   assert.equal(entry(starting, 'Check now').enabled, false);
-  assert.equal(entry(starting, 'Pause check-ins').enabled, false);
+  assert.equal(entry(starting, 'Turn Michi off').enabled, false);
   assert.equal(entry(starting, 'Chat with Michi').enabled, true);
 
   const away = tray.trayMenuModel({ kind: 'unreachable', displayName: 'Robin' }, { platform: 'darwin' });
@@ -407,13 +392,11 @@ test('menu: a warning status row (Auth expired, a source degraded) opens Setting
   assert.deepEqual(transient[0], { type: 'item', label: 'Another Michi is checking', enabled: false, action: null });
 });
 
-test('menu: "Say hello" only while the agent may speak (on, not paused): the panel and the backend start no welcome otherwise', () => {
+test('menu: "Say hello" only while the agent is on: the panel and the backend start no welcome otherwise', () => {
   assert.equal(labels(tray.trayMenuModel(ready({ welcomeWanted: true }), { platform: 'darwin' }))[0], 'Say hello to Robin');
-  const paused = tray.trayMenuModel(ready({ welcomeWanted: true, paused: true, statusLine: { text: 'Paused', tone: 'off' } }), { platform: 'darwin' });
-  assert.equal(labels(paused)[0], 'Robin · Paused');
-  assert.ok(entry(paused, 'Resume check-ins'), 'what the user can do instead');
-  const off = tray.trayMenuModel(ready({ welcomeWanted: true, enabled: false, statusLine: { text: 'Off', tone: 'off' } }), { platform: 'darwin' });
+  const off = tray.trayMenuModel(ready({ welcomeWanted: true, paused: true, statusLine: { text: 'Off', tone: 'off' } }), { platform: 'darwin' });
   assert.equal(labels(off)[0], 'Robin · Off');
+  assert.ok(entry(off, 'Turn Robin on'), 'what the user can do instead');
 });
 
 test('menu: on Windows an ampersand in text from the backend shows as itself, not as a mnemonic', () => {
@@ -701,7 +684,7 @@ function fakeBackend({ trayAnswer = () => ({ status: 200, body: dto() }), action
     req.on('end', async () => {
       const record = { method: req.method, url: req.url, body, contentType: req.headers['content-type'], origin: req.headers.origin, at: Date.now() };
       requests.push(record);
-      if (req.url === '/api/companion/notifications/stream' && stream) return stream(res);
+      if (req.url === '/api/attention/desktop/stream' && stream) return stream(res);
       const answer = req.url === '/api/companion/tray' ? await trayAnswer(record) : actionAnswer(record);
       res.writeHead(answer.status, { 'content-type': 'application/json' });
       res.end(typeof answer.body === 'string' ? answer.body : JSON.stringify(answer.body ?? {}));
@@ -761,7 +744,7 @@ test('the menu pops up from the cached copy: building it never touches the netwo
   });
 });
 
-test('companion_changed frames on the notifier feed refresh the data, once per burst, after the debounce', async () => {
+test('companion_changed frames on the desktop feed refresh the data, once per burst, after the debounce', async () => {
   let revision = 1;
   let streamRes = null;
   const backend = fakeBackend({
@@ -775,9 +758,11 @@ test('companion_changed frames on the notifier feed refresh the data, once per b
   await withServer(backend.handler, async (port) => {
     const { instance, changes } = controller(port, { debounceMs: 120 });
     // Wired as main wires them: the feed's change signal and reconnects schedule a refresh.
-    const feed = new companion.CompanionNotificationFeed({
+    const feed = new companion.AttentionDesktopFeed({
       port: () => port,
-      onNotice: () => {},
+      onSnapshot: () => {},
+      onNotification: () => {},
+      onResolved: () => {},
       onConnected: () => instance.scheduleRefresh(),
       onChanged: () => instance.scheduleRefresh(),
     });
@@ -792,7 +777,7 @@ test('companion_changed frames on the notifier feed refresh the data, once per b
       const t0 = Date.now();
       streamRes.write(changed(2));
       streamRes.write(changed(3, 'status'));
-      streamRes.write(frame('companion_notice', { malformed: true }));
+      streamRes.write(frame('attention_notification', { malformed: true }));
       streamRes.write(changed(4, 'cards'));
       await sleep(60);
       assert.equal(backend.trayGets(), 2, 'not before the debounce has passed');
@@ -1034,10 +1019,10 @@ test('Check now posts to /api/companion/check and refreshes; a 409 not_owner sho
   });
 });
 
-test('Pause and Resume patch /api/companion/settings and the menu follows at once', async () => {
+test('Turn <name> off and on patch /api/companion/settings and the menu follows at once', async () => {
   let paused = false;
   const backend = fakeBackend({
-    trayAnswer: () => ({ status: 200, body: dto({ paused, statusLine: paused ? { text: 'Paused', tone: 'off' } : dto().statusLine }) }),
+    trayAnswer: () => ({ status: 200, body: dto({ paused, statusLine: paused ? { text: 'Off', tone: 'off' } : dto().statusLine }) }),
     actionAnswer: (req) => {
       if (req.method === 'PATCH') paused = JSON.parse(req.body).paused;
       return { status: 200, body: {} };
@@ -1051,20 +1036,20 @@ test('Pause and Resume patch /api/companion/settings and the menu follows at onc
     await instance.setPaused(true);
     const patch = backend.requests.find((r) => r.method === 'PATCH');
     assert.deepEqual([patch.url, JSON.parse(patch.body), patch.contentType], ['/api/companion/settings', { paused: true }, 'application/json']);
-    assert.ok(entry(instance.menu('darwin'), 'Resume check-ins'), 'without waiting for a change frame');
+    assert.ok(entry(instance.menu('darwin'), 'Turn Robin on'), 'without waiting for a change frame');
     await instance.setPaused(false);
-    assert.ok(entry(instance.menu('darwin'), 'Pause check-ins'));
+    assert.ok(entry(instance.menu('darwin'), 'Turn Robin off'));
   });
 });
 
-// ── The notifier feed: change frames and notice channels ─────────────────────
-// (companionNotifications.ts; its delivery and reconnect tests are in
-// electron-companion-notifications.test.mjs.)
+// ── The desktop feed: change frames ──────────────────────────────────────────
+// (attentionNotifications.ts; its records, delivery and reconnects are in
+// electron-attention-notifications.test.mjs and electron-lifecycle-helpers.test.mjs.)
 
-test('the notifier feed reports companion_changed frames and skips malformed ones; notices still arrive', async () => {
-  const notice = {
-    id: 'cmn-1', title: 'Robin', body: 'CR-1 has 2 unresolved comments.', target: TODAY, itemIds: ['cmi-1'],
-    createdAt: Date.now() - 1_000, expiresAt: Date.now() + 60_000,
+test('the desktop feed reports companion_changed frames and skips malformed ones; records still arrive', async () => {
+  const record = {
+    id: 'attn-1', key: 'agent:item:cmi-1', kind: 'needs_input', reason: 'needs_you', title: 'Robin', body: 'CR-1 has 2 unresolved comments.',
+    target: { type: 'agent', ref: 'item:cmi-1', open: TODAY, workspaceId: 'ws-michi' }, createdAt: Date.now() - 1_000, claimedByWindowId: null, claimedAt: null,
   };
   await withServer((_req, res) => {
     res.writeHead(200, { 'content-type': 'text/event-stream' });
@@ -1073,21 +1058,23 @@ test('the notifier feed reports companion_changed frames and skips malformed one
     res.write(frame('companion_changed', '{oops'));
     res.write(frame('companion_changed', { type: 'companion_changed', revision: 'x', reason: 'items' }));
     res.write(frame('companion_changed', { type: 'other', revision: 6, reason: 'items' }));
-    res.write(frame('companion_notice', notice));
+    res.write(frame('attention_notification', record));
     res.write(changed(6, 'brief').replace(/\n/g, '\r\n'));
   }, async (port) => {
     const events = [];
-    const feed = new companion.CompanionNotificationFeed({
+    const feed = new companion.AttentionDesktopFeed({
       port: () => port,
-      onNotice: (value) => events.push(['notice', value.id]),
+      onSnapshot: () => {},
+      onNotification: (value) => events.push(['notification', value.id]),
+      onResolved: () => {},
       onChanged: (event) => events.push(['changed', event]),
     });
     try {
       feed.start();
-      await waitFor(() => events.length >= 3, 'two changes and a notice');
+      await waitFor(() => events.length >= 3, 'two changes and a record');
       assert.deepEqual(events, [
         ['changed', { type: 'companion_changed', revision: 5, reason: 'items' }],
-        ['notice', 'cmn-1'],
+        ['notification', 'attn-1'],
         ['changed', { type: 'companion_changed', revision: 6, reason: 'brief' }],
       ]);
     } finally {
@@ -1104,9 +1091,11 @@ test('a failing change handler is logged without dropping the stream', async () 
   }, async (port) => {
     const seen = [];
     const logs = [];
-    const feed = new companion.CompanionNotificationFeed({
+    const feed = new companion.AttentionDesktopFeed({
       port: () => port,
-      onNotice: () => {},
+      onSnapshot: () => {},
+      onNotification: () => {},
+      onResolved: () => {},
       onChanged: (event) => {
         seen.push(event.revision);
         if (event.revision === 1) throw new Error('boom');
@@ -1116,51 +1105,11 @@ test('a failing change handler is logged without dropping the stream', async () 
     try {
       feed.start();
       await waitFor(() => seen.length === 2, 'both frames');
-      assert.deepEqual(logs, [['INFO', 'companion notification feed connected'], ['WARN', 'companion change handling failed']]);
+      assert.deepEqual(logs, [['INFO', 'attention desktop feed connected'], ['WARN', 'attention frame handling failed']]);
     } finally {
       feed.stop();
     }
   });
-});
-
-test('notice channels: `chat` is kept; absent, null, `companion` and unknown values are the Companion\'s own and still shown', () => {
-  const base = { id: 'cmn-1', title: 'Robin: needs your approval', body: 'Run tests?', target: CHAT, itemIds: [], createdAt: 1, expiresAt: 2 };
-  assert.equal(companion.parseCompanionNotice({ ...base, channel: 'chat' }).channel, 'chat');
-  for (const channel of [undefined, null, 'companion', 'sms', 7]) {
-    const parsed = companion.parseCompanionNotice({ ...base, channel });
-    assert.ok(parsed, `a notice with channel ${JSON.stringify(channel)} is not dropped`);
-    assert.equal('channel' in parsed, false, 'written the way the backend writes the Companion\'s own: without the field');
-    assert.equal(companion.companionNoticeChannel(parsed), 'companion');
-  }
-  assert.equal(companion.companionNoticeChannel({ channel: null }), 'companion');
-  assert.equal(companion.companionNoticeChannel({}), 'companion');
-  assert.equal(companion.companionNoticeChannel({ channel: 'chat' }), 'chat');
-});
-
-test('a chat notice is delivered the same way as the Companion\'s own: a banner whose click opens its target', () => {
-  const opened = [];
-  const banners = [];
-  class Banner {
-    constructor(options) { this.options = options; this.listeners = {}; banners.push(this); }
-    on(event, listener) { this.listeners[event] = listener; }
-    show() {}
-    static isSupported() { return true; }
-  }
-  const acks = [];
-  const notifier = new companion.CompanionNotifier({
-    Notification: Banner,
-    focusedWindow: () => null,
-    open: (target) => opened.push(target),
-    acknowledge: (id) => acks.push(id),
-    now: () => 1,
-  });
-  const target = { kind: 'node', workspaceId: 'ws-1', nodeId: 'node-1' };
-  const notice = companion.parseCompanionNotice({ id: 'cmn-chat-1', title: 'Design review: has a question', body: 'Which branch?', target, itemIds: [], createdAt: 0, expiresAt: 10, channel: 'chat' });
-  assert.equal(notifier.deliver(notice).kind, 'banner');
-  assert.deepEqual(banners[0].options, { title: 'Design review: has a question', body: 'Which branch?' });
-  banners[0].listeners.click();
-  assert.deepEqual(opened, [target]);
-  assert.deepEqual(acks, ['cmn-chat-1']);
 });
 
 // ── main.ts wiring (read from source: main needs Electron to run) ────────────
@@ -1187,7 +1136,7 @@ test('main: closing the last window follows windowAllClosedAction, and the tray 
   assert.doesNotMatch(mainSource, /setContextMenu\(/);
 });
 
-test('main: the tray refreshes from the notifier feed, never from /companion/events, whose subscribers must be windows only', () => {
+test('main: the tray refreshes from the desktop feed, never from /companion/events, whose subscribers must be windows only', () => {
   for (const file of fs.readdirSync(path.join(root, 'electron')).filter((name) => name.endsWith('.ts'))) {
     assert.doesNotMatch(read(`electron/${file}`), /companion\/events/, `electron/${file}`);
   }

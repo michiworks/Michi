@@ -15,14 +15,21 @@
   container-type: inline-size;
   font-family: var(--ui-font);
 }
-/* 16px from the prose on either side; runs that follow each other touch, so
-   the space around the work is wider than the space inside it. */
+/* Loose above, tight below: a run belongs to the prose that reports it, so it
+   sits 22px under what came before and 4px over what follows. Runs that
+   follow each other touch. */
 .agent-line-group,
 .agent-line-run--thought,
-.agent-line-workfold { margin: 16px 0; }
+.agent-line-workfold { margin: 22px 0 4px; }
 .agent-line-group + .agent-line-group,
 .agent-line-run--thought + .agent-line-group,
-.agent-line-group + .agent-line-run--thought { margin-top: -16px; }
+.agent-line-group + .agent-line-run--thought { margin-top: -4px; }
+/* A run that opens a message has no prose above it: the gap between messages
+   already separates it, so adding 22px would push it off its own question. */
+.terminal-message-assistant > :is(.agent-line-group, .agent-line-run--thought, .agent-line-workfold):first-child { margin-top: 0; }
+/* The count line under a message (MessageSubagents): a run's grid and type at
+   the message's own distance. */
+.agent-line-run--roster { margin: 10px 0 6px; }
 
 .agent-line {
   display: grid;
@@ -79,7 +86,6 @@ button.agent-line:active { background: var(--agent-line-press); color: var(--ter
 }
 .agent-line__glyph { grid-area: 1 / 1; display: grid; place-items: center; transform-origin: center; }
 .agent-line__svg.is-fail { color: var(--term-danger); }
-.agent-line__svg.is-agent { color: var(--term-mauve); }
 
 /* Lead + rest are one sentence on one line. Under 6em of room the rest wraps
    onto a clipped second line: readable or gone, never "ran 2 t…". */

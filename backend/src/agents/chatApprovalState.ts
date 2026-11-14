@@ -5,7 +5,7 @@ import {
 import { getRuntimeDeps } from './runtimeDeps';
 import {
     grantChatPermission, resolveChatPolicy, permissionOwnerUserId, permissionNodeId, michiGrantKey, chatPermissionMode, chatApproveForMe,
-    companionTaintResetToken, noteChatToolApproval,
+    noteChatToolApproval, forcedChatDecision, chatTurnGuard,
 } from './permissionPolicy';
 
 // Michi's side of the package ApprovalCoordinator: its permission policy as
@@ -19,20 +19,26 @@ export const michiPermissionPolicy: PermissionPolicyPort = {
     mode: (...args) => chatPermissionMode(...args),
     approveForMe: (...args) => chatApproveForMe(...args),
     resolveOwnerUserId: (...args) => permissionOwnerUserId(...args),
-    decide: (request) => resolveChatPolicy(request.owner, request.ownerUserId, request.toolName, request.nativeRequest, request.mode, request.hostTool),
+    decide: (request) => resolveChatPolicy(request.owner, request.ownerUserId, request.toolName, request.nativeRequest, request.mode, request.hostTool,
+        request.call ?? {}),
+    // D19, Q26: in a guarded turn what leaves the machine asks, whatever the mode, grants or session trust say.
+    forced: (request) => {
+        const forced = forcedChatDecision(request.owner, request.toolName, request.call ?? {}, request.nativeRequest === true, request.hostTool === true);
+        return forced ? { reason: forced.reason } : null;
+    },
+    turnGuard: (owner) => {
+        const guard = chatTurnGuard(owner);
+        return !guard ? 'none' : guard.michiDriven ? 'work' : 'egress';
+    },
     grant: (request) => grantChatPermission(request.owner, request.toolName, request.ownerUserId),
     // The user approved this call through Michi's prompt: Michi's own tool, when the call reaches its
-    // MCP dispatch, does not ask again in a turn that holds check-in material (taintedToolGate.ts, w3-fix D23).
+    // MCP dispatch, does not ask again in a guarded turn (taintedToolGate.ts, w3-fix D23).
     approved: (request) => noteChatToolApproval(request.owner, request.toolName),
-    // Only chats have one, and an unconfigured runtime layer has none. While
-    // the chat holds check-in material it is a new one on every read, so
-    // session trust never covers such a turn (§2.8; sticky per w2-fix D1 and
-    // w3-fix D17; a check-in's direct send, D15).
+    // Only chats have one, and an unconfigured runtime layer has none. Session
+    // trust holds in a guarded turn too: forced asks come before it (D19).
     resetToken: (owner, ownerUserId) => {
         const nodeId = permissionNodeId(owner);
         if (nodeId === undefined) return undefined;
-        const tainted = companionTaintResetToken(nodeId);
-        if (tainted) return tainted;
         try { return getRuntimeDeps().chatPermissions?.resetToken?.(nodeId, permissionOwnerUserId(owner, ownerUserId)); }
         catch { return undefined; }
     },

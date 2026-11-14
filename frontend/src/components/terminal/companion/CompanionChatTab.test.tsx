@@ -37,7 +37,6 @@ const mocks = vi.hoisted(() => ({
   setComposerDraft: vi.fn(),
   dispatch: vi.fn(),
   composing: vi.fn(),
-  welcome: vi.fn(),
   apply: vi.fn(),
   dismiss: vi.fn(),
   undo: vi.fn(),
@@ -70,7 +69,6 @@ vi.mock('../../../state/companion/companionPresence', () => ({
 }));
 vi.mock('../../../services/api/companion', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../../../services/api/companion')>()),
-  requestCompanionWelcome: mocks.welcome,
   applyCompanionCard: mocks.apply,
   dismissCompanionCard: mocks.dismiss,
   undoCompanionRun: mocks.undo,
@@ -155,9 +153,8 @@ const POST: CompanionPostMetadata = {
 
 beforeEach(() => {
   mocks.nodeState = 'ready';
-  for (const mock of [mocks.retry, mocks.setComposerDraft, mocks.dispatch, mocks.composing, mocks.welcome, mocks.apply, mocks.dismiss, mocks.undo, mocks.tpane, mocks.toast, mocks.toast.error,
+  for (const mock of [mocks.retry, mocks.setComposerDraft, mocks.dispatch, mocks.composing, mocks.apply, mocks.dismiss, mocks.undo, mocks.tpane, mocks.toast, mocks.toast.error,
     mocks.followUp, mocks.openConversation, mocks.windowConversation]) mock.mockReset();
-  mocks.welcome.mockResolvedValue(true);
   mocks.openConversation.mockResolvedValue(true);
   mocks.windowConversation.mockResolvedValue({ messages: [], options: [] });
   mocks.layoutRules = null;
@@ -280,17 +277,14 @@ describe('the Chat tab (DESIGN-v2 §1.3)', () => {
     const notes = screen.getAllByRole('note').map((note) => note.textContent);
     expect(notes).toEqual([
       'Michi couldn’t read your rules, so it won’t act on its own this turn.',
-      'Tools ask before running this turn: it includes check-in material.',
-      'Tools ask before running this turn: this conversation read check-in material earlier.',
+      'Anything that would leave this machine asks first: this turn includes check-in material.',
+      'Anything that would leave this machine asks first: this conversation read check-in material earlier.',
     ]);
   });
 
-  it('asks for the welcome only while the snapshot wants one', () => {
-    const view = show({ welcome: { wanted: false } });
-    expect(mocks.welcome).not.toHaveBeenCalled();
-    view.unmount();
+  it('gives the conversation the Get started card as its leading slot, and asks for no welcome (D17)', () => {
     show({ welcome: { wanted: true } });
-    expect(mocks.welcome).toHaveBeenCalledTimes(1);
+    expect(mocks.decorations?.leading).toBeTruthy();
   });
 
   it('applies what an open asked for once the conversation is in: chips, a draft, a send', () => {
@@ -621,12 +615,6 @@ describe('the Chat tab (DESIGN-v2 §1.3)', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Dismiss' }));
     await waitFor(() => expect(mocks.toast).toHaveBeenCalledWith('That suggestion expired'));
     expect(screen.queryByRole('group', { name: 'Add a rule' })).toBeNull();
-  });
-
-  it('points at Today when something needs the user', () => {
-    show({ items: [companionItem('a'), companionItem('b', { bucket: 'update' })] });
-    fireEvent.click(screen.getByRole('button', { name: 'Needs you (1)' }));
-    expect(getCompanionPanelState().tab).toBe('today');
   });
 
 

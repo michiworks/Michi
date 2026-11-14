@@ -49,9 +49,14 @@ function isOptional(value: unknown, type: "string" | "number"): boolean {
     return value === undefined || typeof value === type;
 }
 
-function isSpawnTopic(value: unknown): value is SpawnBranchTopic {
-    return isFields(value) && typeof value.title === "string" && typeof value.prompt === "string"
+function isSpawnTopic(value: unknown): value is SpawnBranchTopic & Fields {
+    return isFields(value) && typeof value.title === "string" && isOptional(value.prompt, "string")
         && typeof value.chatId === "string" && isOptional(value.nodeId, "string");
+}
+
+/** A branch as windows get it: without its prompt, which the backend sends itself (services/spawnChild.ts). */
+function spawnTopic(topic: SpawnBranchTopic): SpawnBranchTopic {
+    return { title: topic.title, chatId: topic.chatId, ...(topic.nodeId !== undefined ? { nodeId: topic.nodeId } : {}) };
 }
 
 function artifact(p: Fields): ChatStreamPayloads["artifact_saved"] | null {
@@ -93,12 +98,14 @@ export function __resetHostEventWarnings(): void {
 /**
  * The branches a spawn_branches event reports. They already exist, so a
  * malformed topic is left out rather than dropping the whole event, as the
- * client's parser always did; with none left the event is dropped.
+ * client's parser always did; with none left the event is dropped. Prompts
+ * are left out: the backend starts each branch's first turn, and a window
+ * running older code sends one only when the frame carries it.
  */
 function spawnedBranches(p: Fields): ChatStreamPayloads["spawn_branches"] | null {
     if (!Array.isArray(p.topics)) return null;
-    const topics = p.topics.filter(isSpawnTopic);
-    if (topics.length === p.topics.length) return { topics: p.topics };
+    const topics = p.topics.filter(isSpawnTopic).map(spawnTopic);
+    if (topics.length === p.topics.length) return { topics };
     if (topics.length === 0) return null;
     warnOnce("host event kept without its malformed topics", "spawn_branches");
     return { topics };

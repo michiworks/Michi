@@ -3,12 +3,10 @@ import { act, fireEvent, render, screen, waitFor, within } from '@testing-librar
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { MetaAgentOverview, ScheduledJobBlockedExecution, ScheduledJobDto, ScheduledJobRunDto } from 'michi-shared';
 import type { Project } from '../../../state/chatTypes';
-import type { MetaAgentInfo } from '../../../services/api/metaAgent';
-import TerminalScheduled, { EARLIER_CONVERSATION_NOTE } from './Scheduled';
-import { AssistantApiError } from '../../../services/api/assistant';
+import TerminalScheduled from './Scheduled';
 import { openScheduledHome, requestScheduledJobDetail, requestScheduledRun } from '../scheduled/scheduledNav';
 import { getCompanionPanelState, resetCompanionPanelForTests } from '../../../state/companion/companionPanel';
-import { getCompanionAssistant, resetCompanionStoreForTests } from '../../../state/companion/companionStore';
+import { resetCompanionStoreForTests } from '../../../state/companion/companionStore';
 import { companionScheduleWorkspace, resetCompanionScreenForTests } from '../../../state/companion/companionScreen';
 
 const state = vi.hoisted(() => ({
@@ -38,20 +36,13 @@ const state = vi.hoisted(() => ({
   notice: vi.fn(),
 }));
 
-const meta = vi.hoisted(() => ({ load: { kind: 'unavailable' } as unknown, info: null as MetaAgentInfo | null, pause: vi.fn(), openDetail: vi.fn() }));
-vi.mock('../../../state/metaAgent/useMetaAgent', async (importOriginal) => ({
-  ...(await importOriginal<typeof import('../../../state/metaAgent/useMetaAgent')>()),
-  useMetaAgentSnapshot: () => ({ status: meta.info ? 'ready' : 'loading', info: meta.info, error: null }),
-}));
+const meta = vi.hoisted(() => ({ load: { kind: 'unavailable' } as unknown, nav: vi.fn() }));
 vi.mock('../../../state/metaAgent/useMetaAgentOverview', () => ({
-  META_AGENT_PAGE_POLL_MS: 15_000,
   useMetaAgentOverview: () => meta.load,
-  pauseMetaAgentMaintenance: (...args: unknown[]) => meta.pause(...args),
-  refreshMetaAgentOverview: () => Promise.resolve(),
 }));
-vi.mock('../scheduled/metaAgent/metaAgentNav', async (importOriginal) => ({
-  ...(await importOriginal<typeof import('../scheduled/metaAgent/metaAgentNav')>()),
-  openMetaAgentDetail: (...args: unknown[]) => meta.openDetail(...args),
+vi.mock('../../../state/appEvents', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../../state/appEvents')>()),
+  navPageEvent: { dispatch: (...args: unknown[]) => meta.nav(...args) },
 }));
 vi.mock('../../../state/chatStore', () => ({
   useChatProjects: () => ({ projects: state.projects, activeProject: state.projects[0] ?? null, hydrated: true }),
@@ -96,18 +87,10 @@ vi.mock('../../ui/ConfirmDialog', () => ({ confirmDialog: (...args: unknown[]) =
 vi.mock('sonner', () => ({ toast: Object.assign((...args: unknown[]) => state.notice(...args), {
   success: (...args: unknown[]) => state.success(...args), error: (...args: unknown[]) => state.error(...args),
 }) }));
-// The upkeep's name comes from the one helper Settings, the rail and Pages use too (F1b-review #7).
-const copy = vi.hoisted(() => ({ upkeepTitle: vi.fn() }));
-vi.mock('../scheduled/metaAgent/metaAgentCopy', async (importOriginal) => {
-  const actual = await importOriginal<typeof import('../scheduled/metaAgent/metaAgentCopy')>();
-  copy.upkeepTitle.mockImplementation(actual.pagesUpkeepTitle);
-  return { ...actual, pagesUpkeepTitle: (name: string) => copy.upkeepTitle(name) };
-});
-// "Create with agent" opens the agent's one panel (DESIGN-v2 §1.2): the conversation's backend calls are fakes.
-const assistantApi = vi.hoisted(() => ({ fetch: vi.fn(), reset: vi.fn() }));
+// "Create with agent" opens the agent's one conversation (Q14): it never starts a new one.
+const assistantApi = vi.hoisted(() => ({ reset: vi.fn() }));
 vi.mock('../../../services/api/assistant', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../../../services/api/assistant')>()),
-  fetchAssistant: (...args: unknown[]) => assistantApi.fetch(...args),
   resetAssistant: (...args: unknown[]) => assistantApi.reset(...args),
 }));
 
@@ -148,49 +131,26 @@ beforeEach(() => {
   state.confirm.mockResolvedValue(true);
   state.reveal.mockResolvedValue(true);
   meta.load = { kind: 'unavailable' };
-  meta.info = null;
-  meta.pause.mockReset().mockResolvedValue(undefined);
-  meta.openDetail.mockReset();
+  meta.nav.mockReset();
   resetCompanionPanelForTests();
   resetCompanionStoreForTests();
   resetCompanionScreenForTests();
-  assistantApi.fetch.mockReset().mockResolvedValue(assistantInfo('n-v'));
-  assistantApi.reset.mockReset().mockResolvedValue(assistantInfo('n-v2'));
+  assistantApi.reset.mockReset();
 });
-
-function assistantInfo(nodeId: string, jobCreated = false) {
-  const runs = { runtimeId: 'claude', providerId: null, modelId: null, reasoning: null };
-  return { nodeId, workspaceId: 'ws-assistant', treeId: 't', settings: runs, conversation: runs, supportedRuntimes: ['claude'], ...(jobCreated ? { jobCreated } : {}) };
-}
 
 function metaOverview(overrides: Partial<MetaAgentOverview> = {}): MetaAgentOverview {
   return {
     state: 'running',
     runtime: { runtimeId: 'claude', providerId: null, modelId: null, reasoning: null, followsGlobal: true },
     today: { checks: 342, checksTruncated: false, modelCalls: 9, writes: 14, pendingProposals: 3 },
-    cursors: [
-      { workspaceId: 'ws-1', workspaceName: 'michi', cursor: 1289, unread: 0, lastRunAt: now - 60_000, state: 'synced' },
-      { workspaceId: 'ws-2', workspaceName: 'research', cursor: 41, unread: 0, lastRunAt: now - 60_000, state: 'synced' },
-    ],
-    recentRuns: [{
-      at: now - 120_000, since: now - 120_000, workspaceId: null, workspaceName: null, workspaceCount: 2, after: null, through: null,
-      turns: 0, routedPages: 0, routedPageTitles: [], writes: 0, proposals: 0, cursorTo: null, noModelCall: true, kind: 'incremental', count: 1, state: 'done',
-    }],
+    cursors: [],
+    recentRuns: [],
     managedJobIds: ['m-1', 'm-2'],
     ...overrides,
   };
 }
 
-function metaInfo(guard: Partial<MetaAgentInfo['guard']> = {}): MetaAgentInfo {
-  return {
-    settings: { runtimeId: null, providerId: null, modelId: null, reasoning: null },
-    resolved: { runtimeId: 'claude', providerId: null, modelId: null, reasoning: null, followsGlobal: true },
-    availability: { available: true, reason: null },
-    guard: { maintenance: null, chat: null, ...guard },
-  } as MetaAgentInfo;
-}
-
-describe('Scheduled page: the Pages upkeep system task', () => {
+describe('Scheduled page: Pages upkeep is not listed (Q8)', () => {
   beforeEach(() => {
     state.jobs = [
       ...state.jobs,
@@ -200,117 +160,21 @@ describe('Scheduled page: the Pages upkeep system task', () => {
     meta.load = { kind: 'ready', overview: metaOverview(), at: now };
   });
 
-  it('shows a database check separately when no AI update has run', async () => {
-    meta.load = { kind: 'ready', overview: { state: 'running', runtime: { runtimeId: 'pi' },
-      today: { checks: 1, checksTruncated: false, modelCalls: 0, writes: 0, pendingProposals: 0 },
-      cursors: [], recentRuns: [], managedJobIds: [], lastCheckedAt: now - 60_000 } };
-    render(<TerminalScheduled />);
-    await waitFor(() => expect(screen.getByText(/Checked .*ago/)).toBeTruthy());
-    expect(screen.getByText(/AI only for pending work/)).toBeTruthy();
-    const row = screen.getByRole('button', { name: 'Open Michi · Pages upkeep' }).closest('article')!;
-    expect(within(row).queryByText('Never run')).toBeNull();
-  });
-
-  it('shows the managed maintenance jobs only as one pinned system row that can be paused but not deleted', async () => {
+  it('lists only the user’s jobs: no upkeep row, and an older backend’s managed jobs stay out', async () => {
     render(<TerminalScheduled />);
     expect(await screen.findByText('Morning digest')).toBeTruthy();
     expect(screen.queryByText('Maintain Pages · michi')).toBeNull();
-    expect(screen.queryByText('Maintain Pages · research')).toBeNull();
-    expect(screen.getByLabelText('2 jobs')).toBeTruthy();
-
-    const system = screen.getByRole('region', { name: 'System task' });
-    const groups = document.querySelectorAll('.trash-group');
-    expect(groups[0]).toBe(system);
-    expect(system.textContent).toContain('All workspaces');
-    const row = within(system).getByRole('article');
-    expect(row.textContent).toContain('Michi · Pages upkeep');
-    expect(copy.upkeepTitle).toHaveBeenCalledWith('Michi');
-    expect(row.textContent).toContain('System');
-    expect(row.textContent).toContain('Checks every 60 s · AI only for pending work · 2 workspaces');
-    expect(row.textContent).toContain('2 min ago');
-    expect(within(row).queryByRole('button', { name: /More actions/ })).toBeNull();
-    expect(within(row).queryByRole('button', { name: /Run .* now/ })).toBeNull();
-    expect(within(row).queryByRole('button', { name: /Delete/ })).toBeNull();
-
-    const pause = within(row).getByRole('switch', { name: 'Pause background updates' });
-    fireEvent.keyDown(document, { key: 'Tab' });
-    fireEvent.focus(pause);
-    expect(screen.getByRole('tooltip').textContent).toBe('Pause background updates');
-    fireEvent.click(pause);
-    expect(meta.pause).toHaveBeenCalledWith(true);
-    fireEvent.click(within(row).getByRole('button', { name: 'Open Michi · Pages upkeep' }));
-    expect(meta.openDetail).toHaveBeenCalled();
-  });
-
-  it('reads Paused when paused, and Resume turns it back on', async () => {
-    meta.load = { kind: 'ready', overview: metaOverview({ state: 'paused' }), at: now };
-    render(<TerminalScheduled />);
-    const row = within(await screen.findByRole('region', { name: 'System task' })).getByRole('article');
-    expect(row.textContent).toContain('Checks every 60 s · AI only for pending work · Paused');
-    fireEvent.click(within(row).getByRole('switch', { name: 'Resume background updates' }));
-    expect(meta.pause).toHaveBeenCalledWith(false);
-  });
-
-  it('reads Not running, as the sidebar does, when the Meta agent’s runtime cannot run it', async () => {
-    meta.load = { kind: 'ready', at: now, overview: metaOverview({ state: 'error', error: 'Crew cannot run the Meta agent',
-      stopped: { reason: 'runtime-unsupported', message: 'Crew cannot run the Meta agent', workspaceIds: [] } }) };
-    render(<TerminalScheduled />);
-    const row = within(await screen.findByRole('region', { name: 'System task' })).getByRole('article');
-    expect(row.textContent).toContain('AI only for pending work · Not running');
-    expect(row.querySelector('.sched-next')!.getAttribute('data-tone')).toBeNull();
-  });
-
-  it('reads a stopped Meta agent and a failed tool check as a red Error', async () => {
-    meta.load = { kind: 'ready', at: now, overview: metaOverview({ state: 'error', error: 'Kiro is not signed in',
-      stopped: { reason: 'signed-out', message: 'Kiro is not signed in', workspaceIds: ['ws-1'] } }) };
-    const { unmount } = render(<TerminalScheduled />);
-    let row = within(await screen.findByRole('region', { name: 'System task' })).getByRole('article');
-    expect(row.textContent).toContain('AI only for pending work · Error');
-    expect(row.querySelector('.sched-next')!.getAttribute('data-tone')).toBe('danger');
-    unmount();
-
-    meta.load = { kind: 'ready', at: now, overview: metaOverview() };
-    meta.info = metaInfo({ maintenance: { state: 'failed', runtimeId: 'claude', toolset: 'maintenance', unexpectedTools: ['Bash'], checkedAt: now } });
-    render(<TerminalScheduled />);
-    row = within(await screen.findByRole('region', { name: 'System task' })).getByRole('article');
-    expect(row.textContent).toContain('AI only for pending work · Error');
-    expect(row.querySelector('.sched-next')!.getAttribute('data-tone')).toBe('danger');
-  });
-
-  it('still reads Paused when paused with a failed tool check on record', async () => {
-    meta.load = { kind: 'ready', overview: metaOverview({ state: 'paused' }), at: now };
-    meta.info = metaInfo({ maintenance: { state: 'failed', runtimeId: 'claude', toolset: 'maintenance', unexpectedTools: ['Bash'], checkedAt: now } });
-    render(<TerminalScheduled />);
-    const row = within(await screen.findByRole('region', { name: 'System task' })).getByRole('article');
-    expect(row.textContent).toContain('AI only for pending work · Paused');
-  });
-
-  it('is searched like a job, and keeps the page when it is the only match', async () => {
-    render(<TerminalScheduled />);
-    expect(await screen.findByText('Morning digest')).toBeTruthy();
-    fireEvent.change(screen.getByRole('searchbox'), { target: { value: 'pages upkeep' } });
-    expect(screen.getByRole('region', { name: 'System task' })).toBeTruthy();
-    expect(screen.queryByText('Morning digest')).toBeNull();
-    expect(screen.queryByRole('heading', { name: 'No matching jobs' })).toBeNull();
-    expect(screen.getByText('1 result')).toBeTruthy();
-    fireEvent.change(screen.getByRole('searchbox'), { target: { value: 'digest' } });
     expect(screen.queryByRole('region', { name: 'System task' })).toBeNull();
-    expect(screen.getByRole('button', { name: 'Open Morning digest' })).toBeTruthy();
+    expect(screen.queryByText(/Pages upkeep/)).toBeNull();
+    expect(screen.getByLabelText('2 jobs')).toBeTruthy();
   });
 
-  it('opens the Pages upkeep page when asked for a maintenance job’s details', async () => {
+  it('sends an older notification for a maintenance job to Pages', async () => {
     render(<TerminalScheduled />);
     expect(await screen.findByText('Morning digest')).toBeTruthy();
     act(() => requestScheduledJobDetail('m-1'));
-    await waitFor(() => expect(meta.openDetail).toHaveBeenCalled());
+    await waitFor(() => expect(meta.nav).toHaveBeenCalledWith({ page: 'spaces' }));
     expect(screen.queryByRole('dialog')).toBeNull();
-  });
-
-  it('still shows the system row when the user has no jobs of their own', async () => {
-    state.jobs = state.jobs.filter((item) => item.id.startsWith('m-'));
-    render(<TerminalScheduled />);
-    expect(await screen.findByRole('heading', { name: 'No jobs of your own yet' })).toBeTruthy();
-    expect(screen.getByRole('region', { name: 'System task' })).toBeTruthy();
   });
 });
 
@@ -431,52 +295,14 @@ describe('Scheduled page', () => {
     expect(companionScheduleWorkspace()).toBeNull();
   });
 
-  it('opens the panel on Chat for Create with agent, in the same conversation until it made a job', async () => {
+  it('opens the agent’s one conversation on Chat for Create with agent, never a new one (Q14)', async () => {
     render(<TerminalScheduled />);
     await screen.findByText('Morning digest');
     fireEvent.click(screen.getByRole('button', { name: /Create with agent/ }));
-    await waitFor(() => expect(getCompanionPanelState()).toMatchObject({ open: true, tab: 'chat' }));
+    expect(getCompanionPanelState()).toMatchObject({ open: true, tab: 'chat' });
+    fireEvent.click(screen.getByRole('button', { name: /Create with agent/ }));
     expect(assistantApi.reset).not.toHaveBeenCalled();
     expect(state.notice).not.toHaveBeenCalled();
-  });
-
-  it('starts a new conversation for Create with agent once the last one made a job (DESIGN-v2 Q5)', async () => {
-    assistantApi.fetch.mockResolvedValue(assistantInfo('n-v', true));
-    render(<TerminalScheduled />);
-    await screen.findByText('Morning digest');
-    fireEvent.click(screen.getByRole('button', { name: /Create with agent/ }));
-    await waitFor(() => expect(getCompanionPanelState()).toMatchObject({ open: true, tab: 'chat' }));
-    expect(assistantApi.reset).toHaveBeenCalledWith('n-v');
-    expect(getCompanionAssistant().info?.nodeId).toBe('n-v2');
-    // One quiet line says where the conversation went (D6), and only that once.
-    await waitFor(() => expect(state.notice).toHaveBeenCalledWith(EARLIER_CONVERSATION_NOTE));
-    expect(state.notice).toHaveBeenCalledTimes(1);
-    expect(EARLIER_CONVERSATION_NOTE).toBe('Your earlier conversation is in History.');
-    expect(state.error).not.toHaveBeenCalled();
-  });
-
-  it('says so when another window already moved on, and shows the conversation current now (DESIGN-v2 Q5)', async () => {
-    assistantApi.fetch.mockResolvedValue(assistantInfo('n-v', true));
-    assistantApi.reset.mockRejectedValue(new AssistantApiError(409, 'assistant_changed', false, assistantInfo('n-v3') as never));
-    render(<TerminalScheduled />);
-    await screen.findByText('Morning digest');
-    fireEvent.click(screen.getByRole('button', { name: /Create with agent/ }));
-    await waitFor(() => expect(state.notice).toHaveBeenCalledWith(EARLIER_CONVERSATION_NOTE));
-    expect(getCompanionAssistant().info?.nodeId).toBe('n-v3');
-    expect(getCompanionPanelState()).toMatchObject({ open: true, tab: 'chat' });
-  });
-
-  it('keeps the conversation and says why when a new one could not be started (DESIGN-v2 Q5)', async () => {
-    assistantApi.fetch.mockResolvedValue(assistantInfo('n-v', true));
-    assistantApi.reset.mockRejectedValue(new AssistantApiError(409, 'A reply is still running', false, null));
-    render(<TerminalScheduled />);
-    await screen.findByText('Morning digest');
-    fireEvent.click(screen.getByRole('button', { name: /Create with agent/ }));
-    await waitFor(() => expect(state.error).toHaveBeenCalledWith('A reply is still running'));
-    expect(state.notice).not.toHaveBeenCalled();
-    // The panel opens on the conversation there is.
-    expect(getCompanionPanelState()).toMatchObject({ open: true, tab: 'chat' });
-    expect(screen.getByRole('button', { name: /Create with agent/ }).hasAttribute('disabled')).toBe(false);
   });
 
   it('has no Create with agent where this backend has no assistant', async () => {

@@ -54,7 +54,7 @@ export interface DurableMessageMetadata {
   /**
    * DESIGN-v2 §1.3, §2.8 T4: on a user message to the agent, the lines shown
    * under it (its rules could not be read; the turn started with check-in or
-   * collector material and runs in Ask). Written by W2-E, rendered by
+   * collector material, so what leaves the machine asks: D19). Written by W2-E, rendered by
    * W2-F1a. See CompanionTurnMetadata.
    */
   companionTurn?: CompanionTurnMetadata;
@@ -99,9 +99,9 @@ export interface ToolCallStreamPayload {
   output?: string;
 }
 
+/** A branch spawn_branches created. Its first turn is the backend's to start, so no prompt comes with it. */
 export interface SpawnBranchTopic {
   title: string;
-  prompt: string;
   chatId: string;
   nodeId?: string;
 }
@@ -422,12 +422,11 @@ function parseSpawnTopics(value: unknown): SpawnBranchTopic[] {
       const raw = objectOrEmpty(topic);
       return {
         title: stringOrEmpty(raw.title),
-        prompt: stringOrEmpty(raw.prompt),
         chatId: stringOrEmpty(raw.chatId),
         nodeId: optionalString(raw.nodeId),
       };
     })
-    .filter((topic) => topic.title || topic.prompt || topic.chatId);
+    .filter((topic) => topic.title || topic.chatId);
 }
 
 function parseStringList(value: unknown): string[] {

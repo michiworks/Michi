@@ -3,6 +3,7 @@ import { recordNodeRowChange } from '../structureEvents';
 import { mainThreadDb } from '../turnPersistence.mainAdapter';
 import { appendBranchOverviewJournal as coreAppendBranchOverviewJournal } from '../turnPersistence.core';
 import { isNodeTombstoned, isWorkspaceTombstoned } from './tombstones';
+import { inheritedMemoryMode } from '../memory/temporaryChat';
 
 export interface NodeRow {
   /** Server-owned native Page helper binding; saveNode never accepts changes to it. */
@@ -33,6 +34,9 @@ export interface NodeRow {
   /** 1: the chat runs Ultracode (chatUltracode.ts). Server-owned like permission_mode. */
   ultracode?: number | null;
   crew_memory_mode?: string | null;
+  /** Server-owned memory setting (migration 0076): NULL learn, 'off' a temporary chat (memory/temporaryChat.ts), legacy 'use_only'.
+   *  Written by the memory service; saveNode only derives it from the parent on insertion. */
+  memory_mode?: string | null;
   pane_width?: number | null;
   digest?: string | null;
   follow_ups?: string | null;
@@ -111,7 +115,7 @@ export function saveNode(node: NodeRow, userId?: string): void {
   const { permission_mode: _permissionMode, permission_approve_for_me: _approveForMe, crew_memory_mode: _crewMemoryMode, maintenance_job_id: _maintenanceJobId,
     scheduled_only_job_id: _scheduledOnlyJobId, viewed_at: _viewedAt, ultracode: _ultracode, completion_seq: _completionSeq, last_completed_at: _lastCompletedAt,
     last_completed_turn_id: _lastCompletedTurnId, seen_completion_seq: _seenCompletionSeq, multi_model_run_id: _multiModelRunId,
-    fresh_context: _freshContext, ...graphNode } = node;
+    fresh_context: _freshContext, memory_mode: _memoryMode, ...graphNode } = node;
   if (process.env.MICHI_CLOUD === '1' && userId !== undefined) {
     const owned = getDb().prepare('SELECT 1 FROM workspaces WHERE id = ? AND owner_user_id = ?').get(node.workspace_id, userId);
     if (!owned) return;
@@ -128,10 +132,11 @@ export function saveNode(node: NodeRow, userId?: string): void {
   // Do not accept a client-provided marker; derive it only from the durable
   // server-owned parent row on insertion. Existing rows keep their marker via
   // the conflict clause below. A branch of a Scheduled-only run's thread
-  // shows where its parent does, so it inherits that marker the same way.
+  // shows where its parent does, so it inherits that marker the same way, and
+  // a branch of a temporary chat is one too (memory_mode, never cleared here).
   const parentMarkers = node.parent_node_id
-    ? getDb().prepare('SELECT maintenance_job_id, scheduled_only_job_id FROM nodes WHERE id = ?').get(node.parent_node_id) as
-      Pick<NodeRow, 'maintenance_job_id' | 'scheduled_only_job_id'> | undefined
+    ? getDb().prepare('SELECT maintenance_job_id, scheduled_only_job_id, memory_mode FROM nodes WHERE id = ?').get(node.parent_node_id) as
+      Pick<NodeRow, 'maintenance_job_id' | 'scheduled_only_job_id' | 'memory_mode'> | undefined
     : undefined;
   const inheritedMaintenanceJobId = parentMarkers?.maintenance_job_id ?? null;
   // A lean window holds no value for a field it deferred (shared/leanNodeFields)
@@ -146,14 +151,14 @@ export function saveNode(node: NodeRow, userId?: string): void {
       acp_session_id, runtime_id,
       provider_id, model_id, reasoning, resume_fingerprint, composer_draft, external_session_id,
       trim_snapshot, last_applied_turn_id, last_applied_seq, pinned_at, created_at, rev, maintenance_job_id,
-      scheduled_only_job_id)
+      scheduled_only_job_id, memory_mode)
     VALUES (@id, @workspace_id, @tree_id, @parent_node_id, @kind, @title, @branch_overview, @status,
       @position_x, @position_y, @minimized, @deleted_at, @deletion_group_id,
       @spawned_by_agent, @current_mode_id, @pane_width, @digest, @follow_ups, @follow_ups_source_message_id,
       @acp_session_id, @runtime_id,
       @provider_id, @model_id, @reasoning, @resume_fingerprint, @composer_draft, @external_session_id,
       @trim_snapshot, @last_applied_turn_id, @last_applied_seq, @pinned_at, @created_at, @rev, @maintenance_job_id,
-      @scheduled_only_job_id)
+      @scheduled_only_job_id, @memory_mode)
     ON CONFLICT(id) DO UPDATE SET
       tree_id=excluded.tree_id, parent_node_id=excluded.parent_node_id,
       kind=excluded.kind, title=excluded.title,
@@ -229,6 +234,7 @@ export function saveNode(node: NodeRow, userId?: string): void {
     rev: null,
     maintenance_job_id: inheritedMaintenanceJobId,
     scheduled_only_job_id: parentMarkers?.scheduled_only_job_id ?? null,
+    memory_mode: inheritedMemoryMode(parentMarkers?.memory_mode),
     ...graphNode,
     // A left-out field inserts NULL; an existing row keeps its value (above).
     branch_overview: graphNode.branch_overview ?? null,
@@ -309,6 +315,16 @@ export function updateNodeBranchOverview(id: string, overview: string, userId?: 
     if (!owned) return;
   }
   coreAppendBranchOverviewJournal(mainThreadDb, id, overview);
+}
+
+/**
+ * A restored node's memory setting, as its backup recorded it (routes/backup.ts):
+ * a temporary chat stays one, a Use only one stays Use only. Only those two
+ * are taken; anything else leaves the node as saveNode stored it.
+ */
+export function restoreNodeMemoryMode(nodeId: string, mode: unknown): void {
+  if (mode !== 'off' && mode !== 'use_only') return;
+  getDb().prepare('UPDATE nodes SET memory_mode = ? WHERE id = ?').run(mode, nodeId);
 }
 
 /** Write the server-owned provenance for a materialized branch thread. */

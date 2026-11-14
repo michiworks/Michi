@@ -214,9 +214,13 @@ export function caretKebabClearance(g: RowGeom): number {
  *  drawer, mobile.css), its clearance from the kebab and the row's flex `gap`
  *  before it. So pinned rows' stars form one column whether or not a row has
  *  branches, and the hover-revealed ⋯ (no background in card modes) never lands
- *  on the star. `rowGap` is the row's flex gap between the star and the caret. */
-export function pinMarkEndMargin(g: RowGeom, rowGap: number): string {
-  return `calc(var(--sb-caret-w, 9px) + ${caretKebabClearance(g) + rowGap}px)`;
+ *  on the star. `rowGap` is the row's flex gap between the star and the caret.
+ *  `paddingClearsKebab`: the row's right padding already holds that clearance
+ *  (the current Activity row, see ThreadRow), so the star leaves it out and
+ *  stays in its column when the row is chosen. */
+export function pinMarkEndMargin(g: RowGeom, rowGap: number, paddingClearsKebab = false): string {
+  const clearance = paddingClearsKebab ? 0 : caretKebabClearance(g);
+  return `calc(var(--sb-caret-w, 9px) + ${clearance + rowGap}px)`;
 }
 
 /** Vertical gap between a thread row and its first branch row.

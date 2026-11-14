@@ -659,6 +659,8 @@ export interface MenuItemProps {
   onClick?: () => void;
   onMouseDown?: React.MouseEventHandler<HTMLLIElement>;
   onMouseEnter?: React.MouseEventHandler<HTMLLIElement>;
+  /** For a list that follows only a pointer that moves (the palette). */
+  onMouseMove?: React.MouseEventHandler<HTMLLIElement>;
   onContextMenu?: React.MouseEventHandler<HTMLLIElement>;
   title?: string;
   role?: string;
@@ -689,6 +691,7 @@ export function MenuItem(props: MenuItemProps) {
     onClick,
     onMouseDown,
     onMouseEnter,
+    onMouseMove,
     onContextMenu,
     title,
     role,
@@ -715,6 +718,7 @@ export function MenuItem(props: MenuItemProps) {
       }}
       onMouseDown={onMouseDown}
       onMouseEnter={onMouseEnter}
+      onMouseMove={onMouseMove}
       onContextMenu={onContextMenu}
       className={`ui-menu-item${className ? ` ${className}` : ''}`}
       style={style}

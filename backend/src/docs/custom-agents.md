@@ -1,6 +1,6 @@
 # Custom Agents, Runs and watches (experimental)
 
-Applies to: backends started with `MICHI_CUSTOM_AGENTS=1`. Disabled by default. Source checked: 2026-11-08 against the feature gate, definition editor, Run UI and recovery code. This is a source-reviewed experimental guide, not a new live-provider certification.
+Applies to: backends started with `MICHI_CUSTOM_AGENTS=1`. Disabled by default. Source checked: 2026-11-12 against the feature gate, definition editor, Run UI and recovery code. This is a source-reviewed experimental guide, not a new live-provider certification.
 
 ## Why is there no Agents page?
 

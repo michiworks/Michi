@@ -15,7 +15,7 @@ import { closeDb, getDb, initDb } from '../src/services/db';
 import { saveWorkspace } from '../src/services/dbRepository';
 import { updateAgentConfig } from '../src/services/agentConfig';
 import {
-  getMetaAgentSettings, MetaAgentSettingsError, metaAgentInfo, resolveMetaAgentBehaviour, resolveMetaAgentRuntime, updateMetaAgentSettings,
+  getMetaAgentSettings, MetaAgentSettingsError, metaAgentInfo, resolveMetaAgentBehaviour, resolveBackgroundRuntime, updateMetaAgentSettings,
 } from '../src/services/metaAgent/settings';
 import { createRemoteAccessMiddleware } from '../src/services/remoteAccess';
 import { setupMetaAgentOverviewRoutes } from '../src/routes/metaAgentOverview';
@@ -86,15 +86,15 @@ describe('Meta agent settings', () => {
 
   test('a fresh record follows the global settings', () => {
     assert.deepEqual(getMetaAgentSettings(), FOLLOW);
-    assert.deepEqual(resolveMetaAgentRuntime(), { runtimeId: 'claude', providerId: null, modelId: 'opus', reasoning: 'high', followsGlobal: true });
+    assert.deepEqual(resolveBackgroundRuntime(), { runtimeId: 'claude', providerId: null, modelId: 'opus', reasoning: 'high', followsGlobal: true });
   });
 
   test('following global, a changed global applies to the next resolution', () => {
-    assert.equal(resolveMetaAgentRuntime().runtimeId, 'claude');
+    assert.equal(resolveBackgroundRuntime().runtimeId, 'claude');
     setGlobal('kiro', { model: 'kiro-model', reasoning: 'low' });
-    assert.deepEqual(resolveMetaAgentRuntime(), { runtimeId: 'kiro', providerId: null, modelId: 'kiro-model', reasoning: 'low', followsGlobal: true });
+    assert.deepEqual(resolveBackgroundRuntime(), { runtimeId: 'kiro', providerId: null, modelId: 'kiro-model', reasoning: 'low', followsGlobal: true });
     setGlobal('pi', { model: 'pi-model' });
-    const pi = resolveMetaAgentRuntime();
+    const pi = resolveBackgroundRuntime();
     assert.equal(pi.runtimeId, 'pi');
     assert.equal(pi.providerId, 'anthropic', 'a provider runtime takes the global provider');
     assert.equal(pi.modelId, 'pi-model');
@@ -103,19 +103,19 @@ describe('Meta agent settings', () => {
   test('an explicit choice wins and is unaffected by later global changes', () => {
     updateMetaAgentSettings({ runtimeId: 'codex', modelId: 'gpt-x', reasoning: 'medium' });
     const expected = { runtimeId: 'codex', providerId: null, modelId: 'gpt-x', reasoning: 'medium', followsGlobal: false };
-    assert.deepEqual(resolveMetaAgentRuntime(), expected);
+    assert.deepEqual(resolveBackgroundRuntime(), expected);
     setGlobal('kiro', { model: 'kiro-model', reasoning: 'low' });
-    assert.deepEqual(resolveMetaAgentRuntime(), expected);
+    assert.deepEqual(resolveBackgroundRuntime(), expected);
   });
 
   test('null fields of an explicit choice follow the global values for that runtime', () => {
     updateMetaAgentSettings({ runtimeId: 'kiro' });
-    assert.deepEqual(resolveMetaAgentRuntime(), { runtimeId: 'kiro', providerId: null, modelId: null, reasoning: 'high', followsGlobal: false });
+    assert.deepEqual(resolveBackgroundRuntime(), { runtimeId: 'kiro', providerId: null, modelId: null, reasoning: 'high', followsGlobal: false });
     updateAgentConfig({ modelByRuntime: { kiro: 'kiro-model' }, reasoningByRuntime: { kiro: 'low' } });
-    assert.deepEqual(resolveMetaAgentRuntime(), { runtimeId: 'kiro', providerId: null, modelId: 'kiro-model', reasoning: 'low', followsGlobal: false });
+    assert.deepEqual(resolveBackgroundRuntime(), { runtimeId: 'kiro', providerId: null, modelId: 'kiro-model', reasoning: 'low', followsGlobal: false });
 
     updateMetaAgentSettings({ runtimeId: 'pi', providerId: 'deepseek' });
-    const other = resolveMetaAgentRuntime();
+    const other = resolveBackgroundRuntime();
     assert.equal(other.providerId, 'deepseek');
     assert.equal(other.modelId, null, 'the global model belongs to the global provider');
   });
@@ -187,7 +187,7 @@ describe('Meta agent settings', () => {
       setGlobal('kiro');
       seedLegacyAssistant({ runtimeId: 'claude', modelId: null, reasoning: null });
       assert.equal(getMetaAgentSettings().runtimeId, null);
-      assert.equal(resolveMetaAgentRuntime().runtimeId, 'kiro');
+      assert.equal(resolveBackgroundRuntime().runtimeId, 'kiro');
     });
 
     test('a non-default runtime with default model stays explicit', () => {
@@ -258,7 +258,7 @@ describe('Meta agent settings', () => {
       assert.deepEqual(answer.body.guard, { maintenance: null, chat: null });
       assert.equal(answer.body.resolved.runtimeId, 'claude');
       assert.deepEqual(answer.body.availability, { available: true, reason: null });
-      assert.deepEqual(answer.body.usageToday, { checks: 0, modelCalls: 0, tokens: null }, 'nothing maintained yet');
+      assert.deepEqual(answer.body.usageToday, { checks: 0, modelCalls: 0, tokens: null, usage: { pages: {}, memory: {}, checkins: {} } }, 'nothing maintained yet');
     });
 
     test('PUT validates, stores and answers the new info', async () => {

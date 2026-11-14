@@ -5,10 +5,16 @@
 }
 
 .home-page {
+  /* The date, the gap under it, two 26px greeting lines and the second line
+     (.home-greeting below): the head's height in every Home state. */
+  --home-head-height: 124px;
   width: 100%;
   max-width: 900px;
   margin: 0 auto;
-  padding: 60px 48px 80px;
+  /* One shell for loading, cards, a Page, nothing and the default hero, so
+     the composer stays in place when content arrives or changes. It sits a
+     little above the middle of an empty pane, with room for cards below. */
+  padding: clamp(28px, calc(16vh - 64px), 140px) 48px 80px;
   display: flex;
   flex-direction: column;
   gap: 18px;
@@ -20,24 +26,16 @@
   .home-page { padding: 28px 20px 56px; }
 }
 
-/* With no Pages content yet, retain the original Home hero's position and width. */
-.home-scroll:has(.home-page[data-default-layout]) {
-  padding: clamp(16px, calc(44vh - 140px), 22vh) 24px 40px;
-}
-.home-page[data-default-layout] {
-  max-width: 850px;
-  padding: 0;
-  gap: 28px;
-}
-/* A greeting with no cards or Page below starts at the default hero's top. */
-.home-page[data-centered] {
-  padding-top: clamp(60px, calc(44vh - 140px), 22vh);
-}
-@container home-scroll (max-width: 560px) {
-  .home-page[data-centered] { padding-top: clamp(28px, calc(44vh - 140px), 22vh); }
+/* What sits above the composer, set on its bottom edge. Only a greeting
+   longer than two lines makes it taller. */
+.home-head {
+  min-height: var(--home-head-height);
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-end;
 }
 .home-default-headline {
-  margin: 0;
+  margin: 0 0 10px;
   font-family: var(--ui-font);
   font-size: var(--fs-5xl);
   font-weight: 500;
@@ -71,6 +69,18 @@
   font-size: 15px;
   font-weight: 400;
   letter-spacing: 0;
+}
+/* The temporary-chat greeting (TemporaryChatGreeting): the ghost leads the
+   eyebrow, and the detail is a paragraph of its own under the headline. */
+.home-greeting__eyebrow-mark {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.home-greeting--temporary .home-greeting__detail {
+  margin: 0;
+  line-height: 1.5;
+  text-wrap: pretty;
 }
 
 .home-compose {
@@ -109,6 +119,8 @@
   margin-top: 17px;
 }
 .home-cards__head {
+  /* As tall as its ghost buttons, with or without them (the placeholder). */
+  min-height: 22px;
   display: flex;
   flex-wrap: wrap;
   align-items: center;
@@ -209,6 +221,173 @@
   font-weight: 500;
   line-height: 1.45;
 }
+
+/* Direction B (Q44): the work strip, then "Jump back in". */
+.home-default {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+.home-work {
+  display: flex;
+  align-items: center;
+  gap: 6px 18px;
+  min-width: 0;
+  padding: 9px 14px;
+  border: 1px solid var(--term-line);
+  border-radius: var(--ui-radius-lg);
+  background: var(--term-surface);
+  color: var(--term-mid);
+  font-size: var(--fs-md);
+  line-height: 1.4;
+}
+.home-work__who {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--term-fg);
+  font-weight: 600;
+}
+.home-work__count {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  white-space: nowrap;
+}
+.home-work__count b { color: var(--term-fg); font-weight: 600; }
+.home-work__count i {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--term-run);
+}
+.home-work__count[data-kind='waiting'] i { background: var(--term-waiting); }
+.home-work__count[data-kind='done'] i { background: var(--term-digest); }
+.home-work__open {
+  margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--term-accent);
+  font: inherit;
+  white-space: nowrap;
+  cursor: pointer;
+}
+.home-work__open:hover { text-decoration: underline; }
+.home-work__open:focus-visible { outline: var(--focus-ring); outline-offset: 2px; }
+.home-work__short { display: none; }
+/* A phone: the counts keep their numbers, the words get short and the name goes. */
+@container (max-width: 560px) {
+  .home-work { gap: 6px 12px; padding: 9px 12px; }
+  .home-work__name, .home-work__long { display: none; }
+  .home-work__short { display: inline; }
+}
+.home-default > .home-work + .home-cards { margin-top: 24px; }
+
+.home-card--recent { min-height: 0; gap: 7px; }
+.home-card__overview {
+  display: -webkit-box;
+  overflow: hidden;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  color: var(--term-mid);
+  font-size: var(--fs-md);
+  line-height: 1.5;
+}
+.home-card__status {
+  margin-top: auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--term-muted);
+  font-size: var(--fs-sm);
+  line-height: 1.4;
+}
+.home-card__dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--term-accent);
+}
+
+/* While Home loads: bars where the greeting goes and the grid's outline,
+   in the faint pulse of the other loading bars (Scheduled.css, Trash.css). */
+.home-greeting__skeleton span,
+.home-skeleton-bar,
+.home-card-skeleton span {
+  display: block;
+  border-radius: var(--ui-radius);
+  background: color-mix(in srgb, var(--term-fg) 6%, transparent);
+  animation: t-skeleton-pulse-soft var(--t-loop) ease-in-out infinite;
+}
+/* A greeting's 35px lines and its 24px second line: one line where a
+   greeting usually fits on one, two on a phone. */
+.home-greeting__skeleton { display: flex; flex-direction: column; }
+.home-greeting__skeleton span:nth-child(1) { width: min(420px, 70%); height: 22px; margin: 7px 0 6px; }
+.home-greeting__skeleton span:nth-child(2) { display: none; width: 55%; height: 22px; margin: 7px 0 6px; }
+.home-greeting__skeleton span:nth-child(3) { width: min(240px, 42%); height: 12px; margin: 8px 0 4px; }
+@container home-scroll (max-width: 560px) {
+  .home-greeting__skeleton span:nth-child(1) { width: 92%; }
+  .home-greeting__skeleton span:nth-child(2) { display: block; }
+  .home-greeting__skeleton span:nth-child(3) { width: 60%; }
+}
+.home-skeleton-bar { width: 72px; height: 10px; }
+/* The placeholders and what replaces them share one cell, so the grid's
+   outline can fade out under the cards as they come in. */
+.home-below {
+  display: grid;
+  min-width: 0;
+}
+.home-below > * { grid-area: 1 / 1; min-width: 0; }
+.home-cards--skeleton[data-leaving] {
+  pointer-events: none;
+  animation: home-leave var(--t-decay) var(--t-ease) forwards;
+}
+.home-card-skeleton {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-height: 150px;
+  padding: 16px;
+  border: 1px solid color-mix(in srgb, var(--term-line) 70%, transparent);
+  border-radius: var(--ui-radius-lg);
+}
+.home-card-skeleton span:nth-child(1) { width: 38%; height: 8px; }
+.home-card-skeleton span:nth-child(2) { width: 72%; height: 12px; margin-top: 2px; }
+.home-card-skeleton span:nth-child(3) { width: 88%; height: 10px; }
+
+/* Content that replaces the placeholders comes into focus in place: the
+   greeting first, then the cards one after another. The date and the
+   composer were already there and stay still. */
+@keyframes home-arrive {
+  from { opacity: 0; transform: translateY(6px); }
+}
+@keyframes home-leave {
+  to { opacity: 0; }
+}
+.home-page[data-arriving] :is(.home-greeting__text, .home-default-headline, .home-cards__head, .chat-home-document, .home-below > [role='status']) {
+  animation: home-arrive var(--t-decay) var(--t-ease) both;
+}
+.home-page[data-arriving] .home-cards__head { animation-delay: 60ms; }
+.home-page[data-arriving] .home-card {
+  animation: home-arrive var(--t-decay) var(--t-ease) both;
+  animation-delay: calc(90ms + var(--home-card-index, 0) * 35ms);
+}
+@media (prefers-reduced-motion: reduce) {
+  .home-greeting__skeleton span,
+  .home-skeleton-bar,
+  .home-card-skeleton span,
+  .home-page[data-arriving] * { animation: none !important; }
+  .home-cards--skeleton[data-leaving] { opacity: 0; }
+}
+/* The same for Settings' Reduce motion. */
+:root[data-reduce-motion='on'] :is(.home-greeting__skeleton span, .home-skeleton-bar, .home-card-skeleton span, .home-page[data-arriving] *) {
+  animation: none !important;
+}
+:root[data-reduce-motion='on'] .home-cards--skeleton[data-leaving] { opacity: 0; }
 
 /* Embedded Page body uses the Home reading width, without a second page shell. */
 .chat-home-document {

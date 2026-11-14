@@ -19,10 +19,9 @@
  * bound, until the user picks a runtime, model or reasoning in a
  * conversation's composer: from then on that conversation keeps its pick
  * (`meta`, one key per conversation). Without a pick its reasoning is the
- * agent's (Settings › <name> › Reasoning), by default the lower of the
- * global level and COMPANION_DEFAULT_REASONING_MAX (§6). A check-in runs on
- * V's runtime and model, its pick included, at the agent's reasoning, never
- * the chip's. Workspaces from before the Meta agent record may still carry
+ * lower of the global level and COMPANION_DEFAULT_REASONING_MAX (§6). A
+ * check-in runs on Background work (resolveBackgroundRuntime), never on what
+ * V's composer picked. Workspaces from before the Meta agent record may still carry
  * runtimeId/modelId/reasoning here; that record's first read folds them in once.
  *
  * Only this module writes these keys, with its own UPDATE: every other
@@ -56,11 +55,11 @@ import { getMichiDataDir } from '../services/dataDir';
 import { getDb, runInTransaction } from '../services/db';
 import { getNode, getWorkspace, isTreeArchived, listWorkspaces, saveWorkspace, type NodeRow, type WorkspaceRow } from '../services/dbRepository';
 import { ensureDurableGraphNode } from '../services/graphCommands';
-import { getMetaAgentSettings } from '../services/metaAgent/settings';
-import { getCompanionSettings, migrateCompanionSettingsV2 } from '../services/companion/settings';
+import { getMetaAgentSettings, resolveBackgroundRuntime } from '../services/metaAgent/settings';
+import { migrateCompanionSettingsV2 } from '../services/companion/settings';
 import { setCompanionNotesOrigin } from '../services/companion/repository';
 import { ASSISTANT_RUNTIMES, isAssistantRuntime } from './policy';
-import { assistantJobCreated, assistantPurposeKey, assistantPurposeOf } from './identity';
+import { assistantPurposeKey, assistantPurposeOf } from './identity';
 
 export type { AssistantPurpose } from './policy';
 
@@ -124,8 +123,8 @@ function globalSettingsFor(runtimeId: string): Required<MichiAssistantSettings> 
 /**
  * The most reasoning the agent runs at by default (DESIGN-v2 §6, user
  * decision 8): a user turn at the global xhigh took 69 s, and check-ins stop
- * after 3 minutes. Settings › <name> › Reasoning (CompanionSettings.reasoning)
- * replaces the default; the composer chip still changes one conversation.
+ * after 3 minutes. The composer chip still changes one conversation, and
+ * Background work's own reasoning a check-in's.
  */
 export const COMPANION_DEFAULT_REASONING_MAX: RuntimeReasoning = 'high';
 
@@ -135,23 +134,25 @@ function companionDefaultReasoning(level: RuntimeReasoning | null): RuntimeReaso
   return REASONING_LEVELS.indexOf(level) > REASONING_LEVELS.indexOf(COMPANION_DEFAULT_REASONING_MAX) ? COMPANION_DEFAULT_REASONING_MAX : level;
 }
 
-/** Settings › <name> › Reasoning; null (the default, or unreadable settings) is min(global, high). */
-function agentReasoningSetting(): RuntimeReasoning | null {
-  try {
-    const level = getCompanionSettings().reasoning;
-    return isReasoningLevel(level) ? level : null;
-  } catch {
-    return null;
-  }
+/**
+ * The agent's reasoning on `runtimeId` (§6): the lower of that runtime's
+ * global level and high. A level the model cannot use is dropped when the
+ * session is bound (binding.ts).
+ */
+export function agentReasoningFor(runtimeId: string): RuntimeReasoning | null {
+  return companionDefaultReasoning(globalSettingsFor(runtimeId).reasoning);
 }
 
 /**
- * The agent's reasoning on `runtimeId` (§6): Settings › <name> › Reasoning,
- * else the lower of that runtime's global level and high. A level the model
- * cannot use is dropped when the session is bound (binding.ts).
+ * What a check-in runs on: Background work, never V's composer pick. Its
+ * reasoning is Background work's own when it has one, else the agent's
+ * (agentReasoningFor), so a global xhigh never drags it past its 3 minutes.
  */
-export function agentReasoningFor(runtimeId: string): RuntimeReasoning | null {
-  return agentReasoningSetting() ?? companionDefaultReasoning(globalSettingsFor(runtimeId).reasoning);
+function checkinRuntime(): MetaAgentResolvedRuntime {
+  const runs = resolveBackgroundRuntime();
+  const settings = getMetaAgentSettings();
+  const own = settings.runtimeId !== null ? settings.reasoning : null;
+  return { ...runs, reasoning: own ?? agentReasoningFor(runs.runtimeId) };
 }
 
 /** The global settings for `runtimeId` as a conversation with the agent starts on them: its reasoning, not the global one. */
@@ -304,22 +305,15 @@ function newConversation(workspace: WorkspaceRow | null, cwd: string): { workspa
  * What an assistant conversation's next message runs on: what the user picked
  * in it, else the global settings resolved now (`followsGlobal`) with the
  * agent's reasoning (§6). Without `nodeId`, the global settings as they are.
- * A check-in node runs on V's runtime, provider and model, V's pick
- * included, always at the agent's reasoning: a one-off chip level never
- * drags a check-in past its 3 minutes. A pick stored under a check-in node's
- * own key is never read (no route writes one; E-review #14). A conversation is not pinned to the
+ * A check-in node runs on checkinRuntime. A pick stored under a check-in
+ * node's own key is never read (no route writes one; E-review #14). A conversation is not pinned to the
  * runtime it ran on; when this names another runtime than its bound session,
  * the session paths open a new native session there and pass the visible
  * history as prior context (assistant_runtime_switches records where that
  * happened).
  */
 export function assistantConversationRuntime(nodeId?: string | null): MetaAgentResolvedRuntime {
-  if (nodeId && assistantPurposeOf(nodeId) === 'checkin') {
-    // currentAssistantNodeId is a 'main' conversation, so this never comes back here.
-    const v = currentAssistantNodeId();
-    const runs = v ? assistantConversationRuntime(v) : { ...globalSettingsForAgent(globalAssistantRuntimeId()), followsGlobal: true };
-    return { ...runs, reasoning: agentReasoningFor(runs.runtimeId) };
-  }
+  if (nodeId && assistantPurposeOf(nodeId) === 'checkin') return checkinRuntime();
   const choice = nodeId ? readConversationChoice(nodeId) : null;
   if (choice) return { ...choice, followsGlobal: false };
   const runtimeId = globalAssistantRuntimeId();
@@ -368,7 +362,6 @@ function info(workspace: WorkspaceRow, node: NodeRow, supported: string[]): Assi
     conversationFollowsGlobal: followsGlobal,
     supportedRuntimes: supported,
     runtimeSwitches: runtimeSwitchesOf(node.id),
-    jobCreated: assistantJobCreated(node.id),
     hadMessagesBeforeMerge: hadMessagesBeforeMerge(node.id),
   };
 }

@@ -12,6 +12,8 @@
  *    The one exception is the Michi assistant (caller.assistant, set from its
  *    session binding): it may reach a started chat in any workspace its owner
  *    owns, and its messages carry the assistant's own header.
+ *  - A temporary chat (services/memory/temporaryChat.ts) sends nothing, and
+ *    another conversation's temporary chat is not found.
  *  - Messages send directly by default. The agent can request a single-use
  *    approval when the user's intent needs clarification.
  *
@@ -60,6 +62,7 @@ import { reservePaneWaitSlot, waitPane, type PaneWaitSlot } from "../services/pa
 import { chatTargetUnavailable } from "../services/chatTarget";
 import { getNode, getWorkspace, type NodeRow } from "../services/dbRepository";
 import { getThreadWake, threadChainHop } from "../services/threadMessageWakeStore";
+import { isTemporaryChat } from "../services/memory/temporaryChat";
 import { activeTurnTrust } from "../services/turnTrust";
 import type { ChatAwaitingUser } from "../services/chatAwaitingUser";
 import { buildPaneInspectionCaller } from "./paneInspectionTools";
@@ -240,12 +243,18 @@ function resolveTarget(caller: ThreadMessageCaller, targetNodeId: string): Resol
   if (targetNodeId === caller.nodeId) {
     throw new CodedToolError("INVALID_TARGET", "cannot send a message to the current thread");
   }
+  // A message would carry what was said here into another conversation.
+  if (isTemporaryChat(caller.nodeId)) {
+    throw new CodedToolError("UNSUPPORTED", "This is a temporary chat: it sends nothing to other conversations, so nothing was sent.");
+  }
+  // The pane caller is this conversation, so another's temporary chat is not found (memory/temporaryChat.ts).
   const sessionCaller = buildPaneInspectionCaller({
     ownerUserId: caller.ownerUserId,
     workspaceId: caller.workspaceId,
     runOwnerRunId: null,
     backendConnectionId: "local",
     ...(caller.assistant ? { assistant: true } : {}),
+    callerNodeId: caller.nodeId,
   });
   // Everyone else stays inside their own workspace. The assistant is scoped
   // to the target's workspace (same owner); no system workspace (its own

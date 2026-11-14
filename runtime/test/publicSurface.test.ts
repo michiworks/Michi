@@ -91,12 +91,13 @@ describe('public surface', () => {
   it('the root entry exports the contract and core', () => {
     assert.deepEqual(valueNames(root), [
       'AGENT_RUN_TOOL_NAMES', 'ApprovalCoordinator', 'CHAT_APPROVAL_OPTION_IDS', 'DEFAULT_HEADLESS_DRIVER_MESSAGES',
-      'FileRuntimeCatalogCache', 'HISTORY_STUB_MAX_ENTRIES', 'HISTORY_STUB_TTL_MS', 'NativeResumeFailedError',
+      'FileRuntimeCatalogCache', 'HISTORY_STUB_MAX_ENTRIES', 'HISTORY_STUB_TTL_MS', 'MULTI_MODEL_PHASES', 'MULTI_MODEL_STEP_STATUSES',
+      'MULTI_MODEL_SYNTHESIS_STATUSES', 'NativeResumeFailedError',
       'NativeResumeUnavailableError', 'RUNTIME_CONTRACT_VERSION', 'ReportedRuntimeError', 'RuntimeHostConfigError',
       'SKILL_FILE_MAX_BYTES', 'SUBMIT_AGENT_RESULT_TOOL', 'SessionProfileUnsupportedError', 'UNKNOWN_HARNESS',
       'UNKNOWN_RUNTIME_DESCRIPTOR', 'approvalCoversTool', 'assertHostPorts', 'assertOwner', 'chatApprovalOptions',
       'classifyRuntimeError', 'createDefaultHost', 'createRuntimeManager', 'createSessionDirectory', 'createSessionStateFeed',
-      'decisionToOptionId', 'descriptorOf', 'discardBackgroundTurn', 'expandSkillPrompt', 'hasProviders', 'interactiveOwner', 'isPermissionOptionId',
+      'decisionToOptionId', 'descriptorOf', 'discardBackgroundTurn', 'expandSkillPrompt', 'forcedApprovalOptions', 'hasProviders', 'interactiveOwner', 'isPermissionOptionId',
       'ownerLabel', 'ownerMode', 'renderSkillBlock', 'resolveAgentRunToolsForSession', 'sameOwner', 'scanSkillRoots',
       'startHeadlessSession', 'substituteSkillArguments',
     ]);

@@ -493,7 +493,34 @@ export interface PermissionDecisionRequest {
    * tool's.
    */
   hostTool?: boolean;
+  /** What the call carries, for a host that decides by what it does (a command, a path, a URL). */
+  call?: PermissionCallDetail;
 }
+
+/** A call's arguments and what its runtime says about the tool. */
+export interface PermissionCallDetail {
+  /** The call's arguments as the runtime sent them. */
+  input?: unknown;
+  /** The ACP tool kind (read, edit, execute, fetch, ...), when the runtime gives one. */
+  kind?: string;
+  /** The tool's MCP annotations, when the runtime knows them. */
+  annotations?: { readOnlyHint?: boolean; destructiveHint?: boolean; openWorldHint?: boolean };
+}
+
+/** A request the host asks the user about whatever the mode, grants or session trust say. */
+export interface ForcedPermissionAsk {
+  /** One line the approval card shows: why this call asks. */
+  reason: string;
+}
+
+/**
+ * How the host guards the owner's running turn: `work`, a turn the host
+ * drove (its own work conversation): local work runs, whatever leaves the
+ * machine asks; `egress`, a turn that holds outside content: whatever
+ * leaves the machine asks, the rest follows the mode; `none`, the mode
+ * decides everything.
+ */
+export type HostTurnGuard = 'none' | 'egress' | 'work';
 
 /** The host's chat permission policy: modes, always-allow grants and their revocation. */
 export interface PermissionPolicyPort {
@@ -516,6 +543,21 @@ export interface PermissionPolicyPort {
   approved?(request: { owner: RuntimeSessionOwner; ownerUserId?: string | null; toolName: string }): void;
   /** Changes on explicit permission updates, revoking temporary session trust. */
   resetToken?(owner: RuntimeSessionOwner, ownerUserId?: string | null): string | undefined;
+  /**
+   * A request that asks whatever the mode, always-allow grants or trust for
+   * the session say (the host's consequence rules: a call that leaves the
+   * machine in a guarded turn). Null: decide() decides. Absent: never. An
+   * adapter shows such a card with single-use options only, and another
+   * card's answer never covers it. Must not throw.
+   */
+  forced?(request: PermissionDecisionRequest): ForcedPermissionAsk | null;
+  /**
+   * How the owner's running turn is guarded (HostTurnGuard), read when a
+   * turn starts: Codex then runs it sandboxed with network off and asks on
+   * escalation, Kiro without the user's pre-approved tools. Absent: `none`.
+   * Must not throw.
+   */
+  turnGuard?(owner: RuntimeSessionOwner | undefined, ownerUserId?: string | null): HostTurnGuard;
   /**
    * The key grant() stores a tool name's always-allow grant under. Adapters
    * compare tool names in this form when one answer may also cover another

@@ -57,6 +57,7 @@ import { ScheduledJobsRepository } from '../src/services/scheduledJobs/repositor
 import { ScheduledJobScheduler } from '../src/services/scheduledJobs/scheduler';
 import { recordCompanionTaint, recordUntrustedSource } from '../src/services/turnTrust';
 import { makeCheckinNode } from './helpers/checkinNodes';
+import { turnCompanionOn, turnBackgroundWorkOn } from './helpers/backgroundWork';
 
 const ME = LOCAL_AGENT_OWNER_ID;
 const saved = { data: process.env.MICHI_DATA_DIR, cloud: process.env.MICHI_CLOUD, direct: process.env.MICHI_MEMORY_DIRECT };
@@ -142,6 +143,8 @@ beforeEach(() => {
   delete process.env.MICHI_MEMORY_DIRECT;
   closeDb();
   initDb(); enableSyntheticCompanionSources();
+  turnCompanionOn();
+  turnBackgroundWorkOn();
   resetReplySources();
   answersDirectly(true);
   seq = 0;
@@ -203,7 +206,7 @@ describe('automatic extraction of V', () => {
   test('the scheduler, wired as server.ts wires it, makes V\'s execution identity with nothing refused; no job or Space maintenance may run there', (t) => {
     const warned = t.mock.method(log, 'warn', () => {});
     const scheduler = new ScheduledJobScheduler({
-      repository: new ScheduledJobsRepository(), events: new ScheduledJobEventBus(() => now), clock: () => now,
+      repository: new ScheduledJobsRepository(), events: new ScheduledJobEventBus(), clock: () => now,
       executor: { start: async () => { throw new Error('not used'); } },
       workspaceExists: (id) => isSchedulableWorkspace(getWorkspace(id)),
       maintenanceWorkspaceExists: (id) => isAssistantWorkspace(id),

@@ -330,7 +330,11 @@ function failed(): false {
   return false;
 }
 
-/** Back to the page the jump started from, at the scroll position it had. */
+/**
+ * Back to the page the jump started from, at the scroll position it had.
+ * @internal No UI calls it since the back bar left the shell (d6221869e); the
+ * return location it restores stays, and the shell's tests drive it here.
+ */
 export function returnToSourceOrigin(): void {
   const back = state.back;
   if (!back) return;

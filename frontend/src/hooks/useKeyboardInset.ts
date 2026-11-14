@@ -3,20 +3,32 @@ import { useEffect, useState } from 'react';
 /**
  * The bottom of the layout viewport that the visual viewport leaves uncovered.
  * Positional readers use it as is, zoomed or not: under a pinch zoom it puts
- * a bottom-fixed element at the visible bottom edge. Only yes/no keyboard
- * readers (onScreenKeyboardUp, useKeyboardDismiss) also check the scale.
+ * a bottom-fixed element at the visible bottom edge. It is not a keyboard
+ * reading: once iOS pans the page to the field, it shrinks while the keyboard
+ * stays up.
  */
 export function keyboardInsetOf(viewport: VisualViewport): number {
   return Math.max(0, Math.round(window.innerHeight - viewport.height - viewport.offsetTop));
 }
 
-/** Above this inset the on-screen keyboard is up. */
+/**
+ * How much shorter than the layout viewport an on-screen keyboard leaves the
+ * visual viewport, wherever that is panned. iOS pans it to reveal the field,
+ * on focus and again when typing moves the caret into view; neither lowers
+ * the keyboard. Yes/no keyboard readers (onScreenKeyboardUp,
+ * useKeyboardDismiss) use this and also check the scale.
+ */
+export function keyboardHeightOf(viewport: VisualViewport): number {
+  return Math.max(0, Math.round(window.innerHeight - viewport.height));
+}
+
+/** Above this height the on-screen keyboard is up. */
 export const KEYBOARD_UP_PX = 120;
 
-/** Whether an on-screen keyboard covers the page's bottom now. Pinch zoom shrinks the visual viewport too; that is not a keyboard. */
+/** Whether an on-screen keyboard is up now. Pinch zoom shrinks the visual viewport too; that is not a keyboard. */
 export function onScreenKeyboardUp(): boolean {
   const viewport = typeof window !== 'undefined' ? window.visualViewport : null;
-  return !!viewport && Math.abs(viewport.scale - 1) <= 0.01 && keyboardInsetOf(viewport) >= KEYBOARD_UP_PX;
+  return !!viewport && Math.abs(viewport.scale - 1) <= 0.01 && keyboardHeightOf(viewport) >= KEYBOARD_UP_PX;
 }
 
 /**

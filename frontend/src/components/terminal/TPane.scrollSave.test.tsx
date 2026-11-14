@@ -25,6 +25,9 @@ import React from 'react';
 import { render, cleanup, act } from '@testing-library/react';
 
 const focusState = vi.hoisted(() => ({ focused: null as string | null, focus: vi.fn() }));
+// `lazy` stands in for a placeholder node whose bodies have not loaded yet.
+const nodeState = vi.hoisted(() => ({ full: null as any, lazy: null as any }));
+const sendScroll = vi.hoisted(() => ({ glideToTail: vi.fn(() => () => {}) }));
 
 // jsdom lacks these — without them effects crash, React tears the tree down,
 // and the teardown save contaminates the experiment.
@@ -76,7 +79,9 @@ vi.mock('../../state/chatStore', async () => {
     pendingComments: [],
     queuedMessages: [],
     injectedContexts: [],
+    messagesLoaded: true,
   };
+  nodeState.full = node;
   return {
     ...actual,
     useChatActions: anyFn,
@@ -97,7 +102,7 @@ vi.mock('../../state/chatStore', async () => {
       paneItems: {},
       viewMode: 'single' as const,
     }),
-    useChatNode: () => node,
+    useChatNode: () => nodeState.lazy ?? node,
     useStructuralSelector: (sel: any) => {
       try { return sel({}); } catch { return undefined; }
     },
@@ -136,6 +141,10 @@ vi.mock('../MentionEditor', () => ({ default: React.forwardRef((_p, ref) => {
   React.useImperativeHandle(ref, () => ({ editor: { commands: { focus: focusState.focus } } }));
   return null;
 }) }));
+vi.mock('./sendScroll', async () => ({
+  ...(await vi.importActual<any>('./sendScroll')),
+  glideToTail: sendScroll.glideToTail,
+}));
 vi.mock('../SelectionActions', () => ({ default: () => null }));
 vi.mock('../UploadProgressBar', () => ({ default: () => null }));
 
@@ -162,6 +171,8 @@ describe('paneScrollCache save gating', () => {
   // or it leaks into the shared localStorage mid-test.
   afterEach(async () => {
     cleanup();
+    nodeState.lazy = null;
+    sendScroll.glideToTail.mockClear();
     focusState.focused = null;
     focusState.focus.mockClear();
     try {
@@ -223,5 +234,23 @@ describe('paneScrollCache save gating', () => {
     // "at bottom" — that's a test-environment artifact. What matters here
     // is that the save FIRED at all: lastSeen advanced past the seed.
     expect(entry.lastSeen).toBe(1200);
+  });
+
+  // A tree opened before its bodies load mounts with no messages, so the
+  // pane has no newest user message to compare later ones against. When the
+  // history arrives, that message must not count as a send: the send glide
+  // would carry the restored viewport to the bottom.
+  it('lazy-loaded history arriving after mount does not start the send glide', async () => {
+    seedCache();
+    vi.resetModules();
+    const { default: TPane } = await import('./TPane');
+    nodeState.lazy = { ...nodeState.full, messages: [], messagesLoaded: false };
+    const { rerender } = render(<TPane nodeId="node1" />);
+    nodeState.lazy = null;
+    // TPane is memoized and the mocked store does not subscribe: a changed
+    // prop makes it read the loaded node.
+    rerender(<TPane nodeId="node1" contentMaxWidth={640} />);
+    await act(async () => { await vi.advanceTimersByTimeAsync(50); });
+    expect(sendScroll.glideToTail).not.toHaveBeenCalled();
   });
 });

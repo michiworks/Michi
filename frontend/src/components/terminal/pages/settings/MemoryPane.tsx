@@ -1,5 +1,4 @@
 import React, { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react';
-import { ChevronRight } from 'lucide-react';
 import {
   MEMORY_BODY_MAX_CHARS,
   MEMORY_KINDS,
@@ -20,7 +19,6 @@ import { backendConnectionIdForWorkspace, LOCAL_BACKEND_CONNECTION_ID } from '..
 import { API_BASE_URL } from '../../../../config/env';
 import { prefersReducedMotion } from '../../../../hooks/useReducedMotion';
 import { relativeTime } from '../../../../lib/relativeTime';
-import { useCompanionName } from '../../../../state/companion/companionName';
 import { isImeComposing } from '../../../../lib/ime';
 import {
   createMemory,
@@ -47,10 +45,10 @@ import { SettingsRow, SettingsSection } from './SettingsSection';
 import './memory.css';
 
 /**
- * Settings › Memory, a page few people need: memory on or off, what agents
- * remember (searchable, by scope; edit, delete, add), About the user (the
- * profile Michi writes from its memories) and, under Details, what automatic
- * memory is doing. Nothing here waits for the user: agents and automatic
+ * Settings › Memory, a page few people need: memory on or off, Learn from
+ * conversations (automatic memory, off until turned on), what agents
+ * remember (searchable, by scope; edit, delete, add) and About the user (the
+ * profile Michi writes from its memories). Nothing here waits for the user: agents and automatic
  * memory save without asking. Everything is on this machine's backend; a
  * workspace on another machine keeps its memories there.
  */
@@ -176,7 +174,7 @@ export function MemoryPane({ onNav }: { onNav?: (page: PageId) => void }) {
     try {
       const saved = await saveMemorySettings(mode);
       setSettings((current) => ({ ...current, mode: saved.mode }));
-      // Each chat's memory control in this window shows only while memory is on.
+      // What this window shows of memory under replies follows.
       noteMemoryOn(API_BASE_URL, saved.mode !== 'off');
     } catch (error) {
       setSettings((current) => ({ ...current, mode: previous }));
@@ -203,21 +201,14 @@ export function MemoryPane({ onNav }: { onNav?: (page: PageId) => void }) {
   const on = settings.mode !== 'off';
   return (
     <>
-      <SettingsSection title="Memory" intro="Michi remembers what you tell it. You can review or edit memories here.">
+      <SettingsSection title="Memory">
         <SettingsRow label="Use memory"
-          description={on
-            ? 'Agents read your memories in every conversation and save what you tell them.'
-            : 'Agents don’t read or save memories. Saved memories stay here until you delete them.'}
-          control={<>
-            <span className="settings-row__state">{on ? 'On' : 'Off'}</span>
-            <Switch on={on} disabled={modeSaving} aria-label="Use memory" onChange={(next) => { void turn(next); }} />
-          </>}>
-          <p className="settings-row__note">Turning memory off doesn’t delete chat history. Conversations are kept as before.</p>
-          {on && <p className="settings-row__note">To leave one chat out, choose Use only or Off from the memory button in its composer.</p>}
+          tip="Agents read your memories and save what you tell them. Turning it off keeps saved memories and chat history. To keep one chat out of memory, start a temporary chat from Home."
+          control={<Switch on={on} disabled={modeSaving} aria-label="Use memory" onChange={(next) => { void turn(next); }} />}>
           {modeSaving && <p className="settings-row__note" role="status">Saving…</p>}
           {modeError && <p className="settings-row__note" role="alert">{modeError}</p>}
         </SettingsRow>
-        {on && <MemoryDetails />}
+        {on && <LearnFromConversations />}
         <DeleteAllMemories onDeleted={() => setResets((count) => count + 1)} />
       </SettingsSection>
       <AboutTheUser memoryOn={on} reloadKey={resets} onShowMemory={(memory) => setReveal({ id: memory.id, body: memory.body })} />
@@ -252,55 +243,42 @@ function DeleteAllMemories({ onDeleted }: { onDeleted: () => void }) {
     }
   };
   return (
-    <SettingsRow label="Delete all memories" description="Every saved memory and About the user. Conversations stay."
+    <SettingsRow label="Delete all memories"
       control={<Button size="sm" danger disabled={busy} onClick={() => { void run(); }}>{busy ? 'Deleting…' : 'Delete all…'}</Button>}>
       {note && <p className="settings-row__note" role={note.tone === 'error' ? 'alert' : 'status'} data-tone={note.tone === 'ok' ? 'ok' : undefined}>{note.text}</p>}
     </SettingsRow>
   );
 }
 
-// ── details: automatic memory's status ─────────────────────────────────────
-
-interface ExtractionView { label: string; description: string; action: 'pause' | 'resume' | null }
+// ── Learn from conversations: automatic memory ─────────────────────────────
 
 /**
- * Label, explanation and the one action that applies; backends without
- * `state` fall back to `paused`. `name` is the agent's name: its Pages upkeep
- * pausing pauses automatic memory too.
+ * What automatic memory is doing, under "Learn from conversations" while it
+ * is on, and whether its switch can act. Backends without `state` fall back
+ * to `paused`. Turning Michi off does not pause it: only this switch does.
  */
-function extractionView(status: MemoryExtractionStatus, name: string): ExtractionView {
-  if (!status.enabled) return { label: 'Off', description: 'Memory is off.', action: null };
+function learningView(status: MemoryExtractionStatus): { on: boolean; supported: boolean; line: string | null } {
   if (status.supported === false || status.state === 'unsupported') {
-    return { label: 'Unsupported', description: 'This backend can’t read conversations in the background.', action: null };
+    return { on: false, supported: false, line: 'This backend can’t read conversations in the background.' };
   }
+  const last = status.lastRunAt ? ` · last run ${updatedText(status.lastRunAt).replace('Updated ', '')}` : '';
   switch (status.state ?? (status.paused ? 'paused' : 'running')) {
-    case 'paused': return { label: 'Paused', description: 'Paused. No conversations are read until you resume.', action: 'resume' };
-    case 'maintenance_paused':
-      return { label: 'Paused', description: `Paused with Pages upkeep, under Settings › ${name} › Pages upkeep.`, action: null };
-    case 'stopped': return { label: 'Stopped', description: 'Stopped after repeated failures. Resume to try again.', action: 'resume' };
-    case 'budget_exhausted': return { label: 'Daily limit reached', description: 'Resumes tomorrow, when the daily token limit resets.', action: 'pause' };
-    case 'waiting': return { label: 'Waiting', description: 'New conversations are queued and will be read soon.', action: 'pause' };
-    case 'idle': return { label: 'Up to date', description: 'Checks new conversations as they finish.', action: 'pause' };
-    default: return { label: 'Running', description: 'Checks new conversations as they finish.', action: 'pause' };
+    case 'paused': return { on: false, supported: true, line: null };
+    case 'stopped': return { on: true, supported: true, line: 'Stopped after repeated failures' };
+    case 'budget_exhausted': return { on: true, supported: true, line: 'Daily limit reached · resumes tomorrow' };
+    case 'waiting': return { on: true, supported: true, line: `Waiting: new conversations are queued${last}` };
+    case 'idle': return { on: true, supported: true, line: `Up to date${last}` };
+    default: return { on: true, supported: true, line: `Running${last}` };
   }
 }
 
-/** A collapsed row under the switch; automatic memory's status is read only once it opens. */
-function MemoryDetails() {
-  const [open, setOpen] = useState(false);
-  return <>
-    <div className="settings-row memory-details">
-      <button type="button" className="memory-details__toggle" aria-expanded={open} onClick={() => setOpen((value) => !value)}>
-        <ChevronRight size={12} strokeWidth={2} aria-hidden="true" />
-        Details
-      </button>
-    </div>
-    {open && <AutomaticMemoryStatus />}
-  </>;
-}
-
-function AutomaticMemoryStatus() {
-  const name = useCompanionName();
+/**
+ * Learn from conversations (automatic memory, Q28): off until the user turns
+ * it on here. On reads finished conversations in the background and saves
+ * what they say about you; off pauses that, and agents still save what you
+ * ask them to.
+ */
+function LearnFromConversations() {
   const [state, setState] = useState<{ status: 'loading' | 'ready' | 'unavailable' | 'error'; value: MemoryExtractionStatus | null; error: string | null }>(
     { status: 'loading', value: null, error: null });
   const [busy, setBusy] = useState(false);
@@ -315,59 +293,51 @@ function AutomaticMemoryStatus() {
   }, []);
   useEffect(() => { void load(); }, [load]);
 
-  const togglePause = async (paused: boolean) => {
+  // A stopped one starts again the same way: resume.
+  const turn = async (on: boolean) => {
     setBusy(true);
     setActionError(null);
     try {
-      const value = await setMemoryExtractionPaused(paused);
+      const value = await setMemoryExtractionPaused(!on);
       if (value) setState({ status: 'ready', value, error: null });
       else await load();
     } catch (error) {
-      setActionError(`Couldn’t ${paused ? 'pause' : 'resume'} automatic memory: ${errorText(error, 'unknown error')}`);
+      setActionError(`Couldn’t turn learning from conversations ${on ? 'on' : 'off'}: ${errorText(error, 'unknown error')}`);
     } finally {
       setBusy(false);
     }
   };
 
-  if (state.status === 'loading') return <p className="settings-section__status" role="status">Loading…</p>;
+  const tip = 'In the background, agents read your finished conversations and save what they say about you. Off: they save only what you ask them to.';
   if (state.status === 'unavailable') {
-    return <p className="settings-section__status">This Michi backend can’t save memories in the background yet. Agents still save memories when you ask.</p>;
+    return <SettingsRow label="Learn from conversations" tip={tip} description="This Michi backend can’t save memories in the background yet." />;
   }
-  if (state.status === 'error' || !state.value) {
+  if (state.status !== 'ready' || !state.value) {
     return (
-      <p className="settings-section__error" role="alert">
-        Couldn’t read automatic memory’s status{state.error ? `: ${state.error}` : ''}.{' '}
-        <button type="button" className="settings-row__link" onClick={() => { void load(); }}>Try again</button>
-      </p>
+      <SettingsRow label="Learn from conversations" tip={tip}
+        description={state.status === 'loading' ? <span role="status">Loading…</span> : (
+          <span role="alert">
+            Couldn’t read its status{state.error ? `: ${state.error}` : ''}.{' '}
+            <button type="button" className="settings-row__link" onClick={() => { void load(); }}>Try again</button>
+          </span>
+        )} />
     );
   }
   const status = state.value;
-  const view = extractionView(status, name);
-  const tokens = status.todayTokens.toLocaleString();
-  return <>
-    <SettingsRow label="Automatic memory" description={view.description}
-      control={<>
-        <span className="settings-row__state">{view.label}</span>
-        {view.action && (
-          <Button size="sm" disabled={busy} aria-label={view.action === 'resume' ? 'Resume automatic memory' : 'Pause automatic memory'}
-            onClick={() => { void togglePause(view.action === 'pause'); }}>
-            {view.action === 'resume' ? 'Resume' : 'Pause'}
-          </Button>
-        )}
-      </>}>
-      {status.stateReason && <p className="settings-row__note">{status.stateReason}</p>}
+  const view = learningView(status);
+  return (
+    <SettingsRow label="Learn from conversations" tip={tip} description={view.line}
+      control={view.supported && <Switch on={view.on} disabled={busy} aria-label="Learn from conversations" onChange={(next) => { void turn(next); }} />}>
+      {status.state === 'stopped' && (
+        <p className="settings-row__note">
+          <button type="button" className="settings-row__link" disabled={busy} onClick={() => { void turn(true); }}>Try again</button>
+        </p>
+      )}
+      {view.on && status.stateReason && <p className="settings-row__note">{status.stateReason}</p>}
+      {view.on && status.lastError && <p className="settings-row__note" role="alert">Last error: {status.lastError}</p>}
       {actionError && <p className="settings-row__note" role="alert">{actionError}</p>}
     </SettingsRow>
-    <SettingsRow label="Last run" control={<span className="settings-row__state">
-      {status.lastRunAt ? <time dateTime={new Date(status.lastRunAt).toISOString()}>{updatedText(status.lastRunAt).replace('Updated ', '')}</time> : 'Not yet'}
-    </span>}>
-      {status.lastError && <p className="settings-row__note" role="alert">Last error: {status.lastError}</p>}
-    </SettingsRow>
-    <SettingsRow label="Today"
-      control={<span className="settings-row__state">
-        {status.dailyTokenLimit ? `${tokens} of ${status.dailyTokenLimit.toLocaleString()} tokens` : `${tokens} tokens`}
-      </span>} />
-  </>;
+  );
 }
 
 // ── saved memories ─────────────────────────────────────────────────────────
@@ -503,8 +473,7 @@ function SavedMemories({ memoryOn, context, reveal, reloadKey }: {
   };
 
   return (
-    <SettingsSection title="Saved memories" className="memory-saved"
-      intro="Deleting a conversation doesn’t delete what Michi learned from it. Delete those memories here.">
+    <SettingsSection title="Saved memories" className="memory-saved">
       <div className="memory-toolbar">
         <select className="ui-select settings-row__select" aria-label="Show memories" value={effectiveFilter}
           onChange={(event) => setFilter(event.target.value as Filter)}>

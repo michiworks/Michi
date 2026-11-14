@@ -1,6 +1,6 @@
 # Getting started with Michi
 
-Applies to: ordinary chats in desktop/web, with local or connected remote backends. Source checked: 2026-11-08. Runtime availability depends on the backend installation. This is a source-reviewed guide, not a live test of your credentials.
+Applies to: ordinary chats in desktop/web, with local or connected remote backends. Source checked: 2026-11-12. Runtime availability depends on the backend installation. This is a source-reviewed guide, not a live test of your credentials.
 
 ## Install, launch and update
 
@@ -59,29 +59,29 @@ Success check: the file exists on the backend machine, its contents match the re
 
 ## 4. Resume and branch
 
-Reopen the same conversation under its workspace in the Conversations sidebar and ask a follow-up. Michi saves history; native session restoration depends on the runtime and settings. See `sessions-and-recovery`.
+Reopen the same conversation under its workspace in the Conversations sidebar (**By project**; **Recent** lists threads by activity), or press ⌘K, which lists recent threads first and searches messages on every connected backend, and ask a follow-up. Michi saves history; native session restoration depends on the runtime and settings. See `sessions-and-recovery`.
 
 Create a branch for another direction with inherited context. For example:
 
 > Create two research branches: one for a simple implementation and one for an extensible design. Compare the findings here before editing anything.
 
-Explicitly ask when you want split work. `spawn_branches` fans out at most five child threads. Conversation branches do not automatically isolate project files. See `concepts-and-context` and `common-workflows` before parallel implementation.
+Explicitly ask when you want split work. `spawn_branches` fans out at most five child threads, each with this chat's permission setting. Conversation branches do not automatically isolate project files. See `concepts-and-context` and `common-workflows` before parallel implementation.
 
 ## 5. Keep useful results
 
-Use Artifacts for reusable specs, reports, files, images and links. Ask the agent to save a summary as an Artifact, then reference its name with `@` in another prompt. Favoriting an Artifact moves it to the Artifacts drawer's Favorites group; it does not send the full document on every turn.
+Use Artifacts for reusable specs, reports, files, images and links. Ask the agent to save a summary as an Artifact, then reference its name with `@` in another prompt. Favoriting an Artifact moves it to the Artifacts drawer's Favorites group, and a new chat's first message names it; it does not send the full document on every turn, and the agent finds other Artifacts with `list_artifacts` and `search_artifacts`.
 
 Use a thread's Export action for a Markdown transcript. A transcript is useful for reading and sharing, but is not a full restorable application backup. See `files-and-artifacts` and `data-and-backups`.
 
 ## 6. Keep a living Page
 
-Open **Pages** for native documents, child pages and database views. Click **+** to start text, or choose **Other blocks** for another native block. Use **Page actions → Layout preferences** to describe how this page should be organized. The Pages **Assistant** has saved conversation history, **New conversation** and a **Full screen** view within Pages.
+Open **Pages** for native documents, child pages and database views. Click **+** to start text, or choose **Other blocks** for another native block. Use **Page actions → Layout preferences** to describe how this page should be organized. To ask about the page you are on, open the Pages **Assistant**: your agent's panel (⌘J; it carries your agent's name, Michi unless you renamed it), whose **⋯** menu has **New conversation** and **History…**.
 
-Pages currently supports the local backend only. Automatic updates require workspace maintenance to be enabled, the page tree not to be excluded, and an available Pages upkeep runtime configured in **Settings → Michi → Pages upkeep** (the Settings page is named after your agent: Michi unless you renamed it); saving a preference does not start an update. See `pages-and-components`, `pages-maintenance` and `page-component-design` before relying on automation or generating custom components.
+A remote connection's pages are listed in the Pages sidebar and open through that connection, but this computer's Pages upkeep, workspace homes, Databases and All tasks cover only its local workspaces. Automatic updates require Michi to run (it is off until you turn it on with Get started's **Start** or its switch in **Settings → Michi**), workspace maintenance to be enabled, the page tree not to be excluded, and an available Background work runtime in **Settings → Michi → Model** (the Settings page is named after your agent: Michi unless you renamed it); saving a preference does not start an update. See `pages-and-components`, `pages-maintenance` and `page-component-design` before relying on automation or generating custom components.
 
 ## Get help
 
-If a chat disconnects, reopen it before repeating the task; the backend may still be working. Use Stop to request cancellation. A remote backend, the macOS background service (Settings → Scheduled jobs → Background → Keep Michi running in the background) or a Linux `michi start` server keeps running after you close the desktop app or browser. Otherwise local execution ends when the app's backend process stops.
+If a chat disconnects, reopen it before repeating the task; the backend may still be working. Use Stop to request cancellation. A remote backend, the macOS background service (Settings → Notifications → When Michi's windows are closed → Keep Michi running after you quit) or a Linux `michi start` server keeps running after you close the desktop app or browser. Otherwise local execution ends when the app's backend process stops.
 
 Ask: “Consult Michi's built-in docs and diagnose this error. Distinguish documented behavior from what you actually checked.” The agent can call `michi_docs` when available. If Michi tools are missing, open the human guide directly; a missing docs tool cannot diagnose itself.
 

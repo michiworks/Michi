@@ -1,6 +1,5 @@
 import { readMetaAgentMetrics } from '../services/metaAgentMetrics';
 import { LOCAL_AGENT_OWNER_ID } from '../services/agentOwner';
-import { decideToolApproval } from '../services/metaAgent/toolApprovals';
 import { Router } from 'express';
 import type { Response } from 'express';
 import type { MetaAgentSettingsPatch, MetaAgentToolset } from 'michi-shared';
@@ -90,19 +89,6 @@ export function setupMetaAgentRoutes(): Router {
     } catch (err) {
       fail(res, err, 'retry');
     }
-  });
-
-  router.post('/meta-agent/tool-approvals/:id', async (req, res) => {
-    const state = req.body?.state;
-    if (!['approved', 'denied', 'revoked'].includes(state)) {
-      res.status(400).json({ error: 'state must be approved, denied or revoked' }); return;
-    }
-    try {
-      if (!decideToolApproval(req.params.id, state)) {
-        res.status(404).json({ error: 'Tool approval request not found' }); return;
-      }
-      res.json(await info());
-    } catch (err) { fail(res, err, 'tool approval'); }
   });
 
   return router;

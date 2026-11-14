@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
@@ -9,6 +9,7 @@ import {
   nodeGypEnvironment,
   parseArgs,
   parseEnvironmentFile,
+  pruneReleases,
   renderEnvironmentFile,
   renderSystemdUnit,
   resolveRemoteConfig,
@@ -115,4 +116,71 @@ test('remote setup points node-gyp at a Python it accepts', () => {
   assert.equal(nodeGypEnvironment(env, () => true, found), env);
   assert.equal(nodeGypEnvironment({ ...env, npm_config_python: '/x' }, () => false, found).npm_config_python, '/x');
   assert.equal(nodeGypEnvironment(env, () => false, () => null), env);
+});
+
+test('pruning keeps the running build, its rollback, Crew\'s build and every release still in use', () => {
+  const root = realpathSync(mkdtempSync(path.join(os.tmpdir(), 'michi-prune-')));
+  try {
+    const releases = path.join(root, 'releases');
+    const release = (tag) => {
+      const dir = path.join(releases, `${tag.repeat(40)}-${tag}0000000-attempt`);
+      mkdirSync(path.join(dir, 'bin'), { recursive: true });
+      return dir;
+    };
+    const [current, rollback, stale, failed, launcher, workingDir, server, crewSource, crewAgent] = ['a', 'b', 'c', 'd', 'e', 'f', '1', '2', '3'].map(release);
+    mkdirSync(path.join(releases, 'notes'));
+    symlinkSync(stale, path.join(releases, `${'9'.repeat(40)}-link`));
+    const home = path.join(root, 'home');
+    mkdirSync(path.join(home, '.local/bin'), { recursive: true });
+    symlinkSync(path.join(launcher, 'bin'), path.join(home, '.local/bin/michi'));
+    const proc = path.join(root, 'proc');
+    mkdirSync(path.join(proc, '41'), { recursive: true });
+    symlinkSync(workingDir, path.join(proc, '41/cwd'));
+    mkdirSync(path.join(proc, '42'));
+    writeFileSync(path.join(proc, '42/cmdline'), `node\0--experimental-sqlite\0${server}/backend/dist/server.js\0`);
+    mkdirSync(path.join(proc, 'self'));
+    const crewManifest = (dir) => JSON.stringify({ mcpServers: { michi: { command: 'python3', env: { MICHI_CREW_INSTALL_DIR: dir } } } });
+    const crewHome = path.join(root, 'crew-home');
+    mkdirSync(path.join(crewHome, 'apps/michi-crew-runtime'), { recursive: true });
+    mkdirSync(path.join(root, 'crew-app'));
+    writeFileSync(path.join(crewHome, 'apps/michi-crew-runtime/installed.json'), JSON.stringify({ source: path.join(root, 'crew-app') }));
+    writeFileSync(path.join(root, 'crew-app/app.json'), crewManifest(crewSource));
+    mkdirSync(path.join(home, '.kiro/agents'), { recursive: true });
+    writeFileSync(path.join(home, '.kiro/agents/kirocrew.json'), crewManifest(crewAgent));
+    writeFileSync(path.join(home, '.kiro/agents/broken.json'), '{');
+
+    const result = pruneReleases({ repoRoot: current, keep: [rollback], homeDir: home, procDir: proc, env: { KIROCREW_HOME: crewHome } });
+
+    assert.deepEqual(result.removed.sort(), [stale, failed].map((dir) => path.basename(dir)).sort());
+    assert.deepEqual(result.failed, []);
+    assert.deepEqual(readdirSync(releases).sort(), [current, rollback, launcher, workingDir, server, crewSource, crewAgent, 'notes', `${'9'.repeat(40)}-link`].map((dir) => path.basename(dir)).sort());
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('pruning does nothing outside a releases directory or without a process list', () => {
+  const root = realpathSync(mkdtempSync(path.join(os.tmpdir(), 'michi-prune-')));
+  try {
+    const sibling = path.join(root, 'checkouts', `${'c'.repeat(40)}-sibling`);
+    mkdirSync(sibling, { recursive: true });
+    mkdirSync(path.join(root, 'checkouts', 'source'));
+    const outside = pruneReleases({ repoRoot: path.join(root, 'checkouts', 'source'), homeDir: root, procDir: root, env: {} });
+    assert.match(outside.skipped, /not a release/);
+    const release = path.join(root, 'releases', `${'a'.repeat(40)}-current`);
+    const old = path.join(root, 'releases', `${'b'.repeat(40)}-old`);
+    mkdirSync(release, { recursive: true });
+    mkdirSync(old);
+    const blind = pruneReleases({ repoRoot: release, homeDir: root, procDir: path.join(root, 'missing-proc'), env: {} });
+    assert.match(blind.skipped, /cannot be listed/);
+    assert.ok(existsSync(sibling) && existsSync(old));
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('prune-releases accepts repeated --keep paths', () => {
+  const options = parseArgs(['prune-releases', '--keep', '/r/old', '--keep=/r/other', '--data-dir', '/d']);
+  assert.equal(options.action, 'prune-releases');
+  assert.deepEqual(options.keep, ['/r/old', '/r/other']);
 });

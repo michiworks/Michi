@@ -8,7 +8,7 @@ import os from 'node:os';
 import path from 'node:path';
 import {
   applyTurnEvent, createDurableTurn, META_AGENT_FIRST_RUN_HELD_PREFIX, META_AGENT_HELD_WRITE_TOOLS, PAGE_WRITE_TOOL_NAMES,
-  type ChatStreamEvent, type HomeCardsWrite, type PageWriteResult,
+  type ChatStreamEvent, type PageWriteResult,
 } from 'michi-shared';
 import { PAGE_TOOL_NAMES } from '../src/agents/pageToolNames';
 import type { AgentRuntime, AgentSession } from '../src/agents/types';
@@ -29,8 +29,11 @@ import {
   ScheduledJobScheduler, type ScheduledJobExecutor, type ScheduledRunHandle, type ScheduledRunHooks, type ScheduledRunOutcome,
 } from '../src/services/scheduledJobs/scheduler';
 import { planHomeRun, retrySpacesFirstRun, spacesFirstRunStatus, startSpacesFirstRun } from '../src/services/metaAgent/firstRun';
+import { metaAgentRoundStatus } from '../src/services/metaAgent/runNow';
+import { SUMMARY_SPACING_MS } from '../src/services/metaAgent/globalSummary';
+import { CONSOLIDATION_LIMITS } from '../src/services/memory/consolidationPolicy';
+import { recordTypedText, releaseTypedText } from '../src/services/memory/typedText';
 import { getHomeState } from '../src/services/metaAgent/firstRunStore';
-import { configureHomeCardsSink } from '../src/services/metaAgent/homeCardsGenerator';
 import { ensureAssistant } from '../src/assistant/store';
 import { ASSISTANT_TOOLS } from '../src/assistant/tools';
 import type { StartRequestedSelfTurnArgs, StartedRequestedSelfTurn } from '../src/agents/chatHub';
@@ -40,6 +43,7 @@ import { firstRunTurnNote, holdWindowPageWrite, resumeHeldEdits } from '../src/s
 import { parseFirstRunEnd } from '../src/services/metaAgent/firstRunNarration';
 import { saveMessage } from '../src/services/dbRepository';
 import { setMemorySettings } from '../src/services/memory/memoryService';
+import { turnBackgroundWorkOn } from './helpers/backgroundWork';
 
 const OWNER = 'local-user';
 const DAY = 86_400_000;
@@ -63,7 +67,6 @@ let now: number;
 let priorDataDir: string | undefined;
 let priorCloud: string | undefined;
 let jobSeq = 0;
-let cardWrites: HomeCardsWrite[] = [];
 
 type ToolResult = { isError?: boolean; content: Array<{ text: string }>; details?: unknown };
 
@@ -151,7 +154,7 @@ function workspace(id: string, name: string, createdAt = 1): void {
 
 function scheduler(model: FakeModel, instanceId = 'first-run-test'): ScheduledJobScheduler {
   const created = new ScheduledJobScheduler({ repository: new ScheduledJobsRepository(), executor: model,
-    events: new ScheduledJobEventBus(() => now), workspaceExists: () => true, runtimeExists: (id) => id === 'pi',
+    events: new ScheduledJobEventBus(), workspaceExists: () => true, runtimeExists: (id) => id === 'pi',
     clock: () => now, instanceId, createId: () => `job-${++jobSeq}`, pollIntervalMs: 600_000, maxConcurrentRuns: 1, cancelGraceMs: 5 });
   created.start();
   return created;
@@ -212,12 +215,11 @@ beforeEach(() => {
   delete process.env.MICHI_CLOUD;
   closeDb();
   initDb();
+  turnBackgroundWorkOn();
   now = Date.parse('2026-10-23T09:00:00Z');
   mock.method(Date, 'now', () => now);
   jobSeq = 0;
   conversationSeq = 0;
-  cardWrites = [];
-  configureHomeCardsSink({ write: (_owner, cards) => { cardWrites.push(cards); } });
   updateMetaAgentSettings({ runtimeId: 'pi' });
   // Automatic memory is on by default and shares the maintenance coordinator;
   // FakeModel drives only the Pages maintenance tools.
@@ -225,7 +227,6 @@ beforeEach(() => {
 });
 
 afterEach(() => {
-  configureHomeCardsSink(null);
   mock.restoreAll();
   closeDb();
   fs.rmSync(tmpDir, { recursive: true, force: true });
@@ -233,7 +234,7 @@ afterEach(() => {
   if (priorCloud === undefined) delete process.env.MICHI_CLOUD; else process.env.MICHI_CLOUD = priorCloud;
 });
 
-test('first run writes each workspace home newest first, then the Spaces Home and cards, and stays quiet without new input', async () => {
+test('first run writes each workspace home newest first, then the Spaces Home but no Home cards, and stays quiet without new input', async () => {
   // Created B first: the run order follows conversation activity, not creation.
   workspace('ws-b', 'Workspace B', 1); workspace('ws-a', 'Workspace A', 2); workspace('ws-empty', 'Empty', 3); workspace('ws-stale', 'Stale', 4);
   conversation('ws-b', 'Older plan', now - 2 * DAY);
@@ -335,22 +336,16 @@ test('first run writes each workspace home newest first, then the Spaces Home an
     const spacesHome = getPage(ensureSpacesHomePageId(OWNER), OWNER);
     assert.equal(spacesHome.blocks[0]?.type, 'callout');
     assert.equal(spacesFirstRunStatus(OWNER, now).summary.state, 'done');
-    assert.equal(cardWrites.length, 1);
-    assert.equal(cardWrites[0]!.greeting?.detail, 'ws-a moved 3 days ago');
-    assert.deepEqual(cardWrites[0]!.sets[0]!.cards.map((card) => card.id), ['continue-a', 'tip-1']);
-    assert.equal(cardWrites[0]!.sets[0]!.cards[0]!.reason, 'Idle for 3 days');
+    // The chat Home's greeting and cards are Today's and the brief's now (D13): the summary asks for none, and a reply
+    // that still ends with them stores nothing.
+    assert.doesNotMatch(model.started[2]!.job.prompt, /greeting and cards/);
+    assert.equal((getDb().prepare('SELECT COUNT(*) AS n FROM home_cards').get() as { n: number }).n, 0);
 
-    // Nothing new: the minute ticks open no model turn and leave the cards alone.
+    // Nothing new: the minute ticks open no model turn, the next day neither.
     for (let i = 0; i < 3; i += 1) { now += 61_000; await sched.tick(); await until(() => idle(sched)); }
-    assert.equal(model.started.length, 3);
-    assert.equal(cardWrites.length, 1);
-
-    // Next day: the date wording moves without a model call.
     now += DAY;
     await sched.tick(); await until(() => idle(sched));
     assert.equal(model.started.length, 3);
-    assert.equal(cardWrites.length, 2);
-    assert.equal(cardWrites[1]!.sets[0]!.cards[0]!.reason, 'Idle for 4 days');
 
     // A person's edit to a workspace home is not new input; an Agent block change is.
     const homeB = homeOf('ws-b');
@@ -362,7 +357,13 @@ test('first run writes each workspace home newest first, then the Spaces Home an
       sources: [{ nodeId: 'n', turnId: 't', assistantId: 'a' }] }]), homeB);
     now += 61_000; await sched.tick();
     await until(() => model.started.length === 4 && idle(sched), 'second summary', sched);
-    assert.match(model.started[3]!.job.prompt, /Spaces Home summary/);
+    const second = model.started[3]!.job.prompt;
+    assert.match(second, /Spaces Home summary/);
+    // Only the home that changed since the last summary is read again.
+    assert.match(second, /^- Workspace B \(ws-b\) \(changed\)$/m);
+    assert.match(second, /^- Workspace A \(ws-a\)$/m);
+    assert.match(second, /Read the workspace homes marked \(changed\)/);
+    assert.doesNotMatch(model.started[2]!.job.prompt, /\(changed\)/, 'the first summary reads every home');
   } finally {
     await sched.stop();
   }
@@ -643,6 +644,32 @@ test('the first read covers the range from the settings, fixed when the run is q
   }
 });
 
+test('the first read leaves temporary chats out: not counted, listed or read', async () => {
+  workspace('ws-a', 'Workspace A');
+  conversation('ws-a', 'Recent', now - 2 * DAY);
+  const secret = conversation('ws-a', 'Secret plan', now - DAY);
+  getDb().prepare("UPDATE nodes SET memory_mode = 'off' WHERE id = ?").run(secret);
+  const model = new FakeModel();
+  const sched = scheduler(model);
+  let listed: string[] = [];
+  const reads: ToolResult[] = [];
+  model.script = () => (current) => {
+    listed = current.call('list_threads', {}).conversations.map((entry: { title: string }) => entry.title);
+    reads.push(current.attempt('read_node', { nodeId: secret }));
+    writesHome(current, 'A');
+  };
+  try {
+    startSpacesFirstRun(sched, OWNER, now);
+    assert.equal(getFirstRun('ws-a', OWNER)?.total, 1);
+    await until(() => getFirstRun('ws-a', OWNER)?.state === 'done' && idle(sched), 'first run', sched);
+    assert.deepEqual(listed, ['Recent']);
+    assert.equal(reads[0]?.isError, true);
+    assert.doesNotMatch(reads[0]!.content[0]!.text, /Secret/);
+  } finally {
+    await sched.stop();
+  }
+});
+
 test('with workspace homes off, background runs leave the homes alone until writing is on again', async () => {
   updateMetaAgentSettings({ writeWorkspaceHomes: false, maintainSpacesHome: false });
   workspace('ws-a', 'Workspace A');
@@ -676,7 +703,8 @@ test('with workspace homes off, background runs leave the homes alone until writ
     assert.equal(getFirstRun('ws-a', OWNER)?.total, 2, 'the first read is queued over a fresh range');
     await until(() => getFirstRun('ws-a', OWNER)?.state === 'done' && idle(sched), 'the first read', sched);
     conversation('ws-a', 'Later work', now);
-    now += 61_000; await sched.tick();
+    // Two incremental batches of an owner start at least spacingMs apart.
+    now += CONSOLIDATION_LIMITS.spacingMs; await sched.tick();
     await until(() => offered.length === 2 && idle(sched), 'the next incremental run', sched);
     assert.equal(offered.at(-1)!.includes(home), true, 'with writing on the home is offered again');
   } finally {
@@ -776,7 +804,7 @@ test('the window conversation hears the first run: what it reads, each home, the
     const blocks = getPage(homeB, OWNER).blocks;
     getDb().prepare('UPDATE pages SET blocks=? WHERE id=?').run(JSON.stringify([...blocks, { id: 'block-agent', type: 'markdown', text: 'B shipped', rev: 9,
       sources: [{ nodeId: 'n', turnId: 't', assistantId: 'a' }] }]), homeB);
-    now += 61_000; await sched.tick();
+    now += SUMMARY_SPACING_MS; await sched.tick();
     await until(() => summaryPrompts.length === 2 && idle(sched), 'second summary', sched);
     assert.doesNotMatch(summaryPrompts[1]!, /closes the first-time generation/);
     await postsLanded();
@@ -813,23 +841,130 @@ test('after the first run closed, a workspace home change runs an ordinary summa
     const blocks = getPage(homeA, OWNER).blocks;
     getDb().prepare('UPDATE pages SET blocks=? WHERE id=?').run(JSON.stringify([...blocks, { id: 'block-agent', type: 'markdown', text: 'A shipped', rev: 9,
       sources: [{ nodeId: 'n', turnId: 't', assistantId: 'a' }] }]), homeA);
-    const due = spacesFirstRunStatus(OWNER, now);
-    assert.deepEqual([due.summary.state, due.closed], ['due', true]);
+    // An ordinary summary waits an hour after the last one.
+    const waiting = spacesFirstRunStatus(OWNER, now);
+    assert.deepEqual([waiting.summary.state, waiting.closed], ['waiting', true]);
     assert.equal(holdWindowPageWrite(null, { turnId: 'turn-later', assistantId: 'a-later' }), null);
     assert.doesNotMatch(firstRunTurnNote(), /still writing/);
+    now += 61_000; await sched.tick(); await until(() => idle(sched));
+    assert.equal(during.length, 1, 'no summary within the hour');
 
-    now += 61_000; await sched.tick();
+    now += SUMMARY_SPACING_MS;
+    assert.equal(spacesFirstRunStatus(OWNER, now).summary.state, 'due');
+    await sched.tick();
     await until(() => during.length === 2 && idle(sched), 'the later summary', sched);
     assert.deepEqual(during[1], { closed: true, state: 'running', held: null });
     assert.deepEqual([spacesFirstRunStatus(OWNER, now).summary.state, spacesFirstRunStatus(OWNER, now).closed], ['done', true]);
 
     // Undoing that change brings back homes an earlier summary read; the page now says what the undone block said, so it runs again.
     getDb().prepare('UPDATE pages SET blocks=? WHERE id=?').run(JSON.stringify(blocks), homeA);
+    assert.equal(spacesFirstRunStatus(OWNER, now).summary.state, 'waiting');
+    now += SUMMARY_SPACING_MS;
     assert.equal(spacesFirstRunStatus(OWNER, now).summary.state, 'due');
-    now += 61_000; await sched.tick();
+    await sched.tick();
     await until(() => during.length === 3 && idle(sched), 'the summary after the undo', sched);
     assert.equal(spacesFirstRunStatus(OWNER, now).summary.state, 'done');
   } finally {
+    await sched.stop();
+  }
+});
+
+test('a Run now that the Spaces Home summary takes is followed by the workspace\'s own batch, which waits for nothing either', async () => {
+  workspace('ws-a', 'Workspace A');
+  conversation('ws-a', 'Release', now - 3_600_000);
+  const model = new FakeModel();
+  const sched = scheduler(model);
+  const batches: string[][] = [];
+  model.script = (run) => (current) => {
+    if (/First-time/.test(run.job.prompt)) { writesHome(current, 'A'); return; }
+    if (/Spaces Home summary/.test(run.job.prompt)) return writesSummary(current, now);
+    const sources = run.hooks.maintenanceContext?.sources ?? [];
+    batches.push(sources.map((source) => source.sourceTurnId));
+    for (const { sourceTurnId } of sources) {
+      const parts = current.call<{ parts: Array<{ partId: string; partHash: string }> }>('maintenance_read_source', { sourceTurnId }).parts;
+      current.call('maintenance_read_source', { sourceTurnId, acknowledgeParts: parts.map(({ partId, partHash }) => ({ partId, partHash })) });
+      current.call('maintenance_list_resources', { sourceTurnId });
+      current.call('maintenance_route_source', { sourceTurnId, candidates: [], reason: 'Nothing to record' });
+    }
+  };
+  try {
+    startSpacesFirstRun(sched, OWNER, now);
+    await until(() => getFirstRun('ws-a', OWNER)?.state === 'done' && idle(sched), 'the home', sched);
+    now += 61_000; await sched.tick();
+    await until(() => spacesFirstRunStatus(OWNER, now).summary.state === 'done' && idle(sched), 'the closing summary', sched);
+    const homeA = homeOf('ws-a');
+    getDb().prepare('UPDATE pages SET blocks=? WHERE id=?').run(JSON.stringify([...getPage(homeA, OWNER).blocks, { id: 'block-agent', type: 'markdown',
+      text: 'A shipped', rev: 9, sources: [{ nodeId: 'n', turnId: 't', assistantId: 'a' }] }]), homeA);
+    conversation('ws-a', 'Hotfix', now);
+    recordTypedText('node-typing', 'turn-typing', 'Still on the hotfix');
+    now += 61_000; await sched.tick(); await until(() => idle(sched));
+    assert.equal(model.started.length, 2, 'on its own nothing starts: the summary waits for the hour, the batch for an idle user');
+
+    const jobId = getMaintenanceConfig('ws-a', OWNER)!.jobId;
+    assert.ok('run' in sched.startNow(jobId));
+    await until(() => batches.length === 1 && idle(sched), 'the batch after the summary', sched);
+    assert.match(model.started[2]!.job.prompt, /Spaces Home summary/);
+    assert.equal(model.started.length, 4);
+    assert.deepEqual(batches[0], ['turn-2']);
+    assert.equal(sched.listRuns(jobId)[0]!.trigger, 'manual');
+  } finally {
+    releaseTypedText('node-typing', 'turn-typing');
+    await sched.stop();
+  }
+});
+
+test('Update brings the Spaces Home up to date: a home its batch rewrote is summarised in the same round, past the hour', async () => {
+  workspace('ws-a', 'Workspace A');
+  conversation('ws-a', 'Release', now - 3_600_000);
+  const model = new FakeModel();
+  const sched = scheduler(model);
+  let batches = 0;
+  model.script = (run) => (current) => {
+    if (/First-time/.test(run.job.prompt)) { writesHome(current, 'A'); return; }
+    if (/Spaces Home summary/.test(run.job.prompt)) return writesSummary(current, now);
+    batches += 1;
+    for (const { sourceTurnId } of run.hooks.maintenanceContext?.sources ?? []) {
+      const parts = current.call<{ parts: Array<{ partId: string; partHash: string }> }>('maintenance_read_source', { sourceTurnId }).parts;
+      current.call('maintenance_read_source', { sourceTurnId, acknowledgeParts: parts.map(({ partId, partHash }) => ({ partId, partHash })) });
+      current.call('maintenance_list_resources', { sourceTurnId });
+      current.call('maintenance_route_source', { sourceTurnId, candidates: [], reason: 'Nothing to record' });
+    }
+    // Stands in for the batch's write to its workspace home.
+    const homeA = homeOf('ws-a');
+    getDb().prepare('UPDATE pages SET blocks=?, updated_at=? WHERE id=?').run(JSON.stringify([...getPage(homeA, OWNER).blocks, { id: `block-${batches}`,
+      type: 'markdown', text: `Batch ${batches}`, rev: 9, sources: [{ nodeId: 'n', turnId: 't', assistantId: 'a' }] }]), now, homeA);
+  };
+  const running = () => metaAgentRoundStatus({ scheduler: sched, ownerUserId: OWNER, now }).workspaces.map((row) => row.running);
+  try {
+    startSpacesFirstRun(sched, OWNER, now);
+    await until(() => getFirstRun('ws-a', OWNER)?.state === 'done' && idle(sched), 'the home', sched);
+    now += 61_000; await sched.tick();
+    await until(() => spacesFirstRunStatus(OWNER, now).summary.state === 'done' && idle(sched), 'the closing summary', sched);
+    conversation('ws-a', 'Hotfix', now);
+    recordTypedText('node-typing', 'turn-typing', 'Still on the hotfix');
+    now += 61_000;
+    const jobId = getMaintenanceConfig('ws-a', OWNER)!.jobId;
+    assert.ok('run' in sched.startNow(jobId));
+    // The batch ends with no tick after it: the round counts A as running until the summary has run.
+    for (let i = 0; i < 400 && !(batches === 1 && idle(sched)); i += 1) await flush();
+    assert.equal(model.started.length, 3);
+    assert.deepEqual(running(), [true]);
+    await sched.tick();
+    await until(() => model.started.length === 4 && idle(sched), 'the summary after the batch', sched);
+    assert.match(model.started[3]!.job.prompt, /Spaces Home summary/);
+    assert.equal(spacesFirstRunStatus(OWNER, now).summary.state, 'done');
+    assert.deepEqual(running(), [false], 'the round is over');
+
+    // An automatic batch afterwards renews nothing: its home change waits for the hour.
+    releaseTypedText('node-typing', 'turn-typing');
+    conversation('ws-a', 'Follow-up', now);
+    now += CONSOLIDATION_LIMITS.spacingMs; await sched.tick();
+    await until(() => batches === 2 && idle(sched), 'the automatic batch', sched);
+    assert.equal(sched.listRuns(jobId)[0]!.trigger, 'scheduled');
+    assert.equal(spacesFirstRunStatus(OWNER, now).summary.state, 'waiting');
+    assert.equal(model.started.length, 5);
+  } finally {
+    releaseTypedText('node-typing', 'turn-typing');
     await sched.stop();
   }
 });

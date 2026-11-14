@@ -120,7 +120,7 @@ function InstructionsEditor({ maintenance }: { maintenance: PageMaintenanceState
 export function MaintenanceWatches({ maintenance }: { maintenance: PageMaintenanceState }) {
   const name = useCompanionName();
   const { value, busy } = maintenance;
-  const [editing, setEditing] = React.useState<string | 'new' | null>(null);
+  const [editing, setEditing] = React.useState<string | null>(null);
   const [confirmingDelete, setConfirmingDelete] = React.useState<string | null>(null);
   const watches = value?.watches;
   // An older backend sends no watches: it cannot run them.
@@ -129,11 +129,11 @@ export function MaintenanceWatches({ maintenance }: { maintenance: PageMaintenan
   return (
     <div style={{ borderTop: '1px solid var(--term-line)', marginTop: 12 }}>
       <InstructionsEditor maintenance={maintenance} />
-      <section aria-label="Watches" style={{ marginTop: 14 }}>
+      {watches.length > 0 && <section aria-label="Watches" style={{ marginTop: 14 }}>
         <h4 style={heading}>Watches</h4>
         <p style={{ ...muted, margin: '3px 0 0' }}>
           Timed checks of outside sources, such as tickets or tasks. Each check uses {name}’s read-only tools and updates this workspace’s pages and task board.
-          Tools that are not read-only need your approval in Settings › {name} › Pages upkeep first.
+          New watches can’t be added: ask {name} for a scheduled job instead.
         </p>
         {watches.map((watch) => editing === watch.id
           ? <WatchForm key={watch.id} initial={watch} busy={busy} submitLabel="Save watch" onCancel={() => setEditing(null)}
@@ -158,11 +158,7 @@ export function MaintenanceWatches({ maintenance }: { maintenance: PageMaintenan
               </div>
             </div>
           </div>)}
-        {editing === 'new'
-          ? <WatchForm busy={busy} submitLabel="Add watch" onCancel={() => setEditing(null)}
-            onSubmit={(input) => maintenance.addWatch(input).then(() => setEditing(null))} />
-          : watches.length < MAINTENANCE_WATCH_LIMITS.maxWatches && <button type="button" style={{ marginTop: 9 }} disabled={busy} onClick={() => setEditing('new')}>Add a watch</button>}
-      </section>
+      </section>}
     </div>
   );
 }

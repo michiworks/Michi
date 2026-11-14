@@ -129,13 +129,14 @@ async function settings(page: Page) {
     rowLabel: await px(main.locator('.settings-phone__label').filter({ hasText: 'Runtime & model' })),
     rowValue: await px(main.locator('.settings-phone__value').first()),
   };
-  await selectSettingsSection(page, 'Notifications');
-  const notifications = {
-    rowLabel: await px(main.locator('.settings-row__label').filter({ hasText: 'Notification sounds' })),
+  // A page with a described row and a radio list with descriptions (Notifications has neither since 2026-11-12).
+  await selectSettingsSection(page, 'Appearance');
+  const appearance = {
+    rowLabel: await px(main.locator('.settings-row__label').filter({ hasText: 'Palette' })),
     rowDescription: await px(main.locator('.settings-row__desc').first()),
     optionDescription: await px(main.locator('.settings-radio__description').first()),
   };
-  return { list, notifications };
+  return { list, appearance };
 }
 
 const EXPECTED: Record<Preset, unknown> = {
@@ -144,7 +145,7 @@ const EXPECTED: Record<Preset, unknown> = {
     artifacts: { title: 11, count: 11, name: 15, meta: 12 },
     settings: {
       list: { title: 11, groupLabel: 12, rowLabel: 15, rowValue: 15 },
-      notifications: { rowLabel: 15, rowDescription: 13, optionDescription: 13 },
+      appearance: { rowLabel: 15, rowDescription: 13, optionDescription: 13 },
     },
   },
   l: {
@@ -152,7 +153,7 @@ const EXPECTED: Record<Preset, unknown> = {
     artifacts: { title: 13, count: 13, name: 17, meta: 14 },
     settings: {
       list: { title: 13, groupLabel: 14, rowLabel: 17, rowValue: 17 },
-      notifications: { rowLabel: 17, rowDescription: 15, optionDescription: 15 },
+      appearance: { rowLabel: 17, rowDescription: 15, optionDescription: 15 },
     },
   },
 };

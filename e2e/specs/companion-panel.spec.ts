@@ -1,8 +1,9 @@
-import { expect, test, type Page } from '@playwright/test';
-import { formatCompanionThreadMessage, type CompanionCardDto, type CompanionCheckinChangeDto } from '../../shared/src/companion';
+import { expect, test, type Locator, type Page, type Route } from '@playwright/test';
+import { DEFAULT_COMPANION_SETTINGS, formatCompanionThreadMessage, type CompanionCardDto, type CompanionCheckinChangeDto } from '../../shared/src/companion';
 import { installMockApi } from '../fixtures/mockApi';
 import { companionItem, createCompanionMock, type CompanionMockController } from '../fixtures/companionFixtures';
-import { openSettings, openThreadFromSidebar } from '../fixtures/shell';
+import { createMemoryMock, memoryRecord } from '../fixtures/memoryFixtures';
+import { leaveSettings, openSettings, openThreadFromSidebar } from '../fixtures/shell';
 
 const runs = { runtimeId: 'mock', providerId: null, modelId: null, reasoning: null };
 const conversation = {
@@ -43,10 +44,12 @@ function workWorkspace(messages: unknown[]) {
   };
 }
 
-async function boot(page: Page, companion: CompanionMockController, messages: unknown[], { openedBefore, prefs = {}, workMessages = [] }: {
+async function boot(page: Page, companion: CompanionMockController, messages: unknown[], { openedBefore, prefs = {}, workMessages = [], extra }: {
   openedBefore: boolean;
   prefs?: Record<string, unknown>;
   workMessages?: unknown[];
+  /** More routes this spec answers itself (true: answered). */
+  extra?: (route: Route) => Promise<boolean>;
 }) {
   const workspace = companionWorkspace(messages);
   const work = workWorkspace(workMessages);
@@ -65,6 +68,7 @@ async function boot(page: Page, companion: CompanionMockController, messages: un
       if (path.startsWith('/api/workspaces/ws-assistant/trees/') && path.endsWith('/messages')) { await route.fulfill({ json: { messages } }); return true; }
       if (path === '/api/workspaces/ws-work') { await route.fulfill({ json: work }); return true; }
       if (path.startsWith('/api/workspaces/ws-work/trees/') && path.endsWith('/messages')) { await route.fulfill({ json: { messages: workMessages } }); return true; }
+      if (extra && await extra(route)) return true;
       return companion.handle(route);
     },
   });
@@ -187,7 +191,7 @@ test('a proposal shows all that Apply will do before it can be applied, and noth
   expect(errors).toEqual([]);
 });
 
-test('a notice the backend sends opens Today at its item: past View all, briefly highlighted', async ({ page }, info) => {
+test('a Needs you record the backend sends opens Today at its item: past View all, briefly highlighted', async ({ page }, info) => {
   const errors: string[] = [];
   page.on('pageerror', (error) => errors.push(error.message));
   const tomorrow = new Date();
@@ -200,11 +204,11 @@ test('a notice the backend sends opens Today at its item: past View all, briefly
       companionItem('cmi-mail', 'Quarterly planning', { source: 'email', subtype: 'email_unread', bucket: 'update', severity: 'digest', itemKey: 'email:conv-1' }),
     ],
     status: { nextBriefAt: tomorrow.getTime() },
-    // A browser has no Electron main: the notices the gate sends reach it over the change feed.
-    notices: [{
-      id: 'cmn-1', title: 'Companion', body: 'Mail from Alex: Quarterly planning',
-      target: { kind: 'companion', tab: 'today', itemId: 'cmi-mail' }, itemIds: ['cmi-mail'],
-      createdAt: Date.now(), expiresAt: Date.now() + 3_600_000,
+    // Michi's notices are attention records on the background feed, as every window gets them.
+    records: [{
+      id: 'attn-1', key: 'agent:item:cmi-mail', kind: 'needs_input', reason: 'needs_you', title: 'Companion', body: 'Mail from Alex: Quarterly planning',
+      target: { type: 'agent', ref: 'item:cmi-mail', open: { kind: 'companion', tab: 'today', itemId: 'cmi-mail' }, workspaceId: 'ws-michi' },
+      createdAt: Date.now(), claimedByWindowId: null, claimedAt: null,
     }],
   });
   await boot(page, companion, seeded, { openedBefore: true });
@@ -228,28 +232,91 @@ test('a notice the backend sends opens Today at its item: past View all, briefly
   expect(errors).toEqual([]);
 });
 
-test('the first open lands on Chat, where an empty conversation asks the Companion to introduce itself', async ({ page }) => {
+test('the first open shows Get started in Chat: nothing starts before Start, and the card follows the first run to its end (D17)', async ({ page }, info) => {
   const errors: string[] = [];
   page.on('pageerror', (error) => errors.push(error.message));
-  // The backend decides that the welcome is wanted (nothing said yet); the panel asks for it once.
-  const companion = createCompanionMock({ conversation, welcome: { wanted: true } });
-  await boot(page, companion, [], { openedBefore: false });
+  const sources = { ...DEFAULT_COMPANION_SETTINGS.sources };
+  for (const kind of ['cr', 'pipeline', 'email', 'calendar'] as const) sources[kind] = { ...sources[kind], enabled: false };
+  const companion = createCompanionMock({
+    conversation, settings: { sources }, welcome: { wanted: true },
+    getStarted: { state: 'offer', at: null, nodeId: 'companion-node', homes: null, watch: null, homesOn: true, firstRunDays: 30 },
+  });
+  // The Pages first run: none until Start; then reading, then done.
+  const home = (state: string, readCount: number) => ({ workspaceId: 'ws-work', workspaceName: 'Work', homePageId: 'pg-work', hiddenAt: null,
+    firstRun: { workspaceId: 'ws-work', state, total: 40, readCount, startSeq: 0, startedAt: 1, updatedAt: Date.now(), error: null } });
+  let reads = 0;
+  const firstRun = () => {
+    if (!companion.writes.includes('POST /companion/get-started')) {
+      return { requestedAt: null, workspaces: [], summary: { state: 'waiting', summarizedAt: null }, haltedReason: null, closed: false };
+    }
+    reads += 1;
+    return reads === 1
+      ? { requestedAt: 1, workspaces: [home('reading', 12)], summary: { state: 'waiting', summarizedAt: null }, haltedReason: null, closed: false }
+      : { requestedAt: 1, workspaces: [home('done', 40)], summary: { state: 'done', summarizedAt: 2 }, haltedReason: null, closed: true };
+  };
+  const extra = async (route: Route) => {
+    const path = new URL(route.request().url()).pathname;
+    // Automatic memory as a new install has it: off until Settings › Memory turns it on; Start leaves it so.
+    if (path === '/api/memory-extraction/status') {
+      await route.fulfill({ json: { enabled: true, paused: true, lastRunAt: null, lastError: null, todayTokens: 0, dailyTokenLimit: null } });
+      return true;
+    }
+    if (path !== '/api/spaces-home/first-run') return false;
+    await route.fulfill({ json: firstRun() });
+    return true;
+  };
+  await boot(page, companion, [], { openedBefore: false, extra });
 
   await page.getByRole('button', { name: 'Michi, new', exact: true }).click();
   const panel = page.getByRole('complementary', { name: 'Michi', exact: true });
   await expect(panel.getByRole('tab', { name: /Chat/ })).toHaveAttribute('aria-selected', 'true');
-  await expect.poll(() => companion.writes).toContain('POST /companion/welcome');
-  expect(companion.writes.filter((write) => write === 'POST /companion/welcome')).toHaveLength(1);
-  // Opened once: no New dot any more.
+  const card = panel.getByRole('region', { name: 'Get started' });
+  await expect(panel.getByText(/I’m Michi\. I keep a home page for each workspace/)).toBeVisible();
+  await expect(card.getByRole('checkbox', { name: /Keep workspace homes up to date/ })).toBeChecked();
+  await expect(card.getByRole('checkbox', { name: 'Watch: Code reviews · Pipelines · Email · Calendar' })).not.toBeChecked();
+  await expect(card.getByText('Morning brief: Weekdays 09:00')).toBeVisible();
+  await expect(card.getByText(/Learn from conversations: Off/)).toBeVisible();
+  await page.screenshot({ path: info.outputPath('companion-get-started.png') });
+  // Opened once: no New dot any more. Nothing started: no welcome, no Start.
   await expect(page.getByRole('button', { name: 'Michi', exact: true })).toBeVisible();
+  expect(companion.writes.filter((write) => write.includes('welcome') || write.includes('get-started'))).toEqual([]);
+
+  await card.getByRole('checkbox', { name: /Watch:/ }).check();
+  const start = page.waitForRequest((request) => request.url().endsWith('/api/companion/get-started'));
+  await card.getByRole('button', { name: 'Start' }).click();
+  expect((await start).postDataJSON()).toEqual({ homes: true, watch: true });
+  await expect(card.getByRole('status')).toContainText('Reading Work: 12 of 40 conversations');
+  await page.screenshot({ path: info.outputPath('companion-get-started-reading.png') });
+  await expect(card.getByRole('status')).toHaveText('Workspace homes are ready · Open Pages', { timeout: 10_000 });
+  await expect(card.getByRole('checkbox')).toHaveCount(0);
+  await page.screenshot({ path: info.outputPath('companion-get-started-ready.png') });
+  expect(companion.writes).not.toContain('POST /companion/welcome');
   expect(errors).toEqual([]);
 });
 
-test('a welcome try that never spoke still asks for the welcome, and the header says so while the agent takes its first look', async ({ page }, info) => {
+test('V always uses memory: no memory setting in its composer, and it says what a reply was based on', async ({ page }, info) => {
   const errors: string[] = [];
   page.on('pageerror', (error) => errors.push(error.message));
-  // The welcome looks at every source before its turn starts (DESIGN-v2 §3.8): the
-  // backend reports the first look, and that the welcome is still wanted.
+  const short = memoryRecord('mem-short', 'Keep answers short.', { kind: 'preference' });
+  const memory = createMemoryMock({ records: [short], conversations: true,
+    sources: { 'a-1': [{ kind: 'memory', memoryId: short.id, text: short.body, savedBy: 'user', at: Date.now() - 3_600_000, from: null }] } });
+  const companion = createCompanionMock({ conversation });
+  await boot(page, companion, seeded, { openedBefore: true, extra: memory.handle });
+
+  await page.locator('[data-companion-button]').click();
+  const chat = page.getByRole('complementary', { name: 'Michi', exact: true }).getByRole('tabpanel', { name: 'Chat' });
+  const based = chat.locator('[data-msg-id="a-1"]').getByRole('region', { name: 'What this reply was based on' });
+  await expect(based.locator('.t-reply-sources-toggle')).toHaveText('Based on 1 thing you told me');
+  expect(memory.sourceRequests.flat()).toContain('a-1');
+  await expect(chat.getByRole('button', { name: /^Memory: / })).toHaveCount(0);
+  await page.screenshot({ path: info.outputPath('companion-memory.png') });
+  expect(errors).toEqual([]);
+});
+
+test('while the agent takes its first look the header says so, and the panel asks for no welcome', async ({ page }, info) => {
+  const errors: string[] = [];
+  page.on('pageerror', (error) => errors.push(error.message));
+  // A backend still running a welcome reports its first look (DESIGN-v2 §3.8); this window never asks for one (D17).
   const companion = createCompanionMock({ conversation, status: { working: true, firstLook: true }, welcome: { wanted: true } });
   // A welcome try that never spoke left its empty row.
   await boot(page, companion, [
@@ -263,9 +330,7 @@ test('a welcome try that never spoke still asks for the welcome, and the header 
   await expect(panel.locator('.companion-head').getByRole('status')).toHaveText('Taking a first look…');
   await expect(panel.locator('.companion-head').getByRole('button', { name: 'Stop' })).toHaveCount(0);
   await page.screenshot({ path: info.outputPath('companion-first-look.png') });
-  // The backend wants the welcome and the user has not written: the agent is asked to introduce itself, once.
-  await expect.poll(() => companion.writes).toContain('POST /companion/welcome');
-  expect(companion.writes.filter((write) => write === 'POST /companion/welcome')).toHaveLength(1);
+  expect(companion.writes).not.toContain('POST /companion/welcome');
   expect(errors).toEqual([]);
 });
 
@@ -358,7 +423,7 @@ test('the window tells the backend its chat notification level at start and when
 
   await expect.poll(() => companion.notificationLevels).toEqual(['approval-only']);
   const settings = await openSettings(page, 'Notifications');
-  await settings.getByRole('radiogroup', { name: 'Notification level' }).getByRole('radio', { name: 'Off' }).check();
+  await settings.getByRole('combobox', { name: 'Notify me' }).selectOption('off');
   await expect.poll(() => companion.notificationLevels).toEqual(['approval-only', 'off']);
   expect(errors).toEqual([]);
 });
@@ -394,5 +459,85 @@ test('a follow-up from the agent in the conversation it started reads “From Mi
   await page.screenshot({ path: info.outputPath('companion-follow-up-from.png') });
   await source.getByRole('button', { name: 'Michi' }).click();
   await expect(page.getByRole('complementary', { name: 'Michi', exact: true })).toBeVisible();
+  expect(errors).toEqual([]);
+});
+
+test('why a turn’s tools ask reads below its message, not under the bubble', async ({ page }, info) => {
+  const errors: string[] = [];
+  page.on('pageerror', (error) => errors.push(error.message));
+  const companion = createCompanionMock({ conversation });
+  const turn = (companionTurn: Record<string, string>) => JSON.stringify({ companionTurn });
+  await boot(page, companion, [
+    ...seeded,
+    { id: 'u-2', node_id: 'companion-node', role: 'user', seq: 3, content: 'Review it in a new chat', metadata: turn({ startTaint: 'checkin' }) },
+    { id: 'a-2', node_id: 'companion-node', role: 'assistant', seq: 4, content: 'Opened one.' },
+  ], {
+    openedBefore: true,
+    workMessages: [
+      { id: 'u-seed', node_id: 'n-worker', role: 'user', seq: 0, content: 'Fix the failing pipeline.' },
+      { id: 'a-seed', node_id: 'n-worker', role: 'assistant', seq: 1, content: 'I reran the Release stage.' },
+      { id: 'u-next', node_id: 'n-worker', role: 'user', seq: 2, content: 'Now update the changelog.', metadata: turn({ carriedTaint: 'checkin' }) },
+      { id: 'a-next', node_id: 'n-worker', role: 'assistant', seq: 3, content: 'Updated.' },
+    ],
+  });
+  // The bubble is positioned, so a line pulled up into it is painted over (5b737b9ec floated the actions row).
+  const startsBelow = async (bubble: Locator, note: Locator) => {
+    await expect(note).toBeVisible();
+    const [b, n] = [await bubble.boundingBox(), await note.boundingBox()];
+    expect(n!.y).toBeGreaterThanOrEqual(b!.y + b!.height);
+  };
+
+  await page.locator('[data-companion-button]').click();
+  const chat = page.getByRole('complementary', { name: 'Michi', exact: true }).getByRole('tabpanel', { name: 'Chat' });
+  await startsBelow(
+    chat.locator('.terminal-message-user', { hasText: 'Review it in a new chat' }),
+    chat.getByRole('note').filter({ hasText: 'this turn includes check-in material' }),
+  );
+  await page.screenshot({ path: info.outputPath('companion-turn-note.png') });
+
+  await openThreadFromSidebar(page, 'Fix the failing pipeline');
+  await startsBelow(
+    page.locator('.terminal-message-user', { hasText: 'Now update the changelog.' }),
+    page.getByRole('note').filter({ hasText: 'this conversation read check-in material earlier' }),
+  );
+  await page.screenshot({ path: info.outputPath('carried-turn-note.png') });
+  expect(errors).toEqual([]);
+});
+
+test('while Michi is off its button, ⌘J and its palette rows are gone; Settings turns it on and the button is back at once; turning it off closes the panel (Q29)', async ({ page }, info) => {
+  const errors: string[] = [];
+  page.on('pageerror', (error) => errors.push(error.message));
+  const companion = createCompanionMock({ conversation, settings: { paused: true }, items: [companionItem('cmi-cr', 'CR-123456 needs attention')] });
+  await boot(page, companion, seeded, { openedBefore: true });
+  const button = page.locator('[data-companion-button]');
+  const panel = page.getByRole('complementary', { name: 'Michi', exact: true });
+  await expect(button).toHaveCount(0);
+  await page.keyboard.press('ControlOrMeta+j');
+  await page.keyboard.press('ControlOrMeta+Shift+j');
+  await expect(panel).toHaveCount(0);
+  await page.screenshot({ path: info.outputPath('michi-off-topbar.png') });
+
+  const palette = page.getByRole('dialog', { name: 'Command palette' });
+  const search = palette.getByPlaceholder('Search chats, commands, messages…');
+  await page.getByRole('button', { name: 'Search', exact: true }).click();
+  await search.fill('Michi');
+  await expect(palette.getByText('Turn Michi on', { exact: true })).toBeVisible();
+  for (const gone of ['Ask Michi', 'Michi: Today', 'Michi: Check now', 'Michi: Settings']) await expect(palette.getByText(gone, { exact: true })).toHaveCount(0);
+  await page.keyboard.press('Escape');
+
+  const settings = await openSettings(page, 'Michi');
+  await settings.getByRole('switch', { name: 'Michi', exact: true }).click();
+  await expect(settings.getByRole('switch', { name: 'Michi', exact: true })).toHaveAttribute('aria-checked', 'true');
+  await leaveSettings(page);
+  await expect(button).toBeVisible();
+  await button.click();
+  await expect(panel).toBeVisible();
+
+  // Off from the palette with the panel open: the panel closes and the button goes.
+  await page.getByRole('button', { name: 'Search', exact: true }).click();
+  await search.fill('Turn Michi off');
+  await palette.getByText('Turn Michi off', { exact: true }).click();
+  await expect(panel).toHaveCount(0);
+  await expect(button).toHaveCount(0);
   expect(errors).toEqual([]);
 });

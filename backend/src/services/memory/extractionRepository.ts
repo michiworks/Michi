@@ -34,10 +34,11 @@ export function extractionIdempotencyKey(input: { ownerUserId: string; workspace
 
 export interface ExtractionOwnerState { paused: boolean; enabledAt: number | null }
 
+/** Automatic memory is off (paused) until the owner turns it on in Settings: an owner without a row is paused, and so is a new row. */
 export function getExtractionState(ownerUserId: string, database: DatabaseSync = db()): ExtractionOwnerState {
   const row = database.prepare('SELECT paused, enabled_at FROM memory_extraction_state WHERE owner_user_id = ?').get(ownerUserId) as
     { paused: number; enabled_at: number | null } | undefined;
-  return { paused: row?.paused === 1, enabledAt: row?.enabled_at ?? null };
+  return { paused: row ? row.paused === 1 : true, enabledAt: row?.enabled_at ?? null };
 }
 
 export function setExtractionPaused(ownerUserId: string, paused: boolean, now: number): void {
@@ -45,9 +46,14 @@ export function setExtractionPaused(ownerUserId: string, paused: boolean, now: n
     ON CONFLICT(owner_user_id) DO UPDATE SET paused = excluded.paused, updated_at = excluded.updated_at`).run(ownerUserId, paused ? 1 : 0, now);
 }
 
+/** Pauses automatic memory for every owner with a row (turnBackgroundWorkOffOnce); the others are paused already. */
+export function pauseEveryExtraction(now: number): void {
+  db().prepare('UPDATE memory_extraction_state SET paused = 1, updated_at = ? WHERE paused = 0').run(now);
+}
+
 /** The time auto mode was first switched on, recording `now` the first time. */
 export function ensureExtractionEnabledAt(ownerUserId: string, now: number): number {
-  db().prepare(`INSERT INTO memory_extraction_state(owner_user_id, enabled_at, updated_at) VALUES (?, ?, ?)
+  db().prepare(`INSERT INTO memory_extraction_state(owner_user_id, paused, enabled_at, updated_at) VALUES (?, 1, ?, ?)
     ON CONFLICT(owner_user_id) DO UPDATE SET enabled_at = COALESCE(memory_extraction_state.enabled_at, excluded.enabled_at),
       updated_at = CASE WHEN memory_extraction_state.enabled_at IS NULL THEN excluded.updated_at ELSE memory_extraction_state.updated_at END`)
     .run(ownerUserId, now, now);
@@ -72,7 +78,7 @@ export function restartExtractionAt(ownerUserId: string, cursorFor: (workspaceId
     for (const { workspace_id: workspaceId } of workspaces) move.run(cursorFor(workspaceId), now, workspaceId, ownerUserId);
     // Every conversation now starts at its workspace's cursor.
     database.prepare('DELETE FROM memory_extraction_conversations WHERE owner_user_id = ?').run(ownerUserId);
-    database.prepare(`INSERT INTO memory_extraction_state(owner_user_id, enabled_at, updated_at) VALUES (?, ?, ?)
+    database.prepare(`INSERT INTO memory_extraction_state(owner_user_id, paused, enabled_at, updated_at) VALUES (?, 1, ?, ?)
       ON CONFLICT(owner_user_id) DO UPDATE SET enabled_at = excluded.enabled_at, updated_at = excluded.updated_at`)
       .run(ownerUserId, now, now);
   });

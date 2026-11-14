@@ -1,5 +1,5 @@
 /**
- * Local wall-clock arithmetic for the Companion: quiet hours, the brief's
+ * Local wall-clock arithmetic for the Companion: the brief's
  * time and date, "today" for the turn budget, and the times its tools take
  * and its notes give (DESIGN-v2 §3.9 conv-2: a local `YYYY-MM-DD HH:MM` or
  * `+90m`, converted here; the run time as ISO 8601 with the offset).
@@ -129,20 +129,4 @@ export function parseCompanionTime(value: unknown, now: number): CompanionTimePa
 export function localTimeEchoText(at: number): string {
   const weekday = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'][localWeekday(at)];
   return `${localDateKey(at)} ${localClockText(at)} (${weekday})`;
-}
-
-/**
- * True while `now` is in the quiet hours: from start (inclusive) to end
- * (exclusive), wrapping midnight when start is later than end. Equal start
- * and end make an empty window.
- */
-export function isInQuietHours(settings: Pick<CompanionSettings, 'quietHours'>, now: number): boolean {
-  const { enabled, start, end } = settings.quietHours;
-  if (!enabled) return false;
-  const from = clockMinutes(start);
-  const to = clockMinutes(end);
-  if (from === to) return false;
-  const date = new Date(now);
-  const minute = date.getHours() * 60 + date.getMinutes();
-  return from < to ? minute >= from && minute < to : minute >= from || minute < to;
 }

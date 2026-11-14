@@ -23,8 +23,8 @@ import { ensureAssistant, resetAssistant } from '../src/assistant/store';
 import { closeDb, getDb, initDb } from '../src/services/db';
 import { CompanionError } from '../src/services/companion/errors';
 import {
+  COMPANION_OWNER,
   COMPANION_PURGED_TOOL_OUTPUT,
-  ackNotice,
   applyItemAction,
   buildCatchUp,
   cancelReminder,
@@ -45,7 +45,6 @@ import {
   getSnapshots,
   insertBrief,
   insertCard,
-  insertNotice,
   isSubtypeDemoted,
   latestCatchUp,
   listDemotedSubtypes,
@@ -55,7 +54,6 @@ import {
   listUnescalatedItems,
   listUnnotifiedNowItems,
   markReminderFired,
-  pendingNotices,
   purgeCompanionToolOutputs,
   purgeExpired,
   putSnapshots,
@@ -82,6 +80,7 @@ import { patchCompanionSettings } from '../src/services/companion/settings';
 import { localDateKey } from '../src/services/companion/clock';
 import type { ItemDraft } from '../src/services/companion/types';
 import { seedConversation } from './helpers/homeConversations';
+import { turnCompanionOn } from './helpers/backgroundWork';
 
 const T0 = new Date(2026, 10, 5, 12, 0, 0, 0).getTime();
 const MINUTE = 60_000;
@@ -128,6 +127,7 @@ describe('Companion user state', () => {
     process.env.MICHI_DATA_DIR = tmpDir;
     closeDb();
     initDb(); enableSyntheticCompanionSources();
+    turnCompanionOn();
   });
 
   afterEach(() => {
@@ -446,12 +446,14 @@ describe('Companion user state', () => {
     const crOld = upsertItem(draft('cr:old:mine'), ago(40)).item;
     resolveItems([crOld.id], ago(35));
 
-    const ackedOld = insertNotice({ title: 'Companion', body: 'Old', target: { kind: 'settings' }, itemIds: [], now: ago(9) });
-    ackNotice(ackedOld.id, ago(8));
-    insertNotice({ title: 'Companion', body: 'Expired', target: { kind: 'settings' }, itemIds: [], now: ago(8) });
-    const ackedRecent = insertNotice({ title: 'Companion', body: 'Recent', target: { kind: 'settings' }, itemIds: [], now: ago(2) });
-    ackNotice(ackedRecent.id, ago(2));
-    const pending = insertNotice({ title: 'Companion', body: 'Pending', target: { kind: 'settings' }, itemIds: [], now: T0 - HOUR });
+    // Rows an older build left in the retired notice outbox (delivered_at: when a notifier acknowledged one).
+    const outbox = (id: string, createdAt: number, deliveredAt: number | null) => getDb().prepare(`INSERT INTO companion_notices
+      (id, owner_user_id, title, body, target_json, item_ids_json, item_versions_json, created_at, expires_at, delivered_at)
+      VALUES (?, ?, 'Companion', 'Old', '{"kind":"settings"}', '[]', '{}', ?, ?, ?)`).run(id, COMPANION_OWNER, createdAt, createdAt + 2 * HOUR, deliveredAt);
+    outbox('cmn-acked-old', ago(9), ago(8));
+    outbox('cmn-expired', ago(8), null);
+    outbox('cmn-acked-recent', ago(2), ago(2));
+    outbox('cmn-pending', T0 - HOUR, null);
 
     const oldPoll = recordRun({ kind: 'poll', trigger: 'cr', startedAt: ago(40), outcome: 'ok', finishedAt: ago(40, 1) });
     // A check-in whose native record is still to be discarded (DESIGN-v2 §3.7).
@@ -498,10 +500,8 @@ describe('Companion user state', () => {
     assert.equal(getItem(crOld.id)!.title, 'cr:old:mine needs attention', 'other sources keep their text');
     assert.ok(listItemEvents(crOld.id).every((event) => event.summary === null), 'but events older than 30 days lose their summary');
 
-    assert.deepEqual(pendingNotices(T0).map((notice) => notice.id), [pending.id]);
-    assert.equal(getDb().prepare('SELECT COUNT(*) AS n FROM companion_notices').get()!.n, 2, 'the recently acknowledged one stays a while');
-    assert.equal(ackNotice(ackedOld.id, T0), 'missing');
-    assert.equal(ackNotice(ackedRecent.id, T0), 'already');
+    assert.deepEqual((getDb().prepare('SELECT id FROM companion_notices ORDER BY id').all() as Array<{ id: string }>).map((row) => row.id),
+      ['cmn-acked-recent', 'cmn-pending'], 'the recently acknowledged one stays a while, the old and the expired go');
 
     assert.equal(getRun(oldPoll.id), null);
     assert.equal(getRun(oldQuiet.id), null, 'no message is hidden any more, so naming one keeps nothing (v2 retired quietMessageIds)');
@@ -627,35 +627,32 @@ describe('Companion user state', () => {
       assert.deepEqual(ids(listOpenItems(T0)), ids([email, trouble, cr]));
     });
 
-    test('the whole Companion off: email and calendar words go a week after the last look', () => {
+    test('Michi paused: email and calendar words go a week after the last look', () => {
       const email = upsertItem(emailDraft('email:thread', 'Email from Alice', ago(9)), ago(9)).item;
       assert.equal(purgeExpired(T0).items, 0, 'on, and the source still sees it: kept');
-      patchCompanionSettings({ enabled: false });
+      patchCompanionSettings({ paused: true }, T0);
       assert.equal(purgeExpired(T0).items, 1);
       assert.equal(getItem(email.id)!.title, 'Email thread');
     });
 
-    test('nothing of a source that is off is notified, escalated, caught up on or replayed', () => {
+    test('nothing of a source that is off is notified, escalated or caught up on', () => {
       const blocked = upsertItem(draft('pipeline:Alpha', { source: 'pipeline', subtype: 'pipeline_blocked', title: 'Pipeline Alpha is blocked' }), T0).item;
       const waiting = upsertItem(draft('michi:node:n1', { source: 'michi', subtype: 'michi_waiting', severity: 'digest', title: 'A chat waits for you' }), T0).item;
-      const notice = insertNotice({ title: 'Companion', body: 'Pipeline Alpha is blocked', target: { kind: 'companion', tab: 'today' }, itemIds: [blocked.id], now: T0 });
       const visible = () => [
         listUnnotifiedNowItems(T0).map((item) => item.id),
         listUnescalatedItems('michi_waiting', T0, T0).map((item) => item.id),
         buildCatchUp(T0 - HOUR, T0 + MINUTE).changedItemIds.sort(),
-        pendingNotices(T0).map((pending) => pending.id),
       ];
-      assert.deepEqual(visible(), [[blocked.id], [waiting.id], [blocked.id, waiting.id].sort(), [notice.id]]);
+      assert.deepEqual(visible(), [[blocked.id], [waiting.id], [blocked.id, waiting.id].sort()]);
       patchCompanionSettings({ sources: { pipeline: { enabled: false }, michi: { enabled: false } } });
-      assert.deepEqual(visible(), [[], [], [], []]);
+      assert.deepEqual(visible(), [[], [], []]);
       patchCompanionSettings({ sources: { pipeline: { enabled: true }, michi: { enabled: true } } });
-      assert.deepEqual(visible(), [[blocked.id], [waiting.id], [blocked.id, waiting.id].sort(), [notice.id]], 'back with its source');
+      assert.deepEqual(visible(), [[blocked.id], [waiting.id], [blocked.id, waiting.id].sort()], 'back with its source');
     });
 
     test('with every source behind the Auth check off, the Auth item is out of sight too, and back with any of them (B2)', () => {
       const auth = upsertItem(draft('system:auth', { source: 'system', subtype: 'system_auth', severity: 'now', title: 'Auth session expired', target: { kind: 'settings' } }), T0).item;
       const waiting = upsertItem(draft('michi:node:n1', { source: 'michi', subtype: 'michi_waiting', severity: 'digest', title: 'A chat waits for you' }), T0).item;
-      const notice = insertNotice({ title: 'Companion', body: 'Auth session expired', target: { kind: 'settings' }, itemIds: [auth.id], now: T0 });
       const shown = () => {
         const snapshot = snapshotDto({ now: T0 + MINUTE, conversation: null });
         return {
@@ -665,16 +662,15 @@ describe('Companion user state', () => {
           open: listOpenItems(T0 + MINUTE, { limit: 500 }).map((item) => item.id).sort(),
           unnotified: listUnnotifiedNowItems(T0 + MINUTE).map((item) => item.id),
           catchUp: buildCatchUp(T0 - HOUR, T0 + MINUTE).changedItemIds.sort(),
-          replay: pendingNotices(T0 + MINUTE).map((pending) => pending.id),
         };
       };
       const both = [auth.id, waiting.id].sort();
-      const everything = { items: both, needsYou: 2, open: both, unnotified: [auth.id], catchUp: both, replay: [notice.id] };
+      const everything = { items: both, needsYou: 2, open: both, unnotified: [auth.id], catchUp: both };
       assert.deepEqual(shown(), everything);
       patchCompanionSettings({ sources: { cr: { enabled: false }, pipeline: { enabled: false }, email: { enabled: false } } });
       assert.deepEqual(shown(), everything, 'the calendar still needs the session');
       patchCompanionSettings({ sources: { calendar: { enabled: false } } });
-      assert.deepEqual(shown(), { items: [waiting.id], needsYou: 1, open: [waiting.id], unnotified: [], catchUp: [waiting.id], replay: [] });
+      assert.deepEqual(shown(), { items: [waiting.id], needsYou: 1, open: [waiting.id], unnotified: [], catchUp: [waiting.id] });
       assert.equal(getItem(auth.id)!.status, 'new', 'kept as it was, not resolved');
       patchCompanionSettings({ sources: { email: { enabled: true } } });
       assert.deepEqual(shown(), everything, 'back with a source that needs the session');

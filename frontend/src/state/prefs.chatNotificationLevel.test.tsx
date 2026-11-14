@@ -3,7 +3,7 @@ import { act, cleanup, fireEvent, render, screen } from '@testing-library/react'
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import type { ChatNotificationLevel } from 'michi-shared';
 import type { ChatNotificationLevelWrite } from '../services/api/prefs';
-import { PrefsProvider, usePrefs } from './prefs';
+import { PrefsProvider, noteNotificationLevelChanged, usePrefs } from './prefs';
 
 // DESIGN-v2 §5.2 (W3: F3 → H): the renderer tells the backend its chat notification level at
 // start and on every change, so the backend can notify by it while no Michi window is open.
@@ -148,6 +148,27 @@ it('does not keep asking a backend that has no such route or refused the body', 
   await advance(500);
   await act(async () => { window.dispatchEvent(new Event('focus')); await vi.advanceTimersByTimeAsync(120_000); });
   expect(sent()).toHaveLength(1);
+});
+
+it('takes the level Michi set on the backend when told, and on focus; a change made here and not saved yet wins', async () => {
+  api.fetchPrefs.mockResolvedValue({ notifications: 'all' });
+  await mount();
+  await advance(500);
+  api.fetchPrefs.mockResolvedValue({ notifications: 'off' });
+  await act(async () => { noteNotificationLevelChanged(); });
+  expect(screen.getByRole('status').textContent).toBe('off');
+  await advance(1_000);
+  expect(api.savePrefs).not.toHaveBeenCalled();
+  api.fetchPrefs.mockResolvedValue({ notifications: 'approval-only' });
+  await act(async () => { window.dispatchEvent(new Event('focus')); });
+  expect(screen.getByRole('status').textContent).toBe('approval-only');
+  // Picked here, then the backend answers with an older change: the user's pick stays and is saved.
+  fireEvent.click(screen.getByText('Off'));
+  api.fetchPrefs.mockResolvedValue({ notifications: 'all' });
+  await act(async () => { noteNotificationLevelChanged(); });
+  expect(screen.getByRole('status').textContent).toBe('off');
+  await advance(500);
+  expect(api.savePrefs).toHaveBeenLastCalledWith({ notifications: 'off' });
 });
 
 it('sends nothing for a stored level that is not one', async () => {

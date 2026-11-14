@@ -5,7 +5,7 @@ import { DEFAULT_PREFS } from '../../../state/prefs';
 import { AppearancePane } from '../pages/settings/AppearancePane';
 import { searchSettings, settingsSearchIndex } from './settingsSearch';
 import {
-  PAGES_UPKEEP_TITLE, SETTINGS_GROUPS, SETTINGS_PAGES, pageForSection, settingsPageForRequest, settingsPageLabel, settingsRevealForRequest, type SettingsPage,
+  BACKGROUND_WORK_LABEL, SETTINGS_GROUPS, SETTINGS_PAGES, pageForSection, settingsPageForRequest, settingsPageLabel, settingsRevealForRequest, type SettingsPage,
 } from './settingsPages';
 
 vi.mock('../../../state/prefs', async importOriginal => ({
@@ -39,10 +39,10 @@ describe('Settings pages', () => {
     ]);
   });
 
-  it('opens a page or one of the older sections a request names; the old Meta agent page is Settings › <name> › Pages upkeep', () => {
+  it('opens a page or one of the older sections a request names; the old Meta agent page is Settings › <name> › Background work', () => {
     expect(settingsPageForRequest('meta-agent')).toBe('companion');
     expect(pageForSection('meta-agent')).toBe('companion');
-    expect(settingsRevealForRequest('meta-agent')).toBe(PAGES_UPKEEP_TITLE);
+    expect(settingsRevealForRequest('meta-agent')).toBe(BACKGROUND_WORK_LABEL);
     expect(settingsRevealForRequest('companion', ' Name ')).toBe('Name');
     expect(settingsRevealForRequest('companion')).toBeNull();
     expect(settingsRevealForRequest('notifications', 42)).toBeNull();
@@ -135,10 +135,17 @@ describe('Settings search', () => {
     }
     const upkeep = search('meta agent', ALL_PAGES, 'Robin');
     expect(upkeep.every((result) => result.page === 'companion')).toBe(true);
-    expect(upkeep.map((result) => result.path)).toContain('Agent › Robin › Pages upkeep');
-    expect(upkeep.map((result) => result.label)).toEqual(expect.arrayContaining(['Pages upkeep', 'Background updates', 'First run', 'Workspace homes']));
+    expect(upkeep.map((result) => result.path)).toContain('Agent › Robin › Pages');
+    expect(upkeep.map((result) => result.label)).toEqual(expect.arrayContaining(['Background work', 'Robin', 'Pages', 'First read', 'Keep workspace homes up to date']));
     // What a result shows (its name, description and path) never says Meta agent.
     for (const entry of settingsSearchIndex('Robin')) expect(`${entry.label} ${entry.description ?? ''} ${entry.group ?? ''}`).not.toMatch(/meta agent/i);
+  });
+
+  it('finds the switch that turns the agent on and off by its name first, and by the words people use', () => {
+    expect(search('robin', ['companion'], 'Robin')[0]).toMatchObject({ page: 'companion', label: 'Robin', path: 'Agent › Robin' });
+    for (const query of ['turn off', 'pause', 'resume']) expect(search(query, ['companion'], 'Robin')[0], query).toMatchObject({ label: 'Robin' });
+    expect(search('automatic memory')[0]).toMatchObject({ page: 'memory', label: 'Learn from conversations', path: 'Agent › Memory' });
+    expect(search('notification sounds')[0]).toMatchObject({ page: 'notifications', label: 'Sounds' });
   });
 
   it('names the agent’s two shortcuts by its name, and finds the moved background switch under Notifications', () => {

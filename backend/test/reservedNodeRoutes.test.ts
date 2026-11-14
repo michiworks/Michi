@@ -118,6 +118,12 @@ describe('the routes that write a node refuse a check-in node id (E-review #6)',
     assert.equal(node('n-plain')!.ultracode, 1);
     assert.equal((await call('PUT', '/nodes/n-plain/memory-mode', { mode: 'off' })).status, 200);
     assert.equal(node('n-plain')!.memory_mode, 'off');
+
+    // Michi's own conversation V always learns and uses memory: its setting is not the user's to change.
+    const fixed = await call('PUT', `/nodes/${v.nodeId}/memory-mode`, { mode: 'use_only' });
+    assert.deepEqual([fixed.status, fixed.body.code], [409, 'invalid_state']);
+    assert.equal(node(v.nodeId)!.memory_mode, null);
+    assert.deepEqual((await call('GET', `/nodes/${v.nodeId}/memory-mode`)).body, { mode: 'learn' });
     assert.equal((await call('POST', '/workspaces/ws-a/nodes/n-plain/trim', { deletedAt: 5, groupId: 'g-2' })).status, 200);
     assert.equal(node('n-plain')!.deleted_at, 5);
     assert.equal((await call('POST', '/workspaces/ws-a/nodes/n-plain/restore-trim', {})).status, 200);

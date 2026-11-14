@@ -14,8 +14,8 @@
  *   went away (its pipeline left the watch list or the favorites, its CR
  *   another account's list) says nothing of approval, merge or recovery.
  *
- * Firing makes (or renews) a `reminder_due` item, needs you / now, which goes
- * through the notice gate like any other item, and marks the reminder fired
+ * Firing makes (or renews) a `reminder_due` item, needs you / now, which is
+ * a Needs you notice (notices.ts) like any other item, and marks the reminder fired
  * (a daily one stays active). Deterministic: no model is involved.
  */
 

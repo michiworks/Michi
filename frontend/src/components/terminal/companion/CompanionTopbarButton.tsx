@@ -2,7 +2,7 @@ import React, { useEffect, useRef, useState } from 'react';
 import { companionBadgeCount } from 'michi-shared';
 import { kbd } from '../../../lib/platform';
 import { Tooltip } from '../../ui/Popover';
-import { loadCompanionAssistant, useCompanion, useCompanionAssistant } from '../../../state/companion/companionStore';
+import { companionIsOff, loadCompanionAssistant, useCompanion, useCompanionAssistant } from '../../../state/companion/companionStore';
 import { closeCompanionPanel, openCompanionPanel, useCompanionPanel } from '../../../state/companion/companionPanel';
 import { useCompanionName } from '../../../state/companion/companionName';
 import { CompanionGlyph } from './CompanionGlyph';
@@ -14,17 +14,20 @@ import './companion.css';
  * without waiting for the Companion snapshot (§1.3); the badge counts what
  * needs the user and is new plus the agent's messages since they last
  * looked, and goes without while there is no snapshot. Before the first open
- * a dot says it is new. Nothing shows when this backend has no assistant.
+ * a dot says it is new. Nothing shows when this backend has no assistant,
+ * or while the agent is off (Q29): Settings › <name> turns it on, and the
+ * button is back at once.
  */
 export function CompanionTopbarButton() {
-  const { snapshot } = useCompanion();
+  const companion = useCompanion();
+  const { snapshot } = companion;
   const assistant = useCompanionAssistant();
   const panel = useCompanionPanel();
   const name = useCompanionName();
   const ref = useRef<HTMLButtonElement>(null);
   const [hover, setHover] = useState(false);
   useEffect(() => { void loadCompanionAssistant(); }, []);
-  if (!assistant.info) return null;
+  if (!assistant.info || companionIsOff(companion)) return null;
   const count = companionBadgeCount(snapshot);
   const fresh = !panel.openedBefore;
   const label = count > 0 ? `${name}, ${count} new` : fresh ? `${name}, new` : name;

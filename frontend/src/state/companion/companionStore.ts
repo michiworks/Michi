@@ -13,7 +13,6 @@ import {
   postCompanionItemAction,
   postCompanionItemsSeen,
   postCompanionView,
-  requestCompanionWelcome,
   type CompanionSnapshot,
 } from '../../services/api/companion';
 import {
@@ -59,9 +58,6 @@ export interface CompanionStoreState {
 const REFRESH_DEBOUNCE_MS = 150;
 const POLL_MS = 60_000;
 const VIEW_THROTTLE_MS = 30_000;
-/** Between welcome asks for a conversation that stays empty: 30s, doubling to 10 minutes. */
-const WELCOME_RETRY_MIN_MS = 30_000;
-const WELCOME_RETRY_MAX_MS = 10 * 60_000;
 /** POST /companion/items/seen takes at most this many ids. */
 const SEEN_BATCH = 100;
 /** After a failed seen mark, the next waits 5s, doubling to 1 minute. */
@@ -90,19 +86,6 @@ let seenItemIds: Set<string> | null = null;
 let arrivals: Record<string, number> = {};
 /** Every conversation the Companion has had in this window (a reset makes a new one). */
 const nodeIds = new Set<string>();
-
-/** The welcome asks for one conversation (wantCompanionWelcome). */
-interface WelcomeAsk {
-  /** Chat tabs showing nothing of it, the user not having written, while the Companion may speak. */
-  wanted: number;
-  inFlight: boolean;
-  /** Asks answered so far; still being wanted means none of them led anywhere. */
-  attempts: number;
-  /** The next ask may go out from then. */
-  nextAt: number;
-  timer: ReturnType<typeof setTimeout> | null;
-}
-const welcomeAsks = new Map<string, WelcomeAsk>();
 
 let generation = 0;
 let inflight: Promise<void> | null = null;
@@ -239,6 +222,20 @@ export function subscribeCompanion(listener: () => void): () => void {
 
 export function useCompanion(): CompanionStoreState {
   return useSyncExternalStore(subscribeCompanion, getCompanionState, getCompanionState);
+}
+
+/**
+ * Michi is off (Q29, Q30): Pause Michi until resumed, which Settings › <name>'s
+ * switch and Turn <name> on / off set. Its entry points hide, ⌘J does
+ * nothing and a notice opens no panel. Before the first snapshot, and on a
+ * backend without a Companion (whose conversation still works), it is on.
+ */
+export function companionIsOff(current: CompanionStoreState = state): boolean {
+  return current.availability === 'available' && current.snapshot?.settings.paused === true;
+}
+
+export function useCompanionOff(): boolean {
+  return companionIsOff(useCompanion());
 }
 
 /**
@@ -451,62 +448,6 @@ export function noteCompanionViewed(now = Date.now()): void {
   }, () => {});
 }
 
-function welcomeRetryDelay(attempts: number): number {
-  return Math.min(WELCOME_RETRY_MAX_MS, WELCOME_RETRY_MIN_MS * 2 ** Math.min(Math.max(attempts - 1, 0), 10));
-}
-
-function askWelcome(nodeId: string, ask: WelcomeAsk): void {
-  if (welcomeAsks.get(nodeId) !== ask || ask.wanted === 0 || ask.inFlight || ask.timer !== null) return;
-  const wait = ask.nextAt - Date.now();
-  if (wait > 0) {
-    ask.timer = setTimeout(() => { ask.timer = null; askWelcome(nodeId, ask); }, wait);
-    return;
-  }
-  ask.inFlight = true;
-  requestCompanionWelcome()
-    .then((started) => { if (started) scheduleCompanionRefresh(); }, () => {})
-    .finally(() => {
-      ask.inFlight = false;
-      ask.attempts += 1;
-      ask.nextAt = Date.now() + welcomeRetryDelay(ask.attempts);
-      // Still wanted means nothing shows yet: refused (paused, busy, not
-      // ready yet), failed, or a welcome that never spoke. Ask again later.
-      askWelcome(nodeId, ask);
-    });
-}
-
-/**
- * The Chat tab shows nothing of this conversation, the user has not written
- * in it, and the Companion may speak (on, not paused): ask for its welcome
- * (R2.6). The backend decides. While that lasts the ask repeats, never two
- * at once, the wait between asks starting at 30s and doubling to 10 minutes.
- * A welcome that spoke shows, the user writing shows too, and the tab lets
- * go; one that ended quiet, stopped or failed leaves only rows the tab hides,
- * and the asks go on (the backend also tries again by itself). Returns the
- * release: the tab left, something shows, a hidden turn runs, or the
- * Companion was paused or turned off.
- */
-export function wantCompanionWelcome(nodeId: string): () => void {
-  let ask = welcomeAsks.get(nodeId);
-  if (!ask) {
-    ask = { wanted: 0, inFlight: false, attempts: 0, nextAt: 0, timer: null };
-    welcomeAsks.set(nodeId, ask);
-  }
-  const mine = ask;
-  mine.wanted += 1;
-  askWelcome(nodeId, mine);
-  let released = false;
-  return () => {
-    if (released) return;
-    released = true;
-    mine.wanted = Math.max(0, mine.wanted - 1);
-    if (mine.wanted === 0 && mine.timer !== null) {
-      clearTimeout(mine.timer);
-      mine.timer = null;
-    }
-  };
-}
-
 /**
  * True for the Companion's conversation (this one or one it started over
  * from): its notices come from the backend's notice pipeline, and revealing it
@@ -665,8 +606,6 @@ export function resetCompanionStoreForTests(patch: Partial<CompanionStoreState> 
   seenItemIds = null;
   arrivals = {};
   nodeIds.clear();
-  for (const ask of welcomeAsks.values()) if (ask.timer !== null) clearTimeout(ask.timer);
-  welcomeAsks.clear();
   lastViewAt = 0;
   briefSeen = null;
   assistantInflight = null;

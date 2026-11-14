@@ -1,11 +1,38 @@
 import React, { useRef, useState } from 'react';
 import { AnimatePresence } from 'motion/react';
 import type { PageSummaryDto } from 'michi-shared';
-import { createPage, deletePage, fetchPage, patchPage, type PageApiIdentity } from '../../../services/api/pages';
+import { createPage, deletePage, fetchPage, patchPage, restorePage, type PageApiIdentity } from '../../../services/api/pages';
 import { notifyPageChanged } from '../../../state/pages/pageEvents';
+import { recordUndo } from '../../../state/undoStack';
 import { ModalShell } from '../../ui/ModalShell';
 import { Button } from '../../ui/controls';
 import './pageActions.css';
+
+const named = (title: string) => `“${title || 'Untitled page'}”`;
+
+type PageActionKind = 'create' | 'rename' | 'move' | 'trash';
+
+/** Puts a page action on the window's undo history (state/undoStack.ts); each Undo goes through the pages API. */
+function recordPageUndo(kind: PageActionKind, page: PageSummaryDto, changedId: string, title: string, identity: PageApiIdentity) {
+  const changed = (pageId: string) => notifyPageChanged({ ...identity, pageId });
+  // Patches the page as it stands when Undo runs, after whatever came since.
+  const patchBack = async (body: { title?: string; parentId?: string | null }) => {
+    const current = await fetchPage(page.id, identity);
+    if (!current) return false;
+    await patchPage(page.id, { revision: current.revision, ...body }, identity);
+    changed(page.id);
+    return true;
+  };
+  if (kind === 'create') {
+    recordUndo({ label: `Created ${named(title)}`, undo: async () => { await deletePage(changedId, identity); changed(changedId); } });
+  } else if (kind === 'trash') {
+    recordUndo({ label: `Moved ${named(page.title)} to Trash`, toast: true, undo: async () => { await restorePage(page.id, identity); changed(page.id); } });
+  } else if (kind === 'rename') {
+    recordUndo({ label: `Renamed ${named(page.title)} to ${named(title)}`, undo: () => patchBack({ title: page.title }) });
+  } else {
+    recordUndo({ label: `Moved ${named(page.title)}`, undo: () => patchBack({ parentId: page.parentId }) });
+  }
+}
 
 export function pageIsWithin(pages: readonly PageSummaryDto[], candidateId: string, ancestorId: string): boolean {
   const byId = new Map(pages.map(page => [page.id, page]));
@@ -31,7 +58,7 @@ export function pageSpaceSubtree(pages: readonly PageSummaryDto[], pageId: strin
   return rootId ? pages.filter(page => pageIsWithin(pages, page.id, rootId)) : [];
 }
 
-type Action = { kind: 'create' | 'rename' | 'move' | 'trash'; page: PageSummaryDto };
+type Action = { kind: PageActionKind; page: PageSummaryDto };
 const TITLES = { create: 'New page', rename: 'Rename page', move: 'Move page', trash: 'Move to trash' };
 
 /** The sidebar and document outline share the same page operations and dialogs. */
@@ -87,6 +114,7 @@ export function usePageActions(options: {
         await patchPage(page.id, { revision: current.revision, ...(kind === 'rename' ? { title } : { parentId: value || null }) }, identity);
       }
       notifyPageChanged({ ...identity, pageId: changedId });
+      recordPageUndo(kind, page, changedId, title, identity);
       const callbacks = latest.current;
       if (callbacks.identity.workspaceId === identity.workspaceId && callbacks.identity.backendConnectionId === identity.backendConnectionId) {
         callbacks.onChanged(changedId);

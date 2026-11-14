@@ -5,7 +5,6 @@ import { API_BASE_URL } from '../../config/env';
 const api = vi.hoisted(() => ({ fetchReplyMemorySources: vi.fn() }));
 const feeds = vi.hoisted(() => ({
   changed: [] as Array<(event: MemoryChangedEvent) => void>,
-  mode: [] as Array<(apiBase: string, nodeId: string, mode: string) => void>,
   on: [] as Array<(apiBase: string, on: boolean) => void>,
 }));
 vi.mock('../../services/api/memories', async (original) => ({
@@ -16,7 +15,6 @@ vi.mock('./memoryNotifications', () => ({
   onMemoryChanged: (listener: (event: MemoryChangedEvent) => void) => { feeds.changed.push(listener); return () => {}; },
 }));
 vi.mock('./conversationMemory', () => ({
-  onConversationMemoryModeChange: (listener: (apiBase: string, nodeId: string, mode: string) => void) => { feeds.mode.push(listener); return () => {}; },
   onMemoryOnChange: (listener: (apiBase: string, on: boolean) => void) => { feeds.on.push(listener); return () => {}; },
 }));
 
@@ -46,7 +44,6 @@ beforeEach(() => {
   vi.useFakeTimers();
   api.fetchReplyMemorySources.mockReset();
   feeds.changed.length = 0;
-  feeds.mode.length = 0;
   feeds.on.length = 0;
   resetReplySources();
 });
@@ -107,31 +104,26 @@ describe('reply sources store', () => {
     expect(readReplySources(LOCAL, 'a-4')).toEqual([memory('mem-3')]);
   });
 
-  it('a past chat no longer recalled leaves every answer of that backend; a source chat that stops learning asks again; opening asks again', async () => {
+  it('a past chat no longer recalled leaves every answer of that backend; opening asks again', async () => {
     const fromN2 = chat(7);
-    const fromN3: ReplyMemorySource = { kind: 'conversation', docId: 8, text: 'y', at: 1, from: { nodeId: 'n-3', messageId: null, title: null } };
-    answerWith({ 'a-1': [fromN2], 'a-2': [fromN2, memory('mem-1')], 'b-1': [fromN3] });
+    answerWith({ 'a-1': [fromN2], 'a-2': [fromN2, memory('mem-1')] });
     requestReplySources(LOCAL, 'a-1');
     requestReplySources({ ...LOCAL, nodeId: 'n-5' }, 'a-2');
-    requestReplySources({ ...LOCAL, nodeId: 'n-6' }, 'b-1');
     await settle();
     removeReplySource(LOCAL, 'a-1', fromN2);
     expect(readReplySources(LOCAL, 'a-1')).toEqual([]);
     // The other conversation's reply too.
     expect(readReplySources({ ...LOCAL, nodeId: 'n-5' }, 'a-2')).toEqual([memory('mem-1')]);
-    // n-3 is set to Use only in its own pane: the replies elsewhere that named it ask again.
-    for (const listener of feeds.mode) listener(API_BASE_URL, 'n-3', 'use_only');
-    expect(readReplySources({ ...LOCAL, nodeId: 'n-6' }, 'b-1')).toBeUndefined();
     // An opened footer asks again even with an answer cached, and a same answer keeps its object.
     answerWith({ 'a-2': [memory('mem-1')] });
     const before = readReplySources({ ...LOCAL, nodeId: 'n-5' }, 'a-2');
     refreshReplySources({ ...LOCAL, nodeId: 'n-5' }, 'a-2');
     await settle();
-    expect(api.fetchReplyMemorySources).toHaveBeenCalledTimes(4);
+    expect(api.fetchReplyMemorySources).toHaveBeenCalledTimes(3);
     expect(readReplySources({ ...LOCAL, nodeId: 'n-5' }, 'a-2')).toBe(before);
   });
 
-  it('a chat\'s memory setting, and memory turned on or off, drop what was cached; the footer\'s own removal is at once', async () => {
+  it('memory turned on or off drops what was cached; the footer\'s own removal is at once', async () => {
     answerWith({ 'a-1': [memory('mem-1'), chat(7)], 'a-2': [memory('mem-1')] });
     requestReplySources(LOCAL, 'a-1');
     requestReplySources(LOCAL, 'a-2');
@@ -141,10 +133,6 @@ describe('reply sources store', () => {
     removeReplySource(LOCAL, 'a-1', memory('mem-1'));
     // A forgotten memory leaves the conversation's other replies too.
     expect(readReplySources(LOCAL, 'a-2')).toEqual([]);
-    for (const listener of feeds.mode) listener(API_BASE_URL, 'n-1', 'off');
-    expect(readReplySources(LOCAL, 'a-1')).toBeUndefined();
-    requestReplySources(LOCAL, 'a-1');
-    await settle();
     for (const listener of feeds.on) listener(API_BASE_URL, false);
     expect(readReplySources(LOCAL, 'a-1')).toBeUndefined();
   });

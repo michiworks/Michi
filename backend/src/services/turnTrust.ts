@@ -151,7 +151,8 @@ export const MICHI_TOOL_NAMES: ReadonlySet<string> = new Set<string>([
   // of check-in or collector material is recorded by the tools themselves (recordCompanionTaint).
   'list_workspaces', 'layout_rules', 'start_conversation', 'companion_items', 'companion_item', 'companion_read',
   'companion_check_now', 'companion_update_item', 'companion_save_notes', 'companion_goal_progress',
-  'companion_edit_goal', 'companion_propose', 'companion_publish_brief', 'companion_set_name', 'nothing_to_do',
+  'companion_edit_goal', 'companion_propose', 'companion_publish_brief', 'companion_set_name',
+  'companion_set_notifications', 'companion_headline', 'nothing_to_do',
 ]);
 
 /** Michi's MCP server as the runtimes name it: Claude and codex `__michi_internal__`, ACP agents `michi`. */

@@ -1,7 +1,7 @@
 import React from 'react';
 import { RefreshCw } from 'lucide-react';
 import { toast } from 'sonner';
-import type { PageLayoutRule, WorkspaceHomeSummaryDto } from 'michi-shared';
+import type { WorkspaceHomeSummaryDto } from 'michi-shared';
 import { useProgressCards, useSpaceActivity, useSpacesHome, useSpacesHomeWorkspaces } from '../../../../state/pages/useSpacesHome';
 import { retryMetaAgentGuard, useMetaAgent } from '../../../../state/metaAgent/useMetaAgent';
 import { metaAgentStatus, type MetaAgentStatusKind } from '../../../../state/metaAgent/metaAgentStatus';
@@ -12,22 +12,17 @@ import { requestWorkspaceHome } from '../../../../state/pages/workspaceHomeNav';
 import { endsTextSelectionIn } from '../../../../lib/cardClick';
 import { Button } from '../../../ui/controls';
 import { useMinuteClock } from '../../content/home/useMinuteClock';
-import { openMetaAgentDetail, requestMetaAgentSettings } from '../../scheduled/metaAgent/metaAgentNav';
+import { requestMetaAgentSettings } from '../../scheduled/metaAgent/metaAgentNav';
 import { MetaAgentGuardAlert } from '../../settings/metaAgent/MetaAgentGuardAlert';
 import { metaAgentRuntimeLabel } from '../../settings/metaAgent/runtimeCopy';
 import { HomePlaceholder, useHomeDocument } from './HomeDocument';
-import { HomeSectionBlock } from './HomeSections';
 import { SpaceActivityList } from './HomeActivity';
 import { NewChatSheetSlot, SpaceProgressCardList, type SpaceConversationScope } from './homeLinks';
 import { DEFAULT_META_STATUS, MetaAgentStatusLine, type MetaAgentHomeStatus, type MetaAgentLineMode } from './MetaAgentStatusLine';
 import { homeDateLabel, latestAgentWrite, splitHomeBlocks } from './homeFormat';
 import { formatMichiAgo } from '../../content/michiFormat';
 import { useHomeNavigation } from './useHomeNavigation';
-import { useSpacesHomeSections } from './homeCounts';
-import { useMarkSpacesHomeLookedOnLeave } from './useMarkSpacesHomeLooked';
 import { LayoutRulesMenuButton } from '../layoutRules/LayoutRulesMenu';
-import { LayoutRuleSectionMarks } from '../layoutRules/LayoutRuleSectionMarks';
-import { navPageEvent } from '../../../../state/appEvents';
 import './home.css';
 import { LOCAL_BACKEND_CONNECTION_ID } from '../../../../config/backendConnections';
 
@@ -41,15 +36,13 @@ export interface SpacesHomeViewProps {
   onUpdate?: () => void;
 }
 
-const openScheduledMetaAgent = () => {
-  openMetaAgentDetail();
-  navPageEvent.dispatch({ page: 'scheduled' });
-};
-
-/** The status line's mode for each state; a failed restriction check shows its own alert instead. */
+/**
+ * The status line's mode for each state; a failed restriction check shows its own alert instead. A finished first
+ * read is an ordinary state here: the line shows only while paused, failing or on the first run (Q8).
+ */
 const LINE_MODE: Record<MetaAgentStatusKind, MetaAgentLineMode> = {
   offline: 'offline', 'guard-failed': 'stopped', 'not-running': 'not-running', unsupported: 'unavailable', stopped: 'stopped',
-  'first-run': 'first-run', paused: 'paused', 'just-read': 'just-read', normal: 'normal',
+  'first-run': 'first-run', paused: 'paused', 'just-read': 'normal', normal: 'normal',
 };
 
 /** A table row on the Home whose first cell names a workspace opens that workspace's home. */
@@ -77,19 +70,15 @@ function useWorkspaceRowLinks(ref: React.RefObject<HTMLElement | null>, workspac
 
 /**
  * The Spaces landing page. It is a real page: its own blocks edit like any
- * other, and between them sit the sections Michi counts from its own
- * conversations (Waiting, Stalled, Done), Space activity and the cards of
- * conversations started from a Space.
+ * other, and between them sit Space activity and the cards of conversations
+ * started from a Space. What needs you is Today's (D13): the page's
+ * `home-section` block, where Waiting stood, is one line that opens it.
  */
-const NO_RULES: readonly PageLayoutRule[] = [];
 
 function SpacesHomeView({ backendConnectionId = LOCAL_BACKEND_CONNECTION_ID, now, meta, onUpdate }: SpacesHomeViewProps) {
   const clock = useMinuteClock(true);
   const home = useSpacesHome(backendConnectionId);
   const workspaces = useSpacesHomeWorkspaces(backendConnectionId);
-  const sections = useSpacesHomeSections(backendConnectionId);
-  // Just done counts from the last look; leaving this page, once it showed the sections, is that look.
-  useMarkSpacesHomeLookedOnLeave(backendConnectionId, sections.data !== null);
   const activity = useSpaceActivity(backendConnectionId);
   const cards = useProgressCards(backendConnectionId);
   const agent = useMetaAgent();
@@ -126,13 +115,12 @@ function SpacesHomeView({ backendConnectionId = LOCAL_BACKEND_CONNECTION_ID, now
     ...meta,
   };
   const mode = LINE_MODE[agentState.kind];
-  const showAgentStatus = mode !== 'normal' || update.phase === 'failed'
-    || overview?.cursors?.some(cursor => cursor.problem);
+  // Only while paused, failing or on its first run (Q8).
+  const showAgentStatus = mode !== 'normal' || update.phase === 'failed' || !!overview?.cursors?.some(cursor => cursor.problem);
 
   const update_ = () => {
     home.refresh();
     workspaces.refresh();
-    sections.refresh();
     activity.refresh();
     cards.refresh();
     doc.pageState.refresh();
@@ -184,7 +172,6 @@ function SpacesHomeView({ backendConnectionId = LOCAL_BACKEND_CONNECTION_ID, now
             recentRuns={overview?.recentRuns}
             update={update}
             homeUpdating={spacesHomeUpdating(firstRun.data)}
-            onOpenScheduled={openScheduledMetaAgent}
             onOpenSettings={requestMetaAgentSettings}
             onResume={() => {
               pauseMetaAgentMaintenance(false).catch((reason: unknown) => {
@@ -206,12 +193,6 @@ function SpacesHomeView({ backendConnectionId = LOCAL_BACKEND_CONNECTION_ID, now
         {empty ? <HomePlaceholder title="This week’s focus" /> : doc.renderBlocks(segments.middle, 'middle')}
         <SpaceActivityList items={activity.data} clock={clock} onOpen={nav.openActivity} />
         {empty ? <HomePlaceholder title="Workspaces" /> : doc.renderBlocks(segments.beforeThreads, 'before-threads')}
-        <HomeSectionBlock section="stalled" connectionId={backendConnectionId} data={sections.data?.stalled ?? null} clock={clock} onAct={nav.openSectionItem} onOpenWorkspace={openWorkspace}>
-          <LayoutRuleSectionMarks pageId={page?.id ?? null} backendConnectionId={backendConnectionId} rules={home.data?.layoutRules ?? NO_RULES} ruleIds={sections.data?.stalled.ruleIds} />
-        </HomeSectionBlock>
-        <HomeSectionBlock section="done" connectionId={backendConnectionId} data={sections.data?.done ?? null} clock={clock} onAct={nav.openSectionItem} onOpenWorkspace={openWorkspace}>
-          <LayoutRuleSectionMarks pageId={page?.id ?? null} backendConnectionId={backendConnectionId} rules={home.data?.layoutRules ?? NO_RULES} ruleIds={sections.data?.done.ruleIds} />
-        </HomeSectionBlock>
         {empty && <HomePlaceholder title="Cross-workspace decisions" />}
         {doc.renderBlocks(segments.rest, 'rest')}
       </div>

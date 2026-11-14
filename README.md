@@ -148,7 +148,7 @@ to the authenticated owner. Agent Runs retain their separate permission policy.
 Kiro Crew is the backend for Michi chats. Setup includes required Michi MCP and
 `sessionApproval` consent; chats and Ask/Trust approvals are handled in Michi.
 The official grant also covers user-owned Crew chats, and Crew allowlists/global
-YOLO remain authoritative. Default installer users install directly from `~/.michi/crew-app`; later updates use `michi update` followed by Crew App **Sync**. Old generated sources and custom installs use the compatibility helper. Missing required setup or an outdated App blocks new work. See the
+YOLO remain authoritative. Default installer users install directly from `~/.michi/crew-app`; later updates use `michi update` followed by Crew App **Sync**. A remote Linux backend registers the App with the compatibility helper run from `~/.local/share/michi/devdesktop/current`, which follows `michi update`. Old generated sources and custom installs use the compatibility helper. Missing required setup or an outdated App blocks new work. See the
 [Crew setup guide](runtime/src/adapters/crew/README.md).
 
 ## Quick Start
@@ -588,11 +588,12 @@ itself, so secrets are never written into the plist; logs go to
 restarted with the new build. Turning the setting off hands the backend back to
 the app. This mode is available only in packaged macOS builds.
 
-Finished runs send a system notification; clicking it opens Michi on the run's
-thread. The app receives notices from `/api/scheduled-jobs/notifications/stream`.
-When no app is connected, the background service starts Michi hidden (no window
-or Dock icon) to show the notification, and that hidden instance quits after
-15 idle minutes.
+A run that finished with Notify on, or one waiting for approval, sends a system
+notification; clicking it opens Michi on the run. Every notification comes from
+the backend's attention service: while no window is open, Electron main shows
+them from its feed (`/api/attention/desktop/stream`). When no app is
+connected, the background service starts Michi hidden (no window or Dock icon)
+to show the notification, and that hidden instance quits after 15 idle minutes.
 
 Web search is offered by local and desktop backends (Electron, the web
 launcher, and a desktop backend reached through remote or phone access) and by
@@ -1136,7 +1137,8 @@ records the tested versions and results of earlier runs.
 - forks one bundled backend (or, with the background service enabled, starts
   or reuses the launchd service), waits for `/api/health`, and loads the
   backend-served frontend;
-- relays scheduled-run notices as clickable system notifications;
+- shows the backend's attention records (approvals, questions, Needs you, finished
+  runs) as clickable system notifications while no window is open;
 - keeps background streaming unthrottled;
 - provides folder/file pickers, external-file artifact linking, file reads,
   path opening, markdown save, notifications, relaunch, and log helpers through

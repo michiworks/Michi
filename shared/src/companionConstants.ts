@@ -17,6 +17,12 @@
  */
 export const DEFAULT_COMPANION_NAME = 'Michi';
 
+/**
+ * Minutes between the polls of code reviews and email (pipelines: twice
+ * that): a constant, no longer a setting (unification P3).
+ */
+export const COMPANION_POLL_MINUTES = 5;
+
 export const COMPANION_LIMITS = Object.freeze({
   minPollMinutes: 2,
   maxPollMinutes: 60,
@@ -25,15 +31,13 @@ export const COMPANION_LIMITS = Object.freeze({
   maxGoalChars: 500,
   maxNotesChars: 4000,
   maxBriefCards: 7,
-  maxDailyTurnBudget: 200,
+  /** Michi's latest line for Home (Q45, CompanionHeadlineDto.text). */
+  maxHeadlineChars: 120,
   /** Away this long, then back: catch-up. */
   catchUpAfterMinutes: 30,
   /** Worker report excerpt cap. */
   maxReportChars: 4000,
   maxRulesChars: 2000,
-  maxDailyNotices: 12,
-  maxNoticesPer30Min: 2,
-  noticeTtlMs: 2 * 60 * 60 * 1000,
   hiddenTurnTimeoutMs: 180_000,
   privacyTtlDays: 7,
   awayModeAfterMinutes: 120,

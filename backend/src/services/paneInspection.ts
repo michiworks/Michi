@@ -52,6 +52,7 @@ import {
 import { getDb } from './db';
 import { AgentRunsRepository } from './agentRunsRepository';
 import { panePresenceRegistry } from './panePresence';
+import { hiddenTemporaryChat } from './memory/temporaryChat';
 
 /** Archived as agents see it: the node (the older status or the archive lane) or its thread. */
 export function isArchivedPaneNode(node: NodeRow): boolean {
@@ -94,6 +95,13 @@ export interface PaneInspectionCaller {
    * the session binding, never for other callers.
    */
   assistant?: boolean;
+  /**
+   * The calling conversation, from the session binding; absent for a caller in
+   * none (an Agent Run, a scheduled job). Every caller here is an agent: a
+   * temporary chat (memory/temporaryChat.ts) is a target only for itself, and
+   * NOT_FOUND, like a missing one, for everyone else.
+   */
+  readerNodeId?: string | null;
 }
 
 /** Maps a caller onto the ring's `AuthorizationScope` shape. Every module that mints or resolves
@@ -265,7 +273,7 @@ function authorizeTarget(caller: PaneInspectionCaller, target: PaneTarget): Auth
   // §2.1 existence + real ownership.
   if (target.kind === 'node') {
     const node = getNode(target.nodeId);
-    if (!node) throw new PaneInspectionError('NOT_FOUND', 'inspect', 'target not found');
+    if (!node || hiddenTemporaryChat(caller.readerNodeId, node.id)) throw new PaneInspectionError('NOT_FOUND', 'inspect', 'target not found');
     const workspace = getWorkspace(node.workspace_id, caller.ownerUserId);
     if (!workspace || workspace.id !== caller.workspaceId) {
       throw new PaneInspectionError('NOT_FOUND', 'inspect', 'target not found');
@@ -322,7 +330,7 @@ export interface InspectPaneInput {
  * function delegates to P2-3's `surfaceToDescriptor` (added for P1-6b — P1-6 and P2-3 shipped in
  * the same wave and could not see each other; both are now present on this branch).
  */
-export function inspect(caller: PaneInspectionCaller, input: InspectPaneInput, options: { publishObservation?: boolean } = {}): PaneDescriptorV1 {
+export function inspect(caller: PaneInspectionCaller, input: InspectPaneInput): PaneDescriptorV1 {
   const target = resolvePaneTarget(input.locator);
   const authorized = authorizeCaller(caller, target);
   const observedAt = Date.now();
@@ -350,9 +358,7 @@ export function inspect(caller: PaneInspectionCaller, input: InspectPaneInput, o
   } else {
     descriptor = inspectNode(caller, authorized.node, input.executionRef, observedAt);
   }
-  // Feed sampling is published by its own flush, after coalescing. Historical turn reads
-  // must not replace the canonical current-pane baseline either.
-  if (options.publishObservation === false) return descriptor;
+  // Historical turn reads must not replace the canonical current-pane baseline.
   const scope = scopeForCaller(caller);
   if (input.executionRef?.kind === 'chat_turn') return { ...descriptor, observation: { ...descriptor.observation,
     cursor: paneInspectionRing.recordObservedAtRefresh(descriptor.ref.paneId, scope) } };

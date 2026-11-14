@@ -120,7 +120,7 @@ export function advanceConsolidationCursor(ownerUserId: string, to: { at: number
 
 /** What the caller (extractionRun.ts) owns of the due rule. */
 export interface ConsolidationHolds {
-  /** Why automatic memory may not run for the owner now (not local, memory off, paused, maintenance paused), or null. */
+  /** Why automatic memory may not run for the owner now (not local, memory off, paused), or null. */
   hold: string | null;
   /** Tokens left of automatic memory's shared daily limit, and the least an execution starts with. */
   budgetLeft: number;

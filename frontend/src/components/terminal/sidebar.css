@@ -212,6 +212,27 @@
   text-overflow: ellipsis;
 }
 
+/* ── Workspace headers (card row styles) ──────────────────────────────────── */
+/* Folded workspaces stack as a list. The 14px above a header sets an open
+   workspace's threads apart from the next one; a folded one has none to set apart. */
+.terminal-sidebar [data-ws-open='false'] + [data-ws-open='false'] {
+  --sb-ws-head-gap: 2px;
+}
+/* The name runs to the row's edge. ⋯ and + sit over its end and take their
+   room only while they show. A touch screen shows them always (index.css), so
+   there they stay in the row's flow. */
+@media (hover: hover) {
+  .terminal-sidebar .ws-head > .ws-hover-actions {
+    position: absolute;
+    top: 50%;
+    right: var(--ws-head-right, 16px);
+    transform: translateY(-50%);
+  }
+  .terminal-sidebar .ws-head:is(:hover, :focus-visible, :has(:focus-visible), [data-menu-open]) > .ws-head__name {
+    padding-right: 48px;
+  }
+}
+
 /* ── Rows and the keyboard ────────────────────────────────────────────────── */
 /* The current row (the one on screen) keeps its ⋯; the rest show it on hover
    or when focus is in the row (index.css .row-kebab). */

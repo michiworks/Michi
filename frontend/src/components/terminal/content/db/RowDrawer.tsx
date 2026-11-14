@@ -5,6 +5,7 @@ import MarkdownContent from '../../../MarkdownContent';
 import { TERM_PROSE_CLASS, UNTRUSTED_MARKDOWN } from '../../../markdownProse';
 import { DrawerShell } from '../../../ui/DrawerShell';
 import { usePanelWidth } from '../../../../state/prefs';
+import { useCompanionName } from '../../../../state/companion/companionName';
 import { openMichiAssistant, type MichiAssistantPage } from '../../../../state/content/assistantBridge';
 import { dialogOf, isEditableTarget } from '../threads/threadItem';
 import { escapeIsForPage, isInAssistantPanel } from '../../escapeLayers';
@@ -64,6 +65,7 @@ export function RowDrawer({
   onAsk?: (row: MichiDbRow) => void;
 }) {
   const row = rowId ? db.rows.find((r) => r.id === rowId) ?? null : null;
+  const agentName = useCompanionName();
   const bodyRef = useRef<HTMLDivElement>(null);
   const orderRef = useRef(order);
   orderRef.current = order;
@@ -128,7 +130,7 @@ export function RowDrawer({
             {onAsk && <button
               type="button"
               className="michi-peek__text-btn"
-              title="Ask the assistant about this row"
+              title={`Ask ${agentName} about this row`}
               onClick={() => onAsk(row)}
             >
               Ask

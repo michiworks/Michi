@@ -462,7 +462,7 @@ function NativePageDocumentContent({
 
   const renderBlock = useCallback((displayBlock: MichiPageBlock, blockCtx: MichiBlockCtx) => {
     const native = displayBlock.id ? nativeById.get(displayBlock.id) : undefined;
-    if (native?.type === 'home-section') return <><NativeHomeSection section={native.section} pageId={page.id} connectionId={backendConnectionIdForWorkspace(page.workspaceId)} readOnly={readOnly} />{native.interaction && <div className="page-view-block-entry"><PageViewEntry action={native.interaction.action}>{native.interaction.label}</PageViewEntry></div>}</>;
+    if (native?.type === 'home-section') return <><NativeHomeSection connectionId={backendConnectionIdForWorkspace(page.workspaceId)} />{native.interaction && <div className="page-view-block-entry"><PageViewEntry action={native.interaction.action}>{native.interaction.label}</PageViewEntry></div>}</>;
     if (native?.type === 'component' && renderComponent) return <>{renderComponent(native)}{native.interaction && <div className="page-view-block-entry"><PageViewEntry action={native.interaction.action}>{native.interaction.label}</PageViewEntry></div>}</>;
     return <MichiBlock block={displayBlock} ctx={blockCtx} />;
   }, [nativeById, renderComponent, page.id, page.workspaceId, readOnly]);

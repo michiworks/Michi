@@ -5,6 +5,8 @@ import { chatPermissionChoiceParts } from 'michi-shared';
 import React, { useCallback, useEffect, useImperativeHandle, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { useChatStore, useStructuralSelector, shallowArrayEqual } from '../../../state/chatStore';
 import { appendComposerLine } from '../../../state/composerDraft';
+import { receiveHomeDraft } from '../../../state/homeDraft';
+import { resetTemporaryChatDraft } from '../../../state/temporaryChatDraft';
 import type { MentionEditorHandle } from '../../MentionEditor';
 import LazyMentionEditor from '../../LazyMentionEditor';
 import type { MentionRecord } from '../../../lib/mentions';
@@ -130,6 +132,12 @@ interface Props {
    * so there is no default; without them the toolbar never compacts.
    */
   toolbarCompaction?: { glyphsBelow: number; hideAgentBelow: number };
+  /**
+   * Home's temporary-chat switch is on: the new thread starts as a temporary
+   * chat (memory off), its composer is dashed, and the send turns the switch
+   * off. Ignored for a digest follow-up.
+   */
+  temporary?: boolean;
   onSubmitted: () => void;
 }
 
@@ -196,9 +204,11 @@ function ScopedManageComposer({
   trayBelow,
   enableAgentSelect = false,
   toolbarCompaction,
+  temporary: temporaryProp = false,
   onSubmitted,
   handleRef,
 }: Props & { handleRef: React.ForwardedRef<ManageComposerHandle> }) {
+  const temporary = temporaryProp && !parentNodeId;
   const toolbarRef = useRef<HTMLDivElement>(null);
   const { tier: toolbarTier, tray } = useToolbarLayout(toolbarRef, toolbarCompaction, trayBelow);
   const {
@@ -397,22 +407,28 @@ function ScopedManageComposer({
 
   const insertMentionTrigger = useCallback(() => inputRef.current?.startMention(), []);
 
+  const insert = useCallback((text: string) => {
+    const editor = inputRef.current?.editor;
+    const live = editor && !editor.isDestroyed ? editor : null;
+    if (text.trim()) {
+      const next = appendComposerLine(draftRef.current, text);
+      // Through the editor, so its change path updates the draft and the
+      // caret can be placed after the new text at once.
+      if (live) live.commands.setContent(draftToDoc(next.value, next.mentions));
+      else setDraft(next);
+    }
+    if (live) live.commands.focus('end');
+    else inputRef.current?.focus();
+  }, [setDraft]);
+
   useImperativeHandle(handleRef, () => ({
-    insert: (text) => {
-      const editor = inputRef.current?.editor;
-      const live = editor && !editor.isDestroyed ? editor : null;
-      if (text.trim()) {
-        const next = appendComposerLine(draftRef.current, text);
-        // Through the editor, so its change path updates the draft and the
-        // caret can be placed after the new text at once.
-        if (live) live.commands.setContent(draftToDoc(next.value, next.mentions));
-        else setDraft(next);
-      }
-      if (live) live.commands.focus('end');
-      else inputRef.current?.focus();
-    },
+    insert,
     startMention: () => inputRef.current?.startMention('end'),
-  }), [setDraft]);
+  }), [insert]);
+
+  // The new-thread composer also takes words sent from elsewhere (the
+  // palette's "New thread: …"), as a card's prompt arrives.
+  useEffect(() => (draftKey === '__manage__' ? receiveHomeDraft(insert) : undefined), [draftKey, insert]);
 
   const openModelMenu = useCallback(
     (anchor: PaneMenuAnchor) => {
@@ -533,7 +549,8 @@ function ScopedManageComposer({
       if (parentNodeId) {
         await createChildChat(parentNodeId, finalText, permissionMeta, { modeId, primaryAgent });
       } else {
-        const nodeId = await createThread(modeId);
+        // A temporary chat is marked at once, so the pane opens with its marks.
+        const nodeId = await (temporary ? createThread(modeId, { temporary: true }) : createThread(modeId));
         if (!nodeId) return;
         if (primaryAgent) {
           bindPendingPrimaryAgent(nodeId, { workspaceId, ...primaryAgent });
@@ -549,10 +566,13 @@ function ScopedManageComposer({
             });
           }
         }
-        sendMessage(nodeId, finalText, permissionMeta);
+        // Its first session is created as a temporary chat (ensure-session).
+        sendMessage(nodeId, finalText, temporary ? { ...permissionMeta, temporary: true } : permissionMeta);
       }
       setDraft({ value: '', mentions: [] });
       setPermissionMode('ask');
+      // The switch was for this chat only.
+      if (temporary) resetTemporaryChatDraft();
       setUltracodeDraft(false);
       setPendingAttachments([]);
       onSubmitted();
@@ -616,7 +636,8 @@ function ScopedManageComposer({
   const showTray = tray && (!!toolbarLeftPrefix || !!permissionControl);
 
   return (
-    <div style={{ marginBottom: parentNodeId ? 0 : 18, flexShrink: 0, minWidth: 0 }} data-composer-tray={showTray || undefined}>
+    <div style={{ marginBottom: parentNodeId ? 0 : 18, flexShrink: 0, minWidth: 0 }} data-composer-tray={showTray || undefined}
+      data-temporary-chat={temporary || undefined}>
       <ComposerShell
         position="static"
         toolbarRef={toolbarRef}
@@ -640,7 +661,7 @@ function ScopedManageComposer({
             mentions={draft.mentions}
             onChange={setDraft}
             disabled={submitting}
-            placeholder="What would you like to explore?"
+            placeholder={temporary ? 'Ask in a temporary chat' : 'What would you like to explore?'}
             className="hide-sb"
             artifacts={artifacts}
             sameTreeNodes={[]}

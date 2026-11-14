@@ -53,7 +53,6 @@ vi.mock('../services/api', () => ({
   steerChat: vi.fn(),
 }));
 
-vi.mock('../services/notifications', () => ({ notify: vi.fn() }));
 vi.mock('../services/attention/policy', async (importOriginal) => ({
   ...await importOriginal<typeof import('../services/attention/policy')>(),
   presentAttention: vi.fn(),
@@ -78,7 +77,6 @@ vi.mock('../services/api/persistence', async (importOriginal) => {
 
 import * as api from '../services/api';
 import * as persistence from '../services/api/persistence';
-import { notify } from '../services/notifications';
 import { dismissAttention, presentAttention, type AttentionIntent } from '../services/attention/policy';
 import { setPanePresenceDashboardVisible } from './panePresenceVisibility';
 import { ChatProvider, useChatStore, useChatNode, useChatNodesSnapshot } from './chatStore';
@@ -88,6 +86,7 @@ import { dispatchChatStreamEvent } from '../services/chatStreamEvents';
 import { ensureSession as ensureSessionRequest, executeChatCommand } from '../services/api/sessions';
 import { turnErrorAction } from './turnErrorRecovery';
 import { receiveServerAttentionFrame, resetServerAttentionStore } from '../services/serverAttentionStore';
+import { onOpenCompanionTargetRequest, onOpenScheduledRunRequest } from './attentionOpenRequests';
 import { agentRunPaneId } from './paneItems';
 import { fetchSkillCatalog } from '../services/api/skills';
 import { loadSkillCatalog, readSkillCatalog, resetSkillCatalogs } from './skillCatalog';
@@ -109,7 +108,6 @@ function useStoreAndNodes() {
 
 const mockEnsureSession = api.ensureSession as ReturnType<typeof vi.fn>;
 const mockStreamMessage = api.streamMessage as ReturnType<typeof vi.fn>;
-const mockNotify = notify as ReturnType<typeof vi.fn>;
 const mockPresentAttention = vi.mocked(presentAttention);
 
 /** The intents of one kind handed to the attention policy, oldest first. */
@@ -163,7 +161,6 @@ describe('auto-branch behavior (real provider)', () => {
     mockEnsureSession.mockReset();
     mockStreamMessage.mockReset();
     vi.mocked(api.steerChat).mockReset();
-    mockNotify.mockReset();
     mockPresentAttention.mockReset();
     vi.mocked(dismissAttention).mockReset();
     vi.mocked(api.cancelChatAndObserve).mockReset().mockImplementation(() => () => {});
@@ -1898,7 +1895,6 @@ describe('auto-branch behavior (real provider)', () => {
     expect(visibleOnDashboard(finished)).toBe(true);
     expect(finished.isTargetVisible!()).toBe(false);
     expect(finished.isStillCurrent!()).toBe(true);
-    expect(mockNotify).not.toHaveBeenCalled();
   });
 
   it('reports a finished turn in another thread as not visible', async () => {
@@ -2260,8 +2256,7 @@ describe('auto-branch behavior (real provider)', () => {
       expect(mockStreamMessage.mock.calls[1][1]).toBe('second');
       expect(result.current.nodes[nodeId].status).toBe('streaming');
       expect(result.current.nodes[nodeId].error).toBeUndefined();
-      expect(mockNotify).not.toHaveBeenCalled();
-    });
+      });
 
     it('shows the existing setup error when the session stays busy', async () => {
       const { result, nodeId } = await finishedFirstTurn();
@@ -2413,6 +2408,33 @@ describe('auto-branch behavior (real provider)', () => {
       expect(() => act(() => { elsewhere.onOpen!(); })).not.toThrow();
       expect(warn).toHaveBeenCalledWith('[attention] could not open the notice target', expect.any(Error));
       expect(result.current.store.paneItems[agentRunPaneId('local', 'run-a2')]).toBeUndefined();
+    });
+
+    it('Michi\'s records and a scheduled run\'s open through the shell\'s openers, with their reason for the level', async () => {
+      vi.spyOn(document, 'hasFocus').mockReturnValue(true);
+      vi.stubGlobal('fetch', vi.fn(async () => new Response('{}', { status: 404 })));
+      renderHook(() => useStoreAndNodes(), { wrapper });
+      const companionOpens: unknown[] = [];
+      const runOpens: unknown[] = [];
+      const stopCompanion = onOpenCompanionTargetRequest((target) => companionOpens.push(target));
+      const stopRuns = onOpenScheduledRunRequest((target) => runOpens.push(target));
+      const open = { kind: 'companion', tab: 'today', itemId: 'cmi-1' };
+      receiveServerAttentionFrame('local', 'attention_notification', JSON.stringify({
+        id: 'attn-m', key: 'agent:item:cmi-1', kind: 'needs_input', reason: 'needs_you', title: 'Michi', body: 'MyService is blocked',
+        target: { type: 'agent', ref: 'item:cmi-1', open, workspaceId: 'ws-michi' }, createdAt: Date.now(), claimedByWindowId: null, claimedAt: null,
+      }));
+      receiveServerAttentionFrame('local', 'attention_notification', JSON.stringify({
+        id: 'attn-s', key: 'scheduled_run:run-1', kind: 'failed', reason: 'run_failed', title: 'Nightly', body: 'Failed: boom',
+        target: { type: 'scheduled_run', runId: 'run-1', jobId: 'job-1', nodeId: null, workspaceId: 'ws-1' }, createdAt: Date.now(), claimedByWindowId: null, claimedAt: null,
+      }));
+      await waitFor(() => expect(mockPresentAttention.mock.calls.filter(([intent]) => intent.source === 'server')).toHaveLength(2));
+      const [michi, run] = mockPresentAttention.mock.calls.map(([intent]) => intent).filter((intent) => intent.source === 'server');
+      expect([michi!.reason, run!.reason]).toEqual(['needs_you', 'run_failed']);
+      act(() => { michi!.onOpen!(); run!.onOpen!(); });
+      expect(companionOpens).toEqual([open]);
+      expect(runOpens).toEqual([{ runId: 'run-1', jobId: 'job-1', workspaceId: 'ws-1', nodeId: null }]);
+      stopCompanion();
+      stopRuns();
     });
   });
 });

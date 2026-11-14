@@ -23,6 +23,7 @@ import {
   WeaveIcon,
   WorkspacesIcon,
 } from './icons';
+import { TemporaryChatGlyph } from './TemporaryChat';
 
 const COMMAND_ICONS: Record<CommandIcon, (props: { size?: number }) => React.ReactElement> = {
   agent: AgentIcon,
@@ -46,6 +47,7 @@ const COMMAND_ICONS: Record<CommandIcon, (props: { size?: number }) => React.Rea
   threads: AllThreadsIcon,
   clock: ClockIcon,
   skill: SkillIcon,
+  ghost: TemporaryChatGlyph,
 };
 
 /** The house SVG for a command palette row, sized to the menu icon slot. */

@@ -222,9 +222,13 @@ export class AcpAgentSession implements AgentSession {
     /** How the agent differs from kiro-cli; read instead of the runtime id. */
     private readonly flavor: AcpAgentFlavor;
     private turnPermissionMode: import('michi-shared').ChatPermissionMode = 'ask';
+    /** The host guards this turn (PermissionPolicyPort.turnGuard): read with the mode when the turn starts. */
+    private turnGuarded = false;
     private readonly approvals: ApprovalCoordinator;
     private readonly pendingChatPermissions = new Map<number, {
         toolName?: string; allowOptionId?: string; options: import('michi-shared').PermissionOption[]; signal: AbortSignal;
+        /** The host forced this ask (PermissionPolicyPort.forced): another card's answer never covers it. */
+        forced?: boolean;
     }>();
     /** The tool call of each approval shown and not yet answered, by requestId (see settleDeclinedToolCall). */
     private readonly permissionToolCalls = new Map<number, string>();
@@ -376,8 +380,21 @@ export class AcpAgentSession implements AgentSession {
         this.permissionToolCalls.clear();
     }
 
+    /**
+     * The chat's agent: a guarded copy reads as the agent it was made from,
+     * and a guarded turn's fallback as the mode it left (the user picks
+     * neither), so the chat's recorded mode stays the user's.
+     */
     get currentModeId(): string | null {
-        return this.runtime.getCurrentMode(this.nativeSessionId) ?? null;
+        return this.presentMode(this.runtime.getCurrentMode(this.nativeSessionId) ?? null);
+    }
+
+    private presentMode(mode: string | null): string | null {
+        const guarded = this.runtime.guardedAgent;
+        if (mode === null || !guarded) return mode;
+        if (guarded.isGuarded(mode)) return guarded.baseOf(mode) ?? this.runtime.getDefaultModeId(this.cwd);
+        const left = mode === this.runtime.guardedFallbackAgent ? this.runtime.guardedFallbacks.get(this.nativeSessionId) : undefined;
+        return left ? left.base ?? this.runtime.getDefaultModeId(this.cwd) ?? mode : mode;
     }
 
     get currentModelId(): string | null {
@@ -385,7 +402,18 @@ export class AcpAgentSession implements AgentSession {
     }
 
     getSessionState() {
-        return this.runtime.getClient?.(this.cwd)?.getSessionState?.(this.nativeSessionId) ?? { runtimeId: this.runtimeId };
+        return this.presentState(this.runtime.getClient?.(this.cwd)?.getSessionState?.(this.nativeSessionId) ?? { runtimeId: this.runtimeId });
+    }
+
+    /** Session state as the chat shows it: guarded agent copies are left out of the agent list and read as their base. */
+    private presentState<T>(state: T): T {
+        const guarded = this.runtime.guardedAgent;
+        if (!guarded || !state || typeof state !== 'object') return state;
+        const record = state as { currentModeId?: unknown; availableModes?: unknown };
+        const next: Record<string, unknown> = { ...(state as Record<string, unknown>) };
+        if (typeof record.currentModeId === 'string') next.currentModeId = this.presentMode(record.currentModeId) ?? record.currentModeId;
+        if (Array.isArray(record.availableModes)) next.availableModes = this.runtime.withoutGuardedModes(record.availableModes);
+        return next as T;
     }
 
     private stateClient?: AcpClient;
@@ -451,6 +479,7 @@ export class AcpAgentSession implements AgentSession {
             this.runtime.assertMetaAgentReady(this.nativeSessionId);
         }
         this.turnPermissionMode = this.runtime.host.permissions.mode(this.owner);
+        this.turnGuarded = this.approvals.turnGuard(this.owner, this.ownerUserId) !== 'none';
         const turn = new AbortController();
         this.activeTurn = turn;
         this.touch();
@@ -699,6 +728,7 @@ export class AcpAgentSession implements AgentSession {
         }
         if (this.stateListeners.size) this.observeClient(c);
         await this.reconcilePolicyPresets(c);
+        await this.reconcileGuardedAgent();
         let endMcpTurn: (() => void) | undefined;
         try {
             // Recovery can replace the MCP group. Activate the rebuilt binding
@@ -729,11 +759,13 @@ export class AcpAgentSession implements AgentSession {
      * Kiro V3 seeds Approve for me only when it opens a session, so this
      * reopens the session when a turn in Ask needs the preset and lacks it,
      * or must not keep one from an earlier choice. Trust and YOLO approve
-     * everything anyway and leave the session as it is. Not removing it fails
-     * the turn: its classifier would approve what the person asked to review.
+     * everything anyway and leave the session as it is, unless the host
+     * guards the turn: its classifier would then approve calls before they
+     * reach the host's rules. Not removing it fails the turn: its classifier
+     * would approve what the person asked to review.
      */
     private async reconcilePolicyPresets(c: AcpClient): Promise<void> {
-        if (this.turnPermissionMode !== 'ask' || !this.runtime.approveForMe) return;
+        if ((this.turnPermissionMode !== 'ask' && !this.turnGuarded) || !this.runtime.approveForMe) return;
         const current = c.policyPresets?.(this.nativeSessionId);
         if (current === undefined) return;
         const has = current.includes(KIRO_APPROVE_FOR_ME_PRESET);
@@ -756,6 +788,98 @@ export class AcpAgentSession implements AgentSession {
             throw new Error(has
                 ? `Kiro could not turn off Approve for me for this chat: ${detail}. Send the message again, or choose Approve for me.`
                 : `Kiro could not turn on Approve for me for this chat: ${detail}. Send the message again.`);
+        }
+    }
+
+    /**
+     * A guarded turn (the host's turnGuard) runs on the guarded copy of the
+     * chat's agent (KiroGuardedAgentOptions), which pre-approves no tools, so
+     * every call reaches the host's approval (lane D, Q26); a later unguarded
+     * turn goes back to the agent the copy was made from. Both engines switch
+     * agents with session/set_mode, which fails unless Kiro selected the
+     * agent. A v3 mode with no agent file to copy (autonomous) runs the
+     * guarded turn on the runtime's fallback, vibe, which asks before commands
+     * and writes; the mode it left is recorded durably first
+     * (kiroGuardedFallbacks.ts), so the next unguarded turn goes back, also
+     * after a restart, and the chat shows that mode meanwhile. A guarded turn
+     * whose copy or fallback cannot be selected does not run: on the chat's
+     * own agent, the tools it pre-approves would skip the host's rules. Going
+     * back that fails leaves the copy or fallback, which only ask more.
+     * Restricted (Meta agent) and Agent Run sessions keep their agents.
+     */
+    private async reconcileGuardedAgent(): Promise<void> {
+        const guarded = this.runtime.guardedAgent;
+        if (!guarded || this.permissionBroker || this.runtime.host.profile.isRestricted(this.toolProfile)) return;
+        if (!isInteractiveOwner(this.owner ?? interactiveOwner(this.id))) return;
+        const sid = this.nativeSessionId;
+        const current = this.runtime.getCurrentMode(sid) ?? null;
+        const inCopy = current !== null && guarded.isGuarded(current);
+        const fallback = this.runtime.guardedFallbackAgent;
+        // A guarded turn's fallback this chat is on (or was on before a restart): the mode it left.
+        const left = this.runtime.guardedFallbacks.get(sid);
+        const base = inCopy ? guarded.baseOf(current!) : left ? left.base : current;
+        if (this.turnGuarded) {
+            let target: string | null;
+            try {
+                target = guarded.ensure(base, this.cwd, fallback);
+            } catch (error) {
+                throw new Error(`Could not prepare a copy of this chat's Kiro agent without pre-approved tools, so nothing ran: ${errorText(error)}`);
+            }
+            if (target === null) {
+                // The agent pre-approves nothing a read would not: the turn keeps it.
+                if (inCopy || left) await this.leaveGuardedAgent(base, left !== undefined);
+                return;
+            }
+            if (current === target) return;
+            const toFallback = !guarded.isGuarded(target);
+            try {
+                // The mode it leaves is kept before the switch, so the next unguarded turn finds it, after a restart too.
+                if (toFallback && !left) this.runtime.guardedFallbacks.set(sid, base);
+            } catch (error) {
+                throw new Error(`Could not record this chat's Kiro mode before running it on ${target}, so nothing ran: ${errorText(error)}`);
+            }
+            try {
+                // Verified: v3 answers set_mode alike whether or not it switched (AcpClient.selectAgentVerified).
+                await (this.runtime.selectGuardedAgent
+                    ? this.runtime.selectGuardedAgent(sid, target)
+                    : this.runtime.setMode(sid, target));
+                this.runtime.host.observability.log('info', 'acp', toFallback
+                    ? 'Kiro chat runs this turn on vibe: its mode has no agent file to copy'
+                    : 'Kiro chat runs this turn on the guarded copy of its agent', { sessionId: sid, agent: target, base });
+            } catch (error) {
+                if (toFallback && !left) this.runtime.guardedFallbacks.delete(sid);
+                throw new Error(toFallback
+                    ? `Kiro could not switch this chat to ${target}, which asks before commands and writes, so nothing ran: ${errorText(error)}.`
+                    : `Kiro could not switch this chat to ${target}, a copy of its agent without pre-approved tools, so nothing ran: ${errorText(error)}. `
+                        + 'Kiro lists a new agent once it restarts for this folder; send the message again after that, or pick an agent that pre-approves no tools.');
+            }
+            return;
+        }
+        if (inCopy || left) await this.leaveGuardedAgent(base, left !== undefined);
+    }
+
+    /**
+     * Back to the agent a guarded copy was made from, or the mode a fallback
+     * left (Kiro's default for none), before the chat's unguarded turn. A
+     * failure leaves the copy or the fallback, which only ask more, and keeps
+     * the record, so the next turn tries again.
+     */
+    private async leaveGuardedAgent(base: string | null, fromFallback: boolean): Promise<void> {
+        const target = base ?? this.runtime.getDefaultModeId(this.cwd);
+        if (!target) {
+            if (fromFallback) this.runtime.guardedFallbacks.delete(this.nativeSessionId);
+            return;
+        }
+        try {
+            // Verified on v3 too, so a switch back Kiro did not apply keeps the record and the next turn tries again.
+            await (this.runtime.selectGuardedAgent
+                ? this.runtime.selectGuardedAgent(this.nativeSessionId, target)
+                : this.runtime.setMode(this.nativeSessionId, target));
+            if (fromFallback) this.runtime.guardedFallbacks.delete(this.nativeSessionId);
+        } catch (error) {
+            this.runtime.host.observability.log('warn', 'acp', 'Kiro chat stays on the agent of its last guarded turn', {
+                sessionId: this.nativeSessionId, agent: target, error: errorText(error),
+            });
         }
     }
 
@@ -826,7 +950,7 @@ export class AcpAgentSession implements AgentSession {
                 const kind = update.sessionUpdate;
                 if (kind === 'tool_call' || kind === 'tool_call_update') toolCallNames.remember(update);
                 if (kind === 'session_state') {
-                    yield { kind: 'session_state', state: update.state };
+                    yield { kind: 'session_state', state: this.presentState(update.state) };
                 } else if (kind === "agent_message_chunk") {
                     const content = update.content;
                     const blocks = Array.isArray(content) ? content : content ? [content] : [];
@@ -1011,22 +1135,28 @@ export class AcpAgentSession implements AgentSession {
                     const toolName = this.flavor.tools?.relayedHostTool?.(update.toolCall, update._meta)
                         ?? acpPermissionToolName(update.toolCall, update._meta, resolveToolName, toolCallNames.get(update.toolCall?.toolCallId));
                     const owner = this.owner ?? interactiveOwner(this.id);
-                    if (allow && this.approvals.policy(owner, null, toolName ?? '', true, this.turnPermissionMode) === 'allow') {
+                    // Kiro sends the call's kind (and on v3 its arguments) on the tool_call update, not in the request.
+                    const seen = toolCallNames.call(update.toolCall?.toolCallId);
+                    const callKind = typeof update.toolCall?.kind === 'string' ? update.toolCall.kind : seen.kind;
+                    const call = { input: update.toolCall?.rawInput ?? seen.rawInput, ...(callKind ? { kind: callKind } : {}) };
+                    if (allow && this.approvals.policy(owner, null, toolName ?? '', true, this.turnPermissionMode, undefined, call) === 'allow') {
                         this.runtime.respondToPermission(this.nativeSessionId, update.requestId, allow.optionId);
                         continue;
                     }
-                    if (allow && isInteractiveOwner(owner)) {
+                    // A forced ask (the host's consequence rules) approves this one call only.
+                    const forced = this.approvals.forcedAsk(owner, null, toolName ?? '', true, undefined, call);
+                    if (allow && isInteractiveOwner(owner) && !forced) {
                         options.push(...chatApprovalOptions(toolName).filter((option) => option.kind === 'allow_always' || option.kind === 'allow_session')
                             .map((option) => ({ ...option, optionId: `michi:${option.optionId}` })));
                     }
-                    this.pendingChatPermissions.set(update.requestId, { toolName, allowOptionId: allow?.optionId, options, signal });
+                    this.pendingChatPermissions.set(update.requestId, { toolName, allowOptionId: allow?.optionId, options, signal, ...(forced ? { forced: true } : {}) });
                     this.rememberPermissionToolCall(update);
                     yield {
                         kind: "permission_request" as const,
                         requestId: update.requestId,
                         toolCallId: update.toolCall?.toolCallId,
                         title: subagentPermissionTitle(update, toolName ? `Approve ${toolName}?` : this.toolTitle(update.toolCall) ?? "Tool call"),
-                        detail: kiroRequestDetail({ toolCall: update.toolCall, meta: update._meta }),
+                        detail: [forced?.reason, kiroRequestDetail({ toolCall: update.toolCall, meta: update._meta })].filter(Boolean).join('\n\n') || undefined,
                         options,
                         source: "acp_permission",
                     };
@@ -1260,6 +1390,8 @@ export class AcpAgentSession implements AgentSession {
 
     async setMode(modeId: string): Promise<void> {
         await this.runtime.setMode(this.nativeSessionId, modeId);
+        // The user picked a mode: no guarded turn's fallback to go back from.
+        this.runtime.guardedFallbacks.delete(this.nativeSessionId);
     }
 
     async setModel(modelId: string): Promise<void> {
@@ -1288,7 +1420,7 @@ export class AcpAgentSession implements AgentSession {
         if (!allow && option.kind?.startsWith('reject')) this.settleDeclinedToolCall(toolCallId);
         if (allow && (option.kind === 'allow_session' || option.kind === 'allow_always')) {
             for (const [id, request] of this.pendingChatPermissions) {
-                if (request.allowOptionId && !request.signal.aborted && this.approvals.covers(option.kind, pending.toolName, request.toolName)) {
+                if (request.allowOptionId && !request.signal.aborted && this.approvals.covers(option.kind, pending.toolName, request.toolName, request.forced === true)) {
                     this.respondToPermission(id, request.allowOptionId);
                 }
             }
@@ -1310,4 +1442,8 @@ export class AcpAgentSession implements AgentSession {
     skipUserInput(requestId: number): void {
         this.runtime.skipUserInput(requestId);
     }
+}
+
+function errorText(error: unknown): string {
+    return error instanceof Error ? error.message : String(error);
 }

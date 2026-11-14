@@ -53,12 +53,12 @@ const PAGE_WRITES = PAGE_TOOL_NAMES.filter((name) => !PAGE_READS.has(name) && !C
 const NATIVE = ['Bash', 'Read', 'Write', 'Edit', 'WebFetch', 'WebSearch', 'Task', 'read', 'write', 'edit', 'bash', 'ls', 'grep', 'find', 'web_search', 'fetch_content'];
 
 describe('a check-in\'s closed profile (DESIGN-v2 §2.2-§2.5)', () => {
-  test('the closed chat toolset with exactly CHECKIN_TOOL_NAMES (29); V stays open', () => {
+  test('the closed chat toolset with exactly CHECKIN_TOOL_NAMES (30); V stays open', () => {
     assert.deepEqual(PROFILE, { assistant: true, restricted: true, metaAgentToolset: 'chat', allowedToolNames: CHECKIN_TOOL_NAMES });
     assert.equal(metaAgentToolsetOf(PROFILE), 'chat');
     assert.equal(isMetaAgentProfile(PROFILE), true);
     assert.deepEqual(assistantToolNamesFor('checkin'), CHECKIN_TOOL_NAMES);
-    assert.equal(CHECKIN_TOOL_NAMES.length, 29, '§2.3: S has 29 tools');
+    assert.equal(CHECKIN_TOOL_NAMES.length, 30, '§2.3: S has 30 tools (with companion_headline, Q45)');
     assert.equal(new Set(COMPANION_TOOL_NAMES).size, COMPANION_TOOL_NAMES.length);
     assert.ok(Object.isFrozen(COMPANION_TOOL_NAMES));
     assert.deepEqual(assistantToolProfile('main'), { assistant: true });

@@ -1,6 +1,6 @@
 # Response time, context and usage
 
-Applies to: ordinary chats; provider metrics vary by runtime/model. Source checked: 2026-11-08. No latency target, price or billing equivalence is implied.
+Applies to: ordinary chats; provider metrics vary by runtime/model. Source checked: 2026-11-12. No latency target, price or billing equivalence is implied.
 
 ## Why is a response taking so long?
 
@@ -54,6 +54,8 @@ Before a long handoff, save the current goal, verified state, files, decisions a
 | Context usage | Estimate/report of occupied model context where supported | Total accumulated billable usage |
 | Provider credits/quotas | Provider-side entitlement/limits | A universal Michi balance |
 | Supplier invoice/account usage | Provider's billing record | Something Michi can infer exactly from every transcript |
+
+The line under an answer shows its time and what the runtime reported: tokens, else a cost or credits (marked *estimated* when it is an estimate), or *usage unverifiable*. Hover it for the duration, the input/cached/output/reasoning breakdown and the share of context used, where reported. The last answer keeps the line showing; earlier ones show it on hover.
 
 Do not add cumulative snapshots as if each were a new increment. Do not invent a token count, price or cost when the runtime did not provide it. Check the actual provider account for billing, model access and current prices.
 

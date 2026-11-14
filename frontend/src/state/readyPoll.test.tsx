@@ -39,7 +39,6 @@ vi.mock('../services/api', async () => {
   };
 });
 
-vi.mock('../services/notifications', () => ({ notify: vi.fn() }));
 
 import * as api from '../services/api';
 import { ChatProvider, useChatStore } from './chatStore';

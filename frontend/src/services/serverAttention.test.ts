@@ -75,11 +75,25 @@ describe('presenting server attention', () => {
     expect(claim).toHaveBeenCalledWith('local', 'attn-1', 'this-window');
     expect(shown).toEqual([{
       intent: {
-        key: 'server:local:node:n1', kind: 'finished', title: 'Fix the build', body: 'Streaming finished', serverId: 'attn-1',
+        key: 'server:local:node:n1', kind: 'finished', reason: 'completed', title: 'Fix the build', body: 'Streaming finished', serverId: 'attn-1',
         target: { type: 'node', nodeId: 'n1', workspaceId: 'ws-1', backendConnectionId: 'local' },
       },
       presentation: { claimed: true, windowFocused: true, replay: false },
     }]);
+    stop();
+  });
+
+  it('Michi\'s records and a scheduled run\'s keep their targets, scoped to the connection', async () => {
+    const { shown, stop } = harness({ focused: true });
+    const open = { kind: 'companion' as const, tab: 'today' as const, itemId: 'cmi-1' };
+    live(record({ id: 'attn-a', key: 'agent:item:cmi-1', kind: 'needs_input', reason: 'needs_you', target: { type: 'agent', ref: 'item:cmi-1', open, workspaceId: 'ws-michi' } }));
+    live(record({ id: 'attn-s', key: 'scheduled_run:run-1', kind: 'failed', reason: 'run_failed',
+      target: { type: 'scheduled_run', runId: 'run-1', jobId: 'job-1', nodeId: null, workspaceId: 'ws-1' } }));
+    await settle();
+    expect(shown.map(({ intent }) => [intent.key, intent.reason, intent.target])).toEqual([
+      ['server:local:agent:item:cmi-1', 'needs_you', { type: 'agent', ref: 'item:cmi-1', open, workspaceId: 'ws-michi', backendConnectionId: 'local' }],
+      ['server:local:scheduled_run:run-1', 'run_failed', { type: 'scheduled_run', runId: 'run-1', jobId: 'job-1', nodeId: null, workspaceId: 'ws-1', backendConnectionId: 'local' }],
+    ]);
     stop();
   });
 

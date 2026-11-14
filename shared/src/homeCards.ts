@@ -67,6 +67,8 @@ export interface HomeCardsDto {
   contentPage?: PageDto | null;
   /** User selected custom/hidden cards; do not substitute onboarding recommendations. */
   cardsCustomized?: boolean;
+  /** User chose the greeting (custom) or hid it: `greeting` is theirs; otherwise Home writes its own. */
+  greetingCustomized?: boolean;
   greeting: HomeGreeting | null;
   sets: HomeCardSet[];
   generatedAt: number | null;

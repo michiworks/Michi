@@ -183,7 +183,7 @@ function Spinner() {
 
 function Glyph({ name }: { name: LineGlyph }) {
   if (name === 'spin') return <Spinner />;
-  const tone = name === 'fail' ? ' is-fail' : name === 'agent' ? ' is-agent' : '';
+  const tone = name === 'fail' ? ' is-fail' : '';
   return <Svg className={`agent-line__svg${tone}`}>{PATHS[name]}</Svg>;
 }
 
@@ -223,7 +223,8 @@ interface LineView {
   leadNode?: React.ReactNode;
   rest?: string;
   restKind?: RestKind;
-  frag?: { tone: 'danger' | 'calm'; text: string; more?: string } | null;
+  /** `srOnly`: read to screen readers, not shown (see StepView.frag). */
+  frag?: { tone: 'danger' | 'calm'; text: string; more?: string; srOnly?: boolean } | null;
   meta?: { text: string; spoken: string } | null;
   /** Settled summary: one muted sentence fitted to the line by whole phrases. */
   sentence?: { phrases: OutcomePhrase[]; dropped: number; full: string };
@@ -325,7 +326,9 @@ function LineRow({ view, live, step, expanded, controls, onToggle, groupHeader }
           {view.rest}
         </LineSwap>
       </span>
-      {view.frag ? (
+      {view.frag?.srOnly ? (
+        <span className="agent-line__frag"><span className="sr-only">{view.frag.text}</span></span>
+      ) : view.frag ? (
         <LineSwap k={`${view.frag.tone}|${view.frag.text}`} className={`agent-line__frag is-${view.frag.tone}`} layerClassName="agent-line__frag-i">
           <Svg size={12} className="agent-line__x">{PATHS.fail}</Svg>
           <span>{view.frag.text}{view.frag.more && <span className="agent-line__more">{view.frag.more}</span>}</span>
@@ -915,17 +918,20 @@ export function LineToolGroup({ tools, subagents, live = false }: {
 /**
  * How a settled run ended, beside its sentence. A run that ended on a failure
  * leads with the failed step and shows its exit code, counting failures only
- * when there are more. One that went on after a failure keeps its sentence and
- * counts what stayed failed. Declined calls are no failure: said calmly.
+ * when there are more; a bare "failed" beside the red error line that already
+ * says so is left to screen readers. One that went on after a failure keeps its sentence and
+ * counts what stayed failed, calmly: the work moved past it, and danger is kept
+ * for a run that ended failing. Declined calls are no failure: said calmly.
  */
 function runFrag(outcome: ReturnType<typeof summarizeOutcome>, single: boolean): LineView['frag'] {
   const NB = '\u00A0';
   if (outcome.restKind === 'error') {
     const code = outcome.leadTool ? toolExitCode(outcome.leadTool) : undefined;
     const count = outcome.failed > 1 ? `${outcome.failed}${NB}failed` : 'failed';
-    return { tone: 'danger', text: code !== undefined ? `exit${NB}${code}${outcome.failed > 1 ? ` · ${count}` : ''}` : count };
+    if (code !== undefined) return { tone: 'danger', text: `exit${NB}${code}${outcome.failed > 1 ? ` · ${count}` : ''}` };
+    return { tone: 'danger', text: count, ...(outcome.rest && outcome.failed <= 1 ? { srOnly: true } : {}) };
   }
-  if (outcome.unrecovered > 0) return { tone: 'danger', text: `${outcome.unrecovered}${NB}failed` };
+  if (outcome.unrecovered > 0) return { tone: 'calm', text: `${outcome.unrecovered}${NB}failed` };
   if (outcome.failed > 0) return { tone: 'calm', text: single ? 'failed' : `${outcome.failed}${NB}failed`, more: ', rerun passed' };
   if (outcome.denied > 0) return { tone: 'calm', text: outcome.endedDenied && outcome.denied === 1 ? 'denied' : `${outcome.denied}${NB}denied` };
   return null;
@@ -968,7 +974,7 @@ export function LineWorkFold({ tools, notes, durationMs, subagents, children }: 
       rest: rest || undefined,
       restKind: 'record',
       frag: outcome.unrecovered > 0
-        ? { tone: 'danger', text: `${outcome.unrecovered}\u00A0failed` }
+        ? { tone: 'calm', text: `${outcome.unrecovered}\u00A0failed` }
         : outcome.failed > 0 ? { tone: 'calm', text: `${outcome.failed}\u00A0failed`, more: ', rerun passed' }
           : outcome.denied > 0 ? { tone: 'calm', text: `${outcome.denied}\u00A0denied` } : null,
     };

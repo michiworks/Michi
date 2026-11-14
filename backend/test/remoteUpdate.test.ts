@@ -8,7 +8,7 @@ import http from 'node:http';
 import express from 'express';
 import type { RemoteUpdateJob } from 'michi-shared';
 import { compareRemoteBuild, type BuildInfo } from '../src/services/buildInfo';
-import { RemoteDesktopError, RemoteDesktopSetup } from '../src/services/remoteDesktopSetup';
+import { buildRemoteUpdateScript, RemoteDesktopError, RemoteDesktopSetup } from '../src/services/remoteDesktopSetup';
 import { saveBackendConnection } from '../src/services/backendConnections';
 import { SshTunnelManager } from '../src/services/sshTunnelManager';
 import { setupBackendConnectionRoutes } from '../src/routes/backendConnections';
@@ -27,6 +27,15 @@ test('only an ancestor of the running local build is older, including legacy sho
   assert.equal(compareRemoteBuild(build, { version: '1.0.0', revision: 'invalid' }, true).state, 'unknown');
   assert.equal(compareRemoteBuild(build, { version: '1.0.0', revision: oldHash }, false).canUpdate, false);
   assert.equal(compareRemoteBuild({ ...build, dirty: true }, { version: '1.0.0', revision: oldHash }, true).canUpdate, false);
+});
+
+test('a remote update removes old releases only after the new build serves, keeping the one it replaced', () => {
+  const script = buildRemoteUpdateScript({ repo: '/remote/old', dataDir: '/remote/data', token: 'token', port: 4444 }, 'ssh://source', 'dev', newHash, 'attempt');
+  const prune = script.indexOf('scripts/remote-control.mjs prune-releases --keep "$old_repo") >>"$log" 2>&1 || true');
+  assert.ok(prune > 0, 'the update prunes, best effort, with its output in the log');
+  assert.ok(prune > script.indexOf('remote-control.mjs launch --no-setup'), 'after the new build starts');
+  assert.ok(prune > script.indexOf('remote-installation.json'), 'after the installation record names the new build');
+  assert.ok(prune < script.indexOf('MICHI_SETUP_JSON'), 'before the final inspection');
 });
 
 test('checks legacy remote version with the saved token and verifies the running build after update', async () => {

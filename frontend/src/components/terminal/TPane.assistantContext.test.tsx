@@ -25,7 +25,6 @@ vi.mock('../../services/api', async (importOriginal) => ({
   ensureSession: vi.fn(() => Promise.reject(new Error('offline in tests'))),
   streamMessage: vi.fn(() => () => {}),
 }));
-vi.mock('../../services/notifications', () => ({ notify: vi.fn() }));
 const selection = vi.hoisted(() => ({
   onBranch: null as null | ((quote: string, prompt: string, anchor?: string) => void),
   onQuote: null as null | ((quote: string, range?: Range) => void),

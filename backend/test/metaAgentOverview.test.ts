@@ -17,11 +17,11 @@ import { ScheduledJobsRepository } from '../src/services/scheduledJobs/repositor
 import { ScheduledJobScheduler, type ScheduledJobExecutor } from '../src/services/scheduledJobs/scheduler';
 import { metaAgentOverview, setMetaAgentPaused, startOfLocalDay } from '../src/services/metaAgent/overview';
 import { metaAgentUsageToday } from '../src/services/metaAgent/todayUsage';
-import { usageSummaryTotalTokens } from 'michi-shared';
 import { setFirstRunWindowDays } from '../src/services/metaAgent/firstRunHistory';
 import { setupMetaAgentOverviewRoutes } from '../src/routes/metaAgentOverview';
 import { recordMetaAgentGuardCheck } from '../src/services/metaAgent/guardStatus';
-import { resolveMetaAgentRuntime } from '../src/services/metaAgent/settings';
+import { resolveBackgroundRuntime } from '../src/services/metaAgent/settings';
+import { turnBackgroundWorkOn } from './helpers/backgroundWork';
 
 const LOCAL = 'local-user';
 const DAY = startOfLocalDay(new Date(2026, 9, 23, 12).getTime());
@@ -41,6 +41,7 @@ beforeEach(() => {
   process.env.MICHI_DATA_DIR = dir;
   delete process.env.MICHI_CLOUD;
   closeDb(); initDb();
+  turnBackgroundWorkOn();
   updateAgentConfig({ runtime: 'claude', modelByRuntime: { claude: 'claude-opus-5.5' }, reasoningByRuntime: { claude: 'high' } });
   now = at(10, 45);
   ids = 0;
@@ -56,7 +57,7 @@ afterEach(() => {
 function scheduler(): ScheduledJobScheduler {
   const executor: ScheduledJobExecutor = { start: async () => { throw new Error('not used'); } };
   return new ScheduledJobScheduler({ repository: new ScheduledJobsRepository(), executor,
-    events: new ScheduledJobEventBus(() => now), workspaceExists: () => true, runtimeExists: () => true,
+    events: new ScheduledJobEventBus(), workspaceExists: () => true, runtimeExists: () => true,
     clock: () => now, createId: () => `job-${++ids}` });
 }
 
@@ -146,13 +147,15 @@ function firstRun(workspaceId: string, total: number, state: string, startedAt: 
     VALUES(?,?,?,0,?,?,?,NULL,?)`).run(workspaceId, LOCAL, startedAt, state === 'done' ? total : 0, total, state, startedAt + 60_000);
 }
 
+const NONE = { pages: {}, memory: {}, checkins: {} };
+
 describe('Meta agent overview', () => {
-  test('usage today counts checks, model sessions (home runs included) and the tokens runtimes reported', () => {
+  test('usage today counts checks, model sessions (home runs included) and what their replies used; a total alone does not count', () => {
     const jobs = scheduler();
     const rabbit = maintained(jobs, 'ws-r', 'rabbitholes', 10, 12);
     const desk = maintained(jobs, 'ws-d', 'agent-desk', 4);
     page('pg-home', 'ws-r', 'rabbitholes home');
-    assert.deepEqual(metaAgentUsageToday(LOCAL, now), { checks: 0, modelCalls: 0, tokens: null });
+    assert.deepEqual(metaAgentUsageToday(LOCAL, now), { checks: 0, modelCalls: 0, tokens: null, usage: NONE });
 
     run(desk, 'ws-d', at(-2));
     session(desk, 'ws-d', at(-2));
@@ -169,7 +172,7 @@ describe('Meta agent overview', () => {
       (id,node_id,role,content,seq,created_at,metadata) VALUES (?,?,'assistant','ok',0,?,?)`).run(id, nodeId, createdAt, usage === undefined ? null : JSON.stringify({ usageSummary: usage }));
     node('n-claude', 'ws-r', rabbit);
     reply('m-claude', 'n-claude', at(9, 6), { contextUsagePercentage: 12, source: 'estimated' });
-    assert.deepEqual(metaAgentUsageToday(LOCAL, now), { checks: 3, modelCalls: 2, tokens: null }, 'a runtime that reports no count leaves tokens unknown');
+    assert.deepEqual(metaAgentUsageToday(LOCAL, now), { checks: 3, modelCalls: 2, tokens: null, usage: NONE }, 'a runtime that reports no count leaves tokens unknown');
 
     node('n-codex', 'ws-d', desk);
     reply('m-codex', 'n-codex', at(9, 11), { totalTokens: 41_000 });
@@ -178,28 +181,42 @@ describe('Meta agent overview', () => {
     reply('m-old', 'n-pi', at(-2), { totalTokens: 5_000 });
     node('n-user', 'ws-d', null);
     reply('m-user', 'n-user', at(9, 30), { totalTokens: 7_000 });
-    assert.deepEqual(metaAgentUsageToday(LOCAL, now), { checks: 3, modelCalls: 2, tokens: 42_000 },
-      'yesterday and ordinary conversations are not counted');
+    assert.deepEqual(metaAgentUsageToday(LOCAL, now), { checks: 3, modelCalls: 2, tokens: 1_000, usage: { ...NONE, pages: { tokens: 1_000 } } },
+      'a total alone, yesterday and ordinary conversations are not counted');
     assert.equal(metaAgentOverview({ ownerUserId: LOCAL, now, dayStart: DAY }).today.modelCalls, 2);
   });
 
-  test('counts a reply\'s tokens as usageSummaryTotalTokens does', () => {
+  test('counts a reply by its charge, else its credits, else its uncached input and output tokens, each unit on its own', () => {
     const jobs = scheduler();
     const desk = maintained(jobs, 'ws-d', 'agent-desk', 4);
     getDb().prepare(`INSERT INTO nodes (id,workspace_id,kind,status,minimized,spawned_by_agent,created_at,maintenance_job_id)
       VALUES ('n-m','ws-d','chat','idle',0,0,1,?)`).run(desk);
-    const cases: unknown[] = [
-      { totalTokens: 1200 }, { inputTokens: 900, outputTokens: 100 }, { totalTokens: 50, inputTokens: 900, outputTokens: 100 },
-      { contextUsagePercentage: 12 }, { inputTokens: 900 }, { totalTokens: '1200', inputTokens: 10, outputTokens: 5 },
-      { inputTokens: '900', outputTokens: 100 }, { totalTokens: 10.6 },
+    const cases: Array<[unknown, Record<string, number>]> = [
+      [{ charge: { amount: 1.5, unit: 'USD', provenance: 'provider_reported' }, totalCredits: 3, inputTokens: 10, outputTokens: 5 }, { USD: 1.5 }],
+      [{ charge: { amount: 31, unit: 'credits', provenance: 'native_metering' } }, { credits: 31 }],
+      [{ totalCredits: 30, inputTokens: 10, outputTokens: 5 }, { credits: 30 }],
+      [{ totalTokens: 1_000_000, inputTokens: 1_000, cachedInputTokens: 900, outputTokens: 50 }, { tokens: 150 }],
+      [{ inputTokens: 100, cachedInputTokens: 500, outputTokens: 1 }, { tokens: 1 }],
+      [{ charge: { amount: '2', unit: 'USD' }, inputTokens: 10, outputTokens: 5 }, { tokens: 15 }],
+      [{ charge: { amount: 2, unit: 'EUR' } }, {}],
+      [{ totalTokens: 1200 }, {}], [{ inputTokens: 900 }, {}], [{ contextUsagePercentage: 12 }, {}],
     ];
-    for (const usage of cases) {
+    for (const [usage, expected] of cases) {
       getDb().prepare("DELETE FROM messages WHERE node_id = 'n-m'").run();
       getDb().prepare(`INSERT INTO messages (id,node_id,role,content,seq,created_at,metadata) VALUES ('m-m','n-m','assistant','ok',0,?,?)`)
         .run(at(9), JSON.stringify({ usageSummary: usage }));
-      const expected = usageSummaryTotalTokens(usage);
-      assert.equal(metaAgentUsageToday(LOCAL, now).tokens, expected === undefined ? null : Math.round(expected), JSON.stringify(usage));
+      assert.deepEqual(metaAgentUsageToday(LOCAL, now).usage!.pages, expected, JSON.stringify(usage));
     }
+  });
+
+  test('a check-in\'s usage is what its run recorded before its node went', () => {
+    const insert = (id: string, startedAt: number, usage: string | null) => getDb().prepare(`INSERT INTO companion_runs(id,owner_user_id,kind,trigger,outcome,started_at,usage_json)
+      VALUES (?,?,'wake','now-items','spoke',?,?)`).run(id, LOCAL, startedAt, usage);
+    insert('r-1', at(9), JSON.stringify({ credits: 20 }));
+    insert('r-2', at(10), JSON.stringify({ credits: 12, tokens: 300 }));
+    insert('r-3', at(11), '{not json');
+    insert('r-old', at(-2), JSON.stringify({ credits: 99 }));
+    assert.deepEqual(metaAgentUsageToday(LOCAL, now).usage!.checkins, { credits: 32, tokens: 300 });
   });
 
   test('a run that failed before its model session opened is no model call, whatever it had to read', () => {
@@ -211,7 +228,7 @@ describe('Meta agent overview', () => {
     }
     getDb().prepare(`INSERT INTO meta_agent_home_runs(id,kind,owner_user_id,workspace_id,job_id,run_id,target_page_id,fingerprint,state,created_at,updated_at)
       VALUES('mhr-f','first-run',?,'ws-r',?,?,'pg-none',NULL,'failed',?,?)`).run(LOCAL, rabbit, run(rabbit, 'ws-r', at(9, 4), 'failed', 'No codex auth found'), at(9, 4), at(9, 4));
-    assert.deepEqual(metaAgentUsageToday(LOCAL, now), { checks: 4, modelCalls: 0, tokens: null });
+    assert.deepEqual(metaAgentUsageToday(LOCAL, now), { checks: 4, modelCalls: 0, tokens: null, usage: NONE });
     session(rabbit, 'ws-r', at(9, 5));
     assert.equal(metaAgentOverview({ ownerUserId: LOCAL, now, dayStart: DAY }).today.modelCalls, 1);
   });
@@ -492,7 +509,7 @@ describe('Meta agent overview', () => {
       const jobs = scheduler();
       maintained(jobs, 'ws-a', 'A', 1);
       updateAgentConfig({ runtime: 'kiro' });
-      recordMetaAgentGuardCheck({ toolset: 'maintenance', profile: resolveMetaAgentRuntime(LOCAL),
+      recordMetaAgentGuardCheck({ toolset: 'maintenance', profile: resolveBackgroundRuntime(LOCAL),
         failure: { runtimeId: 'kiro', unexpectedTools: ['fs_write', 'execute_bash'] }, ownerUserId: LOCAL, now });
       assert.deepEqual(overview().stopped, {
         reason: 'restriction-check', message: 'Kiro started with tools outside Pages upkeep\'s list: fs_write, execute_bash', workspaceIds: [],

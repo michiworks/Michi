@@ -11,9 +11,9 @@
    done. A corner dot would read as an unread badge. */
 .mobile-pane-trigger__live { transition: stroke var(--t-exit) ease-in; }
 .mobile-pane-trigger[data-working='true'] .mobile-pane-trigger__live { stroke: var(--term-run); animation: termBreathe var(--t-loop) ease-in-out 300ms infinite; transition: stroke var(--t-enter) ease-out 300ms; }
-/* Left-aligned after the left cluster; the right cluster is in flow on a
+/* Left-aligned after the left cluster; both clusters are in flow on a
    phone, so the title gets exactly the space between them. */
-.mobile-pane-title { min-width: 0; flex: 1; align-self: center; margin-left: 88px; margin-right: 8px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; text-align: left; font-size: var(--pt-title, var(--fs-md)); font-weight: 600; letter-spacing: var(--ls-tight); color: var(--term-fg); }
+.mobile-pane-title { min-width: 0; flex: 1; align-self: center; margin-right: 8px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; text-align: left; font-size: var(--pt-title, var(--fs-md)); font-weight: 600; letter-spacing: var(--ls-tight); color: var(--term-fg); }
 .mobile-pane-list { padding: 7px; overflow: auto; overscroll-behavior: contain; }
 .mobile-pane-item { display: flex; align-items: center; border-radius: var(--ui-radius); }
 .mobile-pane-item[data-current] { background: var(--term-accent-f); }
@@ -43,7 +43,11 @@
 }
 
 @media (max-width: 700px), (pointer: coarse) and (max-height: 500px) {
-  .terminal-topbar-controls { width: auto !important; padding-left: 8px !important; gap: 0 !important; }
+  /* In flow, like the right cluster. Laid over Zone 2's painted background,
+     iOS Safari stopped drawing it after the page beneath changed (a send
+     from Home, closing Background work) while the in-flow right cluster
+     stayed. The title and crumbs start where it ends, whatever it holds. */
+  .terminal-topbar-controls { position: relative !important; z-index: auto !important; flex: none; width: auto !important; padding-left: 8px !important; padding-right: 0 !important; gap: 0 !important; }
   .terminal-topbar-controls > button { min-height: 44px !important; min-width: 40px !important; }
   .terminal-topbar-controls [aria-label='Go home'],
   .terminal-topbar-controls [aria-label='Search'],
@@ -52,10 +56,10 @@
   /* In flow: phones draw no caption cells for it to stay aligned with, and
      the title then ends where the cluster starts, whatever it holds. */
   .terminal-topbar-right { position: relative !important; flex: none; padding: 0 8px !important; gap: 0 !important; transition: opacity var(--t-enter) var(--t-ease); }
-  .terminal-topbar-main { margin-right: 0 !important; }
+  .terminal-topbar-main { margin-right: 0 !important; padding-left: 0 !important; }
   .terminal-topbar { --topbar-title-size: var(--pt-title); }
   /* Long crumbs ellipsize before the in-flow right cluster. */
-  .terminal-topbar-breadcrumb { margin-left: 88px !important; padding-right: 8px !important; overflow: hidden; }
+  .terminal-topbar-breadcrumb { margin-left: 0 !important; padding-right: 8px !important; overflow: hidden; }
   /* The drawer overlays the shell: the title stays, the right cluster steps
      back and can't open menus over it. */
   .terminal-topbar[data-drawer-open] .terminal-topbar-right { opacity: .4; pointer-events: none; }
@@ -69,9 +73,6 @@
   .mobile-pane-trigger { color: var(--term-mid); }
   .mobile-pane-trigger svg { width: var(--pt-switch); height: var(--pt-switch); }
   [data-testid='topbar-background-work'] { --bgw-height: 44px; --bgw-min-width: 40px; --bgw-count-size: var(--fs-md); --bgw-glyph-size: var(--fs-sm); }
-  /* ≡ ‹ + : the left cluster holds a third button while there is a page to go back to. */
-  .terminal-topbar[data-phone-back] .terminal-topbar-breadcrumb { margin-left: 128px !important; }
-  .terminal-topbar[data-phone-back] .mobile-pane-title { margin-left: 128px; }
 /* The composer, the workflow cards (chat and drawer, multi-model ones
    included) and the chat's fold of finished runs, the drawer's subagent card
    and the user bubble share one corner radius: square on desktop, rounded on
@@ -204,10 +205,8 @@ html[data-reduce-motion='on'] .terminal-composer .t-action-btn:active:not(:disab
   .terminal-pane__transcript :is(.terminal-message-assistant, .terminal-message-user) .prose :where(ol) { padding-inline-start: 1.25em; }
   .terminal-pane__transcript :is(.terminal-message-assistant, .terminal-message-user) .prose :where(li) { padding-inline-start: 0.375em; }
   /* Inline code: no vertical padding, so chips on consecutive lines don't
-     nearly touch; a wrapped chip closes and reopens on each line. File links
-     already read as links (chip, accent, ▧), so they drop the underline. */
+     nearly touch; a wrapped chip closes and reopens on each line. */
   .terminal-pane__transcript :is(.terminal-message-assistant, .terminal-message-user) .prose :not(pre) > code { padding-block: 0; -webkit-box-decoration-break: clone; box-decoration-break: clone; }
-  .terminal-pane__transcript .prose code > a[data-file-link] { text-decoration: none; }
 }
 @media (max-width: 370px) {
   .terminal-dashboard .terminal-composer { --composer-chip-height: 26px; }

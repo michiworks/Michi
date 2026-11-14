@@ -1,6 +1,6 @@
 # History, deletion, backups and migration
 
-Applies to: local and remote backend data; hosted access is owner-scoped. Source checked: 2026-11-08 against persistence, Trash, Archived, export, backup and migration-snapshot code. Recovery depends on what was actually retained; this is not evidence that your backup has been tested.
+Applies to: local and remote backend data; hosted access is owner-scoped. Source checked: 2026-11-12 against persistence, Trash, Archived, export, backup and migration-snapshot code. Recovery depends on what was actually retained; this is not evidence that your backup has been tested.
 
 ## A conversation seems to be missing
 
@@ -8,7 +8,7 @@ Before deleting or resetting anything:
 
 1. Confirm the backend connection and account. A different backend has a different database.
 2. Confirm the workspace and active tree. A workspace can contain several trees.
-3. Check Pages Home (Waiting on you, Stalled, Just done), the workspace's threads under Conversations, Settings › Archived and Settings › Trash.
+3. Check Today in your agent's panel, the workspace's threads under Conversations, Settings › Archived and Settings › Trash. Earlier conversations with your agent (the ⌘J panel) are under History in its panel menu, not in Archived.
 4. Restore connectivity and allow hydration to finish. Backend unavailability is not an empty workspace.
 
 Opening/closing chat panes affects only the view. Clearing browser storage does not restore the authoritative database. Do not replace a database merely because the initial UI looks empty.
@@ -31,7 +31,7 @@ Conversation deletion and project-file deletion are different operations. Removi
 | Kind | What it preserves | What it does not promise |
 | --- | --- | --- |
 | Thread Export / Markdown transcript | Readable selected conversation content | Reimportable complete state, project bytes, credentials or native sessions |
-| Portable JSON backup | Workspace/tree/node/message/Artifact records; version 2 includes an Agents fragment | Full project directories, attachments as a byte archive, Pages and databases, scheduled jobs, memories, the assistant's system workspace, credentials, local settings or live native bindings |
+| Portable JSON backup | Workspace/tree/node/message/Artifact records; version 2 includes an Agents fragment | Full project directories, attachments as a byte archive, Pages and databases, scheduled jobs, memories, the assistant's system workspace (your conversations with your agent) and the agent's Today, notes, goals and rules, credentials, local settings or live native bindings |
 | Stopped-backend filesystem backup | Files/databases you explicitly copy | External targets, remote-host data or provider-side state that you omitted |
 | Git backup | Tracked project history and pushed commits | Untracked Artifacts/attachments, Michi databases, credentials or every native session |
 

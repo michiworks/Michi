@@ -3,8 +3,9 @@
  * fall back to their default), strict patches that refuse everything on one
  * bad field, deep merge with list replacement, fresh copies, the reasoning
  * setting (DESIGN-v2 §6), the v2 migration of the MVP's default name
- * (§8.1(c)), the sources off (conv-3),
- * and the local wall-clock helpers quiet hours, the brief and the tools'
+ * (§8.1(c)), the sources off (conv-3), a new user's outside sources off (D17),
+ * Pause Michi as the settings show and take it,
+ * and the local wall-clock helpers the brief and the tools'
  * times depend on (conv-2). Temp MICHI_DATA_DIR per test.
  */
 
@@ -29,6 +30,7 @@ import {
   effectiveCrAlias,
   getCompanionSettings,
   localAccountAlias,
+  migrateCompanionPause,
   migrateCompanionSettingsV2,
   parseCompanionBaselineValue,
   parseCompanionName,
@@ -36,6 +38,7 @@ import {
   parsePipelineNames,
   patchCompanionSettings,
   previewCompanionSettings,
+  settleCompanionSourceDefaults,
   sourcesTurnedOn,
   sourcesWidened,
 } from '../src/services/companion/settings';
@@ -43,7 +46,6 @@ import {
   atLocalClock,
   clockMinutes,
   isCompanionWorkday,
-  isInQuietHours,
   localClockText,
   localDateKey,
   localDayStart,
@@ -53,10 +55,15 @@ import {
   localWeekday,
   parseCompanionTime,
 } from '../src/services/companion/clock';
+import { michiPause, pauseMichi, resumeMichi } from '../src/services/michiPause';
+import { LOCAL_AGENT_OWNER_ID } from '../src/services/agentOwner';
 
 const stored = () => getDb().prepare("SELECT value FROM meta WHERE key = 'companion:settings'").get() as { value: string } | undefined;
 const store = (value: unknown) => getDb().prepare("INSERT OR REPLACE INTO meta (key, value) VALUES ('companion:settings', ?)")
   .run(typeof value === 'string' ? value : JSON.stringify(value));
+
+/** What is stored: the settings without Pause Michi, which is not theirs to store. */
+const storedPart = ({ enabled: _enabled, paused: _paused, pausedUntil: _until, ...rest }: CompanionSettings) => rest;
 
 function refused(patch: unknown, message?: RegExp): void {
   assert.throws(() => patchCompanionSettings(patch), (error: unknown) => {
@@ -83,14 +90,16 @@ describe('Companion settings', () => {
     fs.rmSync(tmpDir, { recursive: true, force: true });
   });
 
-  test('nothing stored: the defaults, as a fresh copy on every read', () => {
+  test('nothing stored: the defaults, as a fresh copy on every read; Michi starts paused until resumed', () => {
     const settings = getCompanionSettings();
     assert.deepEqual(settings, DEFAULT_COMPANION_SETTINGS);
+    assert.deepEqual([settings.paused, settings.pausedUntil, michiPause('local-user').paused], [true, null, true], 'off until turned on');
     settings.sources.cr.alias = 'changed';
     settings.sources.pipeline.watch.push('Mutated');
     settings.heartbeat.intervalMinutes = 240;
     assert.deepEqual(getCompanionSettings(), DEFAULT_COMPANION_SETTINGS, 'callers cannot reach the stored or default objects');
     assert.deepEqual(DEFAULT_COMPANION_SETTINGS.sources.pipeline.watch, []);
+    assert.equal(DEFAULT_COMPANION_SETTINGS.paused, true, 'Michi is off until the user turns it on: paused until resumed');
     assert.equal(stored(), undefined, 'reading writes nothing');
   });
 
@@ -103,20 +112,19 @@ describe('Companion settings', () => {
     assert.equal(next.sources.email.enabled, false);
     assert.equal(next.sources.calendar.enabled, false);
     assert.deepEqual(getCompanionSettings(), next);
-    assert.deepEqual(JSON.parse(stored()!.value), next);
+    assert.deepEqual(JSON.parse(stored()!.value), storedPart(next));
 
     next.sources.email.enabled = true;
     assert.equal(getCompanionSettings().sources.email.enabled, false, 'the returned settings are a copy');
 
-    const again = patchCompanionSettings({ paused: true, displayName: 'Robin', notifications: 'all', pollMinutes: 10, dailyTurnBudget: 0,
+    const again = patchCompanionSettings({ paused: true, displayName: 'Robin', pollMinutes: 10,
       brief: { time: '07:30' }, quietHours: { enabled: false, start: '22:00', end: '06:30' } });
     assert.equal(again.heartbeat.intervalMinutes, 120, 'earlier patches stay');
     assert.equal(again.paused, true);
     assert.equal(again.displayName, 'Robin');
-    assert.equal(again.notifications, 'all');
+    assert.equal('notifications' in again, false, 'Michi has no notification level of its own: Settings › Notifications is the one');
     assert.equal(again.pollMinutes, 10);
-    assert.equal(again.dailyTurnBudget, 0);
-    assert.deepEqual(again.brief, { enabled: true, time: '07:30' });
+    assert.deepEqual(again.brief, { enabled: true, time: '07:30', days: [1, 2, 3, 4, 5] });
     assert.deepEqual(again.quietHours, { enabled: false, start: '22:00', end: '06:30' });
     assert.deepEqual(patchCompanionSettings({}), again, 'an empty patch changes nothing');
     assert.equal(patchCompanionSettings({ sources: { cr: { alias: null } } }).sources.cr.alias, null);
@@ -150,9 +158,8 @@ describe('Companion settings', () => {
     refused({ pollMinutes: 1 }, /from 2 to 60/);
     refused({ pollMinutes: 61 });
     refused({ pollMinutes: 2.5 });
-    refused({ dailyTurnBudget: -1 });
-    refused({ dailyTurnBudget: 201 });
-    refused({ notifications: 'loud' }, /all, important, off/);
+    refused({ dailyTurnBudget: 30 }, /unknown setting: dailyTurnBudget/);
+    refused({ notifications: 'all' }, /unknown setting: notifications/);
     refused({ displayName: '' }, /1 to 40/);
     refused({ displayName: 'x'.repeat(41) }, /1 to 40/);
     refused({ displayName: 7 });
@@ -182,28 +189,42 @@ describe('Companion settings', () => {
       heartbeat: { intervalMinutes: 45, enabled: false },
       brief: { time: '7am', enabled: false },
       sources: { cr: { alias: 'BAD ALIAS', includeReviews: false }, pipeline: { watch: 'nope' }, system: { enabled: false } },
-      notifications: 'loud',
+      // Michi's own notification level from before P4: no longer read.
+      notifications: 'off',
       someday: { field: true },
     });
     const settings = getCompanionSettings();
     const expected: CompanionSettings = structuredClone(DEFAULT_COMPANION_SETTINGS);
-    expected.paused = true;
     expected.displayName = 'Robin';
     expected.heartbeat.enabled = false;
     expected.brief.enabled = false;
     expected.sources.cr.includeReviews = false;
-    assert.deepEqual(settings, expected);
+    assert.deepEqual(settings, expected, 'a stored pause is not read: Pause Michi is (migrateCompanionPause took it over once)');
 
     store('{not json');
     assert.deepEqual(getCompanionSettings(), DEFAULT_COMPANION_SETTINGS);
     store({ sources: 'garbage', quietHours: [1, 2] });
     assert.deepEqual(getCompanionSettings(), DEFAULT_COMPANION_SETTINGS);
-    // A patch over a lenient read stores the cleaned settings.
+    // A patch over a lenient read stores the cleaned settings; Michi turned on (Resume), as the stored pause no longer says.
+    resumeMichi(LOCAL_AGENT_OWNER_ID);
     store({ pollMinutes: 'often', paused: true });
     const patched = patchCompanionSettings({ displayName: 'Ada' });
     assert.equal(patched.pollMinutes, DEFAULT_COMPANION_SETTINGS.pollMinutes);
-    assert.equal(patched.paused, true);
-    assert.deepEqual(JSON.parse(stored()!.value), patched);
+    assert.equal(patched.paused, false);
+    assert.deepEqual(JSON.parse(stored()!.value), { ...storedPart(patched), paused: true }, 'the old stored pause stays as it was, for a version to go back to');
+  });
+
+  test('the brief\'s days: Monday to Friday by default; stored workdays are read as them until it has its own; a patch replaces them', () => {
+    assert.deepEqual(getCompanionSettings().brief.days, [1, 2, 3, 4, 5]);
+    store({ workdays: [0, 6] });
+    assert.deepEqual(getCompanionSettings().brief.days, [0, 6], 'settings from before read the old workdays');
+    const next = patchCompanionSettings({ brief: { days: [3, 1, 3] } });
+    assert.deepEqual(next.brief.days, [1, 3]);
+    assert.deepEqual(next.workdays, [0, 6], 'the old field stays as it was, for a version');
+    assert.deepEqual(JSON.parse(stored()!.value).brief.days, [1, 3], 'written as the brief\'s own');
+    refused({ brief: { days: [] } }, /at least one day/);
+    store({ workdays: [0, 6], brief: { days: 'never' } });
+    assert.deepEqual(getCompanionSettings().brief.days, [0, 6], 'a bad stored list reads the old workdays too');
   });
 
   test('workdays: Monday to Friday by default; a patch replaces them, in week order without repeats; at least one', () => {
@@ -223,7 +244,7 @@ describe('Companion settings', () => {
     assert.deepEqual(getCompanionSettings().workdays, [1, 2, 3, 4, 5]);
   });
 
-  test('turning a source on (or the Companion itself) forgets its baseline; turning off and other settings do not', () => {
+  test('turning a source on forgets its baseline; turning off, pausing, resuming and other settings do not', () => {
     const baselined = () => COMPANION_CONFIGURABLE_SOURCES.filter((kind) =>
       getDb().prepare('SELECT 1 FROM meta WHERE key = ?').get(companionBaselineMetaKey(kind)) !== undefined);
     const markAll = () => {
@@ -235,16 +256,13 @@ describe('Companion settings', () => {
     patchCompanionSettings({ sources: { email: { enabled: true } } });
     assert.deepEqual(baselined(), COMPANION_CONFIGURABLE_SOURCES.filter((kind) => kind !== 'email'), 'email is turned on again: its next poll is a baseline');
     markAll();
-    patchCompanionSettings({ enabled: false });
-    assert.deepEqual(baselined(), [...COMPANION_CONFIGURABLE_SOURCES]);
-    patchCompanionSettings({ enabled: true, sources: { calendar: { enabled: false } } });
-    assert.deepEqual(baselined(), ['cr', 'pipeline', 'calendar'], 'the Companion turned on again: every source on is a baseline again');
-    markAll();
-    refused({ enabled: false, sources: { cr: { enabled: 'no' } } });
+    patchCompanionSettings({ paused: true });
+    patchCompanionSettings({ paused: false, sources: { calendar: { enabled: false } } });
+    assert.deepEqual(baselined(), [...COMPANION_CONFIGURABLE_SOURCES], 'Pause Michi and its end forget nothing');
+    refused({ paused: true, sources: { cr: { enabled: 'no' } } });
     assert.deepEqual(baselined(), [...COMPANION_CONFIGURABLE_SOURCES], 'a refused patch forgets nothing');
-    const before = structuredClone(DEFAULT_COMPANION_SETTINGS);
+    const before = { ...structuredClone(DEFAULT_COMPANION_SETTINGS), enabled: true };
     assert.deepEqual(sourcesTurnedOn(before, before), []);
-    assert.deepEqual(sourcesTurnedOn({ ...before, enabled: false }, before), ['michi']);
   });
 
   test('watching more reopens a source\'s first look from the change; watching less does not (A5)', () => {
@@ -320,8 +338,8 @@ describe('Companion settings', () => {
     refused({ reasoning: 'extreme' }, /reasoning must be null \(the default\) or one of: minimal, low, medium, high, xhigh, max/);
     refused({ reasoning: 3 });
     refused({ reasoning: {} });
-    store({ reasoning: 'loud', paused: true });
-    assert.deepEqual([getCompanionSettings().reasoning, getCompanionSettings().paused], [null, true]);
+    store({ reasoning: 'loud', displayName: 'Robin' });
+    assert.deepEqual([getCompanionSettings().reasoning, getCompanionSettings().displayName], [null, 'Robin']);
     store({ reasoning: 'low' });
     assert.equal(getCompanionSettings().reasoning, 'low');
   });
@@ -350,36 +368,77 @@ describe('Companion settings', () => {
     assert.equal(getCompanionSettings().displayName, 'Companion');
   });
 
-  test('the sources off: those turned off, or every one when watching is off (conv-3)', () => {
+  test('the sources off: those turned off; pausing Michi turns none off (conv-3)', () => {
     assert.deepEqual(companionSourcesOff(getCompanionSettings()), ['cr', 'pipeline', 'email', 'calendar']);
     const some = patchCompanionSettings({ sources: { email: { enabled: false }, calendar: { enabled: false } } });
     assert.deepEqual(companionSourcesOff(some), ['cr', 'pipeline', 'email', 'calendar']);
-    assert.deepEqual(companionSourcesOff(patchCompanionSettings({ enabled: false })), [...COMPANION_CONFIGURABLE_SOURCES]);
+    assert.deepEqual(companionSourcesOff(patchCompanionSettings({ paused: true })), ['cr', 'pipeline', 'email', 'calendar']);
+  });
+
+  test('Pause Michi: until resumed, for an hour or until tomorrow 08:00; the old off switch pauses too; nothing of it is stored here', () => {
+    const now = new Date(2026, 10, 5, 22, 15).getTime();
+    const tomorrow = new Date(2026, 10, 6, 8, 0).getTime();
+    const pause = () => { const s = getCompanionSettings(now); return [s.enabled, s.paused, s.pausedUntil]; };
+    assert.deepEqual(pause(), [true, true, null], 'off until turned on: paused until resumed');
+    patchCompanionSettings({ paused: false }, now);
+    assert.deepEqual(pause(), [true, false, null], 'Resume turns it on');
+    patchCompanionSettings({ paused: true }, now);
+    assert.deepEqual(pause(), [true, true, null], 'until resumed');
+    assert.deepEqual(michiPause(LOCAL_AGENT_OWNER_ID, now + 30 * 86_400_000), { paused: true, until: null });
+    patchCompanionSettings({ pauseFor: 'hour' }, now);
+    assert.deepEqual(pause(), [true, true, now + 3_600_000]);
+    assert.equal(getCompanionSettings(now + 3_600_000).paused, false, 'it ends by itself');
+    patchCompanionSettings({ pauseFor: 'tomorrow' }, now);
+    assert.deepEqual(pause(), [true, true, tomorrow]);
+    patchCompanionSettings({ paused: false }, now);
+    assert.deepEqual(pause(), [true, false, null]);
+    patchCompanionSettings({ enabled: false }, now);
+    assert.deepEqual(pause(), [true, true, null], 'the old off switch is Pause Michi until resumed');
+    patchCompanionSettings({ enabled: true }, now);
+    assert.deepEqual(pause(), [true, false, null]);
+    patchCompanionSettings({ paused: false, enabled: false }, now);
+    assert.equal(getCompanionSettings(now).paused, true, 'pausing wins over resuming');
+    assert.deepEqual(['enabled', 'paused', 'pausedUntil'].filter((key) => key in JSON.parse(stored()!.value)), [],
+      'Pause Michi stores nothing in these settings');
+
+    refused({ pauseFor: 'week' }, /pauseFor must be one of: hour, tomorrow/);
+    refused({ paused: 'yes' }, /paused must be true or false/);
+    refused({ pausedUntil: now + 1 }, /unknown setting: pausedUntil/);
+    const preview = previewCompanionSettings({ paused: false });
+    assert.equal(preview.paused, false);
+    assert.equal(getCompanionSettings(now).paused, true, 'a preview pauses or resumes nothing');
+  });
+
+  test('migrateCompanionPause: a stored off switch or pause becomes Pause Michi until resumed, once', () => {
+    const paused = () => michiPause(LOCAL_AGENT_OWNER_ID).paused;
+    resumeMichi(LOCAL_AGENT_OWNER_ID);
+    migrateCompanionPause();
+    assert.equal(paused(), false, 'nothing stored: nothing to pause');
+    getDb().prepare("DELETE FROM meta WHERE key = 'companion:pause_merged_at'").run();
+    store({ enabled: false, displayName: 'Robin' });
+    migrateCompanionPause();
+    assert.deepEqual(michiPause(LOCAL_AGENT_OWNER_ID), { paused: true, until: null });
+    assert.deepEqual(JSON.parse(stored()!.value), { enabled: false, displayName: 'Robin' }, 'the stored settings are read, not changed');
+    patchCompanionSettings({ paused: false });
+    migrateCompanionPause();
+    assert.equal(paused(), false, 'a second run changes nothing');
+
+    getDb().prepare("DELETE FROM meta WHERE key = 'companion:pause_merged_at'").run();
+    store({ paused: true });
+    migrateCompanionPause();
+    assert.equal(paused(), true);
+
+    getDb().prepare("DELETE FROM meta WHERE key = 'companion:pause_merged_at'").run();
+    store({ paused: false });
+    const later = Date.now() + 3_600_000;
+    pauseMichi(LOCAL_AGENT_OWNER_ID, later);
+    migrateCompanionPause();
+    assert.deepEqual(michiPause(LOCAL_AGENT_OWNER_ID), { paused: true, until: later }, 'a Michi already paused (Pages upkeep\'s pause) stays as it was');
   });
 });
 
 describe('Companion local clock', () => {
   const at = (hours: number, minutes = 0) => new Date(2026, 10, 5, hours, minutes, 30, 0).getTime();
-  const quiet = (enabled: boolean, start: string, end: string) => ({ quietHours: { enabled, start, end } });
-
-  test('quiet hours run from start to end, wrapping midnight; equal ends make no window', () => {
-    const night = quiet(true, '20:00', '08:00');
-    assert.equal(isInQuietHours(night, at(20, 0)), true);
-    assert.equal(isInQuietHours(night, at(23, 59)), true);
-    assert.equal(isInQuietHours(night, at(0, 0)), true);
-    assert.equal(isInQuietHours(night, at(7, 59)), true);
-    assert.equal(isInQuietHours(night, at(8, 0)), false, 'the end is exclusive');
-    assert.equal(isInQuietHours(night, at(12, 0)), false);
-    assert.equal(isInQuietHours(night, at(19, 59)), false);
-    const lunch = quiet(true, '12:00', '13:30');
-    assert.equal(isInQuietHours(lunch, at(12, 0)), true);
-    assert.equal(isInQuietHours(lunch, at(13, 29)), true);
-    assert.equal(isInQuietHours(lunch, at(13, 30)), false);
-    assert.equal(isInQuietHours(lunch, at(11, 59)), false);
-    assert.equal(isInQuietHours(quiet(false, '00:00', '23:59'), at(12)), false, 'off is never quiet');
-    assert.equal(isInQuietHours(quiet(true, '09:00', '09:00'), at(9)), false);
-  });
-
   test('dates, day starts and clock times are local', () => {
     const now = at(15, 45);
     assert.equal(localDateKey(now), '2026-11-05');

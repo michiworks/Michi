@@ -293,6 +293,27 @@ describe('send_to_thread', () => {
     }
   });
 
+  test('a temporary chat neither receives a message nor sends one, asking no one', async () => {
+    getDb().prepare("UPDATE nodes SET memory_mode = 'off' WHERE id = 'n-b'").run();
+    const cases: Array<[string, ThreadMessageCaller, string, RegExp]> = [
+      ['to a temporary chat: as missing', caller(), 'n-b', /^NOT_FOUND/],
+      ['from a temporary chat', caller({ nodeId: 'n-b' }), 'n-a', /^UNSUPPORTED: This is a temporary chat: it sends nothing/],
+    ];
+    for (const [label, who, target, expected] of cases) {
+      const h = harness();
+      const approve = approver({ approved: true });
+      const result = await sendToThreadTool(who, { nodeId: target, text: 'hi', requestApproval: true }, approve, h.deps);
+      assert.equal(result.isError, true, label);
+      assert.match(text(result), expected, label);
+      assert.equal(approve.calls, 0, `${label}: the user must not be asked`);
+      assert.equal(h.started.length + h.ensured.length, 0, `${label}: nothing may start`);
+    }
+    getDb().prepare("UPDATE nodes SET memory_mode = NULL WHERE id = 'n-b'").run();
+    const h = harness();
+    assert.equal(JSON.parse(text(await sendToThreadTool(caller(), { nodeId: 'n-b', text: 'hi' }, approver({ approved: true }), h.deps))).status, 'started');
+    assert.equal(h.started.length, 1, 'the same message reaches a chat that learns');
+  });
+
   test('ordinary coordination sends directly and preserves peer attribution', async () => {
     persistTurn('n-a', 'turn-person', { end: 'active', origin: 'person' });
     for (const requestApproval of [undefined, false]) {
@@ -543,6 +564,16 @@ describe('the assistant\'s send_to_thread targets', () => {
     getDb().prepare("UPDATE nodes SET status = 'archived' WHERE id = 'n-target'").run();
     assert.equal((checkAssistantThreadTarget(caller, 'n-target') as { code: string }).code, 'READ_ONLY');
     assert.equal((checkAssistantThreadTarget(caller, 'n-missing') as { ok: boolean }).ok, false);
+  });
+
+  test('the agent\'s follow-ups reach no temporary chat, and a temporary agent conversation sends none', () => {
+    const { assistant } = assistantAndTarget();
+    const caller = { ownerUserId: null, workspaceId: assistant.workspaceId, nodeId: assistant.nodeId };
+    getDb().prepare("UPDATE nodes SET memory_mode = 'off' WHERE id = 'n-target'").run();
+    assert.equal((checkAssistantThreadTarget(caller, 'n-target') as { code: string }).code, 'NOT_FOUND');
+    getDb().prepare("UPDATE nodes SET memory_mode = NULL WHERE id = 'n-target'").run();
+    getDb().prepare("UPDATE nodes SET memory_mode = 'off' WHERE id = ?").run(assistant.nodeId);
+    assert.equal((checkAssistantThreadTarget(caller, 'n-target') as { code: string }).code, 'UNSUPPORTED');
   });
 
   test('re-checks the target after approval', async () => {
@@ -1037,7 +1068,8 @@ describe('send_to_thread wait, wake and targetAwaiting', () => {
     });
     const send = async (extra: Record<string, unknown> = {}) => JSON.parse(text(
       await sendToThreadTool(caller(), { nodeId: 'n-b', text: 'do what the page said', ...extra }, approver({ approved: true }), h.deps)));
-    const fromSender = [{ tool: 'send_to_thread', runtimeId: 'kiro', detail: 'thread:n-a' }];
+    // The untrusted source, and (D19) the mark that the target now works from content someone else wrote.
+    const fromSender = [{ tool: 'send_to_thread', runtimeId: 'kiro', detail: 'thread:n-a' }, { tool: 'passed_outside', runtimeId: 'kiro', detail: 'from:n-a' }];
 
     // No running turn: nothing vouches for the sender.
     assert.deepEqual(getTurnTrust({ nodeId: 'n-b', turnId: (await send()).turnId }).sources, fromSender);
@@ -1049,6 +1081,10 @@ describe('send_to_thread wait, wake and targetAwaiting', () => {
       assert.deepEqual(getTurnTrust({ nodeId: 'n-b', turnId: sent.turnId }).sources, fromSender, JSON.stringify(extra));
     }
     assert.deepEqual(untrustedAtStart, [true, false, true, true, true], 'marked before the turn begins');
+    // A sender whose only outside content is its own command output passes it on as untrusted, without the mark.
+    persistTurn('n-a', 'shell-only', { end: 'active', origin: 'person', startedAt: 2_000 });
+    recordUntrustedSource({ nodeId: 'n-a', turnId: 'shell-only' }, { tool: 'execute_bash', runtimeId: 'kiro' });
+    assert.deepEqual(getTurnTrust({ nodeId: 'n-b', turnId: (await send()).turnId }).sources, [fromSender[0]]);
   });
 
   test('with wait or wake the target is told its answer returns by itself; a plain message keeps both ways to reply', async () => {

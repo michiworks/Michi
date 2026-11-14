@@ -1,6 +1,6 @@
 # Choose and configure a runtime
 
-Applies to: registered ordinary-chat runtimes on the selected backend. Source checked: 2026-11-08. Prerequisites are source/documentation reviewed; successful provider authentication must be checked on your installation.
+Applies to: registered ordinary-chat runtimes on the selected backend. Source checked: 2026-11-12. Prerequisites are source/documentation reviewed; successful provider authentication must be checked on your installation.
 
 Open Settings → Runtime & model for the backend you are using. Select a runtime, model and supported reasoning level. A new chat's composer also exposes runtime-specific choices. A model's availability depends on installed software, authentication, provider access and that backend's configuration.
 
@@ -31,7 +31,7 @@ Keep the official local Crew Gateway running and install/enable Michi Crew Runti
 
 The factory pins Crew's own engine independently of the Kiro CLI engine. Keep the default michi-crew template for the complete integration. Other templates may lack Michi instructions or MCP access.
 
-Crew Memory modes are Read & learn, Read only and Off. The default applies to new Crew chats; established chats keep their mode and forks inherit it. Crew App callers cannot perform same-turn steer: busy messages queue for the next turn. The adapter does not support image/audio attachments. These are integration limits, not claims that native Crew lacks those features.
+Crew Memory modes are Read & learn, Read only and Off. The default applies to new Crew chats and is Read only until you choose another, since Michi Memory learns from Michi's chats; established chats keep their mode and forks inherit it. Crew App callers cannot perform same-turn steer: busy messages queue for the next turn. The adapter does not support image/audio attachments. These are integration limits, not claims that native Crew lacks those features.
 
 ## Pi
 
@@ -43,7 +43,7 @@ Pi's composer offers Ask / Trust. Unknown or external MCP tools require approval
 
 ## Claude
 
-Install and authenticate `claude`, or configure `CLAUDE_CLI_BIN` and the relevant Anthropic, Bedrock or Vertex credentials. The CLI supplies native tools. Claude supports Ask / Trust / YOLO. YOLO uses the native bypass mode; approval policy and tool availability are separate controls.
+Install and authenticate `claude`, or configure `CLAUDE_CLI_BIN` and the relevant Anthropic, Bedrock or Vertex credentials. Without `CLAUDE_CLI_BIN`, Michi uses the first `claude` on PATH, then in the standard install folders, that answers `claude --version`, so a stale shim that fails is skipped. The CLI supplies native tools. Claude supports Ask / Trust / YOLO. YOLO uses the native bypass mode; approval policy and tool availability are separate controls.
 
 Michi connects through the pinned Claude Agent SDK while retaining the installed
 CLI's authentication and native history. Native AskUserQuestion uses Michi's
@@ -51,6 +51,16 @@ question card. `/status`, `/model`, `/context` and `/mcp` are host commands and
 can initialize or restore a cold chat without sending a model prompt. Agent Run
 restrictions continue to apply before tool execution, including when native
 settings would automatically approve a tool.
+
+A Claude chat can turn on **Ultracode** in the composer's model picker, under
+the effort slider: Claude Code's multi-agent mode, which runs a workflow for
+each substantive task and uses many more tokens. It is per chat and off for new
+and branched chats; the switch says when the model or setup cannot run it.
+
+Michi titles a new Claude thread beside its first turn, with a separate one-turn
+CLI call on a small model (`MICHI_TITLE_MODEL_CLAUDE`, default `haiku`; `off`
+turns these titles off). Unless the warm pool is off
+(`MICHI_CLAUDE_POOL_DISABLED=1`), one such CLI is kept started for the next title.
 
 ## Codex
 
@@ -61,6 +71,8 @@ A provider that manages its own credentials, such as Amazon Bedrock, needs no `c
 The agent menu lists Codex's collaboration modes, Default and Plan. Plan explores without changing files and ends with a proposed plan, which appears in the answer. A chosen mode applies from the next message and stays until you choose another; a conversation resumed in Plan stays in Plan. Codex goals are off in Michi conversations: Codex would pursue a goal in turns it starts on its own, which Michi does not show.
 
 Michi conversations do not run the MCP servers configured in your Codex `config.toml`: each Codex thread disables them by name and keeps only Michi's own server. If one still runs (for example a server a plugin adds), Michi logs a warning and the conversation continues. Pages upkeep and automatic memory sessions refuse such a session instead.
+
+When an MCP server asks for a typed form in an ordinary Codex chat, the form appears on Michi's question card, headed with the server's name; skipping it cancels the request. URL and verification requests are declined, as is every request in Agent Runs and restricted sessions.
 
 Codex supports Ask / Trust / YOLO. Ask uses a read-only sandbox with approvals; Trust permits workspace writes within the native sandbox; YOLO requests full native access.
 

@@ -35,39 +35,6 @@ export function assistantPurposeOf(nodeId: string | null | undefined): Assistant
   return row && CHECKIN_PURPOSE_RECORDS.has(row.value) ? 'checkin' : 'main';
 }
 
-const jobCreatedKey = (nodeId: string) => `assistant:job-created:${nodeId}`;
-const scheduleTurnKey = (nodeId: string) => `assistant:schedule-turn:${nodeId}`;
-
-/**
- * The user sent V's turn `turnId` from the Scheduled area (its message
- * carried the Scheduled context): routes/michi.ts records it as the turn
- * starts. Only the latest such turn is kept; a job created in it is the one
- * "Create with agent" starts over for (W2 fix decision D6).
- */
-export function noteAssistantScheduleTurn(nodeId: string, turnId: string): void {
-  getDb().prepare('INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)').run(scheduleTurnKey(nodeId), turnId);
-}
-
-/** Whether `turnId` is the turn of `nodeId` the user last sent from the Scheduled area. */
-export function isAssistantScheduleTurn(nodeId: string, turnId: string | null | undefined): boolean {
-  if (!turnId) return false;
-  const row = getDb().prepare('SELECT value FROM meta WHERE key = ?').get(scheduleTurnKey(nodeId)) as { value: string } | undefined;
-  return row?.value === turnId;
-}
-
-/**
- * A turn of an assistant conversation that the user sent from the Scheduled
- * area created a scheduled job (D6): the Scheduled page's "Create with agent"
- * then starts a new conversation. A job made from any other area leaves it.
- */
-export function markAssistantJobCreated(nodeId: string): void {
-  getDb().prepare('INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)').run(jobCreatedKey(nodeId), '1');
-}
-
-export function assistantJobCreated(nodeId: string): boolean {
-  return Boolean(getDb().prepare('SELECT 1 FROM meta WHERE key = ?').get(jobCreatedKey(nodeId)));
-}
-
 /**
  * True for the assistant's hidden workspace (any of them). Always false in
  * cloud mode: the assistant reads every workspace and maintains Pages on

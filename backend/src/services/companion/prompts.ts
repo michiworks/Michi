@@ -238,12 +238,6 @@ function whenText(now: number, at: number): string {
   return `${relative} (${stampText(now, at)})`;
 }
 
-/** A heartbeat interval in words: `30 minutes`, `hour`, `2 hours`. */
-export function everyText(minutes: number): string {
-  if (minutes % 60 !== 0) return `${minutes} minutes`;
-  return minutes === 60 ? 'hour' : `${minutes / 60} hours`;
-}
-
 export function plural(count: number, one: string, many = `${one}s`): string {
   return `${count} ${count === 1 ? one : many}`;
 }
@@ -461,8 +455,6 @@ export interface CompanionTurnView {
   material: CompanionMaterial;
   /** Items the changes or past brief cards name that are not in material.open any more (resolved, dismissed, muted), by id. */
   otherItems?: ReadonlyMap<string, CompanionItemDto>;
-  /** settings.heartbeat.intervalMinutes, for the heartbeat's own words. */
-  heartbeatMinutes?: number;
   /** Subtypes the user's feedback demoted to digest (the brief leaves their kind out). */
   demotedSubtypes?: readonly CompanionItemSubtype[];
   /** Delegated conversations' workspace names, by workspace id (worker reports). */
@@ -480,7 +472,6 @@ export interface CompanionTurnView {
 }
 
 const MAX_CHANGES = 40;
-const MAX_STILL_OPEN = 25;
 const MAX_OPEN = 40;
 const MAX_WELCOME_ITEMS = 20;
 const MAX_FOCUS = 5;
@@ -611,6 +602,21 @@ function feedbackSection(view: CompanionTurnView): string[] {
   return lines.length > 0 ? [fill('section.feedback'), ...capped(lines, MAX_FEEDBACK_LINES)] : [];
 }
 
+const MAX_FOLLOWING = 20;
+
+/** [CONVERSATIONS YOU FOLLOW]: the heartbeat's work in hand, one line per conversation the agent started and follows. */
+function followingSection(view: CompanionTurnView): string[] {
+  const { now } = view.material;
+  const lines = (view.material.following ?? []).map((delegation) => {
+    const workspace = view.workspaceNames?.get(delegation.workspaceId);
+    const parts = [`"${materialLine(delegation.title, 120) || 'Conversation'}"`, ...(workspace ? [`in "${materialLine(workspace, 80)}"`] : []),
+      `michi://node/${delegation.nodeId}`, `started ${stampText(now, delegation.createdAt)}`];
+    if (delegation.lastReportedAt !== null) parts.push(`last reported ${stampText(now, delegation.lastReportedAt)}`);
+    return `- ${parts.join(' · ')}`;
+  });
+  return [fill('section.following'), ...(lines.length > 0 ? capped(lines, MAX_FOLLOWING) : [fill('section.nothing')])];
+}
+
 function workerReportBlock(report: CompanionWorkerReport, view: CompanionTurnView): string {
   const workspace = view.workspaceNames?.get(report.delegation.workspaceId);
   return fill('block.workerReply', {
@@ -632,9 +638,6 @@ function dataLines(view: CompanionTurnView): string[] {
     case 'welcome':
       return [...openSection(material.open, now, MAX_WELCOME_ITEMS), ...sourcesSection(material.open, now), ...firstLookSection(material.firstLook),
         ...focusSection(material.focus, now)];
-    case 'heartbeat':
-      return [...changesSection(view, items), ...stillOpenSection(material.open, now, MAX_STILL_OPEN), ...sourcesSection(material.open, now),
-        ...remindersSection(material.reminders, now), ...focusSection(material.focus, now)];
     case 'wake': {
       const changed = material.changes.filter((event) => event.kind !== 'baseline');
       const ids = new Set(changed.map((event) => event.itemId));
@@ -645,6 +648,9 @@ function dataLines(view: CompanionTurnView): string[] {
       return [fill('section.justHappened'), ...(happened.length > 0 ? capped([...new Set(happened)], MAX_CHANGES) : [fill('section.nothing')]),
         ...stillOpenSection(material.open, now, 10, ids), ...sourcesSection(material.open, now)];
     }
+    case 'heartbeat':
+      return [...openSection(material.open, now, MAX_OPEN), ...followingSection(view), ...sourcesSection(material.open, now),
+        ...remindersSection(material.reminders, now), ...focusSection(material.focus, now)];
     case 'brief':
       return [...openSection(material.open, now, MAX_OPEN), ...changesSection(view, items), ...sourcesSection(material.open, now),
         ...remindersSection(material.reminders, now), ...focusSection(material.focus, now), ...lastBriefSection(view, items), ...feedbackSection(view)];
@@ -657,16 +663,16 @@ function body(view: CompanionTurnView): string {
   const { material } = view;
   switch (view.kind) {
     case 'welcome': return fill('turn.welcome');
-    case 'heartbeat': return fill('turn.heartbeat', { every: everyText(view.heartbeatMinutes ?? 60), notesRevision: material.notesRevision });
     case 'wake': return fill('turn.wake');
     case 'brief': return fill('turn.brief', { date: localDateKey(material.now), maxCards: COMPANION_LIMITS.maxBriefCards });
     case 'worker_report': return fill('turn.worker_report');
+    case 'heartbeat': return fill('turn.heartbeat');
     default: throw new Error(`no Companion note for a ${String(view.kind)} turn`);
   }
 }
 
 const LABELS = {
-  welcome: 'label.welcome', heartbeat: 'label.heartbeat', wake: 'label.wake', brief: 'label.brief', worker_report: 'label.worker_report',
+  welcome: 'label.welcome', wake: 'label.wake', brief: 'label.brief', worker_report: 'label.worker_report', heartbeat: 'label.heartbeat',
 } as const satisfies Partial<Record<CompanionTurnKind, CompanionPromptKey>>;
 
 /**
@@ -843,7 +849,7 @@ const POST_KIND_WORDS: Record<CompanionCheckinKind, string> = {
   welcome: 'first welcome', heartbeat: 'heartbeat', wake: 'wake', brief: 'morning brief', worker_report: 'worker report', catch_up: 'catch-up',
 };
 
-/** A check-in's kind in words: `heartbeat`, `morning brief`, `worker report`. */
+/** A check-in's kind in words: `wake`, `morning brief`, `worker report` (`heartbeat` for one from before P3). */
 export function checkinKindText(kind: CompanionCheckinKind): string {
   return POST_KIND_WORDS[kind] ?? 'check-in';
 }
@@ -852,7 +858,7 @@ export function checkinKindText(kind: CompanionCheckinKind): string {
 const SAFE_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,99}$/;
 const safeId = (value: unknown): string | null => (typeof value === 'string' && SAFE_ID.test(value) ? value : null);
 
-/** One post as a fact: `- 08:40 heartbeat: updated page pg-1 "Tasks" (3 applied, 1 proposed); snoozed item cmi-1`. */
+/** One post as a fact: `- 08:40 wake: updated page pg-1 "Tasks" (3 applied, 1 proposed); snoozed item cmi-1`. */
 function postFactLine(post: CompanionPostFact, now: number): string {
   const facts = post.changes.flatMap((change) => {
     const id = safeId(change.id);

@@ -1,14 +1,14 @@
 # Find Michi help
 
-Applies to: bundled product documentation served by the current backend. Source checked: 2026-11-08. Most articles state their own applicability. The Crew guide records its own dated real-provider/version/platform acceptance; source checks do not rerun those tests.
+Applies to: bundled product documentation served by the current backend. Source checked: 2026-11-12. Most articles state their own applicability. The Crew guide records its own dated real-provider/version/platform acceptance; source checks do not rerun those tests.
 
 ## Choose a document
 
 | Document ID | Use it when |
 | --- | --- |
 | `getting-started` | Installing/launching and completing the first task |
-| `concepts-and-context` | Understanding trees, branches, references, instructions and Michi Memory |
-| `common-workflows` | Researching alternatives, implementing, reviewing and handing off |
+| `concepts-and-context` | Understanding trees, branches, references, instructions, Michi Memory, and your agent (⌘J) with its check-ins and Today |
+| `common-workflows` | Researching alternatives, asking several models, implementing, reviewing and handing off |
 | `runtimes` | Choosing/configuring Kiro CLI, Crew, Pi, Claude, Codex or the opt-in Antigravity runtime |
 | `runtime-capabilities` | Comparing supported integration behavior and limits |
 | `skills` | Keeping skills in the Michi library, using runtime skills and running skills with / |
@@ -17,7 +17,7 @@ Applies to: bundled product documentation served by the current backend. Source 
 | `page-component-design` | Generated-component design conventions, theme tokens, sandbox limits and preview workflow |
 | `page-interactions` | Optional named views, text links, metric actions and block entries that open content inline, in drawers or dialogs |
 | `permissions` | Choosing Ask/Approve for me/Trust/YOLO or understanding approval grants |
-| `sessions-and-recovery` | Queueing, steering, Stop, reconnection, resume and fork |
+| `sessions-and-recovery` | Queueing, steering, Stop, reconnection, resuming interrupted tasks, native resume and fork |
 | `files-and-artifacts` | Finding files, uploading attachments, reusing sources and viewing websites |
 | `data-and-backups` | Recovering history, deletion, export, backup and migration |
 | `configuration` | Settings scope, authentication, CLI paths, environment, Pi web search, updates and the macOS background service |

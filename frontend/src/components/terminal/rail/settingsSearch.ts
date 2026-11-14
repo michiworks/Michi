@@ -28,8 +28,9 @@ const UPKEEP_WORDS = ['meta agent', 'pages upkeep', 'maintenance'] as const;
 
 /**
  * Every setting the window can find, with the agent's `name` where a page
- * shows it (its shortcuts). Settings › <name>'s entries hold no name, so the
- * same labels find their rows whatever it is called.
+ * shows it (its shortcuts, and the switch that turns it on and off). The
+ * other entries of Settings › <name> hold no name, so the same labels find
+ * their rows whatever it is called.
  */
 export function settingsSearchIndex(name: string): SettingsSearchEntry[] {
   return [
@@ -44,44 +45,35 @@ export function settingsSearchIndex(name: string): SettingsSearchEntry[] {
     ...entries('runtime', 'Permissions', [
       { label: 'Use global permissions', description: 'One permission mode for all chats, or one per chat.', keywords: ['ask', 'trust', 'yolo', 'approve', 'approval'] },
     ]),
-    ...entries('companion', 'Name', [
+    // The page's first section has its name: a path leaves it out, as it does the page's own title.
+    ...entries('companion', undefined, [
       { label: 'Name', description: 'What you call it on its button, in messages, notifications and Settings.', keywords: [...AGENT_WORDS, 'rename', 'display name'] },
+      { label: name, description: 'On or off. Off stops check-ins, Pages upkeep and the automatic checks of your sources.',
+        keywords: [...AGENT_WORDS, ...UPKEEP_WORDS, 'turn on', 'turn off', 'enable', 'disable', 'pause', 'resume', 'stop', 'start', 'quiet'] },
     ]),
     ...entries('companion', 'Model', [
-      { label: 'Runs on', description: 'The runtime and model of your conversation with it.', keywords: [...AGENT_WORDS, 'runtime', 'model'] },
-      { label: 'Reasoning', description: 'Used by check-ins and new conversations.', keywords: [...AGENT_WORDS, 'thinking', 'effort', 'high', 'xhigh', 'max'] },
+      { label: 'Conversations', description: 'Same as Settings › Runtime & model.', keywords: [...AGENT_WORDS, 'runtime', 'model'] },
+      { label: 'Background work', description: 'What check-ins and Pages upkeep run on: the same as conversations, or a runtime, model and reasoning of their own.', keywords: [...AGENT_WORDS, ...UPKEEP_WORDS, 'runtime', 'model', 'custom', 'reasoning', 'effort'] },
     ]),
     ...entries('companion', 'Watching', [
-      { label: 'Watch and check in', description: 'Off: no checks, check-ins or notifications; the conversation still works.', keywords: [...AGENT_WORDS, 'proactive', 'watch', 'turn off'] },
-      { label: 'Pause', description: 'Stop checks, check-ins and notifications until you resume.', keywords: [...AGENT_WORDS, 'resume', 'stop'] },
     ]),
-    ...entries('companion', 'Check-ins', [
-      { label: 'Check-ins', description: 'How often it looks over what changed.', keywords: [...AGENT_WORDS, 'heartbeat', 'interval'] },
-      { label: 'Morning brief', description: 'A short brief of what matters today.', keywords: [...AGENT_WORDS, 'brief', 'daily', 'pulse'] },
-      { label: 'Daily turn budget', keywords: [...AGENT_WORDS, 'limit', 'cost'] },
+    ...entries('companion', 'Updates', [
+      { label: 'Morning brief', description: 'A short brief of what matters today, on the days you choose.', keywords: [...AGENT_WORDS, 'brief', 'daily', 'pulse', 'check-in', 'weekdays', 'workdays'] },
     ]),
-    ...entries('companion', 'Notifications', [
-      { label: 'Notifications', description: 'What it notifies you about on its own: posts, the brief and Today.', keywords: [...AGENT_WORDS, 'alerts', 'important'] },
-      { label: 'Quiet hours', description: 'No notifications and no check-ins.', keywords: [...AGENT_WORDS, 'do not disturb', 'night'] },
-      { label: 'Workdays', keywords: [...AGENT_WORDS, 'weekend'] },
-    ]),
-    ...entries('companion', undefined, [
+    ...entries('companion', 'Instructions', [
       { label: 'Your rules', description: 'What it must always follow.', keywords: [...AGENT_WORDS, 'instructions', 'rules'] },
-      { label: 'Notes', description: 'Its own notes; edit, keep or clear them.', keywords: [...AGENT_WORDS, 'memory', 'notes'] },
+      { label: 'Working notes', description: 'What it is following for you, its plans and guesses; edit, keep or clear them.', keywords: [...AGENT_WORDS, 'memory', 'notes', 'working notes'] },
       { label: 'Goals', description: 'What you are working toward.', keywords: [...AGENT_WORDS, 'goals', 'progress'] },
-      { label: 'Activity', description: 'Every check-in, what it changed, and Undo.', keywords: [...AGENT_WORDS, 'log', 'history', 'undo', 'follow-ups', 'ask before sending'] },
-      { label: 'New conversation', description: 'Start over; this conversation moves to History.', keywords: [...AGENT_WORDS, 'reset', 'start over'] },
     ]),
     ...entries('companion', PAGES_UPKEEP_TITLE, [
       { label: PAGES_UPKEEP_TITLE, description: 'Keeps your workspace homes and the Pages Home up to date.', keywords: [...AGENT_WORDS, ...UPKEEP_WORDS] },
-      { label: 'Follow global settings', description: 'Pages upkeep uses the global runtime and model.', keywords: [...UPKEEP_WORDS, 'runtime', 'custom'] },
-      { label: 'Background updates', description: 'Checks every workspace for new conversations every 60 seconds.', keywords: [...UPKEEP_WORDS, 'pause'] },
-      { label: 'First run', description: 'How far back Pages upkeep reads a workspace the first time.', keywords: [...UPKEEP_WORDS, 'days', 'history'] },
-      { label: 'Workspace homes', description: 'Keeps each workspace’s home page up to date.', keywords: [...UPKEEP_WORDS, 'pages', 'home page'] },
-      { label: 'Pages home', description: 'Keeps the overview on the Pages Home up to date.', keywords: [...UPKEEP_WORDS, 'overview'] },
+      { label: 'Keep workspace homes up to date', description: 'Each workspace’s home page.', keywords: [...UPKEEP_WORDS, 'workspace homes', 'home page'] },
+      { label: 'Keep the Pages Home up to date', description: 'The overview on the Pages Home.', keywords: [...UPKEEP_WORDS, 'pages home', 'overview'] },
+      { label: 'First read', description: 'How far back Pages upkeep reads a workspace the first time.', keywords: [...UPKEEP_WORDS, 'first run', 'days', 'history'] },
     ]),
     ...entries('memory', 'Memory', [
-      { label: 'Use memory', description: 'On or off. Michi remembers what you tell it.', keywords: ['remember', 'memories', 'forget', 'automatic memory', 'turn off'] },
+      { label: 'Use memory', description: 'On or off. Michi remembers what you tell it.', keywords: ['remember', 'memories', 'forget', 'turn off'] },
+      { label: 'Learn from conversations', description: 'Save what your finished conversations say about you, in the background. Off by default.', keywords: ['automatic memory', 'extraction', 'background', 'learn', 'memories'] },
       { label: 'Delete all memories', description: 'Every saved memory and About the user. Conversations stay.', keywords: ['reset', 'clear', 'erase', 'forget everything'] },
     ]),
     ...entries('memory', undefined, [
@@ -144,8 +136,8 @@ export function settingsSearchIndex(name: string): SettingsSearchEntry[] {
       { label: 'Chrome rules', description: 'Hairline rules between panes.', keywords: ['lines', 'borders', 'theme.rules'] },
     ]),
     ...entries('notifications', undefined, [
-      { label: 'Notifications', description: 'Approvals, questions and replies in every conversation: all, approvals only, or off.', keywords: ['notify', 'alerts', 'approval', 'questions'] },
-      { label: 'Notification sounds', description: 'A short tone when an agent needs you or finishes.', keywords: ['sound', 'audio', 'chime', 'tone', 'beep'] },
+      { label: 'Notify me', description: 'One level for every notification: all, only when something needs you, or off.', keywords: ['notifications', 'notify', 'alerts', 'approval', 'questions', 'needs you', 'brief', ...AGENT_WORDS] },
+      { label: 'Sounds', description: 'A short tone when an agent needs you or finishes.', keywords: ['notification sounds', 'sound', 'audio', 'chime', 'tone', 'beep'] },
     ]),
     ...entries('notifications', WINDOWS_CLOSED_TITLE, [
       { label: WINDOWS_CLOSED_TITLE, description: 'Stay in the menu bar, and notify you while no window is open.', keywords: ['tray', 'menu bar', 'background', 'quit', 'dock'] },

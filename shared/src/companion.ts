@@ -1,7 +1,7 @@
 import type { MichiAssistantInfo } from './assistant';
 import { isChatPermissionChoice, type ChatPermissionChoice } from './chatPermissions';
 import { DEFAULT_COMPANION_NAME } from './companionConstants';
-import type { CompanionPostChange, CompanionPostChangeAction, CompanionRunKind } from './companionMessageMetadata';
+import type { CompanionCheckinKind, CompanionPostChange, CompanionPostChangeAction, CompanionRunKind } from './companionMessageMetadata';
 import type { CompanionStatusLine } from './companionStatus';
 import type { RuntimeReasoning } from './reasoning';
 
@@ -127,7 +127,7 @@ export type CompanionBucket = 'needs_you' | 'update' | 'stalled' | 'fyi';
 export const COMPANION_BUCKETS: readonly CompanionBucket[] = Object.freeze(['needs_you', 'update', 'stalled', 'fyi']);
 
 /**
- * now    = interrupt: desktop notification (outside quiet hours) and an early Companion wake.
+ * now    = interrupt: a Needs you notification (services/companion/notices.ts) and an early Companion wake.
  * digest = next heartbeat / morning brief.
  * silent = feed only.
  */
@@ -200,17 +200,44 @@ export type CompanionTab = 'chat' | 'today';
 export type CompanionHeartbeatMinutes = 30 | 60 | 120 | 240;
 export const COMPANION_HEARTBEAT_MINUTES: readonly CompanionHeartbeatMinutes[] = Object.freeze([30, 60, 120, 240]);
 
-export type CompanionNotificationLevel = 'all' | 'important' | 'off';
-
 export interface CompanionSourceSettings {
   enabled: boolean;
 }
 
+/**
+ * A timed Pause Michi (PATCH /companion/settings `{pauseFor}`): an hour from
+ * now, or until tomorrow at MICHI_PAUSE_MORNING_HOUR. `{paused: true}` pauses
+ * until the user resumes.
+ */
+export type MichiPauseFor = 'hour' | 'tomorrow';
+export const MICHI_PAUSE_FOR: readonly MichiPauseFor[] = Object.freeze(['hour', 'tomorrow']);
+/** The local hour "Until tomorrow" ends at. */
+export const MICHI_PAUSE_MORNING_HOUR = 8;
+
+/** When a timed pause starting at `now` ends, in the local time of whoever computes it (the backend). */
+export function michiPauseEnd(pauseFor: MichiPauseFor, now: number): number {
+  if (pauseFor === 'hour') return now + 60 * 60_000;
+  const end = new Date(now);
+  end.setDate(end.getDate() + 1);
+  end.setHours(MICHI_PAUSE_MORNING_HOUR, 0, 0, 0);
+  return end.getTime();
+}
+
 export interface CompanionSettings {
-  /** Master switch. Off = no polling, no turns, no notifications. */
+  /**
+   * Always true: whether Michi works is Pause Michi alone (`paused`). Kept so
+   * readers from before the one pause still read "on"; the stored value is
+   * only read once, when it becomes Pause Michi.
+   */
   enabled: boolean;
-  /** Pause keeps settings but stops polling, turns and notifications until resumed. */
+  /**
+   * Pause Michi, as it is now: check-ins, Pages upkeep and automatic polling
+   * stop; Check now, Run now and memory go on. Derived from the owner's
+   * pause (backend services/michiPause.ts), not stored with these settings.
+   */
   paused: boolean;
+  /** When a timed pause ends by itself; null while paused until resumed, or not paused. */
+  pausedUntil: number | null;
   /** What the Companion is called. The user can rename it; the Companion may rename itself when asked. */
   displayName: string;
   sources: {
@@ -230,17 +257,18 @@ export interface CompanionSettings {
     email: CompanionSourceSettings;
     calendar: CompanionSourceSettings;
   };
-  /** Minutes between outside-source polls (CR / email); pipelines and calendar use multiples of it. */
+  /** The old Check every: no longer read; the polls run every COMPANION_POLL_MINUTES. Stays readable for a version. */
   pollMinutes: number;
   heartbeat: { enabled: boolean; intervalMinutes: CompanionHeartbeatMinutes };
-  /** Pulse-style morning brief at a local time `HH:MM`. */
-  brief: { enabled: boolean; time: string };
+  /** Pulse-style morning brief at a local time `HH:MM`, on its own local weekdays (0 = Sunday; default Monday to Friday). */
+  brief: { enabled: boolean; time: string; days: number[] };
   /** Local `HH:MM` window with no notifications and no Companion turns. Wraps midnight when start > end. */
   quietHours: { enabled: boolean; start: string; end: string };
-  notifications: CompanionNotificationLevel;
-  /** Max Companion model turns per local day (heartbeat, wake, brief; welcome and worker reports are exempt). */
-  dailyTurnBudget: number;
-  /** Local weekdays that are workdays (0 = Sunday). Off days: no notices, no heartbeat/wake; polling continues. */
+  /**
+   * The old workdays (0 = Sunday). Read once as brief.days when none is
+   * stored (backend settings.ts), and by the notice gate until it goes; no
+   * longer written by Settings.
+   */
   workdays: number[];
   /**
    * The reasoning check-ins always use, and new conversations with the agent
@@ -272,7 +300,9 @@ export const LEGACY_DEFAULT_COMPANION_NAME = 'Companion';
 
 export const DEFAULT_COMPANION_SETTINGS: CompanionSettings = Object.freeze({
   enabled: true,
-  paused: false,
+  // Off until the user turns it on (2026-11-12): paused until resumed, as michiPause.ts reads an owner without a row.
+  paused: true,
+  pausedUntil: null,
   displayName: DEFAULT_COMPANION_NAME,
   sources: {
     michi: { enabled: true },
@@ -283,10 +313,8 @@ export const DEFAULT_COMPANION_SETTINGS: CompanionSettings = Object.freeze({
   },
   pollMinutes: 5,
   heartbeat: { enabled: true, intervalMinutes: 60 },
-  brief: { enabled: true, time: '09:00' },
+  brief: { enabled: true, time: '09:00', days: [1, 2, 3, 4, 5] },
   quietHours: { enabled: true, start: '20:00', end: '08:00' },
-  notifications: 'important',
-  dailyTurnBudget: 30,
   workdays: [1, 2, 3, 4, 5],
   reasoning: null,
 }) as CompanionSettings;
@@ -354,10 +382,8 @@ export type CompanionCardKind =
   | 'goal.add'
   | 'goal.update'
   | 'goal.remove'
-  | 'checkins.update'
   | 'source.update'
   | 'pipeline.watch'
-  | 'quiet_hours.update'
   /** Delegate work: Apply starts a normal Michi conversation (the click is the approval). */
   | 'conversation.start'
   | 'reminder.add'
@@ -634,6 +660,20 @@ export interface CompanionCatchUpDto {
   line: string;
 }
 
+/**
+ * Michi's latest line (Q45): one line a check-in wrote about what it is doing
+ * or what changed, for Home's greeting. Never how many things need the user:
+ * Today lists those (Q12). Kept until a later check-in writes another.
+ */
+export interface CompanionHeadlineDto {
+  /** One line of plain text, at most COMPANION_LIMITS.maxHeadlineChars. */
+  text: string;
+  /** When the check-in that wrote it ended. */
+  at: number;
+  /** Which check-in wrote it. */
+  kind: CompanionCheckinKind;
+}
+
 export interface CompanionSnapshotDto {
   settings: CompanionSettings;
   status: CompanionStatusDto;
@@ -657,6 +697,8 @@ export interface CompanionSnapshotDto {
   counts: { needsYou: number; newItems: number; unreadMessages: number };
   /** Monotonic; bumps on every change (SSE `companion_changed`). */
   revision: number;
+  /** Michi's latest line (Q45): null when none was written yet; absent from older backends. */
+  headline?: CompanionHeadlineDto | null;
   /**
    * Whether the panel should ask for the welcome (DESIGN-v2 §3.8): it has not
    * happened yet (`welcome_done` unset) and the user has written nothing in
@@ -687,6 +729,44 @@ export interface CompanionSnapshotDto {
    * §2.7), and so do the receipts' per-target lines (W2-F1a). W2-G1a fills it.
    */
   checkinChanges?: CompanionCheckinChangeDto[];
+  /**
+   * The Get started card in V (unification design D17): null when there is
+   * none, for someone who met Michi before it existed. Absent from older
+   * backends, which welcome with a model turn instead.
+   */
+  getStarted?: CompanionGetStartedDto | null;
+  /**
+   * When this owner was told once that Michi is off and where to turn it on
+   * (Q29: no button or ⌘J while off), or found it on: null until then.
+   * POST /companion/off-notice sets it. Absent from older backends.
+   */
+  offNoticeAt?: number | null;
+}
+
+/**
+ * The Get started card (D17): the first time the panel opens, V shows a
+ * model-free introduction and this card, and nothing starts until Start.
+ * `offer`: not answered yet; `later`: Not now, so it can still be started;
+ * `started`: Start was pressed in the conversation `nodeId` (another
+ * conversation shows no card).
+ */
+export interface CompanionGetStartedDto {
+  state: 'offer' | 'later' | 'started';
+  /** When Start or Not now was pressed; null while offered. */
+  at: number | null;
+  nodeId: string | null;
+  /** What Start chose for workspace homes, and for watching the outside sources (null: left as they were); null before Start. */
+  homes: boolean | null;
+  watch: boolean | null;
+  /** The card's first line now: whether workspace homes are kept up to date, and how many days back the first read goes. */
+  homesOn: boolean;
+  firstRunDays: number;
+}
+
+/** POST /companion/get-started: the card's choices. `watch` left out leaves the outside sources as they are. */
+export interface CompanionGetStartedInput {
+  homes: boolean;
+  watch?: boolean;
 }
 
 /** Renderer activity beacon: the backend uses it for catch-up and to keep turns out of the user's way. */
@@ -699,65 +779,35 @@ export interface CompanionPresenceInput {
   lastInputAt: number | null;
   /** The user is typing in (or just focused) the Companion composer: Michi stops any hidden turn so the user goes first. */
   composing: boolean;
+  /** The window that sent it (its WINDOW_ID): every window, a remote one included, is heard on its own. Absent: one unnamed window. */
+  windowId?: string;
+  /**
+   * Set only on Electron main's system beacon: how long the computer has had
+   * no keyboard or mouse input (powerMonitor.getSystemIdleTime), so working in
+   * another app counts as here. Such a beacon says nothing about any window.
+   */
+  systemIdleSeconds?: number;
 }
 
 /** SSE stream `GET /api/companion/events`. */
 export const COMPANION_EVENTS_PATH = '/companion/events';
-/** SSE stream for the Electron main-process notifier `GET /api/companion/notifications/stream`. */
-export const COMPANION_NOTIFICATIONS_PATH = '/companion/notifications/stream';
 
 export interface CompanionChangedEvent {
   type: 'companion_changed';
   revision: number;
-  reason: 'items' | 'brief' | 'cards' | 'goals' | 'notes' | 'settings' | 'status' | 'activity' | 'catch_up' | 'conversation' | 'reminders' | 'rules';
+  /** `notifications`: the user's notification level changed (Michi's companion_set_notifications); windows read their prefs again. */
+  reason: 'items' | 'brief' | 'cards' | 'goals' | 'notes' | 'settings' | 'status' | 'activity' | 'catch_up' | 'conversation' | 'reminders' | 'rules'
+    | 'notifications';
 }
 
 /**
- * Which gate a notice passed (DESIGN-v2 §5.2). `companion`: the agent's own
- * notice gate (items, posted check-ins, the brief), with its level, quiet
- * hours, workdays and caps. `chat`: a conversation's approval request,
- * question or finished reply, which the backend sends on the renderer's
- * behalf while no Michi window is open, by the chat notification level only
- * (ChatNotificationLevel). Absent means `companion`.
- */
-export type CompanionNoticeChannel = 'companion' | 'chat';
-
-/** One desktop notification the Companion wants shown (replayed until acked). */
-export interface CompanionNotice {
-  id: string;
-  title: string;
-  body: string;
-  target: CompanionTarget;
-  itemIds: string[];
-  createdAt: number;
-  /** After this the notice is stale and must not be shown. */
-  expiresAt: number;
-  /**
-   * The gate it came through; absent from notices of the Companion's own
-   * gate written before v2. W3-H sets `chat` (services/companion/chatNotices.ts);
-   * the notifier in Electron main shows both kinds the same way. Absent and
-   * null both mean `companion` (a nullable column read as null must not drop
-   * the notices written before v2); producers omit it rather than write null.
-   * Read it with companionNoticeChannel.
-   */
-  channel?: CompanionNoticeChannel | null;
-}
-
-/** The gate a notice came through: `companion` unless it says `chat`. */
-export function companionNoticeChannel(notice: Pick<CompanionNotice, 'channel'>): CompanionNoticeChannel {
-  return notice.channel === 'chat' ? 'chat' : 'companion';
-}
-
-/**
- * The chat notification level (Settings › Notifications): `all` = approval
- * requests, questions and finished replies in every conversation, the
- * agent's own included; `approval-only` = approvals and questions; `off`.
- * The same values as the renderer's pref (frontend state/prefs.tsx
+ * The user's one notification level (Settings › Notifications), what
+ * attentionLevelAllows reads: `all`; `approval-only`, shown as "Only when
+ * something needs me" (approvals, questions, Needs you, a task that failed);
+ * `off`. The same values as the renderer's pref (frontend state/prefs.tsx
  * `notifications`), where it lives; the renderer PUTs it to
- * COMPANION_CHAT_NOTIFICATION_LEVEL_PATH at start and on every change so the
- * backend can notify by it while no window is open (DESIGN-v2 §5.2). Never
- * subject to the Companion's quiet hours, workdays or caps. W3-F3 syncs it;
- * W3-H stores it in meta and routes `chat` notices by it.
+ * COMPANION_CHAT_NOTIFICATION_LEVEL_PATH at start and on every change so
+ * Electron main's banners follow it while no window is open (DESIGN P4).
  */
 export type ChatNotificationLevel = 'all' | 'approval-only' | 'off';
 
@@ -782,19 +832,6 @@ export function isCompanionChangedEvent(value: unknown): value is CompanionChang
   if (!value || typeof value !== 'object') return false;
   const event = value as Partial<CompanionChangedEvent>;
   return event.type === 'companion_changed' && typeof event.revision === 'number' && typeof event.reason === 'string';
-}
-
-export function isCompanionNotice(value: unknown): value is CompanionNotice {
-  if (!value || typeof value !== 'object') return false;
-  const notice = value as Partial<CompanionNotice>;
-  return typeof notice.id === 'string'
-    && typeof notice.title === 'string'
-    && typeof notice.body === 'string'
-    && !!notice.target && typeof notice.target === 'object'
-    && Array.isArray(notice.itemIds)
-    && typeof notice.createdAt === 'number'
-    && typeof notice.expiresAt === 'number'
-    && (notice.channel === undefined || notice.channel === null || notice.channel === 'companion' || notice.channel === 'chat');
 }
 
 /** `HH:MM` 24h. */

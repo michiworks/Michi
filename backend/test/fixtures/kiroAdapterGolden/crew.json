@@ -405,15 +405,15 @@
       "name": "restricted profile",
       "newSession": {
         "name": "AssistantRuntimeUnsupportedError",
-        "message": "Pages upkeep does not run on Kiro Crew yet. Choose another runtime for it under Pages upkeep in Settings."
+        "message": "Michi does not run on Kiro Crew yet. Choose another runtime for Background work in Settings › Michi."
       },
       "loadSession": {
         "name": "AssistantRuntimeUnsupportedError",
-        "message": "Pages upkeep does not run on Kiro Crew yet. Choose another runtime for it under Pages upkeep in Settings."
+        "message": "Michi does not run on Kiro Crew yet. Choose another runtime for Background work in Settings › Michi."
       },
       "forkSession": {
         "name": "AssistantRuntimeUnsupportedError",
-        "message": "Pages upkeep does not run on Kiro Crew yet. Choose another runtime for it under Pages upkeep in Settings."
+        "message": "Michi does not run on Kiro Crew yet. Choose another runtime for Background work in Settings › Michi."
       },
       "wire": []
     },

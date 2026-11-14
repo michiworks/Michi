@@ -1,4 +1,4 @@
-import { isChatPermissionMode, parseWorkspaceSettings, readPendingSpawnPrompt, selectWindowComposerDraft, workspaceSystemOf } from 'michi-shared';
+import { isChatPermissionMode, parseWorkspaceSettings, selectWindowComposerDraft, workspaceSystemOf } from 'michi-shared';
 import { WINDOW_ID } from '../config/windowIdentity';
 import { backendEntityId, mapBackendPayload, serverEntityId } from '../config/backendIdentity';
 import { finalizeAssistantBlocks, migrateAssistantToBlocks, parseAssistantBlocks } from './assistantBlocks';
@@ -259,10 +259,7 @@ function leanFieldState(field: LeanNodeField, row: Record<string, unknown>): Par
         followUpsSourceMessageId: asString(row.follow_ups_source_message_id) || undefined,
       };
     case 'composer_draft':
-      return {
-        pendingSpawnPrompt: readPendingSpawnPrompt(row.composer_draft),
-        composerDraft: parseComposerDraft(row.composer_draft),
-      };
+      return { composerDraft: parseComposerDraft(row.composer_draft) };
   }
 }
 
@@ -764,6 +761,9 @@ export function mapNodeRowScalars(row: Record<string, unknown>): Partial<ChatNod
     pageId: asString(row.page_id) ?? null,
     maintenanceJobId: asString(row.maintenance_job_id) ?? null,
     scheduledOnlyJobId: asString(row.scheduled_only_job_id) ?? null,
+    // A temporary chat: memory off, set once when its first session was made.
+    // Read-only here like pageId; serializeNodeRow never writes it back.
+    temporary: row.memory_mode === 'off' ? true : undefined,
     // Compatibility marker only: a bound node always uses its nodeId on the
     // public API. Runtime-native ids remain in SQLite/backend adapters.
     chatId: hasRuntimeBinding ? nodeId : null,
@@ -1093,10 +1093,6 @@ export function hydrateSavedState(saved: unknown): HydratedState {
       // peer context.
       consumedLinks: undefined,
       spawnedByAgent: (raw as any).spawnedByAgent === true || undefined,
-      pendingSpawnPrompt:
-        typeof (raw as any).pendingSpawnPrompt === 'string' && (raw as any).pendingSpawnPrompt.trim()
-          ? (raw as any).pendingSpawnPrompt
-          : undefined,
       deletedAt:
         typeof (raw as any).deletedAt === 'number' ? (raw as any).deletedAt : undefined,
       deletionGroupId:

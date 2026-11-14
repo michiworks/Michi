@@ -2,7 +2,7 @@ import { createContext, useCallback, useContext, useEffect, useSyncExternalStore
 import type { MemoryChangedEvent, ReplyMemorySource } from 'michi-shared';
 import { API_BASE_URL } from '../../config/env';
 import { fetchReplyMemorySources, isMemoryUnavailable, MemoryApiError } from '../../services/api/memories';
-import { onConversationMemoryModeChange, onMemoryOnChange } from './conversationMemory';
+import { onMemoryOnChange } from './conversationMemory';
 import { onMemoryChanged } from './memoryNotifications';
 
 /**
@@ -15,14 +15,14 @@ import { onMemoryChanged } from './memoryNotifications';
  * within BATCH_MS, at most BATCH_MAX ids), answers are cached per message (an
  * empty one too) for the page's lifetime, unless something changes what they
  * would say: a memory deleted, updated or put away on this machine (the
- * change feed), a past chat no longer recalled from any footer, this chat's
- * or a source chat's memory setting,
- * memory turned on or off. Opening a footer asks again, so what it lists is
+ * change feed), a past chat no longer recalled from any footer, memory
+ * turned on or off. (A temporary chat asks nothing: it uses no memory, and
+ * is one from its first message on.) Opening a footer asks again, so what it lists is
  * current even when the change happened elsewhere (another backend, the
  * agent). A backend without the route is not asked again.
  */
 
-/** Where a conversation's replies ask (PaneMessageList provides it; the assistant and meta chats do not). */
+/** Where a conversation's replies ask (PaneMessageList provides it for ordinary chats and the agent's V; meta chats get none). */
 export interface ReplySourcesTarget {
   /** The conversation's backend API (workspaceBackendApiBase). */
   apiBase: string;
@@ -224,14 +224,6 @@ function ensureInvalidation(): void {
       for (const cache of caches.values()) {
         if (cache.apiBase !== API_BASE_URL) continue;
         dropMemory(cache, event.memoryId, removed ? 'remove' : 'refetch');
-      }
-    }),
-    onConversationMemoryModeChange((apiBase, nodeId) => {
-      const cache = caches.get(cacheKey(apiBase, nodeId));
-      if (cache) dropCache(cache);
-      // A chat that stops learning is no longer a past chat any reply may name.
-      for (const other of caches.values()) {
-        if (other.apiBase === apiBase) dropItems(other, (item) => item.kind === 'conversation' && item.from.nodeId === nodeId, 'refetch');
       }
     }),
     onMemoryOnChange((apiBase) => {

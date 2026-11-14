@@ -120,12 +120,13 @@ describe('chatStreamEvents route mapping', () => {
   });
 
   test('maps Michi host events to the wire events their type names, field for field', () => {
+    // The prompt stays on the backend, which starts the branch's first turn.
     const topics = [{ title: 'Alpha', prompt: 'Explore alpha', chatId: 'chat-a', nodeId: 'node-a' }];
     const cases: Array<{ input: NormalizedEvent; expected: ReturnType<typeof toChatStreamEvent>; frame: string }> = [
       {
         input: { kind: 'host_event', type: 'spawn_branches', payload: { topics } },
-        expected: { event: CHAT_STREAM_EVENTS.spawnBranches, data: { topics } },
-        frame: 'event: spawn_branches\ndata: {"topics":[{"title":"Alpha","prompt":"Explore alpha","chatId":"chat-a","nodeId":"node-a"}]}\n\n',
+        expected: { event: CHAT_STREAM_EVENTS.spawnBranches, data: { topics: [{ title: 'Alpha', chatId: 'chat-a', nodeId: 'node-a' }] } },
+        frame: 'event: spawn_branches\ndata: {"topics":[{"title":"Alpha","chatId":"chat-a","nodeId":"node-a"}]}\n\n',
       },
       {
         input: { kind: 'host_event', type: 'branch_overview', payload: { overview: 'Current branch state.' } },

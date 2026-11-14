@@ -13,7 +13,8 @@ import {
   type PageChangeAction,
 } from '../../services/api/pages';
 import { notifyPageChanged, subscribePageChanges } from './pageEvents';
-import { batchOutcomeNotice, revertPageBatches, UNDO_FAILED } from './pageUndo';
+import { batchOutcomeNotice, pageEditLabel, revertPageBatches, undoPageBatches, UNDO_FAILED, writtenBatchIds } from './pageUndo';
+import { recordUndo } from '../undoStack';
 import {
   commitResourceRead,
   failResourceRead,
@@ -219,6 +220,11 @@ export function usePage({ backendConnectionId, workspaceId, pageId, enabled = tr
       const answer = await editPage(pageId, { revision: page.revision, ops }, identity);
       writeResource(key, answer.page);
       notifyPageChanged({ backendConnectionId, workspaceId, pageId });
+      const batches = writtenBatchIds(answer.changes).map((batchId) => ({
+        batchId, workspaceId, changed: [{ backendConnectionId, workspaceId, pageId }],
+      }));
+      // A deleted block leaves the page, so its toast offers Undo too.
+      if (batches.length) recordUndo({ label: pageEditLabel(ops, page.title), undo: undoPageBatches(backendConnectionId, batches), toast: ops.some((op) => op.op === 'delete') });
       await refreshChanges();
     } catch (error) {
       if (pageEditFailure(error) === 'stale') refresh();

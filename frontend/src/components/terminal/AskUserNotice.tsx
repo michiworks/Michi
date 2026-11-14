@@ -1,8 +1,10 @@
 import React, { useCallback, useId, useMemo } from 'react';
 import { CircleHelp } from 'lucide-react';
 import { AnimatePresence, useIsPresent } from 'motion/react';
-import { isAssistantConversation, useChatActions, useChatProjects, useStructuralSelector } from '../../state/chatStore';
+import { isAssistantConversation, useChatActions, useChatPanes, useChatProjects, useStructuralSelector } from '../../state/chatStore';
 import { useCompanionName } from '../../state/companion/companionName';
+import { useCompanionPanelShownNodeIds } from '../../state/companion/companionPanel';
+import { usePanePresenceDashboardVisible } from '../../state/panePresenceVisibility';
 import {
   pendingAskUsersEqual,
   selectPendingAskUsers,
@@ -27,6 +29,10 @@ import { NoticeHeader, NoticeMotion, NoticeTab, shrinkOnEscape, useAnnounceNew, 
  * Deliberately not gated on the `notifications` pref — that pref governs
  * toasts / OS notifications (transient, dismissible), while this is a state
  * indicator that disappears only when the question is answered or skipped.
+ * It leaves out the conversation the user is in (the focused pane, or the
+ * one the agent's panel shows), whose inline card already asks: clicking
+ * Answer takes the user there, so the reminder steps back, and returns if
+ * they leave without answering.
  * It can shrink to a tab; a new question opens it again. A new question is
  * read out politely (ShellNotices' live region), never as an alert that
  * interrupts typing.
@@ -34,8 +40,15 @@ import { NoticeHeader, NoticeMotion, NoticeTab, shrinkOnEscape, useAnnounceNew, 
 export default function AskUserNotice() {
   const { revealNode } = useChatActions();
 
-  const pending = useStructuralSelector(selectPendingAskUsers, pendingAskUsersEqual);
-  const keys = useMemo(() => pending.map((ask) => `${ask.nodeId}:${ask.requestId}`), [pending]);
+  const asks = useStructuralSelector(selectPendingAskUsers, pendingAskUsersEqual);
+  // Every unanswered ask counts for shrinking and announcing, so going in and
+  // out of a conversation never reads as a new question.
+  const keys = useMemo(() => asks.map((ask) => `${ask.nodeId}:${ask.requestId}`), [asks]);
+  const { focusedPane } = useChatPanes();
+  const dashboardVisible = usePanePresenceDashboardVisible();
+  const panelShown = useCompanionPanelShownNodeIds();
+  const pending = useMemo(() => asks.filter((ask) => !panelShown.includes(ask.nodeId)
+    && !(dashboardVisible && focusedPane === ask.nodeId)), [asks, dashboardVisible, focusedPane, panelShown]);
   const { minimized, minimize, expand, focus, focusDone } = useNoticeMinimized(keys, { storageKey: 'ask' });
   // The agent's own conversation goes by its name, not a thread title (§1.5).
   const { projects } = useChatProjects();
@@ -43,7 +56,7 @@ export default function AskUserNotice() {
   const labelFor = useCallback((target: PendingAskUser) => (
     isAssistantConversation(projects, target.nodeId) ? name : target.title || 'Untitled thread'
   ), [name, projects]);
-  useAnnounceNew(keys, () => `Agent question: ${pending[0] ? labelFor(pending[0]) : 'Untitled thread'}`);
+  useAnnounceNew(keys, () => `Agent question: ${asks[0] ? labelFor(asks[0]) : 'Untitled thread'}`);
   // A phone has no room beside the chat it opens: the notice gets out of the way.
   const phone = usePhoneLayout();
 

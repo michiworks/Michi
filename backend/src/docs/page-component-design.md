@@ -1,6 +1,6 @@
 # Design generated components for Michi Pages
 
-Applies to: native Page composition and the current generated-component sandbox. Source checked: 2026-11-08. This guide records the design conventions and the APIs that actually exist. It does not add a component SDK, style validator or automatic preview tool. Read `pages-and-components` for the source/call contract.
+Applies to: native Page composition and the current generated-component sandbox. Source checked: 2026-11-12. This guide records the design conventions and the APIs that actually exist. It does not add a component SDK, style validator or automatic preview tool. Read `pages-and-components` for the source/call contract.
 
 ## Choose the smallest supported building block
 
@@ -72,8 +72,8 @@ For database views, values are keyed by stable column IDs; respect the supplied 
 1. Read the target page/database, current layout preferences, this design guide and the `pages-and-components` contract. Read the component library and the source/schema of any component you plan to reuse.
 2. Choose native blocks or a custom view based on actual capabilities. For custom source, use the supported tokens and simple semantic elements; keep loading, empty, error and partial-data states explicit.
 3. Save with the current library revision. Saving creates an immutable **active** version, so enabled unpinned hosts may update. A new host needs a separate attachment. Pin a version when that host should not follow later library saves.
-4. Inspect the native Components preview where available, then the intended host with representative data. The current tool catalog has no dedicated agent component-preview/visual-validation tool. Preview data is a small sample and host capabilities are unavailable there.
-5. With browser/UI tooling actually available to the session, inspect light/dark themes, a narrow pane, long labels, keyboard focus, actions and data refresh. Verify persistence/receipts separately. If you cannot run the UI, report source/save/readback evidence and say that rendering remains unverified.
+4. Inspect the native Components preview where available, then the intended host with representative data. The current tool catalog has no dedicated agent component-preview/visual-validation tool: `preview_page` shows how a page's native blocks render, but custom components show as paused there. Preview data is a small sample and host capabilities are unavailable there.
+5. With browser/UI tooling actually available to the session, inspect light/dark themes, a narrow pane, long labels, keyboard focus, actions and data refresh; for native blocks, `preview_page` with `?palette=<name>` gives a read-only page to look at in another theme. Verify persistence/receipts separately. If you cannot run the UI, report source/save/readback evidence and say that rendering remains unverified.
 
 The host retains the last successful frame while a candidate source version loads; the old worker loses its actions, and the candidate cannot write/navigate/fill drafts until activation. A first-render failure keeps the old view. This behavior does not undo the saved active library version or prove the replacement's design is correct.
 

@@ -20,6 +20,8 @@ On macOS the update rebuilds/replaces the application and quits Michi; reopen it
 
 A default installation already contains the complete **~/.michi/crew-app** directory. **Do not run crew-setup.cjs or copy App files for a new default installation.** A data directory from a standalone desktop bundle alone is not an installation checkout: it must contain `package.json`, `crew-app/launch.py`, `backend/dist/crewMcpHost.js`, `backend/dist/crewMcp.js` and `backend/dist/crew-node.json`.
 
+A remote Linux backend set up by the desktop app is not a default installation: its `~/.michi` holds only data, and each `michi update` builds a new release under `~/.local/share/michi/devdesktop/releases/`. Prepare its App from `~/.local/share/michi/devdesktop/current` as described in section 9, then install from the persistent source you copy it to.
+
 ## 2. Install the App directly in Crew
 
 Start the official KiroCrew application and sign in. The default local Gateway is `http://127.0.0.1:5476`.
@@ -64,6 +66,8 @@ michi update
 
 Then open **Apps / Library → Michi Crew Runtime → Sync** in Crew. Sync rereads the recorded `~/.michi/crew-app` source, updates its manifest/template, and preserves the App secret and App data. No App generation or copying is needed for default installations. After Sync, reload **Developer → MCP Management** and approve the new command if it reports **command changed**. The first migration from an App older than **0.6.0** also requires a Gateway restart; later host/launcher/API changes may require another restart, as described by the release.
 
+An App prepared from a remote backend's `current` link (section 9) needs no Sync after `michi update`. Only when the App files change, which Michi reports with **Sync Crew App**, run the helper again from that link, copy its output into the same registered source, and Sync.
+
 Michi checks the installed App version and displays **Sync Crew App** when it is older than the version included in Michi. It blocks new Crew work until the App is updated; return to Michi after Sync to refresh the check.
 
 Already-running MCP connections load updated compatible relay handlers on subsequent requests. In-flight calls finish with the generation they started with. A rebuild gap retains the last working handlers. A change to the host/launcher or handler API still requires a new MCP process; reopen the Crew session or restart its Gateway when the release requests it.
@@ -94,7 +98,7 @@ In the Crew sidebar, new Michi chats are filed under **Michi Crew / <workspace n
 
 ## 5. Choose a Memory mode
 
-When the runtime selected in **Settings → Runtime & model** is **Kiro Crew**, a **Memory** selector appears above **FOLLOW-UPS**. It sets the default for **new Crew chats**.
+When the runtime selected in **Settings → Runtime & model** is **Kiro Crew**, a **Memory** selector appears above **FOLLOW-UPS**. It sets the default for **new Crew chats**. Until you choose one, the default is **Read only**: Michi Memory learns from your Michi chats, so Crew recalls what its own memory already holds without adding to it.
 
 | Mode | Behavior |
 | --- | --- |
@@ -116,6 +120,8 @@ Set the mode in **Michi Settings → Runtime & model → Permissions**:
 - **Trust:** Michi answers pending requests automatically according to its permission policy.
 
 There is one approval workflow, in Michi. If sessionApproval consent is missing or revoked, setup is incomplete: new turns are blocked until access is restored.
+
+Michi's own conversation tools run without a card in every mode, as on the other runtimes: `michi_list_tools`, Michi's reads, a turn's title and follow-ups, questions, thread messages and Memory. A card for another Michi tool called through `michi_call_tool` names that tool, and **Trust this tool** trusts that one Michi tool.
 
 Crew has no separate Michi YOLO control. A global Michi YOLO preference behaves as Trust for Crew. Crew's own allowlists, governance rules, and global YOLO apply first. If Crew auto-approves an operation, there is no pending request for Michi Ask to intercept.
 
@@ -170,6 +176,8 @@ node backend/scripts/crew-setup.cjs
 ```
 
 The helper prints **Prepared App: /actual/path/michi-crew-app-...** and always includes both capabilities. It sets `MICHI_CREW_INSTALL_DIR` to that checkout and `MICHI_CREW_MCP_DIR` to the binding directory. It prepares files without granting authorization.
+
+On a remote Linux installation, `michi update` builds each version in a new `~/.local/share/michi/devdesktop/releases/` checkout and points `~/.local/share/michi/devdesktop/current` at the running one. Run the helper from that link (`node ~/.local/share/michi/devdesktop/current/backend/scripts/crew-setup.cjs`): it then sets `MICHI_CREW_INSTALL_DIR` to the link instead of one release, so later updates need no new Sync or launch approval unless the App files change. For a first installation, copy the prepared files into a persistent source outside `releases/`, such as `~/.local/share/michi/crew-app`, and install from its absolute path. An MCP host that is already running keeps its release until Crew restarts it. An App registered to a single release keeps that release, and `michi update` does not remove it.
 
 For a first custom installation, copy the prepared files into a dedicated persistent App source, such as `<custom-install>/crew-app-prepared`, then install from that absolute path. **Do not copy generated files over the repository's canonical crew-app directory.**
 

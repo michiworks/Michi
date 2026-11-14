@@ -58,17 +58,27 @@ afterEach(() => {
 });
 
 describe('Settings › Notifications', () => {
-  it('sets the chat level for every conversation, the agent’s included, and links to the agent’s own notifications', () => {
+  it('sets the one level for every notification, Robin\'s included, from one select with what each level means behind its “?”', () => {
     const open = vi.fn();
     render(<SettingsOpenContext.Provider value={open}><NotificationsPane /></SettingsOpenContext.Provider>);
     const chat = section('Notifications');
-    expect(chat.textContent).toContain('your conversation with Robin included, whether Michi’s windows are open or closed');
-    expect(chat.textContent).toContain('Quiet hours don’t apply');
-    expect((within(chat).getByRole('radio', { name: /Approval only/ }) as HTMLInputElement).checked).toBe(true);
-    fireEvent.click(within(chat).getByRole('radio', { name: /^All/ }));
+    expect(document.querySelector('.settings-section__intro')).toBeNull();
+    const level = within(chat).getByRole('combobox', { name: 'Notify me' }) as HTMLSelectElement;
+    expect(level.value).toBe('approval-only');
+    expect(Array.from(level.options).map((option) => option.textContent)).toEqual(['All', 'Only when something needs me', 'Off']);
+    fireEvent.change(level, { target: { value: 'all' } });
     expect(mocks.setPref).toHaveBeenCalledWith('notifications', 'all');
-    fireEvent.click(within(chat).getByRole('button', { name: 'Settings › Robin › Notifications' }));
-    expect(open).toHaveBeenCalledWith('companion', 'Notifications');
+    expect(chat.textContent).not.toContain('Quiet hours');
+    const tips = within(chat).getAllByRole('button', { name: 'More about this setting' });
+    fireEvent.click(tips[0]!);
+    expect(chat.textContent).toContain('One level for every notification: your conversations, Robin, scheduled jobs and agent runs, windows open or closed. '
+      + 'All: also when a conversation or a scheduled job with Notify finishes, and Michi’s updates and morning brief. '
+      + 'Only when something needs me: approvals, questions, what needs you in Today, and a task of yours that failed.');
+    // Sounds, named as Settings search names it.
+    expect(within(chat).getByRole('switch', { name: 'Notification sounds' })).toBeTruthy();
+    expect(within(chat).getByText('Sounds')).toBeTruthy();
+    expect(within(chat).queryByRole('button', { name: 'Settings › Robin › Notifications' })).toBeNull();
+    expect(open).not.toHaveBeenCalled();
   });
 
   it('says the section is the desktop app’s outside it, and leaves it out on a phone', () => {
@@ -98,7 +108,9 @@ describe('Settings › Notifications', () => {
     expect(closed.textContent).toContain(`Needs “${TRAY_LABEL}”.`);
 
     const keep = within(closed).getByRole('switch', { name: KEEP_RUNNING_LABEL });
-    expect(keep.closest('.settings-row')!.textContent).toContain('Scheduled jobs and Robin’s check-ins run only while Michi is open.');
+    const keepRow = keep.closest('.settings-row') as HTMLElement;
+    fireEvent.click(within(keepRow).getByRole('button', { name: 'More about this setting' }));
+    expect(keepRow.textContent).toContain('so scheduled jobs run on time and Robin can notify you. Your Mac still pauses it while it sleeps');
     fireEvent.click(keep);
     await waitFor(() => expect(mocks.confirm).toHaveBeenCalledTimes(1));
     expect(bridge.setBackgroundServiceEnabled).not.toHaveBeenCalled();
@@ -106,7 +118,7 @@ describe('Settings › Notifications', () => {
     await waitFor(() => expect(bridge.setBackgroundServiceEnabled).toHaveBeenCalledWith(true));
     expect(mocks.confirm.mock.calls[1]![0].message).toContain('Robin can still notify you');
     await waitFor(() => expect(within(closed).getByRole('switch', { name: KEEP_RUNNING_LABEL }).getAttribute('aria-checked')).toBe('true'));
-    expect(closed.textContent).toContain('Your Mac still pauses Michi while it sleeps.');
+    expect(closed.textContent).not.toContain('Not running right now');
   });
 
   it('offers Open at login where the install can, says why the icon can’t stay, and shows a failed change', async () => {

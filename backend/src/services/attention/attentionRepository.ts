@@ -4,6 +4,7 @@ import {
   isAssistantWorkspaceSettings,
   nodeLifecycleState,
   oneLine,
+  parseAttentionOpenTarget,
   type AttentionClaimResultV1,
   type AttentionKind,
   type AttentionNotificationV1,
@@ -19,7 +20,7 @@ import { LOCAL_AGENT_OWNER_ID } from '../agentOwner';
 /**
  * The attention service's queries (attentionService.ts): the
  * attention_notifications records and the node and turn facts they are
- * decided from (migration 0064); the wake records it reads are in
+ * decided from (migrations 0064, 0087); the wake records it reads are in
  * attentionWakeFacts.ts. Record queries are owner-scoped, except the upkeep
  * that follows a target (moved or purged), whatever owner holds its records.
  */
@@ -28,8 +29,10 @@ interface AttentionRow {
   id: string;
   owner_user_id: string;
   workspace_id: string;
-  target_type: 'node' | 'agent_run';
+  target_type: AttentionTargetV1['type'];
   target_id: string;
+  /** agent: the CompanionTarget a click opens; scheduled_run: {jobId, nodeId}; null otherwise. */
+  target_detail: string | null;
   key: string;
   fact: string;
   kind: AttentionKind;
@@ -100,10 +103,41 @@ export type AttentionWorkspaceState = 'live' | 'hidden' | 'gone';
 const TITLE_MAX = 200;
 const BODY_MAX = 500;
 
+function detailOf(row: AttentionRow): Record<string, unknown> {
+  try {
+    const parsed: unknown = row.target_detail === null ? null : JSON.parse(row.target_detail);
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed as Record<string, unknown> : {};
+  } catch {
+    return {};
+  }
+}
+
 function targetOf(row: AttentionRow): AttentionTargetV1 {
-  return row.target_type === 'node'
-    ? { type: 'node', nodeId: row.target_id, workspaceId: row.workspace_id }
-    : { type: 'agent_run', runId: row.target_id, workspaceId: row.workspace_id };
+  switch (row.target_type) {
+    case 'node':
+      return { type: 'node', nodeId: row.target_id, workspaceId: row.workspace_id };
+    case 'agent_run':
+      return { type: 'agent_run', runId: row.target_id, workspaceId: row.workspace_id };
+    case 'agent':
+      // A detail this build cannot read opens the agent's conversation.
+      return { type: 'agent', ref: row.target_id, open: parseAttentionOpenTarget(detailOf(row)) ?? { kind: 'companion', tab: 'chat' }, workspaceId: row.workspace_id };
+    case 'scheduled_run': {
+      const detail = detailOf(row);
+      return {
+        type: 'scheduled_run',
+        runId: row.target_id,
+        jobId: typeof detail.jobId === 'string' ? detail.jobId : '',
+        nodeId: typeof detail.nodeId === 'string' && detail.nodeId ? detail.nodeId : null,
+        workspaceId: row.workspace_id,
+      };
+    }
+  }
+}
+
+function targetDetailOf(target: AttentionTargetV1): string | null {
+  if (target.type === 'agent') return JSON.stringify(target.open);
+  if (target.type === 'scheduled_run') return JSON.stringify({ jobId: target.jobId, nodeId: target.nodeId });
+  return null;
 }
 
 function fromRow(row: AttentionRow): StoredAttention {
@@ -183,10 +217,10 @@ export class AttentionRepository {
       const id = this.newId();
       const targetId = targetIdOf(record.target);
       db.prepare(`INSERT INTO attention_notifications
-        (id, owner_user_id, workspace_id, target_type, target_id, key, fact, kind, reason, title, body, created_at, status)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active')`).run(
-        id, record.ownerUserId, record.target.workspaceId, record.target.type, targetId, record.key, record.fact,
-        record.kind, record.reason, oneLine(record.title, TITLE_MAX), oneLine(record.body, BODY_MAX), record.createdAt,
+        (id, owner_user_id, workspace_id, target_type, target_id, target_detail, key, fact, kind, reason, title, body, created_at, status)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active')`).run(
+        id, record.ownerUserId, record.target.workspaceId, record.target.type, targetId, targetDetailOf(record.target), record.key,
+        record.fact, record.kind, record.reason, oneLine(record.title, TITLE_MAX), oneLine(record.body, BODY_MAX), record.createdAt,
       );
       return {
         created: this.byId(id)!,
@@ -278,14 +312,16 @@ export class AttentionRepository {
   }
 
   /**
-   * Deletes the records (any status) of purged workspaces and of nodes that
-   * are purged or no longer exist; only `workspaceId`'s when given. Returns
-   * how many.
+   * Deletes the records (any status) of purged workspaces, of nodes that are
+   * purged or no longer exist, and of Scheduled Job runs that were pruned;
+   * only `workspaceId`'s when given. Returns how many.
    */
   deleteRecordsOfGoneTargets(workspaceId?: string): number {
     const gone = `(workspace_id IN (SELECT id FROM workspaces WHERE purged_at IS NOT NULL)
       OR (target_type = 'node' AND NOT EXISTS (
-        SELECT 1 FROM nodes n WHERE n.id = attention_notifications.target_id AND n.purged_at IS NULL)))`;
+        SELECT 1 FROM nodes n WHERE n.id = attention_notifications.target_id AND n.purged_at IS NULL))
+      OR (target_type = 'scheduled_run' AND NOT EXISTS (
+        SELECT 1 FROM scheduled_job_runs r WHERE r.id = attention_notifications.target_id)))`;
     const result = workspaceId === undefined
       ? getDb().prepare(`DELETE FROM attention_notifications WHERE ${gone}`).run()
       : getDb().prepare(`DELETE FROM attention_notifications WHERE workspace_id = ? AND ${gone}`).run(workspaceId);
@@ -337,6 +373,13 @@ export class AttentionRepository {
     return !!row?.job;
   }
 
+  /** Whose records a workspace's events are: attentionOwnerOf its owner; null for a workspace that is gone. */
+  workspaceOwner(workspaceId: string): string | null {
+    const row = getDb().prepare('SELECT owner_user_id FROM workspaces WHERE id = ? AND purged_at IS NULL').get(workspaceId) as
+      { owner_user_id: string | null } | undefined;
+    return row ? attentionOwnerOf(row.owner_user_id) : null;
+  }
+
   /** For a run's record, whose target lives as long as its workspace. */
   workspaceState(workspaceId: string): AttentionWorkspaceState {
     const row = getDb().prepare('SELECT deleted_at, archived_at, purged_at FROM workspaces WHERE id = ?').get(workspaceId) as
@@ -347,5 +390,9 @@ export class AttentionRepository {
 }
 
 function targetIdOf(target: AttentionTargetV1): string {
-  return target.type === 'node' ? target.nodeId : target.runId;
+  switch (target.type) {
+    case 'node': return target.nodeId;
+    case 'agent': return target.ref;
+    default: return target.runId;
+  }
 }

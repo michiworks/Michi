@@ -1,5 +1,4 @@
 import type {
-  HomeReminderAction,
   HomeActionTarget,
   HomeConversationItem,
   HomeConversationsDto,
@@ -16,7 +15,6 @@ import type {
   SpaceActivityItem,
   SpacesFirstRunStatus,
   SpacesHomeDto,
-  SpacesHomeLookDto,
   SpacesHomeSectionsDto,
   ThreadCardItem,
   ThreadCardsDto,
@@ -195,10 +193,6 @@ export async function fetchThreadStates(connectionId: string, options: { nodeIds
 }
 
 /** Records that the user just left the Spaces Home: Just done starts again from now. */
-export async function markSpacesHomeLooked(connectionId: string): Promise<SpacesHomeLookDto> {
-  return request<SpacesHomeLookDto>(`${base(connectionId)}/spaces-home/look`, { method: 'POST' });
-}
-
 export async function fetchSpaceActivity(connectionId: string, options: { limit?: number; signal?: AbortSignal } = {}): Promise<SpaceActivityItem[]> {
   const query = options.limit === undefined ? '' : `?limit=${encodeURIComponent(String(options.limit))}`;
   const answer = await request<{ items?: SpaceActivityItem[] }>(`${base(connectionId)}/spaces-home/activity${query}`, { signal: options.signal });
@@ -301,10 +295,4 @@ export async function fetchSpacesFirstRun(connectionId: string, signal?: AbortSi
 export async function retrySpacesFirstRun(connectionId: string, workspaceId?: string): Promise<SpacesFirstRunStatus> {
   const body = workspaceId ? { workspaceId: serverEntityId(workspaceId, connectionId) } : {};
   return mapFirstRunStatus(await request<SpacesFirstRunStatus>(`${base(connectionId)}/spaces-home/first-run/retry`, { method: 'POST', body }), connectionId);
-}
-
-export async function actOnHomeReminder(connectionId: string, item: HomeSectionItem, action: HomeReminderAction): Promise<void> {
-  await request(`${base(connectionId)}/spaces-home/reminders`, {
-    method: 'POST', body: { itemId: item.id, version: item.reminderVersion, action },
-  });
 }

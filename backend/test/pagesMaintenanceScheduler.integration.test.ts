@@ -22,6 +22,7 @@ import { ScheduledJobEventBus } from '../src/services/scheduledJobs/events';
 import type { ScheduledJobRecord, ScheduledJobRunRecord } from '../src/services/scheduledJobs/repository';
 import { ScheduledJobsRepository } from '../src/services/scheduledJobs/repository';
 import { ScheduledJobScheduler, type ScheduledJobExecutor, type ScheduledRunHandle, type ScheduledRunHooks } from '../src/services/scheduledJobs/scheduler';
+import { turnBackgroundWorkOn } from './helpers/backgroundWork';
 
 const OWNER = 'local-user';
 
@@ -147,6 +148,7 @@ function describeTest(): void {
     delete process.env.MICHI_CLOUD;
     closeDb();
     initDb();
+    turnBackgroundWorkOn();
     now = Date.parse('2026-10-23T02:00:00Z');
     mock.method(Date, 'now', () => now);
     nextJob = 0;
@@ -166,7 +168,7 @@ function describeTest(): void {
   function fixture(): { scheduler: ScheduledJobScheduler; executor: MaintenanceExecutor; jobId: string; planConfigRevision: number } {
     const executor = new MaintenanceExecutor();
     const scheduler = new ScheduledJobScheduler({ repository: new ScheduledJobsRepository(), executor,
-      events: new ScheduledJobEventBus(() => now), workspaceExists: () => true, runtimeExists: (runtimeId) => runtimeId === 'pi',
+      events: new ScheduledJobEventBus(), workspaceExists: () => true, runtimeExists: (runtimeId) => runtimeId === 'pi',
       clock: () => now, instanceId: 'maintenance-test-worker', createId: () => `maintenance-job-${++nextJob}`, pollIntervalMs: 60_000 });
     const job = scheduler.createJob({ workspaceId: 'ws', name: 'Space maintenance', prompt: 'Maintain relevant spaces',
       schedule: { kind: 'every', everySeconds: 60 }, permissionMode: 'trust', sessionMode: 'fresh',

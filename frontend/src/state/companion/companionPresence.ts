@@ -1,4 +1,5 @@
 import type { CompanionPresenceInput } from 'michi-shared';
+import { WINDOW_ID } from '../../config/windowIdentity';
 import { CompanionApiError, postCompanionPresence } from '../../services/api/companion';
 import { getCompanionPanelState, subscribeCompanionPanel } from './companionPanel';
 import { getCompanionState } from './companionStore';
@@ -6,7 +7,8 @@ import { getCompanionState } from './companionStore';
 /**
  * The renderer's activity beacon (POST /api/companion/presence): whether
  * the window is in use, whether the Companion panel has focus, the last
- * input, and whether the user is writing to the Companion. The backend uses
+ * input, and whether the user is writing to the Companion, under this
+ * window's id (the backend hears every window on its own, DESIGN §3.2). The backend uses
  * it for "Since you left", away mode and to keep hidden turns out of the
  * user's way: `composing` goes out at once (the user goes first), every
  * other change at most every 5s, and while the user is active a beacon
@@ -23,6 +25,8 @@ const PANEL_SELECTOR = '[data-companion-panel]';
 
 let users = 0;
 let lastInputAt: number | null = null;
+/** The last click or tap landed in the panel: reading V there, focus on nothing focusable, still counts as in the panel. */
+let pointerInPanel = false;
 let composing = false;
 let lastSent: { key: string; at: number; composing: boolean } | null = null;
 let throttleTimer: ReturnType<typeof setTimeout> | null = null;
@@ -34,8 +38,10 @@ let refused = false;
 function currentInput(now: number, composingNow = composing): CompanionPresenceInput {
   const focused = !document.hidden && document.hasFocus();
   const recent = lastInputAt !== null && now - lastInputAt < ACTIVE_INPUT_MS;
-  const inPanel = getCompanionPanelState().open && focused && !!document.activeElement?.closest(PANEL_SELECTOR);
-  return { active: focused && recent, companionFocused: inPanel, lastInputAt, composing: composingNow && inPanel };
+  const active = document.activeElement;
+  const onNothing = !active || active === document.body;
+  const inPanel = getCompanionPanelState().open && focused && (onNothing ? pointerInPanel : !!active.closest(PANEL_SELECTOR));
+  return { active: focused && recent, companionFocused: inPanel, lastInputAt, composing: composingNow && inPanel, ...(WINDOW_ID ? { windowId: WINDOW_ID } : {}) };
 }
 
 const keyOf = (input: CompanionPresenceInput) => `${input.active}|${input.companionFocused}|${input.composing}`;
@@ -64,10 +70,12 @@ function send(reason: 'change' | 'keepalive'): void {
 }
 
 const onChange = () => send('change');
-const onInput = () => {
+const onInput = (event: Event) => {
   const wasActive = lastInputAt !== null && Date.now() - lastInputAt < ACTIVE_INPUT_MS;
   lastInputAt = Date.now();
-  if (!wasActive) send('change');
+  const wasInPanel = pointerInPanel;
+  if (event.type === 'pointerdown') pointerInPanel = event.target instanceof Element && !!event.target.closest(PANEL_SELECTOR);
+  if (!wasActive || wasInPanel !== pointerInPanel) send('change');
 };
 
 /**
@@ -136,6 +144,7 @@ export function resetCompanionPresenceForTests(): void {
   if (typeof window !== 'undefined') detach();
   users = 0;
   lastInputAt = null;
+  pointerInPanel = false;
   composing = false;
   lastSent = null;
   refused = false;

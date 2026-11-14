@@ -67,6 +67,19 @@ describe('Pages upkeep detail rows in words', () => {
     expect(list.textContent).not.toMatch(DEVELOPER_TERMS);
   });
 
+  it('says the Home summary waits for first reads only while one runs; with every home written, it updates within the hour', () => {
+    const summaryRow = (run: FirstRunProgressDto) => {
+      const status: SpacesFirstRunStatus = { requestedAt: 1, workspaces: [home(run)], summary: { state: 'waiting', summarizedAt: NOW - 20 * MIN }, haltedReason: null, closed: true };
+      const view = render(<MetaAgentStatusLine status={DEFAULT_META_STATUS} workspaces={status.workspaces} clock={NOW} firstRun={status} />);
+      fireEvent.click(screen.getByRole('button', { name: 'Details' }));
+      const text = within(screen.getByRole('list', { name: 'Pages upkeep per workspace' })).getByText('Home (global)').parentElement!.textContent;
+      view.unmount();
+      return text;
+    };
+    expect(summaryRow(firstRun('done', 38))).toBe('·Home (global)Updates within the hour');
+    expect(summaryRow(firstRun('reading', 21))).toBe('·Home (global)Waits for every workspace home');
+  });
+
   it('keeps the steady-state detail list free of developer terms', () => {
     const cursors = [cursor(), cursor({ workspaceId: 'ws-2', workspaceName: 'agent-desk', state: 'next', unread: 2 })];
     const workspaces = [home(null), { ...home(null), workspaceId: 'ws-2', workspaceName: 'agent-desk' }];
@@ -85,7 +98,8 @@ describe('Pages upkeep status line states', () => {
     expect(screen.queryByText(/wrote rabbitholes/)).toBeNull();
     expect(screen.getByText(/Pages upkeep checks new conversations every 60 s · Claude \(follows global\)/)).toBeTruthy();
     expect(screen.getByRole('button', { name: 'Details' })).toBeTruthy();
-    expect(screen.getByRole('button', { name: 'Scheduled' })).toBeTruthy();
+    // Scheduled does not list Pages upkeep (Q8): the line links nowhere there.
+    expect(screen.queryByRole('button', { name: 'Scheduled' })).toBeNull();
   });
 
   it('stopped: names the reason, retries, and offers another runtime only when that helps', async () => {
@@ -118,7 +132,7 @@ describe('Pages upkeep status line states', () => {
     const cursors = [cursor({ state: 'error', problem: { reason: 'quota', message: 'Claude reached its usage or rate limit', stopped: false } })];
     render(<MetaAgentStatusLine status={{ ...DEFAULT_META_STATUS, runtimeLabel: 'Claude', followsGlobal: true }} workspaces={[]} clock={NOW} cursors={cursors} />);
     expect(document.querySelector('.spaces-home-status__text')?.textContent)
-      .toBe('Pages upkeep checks new conversations every 60 s · Claude (follows global)·Details·Scheduled·Claude reached its usage or rate limit · retrying');
+      .toBe('Pages upkeep checks new conversations every 60 s · Claude (follows global)·Details·Claude reached its usage or rate limit · retrying');
   });
 
   it('paused: says so and resumes, apart from the stopped state', () => {

@@ -203,9 +203,6 @@ export function runChatStream({
       } else if (data.assistantId) {
         currentAssistantId = data.assistantId;
       }
-      // The server has committed the provisional user/assistant rows before
-      // this frame. It is now safe to ack a recovered agent-spawn outbox item.
-      dispatch({ type: 'spawn-prompt-started', nodeId });
       dispatch({ type: 'active-turn', nodeId, assistantId: currentAssistantId, turnId: data.turnId });
       // What the route decided about this message (DESIGN-v2 §1.3) reaches the sender on its turn_start too.
       if (data.userMetadata || data.assistantMetadata) {
@@ -413,7 +410,6 @@ export function runChatStream({
         // turn_start never reached this window; adopt the identity it carried.
         dispatch({ type: 'realign-assistant-id', nodeId, fromId: currentAssistantId, toId: saved.assistantId });
         currentAssistantId = saved.assistantId;
-        dispatch({ type: 'spawn-prompt-started', nodeId });
       }
       currentTurnId = saved.turnId;
       dispatch({

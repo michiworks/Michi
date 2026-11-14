@@ -5,6 +5,7 @@ import { toast } from 'sonner';
 import { revertPageBatch } from '../../../services/api/pages';
 import { notifyPageChanged } from '../../../state/pages/pageEvents';
 import { usePageDatabase } from '../../../state/pages/usePageDatabase';
+import { resetUndoStackForTests, undoLatest } from '../../../state/undoStack';
 import type { DbEdit } from '../content/db/views/viewTypes';
 import NativeDatabase from './NativeDatabase';
 
@@ -37,6 +38,7 @@ beforeEach(() => {
   vi.mocked(notifyPageChanged).mockReset();
   refresh.mockReset();
   edit.mockReset();
+  resetUndoStackForTests();
   vi.mocked(usePageDatabase).mockReturnValue({ database, status: 'ready', error: null, stale: false, refresh, edit });
 });
 
@@ -47,13 +49,14 @@ describe('NativeDatabase undo', () => {
     show();
     await act(async () => { expect(await captured.edit!(ops, 'Changed Status', { undo: true })).toBe(true); });
     expect(edit).toHaveBeenCalledWith([{ ...ops[0], expectRev: 3 }]);
-    expect(toast).toHaveBeenCalledWith('Changed Status', { action: { label: 'Undo', onClick: expect.any(Function) } });
+    expect(toast).toHaveBeenCalledWith('Changed Status', { id: expect.any(String), action: { label: 'Undo', onClick: expect.any(Function) } });
     const { action } = vi.mocked(toast).mock.calls[0][1] as unknown as { action: { onClick: () => void } };
     act(() => { action.onClick(); });
     await waitFor(() => expect(refresh).toHaveBeenCalled());
     expect(revertPageBatch).toHaveBeenCalledWith('batch-7', { backendConnectionId: 'local', workspaceId: 'ws-1' });
     expect(notifyPageChanged).toHaveBeenCalledWith({ backendConnectionId: 'local', workspaceId: 'ws-1', databaseId: 'db-1' });
     expect(toast.error).not.toHaveBeenCalled();
+    await waitFor(() => expect(toast).toHaveBeenLastCalledWith('Undone', { description: 'Changed Status' }));
   });
 
   it('says so when the move changed again before Undo', async () => {
@@ -63,7 +66,7 @@ describe('NativeDatabase undo', () => {
     await act(async () => { await captured.edit!(ops, 'Changed Status', { undo: true }); });
     const { action } = vi.mocked(toast).mock.calls[0][1] as unknown as { action: { onClick: () => void } };
     act(() => { action.onClick(); });
-    await waitFor(() => expect(toast.error).toHaveBeenCalledWith('Not undone: it changed again since. Move it back yourself.'));
+    await waitFor(() => expect(toast.error).toHaveBeenCalledWith('Not undone: it changed again since. Move it back yourself.', { description: 'Changed Status' }));
   });
 
   it('undoes a reorder by moving the card back, not by reverting its batch', async () => {
@@ -77,14 +80,27 @@ describe('NativeDatabase undo', () => {
     expect(edit).toHaveBeenLastCalledWith(back);
     expect(revertPageBatch).not.toHaveBeenCalled();
     expect(toast.error).not.toHaveBeenCalled();
-    expect(vi.mocked(toast)).toHaveBeenCalledTimes(1);
+    // The move back is the Undo itself, so it offers no Undo of its own.
+    await waitFor(() => expect(toast).toHaveBeenLastCalledWith('Undone', { description: 'Moved a card' }));
+    expect(vi.mocked(toast)).toHaveBeenCalledTimes(2);
   });
 
-  it('offers no Undo for other edits', async () => {
+  it('offers no toast for other edits, and ⌘Z still puts their batch back', async () => {
     edit.mockResolvedValue(written);
+    vi.mocked(revertPageBatch).mockResolvedValue({ reverted: ['change-1'], conflicts: [] });
     show();
     await act(async () => { await captured.edit!(ops, 'Changed Title'); });
     expect(toast).not.toHaveBeenCalled();
+    await act(async () => { expect(await undoLatest()).toBe('undone'); });
+    expect(revertPageBatch).toHaveBeenCalledWith('batch-7', { backendConnectionId: 'local', workspaceId: 'ws-1' });
+    expect(refresh).toHaveBeenCalled();
+  });
+
+  it('offers Undo in a toast for a deleted row', async () => {
+    edit.mockResolvedValue(written);
+    show();
+    await act(async () => { await captured.edit!([{ op: 'row.delete', id: 'row-1' }], 'Deleted 1 row'); });
+    expect(toast).toHaveBeenCalledWith('Deleted 1 row', { id: expect.any(String), action: { label: 'Undo', onClick: expect.any(Function) } });
   });
 
   it('says the database changed when a write meets a newer revision', async () => {
@@ -106,7 +122,7 @@ describe('NativeDatabase undo of a reorder that cannot be applied', () => {
     await act(async () => { await captured.edit!([{ op: 'row.move', id: 'row-1', after: 'row-2' }], 'Moved a card', { undo: true, undoOps: back }); });
     const { action } = vi.mocked(toast).mock.calls[0][1] as unknown as { action: { onClick: () => void } };
     act(() => { action.onClick(); });
-    await waitFor(() => expect(toast.error).toHaveBeenCalledWith("Couldn't undo the move."));
+    await waitFor(() => expect(toast.error).toHaveBeenCalledWith("Couldn't undo the move.", { description: 'Moved a card' }));
     expect(screen.queryByRole('alert')).toBeNull();
     expect(screen.queryByText(/Retry/)).toBeNull();
   });

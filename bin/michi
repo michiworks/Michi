@@ -143,6 +143,10 @@ remote_update() {
   fi
   [ "$(remote_revision "$repo")" = "$revision" ] \
     || remote_fail "The backend did not report ${revision:0:8} after the switch; see $log"
+  # Keep this build and the one it replaced, for rollback; remove older
+  # releases and failed attempts.
+  remote_control "$repo" prune-releases --keep "$old_repo" 2>>"$log" \
+    || echo "⚠ Could not remove every old release; see $log" >&2
   echo "✔ Michi updated to $(git -C "$repo" log -1 --format='%h %s')"
 }
 
@@ -158,7 +162,8 @@ Commands:
   restart   Stop then start
   status    Show whether the backend runs, and its revision
   logs      Follow the backend log
-  update    Build the latest main beside the running backend, then switch to it
+  update    Build the latest main beside the running backend, then switch to it;
+            keeps the replaced build for rollback and removes older ones
             (--force: update even if the running build has local changes)
 
 Flags:

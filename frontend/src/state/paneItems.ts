@@ -15,7 +15,7 @@ interface PaneItemBase {
 
 export interface LauncherPaneItem extends PaneItemBase {
   kind: 'launcher';
-  /** Chat pane that was focused when the launcher opened. Used by Side chat. */
+  /** Chat pane that was focused when the launcher opened. Used by Blank branch. */
   anchorNodeId?: string;
 }
 

@@ -30,7 +30,8 @@ export async function startNewCompanionConversation(nodeId: string | undefined):
   }
 }
 
-export type CommandGroup = 'recent' | 'nav' | 'action' | 'workspace' | 'chat' | 'search-result';
+/** 'fallback': what the palette offers to do with words that matched nothing. */
+export type CommandGroup = 'recent' | 'nav' | 'action' | 'workspace' | 'chat' | 'search-result' | 'fallback';
 
 /** Leading icon for a palette row. Names map to the SVG set in
  *  components/terminal/icons.tsx (see commandIcons.tsx); this module stays
@@ -38,7 +39,7 @@ export type CommandGroup = 'recent' | 'nav' | 'action' | 'workspace' | 'chat' | 
 export type CommandIcon =
   | 'agent' | 'home' | 'branches' | 'map' | 'digest' | 'workspace' | 'trash'
   | 'archive' | 'settings' | 'profile' | 'plus' | 'shield' | 'shield-off'
-  | 'thread' | 'weave' | 'export' | 'close' | 'chat' | 'threads' | 'clock' | 'skill';
+  | 'thread' | 'weave' | 'export' | 'close' | 'chat' | 'threads' | 'clock' | 'skill' | 'ghost';
 
 export interface Command {
   id: string;
@@ -47,6 +48,8 @@ export interface Command {
   label: string;
   keys?: string;
   meta?: string;
+  /** The workspace a thread or chat lives in: shown at the row's end, and searched with the label. */
+  where?: string;
   /** A conversation the row opens, prefetched while the row is highlighted. */
   prefetchNodeId?: string;
   run: () => void;
@@ -141,6 +144,8 @@ export interface CommandContext {
    *  dashboard so its active tree renders. */
   switchWorkspace: (projectId: string) => void;
   createThread: () => void;
+  /** Home with its temporary-chat switch on; absent where nothing answers it. */
+  createTemporaryChat?: () => void;
   /** The latest threads across workspaces, newest first (selectRecentThreads). */
   recentThreads?: readonly RecentThread[];
   /** Open a thread in its workspace, switching workspace when needed. */
@@ -167,19 +172,26 @@ export interface CompanionCommands {
   today: () => void;
   newConversation: () => void;
   settings: () => void;
-  /** Check-ins: only once the Companion's state has loaded (they act on it). */
+  /**
+   * Check-ins: only once the Companion's state has loaded (they act on it).
+   * `paused` is off (Pause Michi until resumed, Q30); `togglePause` turns it on or off.
+   */
   checkIns?: { checkNow: () => void; paused: boolean; togglePause: () => void };
 }
 
-/** The agent's palette rows: "Ask <name>", "<name>: Today", and the rest under its name. */
+/**
+ * The agent's palette rows: "Ask <name>", "<name>: Today", and the rest under
+ * its name. While it is off only "Turn <name> on" (Q29).
+ */
 function companionCommands(companion: CompanionCommands): Command[] {
   const { name, checkIns } = companion;
+  if (checkIns?.paused) return [{ id: 'companion.pause', group: 'action', icon: 'close', label: `Turn ${name} on`, run: checkIns.togglePause }];
   return [
     { id: 'companion.ask', group: 'action', icon: 'chat', label: `Ask ${name}`, keys: kbd('mod', 'J'), run: companion.ask },
     { id: 'companion.today', group: 'action', icon: 'chat', label: `${name}: Today`, keys: kbd('shift', 'mod', 'J'), run: companion.today },
     ...(checkIns ? [
       { id: 'companion.check', group: 'action', icon: 'clock', label: `${name}: Check now`, run: checkIns.checkNow },
-      { id: 'companion.pause', group: 'action', icon: 'close', label: `${name}: ${checkIns.paused ? 'Resume check-ins' : 'Pause check-ins'}`, run: checkIns.togglePause },
+      { id: 'companion.pause', group: 'action', icon: 'close', label: `Turn ${name} off`, run: checkIns.togglePause },
     ] satisfies Command[] : []),
     { id: 'companion.new', group: 'action', icon: 'plus', label: `${name}: New conversation`, run: companion.newConversation },
     { id: 'companion.settings', group: 'action', icon: 'settings', label: `${name}: Settings`, run: companion.settings },
@@ -194,9 +206,10 @@ export function buildCommands(ctx: CommandContext): Command[] {
       out.push({
         id: `recent.${t.projectId}.${t.treeId}`,
         group: 'recent',
-        icon: 'thread',
+        // The icon and shape a chat row has: the same thing, found two ways.
+        icon: 'chat',
         label: t.name,
-        meta: t.projectName,
+        where: t.projectName,
         prefetchNodeId: t.rootNodeId,
         run: () => openThread(t.projectId, t.treeId),
       });
@@ -229,6 +242,9 @@ export function buildCommands(ctx: CommandContext): Command[] {
       );
     }
     out.push({ id: 'thread.new', group: 'action', icon: 'plus', label: 'New thread', keys: kbd('mod', 'T'), run: ctx.createThread });
+    if (ctx.createTemporaryChat) {
+      out.push({ id: 'thread.new-temporary', group: 'action', icon: 'ghost', label: 'New temporary chat', run: ctx.createTemporaryChat });
+    }
     out.push({
       id: 'action.permissions',
       group: 'action',
@@ -261,7 +277,8 @@ export function buildCommands(ctx: CommandContext): Command[] {
       id: `workspace.switch.${w.id}`,
       group: 'workspace',
       icon: 'workspace',
-      label: `Switch to workspace ▸ ${w.name}`,
+      // Its name alone: the Workspaces section and the row's end say what it is.
+      label: w.name,
       ...(w.remoteNote ? { meta: w.remoteNote } : {}),
       run: () => ctx.switchWorkspace(w.id),
     });
@@ -272,7 +289,8 @@ export function buildCommands(ctx: CommandContext): Command[] {
       id: `chat.${c.id}`,
       group: 'chat',
       icon: 'chat',
-      label: `${c.title} · ${c.projectName}`,
+      label: c.title,
+      where: c.projectName,
       run: () => {
         ctx.switchProject(c.projectId);
         ctx.openChat(c.id);
@@ -285,5 +303,19 @@ export function buildCommands(ctx: CommandContext): Command[] {
 export function filterCommands(cmds: Command[], query: string): Command[] {
   const q = query.trim().toLowerCase();
   if (!q) return cmds;
-  return cmds.filter((c) => c.label.toLowerCase().includes(q) || !!c.meta?.toLowerCase().includes(q));
+  return cmds.filter((c) => [c.label, c.meta, c.where].some((text) => !!text?.toLowerCase().includes(q)));
+}
+
+/**
+ * Where `query` sits in `text`, for the palette to mark: the first match,
+ * found as filterCommands finds it. Null when it is not there (the row
+ * matched on its workspace instead).
+ */
+export function matchRange(text: string, query: string): [start: number, end: number] | null {
+  const q = query.trim().toLowerCase();
+  const lower = text.toLowerCase();
+  // Lowercasing changes a few letters' length (İ): mark nothing then.
+  if (!q || lower.length !== text.length) return null;
+  const start = lower.indexOf(q);
+  return start < 0 ? null : [start, start + q.length];
 }

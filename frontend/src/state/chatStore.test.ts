@@ -102,7 +102,7 @@ describe('hydrateSavedState v4 artifacts', () => {
 });
 
 describe('hydrateBackendWorkspaces', () => {
-    it('maps a spawned child durable outbox independently from composer drafts', () => {
+    it('leaves a legacy spawn outbox in a stored draft unsent and out of the composer', () => {
         const result = hydrateBackendWorkspaces([{
             workspace: { id: 'p-spawn', name: 'Recovery', active_tree_id: 't-spawn', created_at: 1 },
             trees: [{ id: 't-spawn', workspace_id: 'p-spawn', root_node_id: 'n-spawn', created_at: 1, last_active_at: 1 }],
@@ -121,8 +121,8 @@ describe('hydrateBackendWorkspaces', () => {
             chatId: 'n-spawn',
             title: 'Durable child',
             spawnedByAgent: true,
-            pendingSpawnPrompt: 'Resume this child after a missed event',
         });
+        expect(result.nodes['n-spawn']).not.toHaveProperty('pendingSpawnPrompt');
         expect(result.nodes['n-spawn'].composerDraft).toBeUndefined();
     });
 

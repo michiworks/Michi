@@ -176,7 +176,20 @@ describe('ThreadRow', () => {
       const { rerender } = renderThreadRow({ subtitle: 'Michi', isActive: false });
       expect(row().style.paddingRight).toBe('16px');
       rerender({ isActive: true });
-      expect(row().style.paddingRight).toBe('calc(16px + 16px + var(--row-kebab-extra, 0px))');
+      expect(row().style.paddingRight).toBe('calc(32px)');
+    });
+
+    it('keeps a pinned Activity row\'s star in its column when the row is chosen', () => {
+      mockPrefs.sidebarRowStyle = 'square-full';
+      const tree = { id: 't1', rootNodeId: 'n1', createdAt: 0, lastActiveAt: Date.now(), pinnedAt: 1 };
+      const { rerender } = renderThreadRow({ tree, subtitle: 'Michi', isActive: false });
+      const star = () => row().querySelector('svg[aria-label="pinned"]') as SVGElement;
+      expect(row().style.paddingRight).toBe('16px');
+      expect(star().style.marginRight).toBe('calc(var(--sb-caret-w, 9px) + 21px)');
+      // The padding takes the ⋯'s 16px, so the star gives the same 16px back.
+      rerender({ isActive: true });
+      expect(row().style.paddingRight).toBe('calc(32px)');
+      expect(star().style.marginRight).toBe('calc(var(--sb-caret-w, 9px) + 5px)');
     });
   });
 

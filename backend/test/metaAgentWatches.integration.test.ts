@@ -22,13 +22,15 @@ import type { MaintenanceExecutionContext } from '../src/services/pages/maintena
 import { createPage, getDatabase, getPage } from '../src/services/pages/repository';
 import { openTaskDatabase } from '../src/services/pages/taskDatabase';
 import { maintenanceHasWork } from '../src/services/metaAgent/maintenanceCoordinator';
-import { createWatch, listWatches, saveWorkspaceInstructions, updateWatch } from '../src/services/metaAgent/watches';
+import { listWatches, saveWorkspaceInstructions, updateWatch } from '../src/services/metaAgent/watches';
+import { seedWatch } from './helpers/pagesWatches';
 import { setupPageMaintenanceRoutes } from '../src/routes/pageMaintenance';
 import { ScheduledJobEventBus } from '../src/services/scheduledJobs/events';
 import { ScheduledJobsRepository, type ScheduledJobRecord, type ScheduledJobRunRecord } from '../src/services/scheduledJobs/repository';
 import {
   ScheduledJobScheduler, type ScheduledJobExecutor, type ScheduledRunHandle, type ScheduledRunHooks, type ScheduledRunOutcome,
 } from '../src/services/scheduledJobs/scheduler';
+import { turnBackgroundWorkOn } from './helpers/backgroundWork';
 
 const OWNER = 'local-user';
 const MINUTE = 60_000;
@@ -116,7 +118,7 @@ async function until(predicate: () => boolean, label: string): Promise<void> {
 
 function scheduler(model: FakeModel): ScheduledJobScheduler {
   const created = new ScheduledJobScheduler({ repository: new ScheduledJobsRepository(), executor: model,
-    events: new ScheduledJobEventBus(() => now), workspaceExists: () => true, runtimeExists: (id) => id === 'pi',
+    events: new ScheduledJobEventBus(), workspaceExists: () => true, runtimeExists: (id) => id === 'pi',
     clock: () => now, instanceId: 'watch-test', createId: () => `job-${++jobSeq}`, pollIntervalMs: 600_000, maxConcurrentRuns: 1, cancelGraceMs: 5 });
   created.start();
   return created;
@@ -152,6 +154,7 @@ beforeEach(() => {
   delete process.env.MICHI_CLOUD;
   closeDb();
   initDb();
+  turnBackgroundWorkOn();
   now = Date.parse('2026-10-31T09:00:00Z');
   mock.method(Date, 'now', () => now);
   jobSeq = 0;
@@ -181,7 +184,7 @@ test('a due watch runs as its own check: one final decision per resource, and th
     const jobId = enable(sched);
     const cursor = getMaintenanceConfig('ws', OWNER)!.completionCursor;
     saveWorkspaceInstructions({ workspaceId: 'ws', ownerUserId: OWNER, text: 'Owners are listed on the Tickets page.', expectedRevision: 0, now });
-    createWatch({ workspaceId: 'ws', ownerUserId: OWNER, title: 'Sev-2 tickets', instructions: 'Check open Sev-2 tickets in resolver group X',
+    seedWatch({ workspaceId: 'ws', ownerUserId: OWNER, title: 'Sev-2 tickets', instructions: 'Check open Sev-2 tickets in resolver group X',
       intervalMinutes: 30, now });
     const startedAt = now;
     let added: PageWriteResult | null = null;
@@ -252,7 +255,7 @@ test('a check that records no decision fails, and three in a row pause the watch
   const sched = scheduler(model);
   try {
     const jobId = enable(sched);
-    const watchId = createWatch({ workspaceId: 'ws', ownerUserId: OWNER, title: 'Tasks', instructions: 'Sync my project tasks', intervalMinutes: 15, now });
+    const watchId = seedWatch({ workspaceId: 'ws', ownerUserId: OWNER, title: 'Tasks', instructions: 'Sync my project tasks', intervalMinutes: 15, now });
     model.script = () => ({ reply: 'Everything looks fine.' });
     for (let attempt = 1; attempt <= 3; attempt += 1) {
       await runOnce(sched, model, jobId);
@@ -283,7 +286,7 @@ for (const stop of ['Michi stops', 'the scheduler loses its lease'] as const) {
     model.setup = () => { entered(); return new Promise<void>((resolve) => { release = resolve; }); };
     try {
       const jobId = enable(sched);
-      createWatch({ workspaceId: 'ws', ownerUserId: OWNER, title: 'Tickets', instructions: 'Check tickets', intervalMinutes: 15, now });
+      seedWatch({ workspaceId: 'ws', ownerUserId: OWNER, title: 'Tickets', instructions: 'Check tickets', intervalMinutes: 15, now });
       assert.ok('run' in sched.startNow(jobId));
       await entering;
       if (stop === 'Michi stops') await sched.stop();
@@ -312,7 +315,7 @@ test('a due watch goes before conversation work, which then carries the workspac
     setSpaceMaintenanceExcluded({ workspaceId: 'ws', ownerUserId: OWNER, spaceId: excluded.id, excluded: true,
       expectedRevision: getMaintenanceConfig('ws', OWNER)!.revision, now });
     saveWorkspaceInstructions({ workspaceId: 'ws', ownerUserId: OWNER, text: 'Keep summaries in English.', expectedRevision: 0, now });
-    createWatch({ workspaceId: 'ws', ownerUserId: OWNER, title: 'Tickets', instructions: 'Check tickets', intervalMinutes: 60, now });
+    seedWatch({ workspaceId: 'ws', ownerUserId: OWNER, title: 'Tickets', instructions: 'Check tickets', intervalMinutes: 60, now });
     completeConversation('turn-a');
     model.script = (run) => {
       assert.match(run.refused('maintenance_read_page', { sourceTurnId: run.planId, pageId: excluded.id }), /not one this watch may change/);
@@ -330,7 +333,7 @@ test('a due watch goes before conversation work, which then carries the workspac
   }
 });
 
-test('the maintenance routes save instructions and add, change, run and delete watches', async () => {
+test('the maintenance routes save instructions and change, run and delete watches; none adds one', async () => {
   const model = new FakeModel();
   const sched = scheduler(model);
   try {
@@ -345,9 +348,6 @@ test('the maintenance routes save instructions and add, change, run and delete w
       return { status: response.status, body: await response.json() as MaintenanceWorkspaceResponse & { error?: { message: string } } };
     };
 
-    const early = await send('POST', `${base}/watches`, { title: 'Tickets', instructions: 'Check tickets', intervalMinutes: 30 });
-    assert.equal(early.status, 409);
-    assert.match(early.body.error!.message, /Enable updates/);
     const jobId = enable(sched);
 
     const saved = await send('PUT', `${base}/instructions`, { expectedRevision: 0, text: '  Track Sev-2 only.  ' });
@@ -355,10 +355,11 @@ test('the maintenance routes save instructions and add, change, run and delete w
     assert.deepEqual({ text: saved.body.instructions?.text, revision: saved.body.instructions?.revision }, { text: 'Track Sev-2 only.', revision: 1 });
     assert.equal((await send('PUT', `${base}/instructions`, { expectedRevision: 0, text: 'x' })).status, 409);
 
-    assert.equal((await send('POST', `${base}/watches`, { title: 'Tickets', instructions: 'Check tickets', intervalMinutes: 5 })).status, 400);
-    const created = await send('POST', `${base}/watches`, { title: 'Tickets', instructions: 'Check tickets', intervalMinutes: 30, enabled: false });
-    assert.equal(created.status, 201);
-    const watch = created.body.watches![0]!;
+    const add = await fetch(`${base}/watches`, { method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ title: 'Tickets', instructions: 'Check tickets', intervalMinutes: 30 }) });
+    assert.equal(add.status, 404, 'new watches stopped');
+    seedWatch({ workspaceId: 'ws', ownerUserId: OWNER, title: 'Tickets', instructions: 'Check tickets', intervalMinutes: 30, enabled: false, now });
+    const watch = (await send('GET', base)).body.watches![0]!;
     assert.deepEqual({ title: watch.title, intervalMinutes: watch.intervalMinutes, enabled: watch.enabled, nextCheckAt: watch.nextCheckAt },
       { title: 'Tickets', intervalMinutes: 30, enabled: false, nextCheckAt: null });
     assert.equal((await send('POST', `${base}/watches/${watch.id}/run`, {})).status, 409);

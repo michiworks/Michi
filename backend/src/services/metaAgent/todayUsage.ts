@@ -2,12 +2,14 @@ import type { DatabaseSync } from 'node:sqlite';
 import {
   SCHEDULED_JOB_LIMITS,
   isSystemWorkspaceSettings,
+  type BackgroundUsageAmounts,
   type MetaAgentTodayMetrics,
   type MetaAgentUsageToday,
 } from 'michi-shared';
 import { workspaceOwnerMatches } from '../agentOwner';
 import { getDb } from '../db';
 import { memoryExtractionJobIds } from '../memory/extractionRepository';
+import { mergeUsage, parseUsageAmounts, usageOfSummaries } from '../backgroundUsage';
 
 export interface MaintenanceConfigRow {
   workspace_id: string; job_id: string; paused: number; revision: number; completion_cursor: number;
@@ -77,41 +79,50 @@ export function todayMetrics(ownerUserId: string, configs: MaintenanceConfigRow[
     modelCalls, writes, pendingProposals };
 }
 
-/** Tokens reported on the maintenance sessions' replies since `dayStart`; null when no reply carries a count. */
-function tokensSince(jobIds: string[], dayStart: number, database: DatabaseSync): number | null {
-  if (jobIds.length === 0) return null;
-  const usage = `json_extract(CASE WHEN json_valid(m.metadata) THEN m.metadata ELSE '{}' END, '$.usageSummary')`;
-  // usageSummaryTotalTokens' rule: the total, else input plus output; only numbers count.
-  const numeric = (field: string) => `json_type(${usage}, '$.${field}') IN ('integer','real')`;
+/** The usage_summary of each reply in these jobs' maintenance sessions since `dayStart` (backgroundUsage.ts counts them). */
+function sessionUsageSince(jobIds: string[], dayStart: number, database: DatabaseSync): BackgroundUsageAmounts {
+  if (jobIds.length === 0) return {};
   // Start with maintenance nodes, then use the messages(node_id, role) index.
   // SQLite otherwise scans every conversation's message rows for this status
   // request; large histories can block the server (including static assets).
-  const row = database.prepare(`SELECT COUNT(t) AS reported, SUM(t) AS total FROM (
-      SELECT CASE WHEN ${numeric('totalTokens')} THEN json_extract(${usage}, '$.totalTokens')
-        WHEN ${numeric('inputTokens')} AND ${numeric('outputTokens')}
-          THEN json_extract(${usage}, '$.inputTokens') + json_extract(${usage}, '$.outputTokens') END AS t
+  const rows = database.prepare(`SELECT json_extract(CASE WHEN json_valid(m.metadata) THEN m.metadata ELSE '{}' END, '$.usageSummary') AS usage
       FROM nodes n CROSS JOIN messages m ON m.node_id=n.id
-      WHERE n.maintenance_job_id IN (${placeholders(jobIds.length)}) AND m.role='assistant' AND m.created_at>=?
-    ) WHERE t IS NOT NULL`).get(...jobIds, dayStart) as { reported: number; total: number | null };
-  // Automatic memory runs answered by a direct structured call open no session: their run records hold what they reported.
-  const direct = database.prepare(`SELECT COUNT(x.reported_tokens) AS reported, SUM(x.reported_tokens) AS total
+      WHERE n.maintenance_job_id IN (${placeholders(jobIds.length)}) AND m.role='assistant' AND m.created_at>=?`)
+    .all(...jobIds, dayStart) as Array<{ usage: string | null }>;
+  return usageOfSummaries(rows.map((row) => row.usage));
+}
+
+/** Automatic memory runs answered by a direct structured call open no session: their run records hold the tokens they reported. */
+function directMemoryTokensSince(jobIds: string[], dayStart: number, database: DatabaseSync): BackgroundUsageAmounts {
+  if (jobIds.length === 0) return {};
+  const row = database.prepare(`SELECT COUNT(x.reported_tokens) AS reported, SUM(x.reported_tokens) AS total
       FROM memory_extraction_runs x JOIN scheduled_job_runs r ON r.id = x.run_id
       WHERE x.job_id IN (${placeholders(jobIds.length)}) AND r.node_id IS NULL AND x.reported_tokens IS NOT NULL AND x.started_at >= ?`)
     .get(...jobIds, dayStart) as { reported: number; total: number | null };
-  return row.reported + direct.reported > 0 ? Math.round((row.total ?? 0) + (direct.total ?? 0)) : null;
+  return row.reported > 0 ? { tokens: Math.round(row.total ?? 0) } : {};
 }
 
-/** The execution identities whose sessions count as Meta agent background usage: Pages maintenance and automatic memory. */
-function usageJobIds(ownerUserId: string, configs: MaintenanceConfigRow[], database: DatabaseSync): string[] {
-  return [...configs.map((config) => config.job_id), ...memoryExtractionJobIds(ownerUserId, database)];
+/** What the check-ins that started since `dayStart` recorded (companion_runs.usage_json, written before their node goes). */
+function checkinUsageSince(ownerUserId: string, dayStart: number, database: DatabaseSync): BackgroundUsageAmounts {
+  const rows = database.prepare('SELECT usage_json FROM companion_runs WHERE owner_user_id=? AND started_at>=? AND usage_json IS NOT NULL')
+    .all(ownerUserId, dayStart) as Array<{ usage_json: string }>;
+  return rows.reduce((total, row) => mergeUsage(total, parseUsageAmounts(row.usage_json)), {} as BackgroundUsageAmounts);
 }
 
-/** Settings › Meta agent › Usage: the same checks and model calls as Scheduled › Meta agent, plus reported tokens (automatic memory included). */
+function usageToday(ownerUserId: string, configs: MaintenanceConfigRow[], dayStart: number, today: MetaAgentTodayMetrics, database: DatabaseSync): MetaAgentUsageToday {
+  const memoryJobs = memoryExtractionJobIds(ownerUserId, database);
+  const pages = sessionUsageSince(configs.map((config) => config.job_id), dayStart, database);
+  const memory = mergeUsage(sessionUsageSince(memoryJobs, dayStart, database), directMemoryTokensSince(memoryJobs, dayStart, database));
+  const tokens = pages.tokens === undefined && memory.tokens === undefined ? null : Math.round((pages.tokens ?? 0) + (memory.tokens ?? 0));
+  return { checks: today.checks, modelCalls: today.modelCalls, tokens,
+    usage: { pages, memory, checkins: checkinUsageSince(ownerUserId, dayStart, database) } };
+}
+
+/** Today's background usage: the same checks and model calls as Scheduled › Pages upkeep, and what Pages, memory and check-ins used. */
 export function metaAgentUsageToday(ownerUserId: string, now: number, database: DatabaseSync = getDb()): MetaAgentUsageToday {
   const configs = listMaintenanceConfigs(ownerUserId, database);
   const dayStart = startOfLocalDay(now);
-  const today = todayMetrics(ownerUserId, configs, dayStart, database);
-  return { checks: today.checks, modelCalls: today.modelCalls, tokens: tokensSince(usageJobIds(ownerUserId, configs, database), dayStart, database) };
+  return usageToday(ownerUserId, configs, dayStart, todayMetrics(ownerUserId, configs, dayStart, database), database);
 }
 
 /** One read transaction in the background statistics worker, shared by both status APIs. */
@@ -119,7 +130,5 @@ export function metaAgentMetricsSnapshot(ownerUserId: string, now: number, datab
   const configs = listMaintenanceConfigs(ownerUserId, database);
   const dayStart = startOfLocalDay(now);
   const today = todayMetrics(ownerUserId, configs, dayStart, database);
-  const usage = { checks: today.checks, modelCalls: today.modelCalls,
-    tokens: tokensSince(usageJobIds(ownerUserId, configs, database), dayStart, database) };
-  return { dayStart, today, usage };
+  return { dayStart, today, usage: usageToday(ownerUserId, configs, dayStart, today, database) };
 }

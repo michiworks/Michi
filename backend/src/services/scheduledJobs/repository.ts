@@ -382,22 +382,29 @@ export class ScheduledJobsRepository {
       if (input.requireDue && (row.execution_kind !== 'scheduled' || row.enabled !== 1 || row.auto_paused === 1 || row.next_run_at === null || row.next_run_at > input.now)) {
         return { run: null, reason: 'not_due' };
       }
+      // The check-in lane (companion/checkinIdentity.ts) is admitted apart: its
+      // claims count only against each other, and no other claim counts against them.
+      const checkin = !!getDb().prepare('SELECT 1 FROM companion_checkin_jobs WHERE job_id = ?').get(input.jobId);
+      const side = checkin ? 'IN' : 'NOT IN';
+      const onSide = `x.job_id ${side} (SELECT job_id FROM companion_checkin_jobs)`;
       // A previous holder may still be starting/cancelling an executor. Lease
       // takeover fences commits but cannot prove external work has stopped.
       // Claims past CLAIM_RELEASES_AT no longer count here or below:
       // acquireOwnership releases them (releaseExpiredExecutions) before admission.
-      const foreign = getDb().prepare(`SELECT 1 FROM scheduler_execution_claims
-        WHERE holder != ? OR generation != ? OR quarantined_at IS NOT NULL LIMIT 1`).get(input.lease.holder, input.lease.generation);
+      const foreign = getDb().prepare(`SELECT 1 FROM scheduler_execution_claims x
+        WHERE (x.holder != ? OR x.generation != ? OR x.quarantined_at IS NOT NULL) AND ${onSide} LIMIT 1`).get(input.lease.holder, input.lease.generation);
       if (foreign) return { run: null, reason: 'unresolved_execution' };
       const running = getDb().prepare(`SELECT 1 FROM scheduled_job_runs WHERE job_id = ? AND status = 'running'
         UNION ALL SELECT 1 FROM scheduler_execution_claims WHERE job_id = ? LIMIT 1`).get(input.jobId, input.jobId);
       if (running) return { run: null, reason: 'job_running' };
-      if (row.execution_kind === 'maintenance' && getDb().prepare(`SELECT 1 FROM scheduler_execution_claims x
-        JOIN scheduled_jobs j ON j.id=x.job_id WHERE j.execution_kind='maintenance' LIMIT 1`).get()) {
-        return { run: null, reason: 'capacity' };
+      if (!checkin) {
+        if (row.execution_kind === 'maintenance' && getDb().prepare(`SELECT 1 FROM scheduler_execution_claims x
+          JOIN scheduled_jobs j ON j.id=x.job_id WHERE j.execution_kind='maintenance' AND ${onSide} LIMIT 1`).get()) {
+          return { run: null, reason: 'capacity' };
+        }
+        const count = getDb().prepare(`SELECT COUNT(*) AS count FROM scheduler_execution_claims x WHERE ${onSide}`).get() as { count: number };
+        if (count.count >= input.maxConcurrentRuns) return { run: null, reason: 'capacity' };
       }
-      const count = getDb().prepare('SELECT COUNT(*) AS count FROM scheduler_execution_claims').get() as { count: number };
-      if (count.count >= input.maxConcurrentRuns) return { run: null, reason: 'capacity' };
       getDb().prepare(`
         INSERT INTO scheduled_job_runs (id, job_id, workspace_id, trigger, status, scheduled_for, started_at, claimed_by)
         VALUES (?, ?, ?, ?, 'running', ?, ?, ?)
@@ -542,24 +549,6 @@ export class ScheduledJobsRepository {
       .run(runId, lease.holder, lease.generation);
   }
 
-  markNotified(runId: string): boolean {
-    const result = getDb().prepare(`UPDATE scheduled_job_runs SET notify_state = 'delivered' WHERE id = ? AND notify_state = 'pending'`).run(runId);
-    return Number(result.changes) > 0;
-  }
-
-  /** Undelivered notifications, newest last. */
-  pendingNotifications(since: number): ScheduledJobRunRecord[] {
-    const rows = getDb().prepare(`
-      SELECT * FROM scheduled_job_runs
-       WHERE notify_state = 'pending'
-         AND COALESCE(finished_at, started_at) >= ?
-         AND (notify_kind = 'finished' OR status = 'running')
-       ORDER BY COALESCE(finished_at, started_at) ASC
-       LIMIT 20
-    `).all(since) as unknown as RunRow[];
-    return rows.map(toRunRecord);
-  }
-
   /** Fence records from older ownership; reservations remain until termination is known. */
   interruptStaleRuns(lease: SchedulerLease, now: number): number {
     return runInTransaction(() => {
@@ -599,10 +588,11 @@ export class ScheduledJobsRepository {
       WHERE run_id = ? AND holder = ? AND generation = ?`).run(now, reason, runId, lease.holder, lease.generation);
   }
 
+  /** Unconfirmed claims for the Scheduled page. Not the check-in lane's: it releases its own (releaseForeignCheckinClaims). */
   blockedExecutions(): ScheduledJobBlockedExecution[] {
     return (getDb().prepare(`SELECT x.run_id, x.job_id, x.workspace_id, x.reason, x.quarantined_at, ${CLAIM_RELEASES_AT} AS releases_at
       FROM scheduler_execution_claims x LEFT JOIN scheduled_jobs j ON j.id = x.job_id
-      WHERE x.quarantined_at IS NOT NULL ORDER BY x.quarantined_at`).all() as Array<{
+      WHERE x.quarantined_at IS NOT NULL AND x.job_id NOT IN (SELECT job_id FROM companion_checkin_jobs) ORDER BY x.quarantined_at`).all() as Array<{
       run_id: string; job_id: string; workspace_id: string; reason: string; quarantined_at: number; releases_at: number;
     }>).map(row => ({ runId: row.run_id, jobId: row.job_id, workspaceId: row.workspace_id, reason: row.reason,
       since: row.quarantined_at, releasesAt: row.releases_at }));
@@ -655,6 +645,27 @@ export class ScheduledJobsRepository {
       }
       return expired.map(claim => ({ runId: claim.run_id, jobId: claim.job_id, workspaceId: claim.workspace_id,
         acquiredAt: claim.acquired_at, releasesAt: claim.releases_at }));
+    });
+  }
+
+  /**
+   * The check-in lane's claims of an earlier ownership, released once the
+   * Companion has cleaned up the check-ins a stopped Michi left
+   * (scheduler.releaseSettledCheckinClaims): their runs end interrupted.
+   */
+  releaseForeignCheckinClaims(lease: SchedulerLease, now: number): number {
+    return runInTransaction(() => {
+      if (!this.ownsLease(lease, now)) return 0;
+      const claims = getDb().prepare(`SELECT run_id FROM scheduler_execution_claims
+        WHERE (holder != ? OR generation != ?) AND job_id IN (SELECT job_id FROM companion_checkin_jobs)`)
+        .all(lease.holder, lease.generation) as Array<{ run_id: string }>;
+      for (const claim of claims) {
+        getDb().prepare(`UPDATE scheduled_job_runs SET status = 'interrupted', finished_at = COALESCE(finished_at, ?),
+            error = COALESCE(error, 'Michi stopped while this check-in ran; its session was cleaned up')
+          WHERE id = ? AND status IN ('running', 'interrupted')`).run(now, claim.run_id);
+        this.deleteClaim(claim.run_id);
+      }
+      return claims.length;
     });
   }
 

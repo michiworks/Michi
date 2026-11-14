@@ -1,4 +1,4 @@
-import { ApprovalCoordinator, chatApprovalOptions } from '../../core/approvals';
+import { ApprovalCoordinator, chatApprovalOptions, forcedApprovalOptions } from '../../core/approvals';
 import { assertPermissionAnswer, nextInteractionRequestId } from '../../core/pendingInteractions';
 import { randomUUID } from 'node:crypto';
 import type {
@@ -269,7 +269,7 @@ export class CodexSession implements AgentSession {
   /** Exposed for test inspection (security contract tests). Do not mutate externally. */
   public readonly pendingPermissions = new Map<
     number,
-    { resolve: (optionId: string | null) => void; timer: NodeJS.Timeout; toolName?: string }
+    { resolve: (optionId: string | null) => void; timer: NodeJS.Timeout; toolName?: string; forced?: boolean }
   >();
 
   // User input state — same pattern as permissions
@@ -489,10 +489,11 @@ export class CodexSession implements AgentSession {
         this.settleNativeTurn = () => resolve({ ok: true });
       });
       if (this.interactive) this.permissionModeForTurn = this.host.permissions.mode(this.owner, this.ownerUserId);
+      const turnGuard = this.interactive ? this.approvals.turnGuard(this.owner, this.ownerUserId) : 'none';
       const mainTurnStart = this.client.request('turn/start', codexTurnStartParams({
         // The Michi assistant runs read-only and offline whatever the chat's mode.
         policy: this.isAssistant ? CODEX_RESTRICTED_TURN_POLICY
-          : this.interactive ? codexChatTurnPolicy(this.permissionModeForTurn!, this.cwd) : {},
+          : this.interactive ? codexChatTurnPolicy(this.permissionModeForTurn!, this.cwd, turnGuard) : {},
         threadId: this.threadId,
         input: turnInput,
         effort: this.effort,
@@ -941,7 +942,8 @@ export class CodexSession implements AgentSession {
 
     // The one chat decision for this request, with this session's own user:
     // grants are evaluated for every request, including later tools in this turn.
-    const policy = this.approvals.policy(this.owner, this.ownerUserId, toolName, true, this.permissionModeForTurn);
+    const call = { input: params };
+    const policy = this.approvals.policy(this.owner, this.ownerUserId, toolName, true, this.permissionModeForTurn, undefined, call);
     if (policy === 'allow') {
       respond({ decision: 'accept' });
       return;
@@ -951,18 +953,21 @@ export class CodexSession implements AgentSession {
       return;
     }
 
-    // Chat session: existing user-facing permission request flow.
+    // Chat session: existing user-facing permission request flow. A forced
+    // ask (the host's consequence rules) approves this one call only.
     const requestId = nextInteractionRequestId();
+    const forced = this.approvals.forcedAsk(this.owner, this.ownerUserId, toolName, true, undefined, call);
+    const request = codexPermissionRequest(requestId, method, params, toolName, forced ? forcedApprovalOptions() : chatApprovalOptions(toolName));
+    if (forced && request.kind === 'permission_request') request.detail = [forced.reason, request.detail].filter(Boolean).join('\n\n');
+    this.queue.push(request);
 
-    this.queue.push(codexPermissionRequest(requestId, method, params, toolName, chatApprovalOptions(toolName)));
-
-    const result = await this.awaitPermission(requestId, signal, toolName);
+    const result = await this.awaitPermission(requestId, signal, toolName, forced !== null);
 
     if (!isCurrent()) { respond({ decision: 'decline' }); return; }
 
     if (this.approvals.accept(result, this.owner, toolName, this.ownerUserId)) {
-      for (const [id, request] of this.pendingPermissions) {
-        if (this.approvals.covers(result, toolName, request.toolName)) this.respondToPermission(id, 'allow_once');
+      for (const [id, pending] of this.pendingPermissions) {
+        if (this.approvals.covers(result, toolName, pending.toolName, pending.forced === true)) this.respondToPermission(id, 'allow_once');
       }
       respond({ decision: 'accept' });
       return;
@@ -970,7 +975,7 @@ export class CodexSession implements AgentSession {
     respond({ decision: 'decline' });
   }
 
-  private awaitPermission(requestId: number, signal?: AbortSignal, toolName?: string): Promise<string | null> {
+  private awaitPermission(requestId: number, signal?: AbortSignal, toolName?: string, forced = false): Promise<string | null> {
     // The queue the request was pushed on, so the resolution reaches its turn.
     const queue = this.queue;
     return new Promise<string | null>((resolve) => {
@@ -986,7 +991,7 @@ export class CodexSession implements AgentSession {
         queue.push({ kind: 'permission_resolved', requestId });
         finish(null);
       }, this.approveTimeoutMs);
-      this.pendingPermissions.set(requestId, { resolve: finish, timer, toolName });
+      this.pendingPermissions.set(requestId, { resolve: finish, timer, toolName, ...(forced ? { forced } : {}) });
       signal?.addEventListener('abort', onAbort, { once: true });
       if (signal?.aborted) onAbort();
     });

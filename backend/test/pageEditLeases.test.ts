@@ -16,6 +16,7 @@ import { createMaintenanceTools } from '../src/services/pages/maintenanceTools';
 import type { MaintenanceExecutionContext } from '../src/services/pages/maintenanceWriter';
 import { maintenanceHasWork } from '../src/services/metaAgent/maintenanceCoordinator';
 import { runPageTool } from '../src/agents/pageTools';
+import { turnBackgroundWorkOn } from './helpers/backgroundWork';
 
 let dir: string;
 let priorData: string | undefined;
@@ -29,6 +30,7 @@ beforeEach(() => {
   delete process.env.MICHI_CLOUD;
   closeDb();
   initDb();
+  turnBackgroundWorkOn(['alice']);
   const db = getDb();
   db.prepare('INSERT INTO workspaces(id,name,owner_user_id,created_at,updated_at) VALUES (?,?,?,1,1)').run('ws', 'Workspace', 'alice');
   db.prepare("INSERT INTO nodes(id,workspace_id,kind,status,title) VALUES ('n1','ws','chat','idle','Release notes'),('n2','ws','chat','idle',NULL)").run();

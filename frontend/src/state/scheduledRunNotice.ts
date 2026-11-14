@@ -1,4 +1,3 @@
-import type { ScheduledJobRunEvent } from 'michi-shared';
 import type { ChatMessage } from './chatTypes';
 
 /**
@@ -15,36 +14,12 @@ export function latestTurnIsScheduled(messages: readonly ChatMessage[] | undefin
   return false;
 }
 
-/** Fired by the chat store for every scheduled run lifecycle frame. */
+/**
+ * Fired by the chat store for every scheduled run lifecycle frame, so open
+ * Scheduled views refresh. What deserves a notification is the backend's
+ * attention service's (scheduled_run records), not this event's.
+ */
 export const SCHEDULED_JOB_RUN_WINDOW_EVENT = 'michi:scheduled-job-run';
 
 /** Fired by the chat store when a job is created, edited or deleted elsewhere. */
 export const SCHEDULED_JOBS_CHANGED_WINDOW_EVENT = 'michi:scheduled-jobs-changed';
-
-export interface ScheduledRunNoticeText {
-  title: string;
-  subtitle: string;
-  body: string;
-}
-
-/**
- * Wording for a scheduled run notification. Mirrors describeNotice in
- * electron/scheduledNotifications.ts, which the desktop app uses instead.
- */
-export function describeScheduledRunNotice(event: ScheduledJobRunEvent): ScheduledRunNoticeText | null {
-  if (event.phase === 'attention') {
-    return {
-      title: event.jobName,
-      subtitle: event.attention === 'input' ? 'Needs your input' : 'Needs your approval',
-      body: 'The scheduled run is waiting. Open it to continue.',
-    };
-  }
-  if (event.phase !== 'finished' || !event.notify) return null;
-  if (event.status === 'succeeded') {
-    return { title: event.jobName, subtitle: 'Scheduled job finished', body: event.summary || 'Open the thread to see the result.' };
-  }
-  if (event.status === 'failed' || event.status === 'timed_out') {
-    return { title: event.jobName, subtitle: 'Scheduled job failed', body: event.error || 'Open the job for details.' };
-  }
-  return null;
-}

@@ -1,5 +1,4 @@
-import { HOME_SECTION_TITLES, type HomeSectionItem, type HomeSectionKey, type PageBlock, type PageChangeDto, type SpaceActivityItem } from 'michi-shared';
-import { formatMichiAge, formatMichiAgo } from '../../content/michiFormat';
+import { type PageBlock, type PageChangeDto, type SpaceActivityItem } from 'michi-shared';
 import { michiHomeEyebrow } from '../../content/home/michiHomeFormat';
 
 /** Today as Michi Home writes it, `Fri, Oct 23`, whatever the browser's locale. */
@@ -52,31 +51,6 @@ export function splitHomeBlocks<T extends { type: string }>(blocks: readonly T[]
     beforeThreads: slice(HOME_SLOTS.activity, HOME_SLOTS.threads),
     rest: slice(HOME_SLOTS.threads),
   };
-}
-
-export const HOME_SECTION_COPY: Record<HomeSectionKey, { title: string; empty: string }> = {
-  waiting: { title: HOME_SECTION_TITLES.waiting, empty: 'Nothing is waiting on you.' },
-  stalled: { title: HOME_SECTION_TITLES.stalled, empty: 'Nothing has stalled.' },
-  done: { title: HOME_SECTION_TITLES.done, empty: 'Nothing finished since you last looked.' },
-};
-
-/** The one action a section row offers; a conversation in no section (All threads) just opens. */
-export function homeRowAction(section: HomeSectionKey | null, item: HomeSectionItem): string {
-  if (item.target.kind === 'page') return 'Review';
-  if (section === 'waiting') return 'Back to chat';
-  if (section === 'stalled') return 'Continue';
-  if (section === 'done') return 'View chat';
-  return 'Open chat';
-}
-
-/** `Stalled 3d` style ages read better as how long the row has not moved. */
-export function homeRowAge(section: HomeSectionKey | null, item: HomeSectionItem, now: number = Date.now()): string {
-  if (item.at == null) return '';
-  if (section === 'stalled') {
-    const age = formatMichiAge(item.at, now);
-    return age === 'now' ? 'just now' : `quiet ${age}`;
-  }
-  return formatMichiAgo(item.at, now);
 }
 
 /** The newest page an agent wrote, from Space activity (newest first): where and when. */

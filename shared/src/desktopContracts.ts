@@ -17,7 +17,7 @@ export interface AppUpdateState {
   error?: string;
 }
 
-import type { CompanionNotice, CompanionTarget } from './companion';
+import type { CompanionTarget } from './companion';
 import type { RemoteAuthenticationTarget } from './remoteDiagnostics';
 
 /** Public desktop payloads contain no Electron, DOM, Node, or process objects. */
@@ -154,13 +154,6 @@ export interface ScheduledRunTarget {
   nodeId: string | null;
 }
 
-export interface ScheduledNotice {
-  title: string;
-  subtitle: string;
-  body: string;
-  target: ScheduledRunTarget;
-}
-
 /**
  * Where a renderer-raised OS notification leads. Clicking it focuses the
  * window that raised it and reports `key` back to that window
@@ -189,14 +182,10 @@ export interface DesktopBridge {
   /** Set when this window was opened by clicking a scheduled-run notification. */
   initialScheduledRun: ScheduledRunTarget | null;
   onScheduledRunOpen(handler: (target: ScheduledRunTarget) => void): () => void;
-  /** Scheduled-run notices delivered while this window is focused (shown as toasts). */
-  onScheduledNotice(handler: (notice: ScheduledNotice) => void): () => void;
-  /** Set when this window was opened by clicking a Companion notification. Absent in older builds. */
+  /** Set when this window was opened by clicking a notification (or a tray row) whose target is a conversation, Michi's panel or Settings. Absent in older builds. */
   initialCompanionTarget?: CompanionTarget | null;
-  /** Clicking a Companion notification: open the Companion panel at this target. Absent in older builds. */
+  /** Clicking such a notification or tray row: open it at this target. Absent in older builds. */
   onCompanionOpen?(handler: (target: CompanionTarget) => void): () => void;
-  /** Companion notices delivered while this window is focused (shown as toasts). Absent in older builds. */
-  onCompanionNotice?(handler: (notice: CompanionNotice) => void): () => void;
   onOpenUrl(handler: (url: string) => void): () => void;
   /** True only in `electron-builder` packaged builds. Absent in older builds — treat as false. */
   isPackaged: boolean;
@@ -331,9 +320,7 @@ export interface DesktopEventContract {
   'app:openUrl': [url: string];
   'app:attentionNotificationClicked': [key: string];
   'scheduled:open-run': [target: ScheduledRunTarget];
-  'scheduled:notice': [notice: ScheduledNotice];
   'companion:open': [target: CompanionTarget];
-  'companion:notice': [notice: CompanionNotice];
   'terminal:data': [surfaceId: string, data: string];
   'terminal:exit': [surfaceId: string, exitCode: number];
   'browser:state': [state: BrowserSurfaceState];

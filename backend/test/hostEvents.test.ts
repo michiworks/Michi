@@ -10,7 +10,7 @@ import {
 import { log } from '../src/services/logger';
 
 const EVENTS: MichiHostEvent[] = [
-  { type: 'spawn_branches', payload: { topics: [{ title: 'Alpha', prompt: 'Explore alpha', chatId: 'chat-a', nodeId: 'node-a' }] } },
+  { type: 'spawn_branches', payload: { topics: [{ title: 'Alpha', chatId: 'chat-a', nodeId: 'node-a' }] } },
   { type: 'spawn_branches', payload: { topics: [] } },
   { type: 'branch_overview', payload: { overview: 'Explored alpha.' } },
   { type: 'follow_ups', payload: { followUps: ['First?', 'Second?', 'Third?'] } },
@@ -52,13 +52,21 @@ describe('Michi host events', () => {
     assert.deepEqual(Object.keys(image?.payload ?? {}), ['path', 'caption', 'mimeType', 'size']);
   });
 
-  test('decode passes reported arrays through unchanged', () => {
-    const topics = [{ title: 'Alpha', prompt: 'Explore alpha', chatId: 'chat-a', nodeId: 'node-a' }];
+  test('decode passes a reported follow-up array through unchanged', () => {
     const followUps = ['First?'];
-    const spawn = decodeMichiHostEvent(hostEvent('spawn_branches', { topics }));
     const follow = decodeMichiHostEvent(hostEvent('follow_ups', { followUps }));
-    assert.equal(spawn?.type === 'spawn_branches' && spawn.payload.topics, topics);
     assert.equal(follow?.type === 'follow_ups' && follow.payload.followUps, followUps);
+  });
+
+  test('a spawn_branches event reaches windows without the prompts, which the backend sends', () => {
+    const spawn = decodeMichiHostEvent(hostEvent('spawn_branches', {
+      topics: [{ title: 'Alpha', prompt: 'Explore alpha', chatId: 'chat-a', nodeId: 'node-a' }, { title: 'Beta', prompt: 'Explore beta', chatId: 'chat-b' }],
+    }));
+    assert.deepEqual(spawn, {
+      type: 'spawn_branches',
+      payload: { topics: [{ title: 'Alpha', chatId: 'chat-a', nodeId: 'node-a' }, { title: 'Beta', chatId: 'chat-b' }] },
+    });
+    assert.equal(JSON.stringify(spawn).includes('Explore'), false);
   });
 
   test('a spawn_branches event keeps its well-formed topics and drops only the malformed ones', (t) => {
@@ -67,9 +75,12 @@ describe('Michi host events', () => {
     const beta = { title: 'Beta', prompt: 'Explore beta', chatId: 'chat-b' };
     for (let i = 0; i < 2; i++) {
       const spawn = decodeMichiHostEvent(hostEvent('spawn_branches', {
-        topics: [alpha, { title: 'No chat', prompt: 'Lost' }, null, beta, { ...beta, nodeId: 7 }],
+        topics: [alpha, { title: 'No chat', prompt: 'Lost' }, null, beta, { ...beta, nodeId: 7 }, { ...beta, prompt: 3 }],
       }));
-      assert.deepEqual(spawn, { type: 'spawn_branches', payload: { topics: [alpha, beta] } });
+      assert.deepEqual(spawn, {
+        type: 'spawn_branches',
+        payload: { topics: [{ title: 'Alpha', chatId: 'chat-a', nodeId: 'node-a' }, { title: 'Beta', chatId: 'chat-b' }] },
+      });
     }
     assert.deepEqual(warn.mock.calls.map((call) => [call.arguments[1], call.arguments[2]]), [
       ['host event kept without its malformed topics', { type: 'spawn_branches' }],

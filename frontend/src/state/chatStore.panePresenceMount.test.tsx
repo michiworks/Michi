@@ -41,7 +41,6 @@ vi.mock('../services/api', () => ({
   streamMessage: vi.fn(),
 }));
 
-vi.mock('../services/notifications', () => ({ notify: vi.fn() }));
 vi.mock('../services/digestApi', () => ({
   streamDigest: vi.fn(async () => '# Decisions\n\nKeep the source thread context.'),
 }));

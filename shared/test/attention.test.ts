@@ -2,6 +2,9 @@ import assert from 'node:assert/strict';
 import { describe, test } from 'node:test';
 import {
   approvalAttentionCopy,
+  attentionDesktopClaimPath,
+  attentionLevelAllows,
+  ATTENTION_DESKTOP_STREAM_PATH,
   ATTENTION_EVENTS,
   completionAttentionCopy,
   encodeAttentionFrame,
@@ -11,6 +14,7 @@ import {
   parseAttentionNotification,
   parseAttentionResolved,
   parseAttentionSnapshot,
+  parseAttentionTarget,
   questionAttentionCopy,
   turnEndAttentionKind,
   type AttentionNotificationV1,
@@ -68,6 +72,44 @@ describe('attention wire contract', () => {
       { claimed: false, claimedByWindowId: null, status: 'expired' });
     assert.equal(parseAttentionClaimResult({ claimed: 'yes', claimedByWindowId: null, status: 'active' }), null);
     assert.equal(parseAttentionClaimResult({ claimed: true, claimedByWindowId: null, status: 'pending' }), null);
+  });
+});
+
+describe('Michi\'s and Scheduled Job runs\' targets', () => {
+  test('an agent target opens where its record says; a scheduled run names its job and thread', () => {
+    const agent = { type: 'agent', ref: 'item:cmi-1', open: { kind: 'companion', tab: 'today', itemId: 'cmi-1' }, workspaceId: 'ws-michi' };
+    assert.deepEqual(parseAttentionTarget(agent), agent);
+    assert.deepEqual(parseAttentionTarget({ ...agent, open: { kind: 'companion', tab: 'chat', itemId: 'cmi-1' } }),
+      { ...agent, open: { kind: 'companion', tab: 'chat' } }, 'an item only on Today');
+    assert.deepEqual(parseAttentionTarget({ ...agent, open: { kind: 'node', workspaceId: 'ws', nodeId: 'n-1' } })?.type, 'agent');
+    assert.equal(parseAttentionTarget({ ...agent, open: { kind: 'url', url: 'file:///etc/passwd' } }), null, 'no link but http(s)');
+    assert.equal(parseAttentionTarget({ ...agent, open: null }), null);
+    assert.equal(parseAttentionTarget({ ...agent, ref: '' }), null);
+    const run = { type: 'scheduled_run', runId: 'run-1', jobId: 'job-1', nodeId: null, workspaceId: 'ws-1' };
+    assert.deepEqual(parseAttentionTarget(run), run, 'a run that failed before its thread existed');
+    assert.deepEqual(parseAttentionTarget({ ...run, nodeId: 'n-1' }), { ...run, nodeId: 'n-1' });
+    assert.equal(parseAttentionTarget({ ...run, jobId: undefined }), null);
+    const update = { ...notification, key: 'agent:chat', kind: 'finished', reason: 'update', target: { ...agent, ref: 'chat', open: { kind: 'companion', tab: 'chat' } } };
+    assert.deepEqual(parseAttentionNotification(update), update);
+    assert.equal(parseAttentionNotification({ ...notification, reason: 'needs_you' })?.reason, 'needs_you');
+  });
+});
+
+describe('the user\'s one notification level', () => {
+  test('off: nothing; "Only when something needs me": what waits on the user and a task that failed; all: everything', () => {
+    const cases: Array<[Parameters<typeof attentionLevelAllows>[1], Parameters<typeof attentionLevelAllows>[2]]> = [
+      ['needs_input', 'approval'], ['needs_input', 'question'], ['needs_input', 'needs_you'], ['failed', 'run_failed'],
+      ['failed', 'error'], ['finished', 'completed'], ['finished', 'run_completed'], ['finished', 'update'],
+    ];
+    assert.deepEqual(cases.map(([kind, reason]) => attentionLevelAllows('approval-only', kind, reason)), [true, true, true, true, false, false, false, false]);
+    assert.ok(cases.every(([kind, reason]) => attentionLevelAllows('all', kind, reason)));
+    assert.ok(cases.every(([kind, reason]) => !attentionLevelAllows('off', kind, reason)));
+    assert.equal(attentionLevelAllows('approval-only', 'needs_input'), true, 'a kind without a reason is judged by its kind');
+  });
+
+  test('the desktop notifier\'s routes', () => {
+    assert.equal(ATTENTION_DESKTOP_STREAM_PATH, '/attention/desktop/stream');
+    assert.equal(attentionDesktopClaimPath('attn 1/2'), '/attention/desktop/notifications/attn%201%2F2/claim');
   });
 });
 

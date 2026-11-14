@@ -27,10 +27,18 @@ const KIND_LOOK: Record<HomeCardKind, { tone: string; icon: React.ReactNode }> =
   tip: { tone: 'muted', icon: <Lightbulb size={ICON_SIZE} strokeWidth={1.6} aria-hidden="true" /> },
 };
 
-function HomeCardButton({ card, onPick }: { card: HomeCardView; onPick: (id: string) => void }) {
+function HomeCardButton({ card, index, onPick }: { card: HomeCardView; index: number; onPick: (id: string) => void }) {
   const look = KIND_LOOK[card.kind];
   return (
-    <button type="button" className="home-card" data-tone={look.tone} data-testid="home-card" onClick={() => onPick(card.id)}>
+    <button
+      type="button"
+      className="home-card"
+      data-tone={look.tone}
+      data-testid="home-card"
+      // Orders the cards' entrance after a load (homeCards.css).
+      style={{ ['--home-card-index' as string]: index } as React.CSSProperties}
+      onClick={() => onPick(card.id)}
+    >
       <span className="home-card__kind">{look.icon}<span className="home-card__label">{card.label}</span></span>
       <span className="home-card__title">{card.title}</span>
       <span className="home-card__reason">{card.reason}</span>
@@ -72,8 +80,22 @@ export function HomeCardGrid({
         </span>
       </div>
       <div className="home-cards__grid" data-count={cards.length}>
-        {cards.map((card) => <HomeCardButton key={card.id} card={card} onPick={onPick} />)}
+        {cards.map((card, index) => <HomeCardButton key={card.id} card={card} index={index} onPick={onPick} />)}
       </div>
     </section>
+  );
+}
+
+/** The grid's outline while Home loads: `count` cards, without text. */
+export function HomeCardGridSkeleton({ count, leaving = false }: { count: number; leaving?: boolean }) {
+  return (
+    <div className="home-cards home-cards--skeleton" data-leaving={leaving || undefined} aria-hidden="true">
+      <div className="home-cards__head"><span className="home-skeleton-bar" /></div>
+      <div className="home-cards__grid">
+        {Array.from({ length: count }, (_, index) => (
+          <div key={index} className="home-card-skeleton"><span /><span /><span /></div>
+        ))}
+      </div>
+    </div>
   );
 }

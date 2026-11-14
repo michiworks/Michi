@@ -64,15 +64,6 @@ export const UPKEEP_HEADLINE: Record<Exclude<MetaAgentStatusKind, 'first-run' | 
   paused: 'Pages upkeep is paused',
 };
 
-/** The word a Scheduled row shows in place of its ordinary line, in the list and in its sidebar alike. */
-export const META_AGENT_ROW_WORD: Partial<Record<MetaAgentStatusKind, { text: string; tone?: 'danger' }>> = {
-  'guard-failed': { text: 'Error', tone: 'danger' },
-  stopped: { text: 'Error', tone: 'danger' },
-  'not-running': { text: 'Not running' },
-  unsupported: { text: 'Not running' },
-  paused: { text: 'Paused' },
-};
-
 const SETTINGS_FIXES: ReadonlySet<MetaAgentStatusKind> = new Set(['guard-failed', 'unsupported', 'stopped']);
 
 function status(kind: MetaAgentStatusKind, extra: Partial<MetaAgentStatus> = {}): MetaAgentStatus {

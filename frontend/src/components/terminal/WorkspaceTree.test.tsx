@@ -262,7 +262,8 @@ describe('WorkspaceTree', () => {
     expect(await screen.findByText('Thread 1')).toBeTruthy();
     expect(screen.getByText('Thread 5')).toBeTruthy();
     expect(screen.queryByText('Thread 6')).toBeNull();
-    fireEvent.click(screen.getByText(/Show more/));
+    // It names what the click brings in.
+    fireEvent.click(screen.getByText('Show 1 more'));
     expect(await screen.findByText('Thread 6')).toBeTruthy();
   });
 
@@ -346,6 +347,15 @@ describe('WorkspaceTree', () => {
     expect(all.hasAttribute('aria-current')).toBe(false);
     fireEvent.click(all);
     expect(onOpenWorkspaces).toHaveBeenCalledTimes(1);
+  });
+
+  it('moves "All N ›" up to the Pinned header when some workspaces are pinned', async () => {
+    const { nodes, projects } = fixture();
+    projects[0] = { ...projects[0], pinnedAt: Date.now() };
+    renderTreeWith({ nodes, projects }, { onOpenWorkspaces: vi.fn() });
+    const pinned = await screen.findByTestId('section-label-pinned');
+    expect(within(pinned).getByRole('button', { name: 'All 2 workspaces' })).toBeTruthy();
+    expect(within(screen.getByTestId('section-label-projects')).queryByRole('button')).toBeNull();
   });
 
   it('folds workspaces left alone for 30 days into a closed Earlier group, in their own order, and remembers it open', async () => {

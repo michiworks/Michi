@@ -14,9 +14,10 @@ import { useCompanionName } from '../../../state/companion/companionName';
 import { getElectron } from '../../../lib/electronBridge';
 import { AppearancePane } from '../pages/settings/AppearancePane';
 import {
-  SettingsBackContext, SettingsHeaderActionContext, SettingsLayoutContext, SettingsOpenContext, SettingsPageTitleContext, SettingsTargetContext,
-  type SettingsHeaderAction,
+  SettingsBackContext, SettingsHeaderActionContext, SettingsLayoutContext, SettingsOpenContext, SettingsPageLabelContext, SettingsPageTitleContext,
+  SettingsTargetContext, type SettingsHeaderAction,
 } from '../pages/settings/settingsPhone';
+import { SettingsToc } from './SettingsToc';
 import { Button } from '../../ui/controls';
 import { PhoneSettingsMenu } from './PhoneSettingsMenu';
 import { SETTINGS_GROUPS, SETTINGS_PAGES, settingsPageLabel, type SettingsPage } from './settingsPages';
@@ -70,8 +71,8 @@ function useHistoryCounts(): { trash: number; archived: number } {
 }
 
 /** The element of a page that shows a setting, found by the name a search result carries. */
-const SETTING_NAMES = '.settings-row__label, .settings-section__title, .settings-backup__title, .meta-set__row-k, .meta-set__radio-t, .settings-shortcut-row__label';
-const SETTING_BLOCKS = '.settings-row, .meta-set__row, .meta-set__radio, .settings-shortcut-row, .settings-section, .settings-backup';
+const SETTING_NAMES = '.settings-row__label, .settings-section__title, .settings-backup__title, .settings-shortcut-row__label';
+const SETTING_BLOCKS = '.settings-row, .settings-shortcut-row, .settings-section, .settings-backup';
 function findSetting(root: HTMLElement, label: string): HTMLElement | null {
   const name = Array.from(root.querySelectorAll<HTMLElement>(SETTING_NAMES)).find((element) => element.textContent?.trim() === label);
   return name ? name.closest<HTMLElement>(SETTING_BLOCKS) ?? name : null;
@@ -342,7 +343,9 @@ export default function SettingsMain({ page, onPageChange, workspaceReady = true
           <SettingsBackContext.Provider value={registerBack}>
             <SettingsHeaderActionContext.Provider value={stacked ? onHeaderAction ?? null : setHeaderAction}>
               <SettingsPageTitleContext.Provider value={setTitled}>
-                <SectionContent>{body}</SectionContent>
+                <SettingsPageLabelContext.Provider value={titled ? null : label}>
+                  <SectionContent>{body}</SectionContent>
+                </SettingsPageLabelContext.Provider>
               </SettingsPageTitleContext.Provider>
             </SettingsHeaderActionContext.Provider>
           </SettingsBackContext.Provider>
@@ -370,7 +373,11 @@ export default function SettingsMain({ page, onPageChange, workspaceReady = true
         <WindowNav page={page} name={name} query={query} onQuery={setQuery} onOpen={(next) => openPage(next)}
           onSubmit={() => { if (results[0]) pick(results[0]); }}
           history={workspaceReady ? history : { trash: 0, archived: 0 }} metaAgentAlert={metaAgentAlert} searchRef={searchRef} />
-        {query.trim() ? <SearchResults query={query} results={results} onPick={pick} /> : content}
+        {query.trim() ? <SearchResults query={query} results={results} onPick={pick} /> : <>
+          {content}
+          {/* A long page lists its groups beside it; keyed as the page is, so it reads the page shown. */}
+          {!titled && <SettingsToc key={`toc:${page}:${target?.seq ?? 0}`} contentRef={contentRef} />}
+        </>}
       </div>
     </SettingsLayoutContext.Provider>
   );

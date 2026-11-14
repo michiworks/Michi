@@ -12,7 +12,7 @@ import { buildTopology } from "./topologyBuilder";
 import { keywordSearch } from "../routes/search";
 import { getDb } from "./db";
 import { getAiGlobalContext, getWorkspace } from "./dbRepository";
-import { readConversationMemoryMode } from "./memory/memoryRepository";
+import { hiddenTemporaryChat, isTemporaryChat } from "./memory/temporaryChat";
 import { decodePaneId, isSystemWorkspaceSettings, parseBranchOverviewEntries } from "michi-shared";
 
 export const DISABLED_MESSAGE =
@@ -21,25 +21,26 @@ export const DISABLED_MESSAGE =
 export const NO_WORKSPACE_MESSAGE =
     "No active workspace bound to this session yet.";
 
-/** What a thread or pane tool answers instead, in a conversation whose memory setting is off. */
+/** What a thread or pane tool answers instead, in a temporary chat. */
 export const TEMPORARY_CHAT_MESSAGE =
-    "This conversation's memory setting is Off: like a temporary chat, it reads neither memory nor other conversations, so nothing was read. "
-    + "The user can set it to Learn or Use only to bring them back.";
+    "This is a temporary chat: it reads neither memory nor other conversations, so nothing was read.";
 
 /**
- * A conversation whose memory setting is off is a temporary chat: no memory,
- * and no other conversations. Its thread tools (list_threads, search_messages,
- * read_node, read_node_overview, read_conversation_updates) and pane tools on
- * chat panes read only the conversation itself (services/mcpServer.ts,
+ * A temporary chat (memory/temporaryChat.ts) reads no memory and no other
+ * conversation. Its thread tools (list_threads, search_messages, read_node,
+ * read_node_overview, read_conversation_updates) and pane tools on chat panes
+ * read only the conversation itself (services/mcpServer.ts,
  * agents/pi/piTools.ts, and the assistant's conversation's in
  * assistant/tools.ts). True when a read by `callerNodeId` is refused:
  * `targetNodeIds` are the conversations it names, none for a tool that lists
- * or searches across them.
+ * or searches across them. The other way round, every other reader is kept
+ * from a temporary chat: the functions below and pane inspection leave it out
+ * of lists and read it as not found (hiddenTemporaryChat).
  */
 export function temporaryChatRefuses(callerNodeId: string | null | undefined, targetNodeIds?: readonly string[]): boolean {
     if (!callerNodeId) return false;
     if (targetNodeIds && targetNodeIds.every((nodeId) => nodeId === callerNodeId)) return false;
-    return readConversationMemoryMode(callerNodeId) === "off";
+    return isTemporaryChat(callerNodeId);
 }
 
 /** The conversations a pane tool's arguments name: nodeId, a chat pane's paneId, an executionRef's nodeId. */
@@ -94,7 +95,8 @@ export interface ReadNodeResult {
  *                           DB reads are scoped to this user's workspaces so an attacker who
  *                           gains chat access cannot read another user's data via this tool.
  * @param targetWorkspaceId  optional override (model passes workspaceId arg). Defaults to session.
- * @param currentNodeId      node currently in focus, marked with > YOU in the output.
+ * @param currentNodeId      node currently in focus, marked with > YOU in the output. Other
+ *                           conversations' temporary chats are left out (buildTopology).
  * @param options            includeScheduledRuns: also list Scheduled-only jobs' run threads.
  */
 export function listThreads(
@@ -145,6 +147,9 @@ export function listThreads(
  *                           that is not in Trash and lets AI navigate it.
  * @param limit              clamped to 1..50, default 10.
  * @param options            includeScheduledRuns: also search Scheduled-only jobs' run threads.
+ *
+ * Temporary chats are never searched: a temporary chat's own tools refuse to
+ * search (temporaryChatRefuses), and no other reader may find one.
  */
 export function searchMessages(
     sessionWorkspaceId: string | null,
@@ -173,6 +178,7 @@ export function searchMessages(
     // Pass ownerUserId so keywordSearch's cloud-mode owner filter applies.
     // Across workspaces, leave out those in Trash and those AI navigation may not read.
     const results = keywordSearch(trimmed, wsArg, clampedLimit, ownerUserId ?? undefined, {
+        excludeTemporaryChats: true,
         ...(options.includeScheduledRuns === true ? { includeScheduledRuns: true } : {}),
         ...(wsArg === undefined ? { excludeDeletedWorkspaces: true, excludeNavigationDisabled: true } : {}),
     });
@@ -236,11 +242,16 @@ function lookupNode(
         .get(trimmedId) as unknown as NodeInfoRow | undefined;
 }
 
-/** Shared access-control preamble for node-reading tools. */
+/**
+ * Shared access-control preamble for node-reading tools. `readerNodeId` is the
+ * calling conversation (null: none): another conversation's temporary chat
+ * reads as not found.
+ */
 function validateNodeAccess(
     sessionWorkspaceId: string | null,
     ownerUserId: string | null | undefined,
     nodeId: string,
+    readerNodeId: string | null | undefined,
 ): { error: ReadNodeResult } | { trimmedId: string; db: ReturnType<typeof getDb>; nodeRow: NodeInfoRow } {
     if (!sessionWorkspaceId) {
         return { error: { status: "no_workspace", text: NO_WORKSPACE_MESSAGE } };
@@ -254,7 +265,7 @@ function validateNodeAccess(
     }
     const db = getDb();
     const nodeRow = lookupNode(db, trimmedId, ownerUserId);
-    if (!nodeRow || hiddenFrom(sessionWorkspaceId, nodeRow.workspace_id)) {
+    if (!nodeRow || hiddenFrom(sessionWorkspaceId, nodeRow.workspace_id) || hiddenTemporaryChat(readerNodeId, nodeRow.id)) {
         return { error: { status: "not_found", text: `node not found: ${trimmedId}` } };
     }
     return { trimmedId, db, nodeRow };
@@ -295,13 +306,15 @@ const continueInMessage = (messageId: string, end: number) =>
 
 /**
  * Read a node's branch overview journal — lightweight chronological summary.
+ * `readerNodeId`: the calling conversation, as for readNode.
  */
 export function readNodeOverview(
     sessionWorkspaceId: string | null,
     ownerUserId: string | null | undefined,
     nodeId: string,
+    readerNodeId?: string | null,
 ): ReadNodeResult {
-    const access = validateNodeAccess(sessionWorkspaceId, ownerUserId, nodeId);
+    const access = validateNodeAccess(sessionWorkspaceId, ownerUserId, nodeId, readerNodeId);
     if ("error" in access) return access.error;
     const { trimmedId, db, nodeRow } = access;
 
@@ -331,13 +344,18 @@ export function readNodeOverview(
     };
 }
 
+/**
+ * Read a node's transcript. `readerNodeId` is the calling conversation (none:
+ * an Agent Run, a Home run): a temporary chat is found only by itself.
+ */
 export function readNode(
     sessionWorkspaceId: string | null,
     ownerUserId: string | null | undefined,
     nodeId: string,
     opts?: ReadNodeOpts,
+    readerNodeId?: string | null,
 ): ReadNodeResult {
-    const access = validateNodeAccess(sessionWorkspaceId, ownerUserId, nodeId);
+    const access = validateNodeAccess(sessionWorkspaceId, ownerUserId, nodeId, readerNodeId);
     if ("error" in access) return access.error;
     const { trimmedId, db, nodeRow } = access;
 

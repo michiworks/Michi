@@ -1,6 +1,6 @@
 import { expect, test, type Page } from '@playwright/test';
 import { installMockApi } from '../fixtures/mockApi';
-import { areaButton, openArea } from '../fixtures/shell';
+import { openArea } from '../fixtures/shell';
 
 async function boot(page: Page) {
   await page.addInitScript(() => {
@@ -44,45 +44,11 @@ async function boot(page: Page) {
   await expect(page.locator('.home-page')).toBeVisible();
 }
 
-test('Scheduled detail participates in back/forward history and has a direct route home', async ({ page }, info) => {
-  const errors: string[] = [];
-  page.on('pageerror', error => errors.push(error.message));
-  await boot(page);
-  await openArea(page, 'scheduled');
-  const list = page.getByRole('heading', { level: 1, name: 'Scheduled', exact: true });
-  const detail = page.getByRole('heading', { level: 1, name: 'Michi · Pages upkeep', exact: true });
-  const systemRow = page.locator('.scheduled-side').getByRole('button', { name: 'Michi · Pages upkeep System', exact: true });
-  const back = page.getByRole('button', { name: 'Navigate back', exact: true });
-  const forward = page.getByRole('button', { name: 'Navigate forward', exact: true });
-  await expect(list).toBeVisible();
-  await systemRow.click();
-  await expect(detail).toBeVisible();
-  await back.click();
-  await expect(list).toBeVisible();
-  await expect(systemRow).not.toHaveAttribute('aria-current');
-  await back.click();
-  await expect(page.locator('.home-page')).toBeVisible();
-  await forward.click();
-  await expect(list).toBeVisible();
-  await page.keyboard.press('ControlOrMeta+]');
-  await expect(detail).toBeVisible();
-  await openArea(page, 'conversations');
-  await expect(areaButton(page, 'conversations')).toHaveAttribute('aria-current', 'page');
-  await page.keyboard.press('ControlOrMeta+[');
-  await expect(detail).toBeVisible();
-  await page.screenshot({ path: info.outputPath('scheduled-detail.png') });
-  await page.getByRole('button', { name: 'SCHEDULED', exact: true }).click();
-  await expect(list).toBeVisible();
-  await back.click();
-  await expect(detail).toBeVisible();
-  await openArea(page, 'scheduled');
-  await expect(list).toBeVisible();
-  expect(errors).toEqual([]);
-});
-
 test('ordinary job details and sidebar selection restore together after closing', async ({ page }) => {
   await boot(page);
   await openArea(page, 'scheduled');
+  // Pages upkeep runs when conversations go quiet, not on a schedule: no row for it here (Q8).
+  await expect(page.getByText('Michi · Pages upkeep')).toHaveCount(0);
   await page.getByRole('button', { name: 'Open Morning digest', exact: true }).click();
   const dialog = page.getByRole('dialog', { name: 'Scheduled job', exact: true });
   await expect(dialog.getByRole('heading', { name: 'Morning digest', exact: true })).toBeVisible();

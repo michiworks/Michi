@@ -81,20 +81,16 @@ describe('what a proposal’s Apply does', () => {
       { kind: 'lead', text: 'Watches this item and tells you when it is approved:' },
       { kind: 'text', label: null, text: 'CR-123456 needs attention' },
     ]);
-    expect(fields(companionCardPreview(card('checkins.update', { heartbeat: { intervalMinutes: 120 }, brief: { enabled: false } }), context()).parts))
-      .toEqual(['Check-ins: Every hour → Every 2 hours', 'Morning brief: At 09:00 → Off']);
     expect(fields(companionCardPreview(card('source.update', { source: 'email', enabled: false }), context()).parts)).toEqual(['Email: Not watched → Not watched']);
     expect(fields(companionCardPreview(card('pipeline.watch', { add: ['MyService', 'Other'], remove: ['Old'] }), context()).parts))
       .toEqual(['Starts watching: MyService, Other', 'Stops watching: Old']);
-    expect(fields(companionCardPreview(card('quiet_hours.update', { enabled: true, start: '21:00' }), context()).parts)).toEqual(['Quiet hours: 20:00 to 08:00 → 21:00 to 08:00']);
   });
 
   it('names the agent in its leads, never “the Companion” (§1.5)', () => {
     const named = context({ settings: { ...structuredClone(DEFAULT_COMPANION_SETTINGS), displayName: 'Robin' } });
     const lead = (kind: CompanionCardDto['kind'], payload: Record<string, unknown>, at = named) => companionCardPreview(card(kind, payload), at).parts[0];
-    expect(lead('checkins.update', { heartbeat: { intervalMinutes: 120 } })).toEqual({ kind: 'lead', text: 'Changes when Robin speaks:' });
     expect(lead('pipeline.watch', { add: ['MyService'] })).toEqual({ kind: 'lead', text: 'Changes the pipelines Robin watches:' });
-    expect(lead('checkins.update', { heartbeat: { intervalMinutes: 120 } }, context())).toEqual({ kind: 'lead', text: 'Changes when Michi speaks:' });
+    expect(lead('pipeline.watch', { add: ['MyService'] }, context())).toEqual({ kind: 'lead', text: 'Changes the pipelines Michi watches:' });
   });
 
   it('a follow-up: the conversation, its workspace, how its tools run, and the whole message (DESIGN-v2 §4)', () => {
@@ -131,7 +127,8 @@ describe('what a proposal’s Apply does', () => {
       card('future.kind' as CompanionCardDto['kind'], { a: 1 }),
       card('source.update', { source: 'toString', enabled: true }),
       card('watch.add', { itemId: 'cmi-cr', until: 'constructor' }),
-      card('checkins.update', { heartbeat: { intervalMinutes: '120' } }),
+      // A card of a kind that is gone (P3), still waiting from before: worded as it is.
+      card('checkins.update' as CompanionCardDto['kind'], { heartbeat: { intervalMinutes: 120 } }),
     ]) {
       const preview = companionCardPreview(unknown, context());
       expect(preview.parts[0]).toEqual({ kind: 'lead', text: 'Apply sends this change as it is:' });

@@ -23,7 +23,7 @@ function state(watches: MaintenanceWatch[] | undefined, instructions: string | n
     loading: false, busy: false, error: null, refresh: vi.fn(),
     update: vi.fn(async () => undefined), setSpaceExcluded: vi.fn(async () => undefined), runNow: vi.fn(async () => undefined),
     reconsider: vi.fn(async () => undefined), catchUp: vi.fn(async () => ({ requestId: 'r', after: 0, through: 0, queued: true as const })),
-    saveInstructions: vi.fn(async () => undefined), addWatch: vi.fn(async () => undefined), changeWatch: vi.fn(async () => undefined),
+    saveInstructions: vi.fn(async () => undefined), changeWatch: vi.fn(async () => undefined),
     removeWatch: vi.fn(async () => undefined), runWatch: vi.fn(async () => undefined),
   };
 }
@@ -71,17 +71,11 @@ describe('MaintenanceWatches', () => {
     expect(maintenance.changeWatch).toHaveBeenCalledWith('watch-1', { enabled: true });
   });
 
-  it('adds a watch from the form', () => {
-    const maintenance = state([]);
-    render(<MaintenanceWatches maintenance={maintenance} />);
-    fireEvent.click(screen.getByRole('button', { name: 'Add a watch' }));
-    const form = screen.getByRole('form', { name: 'New watch' });
-    expect((screen.getByRole('button', { name: 'Add watch' }) as HTMLButtonElement).disabled).toBe(true);
-    fireEvent.change(screen.getByLabelText('Name'), { target: { value: ' My tasks ' } });
-    fireEvent.change(screen.getByLabelText('What to check and where to record it'), { target: { value: 'Sync my project tasks' } });
-    fireEvent.change(screen.getByLabelText('How often'), { target: { value: '240' } });
-    fireEvent.submit(form);
-    expect(maintenance.addWatch).toHaveBeenCalledWith({ title: 'My tasks', instructions: 'Sync my project tasks', intervalMinutes: 240 });
+  it('offers no way to add a watch: with none left, there is no Watches section', () => {
+    render(<MaintenanceWatches maintenance={state([])} />);
+    expect(screen.queryByRole('region', { name: 'Watches' })).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Add a watch' })).toBeNull();
+    expect(screen.getByLabelText('Instructions for this workspace')).toBeTruthy();
   });
 
   it('saves the workspace instructions only when they changed', () => {

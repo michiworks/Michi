@@ -49,12 +49,6 @@ export interface MichiAssistantInfo {
    */
   runtimeSwitches?: MichiAssistantRuntimeSwitch[];
   /**
-   * A turn the user sent from the Scheduled area created a scheduled job, so
-   * "Create with agent" starts a new conversation (W2 fix decision D6).
-   * Absent from older backends.
-   */
-  jobCreated?: boolean;
-  /**
    * The conversation held the user's own messages before the v2 merge
    * (`v2_merged_at`): the panel shows its one-time upgrade note (W2 fix
    * decision D7). The backend decides; absent from older backends (= false).

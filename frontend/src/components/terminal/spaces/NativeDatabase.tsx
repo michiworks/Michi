@@ -8,7 +8,8 @@ import { fetchTaskOrigin } from '../../../services/api/taskDatabase';
 import { useOptionalChatProjects } from '../../../state/chatStore';
 import { openExactSourcePopover, openThreadCard } from '../../../state/sourceNav/sourceNav';
 import { notifyPageChanged } from '../../../state/pages/pageEvents';
-import { batchOutcomeNotice, revertPageBatches, UNDO_FAILED } from '../../../state/pages/pageUndo';
+import { batchOutcomeNotice, revertPageBatches, undoPageBatches, UNDO_FAILED, writtenBatchIds } from '../../../state/pages/pageUndo';
+import { recordUndo } from '../../../state/undoStack';
 import { usePageDatabase } from '../../../state/pages/usePageDatabase';
 import { DatabaseView } from '../content/db/DatabaseView';
 import { LiveThreadsContext, type LiveThreads } from '../content/db/liveThreads';
@@ -95,48 +96,50 @@ function NativeDatabase({ databaseId, workspaceId, connectionId, viewId, compact
     ...(canOpenThread ? { open: (item: ThreadCardItem) => openThreadCard(connectionId, item, (card) => openThreadRef.current?.(card)) } : {}),
   } : null), [tasks, threadStates, workspaceId, workspaceName, loadConversations, canOpenThread, connectionId]);
 
-  // Undo of a card moved on a board: the batch its edit made, put back.
-  const undo = useCallback(async (batchId: string) => {
-    try {
-      const outcome = await revertPageBatches(connectionId, [{
-        batchId, workspaceId, changed: [{ backendConnectionId: connectionId, workspaceId, databaseId }],
-      }]);
-      const notice = batchOutcomeNotice(outcome, 'undone', 'Move it back yourself.');
-      if (notice) toast.error(notice);
-    } catch {
-      toast.error(UNDO_FAILED);
-    }
-    refresh();
-  }, [connectionId, databaseId, refresh, workspaceId]);
-
+  // An Undo can run after this view has moved on: it reads the database again through the newest refresh.
+  const refreshRef = useRef(refresh);
+  refreshRef.current = refresh;
   const saveRef = useRef<((ops: MichiDbEditOp[], label: string, options?: DbEditOptions, undoing?: boolean) => Promise<boolean>) | null>(null);
-  // `undoing`: this write is an Undo's inverse; if it cannot be applied (its anchor row is gone), say so rather than keep a draft whose Retry can never work.
+  // `undoing`: this write is an Undo's inverse; if it cannot be applied (its anchor row is gone), the Undo says so rather than keep a draft whose Retry can never work.
   const save = useCallback(async (ops: MichiDbEditOp[], label: string, options?: DbEditOptions, undoing = false): Promise<boolean> => {
     if (!database || ownerReadOnly || status !== 'ready' || stale || ops.length === 0) return false;
     setWriteError(null);
     try {
       const answer = await edit(pageDatabaseOps(ops, database));
       setFailedDraft(null);
-      const batchId = answer?.changes?.applied?.[0]?.batchId;
-      if (options?.undo && batchId) {
+      const batchIds = writtenBatchIds(answer?.changes);
+      if (!undoing && batchIds.length) {
         // A reorder is undone by moving the card back as a new edit: reverting the batch would fight the renumbered neighbours.
-        const back = options.undoOps;
-        toast(label, { action: { label: 'Undo', onClick: () => { if (back) void saveRef.current?.(back, 'Moved it back', undefined, true); else void undo(batchId); } } });
+        const back = options?.undoOps;
+        const revert = undoPageBatches(connectionId, batchIds.map((batchId) => ({
+          batchId, workspaceId, changed: [{ backendConnectionId: connectionId, workspaceId, databaseId }],
+        })), options?.undo ? 'Move it back yourself.' : 'Change it back yourself.');
+        recordUndo({
+          label,
+          undo: back
+            ? async () => (await saveRef.current?.(back, 'Moved it back', undefined, true)) || "Couldn't undo the move."
+            : async () => {
+              try {
+                return await revert();
+              } finally {
+                refreshRef.current();
+              }
+            },
+          // A move or a delete takes something out of where it was, so its toast offers Undo.
+          toast: options?.undo === true || ops.some((op) => op.op.endsWith('.delete')),
+        });
       }
       return true;
     } catch (cause) {
       // Changed meanwhile (here, in another pane, by the assistant): edit has already read it again to show where it stands.
       const conflict = pageEditFailure(cause) === 'stale';
       if (!conflict) refresh();
-      if (undoing) {
-        toast.error("Couldn't undo the move.");
-        return false;
-      }
+      if (undoing) return false;
       setWriteError(conflict ? 'This database just changed, so it was refreshed. Try again.' : cause instanceof Error ? cause.message : "Couldn't save this database");
       setFailedDraft({ ops, label });
       return false;
     }
-  }, [database, edit, ownerReadOnly, refresh, stale, status, undo]);
+  }, [connectionId, database, databaseId, edit, ownerReadOnly, refresh, stale, status, workspaceId]);
   saveRef.current = save;
 
   // Pages upkeep of a task board: its marks, its suggestions, and its latest update with Undo.

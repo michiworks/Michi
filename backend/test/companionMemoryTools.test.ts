@@ -266,6 +266,7 @@ describe('V\'s conversation setting (D2)', () => {
       ['list_threads', { workspaceId: 'ws-1' }], ['search_messages', { query: 'release' }], ['read_node', { nodeId: 'n-1' }],
       ['read_node_overview', { nodeId: 'n-1' }], ['inspect_pane', { nodeId: 'n-1' }], ['read_pane_output', { paneId: 'node:n-1' }],
       ['wait_pane', { nodeId: 'n-1', until: 'changed', cursor: 'c' }], ['read_conversation_updates', { workspaceId: 'ws-1', after: 0 }],
+      ['list_panes', { workspaceId: 'ws-1', scope: 'all' }],
     ] as const) {
       assert.equal((await call(name, args)).text, TEMPORARY_CHAT_MESSAGE, `${name} ${JSON.stringify(args)}`);
     }
@@ -279,6 +280,32 @@ describe('V\'s conversation setting (D2)', () => {
       (await pi.find((tool: any) => tool.name === name).execute('call', { __tool_use_purpose: 'test', ...args })).content[0].text as string;
     assert.equal(await run('list_threads', { workspaceId: 'ws-1' }), TEMPORARY_CHAT_MESSAGE);
     assert.match(await run('memory_save', { body: 'Reply in Chinese.', kind: 'preference', userAsked: true }), /^MEMORY_OFF_HERE/);
+  });
+
+  test('another conversation\'s temporary chat is not there for V: not listed, searched, read or inspected', async () => {
+    runningTurn();
+    saveTree({ id: 't-n-temp', workspace_id: 'ws-1', root_node_id: 'n-temp', last_active_at: 1, created_at: 1 });
+    saveNode({ id: 'n-temp', workspace_id: 'ws-1', tree_id: 't-n-temp', kind: 'chat', title: 'Secret plan', status: 'idle',
+      minimized: 0, spawned_by_agent: 0, acp_session_id: 'n-temp', runtime_id: 'claude', created_at: 1 });
+    getDb().prepare("UPDATE nodes SET memory_mode = 'off' WHERE id = 'n-temp'").run();
+    const say = getDb().prepare("INSERT INTO messages (id, node_id, role, content, seq, created_at) VALUES (?, ?, 'user', ?, 1, 1)");
+    say.run('m-n-1', 'n-1', 'heron release');
+    say.run('m-n-temp', 'n-temp', 'heron secret');
+    const threads = (await call('list_threads', { workspaceId: 'ws-1' })).text;
+    assert.match(threads, /n-1/);
+    assert.doesNotMatch(threads, /n-temp|Secret/);
+    const found = (await call('search_messages', { query: 'heron' })).text;
+    assert.match(found, /n-1/);
+    assert.doesNotMatch(found, /n-temp/);
+    for (const name of ['read_node', 'read_node_overview']) assert.equal((await call(name, { nodeId: 'n-temp' })).text, 'node not found: n-temp', name);
+    for (const [name, args] of [
+      ['inspect_pane', { nodeId: 'n-temp' }], ['read_pane_output', { paneId: 'node:n-temp' }], ['wait_pane', { nodeId: 'n-temp', until: 'changed', cursor: 'c' }],
+    ] as const) {
+      assert.match((await call(name, args)).text, /^NOT_FOUND/, name);
+    }
+    const panes = (await call('list_panes', { workspaceId: 'ws-1', scope: 'all' })).text;
+    assert.match(panes, /node:n-1/);
+    assert.doesNotMatch(panes, /n-temp/);
   });
 
   test('Use only reads, but saves and corrects nothing', async () => {

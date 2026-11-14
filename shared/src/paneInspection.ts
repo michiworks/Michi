@@ -215,8 +215,6 @@ export const PANE_INSPECTION_LIMITS = {
   waitTimeoutMaxMs: 30_000,
   /** §11 maximum serialized PaneDescriptorV1 size, bytes. */
   descriptorMaxBytes: 32_768,
-  /** §8 output_changed event coalescing window, ms; terminal events flush immediately. */
-  outputChangedCoalesceMs: 250,
   /** §8 per-object inspection ring retention window, seconds. */
   ringRetentionSeconds: 60,
   /** §8 per-object inspection ring maximum event count. */
@@ -344,13 +342,6 @@ export interface ReadPaneOutputRequestV1 {
   limitBytes: number;
 }
 
-export interface SubscribePanesRequestV1 {
-  version: 1;
-  paneIds: string[];
-  /** Most recently received observation cursor per paneId, if any. */
-  cursors: Record<string, string | undefined>;
-}
-
 export interface WaitPaneRequestV1 {
   version: 1;
   locator: PaneLocator;
@@ -372,28 +363,6 @@ export interface PaneSummaryV1 {
   openedInViews: number;
   updatedAt: number;
 }
-
-// ---------------------------------------------------------------------------
-// §8 Feed event union
-// ---------------------------------------------------------------------------
-
-interface PaneFeedEventBase {
-  version: 1;
-  paneId: string;
-  /** Opaque server-side lookup key — not decodable or forgeable by the client. */
-  cursor: string;
-  emittedAt: number;
-}
-
-export type PaneFeedEventV1 =
-  | (PaneFeedEventBase & { type: 'snapshot'; descriptor: PaneDescriptorV1 })
-  | (PaneFeedEventBase & { type: 'changed'; changedSections: string[]; descriptor: PaneDescriptorV1 })
-  | (PaneFeedEventBase & { type: 'output_changed'; outputId: string; outputRevision: string; preview: OutputPreview })
-  | (PaneFeedEventBase & { type: 'execution_settled'; execution: ExecutionRef; outcome: ExecutionStatus; commitState: CommitState; descriptor?: PaneDescriptorV1 })
-  | (PaneFeedEventBase & { type: 'removed' })
-  | (PaneFeedEventBase & { type: 'access_revoked' })
-  | (PaneFeedEventBase & { type: 'resync_required' })
-  | (PaneFeedEventBase & { type: 'heartbeat' });
 
 export interface WaitPaneResultV1 {
   version: 1;
@@ -640,23 +609,6 @@ export function parseReadPaneOutputRequestV1(value: unknown, path = 'request'): 
   if (raw.outputId !== undefined) out.outputId = str(raw.outputId, `${path}.outputId`);
   if (raw.pageCursor !== undefined) out.pageCursor = str(raw.pageCursor, `${path}.pageCursor`);
   return out;
-}
-
-export function parseSubscribePanesRequestV1(value: unknown, path = 'request'): SubscribePanesRequestV1 {
-  const raw = obj(value, path);
-  if (!Array.isArray(raw.paneIds)) fail('INVALID_ARGUMENT', `${path}.paneIds`, 'must be an array');
-  if (raw.paneIds.length === 0) fail('INVALID_ARGUMENT', `${path}.paneIds`, 'must not be empty');
-  if (raw.paneIds.length > PANE_INSPECTION_LIMITS.subscribeMaxPanes) {
-    fail('INVALID_ARGUMENT', `${path}.paneIds`, `must contain at most ${PANE_INSPECTION_LIMITS.subscribeMaxPanes} items`);
-  }
-  const paneIds = raw.paneIds.map((id, i) => str(id, `${path}.paneIds[${i}]`));
-  if (new Set(paneIds).size !== paneIds.length) fail('INVALID_ARGUMENT', `${path}.paneIds`, 'must not contain duplicates');
-  const cursorsRaw = raw.cursors === undefined ? {} : obj(raw.cursors, `${path}.cursors`);
-  const cursors: Record<string, string | undefined> = {};
-  for (const [key, val] of Object.entries(cursorsRaw)) {
-    if (val !== undefined) cursors[key] = str(val, `${path}.cursors.${key}`);
-  }
-  return { version: 1, paneIds, cursors };
 }
 
 export function parseWaitPaneRequestV1(value: unknown, path = 'request'): WaitPaneRequestV1 {

@@ -15,10 +15,9 @@
  * NOT owned here: the agent tools that call it (`wait_pane` in
  * backend/src/agents/paneInspectionTools.ts, and threadMessageTool.ts). There is no HTTP route.
  *
- * Built on P3-2/P3-4's `PaneFeed.oncePerObject` seam (`paneInspectionSubscribe.ts`), which this
- * task implements: a non-coalescing, ring-untouched one-shot change listener that reuses the
- * exact same ChatHub/AgentRunEventBus notification sources the SSE feed uses, so `wait_pane` and
- * `subscribePanes` can never disagree about what "changed" means for the same object.
+ * Built on `PaneFeed.oncePerObject` (`paneInspectionSubscribe.ts`): a non-coalescing one-shot
+ * change listener on the object's ChatHub/AgentRunEventBus notification sources, which decides
+ * "changed" with the same `paneContentSnapshot`/`contentEquals` rule as this module.
  *
  * Design: docs/pane-inspection-api-design-2026-09-14.md §7.4, §11. COMMON.md decisions 8, 9, 10.
  */
@@ -45,7 +44,7 @@ export interface WaitPaneInput {
   locator: PaneLocator;
   until: WaitUntil;
   /** Required and only meaningful for until: 'changed'. The observation cursor the caller last
-   *  saw (e.g. from a prior inspect_pane/wait_pane/subscribePanes event). */
+   *  saw (e.g. from a prior inspect_pane/wait_pane result). */
   cursor?: string;
   /** Required and only meaningful for until: 'terminal'. Must name a turn/run that has already
    *  started (COMMON.md / design §7.4: a `queued` chat has no turnId yet and may only use
@@ -202,7 +201,7 @@ function runWait(
     }
 
     // ---- subscribe ------------------------------------------------------------------------------
-    const feed = new PaneFeed({ clock: deps.clock, ring: paneInspectionRing, agentRunEvents: deps.agentRunEvents });
+    const feed = new PaneFeed({ clock: deps.clock, agentRunEvents: deps.agentRunEvents });
     const paneId = descriptor.ref.paneId;
     let settled = false;
     let timeoutHandle: unknown;
@@ -213,7 +212,6 @@ function runWait(
       settled = true;
       if (timeoutHandle !== undefined) deps.clock.clearTimeout(timeoutHandle);
       detach?.();
-      feed.stop();
       input.signal?.removeEventListener('abort', abort);
     };
     const finish = (out: WaitPaneResultV1): void => {

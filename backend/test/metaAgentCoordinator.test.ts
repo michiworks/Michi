@@ -11,10 +11,13 @@ import { updateAgentConfig } from '../src/services/agentConfig';
 import { PageMaintenanceConfigService } from '../src/services/pages/maintenanceConfig';
 import { getMaintenanceConfig } from '../src/services/pages/maintenanceRepository';
 import { maintenanceCoordinatorState } from '../src/services/metaAgent/maintenanceCoordinator';
+import { CONSOLIDATION_LIMITS } from '../src/services/memory/consolidationPolicy';
 import { metaAgentOverview, setMetaAgentPaused } from '../src/services/metaAgent/overview';
+import { pauseMichi } from '../src/services/michiPause';
 import { ScheduledJobsRepository } from '../src/services/scheduledJobs/repository';
 import { ScheduledJobEventBus } from '../src/services/scheduledJobs/events';
 import { ScheduledJobScheduler, type ScheduledRunOutcome } from '../src/services/scheduledJobs/scheduler';
+import { turnBackgroundWorkOn } from './helpers/backgroundWork';
 
 const owner = 'local-user';
 let dir: string, previous: string | undefined, now: number, seq: number;
@@ -28,9 +31,10 @@ beforeEach(() => {
   dir = fs.mkdtempSync(path.join(os.tmpdir(), 'michi-coordinator-'));
   process.env.MICHI_DATA_DIR = dir;
   closeDb(); initDb();
+  turnBackgroundWorkOn();
   now = Date.parse('2026-10-28T09:00:00Z'); seq = 0; calls = []; finish = null;
   updateAgentConfig({ runtime: 'pi' });
-  scheduler = new ScheduledJobScheduler({ repository: new ScheduledJobsRepository(), events: new ScheduledJobEventBus(() => now),
+  scheduler = new ScheduledJobScheduler({ repository: new ScheduledJobsRepository(), events: new ScheduledJobEventBus(),
     workspaceExists: () => true, runtimeExists: () => true, clock: () => now, createId: () => `job-${++seq}`,
     pollIntervalMs: 600_000, maxConcurrentRuns: 4,
     executor: { start: async job => {
@@ -105,6 +109,27 @@ test('global pause persists and preserves local pauses, cursors and newly enroll
   assert.equal(getMaintenanceConfig('b', owner)!.paused, true);
 });
 
+test('Pause Michi holds only the automatic path: a timed pause ends by itself, and Run now starts while paused', async () => {
+  enroll('a'); const b = enroll('b'); complete('a');
+  pauseMichi(owner, now + 3_600_000);
+  scheduler.start(); await tick();
+  assert.deepEqual(calls, [], 'paused for an hour: the automatic path waits');
+  assert.equal(metaAgentOverview({ ownerUserId: owner, now }).state, 'paused');
+  now += 3_600_000; await tick();
+  assert.deepEqual(calls, ['a'], 'the hour is over');
+  finish!({ status: 'succeeded', summary: null, error: null });
+  await flush();
+
+  setMetaAgentPaused({ scheduler, ownerUserId: owner, paused: true, clock: () => now });
+  complete('b');
+  now += 61_000; await tick();
+  assert.deepEqual(calls, ['a']);
+  const started = scheduler.startNow(b);
+  assert.ok('run' in started, 'a person\'s start runs while Michi is paused');
+  await flush();
+  assert.deepEqual(calls, ['a', 'b']);
+});
+
 test('only one maintenance execution is admitted and failures yield to another workspace', async () => {
   const a = enroll('a'); const b = enroll('b'); complete('a'); complete('b');
   scheduler.start(); await tick();
@@ -138,7 +163,8 @@ test('pausing globally lets an active execution settle and holds the next worksp
   assert.equal(scheduler.getJob(a).activeRunId, active);
   assert.equal(getMaintenanceConfig('a', owner)!.revision, revision);
   finish!({ status: 'failed', summary: null, error: 'Temporary error' });
-  await flush(); now += 120_000; await tick();
+  // Past the spacing between two incremental batches, so only the pause holds b.
+  await flush(); now += CONSOLIDATION_LIMITS.spacingMs; await tick();
   assert.deepEqual(calls, ['a']);
   setMetaAgentPaused({ scheduler, ownerUserId: owner, paused: false, clock: () => now });
   await tick();

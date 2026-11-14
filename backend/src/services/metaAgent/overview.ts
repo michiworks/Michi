@@ -1,4 +1,5 @@
-import { maintenanceCoordinatorState, pauseMaintenanceCoordinator } from './maintenanceCoordinator';
+import { maintenanceCoordinatorState } from './maintenanceCoordinator';
+import { pauseMichi, resumeMichi } from '../michiPause';
 import {
   SCHEDULED_JOB_LIMITS,
   type MetaAgentTodayMetrics,
@@ -19,7 +20,7 @@ import { scheduledJobsFeatureEnabled } from '../scheduledJobs/feature';
 import type { ScheduledJobScheduler } from '../scheduledJobs/scheduler';
 import { firstRunWindowDays } from './firstRunHistory';
 import { getMetaAgentGuardStatus } from './guardStatus';
-import { resolveMetaAgentRuntime } from './settings';
+import { resolveBackgroundRuntime } from './settings';
 import { classifyMetaAgentRunError, errorFirstLine, runtimeLabel } from './stopReason';
 import {
   listManagedMaintenanceJobIds, listMaintenanceConfigs as listConfigs, placeholders, startOfLocalDay, todayMetrics,
@@ -243,9 +244,9 @@ const stoppedBy = (stop: MetaAgentStop): OverallState => ({ state: 'error', erro
  */
 function overallState(
   ownerUserId: string, runtime: MetaAgentResolvedRuntime, configs: ConfigRow[],
-  rows: Array<{ row: MetaAgentCursorRow; detail?: string }>,
+  rows: Array<{ row: MetaAgentCursorRow; detail?: string }>, now: number,
 ): OverallState {
-  if (maintenanceCoordinatorState(ownerUserId).paused) return { state: 'paused', stopped: null };
+  if (maintenanceCoordinatorState(ownerUserId, now).paused) return { state: 'paused', stopped: null };
   const availability = maintenanceRuntimeAvailability(runtime.runtimeId);
   if (!availability.available) {
     return stoppedBy({ reason: 'runtime-unsupported', message: availability.reason ?? `Pages upkeep cannot run on ${runtimeLabel(runtime.runtimeId)}`, workspaceIds: [] });
@@ -273,7 +274,7 @@ function overallState(
 
 export function metaAgentOverview(input: { ownerUserId: string; now: number; dayStart?: number; today?: MetaAgentTodayMetrics }): MetaAgentOverview {
   const { ownerUserId } = input;
-  const runtime = resolveMetaAgentRuntime(ownerUserId);
+  const runtime = resolveBackgroundRuntime(ownerUserId);
   const configs = listConfigs(ownerUserId);
   const jobIds = configs.map((config) => config.job_id);
   const names = new Map(configs.map((config) => [config.workspace_id, config.workspace_name] as const));
@@ -282,7 +283,7 @@ export function metaAgentOverview(input: { ownerUserId: string; now: number; day
   const entries = jobIds.length === 0 ? [] : [...planEntries(jobIds, ownerUserId, cursors, names), ...checkEntries(jobIds, names)];
   const rows = configs.map((config) => cursorRow(config, ownerUserId, runtime.runtimeId));
   return {
-    ...overallState(ownerUserId, runtime, configs, rows),
+    ...overallState(ownerUserId, runtime, configs, rows, input.now),
     // The server builds no scheduler when the feature is off, so no maintenance job starts.
     notRunning: scheduledJobsFeatureEnabled() ? null : { reason: 'scheduler-off', message: 'Scheduled jobs are off on this backend' },
     runtime,
@@ -290,7 +291,7 @@ export function metaAgentOverview(input: { ownerUserId: string; now: number; day
     cursors: rows.map(({ row }) => row),
     recentRuns: mergeQuiet([...entries, ...(first ? [first] : []), ...summaryEntries(ownerUserId)]),
     managedJobIds: listManagedMaintenanceJobIds(ownerUserId),
-    lastCheckedAt: maintenanceCoordinatorState(ownerUserId).lastCheckedAt,
+    lastCheckedAt: maintenanceCoordinatorState(ownerUserId, input.now).lastCheckedAt,
   };
 }
 
@@ -298,12 +299,22 @@ export class MetaAgentPauseError extends Error {
   constructor(message: string) { super(message); this.name = 'MetaAgentPauseError'; }
 }
 
-/** Global pause leaves each workspace's own pause and cursor untouched.
- * Explicit retry/resume also retries stopped workspaces that are not locally paused.
+/**
+ * Pause Michi until resumed, or resume it; each workspace's own pause and
+ * cursor stay as they are. Resuming retries stopped workspaces that are not
+ * paused on their own (retryStoppedMaintenance).
  */
 export function setMetaAgentPaused(input: { scheduler: ScheduledJobScheduler; ownerUserId: string; paused: boolean; clock?: () => number }): void {
-  pauseMaintenanceCoordinator(input.ownerUserId, input.paused);
-  if (input.paused) return;
+  if (input.paused) {
+    pauseMichi(input.ownerUserId, null);
+    return;
+  }
+  resumeMichi(input.ownerUserId);
+  retryStoppedMaintenance(input);
+}
+
+/** After Michi is resumed: each workspace not paused on its own looks at its sources needing attention again, and a job that stopped itself restarts. */
+export function retryStoppedMaintenance(input: { scheduler: ScheduledJobScheduler; ownerUserId: string; clock?: () => number }): void {
   const clock = input.clock ?? Date.now;
   const failures: string[] = [];
   for (const config of listConfigs(input.ownerUserId)) {

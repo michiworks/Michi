@@ -1,6 +1,6 @@
-import type { CompanionNotice } from 'michi-shared';
 import { subscribeCompanionEvents } from '../../services/api/companion';
 import { SseHttpError } from '../../services/api/sseParser';
+import { noteNotificationLevelChanged } from '../prefs';
 import { getCompanionState, loadCompanion, noteCompanionChanged, refreshCompanion, subscribeCompanion } from './companionStore';
 
 /**
@@ -9,16 +9,13 @@ import { getCompanionState, loadCompanion, noteCompanionChanged, refreshCompanio
  * reconnect after 1s doubling to 30s (back to 1s once a connection held for
  * 30s), and 401/403/404 taken as "no feed here" (reads on window focus
  * instead). Each frame names the backend's revision; the store reads the
- * snapshot again when it differs from its own. A `companion_notice` frame is
- * a notice the backend's gate produced; subscribeCompanionNotices hands it on.
+ * snapshot again when it differs from its own. Michi's notices are not on
+ * this feed: they are attention records on the background feed
+ * (services/serverAttention.ts).
  *
- * The backend also counts this feed as the window being open (DESIGN-v2
- * §5.2): while no window's feed is connected for five seconds, it notifies
- * conversations' approvals, questions and replies itself, and a window that
- * notifies them too would double them. So the feed opens as soon as the
- * shell mounts it, whether or not the first `GET /companion` answered (D20),
- * and until it has connected once, it retries within FIRST_CONNECT_RETRY_MAX_MS
- * rather than backing off to 30s.
+ * The feed opens as soon as the shell mounts it, whether or not the first
+ * `GET /companion` answered (D20), and until it has connected once, it
+ * retries within FIRST_CONNECT_RETRY_MAX_MS rather than backing off to 30s.
  */
 
 const RECONNECT_MIN_MS = 1_000;
@@ -36,27 +33,6 @@ let openedAt = 0;
 let connectedOnce = false;
 let feedState: 'idle' | 'open' | 'unavailable' = 'idle';
 let unsubscribeStore: (() => void) | null = null;
-const noticeListeners = new Set<(notice: CompanionNotice) => void>();
-
-function publishNotice(notice: CompanionNotice): void {
-  for (const listener of [...noticeListeners]) {
-    try {
-      listener(notice);
-    } catch {
-      // One listener must not stop the others.
-    }
-  }
-}
-
-/**
- * The notices the backend's notice gate sends over this feed (R2.7): what a
- * browser window shows, since it has no main process to show them. Only
- * while the feed is open (startCompanionFeed). Returns unsubscribe.
- */
-export function subscribeCompanionNotices(listener: (notice: CompanionNotice) => void): () => void {
-  noticeListeners.add(listener);
-  return () => { noticeListeners.delete(listener); };
-}
 
 function connect(): void {
   // A reconnect already waiting keeps its backoff.
@@ -67,8 +43,11 @@ function connect(): void {
       openedAt = Date.now();
       connectedOnce = true;
     },
-    onEvent: noteCompanionChanged,
-    onNotice: publishNotice,
+    onEvent: (event) => {
+      noteCompanionChanged(event);
+      // Michi changed the user's notification level: the prefs read it again.
+      if (event.reason === 'notifications') noteNotificationLevelChanged();
+    },
     onDisconnect: (error) => {
       stop = null;
       const status = error instanceof SseHttpError ? error.status : null;
@@ -133,7 +112,6 @@ export function resetCompanionFeedForTests(): void {
   stop = null;
   unsubscribeStore?.();
   unsubscribeStore = null;
-  noticeListeners.clear();
   users = 0;
   failures = 0;
   openedAt = 0;

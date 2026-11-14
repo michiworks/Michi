@@ -1,6 +1,9 @@
-import { act, fireEvent, render, screen } from '@testing-library/react';
+import { act, fireEvent, render, renderHook, screen } from '@testing-library/react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import CommandPalette from './CommandPalette';
+import { __resetHomeDraftForTests, receiveHomeDraft } from '../../state/homeDraft';
+import { paletteRow } from '../../test/paletteRow';
+import { resetTemporaryChatDraft, useTemporaryChatDraft } from '../../state/temporaryChatDraft';
 
 const selectProject = vi.hoisted(() => vi.fn());
 const revealNode = vi.hoisted(() => vi.fn());
@@ -73,7 +76,11 @@ describe('CommandPalette workspace routing', () => {
     fireEvent.change(screen.getByPlaceholderText('Search chats, commands, messages…'), {
       target: { value: 'Pricing' },
     });
-    fireEvent.click(screen.getByText('Pricing · Workspace B'));
+    // Its name, marked where the words sit, with its workspace at the row's end.
+    const row = screen.getByText(paletteRow('Pricing')).closest('li')!;
+    expect(row.querySelector('mark')?.textContent).toBe('Pricing');
+    expect(row.querySelector('.michi-menu-where')?.textContent).toBe('Workspace B');
+    fireEvent.click(row);
 
     expect(selectProject).toHaveBeenCalledWith('workspace-2');
     // revealNode opens it in its own slot and shows the Dashboard.
@@ -126,7 +133,44 @@ describe('CommandPalette message search', () => {
 
     messageSearch.status = 'ready';
     view.rerender(palette());
-    expect(screen.getByText('No matches')).toBeTruthy();
+    expect(screen.getByText('No matches for “zzz-unmatched”')).toBeTruthy();
+  });
+
+  it('offers to start a thread with words that found nothing, and leaves them in the Home composer', async () => {
+    const setPage = vi.fn();
+    const onClose = vi.fn();
+    const received: string[] = [];
+    const stop = receiveHomeDraft((text) => received.push(text));
+    try {
+      render(<CommandPalette activePage="dashboard" setPage={setPage} onClose={onClose} />);
+      fireEvent.change(screen.getByPlaceholderText('Search chats, commands, messages…'), { target: { value: 'zzz-unmatched' } });
+      // Not while the message search may still find something.
+      expect(screen.queryByText(paletteRow('New thread: “zzz-unmatched”'))).toBeNull();
+      await act(async () => { await new Promise((resolve) => setTimeout(resolve, 250)); });
+      fireEvent.click(screen.getByText(paletteRow('New thread: “zzz-unmatched”')));
+      expect(received).toEqual(['zzz-unmatched']);
+      expect(setPage).toHaveBeenCalledWith('home');
+      expect(onClose).toHaveBeenCalled();
+    } finally {
+      stop();
+      __resetHomeDraftForTests();
+    }
+  });
+});
+
+describe('CommandPalette New temporary chat', () => {
+  it('turns on Home’s temporary-chat switch and opens Home', () => {
+    act(() => resetTemporaryChatDraft());
+    const draft = renderHook(() => useTemporaryChatDraft());
+    const setPage = vi.fn();
+    const onClose = vi.fn();
+    render(<CommandPalette activePage="dashboard" setPage={setPage} onClose={onClose} />);
+    fireEvent.change(screen.getByPlaceholderText('Search chats, commands, messages…'), { target: { value: 'temporary' } });
+    fireEvent.click(screen.getByText(paletteRow('New temporary chat')));
+    expect(draft.result.current).toBe(true);
+    expect(setPage).toHaveBeenCalledWith('home');
+    expect(onClose).toHaveBeenCalled();
+    act(() => resetTemporaryChatDraft());
   });
 });
 

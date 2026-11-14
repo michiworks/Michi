@@ -12,6 +12,7 @@ import { useCloseOtherPanes } from '../../state/closeOtherPanes';
 import ContextMenu, { menuOpenKey } from '../ContextMenu';
 import { Dot } from './primitives';
 import PaneLauncher from './PaneLauncher';
+import { TemporaryChatGlyph } from './TemporaryChat';
 import { kbd } from '../../lib/platform';
 
 const TAB_DRAG_MIME = 'application/x-michi-tab-id';
@@ -42,11 +43,12 @@ function ChatGlyph() {
   );
 }
 
-function TabIcon({ kind, status }: { kind: TabKind; status: string }) {
+function TabIcon({ kind, status, temporary }: { kind: TabKind; status: string; temporary: boolean }) {
   if (status === 'streaming') return <Dot color="var(--term-run)" size={7} pulse />;
   if (status === 'error') return <Dot color="var(--term-danger)" size={7} />;
   const glyph = KIND_GLYPH[kind];
-  if (!glyph) return <ChatGlyph />;
+  // A temporary chat's ghost, before its title, stands in for the chat glyph.
+  if (!glyph) return temporary ? null : <ChatGlyph />;
   return (
     <span aria-hidden style={{ fontFamily: 'var(--font-mono)', fontSize: 'var(--fs-sm)', fontWeight: 700, flexShrink: 0 }}>
       {glyph}
@@ -81,6 +83,10 @@ export default function PaneTabStrip({ titleOverride, leftInset }: {
   );
   const kinds = useStructuralSelector(
     (nodesMap) => tabPanes.map((id) => (paneItems[id]?.kind ?? nodesMap[id]?.kind ?? 'chat') as string),
+    shallowArrayEqual,
+  );
+  const temporaries = useStructuralSelector(
+    (nodesMap) => tabPanes.map((id) => !paneItems[id] && nodesMap[id]?.temporary === true),
     shallowArrayEqual,
   );
 
@@ -121,6 +127,7 @@ export default function PaneTabStrip({ titleOverride, leftInset }: {
           title={titles[i] || 'Untitled'}
           kind={(kinds[i] ?? 'chat') as TabKind}
           status={statuses[i] ?? 'idle'}
+          temporary={temporaries[i] ?? false}
           active={id === focusedPane}
           tabRef={(el) => { tabRefs.current[id] = el; }}
           onSelect={focusPane}
@@ -157,11 +164,12 @@ export default function PaneTabStrip({ titleOverride, leftInset }: {
   );
 }
 
-function PaneTab({ id, title, kind, status, active, tabRef, onSelect, onClose, onMenu, onReorder }: {
+function PaneTab({ id, title, kind, status, temporary, active, tabRef, onSelect, onClose, onMenu, onReorder }: {
   id: string;
   title: string;
   kind: TabKind;
   status: string;
+  temporary: boolean;
   active: boolean;
   tabRef: (el: HTMLDivElement | null) => void;
   onSelect: (id: string) => void;
@@ -225,7 +233,8 @@ function PaneTab({ id, title, kind, status, active, tabRef, onSelect, onClose, o
         transition: 'background var(--t-quick) var(--t-ease), color var(--t-quick) var(--t-ease)',
       } as React.CSSProperties}
     >
-      <TabIcon kind={kind} status={status} />
+      <TabIcon kind={kind} status={status} temporary={temporary} />
+      {temporary && <TemporaryChatGlyph size={14} />}
       <span style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
         {title}
       </span>

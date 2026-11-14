@@ -1,3 +1,4 @@
+import { KIRO_GUARDED_FALLBACK_AGENT, kiroGuardedFallbacks, type KiroGuardedFallbacks } from './kiroGuardedFallbacks';
 import { assertToolCatalog, catalogUnavailable, guardError } from '../../core/restrictedCatalog';
 import { assertReleaseOwnership } from '../../core/release';
 import { hostSkillsPrefix, scanSkillRoots, type SkillScanRoot } from '../../core/skills';
@@ -209,6 +210,14 @@ export interface KiroAdapterOptions extends AcpProcessOptions {
         };
     };
     /**
+     * The host's guarded agents (KiroGuardedAgentOptions): a chat turn the
+     * host guards (PermissionPolicyPort.turnGuard: anything but `none`) runs
+     * on a copy of the chat's agent that pre-approves no tools, so every
+     * call reaches the host's approval. Absent: every turn keeps the chat's
+     * agent (Kiro Crew, Antigravity).
+     */
+    guardedAgent?: KiroGuardedAgentOptions;
+    /**
      * Runtime host ports. Required; see KIRO_HOST_PORTS. A v3 session worker
      * runs on its parent's host (and slot provider).
      */
@@ -309,6 +318,36 @@ export interface KiroAdapterOptions extends AcpProcessOptions {
 }
 
 /** What AcpAgentRuntime is built from: the adapter's options plus the host's tool effects and MCP slots. */
+/**
+ * Copies of the user's Kiro agents that pre-approve nothing (lane D, Q26):
+ * kiro-cli runs without asking whatever the agent's `allowedTools`,
+ * `toolsSettings` and permission rules allow, so a guarded turn switches the
+ * session to such a copy (`session/set_mode`, both engines) and the next
+ * unguarded turn back to the agent it was made from.
+ */
+export interface KiroGuardedAgentOptions {
+    /**
+     * Writes (or keeps) the guarded copy of `base`, the session's agent (null:
+     * Kiro's default), where `cwd`'s kiro-cli finds it; returns its agent
+     * name, or null when `base` pre-approves nothing a read would not (the
+     * turn keeps it). For an agent without a file to copy (v3's bundled
+     * modes), `fallback` when given: an agent Kiro lists that asks before
+     * commands and writes (KIRO_GUARDED_FALLBACK_AGENT); the turn runs on it
+     * and the next unguarded turn goes back. Throws when it cannot tell or
+     * cannot write: the turn then does not run.
+     */
+    ensure(base: string | null, cwd: string, fallback?: string): string | null;
+    /** Whether an agent (mode) id is one of the guarded copies. */
+    isGuarded(modeId: string): boolean;
+    /** The agent a guarded copy was made from; null: Kiro's default. */
+    baseOf(modeId: string): string | null;
+    /**
+     * Before a chat kiro-cli starts in `cwd`: write the guarded copies it
+     * should list (kiro-cli reads its agents when it starts). Must not throw.
+     */
+    prepare?(cwd: string): void;
+}
+
 export interface KiroRuntimeOptions extends KiroAdapterOptions {
     /** Business effects of the host's tools (spawn branches, save/update artifacts, Agent Run tools). */
     bridge: AgentToolBridge;
@@ -1304,6 +1343,39 @@ export class AcpAgentRuntime implements AgentRuntime {
         entry.resolve(null);
     }
 
+    /** The mode each chat left for a guarded turn's fallback (kiroGuardedFallbacks.ts), under the host's data directory. */
+    readonly guardedFallbacks: KiroGuardedFallbacks = kiroGuardedFallbacks(() => this.host.config.dataDir());
+
+    /** Where a guarded turn goes for an agent without a file to copy: v3's vibe; none on v2, which gets a stand-in copy. */
+    get guardedFallbackAgent(): string | undefined {
+        return this.engine === 'v3' ? KIRO_GUARDED_FALLBACK_AGENT : undefined;
+    }
+
+    /** The host's guarded agents for chat sessions; none on a restricted (Meta agent) runtime. */
+    get guardedAgent(): KiroGuardedAgentOptions | undefined {
+        return this.runtimeOptions.metaAgent ? undefined : this.runtimeOptions.guardedAgent;
+    }
+
+    /** Lets a chat kiro-cli about to start in `cwd` list the guarded copies (KiroGuardedAgentOptions.prepare). */
+    private prepareGuardedAgents(cwd: string): void {
+        try { this.guardedAgent?.prepare?.(cwd); }
+        catch (error) {
+            this.host.observability.log('warn', 'acp', 'Kiro guarded agents not prepared; a guarded turn may not start', {
+                cwd, error: error instanceof Error ? error.message : String(error),
+            });
+        }
+    }
+
+    /** A mode catalog without the guarded copies, which nobody picks by hand. */
+    withoutGuardedModes<T>(modes: T[]): T[] {
+        const guarded = this.guardedAgent;
+        if (!guarded) return modes;
+        return modes.filter((mode) => {
+            const id = (mode as { id?: unknown } | null)?.id;
+            return typeof id !== 'string' || !guarded.isGuarded(id);
+        });
+    }
+
     /** Only an explicit availability override can block a spawn; Kiro's default never does. */
     private launchUnavailableDetail(): string | null {
         const check = this.runtimeOptions.checkAvailability;
@@ -1355,6 +1427,7 @@ export class AcpAgentRuntime implements AgentRuntime {
                 if (this.closing) throw new ACPNotRunningError('Kiro runtime is shutting down');
                 const unavailable = this.launchUnavailableDetail();
                 if (unavailable) throw new Error(unavailable);
+                this.prepareGuardedAgents(cwd);
                 const c = new AcpClient(undefined, cwd, model, this.engine, this.runtimeOptions.launch, this.id, this.acpClientOptions());
                 this.attachWorkflowBridge(c);
                 c.onExit(() => {
@@ -1433,6 +1506,7 @@ export class AcpAgentRuntime implements AgentRuntime {
                 this.pool.delete(cwd);
                 this.purgeSessionsForCwd(cwd);
                 remaining();
+                this.prepareGuardedAgents(cwd);
                 client = new AcpClient(undefined, cwd, model, this.engine, this.runtimeOptions.launch, this.id, this.acpClientOptions());
                 this.attachWorkflowBridge(client);
                 const replacement = client;
@@ -1992,8 +2066,8 @@ export class AcpAgentRuntime implements AgentRuntime {
     async getAvailableModes(): Promise<any[]> {
         // An agent without modes has none to probe for.
         if (!this.capabilities.modes) return this.globalAvailableModes ??= [];
-        if (this.globalAvailableModes) return this.globalAvailableModes;
-        if (this.modesLoadLock) return this.modesLoadLock;
+        if (this.globalAvailableModes) return this.withoutGuardedModes(this.globalAvailableModes);
+        if (this.modesLoadLock) return this.modesLoadLock.then((modes) => this.withoutGuardedModes(modes));
 
         // If a warmNextSession is already in flight for defaultCwd, wait
         // for it — it will populate globalAvailableModes via openSession's
@@ -2002,9 +2076,9 @@ export class AcpAgentRuntime implements AgentRuntime {
         const inflightWarm = this.warmSessionLocks.get(this.defaultCwd);
         if (inflightWarm) {
             await inflightWarm.catch(() => {});
-            if (this.globalAvailableModes) return this.globalAvailableModes;
+            if (this.globalAvailableModes) return this.withoutGuardedModes(this.globalAvailableModes);
         }
-        return this.probeSessionCatalog();
+        return this.withoutGuardedModes(await this.probeSessionCatalog());
     }
 
     /** Opens and drops a session on defaultCwd for the mode and model catalogs it reports. */
@@ -2038,6 +2112,23 @@ export class AcpAgentRuntime implements AgentRuntime {
         if (!c) throw new Error("client not running");
         await c.setMode(sid, modeId);
         this.sessionCurrentMode.set(sid, modeId);
+    }
+
+    /**
+     * Switches a chat to a guarded copy of its agent or the fallback (lane D),
+     * or back from one, and confirms Kiro applied it
+     * (AcpClient.selectAgentVerified): a switch that did not happen would run
+     * the turn on the user's pre-approving agent, or lose the mode it left.
+     */
+    async selectGuardedAgent(sid: string, agent: string): Promise<void> {
+        const worker = this.workerForNativeId(sid);
+        if (worker) return worker.selectGuardedAgent(sid, agent);
+        const cwd = this.getCwdForSession(sid);
+        if (!cwd) throw new Error("unknown chat");
+        const c = this.pool.get(cwd);
+        if (!c) throw new Error("client not running");
+        await c.selectAgentVerified(sid, agent);
+        this.sessionCurrentMode.set(sid, agent);
     }
 
     /** currentModelId for a session (undefined if unknown). */

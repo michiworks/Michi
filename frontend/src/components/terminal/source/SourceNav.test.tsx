@@ -8,7 +8,7 @@ vi.mock('../../../state/sourceNav/sourceApi', () => api);
 vi.mock('sonner', () => ({ toast: { error: vi.fn() } }));
 vi.mock('../../MarkdownContent', () => ({ default: ({ text }: { text: string }) => <span>{text}</span> }));
 
-import { SourceBackBar, SourcePopoverHost } from './SourceNav';
+import { SourcePopoverHost } from './SourceNav';
 import { PaneMessageList } from '../PaneMessageList';
 import {
   openConversationFromSpaces, openExactSourcePopover, registerSourceNavigator, resetSourceNavForTests, type SourceOrigin,
@@ -26,29 +26,6 @@ beforeEach(() => {
   registerSourceNavigator(navigator);
 });
 afterEach(() => { cleanup(); });
-
-describe('Back to page bar', () => {
-  it('appears after a jump, stays through later jumps, returns on Back and goes away on ×', async () => {
-    render(<SourceBackBar contentWidth={740} />);
-    expect(screen.queryByRole('navigation', { name: 'Back to Pages' })).toBeNull();
-    await act(async () => { await openConversationFromSpaces({ backendConnectionId: 'local', workspaceId: 'ws-1', nodeId: 'n1', messageId: 'm4', page }); });
-    const bar = screen.getByRole('navigation', { name: 'Back to Pages' });
-    expect(bar.textContent).toContain('From Pages’ “Michi 0.9 发布”');
-    expect(bar.style.maxWidth).toBe('740px');
-    navigator.currentOrigin = () => null;
-    await act(async () => { await openConversationFromSpaces({ backendConnectionId: 'local', workspaceId: 'ws-1', nodeId: 'n2', messageId: 'm1' }); });
-    expect(screen.getByRole('button', { name: 'Back to “Michi 0.9 发布”' })).toBeTruthy();
-    fireEvent.click(screen.getByRole('button', { name: 'Back to “Michi 0.9 发布”' }));
-    expect(navigator.returnTo).toHaveBeenCalledWith(origin);
-    expect(screen.queryByRole('navigation', { name: 'Back to Pages' })).toBeNull();
-
-    navigator.currentOrigin = () => origin;
-    await act(async () => { await openConversationFromSpaces({ backendConnectionId: 'local', workspaceId: 'ws-1', nodeId: 'n1', messageId: 'm4' }); });
-    fireEvent.click(screen.getByRole('button', { name: 'Close the back bar' }));
-    expect(screen.queryByRole('navigation', { name: 'Back to Pages' })).toBeNull();
-    expect(navigator.returnTo).toHaveBeenCalledTimes(1);
-  });
-});
 
 describe('source popover host', () => {
   it('opens the popover from a source link and Continue reveals the conversation it resolved', async () => {

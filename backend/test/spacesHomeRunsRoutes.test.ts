@@ -14,6 +14,8 @@ import { ScheduledJobEventBus } from '../src/services/scheduledJobs/events';
 import { ScheduledJobsRepository } from '../src/services/scheduledJobs/repository';
 import { ScheduledJobScheduler } from '../src/services/scheduledJobs/scheduler';
 import { getMaintenanceConfig } from '../src/services/pages/maintenanceRepository';
+import { pauseMichi, resumeMichi } from '../src/services/michiPause';
+import { turnBackgroundWorkOn } from './helpers/backgroundWork';
 
 let dataDir: string;
 let previousDataDir: string | undefined;
@@ -22,10 +24,10 @@ let baseUrl = '';
 let sched: ScheduledJobScheduler;
 let jobSeq = 0;
 
-async function listen(scheduler: ScheduledJobScheduler | null): Promise<void> {
+async function listen(scheduler: ScheduledJobScheduler | null, visitMayStart?: () => boolean): Promise<void> {
   const app = express();
   app.use(express.json());
-  app.use('/api', setupSpacesHomeRunRoutes({ scheduler, clock: () => 5_000 }));
+  app.use('/api', setupSpacesHomeRunRoutes({ scheduler, clock: () => 5_000, ...(visitMayStart ? { visitMayStart } : {}) }));
   server = app.listen(0, '127.0.0.1');
   await new Promise<void>((resolve) => server!.once('listening', resolve));
   baseUrl = `http://127.0.0.1:${(server!.address() as AddressInfo).port}/api`;
@@ -37,10 +39,11 @@ beforeEach(() => {
   process.env.MICHI_DATA_DIR = dataDir;
   closeDb();
   initDb();
+  turnBackgroundWorkOn();
   getDb().prepare('INSERT INTO workspaces(id,name,created_at,updated_at) VALUES(?,?,1,1)').run('ws-a', 'Workspace A');
   sched = new ScheduledJobScheduler({ repository: new ScheduledJobsRepository(),
     executor: { start: async () => { throw new Error('no model in route tests'); } },
-    events: new ScheduledJobEventBus(() => 5_000), workspaceExists: () => true, runtimeExists: () => true,
+    events: new ScheduledJobEventBus(), workspaceExists: () => true, runtimeExists: () => true,
     clock: () => 5_000, instanceId: 'routes', createId: () => `job-${++jobSeq}` });
 });
 
@@ -72,6 +75,31 @@ test('opening Spaces starts the first run once and later calls change nothing', 
   assert.equal(sched.listJobs().length, 0, 'maintenance is not an ordinary scheduled job');
   assert.equal(sched.getJob(jobId).nextRunAt, null);
   assert.equal(new ScheduledJobsRepository().listMaintenanceExecutions().length, 1);
+});
+
+test('while Get started decides it, opening Spaces starts no first run; one already asked for is woken', async () => {
+  let mayStart = false;
+  await listen(sched, () => mayStart);
+  const waiting = await post('/spaces-home/first-run');
+  assert.equal(waiting.status, 200);
+  assert.equal(((await waiting.json()) as { requestedAt: number | null }).requestedAt, null);
+  assert.equal(getMaintenanceConfig('ws-a', 'local-user'), null, 'nothing is enrolled');
+  mayStart = true;
+  const started = await (await post('/spaces-home/first-run')).json() as { requestedAt: number | null };
+  assert.equal(started.requestedAt, 5_000);
+  mayStart = false;
+  assert.deepEqual(await (await post('/spaces-home/first-run')).json(), started, 'a run asked for is woken whatever the card says');
+});
+
+test('while Michi is paused (off until turned on), opening Spaces enrolls and queues nothing', async () => {
+  pauseMichi('local-user', null);
+  await listen(sched);
+  const status = await (await post('/spaces-home/first-run')).json() as { requestedAt: number | null; workspaces: Array<{ firstRun: unknown }> };
+  assert.equal(status.requestedAt, null);
+  assert.deepEqual(status.workspaces.map((home) => home.firstRun), [null]);
+  assert.equal(getMaintenanceConfig('ws-a', 'local-user'), null);
+  resumeMichi('local-user');
+  assert.equal((await (await post('/spaces-home/first-run')).json() as { requestedAt: number | null }).requestedAt, 5_000, 'resumed, the next visit starts it');
 });
 
 test('retry validates its body and the routes need the scheduler', async () => {

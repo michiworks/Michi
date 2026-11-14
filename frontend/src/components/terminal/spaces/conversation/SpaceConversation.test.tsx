@@ -32,7 +32,7 @@ vi.mock('../../../../state/pages/useSpacesHome', () => ({
   useProgressCards: () => ({ data: mocks.cards, status: 'ready', error: null, stale: false, refresh: mocks.refresh }),
 }));
 
-import { NewChatSheetSlot, PageProgressCards, SpaceConversationSlot, SpaceProgressCardList } from './SpaceConversationSlot';
+import { NewChatSheetSlot, PageProgressCards, SpaceProgressCardList } from './SpaceConversationSlot';
 import { SPACE_CONVERSATION_OPENED_EVENT, type SpaceConversationOpened } from './openConversation';
 import { getSourceNavState, registerSourceNavigator, resetSourceNavForTests } from '../../../../state/sourceNav/sourceNav';
 import {
@@ -277,7 +277,7 @@ describe('Progress cards', () => {
     expect(screen.getByRole('article').textContent).toContain('Running tests…');
     expect(screen.queryByRole('button', { name: /Dismiss/ })).toBeNull();
     unmount();
-    render(<SpaceConversationSlot scope={homeScope} cards={mocks.cards as ProgressCardDto[]} />);
+    render(<SpaceProgressCardList scope={homeScope} cards={mocks.cards as ProgressCardDto[]} everyPage />);
     expect(screen.getAllByRole('article')).toHaveLength(2);
   });
 });

@@ -134,7 +134,7 @@ describe('reduceNodes agent-spawn', () => {
   const spawn = (blocks: NonNullable<ChatNodeState['messages'][number]['blocks']>) => {
     const next = reduceNodes({ n1: makeNode({ messages: [{ id: 'a1', role: 'assistant', text: '', toolCalls: [], blocks, streaming: true, createdAt: 1 }] }) }, {
       type: 'agent-spawn', parentNodeId: 'n1', projectId: 'p1',
-      nodes: [{ nodeId: 'b1', chatId: 'cb1', title: 'Try A', prompt: 'a' }, { nodeId: 'b2', chatId: 'cb2', title: 'Try B', prompt: 'b' }],
+      nodes: [{ nodeId: 'b1', chatId: 'cb1', title: 'Try A' }, { nodeId: 'b2', chatId: 'cb2', title: 'Try B' }],
     });
     return next.n1.messages[0]!;
   };

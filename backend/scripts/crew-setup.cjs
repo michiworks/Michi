@@ -12,8 +12,15 @@ const target = fs.mkdtempSync(path.join(os.tmpdir(), 'michi-crew-app-'));
 const source = path.join(root, '../crew-app');
 const manifest = JSON.parse(fs.readFileSync(path.join(source, 'app.json'), 'utf8'));
 fs.cpSync(source, target, { recursive: true });
+// A remote installation runs from a new release after each michi update;
+// <devdesktop>/current follows the running build (scripts/remote-control.mjs),
+// so an App registered to that link keeps working across updates.
+const installation = path.resolve(root, '..');
+const current = path.join(os.homedir(), '.local/share/michi/devdesktop/current');
+const real = (file) => { try { return fs.realpathSync(file); } catch { return ''; } };
+const followsUpdates = real(current) === real(installation);
 manifest.mcpServers.michi.env = {
-    MICHI_CREW_INSTALL_DIR: path.resolve(root, '..'),
+    MICHI_CREW_INSTALL_DIR: followsUpdates ? current : installation,
     MICHI_CREW_MCP_DIR: process.env.MICHI_CREW_MCP_DIR || path.join(os.homedir(), '.michi', 'crew-mcp'),
 };
 fs.writeFileSync(path.join(target, 'app.json'), JSON.stringify(manifest, null, 2) + '\n');
@@ -22,5 +29,7 @@ fs.writeFileSync(path.join(target, 'app.json'), JSON.stringify(manifest, null, 2
 console.log(`Prepared App: ${target}`);
 console.log('Copy the prepared files into a persistent App source for first installation, or the existing App’s registered source before Sync. Crew Sync reuses that source; it does not choose this new temporary directory. Preserve the existing App secret; do not uninstall.');
 console.log('Michi MCP and Approvals are included and required. In Crew Apps, complete sessionApproval consent and confirm the App is Enabled. The official grant also permits user-owned chats; it is broader than App-only access.');
-console.log('In Crew Developer > MCP Management, find michi-crew-runtime:michi, inspect the Python launcher and Michi installation environment, enable Stub/Routed and approve that launch. Restart the Gateway after first installation or migration from an App older than 0.6.0 (kirocrew restart); Apply & Restart only restarts chat agents. Keep this Michi build at its current path.');
+console.log('In Crew Developer > MCP Management, find michi-crew-runtime:michi, inspect the Python launcher and Michi installation environment, enable Stub/Routed and approve that launch. Restart the Gateway after first installation or migration from an App older than 0.6.0 (kirocrew restart); Apply & Restart only restarts chat agents. ' + (followsUpdates
+    ? `The App follows ${current}, so michi update needs no new Sync unless the App files change.`
+    : 'Keep this Michi build at its current path.'));
 console.log('After setup, use Michi for chats, Ask/Trust and approval cards. Crew supplies the backend.');

@@ -1,5 +1,5 @@
 import { vi } from 'vitest';
-import { buildCommands, CommandContext, filterCommands, selectRecentThreads } from './commands';
+import { buildCommands, CommandContext, filterCommands, matchRange, selectRecentThreads, type Command } from './commands';
 import type { Project, Tree } from './chatTypes';
 
 function makeCtx(overrides: Partial<CommandContext> = {}): CommandContext {
@@ -56,6 +56,18 @@ describe('buildCommands', () => {
     expect(actions.indexOf('skills.open')).toBeGreaterThan(actions.indexOf('action.permissions'));
   });
 
+  it('offers New temporary chat right after New thread, where the shell can start one', () => {
+    const createTemporaryChat = vi.fn();
+    const actions = buildCommands(makeCtx({ hasActiveProject: true, createTemporaryChat })).filter((c) => c.group === 'action');
+    const ids = actions.map((c) => c.id);
+    expect(ids[ids.indexOf('thread.new') + 1]).toBe('thread.new-temporary');
+    const command = actions.find((c) => c.id === 'thread.new-temporary')!;
+    expect(command).toMatchObject({ label: 'New temporary chat', icon: 'ghost' });
+    command.run();
+    expect(createTemporaryChat).toHaveBeenCalledOnce();
+    expect(buildCommands(makeCtx({ hasActiveProject: true })).some((c) => c.id === 'thread.new-temporary')).toBe(false);
+  });
+
   it('does not offer the removed All threads page', () => {
     const cmds = buildCommands(makeCtx({ hasActiveProject: true }));
     expect(cmds.some(c => c.id === 'nav.threads')).toBe(false);
@@ -94,7 +106,7 @@ describe('the agent’s commands (DESIGN-v2 §1.2)', () => {
       ['Ask Robin', expect.stringMatching(/J$/)],
       ['Robin: Today', expect.stringMatching(/J$/)],
       ['Robin: Check now', undefined],
-      ['Robin: Pause check-ins', undefined],
+      ['Turn Robin off', undefined],
       ['Robin: New conversation', undefined],
       ['Robin: Settings', undefined],
     ]);
@@ -106,9 +118,12 @@ describe('the agent’s commands (DESIGN-v2 §1.2)', () => {
     }
   });
 
-  it('says Resume check-ins while paused and leaves check-ins out until they can act', () => {
+  it('offers only Turn <name> on while it is off (Q29), and leaves check-ins out until they can act', () => {
     const paused = { ...companion(), checkIns: { checkNow: vi.fn(), paused: true, togglePause: vi.fn() } };
-    expect(buildCommands(makeCtx({ companion: paused })).find((cmd) => cmd.id === 'companion.pause')?.label).toBe('Robin: Resume check-ins');
+    const off = buildCommands(makeCtx({ companion: paused })).filter((cmd) => cmd.id.startsWith('companion.'));
+    expect(off.map((cmd) => cmd.label)).toEqual(['Turn Robin on']);
+    off[0]!.run();
+    expect(paused.checkIns.togglePause).toHaveBeenCalledOnce();
     const { checkIns: _none, ...chatOnly } = companion();
     const ids = buildCommands(makeCtx({ companion: chatOnly })).map((cmd) => cmd.id);
     expect(ids).toEqual(expect.arrayContaining(['companion.ask', 'companion.today', 'companion.new', 'companion.settings']));
@@ -146,11 +161,23 @@ describe('workspace commands', () => {
       workspaces: [{ id: 'w1', name: 'Stocks' }, { id: 'w2', name: 'Bonds', remoteNote: 'Remote · Dev desktop' }],
     }));
     const rows = cmds.filter((c) => c.group === 'workspace');
+    // The name alone: the Workspaces section and the row's end say what it is.
     expect(rows.map((c) => [c.label, c.meta])).toEqual([
-      ['Switch to workspace ▸ Stocks', undefined],
-      ['Switch to workspace ▸ Bonds', 'Remote · Dev desktop'],
+      ['Stocks', undefined],
+      ['Bonds', 'Remote · Dev desktop'],
     ]);
     expect(filterCommands(rows, 'dev desktop').map((c) => c.id)).toEqual(['workspace.switch.w2']);
+  });
+
+  it('finds a chat by the workspace it lives in, and marks where the words sit in a name', () => {
+    const rows: Command[] = [
+      { id: 'a', group: 'chat', icon: 'chat', label: 'Fireworks', where: 'Tokyo trip', run: () => {} },
+      { id: 'b', group: 'chat', icon: 'chat', label: 'Groceries', run: () => {} },
+    ];
+    expect(filterCommands(rows, 'tokyo').map((c) => c.id)).toEqual(['a']);
+    expect(matchRange('Fireworks', ' WORK ')).toEqual([4, 8]);
+    expect(matchRange('Fireworks', 'tokyo')).toBeNull();
+    expect(matchRange('İstanbul', 'stan')).toBeNull();
   });
 });
 
@@ -188,7 +215,7 @@ describe('recent threads', () => {
       recentThreads: [{ treeId: 't1', projectId: 'w1', rootNodeId: 'n1', name: 'Fireworks', projectName: 'Tokyo trip' }],
     }));
     const row = cmds.find((c) => c.group === 'recent')!;
-    expect([row.label, row.meta, row.prefetchNodeId]).toEqual(['Fireworks', 'Tokyo trip', 'n1']);
+    expect([row.label, row.where, row.icon, row.prefetchNodeId]).toEqual(['Fireworks', 'Tokyo trip', 'chat', 'n1']);
     row.run();
     expect(openThread).toHaveBeenCalledWith('w1', 't1');
     expect(buildCommands(makeCtx({ recentThreads: [] })).some((c) => c.group === 'recent')).toBe(false);

@@ -30,7 +30,6 @@ vi.mock('../services/api', () => ({
   syncWorkspace: () => Promise.resolve({ ok: true }),
 }));
 
-vi.mock('../services/notifications', () => ({ notify: vi.fn() }));
 
 import { ChatProvider, useChatStore, useStructuralSelector } from './chatStore';
 import type { ChatNodeState } from './chatTypes';

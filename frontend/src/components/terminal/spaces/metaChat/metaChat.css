@@ -36,9 +36,9 @@
 .meta-chat-panel__name { flex: none; font-size: var(--fs-xl); font-weight: 600; }
 .meta-chat-panel__viewing {
   min-width: 0; margin-right: auto; overflow: hidden; text-overflow: ellipsis;
-  padding: 3px 4px; border: 1px solid var(--term-mauve-f); border-radius: var(--ui-radius-sm);
-  background: color-mix(in srgb, var(--term-mauve-f) 35%, var(--term-surface));
-  color: var(--term-mauve); font: 400 var(--fs-xs)/1 var(--font-mono);
+  padding: 3px 4px; border: 1px solid var(--term-accent-f); border-radius: var(--ui-radius-sm);
+  background: color-mix(in srgb, var(--term-accent-f) 35%, var(--term-surface));
+  color: var(--term-accent); font: 400 var(--fs-xs)/1 var(--font-mono);
 }
 
 
@@ -147,13 +147,7 @@
 .meta-chat-conversation .terminal-message-assistant { padding-top: 1px !important; padding-bottom: 0 !important; }
 .meta-chat-conversation .terminal-message-assistant .prose > :last-child { margin-bottom: 0; }
 .meta-chat-conversation .terminal-message-frame:last-of-type > div { margin-bottom: 0 !important; }
-/* Links read as accent text inside the window's narrow replies; lists keep their numbers at the margin. */
-.meta-chat-conversation .terminal-message-assistant .prose .assistant-cite {
-  display: inline; padding: 0; border: 0; border-radius: 0; font: inherit; color: var(--term-accent);
-  text-decoration: underline; text-decoration-color: var(--term-accent-f); text-underline-offset: 3px;
-}
-.meta-chat-conversation .terminal-message-assistant .prose .assistant-cite__icon { display: none; }
-.meta-chat-conversation .terminal-message-assistant .prose .assistant-cite__text { white-space: normal; overflow: visible; }
+/* Lists keep their numbers at the margin in the window's narrow replies. */
 .meta-chat-conversation .terminal-message-assistant .prose :is(ol, ul) { padding-inline-start: 0; margin-inline-start: 0; list-style-position: inside; }
 .meta-chat-conversation .terminal-message-assistant .prose li { padding-inline-start: 0; margin-inline-start: 0; }
 .meta-chat-conversation .terminal-message-assistant .prose li > p { display: inline; }
@@ -200,6 +194,8 @@
 .meta-chat-card__open { max-width: 96px; }
 .meta-chat-card__open .assistant-cite { border-color: transparent; color: var(--term-accent); padding: 0 4px; line-height: 1.6; }
 .meta-chat-card__open .assistant-cite__text { white-space: normal; text-align: left; }
+/* The card's own glyph already says conversation. */
+.meta-chat-card__open .assistant-cite__icon { display: none; }
 
 .meta-chat-panel__notice {
   display: flex; align-items: baseline; gap: 6px; flex: none; margin: 0 14px 4px; overflow: hidden;

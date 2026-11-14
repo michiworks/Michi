@@ -9,15 +9,18 @@
  *   shown one, even when the newer one ends up not being shown.
  * - Presented after a short delay, then revalidated: dropped if no longer
  *   current (answered, a new turn started) or now in view.
- * - Gated by prefs.notifications: needs_input for 'all' and 'approval-only',
- *   finished and failed for 'all' only, nothing for 'off'.
- * - A toast per notification (at most MAX_SHOWN), an OS notification while
+ * - Gated by prefs.notifications, the one level (shared attentionLevelAllows):
+ *   at 'approval-only' ("Only when something needs me") what waits on the
+ *   user (approvals, questions, Michi's Needs you) and a task that failed;
+ *   everything at 'all'; nothing at 'off'.
+ * - A toast per notification (at most MAX_SHOWN; none where the intent's
+ *   showToast says a standing notice already shows it), an OS notification while
  *   the window is unfocused or hidden (its click returns to this window), and
  *   a tone per kind when prefs.notificationSounds is on; the OS notification
  *   is silent unless the window cannot play the tone. Re-presenting the same
  *   kind for a target whose toast is still up refreshes it quietly.
  */
-import type { AttentionKind } from 'michi-shared';
+import { attentionLevelAllows, type AttentionKind, type AttentionReason, type CompanionTarget } from 'michi-shared';
 import { backendEntityId } from '../../config/backendIdentity';
 import { showOsNotification } from './desktop';
 import { playAttentionSound } from './sound';
@@ -26,12 +29,17 @@ import { LOCAL_BACKEND_CONNECTION_ID } from '../../config/backendConnections';
 
 export type AttentionTarget =
   | { type: 'node'; nodeId: string; workspaceId?: string; backendConnectionId?: string }
-  | { type: 'agent_run'; runId: string; workspaceId?: string; backendConnectionId?: string };
+  | { type: 'agent_run'; runId: string; workspaceId?: string; backendConnectionId?: string }
+  /** Michi itself: `ref` names the slot (`chat`, `item:<id>`, `node:<id>`), `open` where a click goes. */
+  | { type: 'agent'; ref: string; open: CompanionTarget; workspaceId?: string; backendConnectionId?: string }
+  | { type: 'scheduled_run'; runId: string; jobId: string; nodeId: string | null; workspaceId?: string; backendConnectionId?: string };
 
 export interface AttentionIntent {
   /** Stable per target, normally attentionTargetKey(target). */
   key: string;
   kind: AttentionKind;
+  /** Why it was raised (a server record's reason): the level reads it. Absent: judged by its kind. */
+  reason?: AttentionReason;
   title: string;
   body?: string;
   /** What the notification is about. */
@@ -46,6 +54,12 @@ export interface AttentionIntent {
   onOpen?: () => void;
   /** 'never': no OS notification from this window (another window claimed it). Default 'auto'. */
   osNotification?: 'auto' | 'never';
+  /**
+   * Re-checked on delivery: false skips the in-app toast while the tone and
+   * OS notification still go out, for news a standing notice in the window
+   * already shows (an agent's question: AskUserNotice). Absent: always.
+   */
+  showToast?: () => boolean;
 }
 
 export interface AttentionPreferences {
@@ -98,6 +112,8 @@ export function setAttentionPreferences(next: AttentionPreferences): void {
 export function attentionTargetKey(target: AttentionTarget): string {
   const connectionId = target.backendConnectionId ?? LOCAL_BACKEND_CONNECTION_ID;
   if (target.type === 'agent_run') return `agent_run:${JSON.stringify([connectionId, target.runId])}`;
+  if (target.type === 'agent') return `agent:${JSON.stringify([connectionId, target.ref])}`;
+  if (target.type === 'scheduled_run') return `scheduled_run:${JSON.stringify([connectionId, target.runId])}`;
   let nodeId = target.nodeId;
   try {
     nodeId = backendEntityId(connectionId, target.nodeId);
@@ -108,12 +124,12 @@ export function attentionTargetKey(target: AttentionTarget): string {
 }
 
 /**
- * The user's Notifications setting lets this kind through. Notices that do not
- * go through presentAttention (the Meta agent's and Memory's) check it too.
+ * The user's Notifications setting lets this kind (and reason) through.
+ * Notices that do not go through presentAttention (the Meta agent's and
+ * Memory's) check it too.
  */
-export function attentionAllowed(kind: AttentionKind): boolean {
-  if (preferences.level === 'off') return false;
-  return preferences.level === 'all' || kind === 'needs_input';
+export function attentionAllowed(kind: AttentionKind, reason?: AttentionReason): boolean {
+  return attentionLevelAllows(preferences.level, kind, reason);
 }
 
 /** This window is in front of the user: focused, and its document not hidden. */
@@ -168,7 +184,7 @@ export function presentAttention(intent: AttentionIntent): void {
     clearTimeout(previous.timer);
     pending.delete(intent.key);
   }
-  if (!attentionAllowed(intent.kind) || inView(intent)) {
+  if (!attentionAllowed(intent.kind, intent.reason) || inView(intent)) {
     // Still the newest word on this target: what it replaces is moot.
     closeShown(intent.key);
     return;
@@ -193,7 +209,7 @@ function deliver(key: string): void {
   if (!entry) return;
   pending.delete(key);
   const { intent } = entry;
-  if (!attentionAllowed(intent.kind) || !check(intent.isStillCurrent, true) || inView(intent)) {
+  if (!attentionAllowed(intent.kind, intent.reason) || !check(intent.isStillCurrent, true) || inView(intent)) {
     closeShown(key);
     return;
   }
@@ -201,23 +217,25 @@ function deliver(key: string): void {
   const repeat = previous?.kind === intent.kind;
   const alreadySent = repeat && previous.osSent;
   closeShown(key);
-  for (const oldest of shown.keys()) {
-    if (shown.size < MAX_SHOWN) break;
-    closeShown(oldest);
-  }
   const toastId = `attention:${++toastSequence}`;
   const sendOs = intent.osNotification !== 'never' && !windowAttended() && !alreadySent;
-  shown.set(key, { toastId, kind: intent.kind, osSent: sendOs || alreadySent });
   const open = intent.onOpen;
-  showNotificationCard({
-    id: toastId,
-    title: intent.title,
-    body: intent.body,
-    kind: intent.kind,
-    duration: DURATION_MS[intent.kind],
-    onClick: open ? () => { forget(key, toastId); open(); } : undefined,
-    onClose: () => forget(key, toastId),
-  });
+  if (check(intent.showToast, true)) {
+    for (const oldest of shown.keys()) {
+      if (shown.size < MAX_SHOWN) break;
+      closeShown(oldest);
+    }
+    shown.set(key, { toastId, kind: intent.kind, osSent: sendOs || alreadySent });
+    showNotificationCard({
+      id: toastId,
+      title: intent.title,
+      body: intent.body,
+      kind: intent.kind,
+      duration: DURATION_MS[intent.kind],
+      onClick: open ? () => { forget(key, toastId); open(); } : undefined,
+      onClose: () => forget(key, toastId),
+    });
+  }
   const tone = !repeat || sendOs ? chime(intent.kind) : 'quiet';
   if (sendOs) {
     showOsNotification({

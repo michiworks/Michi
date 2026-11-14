@@ -86,7 +86,7 @@ async function startServer(withScheduler: boolean, runExecutor = executor, maxCo
   const app = express();
   app.use(express.json());
   app.use('/api', createLocalOriginGuard({ loopbackListener: true }));
-  app.use('/api', setupScheduledJobRoutes({ scheduler, events }));
+  app.use('/api', setupScheduledJobRoutes({ scheduler }));
   server = app.listen(0, '127.0.0.1');
   await new Promise<void>((resolve) => server.once('listening', () => resolve()));
   port = (server.address() as AddressInfo).port;
@@ -273,28 +273,10 @@ describe('scheduled job routes', () => {
     assert.deepEqual((await request('GET', '/api/scheduled-jobs')).body.scheduler.blockedExecutions, []);
   });
 
-  test('replays pending notifications on the notifier stream and accepts acknowledgements', async () => {
+  test('has no notifier stream of its own: scheduled runs notify through attention', async () => {
     await startServer(true);
-    const created = await request('POST', '/api/scheduled-jobs', { body });
-    const started = await request('POST', `/api/scheduled-jobs/${created.body.id}/run`);
-    await new Promise((resolve) => setTimeout(resolve, 20));
-    const frame = await new Promise<string>((resolve, reject) => {
-      const req = http.get({ host: '127.0.0.1', port, path: '/api/scheduled-jobs/notifications/stream' }, (res) => {
-        res.setEncoding('utf8');
-        res.on('data', (chunk: string) => {
-          if (chunk.includes('scheduled_job_run')) {
-            resolve(chunk);
-            req.destroy();
-          }
-        });
-      });
-      req.on('error', (error) => { if (!(error as NodeJS.ErrnoException).code?.includes('ECONNRESET')) reject(error); });
-    });
-    const event = JSON.parse(frame.split('data: ')[1]);
-    assert.equal(event.runId, started.body.id);
-    assert.equal(event.phase, 'finished');
-    const ack = await request('POST', `/api/scheduled-jobs/runs/${started.body.id}/notified`);
-    assert.equal(ack.body.acknowledged, true);
+    assert.equal((await request('GET', '/api/scheduled-jobs/notifications/stream')).status, 404);
+    assert.equal((await request('POST', '/api/scheduled-jobs/runs/run-1/notified')).status, 404);
   });
 
   test('rejects foreign origins, cross-site requests and rebound hosts', async (t) => {

@@ -110,13 +110,16 @@ test('remote authentication target crosses only its dedicated IPC channel', asyn
 
 test('preload event subscriptions preserve payloads and release their exact listener', () => {
   const { bridge, handlers } = loadPreload();
-  const notice = { title: 'Done', subtitle: 'Scheduled', body: 'Result', target: { runId: 'r', jobId: 'j', workspaceId: 'w', nodeId: null } };
+  const target = { runId: 'r', jobId: 'j', workspaceId: 'w', nodeId: null };
   let received;
-  const stop = bridge.onScheduledNotice((value) => { received = value; });
-  handlers.get('scheduled:notice')({}, notice);
-  assert.equal(received, notice);
+  const stop = bridge.onScheduledRunOpen((value) => { received = value; });
+  handlers.get('scheduled:open-run')({}, target);
+  assert.equal(received, target);
   stop();
-  assert.equal(handlers.has('scheduled:notice'), false);
+  assert.equal(handlers.has('scheduled:open-run'), false);
+  // Main sends no notices of its own to a window any more: windows present the attention records themselves.
+  assert.equal('onScheduledNotice' in bridge, false);
+  assert.equal('onCompanionNotice' in bridge, false);
 });
 
 test('notifications keep the two-argument call and route a targeted click back', () => {
@@ -172,55 +175,42 @@ test('main holds one notification per window and key, bounded', async () => {
   assert.equal(newer.closed, 0);
 });
 
-test('Companion subscriptions pass notices and targets through and release their exact listener', () => {
+test('a banner click\'s Companion target passes through, and the subscription releases its exact listener', () => {
   const { bridge, handlers } = loadPreload();
-  // A notice about one Michi conversation, as the backend sends it.
-  const notice = {
-    id: 'cmn-1', title: 'Companion', body: 'Chat X has been waiting 30 min', target: { kind: 'node', workspaceId: 'w', nodeId: 'n' },
-    itemIds: ['cmi-1'], createdAt: 1, expiresAt: 2,
-  };
-  // A banner's click for a notice about one item: Today, at that item.
+  // A banner's click for a record about one item: Today, at that item.
   const target = { kind: 'companion', tab: 'today', itemId: 'cmi-2' };
-  let receivedNotice;
   let receivedTarget;
-  const stopNotice = bridge.onCompanionNotice((value) => { receivedNotice = value; });
   const stopOpen = bridge.onCompanionOpen((value) => { receivedTarget = value; });
-  handlers.get('companion:notice')({}, notice);
   handlers.get('companion:open')({}, target);
-  assert.equal(receivedNotice, notice);
   assert.equal(receivedTarget, target);
-  stopNotice();
   stopOpen();
-  assert.equal(handlers.has('companion:notice'), false);
   assert.equal(handlers.has('companion:open'), false);
 });
 
-test('Companion subscriptions tell main when this document starts and stops listening, on the channel main reads', () => {
-  // The name main.ts listens on (electron/companionNotifications.ts); preload.ts cannot import it.
-  const { COMPANION_READY_CHANNEL } = require('../electron/dist/companionNotifications.js');
+test('click subscriptions tell main when this document starts and stops listening, on the channel main reads', () => {
+  // The name main.ts listens on (electron/attentionNotifications.ts); preload.ts cannot import it.
+  const { COMPANION_READY_CHANNEL } = require('../electron/dist/attentionNotifications.js');
   const { bridge, calls } = loadPreload();
-  const stopFirst = bridge.onCompanionNotice(() => {});
-  const stopSecond = bridge.onCompanionNotice(() => {});
-  const stopOpen = bridge.onCompanionOpen(() => {});
-  assert.deepEqual(calls, [[COMPANION_READY_CHANNEL, 'notice', true], [COMPANION_READY_CHANNEL, 'open', true]]);
+  const stopFirst = bridge.onCompanionOpen(() => {});
+  const stopSecond = bridge.onCompanionOpen(() => {});
+  assert.deepEqual(calls, [[COMPANION_READY_CHANNEL, 'open', true]]);
   stopFirst();
   stopFirst();
-  assert.equal(calls.length, 2, 'one notice listener is left, and a second stop does nothing');
+  assert.equal(calls.length, 1, 'one listener is left, and a second stop does nothing');
   stopSecond();
-  stopOpen();
-  assert.deepEqual(calls.slice(2), [[COMPANION_READY_CHANNEL, 'notice', false], [COMPANION_READY_CHANNEL, 'open', false]]);
+  assert.deepEqual(calls.slice(1), [[COMPANION_READY_CHANNEL, 'open', false]]);
   // Subscribing again (React StrictMode runs an effect twice) is reported again.
-  bridge.onCompanionNotice(() => {});
-  assert.deepEqual(calls.slice(4), [[COMPANION_READY_CHANNEL, 'notice', true]]);
+  bridge.onCompanionOpen(() => {});
+  assert.deepEqual(calls.slice(2), [[COMPANION_READY_CHANNEL, 'open', true]]);
   // Other subscriptions say nothing.
-  bridge.onScheduledNotice(() => {});
+  bridge.onScheduledRunOpen(() => {});
   bridge.onOpenUrl(() => {});
-  assert.equal(calls.length, 5);
+  assert.equal(calls.length, 3);
 });
 
 test('a window a Companion notification opened reads its target from the parameter main.ts sets', () => {
-  // The name main.ts writes (electron/companionNotifications.ts); preload.ts cannot import it.
-  const { COMPANION_TARGET_PARAM } = require('../electron/dist/companionNotifications.js');
+  // The name main.ts writes (electron/attentionNotifications.ts); preload.ts cannot import it.
+  const { COMPANION_TARGET_PARAM } = require('../electron/dist/attentionNotifications.js');
   const withTarget = (raw) => `?${new URLSearchParams({ michiWindowId: 'window', [COMPANION_TARGET_PARAM]: raw })}`;
   for (const target of [
     { kind: 'node', workspaceId: 'w', nodeId: 'n' },
@@ -254,7 +244,7 @@ test('a window a Companion notification opened reads its target from the paramet
 });
 
 test('every target main.ts accepts survives the preload unchanged', () => {
-  const { COMPANION_TARGET_PARAM, parseCompanionTarget } = require('../electron/dist/companionNotifications.js');
+  const { COMPANION_TARGET_PARAM, parseCompanionTarget } = require('../electron/dist/attentionNotifications.js');
   const long = (n) => 'x'.repeat(n);
   const candidates = [
     { kind: 'node', workspaceId: 'w', nodeId: 'n' }, { kind: 'node', workspaceId: long(160), nodeId: long(160) },

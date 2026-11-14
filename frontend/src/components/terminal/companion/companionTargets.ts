@@ -3,6 +3,8 @@ import { toast } from 'sonner';
 import type { CompanionTarget } from 'michi-shared';
 import { useChatActions } from '../../../state/chatStore';
 import { openCompanionPanel } from '../../../state/companion/companionPanel';
+import { companionIsOff } from '../../../state/companion/companionStore';
+import { companionNameNow } from '../../../state/companion/companionName';
 import { openPreferredUrl } from '../../../services/openUrl';
 import { OPEN_SETTINGS_SECTION_EVENT } from '../scheduled/metaAgent/metaAgentNav';
 
@@ -11,11 +13,18 @@ export function openCompanionSettings(): void {
   window.dispatchEvent(new CustomEvent(OPEN_SETTINGS_SECTION_EVENT, { detail: { section: 'companion' } }));
 }
 
+/** Settings › <name> at the switch that turns it on and off (its row is called by the agent's name). */
+export function openCompanionSettingsSwitch(): void {
+  window.dispatchEvent(new CustomEvent(OPEN_SETTINGS_SECTION_EVENT, { detail: { section: 'companion', setting: companionNameNow() } }));
+}
+
 /**
  * Where "Open" (and a notice's click, toast or banner alike) takes the user:
  * a Michi conversation in its workspace, a page in the preferred browser, the
  * panel's tab (on Today, at the item the target names), or Settings ›
- * Companion. Only ever called from a user action.
+ * Companion. Only ever called from a user action. While the agent is off
+ * (Q29) a target on its panel opens nothing: a notice from before it was
+ * turned off leads nowhere.
  */
 export function useOpenCompanionTarget(): (target: CompanionTarget) => Promise<void> {
   const { revealBackendNode } = useChatActions();
@@ -28,6 +37,7 @@ export function useOpenCompanionTarget(): (target: CompanionTarget) => Promise<v
         openPreferredUrl(target.url);
         return;
       case 'companion':
+        if (companionIsOff()) return;
         // Today scrolls to the item and highlights it (just Today when it is no longer open).
         openCompanionPanel(target.tab === 'today' && target.itemId ? { tab: 'today', focusItem: target.itemId } : { tab: target.tab });
         return;

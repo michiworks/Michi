@@ -1,8 +1,7 @@
 import React from 'react';
-import type { PageBlock, PageChangeDto, PageDto, PageEditOp, SpaceSummaryDto, SpacesHomeSectionsDto, WorkspaceHomeSummaryDto } from 'michi-shared';
+import type { PageBlock, PageChangeDto, PageDto, PageEditOp, WorkspaceHomeSummaryDto } from 'michi-shared';
 import { useChatNodesSnapshot } from '../../../../state/chatStore';
 import { usePage, type PageApplyResult, type UsePageResult } from '../../../../state/pages/usePage';
-import { useSpaces } from '../../../../state/pages/useSpaces';
 import { fetchPageActivitySeen } from '../../../../services/api/pages';
 import type { ExactPageSource } from '../../../../state/pages/revealSource';
 import NativeDatabase from '../NativeDatabase';
@@ -16,7 +15,6 @@ import { NativePageDocument, openNewChatSheet, useSpacesSourceNav } from './home
 import { useCompanionTargeting } from '../NativePageDocument';
 import { useCompanionName } from '../../../../state/companion/companionName';
 import { homeChangesShown } from './homeFormat';
-import { homeWorkspaceCounts, useSpacesHomeSections } from './homeCounts';
 import { prefersReducedMotion } from '../../../../hooks/useReducedMotion';
 import { EASE } from '../../../../motion/tokens';
 import { FRESH_MS } from '../../../../motion/useFresh';
@@ -28,15 +26,15 @@ const startConversation = (text: string, workspaceId: string) => { openNewChatSh
 /** How the panel's "Targeting" chip names a home block: as on a Space page (pageBlockTarget). */
 const homeBlockTitle = (block: PageBlock): string => pageBlockTarget(block).title;
 
-export type WorkspaceDotTone = 'pending' | 'waiting' | 'stalled' | 'calm';
+export type WorkspaceDotTone = 'pending' | 'calm';
 
-/** A workspace's dot as its Spaces sidebar row draws it: not written yet, waiting on you, stalled, or calm. */
-export function workspaceDotTone(home: WorkspaceHomeSummaryDto, sections: SpacesHomeSectionsDto | null | undefined, spaces: readonly SpaceSummaryDto[] | null): WorkspaceDotTone {
-  if (home.firstRun && home.firstRun.state !== 'done') return 'pending';
-  const counts = homeWorkspaceCounts(sections, home.workspaceId);
-  const waiting = counts.waiting > 0 || (home.pendingProposals ?? 0) > 0
-    || (spaces ?? []).some((space) => space.workspaceId === home.workspaceId && space.pendingProposals > 0);
-  return waiting ? 'waiting' : counts.stalled > 0 ? 'stalled' : 'calm';
+/**
+ * A workspace's dot as its Spaces sidebar row draws it: not written yet, or
+ * calm. What needs you is Today's (D13), and suggestions show on their page
+ * and in the sidebar count (Q20), so the dot says neither.
+ */
+export function workspaceDotTone(home: WorkspaceHomeSummaryDto): WorkspaceDotTone {
+  return home.firstRun && home.firstRun.state !== 'done' ? 'pending' : 'calm';
 }
 
 const hasTable = (block: PageBlock) => block.type === 'markdown' && /^\s*\|/m.test(block.text);
@@ -46,14 +44,11 @@ const hasTable = (block: PageBlock) => block.type === 'markdown' && /^\s*\|/m.te
  * dot tone (`data-home-tone`); the row's first cell draws the dot. The table is
  * Markdown drawn by MarkdownContent, so the mark is an attribute on its row.
  */
-function WorkspaceRowDots({ container, homes, backendConnectionId }: {
+function WorkspaceRowDots({ container, homes }: {
   container: React.RefObject<HTMLDivElement | null>;
   homes: readonly WorkspaceHomeSummaryDto[];
-  backendConnectionId: string;
 }) {
-  const sections = useSpacesHomeSections(backendConnectionId).data;
-  const { spaces } = useSpaces(backendConnectionId);
-  const tones = React.useMemo(() => new Map(homes.map((home) => [home.workspaceName.trim().toLowerCase(), workspaceDotTone(home, sections, spaces)] as const)), [homes, sections, spaces]);
+  const tones = React.useMemo(() => new Map(homes.map((home) => [home.workspaceName.trim().toLowerCase(), workspaceDotTone(home)] as const)), [homes]);
   React.useLayoutEffect(() => {
     for (const row of Array.from(container.current?.querySelectorAll<HTMLTableRowElement>('tbody tr') ?? [])) {
       const tone = tones.get(row.cells[0]?.textContent?.trim().toLowerCase() ?? '');
@@ -135,10 +130,9 @@ function riseIn(el: HTMLElement, order: number) {
 }
 
 /** One segment of a home's blocks; a segment holding a table marks its workspace rows. */
-function HomeSegment({ segment, homes, backendConnectionId, blockIds, reveal, children }: {
+function HomeSegment({ segment, homes, blockIds, reveal, children }: {
   segment: string;
   homes: readonly WorkspaceHomeSummaryDto[] | null;
-  backendConnectionId: string;
   blockIds: readonly string[];
   reveal: BlockReveal;
   children: React.ReactNode;
@@ -158,7 +152,7 @@ function HomeSegment({ segment, homes, backendConnectionId, blockIds, reveal, ch
   });
   return <div ref={ref} className="spaces-home-blocks" data-segment={segment}>
     {children}
-    {homes && homes.length > 0 && <WorkspaceRowDots container={ref} homes={homes} backendConnectionId={backendConnectionId} />}
+    {homes && homes.length > 0 && <WorkspaceRowDots container={ref} homes={homes} />}
   </div>;
 }
 
@@ -286,7 +280,7 @@ export function useHomeDocument({ backendConnectionId, initial, allowEmptyEditor
       />
     </>;
     // Sources live in the block menu, without a footer below the content.
-    return <HomeSegment key={key} segment={key} homes={workspaceHomes && blocks.some(hasTable) ? workspaceHomes : null} backendConnectionId={backendConnectionId}
+    return <HomeSegment key={key} segment={key} homes={workspaceHomes && blocks.some(hasTable) ? workspaceHomes : null}
       blockIds={blocks.map((block) => block.id)} reveal={reveal}><NativePageDocument
       page={page}
       visibleBlocks={blocks}

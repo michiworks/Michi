@@ -6,9 +6,16 @@ import PaneChooser from './PaneChooser';
 
 const state = vi.hoisted(() => ({
   list: vi.fn(),
-  actions: { activateLauncherPane: vi.fn(), adoptTerminalPane: vi.fn(), adoptBackendTerminal: vi.fn(), focusPane: vi.fn(), setFocusedNodeId: vi.fn() },
+  actions: {
+    activateLauncherPane: vi.fn(), adoptTerminalPane: vi.fn(), adoptBackendTerminal: vi.fn(), openNodeInLauncherPane: vi.fn(),
+    focusPane: vi.fn(), closePane: vi.fn(), setFocusedNodeId: vi.fn(),
+  },
   electron: undefined as Record<string, unknown> | undefined,
   phone: false,
+  focusedPane: null as string | null,
+  openPanes: ['pane:launcher:1'],
+  nodes: {} as Record<string, unknown>,
+  project: { id: 'p1', cwd: '/home/me/Michi', trees: [] as Array<{ id: string; rootNodeId: string; name?: string }>, edges: [] as Array<{ source: string; target: string }> },
 }));
 vi.mock('sonner', () => ({ toast: { error: vi.fn() } }));
 vi.mock('../../hooks/usePaneShellStyle', () => ({ usePaneShellStyle: () => ({}) }));
@@ -17,8 +24,9 @@ vi.mock('../../lib/electronBridge', () => ({ getElectron: () => state.electron }
 vi.mock('../../services/api/terminals', () => ({ listTerminals: state.list }));
 vi.mock('../../state/chatStore', () => ({
   useChatActions: () => state.actions,
-  useChatPanes: () => ({ paneItems: {}, openPanes: ['pane:launcher:1'] }),
-  useOptionalChatProjects: () => ({ projects: [{ id: 'p1', cwd: '/home/me/Michi' }] }),
+  useChatPanes: () => ({ paneItems: {}, openPanes: state.openPanes, focusedPane: state.focusedPane }),
+  useOptionalChatProjects: () => ({ projects: [state.project] }),
+  useStructuralSelector: (selector: (nodes: Record<string, unknown>) => unknown) => selector(state.nodes),
 }));
 
 const launcher: LauncherPaneItem = { id: 'pane:launcher:1', kind: 'launcher', projectId: 'p1', treeId: null, title: 'New pane', createdAt: 1 };
@@ -31,8 +39,14 @@ beforeEach(() => {
   state.list.mockReset().mockResolvedValue({ available: true, terminals: [] } satisfies TerminalListResponse);
   state.electron = undefined;
   state.phone = false;
+  state.focusedPane = null;
+  state.openPanes = ['pane:launcher:1'];
+  state.nodes = {};
+  state.project = { id: 'p1', cwd: '/home/me/Michi', trees: [], edges: [] };
   for (const action of Object.values(state.actions)) action.mockReset();
 });
+
+const chat = (nodeId: string, title: string, extra: Record<string, unknown> = {}) => ({ nodeId, kind: 'chat', title, projectId: 'p1', messages: [], ...extra });
 
 describe('PaneChooser', () => {
   it('leaves no hover border on a choice whose launch failed after the pointer left', async () => {
@@ -50,13 +64,69 @@ describe('PaneChooser', () => {
     expect(review.style.background).not.toBe('var(--term-alt)');
   });
 
-  it('advertises no keyboard shortcut, since none of its choices has one', async () => {
-    const { container } = render(<PaneChooser item={launcher} />);
+  it('marks each choice with its digit and picks it by that key', async () => {
+    render(<PaneChooser item={launcher} />);
     await act(async () => {});
-    for (const label of ['Review', 'Terminal', 'Files', 'Side chat']) {
-      expect(screen.getByRole('button', { name: label })).not.toBeNull();
-    }
-    expect(container.querySelector('kbd')).toBeNull();
+    ['Review', 'Terminal', 'Files', 'Blank branch'].forEach((label, i) => {
+      const row = screen.getByRole('button', { name: label });
+      expect(row.getAttribute('aria-keyshortcuts')).toBe(String(i + 1));
+      expect(row.querySelector('kbd')?.textContent).toBe(String(i + 1));
+    });
+    fireEvent.keyDown(screen.getByRole('button', { name: 'Review' }), { key: '4' });
+    expect(state.actions.activateLauncherPane).toHaveBeenCalledWith('pane:launcher:1', 'side-chat');
+  });
+
+  it('takes the keyboard when its pane is focused, and moves with the arrows', async () => {
+    state.focusedPane = 'pane:launcher:1';
+    render(<PaneChooser item={launcher} />);
+    await act(async () => {});
+    expect(document.activeElement).toBe(screen.getByRole('button', { name: 'Review' }));
+    fireEvent.keyDown(document.activeElement!, { key: 'ArrowDown' });
+    expect(document.activeElement).toBe(screen.getByRole('button', { name: 'Terminal' }));
+    fireEvent.keyDown(document.activeElement!, { key: 'End' });
+    expect(document.activeElement).toBe(screen.getByRole('button', { name: 'Blank branch' }));
+    fireEvent.keyDown(document.activeElement!, { key: 'ArrowDown' });
+    expect(document.activeElement).toBe(screen.getByRole('button', { name: 'Blank branch' }));
+    fireEvent.keyDown(document.activeElement!, { key: 'ArrowUp' });
+    expect(document.activeElement).toBe(screen.getByRole('button', { name: 'Files' }));
+  });
+
+  it('leaves focus where it is when another pane is focused', async () => {
+    render(<PaneChooser item={launcher} />);
+    await act(async () => {});
+    expect(document.activeElement).toBe(document.body);
+  });
+
+  it('closes on Escape and hands focus back to the + that opened it', async () => {
+    state.focusedPane = 'pane:launcher:1';
+    render(<><button type="button" aria-label="New pane">+</button><PaneChooser item={launcher} /></>);
+    await act(async () => {});
+    fireEvent.keyDown(document.activeElement!, { key: 'Escape' });
+    expect(state.actions.closePane).toHaveBeenCalledWith('pane:launcher:1');
+    expect(document.activeElement).toBe(screen.getByRole('button', { name: 'New pane' }));
+  });
+
+  it('lists the thread’s conversations no pane shows, and opens one in this pane', async () => {
+    state.project = {
+      id: 'p1', cwd: '/home/me/Michi',
+      trees: [{ id: 't1', rootNodeId: 'root', name: 'Body rhythm' }],
+      edges: [{ source: 'root', target: 'a' }, { source: 'root', target: 'b' }, { source: 'a', target: 'gone' }],
+    };
+    state.nodes = { root: chat('root', 'root title'), a: chat('a', 'File link underline'), b: chat('b', 'Table toolbar'), gone: chat('gone', 'Deleted', { deletedAt: 1 }) };
+    state.openPanes = ['a', 'pane:launcher:1'];
+    state.focusedPane = 'pane:launcher:1';
+    render(<PaneChooser item={{ ...launcher, treeId: 't1' }} />);
+    await act(async () => {});
+    expect(screen.getByText('In this thread, not open')).not.toBeNull();
+    const rows = screen.getAllByRole('button').slice(0, 2).map((row) => row.textContent);
+    // The thread's own name for its root; the open one and the deleted one are not offered.
+    expect(rows).toEqual(['Body rhythm', 'Table toolbar']);
+    expect(document.activeElement?.textContent).toBe('Body rhythm');
+    fireEvent.click(screen.getByRole('button', { name: 'Table toolbar' }));
+    expect(state.actions.openNodeInLauncherPane).toHaveBeenCalledWith('pane:launcher:1', 'b');
+    // The digits still pick the four choices below.
+    fireEvent.keyDown(document.activeElement!, { key: '1' });
+    expect(state.actions.activateLauncherPane).toHaveBeenCalledWith('pane:launcher:1', 'review');
   });
 });
 

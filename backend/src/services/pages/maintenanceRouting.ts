@@ -5,7 +5,7 @@ import type { ScheduledJobScheduler } from '../scheduledJobs/scheduler';
 import { getMaintenanceConfig, listMaintenanceBacklog, listMaintenanceCatchupSuggestions,
   listMaintenanceExcludedSpaces } from './maintenanceRepository';
 import { maintenanceRuntimeAvailability } from '../../agents/maintenancePolicy';
-import { resolveMetaAgentRuntime } from '../metaAgent/settings';
+import { resolveBackgroundRuntime } from '../metaAgent/settings';
 import { getWorkspaceInstructions, listWatches } from '../metaAgent/watches';
 
 export type MaintenanceWorkspaceView = MaintenanceWorkspaceResponse;
@@ -20,7 +20,7 @@ export function getMaintenanceWorkspaceView(input: {
   const lastRun = config ? input.scheduler.listRuns(config.jobId)[0] ?? null : null;
   const excludedSpaceIds = listMaintenanceExcludedSpaces(input.workspaceId, input.ownerUserId);
   const catchUpSuggestions = config ? listMaintenanceCatchupSuggestions(input.workspaceId, input.ownerUserId) : [];
-  const runtime = resolveMetaAgentRuntime(input.ownerUserId);
+  const runtime = resolveBackgroundRuntime(input.ownerUserId);
   const unavailable = config ? maintenanceRuntimeAvailability(runtime.runtimeId).available === false : false;
   return {
     config,
@@ -30,7 +30,7 @@ export function getMaintenanceWorkspaceView(input: {
       pendingSources: backlog.pendingSources,
       attentionSources: backlog.attentionSources,
     } : null,
-    backlog, job, scheduler: !job || unavailable ? 'unavailable' : (config?.paused || maintenanceCoordinatorState(input.ownerUserId).paused) ? 'paused' : 'available', excludedSpaceIds,
+    backlog, job, scheduler: !job || unavailable ? 'unavailable' : (config?.paused || maintenanceCoordinatorState(input.ownerUserId, input.now).paused) ? 'paused' : 'available', excludedSpaceIds,
     catchUpSuggestions, runtime,
     instructions: getWorkspaceInstructions(input.workspaceId, input.ownerUserId),
     watches: listWatches(input.workspaceId, input.ownerUserId),

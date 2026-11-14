@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { WINDOW_ID } from '../../config/windowIdentity';
 import { companionSnapshot, jsonResponse } from '../../test/companionFixtures';
 import { resetCompanionPanelForTests } from './companionPanel';
 import {
@@ -44,7 +45,7 @@ afterEach(() => {
 describe('the Companion presence beacon', () => {
   it('says the user is here, and that they are writing to the Companion at once', () => {
     const release = startCompanionPresence();
-    expect(beacons).toEqual([{ active: true, companionFocused: false, lastInputAt: expect.any(Number), composing: false }]);
+    expect(beacons).toEqual([{ active: true, companionFocused: false, lastInputAt: expect.any(Number), composing: false, windowId: WINDOW_ID }]);
     panelInput.focus();
     noteCompanionComposing(true);
     // Within the 5s gap, composing still goes out right away.
@@ -56,6 +57,22 @@ describe('the Companion presence beacon', () => {
     expect(beacons).toHaveLength(sent);
     vi.advanceTimersByTime(5_000);
     expect(beacons.at(-1)).toMatchObject({ companionFocused: true, composing: false });
+    release();
+  });
+
+  it('reading V after a click in the panel still counts as in the panel; a click outside does not', () => {
+    const release = startCompanionPresence();
+    const text = document.createElement('p');
+    panelInput.parentElement!.append(text);
+    const outside = document.createElement('p');
+    document.body.append(outside);
+    text.dispatchEvent(new Event('pointerdown', { bubbles: true }));
+    vi.advanceTimersByTime(5_000);
+    expect(document.activeElement).toBe(document.body);
+    expect(beacons.at(-1)).toMatchObject({ companionFocused: true });
+    outside.dispatchEvent(new Event('pointerdown', { bubbles: true }));
+    vi.advanceTimersByTime(5_000);
+    expect(beacons.at(-1)).toMatchObject({ companionFocused: false });
     release();
   });
 

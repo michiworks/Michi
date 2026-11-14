@@ -103,7 +103,7 @@ describe('the agent\'s own tools, per runtime (DESIGN-v2 §2.3)', () => {
       minimized: 0, spawned_by_agent: 0, acp_session_id: 'n-1', runtime_id: 'claude', created_at: 1 });
     const runtimeDir = path.join(tmpDir, 'runtime');
 
-    assert.deepEqual(MAIN_OWN, COMPANION_OWN_TOOL_NAMES.filter((name) => name !== 'nothing_to_do'));
+    assert.deepEqual(MAIN_OWN, COMPANION_OWN_TOOL_NAMES.filter((name) => name !== 'nothing_to_do' && name !== 'companion_headline'));
     assert.deepEqual(assistantToolsFor('main').filter((tool) => OWN.has(tool.name)).map((tool) => tool.name), MAIN_OWN);
     assert.deepEqual(assistantToolsFor('checkin').filter((tool) => OWN.has(tool.name)).map((tool) => tool.name), CHECKIN_OWN);
     // ask_user is the runtime's user channel (the MCP slot's, Pi's), not one of these.

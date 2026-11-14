@@ -83,7 +83,7 @@ test('real read-only worker computes the same owner-scoped statistics as the rep
     database.prepare(`INSERT INTO nodes(id,workspace_id,kind,status,minimized,spawned_by_agent,created_at,maintenance_job_id)
       VALUES (?,?,'chat','idle',0,0,?,?)`).run(`node-${owner}`, owner, now, `job-${owner}`);
     database.prepare(`INSERT INTO messages(id,node_id,role,content,seq,created_at,metadata)
-      VALUES (?,?,'assistant','content',0,?,?)`).run(`message-${owner}`, `node-${owner}`, now, JSON.stringify({ usageSummary: { totalTokens: owner === 'owner-a' ? 42 : 9 } }));
+      VALUES (?,?,'assistant','content',0,?,?)`).run(`message-${owner}`, `node-${owner}`, now, JSON.stringify({ usageSummary: { inputTokens: owner === 'owner-a' ? 40 : 9, outputTokens: owner === 'owner-a' ? 2 : 0 } }));
   }
   const reader = new MetaAgentMetricsReader(getDbPath());
   try {

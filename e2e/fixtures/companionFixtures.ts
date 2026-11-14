@@ -1,4 +1,5 @@
 import type { Route } from '@playwright/test';
+import type { AttentionNotificationV1 } from '../../shared/src/attention';
 import {
   COMPANION_CHAT_NOTIFICATION_LEVEL_PATH,
   DEFAULT_COMPANION_SETTINGS,
@@ -7,9 +8,9 @@ import {
   type CompanionBriefDto,
   type CompanionCardDto,
   type CompanionCheckinChangeDto,
+  type CompanionGetStartedDto,
   type CompanionGoalDto,
   type CompanionItemDto,
-  type CompanionNotice,
   type CompanionReminderDto,
   type CompanionSettings,
   type CompanionSnapshotDto,
@@ -21,7 +22,7 @@ import {
  * installMockApi uses a quiet instance by default (no items, no brief, no
  * conversation, a change feed that sends the current revision and ends), so
  * the Topbar button shows and nothing errors; a spec that needs data seeds
- * its own (items, a status, notices the feed carries once) and passes
+ * its own (items, a status, Michi's attention records the background feed carries once) and passes
  * `handle` as `custom`. No backend, MCP or Auth.
  *
  * Unknown /companion routes answer 404, so a renderer calling one the
@@ -36,15 +37,23 @@ export interface CompanionMockOptions {
   /** Status fields to report (e.g. `nextBriefAt`). */
   status?: Partial<CompanionStatusDto>;
   /**
-   * Notices the backend's gate sends to renderer feeds: the first GET
-   * /companion/events carries them as `companion_notice` frames.
+   * Michi's attention records (services/companion/notices.ts on the backend):
+   * the first POST /chats/background/subscribe carries them, live, after an
+   * empty snapshot; a window's claim of one is won.
    */
-  notices?: CompanionNotice[];
+  records?: AttentionNotificationV1[];
   /**
    * What the backend says about the welcome (DESIGN-v2 §3.8): `wanted` asks
    * the panel to request it. Absent, the snapshot carries none (no welcome).
    */
   welcome?: CompanionSnapshotDto['welcome'];
+  /**
+   * The Get started card (D17). Start and Not now answer with the card
+   * moved on, as the backend does; Start with `watch` sets the outside sources.
+   */
+  getStarted?: CompanionGetStartedDto | null;
+  /** When "Michi is off" was told (Q29): null, not yet; absent, a backend without the record. */
+  offNoticeAt?: number | null;
   /** The check-ins' changes to Today items and goals, newest first (DESIGN-v2 §2.7, snapshot.checkinChanges). */
   checkinChanges?: CompanionCheckinChangeDto[];
 }
@@ -82,7 +91,8 @@ function isOpen(item: CompanionItemDto, now: number): boolean {
 
 export function createCompanionMock(options: CompanionMockOptions = {}): CompanionMockController {
   const state = {
-    settings: { ...DEFAULT_COMPANION_SETTINGS, ...options.settings } as CompanionSettings,
+    // A Michi the user turned on (Resume: it starts paused); options.settings can pause it again.
+    settings: { ...DEFAULT_COMPANION_SETTINGS, enabled: true, paused: false, ...options.settings } as CompanionSettings,
     items: [...(options.items ?? [])],
     cards: [...(options.cards ?? [])],
     goals: [] as CompanionGoalDto[],
@@ -92,13 +102,15 @@ export function createCompanionMock(options: CompanionMockOptions = {}): Compani
     notesRevision: 0,
     rules: '',
     revision: 1,
+    getStarted: options.getStarted,
+    offNoticeAt: options.offNoticeAt,
   };
   const writes: string[] = [];
   const actions: Array<{ id: string; body: Record<string, unknown> }> = [];
   const notificationLevels: ChatNotificationLevel[] = [];
   let next = 1;
-  /** Notices not sent yet: the first feed connection carries them. */
-  let unsentNotices = [...(options.notices ?? [])];
+  /** Records not sent yet: the first background subscription carries them. */
+  let unsentRecords = [...(options.records ?? [])];
 
   const snapshot = (): CompanionSnapshotDto => {
     const now = Date.now();
@@ -128,6 +140,8 @@ export function createCompanionMock(options: CompanionMockOptions = {}): Compani
       reminders: state.reminders,
       ...(options.welcome ? { welcome: options.welcome } : {}),
       ...(options.checkinChanges ? { checkinChanges: options.checkinChanges } : {}),
+      ...(state.getStarted !== undefined ? { getStarted: state.getStarted } : {}),
+      ...(state.offNoticeAt !== undefined ? { offNoticeAt: state.offNoticeAt } : {}),
       demotedSubtypes: [],
       catchUp: null,
       activity: [],
@@ -145,6 +159,21 @@ export function createCompanionMock(options: CompanionMockOptions = {}): Compani
     const request = route.request();
     const path = new URL(request.url()).pathname.replace(/^.*?\/api/, '');
     const method = request.method();
+    if (method === 'POST' && path === '/chats/background/subscribe' && unsentRecords.length > 0) {
+      const frames = [
+        `event: attention_snapshot\ndata: ${JSON.stringify({ protocol: 'v1', notifications: [] })}\n\n`,
+        ...unsentRecords.map((record) => `event: attention_notification\ndata: ${JSON.stringify(record)}\n\n`),
+      ].join('');
+      unsentRecords = [];
+      await route.fulfill({ status: 200, contentType: 'text/event-stream', headers: { 'cache-control': 'no-cache' }, body: `: keepalive\n\n${frames}` });
+      return true;
+    }
+    if (method === 'POST' && /^\/attention\/notifications\/[^/]+\/claim$/.test(path)) {
+      let windowId = 'window';
+      try { windowId = String((request.postDataJSON() as { windowId?: unknown } | null)?.windowId ?? windowId); } catch { /* no body */ }
+      await json(route, { claimed: true, claimedByWindowId: windowId, status: 'active' });
+      return true;
+    }
     if (path !== '/companion' && !path.startsWith('/companion/')) return false;
     if (method !== 'GET') writes.push(`${method} ${path}`);
     const body = (): Record<string, unknown> => {
@@ -152,16 +181,10 @@ export function createCompanionMock(options: CompanionMockOptions = {}): Compani
     };
 
     if (method === 'GET' && path === '/companion/events') {
-      const notices = unsentNotices.map((notice) => `event: companion_notice\ndata: ${JSON.stringify(notice)}\n\n`).join('');
-      unsentNotices = [];
       await route.fulfill({
         status: 200, contentType: 'text/event-stream', headers: { 'cache-control': 'no-cache' },
-        body: `event: companion_changed\ndata: ${JSON.stringify({ type: 'companion_changed', revision: state.revision, reason: 'status' })}\n\n${notices}`,
+        body: `event: companion_changed\ndata: ${JSON.stringify({ type: 'companion_changed', revision: state.revision, reason: 'status' })}\n\n`,
       });
-      return true;
-    }
-    if (method === 'GET' && path === '/companion/notifications/stream') {
-      await route.fulfill({ status: 200, contentType: 'text/event-stream', headers: { 'cache-control': 'no-cache' }, body: ': connected\n\n' });
       return true;
     }
     if (method === 'GET' && path === '/companion') { await json(route, snapshot()); return true; }
@@ -185,9 +208,31 @@ export function createCompanionMock(options: CompanionMockOptions = {}): Compani
       return true;
     }
     if (method === 'POST' && path === '/companion/check') { await json(route, { queued: true }, 202); return true; }
+    if (method === 'POST' && path === '/companion/off-notice') {
+      if (state.offNoticeAt === null) state.offNoticeAt = Date.now();
+      await noContent(route);
+      return true;
+    }
     if (method === 'POST' && path === '/companion/presence') { await noContent(route); return true; }
     if (method === 'POST' && path === '/companion/view') { await json(route, { catchUp: null }); return true; }
     if (method === 'POST' && path === '/companion/welcome') { await json(route, { started: false }); return true; }
+    if (method === 'POST' && (path === '/companion/get-started' || path === '/companion/get-started/later') && state.getStarted) {
+      const input = body();
+      if (path === '/companion/get-started') {
+        if (typeof input.watch === 'boolean') {
+          const sources = { ...state.settings.sources };
+          for (const kind of ['cr', 'pipeline', 'email', 'calendar'] as const) sources[kind] = { ...sources[kind], enabled: input.watch };
+          state.settings = { ...state.settings, sources } as CompanionSettings;
+        }
+        state.getStarted = { ...state.getStarted, state: 'started', at: Date.now(), homes: input.homes === true,
+          watch: typeof input.watch === 'boolean' ? input.watch : null, homesOn: input.homes === true };
+      } else if (state.getStarted.state !== 'started') {
+        state.getStarted = { ...state.getStarted, state: 'later', at: Date.now() };
+      }
+      changed();
+      await json(route, snapshot());
+      return true;
+    }
     if (method === 'POST' && path === '/companion/items/seen') {
       const ids = new Set((body().ids as string[] | undefined) ?? []);
       for (const item of state.items) if (ids.has(item.id) && item.status === 'new') item.status = 'seen';

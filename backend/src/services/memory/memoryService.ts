@@ -15,6 +15,7 @@ import {
   type MemoryChangeAction,
   type MemoryChangedEvent,
   type MemoryErrorCode,
+  type MemoryErrorResponse,
   type MemoryKind,
   type MemoryMode,
   type MemoryOrigin,
@@ -31,6 +32,7 @@ import { runAfterCommit } from '../db';
 import { restartExtractionAt, skipConversationExtraction, workspaceCompletionCounter } from './extractionRepository';
 import {
   bumpScopeVersion,
+  conversationStart,
   conversationWorkspaceId,
   deleteMemoryRow,
   deleteOwnerMemoryRows,
@@ -58,6 +60,7 @@ import {
   type MemoryScopeFilter,
 } from './memoryRepository';
 import { hideConversationTurns, indexMemory, removeMemory as removeRecallDoc, resetOwnerRecall } from './recallIndex';
+import { isTemporaryChat } from './temporaryChat';
 
 /**
  * Michi Memory service (C1). Every entry point takes the caller's owner and
@@ -72,12 +75,19 @@ export interface MemoryCaller {
   ownerUserId: string;
 }
 
-const KIND_FOR_CODE: Record<MemoryErrorCode, DomainErrorKind> = {
+/** The shared codes, and memory_mode_locked: a conversation's memory setting asked to change after it began. */
+export type MemoryServiceErrorCode = MemoryErrorCode | 'memory_mode_locked';
+
+/** MemoryErrorResponse with the service's codes, as the memory routes answer. */
+export type MemoryServiceErrorResponse = Omit<MemoryErrorResponse, 'code'> & { code: MemoryServiceErrorCode | 'unauthorized' };
+
+const KIND_FOR_CODE: Record<MemoryServiceErrorCode, DomainErrorKind> = {
   invalid_argument: 'invalid_argument',
   not_found: 'not_found',
   version_conflict: 'conflict',
   invalid_state: 'conflict',
   memory_disabled: 'conflict',
+  memory_mode_locked: 'conflict',
 };
 
 /**
@@ -86,7 +96,7 @@ const KIND_FOR_CODE: Record<MemoryErrorCode, DomainErrorKind> = {
  */
 export class MemoryError extends DomainError {
   constructor(
-    readonly code: MemoryErrorCode,
+    readonly code: MemoryServiceErrorCode,
     message: string,
     /** The stored version, for version_conflict. */
     readonly currentVersion?: number,
@@ -808,7 +818,9 @@ export interface ConversationModeChange {
  * with their history, and so do earlier versions from it that a later
  * conversation's correction replaced (that memory's history). Coming back to
  * learn starts after what was said meanwhile: extraction never reads it.
- * Works with memory off.
+ * Works with memory off. What the user asks for goes through
+ * chooseConversationMemoryMode, which allows a change only before the
+ * conversation begins.
  */
 export function setConversationMemoryMode(caller: MemoryCaller, nodeId: string, mode: unknown): ConversationModeChange {
   const ownerUserId = owner(caller);
@@ -831,6 +843,52 @@ export function setConversationMemoryMode(caller: MemoryCaller, nodeId: string, 
       if (removeMemory(ownerUserId, id, 'deleted').removed.length > 0 && shown) removedMemories += 1;
     }
     return { mode, hiddenTurns: hideConversationTurns(ownerUserId, conversation.nodeId), removedMemories };
+  });
+}
+
+/**
+ * The user's choice of a conversation's memory setting (PUT
+ * /api/nodes/:nodeId/memory-mode), made before the conversation begins: once
+ * it has a message or a turn, or when it branched from a temporary chat, a
+ * change is memory_mode_locked, in either direction. Asking for the setting it
+ * has changes nothing. setConversationMemoryMode makes the change.
+ */
+export function chooseConversationMemoryMode(caller: MemoryCaller, nodeId: string, mode: unknown): ConversationModeChange {
+  const ownerUserId = owner(caller);
+  if (!isConversationMemoryMode(mode)) throw new MemoryError('invalid_argument', 'mode must be learn, use_only or off');
+  return memoryTransaction((): ConversationModeChange => {
+    const conversation = ownedConversation(ownerUserId, nodeId);
+    if (readConversationMemoryMode(conversation.nodeId) !== mode) {
+      const start = conversationStart(conversation.nodeId);
+      if (start.hasMessage || start.hasTurn || isTemporaryChat(start.parentNodeId)) {
+        throw new MemoryError('memory_mode_locked', "A conversation's memory setting is chosen before its first message and cannot change afterwards");
+      }
+    }
+    return setConversationMemoryMode(caller, conversation.nodeId, mode);
+  });
+}
+
+/**
+ * Makes one of the owner's conversations a temporary chat (memory setting
+ * off, services/memory/temporaryChat.ts) while no turn has started in it
+ * (ensure-session's `temporary`, sent from the first message on). Its
+ * messages do not count: the window's sync may store the first one before
+ * ensure-session arrives, and that chat must still become temporary. One
+ * with a turn keeps its setting. Nothing is learned before a turn, so nothing
+ * is removed or hidden. Works with memory off. A node that is not one of the
+ * owner's conversations is left alone.
+ */
+export function startTemporaryConversation(caller: MemoryCaller, nodeId: string): void {
+  const ownerUserId = owner(caller);
+  memoryTransaction((): void => {
+    let conversation: { nodeId: string };
+    try {
+      conversation = ownedConversation(ownerUserId, nodeId);
+    } catch (error) {
+      if (error instanceof MemoryError && error.code === 'not_found') return;
+      throw error;
+    }
+    if (!conversationStart(conversation.nodeId).hasTurn) writeConversationMemoryMode(conversation.nodeId, 'off');
   });
 }
 

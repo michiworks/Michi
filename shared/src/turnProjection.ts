@@ -191,6 +191,7 @@ function titleMatch(raw: string): { start: number; end: number; title: string } 
 const FOLLOW_UP_START_RE_G = /\[FOLLOW-UP\s+([1-3])\s*(?:\/\s*3)?\s*:\s*/gi;
 /** Sentinels that end at the last `]` of their line. */
 const LINE_SENTINEL_PREFIX_RE = /^\[(?:FOLLOW-UP\s+[1-3]|BRANCH-OVERVIEW:)/i;
+const FOLLOW_UP_PREFIX_RE = /^\[FOLLOW-UP\s+[1-3]/i;
 const METADATA_LINE_RE = /^\[(?:TITLE|BRANCH-OVERVIEW):/i;
 
 interface FollowUpSentinel {
@@ -408,10 +409,40 @@ function nextFollowUpStart(text: string, quoted: ReadonlySet<number>, offset: nu
   return -1;
 }
 
+/** Whether the line `pos` is on has text before it, other than blanks and `cuts`. */
+function lineHasTextBefore(raw: string, cuts: ReadonlyArray<{ start: number; end: number }>, pos: number): boolean {
+  let index = Math.max(raw.lastIndexOf('\n', pos - 1), raw.lastIndexOf('\r', pos - 1)) + 1;
+  for (const cut of cuts) {
+    if (cut.end <= index) continue;
+    if (/\S/.test(raw.slice(index, Math.max(index, cut.start)))) return true;
+    index = cut.end;
+  }
+  return /\S/.test(raw.slice(index, pos));
+}
+
+/**
+ * A follow-up with text before it on its line: `after` is the rest of it after
+ * its first `]`, up to the next follow-up or its line's end at `lineEnd` (-1:
+ * not yet). It is prose unless it ends with `]` and opens the answer's
+ * follow-up lines, as when Kiro writes the first one after the answer's last
+ * sentence: the next line that is not blank starts with a sentinel.
+ */
+function midLineFollowUp(raw: string, after: string, lineEnd: number): 'pending' | 'sentinel' | 'prose' {
+  if (after.trim() && !after.trimEnd().endsWith(']')) return 'prose';
+  if (lineEnd < 0) return 'pending';
+  let start = lineEnd;
+  while (start < raw.length && /\s/.test(raw[start])) start += 1;
+  if (start === raw.length) return 'pending';
+  const nextLineEnd = raw.slice(start).search(/[\n\r]/);
+  const head = raw.slice(start, nextLineEnd < 0 ? raw.length : start + nextLineEnd);
+  if (LINE_SENTINEL_PREFIX_RE.test(head) || METADATA_LINE_RE.test(head)) return 'sentinel';
+  return nextLineEnd < 0 && couldStillBeSentinel(head) ? 'pending' : 'prose';
+}
+
 export interface TurnMetadataSentinelScan {
   /** Completed sentinels, each with the whitespace that follows it. */
   cuts: Array<{ start: number; end: number }>;
-  /** Start of a trailing candidate still waiting for its `]` (a follow-up or overview: its line's end), or -1. */
+  /** Start of a trailing candidate still waiting for its `]` (a follow-up or overview: its line's end; one after text: the next line), or -1. */
   pendingStart: number;
 }
 
@@ -419,8 +450,9 @@ export interface TurnMetadataSentinelScan {
  * Locate Michi metadata sentinels in raw answer text. A sentinel is one line
  * of prose, so a prefix quoted in inline code (`[BRANCH-OVERVIEW:`) or one
  * whose line ends before a `]` is ordinary text. A follow-up or overview ends at
- * the last `]` of its line. Undecided text stays held, so appending text never hides
- * what was already visible.
+ * the last `]` of its line. A follow-up with text before it on its line is
+ * prose (midLineFollowUp). Undecided text stays held, so appending text never
+ * hides what was already visible.
  */
 export function scanTurnMetadataSentinels(raw: string): TurnMetadataSentinelScan {
   const cuts: Array<{ start: number; end: number }> = [];
@@ -442,7 +474,17 @@ export function scanTurnMetadataSentinels(raw: string): TurnMetadataSentinelScan
       const rest = raw.slice(cursor + 1, lineEnd < 0 ? raw.length : cursor + lineEnd);
       const next = nextFollowUpStart(rest, quoted, cursor + 1);
       if (lineEnd < 0 && next < 0) break;
-      let end = cursor + 1 + rest.slice(0, next < 0 ? rest.length : next).lastIndexOf(']') + 1;
+      const after = rest.slice(0, next < 0 ? rest.length : next);
+      if (FOLLOW_UP_PREFIX_RE.test(candidate) && lineHasTextBefore(raw, cuts, holdStart)) {
+        const midLine = midLineFollowUp(raw, after, lineEnd < 0 ? -1 : cursor + lineEnd);
+        if (midLine === 'pending') break;
+        if (midLine === 'prose') {
+          cursor += 1;
+          holdStart = -1;
+          continue;
+        }
+      }
+      let end = cursor + 1 + after.lastIndexOf(']') + 1;
       while (end < raw.length && /\s/.test(raw[end])) end += 1;
       cuts.push({ start: holdStart, end });
       cursor = end;

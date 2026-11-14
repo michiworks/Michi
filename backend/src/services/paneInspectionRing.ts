@@ -70,17 +70,17 @@ function scopesEqual(a: AuthorizationScope, b: AuthorizationScope): boolean {
   return a.ownerUserId === b.ownerUserId && a.workspaceId === b.workspaceId && (a.runOwnerId ?? null) === (b.runOwnerId ?? null);
 }
 
-/** One feed-shaped event as stored in the ring. Intentionally a subset of `PaneFeedEventV1`'s
+/** One feed-shaped event as stored in the ring. Intentionally only part of a feed event's
  *  fields — this module does not know how to serialise a full descriptor and does not need to:
  *  callers (P3-2) attach their own `PaneDescriptorV1`/`OutputPreview`/etc. payload; this module
  *  only needs `sizeBytes` (for the byte bound) and `kind` (for revision bookkeeping and replay
  *  filtering). `payload` travels opaquely. */
 export interface RingEvent {
-  /** Mirrors `PaneFeedEventV1['type']` minus `'snapshot'` (a snapshot is the ring's baseline,
+  /** A feed event's type minus `'snapshot'` (a snapshot is the ring's baseline,
    *  not a ring *event* — see `recordSnapshot`). */
   kind: 'changed' | 'output_changed' | 'execution_settled' | 'removed' | 'access_revoked';
   /** Caller-supplied payload, stored and replayed opaquely (e.g. a `changedSections` list plus
-   *  descriptor, for P3-2 to serialise into a `PaneFeedEventV1`). Never inspected by this module. */
+   *  descriptor, as `inspect` publishes it). Never inspected by this module. */
   payload: unknown;
   /** UTF-8 byte size of `payload` as the caller measured it, for the ring's byte bound. This
    *  module does not serialise `payload` itself (it is unknown to us) — the caller, which already
@@ -654,9 +654,9 @@ export class PaneInspectionRing {
  *  module's doc comment on why two independently-constructed instances is a real bug class, not
  *  a style nit: a cursor minted against one instance's `objects`/`cursors` maps is invisible to
  *  another). `paneInspection.ts` (P3-3, the `inspect` boundary) and `paneInspectionWait.ts`
- *  (which hands it to `paneInspectionSubscribe.ts`'s `PaneFeed`) MUST share this exact instance —
+ *  (which resolves a wait's cursor here) MUST share this exact instance —
  *  that sharing is what makes the acceptance criterion "a cursor minted by inspect resolves
  *  through this ring" true at all. Real `Date.now()` clock in production; tests construct their own
  *  `new PaneInspectionRing({ now: fakeClock.now })` instead of importing this singleton, exactly
- *  like `paneInspectionSubscribe.test.ts` already does. */
+ *  like `paneInspectionRing.test.ts` already does. */
 export const paneInspectionRing = new PaneInspectionRing({ now: () => Date.now() });

@@ -2,10 +2,11 @@
  * Tests for michiGrantKey — the key chat always-allow grants are stored
  * under, which Michi's permission port gives adapters as grantKey — and for
  * which of Michi's own tools a chat runs without a prompt, and for the chat
- * policy while a turn holds check-in or collector material (DESIGN-v2 §2.8):
- * the mode reads Ask, grants and session trust (through the port's reset
- * token) are not honoured, and only reads and Michi's own internal writes
- * still run. The rest of chat policy is covered by chatPermissionRuntimes and
+ * policy by consequence (D19, Q26): in a guarded turn (Michi drove it, or it
+ * holds outside content) what leaves the machine asks whatever the mode,
+ * grants or session trust; a work conversation runs local work unasked; work
+ * started from someone else's content asks for network and credential reads
+ * too. The rest of chat policy is covered by chatPermissionRuntimes and
  * chatApprovalState; the names each adapter sends by permissionToolNames,
  * each runtime's decisions end to end by permissionMatrix, and V's routes by
  * companionTrustBoundary.
@@ -24,9 +25,12 @@ import { BUILTIN_TOOLS } from '../src/agents/builtinTools';
 import { CHECKIN_TOOL_NAMES, MAIN_TOOL_NAMES } from '../src/assistant/policy';
 import { configureRuntimeDeps, __resetRuntimeDeps } from '../src/agents/runtimeDeps';
 import { closeDb, getDb, initDb } from '../src/services/db';
-import { clearCarriedCompanionTaint, recordCompanionTaint } from '../src/services/turnTrust';
+import { clearCarriedCompanionTaint, recordCompanionTaint, recordUntrustedSource } from '../src/services/turnTrust';
+import { __resetTurnGuard, noteMichiStartedTurn, recordPassedOutsideContent } from '../src/services/turnGuard';
 import { chatOwner, runOwner } from './helpers/owners';
-import { activeTurnRow } from './helpers/checkinNodes';
+import { activeTurnRow, makeCheckinNode } from './helpers/checkinNodes';
+import { backgroundRefusal } from '../src/agents/permissionPolicy';
+import { claudeCallNeedsMichiApproval } from '../src/agents/michiClaudeOptions';
 import { registerLiveSession } from './helpers/liveSession';
 import { clearAllSessions } from '../src/agents/sessionRegistry';
 
@@ -52,6 +56,7 @@ for (const [label, grantKey] of [['michiGrantKey', michiGrantKey], ['michiPermis
 // Michi's data, what Michi records about the turn, its question card, thread
 // messages, Memory, Artifact reads, multi-model plans (the plan card is the
 // consent), delete_artifact, whose own card asks every time (hostApproval),
+// start_conversation, whose own card asks outside a turn the user sent,
 // and the agent's own tools, which gate themselves. Every other Michi tool
 // asks in Ask. A new Michi tool fails the catalog test below until it is
 // placed in one of the two lists.
@@ -59,19 +64,19 @@ const SELF_SCOPED = new Set([
     'michi_docs', 'michi_skills', 'list_workspaces', 'list_threads', 'search_messages', 'read_node', 'read_node_overview',
     'read_conversation_updates', 'list_panes', 'inspect_pane', 'read_pane_output', 'wait_pane',
     'read_home', 'list_pages', 'read_page', 'read_database', 'list_page_components', 'read_page_component', 'list_tasks',
-    'list_scheduled_jobs', 'list_agents', 'check_agent', 'wait_agent', 'list_artifacts', 'search_artifacts', 'delete_artifact',
+    'list_scheduled_jobs', 'list_agents', 'check_agent', 'wait_agent', 'list_artifacts', 'search_artifacts', 'delete_artifact', 'start_conversation',
     'set_branch_overview', 'set_follow_ups', 'report_conversation_no_change',
     'ask_user', 'send_to_thread', 'memory_search', 'memory_save', 'memory_update', 'memory_delete',
     'list_ready_models', 'propose_multi_model_plan',
     'companion_items', 'companion_item', 'companion_check_now', 'companion_update_item', 'companion_save_notes',
     'companion_goal_progress', 'companion_edit_goal', 'companion_propose', 'companion_publish_brief', 'companion_set_name',
-    'companion_read', 'companion_session_send',
-    'nothing_to_do',
+    'companion_set_notifications', 'companion_read', 'companion_session_send',
+    'companion_headline', 'nothing_to_do',
 ]);
 // Writes of pages, artifacts and jobs, a page preview's link, the web, links, images, branches and Agent Runs.
 const ASKS = new Set([
     'configure_database', 'configure_database_view', 'create_database', 'create_page', 'edit_database', 'edit_home',
-    'edit_page', 'preview_page', 'save_page_component', 'open_task_database', 'layout_rules', 'start_conversation',
+    'edit_page', 'preview_page', 'save_page_component', 'open_task_database', 'layout_rules',
     'create_scheduled_job', 'update_scheduled_job', 'run_scheduled_job', 'delete_scheduled_job',
     'open_url', 'show_image', 'spawn_branches', 'save_artifact', 'update_artifact', 'web_search', 'fetch_content',
     'spawn_agent', 'send_agent_input', 'cancel_agent', 'watch_agent_runs', 'update_agent_watch', 'submit_agent_result',
@@ -145,11 +150,12 @@ describe("Michi's own tools in a chat", () => {
     });
 });
 
-describe('the chat policy while a turn holds check-in or collector material', () => {
+describe('the chat policy by consequence (D19, Q26)', () => {
     let tmpDir: string;
     const grants = new Set<string>();
     const node = 'n-chat';
     const owner = chatOwner(node);
+    let mode: 'ask' | 'trust' | 'yolo' = 'yolo';
 
     beforeEach(() => {
         tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'michi-permission-policy-'));
@@ -157,6 +163,8 @@ describe('the chat policy while a turn holds check-in or collector material', ()
         closeDb();
         initDb();
         grants.clear();
+        mode = 'yolo';
+        __resetTurnGuard();
         getDb().prepare("INSERT INTO workspaces (id, name, cwd, created_at, updated_at) VALUES ('ws-1', 'W', ?, 1, 1)").run(tmpDir);
         getDb().prepare("INSERT INTO nodes (id, workspace_id, kind, status, created_at) VALUES (?, 'ws-1', 'chat', 'idle', 1)").run(node);
         configureRuntimeDeps({
@@ -164,7 +172,7 @@ describe('the chat policy while a turn holds check-in or collector material', ()
             historyStore: { getNode: () => null, listMessages: () => [], getWorkspace: () => null, getWorkspaceInstructions: () => null },
             agentConfig: { getAgentConfig: () => ({ runtime: 'pi', provider: 'x', modelByRuntime: {}, reasoningByRuntime: {} }) as never, resolveModel: () => '', resolveReasoning: () => undefined },
             chatPermissions: {
-                getMode: () => 'yolo', getApproveForMe: () => true, resetToken: () => 'token-1',
+                getMode: () => mode, getApproveForMe: () => true, resetToken: () => 'token-1',
                 hasGrant: (id, tool) => grants.has(`${id}:${tool}`), grant: (id, tool) => { grants.add(`${id}:${tool}`); },
             },
         });
@@ -172,65 +180,178 @@ describe('the chat policy while a turn holds check-in or collector material', ()
 
     afterEach(() => {
         __resetRuntimeDeps();
+        __resetTurnGuard();
         closeDb();
         fs.rmSync(tmpDir, { recursive: true, force: true });
     });
 
-    test('mode, approve-for-me, grants and the reset token as the user set them until the turn takes it in; then Ask', () => {
-        activeTurnRow(node, 'turn-p', 'a-p');
-        grants.add(`${node}:bash`);
-        assert.equal(chatPermissionMode(owner, null), 'yolo');
-        assert.equal(chatApproveForMe(owner, null), true);
-        assert.equal(resolveChatPolicy(owner, null, 'Bash', true, 'ask'), 'allow', 'the grant');
-        assert.equal(michiPermissionPolicy.resetToken!(owner, null), 'token-1');
+    const decide = (toolName: string, input?: unknown, turnMode = mode) => michiPermissionPolicy.decide({
+        owner, ownerUserId: null, toolName, nativeRequest: true, mode: turnMode, ...(input !== undefined ? { call: { input } } : {}),
+    });
+    const forced = (toolName: string, input?: unknown) => michiPermissionPolicy.forced!({
+        owner, ownerUserId: null, toolName, nativeRequest: true, ...(input !== undefined ? { call: { input } } : {}),
+    });
+    /** The running turn's user message, with this metadata (a message Michi sent carries threadMessage or companionSend). */
+    function userMessage(turnId: string, metadata: Record<string, unknown> | null): void {
+        const id = `m-${turnId}`;
+        getDb().prepare("INSERT INTO messages (id, node_id, role, content, seq, metadata) VALUES (?, ?, 'user', 'x', 1, ?)")
+            .run(id, node, metadata ? JSON.stringify(metadata) : null);
+        getDb().prepare('UPDATE turns SET user_message_id = ? WHERE turn_id = ?').run(id, turnId);
+    }
 
-        recordCompanionTaint({ nodeId: node, turnId: 'turn-p' }, 'read_page', 'checkin');
-        assert.equal(chatPermissionMode(owner, null), 'ask');
-        assert.equal(chatApproveForMe(owner, null), false);
-        for (const mode of ['ask', 'trust', 'yolo'] as const) {
-            for (const tool of ['Bash', 'bash', 'Write', 'WebFetch', 'mcp__github__create_issue', '@michi/start_conversation']) {
-                assert.equal(resolveChatPolicy(owner, null, tool, true, mode), 'ask', `${mode} ${tool}`);
-            }
-        }
-        for (const mode of ['trust', 'yolo'] as const) {
-            for (const tool of ['Read', 'Grep', 'mcp____michi_internal____read_page', '@michi/edit_page', 'companion_read']) {
-                assert.equal(resolveChatPolicy(owner, null, tool, true, mode), 'allow', `${mode} ${tool}`);
-            }
-        }
-        // Michi's self-scoped tools, which run in every mode otherwise, hold to it too: its reads, Memory and
-        // reply metadata (Michi-internal writes) still run; thread messages and the question card ask.
-        for (const mode of ['ask', 'trust', 'yolo'] as const) {
-            for (const tool of ['@michi/read_node', 'memory_search', 'mcp____michi_internal____memory_save', 'memory_delete', 'set_follow_ups']) {
-                assert.equal(resolveChatPolicy(owner, null, tool, true, mode), 'allow', `${mode} ${tool}`);
-            }
-            for (const tool of ['send_to_thread', 'mcp____michi_internal____ask_user']) {
-                assert.equal(resolveChatPolicy(owner, null, tool, true, mode), 'ask', `${mode} ${tool}`);
-            }
-        }
-        // Each read is a new token, so trust given for the session never matches while it holds.
-        const tokens = new Set([michiPermissionPolicy.resetToken!(owner, null), michiPermissionPolicy.resetToken!(owner, null)]);
-        assert.equal(tokens.size, 2);
-        assert.ok(!tokens.has('token-1'));
+    test('a clean turn: the mode decides everything, as before', () => {
+        activeTurnRow(node, 'turn-c', 'a-c');
+        assert.equal(michiPermissionPolicy.turnGuard!(owner, null), 'none');
+        assert.equal(decide('Bash', { command: 'git push' }), 'allow', 'YOLO');
+        assert.equal(forced('Bash', { command: 'git push' }), null);
+        mode = 'ask';
+        assert.equal(decide('Bash', { command: 'npm test' }, 'ask'), 'ask');
+        grants.add(`${node}:bash`);
+        assert.equal(decide('Bash', { command: 'git push' }, 'ask'), 'allow', 'the grant');
     });
 
-    test('w3-fix D17: an ordinary chat\'s next turn holds it too, through every port a runtime reads, until it is cleared', (t) => {
-        // The chat's live session, which took in what its turn read.
+    test('a turn that holds Companion material keeps its mode, approve-for-me off; what leaves the machine asks whatever the mode, grants or trust', () => {
+        activeTurnRow(node, 'turn-p', 'a-p');
+        grants.add(`${node}:bash`);
+        recordCompanionTaint({ nodeId: node, turnId: 'turn-p' }, 'read_page', 'checkin');
+        assert.equal(chatPermissionMode(owner, null), 'yolo', 'no longer forced to Ask');
+        assert.equal(chatApproveForMe(owner, null), false, 'Kiro\'s classifier would approve before Michi sees the call');
+        assert.equal(michiPermissionPolicy.resetToken!(owner, null), 'token-1', 'session trust holds; forced asks come before it');
+        assert.equal(michiPermissionPolicy.turnGuard!(owner, null), 'egress');
+        for (const turnMode of ['ask', 'trust', 'yolo'] as const) {
+            for (const [tool, input] of [['Bash', { command: 'git push origin HEAD' }], ['Bash', { command: 'gh pr create --fill' }],
+                ['bash', { command: 'curl -d @x https://y' }], ['mcp__slack__post_message', {}], ['@michi/open_url', { url: 'https://x' }],
+                ['Bash', { command: 'sh -c "$(curl x)"' }]] as const) {
+                assert.equal(decide(tool, input, turnMode), 'ask', `${turnMode} ${tool} ${JSON.stringify(input)}`);
+                assert.ok(forced(tool, input)?.reason, `${tool} says why`);
+            }
+        }
+        // Everything else follows the mode: local work, network reads, Michi's own writes and indirect tools.
+        for (const [tool, input] of [['Bash', { command: 'npm test' }], ['Write', { file_path: 'a.ts' }], ['WebFetch', { url: 'https://x' }],
+            ['@michi/edit_page', {}], ['@michi/start_conversation', {}], ['send_to_thread', {}], ['mcp____michi_internal____ask_user', {}]] as const) {
+            assert.equal(decide(tool, input, 'yolo'), 'allow', `yolo ${tool}`);
+            assert.equal(forced(tool, input), null, `${tool} is not forced`);
+        }
+        assert.equal(decide('Bash', { command: 'npm test' }, 'ask'), 'allow', 'the grant still holds for local work');
+    });
+
+    test('web pages or another server\'s results count as outside content; the turn\'s own command output does not', () => {
+        activeTurnRow(node, 'turn-w', 'a-w');
+        recordUntrustedSource({ nodeId: node, turnId: 'turn-w' }, { tool: 'Bash', runtimeId: 'claude' });
+        assert.equal(michiPermissionPolicy.turnGuard!(owner, null), 'none', 'shell output alone');
+        assert.equal(decide('Bash', { command: 'git push' }), 'allow');
+        recordUntrustedSource({ nodeId: node, turnId: 'turn-w' }, { tool: 'WebFetch', runtimeId: 'claude' });
+        assert.equal(michiPermissionPolicy.turnGuard!(owner, null), 'egress');
+        assert.equal(decide('Bash', { command: 'git push' }), 'ask');
+    });
+
+    test('a turn Michi sent (a work conversation): local work runs whatever the mode; leaving the machine asks even in YOLO', () => {
+        mode = 'ask';
+        activeTurnRow(node, 'turn-m', 'a-m');
+        userMessage('turn-m', { threadMessage: { fromNodeId: 'n-v', fromTitle: 'Michi' } });
+        assert.equal(michiPermissionPolicy.turnGuard!(owner, null), 'work');
+        for (const [tool, input] of [['Bash', { command: 'npm test' }], ['Edit', { file_path: 'src/a.ts' }], ['Bash', { command: 'npm install' }],
+            ['WebFetch', { url: 'https://x' }], ['Bash', { command: 'cat .env' }]] as const) {
+            assert.equal(decide(tool, input, 'ask'), 'allow', `${tool} ${JSON.stringify(input)}`);
+        }
+        for (const turnMode of ['ask', 'trust', 'yolo'] as const) {
+            assert.equal(decide('Bash', { command: 'git push' }, turnMode), 'ask', turnMode);
+            assert.equal(decide('Bash', { command: 'gh pr create --fill' }, turnMode), 'ask', turnMode);
+        }
+        assert.match(forced('Bash', { command: 'git push' })!.reason, /Michi is doing this work for you/);
+    });
+
+    test('a follow-up, and a followed conversation the user has not written in, are Michi\'s work too', () => {
+        activeTurnRow(node, 'turn-f', 'a-f');
+        userMessage('turn-f', { companionSend: { runId: 'r', via: 'user' }, threadMessage: { fromNodeId: 'n-v', fromTitle: 'Michi' } });
+        assert.equal(michiPermissionPolicy.turnGuard!(owner, null), 'work');
+        getDb().prepare("UPDATE turns SET status = 'completed'").run();
+        getDb().prepare("DELETE FROM messages").run();
+
+        // start_conversation's first message carries no metadata: its delegation says so, until the user writes there.
+        getDb().prepare(`INSERT INTO companion_delegations (id, owner_user_id, workspace_id, node_id, title, created_at, state)
+            VALUES ('d-1', 'local-user', 'ws-1', ?, 'T', 1, 'following')`).run(node);
+        activeTurnRow(node, 'turn-s', 'a-s');
+        userMessage('turn-s', null);
+        assert.equal(michiPermissionPolicy.turnGuard!(owner, null), 'work');
+        getDb().prepare("UPDATE turns SET status = 'completed'").run();
+        activeTurnRow(node, 'turn-u', 'a-u');
+        getDb().prepare("INSERT INTO messages (id, node_id, role, content, seq) VALUES ('m-u', ?, 'user', 'mine', 2)").run(node);
+        getDb().prepare("UPDATE turns SET user_message_id = 'm-u' WHERE turn_id = 'turn-u'").run();
+        assert.equal(michiPermissionPolicy.turnGuard!(owner, null), 'none', 'the user took it over');
+    });
+
+    test('start_conversation notes its first turn before any delegation is recorded', () => {
+        activeTurnRow(node, 'turn-first', 'a-first');
+        noteMichiStartedTurn(node, 'turn-first');
+        assert.equal(michiPermissionPolicy.turnGuard!(owner, null), 'work');
+    });
+
+    test('work that started from someone else\'s content asks for network and credential reads too, for the rest of the conversation', () => {
+        activeTurnRow(node, 'turn-o', 'a-o');
+        userMessage('turn-o', { threadMessage: { fromNodeId: 'n-v', fromTitle: 'Michi' } });
+        recordPassedOutsideContent({ nodeId: node, turnId: 'turn-o' }, 'n-v', 'claude');
+        for (const [tool, input] of [['WebFetch', { url: 'https://x' }], ['Bash', { command: 'npm install' }], ['Bash', { command: 'cat ~/.aws/credentials' }],
+            ['Read', { file_path: '/home/u/.ssh/id_rsa' }]] as const) {
+            assert.equal(decide(tool, input, 'yolo'), 'ask', `${tool} ${JSON.stringify(input)}`);
+        }
+        assert.match(forced('WebFetch', { url: 'https://x' })!.reason, /someone else wrote/);
+        assert.equal(decide('Bash', { command: 'npm test' }, 'ask'), 'allow', 'local work still runs');
+        // A later follow-up into the same conversation, from a clean turn: still started from that content.
+        getDb().prepare("UPDATE turns SET status = 'completed'").run();
+        activeTurnRow(node, 'turn-o2', 'a-o2');
+        getDb().prepare("INSERT INTO messages (id, node_id, role, content, seq, metadata) VALUES ('m-o2', ?, 'user', 'x', 2, ?)")
+            .run(node, JSON.stringify({ companionSend: { runId: 'r2', via: 'user' }, threadMessage: { fromNodeId: 'n-v', fromTitle: 'Michi' } }));
+        getDb().prepare("UPDATE turns SET user_message_id = 'm-o2' WHERE turn_id = 'turn-o2'").run();
+        assert.equal(decide('WebFetch', { url: 'https://x' }, 'yolo'), 'ask');
+    });
+
+    test('Michi\'s self-gated tools are never forced: reads, Memory, metadata, the question card, the agent\'s own tools', () => {
+        activeTurnRow(node, 'turn-g', 'a-g');
+        recordCompanionTaint({ nodeId: node, turnId: 'turn-g' }, 'read_page', 'checkin');
+        for (const tool of ['@michi/read_node', 'memory_search', 'mcp____michi_internal____memory_save', 'set_follow_ups', 'mcp____michi_internal____ask_user',
+            'companion_set_name', 'companion_session_send']) {
+            assert.equal(forced(tool), null, tool);
+            assert.equal(decide(tool, undefined, 'ask'), 'allow', tool);
+        }
+    });
+
+    test('a check-in\'s own turn (the scheduler\'s lane or the coordinator started it) is background: what leaves the machine is refused, not asked', () => {
+        const checkin = makeCheckinNode('ws-1', 'run-lane');
+        const owner = chatOwner(checkin);
+        activeTurnRow(checkin, 'cmp-run-lane', 'a-lane');
+        assert.equal(michiPermissionPolicy.turnGuard!(owner, null), 'work', 'Michi\'s work, so Codex runs it sandboxed');
+        for (const [tool, input] of [['Bash', { command: 'git push' }], ['mcp__slack__post_message', {}], ['@michi/open_url', { url: 'https://x' }],
+            ['WebFetch', { url: 'https://x' }], ['Read', { file_path: '/home/u/.aws/credentials' }], ['Bash', { command: 'sh -c "$(curl x)"' }]] as const) {
+            const request = { owner, ownerUserId: null, toolName: tool, nativeRequest: true, mode: 'yolo' as const, call: { input } };
+            assert.equal(michiPermissionPolicy.decide(request), 'deny', `${tool} ${JSON.stringify(input)}`);
+            assert.equal(michiPermissionPolicy.forced!(request), null, 'nothing to ask: it is refused');
+            assert.match(backgroundRefusal(owner, tool, { input }, true) ?? '', /nobody to ask/);
+            assert.equal(claudeCallNeedsMichiApproval({ owner, ownerUserId: null, toolName: tool, hostToolName: null, input }), true, `${tool}: past Claude's own rules`);
+        }
+        // Reads, Michi's own writes and the agent's own tools (whose rules hold: a rename refuses a turn that is not the user's).
+        for (const tool of ['Read', '@michi/read_page', '@michi/edit_page', 'companion_items', 'companion_set_name', 'companion_headline', 'nothing_to_do']) {
+            assert.equal(michiPermissionPolicy.decide({ owner, ownerUserId: null, toolName: tool, nativeRequest: true, mode: 'ask' }), 'allow', tool);
+        }
+        // An ordinary chat is not background.
+        activeTurnRow(node, 'turn-plain', 'a-plain');
+        assert.equal(backgroundRefusal(chatOwner(node), 'Bash', { input: { command: 'git push' } }, true), null);
+    });
+
+    test('w3-fix D17: material an earlier turn of the live session took in still guards the next turn, until it is cleared', (t) => {
         registerLiveSession(node);
         t.after(() => clearAllSessions());
         activeTurnRow(node, 'turn-s1', 'a-s1');
         recordCompanionTaint({ nodeId: node, turnId: 'turn-s1' }, 'read_page', 'checkin');
         getDb().prepare("UPDATE turns SET status = 'completed' WHERE node_id = ?").run(node);
         activeTurnRow(node, 'turn-s2', 'a-s2');
-        grants.add(`${node}:bash`);
-        assert.equal(michiPermissionPolicy.mode(owner, null), 'ask');
-        assert.equal(michiPermissionPolicy.approveForMe!(owner, null), false, 'no Kiro classifier preset (K-review #4)');
-        assert.equal(michiPermissionPolicy.decide({ owner, ownerUserId: null, toolName: 'Bash', nativeRequest: true, mode: 'yolo' }), 'ask', 'the grant is not honoured');
-        assert.notEqual(michiPermissionPolicy.resetToken!(owner, null), 'token-1');
+        assert.equal(michiPermissionPolicy.mode(owner, null), 'yolo');
+        assert.equal(michiPermissionPolicy.approveForMe!(owner, null), false);
+        assert.equal(decide('Bash', { command: 'git push' }), 'ask');
         clearCarriedCompanionTaint(node);
         getDb().prepare("UPDATE turns SET status = 'completed' WHERE node_id = ?").run(node);
         activeTurnRow(node, 'turn-s3', 'a-s3');
-        assert.equal(michiPermissionPolicy.mode(owner, null), 'yolo');
         assert.equal(michiPermissionPolicy.approveForMe!(owner, null), true);
-        assert.equal(michiPermissionPolicy.resetToken!(owner, null), 'token-1');
+        assert.equal(decide('Bash', { command: 'git push' }), 'allow');
     });
 });

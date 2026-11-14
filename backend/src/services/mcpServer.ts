@@ -567,19 +567,21 @@ interface ToolConfig {
     loadUpFront?: boolean;
 }
 /**
- * Every Michi tool call passes here (w3-fix D23, agents/taintedToolGate.ts):
- * a tool that makes other work run or acts outside Michi, called from a turn
- * that holds check-in or collector material, runs only after the user
- * approved this call. Michi's runtime gate may already have asked (Claude's
- * hook, Kiro's request_permission): then it runs. Otherwise it asks through
- * the slot's ask_user channel, or is refused when there is none (Codex
- * MCP calls, and Kiro tools the user's agent pre-allows, never reach the
- * runtime gate). send_to_thread asks through its own requestApproval below.
+ * Every Michi tool call passes here (w3-fix D23, D19, agents/taintedToolGate.ts):
+ * a tool that leaves the machine, or starts work the turn's outside content
+ * would not travel with, called from a guarded turn (services/turnGuard.ts),
+ * runs only after the user approved this call. Michi's runtime gate may
+ * already have asked (Claude's hook, Kiro's request_permission): then it
+ * runs. Otherwise it asks through the slot's ask_user channel, or is refused
+ * when there is none (Codex MCP calls, and Kiro tools the user's agent
+ * pre-allows, never reach the runtime gate). send_to_thread is not gated: its
+ * message carries the turn's outside content to the turn it starts.
  */
 function taintGated(slot: McpSlot, name: string, handler: ToolHandler): ToolHandler {
     if (name === SEND_TO_THREAD_TOOL || !taintGatedMichiTool(name)) return handler;
     return async (args, extra) => {
         const gate = taintedMichiToolGate(resolveSlotBinding(slot).nodeId, name);
+        if (gate.kind === "refuse") return { content: [{ type: "text" as const, text: `REFUSED: ${gate.reason}` }], isError: true };
         if (gate.kind === "ask") {
             const refused = await askBeforeTaintedTool(slot.onAskUser, name, args, gate.reason);
             if (refused) return refused;
@@ -828,7 +830,7 @@ function michiToolCatalog(slot: McpSlot): MichiTool[] {
         );
     }
 
-    // A conversation whose memory setting is off reads no other conversation (globalContext.temporaryChatRefuses).
+    // A temporary chat reads no other conversation, and no other reads it (globalContext.temporaryChatRefuses).
     const temporaryChat = { content: [{ type: "text" as const, text: TEMPORARY_CHAT_MESSAGE }] };
 
     if (exposes("list_threads")) registerTool(
@@ -880,7 +882,7 @@ function michiToolCatalog(slot: McpSlot): MichiTool[] {
             if (typeof args?.messageId === "string") opts.messageId = args.messageId;
             if (typeof args?.charOffset === "number") opts.charOffset = args.charOffset;
             const hasOpts = Object.keys(opts).length > 0;
-            const result = readNode(binding.workspaceId, slot.ownerUserId, String(args?.nodeId ?? ""), hasOpts ? opts : undefined);
+            const result = readNode(binding.workspaceId, slot.ownerUserId, String(args?.nodeId ?? ""), hasOpts ? opts : undefined, binding.nodeId);
             return { content: [{ type: "text", text: result.text }] };
         },
     );
@@ -906,7 +908,7 @@ function michiToolCatalog(slot: McpSlot): MichiTool[] {
         async (args) => {
             const binding = resolveSlotBinding(slot);
             if (temporaryChatRefuses(binding.nodeId, [String(args?.nodeId ?? "")])) return temporaryChat;
-            const result = readNodeOverview(binding.workspaceId, slot.ownerUserId, String(args?.nodeId ?? ""));
+            const result = readNodeOverview(binding.workspaceId, slot.ownerUserId, String(args?.nodeId ?? ""), binding.nodeId);
             return { content: [{ type: "text", text: result.text }] };
         },
     );
@@ -924,6 +926,7 @@ function michiToolCatalog(slot: McpSlot): MichiTool[] {
             workspaceId: resolved.workspaceId,
             runOwnerRunId: runIdOfOwner(slot.owner),
             backendConnectionId: 'local',
+            callerNodeId: resolved.nodeId,
         };
     }
 
@@ -968,6 +971,7 @@ function michiToolCatalog(slot: McpSlot): MichiTool[] {
         builtinRegistration("list_panes"),
         async (args) => {
             if (!isToolExposed(slot, "list_panes")) throw new Error("Tool is not exposed: list_panes");
+            if (temporaryChatRefuses(resolveSlotBinding(slot).nodeId)) return temporaryChat;
             const binding = paneInspectionBinding();
             return listPanesTool(binding, {
                 treeId: typeof args?.treeId === "string" ? args.treeId : undefined,
@@ -1011,8 +1015,8 @@ function michiToolCatalog(slot: McpSlot): MichiTool[] {
         async (args, extra) => {
             const binding = resolveSlotBinding(slot);
             const approver = askUserThreadMessageApprover(slot.onAskUser);
-            // w3-fix D23: from a turn that holds check-in material the message waits for the user's
-            // approval, unless Michi's runtime gate already asked for this call (taintGated, above).
+            // send_to_thread carries the turn's outside content to the turn it starts (D19), so the gate
+            // lets it run; the user's own requestApproval still asks.
             const gate = taintedMichiToolGate(binding.nodeId, SEND_TO_THREAD_TOOL);
             return sendToThreadTool(
                 {

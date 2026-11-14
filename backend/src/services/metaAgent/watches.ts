@@ -10,7 +10,8 @@ import { stripSentinelsStreamingSafe } from '../messageSerialization';
 /**
  * A workspace's instructions for the Meta agent, and its watches: timed checks
  * of outside sources (tickets, tasks) that the workspace's maintenance
- * execution runs between conversation batches. A check is a run of its own,
+ * execution runs between conversation batches. Nothing creates a watch any
+ * more (unification §P2); the existing ones run, change and go as before. A check is a run of its own,
  * like a home run: its id is the planId its tools are bound to, and only the
  * decisions its tools record settle it, never the reply's prose.
  */
@@ -116,21 +117,6 @@ function requireWatch(workspaceId: string, ownerUserId: string, watchId: string)
   const row = watchRow(watchId, ownerUserId);
   if (!row || row.workspace_id !== workspaceId) throw new PageWriteError(404, 'not_found', 'Watch not found');
   return row;
-}
-
-export function createWatch(input: { workspaceId: string; ownerUserId: string; title: unknown; instructions: unknown; intervalMinutes: unknown; enabled?: unknown; now: number }): string {
-  requirePagesWorkspace(input.workspaceId, input.ownerUserId, true);
-  const title = text(input.title, 'Title', MAINTENANCE_WATCH_LIMITS.titleMaxLength);
-  const instructions = text(input.instructions, 'What to check', MAINTENANCE_WATCH_LIMITS.instructionsMaxLength);
-  const seconds = intervalSeconds(input.intervalMinutes);
-  if (input.enabled !== undefined && typeof input.enabled !== 'boolean') throw invalid('enabled must be boolean');
-  const count = (db().prepare('SELECT COUNT(*) AS n FROM meta_agent_watches WHERE workspace_id=? AND owner_user_id=?')
-    .get(input.workspaceId, input.ownerUserId) as { n: number }).n;
-  if (count >= MAINTENANCE_WATCH_LIMITS.maxWatches) throw invalid(`A workspace can have at most ${MAINTENANCE_WATCH_LIMITS.maxWatches} watches`);
-  const id = `watch-${randomUUID()}`;
-  db().prepare(`INSERT INTO meta_agent_watches(id,workspace_id,owner_user_id,title,instructions,interval_seconds,enabled,created_at,updated_at)
-    VALUES(?,?,?,?,?,?,?,?,?)`).run(id, input.workspaceId, input.ownerUserId, title, instructions, seconds, input.enabled === false ? 0 : 1, input.now, input.now);
-  return id;
 }
 
 /** Turning a watch back on clears the pause it put on itself. */

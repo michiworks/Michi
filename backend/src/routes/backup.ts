@@ -3,7 +3,7 @@ import { randomUUID } from 'node:crypto';
 import { getDb, runInTransaction } from '../services/db';
 import {
   loadFullWorkspace, loadAllWorkspaces, purgeWorkspaceInTransaction, saveWorkspace, saveTree,
-  saveNode, saveEdge, saveMessage, saveContext, setNodeForkProvenance,
+  saveNode, saveEdge, saveMessage, saveContext, setNodeForkProvenance, restoreNodeMemoryMode,
   WorkspaceRow, TreeRow, NodeRow, EdgeRow, MessageRow, ContextRow,
 } from '../services/dbRepository';
 import { normalizeIncomingMessageRow } from '../services/messageSerialization';
@@ -487,6 +487,8 @@ export function setupBackupRoutes(): express.Router {
               forkBoundaryMessageId: mapped(messageIdMap, n.fork_boundary_message_id),
               inheritedMessageCount: n.inherited_message_count ?? 0,
             });
+            // Server-owned too: a temporary chat does not come back as one that learns.
+            restoreNodeMemoryMode(restoredNodeId, n.memory_mode);
           }
           for (const e of ws.edges) {
             const sourceNodeId = requiredMapped(nodeIdMap, e.source_node_id, 'Edge source Node');

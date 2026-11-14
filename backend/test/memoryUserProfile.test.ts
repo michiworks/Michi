@@ -15,6 +15,7 @@ import { closeDb, getDb, initDb } from '../src/services/db';
 import { LOCAL_AGENT_OWNER_ID } from '../src/services/agentOwner';
 import { PROFILE_RUN_ID_PREFIX, profileRebuildDue } from '../src/services/memory/extractionRun';
 import { setExtractionPaused } from '../src/services/memory/extractionRepository';
+import { pauseMichi, resumeMichi } from '../src/services/michiPause';
 import { installMemoryExtractionHooks } from '../src/services/memory/extractionService';
 import { memoryRef } from '../src/services/memory/memoryRefs';
 import {
@@ -26,6 +27,7 @@ import {
   memoryProfileView, profileLineMemoryIds, profileRebuildState, profileTokens, readUserProfile, recordProfileAttempt, requestProfileRebuild,
   sensitiveForProfile, validateProfilePayload, type ProfilePrompt,
 } from '../src/services/memory/userProfile';
+import { turnBackgroundWorkOn } from './helpers/backgroundWork';
 
 const ME = LOCAL_AGENT_OWNER_ID;
 const DAY = 24 * 60 * 60 * 1000;
@@ -75,6 +77,7 @@ beforeEach(() => {
   delete process.env.MICHI_CLOUD;
   closeDb();
   initDb();
+  turnBackgroundWorkOn();
   getDb().prepare(`INSERT INTO workspaces (id, name, created_at, updated_at) VALUES ('ws', 'Home', 1, 1)`).run();
   uninstall = installUserProfileHooks();
 });
@@ -402,6 +405,9 @@ describe('when a rebuild is due', () => {
     assert.equal(profileRebuildDue(ME, clock), false, 'local backends only');
     delete process.env.MICHI_CLOUD;
     assert.equal(profileRebuildDue(ME, clock), true);
+    pauseMichi(ME, null);
+    assert.equal(profileRebuildDue(ME, clock), true, 'the Meta agent pause is not memory\'s');
+    resumeMichi(ME);
     setMemorySettings(ME, { mode: 'off' });
     assert.equal(profileRebuildDue(ME, clock), false, 'memory off');
     assert.equal(PROFILE_RUN_ID_PREFIX, 'mpr-');

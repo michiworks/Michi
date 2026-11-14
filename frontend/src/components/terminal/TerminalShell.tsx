@@ -12,6 +12,7 @@ import { animate, useMotionValue } from 'motion/react';
 import { useSwipeTrack, type SwipeTrack } from '../../hooks/useEdgeSwipe';
 import { useBackSwipe, useSystemBack } from '../../hooks/useBackNavigation';
 import { usePhoneLayout } from '../../hooks/usePhoneLayout';
+import { useUndoShortcut } from '../../hooks/useUndoShortcut';
 import { escLayerOpen, modalOpen, useBackLayer } from '../../lib/backStack';
 import { TRANSITION } from '../../motion/tokens';
 import { installTouchContextMenu } from '../../lib/touchContextMenu';
@@ -64,15 +65,13 @@ import { MemoryNotifications } from './settings/memory/MemoryNotifications';
 import { CompanionPanelHost } from './companion/CompanionPanel';
 import { CompanionNotifications } from './companion/CompanionNotifications';
 import { closeCompanionPanel, registerCompanionOpenSource, toggleCompanionPanel } from '../../state/companion/companionPanel';
+import { companionIsOff } from '../../state/companion/companionStore';
 import { AreaRail, AreaTabs } from './rail/AreaRail';
 import { useRailBadges } from './rail/useRailBadges';
 import { ScheduledSidebar } from './rail/AreaSidebars';
 import type { SettingsLevel } from './rail/SettingsMain';
 import { openScheduledHome, requestScheduledJobDetail, setScheduledRoute, useScheduledCrumb, useScheduledRoute } from './scheduled/scheduledNav';
-import { OPEN_SETTINGS_SECTION_EVENT, requestMetaAgentSettings } from './scheduled/metaAgent/metaAgentNav';
-import { pagesUpkeepTitle } from './scheduled/metaAgent/metaAgentCopy';
-import { useCompanionName } from '../../state/companion/companionName';
-import { useMetaAgentApprovalReview } from '../../state/metaAgent/useMetaAgent';
+import { OPEN_SETTINGS_SECTION_EVENT } from './scheduled/metaAgent/metaAgentNav';
 import { useMetaAgentOverviewSnapshot } from '../../state/metaAgent/useMetaAgentOverview';
 import { SpacesMetaChat, type SpacesChatView } from './spaces/metaChat/SpacesMetaChat';
 import { ALL_TASKS, SPACES_HOME, areaForPage, entryPageForArea, type ShellArea, type SpacesHomeTarget } from '../../state/shellArea';
@@ -111,7 +110,6 @@ const TerminalWorkspaces = deferredComponent<{ onNav: (page: PageId) => void }>(
 const TerminalWorkspaceManage = React.lazy(() => import('./pages/WorkspaceManage'));
 const TerminalProfile = React.lazy(() => import('./pages/Profile'));
 const TerminalScheduled = React.lazy(() => import('./pages/Scheduled'));
-const TerminalMetaAgentScheduled = React.lazy(() => import('./scheduled/metaAgent/MetaAgentDetail'));
 const AgentLibraryPage = React.lazy(() => import('./agents/AgentLibraryPage'));
 const AgentEditorPage = React.lazy(() => import('./agents/AgentEditorPage'));
 const CommandPalette = React.lazy(() => import('./CommandPalette'));
@@ -162,13 +160,10 @@ export default function TerminalShell() {
   }, [settingsOpen, settingsPresent]);
   const scheduledRoute = useScheduledRoute();
   const scheduledJobId = scheduledRoute.kind === 'job' ? scheduledRoute.jobId : null;
-  const metaAgentOpen = scheduledRoute.kind === 'meta-agent';
   const scheduledCrumb = useScheduledCrumb();
-  // The upkeep page's crumb carries the agent's name, as its row and title do (DESIGN-v2 §1.5).
-  const companionName = useCompanionName();
   const metaAgentOverview = useMetaAgentOverviewSnapshot();
-  // Managed jobs redirect to the system detail; their intermediate route is
-  // not a destination to revisit with Back, even if opened before data loaded.
+  // Managed jobs redirect to Pages (Scheduled does not list upkeep, Q8); their
+  // intermediate route is not a destination to revisit with Back, even if opened before data loaded.
   const isScheduledJobLive = React.useCallback((jobId: string) =>
     metaAgentOverview.kind !== 'ready' || !metaAgentOverview.overview.managedJobIds?.includes(jobId), [metaAgentOverview]);
   useEffect(() => {
@@ -183,7 +178,6 @@ export default function TerminalShell() {
     window.addEventListener(OPEN_SETTINGS_SECTION_EVENT, onSection);
     return () => window.removeEventListener(OPEN_SETTINGS_SECTION_EVENT, onSection);
   }, []);
-  useMetaAgentApprovalReview(requestMetaAgentSettings);
   const [createSpaceOpen, setCreateSpaceOpen] = useState(false);
   const lastConversationPageRef = React.useRef<PageId>(page);
   useEffect(() => { if (areaForPage(page) === 'conversations') lastConversationPageRef.current = page; }, [page]);
@@ -334,7 +328,6 @@ export default function TerminalShell() {
     closePane,
     openPane,
     createBlankChild,
-    restoreLastDeletion,
     clearSelection,
     clearTreeSelection,
     selectAllTrees,
@@ -342,7 +335,6 @@ export default function TerminalShell() {
     activateTree,
     setFocusedNodeId,
     selectProject,
-    revealNode,
     revealBackendNode,
   } = useChatActions();
   const location = React.useMemo<ShellLocation>(() => ({
@@ -500,6 +492,9 @@ export default function TerminalShell() {
     };
   }, [cssVars]);
 
+  // ⌘Z undoes the user's newest action (state/undoStack.ts); a text field keeps it for its own newer typing.
+  useUndoShortcut(hydrated && !settingsOpen && !remoteAuthenticationOpen && !remoteRecoveryOpen);
+
   // Keyboard shortcuts. Input-focus gated (except Ctrl+Tab for browser-style cycling).
   useEffect(() => {
     const isEditable = (el: EventTarget | null): boolean => {
@@ -562,10 +557,11 @@ export default function TerminalShell() {
       }
       // ⌘J opens, focuses or closes the <name> panel on Chat, ⇧⌘J on Today
       // (DESIGN-v2 §1.2): in every area, Pages included, and inside inputs
-      // too, like ⌘K. The panel decides which of the three it is.
+      // too, like ⌘K. The panel decides which of the three it is. While the
+      // agent is off (Q29) it does nothing.
       if (meta && !e.altKey && (e.key === 'j' || e.key === 'J')) {
         e.preventDefault();
-        toggleCompanionPanel(e.shiftKey ? 'today' : 'chat');
+        if (!companionIsOff()) toggleCompanionPanel(e.shiftKey ? 'today' : 'chat');
         return;
       }
       // ⌘F → dispatch per-pane find for the focused pane (works inside inputs).
@@ -702,14 +698,6 @@ export default function TerminalShell() {
         selectAllTrees();
         return;
       }
-      // ⌘Z restore last deletion (trash / undo).
-      if (!e.shiftKey && (e.key === 'z' || e.key === 'Z')) {
-        e.preventDefault();
-        const restoredRoot = restoreLastDeletion();
-        // Deleting moved the shown thread on: reveal the root in its own.
-        if (restoredRoot) revealNode(restoredRoot);
-        return;
-      }
       // ⌘B toggle sidebar (Profile owns a fullscreen navigation rail).
       if (page !== 'profile' && !e.shiftKey && !e.altKey && (e.key === 'b' || e.key === 'B')) {
         e.preventDefault();
@@ -770,7 +758,7 @@ export default function TerminalShell() {
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [hydrated, page, openPanes, slotPanes, focusedPane, zoomedPane, zoomPane, phoneLayout, tabPanes, paneItems, focusedLastMessageId, reopenCandidate, navigationDeps, activeProject?.id, focusPane, closePane, createBlankChild, restoreLastDeletion, revealNode, selection, clearSelection, treeSelection, clearTreeSelection, selectAllTrees, prefs.sidebarCollapsed, setPref, handleNav, digestEnabled, navBack, navForward, canNavBack, canNavForward, remoteAuthenticationOpen, remoteRecoveryOpen, settingsOpen, projects]);
+  }, [hydrated, page, openPanes, slotPanes, focusedPane, zoomedPane, zoomPane, phoneLayout, tabPanes, paneItems, focusedLastMessageId, reopenCandidate, navigationDeps, activeProject?.id, focusPane, closePane, createBlankChild, selection, clearSelection, treeSelection, clearTreeSelection, selectAllTrees, prefs.sidebarCollapsed, setPref, handleNav, digestEnabled, navBack, navForward, canNavBack, canNavForward, remoteAuthenticationOpen, remoteRecoveryOpen, settingsOpen, projects]);
 
   useEffect(() => {
     const onEvt = () => { if (hydrated) setNewWsOpen(true); };
@@ -949,25 +937,42 @@ export default function TerminalShell() {
     if (narrowMode) setNarrowOverlayOpen((v) => !v);
     else setPref('sidebarCollapsed', !prefs.sidebarCollapsed);
   }, [narrowMode, prefs.sidebarCollapsed, setPref]);
+  // A destination picked in the narrow drawer (or the topbar's +) takes the
+  // screen: the drawer closes, and so does the <name> panel, which lies over
+  // the page there and would hide it (as a page opened from inside it does).
+  const leaveForNarrowChoice = React.useCallback(() => {
+    if (!narrowMode) return;
+    setNarrowOverlayOpen(false);
+    closeCompanionPanel();
+  }, [narrowMode]);
   // Auto-close overlay after navigation in narrow mode.
   const handleNavWithClose = React.useCallback((p: PageId) => {
     handleNav(p);
-    if (narrowMode) setNarrowOverlayOpen(false);
-  }, [handleNav, narrowMode]);
+    leaveForNarrowChoice();
+  }, [handleNav, leaveForNarrowChoice]);
   // Area sidebar rows that open something in the main column close it too.
-  const closeNarrowOverlay = React.useCallback(() => {
-    if (narrowMode) setNarrowOverlayOpen(false);
-  }, [narrowMode]);
+  const closeNarrowOverlay = leaveForNarrowChoice;
+  const newThread = React.useCallback(() => {
+    setPage('home');
+    leaveForNarrowChoice();
+  }, [leaveForNarrowChoice]);
+  // The drawer's Search leads to a destination too.
+  const openPaletteFromDrawer = React.useCallback(() => {
+    if (!hydrated) return;
+    if (narrowMode) closeCompanionPanel();
+    setPaletteOpen(true);
+  }, [hydrated, narrowMode]);
   // Home opens in the main column, so a narrow drawer would cover it
   // (e.g. a workspace row's "+"). Wide windows never hold the overlay open.
   useEffect(() => {
     const onEvt = () => {
       setPage('home');
       setNarrowOverlayOpen(false);
+      if (narrowMode) closeCompanionPanel();
     };
     window.addEventListener('michi:goto-home', onEvt as EventListener);
     return () => window.removeEventListener('michi:goto-home', onEvt as EventListener);
-  }, []);
+  }, [narrowMode]);
 
   // Inside a Settings page, Back (the header's, Esc, the phone's) first
   // closes a level open in it, then returns to the page list.
@@ -1017,13 +1022,13 @@ export default function TerminalShell() {
         sidebarRail={!profileFullscreen && !narrowMode && sidebarCollapsedEffective}
         onToggleSidebar={handleToggleSidebarEffective}
         phoneBack={narrowMode && phoneNavigation.canBack ? phoneNavigation.onBack : undefined}
-        onNewThread={() => { setPage('home'); if (narrowMode) setNarrowOverlayOpen(false); }}
+        onNewThread={newThread}
         onOpenPalette={() => { if (hydrated) setPaletteOpen(true); }}
         artifactsOpen={artifactsOpen}
         remoteRecoveryControl={<RemoteRecoveryIndicator onOpenDetails={openRemoteRecovery} />}
         spacesCrumb={spacesSettingsOpen ? 'Settings' : page === 'spaces' ? (spacesHome.kind === 'all-tasks' ? 'All tasks' : spacesChatView.kind === 'workspace' ? spacesChatView.name : 'Home') : undefined}
         onAreaHome={page === 'scheduled' ? openScheduledHome : undefined}
-        areaCrumb={page === 'scheduled' ? (metaAgentOpen ? pagesUpkeepTitle(companionName) : scheduledCrumb ?? undefined) : undefined}
+        areaCrumb={page === 'scheduled' ? scheduledCrumb ?? undefined : undefined}
       />
       <RemoteServiceRecoveryMonitor />
       <RemoteAuthenticationDialog />
@@ -1052,8 +1057,8 @@ export default function TerminalShell() {
             activePage={page}
             customAgentsEnabled={agentStatus?.customAgentsEnabled === true}
             onNav={narrowMode ? handleNavWithClose : handleNav}
-            onOpenPalette={() => { if (hydrated) setPaletteOpen(true); }}
-            onNewThread={() => { setPage('home'); if (narrowMode) setNarrowOverlayOpen(false); }}
+            onOpenPalette={openPaletteFromDrawer}
+            onNewThread={newThread}
             narrowMode={narrowMode}
             narrowOverlayOpen={narrowOverlayOpen}
             onCloseOverlay={() => setNarrowOverlayOpen(false)}
@@ -1061,8 +1066,10 @@ export default function TerminalShell() {
             onOverlayChoice={noteOverlayChoice}
             overlayHeader={<ShellAreaTabs area={area} settingsOpen={settingsOpen} onSelect={(next) => {
               selectArea(next);
-              // Settings opens its own drawer; other areas swap this drawer's list.
+              // Settings opens its own drawer; other areas swap this drawer's
+              // list and the page under the panel, which would hide that page.
               if (next === 'settings') setNarrowOverlayOpen(false);
+              else closeCompanionPanel();
             }} />}
           />
         )}
@@ -1094,14 +1101,14 @@ export default function TerminalShell() {
               <TerminalWorkspaceManage workspaceId={manageWorkspaceId} onNav={handleNav} />
             </LazyPage>
           )}
-          {page === 'scheduled' && (metaAgentOpen ? <LazyPage><TerminalMetaAgentScheduled /></LazyPage> : <LazyPage><TerminalScheduled onNav={handleNav} /></LazyPage>)}
+          {page === 'scheduled' && <LazyPage><TerminalScheduled onNav={handleNav} /></LazyPage>}
           {page === 'profile' && PROFILE_PAGE_ENABLED && <LazyPage><TerminalProfile onNav={handleNav} /></LazyPage>}
           {page === 'agents' && <LazyPage><AgentManagementLibrary onNav={handleNav} /></LazyPage>}
           {page === 'agent-manage' && <LazyPage><AgentManagementEditor route={manageAgentRoute} onNav={handleNav} /></LazyPage>}
           </>}
         </div>
         {/* Shell-level and docked right of every page (over the page in a narrow window). */}
-        {hydrated && <CompanionPanelHost narrow={narrowMode} page={page} />}
+        {hydrated && <CompanionPanelHost narrow={narrowMode} page={page} covered={narrowMode && narrowOverlayOpen} />}
       </div>
       {hydrated && paletteOpen && (
         <React.Suspense fallback={null}>
@@ -1161,7 +1168,7 @@ export default function TerminalShell() {
       {hydrated && <SourcePopoverHost />}
       {hydrated && <SpaceConversationWatcher page={page} />}
       {hydrated && <MemoryNotifications noticeReady={prefs.onboardingCompletedAt != null && userProjectCount > 0} />}
-      {hydrated && <CompanionNotifications />}
+      {hydrated && <CompanionNotifications noticeReady={prefs.onboardingCompletedAt != null} />}
       {hydrated && backgroundWork && (backgroundWorkShown || backgroundWorkPresent) && (
         <React.Suspense fallback={null}>
           <BackgroundWorkDrawer

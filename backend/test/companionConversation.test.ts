@@ -58,6 +58,8 @@ import {
   applyItemAction,
   briefForDate,
   cardDto,
+  companionHeadline,
+  currentRevision,
   decideCard,
   finishRun,
   getItem,
@@ -221,12 +223,13 @@ function material(overrides: Partial<CompanionMaterial> = {}): CompanionMaterial
 }
 
 /** A check-in's request for a run that is in companion_runs, as the coordinator starts one. */
-function request(kind: CompanionTurnKind = 'heartbeat', overrides: Partial<CompanionMaterial> = {}): CompanionTurnRequest {
+function request(kind: CompanionTurnKind = 'wake', overrides: Partial<CompanionMaterial> = {}): CompanionTurnRequest {
   const run = startRun({ kind, trigger: 'schedule', startedAt: T0 });
   return { kind, trigger: 'schedule', runId: run.id, material: material(overrides) };
 }
 
 const nothingToDo = COMPANION_OWN_TOOLS.find((tool) => tool.name === 'nothing_to_do')!;
+const headlineTool = COMPANION_OWN_TOOLS.find((tool) => tool.name === 'companion_headline')!;
 
 function toolContext(nodeId: string, workspaceId: string, turn: Attribution): AssistantToolContext {
   return {
@@ -290,7 +293,7 @@ describe('the agent\'s check-ins', () => {
     const baseline = upsertItem(draft('cr:CR-2', { title: 'CR-2 was already there' }), T0, { baseline: true });
     // The material is a few seconds old; the user's rules are read when the check-in starts.
     setCompanionRules('No pings before 10:00');
-    const req = request('heartbeat', { changes: [changed.event!, baseline.event!], open: [changed.item, baseline.item] });
+    const req = request('wake', { changes: [changed.event!, baseline.event!], open: [changed.item, baseline.item] });
     const S = checkinNodeId(req.runId);
     const turnId = companionCheckinTurnId(req.runId);
     const postId = companionPostId(req.runId);
@@ -316,7 +319,7 @@ describe('the agent\'s check-ins', () => {
       'nobody saved anything yet: no memory block');
     assert.equal('displayText' in started, false, 'no user bubble');
     assert.equal((started.session as { id: string }).id, S);
-    assert.match(started.text, /^\[Heartbeat\]/);
+    assert.match(started.text, /^\[Wake\]/);
     assert.match(started.text, /\[YOUR RULES[^\n]*\]\nNo pings before 10:00\n/);
     assert.ok(started.text.indexOf('No pings before 10:00') < started.text.indexOf('<<<collector data'), 'the rules come before the data');
     assert.match(started.text, /CR-1 needs attention/);
@@ -325,9 +328,9 @@ describe('the agent\'s check-ins', () => {
     const post = hub.posts[0];
     assert.deepEqual([post.chatId, post.nodeId, post.turnId, post.messageId, post.text, post.followUps, post.ownerUserId],
       [v.nodeId, v.nodeId, postId, postId, 'CR-1 needs your review.', ['Open CR-1', 'Later'], null], 'into V, under the run\'s post id, its sentinels as chips');
-    assert.deepEqual(post.metadata, { companionPost: { runId: req.runId, kind: 'heartbeat', changes: [] } });
+    assert.deepEqual(post.metadata, { companionPost: { runId: req.runId, kind: 'wake', changes: [] } });
     assert.deepEqual(post.untrusted, { tool: 'companion_post', detail: 'checkin' });
-    assert.deepEqual(spoke, [{ runId: req.runId, runKind: 'heartbeat', itemIds: [changed.item.id] }]);
+    assert.deepEqual(spoke, [{ runId: req.runId, runKind: 'wake', itemIds: [changed.item.id] }]);
     assert.ok(events.includes('conversation'), 'the snapshot hears of the post (unread count)');
 
     const run = getRun(req.runId)!;
@@ -378,6 +381,36 @@ describe('the agent\'s check-ins', () => {
     assert.equal(getDb().prepare("SELECT COUNT(*) AS n FROM nodes WHERE id LIKE 'n-cmph-%'").get()!.n, 0, 'each S is purged');
   });
 
+  test('Michi\'s line for Home (Q45): a check-in that ran keeps the line it wrote; one that wrote none or failed leaves the last', async () => {
+    const v = ensureAssistant();
+    const line = (text: string, then?: (turn: Attribution, nodeId: string) => Promise<unknown>) => (args: StartRequestedSelfTurnArgs) => hub.answer(args, then ? '' : 'CR-1 needs your review.', {
+      during: async (turn) => {
+        await headlineTool.execute(toolContext(args.nodeId, v.workspaceId, turn), { text });
+        await then?.(turn, args.nodeId);
+      },
+    });
+    const revision = currentRevision();
+    hub.respond = line('Watching the release pipeline', (turn, nodeId) => nothingToDo.execute(toolContext(nodeId, v.workspaceId, turn), {}));
+    const quietRun = await runner().run(request('heartbeat'));
+    assert.equal(quietRun.outcome, 'quiet', JSON.stringify(quietRun));
+    assert.deepEqual(companionHeadline(), { text: 'Watching the release pipeline', at: T0, kind: 'heartbeat' }, 'a quiet check-in keeps it');
+    assert.ok(currentRevision() > revision, 'the snapshot moves on');
+
+    hub.respond = (args) => hub.answer(args, '');
+    await runner().run(request('wake'));
+    assert.equal(companionHeadline()?.text, 'Watching the release pipeline', 'one that wrote none leaves the last');
+
+    hub.respond = line('CR-1 is ready for your review');
+    assert.equal((await runner().run(request('wake'))).outcome, 'spoke');
+    assert.deepEqual([companionHeadline()?.text, companionHeadline()?.kind], ['CR-1 is ready for your review', 'wake']);
+
+    hub.respond = (args) => hub.answer(args, '', { status: 'error', error: 'boom', during: async (turn) => {
+      await headlineTool.execute(toolContext(args.nodeId, v.workspaceId, turn), { text: 'Should not stay' });
+    } });
+    assert.equal((await runner().run(request('wake'))).outcome, 'error');
+    assert.equal(companionHeadline()?.text, 'CR-1 is ready for your review', 'a failed one leaves the last');
+  });
+
   test('a check-in that changed something must post: quiet, its receipt is posted with the changes and Undo all', async () => {
     const item = upsertItem(draft('cr:CR-1'), T0).item;
     const req = request();
@@ -393,7 +426,7 @@ describe('the agent\'s check-ins', () => {
     assert.equal(hub.posts.length, 1);
     assert.equal(hub.posts[0].text, companionPostReceipt(getCompanionSettings().displayName, changes, { stopped: false }));
     assert.equal('followUps' in hub.posts[0], false, 'a receipt has no chips');
-    assert.deepEqual(hub.posts[0].metadata, { companionPost: { runId: req.runId, kind: 'heartbeat', changes } });
+    assert.deepEqual(hub.posts[0].metadata, { companionPost: { runId: req.runId, kind: 'wake', changes } });
     assert.deepEqual(getRun(req.runId)?.changes, changes);
     assert.equal(spoke.length, 1, 'the notification gate judges the receipt too');
   });
@@ -634,7 +667,7 @@ describe('the agent\'s check-ins', () => {
     assert.doesNotMatch(text, /cr_unpublished items/, 'thumbs down are about one item, never a kind');
     assert.ok(text.indexOf('[YOUR LAST BRIEF') < text.indexOf('>>>end of collector data'), 'inside the collector data');
 
-    await runner().run(request('heartbeat', { open: [draftCr] }));
+    await runner().run(request('wake', { open: [draftCr] }));
     assert.doesNotMatch(hub.starts[1].text, /\[YOUR LAST BRIEF|rated useful/, 'only the brief reads its past');
   });
 
@@ -665,7 +698,7 @@ describe('the agent\'s check-ins', () => {
     // The coordinator's own list wins, and is marked the same way.
     const other = proposeCompanionCard({ kind: 'rules.update', payload: { rules: 'Never email' } }, T0);
     const decided = decideCard(other.id, 'applied', T0 + 2)!;
-    await runner().run(request('heartbeat', { cardResults: [cardDto(decided)] }));
+    await runner().run(request('wake', { cardResults: [cardDto(decided)] }));
     assert.match(hub.starts[1].text, /Applied by the user/);
     assert.deepEqual(listUnreportedCards(), []);
   });

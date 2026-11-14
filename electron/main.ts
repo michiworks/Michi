@@ -1,5 +1,5 @@
 import type {
-  BackgroundServiceStatus, BrowserSurfaceState, CompanionChangedEvent, CompanionNotice as SharedCompanionNotice,
+  AttentionTargetV1, BackgroundServiceStatus, BrowserSurfaceState, CompanionChangedEvent,
   CompanionTarget as SharedCompanionTarget, CompanionTrayDto, DesktopCommandContract, DesktopEventContract, DesktopInvokeContract,
   DesktopBootstrapParam, DesktopInvokeArgs, DesktopInvokeResult, DesktopResidency, DesktopResidencyPatch, MichiBackendHealth,
   ScheduledRunTarget, TerminalSurfaceSnapshot, VibrancyMaterial,
@@ -44,7 +44,6 @@ import {
   stopService,
   writeServiceState,
 } from './backgroundService';
-import { planNoticeDelivery, ScheduledNotificationFeed, type ScheduledRunNotice } from './scheduledNotifications';
 import {
   HIDDEN_LAUNCH_ARG,
   PACKAGED_TRAY_ICON_NAME,
@@ -55,16 +54,16 @@ import {
 } from './windowsLifecycle';
 import { createNotificationHolder, parseNotificationRequest } from './rendererNotifications';
 import {
+  AttentionDesktopFeed,
+  AttentionNotifier,
   COMPANION_READY_CHANNEL,
   COMPANION_TARGET_PARAM,
-  CompanionNotificationFeed,
-  CompanionNotifier,
   CompanionRenderers,
-  companionNoticeChannel,
+  type AttentionTarget,
   type CompanionChangedFrame,
-  type CompanionNoticeChannel,
   type CompanionTarget,
-} from './companionNotifications';
+} from './attentionNotifications';
+import { SystemPresenceReporter } from './systemPresence';
 import { appendLogLine, formatLogLine } from './logFile';
 import { mergeFeatureList, michiDisabledFeatures } from './chromiumFeatures';
 import { readWindowGlass, writeWindowGlass } from './windowGlass';
@@ -104,15 +103,15 @@ import {
 
 // The mirrors Electron main keeps of shared contracts (it loads no workspace
 // package at runtime) must still fit them: the tray reads every
-// CompanionTrayDto the backend sends, the notifier feed every change frame,
-// notice gate and target, and the residency is the bridge's.
+// CompanionTrayDto the backend sends, the desktop feed every change frame and
+// every attention target, both ways (a target the backend adds must reach
+// this mirror), and the residency is the bridge's.
 type Fits<T extends U, U> = T;
 type MirrorsFitTheirContracts = [
   Fits<CompanionTrayDto, TrayCompanionDto>,
   Fits<CompanionChangedEvent, CompanionChangedFrame>,
-  // The gate a notice came through, both ways: a gate the backend adds must reach this mirror.
-  Fits<NonNullable<SharedCompanionNotice['channel']>, CompanionNoticeChannel>,
-  Fits<CompanionNoticeChannel, NonNullable<SharedCompanionNotice['channel']>>,
+  Fits<AttentionTargetV1, AttentionTarget>,
+  Fits<AttentionTarget, AttentionTargetV1>,
   Fits<SharedCompanionTarget, CompanionTarget>,
   Fits<Residency, DesktopResidency>,
   Fits<DesktopResidencyPatch, ResidencyPatch>,
@@ -1089,8 +1088,7 @@ async function setBackgroundServiceEnabled(enabled: boolean): Promise<Background
       const state = readServiceState(SERVICE_PATHS.stateFile);
       if (state?.enabled) writeServiceState(SERVICE_PATHS.stateFile, { ...state, enabled: false });
     }
-    notificationFeed.restart();
-    companionFeed.restart();
+    attentionFeed.restart();
     return backgroundServiceStatus();
   })();
   serviceTransition = work;
@@ -1101,21 +1099,13 @@ async function setBackgroundServiceEnabled(enabled: boolean): Promise<Background
   }
 }
 
-// ── Scheduled job notifications ────────────────────────────────────────────
+// ── Notifications while no window is open (attentionNotifications.ts) ─────
 
-// Window id 0 is no webContents id; a separate holder keeps renderer notices from evicting these.
-const scheduledBanners = createNotificationHolder<ElectronNotification>();
 let backgroundIdleTimer: ReturnType<typeof setTimeout> | null = null;
 
 function devBackendPort(): number {
   return parsePort(process.env.MICHI_BACKEND_PORT) ?? parsePort(process.env.PORT) ?? 3000;
 }
-
-const notificationFeed = new ScheduledNotificationFeed({
-  port: () => resolvedBackendPort ?? (backendMode === 'external' ? devBackendPort() : null),
-  onNotice: (notice) => handleScheduledNotice(notice),
-  log: (level, message, meta) => elog(level, 'schedule', message, meta),
-});
 
 function cancelBackgroundIdleQuit(): void {
   if (backgroundIdleTimer) clearTimeout(backgroundIdleTimer);
@@ -1128,14 +1118,10 @@ function armBackgroundIdleQuit(): void {
   cancelBackgroundIdleQuit();
   backgroundIdleTimer = setTimeout(() => {
     if (windows.size === 0) {
-      elog('INFO', 'schedule', 'background launch idle; quitting');
+      elog('INFO', 'attention', 'background launch idle; quitting');
       app.quit();
     }
   }, BACKGROUND_IDLE_QUIT_MS);
-}
-
-function targetOf(notice: ScheduledRunNotice): ScheduledRunTarget {
-  return { runId: notice.runId, jobId: notice.jobId, workspaceId: notice.workspaceId, nodeId: notice.nodeId };
 }
 
 function openScheduledRun(target: ScheduledRunTarget): void {
@@ -1153,43 +1139,13 @@ function openScheduledRun(target: ScheduledRunTarget): void {
   if (process.platform === 'darwin') app.focus({ steal: true });
 }
 
-function handleScheduledNotice(notice: ScheduledRunNotice): void {
-  const focused = BrowserWindow.getFocusedWindow();
-  const focusedWindow = focused && windows.has(focused) && !focused.isDestroyed() ? focused : null;
-  const plan = planNoticeDelivery(notice, {
-    hasFocusedWindow: focusedWindow !== null,
-    osNotificationsSupported: ElectronNotification.isSupported(),
-  });
-  const target = targetOf(notice);
-  if (plan.kind === 'toast' && focusedWindow) {
-    sendDesktopEvent(focusedWindow.webContents, 'scheduled:notice', { ...plan.content, target });
-  } else if (plan.kind === 'banner') {
-    const { title, subtitle, body } = plan.content;
-    const notification = new ElectronNotification({ title, subtitle, body });
-    const release = scheduledBanners.hold(0, `scheduled:${notice.runId}`, notification);
-    notification.on('click', () => {
-      release();
-      openScheduledRun(target);
-    });
-    notification.on('close', release);
-    notification.show();
-  }
-  if (plan.ack) notificationFeed.acknowledge(notice.runId);
-  if (plan.kind === 'banner' || plan.kind === 'defer') armBackgroundIdleQuit();
-}
-
-// ── Companion notifications ────────────────────────────────────────────────
-
-/** Blurring a window precedes focusing the next: a held notice turns into a banner only if no Michi window has focus by then. */
-const COMPANION_BLUR_SETTLE_MS = 250;
-
-/** Whose renderer listens for Companion notices and clicks, and the click waiting for a window that is still loading. */
+/** Whose renderer listens for notification clicks, and the click waiting for a window that is still loading. */
 const companionRenderers = new CompanionRenderers((windowId, target) => {
   const win = [...windows].find((candidate) => !candidate.isDestroyed() && candidate.webContents.id === windowId);
   if (win) sendDesktopEvent(win.webContents, 'companion:open', target);
 });
 
-/** Bring Michi forward with the Companion open at `target` (a Companion banner click). */
+/** Bring Michi forward at `target` (a banner's click, a tray row): a conversation, Michi's panel, Settings. */
 function openCompanionTarget(target: CompanionTarget): void {
   cancelBackgroundIdleQuit();
   showDock();
@@ -1206,64 +1162,65 @@ function openCompanionTarget(target: CompanionTarget): void {
   if (process.platform === 'darwin') app.focus({ steal: true });
 }
 
-const companionNotifier = new CompanionNotifier({
+/** A banner's click: where its record says. An Agent Run has no window parameter: Michi comes forward and its windows list it. */
+function openAttentionTarget(target: AttentionTarget): void {
+  switch (target.type) {
+    case 'node':
+      openCompanionTarget({ kind: 'node', workspaceId: target.workspaceId, nodeId: target.nodeId });
+      return;
+    case 'agent':
+      openCompanionTarget(target.open);
+      return;
+    case 'scheduled_run':
+      openScheduledRun({ runId: target.runId, jobId: target.jobId, workspaceId: target.workspaceId, nodeId: target.nodeId });
+      return;
+    case 'agent_run':
+      openMichiWindow();
+      return;
+  }
+}
+
+const attentionNotifier = new AttentionNotifier({
   Notification: ElectronNotification,
-  focusedWindow: () => {
-    const focused = BrowserWindow.getFocusedWindow();
-    if (!focused || !windows.has(focused) || focused.isDestroyed()) return null;
-    const contents = focused.webContents;
-    return {
-      listening: companionRenderers.listens(contents.id, 'notice'),
-      showNotice: (notice) => sendDesktopEvent(contents, 'companion:notice', notice),
-    };
-  },
-  open: (target) => openCompanionTarget(target),
-  acknowledge: (noticeId) => companionFeed.acknowledge(noticeId),
+  hasOpenWindow: () => [...windows].some((win) => !win.isDestroyed()),
+  claim: (id) => attentionFeed.claim(id),
+  open: (target) => openAttentionTarget(target),
   now: () => Date.now(),
   onBackgroundDelivery: () => armBackgroundIdleQuit(),
-  onHandled: (notice, plan) => {
-    // Ids and outcomes only: notice text stays out of the log.
-    elog('INFO', 'companion', 'notice handled', { id: notice.id, channel: companionNoticeChannel(notice), delivery: plan.kind, ...(plan.kind === 'skip' ? { reason: plan.reason } : {}) });
-    // A notice means the agent's items moved, or (a `chat` notice) a
-    // conversation, the agent's own included, asked for an approval or an
-    // answer or finished a reply: the tray's Needs you and "<name> is waiting
-    // for you" follow.
-    trayController.scheduleRefresh();
-  },
+  // Ids and outcomes only: no notification text in the log.
+  onHandled: (record, outcome) => elog('INFO', 'attention', 'record handled', { id: record.id, reason: record.reason, delivery: outcome }),
 });
 
-const companionFeed = new CompanionNotificationFeed({
+/** Electron main's one notification subscription (DESIGN P4): attention records, and the tray's change frames. */
+const attentionFeed = new AttentionDesktopFeed({
   port: () => resolvedBackendPort ?? (backendMode === 'external' ? devBackendPort() : null),
-  onNotice: (notice) => { companionNotifier.deliver(notice); },
-  onConnected: () => {
-    // The backend replays every unacknowledged notice on a new connection, held ones included.
-    companionNotifier.dropHeld();
-    // Changes made while the feed was away sent no frame here.
-    trayController.scheduleRefresh();
-  },
-  // The tray's refresh signal (DESIGN-v2 §5.1). Main never subscribes to the
-  // agent's events stream (COMPANION_EVENTS_PATH): its subscribers are windows
-  // only, which is how the backend tells that no window is open (§5.2).
+  onSnapshot: (records) => attentionNotifier.snapshot(records),
+  onNotification: (record) => { void attentionNotifier.notification(record); },
+  onResolved: (id) => attentionNotifier.resolved(id),
+  // Changes made while the feed was away sent no frame here.
+  onConnected: () => trayController.scheduleRefresh(),
+  // The tray's refresh signal (DESIGN-v2 §5.1).
   onChanged: () => trayController.scheduleRefresh(),
-  log: (level, message, meta) => elog(level, 'companion', message, meta),
+  log: (level, message, meta) => elog(level, 'attention', message, meta),
+});
+
+/** The system beacon (DESIGN §3.2): input in any app counts as the user being here. */
+const systemPresence = new SystemPresenceReporter({
+  port: () => resolvedBackendPort ?? (backendMode === 'external' ? devBackendPort() : null),
+  idleSeconds: () => powerMonitor.getSystemIdleTime(),
 });
 
 // A window's preload reports when its renderer starts or stops listening for
-// Companion notices and clicks. Not a DesktopCommandContract channel: no
-// renderer code sends it (see COMPANION_READY_CHANNEL).
+// notification clicks. Not a DesktopCommandContract channel: no renderer code
+// sends it (see COMPANION_READY_CHANNEL).
 ipcMain.on(COMPANION_READY_CHANNEL, (event, kind: unknown, listening: unknown) => {
   const win = BrowserWindow.fromWebContents(event.sender);
   if (!win || !windows.has(win)) return;
-  if (companionRenderers.report(event.sender.id, kind, listening)) companionNotifier.refresh();
+  companionRenderers.report(event.sender.id, kind, listening);
 });
 
-// A held notice is shown in whichever Michi window has focus once its renderer listens, or becomes a banner when Michi loses focus.
 app.on('browser-window-focus', (_event, win) => {
   if (windows.has(win)) lastFocusedWindow = win;
-  companionNotifier.refresh();
-});
-app.on('browser-window-blur', () => {
-  setTimeout(() => companionNotifier.refresh(), COMPANION_BLUR_SETTLE_MS);
 });
 
 // ── Menu-bar / notification-area icon (DESIGN-v2 §5.1) ─────────────────────
@@ -1846,10 +1803,10 @@ async function createWindow(openRun?: ScheduledRunTarget, openCompanion?: Compan
     }
   });
 
-  // The Companion sends notices and clicks only to a renderer that listens;
-  // a new document listens only once its preload says so.
+  // Main sends notification clicks only to a renderer that listens; a new
+  // document listens only once its preload says so.
   const companionDocumentGone = (): void => {
-    if (companionRenderers.documentGone(ownerWebContentsId)) companionNotifier.refresh();
+    companionRenderers.documentGone(ownerWebContentsId);
   };
   win.webContents.on('did-start-navigation', (details) => {
     // A navigation main starts (loadURL, reload) replaces the document. One
@@ -2148,8 +2105,8 @@ onDesktopCommand('app:showNotification', (event, title, body, target) => {
 // on the same data.
 onDesktopCommand('app:relaunch', () => {
   void (async () => {
-    notificationFeed.stop();
-    companionFeed.stop();
+    attentionFeed.stop();
+    systemPresence.stop();
     // app.exit() skips before-quit and will-quit: the icon goes now, or Windows leaves a ghost icon.
     trayController.stop();
     destroyTray();
@@ -2397,8 +2354,8 @@ app.whenReady().then(async () => {
     void whenBackendBoot(['ready']).then(() => {
       if (appQuitting) return;
       elog('INFO', 'boot', 'starting the notification feed', { port: resolvedBackendPort, backendMode, mode });
-      notificationFeed.start();
-      companionFeed.start();
+      attentionFeed.start();
+      systemPresence.start();
       initAutoUpdate({ isDev, isPackaged: app.isPackaged, sendToWindows: (channel, payload) => {
         for (const w of windows) if (!w.isDestroyed()) w.webContents.send(channel, payload);
       } });
@@ -2449,8 +2406,8 @@ app.on('will-quit', async (ev) => {
   appQuitting = true;
   windowsLifetime.beginQuit('user');
   destroyWindowsTray();
-  notificationFeed.stop();
-  companionFeed.stop();
+  attentionFeed.stop();
+  systemPresence.stop();
   // The quit goes ahead (app.quit() emits no window-all-closed): the icon
   // goes now, or Windows leaves a ghost icon in the notification area until
   // the pointer passes over it.

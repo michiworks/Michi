@@ -126,15 +126,3 @@ export function PageProgressCards({ scope }: { scope: SpaceConversationScope }) 
   );
   return <SpaceProgressCardList scope={scope} cards={mine} onChanged={cards.refresh} />;
 }
-
-/** One mount for a page that has a single slot: the sheet, then the cards it passes in. */
-export function SpaceConversationSlot({ scope, cards, onCardsChanged }: {
-  scope: SpaceConversationScope;
-  cards: readonly ProgressCardDto[];
-  onCardsChanged?: () => void;
-}) {
-  return <>
-    <NewChatSheetSlot scope={scope} />
-    <SpaceProgressCardList scope={scope} cards={cards} everyPage onChanged={onCardsChanged} />
-  </>;
-}

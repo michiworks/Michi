@@ -2,13 +2,12 @@ import { act, render, screen } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { MetaAgentOverview } from 'michi-shared';
 
-const api = vi.hoisted(() => ({ overview: vi.fn(), paused: vi.fn(), guardFailed: false, schedulerOff: false, pendingApproval: false }));
+const api = vi.hoisted(() => ({ overview: vi.fn(), paused: vi.fn(), guardFailed: false, schedulerOff: false }));
 vi.mock('../../services/api/metaAgentOverview', () => ({ fetchMetaAgentOverview: () => api.overview(), setMetaAgentPaused: (paused: boolean) => api.paused(paused) }));
 vi.mock('./useMetaAgent', async (importOriginal) => ({
   ...(await importOriginal<typeof import('./useMetaAgent')>()),
   useMetaAgentGuardFailed: () => api.guardFailed,
   useMetaAgentSnapshot: () => ({ status: 'ready', error: null, info: {
-    toolApprovals: api.pendingApproval ? [{ state: 'pending' }] : [],
     settings: { runtimeId: null, providerId: null, modelId: null, reasoning: null },
     resolved: { runtimeId: 'kiro', providerId: null, modelId: null, reasoning: null, followsGlobal: true },
     availability: { available: true, reason: null },
@@ -62,12 +61,6 @@ describe('useMetaAgentSettingsAlert (the rail Settings dot)', () => {
     expect(await alertFor(overview({ state: 'running' }))).toBe('false');
     api.schedulerOff = false;
   });
-});
-
-it('lights the Settings badge when a tool is waiting for approval', async () => {
-  api.pendingApproval = true;
-  expect(await alertFor(overview({ state: 'running' }))).toBe('true');
-  api.pendingApproval = false;
 });
 
 describe('one overview for every reader', () => {

@@ -131,6 +131,22 @@ function readGeneratedHomeCards(ownerUserId: string): HomeCardsDto {
   };
 }
 
+const SUMMARY_CARDS_CLEARED_KEY = 'home_cards_summary_cleared_v1';
+
+/**
+ * Once, at boot (server.ts): the greeting and cards the Spaces Home summary
+ * wrote go. The summary no longer writes them (D13), so nothing would keep
+ * them current, and the chat Home shows its own defaults instead. Owners'
+ * customizations (read_home/edit_home) and clicked cards stay.
+ */
+export function clearSummaryHomeCards(): void {
+  if (db().prepare('SELECT 1 FROM meta WHERE key = ?').get(SUMMARY_CARDS_CLEARED_KEY)) return;
+  runInTransaction(() => {
+    db().prepare('DELETE FROM home_cards').run();
+    db().prepare('INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)').run(SUMMARY_CARDS_CLEARED_KEY, String(Date.now()));
+  });
+}
+
 /** Replaces the owner's greeting and sets. Clicked cards stay remembered. */
 export function writeHomeCards(ownerUserId: string, write: HomeCardsWrite, now = Date.now()): HomeCardsDto {
   db().prepare(`INSERT INTO home_cards(owner_user_id,greeting,sets,input_fingerprint,generated_at) VALUES(?,?,?,?,?)
@@ -226,6 +242,7 @@ export function readHomeCards(ownerUserId: string): HomeCardsDto {
     ...(preferences.contentMode ? { contentMode: preferences.contentMode, contentPage } : {}),
     ...generated,
     ...(preferences.cardsMode && preferences.cardsMode !== 'auto' ? { cardsCustomized: true } : {}),
+    ...(preferences.greetingMode && preferences.greetingMode !== 'auto' ? { greetingCustomized: true } : {}),
     greeting: preferences.greetingMode === 'hidden' ? null
       : preferences.greetingMode === 'custom' ? preferences.greeting! : generated.greeting,
     sets: sets.map((set) => ({ cards: set.cards.map((card) => shownCard(card, resolver)) })),

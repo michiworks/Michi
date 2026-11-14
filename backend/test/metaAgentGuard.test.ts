@@ -1,7 +1,7 @@
 import { restrictedChatProfile } from './helpers/restrictedChatProfile';
 import { describe, test } from 'node:test';
 import assert from 'node:assert/strict';
-import { META_AGENT_RUNTIMES } from 'michi-shared';
+import { MICHI_AGENT_RUNTIMES } from 'michi-shared';
 import {
   MetaAgentGuardError, assertMetaAgentToolCatalog, checkMetaAgentToolCatalog, isMetaAgentGuardError, isMetaAgentProfile,
   metaAgentCatalogUnavailable, metaAgentRuntimeAvailability, metaAgentToolsetOf,
@@ -93,9 +93,9 @@ describe('Meta agent toolsets', () => {
 });
 
 describe('Meta agent runtime availability', () => {
-  test('every configurable runtime but Crew can run both toolsets', () => {
-    assert.deepEqual([...META_AGENT_RUNTIMES].sort(), ['claude', 'codex', 'crew', 'kiro', 'pi']);
-    for (const id of ['claude', 'pi', 'codex', 'kiro']) assert.deepEqual(metaAgentRuntimeAvailability(id), { available: true }, id);
+  test('Michi\'s one runtime list runs both toolsets; Crew, Antigravity and the rest are refused with a reason', () => {
+    assert.deepEqual([...MICHI_AGENT_RUNTIMES], ['claude', 'codex', 'pi', 'kiro']);
+    for (const id of MICHI_AGENT_RUNTIMES) assert.deepEqual(metaAgentRuntimeAvailability(id), { available: true }, id);
     const crew = metaAgentRuntimeAvailability('crew');
     assert.equal(crew.available, false);
     assert.match(crew.reason ?? '', /Kiro Crew/);

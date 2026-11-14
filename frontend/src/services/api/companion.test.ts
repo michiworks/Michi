@@ -3,12 +3,10 @@ import { companionItem, companionSnapshotDto, jsonResponse } from '../../test/co
 import {
   CompanionApiError,
   applyCompanionCard,
-  resetCompanionConversation,
   stopCompanionDelegationAutoSend,
   undoCompanionRun,
   fetchCompanion,
   isCompanionUnavailable,
-  parseCompanionNotice,
   parseCompanionSnapshot,
   postCompanionPresence,
   subscribeCompanionEvents,
@@ -48,6 +46,16 @@ describe('Companion snapshot shape', () => {
     expect(snapshot!.settings.workdays).toEqual([1, 2, 3, 4, 5]);
     expect(snapshot!.conversation).toEqual({ workspaceId: 'ws-assistant', nodeId: 'companion-node', assistant: null });
     expect(snapshot!.items.map((item) => item.id)).toEqual(['ok']);
+  });
+
+  it('reads Michi\'s latest line (Q45): none before one was written, absent from older backends, none when it is not one', () => {
+    const headline = { text: 'Two reviews came back.', at: 5, kind: 'heartbeat' };
+    expect(parseCompanionSnapshot({ ...companionSnapshotDto(), headline })?.headline).toEqual(headline);
+    expect(parseCompanionSnapshot({ ...companionSnapshotDto(), headline: null })?.headline).toBeNull();
+    expect(parseCompanionSnapshot(companionSnapshotDto())).not.toHaveProperty('headline');
+    for (const broken of [{ ...headline, text: '  ' }, { ...headline, at: 'now' }, { ...headline, kind: 'poll' }, 'text']) {
+      expect(parseCompanionSnapshot({ ...companionSnapshotDto(), headline: broken })?.headline, JSON.stringify(broken)).toBeNull();
+    }
   });
 
   it('is not a snapshot when the shape is another answer (the e2e mock, another backend)', () => {
@@ -99,43 +107,24 @@ describe('the Companion change feed', () => {
   }), { status: 200, headers: { 'Content-Type': 'text/event-stream' } });
   const notice = { id: 'cmn-1', title: 'Companion', body: 'CR-1 needs attention', target: { kind: 'companion', tab: 'today' }, itemIds: ['cmi-1'], createdAt: 1, expiresAt: 2 };
 
-  it('hands on changes, and the notices the backend’s gate sends; nothing else', async () => {
+  it('hands on changes; nothing else (Michi\'s notices are attention records)', async () => {
     stream.fetchStream.mockResolvedValue(sse([
       `event: companion_changed\ndata: ${JSON.stringify({ type: 'companion_changed', revision: 3, reason: 'status' })}\n\n`,
       `event: companion_notice\ndata: ${JSON.stringify(notice)}\n\n`,
-      `event: companion_notice\ndata: ${JSON.stringify({ ...notice, id: 'cmn-2', target: { kind: 'elsewhere' } })}\n\n`,
-      'event: companion_notice\ndata: {"id":"cmn-3"}\n\n',
       `event: other\ndata: ${JSON.stringify(notice)}\n\n`,
     ].join('')));
     const onEvent = vi.fn();
-    const onNotice = vi.fn();
-    const ended = new Promise<Error | undefined>((resolve) => subscribeCompanionEvents({ onEvent, onNotice, onDisconnect: resolve }));
+    const ended = new Promise<Error | undefined>((resolve) => subscribeCompanionEvents({ onEvent, onDisconnect: resolve }));
     expect(await ended).toBeUndefined();
     expect(String(stream.fetchStream.mock.calls[0][0])).toMatch(/\/companion\/events$/);
     expect(onEvent.mock.calls).toEqual([[{ type: 'companion_changed', revision: 3, reason: 'status' }]]);
-    expect(onNotice.mock.calls).toEqual([[notice]]);
   });
 
-  it('keeps the item a Companion target names on Today, and only a well-formed one', () => {
+  it('keeps the item a Companion target names on Today', () => {
     const today = { kind: 'companion', tab: 'today' } as const;
-    expect(parseCompanionNotice({ ...notice, target: { ...today, itemId: 'cmi-1' } })?.target).toEqual({ ...today, itemId: 'cmi-1' });
-    for (const itemId of ['', 7, null, 'x'.repeat(161)]) {
-      expect(parseCompanionNotice({ ...notice, target: { ...today, itemId } })?.target, String(itemId)).toEqual(today);
-    }
-    // Chat has no item to bring into view.
-    expect(parseCompanionNotice({ ...notice, target: { kind: 'companion', tab: 'chat', itemId: 'cmi-1' } })?.target).toEqual({ kind: 'companion', tab: 'chat' });
-    // An item's own target keeps it too (a reminder about another item opens Today there).
+    // An item's own target keeps it (a reminder about another item opens Today there).
     const snapshot = parseCompanionSnapshot(companionSnapshotDto({ items: [companionItem('cmi-r', { target: { ...today, itemId: 'cmi-1' } })] }));
     expect(snapshot?.items[0].target).toEqual({ ...today, itemId: 'cmi-1' });
-  });
-
-  it('reads a notice only with a target this window can open and item ids', () => {
-    expect(parseCompanionNotice(notice)).toEqual(notice);
-    expect(parseCompanionNotice({ ...notice, target: { kind: 'node', workspaceId: 'ws-1', nodeId: 'n-1' } })?.target).toEqual({ kind: 'node', workspaceId: 'ws-1', nodeId: 'n-1' });
-    expect(parseCompanionNotice({ ...notice, target: { kind: 'companion', tab: 'elsewhere' } })).toBeNull();
-    expect(parseCompanionNotice({ ...notice, itemIds: [7] })).toBeNull();
-    expect(parseCompanionNotice({ ...notice, expiresAt: Number.NaN })).toBeNull();
-    expect(parseCompanionNotice(null)).toBeNull();
   });
 });
 
@@ -196,18 +185,21 @@ describe('v2 snapshot fields (DESIGN-v2 §8.1)', () => {
     ]);
   });
 
+  it('reads the Get started card: null when there is none or it does not parse (D17)', () => {
+    const base = companionSnapshotDto();
+    const card = { state: 'started', at: 5, nodeId: 'companion-node', homes: true, watch: null, homesOn: true, firstRunDays: 30 };
+    expect(parseCompanionSnapshot({ ...base, getStarted: card })?.getStarted).toEqual(card);
+    expect(parseCompanionSnapshot({ ...base, getStarted: null })?.getStarted).toBeNull();
+    expect(parseCompanionSnapshot({ ...base, getStarted: { ...card, state: 'welcome' } })?.getStarted).toBeNull();
+  });
+
   it('leaves the v2 fields out when an older backend sends none', () => {
     const snapshot = parseCompanionSnapshot(companionSnapshotDto());
     expect(snapshot?.welcome).toBeUndefined();
+    expect(snapshot?.getStarted).toBeUndefined();
     expect(snapshot?.delegations).toBeUndefined();
     expect(snapshot?.status.firstLook).toBeUndefined();
     expect(snapshot?.settings.reasoning).toBeNull();
-  });
-
-  it('keeps a notice\'s channel, reading null as the agent\'s own', () => {
-    const notice = { id: 'n1', title: 't', body: 'b', target: { kind: 'companion', tab: 'chat' }, itemIds: [], createdAt: 1, expiresAt: 2 };
-    expect(parseCompanionNotice({ ...notice, channel: 'chat' })?.channel).toBe('chat');
-    expect(parseCompanionNotice({ ...notice, channel: null })?.channel).toBe('companion');
   });
 
   it('Undo all posts to the run\'s undo path and reads the result', async () => {
@@ -227,17 +219,5 @@ describe('v2 snapshot fields (DESIGN-v2 §8.1)', () => {
     expect(url).toMatch(/\/companion\/delegations\/d1$/);
     expect(init.method).toBe('PATCH');
     expect(JSON.parse(String(init.body))).toEqual({ autoSend: false });
-  });
-
-  it('New conversation resets the assistant (no /companion/reset) and reads the snapshot again', async () => {
-    const info = { nodeId: 'v2', workspaceId: 'ws-assistant', treeId: 't2', settings: { runtimeId: 'claude', modelId: null, reasoning: null }, supportedRuntimes: ['claude'] };
-    const fetchMock = vi.fn(async (url: string) => (url.endsWith('/assistant/reset') ? jsonResponse(info) : jsonResponse(companionSnapshotDto())));
-    vi.stubGlobal('fetch', fetchMock);
-    await resetCompanionConversation('v1');
-    const urls = fetchMock.mock.calls.map((call) => String((call as unknown as [string])[0]));
-    expect(urls[0]).toMatch(/\/assistant\/reset$/);
-    expect(JSON.parse(String((fetchMock.mock.calls[0] as unknown as [string, RequestInit])[1].body))).toEqual({ nodeId: 'v1' });
-    expect(urls.some((url) => url.endsWith('/companion/reset'))).toBe(false);
-    expect(urls[1]).toMatch(/\/companion$/);
   });
 });

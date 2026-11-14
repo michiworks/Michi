@@ -325,8 +325,8 @@ export function coreFinalizeTurn(db: DbPrimitives, snapshot: DurableTurnSnapshot
  * coreFinalizeTurn's writes, inside the caller's transaction. A turn that
  * ran records the node's completion facts; a posted message
  * (coreBeginAndFinalizeTurn) does not: the Companion's own unread badge and
- * notice gate report a post (DESIGN-v2 §3.3, §3.8), so the attention
- * service proposes nothing for it.
+ * notices (companion/notices.ts, an `agent:chat` update) report a post
+ * (DESIGN-v2 §3.3, §3.8), so no completion record is made for it.
  */
 function finalizeTurnRows(
   db: DbPrimitives,

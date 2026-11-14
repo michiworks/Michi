@@ -1,5 +1,6 @@
 import express, { type Request, type Response } from 'express';
 import { SSE_HEARTBEAT_MS, isCheckinNodeId, type MemoryErrorResponse, type MemoryStatus } from 'michi-shared';
+import { isAssistantNode } from '../assistant/identity';
 import { beginSse } from '../services/httpSse';
 import { log } from '../services/logger';
 import { wakeMemoryExtraction } from '../services/memory/extractionService';
@@ -8,6 +9,7 @@ import { requestAgentOwnerOrNull } from '../services/agentOwner';
 import {
   MemoryError,
   approveMemory,
+  chooseConversationMemoryMode,
   createMemory,
   forgetMemory,
   getConversationMemoryMode,
@@ -16,10 +18,10 @@ import {
   memorySettingsView,
   rejectMemory,
   resetMemories,
-  setConversationMemoryMode,
   setMemorySettings,
   updateMemory,
   type MemoryCaller,
+  type MemoryServiceErrorResponse,
 } from '../services/memory/memoryService';
 import { forgetRecalledTurn, recalledTurnScope, replySourcesView } from '../services/memory/replySources';
 import { memoryProfileView, profileLineMemoryIds, requestProfileRebuild } from '../services/memory/userProfile';
@@ -41,6 +43,7 @@ const STATUS_FOR_CODE: Record<MemoryError['code'], number> = {
   version_conflict: 409,
   invalid_state: 409,
   memory_disabled: 409,
+  memory_mode_locked: 409,
 };
 
 function caller(req: Request): MemoryCaller | null {
@@ -61,7 +64,7 @@ function route(fn: (req: Request, res: Response, caller: MemoryCaller) => void) 
     } catch (error) {
       if (error instanceof MemoryError || error instanceof RequestError) {
         const code = error instanceof MemoryError ? error.code : 'invalid_argument';
-        const body: MemoryErrorResponse = { error: error.message, code };
+        const body: MemoryServiceErrorResponse = { error: error.message, code };
         if (error instanceof MemoryError && error.currentVersion !== undefined) body.currentVersion = error.currentVersion;
         res.status(STATUS_FOR_CODE[code]).json(body);
         return;
@@ -286,9 +289,17 @@ export function setupMemoryRoutes(): express.Router {
     }
     res.status(400).json({ code: 'reserved_node_id', error: `node id ${nodeId} is reserved for Michi's check-ins` });
   };
-  router.put('/nodes/:nodeId/memory-mode', refuseCheckinNode, route((req, res, who) => {
+  // Michi's own conversations (V and its earlier ones) always learn and use memory: their setting is not the user's to change.
+  const refuseAssistantNode = (req: Request, res: Response, next: express.NextFunction): void => {
+    if (!isAssistantNode(nodeIdParam(req))) {
+      next();
+      return;
+    }
+    res.status(409).json({ code: 'invalid_state', error: 'Michi’s own conversation always learns and uses Michi Memory' });
+  };
+  router.put('/nodes/:nodeId/memory-mode', refuseCheckinNode, refuseAssistantNode, route((req, res, who) => {
     const body = jsonBody(req, ['mode']);
-    res.json(setConversationMemoryMode(who, nodeIdParam(req), body.mode));
+    res.json(chooseConversationMemoryMode(who, nodeIdParam(req), body.mode));
   }));
 
   // ── what a reply was based on (services/memory/replySources.ts) ──

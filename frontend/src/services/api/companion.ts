@@ -1,14 +1,13 @@
 import {
   COMPANION_BUCKETS,
+  COMPANION_CHECKIN_KINDS,
   COMPANION_CONFIGURABLE_SOURCES,
   COMPANION_HEARTBEAT_MINUTES,
   COMPANION_SOURCE_KINDS,
   DEFAULT_COMPANION_SETTINGS,
   companionDelegationPath,
-  companionNoticeChannel,
   companionRunUndoPath,
   isCompanionChangedEvent,
-  isCompanionNotice,
   isReasoningLevel,
   parseCompanionPostMetadata,
   type CompanionCheckinChangeDto,
@@ -25,12 +24,14 @@ import {
   type CompanionChangedEvent,
   type CompanionConfigurableSource,
   type CompanionFeedback,
+  type CompanionGetStartedDto,
+  type CompanionGetStartedInput,
   type CompanionGoalDto,
+  type CompanionHeadlineDto,
   type CompanionHeartbeatMinutes,
   type CompanionItemAction,
   type CompanionItemDto,
   type CompanionItemSubtype,
-  type CompanionNotice,
   type CompanionPresenceInput,
   type CompanionReminderDto,
   type CompanionRunDto,
@@ -41,7 +42,7 @@ import {
   type CompanionTarget,
 } from 'michi-shared';
 import { API_BASE_URL } from '../../config/env';
-import { isAssistantInfo, resetAssistant, type AssistantInfo } from './assistant';
+import { isAssistantInfo, type AssistantInfo } from './assistant';
 import { readSseStream, SseHttpError } from './sseParser';
 import { fetchStream } from './streamTransport';
 
@@ -87,19 +88,12 @@ type Sources = CompanionSettings['sources'];
 
 /** PATCH /companion/settings: the backend deep-merges it over the current settings. */
 export interface CompanionSettingsPatch {
-  enabled?: boolean;
+  /** Michi off (Pause Michi until resumed) or, false, on (Q30). Settings no longer pause it for a while. */
   paused?: boolean;
   displayName?: string;
   sources?: { [K in keyof Sources]?: Partial<Sources[K]> };
-  pollMinutes?: number;
-  heartbeat?: Partial<CompanionSettings['heartbeat']>;
+  /** `days` replaces the list. */
   brief?: Partial<CompanionSettings['brief']>;
-  quietHours?: Partial<CompanionSettings['quietHours']>;
-  notifications?: CompanionSettings['notifications'];
-  dailyTurnBudget?: number;
-  workdays?: number[];
-  /** null: the default (the global reasoning, at most high). DESIGN-v2 §6. */
-  reasoning?: CompanionSettings['reasoning'];
 }
 
 // ── shape checks ───────────────────────────────────────────────────────────
@@ -129,7 +123,7 @@ const REMINDER_STATUSES = ['active', 'paused', 'fired', 'cancelled'] as const;
 const REMINDER_UNTIL = ['approved', 'merged', 'recovered', 'read', 'answered'] as const;
 const oneOf = <T extends string>(values: readonly T[], value: unknown): value is T => isString(value) && (values as readonly string[]).includes(value);
 
-/** The longest item id a target carries (electron/companionNotifications.ts takes the same). */
+/** The longest item id a target carries (electron/attentionNotifications.ts takes the same). */
 const MAX_TARGET_ID_CHARS = 160;
 
 function parseTarget(value: unknown): CompanionTarget | null {
@@ -187,6 +181,12 @@ export function parseCompanionItem(value: unknown): CompanionItemDto | null {
 const bool = (value: unknown, fallback: boolean): boolean => (isBoolean(value) ? value : fallback);
 const clock = (value: unknown, fallback: string): string => (isString(value) && /^([01]\d|2[0-3]):[0-5]\d$/.test(value) ? value : fallback);
 
+/** Local weekdays (0 = Sunday), de-duplicated and in week order; null unless a non-empty list of them. */
+function weekdays(value: unknown): number[] | null {
+  if (!Array.isArray(value) || value.length === 0 || !value.every((day) => Number.isInteger(day) && day >= 0 && day <= 6)) return null;
+  return [...new Set(value as number[])].sort((a, b) => a - b);
+}
+
 function parseSettings(value: unknown): CompanionSettings | null {
   if (!isObject(value) || !isBoolean(value.enabled) || !isBoolean(value.paused) || !isObject(value.sources)) return null;
   const d = DEFAULT_COMPANION_SETTINGS;
@@ -197,12 +197,11 @@ function parseSettings(value: unknown): CompanionSettings | null {
   const heartbeat = isObject(value.heartbeat) ? value.heartbeat : {};
   const brief = isObject(value.brief) ? value.brief : {};
   const quiet = isObject(value.quietHours) ? value.quietHours : {};
-  const workdays = Array.isArray(value.workdays) && value.workdays.every((day) => Number.isInteger(day) && day >= 0 && day <= 6)
-    ? [...new Set(value.workdays as number[])].sort((a, b) => a - b)
-    : [...d.workdays];
+  const workdays = weekdays(value.workdays) ?? [...d.workdays];
   return {
     enabled: value.enabled,
     paused: value.paused,
+    pausedUntil: isNumber(value.pausedUntil) ? value.pausedUntil : null,
     displayName: isString(value.displayName) && value.displayName.trim() ? value.displayName : d.displayName,
     sources: {
       michi: { enabled: bool(source('michi').enabled, d.sources.michi.enabled) },
@@ -224,10 +223,13 @@ function parseSettings(value: unknown): CompanionSettings | null {
       enabled: bool(heartbeat.enabled, d.heartbeat.enabled),
       intervalMinutes: (COMPANION_HEARTBEAT_MINUTES as readonly unknown[]).includes(heartbeat.intervalMinutes) ? heartbeat.intervalMinutes as CompanionHeartbeatMinutes : d.heartbeat.intervalMinutes,
     },
-    brief: { enabled: bool(brief.enabled, d.brief.enabled), time: clock(brief.time, d.brief.time) },
+    brief: {
+      enabled: bool(brief.enabled, d.brief.enabled),
+      time: clock(brief.time, d.brief.time),
+      // An older backend sends no brief days: its brief came on the workdays.
+      days: weekdays(brief.days) ?? weekdays(value.workdays) ?? [...d.brief.days],
+    },
     quietHours: { enabled: bool(quiet.enabled, d.quietHours.enabled), start: clock(quiet.start, d.quietHours.start), end: clock(quiet.end, d.quietHours.end) },
-    notifications: value.notifications === 'all' || value.notifications === 'important' || value.notifications === 'off' ? value.notifications : d.notifications,
-    dailyTurnBudget: isNumber(value.dailyTurnBudget) ? value.dailyTurnBudget : d.dailyTurnBudget,
     workdays,
     reasoning: isReasoningLevel(value.reasoning) ? value.reasoning : null,
   };
@@ -387,6 +389,23 @@ export function parseCompanionDelegation(value: unknown): CompanionDelegationDto
   };
 }
 
+const GET_STARTED_STATES: ReadonlySet<unknown> = new Set(['offer', 'later', 'started']);
+const nullableBoolean = (value: unknown): boolean | null => (isBoolean(value) ? value : null);
+
+/** The Get started card (D17); null when there is none or it does not parse, undefined from an older backend. */
+function parseGetStarted(value: unknown): CompanionGetStartedDto | null {
+  if (!isObject(value) || !GET_STARTED_STATES.has(value.state) || !isBoolean(value.homesOn) || !isNumber(value.firstRunDays)) return null;
+  return {
+    state: value.state as CompanionGetStartedDto['state'],
+    at: nullableNumber(value.at),
+    nodeId: isString(value.nodeId) ? value.nodeId : null,
+    homes: nullableBoolean(value.homes),
+    watch: nullableBoolean(value.watch),
+    homesOn: value.homesOn,
+    firstRunDays: value.firstRunDays,
+  };
+}
+
 function parseWelcome(value: unknown): CompanionSnapshot['welcome'] {
   if (!isObject(value) || !isBoolean(value.wanted)) return undefined;
   return { wanted: value.wanted };
@@ -457,7 +476,17 @@ export function parseCompanionSnapshot(value: unknown): CompanionSnapshot | null
     ...(Array.isArray(value.delegations) ? { delegations: list(value.delegations, parseCompanionDelegation) } : {}),
     ...(oneOf(TEXT_ORIGINS, value.notesOrigin) ? { notesOrigin: value.notesOrigin as CompanionTextOrigin } : {}),
     ...(Array.isArray(value.checkinChanges) ? { checkinChanges: list(value.checkinChanges, parseCheckinChange) } : {}),
+    ...('getStarted' in value ? { getStarted: parseGetStarted(value.getStarted) } : {}),
+    ...(value.offNoticeAt === null || isNumber(value.offNoticeAt) ? { offNoticeAt: value.offNoticeAt } : {}),
+    ...('headline' in value ? { headline: parseHeadline(value.headline) } : {}),
   };
+}
+
+/** Michi's latest line (Q45); one that does not read as one is none. */
+function parseHeadline(value: unknown): CompanionHeadlineDto | null {
+  if (!isObject(value) || !isString(value.text) || !value.text.trim() || !isNumber(value.at)
+    || !oneOf(COMPANION_CHECKIN_KINDS, value.kind)) return null;
+  return { text: value.text, at: value.at, kind: value.kind as CompanionHeadlineDto['kind'] };
 }
 
 // ── requests ───────────────────────────────────────────────────────────────
@@ -530,9 +559,19 @@ export async function postCompanionView(): Promise<CompanionCatchUpDto | null> {
   return isObject(body) ? parseCatchUp(body.catchUp) : null;
 }
 
-export async function requestCompanionWelcome(): Promise<boolean> {
-  const body = await request('/welcome', { method: 'POST', body: {} });
-  return isObject(body) && body.started === true;
+/** POST /companion/get-started: Get started's Start with the card's choices (D17). 409 scheduler_off: homes cannot run here. */
+export async function startCompanionGetStarted(input: CompanionGetStartedInput): Promise<CompanionSnapshot> {
+  return snapshotOf(await request('/get-started', { method: 'POST', body: input }));
+}
+
+/** POST /companion/off-notice: "Michi is off" was told once, or Michi was found on (Q29). */
+export async function markCompanionOffNotice(): Promise<void> {
+  await request('/off-notice', { method: 'POST', body: {} });
+}
+
+/** POST /companion/get-started/later: Not now. */
+export async function postponeCompanionGetStarted(): Promise<CompanionSnapshot> {
+  return snapshotOf(await request('/get-started/later', { method: 'POST', body: {} }));
 }
 
 async function decideCard(id: string, decision: 'apply' | 'dismiss'): Promise<CompanionCardDto> {
@@ -619,17 +658,6 @@ export async function setCompanionBriefFeedback(briefId: string, index: number, 
 }
 
 /**
- * Starts the conversation over (New conversation): v2 has one conversation,
- * the assistant's, so this is POST /assistant/reset for `nodeId` (the one on
- * screen; a 409 assistant_changed names the one current now), then the
- * snapshot that shows it. `POST /companion/reset` is gone (DESIGN-v2 §1.4).
- */
-export async function resetCompanionConversation(nodeId?: string): Promise<CompanionSnapshot> {
-  await resetAssistant(nodeId);
-  return fetchCompanion();
-}
-
-/**
  * "Undo all" on a check-in's receipt (DESIGN-v2 §2.7): reverts what the run
  * changed, newest first, stopping at the first conflict. Safe to repeat.
  */
@@ -649,29 +677,8 @@ export async function stopCompanionDelegationAutoSend(delegationId: string): Pro
 
 // ── change feed ────────────────────────────────────────────────────────────
 
-/**
- * A notice the backend's notice gate produced (R2.7), or null for anything
- * else: its target must be one this window can open.
- */
-export function parseCompanionNotice(value: unknown): CompanionNotice | null {
-  if (!isCompanionNotice(value)) return null;
-  const target = parseTarget(value.target);
-  if (!target || !value.itemIds.every(isString) || !isNumber(value.createdAt) || !isNumber(value.expiresAt)) return null;
-  return {
-    id: value.id, title: value.title, body: value.body, target, itemIds: [...value.itemIds], createdAt: value.createdAt, expiresAt: value.expiresAt,
-    // Which gate sent it; a null channel reads as the agent's own (DESIGN-v2 §8.1 #15), absent stays absent.
-    ...(value.channel !== undefined ? { channel: companionNoticeChannel(value) } : {}),
-  };
-}
-
 export interface CompanionEventsSubscription {
   onEvent: (event: CompanionChangedEvent) => void;
-  /**
-   * A `companion_notice` frame: a notice that passed the backend's single
-   * notice gate. A browser window shows these; the desktop app's main process
-   * gets its own (GET /companion/notifications/stream) and its windows ignore them.
-   */
-  onNotice?: (notice: CompanionNotice) => void;
   onOpen?: () => void;
   /** The feed ended or failed; an SseHttpError carries the HTTP status. Not called after unsubscribe. */
   onDisconnect?: (error?: Error) => void;
@@ -679,9 +686,7 @@ export interface CompanionEventsSubscription {
 
 /**
  * GET /api/companion/events through the shared stream transport: the current
- * revision first, then one `companion_changed` per change, and a
- * `companion_notice` for each notice the backend's gate sends to renderer
- * feeds. Returns unsubscribe.
+ * revision first, then one `companion_changed` per change. Returns unsubscribe.
  */
 export function subscribeCompanionEvents(options: CompanionEventsSubscription): () => void {
   const controller = new AbortController();
@@ -695,15 +700,10 @@ export function subscribeCompanionEvents(options: CompanionEventsSubscription): 
       if (stopped) return;
       options.onOpen?.();
       await readSseStream(response.body.getReader(), (event, data) => {
-        if (event !== 'companion_changed' && event !== 'companion_notice') return;
+        if (event !== 'companion_changed') return;
         let json: unknown;
         try { json = JSON.parse(data); } catch { return; }
-        if (event === 'companion_changed') {
-          if (isCompanionChangedEvent(json)) options.onEvent(json);
-          return;
-        }
-        const notice = parseCompanionNotice(json);
-        if (notice) options.onNotice?.(notice);
+        if (isCompanionChangedEvent(json)) options.onEvent(json);
       }, { shouldStop: () => stopped });
     } catch (error) {
       if (!stopped) disconnectError = error instanceof Error ? error : new Error(String(error));

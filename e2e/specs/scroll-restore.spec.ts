@@ -3,7 +3,7 @@ import { installMockApi } from '../fixtures/mockApi';
 
 // Pane scroll restore behavior (TPane mount positioning):
 //   1. First open on a device (no saved anchor) → bottom.
-//   2. Already-read chat → reopens at bottom, including after leaving mid-history.
+//   2. Already-read chat left mid-history → reopens where the reader left it.
 //   3. Chat with messages newer than the saved lastSeen horizon → first
 //      unseen message parked at ~30% of the viewport height.
 //
@@ -151,7 +151,7 @@ async function openChat(page: Page, title: string, nodeId: string) {
 }
 
 test.describe('pane scroll restore', () => {
-  test('first open and reopening a read chat land at the bottom', async ({ page }) => {
+  test('first open lands at the bottom; reopening returns to where the reader left', async ({ page }) => {
     await seed(page);
     await page.goto('/');
 
@@ -176,10 +176,11 @@ test.describe('pane scroll restore', () => {
     await openChat(page, 'Chat B', 'nB');
     await expect(page.locator('[data-node-id="nA"]')).toHaveCount(0);
 
-    // ── Reopen: no newer messages → bottom ─────────────────────────────
+    // ── Reopen: no newer messages → back at the saved anchor ────────────
     await openChat(page, 'Chat A', 'nA');
     const after = await probe(page, 'nA');
-    expect(after.distFromBottom).toBeLessThan(200);
+    expect(after.topMsgId).toBe(before.topMsgId);
+    expect(Math.abs(after.topMsgOffset - before.topMsgOffset)).toBeLessThan(24);
   });
 
   test('unread chat opens with the first unseen message at ~30% viewport height', async ({ page }) => {
@@ -207,8 +208,8 @@ test.describe('pane scroll restore', () => {
     expect(p.distFromBottom).toBeGreaterThan(200);
   });
 
-  test('read chat with a saved mid-history anchor opens at the bottom', async ({ page }) => {
-    // lastSeen equals the newest message → nothing unseen → bottom.
+  test('read chat with a saved mid-history anchor opens at that anchor', async ({ page }) => {
+    // lastSeen equals the newest message → nothing unseen → the anchor.
     const lastSeen = BASE_T + (TURNS - 1) * 1_000 + 500;
     await seed(page, [[
       'nA',
@@ -218,6 +219,8 @@ test.describe('pane scroll restore', () => {
 
     await openChat(page, 'Chat A', 'nA');
     const p = await probe(page, 'nA');
-    expect(p.distFromBottom).toBeLessThan(200);
+    expect(p.topMsgId).toBe('u-nA-4');
+    expect(Math.abs(p.topMsgOffset - -20)).toBeLessThan(24);
+    expect(p.distFromBottom).toBeGreaterThan(200);
   });
 });

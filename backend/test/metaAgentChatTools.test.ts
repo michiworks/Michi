@@ -25,6 +25,7 @@ import { updateMetaAgentSettings } from '../src/services/metaAgent/settings';
 import { updateAgentConfig } from '../src/services/agentConfig';
 import { LOCAL_AGENT_OWNER_ID } from '../src/services/agentOwner';
 import { closeDb, getDb, initDb } from '../src/services/db';
+import { getTurnTrust, recordCompanionTaint } from '../src/services/turnTrust';
 import { beginTurn, finalizeTurn, getNode, saveNode, saveTree, saveWorkspace, setAiGlobalContext } from '../src/services/dbRepository';
 import { McpSlotRegistry, buildMcpServerForSlot, type McpSlot } from '../src/services/mcpServer';
 import { createDatabase, createPage, getDatabase, getPage, listPages, listSpaces } from '../src/services/pages/repository';
@@ -486,6 +487,26 @@ describe('Meta agent chat window tools', () => {
     assert.doesNotMatch(body.next, /Do not message it/);
   });
 
+  test('a conversation a temporary chat starts is a temporary chat before its session opens, and not followed; any other learns', async () => {
+    const h = harness();
+    const start = async () => JSON.parse((await startConversationTool({ ownerUserId: null, workspaceId: assistant.workspaceId, nodeId: assistant.nodeId },
+      { workspaceId: 'ws-b', text: 'Run it' }, async () => ({ approved: true }), h.deps)).content[0].text).conversation.nodeId as string;
+    const memoryModeAtOpen: Array<string | null> = [];
+    const ensureSession = h.deps.ensureSession;
+    h.deps.ensureSession = async (input) => {
+      memoryModeAtOpen.push(getNode(input.nodeId)?.memory_mode ?? null);
+      return ensureSession(input);
+    };
+    const learning = await start();
+    getDb().prepare("UPDATE nodes SET memory_mode = 'off' WHERE id = ?").run(assistant.nodeId);
+    const temporary = await start();
+    assert.equal(getNode(learning)?.memory_mode ?? null, null);
+    assert.equal(getNode(temporary)?.memory_mode, 'off');
+    assert.deepEqual(memoryModeAtOpen, [null, 'off']);
+    assert.ok(getDelegation(learning), 'followed: its replies come back as worker reports');
+    assert.equal(getDelegation(temporary), null, 'a temporary chat follows nothing it started');
+  });
+
   test('start_conversation from a closed conversation is not followed, nor one that never started (DESIGN-v2 §4)', async () => {
     const h = harness();
     // The MVP's closed Companion conversation: assistant workspace, purpose recorded 'companion'.
@@ -528,6 +549,53 @@ describe('Meta agent chat window tools', () => {
 
     assert.equal(h.started.length, 0);
     assert.equal((getDb().prepare('SELECT COUNT(*) AS n FROM nodes').get() as { n: number }).n, before);
+  });
+
+  test('start_conversation in a turn the user sent starts without a card, whatever it read; a turn Michi started asks (2026-11-12)', async () => {
+    const h = harness();
+    const v = { ownerUserId: null, workspaceId: assistant.workspaceId, nodeId: assistant.nodeId };
+    const turn = (turnId: string, assistantId: string, metadata?: Record<string, unknown>) => {
+      getDb().prepare("UPDATE turns SET status = 'completed' WHERE node_id = ?").run(assistant.nodeId);
+      let userMessageId: string | null = null;
+      if (metadata) {
+        userMessageId = `u-${turnId}`;
+        getDb().prepare("INSERT INTO messages (id, node_id, role, content, seq, metadata) VALUES (?, ?, 'user', 'x', 1, ?)")
+          .run(userMessageId, assistant.nodeId, JSON.stringify(metadata));
+      }
+      getDb().prepare("INSERT INTO turns (turn_id, node_id, user_message_id, assistant_message_id, status, started_at, updated_at) VALUES (?, ?, ?, ?, 'active', 1, 1)")
+        .run(turnId, assistant.nodeId, userMessageId, assistantId);
+    };
+    const asked: string[] = [];
+    const approve = async (request: { text: string }) => { asked.push(request.text); return { approved: false as const, reason: 'declined' as const }; };
+
+    // The user's own message to V (`a-…`), after it read check-in material: started, no card.
+    turn('turn-user', 'a-turn-user');
+    recordCompanionTaint({ nodeId: assistant.nodeId, turnId: 'turn-user' }, 'companion_read', 'checkin');
+    const started = await startConversationTool(v, { workspaceId: 'ws-b', text: 'Fix the flaky test' }, approve, h.deps);
+    assert.equal(JSON.parse(started.content[0].text).status, 'started');
+    assert.deepEqual(asked, []);
+    // The new conversation is still Michi's work, started from what V's turn read.
+    assert.deepEqual(getTurnTrust({ nodeId: h.started[0].nodeId, turnId: h.started[0].turnId }).sources.map((source) => source.tool), ['passed_outside']);
+
+    // A turn Michi requested in V (`self-…`: a note, a worker report, a thread reply): asks.
+    turn('turn-self', `self-${assistant.nodeId}-turn-self`);
+    assert.equal(JSON.parse((await startConversationTool(v, { workspaceId: 'ws-b', text: 'From a note' }, approve, h.deps)).content[0].text).status, 'declined');
+    // A user-sent id whose message Michi relayed (threadMessage): asks.
+    turn('turn-relayed', 'a-turn-relayed', { threadMessage: { fromNodeId: 'n-x', fromTitle: 'X' } });
+    await startConversationTool(v, { workspaceId: 'ws-b', text: 'Relayed' }, approve, h.deps);
+    // No running turn (an applied card's own approver answers then) or one Michi cannot read: asks.
+    getDb().prepare("UPDATE turns SET status = 'completed' WHERE node_id = ?").run(assistant.nodeId);
+    await startConversationTool(v, { workspaceId: 'ws-b', text: 'No turn' }, approve, h.deps);
+    // A guard Michi cannot read fails closed (turnGuard: Michi's work): asks.
+    turn('turn-unreadable', 'a-turn-unreadable');
+    getDb().exec('ALTER TABLE companion_delegations RENAME TO companion_delegations_unreadable');
+    try {
+      await startConversationTool(v, { workspaceId: 'ws-b', text: 'Unreadable' }, approve, h.deps);
+    } finally {
+      getDb().exec('ALTER TABLE companion_delegations_unreadable RENAME TO companion_delegations');
+    }
+    assert.deepEqual(asked, ['From a note', 'Relayed', 'No turn', 'Unreadable']);
+    assert.equal(h.started.length, 1);
   });
 
   test('start_conversation through the slot asks in the chat window and leaves no thread when the session fails', async () => {

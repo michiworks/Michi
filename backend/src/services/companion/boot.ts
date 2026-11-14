@@ -13,7 +13,7 @@
  * only while this process holds the scheduler lease.
  */
 
-import { currentAssistantNodeId } from '../../assistant/store';
+import { currentAssistantNodeId, findAssistantWorkspace } from '../../assistant/store';
 import { LOCAL_AGENT_OWNER_ID } from '../agentOwner';
 import { log } from '../logger';
 import { firstRunEndPosted } from '../metaAgent/firstRunNarration';
@@ -21,6 +21,7 @@ import { firstRunClosed, firstRunWriting } from '../metaAgent/firstRunHold';
 import { cleanUpCheckins, discardMvpCompanionSessions, type CompanionMvpDiscard } from './cleanup';
 import { systemCompanionClock } from './clock';
 import { createCompanionTurnRunner, type CompanionTurnChatHub, type CompanionTurnChatManager } from './conversation';
+import { createCheckinLane, type CheckinLane } from './checkinLane';
 import { startCompanion, type CompanionCoordinatorDeps } from './coordinator';
 import { getCompanionSettings } from './settings';
 import { createExternalSources, type CompanionExternalSources } from './sources';
@@ -45,6 +46,8 @@ export interface RunningCompanion {
   service: CompanionService;
   /** Stops the engine and closes the MCP connections; once it resolves, the database may close. */
   stop(): Promise<void>;
+  /** The scheduler's check-in lane (checkinLane.ts, unification D11, P6): each scheduler tick, and the check-in runs it starts. */
+  checkinLane: CheckinLane;
 }
 
 /**
@@ -67,7 +70,7 @@ export function bootCompanion(deps: CompanionBootDeps): RunningCompanion {
     ...deps.coordinator,
     sources: external.sources,
     auth: external.auth,
-    // Check-ins go through the runner, which reports every post to the coordinator's notice gate.
+    // Check-ins go through the runner, which reports every post to the coordinator's notices (notices.ts).
     turnRunner: (notifier) => createCompanionTurnRunner({ chatHub, chatManager, notifier, clock }),
     isLeaseHolder: deps.isLeaseHolder,
     // Busy while it answers and while its runtime still cleans up after the answer.
@@ -100,6 +103,7 @@ export function bootCompanion(deps: CompanionBootDeps): RunningCompanion {
   let stopping: Promise<void> | null = null;
   return {
     service,
+    checkinLane: createCheckinLane(coordinator, { workspaceId: () => findAssistantWorkspace()?.id ?? null, stopped: () => stopping !== null }),
     stop: () => stopping ??= (async () => {
       setCompanionToolDeps({});
       try {

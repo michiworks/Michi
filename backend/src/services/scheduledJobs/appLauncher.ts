@@ -7,11 +7,11 @@ import { log } from '../logger';
 export const BACKGROUND_LAUNCH_ARG = '--michi-background-launch';
 
 /**
- * How long a notifier (the Electron main process's notification feed) must
- * have been gone before a notice wakes the app: longer than the feeds'
+ * How long the desktop notifier (Electron main's attention feed) must have
+ * been gone before a record wakes the app: longer than the feeds'
  * longest reconnect backoff (15 s), so a notifier that is only reconnecting
  * is never taken for a quit app (DESIGN-v2 §5.1; electron-tray-map §1.9).
- * The scheduler and the Companion both wait this long.
+ * The attention service waits this long before it wakes the app.
  */
 export const NOTIFIER_GRACE_MS = 30_000;
 
@@ -53,8 +53,7 @@ function forwardedEnvArgs(env: Readonly<Record<string, string | undefined>>): st
 /**
  * Only the macOS background service launches the app: the backend itself
  * cannot show clickable notifications, and a forked child exits with the app.
- * One launcher per backend: the scheduler and the Companion share it, and so
- * its throttle (one wake a minute between them).
+ * One launcher per backend, the attention service's: one wake a minute.
  */
 export function createDesktopAppLauncher(options: DesktopAppLauncherOptions = {}): AppLauncher {
   const bundlePath = options.bundlePath ?? process.env.MICHI_APP_BUNDLE ?? null;

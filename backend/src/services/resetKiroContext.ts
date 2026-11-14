@@ -1,4 +1,5 @@
 import { workspaceSessionCwd } from './workspaceSandbox';
+import { workConversationCwd } from './workConversationWorktree';
 import type { AgentSession, NewAgentSessionOptions } from '../agents/types';
 import { getRuntime } from '../agents/registry';
 import { descriptorOf } from 'michi-runtime/internal/core/descriptors';
@@ -45,7 +46,8 @@ export async function resetKiroContext(original: AgentSession, ownerUserId: stri
         dropSession(original.id);
         let replacement: AgentSession | undefined;
         try {
-            replacement = await runtime.newSession({ sessionId: original.id, cwd: workspaceSessionCwd(workspace, ownerUserId, process.cwd()),
+            replacement = await runtime.newSession({ sessionId: original.id,
+                cwd: workConversationCwd(original.id) ?? workspaceSessionCwd(workspace, ownerUserId, process.cwd()),
                 workspaceId: workspace.id, ownerUserId, model, reasoning,
                 owner: chatOwner(original.id),
                 ...bootstrap,

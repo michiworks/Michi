@@ -10,6 +10,7 @@ import { ActionMenu, type ActionMenuEntry } from '../../ui/ActionMenu';
 import { useFresh } from '../../../motion/useFresh';
 import { TRANSITION } from '../../../motion/tokens';
 import { actOnCompanionItem } from '../../../state/companion/companionStore';
+import { recordUndo } from '../../../state/undoStack';
 import { useCompanionName } from '../../../state/companion/companionName';
 import { companionItemTime, companionSnoozeTimes } from '../../../state/companion/companionView';
 import { CompanionVisibleText } from './CompanionVisibleText';
@@ -86,14 +87,8 @@ export function CompanionItemRow({ item, clock, arrivedAt, showNew, focused, che
     setBusy(true);
     try {
       await actOnCompanionItem(item.id, action);
-      if (done) {
-        toast(done.text, done.undo ? {
-          action: {
-            label: 'Undo',
-            onClick: () => { actOnCompanionItem(item.id, { action: 'restore' }).catch((error: unknown) => toast.error(`Couldn’t undo: ${errorText(error)}`)); },
-          },
-        } : undefined);
-      }
+      if (done?.undo) recordUndo({ label: done.text, toast: true, undo: () => actOnCompanionItem(item.id, { action: 'restore' }) });
+      else if (done) toast(done.text);
     } catch (error) {
       toast.error(`Couldn’t update “${item.title}”: ${errorText(error)}`);
     } finally {

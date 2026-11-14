@@ -18,6 +18,8 @@ macOS 更新会重建并替换 App，同时退出 Michi，之后重新打开。�
 
 默认安装现在已经包含完整的 `~/.michi/crew-app`，**首次接入无须运行 setup 脚本，也无须复制文件**。只有桌面包产生的数据目录不算代码安装目录；安装目录应包含 `package.json`、`crew-app/launch.py`、`backend/dist/crewMcpHost.js`、`crewMcp.js` 和 `crew-node.json`。
 
+桌面端设置的远程 Linux 后端不算默认安装：它的 `~/.michi` 只放数据，每次 `michi update` 都在 `~/.local/share/michi/devdesktop/releases/` 下构建新版本。请按第 8 节从 `~/.local/share/michi/devdesktop/current` 生成 App，复制到持久来源目录后再从那里安装。
+
 ## 2. 在 Crew 中直接安装
 
 启动官方 Crew 并登录。本地默认 Gateway 地址是 `http://127.0.0.1:5476`。
@@ -50,6 +52,8 @@ michi update
 然后到 **Apps / Library → Michi Crew Runtime → Sync**。无需生成或复制；Sync 从同一个 `~/.michi/crew-app` 读取新版，保留 App secret 和数据。Sync 后重新加载 **Developer → MCP Management**；如显示 **command changed**，批准当前新命令。首次从 0.6.0 之前迁移必须重启 Gateway；以后 host、launcher 或 API 变化则按版本说明重启。
 
 Michi 检查已安装 App 的版本；旧版会显示 **Sync Crew App** 并阻止新的 Crew 工作。Sync 后回到 Michi 刷新。
+
+从远程后端 `current` 链接生成的 App（第 8 节）在 `michi update` 后无需 Sync。只有 App 文件本身变了（Michi 会显示 **Sync Crew App**），才需要再从该链接运行 helper，把输出复制到同一个已登记来源，然后 Sync。
 
 已运行的 MCP 连接会在下一次请求加载兼容的新 relay handler；进行中的调用保留原来的版本，构建间隙保留最后可用 handler。如果版本改变 host、launcher 或 handler API，仍需要重开会话或重启 Gateway，按版本说明操作。
 
@@ -157,6 +161,8 @@ node backend/scripts/crew-setup.cjs
 ```
 
 helper 打印 Prepared App 路径，始终包含 MCP 和审批，并设置明确的 `MICHI_CREW_INSTALL_DIR` / `MICHI_CREW_MCP_DIR`。
+
+远程 Linux 安装中，`michi update` 每次都在新的 `~/.local/share/michi/devdesktop/releases/` checkout 里构建，并让 `~/.local/share/michi/devdesktop/current` 指向正在运行的版本。请从这个链接运行 helper（`node ~/.local/share/michi/devdesktop/current/backend/scripts/crew-setup.cjs`）：它会把 `MICHI_CREW_INSTALL_DIR` 设为该链接而不是某个具体版本，之后更新无需重新 Sync 或审批启动，除非 App 文件本身有变。首次安装时，把生成文件复制到 `releases/` 之外的持久来源目录，例如 `~/.local/share/michi/crew-app`，再从它的绝对路径安装。已在运行的 MCP host 会继续用它启动时的版本，直到 Crew 重启它。注册到单个版本的 App 会一直用那个版本，`michi update` 也不会删除它。
 
 首次自定义安装，把生成文件复制到专用持久目录，例如 `<自定义安装>/crew-app-prepared`，从它安装。**不要把生成文件覆盖到仓库自带的 crew-app。**
 

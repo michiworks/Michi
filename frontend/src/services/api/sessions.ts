@@ -142,6 +142,8 @@ export interface EnsureSessionOptions {
   graphPrerequisite?: Record<string, unknown>;
   agentDefinitionId?: string;
   crewMemoryMode?: import('michi-shared').CrewMemoryMode;
+  /** Create the chat as a temporary chat (memory off). Sent only before it has a session. */
+  temporary?: boolean;
   permissionMode?: import('michi-shared').ChatPermissionMode;
   /** Approve for me on top of permissionMode 'ask' for a new chat. */
   approveForMe?: boolean;
@@ -246,6 +248,7 @@ export async function ensureSession(opts: EnsureSessionOptions): Promise<EnsureS
   if (opts.runtimeId) body.runtimeId = opts.runtimeId;
   if (opts.modeId) body.modeId = opts.modeId;
   if (opts.crewMemoryMode) body.crewMemoryMode = opts.crewMemoryMode;
+  if (opts.temporary && !opts.chatId) body.temporary = true;
   if (opts.permissionMode) body.permissionMode = opts.permissionMode;
   if (opts.permissionMode === 'ask' && opts.approveForMe) body.approveForMe = true;
   if (opts.providerId) body.providerId = opts.providerId;

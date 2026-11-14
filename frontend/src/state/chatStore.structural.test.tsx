@@ -19,7 +19,6 @@ vi.mock('../services/api', () => ({
   streamMessage: vi.fn(),
 }));
 
-vi.mock('../services/notifications', () => ({ notify: vi.fn() }));
 
 // jsdom lacks matchMedia
 Object.defineProperty(window, 'matchMedia', {

@@ -57,8 +57,7 @@ const CHECKIN_NODE = { error: "A check-in's conversation is not one of yours to 
  * locally and to the authenticated remote owner; never mounted in cloud mode.
  *
  *   GET  /api/assistant           → MichiAssistantInfo of V (creates it on first use), with
- *                                 `hadMessagesBeforeMerge` (D7: the one-time upgrade note) and
- *                                 `jobCreated` (D6: a turn sent from Scheduled made a job); every answer below has both
+ *                                 `hadMessagesBeforeMerge` (D7: the one-time upgrade note); every answer below has it
  *   PUT  /api/assistant/settings  {nodeId?, runtimeId?, providerId?, modelId?, reasoning?} → MichiAssistantInfo
  *                                 (what the user picked in that conversation, V by default); 409 checkin_node for a check-in
  *   GET  /api/assistant/conversations          → History: every 'main' conversation, the old Scheduled ones included

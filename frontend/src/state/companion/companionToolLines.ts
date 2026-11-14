@@ -1,6 +1,6 @@
 import type { CompanionBucket, CompanionSourceKind } from 'michi-shared';
 import type { ToolCallState } from '../chatTypes';
-import { normalizeTurnToolName } from '../../lib/turnPageReceipt';
+import { normalizeToolResultEnvelope, normalizeTurnToolName } from '../../lib/turnPageReceipt';
 import { metaAgentToolLine, type ToolLineNames } from '../metaChat/toolLines';
 
 /**
@@ -22,6 +22,7 @@ const OWN_TOOLS = [
   'companion_propose',
   'companion_publish_brief',
   'companion_set_name',
+  'companion_set_notifications',
   'companion_cr_detail',
   'companion_pipeline_detail',
   'companion_email_search',
@@ -33,6 +34,10 @@ const MICHI_READ_TOOLS = [
   'michi_docs', 'list_workspaces', 'list_threads', 'search_messages', 'read_node', 'read_node_overview',
   'list_panes', 'inspect_pane', 'read_pane_output', 'read_conversation_updates', 'list_tasks',
 ] as const;
+
+/** Michi Memory's writes, worded by what they did: a save that was not made says so. */
+const MEMORY_WRITE_TOOLS = ['memory_save', 'memory_update', 'memory_delete'] as const;
+type MemoryWriteTool = typeof MEMORY_WRITE_TOOLS[number];
 
 /** What the window knows to name what a call is about. */
 export interface CompanionToolLineNames extends ToolLineNames {
@@ -64,10 +69,8 @@ const PROPOSAL_WORDS: Record<string, string> = {
   'goal.add': 'a goal',
   'goal.update': 'a goal change',
   'goal.remove': 'removing a goal',
-  'checkins.update': 'a check-in change',
   'source.update': 'a source change',
   'pipeline.watch': 'a pipeline to watch',
-  'quiet_hours.update': 'new quiet hours',
   'conversation.start': 'a new conversation',
   'reminder.add': 'a reminder',
   'watch.add': 'a watch',
@@ -152,6 +155,13 @@ function ownLine(name: OwnTool, input: Record<string, unknown>, doing: boolean, 
       const next = str(input.name);
       return next ? `${say('Changing its name to', 'Changed its name to')} ${quoted(next)}` : say('Changing its name', 'Changed its name');
     }
+    case 'companion_set_notifications':
+      switch (str(input.level)) {
+        case 'all': return say('Turning on all notifications', 'Turned on all notifications');
+        case 'approval-only': return say('Setting notifications to only what needs you', 'Set notifications to only what needs you');
+        case 'off': return say('Turning off notifications', 'Turned off notifications');
+        default: return say('Changing your notifications', 'Changed your notifications');
+      }
     case 'companion_cr_detail': return `${say('Reading', 'Read')} ${crName(input.cr) ?? 'a CR'}`;
     case 'companion_pipeline_detail': {
       const pipeline = str(input.pipeline);
@@ -165,12 +175,54 @@ function ownLine(name: OwnTool, input: Record<string, unknown>, doing: boolean, 
   }
 }
 
+/** The memory tool's answer: its last object with a `status` (memoryTools.ts jsonResult). */
+function memoryStatus(tool: ToolCallState): { status: string | null; reason: string | null } {
+  const values = normalizeToolResultEnvelope(tool.output);
+  for (let i = values.length - 1; i >= 0; i--) {
+    const value = values[i];
+    if (value && typeof value === 'object' && !Array.isArray(value) && 'status' in value) {
+      const record = value as Record<string, unknown>;
+      return { status: str(record.status), reason: str(record.reason) };
+    }
+  }
+  return { status: null, reason: null };
+}
+
+const NOT_SAVED_BECAUSE: Record<string, string> = {
+  deleted_before: 'you removed it before',
+  companion_material: 'this turn read check-in material',
+};
+
+/**
+ * A memory write in V: "Remembered …", "Updated a memory", "Forgot a
+ * memory". A save or update the backend did not make (status not_saved:
+ * removed before, or a turn that read check-in material) is an ordinary
+ * answer, worded as not saved, never as saved.
+ */
+function memoryLine(name: MemoryWriteTool, tool: ToolCallState, doing: boolean): string {
+  const input = parse(tool.inputJson);
+  if (doing) return name === 'memory_save' ? 'Saving a memory' : name === 'memory_update' ? 'Updating a memory' : 'Forgetting a memory';
+  if (tool.status === 'failed') return name === 'memory_delete' ? 'Couldn’t forget a memory' : `Couldn’t ${name === 'memory_save' ? 'save' : 'update'} a memory`;
+  const { status, reason } = memoryStatus(tool);
+  if (status === 'not_saved') {
+    const why = reason ? NOT_SAVED_BECAUSE[reason] : undefined;
+    return `Didn’t save it${why ? `: ${why}` : ''}`;
+  }
+  if (name === 'memory_delete') return 'Forgot a memory';
+  if (name === 'memory_update') return status === 'unchanged' ? 'Memory already said that' : 'Updated a memory';
+  const body = str(input.body);
+  return body ? `Remembered ${quoted(body)}` : 'Remembered it';
+}
+
 /**
  * One line for one call in the Companion's chat (MetaChatDecorations
- * toolLine): its own tools in plain words, its Michi read tools as the Meta
- * agent words them, null for anything else (the generic row).
+ * toolLine): its own tools in plain words, Michi Memory's writes by what
+ * they did, its Michi read tools as the Meta agent words them, null for
+ * anything else (the generic row).
  */
 export function companionToolLine(tool: ToolCallState, names: CompanionToolLineNames): string | null {
+  const memory = normalizeTurnToolName(tool.title, MEMORY_WRITE_TOOLS) as MemoryWriteTool | null;
+  if (memory) return memoryLine(memory, tool, !tool.status || RUNNING.has(tool.status));
   const name = ownTool(tool);
   if (!name) return metaAgentToolLine(tool, names);
   return ownLine(name, parse(tool.inputJson), !tool.status || RUNNING.has(tool.status), names);
@@ -189,6 +241,7 @@ function phrase(name: OwnTool | 'michi' | 'tasks' | 'docs', tools: readonly Tool
     case 'companion_propose': return n === 1 ? 'suggested a change' : `suggested ${n} changes`;
     case 'companion_publish_brief': return 'wrote today’s brief';
     case 'companion_set_name': return 'changed its name';
+    case 'companion_set_notifications': return 'changed your notifications';
     case 'companion_cr_detail': {
       // Distinct CRs: reading one twice is still one CR (a call it cannot name counts on its own).
       const crs = new Set(tools.map((tool) => crName(parse(tool.inputJson).cr) ?? `call:${tool.id}`));

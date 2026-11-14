@@ -3,6 +3,8 @@ import {
   type AttentionClaimResultV1,
   type AttentionKind,
   type AttentionNotificationV1,
+  type AttentionReason,
+  type CompanionTarget,
 } from 'michi-shared';
 import { WINDOW_ID } from '../config/windowIdentity';
 import { backendApiBase } from '../config/backendConnections';
@@ -45,12 +47,16 @@ export { isServerAttentionActive, noteServerAttentionCapabilities, supportsServe
 
 export type AttentionIntentTarget =
   | { type: 'node'; nodeId: string; workspaceId: string; backendConnectionId: string }
-  | { type: 'agent_run'; runId: string; workspaceId: string; backendConnectionId: string };
+  | { type: 'agent_run'; runId: string; workspaceId: string; backendConnectionId: string }
+  | { type: 'agent'; ref: string; open: CompanionTarget; workspaceId: string; backendConnectionId: string }
+  | { type: 'scheduled_run'; runId: string; jobId: string; nodeId: string | null; workspaceId: string; backendConnectionId: string };
 
 export interface AttentionIntent {
   /** Stable for the target across windows and reloads: `server:<connection>:<record key>`. */
   key: string;
   kind: AttentionKind;
+  /** Why the backend raised it: a question, an approval, a completion… */
+  reason: AttentionReason;
   title: string;
   body: string;
   target: AttentionIntentTarget;
@@ -128,12 +134,11 @@ export async function claimServerAttention(connectionId: string, id: string, win
 }
 
 export function attentionIntentOf(connectionId: string, record: AttentionNotificationV1): AttentionIntent {
-  const target: AttentionIntentTarget = record.target.type === 'node'
-    ? { type: 'node', nodeId: record.target.nodeId, workspaceId: record.target.workspaceId, backendConnectionId: connectionId }
-    : { type: 'agent_run', runId: record.target.runId, workspaceId: record.target.workspaceId, backendConnectionId: connectionId };
+  const target: AttentionIntentTarget = { ...record.target, backendConnectionId: connectionId };
   return {
     key: `server:${connectionId}:${record.key}`,
     kind: record.kind,
+    reason: record.reason,
     title: record.title,
     body: record.body,
     target,

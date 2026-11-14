@@ -112,6 +112,42 @@
   color: var(--term-faint);
 }
 
+/* In Markdown text a michi:// link is drawn like an @ mention (.mention-chip
+   in index.css), at the text's size, with an icon saying thread or page. */
+.prose .assistant-cite {
+  display: inline-block;
+  max-width: 100%;
+  box-sizing: border-box;
+  margin-block: -1px;
+  padding: 1px 6px;
+  border: 0;
+  border-radius: var(--ui-radius-sm);
+  background: color-mix(in srgb, var(--term-accent) 12%, transparent);
+  color: var(--term-accent);
+  font: inherit;
+  font-weight: 500;
+  line-height: normal;
+  overflow-wrap: anywhere;
+  text-align: inherit;
+  vertical-align: baseline;
+  transition: box-shadow var(--t-enter) ease, background var(--t-enter) ease;
+}
+.prose .assistant-cite:hover {
+  background: color-mix(in srgb, var(--term-accent) 18%, transparent);
+  box-shadow: 0 0 3px color-mix(in srgb, var(--term-accent) 30%, transparent);
+  color: var(--term-accent);
+}
+.prose .assistant-cite__icon { margin-inline-end: 4px; color: inherit; vertical-align: -0.1em; }
+.prose .assistant-cite__icon svg { width: 0.8em; height: 0.8em; }
+.prose .assistant-cite__text { overflow: visible; white-space: normal; }
+.prose .assistant-cite__note { margin-inline-start: 4px; }
+.prose .assistant-cite[aria-disabled='true'],
+.prose .assistant-cite[aria-disabled='true']:hover {
+  background: color-mix(in srgb, var(--term-muted) 10%, transparent);
+  box-shadow: none;
+  color: var(--term-muted);
+}
+
 /* ── Receipt for a Michi write, under its tool call ───────────── */
 .assistant-receipt {
   display: flex;

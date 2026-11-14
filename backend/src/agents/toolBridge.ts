@@ -44,7 +44,7 @@ export interface AgentToolBridgeDeps {
         ownerUserId?: string | null;
         /** Durable node title — survives an expired parent replay frame. */
         title: string;
-        /** First child turn, stored as a durable outbox item until it starts. */
+        /** The child's first turn, which the backend starts. */
         prompt: string;
     }) => Promise<{ chatId: string; nodeId: string }>;
     /**

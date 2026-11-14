@@ -6,7 +6,7 @@ import { getScheduledJobSettings, updateScheduledJobSettings } from '../../../..
 import { useCompanionName } from '../../../../state/companion/companionName';
 import { useBackgroundService } from '../../scheduled/useBackgroundService';
 import { useDesktopLifetime } from '../../scheduled/useDesktopLifetime';
-import { Switch } from '../../../ui/controls';
+import { Button, Switch } from '../../../ui/controls';
 import { Radio } from './controls';
 import { keepRunningShown } from './NotificationsPane';
 import { KEEP_RUNNING_LABEL, WINDOWS_CLOSED_TITLE } from './residencyCopy';
@@ -34,11 +34,11 @@ export function BackgroundPane({ onOpenScheduled }: { onOpenScheduled?: () => vo
       {!phone && keepRunningShown(service) && (
         <SettingsRow label={KEEP_RUNNING_LABEL}
           description={`So scheduled jobs run on time, and ${name} can still notify you, after you quit. It is under Settings › Notifications › ${WINDOWS_CLOSED_TITLE}.`}
-          control={<button type="button" className="settings-row__link" onClick={() => openSettingsPage('notifications', KEEP_RUNNING_LABEL)}>Open</button>} />
+          control={<Button size="sm" onClick={() => openSettingsPage('notifications', KEEP_RUNNING_LABEL)}>Open</Button>} />
       )}
       {onOpenScheduled && (
         <SettingsRow label="Manage scheduled jobs"
-          control={<button type="button" className="settings-row__link" onClick={onOpenScheduled}>Open</button>} />
+          control={<Button size="sm" onClick={onOpenScheduled}>Open</Button>} />
       )}
     </SettingsSection>
   );
@@ -157,10 +157,7 @@ function ScheduledJobDefaults() {
       description={settings.requireCreateApproval
         ? 'An agent shows you each new job and saves it only after you approve.'
         : 'An agent saves a new job right away, and the conversation shows what it scheduled. Changing, running or deleting a job always asks.'}
-      control={<>
-        <span className="settings-row__state">{settings.requireCreateApproval ? 'On' : 'Off'}</span>
-        <Switch on={settings.requireCreateApproval} disabled={saving} aria-label="Ask before agents create scheduled jobs"
-          onChange={(requireCreateApproval) => { if (!saving) void save({ requireCreateApproval }); }} />
-      </>} />}
+      control={<Switch on={settings.requireCreateApproval} disabled={saving} aria-label="Ask before agents create scheduled jobs"
+        onChange={(requireCreateApproval) => { if (!saving) void save({ requireCreateApproval }); }} />} />}
   </>;
 }

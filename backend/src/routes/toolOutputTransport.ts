@@ -39,7 +39,8 @@ export const PARSED_OUTPUT_TOOLS: ReadonlySet<string> = new Set([
   'propose_multi_model_plan',
   'companion_items', 'companion_item', 'companion_check_now', 'companion_update_item', 'companion_save_notes',
   'companion_goal_progress', 'companion_propose', 'companion_publish_brief', 'companion_set_name',
-  'companion_cr_detail', 'companion_pipeline_detail', 'companion_email_search', 'nothing_to_do',
+  'companion_set_notifications', 'companion_cr_detail', 'companion_pipeline_detail', 'companion_email_search', 'companion_headline', 'nothing_to_do',
+  'memory_save', 'memory_update', 'memory_delete',
 ]);
 
 /**

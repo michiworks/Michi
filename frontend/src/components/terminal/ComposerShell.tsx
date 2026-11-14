@@ -246,9 +246,12 @@ export const ComposerShell = forwardRef<ComposerShellHandle, ComposerShellProps>
     const canCollapse = collapsible && phone;
     const [engaged, setEngaged] = useState(false);
     // Queued messages, quotes and attachments render here; never hide them.
+    // A block marked data-composer-ambient (what the message will say about
+    // the screen) still lets the composer rest; it shows again once it opens.
     const [hasPreBlocks, setHasPreBlocks] = useState(false);
     useLayoutEffect(() => {
-      const filled = (preBlocksRef.current?.childElementCount ?? 0) > 0;
+      const blocks = preBlocksRef.current ? Array.from(preBlocksRef.current.children) : [];
+      const filled = blocks.some((block) => !block.hasAttribute('data-composer-ambient'));
       if (filled !== hasPreBlocks) setHasPreBlocks(filled);
     }, [preBlocks, hasPreBlocks]);
     // Settle on a tap elsewhere, not on blur: Safari does not focus a tapped

@@ -11,7 +11,9 @@ import {
   type AgentRunDtoV1,
   type AgentRunWatchDtoV1,
   type ChatStreamEvent,
+  type AttentionLevel,
   type PaneTarget,
+  type ScheduledJobRunEvent,
   type WatchConditionV1,
   type WorkflowRunDtoV1,
 } from 'michi-shared';
@@ -128,14 +130,17 @@ function setup(options: {
   repository?: AttentionRepository;
   isHandOffTurn?: (turnId: string) => boolean;
   assistantName?: () => string;
+  agentPanelFocused?: () => boolean;
+  level?: () => AttentionLevel;
 } = {}) {
   const clock = manualClock();
-  const feed = new AttentionFeed();
+  const feed = new AttentionFeed(() => clock.now());
   const shown = options.presence ?? visibility();
   const errors: unknown[] = [];
   const service = new AttentionService({
     presence: options.presenceStub ?? shown.presence, feed, clock, getRun: options.getRun, repository: options.repository,
-    isHandOffTurn: options.isHandOffTurn, assistantName: options.assistantName, onError: (_message, error) => errors.push(error),
+    isHandOffTurn: options.isHandOffTurn, assistantName: options.assistantName, agentPanelFocused: options.agentPanelFocused,
+    level: options.level, onError: (_message, error) => errors.push(error),
   });
   service.start();
   return { clock, feed, shown, service, errors };
@@ -758,61 +763,232 @@ describe("the agent's own conversation and Michi's posts into it", () => {
   });
 });
 
-describe('the desktop notifier (services/companion/chatNotices.ts)', () => {
-  test('an event it raised before the decision is claimed for it: windows list it, and none raises it again', () => {
-    const { clock, feed, service } = setup();
-    const window = collect(feed, LOCAL);
-    service.observeChatEvent(permission('n-1', 't1', 3));
-    service.shownByDesktop({ nodeId: 'n-1', turnId: 't1', kind: 'approval', requestId: 3 });
-    clock.advance(1_000);
-    const [notification] = window.of('attention_notification');
-    assert.equal(notification.claimedByWindowId, DESKTOP_NOTIFIER_WINDOW_ID);
-    assert.equal(collect(feed, LOCAL).of('attention_snapshot')[0].notifications[0].claimedByWindowId, DESKTOP_NOTIFIER_WINDOW_ID,
-      'a window that opens later finds it claimed: it lists it without an OS notification');
-    assert.deepEqual(service.claim(LOCAL, notification.id, 'w-1'), { claimed: false, claimedByWindowId: DESKTOP_NOTIFIER_WINDOW_ID, status: 'active' });
-    assert.equal(service.shownInWindow({ nodeId: 'n-1', turnId: 't1', kind: 'approval', requestId: 3 }), false, 'the notifier holds it, not a window');
+/** Electron main's feed: what the level lets through (routes/attention.ts subscribes it so). */
+function collectDesktop(feed: AttentionFeed, service: AttentionService): ReturnType<typeof collect> {
+  const frames: Frame[] = [];
+  const stop = feed.subscribe(LOCAL, {
+    send(frame) {
+      const [eventLine, dataLine] = frame.trimEnd().split('\n');
+      frames.push({ event: eventLine.slice('event: '.length), data: JSON.parse(dataLine.slice('data: '.length)) });
+    },
+    desktop: { accepts: (notification) => service.desktopAccepts(notification) },
+  });
+  return { frames, stop, of: (event) => frames.filter((frame) => frame.event === event).map((frame) => frame.data) };
+}
 
-    // A reply is the turn's own completion.
+describe('the desktop notifier (Electron main, routes/attention.ts)', () => {
+  test('it gets what the level lets through, snapshot included, and every resolution; its claim keeps windows from raising it again', () => {
+    let level: AttentionLevel = 'approval-only';
+    const { clock, feed, service } = setup({ level: () => level });
+    const window = collect(feed, LOCAL);
+    const desktop = collectDesktop(feed, service);
+    service.observeChatEvent(permission('n-1', 't1', 3));
     service.observeChatEvent(turnStart('n-2', 't2'));
     completeTurn('n-2', 'ws-a', 't2');
     service.observeChatEvent(done('n-2', 't2'));
-    service.shownByDesktop({ nodeId: 'n-2', turnId: 't2', kind: 'reply' });
     clock.advance(1_000);
-    assert.deepEqual(claimants(), [['permission:t1:3', DESKTOP_NOTIFIER_WINDOW_ID], ['completion:1', DESKTOP_NOTIFIER_WINDOW_ID]]);
+    assert.deepEqual(window.of('attention_notification').map((item) => item.reason), ['approval', 'completed'], 'windows get everything');
+    assert.deepEqual(desktop.of('attention_notification').map((item) => item.reason), ['approval'], '"Only when something needs me": no completion');
+    const [approval] = desktop.of('attention_notification');
+    assert.deepEqual(service.claimForDesktop(LOCAL, approval.id), { claimed: true, claimedByWindowId: DESKTOP_NOTIFIER_WINDOW_ID, status: 'active' });
+    assert.deepEqual(service.claim(LOCAL, approval.id, 'w-1'), { claimed: false, claimedByWindowId: DESKTOP_NOTIFIER_WINDOW_ID, status: 'active' },
+      'a window that opens later lists it without an OS notification');
+    level = 'all';
+    // Both were decided at the same instant: the snapshot's order between them is the ids'.
+    assert.deepEqual(collectDesktop(feed, service).of('attention_snapshot')[0].notifications.map((item: { reason: string }) => item.reason).sort(),
+      ['approval', 'completed'], 'a snapshot by the level as it is now');
+    level = 'off';
+    assert.deepEqual(collectDesktop(feed, service).of('attention_snapshot')[0].notifications, []);
+    service.permissionAnswered({ nodeId: 'n-1', turnId: 't1', requestId: 3 });
+    assert.deepEqual(desktop.of('attention_resolved').map((item) => [item.id, item.reason]), [[approval.id, 'answered']], 'resolutions go to it whatever the level');
+    assert.equal(service.claimForDesktop('bob', approval.id), null, 'another owner\'s record is not there');
   });
 
-  test('an event it raised after the decision is claimed then; one a window raised first stays the window\'s', () => {
-    const { clock, service } = setup();
-    service.observeChatEvent(question('n-1', 't1', 1));
+  test('a decided record wakes the quit app once no notifier has been connected for the grace; within it, once the grace is up if it still waits', () => {
+    let level: AttentionLevel = 'all';
+    const { clock, feed, service } = setup({ level: () => level });
+    let wakes = 0;
+    service.configureDesktopWake({ launcher: { wake: () => { wakes += 1; return true; } }, graceMs: 30_000 });
+    clock.advance(9_000);
+    service.observeChatEvent(permission('n-1', 't1', 1));
     clock.advance(1_000);
-    const asked = { nodeId: 'n-1', turnId: 't1', kind: 'question', requestId: 1 } as const;
-    assert.equal(service.shownInWindow(asked), false);
-    service.shownByDesktop(asked);
-    assert.deepEqual(claimants(), [['input:t1:1', DESKTOP_NOTIFIER_WINDOW_ID]]);
+    assert.equal(wakes, 0, 'ten seconds after boot: a notifier may only be reconnecting');
+    clock.advance(19_999);
+    assert.equal(wakes, 0);
+    clock.advance(1);
+    assert.equal(wakes, 1, 'nobody came, and it still waits unclaimed: the app is woken');
 
-    service.observeChatEvent(permission('n-2', 't2', 4));
+    clock.advance(30_000);
+    service.observeChatEvent(permission('n-2', 't2', 1));
     clock.advance(1_000);
-    const id = (getDb().prepare("SELECT id FROM attention_notifications WHERE fact = 'permission:t2:4'").get() as { id: string }).id;
-    service.claim(LOCAL, id, 'w-1');
-    const approval = { nodeId: 'n-2', turnId: 't2', kind: 'approval', requestId: 4 } as const;
-    assert.equal(service.shownInWindow(approval), true, 'a window raised it: the notifier stays quiet');
-    assert.equal(service.shownInWindow({ ...approval, requestId: 5 }), false, 'another request is another event');
-    service.shownByDesktop(approval);
-    assert.deepEqual(claimants().at(-1), ['permission:t2:4', 'w-1'], 'the window keeps its claim');
+    assert.equal(wakes, 2, 'past the grace: at once');
+
+    const desktop = collectDesktop(feed, service);
+    service.observeChatEvent(question('n-1', 't3', 1));
+    clock.advance(1_000);
+    assert.equal(wakes, 2, 'a notifier is connected');
+    desktop.stop();
+
+    // One the notifier claimed before the grace was up wakes nothing.
+    service.observeChatEvent(permission('n-2', 't4', 2));
+    clock.advance(1_000);
+    const [claimed] = records().filter((row) => row.fact === 'permission:t4:2');
+    service.claimForDesktop(LOCAL, claimed!.id as string);
+    clock.advance(30_000);
+    assert.equal(wakes, 2, 'it was taken meanwhile');
+
+    // Nothing the level holds back wakes it.
+    clock.advance(30_000);
+    level = 'approval-only';
+    service.observeChatEvent(turnStart('n-1', 't5'));
+    completeTurn('n-1', 'ws-a', 't5');
+    service.observeChatEvent(done('n-1', 't5'));
+    clock.advance(1_000);
+    assert.equal(wakes, 2, 'a completion at "Only when something needs me"');
+    level = 'all';
+
+    // stop() and configureDesktopWake(null) cancel the look again.
+    service.observeChatEvent(permission('n-2', 't6', 1));
+    const reconnect = collectDesktop(feed, service);
+    reconnect.stop();
+    clock.advance(1_000);
+    service.configureDesktopWake(null);
+    clock.advance(60_000);
+    assert.equal(wakes, 2);
+  });
+});
+
+describe('Scheduled Job runs', () => {
+  const run = (overrides: Partial<ScheduledJobRunEvent>): ScheduledJobRunEvent => ({
+    phase: 'finished', runId: 'run-1', jobId: 'job-1', jobName: 'Nightly digest', workspaceId: 'ws-a', nodeId: 'n-1', treeId: null,
+    status: 'succeeded', summary: 'Three CRs merged', error: null, notify: true, at: 10, ...overrides,
   });
 
-  test('a reply names its turn: a notice of an older reply claims no newer completion', () => {
+  test('a run waiting on the user is a record whatever Notify says; an answer in its thread resolves it', () => {
+    const { clock, feed, service } = setup();
+    const window = collect(feed, LOCAL);
+    service.observeScheduledRun(run({ phase: 'started', status: 'running' }));
+    service.observeScheduledRun(run({ phase: 'attention', status: 'running', attention: 'approval', notify: false }));
+    clock.advance(1_000);
+    const [asked] = window.of('attention_notification');
+    assert.deepEqual([asked.key, asked.kind, asked.reason, asked.title], ['scheduled_run:run-1', 'needs_input', 'approval', 'Nightly digest']);
+    assert.deepEqual(asked.target, { type: 'scheduled_run', runId: 'run-1', jobId: 'job-1', nodeId: 'n-1', workspaceId: 'ws-a' });
+    service.observeChatEvent(ev('permission_resolved', { nodeId: 'n-1', chatId: 'n-1', turnId: 't-s', requestId: 1 }));
+    assert.deepEqual(window.of('attention_resolved').map((item) => [item.key, item.reason]), [['scheduled_run:run-1', 'answered']]);
+
+    service.observeScheduledRun(run({ runId: 'run-2', phase: 'attention', status: 'running', attention: 'input' }));
+    clock.advance(1_000);
+    assert.equal(window.of('attention_notification').at(-1).reason, 'question');
+    service.observeScheduledRun(run({ runId: 'run-2', notify: false }));
+    const last = window.of('attention_resolved').at(-1);
+    assert.deepEqual([last.key, last.reason], ['scheduled_run:run-2', 'stale'], 'the run ended without Notify: what it waited on is moot, and nothing more is said');
+    clock.advance(1_000);
+    assert.equal(window.of('attention_notification').length, 2);
+  });
+
+  test('a run that finished with Notify on: succeeded or failed; any other end says nothing', () => {
+    const { clock, feed, service } = setup();
+    const window = collect(feed, LOCAL);
+    service.observeScheduledRun(run({}));
+    service.observeScheduledRun(run({ runId: 'run-2', status: 'timed_out', summary: null, error: 'Timed out after 10 min', nodeId: null }));
+    service.observeScheduledRun(run({ runId: 'run-3', status: 'cancelled' }));
+    service.observeScheduledRun(run({ runId: 'run-4', status: 'interrupted' }));
+    service.observeScheduledRun(run({ runId: 'run-5', notify: false }));
+    clock.advance(1_000);
+    assert.deepEqual(window.of('attention_notification').map((item) => [item.key, item.kind, item.reason, item.body, item.target.nodeId]), [
+      ['scheduled_run:run-1', 'finished', 'run_completed', 'Three CRs merged', 'n-1'],
+      ['scheduled_run:run-2', 'failed', 'run_failed', 'Failed: Timed out after 10 min', null],
+    ]);
+    assert.equal(service.desktopAccepts({ kind: 'failed', reason: 'run_failed' }), true);
+  });
+
+  test('a run whose thread a focused window shows asks nobody; a trashed workspace\'s runs say nothing', () => {
+    const shown = visibility();
+    const { clock, feed, service } = setup({ presence: shown });
+    const window = collect(feed, LOCAL);
+    shown.show(LOCAL, { kind: 'node', nodeId: 'n-1' });
+    service.observeScheduledRun(run({ phase: 'attention', status: 'running', attention: 'approval' }));
+    clock.advance(1_000);
+    assert.deepEqual(window.of('attention_notification'), []);
+    getDb().prepare('UPDATE workspaces SET deleted_at = 5 WHERE id = ?').run('ws-a');
+    service.observeScheduledRun(run({ runId: 'run-2' }));
+    clock.advance(1_000);
+    assert.deepEqual(window.of('attention_notification'), []);
+  });
+});
+
+describe("Michi's own records (proposeAgent)", () => {
+  beforeEach(() => {
+    getDb().prepare("INSERT INTO workspaces(id,name,owner_user_id,created_at,updated_at) VALUES ('ws-michi','Michi assistant',NULL,1,1)").run();
+  });
+
+  const needsYou = {
+    key: 'agent:item:cmi-1', fact: 'item:v1', kind: 'needs_input' as const, reason: 'needs_you' as const, title: 'Michi',
+    body: 'MyService is blocked', ref: 'item:cmi-1', open: { kind: 'companion' as const, tab: 'today' as const, itemId: 'cmi-1' },
+  };
+  const update = {
+    key: 'agent:chat', fact: 'post:r-1', kind: 'finished' as const, reason: 'update' as const, title: 'Michi',
+    body: 'Michi: CR-1 needs attention', ref: 'chat', open: { kind: 'companion' as const, tab: 'chat' as const },
+  };
+
+  test('a Needs you item is a record in Michi\'s workspace that opens where its row does, until the item no longer holds', () => {
+    const { clock, feed, service } = setup({ level: () => 'approval-only' });
+    const window = collect(feed, LOCAL);
+    const desktop = collectDesktop(feed, service);
+    service.proposeAgent(needsYou, 'ws-michi', LOCAL);
+    clock.advance(1_000);
+    const [record] = window.of('attention_notification');
+    assert.deepEqual([record.kind, record.reason, record.body], ['needs_input', 'needs_you', 'MyService is blocked']);
+    assert.deepEqual(record.target, { type: 'agent', ref: 'item:cmi-1', open: needsYou.open, workspaceId: 'ws-michi' });
+    assert.equal(desktop.of('attention_notification').length, 1, 'Needs you passes "Only when something needs me"');
+    assert.deepEqual(service.activeAgentRecords('agent:item:'), [{ key: 'agent:item:cmi-1', fact: 'item:v1' }]);
+    assert.deepEqual(service.activeAgentRecords('node:'), [], 'only Michi\'s own');
+    service.resolveAgent('agent:item:cmi-1');
+    assert.deepEqual(window.of('attention_resolved').map((item) => [item.key, item.reason]), [['agent:item:cmi-1', 'stale']]);
+    service.proposeAgent({ ...needsYou, fact: 'item:v2', isCurrent: () => false }, 'ws-michi', LOCAL);
+    clock.advance(1_000);
+    assert.equal(window.of('attention_notification').length, 1, 'no longer current when decided: nothing');
+    service.proposeAgent({ ...needsYou, fact: 'item:v3' }, 'ws-michi', LOCAL);
+    service.resolveAgent('agent:item:cmi-1');
+    clock.advance(1_000);
+    assert.equal(window.of('attention_notification').length, 1, 'resolved before it was decided: dropped');
+  });
+
+  test('a post is an update the level "All" lets through; the newest replaces the last, and the focused panel sees it', () => {
+    let panelFocused = false;
+    const { clock, feed, service } = setup({ level: () => 'approval-only', agentPanelFocused: () => panelFocused });
+    const window = collect(feed, LOCAL);
+    const desktop = collectDesktop(feed, service);
+    service.proposeAgent(update, 'ws-michi', LOCAL);
+    clock.advance(1_000);
+    service.proposeAgent({ ...update, fact: 'post:r-2' }, 'ws-michi', LOCAL);
+    clock.advance(1_000);
+    assert.deepEqual(window.of('attention_notification').map((item) => [item.key, item.kind, item.reason]), [
+      ['agent:chat', 'finished', 'update'], ['agent:chat', 'finished', 'update'],
+    ]);
+    assert.deepEqual(window.of('attention_resolved').map((item) => item.reason), ['superseded']);
+    assert.deepEqual(desktop.of('attention_notification'), [], 'not at "Only when something needs me"');
+    panelFocused = true;
+    service.presenceChanged(LOCAL);
+    assert.deepEqual(window.of('attention_resolved').map((item) => item.reason), ['superseded', 'seen'], 'the panel got focus');
+    service.proposeAgent({ ...update, fact: 'post:r-3' }, 'ws-michi', LOCAL);
+    clock.advance(1_000);
+    assert.equal(window.of('attention_notification').length, 2, 'while the panel has focus a post asks nobody');
+  });
+
+  test('its records survive a restart with their targets, and go with Michi\'s workspace', () => {
     const { clock, service } = setup();
-    for (const turnId of ['t1', 't2']) {
-      service.observeChatEvent(turnStart('n-1', turnId));
-      completeTurn('n-1', 'ws-a', turnId);
-      service.observeChatEvent(done('n-1', turnId));
-      clock.advance(1_000);
-    }
-    service.shownByDesktop({ nodeId: 'n-1', turnId: 't1', kind: 'reply' });
-    assert.deepEqual(claimants(), [['completion:1', null], ['completion:2', null]]);
-    service.shownByDesktop({ nodeId: 'n-1', turnId: 't2', kind: 'reply' });
-    assert.deepEqual(claimants(), [['completion:1', null], ['completion:2', DESKTOP_NOTIFIER_WINDOW_ID]]);
+    service.proposeAgent(update, 'ws-michi', LOCAL);
+    service.proposeAgent({ ...needsYou, open: { kind: 'node', workspaceId: 'ws-a', nodeId: 'n-1' }, ref: 'item:cmi-1' }, 'ws-michi', LOCAL);
+    clock.advance(1_000);
+    service.stop();
+    const again = setup();
+    const snapshot = collect(again.feed, LOCAL).of('attention_snapshot')[0].notifications;
+    assert.deepEqual(snapshot.map((item: { target: unknown }) => item.target), [
+      { type: 'agent', ref: 'chat', open: { kind: 'companion', tab: 'chat' }, workspaceId: 'ws-michi' },
+    ], 'the update stays; a needs-input record does not outlive the process that asked');
+    getDb().prepare('DELETE FROM workspaces WHERE id = ?').run('ws-michi');
+    assert.deepEqual(records(), []);
   });
 });
 

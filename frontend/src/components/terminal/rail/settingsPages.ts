@@ -91,15 +91,19 @@ export function settingsPageForRequest(value: unknown): SettingsPage | null {
   return section ? pageForSection(section.id) : null;
 }
 
-/** The heading of Settings › <name>'s part that was Settings › Meta agent. */
-export const PAGES_UPKEEP_TITLE = 'Pages upkeep';
+/** The heading of Settings › <name>'s part that was Settings › Meta agent: what Pages upkeep writes and reads. */
+export const PAGES_UPKEEP_TITLE = 'Pages';
+
+/** The row of Settings › <name> › Model that sets what check-ins and Pages upkeep run on. */
+export const BACKGROUND_WORK_LABEL = 'Background work';
 
 /**
  * The setting a request points at on its page, by the name the page shows
- * it under: the request's own `setting`, or, for the old Meta agent page,
- * the Pages upkeep part of Settings › <name>. Null when it names none.
+ * it under: the request's own `setting`, or, for the old Meta agent page
+ * (asked for from Pages to change the runtime), Background work. Null when
+ * it names none.
  */
 export function settingsRevealForRequest(section: unknown, setting?: unknown): string | null {
   if (typeof setting === 'string' && setting.trim()) return setting.trim();
-  return section === 'meta-agent' ? PAGES_UPKEEP_TITLE : null;
+  return section === 'meta-agent' ? BACKGROUND_WORK_LABEL : null;
 }

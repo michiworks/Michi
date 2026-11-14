@@ -1,10 +1,8 @@
 import {
-  isConversationMemoryMode,
   isMemoryKind,
   isMemoryMode,
   isMemoryOrigin,
   isMemoryStatus,
-  type ConversationMemoryMode,
   SSE_HEARTBEAT_MS,
   sseSilenceTimeoutMs,
   type MemoryChangedEvent,
@@ -244,27 +242,6 @@ export async function removeMemoryProfileLine(index: number, version: number): P
   return profileOf(await request('/memory-profile/remove-line', { method: 'POST', body: { index, version } }));
 }
 
-// ── a conversation's memory setting ────────────────────────────────────────
-
-/** On the conversation's backend (`apiBase`). A conversation it does not have yet answers not_found. */
-export async function fetchConversationMemoryMode(apiBase: string, nodeId: string, signal?: AbortSignal): Promise<ConversationMemoryMode> {
-  const body = await request(`/nodes/${encodeURIComponent(nodeId)}/memory-mode`, { signal }, apiBase);
-  if (!isObject(body) || !isConversationMemoryMode(body.mode)) throw unexpected();
-  return body.mode;
-}
-
-export interface ConversationMemoryChange {
-  mode: ConversationMemoryMode;
-  /** Memories Michi had saved on its own from the conversation, removed as it left learn. */
-  removedMemories: number;
-}
-
-export async function saveConversationMemoryMode(apiBase: string, nodeId: string, mode: ConversationMemoryMode): Promise<ConversationMemoryChange> {
-  const body = await request(`/nodes/${encodeURIComponent(nodeId)}/memory-mode`, { method: 'PUT', body: { mode } }, apiBase);
-  if (!isObject(body) || !isConversationMemoryMode(body.mode)) throw unexpected();
-  return { mode: body.mode, removedMemories: typeof body.removedMemories === 'number' ? body.removedMemories : 0 };
-}
-
 // ── what a reply was based on ──────────────────────────────────────────────
 
 const IMPORT_SOURCES = ['claude', 'codex', 'kiro'];
@@ -321,7 +298,7 @@ export interface MemoryExtractionStatus {
 }
 
 const EXTRACTION_STATES: readonly MemoryExtractionState[] = [
-  'off', 'unsupported', 'paused', 'maintenance_paused', 'stopped', 'budget_exhausted', 'running', 'waiting', 'idle',
+  'off', 'unsupported', 'paused', 'stopped', 'budget_exhausted', 'running', 'waiting', 'idle',
 ];
 
 const nullableNumber = (value: unknown) => value === null || value === undefined || (typeof value === 'number' && Number.isFinite(value));

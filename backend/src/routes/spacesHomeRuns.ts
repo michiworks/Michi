@@ -5,6 +5,7 @@ import { requestAgentOwner } from '../services/agentOwner';
 import { PageWriteError } from '../services/pages/core';
 import type { ScheduledJobScheduler } from '../services/scheduledJobs/scheduler';
 import { retrySpacesFirstRun, spacesFirstRunStatus, startSpacesFirstRun } from '../services/metaAgent/firstRun';
+import { maintenanceCoordinatorState } from '../services/metaAgent/maintenanceCoordinator';
 import { isObject, pageBody, pageErrors, route, type Obj } from './pageRouteKit';
 const owner = (req: Request): string => requestAgentOwner((req as Request & { user?: { id?: string } }).user?.id);
 
@@ -25,11 +26,18 @@ const answer = (res: Response, status: SpacesFirstRunStatus) => { res.json(statu
 
 /**
  * First-time generation of the workspace homes and the Spaces Home. Mount at /api.
- *   POST /spaces-home/first-run        -> SpacesFirstRunStatus (idempotent; call whenever Spaces opens)
+ *   POST /spaces-home/first-run        -> SpacesFirstRunStatus (idempotent; call whenever Spaces opens). A first run
+ *                                         that never ran starts only when `visitMayStart` allows it (D17: else the
+ *                                         Get started card starts it); a run already asked for is woken
  *   GET  /spaces-home/first-run        -> SpacesFirstRunStatus
  *   POST /spaces-home/first-run/retry  { workspaceId? } -> SpacesFirstRunStatus (failed runs only)
  */
-export function setupSpacesHomeRunRoutes(deps: { scheduler: ScheduledJobScheduler | null; clock?: () => number }): Router {
+export function setupSpacesHomeRunRoutes(deps: {
+  scheduler: ScheduledJobScheduler | null;
+  clock?: () => number;
+  /** Whether opening Spaces may start a first run that never ran (companion/getStarted.ts); absent: it always may. */
+  visitMayStart?: () => boolean;
+}): Router {
   const router = Router();
   const now = () => (deps.clock ?? Date.now)();
   const scheduler = (): ScheduledJobScheduler => {
@@ -43,7 +51,15 @@ export function setupSpacesHomeRunRoutes(deps: { scheduler: ScheduledJobSchedule
 
   router.post('/spaces-home/first-run', route((req, res) => {
     body(req, []);
-    answer(res, startSpacesFirstRun(scheduler(), requireOwner(req), now()));
+    const ownerUserId = requireOwner(req);
+    const status = spacesFirstRunStatus(ownerUserId, now());
+    // While Michi is paused (until Get started's Start or Resume), opening Spaces queues and announces nothing that would not run;
+    // nor does a visit Get started says may not start it.
+    if (maintenanceCoordinatorState(ownerUserId).paused || (status.requestedAt === null && deps.visitMayStart && !deps.visitMayStart())) {
+      answer(res, status);
+      return;
+    }
+    answer(res, startSpacesFirstRun(scheduler(), ownerUserId, now()));
   }));
 
   router.post('/spaces-home/first-run/retry', route((req, res) => {

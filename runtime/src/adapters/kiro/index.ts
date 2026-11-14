@@ -2,7 +2,7 @@
 import { AcpAgentRuntime } from './AcpAgentRuntime';
 import type { AcpAgentFlavor } from './acpAgentFlavor';
 export { AcpAgentRuntime, KiroConcurrencyError, KiroProcessCapError } from './AcpAgentRuntime';
-export type { KiroAdapterOptions, KiroRuntimeOptions } from './AcpAgentRuntime';
+export type { KiroAdapterOptions, KiroRuntimeOptions, KiroGuardedAgentOptions } from './AcpAgentRuntime';
 /** @deprecated Renamed AcpAgentRuntime: Kiro CLI, Kiro Crew and Antigravity share it. */
 export const KiroRuntime = AcpAgentRuntime;
 /** @deprecated Renamed AcpAgentRuntime. */
@@ -31,3 +31,4 @@ export type { KiroCliLookup } from './kiroCli';
 
 export type { AcpPresetRuntimeOptions } from './acpPreset';
 export type { KiroPageTurnAttribution } from './kiroProtocol';
+export type { KiroGuardedFallbacks } from './kiroGuardedFallbacks';

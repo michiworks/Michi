@@ -1,4 +1,4 @@
-import { editHomeCustomization, readHomeCustomization } from '../src/services/homeCards/repository';
+import { clearSummaryHomeCards, editHomeCustomization, readHomeCards, readHomeCustomization, writeHomeCards } from '../src/services/homeCards/repository';
 import assert from 'node:assert/strict';
 import { afterEach, beforeEach, test } from 'node:test';
 import express from 'express';
@@ -193,8 +193,21 @@ test('custom Home survives generation, isolates owners, validates atomically and
   assert.equal((await read()).greeting, null);
   assert.deepEqual((await read()).sets, []);
   closeDb(); initDb();
-  assert.equal((await read()).cardsCustomized, true);
+  assert.deepEqual([(await read()).cardsCustomized, (await read()).greetingCustomized], [true, true]);
   editHomeCustomization(LOCAL_AGENT_OWNER_ID, { expectedRevision: 2, greetingMode: 'auto', cardsMode: 'auto' });
   assert.equal((await read()).greeting?.text, '早上好。');
+  assert.deepEqual([(await read()).cardsCustomized, (await read()).greetingCustomized], [undefined, undefined], 'Home writes its own again');
   assert.equal((await read()).sets[0].cards[0].id, 'later');
+});
+
+test('the Home cards the Spaces Home summary wrote go once at boot; customizations stay (D13)', () => {
+  writeHomeCards(LOCAL_AGENT_OWNER_ID, { greeting: { text: 'Good morning.', detail: null }, sets: [{ cards: [card('continue-a')] }], inputFingerprint: 'f' } as never);
+  editHomeCustomization(LOCAL_AGENT_OWNER_ID, { expectedRevision: 0, greetingMode: 'custom', greetingText: 'Mine' });
+  clearSummaryHomeCards();
+  const after = readHomeCards(LOCAL_AGENT_OWNER_ID);
+  assert.deepEqual(after.sets, []);
+  assert.equal(after.greeting?.text, 'Mine');
+  writeHomeCards(LOCAL_AGENT_OWNER_ID, { greeting: null, sets: [{ cards: [card('later')] }], inputFingerprint: 'g' } as never);
+  clearSummaryHomeCards();
+  assert.deepEqual(readHomeCards(LOCAL_AGENT_OWNER_ID).sets.map((set) => set.cards.map((entry) => entry.id)), [['later']], 'only once');
 });

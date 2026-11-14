@@ -23,8 +23,9 @@ const SATURDAY = 7;
 const SUNDAY = 8;
 const MONDAY = 9;
 
+/** The defaults of a Michi the user turned on (Resume: it starts paused), then `patch`. */
 function settings(patch: (value: CompanionSettings) => void = () => {}): CompanionSettings {
-  const value = structuredClone(DEFAULT_COMPANION_SETTINGS);
+  const value = { ...structuredClone(DEFAULT_COMPANION_SETTINGS), enabled: true, paused: false };
   patch(value);
   return value;
 }
@@ -33,9 +34,8 @@ const next = (now: number, welcomeAt: number | null, briefToday = false, value: 
   nextCompanionBriefAt({ settings: value, now, welcomeAt, briefToday });
 
 describe('the next brief', () => {
-  test('none while the Companion is off or paused, or the brief is off', () => {
+  test('none while Michi is paused, or the brief is off', () => {
     const welcomed = at(THURSDAY - 1, 10);
-    assert.equal(next(at(THURSDAY, 8), welcomed, false, settings((value) => { value.enabled = false; })), null);
     assert.equal(next(at(THURSDAY, 8), welcomed, false, settings((value) => { value.paused = true; })), null);
     assert.equal(next(at(THURSDAY, 8), welcomed, false, settings((value) => { value.brief.enabled = false; })), null);
   });
@@ -54,14 +54,15 @@ describe('the next brief', () => {
     assert.equal(next(at(FRIDAY, 9, 5), welcomed, true), at(MONDAY, 9), 'not Saturday');
   });
 
-  test('off days are skipped: no brief on the weekend, even before its time', () => {
+  test('the brief\'s own days: none on the weekend by default, even before its time; the old workdays only when it has none stored', () => {
     const welcomed = at(THURSDAY, 8);
     assert.equal(next(at(SATURDAY, 7), welcomed), at(MONDAY, 9));
     assert.equal(next(at(SATURDAY, 12), welcomed), at(MONDAY, 9));
     assert.equal(next(at(SUNDAY, 23, 59), welcomed), at(MONDAY, 9));
-    const weekends = settings((value) => { value.workdays = [0, 6]; });
-    assert.equal(next(at(THURSDAY, 8), welcomed, false, weekends), at(SATURDAY, 9), 'whatever the workdays are');
+    const weekends = settings((value) => { value.brief.days = [0, 6]; });
+    assert.equal(next(at(THURSDAY, 8), welcomed, false, weekends), at(SATURDAY, 9), 'whatever its days are');
     assert.equal(next(at(SATURDAY, 12), welcomed, true, weekends), at(SUNDAY, 9));
+    assert.equal(next(at(THURSDAY, 8), welcomed, false, settings((value) => { value.workdays = [0, 6]; })), at(THURSDAY, 9), 'workdays no longer set it');
   });
 
   test('the day the welcome came at or after the brief\'s time has no brief: the welcome was that day\'s look', () => {

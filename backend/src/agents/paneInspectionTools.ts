@@ -82,6 +82,9 @@ export interface PaneInspectionToolBinding {
    *  workspace (same owner) instead of the session's, and skips the AI-navigation gate. Set only
    *  by the assistant's tool layer from its session binding — never for chats or Agent Runs. */
   assistant?: boolean;
+  /** The calling conversation's node, from the session (none for an Agent Run): the one
+   *  temporary chat this caller may see (PaneInspectionCaller.readerNodeId). */
+  callerNodeId?: string | null;
 }
 
 /**
@@ -110,6 +113,7 @@ export function buildPaneInspectionCaller(binding: PaneInspectionToolBinding): P
     backendConnectionId: binding.backendConnectionId,
     runOwner: binding.runOwnerRunId ? { runId: binding.runOwnerRunId } : null,
     ...(isAssistantBinding(binding) ? { assistant: true } : {}),
+    readerNodeId: binding.callerNodeId ?? null,
   };
 }
 

@@ -1,6 +1,5 @@
 import React from 'react';
 import { flushSync } from 'react-dom';
-import { toast } from 'sonner';
 import { plural } from 'michi-shared';
 import {
   Archive,
@@ -279,9 +278,7 @@ function deleteExplanation(card: WorkspaceCardData): string {
   return `${threads} You can restore it from Trash.${files}`;
 }
 
-export type PhoneWorkspaceActions = Omit<WorkspaceRowActions, 'beginInlineRename' | 'requestDelete'> & {
-  restoreProject: (projectId: string) => void;
-};
+export type PhoneWorkspaceActions = Omit<WorkspaceRowActions, 'beginInlineRename' | 'requestDelete'>;
 
 interface Props {
   /** Live workspaces, newest activity first. */
@@ -362,11 +359,6 @@ export default function PhoneWorkspaces({
 
   const rowActions: WorkspaceRowActions = {
     ...actions,
-    archiveProject: (id) => {
-      const name = projects.find((project) => project.id === id)?.name ?? 'workspace';
-      actions.archiveProject(id);
-      toast(`Archived “${name}”`, { action: { label: 'Undo', onClick: () => actions.unarchiveProject(id) } });
-    },
     // In the same tap that chose Rename, so iOS raises the keyboard for the field.
     beginInlineRename: (id) => {
       flushSync(() => {
@@ -391,10 +383,9 @@ export default function PhoneWorkspaces({
 
   const confirmDelete = () => {
     if (!sheetCard) return;
-    const { id, name } = sheetCard;
-    actions.deleteProject(id);
+    // Its toast, with Undo, comes from the store's undoable delete.
+    actions.deleteProject(sheetCard.id);
     closeSheet();
-    toast(`Moved “${name}” to Trash`, { action: { label: 'Undo', onClick: () => actions.restoreProject(id) } });
   };
 
   const renderRow = (card: WorkspaceCardData, isArchived = false) => (

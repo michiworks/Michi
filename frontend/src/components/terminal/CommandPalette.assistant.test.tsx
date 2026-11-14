@@ -6,6 +6,7 @@ import CommandPalette from './CommandPalette';
 import { getCompanionAssistant, resetCompanionStoreForTests, type CompanionAssistantState } from '../../state/companion/companionStore';
 import { getCompanionPanelState, resetCompanionPanelForTests } from '../../state/companion/companionPanel';
 import { companionSnapshot } from '../../test/companionFixtures';
+import { paletteRow } from '../../test/paletteRow';
 
 // One user workspace and the assistant's hidden one, each with a chat whose
 // title and messages match "plan".
@@ -77,7 +78,8 @@ function search(query: string) {
 }
 
 function named(name: string) {
-  const settings = { ...structuredClone(DEFAULT_COMPANION_SETTINGS), displayName: name };
+  // A Michi the user turned on (Resume: it starts paused).
+  const settings = { ...structuredClone(DEFAULT_COMPANION_SETTINGS), paused: false, displayName: name };
   resetCompanionStoreForTests({ availability: 'available', snapshot: companionSnapshot({ settings }), assistant: ready() });
 }
 
@@ -91,9 +93,9 @@ describe('CommandPalette and the assistant', () => {
     expect(document.body.textContent).not.toContain('Plan with the assistant');
     expect(document.body.textContent).not.toContain('plan secret');
     search('Assistant');
-    expect(screen.queryByText('Switch to workspace ▸ Assistant')).toBeNull();
+    expect(screen.queryByText(paletteRow('Assistant'))).toBeNull();
     search('Workspace A');
-    expect(screen.getByText('Switch to workspace ▸ Workspace A')).toBeTruthy();
+    expect(screen.getByText(paletteRow('Workspace A'))).toBeTruthy();
   });
 
   it('hides the assistant conversation from search before its workspace is loaded', async () => {
@@ -116,14 +118,14 @@ describe('CommandPalette and the assistant', () => {
     try {
       const view = render(<CommandPalette activePage="dashboard" setPage={vi.fn()} onClose={vi.fn()} />);
       search('Archive current');
-      expect(screen.getByText('Archive current thread')).toBeTruthy();
+      expect(screen.getByText(paletteRow('Archive current thread'))).toBeTruthy();
       view.unmount();
       palette.active = { ...projects[1], trees: [tree('t-new'), tree('t-old', 5)], activeTreeId: 't-new' };
       render(<CommandPalette activePage="dashboard" setPage={vi.fn()} onClose={vi.fn()} />);
       search('thread');
-      expect(screen.queryByText('Archive current thread')).toBeNull();
-      expect(screen.queryByText(/Switch to archived thread/)).toBeNull();
-      expect(screen.getByText('New thread')).toBeTruthy();
+      expect(screen.queryByText(paletteRow('Archive current thread'))).toBeNull();
+      expect(screen.queryByText(paletteRow(/Switch to archived thread/))).toBeNull();
+      expect(screen.getByText(paletteRow('New thread'))).toBeTruthy();
     } finally {
       palette.active = null;
     }
@@ -133,25 +135,25 @@ describe('CommandPalette and the assistant', () => {
     named('Robin');
     render(<CommandPalette activePage="home" setPage={vi.fn()} onClose={vi.fn()} />);
     search('robin');
-    for (const label of ['Ask Robin', 'Robin: Today', 'Robin: Check now', 'Robin: Pause check-ins', 'Robin: New conversation', 'Robin: Settings']) {
-      expect(screen.getByText(label)).toBeTruthy();
+    for (const label of ['Ask Robin', 'Robin: Today', 'Robin: Check now', 'Turn Robin off', 'Robin: New conversation', 'Robin: Settings']) {
+      expect(screen.getByText(paletteRow(label))).toBeTruthy();
     }
     search('ask the');
-    expect(screen.queryByText('Ask the assistant')).toBeNull();
+    expect(screen.queryByText(paletteRow(/Ask the assistant/))).toBeNull();
     search('companion');
-    expect(screen.queryByText(/Companion/)).toBeNull();
+    expect(screen.queryByText(paletteRow(/Companion/))).toBeNull();
   });
 
   it('opens the panel on Chat for Ask and on Today for Today', () => {
     const onClose = vi.fn();
     render(<CommandPalette activePage="home" setPage={vi.fn()} onClose={onClose} />);
     search('Ask Michi');
-    fireEvent.click(screen.getByText('Ask Michi'));
+    fireEvent.click(screen.getByText(paletteRow('Ask Michi')));
     expect(onClose).toHaveBeenCalled();
     expect(getCompanionPanelState()).toMatchObject({ open: true, tab: 'chat' });
     act(() => resetCompanionPanelForTests());
     search('Michi: Today');
-    fireEvent.click(screen.getByText('Michi: Today'));
+    fireEvent.click(screen.getByText(paletteRow('Michi: Today')));
     expect(getCompanionPanelState()).toMatchObject({ open: true, tab: 'today' });
   });
 
@@ -159,25 +161,27 @@ describe('CommandPalette and the assistant', () => {
     resetCompanionStoreForTests({ assistant: ready() });
     const view = render(<CommandPalette activePage="home" setPage={vi.fn()} onClose={vi.fn()} />);
     search('michi');
-    expect(screen.getByText('Ask Michi')).toBeTruthy();
-    expect(screen.getByText('Michi: New conversation')).toBeTruthy();
-    expect(screen.queryByText('Michi: Check now')).toBeNull();
-    expect(screen.queryByText(/check-ins/)).toBeNull();
+    expect(screen.getByText(paletteRow('Ask Michi'))).toBeTruthy();
+    expect(screen.getByText(paletteRow('Michi: New conversation'))).toBeTruthy();
+    expect(screen.queryByText(paletteRow('Michi: Check now'))).toBeNull();
+    expect(screen.queryByText(paletteRow('Turn Michi off'))).toBeNull();
     view.unmount();
     named('Michi');
     render(<CommandPalette activePage="home" setPage={vi.fn()} onClose={vi.fn()} />);
     search('michi');
-    expect(screen.getByText('Michi: Check now')).toBeTruthy();
-    expect(screen.getByText('Michi: Pause check-ins')).toBeTruthy();
+    expect(screen.getByText(paletteRow('Michi: Check now'))).toBeTruthy();
+    expect(screen.getByText(paletteRow('Turn Michi off'))).toBeTruthy();
   });
 
-  it('says Resume check-ins while they are paused', () => {
+  it('offers only Turn Michi on while it is off (Q29)', () => {
     const settings = { ...structuredClone(DEFAULT_COMPANION_SETTINGS), paused: true };
     resetCompanionStoreForTests({ availability: 'available', snapshot: companionSnapshot({ settings }), assistant: ready() });
     render(<CommandPalette activePage="home" setPage={vi.fn()} onClose={vi.fn()} />);
-    search('check-ins');
-    expect(screen.getByText('Michi: Resume check-ins')).toBeTruthy();
-    expect(screen.queryByText('Michi: Pause check-ins')).toBeNull();
+    search('michi');
+    expect(screen.getByText(paletteRow('Turn Michi on'))).toBeTruthy();
+    for (const gone of ['Turn Michi off', 'Ask Michi', 'Michi: Today', 'Michi: Check now', 'Michi: New conversation', 'Michi: Settings']) {
+      expect(screen.queryByText(paletteRow(gone)), gone).toBeNull();
+    }
   });
 
   it('starts a new conversation on the one on screen and shows it in the panel', async () => {
@@ -188,7 +192,7 @@ describe('CommandPalette and the assistant', () => {
     try {
       render(<CommandPalette activePage="home" setPage={vi.fn()} onClose={vi.fn()} />);
       search('New conversation');
-      fireEvent.click(screen.getByText('Michi: New conversation'));
+      fireEvent.click(screen.getByText(paletteRow('Michi: New conversation')));
       expect(api.reset).toHaveBeenCalledWith('n-sys');
       await act(async () => { await Promise.resolve(); await Promise.resolve(); });
       expect(getCompanionAssistant().info?.nodeId).toBe('n-new');
@@ -205,7 +209,7 @@ describe('CommandPalette and the assistant', () => {
     try {
       render(<CommandPalette activePage="home" setPage={vi.fn()} onClose={vi.fn()} />);
       search('Michi: Settings');
-      fireEvent.click(screen.getByText('Michi: Settings'));
+      fireEvent.click(screen.getByText(paletteRow('Michi: Settings')));
       expect((onSection.mock.calls[0]?.[0] as CustomEvent).detail).toEqual({ section: 'companion' });
     } finally {
       window.removeEventListener('michi:open-settings-section', onSection);
@@ -216,7 +220,7 @@ describe('CommandPalette and the assistant', () => {
     resetCompanionStoreForTests({ assistant: { status: 'unsupported', info: null, error: null } });
     render(<CommandPalette activePage="home" setPage={vi.fn()} onClose={vi.fn()} />);
     search('michi');
-    expect(screen.queryByText('Ask Michi')).toBeNull();
-    expect(screen.queryByText('Michi: Today')).toBeNull();
+    expect(screen.queryByText(paletteRow('Ask Michi'))).toBeNull();
+    expect(screen.queryByText(paletteRow('Michi: Today'))).toBeNull();
   });
 });

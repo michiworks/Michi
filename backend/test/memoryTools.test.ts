@@ -41,6 +41,7 @@ import { META_AGENT_MAINTENANCE_TOOL_NAMES } from '../src/agents/maintenancePoli
 import { isMaintenanceInternalTool } from '../src/services/metaAgent/maintenanceAccess';
 import { CHECKIN_TOOL_NAMES, MAIN_TOOL_NAMES, META_AGENT_CHAT_TOOL_NAMES } from '../src/assistant/policy';
 import { McpSlotRegistry, buildMcpServerForSlot } from '../src/services/mcpServer';
+import { listThreads, readNode, readNodeOverview, searchMessages } from '../src/services/globalContext';
 import { buildPiTools } from '../src/agents/pi/piTools';
 import { loadPiAi, loadPiTypebox } from '../src/agents/pi/piAi';
 import { configureRuntimeDeps, __resetRuntimeDeps } from '../src/agents/runtimeDeps';
@@ -1259,7 +1260,7 @@ describe('Michi MCP server (Claude, Codex, Kiro, Crew)', () => {
     const client = await mcpClient(t, 'alice', { nodeId: 'n-a', workspaceId: 'ws-a' });
     const text = async (name: string, args: Record<string, unknown>) =>
       ((await client.callTool({ name, arguments: args })) as { content: Array<{ text: string }> }).content[0]!.text;
-    const OFF = /^This conversation's memory setting is Off: like a temporary chat, it reads neither memory nor other conversations/;
+    const OFF = /^This is a temporary chat: it reads neither memory nor other conversations/;
     assert.doesNotMatch(await text('list_threads', {}), OFF);
     getDb().prepare("UPDATE nodes SET memory_mode = 'off' WHERE id = 'n-a'").run();
     for (const [name, args] of [
@@ -1267,6 +1268,7 @@ describe('Michi MCP server (Claude, Codex, Kiro, Crew)', () => {
       ['inspect_pane', { nodeId: 'n-a-other' }], ['read_pane_output', { paneId: 'node:n-a-other' }],
       ['inspect_pane', { executionRef: { kind: 'chat_turn', nodeId: 'n-a-other', turnId: 't-1' } }],
       ['wait_pane', { nodeId: 'n-a-other', until: 'changed', cursor: 'c' }],
+      ['list_panes', { scope: 'all' }],
       ['read_conversation_updates', { after: 0, includeMessages: true }],
     ] as const) {
       assert.match(await text(name, args), OFF, `${name} ${JSON.stringify(args)}`);
@@ -1276,6 +1278,39 @@ describe('Michi MCP server (Claude, Codex, Kiro, Crew)', () => {
     }
     getDb().prepare("UPDATE nodes SET memory_mode = 'use_only' WHERE id = 'n-a'").run();
     assert.doesNotMatch(await text('list_threads', {}), OFF, 'use only still reads');
+  });
+
+  test('another conversation\'s temporary chat is not there for the thread and pane tools; from inside, it reads itself', async (t) => {
+    node('n-a-other', 'ws-a');
+    node('n-a-temp', 'ws-a');
+    getDb().prepare("UPDATE nodes SET memory_mode = 'off', title = 'Secret plan' WHERE id = 'n-a-temp'").run();
+    const say = getDb().prepare("INSERT INTO messages (id, node_id, role, content, seq, created_at) VALUES (?, ?, 'user', ?, 1, 1)");
+    say.run('m-other', 'n-a-other', 'heron public');
+    say.run('m-temp', 'n-a-temp', 'heron secret');
+    const reader = async (nodeId: string) => {
+      const client = await mcpClient(t, 'alice', { nodeId, workspaceId: 'ws-a' });
+      return async (name: string, args: Record<string, unknown>) =>
+        ((await client.callTool({ name, arguments: args })) as { content: Array<{ text: string }> }).content[0]!.text;
+    };
+    const text = await reader('n-a');
+    assert.match(await text('list_threads', {}), /n-a-other/);
+    assert.doesNotMatch(await text('list_threads', {}), /n-a-temp|Secret/);
+    const found = await text('search_messages', { query: 'heron' });
+    assert.match(found, /n-a-other/);
+    assert.doesNotMatch(found, /n-a-temp/);
+    for (const name of ['read_node', 'read_node_overview']) assert.equal(await text(name, { nodeId: 'n-a-temp' }), 'node not found: n-a-temp', name);
+    for (const [name, args] of [
+      ['inspect_pane', { nodeId: 'n-a-temp' }], ['read_pane_output', { paneId: 'node:n-a-temp' }],
+      ['wait_pane', { nodeId: 'n-a-temp', until: 'changed', cursor: 'c' }],
+    ] as const) {
+      assert.match(await text(name, args), /^NOT_FOUND/, name);
+    }
+    const panes = await text('list_panes', { scope: 'all' });
+    assert.match(panes, /node:n-a-other/);
+    assert.doesNotMatch(panes, /n-a-temp/);
+    const own = await reader('n-a-temp');
+    assert.match(await own('read_node', { nodeId: 'n-a-temp' }), /heron secret/);
+    assert.doesNotMatch(await own('inspect_pane', { nodeId: 'n-a-temp' }), /^NOT_FOUND/);
   });
 
   test('a slot cannot reach another owner\'s workspace through its cached binding', async (t) => {
@@ -1406,14 +1441,49 @@ describe('Pi built-in tools', () => {
     const run = async (name: string, args: Record<string, unknown>) => (await tools.find((tool: any) => tool.name === name).execute('call', args)).content[0].text as string;
     getDb().prepare("UPDATE nodes SET memory_mode = 'off' WHERE id = 'n-a'").run();
     for (const [name, args] of [['list_threads', {}], ['search_messages', { query: 'x' }], ['read_node', { nodeId: 'n-b' }],
-      ['read_node_overview', { nodeId: 'n-b' }], ['read_pane_output', { nodeId: 'n-b' }], ['read_conversation_updates', { after: 0 }]] as const) {
-      assert.match(await run(name, args), /^This conversation's memory setting is Off/, name);
+      ['read_node_overview', { nodeId: 'n-b' }], ['read_pane_output', { nodeId: 'n-b' }], ['list_panes', { scope: 'all' }],
+      ['read_conversation_updates', { after: 0 }]] as const) {
+      assert.match(await run(name, args), /^This is a temporary chat/, name);
     }
     assert.deepEqual(read, []);
     assert.equal(await run('read_node', { nodeId: 'n-a' }), 'node', 'its own transcript');
     getDb().prepare("UPDATE nodes SET memory_mode = NULL WHERE id = 'n-a'").run();
     assert.equal(await run('list_threads', {}), 'threads');
     assert.deepEqual(read, ['node n-a', 'list']);
+  });
+
+  test('another conversation\'s temporary chat is not there for the thread and pane tools; from inside, it reads itself', async () => {
+    node('n-a-other', 'ws-a');
+    node('n-a-temp', 'ws-a');
+    getDb().prepare("UPDATE nodes SET memory_mode = 'off', title = 'Secret plan' WHERE id = 'n-a-temp'").run();
+    const say = getDb().prepare("INSERT INTO messages (id, node_id, role, content, seq, created_at) VALUES (?, ?, 'user', ?, 1, 1)");
+    say.run('m-other', 'n-a-other', 'heron public');
+    say.run('m-temp', 'n-a-temp', 'heron secret');
+    const globalContext = { listThreads, searchMessages, readNode, readNodeOverview };
+    const reader = async (nodeId: string) => {
+      const { tools } = await piTools(chatOwner(nodeId), {}, { globalContext });
+      return async (name: string, args: Record<string, unknown>) =>
+        (await tools.find((tool: any) => tool.name === name).execute('call', args)).content[0].text as string;
+    };
+    const run = await reader('n-a');
+    assert.match(await run('list_threads', {}), /n-a-other/);
+    assert.doesNotMatch(await run('list_threads', {}), /n-a-temp|Secret/);
+    const found = await run('search_messages', { query: 'heron' });
+    assert.match(found, /n-a-other/);
+    assert.doesNotMatch(found, /n-a-temp/);
+    for (const name of ['read_node', 'read_node_overview']) assert.equal(await run(name, { nodeId: 'n-a-temp' }), 'node not found: n-a-temp', name);
+    for (const [name, args] of [
+      ['inspect_pane', { nodeId: 'n-a-temp' }], ['read_pane_output', { paneId: 'node:n-a-temp' }],
+      ['wait_pane', { nodeId: 'n-a-temp', until: 'changed', cursor: 'c' }],
+    ] as const) {
+      assert.match(await run(name, args), /^NOT_FOUND/, name);
+    }
+    const panes = await run('list_panes', { scope: 'all' });
+    assert.match(panes, /node:n-a-other/);
+    assert.doesNotMatch(panes, /n-a-temp/);
+    const own = await reader('n-a-temp');
+    assert.match(await own('read_node', { nodeId: 'n-a-temp' }), /heron secret/);
+    assert.doesNotMatch(await own('inspect_pane', { nodeId: 'n-a-temp' }), /^NOT_FOUND/);
   });
 
   test('Agent Runs get none', async () => {

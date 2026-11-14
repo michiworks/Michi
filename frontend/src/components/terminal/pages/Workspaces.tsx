@@ -206,7 +206,6 @@ export default function TerminalWorkspaces({ onNav }: { onNav: (p: PageId) => vo
     projects,
     activeProjectId,
     deleteProject,
-    restoreProject,
     renameProject,
     setProjectCwd,
     archiveProject,
@@ -336,7 +335,6 @@ export default function TerminalWorkspaces({ onNav }: { onNav: (p: PageId) => vo
           pinProject,
           unpinProject,
           deleteProject,
-          restoreProject,
           openManageWorkspace: openManage,
           // Linking a folder needs the desktop app's folder picker.
           changeFolder: getElectron() ? (id) => { void changeFolder(id); } : undefined,

@@ -65,28 +65,6 @@
 .source-pop__note { margin: 0; color: var(--term-faint); font-size: var(--fs-sm); line-height: 1.5; }
 .source-pop__note--closed { color: var(--term-mid); }
 
-/* "Back to <page>": above the conversations while the jump from Spaces is open.
-   Wash and lift are the user bubble's (.terminal-message-user). */
-.source-back { flex: none; padding: 18px 32px 0; }
-.source-back__bar {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  margin: 0 auto;
-  padding: 5px 6px 5px 12px;
-  border: 1px solid var(--term-accent-f);
-  border-radius: var(--ui-radius);
-  background: color-mix(in srgb, var(--term-accent) 4%, var(--term-surface));
-  box-shadow: 0 6px 18px -10px color-mix(in srgb, var(--term-accent) 22%, transparent);
-  color: var(--term-mid);
-  font-size: var(--fs-sm);
-}
-.source-back__icon { flex: none; color: var(--term-accent); }
-.source-back__from { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.source-back__spacer { flex: 1; }
-.source-back__bar .ui-btn { flex: none; gap: 4px; background: var(--term-surface); }
-.source-back .source-back__close { flex: none; min-width: 22px; min-height: 22px; padding: 2px; color: var(--term-muted); }
-
 /* The cited message, highlighted where the jump landed. The frame holds the
    message only; its hover actions keep their row under it. Off-screen frames
    skip painting (content-visibility), which would clip this frame's outset. */

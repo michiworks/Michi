@@ -1,5 +1,5 @@
 import React from 'react';
-import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { CompanionRunDto } from 'michi-shared';
 import {
@@ -9,7 +9,7 @@ import {
   resetCompanionPanelForTests,
   setCompanionTarget,
 } from '../../../state/companion/companionPanel';
-import { getCompanionAssistant, resetCompanionStoreForTests, updateCompanionSnapshot } from '../../../state/companion/companionStore';
+import { adoptCompanionSnapshot, getCompanionAssistant, resetCompanionStoreForTests, updateCompanionSnapshot } from '../../../state/companion/companionStore';
 import { getAssistantComposer, resetAssistantComposerForTests } from '../../../state/assistant/assistantComposer';
 import { dispatchPageHelperDraft } from '../../../state/pages/pageHelperDraft';
 import { backTarget, hasBackLayer } from '../../../lib/backStack';
@@ -98,6 +98,37 @@ describe('the panel (DESIGN-v2 §1)', () => {
     act(() => updateCompanionSnapshot((current) => ({ ...current, counts: { ...current.counts, unreadMessages: 1 } })));
     expect(screen.getByLabelText('1 new')).toBeTruthy();
     expect(screen.getByRole('tabpanel', { name: 'Today' }).textContent).toContain('CR-1 needs attention');
+  });
+
+  it('puts Needs you beside the tabs on the Chat, not in a row above it, and it opens Today', async () => {
+    act(() => updateCompanionSnapshot((current) => ({ ...current, items: [...current.items, companionItem('c', { bucket: 'update' })] })));
+    render(<CompanionPanelHost narrow />);
+    await open({ tab: 'chat' });
+    const pill = screen.getByRole('button', { name: 'Needs you (2)' });
+    expect(pill.closest('.companion-head')).toBeTruthy();
+    expect(pill.closest('[role="tablist"]')).toBeNull();
+    fireEvent.click(pill);
+    expect(screen.getByRole('tab', { name: /Today/ }).getAttribute('aria-selected')).toBe('true');
+    expect(screen.queryByRole('button', { name: 'Needs you (2)' })).toBeNull();
+  });
+
+  it('on a phone keeps the name and tabs in one row, with the status in words only for a check-in or a warning', async () => {
+    const view = render(<CompanionPanelHost narrow />);
+    await open({ tab: 'chat' });
+    const head = document.querySelector<HTMLElement>('.companion-head')!;
+    expect(head.querySelectorAll('.companion-head__top, .companion-head__bar')).toHaveLength(1);
+    expect(head.querySelector('.companion-head__top [role="tablist"]')).toBeTruthy();
+    // The routine line is for a screen reader only.
+    expect(head.querySelector('.companion-head__status')).toBeNull();
+    expect(screen.getByRole('status').className).toBe('sr-only');
+    expect(screen.getByRole('status').textContent).toBe('Watching · not checked yet');
+    view.unmount();
+    resetCompanionStoreForTests({ assistant: ready, snapshot: { ...snapshot, status: { ...snapshot.status, working: true }, activity: [running('heartbeat')] } });
+    render(<CompanionPanelHost narrow />);
+    expect(screen.getByRole('status').textContent).toContain('Checking in…');
+    expect(screen.queryByRole('button', { name: /Needs you/ })).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: 'Stop' }));
+    expect(mocks.preempt).toHaveBeenCalled();
   });
 
   it('says "Checking in…" with Stop for a check-in, and "Saying hello…" without Stop for the welcome (F4)', async () => {
@@ -245,7 +276,49 @@ describe('the panel (DESIGN-v2 §1)', () => {
     expect(getCompanionPanelState().target).toBeNull();
   });
 
-  it('opens History when asked to (Settings › Conversation › History)', async () => {
+  it('closes when the agent is turned off; opened while it is off (Pages\' Ask, a link), it stays open (Q29)', async () => {
+    resetCompanionStoreForTests({ assistant: ready, snapshot });
+    render(<CompanionPanelHost narrow={false} />);
+    await open();
+    expect(panel()).toBeTruthy();
+    const off = { ...snapshot, settings: { ...snapshot.settings, paused: true } };
+    act(() => adoptCompanionSnapshot({ ...off, revision: snapshot.revision + 1 }));
+    expect(panel()).toBeNull();
+    expect(getCompanionPanelState().open).toBe(false);
+    // Off: an entry that still opens it (Pages' Ask) shows it, and a later snapshot leaves it open.
+    await open({ tab: 'chat', draft: 'Tell me about this page' });
+    expect(panel()).toBeTruthy();
+    act(() => adoptCompanionSnapshot({ ...off, revision: snapshot.revision + 2 }));
+    expect(panel()).toBeTruthy();
+    act(() => adoptCompanionSnapshot({ ...snapshot, revision: snapshot.revision + 3 }));
+    expect(panel()).toBeTruthy();
+  });
+
+  it('leaves a panel open before the first snapshot open when that snapshot says the agent is off', async () => {
+    resetCompanionStoreForTests({ assistant: ready });
+    render(<CompanionPanelHost narrow={false} />);
+    await open();
+    expect(panel()).toBeTruthy();
+    act(() => adoptCompanionSnapshot({ ...snapshot, settings: { ...snapshot.settings, paused: true } }));
+    expect(panel()).toBeTruthy();
+  });
+
+  it('opens Activity from its menu, with what check-ins did, and closes it on Escape (Q31)', async () => {
+    resetCompanionStoreForTests({ assistant: ready, snapshot: { ...snapshot, activity: [
+      { id: 'r1', kind: 'heartbeat', trigger: 'interval', outcome: 'quiet', detail: null, startedAt: Date.UTC(2026, 10, 5, 9, 12), finishedAt: null },
+    ] } });
+    render(<CompanionPanelHost narrow={false} />);
+    await open();
+    fireEvent.click(screen.getByRole('button', { name: 'Sidekick menu' }));
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Activity…' }));
+    const activity = screen.getByRole('dialog', { name: 'Activity' });
+    expect(within(activity).getByRole('list', { name: 'Recent activity' }).textContent).toContain('Check-in · nothing to say');
+    fireEvent.keyDown(activity, { key: 'Escape' });
+    expect(screen.queryByRole('dialog', { name: 'Activity' })).toBeNull();
+    expect(screen.getByRole('complementary')).toBeTruthy();
+  });
+
+  it('opens History when asked to', async () => {
     render(<CompanionPanelHost narrow={false} />);
     await open({ history: true });
     expect(screen.getByRole('dialog', { name: 'History' }).textContent).toContain('Recent conversations');

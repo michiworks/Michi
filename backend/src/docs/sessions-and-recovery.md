@@ -1,6 +1,6 @@
 # Task states, queued messages and session recovery
 
-Applies to: ordinary desktop/web chats, including remote workspaces. Agent Runs use the lifecycle in `custom-agents`. Source checked: 2026-11-11; native behavior depends on installed runtimes.
+Applies to: ordinary desktop/web chats, including remote workspaces. Agent Runs use the lifecycle in `custom-agents`. Source checked: 2026-11-12; native behavior depends on installed runtimes.
 
 ## Is the task working or stuck?
 
@@ -29,6 +29,8 @@ The composer follows current session capabilities.
 | Crew | Queues for the next turn; official App callers cannot same-turn steer |
 | Antigravity (opt-in: `MICHI_ENABLE_ANTIGRAVITY=1`, or `antigravity` listed in `MICHI_ENABLED_RUNTIMES`) | No steering; a busy send waits for the next turn |
 
+A queued message waits above the composer (**queued 1 · sends when stream ends**). **Steer now** steers it into the running turn where the runtime supports steering; **×** takes it back into the composer, in front of what you have typed since. After a stream error the queue pauses (**paused, review and send manually**): a later turn end does not send it, so take each message back with **×** and send it yourself.
+
 Steering does not instantly roll back an executing command. If execution must stop, use Stop, inspect actual effects, then send the corrected request. Queueing and steering do not undo prior effects.
 
 ## Stop, close, refresh and quit
@@ -38,8 +40,8 @@ Steering does not instantly roll back an executing command. If execution must st
 | Stop a chat | Requests targeted cancellation; prior file/external changes remain |
 | Close a chat pane | Closes the view; does not delete history or request cancellation |
 | Refresh/reload | Detaches subscriptions, then rehydrates/reconnects |
-| Close a desktop window | Does not itself send cancellation; process lifetime depends on platform/app |
-| Quit the local app | An app-owned backend stops with the app, and its local execution ends; saved history remains. On macOS, with **Keep Michi running in the background** (Settings → Scheduled jobs) on, the backend keeps running after you quit, and so do its turns, scheduled jobs and SSH tunnels |
+| Close a desktop window | Does not itself send cancellation; process lifetime depends on platform/app. On macOS and Windows, with **Keep Michi in the menu bar** (Windows: notification area; on by default, Settings → Notifications → When Michi's windows are closed), closing the last window keeps Michi and its backend running |
+| Quit the local app | An app-owned backend stops with the app, and its local execution ends; saved history remains. On macOS, with **Keep Michi running after you quit** (Settings → Notifications → When Michi's windows are closed) on, the backend keeps running after you quit, and so do its turns, scheduled jobs and SSH tunnels |
 | Quit desktop using a remote workspace | Does not stop the remote backend or its turns. For an SSH machine, the local tunnel stops only when the local backend stops (not in macOS background-service mode) |
 | Restart a backend | Interrupts running processes; durable records support recovery, not uninterrupted work |
 

@@ -30,14 +30,12 @@ export function overviewTrail(node: ChatNodeState): BranchOverviewEntry[] {
 
 /**
  * Ribbon text = "what this branch was opened to answer".
- * quotedText (manual selection) > pendingSpawnPrompt (fanout) > first user msg > null.
+ * quotedText (manual selection) > first user msg (a fanout branch's prompt) > null.
  */
 export function branchRibbonText(node: ChatNodeState): string | null {
   const firstUser = node.messages.find((m) => m.role === 'user');
   const quoted = firstUser?.quotedText?.trim();
   if (quoted) return quoted;
-  const spawn = node.pendingSpawnPrompt?.trim();
-  if (spawn) return spawn;
   const userText = firstUser?.text?.trim();
   if (userText) return userText;
   return null;

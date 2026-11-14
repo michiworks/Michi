@@ -30,7 +30,6 @@ vi.mock('../services/api', async (importOriginal) => ({
   steerChat: vi.fn(async () => ({ accepted: true })),
   getSavedTurn: vi.fn(async () => null),
 }));
-vi.mock('../services/notifications', () => ({ notify: vi.fn() }));
 vi.mock('../services/api/assistant', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../services/api/assistant')>()),
   fetchAssistant: vi.fn(() => new Promise(() => {})),

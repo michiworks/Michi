@@ -1,7 +1,6 @@
 import assert from 'node:assert/strict';
 import { test, before, after } from 'node:test';
 import { initDb, closeDb } from '../src/services/db';
-import { decideToolApproval, listToolApprovals, toolApprovalId } from '../src/services/metaAgent/toolApprovals';
 before(() => { initDb(); });
 after(() => { closeDb(); });
 import { createMaintenanceAccessTools, isExternalReadOnlyTool, isMaintenanceInternalTool } from '../src/services/metaAgent/maintenanceAccess';
@@ -60,7 +59,7 @@ test('fresh discovery rejects a tool changed to write-capable, including direct 
   const s = setup();
   await s.list({ server: 'external' });
   s.setTools([{ ...read, annotations: { readOnlyHint: false } }]);
-  assert.equal(json(await s.call({ server: 'external', tool: 'search', arguments: { query: 'x' } })).status, 'approval_required');
+  assert.equal(json(await s.call({ server: 'external', tool: 'search', arguments: { query: 'x' } })).status, 'unavailable');
   assert.equal(json(await s.call({ server: 'external', tool: 'invented', arguments: {} })).status, 'unavailable');
   assert.equal(json(await s.call({ tool: 'spawn_agent', arguments: { query: 'write externally' } })).status, 'unavailable');
   assert.equal(s.counters().calls, 0);
@@ -86,42 +85,13 @@ test('schemas and cancellation are enforced before dispatch', async () => {
   assert.equal(s.counters().closed, 1);
 });
 
-test('approval persists across gateways, deduplicates, and is invalidated by definition changes or revocation', async () => {
-  const tool = { ...read, name: 'write_approved', annotations: { readOnlyHint: false } };
-  const s = setup(); s.setTools([tool]);
-  const args = { server: 'external', tool: tool.name, arguments: { query: 'x' } };
-  const pending = json(await s.call(args));
-  assert.equal(pending.status, 'approval_required');
-  assert.equal(json(await s.call(args)).requestId, pending.requestId);
-  assert.equal(s.counters().calls, 0);
-  assert.equal(decideToolApproval(pending.requestId, 'approved', context.ownerUserId), true);
-  const next = setup(); next.setTools([tool]);
-  assert.equal((await next.call(args)).isError, undefined);
-  assert.equal(next.counters().calls, 1);
-  next.setTools([{ ...tool, description: 'changed behavior' }]);
-  assert.equal(json(await next.call(args)).status, 'approval_required');
-  assert.equal(next.counters().calls, 1);
-  decideToolApproval(pending.requestId, 'revoked', context.ownerUserId);
-  assert.equal(json(await s.call(args)).status, 'revoked');
-  assert.equal(s.counters().calls, 0);
-  assert.ok(listToolApprovals(context.ownerUserId).some(r => r.id === pending.requestId && r.state === 'revoked'));
-});
-
-test('approval fingerprint covers configuration secrets without storing them and ignores object key order', () => {
-  const config = { serverName: 's', command: 'mcp', env: { SECRET: 'one', A: 'a' } };
-  assert.equal(toolApprovalId(config, read), toolApprovalId({ ...config, env: { A: 'a', SECRET: 'one' } }, read));
-  assert.notEqual(toolApprovalId(config, read), toolApprovalId({ ...config, env: { SECRET: 'two' } }, read));
-  assert.ok(!JSON.stringify(listToolApprovals()).includes('SECRET'));
-});
-
-test('denial is durable across database reopen and does not generate another pending request', async () => {
-  const s = setup(); s.setTools([{ ...read, name: 'denied_tool', annotations: {} }]);
-  const args = { server: 'external', tool: 'denied_tool', arguments: { query: 'x' } };
-  const pending = json(await s.call(args));
-  decideToolApproval(pending.requestId, 'denied');
-  closeDb(); initDb();
-  const denied = json(await s.call(args));
-  assert.equal(denied.status, 'denied');
-  assert.equal(denied.requestId, pending.requestId);
+test('a tool that is not read-only is never listed or run, and asks nobody for approval', async () => {
+  const s = setup();
+  s.setTools([read, { ...read, name: 'send', annotations: { readOnlyHint: false } }, { ...read, name: 'plain', annotations: {} }]);
+  assert.deepEqual(json(await s.list({ server: 'external' })).tools.map((t: any) => t.name), ['search']);
+  for (const name of ['send', 'plain']) {
+    const answer = json(await s.call({ server: 'external', tool: name, arguments: { query: 'x' } }));
+    assert.deepEqual([answer.status, answer.alternatives], ['unavailable', ['search']], name);
+  }
   assert.equal(s.counters().calls, 0);
 });

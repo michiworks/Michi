@@ -395,23 +395,6 @@ describe('chatStreamRunner — chunk/tool-call ordering', () => {
       .toBe('server reply');
   });
 
-  it('acknowledges a recovered spawn outbox only after the server turn starts', () => {
-    const dispatched: ChatAction[] = [];
-    runChatStream({
-      prompt: 'recovered child prompt',
-      nodeId: 'n1',
-      assistantId: 'a1',
-      dispatch: (action) => dispatched.push(action),
-      assistantTextBufs: { current: {} },
-      cancelFns: { current: {} },
-    });
-
-    const handlers = mockStream.mock.calls[0][2];
-    expect(dispatched).not.toContainEqual({ type: 'spawn-prompt-started', nodeId: 'n1' });
-    handlers.onTurnStart({ turnId: 'turn-durable', assistantId: 'a1', userText: 'recovered child prompt' });
-    expect(dispatched).toContainEqual({ type: 'spawn-prompt-started', nodeId: 'n1' });
-  });
-
   it('flushes pending chunks before tool-call-update dispatch', () => {
     const dispatched: ChatAction[] = [];
     const bufs = { current: {} as Record<string, string> };

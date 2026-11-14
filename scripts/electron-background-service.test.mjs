@@ -3,14 +3,12 @@ import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { execFileSync } from "node:child_process";
 import fs from "node:fs";
-import http from "node:http";
 import os from "node:os";
 import path from "node:path";
 import { createRequire } from "node:module";
 
 const require = createRequire(import.meta.url);
 const service = require("../electron/dist/backgroundService.js");
-const notifications = require("../electron/dist/scheduledNotifications.js");
 
 function tempDir() {
   return fs.mkdtempSync(path.join(os.tmpdir(), "michi-service-test-"));
@@ -237,93 +235,5 @@ test("stop boots out a loaded service and removes the plist when asked", async (
     assert.equal(fs.existsSync(plistFile), false);
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
-  }
-});
-
-test("SSE parser handles split chunks, comments and CRLF", () => {
-  const events = [];
-  const parse = notifications.createSseParser((event, data) => events.push([event, data]));
-  parse(": keepalive\n\nevent: scheduled_job_run\r\ndata: {\"a\"");
-  parse(":1}\r\n\r\ndata: plain\n\n");
-  assert.deepEqual(events, [["scheduled_job_run", "{\"a\":1}"], ["message", "plain"]]);
-});
-
-const notice = {
-  phase: "finished", runId: "run-1", jobId: "job-1", jobName: "Digest", workspaceId: "ws-1",
-  nodeId: "n-1", treeId: "t-1", status: "succeeded", summary: "All quiet", error: null, notify: true, at: 1,
-};
-
-test("describeNotice words finished, failed and attention notices", () => {
-  assert.deepEqual(notifications.describeNotice(notice), { title: "Digest", subtitle: "Scheduled job finished", body: "All quiet" });
-  assert.equal(notifications.describeNotice({ ...notice, status: "failed", error: "boom" }).body, "boom");
-  assert.equal(notifications.describeNotice({ ...notice, notify: false }), null);
-  assert.equal(notifications.describeNotice({ ...notice, status: "cancelled" }), null);
-  assert.equal(notifications.describeNotice({ ...notice, phase: "attention", attention: "input", notify: false }).subtitle, "Needs your input");
-});
-
-test("planNoticeDelivery skips notices that are not shown", () => {
-  const env = { hasFocusedWindow: true, osNotificationsSupported: true };
-  assert.deepEqual(notifications.planNoticeDelivery({ ...notice, phase: "started" }, env), { kind: "skip", ack: false });
-  assert.deepEqual(notifications.planNoticeDelivery({ ...notice, notify: false }, env), { kind: "skip", ack: true });
-});
-
-test("planNoticeDelivery shows only an in-app toast while a window is focused", () => {
-  const content = notifications.describeNotice(notice);
-  for (const osNotificationsSupported of [true, false]) {
-    assert.deepEqual(
-      notifications.planNoticeDelivery(notice, { hasFocusedWindow: true, osNotificationsSupported }),
-      { kind: "toast", ack: true, content },
-    );
-  }
-});
-
-test("planNoticeDelivery uses an OS banner when no window is focused", () => {
-  assert.deepEqual(
-    notifications.planNoticeDelivery(notice, { hasFocusedWindow: false, osNotificationsSupported: true }),
-    { kind: "banner", ack: true, content: notifications.describeNotice(notice) },
-  );
-});
-
-test("planNoticeDelivery defers without acknowledging when nothing can show the notice", () => {
-  const plan = notifications.planNoticeDelivery(notice, { hasFocusedWindow: false, osNotificationsSupported: false });
-  assert.deepEqual(plan, { kind: "defer", ack: false });
-});
-
-test("notification feed replays notices, reconnects and acknowledges", async () => {
-  const acks = [];
-  let connections = 0;
-  const server = http.createServer((req, res) => {
-    if (req.method === "POST") {
-      acks.push(req.url);
-      res.end("{}");
-      return;
-    }
-    connections += 1;
-    res.writeHead(200, { "content-type": "text/event-stream" });
-    res.write(`event: scheduled_job_run\ndata: ${JSON.stringify({ ...notice, runId: `run-${connections}` })}\n\n`);
-    // Drop the first connection to exercise reconnect.
-    if (connections === 1) setTimeout(() => res.destroy(), 20);
-  });
-  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
-  const { port } = server.address();
-  const seen = [];
-  const feed = new notifications.ScheduledNotificationFeed({
-    port: () => port,
-    onNotice: (value) => {
-      seen.push(value.runId);
-      feed.acknowledge(value.runId);
-    },
-    reconnectBaseMs: 10,
-  });
-  try {
-    feed.start();
-    const deadline = Date.now() + 3000;
-    while ((seen.length < 2 || acks.length < 2) && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 20));
-    assert.deepEqual(seen, ["run-1", "run-2"]);
-    assert.deepEqual(acks.sort(), ["/api/scheduled-jobs/runs/run-1/notified", "/api/scheduled-jobs/runs/run-2/notified"]);
-  } finally {
-    feed.stop();
-    server.closeAllConnections();
-    await new Promise((resolve) => server.close(resolve));
   }
 });

@@ -207,6 +207,8 @@ export interface CompanionMaterial {
    * implying there is nothing there. Absent or empty: none.
    */
   firstLook?: ReadonlyArray<{ source: CompanionConfigurableSource; state: 'running' | 'failed'; detail?: string | null }>;
+  /** The work heartbeat: the conversations the agent started and still follows (its work in hand), newest first. */
+  following?: CompanionDelegationRecord[];
 }
 
 /** A turn of the agent's own: a check-in (DESIGN-v2 §3.1), never a poll or a follow-up `send`. */

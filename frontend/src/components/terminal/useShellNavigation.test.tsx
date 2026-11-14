@@ -39,15 +39,14 @@ describe('visible shell navigation', () => {
     expect(h.result.current.canForward).toBe(false);
   });
 
-  it('distinguishes the Scheduled list, system detail and each ordinary job', () => {
+  it('distinguishes the Scheduled list and each ordinary job', () => {
     const list: ShellLocation = { ...home, page: 'scheduled' };
-    const meta: ShellLocation = { ...list, scheduledRoute: { kind: 'meta-agent' } };
     const jobA: ShellLocation = { ...list, scheduledRoute: { kind: 'job', jobId: 'a' } };
     const jobB: ShellLocation = { ...list, scheduledRoute: { kind: 'job', jobId: 'b' } };
     const h = setup(home);
-    for (const location of [list, meta, jobA, jobB]) h.visit(location);
-    for (const location of [jobA, meta, list, home]) expect(h.step('onBack')).toEqual(location);
-    for (const location of [list, meta, jobA, jobB]) expect(h.step('onForward')).toEqual(location);
+    for (const location of [list, jobA, jobB]) h.visit(location);
+    for (const location of [jobA, list, home]) expect(h.step('onBack')).toEqual(location);
+    for (const location of [list, jobA, jobB]) expect(h.step('onForward')).toEqual(location);
     h.visit(home);
     h.visit({ ...home, scheduledRoute: { kind: 'list' } });
     expect(h.step('onBack')).toEqual(jobB);
@@ -63,15 +62,15 @@ describe('visible shell navigation', () => {
     expect(h.step('onBack')).toEqual(home);
   });
 
-  it('skips a managed job notification route once it redirects to the system detail', () => {
+  it('skips a managed job notification route once it redirects to Pages', () => {
     const list: ShellLocation = { ...home, page: 'scheduled' };
-    const meta: ShellLocation = { ...list, scheduledRoute: { kind: 'meta-agent' } };
+    const pages: ShellLocation = { ...home, page: 'spaces' };
     const h = setup(list);
     h.visit({ ...list, scheduledRoute: { kind: 'job', jobId: 'managed' } });
     h.deadJobs.add('managed');
-    h.visit(meta);
+    h.visit(pages);
     expect(h.step('onBack')).toEqual(list);
-    expect(h.step('onForward')).toEqual(meta);
+    expect(h.step('onForward')).toEqual(pages);
   });
 
   it('accepts the current tree when a chat moved since its last visit', () => {
