@@ -41,7 +41,7 @@ function namesManagementRoute(path: string): boolean {
  * a private, owner-only Unix socket (macOS/Linux), or a loopback TCP listener
  * with `verifyConnection` (OS-verified Tailscale service peer) plus `pathSecret`
  * (the per-run segment Michi's own Serve handler prepends). Never listen on
- * shared TCP without both. */
+ * shared TCP without both, unless browser pairing is required instead. */
 export function createMobileAccessGateway(options: {
   target: string;
   token?: string | null;
@@ -50,6 +50,8 @@ export function createMobileAccessGateway(options: {
   identityHeader?: 'tailscale-user-login';
   /** Per-run response challenge for an authenticated Serve readiness check. */
   probeToken?: string;
+  /** Browser pairing is mandatory when TCP has no OS peer verifier. */
+  requirePairing?: boolean;
   publicOrigin: () => string;
   now?: () => number;
   /** TCP ingress: resolves only for a connection proven to come from the
@@ -78,6 +80,24 @@ export function createMobileAccessGateway(options: {
     return rest.startsWith('/') ? rest : `/${rest}`;
   };
   const now = options.now ?? Date.now;
+  const pairingToken = options.requirePairing ? randomBytes(32).toString('hex') : '';
+  const sessionToken = options.requirePairing ? randomBytes(32).toString('hex') : '';
+  const cookieName = '__Host-michi-phone';
+  const matches = (value: string | undefined, expected: string) => !!expected && typeof value === 'string'
+    && Buffer.byteLength(value) === Buffer.byteLength(expected)
+    && timingSafeEqual(Buffer.from(value), Buffer.from(expected));
+  const authenticationError = (req: IncomingMessage, pathname: string, upgrade: boolean): string | null => {
+    if (!options.requirePairing) return null;
+    if (!upgrade && pathname === '/mobile-connect' && req.method === 'GET') return null;
+    if (!upgrade && pathname === '/_michi/mobile/session' && req.method === 'POST') {
+      return matches(req.headers.authorization, `Bearer ${pairingToken}`) ? null : 'Open the current phone link to pair this browser.';
+    }
+    if (!upgrade && pathname === '/_michi/mobile/ready' && req.method === 'GET') {
+      return options.probeToken && matches(req.headers.authorization, `Bearer ${options.probeToken}`) ? null : 'Invalid readiness credentials.';
+    }
+    const cookies = (req.headers.cookie ?? '').split(';').map(value => value.trim());
+    return cookies.some(value => matches(value, `${cookieName}=${sessionToken}`)) ? null : 'Open the current phone link to pair this browser.';
+  };
   const sockets = new Set<Duplex>();
   const verified = new WeakSet<object>();
   let generation = 0;
@@ -91,13 +111,13 @@ export function createMobileAccessGateway(options: {
     // verified user on HTTP and WebSocket upgrades. Do not trust forwarded Host.
     if (!origin || req.headers[options.identityHeader ?? 'tailscale-user-login'] !== options.owner) return 'Mobile access is restricted to the tunnel owner.';
     const originError = 'Mobile access requires a same-origin request. Open the phone link directly in your browser.';
-    if (req.headers.origin !== undefined) return req.headers.origin === origin ? null : originError;
+    if (req.headers.origin !== undefined) return req.headers.origin === origin ? authenticationError(req, pathname, upgrade) : originError;
     if (upgrade || !['GET', 'HEAD'].includes(req.method ?? '')) return originError;
-    if (req.headers['sec-fetch-site'] !== 'cross-site') return null;
+    if (req.headers['sec-fetch-site'] !== 'cross-site') return authenticationError(req, pathname, upgrade);
     // An owner can open the UI from another site. Permit that top-level entry,
     // while keeping cross-site fetches, frames and even GET APIs blocked.
     return req.headers['sec-fetch-mode'] === 'navigate' && req.headers['sec-fetch-dest'] === 'document'
-      && !/^\/(?:api|_michi)(?:\/|$)/.test(pathname) ? null : originError;
+      && !/^\/(?:api|_michi)(?:\/|$)/.test(pathname) ? authenticationError(req, pathname, upgrade) : originError;
   };
   const headersFor = (req: IncomingMessage, upgrade = false): IncomingHttpHeaders => {
     const headers: IncomingHttpHeaders = {};
@@ -143,13 +163,23 @@ export function createMobileAccessGateway(options: {
       res.setHeader('Content-Type', 'text/html; charset=utf-8');
       res.setHeader('Content-Security-Policy', `default-src 'none'; script-src 'nonce-${nonce}'; connect-src 'self'; base-uri 'none'; frame-ancestors 'none'`);
       res.end(`<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><title>Connect to Michi</title></head><body><p id="status">Connecting to Michi…</p><script nonce="${nonce}">
-history.replaceState(null,'','/mobile-connect');location.replace('/');
+${options.requirePairing ? `
+function pair(){
+const token=location.hash.slice(1);
+history.replaceState(null,'','/mobile-connect');
+fetch('/_michi/mobile/session',{method:'POST',headers:{Authorization:'Bearer '+token}})
+.then(response=>{if(!response.ok)throw new Error();location.replace('/');})
+.catch(()=>{document.getElementById('status').textContent='Pairing failed. Open the current phone link from Michi.';});
+}
+window.addEventListener('hashchange',pair);
+pair();
+` : "history.replaceState(null,'','/mobile-connect');location.replace('/');"}
 </script></body></html>`);
       return;
     }
     if (pathname === '/_michi/mobile/session' && req.method === 'POST') {
-      // Compatibility for an already-open legacy pairing page. The verified
-      // owner and Origin above are sufficient; there is no session to mint.
+      if (options.requirePairing) res.setHeader('Set-Cookie', `${cookieName}=${sessionToken}; Path=/; HttpOnly; Secure; SameSite=Strict`);
+      // Header-authenticated Linux/Windows ingress retains the legacy no-cookie exchange.
       req.resume(); res.writeHead(204).end();
       return;
     }
@@ -250,8 +280,8 @@ history.replaceState(null,'','/mobile-connect');location.replace('/');
       const origin = options.publicOrigin();
       if (!origin) throw new Error('Connect the tunnel before creating a phone link');
       // Old desktop clients require a numeric expiry to display their QR.
-      // This is only a legacy display deadline: the URL itself never expires.
-      return { url: `${origin}/`, reusable: true, expiresAt: now() + 5 * 60_000 };
+      // Pairing links last for this ingress run; the timestamp is legacy display only.
+      return { url: options.requirePairing ? `${origin}/mobile-connect#${pairingToken}` : `${origin}/`, reusable: true, expiresAt: now() + 5 * 60_000 };
     },
     async close() {
       disconnect();
@@ -284,6 +314,22 @@ async function listenPrivateIngress(gateway: MobileAccessGateway, prefix: string
     return { endpoint: `unix:${socket}`, close };
   } catch (error) {
     await close();
+    throw error;
+  }
+}
+
+/** Standalone macOS Serve can reach TCP without filesystem or root access.
+ * Pairing is enforced at construction, including HTTP and WebSocket requests. */
+export async function listenPairedIngress(options: Parameters<typeof createMobileAccessGateway>[0]) {
+  const gateway = createMobileAccessGateway({ ...options, requirePairing: true });
+  try {
+    gateway.server.listen(0, '127.0.0.1');
+    await once(gateway.server, 'listening');
+    const address = gateway.server.address();
+    if (!address || typeof address === 'string') throw new Error('Could not create the phone pairing listener');
+    return { gateway, endpoint: `http://127.0.0.1:${address.port}`, close: () => gateway.close() };
+  } catch (error) {
+    await gateway.close();
     throw error;
   }
 }

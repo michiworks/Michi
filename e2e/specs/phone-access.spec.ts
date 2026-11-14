@@ -20,7 +20,7 @@ test('Tailscale setup guides login and HTTPS consent before showing a private re
     if (action === '/login') status = { ...status, tailscale: { state: 'needs-login', actionUrl: 'https://login.tailscale.com/a/fixture' } };
     if (action === '/start') status = { ...status, state: 'starting', tailscale: { state: 'needs-approval', actionUrl: 'https://login.tailscale.com/f/serve?node=fixture' } };
     if (action === '/stop') status = { ...status, state: 'stopped', url: '' };
-    await route.fulfill({ json: action === '/link' ? { url: url + '/', reusable: true, expiresAt: 1 } : status });
+    await route.fulfill({ json: action === '/link' ? { url: url + '/mobile-connect#fixture-pairing-key', reusable: true, expiresAt: 1 } : status });
     return true;
   } });
   await page.setViewportSize({ width: 1440, height: 1100 });
@@ -38,6 +38,8 @@ test('Tailscale setup guides login and HTTPS consent before showing a private re
   status = { ...status, state: 'connected', url, tailscale: { state: 'ready', account: 'owner@example.com' } };
   await expect(section.getByRole('img', { name: 'Scan to connect to Michi' })).toBeVisible();
   await expect(section.getByRole('button', { name: 'Copy phone link' })).toBeVisible();
+  await expect(section.getByRole('link', { name: url, exact: true })).toHaveAttribute('href', url + '/mobile-connect#fixture-pairing-key');
+  await expect(section.getByText(/This link pairs your phone for this run/)).toBeVisible();
   await expect(section.getByRole('button', { name: 'Allow Tailscale HTTPS' })).toHaveCount(0);
   await expect(section.getByText(/expires|One use/)).toHaveCount(0);
   const evidence = resolve('.artifacts/tailscale-phone-access'); mkdirSync(evidence, { recursive: true });

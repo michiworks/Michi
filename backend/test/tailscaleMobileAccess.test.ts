@@ -6,7 +6,7 @@ import type { ChildProcess } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
-import { TailscaleMobileAccess, tailscaleActionUrl, tailscaleServePort } from '../src/services/tailscaleMobileAccess';
+import { TailscaleMobileAccess, tailscaleActionUrl, tailscaleServePort, describeServeProbeError } from '../src/services/tailscaleMobileAccess';
 import { createMobileAccess, defaultMobileAccessProvider, MobileAccessManager, type MobileAccessController } from '../src/services/mobileAccessManager';
 import { readMobileAccessChoice, saveMobileAccessChoice } from '../src/services/mobileAccess';
 
@@ -17,7 +17,7 @@ function child() {
   return Object.assign(events, { stdout: new PassThrough(), stderr: new PassThrough(), exitCode: null as number | null, signalCode: null as string | null,
     kill(signal: string) { this.signalCode = signal; events.emit('exit', null, signal); return true; } });
 }
-function fixture() {
+function fixture(platform: NodeJS.Platform = 'linux') {
   let status: object = node;
   let config: any = {};
   let commandFailure = '';
@@ -26,7 +26,7 @@ function fixture() {
   const calls: string[][] = [];
   const children: Array<{ args: string[]; process: ReturnType<typeof child> }> = [];
   const access = new TailscaleMobileAccess({ target: () => 'http://127.0.0.1:3000', token: () => 'private-backend-token',
-    resolveBinary: () => installed ? '/fixture/tailscale' : null, pollMs: 60_000, retryMs: 1, windowsPowerShell: () => null,
+    resolveBinary: () => installed ? '/fixture/tailscale' : null, pollMs: 60_000, retryMs: 1, platform: () => platform, windowsPowerShell: () => null,
     probe: async (origin, token) => { assert.match(origin, /^https:\/\/michi\.tail123\.ts\.net(?::\d+)?$/); assert.match(token, /^[a-f0-9]{48}$/); if (probeFailure) throw new Error('Serve cannot dial the Unix socket'); },
     run: async (_binary, args) => { calls.push(args); if (args[0] === commandFailure) throw new Error('CLI unavailable'); return JSON.stringify(args[0] === 'status' ? status : config); },
     spawn: (_binary, args) => { const process = child(); children.push({ args, process }); return process as unknown as ChildProcess; },
@@ -86,9 +86,9 @@ test('a fresh Tailscale installation with no Serve config can start, but Windows
   await f.access.start();
   assert.equal(f.children.length, 1);
   await f.access.stop();
-  t.mock.method(os, 'platform', () => 'win32');
-  assert.equal((await f.access.status()).available, false);
-  await assert.rejects(f.access.start(), /PowerShell to verify Tailscale connections/);
+  const windows = fixture('win32'); t.after(() => windows.access.stop());
+  assert.equal((await windows.access.status()).available, false);
+  await assert.rejects(windows.access.start(), /PowerShell to verify Tailscale connections/);
   assert.equal(f.children.length, 1);
 });
 
@@ -251,4 +251,36 @@ test('concurrent manager actions retain start/stop ordering', async () => {
   const manager = new MobileAccessManager({ tailscale: service }, 'tailscale');
   await Promise.all([manager.start(), manager.stop(), manager.start()]);
   assert.deepEqual(calls, ['start', 'stop', 'start']);
+});
+
+test('readiness failures distinguish upstream, authentication, DNS, TLS and timeout errors without leaking output', () => {
+  for (const [error, expected] of [
+    [new Error('Tailscale Serve returned HTTP 502.'), /HTTP 502.*local Michi/],
+    [new Error('Tailscale Serve returned HTTP 403.'), /HTTP 403.*authentication/],
+    [Object.assign(new Error(), { code: 'ENOTFOUND' }), /MagicDNS/],
+    [Object.assign(new Error(), { code: 'CERT_HAS_EXPIRED' }), /certificate/],
+    [new Error('Tailscale Serve connection timed out'), /timed out/],
+    [Object.assign(new Error(), { code: 'ECONNREFUSED' }), /refused/],
+    [new Error('secret-provider-output'), /could not be reached/],
+  ] as const) {
+    assert.match(describeServeProbeError(error), expected);
+    assert.doesNotMatch(describeServeProbeError(error), /secret-provider-output/);
+  }
+});
+
+test('macOS uses paired loopback TCP without requiring a socket or administrator access', async t => {
+  const f = fixture('darwin'); t.after(() => f.access.stop());
+  await f.access.start(); f.connect();
+  assert.equal((await f.access.status()).state, 'connected');
+  const endpoint = f.children[0].args[2];
+  assert.match(endpoint, /^http:\/\/127\.0\.0\.1:\d+$/);
+  const headers = { 'tailscale-user-login': 'owner@example.com', origin: `https://${hostname}` };
+  assert.equal((await fetch(endpoint + '/api/workspaces', { headers })).status, 403);
+  const link = f.access.link();
+  assert.equal(new URL(link.url).pathname, '/mobile-connect');
+  assert.match(new URL(link.url).hash, /^#[a-f0-9]{64}$/);
+  const response = await fetch(endpoint + '/_michi/mobile/session', { method: 'POST',
+    headers: { ...headers, authorization: `Bearer ${new URL(link.url).hash.slice(1)}` } });
+  assert.equal(response.status, 204);
+  await f.access.stop(); await assert.rejects(fetch(endpoint));
 });

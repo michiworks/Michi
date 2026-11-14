@@ -16,7 +16,7 @@ async function until(predicate: () => boolean) {
   for (let i = 0; i < 200; i++) { if (predicate()) return; await new Promise(r => setTimeout(r, 5)); }
   assert.ok(predicate(), 'condition did not become true');
 }
-async function fixture(t: TestContext, identityHeader: 'tailscale-user-login' = 'tailscale-user-login') {
+async function fixture(t: TestContext, identityHeader: 'tailscale-user-login' = 'tailscale-user-login', requirePairing = false) {
   const app = express();
   app.use(express.json());
   const calls: Array<{ path: string; headers: Record<string, unknown>; body: unknown }> = [];
@@ -43,12 +43,18 @@ async function fixture(t: TestContext, identityHeader: 'tailscale-user-login' = 
   const address = upstream.address(); assert.ok(address && typeof address !== 'string');
   const target = `http://127.0.0.1:${address.port}`;
   let now = Date.now();
-  const options = { target, token: 'fixture-backend-token', owner: 'owner', identityHeader, probeToken: 'fixture-readiness-challenge', publicOrigin: () => origin, now: () => now };
+  const options = { requirePairing, target, token: 'fixture-backend-token', owner: 'owner', identityHeader, probeToken: 'fixture-readiness-challenge', publicOrigin: () => origin, now: () => now };
   let gateway = createMobileAccessGateway(options);
   gateway.server.listen(0, '127.0.0.1'); await once(gateway.server, 'listening');
   const local = gateway.server.address(); assert.ok(local && typeof local !== 'string');
   let base = `http://127.0.0.1:${local.port}`;
   const headers: Record<string, string> = { [identityHeader]: 'owner', origin };
+  if (requirePairing) {
+    const paired = await fetch(`${base}/_michi/mobile/session`, { method: 'POST', headers: { ...headers,
+      authorization: `Bearer ${new URL(gateway.mintLink().url).hash.slice(1)}` } });
+    assert.equal(paired.status, 204);
+    headers.cookie = paired.headers.get('set-cookie')!.split(';')[0];
+  }
   const exchange = async (link = gateway.mintLink()) => fetch(`${base}/_michi/mobile/session`, {
     method: 'POST', headers: { ...headers, 'content-type': 'application/json' }, body: JSON.stringify({ token: new URL(link.url).hash.slice(1) }),
   });
@@ -185,7 +191,7 @@ test('lets the phone cache fingerprinted assets and gzips known-length bodies it
 
 for (const identityHeader of ['tailscale-user-login'] as const) {
 test(`${identityHeader}: streams SSE incrementally and client disconnect only releases that subscriber`, async t => {
-  const f = await fixture(t, identityHeader);
+  const f = await fixture(t, identityHeader, true);
   const controller = new AbortController();
   const response = await fetch(f.base + '/api/chats/node/stream', { headers: f.headers, signal: controller.signal });
   assert.equal(response.headers.get('content-encoding'), null);
@@ -199,7 +205,7 @@ test(`${identityHeader}: streams SSE incrementally and client disconnect only re
 });
 
 test(`${identityHeader}: real multiplexed WS tickets work through the ingress, retain route guards, reject replay and revoke without stopping the server`, async t => {
-  const f = await fixture(t, identityHeader);
+  const f = await fixture(t, identityHeader, true);
   const response = await fetch(f.base + '/api/stream-transport', { method: 'POST', headers: f.headers });
   assert.equal(response.status, 200);
   const { token } = await response.json() as { token: string };
@@ -267,4 +273,38 @@ test('saved-connection proxy paths cannot reach another machine\'s phone-access 
     assert.equal(await send(proxy + suffix, method), 403, `${suffix} reached ${JSON.stringify(remoteCalls.slice(1))}`);
   }
   assert.deepEqual(remoteCalls, ['GET /api/files/mobile-access.md']);
+});
+
+test('paired TCP rejects forged identity, wrong pairing keys and stale cookies; secrets never reach the backend', async t => {
+  const f = await fixture(t, 'tailscale-user-login', true);
+  const link = f.gateway.mintLink();
+  const key = new URL(link.url).hash.slice(1);
+  const owner = { 'tailscale-user-login': 'owner', origin };
+  for (const headers of [owner, { ...owner, cookie: '__Host-michi-phone=forged' }, { ...owner, authorization: `Bearer ${key}` }]) {
+    assert.equal((await fetch(f.base + '/api/workspaces', { headers })).status, 403);
+    const ws = new WebSocket(f.base.replace('http:', 'ws:') + '/api/stream-transport?token=forged', { headers });
+    await assert.rejects(once(ws, 'open'), /403/);
+  }
+  for (const headers of [owner, { ...owner, authorization: 'Bearer wrong' },
+    { ...owner, origin: 'https://evil.example', authorization: `Bearer ${key}` },
+    { ...owner, 'tailscale-user-login': 'another', authorization: `Bearer ${key}` }]) {
+    const response = await fetch(f.base + '/_michi/mobile/session', { method: 'POST', headers });
+    assert.equal(response.status, 403); assert.equal(response.headers.get('set-cookie'), null);
+  }
+  const page = await fetch(f.base + '/mobile-connect', { headers: owner });
+  assert.equal(page.status, 200); assert.doesNotMatch(await page.text(), new RegExp(key));
+  const paired = await fetch(f.base + '/_michi/mobile/session', { method: 'POST', headers: { ...owner, authorization: `Bearer ${key}` } });
+  assert.equal(paired.status, 204);
+  assert.match(paired.headers.get('set-cookie')!, /Path=\/; HttpOnly; Secure; SameSite=Strict/);
+  assert.equal((await fetch(f.base + '/api/workspaces', { headers: f.headers })).status, 200);
+  assert.equal(f.calls.at(-1)!.headers.cookie, undefined);
+  assert.equal(f.calls.at(-1)!.headers.authorization, 'Bearer fixture-backend-token');
+  assert.equal((await fetch(f.base + '/_michi/mobile/ready', { headers: owner })).status, 403);
+  const ready = await fetch(f.base + '/_michi/mobile/ready', { headers: { ...owner, authorization: 'Bearer fixture-readiness-challenge' } });
+  assert.equal(await ready.text(), 'fixture-readiness-challenge');
+  assert.equal((await fetch(f.base + '/api/workspaces', { headers: { ...owner, authorization: 'Bearer fixture-readiness-challenge' } })).status, 403);
+  await f.restart();
+  assert.notEqual(f.gateway.mintLink().url, link.url);
+  assert.equal((await fetch(f.base + '/api/workspaces', { headers: f.headers })).status, 403);
+  assert.equal((await fetch(f.base + '/_michi/mobile/session', { method: 'POST', headers: { ...owner, authorization: `Bearer ${key}` } })).status, 403);
 });

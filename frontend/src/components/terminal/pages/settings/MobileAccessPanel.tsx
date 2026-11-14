@@ -61,7 +61,8 @@ export function MobileAccessPanel({ connections }: { connections: BackendConnect
       if (!cancelled && revision === generation.current && version === mutation.current) setLink(next);
     }, err => { if (!cancelled && revision === generation.current && version === mutation.current) setError((err as Error).message); });
     return () => { cancelled = true; };
-  }, [machine, status?.provider, status?.state, status?.url]);
+  }, [machine, status]);
+  const paired = !!link?.url.includes('/mobile-connect#');
   const now = useNow(1_000, !!link && !link.reusable);
   const activeLink = link && (link.reusable || link.expiresAt > now) ? link : null;
   const qr = useMemo(() => {
@@ -130,7 +131,7 @@ export function MobileAccessPanel({ connections }: { connections: BackendConnect
       <ol>
         <li><strong>Connect this machine.</strong> {setup?.account ? <>Signed in as {setup.account}.</> : setup?.message || 'Checking Tailscale…'}</li>
         <li><strong>Connect your phone.</strong> Install Tailscale on your phone, sign in with the same account and allow its VPN connection. <button type="button" className="mobile-access__text-link" onClick={() => openExternalUrl('https://tailscale.com/download')}>Get Tailscale</button></li>
-        <li><strong>Open Michi.</strong> Scan the code below inside Michi on your iPhone to connect the app. Your phone’s Camera app opens the web version, which you can bookmark or add to your home screen.</li>
+        <li><strong>Open Michi.</strong> {paired ? 'Scan with your phone’s Camera app to pair the web version. Scan again after restarting Michi or re-enabling phone access.' : 'Scan the code below inside Michi on your iPhone to connect the app. Your phone’s Camera app opens the web version, which you can bookmark or add to your home screen.'}</li>
       </ol>
       {setup?.state === 'not-installed' && <Button onClick={() => openExternalUrl('https://tailscale.com/download')}>Install Tailscale on this machine</Button>}
       {setup?.state === 'not-running' && setup.canOpenApp && <Button disabled={busy} onClick={() => void act('open-app')}>Open Tailscale</Button>}
@@ -152,12 +153,12 @@ export function MobileAccessPanel({ connections }: { connections: BackendConnect
         <rect x="-4" y="-4" width={qr.getModuleCount() + 8} height={qr.getModuleCount() + 8} fill="white" />
         <path fill="black" d={Array.from({ length: qr.getModuleCount() }, (_, r) => Array.from({ length: qr.getModuleCount() }, (_, c) => qr.isDark(r, c) ? `M${c} ${r}h1v1h-1z` : '').join('')).join('')} />
       </svg>
-      <div><p>{'Keep Tailscale connected on your phone, then scan inside Michi or with your camera.'}</p><p>{activeLink.reusable ? 'Reuse or bookmark this link while phone access is enabled.' : <>One use · expires in {Math.max(1, Math.ceil((activeLink.expiresAt - now) / 60_000))} min</>}</p>
+      <div><p>{paired ? 'Keep Tailscale connected on your phone, then scan with your camera.' : 'Keep Tailscale connected on your phone, then scan inside Michi or with your camera.'}</p><p>{activeLink.reusable ? (paired ? 'This link pairs your phone for this run. Scan again after restarting Michi or re-enabling phone access.' : 'Reuse or bookmark this link while phone access is enabled.') : <>One use · expires in {Math.max(1, Math.ceil((activeLink.expiresAt - now) / 60_000))} min</>}</p>
         <Button onClick={() => { const revision = generation.current; void copyText(activeLink.url).then((ok) => { if (revision !== generation.current) return; if (ok) setCopied(true); else setError('Could not copy. Scan the code to connect.'); }); }}>{copied ? 'Copied' : activeLink.reusable ? 'Copy phone link' : 'Copy sign-in link'}</Button>
       </div>
     </div>}
     {link && !activeLink && <p>The sign-in link expired. Create a new one to connect.</p>}
-    {status?.url && <a className="mobile-access__url" href={status.url} target="_blank" rel="noreferrer">{status.url}</a>}
+    {status?.url && <a className="mobile-access__url" href={activeLink?.url ?? status.url} target="_blank" rel="noreferrer">{status.url}</a>}
     {tailscale && status?.state === 'connected' && <p>On iPhone, enable VPN On Demand in Tailscale to reconnect automatically. Another VPN may interrupt the connection. This machine must stay awake with Michi running.</p>}
   </SettingsSection>;
 }

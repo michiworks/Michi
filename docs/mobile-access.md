@@ -13,18 +13,35 @@ continue to live on the selected machine.
    HTTPS** and finish Tailscale's consent page. Michi checks its Serve mapping
    and authenticated HTTPS ingress before displaying the phone link and QR.
 4. Install Tailscale on your phone, sign in with the same account, and connect
-   its VPN. Scan the QR with your phone camera. Bookmark the URL or add it to
-   your home screen. The link stays reusable while phone access is enabled.
+   its VPN. Scan the QR with your phone camera. The link stays reusable while
+   phone access is enabled. For a macOS host, scan again after restarting Michi
+   or turning phone access off and on.
 5. Keep this computer awake with Michi running. On iPhone, Tailscale's VPN On
    Demand can reconnect automatically. Another active VPN may interrupt it.
 
 Michi uses private **Tailscale Serve**. It does not enable public Funnel.
 Only the Tailscale login that owns the host can access this ingress; tagged
-hosts are unsupported. On macOS and Linux, a separate Unix socket in an
-owner-only directory receives verified identity headers. HTTP and WebSocket
+hosts are unsupported. On Linux, a separate Unix socket in an owner-only
+directory receives verified identity headers. HTTP and WebSocket
 requests retain origin checks, and the backend bearer token stays on the server.
 Phone requests cannot enable phone access or publish another machine through a
 saved connection.
+
+On macOS, Michi uses a paired loopback TCP listener so Tailscale Standalone
+can forward requests without Unix socket access or administrator privileges.
+Scan the QR with the phone's Camera app to open the web version. The per-run
+key is carried in a URL fragment, exchanged for a Secure, HttpOnly,
+SameSite=Strict cookie, then removed from browser history. HTTP and WebSocket
+requests require both pairing and the owner's Tailscale identity; forging a
+local identity header alone cannot grant access. Restarting Michi or turning
+phone access off and on revokes the link and sessions; scan the new QR.
+These paired links currently use the browser, not the native iOS scanner.
+Linux and Windows retain their existing root links and native-client flow.
+
+`npm run test:phone-pairing` verifies browser pairing and revocation with a
+local HTTPS stand-in for Serve. It requires OpenSSL and Playwright Chromium;
+it neither installs nor invokes Tailscale. Actual Standalone/phone connectivity
+still requires testing on a machine with Tailscale installed.
 
 Windows Tailscale Serve cannot target a Unix socket, so Michi listens on a
 separate loopback TCP port. Any local process can connect to such a port, and

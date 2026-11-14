@@ -8,7 +8,7 @@ import { BlockList, isIP, type AddressInfo } from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
 import type { MobileAccessStatus, TailscaleSetup } from 'michi-shared';
-import { createMobileAccessGateway } from './mobileAccessGateway';
+import { createMobileAccessGateway, listenPairedIngress } from './mobileAccessGateway';
 import {
   createWindowsServeVerifier, powershellIngressProbe, resolveWindowsTailscaleBinary,
   windowsPowerShellPath, windowsTailscaledFor, type WindowsIngressProbe,
@@ -188,7 +188,8 @@ function command(binary: string, args: string[]): Promise<string> {
  * header. A configured listener alone cannot prove that Serve can dial us. */
 function probeServe(origin: string, expectedToken: string, timeoutMs = 5000): Promise<void> {
   return new Promise((resolve, reject) => {
-    const request = get(`${origin}/_michi/mobile/ready`, { headers: { origin }, agent: false }, response => {
+    const request = get(`${origin}/_michi/mobile/ready`, { headers: { origin, authorization: `Bearer ${expectedToken}` }, agent: false }, response => {
+      if (response.statusCode !== 200) { reject(new Error(`Tailscale Serve returned HTTP ${response.statusCode}.`)); response.destroy(); return; }
       let body = '';
       response.setEncoding('utf8');
       response.on('data', chunk => {
@@ -197,7 +198,7 @@ function probeServe(origin: string, expectedToken: string, timeoutMs = 5000): Pr
       });
       response.on('error', reject);
       response.on('end', () => response.statusCode === 200 && body === expectedToken
-        ? resolve() : reject(new Error('Tailscale Serve did not reach the authenticated Michi ingress')));
+        ? resolve() : reject(new Error('Tailscale Serve returned an unexpected readiness response.')));
     });
     const timer = setTimeout(() => request.destroy(new Error('Tailscale Serve connection timed out')), timeoutMs);
     request.on('error', reject);
@@ -205,9 +206,22 @@ function probeServe(origin: string, expectedToken: string, timeoutMs = 5000): Pr
   });
 }
 
+/** Classify failures without reflecting arbitrary provider output or credentials. */
+export function describeServeProbeError(error: unknown): string {
+  const code = (error as NodeJS.ErrnoException | undefined)?.code;
+  const message = error instanceof Error ? error.message : '';
+  if (/HTTP 502\b/.test(message)) return 'Tailscale HTTPS returned HTTP 502: Serve could not reach the local Michi phone listener. Turn phone access off and on to recreate it.';
+  if (/HTTP 403\b/.test(message)) return 'Tailscale HTTPS returned HTTP 403: phone ingress authentication failed. Check the Tailscale account and enable phone access again.';
+  if (code === 'ENOTFOUND' || code === 'EAI_AGAIN') return 'The Tailscale phone hostname could not be resolved. Check MagicDNS on this machine.';
+  if (code?.includes('CERT') || code?.includes('TLS') || code?.includes('SSL')) return 'The Tailscale HTTPS certificate or TLS connection could not be verified. Check Tailscale HTTPS and this machine’s clock.';
+  if (code === 'ETIMEDOUT' || /timed out/.test(message)) return 'The Tailscale HTTPS connection timed out. Check this machine’s Tailscale connection.';
+  if (code === 'ECONNREFUSED') return 'The Tailscale HTTPS listener refused the connection. Check that Tailscale Serve is running.';
+  return 'Michi could not be reached through authenticated Tailscale HTTPS. Check Tailscale Serve and enable phone access again.';
+}
+
 /** A foreground Serve session owns only its own ephemeral configuration.
  * The proxy trusts Serve identity headers only over a private Unix socket
- * (macOS/Linux) or, on Windows, over loopback TCP connections that the OS
+ * (Linux), browser-paired loopback TCP (macOS), or, on Windows, over loopback TCP connections that the OS
  * proves belong to the Tailscale service and that carry the per-run path
  * secret of Michi's own Serve handler. The desktop API and other users'
  * Serve/Funnel listeners are never exposed. */
@@ -352,12 +366,12 @@ export class TailscaleMobileAccess {
             const windows = !!this.verifier;
             // Windows adds a bounded OS peer check to the first new connection.
             try { await (this.options.probe ?? ((o: string, t: string) => probeServe(o, t, windows ? 20_000 : 5000)))(origin, this.probeToken); }
-            catch {
+            catch (error) {
               this.suspendIngress();
               const verification = this.verifier?.lastError();
               this.current = { ...this.current, state: 'reconnecting', error: verification
                 ? `${verification} Phone access stays off until Michi can prove each connection comes from Tailscale.`
-                : 'Michi could not be reached through Tailscale HTTPS. Check this machine’s Tailscale connection, DNS and socket permissions.' };
+                : describeServeProbeError(error) };
               return this.snapshot();
             }
             // The Serve child may exit while HTTPS is being checked.
@@ -432,6 +446,10 @@ export class TailscaleMobileAccess {
         await once(this.gateway.server, 'listening');
         const { port } = this.gateway.server.address() as AddressInfo;
         this.endpoint = `http://127.0.0.1:${port}/${pathSecret}`;
+      } else if (this.platform() === 'darwin') {
+        const ingress = await listenPairedIngress(shared);
+        this.gateway = ingress.gateway;
+        this.endpoint = ingress.endpoint;
       } else {
         this.gateway = createMobileAccessGateway(shared);
         this.directory = await mkdtemp(path.join(os.tmpdir(), 'michi-ts-'));
