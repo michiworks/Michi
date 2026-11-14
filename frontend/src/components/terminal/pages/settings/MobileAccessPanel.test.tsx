@@ -106,7 +106,7 @@ it('keeps HTTPS consent visible and automatically shows a reusable QR only after
   const pending = { ...off, provider: 'tailscale', state: 'starting', tailscale: { state: 'needs-approval', actionUrl: 'https://login.tailscale.com/f/serve?node=fixture' } };
   const ready = { ...connected, provider: 'tailscale', url: 'https://michi.tail123.ts.net', tailscale: { state: 'ready', account: 'owner@example.com' } };
   mocks.request.mockResolvedValue(pending);
-  mocks.link.mockResolvedValue({ url: ready.url + '/', reusable: true, expiresAt: Date.now() + 1000 });
+  mocks.link.mockResolvedValue({ url: ready.url + '/mobile-connect#first-key', reusable: true, expiresAt: Date.now() + 1000 });
   render(<MobileAccessPanel connections={connections} />); await act(async () => {});
   expect(screen.getByRole('button', { name: 'Allow Tailscale HTTPS' })).toBeTruthy();
   expect(screen.queryByRole('img')).toBeNull();
@@ -116,8 +116,13 @@ it('keeps HTTPS consent visible and automatically shows a reusable QR only after
   expect(screen.getByRole('img', { name: 'Scan to connect to Michi' })).toBeTruthy();
   expect(screen.queryByRole('button', { name: 'Allow Tailscale HTTPS' })).toBeNull();
   expect(screen.getByText(/owner@example.com/)).toBeTruthy();
+  expect(screen.getByRole('link', { name: ready.url }).getAttribute('href')).toBe(ready.url + '/mobile-connect#first-key');
+  expect(screen.getByText(/This link pairs your phone for this run/)).toBeTruthy();
+  mocks.request.mockImplementation(async () => ({ ...ready }));
+  mocks.link.mockResolvedValue({ url: ready.url + '/mobile-connect#new-key', reusable: true, expiresAt: 1 });
   await act(() => vi.advanceTimersByTimeAsync(3000));
   expect(screen.getByRole('img')).toBeTruthy();
+  expect(screen.getByRole('link', { name: ready.url }).getAttribute('href')).toBe(ready.url + '/mobile-connect#new-key');
 });
 
 it('a machine switch discards a pending QR from the old machine', async () => {
