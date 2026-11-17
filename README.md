@@ -1,5 +1,7 @@
 <div align="center">
 
+<img src="assets/icons/icon.png" alt="Michi logo" width="128" height="128" />
+
 # Michi
 
 **Fork, detour, side quest, btw, branch — Michi keeps up with your non-linear mind.**
